@@ -1,0 +1,16 @@
+[Unit]
+Description=$service_name
+After=network.target
+
+[Service]
+ExecStart=$cmd_line
+Restart=on-failure
+StandardOutput=journal
+StandardError=journal
+RestartSec=2s
+
+$Environment
+$ExecStartPre
+
+[Install]
+WantedBy=multi-user.target

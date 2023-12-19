@@ -1,0 +1,212 @@
+version: '3.8'
+
+services:
+  fdb-server:
+    image: foundationdb/foundationdb:7.3.2
+    networks:
+      - hostnet
+    environment:
+      FDB_CLUSTER_FILE_CONTENTS: '$FDB_CLUSTER_FILE_CONTENTS'
+      FDB_NETWORKING_MODE: 'container'
+      FDB_CLUSTER_FILE: '/etc/foundationdb/fdb.cluster'
+    volumes:
+      - "/etc/foundationdb:/etc/foundationdb"
+      - "/etc/foundationdb/data:/var/fdb/data"
+      - "/etc/foundationdb/logs:/var/fdb/logs"
+
+    deploy:
+      mode: global
+      placement:
+        constraints: [ node.role == manager ]
+
+
+  WebAppAPI:
+    image: hamdykhader/simplyblock:latest
+    command: "python WebApp/app.py"
+    deploy:
+      endpoint_mode: dnsrr
+      mode: global
+      placement:
+        constraints: [node.role == manager]
+    volumes:
+      - "/etc/foundationdb:/etc/foundationdb"
+    environment:
+      - FLASK_DEBUG=False
+      - FLASK_ENV=production
+
+  CLI:
+    image: hamdykhader/simplyblock:latest
+    command: "bash scripts/run_ssh.sh $CLI_SSH_PASS"
+    deploy:
+      mode: global
+      placement:
+        constraints: [node.role == manager]
+    ports:
+      - 2222:22
+    volumes:
+      - "/etc/foundationdb:/etc/foundationdb"
+
+  StorageNodeMonitor:
+    image: hamdykhader/simplyblock:latest
+    command: "python api/management/services/storage_node_monitor.py"
+    deploy:
+      placement:
+        constraints: [node.role == manager]
+    volumes:
+      - "/etc/foundationdb:/etc/foundationdb"
+    networks:
+      - hostnet
+
+  MgmtNodeMonitor:
+    image: hamdykhader/simplyblock:latest
+    command: "python api/management/services/mgmt_node_monitor.py"
+    deploy:
+      placement:
+        constraints: [node.role == manager]
+    volumes:
+      - "/etc/foundationdb:/etc/foundationdb"
+    networks:
+      - hostnet
+
+  CachingNodeMonitor:
+    image: hamdykhader/simplyblock:latest
+    command: "python api/management/services/caching_node_monitor.py"
+    deploy:
+      placement:
+        constraints: [node.role == manager]
+    volumes:
+      - "/etc/foundationdb:/etc/foundationdb"
+    networks:
+      - hostnet
+
+  LVolStatsCollector:
+    image: hamdykhader/simplyblock:latest
+    command: "python api/management/services/lvol_stat_collector.py"
+    deploy:
+      placement:
+        constraints: [node.role == manager]
+    volumes:
+      - "/etc/foundationdb:/etc/foundationdb"
+
+  DeviceStatsCollector:
+    image: hamdykhader/simplyblock:latest
+    command: "python api/management/services/device_stat_collector.py"
+    deploy:
+      placement:
+        constraints: [node.role == manager]
+    volumes:
+      - "/etc/foundationdb:/etc/foundationdb"
+
+  PortStatsCollector:
+    image: hamdykhader/simplyblock:latest
+    command: "python api/management/services/port_stat_collector.py"
+    networks:
+      - hostnet
+    deploy:
+      mode: global
+      placement:
+        constraints: [node.role == worker]
+    volumes:
+      - "/etc/foundationdb:/etc/foundationdb"
+
+  DistrEventCollector:
+    image: hamdykhader/simplyblock:latest
+    command: "python api/management/services/distr_event_collector.py"
+    networks:
+      - hostnet
+    deploy:
+      mode: global
+      placement:
+        constraints: [node.role == worker]
+    volumes:
+      - "/etc/foundationdb:/etc/foundationdb"
+
+  visualizer:
+    image: dockersamples/visualizer:latest
+    ports:
+      - 8081:8080
+    volumes:
+      - "/var/run/docker.sock:/var/run/docker.sock"
+    deploy:
+      placement:
+        constraints: [node.role == manager]
+
+
+  HAProxy:
+    image: haproxytech/haproxy-debian:latest
+    deploy:
+      mode: global
+      placement:
+        constraints: [node.role == manager]
+    ports:
+      - 80:80
+      - 8404:8404
+    volumes:
+      - "$TD/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg"
+
+  CapacityCollector:
+    image: hamdykhader/simplyblock:latest
+    command: "python api/management/services/capacity_collector.py"
+    deploy:
+      placement:
+        constraints: [node.role == manager]
+    volumes:
+      - "/etc/foundationdb:/etc/foundationdb"
+
+  CapacityMonitor:
+    image: hamdykhader/simplyblock:latest
+    command: "python api/management/services/cap_monitor.py"
+    deploy:
+      placement:
+        constraints: [node.role == manager]
+    volumes:
+      - "/etc/foundationdb:/etc/foundationdb"
+
+
+#  SpdkAppProxy:
+#    image: hamdykhader/spdk:latest
+#    command: "python /root/scripts/spdk_http_proxy.py"
+#    networks:
+#      - hostnet
+#    deploy:
+#      mode: global
+#      placement:
+#        constraints: [node.role == worker]
+#      restart_policy:
+#        condition: on-failure
+#        delay: 3s
+#        window: 15s
+#    volumes:
+#      - "/var/tmp:/var/tmp"
+#      - "/etc/foundationdb:/etc/foundationdb"
+
+
+#  StorageNodeOperations:
+#    image: hamdykhader/simplyblock:latest
+#    command: "python WebApp/snode_app.py"
+#    networks:
+#      - hostnet
+#    deploy:
+#      mode: global
+#      placement:
+#        constraints: [node.role == worker]
+#      restart_policy:
+#        condition: on-failure
+#        delay: 3s
+#        window: 15s
+#    environment:
+#      - FLASK_DEBUG=False
+#      - FLASK_ENV=production
+#    ports:
+#      - "4040:5000"
+#    volumes:
+#      - "/var/tmp:/var/tmp"
+#      - "/dev:/dev"
+#      - "/lib/modules/:/lib/modules/"
+#      - "/sys:/sys"
+
+
+networks:
+  hostnet:
+    external: true
+    name: host
