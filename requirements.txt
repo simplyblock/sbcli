@@ -6,3 +6,5 @@ prettytable
 docker
 psutil
 py-cpuinfo
+pytest
+mock
