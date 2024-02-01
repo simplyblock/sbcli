@@ -11,7 +11,6 @@ from prettytable import PrettyTable
 
 from simplyblock_core import constants
 from simplyblock_core import shell_utils
-from simplyblock_core.kv_store import DBController
 
 
 logger = logging.getLogger()
@@ -123,6 +122,7 @@ def generate_string(length):
 
 
 def get_docker_client(cluster_id=None):
+    from simplyblock_core.kv_store import DBController
     db_controller = DBController()
     nodes = db_controller.get_mgmt_nodes(cluster_id)
     if not nodes:

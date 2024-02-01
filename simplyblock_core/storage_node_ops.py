@@ -758,7 +758,7 @@ def remove_storage_node(node_id, force_remove=False, force_migrate=False):
     except:
         pass
 
-    snode_api = SNodeClient(snode.api_endpoint)
+    snode_api = SNodeClient(snode.api_endpoint, timeout=20)
     snode_api.spdk_process_kill()
     snode_api.leave_swarm()
 

@@ -1,7 +1,5 @@
 # coding=utf-8
 import logging
-import os
-import numpy
 
 import time
 import sys
@@ -10,16 +8,6 @@ import sys
 from simplyblock_core import constants, kv_store
 from simplyblock_core.rpc_client import RPCClient
 from simplyblock_core.models.device_stat import LVolStat
-
-
-def calculate_mean_and_stdev_for_all_devices(devices_list):
-    capacity_list = []
-    for device in devices_list:
-        capacity_list.append(device.get_capacity_percentage())
-    n_array = numpy.array(capacity_list)
-    mean_value = int(numpy.mean(n_array))
-    st_dev = int(numpy.std(n_array))
-    return mean_value, st_dev
 
 
 def update_lvol_stats(node, lvol, stats):
