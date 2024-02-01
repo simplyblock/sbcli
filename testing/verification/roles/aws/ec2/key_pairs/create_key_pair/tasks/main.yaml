@@ -1,0 +1,10 @@
+- name: "Create keypair {{ private_key_name }}"
+  amazon.aws.ec2_key:
+    force: false
+    file_name: "{{ private_key_path }}"
+    name: "{{ private_key_name }}"
+    tags:
+      ResourceType: "key-pair"
+      env_name: "{{ env_name }}"
+      automation_tag: "{{ automation_tag }}"
+    state: present

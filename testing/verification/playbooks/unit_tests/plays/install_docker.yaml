@@ -1,0 +1,8 @@
+---
+- hosts: storage
+  remote_user: ec2-user
+  gather_facts: yes
+  tasks:
+    - name: test
+      script: ./install_docker.sh
+      become: true

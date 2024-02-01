@@ -1,0 +1,2 @@
+- import_playbook: plays/install_docker.yaml
+- import_playbook: plays/run_spdk_container.yaml

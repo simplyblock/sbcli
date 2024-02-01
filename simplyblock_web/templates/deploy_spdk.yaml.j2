@@ -1,0 +1,75 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: spdk-deployment
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: spdk-app
+  template:
+    metadata:
+      labels:
+        app: spdk-app
+    spec:
+      hostNetwork: true
+      volumes:
+        - name: socket-dir
+          emptyDir:
+            medium: "Memory"
+        - name: host-sys
+          hostPath:
+            path: /sys
+        - name: host-modules
+          hostPath:
+            path: /lib/modules
+        - name: dev-vol
+          hostPath:
+            path: /dev
+        - name: mnt-huge
+          hostPath:
+            path: /mnt/huge
+        - name: hugepage
+          emptyDir:
+            medium: HugePages
+      containers:
+      - name: spdk-container
+        image: {{ SPDK_IMAGE }}
+        imagePullPolicy: "Always"
+        command: ["/root/scripts/run_spdk_tgt.sh", "{{ SPDK_CPU_MASK }}", "{{ SPDK_MEM }}"]
+        securityContext:
+          privileged: true
+        volumeMounts:
+        - name: socket-dir
+          mountPath: /var/tmp
+        - name: host-sys
+          mountPath: /sys
+        - name: host-modules
+          mountPath: /lib/modules
+        - name: dev-vol
+          mountPath: /dev
+        - name: mnt-huge
+          mountPath: /mnt/huge
+        resources:
+          limits:
+            hugepages-2Mi: 2Gi
+            memory: 1024Mi
+          requests:
+            memory: 1024Mi
+
+      - name: spdk-proxy-container
+        image: {{ SPDK_IMAGE }}
+        imagePullPolicy: "Always"
+        command: ["python", "/root/scripts/spdk_http_proxy_server.py"]
+        volumeMounts:
+        - name: socket-dir
+          mountPath: /var/tmp
+        env:
+        - name: SERVER_IP
+          value: "{{ SERVER_IP }}"
+        - name: RPC_PORT
+          value: "{{ RPC_PORT }}"
+        - name: RPC_USERNAME
+          value: "{{ RPC_USERNAME }}"
+        - name: RPC_PASSWORD
+          value: "{{ RPC_PASSWORD }}"

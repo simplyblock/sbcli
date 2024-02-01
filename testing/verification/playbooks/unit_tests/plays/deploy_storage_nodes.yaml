@@ -1,0 +1,15 @@
+- name: "Add storage nodes"
+  hosts: storage
+  remote_user: ec2-user
+  gather_facts: yes
+  tasks:
+    - name: Disable IPV6
+      shell:
+        cmd: "sysctl net.ipv6.conf.all.disable_ipv6=1"
+      become: true
+    - name: Deploy storage nodes
+      shell:
+        cmd: "sbcli -d storage-node deploy"
+      async: 3600
+      poll: 5
+

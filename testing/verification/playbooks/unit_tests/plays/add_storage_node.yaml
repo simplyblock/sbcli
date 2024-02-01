@@ -1,0 +1,16 @@
+- name: Deploy cluster on the first management node
+  hosts: management[0]
+  remote_user: ec2-user
+  gather_facts: yes
+  tasks:
+    - name: Get cluster ID
+      shell:
+        cmd: "sbcli cluster list | tail -2 | head -1 | awk '{print $2}'| xargs"
+      register: cluster_id
+    - name: Add storage nodes
+      shell:
+        cmd: "sbcli -d storage-node add-node {{ cluster_id.stdout }} {{ hostvars[item]['ansible_facts']['default_ipv4']['address'] }}:5000 eth0 --memory 16G --spdk-cmd-params 1 \"\" all"
+      loop: "{{ groups['storage'] }}"
+      async: 3600
+      poll: 30
+

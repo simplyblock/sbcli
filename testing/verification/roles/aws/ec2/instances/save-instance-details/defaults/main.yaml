@@ -1,0 +1,2 @@
+ec2_filters: {}
+ec2_information_file_path: "{{ artifacts_path }}/ec2_instances_info.txt"

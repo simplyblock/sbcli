@@ -1,0 +1,18 @@
+- name: fetch instances information from aws
+  amazon.aws.ec2_instance_info:
+    filters: "{{ ec2_filters }}"
+  when: ec2_filters | length > 0
+  register: "ec2_instances_info"
+
+- name: fetch instances information from aws
+  amazon.aws.ec2_instance_info:
+    filters:
+      "tag:ResourceType": "instance"
+      "tag:env_name": "{{ env_name }}"
+      "tag:automation_tag": "{{ automation_tag }}"
+  when: ec2_filters | length == 0
+  register: "ec2_instances_info"
+
+- name: Save instances info
+  shell:
+    cmd: "echo '{{ ec2_instances_info | to_json }}' | jq -r '.instances[] | .tags.Name + \"\t\" + .network_interfaces[].private_ip_addresses[].association.public_ip + \"\t\" + .network_interfaces[].private_ip_addresses[].private_ip_address + \"\t\" + .instance_id + \"\t\" + .vpc_id + \"\t\" + .tags.env_name + \"\t\" + .tags.node_type' > {{ ec2_information_file_path }}"

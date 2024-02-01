@@ -1,0 +1,5 @@
+- name: "Create placement group {{ placement_group_name }}"
+  community.aws.ec2_placement_group:
+    strategy: "{{ placement_group_strategy }}"
+    name: "{{ placement_group_name }}"
+    state: present

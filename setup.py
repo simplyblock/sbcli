@@ -1,9 +1,23 @@
 import os
 
-from setuptools import setup, find_packages
+from setuptools import setup
 
-with open("README.md", "r", encoding="utf-8") as fh:
-    long_description = fh.read()
+
+def get_env_var(name, default=None):
+    if not name:
+        return False
+    with open("env_var", "r", encoding="utf-8") as fh:
+        lines = fh.readlines()
+    data = {}
+    for line in lines:
+        if not line or line.startswith("#"):
+            continue
+        try:
+            k, v = line.split("=")
+            data[k.strip()] = v.strip()
+        except:
+            pass
+    return data.get(name, default)
 
 
 def gen_data_files(*dirs):
@@ -14,15 +28,42 @@ def gen_data_files(*dirs):
     return results
 
 
+def get_long_description():
+    with open("README.md", "r", encoding="utf-8") as fh:
+        return fh.read()
+
+
+COMMAND_NAME = get_env_var("SIMPLY_BLOCK_COMMAND_NAME", "sbcli")
+VERSION = get_env_var("SIMPLY_BLOCK_VERSION", "1")
+
+data_files = gen_data_files(
+        "simplyblock_core/controllers",
+        "simplyblock_core/models",
+        "simplyblock_core/scripts",
+        "simplyblock_core/services",
+        "simplyblock_core/spdk_installer",
+        "simplyblock_web/blueprints",
+        "simplyblock_web/static",
+        "simplyblock_web/templates")
+
+data_files.append(('', ['env_var']))
+
 setup(
-    name='sbcli',
-    version='4.2.5',
-    packages=find_packages(),
-    url='https://github.com/',
-    author='Hamdy Khader',
-    author_email='hamdy.khader@gmail.com',
+    name=COMMAND_NAME,
+    version=VERSION,
+    packages=[
+        'simplyblock_core',
+        'simplyblock_core.controllers',
+        'simplyblock_core.models',
+        'simplyblock_core.scripts',
+        'simplyblock_core.services',
+        'simplyblock_core.spdk_installer',
+        'simplyblock_cli', 'simplyblock_web', ],
+    url='https://www.simplyblock.io/',
+    author='Hamdy',
+    author_email='hamdy@simplyblock.io',
     description='CLI for managing SimplyBlock cluster',
-    long_description=long_description,
+    long_description=get_long_description(),
     long_description_content_type="text/markdown",
     install_requires=[
         "foundationdb",
@@ -35,9 +76,9 @@ setup(
     ],
     entry_points={
         'console_scripts': [
-            'sbcli=management.cli:main',
+            f'{COMMAND_NAME}=simplyblock_cli.cli:main',
         ]
     },
     include_package_data=True,
-    data_files=gen_data_files("management/scripts", "management/services", "management/spdk_installer"),
+    data_files=data_files,
 )

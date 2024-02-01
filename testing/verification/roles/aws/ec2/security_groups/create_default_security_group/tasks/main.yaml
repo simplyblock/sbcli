@@ -1,0 +1,46 @@
+- name: "Creating security group {{ security_group_name }}"
+  amazon.aws.ec2_security_group:
+    name: "{{ security_group_name }}"
+    description: "{{ security_group_description }}"
+    state: present
+    vpc_id: "{{ vpc_id }}"
+    tags:
+      ResourceType: "security-group"
+      env_name: "{{ env_name }}"
+      automation_tag: "{{ automation_tag }}"
+    rules:
+      - proto: "tcp"
+        ports: 443
+        cidr_ip: 0.0.0.0/0
+      - proto: "tcp"
+        ports: 80
+        cidr_ip: 0.0.0.0/0
+      - proto: "tcp"
+        ports: 8080
+        cidr_ip: 0.0.0.0/0
+      - proto: "tcp"
+        ports: 22
+        cidr_ip: 0.0.0.0/0
+      - proto: -1
+        ports: -1
+        group_name: "{{ security_group_name }}"
+    rules_egress:
+      - proto: "tcp"
+        ports: 443
+        cidr_ip: 0.0.0.0/0
+      - proto: "tcp"
+        ports: 80
+        cidr_ip: 0.0.0.0/0
+      - proto: "tcp"
+        ports: 8080
+        cidr_ip: 0.0.0.0/0
+      - proto: "tcp"
+        ports: 22
+        cidr_ip: 0.0.0.0/0
+      - proto: -1
+        ports: -1
+        group_name: "{{ security_group_name }}"
+  register: security_group_info
+
+
+

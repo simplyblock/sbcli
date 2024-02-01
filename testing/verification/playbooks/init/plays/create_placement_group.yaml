@@ -1,0 +1,10 @@
+- name: "Create placement group"
+  hosts: localhost
+  tasks:
+    - name: "Create {{ placement_group_name }} if it does not exist"
+      include_role:
+        name: "aws/ec2/placement_group/create_placement_group"
+      vars:
+        placement_group_name: "{{ placement_group_name }}"
+        placement_group_strategy: "{{ placement_group_strategy }}"
+      when: placement_group_strategy != "None"

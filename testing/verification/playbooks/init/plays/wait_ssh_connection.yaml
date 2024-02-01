@@ -1,0 +1,7 @@
+- name: "Wait ssh connection for all machines"
+  hosts: all
+  tasks:
+    - name: Wait 300 seconds
+      ansible.builtin.wait_for_connection:
+        delay: 0
+        timeout: 300

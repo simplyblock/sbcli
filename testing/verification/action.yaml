@@ -1,0 +1,89 @@
+name: 'Simply block verification'
+description: 'An action to run simplyblock verification tests on github actions'
+inputs:
+  aws-access-key:
+    description: 'aws access key'
+    required: true
+  aws-secret-key:
+    description: 'aws secret key'
+    required: true
+  aws-region:
+    description: 'aws region'
+    required: true
+    default: "eu-central-1"
+  ha-type:
+    required: true
+    description: Ha storage cluster type
+    default: "single"
+  cluster-type:
+    description: 'cluster type'
+    required: false
+    default: "none"
+  branch:
+    description: 'branch'
+    required: true
+    default: "main"
+  test:
+    description: 'test to run'
+    required: false
+    default: "empty"
+  mgmt-nodes:
+    required: false
+    description: 'Number of mgmt nodes'
+    default: 1
+  storage-nodes:
+    required: false
+    description: Number of storage nodes
+    default: 1
+  mgmt-instance-type:
+    description: 'Type of mgmt nodes'
+    required: false
+    default: 'm6i.xlarge'
+  storage-instance-type:
+    description: 'Type of storage nodes'
+    required: false
+    default: 'i3en.xlarge'
+  vpc-subnet-id:
+    description: 'Subnet of VPC'
+    required: false
+    default: 'none'
+  placement-group-strategy:
+    description: 'Placement group strategy'
+    required: true
+    default: 'spread'
+  image-ami:
+    description: 'ami-id of the image'
+    required: true
+    default: 'ami-03cbad7144aeda3eb'
+runs:
+  using: 'docker'
+  image: 'Dockerfile'
+  args:
+    - "--aws-access-key"
+    - "${{ inputs.aws-access-key }}"
+    - "--aws-secret-key"
+    - "${{ inputs.aws-secret-key }}"
+    - "--aws-region"
+    - "${{ inputs.aws-region }}"
+    - "--ha-type"
+    - "${{ inputs.ha-type }}"
+    - "--cluster-type"
+    - "${{ inputs.cluster-type }}"
+    - "--branch"
+    - "${{ inputs.branch }}"
+    - "--test"
+    - "${{ inputs.test }}"
+    - "--management-instance-type"
+    - "${{ inputs.mgmt-instance-type }}"
+    - "--storage-instance-type"
+    - "${{ inputs.storage-instance-type }}"
+    - "--storage-instances"
+    - ${{ inputs.storage-nodes }}
+    - "--management-instances"
+    - ${{ inputs.mgmt-nodes }}
+    - "--vpc-subnet-id"
+    - "${{ inputs.vpc-subnet-id }}"
+    - "--placement-group-strategy"
+    - "${{ inputs.placement-group-strategy }}"
+    - "--image-ami"
+    - "${{ inputs.image-ami }}"

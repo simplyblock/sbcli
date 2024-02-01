@@ -1,0 +1,60 @@
+- name: "Check instance_type"
+  fail:
+    msg: "instance_type is not provided"
+  when: instance_type == ""
+
+- name: "Check instance_name"
+  fail:
+    msg: "instance_name is not provided"
+  when: instance_name == ""
+
+- name: "Check instance_image"
+  fail:
+    msg: "instance_image is not provided"
+  when: instance_image == ""
+
+- name: "Check node_type"
+  fail:
+    msg: "node_type is not provided"
+  when: node_type == ""
+
+- name: "Check instance_key_name"
+  fail:
+    msg: "instance_key_name is not provided"
+  when: instance_key_name == ""
+
+- name: "Check instance_security_group"
+  fail:
+    msg: "instance_security_group is not provided"
+  when: instance_security_group == ""
+
+#- name: "Check if image id is supported"
+#  fail:
+#    msg: "{{ instance_image }} is not supported by the scripts"
+#  when: instance_image not in image_to_os_type
+
+- name: "Creating {{ node_type }} instance {{ instance_name }}"
+  amazon.aws.ec2_instance:
+    name: "{{ instance_name }}"
+    count: 1
+    state: running
+    image_id: "{{ instance_image }}"
+    instance_type: "{{ instance_type }}"
+    key_name: "{{ instance_key_name }}"
+    security_group: "{{ instance_security_group }}"
+    placement_group: "{{ placement_group | default(omit, true) }}"
+    vpc_subnet_id: "{{ vpc_subnet_id | default(omit, true) }}"
+    network:
+      assign_public_ip: true
+    tags:
+      ResourceType: "instance"
+      env_name: "{{ env_name }}"
+      os: "rhel"
+#      os: "{{ image_to_os_type[instance_image] }}"
+      automation_tag: "{{ automation_tag }}"
+      node_type: "{{ node_type }}"
+    volumes:
+      - device_name: "/dev/sda1"
+        ebs:
+          delete_on_termination: true
+          volume_size: "{{ volume_size }}"

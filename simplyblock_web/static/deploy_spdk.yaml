@@ -1,0 +1,60 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: spdk-deployment
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: spdk-app
+  template:
+    metadata:
+      labels:
+        app: spdk-app
+    spec:
+      hostNetwork: true
+      volumes:
+        - name: socket-dir
+          emptyDir:
+            medium: "Memory"
+        - name: hugepage
+          emptyDir:
+            medium: HugePages
+      containers:
+      - name: spdk-container
+        image: hamdykhader/spdk:core
+        env:
+          - name: SPDK_CPU_MASK
+            value: "0x1"
+          - name: SPDK_MEM
+            value: "0"
+        command: ["/root/scripts/run_spdk_tgt.sh", "$(SPDK_CPU_MASK)", "$(SPDK_MEM)"]
+        securityContext:
+          privileged: true
+        volumeMounts:
+        - name: socket-dir
+          mountPath: /var/tmp
+        - name: hugepage
+          mountPath: /dev/hugepages
+        resources:
+          limits:
+            hugepages-2Mi: 2Gi
+            memory: 1024Mi
+          requests:
+            memory: 1024Mi
+
+      - name: spdk-proxy-container
+        image: hamdykhader/spdk:core
+        command: ["python", "/root/scripts/spdk_http_proxy_server.py"]
+        volumeMounts:
+        - name: socket-dir
+          mountPath: /var/tmp
+        env:
+        - name: SERVER_IP
+          value: "ip"
+        - name: RPC_PORT
+          value: "id"
+        - name: RPC_USERNAME
+          value: "secret"
+        - name: RPC_PASSWORD
+          value: "secret"

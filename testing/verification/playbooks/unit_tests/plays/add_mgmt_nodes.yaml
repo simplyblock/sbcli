@@ -1,0 +1,15 @@
+- name: "Install sbcli"
+  hosts: localhost
+  tasks:
+    - name: "Fetch key pair {{ default_key_pair_name }}"
+      amazon.aws.ec2_key_info:
+        names: "{{ default_key_pair_name }}"
+      register: key_pair_info
+
+    - name: "Create {{ default_key_pair_name }} if it does not exist"
+      include_role:
+        name: "aws/ec2/key_pairs/create_key_pair"
+      vars:
+        private_key_name: "{{ default_key_pair_name }}"
+        private_key_path: "{{ default_key_pair_path }}"
+      when: key_pair_info.keypairs | length == 0

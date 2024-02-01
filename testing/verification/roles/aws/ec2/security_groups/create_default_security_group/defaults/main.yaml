@@ -1,0 +1,4 @@
+security_group_name: "MySecurityGroup"
+security_group_id: ""
+vpc_id: ""
+security_group_description: "Security Group for Instances with specific ports allowed"

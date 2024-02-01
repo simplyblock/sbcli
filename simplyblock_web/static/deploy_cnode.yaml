@@ -1,0 +1,22 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: caching-node-deployment
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: caching-node-api
+  template:
+    metadata:
+      labels:
+        app: caching-node-api
+    spec:
+      hostNetwork: true
+      containers:
+      - name: c-node-api-container
+        image: hamdykhader/simplyblock:latest
+        imagePullPolicy: "Always"
+        command: ["python", "WebApp/caching_node_app_k8s.py"]
+        securityContext:
+          privileged: true

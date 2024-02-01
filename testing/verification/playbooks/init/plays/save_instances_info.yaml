@@ -1,0 +1,10 @@
+- hosts: localhost
+  tasks:
+    - name: Assure artifacts directory exists
+      file:
+        path: "{{ artifacts_path }}"
+        state: directory
+
+    - name: Save ec2 instances information
+      include_role:
+        name: "aws/ec2/instances/save-instance-details"

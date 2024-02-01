@@ -1,0 +1,19 @@
+- name: "Install sbcli"
+  hosts: management:storage
+  gather_facts: yes
+  tasks:
+    - name: Update all packages
+      ansible.builtin.yum:
+        name: '*'
+        state: latest
+      become: true
+
+    - name: Install the latest version of PIP
+      ansible.builtin.yum:
+        name: pip
+        state: latest
+      become: true
+
+    - name: Install sbcli python package
+      ansible.builtin.pip:
+        name: sbcli

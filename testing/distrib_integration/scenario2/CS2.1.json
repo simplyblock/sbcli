@@ -1,0 +1,7 @@
+{
+  "nbblock_distrib": 512,
+  "nbchunk_distrib": 4096,
+  "ndcs": 4,
+  "npcs": 1,
+  "page_size": 4194304
+}

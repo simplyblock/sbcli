@@ -1,0 +1,5 @@
+- import_playbook: plays/install_sbcli.yaml
+- import_playbook: plays/deploy_storage_nodes.yaml
+- import_playbook: plays/deploy_cluster.yaml
+#- import_playbook: plays/add_mgmt_nodes.yaml
+- import_playbook: plays/add_storage_node.yaml

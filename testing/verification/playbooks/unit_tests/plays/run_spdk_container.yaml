@@ -1,0 +1,15 @@
+- name: "Run spdk container"
+  hosts: storage
+  become: true
+  tasks:
+    - name: start spdk container
+      docker_container:
+        name: spdk
+        command: /root/scripts/run_distr.sh
+        state: started
+        image: "public.ecr.aws/n7y8o1v5/spdk:{{ branch }}"
+        pull: true
+        volumes:
+          - /dev
+          - /var/tmp
+          - /lib/modules

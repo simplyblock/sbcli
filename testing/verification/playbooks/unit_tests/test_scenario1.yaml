@@ -1,0 +1,7 @@
+- import_playbook: plays/pull_spdk_image.yaml
+- import_playbook: plays/run_spdk_container.yaml
+- import_playbook: plays/create_distrib_bdev.yaml
+- import_playbook: plays/get_connect_command.yaml
+- import_playbook: plays/connect_device_to_host.yaml
+- import_playbook: plays/get_nvme_device.yaml
+- import_playbook: plays/run_test.yaml

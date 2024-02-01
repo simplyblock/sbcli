@@ -1,0 +1,15 @@
+- name: "Check node_type"
+  fail:
+    msg: "node_type is not provided"
+  when: node_type_to_delete == ""
+
+- name: "Deleting {{ node_type_to_delete }} instance {{ instance_name_to_delete }}"
+  amazon.aws.ec2_instance:
+    name: "{{ instance_name_to_delete | default(omit, true) }}"
+    state: absent
+    filters:
+      "tag:ResourceType": "instance"
+      "tag:env_name": "{{ env_name }}"
+      "tag:automation_tag": "{{ automation_tag }}"
+      "tag:node_type": "{{ node_type_to_delete }}"
+      "instance-state-name": "running"

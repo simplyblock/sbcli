@@ -1,0 +1,19 @@
+- name: Deploy cluster on the first management node
+  hosts: management[0]
+  remote_user: ec2-user
+  gather_facts: yes
+  tasks:
+    - name: Disable IPV6
+      shell:
+        cmd: "sysctl net.ipv6.conf.all.disable_ipv6=1"
+      become: true
+    - name: Wait 300 seconds
+      ansible.builtin.wait_for_connection:
+        delay: 0
+        timeout: 300
+    - name: Run cluster create command
+      shell:
+        cmd: "sbcli -d cluster create --ha_type {{ ha_type }}"
+      async: 3600
+      poll: 5
+

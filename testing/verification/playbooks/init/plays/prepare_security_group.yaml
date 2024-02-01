@@ -1,0 +1,43 @@
+- name: "Prepare security group"
+  hosts: localhost
+  tasks:
+    - name: "Fetch vpc from aws if subnet provided"
+      amazon.aws.ec2_vpc_subnet_info:
+        subnet_ids: "{{ vpc_subnet_id }}"
+      register: vpc_subnet_info
+      when: vpc_subnet_id | length != 0
+    - set_fact:
+        target_vpc_id: "{{ vpc_subnet_info['subnets'][0]['vpc_id'] }}"
+      when: vpc_subnet_id | length != 0
+
+    - name: "Fetch default vpc if subnet not provided"
+      amazon.aws.ec2_vpc_net_info:
+        filters:
+          "is-default": True
+      when: vpc_subnet_id | length == 0
+      register: vpc_info
+    - set_fact:
+        target_vpc_id: "{{ vpc_info['vpcs'][0]['vpc_id'] }}"
+      when: vpc_subnet_id | length == 0
+    - name: "Fetch security group {{ default_security_group_name }}"
+      amazon.aws.ec2_security_group_info:
+        filters:
+          group-name: "{{ default_security_group_name }}"
+          vpc-id: "{{ target_vpc_id }}"
+      register: exist_security_group_info
+    - name: get security group ID
+      set_fact:
+        security_group_id: "{{ exist_security_group_info['security_groups'][0]['group_id'] }}"
+      when: exist_security_group_info['security_groups'] | length != 0
+
+    - name: "Create {{ default_security_group_name }} if it does not exist"
+      include_role:
+        name: "aws/ec2/security_groups/create_default_security_group"
+      vars:
+        security_group_name: "{{ default_security_group_name }}"
+        vpc_id: "{{ target_vpc_id }}"
+      when: exist_security_group_info['security_groups'] | length == 0
+    - name: get security group ID
+      set_fact:
+        security_group_id: "{{ security_group_info['group_id'] }}"
+      when: exist_security_group_info['security_groups'] | length == 0

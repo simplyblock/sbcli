@@ -1,0 +1,8 @@
+- name: "Delete keypair {{ private_key_name_to_delete }}"
+  amazon.aws.ec2_key:
+    name: "{{ private_key_name_to_delete }}"
+    tags:
+      ResourceType: "key-pair"
+      env_name: "{{ env_name }}"
+      automation_tag: "{{ automation_tag }}"
+    state: absent

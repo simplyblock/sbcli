@@ -1,0 +1,60 @@
+- name: "Instances creation"
+  hosts: localhost
+  tasks:
+    - name: Create management nodes
+      include_role:
+        name: "aws/ec2/instances/create_instance"
+      vars:
+        instance_type: "{{ management_instance_type }}"
+        instance_name: "Management-Instance-{{ env_name }}-{{ instance_index }}"
+        instance_image: "{{ management_image_id }}"
+        node_type: "management"
+        instance_key_name: "{{ default_key_pair_name }}"
+        instance_security_group: "{{ security_group_id }}"
+        vpc_subnet_id: "{{ vpc_subnet_id }}"
+      loop: "{{ range(0, management_instances | int) }}"
+      loop_control:
+        loop_var: "instance_index"
+      when: management_instances | int > 0
+
+    - name: Create client nodes
+      include_role:
+        name: "aws/ec2/instances/create_instance"
+      vars:
+        instance_type: "{{ client_instance_type }}"
+        instance_name: "Client-Instance-{{ env_name }}-{{ instance_index }}"
+        instance_image: "{{ client_image_id }}"
+        node_type: "client"
+        instance_key_name: "{{ default_key_pair_name }}"
+        instance_security_group: "{{ security_group_id }}"
+      loop: "{{ range(0, client_instances | int) }}"
+      loop_control:
+        loop_var: "instance_index"
+      when: client_instances | int > 0
+
+    - name: "Set storage instance type based on number of nvme"
+      set_fact:
+        actual_storage_instance_type: "{{ nvme_number_to_instance_type[storage_instance_nvme_count] }}"
+      when: storage_instance_nvme_count != "" and storage_instance_nvme_count in nvme_number_to_instance_type.keys()
+
+    - name: "Set storage instance type from the global value"
+      set_fact:
+        actual_storage_instance_type: "{{ storage_instance_type }}"
+      when: storage_instance_nvme_count == ""
+
+    - name: Create storage nodes
+      include_role:
+        name: "aws/ec2/instances/create_instance"
+      vars:
+        instance_type: "{{ actual_storage_instance_type }}"
+        instance_name: "Storage-Instance-{{ env_name }}-{{ instance_index }}"
+        instance_image: "{{ storage_image_id }}"
+        node_type: "storage"
+        instance_key_name: "{{ default_key_pair_name }}"
+        instance_security_group: "{{ security_group_id }}"
+        placement_group: "{{ placement_group_name }}"
+        vpc_subnet_id: "{{ vpc_subnet_id }}"
+      loop: "{{ range(0, storage_instances | int) }}"
+      loop_control:
+        loop_var: "instance_index"
+      when: storage_instances | int > 0

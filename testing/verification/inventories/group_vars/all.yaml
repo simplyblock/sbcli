@@ -1,0 +1,63 @@
+ansible_ssh_common_args: '-o StrictHostKeyChecking=no'
+
+env_name: "nightly"
+automation_tag: "automation_spawn"
+artifacts_path: "{{ lookup('ansible.builtin.env', 'HOME') }}/artifacts"
+
+default_security_group_name: "MySecurityGroup"
+default_key_pair_name: "my_key_pair"
+default_key_pair_path: "my_key_pair.pem"
+
+ansible_ssh_private_key_file: '{{ default_key_pair_path }}'
+
+management_image_id: "ami-03cbad7144aeda3eb"
+storage_image_id: "ami-03cbad7144aeda3eb"
+client_image_id: "ami-03cbad7144aeda3eb"
+
+management_instances: "1"
+storage_instances: "1"
+client_instances: "1"
+
+management_instance_type: "m6i.xlarge"
+storage_instance_type: "i3en.xlarge"
+client_instance_type: "m6i.xlarge"
+
+storage_instance_nvme_count: ""
+ha_type: "single"
+
+nvme_number_to_instance_type:
+  "1": "i3en.xlarge"
+  "2": "i3en.2xlarge"
+  "4": "i3en.12xlarge"
+
+image_to_os_type:
+  "ami-023b76ea7e1fcaa22": "rhel"
+  "ami-07e09b6e170d74f7f": "rhel"
+  "ami-0de1cf33b5284129c": "rhel"
+  "ami-0161c9a9247495ec1": "rhel"
+  "ami-045dc2b7e7d8e222b": "rhel"
+  "ami-0a7194a1eae13049d": "rhel"
+  "ami-0ba784927b06baa0e": "rhel"
+  "ami-096cd09f472ab6a99": "rhel"
+  "ami-061d78b525b9ce62c": "rhel"
+  "ami-03cbad7144aeda3eb": "rhel"
+  "ami-00bd9c66f2ab306ae": "ubuntu"
+  "ami-00af789732f34021b": "ubuntu"
+  "ami-0000432aada5de175": "ubuntu"
+  "ami-0ab1a82de7ca5889c": "ubuntu"
+  "ami-04e601abe3e1a910f": "ubuntu"
+  "ami-09218ca60f41ef608": "centos"
+  "ami-05cd8511f031716ab": "centos"
+  "ami-0e5efcb558574dca7": "centos"
+  "ami-08c21233410b8b8f2": "debian"
+  "ami-0b157e89996563778": "debian"
+  "ami-00d780ec8624525d0": "debian"
+  "ami-056daded0a509751b": "oci"
+  "ami-0f30ca3dd2f6f5b1e": "oci"
+  "ami-08562ac1c0e988348": "oci"
+
+
+key_pair_name_to_delete: ""
+management_instances_to_delete: "all"
+storage_instances_to_delete: "all"
+client_instances_to_delete: "all"

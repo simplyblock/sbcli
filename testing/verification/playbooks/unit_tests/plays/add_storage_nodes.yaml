@@ -1,0 +1,15 @@
+- name: "Add storage nodes"
+  hosts: storage
+  remote_user: ec2-user
+  gather_facts: yes
+  tasks:
+    - name: Disable IPV6
+      shell:
+        cmd: "sysctl net.ipv6.conf.all.disable_ipv6=1"
+      become: true
+    - name: Get main cluster management IP
+      command: "hostname -i"
+      register: node_ip
+    - name: Add storage nodes
+      shell:
+        cmd: "sbcli -d storage-node add-node {{ hostvars[groups['management'][0]]['cluster_id'].stdout }} {{ node_ip.stdout }}:5000 eth0"

@@ -1,0 +1,59 @@
+- name: "Instances deletion"
+  hosts: localhost
+  tasks:
+    - name: Delete management nodes
+      include_role:
+        name: "aws/ec2/instances/delete_instance"
+      vars:
+        instance_name_to_delete: "{{ instance_name }}"
+        node_type_to_delete: "management"
+      loop: "{{ management_instances_to_delete.split(',') }}"
+      loop_control:
+        loop_var: "instance_name"
+      when: management_instances_to_delete != 'all'
+
+    - name: Delete all management nodes
+      include_role:
+        name: "aws/ec2/instances/delete_instance"
+      vars:
+        instance_name_to_delete: ""
+        node_type_to_delete: "management"
+      when: management_instances_to_delete == 'all'
+
+    - name: Delete client nodes
+      include_role:
+        name: "aws/ec2/instances/delete_instance"
+      vars:
+        instance_name_to_delete: "{{ instance_name }}"
+        node_type_to_delete: "client"
+      loop: "{{ client_instances_to_delete.split(',') }}"
+      loop_control:
+        loop_var: "instance_name"
+      when: client_instances_to_delete != 'all'
+
+    - name: Delete all client nodes
+      include_role:
+        name: "aws/ec2/instances/delete_instance"
+      vars:
+        instance_name_to_delete: ""
+        node_type_to_delete: "client"
+      when: client_instances_to_delete == 'all'
+
+    - name: Delete storage nodes
+      include_role:
+        name: "aws/ec2/instances/delete_instance"
+      vars:
+        instance_name_to_delete: "{{ instance_name }}"
+        node_type_to_delete: "storage"
+      loop: "{{ storage_instances_to_delete.split(',') }}"
+      loop_control:
+        loop_var: "instance_name"
+      when: storage_instances_to_delete != 'all'
+
+    - name: Delete all storage nodes
+      include_role:
+        name: "aws/ec2/instances/delete_instance"
+      vars:
+        instance_name_to_delete: ""
+        node_type_to_delete: "storage"
+      when: storage_instances_to_delete == 'all'

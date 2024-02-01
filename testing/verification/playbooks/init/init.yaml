@@ -1,0 +1,6 @@
+- import_playbook: plays/prepare_key_pairs.yaml
+- import_playbook: plays/prepare_security_group.yaml
+- import_playbook: plays/create_placement_group.yaml
+- import_playbook: plays/start_instances.yaml
+- import_playbook: plays/wait_ssh_connection.yaml
+- import_playbook: plays/save_instances_info.yaml

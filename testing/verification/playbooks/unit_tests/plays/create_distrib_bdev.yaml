@@ -1,0 +1,15 @@
+- name: "Prepare security group"
+  hosts: localhost
+  tasks:
+    - name: "Fetch security group {{ default_security_group_name }}"
+      amazon.aws.ec2_security_group_info:
+        filters:
+          group-name: "{{ default_security_group_name }}"
+      register: security_group_info
+
+    - name: "Create {{ default_security_group_name }} if it does not exist"
+      include_role:
+        name: "aws/ec2/security_groups/create_default_security_group"
+      vars:
+        security_group_name: "{{ default_security_group_name }}"
+      when: security_group_info | length == 0

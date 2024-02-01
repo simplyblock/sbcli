@@ -1,0 +1,16 @@
+# This file will be overriden by init.sh, only modify if the init is not needed any more
+plugin: amazon.aws.aws_ec2
+
+filters:
+  tag:env_name: nightly
+  tag:automation_tag: automation_spawn
+
+groups:
+  storage: "'storage' in tags.node_type"
+  client: "'client' in tags.node_type"
+  management: "'management' in tags.node_type"
+  rhel: "'rhel' in tags.os"
+  centos: "'centos' in tags.os"
+  ubuntu: "'ubuntu' in tags.os"
+  debian: "'debian' in tags.os"
+  oci: "'oci' in tags.os"

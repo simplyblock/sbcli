@@ -1,0 +1,561 @@
+import json
+
+import requests
+import logging
+
+from requests.adapters import HTTPAdapter
+from urllib3 import Retry
+
+logger = logging.getLogger()
+
+
+def print_dict(d):
+    print(json.dumps(d, indent=2))
+
+
+def print_json(s):
+    print(json.dumps(s, indent=2).strip('"'))
+
+
+class RPCException(Exception):
+    def __init__(self, message):
+        self.message = message
+
+
+class RPCClient:
+
+    # ref: https://spdk.io/doc/jsonrpc.html
+
+    def __init__(self, ip_address, port, username, password, timeout=5, retry=3):
+        self.ip_address = ip_address
+        self.port = port
+        self.url = 'http://%s:%s/' % (self.ip_address, self.port)
+        self.username = username
+        self.password = password
+        self.timeout = timeout
+        self.session = requests.session()
+        self.session.auth = (self.username, self.password)
+        self.session.verify = False
+        retries = Retry(total=retry, backoff_factor=1, connect=retry, read=retry)
+        self.session.mount("http://", HTTPAdapter(max_retries=retries))
+        self.session.timeout = self.timeout
+
+    def _request(self, method, params=None):
+        ret, _ = self._request2(method, params)
+        return ret
+
+    def _request2(self, method, params=None):
+        payload = {'id': 1, 'method': method}
+        if params:
+            payload['params'] = params
+        try:
+            logger.debug("Requesting method: %s, params: %s", method, params)
+            response = self.session.post(self.url, data=json.dumps(payload), timeout=self.timeout)
+        except Exception as e:
+            return False, str(e)
+
+        logger.debug("Response: status_code: %s, content: %s",
+                     response.status_code, response.content)
+        ret_code = response.status_code
+
+        result = None
+        error = None
+        if ret_code == 200:
+            try:
+                data = response.json()
+            except Exception:
+                return response.content, None
+
+            if 'result' in data:
+                result = data['result']
+            if 'error' in data:
+                error = data['error']
+            if result is not None or error is not None:
+                return result, error
+            else:
+                return data, None
+
+        if ret_code in [500, 400]:
+            raise RPCException("Invalid http status: %s" % ret_code)
+        logger.error("Unknown http status: %s", ret_code)
+        return None, None
+
+    def get_version(self):
+        return self._request("spdk_get_version")
+
+    def subsystem_list(self, nqn_name=None):
+        data = self._request("nvmf_get_subsystems")
+        if data and nqn_name:
+            for d in data:
+                if d['nqn'] == nqn_name:
+                    return [d]
+            return []
+        else:
+            return data
+
+    def subsystem_delete(self, nqn):
+        return self._request("nvmf_delete_subsystem", params={'nqn': nqn})
+
+    def subsystem_create(self, nqn, serial_number, model_number):
+        params = {
+            "nqn": nqn,
+            "serial_number": serial_number,
+            "allow_any_host": True,
+            "ana_reporting": True,
+            "model_number": model_number}
+        return self._request("nvmf_create_subsystem", params)
+
+    def subsystem_add_host(self, nqn, host):
+        params = {"nqn": nqn, "host": host}
+        return self._request("nvmf_subsystem_add_host", params)
+
+    def transport_list(self, trtype=None):
+        params = None
+        if trtype:
+            params = {"trtype": trtype}
+        return self._request("nvmf_get_transports", params)
+
+    def transport_create(self, trtype):
+        params = {"trtype": trtype}
+        return self._request("nvmf_create_transport", params)
+
+    def listeners_list(self, nqn):
+        params = {"nqn": nqn}
+        return self._request("nvmf_subsystem_get_listeners", params)
+
+    def listeners_create(self, nqn, trtype, traddr, trsvcid):
+        """"
+            nqn: Subsystem NQN.
+            trtype: Transport type ("RDMA").
+            traddr: Transport address.
+            trsvcid: Transport service ID (required for RDMA or TCP).
+        """
+        params = {
+            "nqn": nqn,
+            "listen_address": {
+                "trtype": trtype,
+                "adrfam": "IPv4",
+                "traddr": traddr,
+                "trsvcid": trsvcid
+            }
+        }
+        return self._request("nvmf_subsystem_add_listener", params)
+
+    def bdev_nvme_controller_list(self, name=None):
+        params = None
+        if name:
+            params = {"name": name}
+        return self._request("bdev_nvme_get_controllers", params)
+
+    def bdev_nvme_controller_attach(self, name, pci_addr):
+        params = {"name": name, "trtype": "pcie", "traddr": pci_addr}
+        return self._request2("bdev_nvme_attach_controller", params)
+
+    def alloc_bdev_controller_attach(self, name, pci_addr):
+        params = {"traddr": pci_addr, "ns_id": 1, "label": name}
+        return self._request2("ultra21_alloc_ns_mount", params)
+
+    def bdev_nvme_detach_controller(self, name):
+        params = {"name": name}
+        return self._request2("bdev_nvme_detach_controller", params)
+
+    def ultra21_alloc_ns_init(self, pci_addr):
+        params = {
+            "traddr": pci_addr,
+            "ns_id": 1,
+            "label": "SYSVMS84-x86",
+            "desc": "A volume to keep OpenVMS/VAX/Alpha/IA64/x86 operation system data",
+            "pagesz": 16384
+        }
+        return self._request2("ultra21_alloc_ns_init", params)
+
+    def create_nvme_partitions(self, params):
+        # this is not implemented in the spdk side, will not issue a request.
+        # TODO: implement
+        return params
+
+    def allocate_bdev(self, name, sn):
+        # this is not implemented in the spdk side, will not issue a request.
+        # TODO: implement
+        return name, sn
+
+    def nvmf_subsystem_add_ns(self, nqn, dev_name, uuid=None, nguid=None):
+        params = {
+            "nqn": nqn,
+            "namespace": {
+                "bdev_name": dev_name
+            }
+        }
+
+        if uuid:
+            params['namespace']['uuid'] = uuid
+
+        if nguid:
+            params['namespace']['nguid'] = nguid
+
+        return self._request("nvmf_subsystem_add_ns", params)
+
+    def nvmf_subsystem_remove_ns(self, nqn, nsid):
+        params = {
+            "nqn": nqn,
+            "nsid": nsid}
+        return self._request("nvmf_subsystem_remove_ns", params)
+
+    def nvmf_subsystem_listener_set_ana_state(self, nqn, ip, port, is_optimized=True):
+        params = {
+            "nqn": nqn,
+            "listen_address": {
+                "trtype": "tcp",
+                "adrfam": "ipv4",
+                "traddr": ip,
+                "trsvcid": str(port)
+            },
+        }
+        if is_optimized:
+            params['ana_state'] = "optimized"
+        else:
+            params['ana_state'] = "non_optimized"
+
+        return self._request("nvmf_subsystem_listener_set_ana_state", params)
+
+    def get_device_status(self, device_name):
+        # TODO: to be implemented
+        return {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                'name': device_name,
+                'status': 'live'
+            }
+        }
+
+    def get_device_stats(self, uuid):
+        params = {"name": uuid}
+        return self._request("bdev_get_iostat", params)
+
+    def shutdown_node(self, node_id):
+        # TODO: to be implemented
+        return {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": True
+        }
+
+    def suspend_node(self, node_id):
+        # TODO: to be implemented
+        return {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": True
+        }
+
+    def resume_node(self, node_id):
+        # TODO: to be implemented
+        return {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": True
+        }
+
+    def reset_device(self, device_name):
+        params = {"name": device_name}
+        return self._request("bdev_nvme_reset_controller", params)
+
+    def create_lvstore(self, name, bdev_name):
+        params = {"bdev_name": bdev_name, "lvs_name": name}
+        return self._request("bdev_lvol_create_lvstore", params)
+
+    def create_lvol(self, name, size, lvs_name):
+        params = {
+            "lvol_name": name,
+            "size": size,
+            "lvs_name": lvs_name,
+            "thin_provision": True,
+        }
+        return self._request("bdev_lvol_create", params)
+
+    def delete_lvol(self, name):
+        params = {"name": name}
+        return self._request("bdev_lvol_delete", params)
+
+    def get_bdevs(self, name=None):
+        params = None
+        if name:
+            params = {"name": name}
+        return self._request("bdev_get_bdevs", params)
+
+    def resize_lvol(self, name, new_size_mb):
+        params = {
+            "name": name,
+            "size_in_mib": new_size_mb
+        }
+        return self._request("bdev_lvol_resize", params)
+
+    def lvol_read_only(self, name):
+        params = {"name": name}
+        return self._request("bdev_lvol_set_read_only", params)
+
+    def lvol_create_snapshot(self, lvol_id, snapshot_name):
+        params = {
+            "lvol_name": lvol_id,
+            "snapshot_name": snapshot_name}
+        return self._request("bdev_lvol_snapshot", params)
+
+    def lvol_clone(self, snapshot_name, clone_name):
+        params = {
+            "snapshot_name": snapshot_name,
+            "clone_name": clone_name}
+        return self._request("bdev_lvol_clone", params)
+
+    def lvol_compress_create(self, base_bdev_name, pm_path):
+        params = {
+            "base_bdev_name": base_bdev_name,
+            "pm_path": pm_path
+        }
+        return self._request("bdev_compress_create", params)
+
+    def lvol_crypto_create(self, name, base_name, key_name):
+        params = {
+            "base_bdev_name": base_name,
+            "name": name,
+            "key_name": key_name,
+        }
+        return self._request("bdev_crypto_create", params)
+
+    def lvol_crypto_key_create(self, name, key, key2):
+        params = {
+            "cipher": "AES_XTS",
+            "key": key,
+            "key2": key2,
+            "name": name
+        }
+        return self._request("accel_crypto_key_create", params)
+
+    def lvol_crypto_delete(self, name):
+        params = {"name": name}
+        return self._request("bdev_crypto_delete", params)
+
+    def lvol_compress_delete(self, name):
+        params = {"name": name}
+        return self._request("bdev_compress_delete", params)
+
+    def ultra21_bdev_pass_create(self, alloc_bdev, vuid, pt_name):
+        params = {
+            "base_bdev": alloc_bdev,
+            "vuid": vuid,
+            "pt_bdev": pt_name
+        }
+        return self._request2("ultra21_bdev_pass_create", params)
+
+    def ultra21_bdev_pass_delete(self, name):
+        params = {"name": name}
+        return self._request2("ultra21_bdev_pass_delete", params)
+
+    def bdev_alceml_create(self, alceml_name, nvme_name, uuid, pba_init_mode=3):
+        params = {
+            "name": alceml_name,
+            "cntr_path": nvme_name,
+            "num_blocks": 0,
+            "block_size": 0,
+            "num_blocks_reported": 0,
+            "md_size": 0,
+            "use_ram": False,
+            "pba_init_mode": pba_init_mode,
+            "pba_page_size": 2097152,
+            "uuid": uuid,
+            # "use_scheduling": True,
+            "use_optimized": True,
+            "pba_nbalign": 4096
+        }
+        return self._request2("bdev_alceml_create", params)
+
+    def bdev_distrib_create(self, name, vuid, ndcs, npcs, num_blocks, block_size, alloc_names,
+                            chunk_size, ha_comm_addrs=None, ha_inode_self=None, pba_page_size=2097152):
+        """"
+            // Optional (not specified = no HA)
+            // Comma-separated communication addresses, for each node, e.g. "192.168.10.1:45001,192.168.10.1:32768".
+            // Number of addresses in the list is exactly the number of nodes in HA group,
+            //  this must be common among all DISTRIB instances in the group.
+          "ha_comm_addrs": "192.168.10.1:45001,192.168.10.1:32768"
+
+            // Optional, default = 0
+            //  This node (device) number, in the group, defined by ha_comm_addrs.
+          "ha_inode_self": 1
+        """
+        params = {
+            "name": name,
+            # "alloc_names": alloc_names,
+            "vuid": vuid,
+            "ndcs": ndcs,
+            "npcs": npcs,
+            "num_blocks": num_blocks,
+            "block_size": block_size,
+            "chunk_size": chunk_size,
+            "pba_page_size": pba_page_size
+        }
+        if ha_comm_addrs:
+            params['ha_comm_addrs'] = ha_comm_addrs
+            params['ha_inode_self'] = ha_inode_self
+
+        return self._request("bdev_distrib_create", params)
+
+    def bdev_lvol_delete_lvstore(self, name):
+        params = {"lvs_name": name}
+        return self._request2("bdev_lvol_delete_lvstore", params)
+
+    def bdev_distrib_delete(self, name):
+        params = {"name": name}
+        return self._request2("bdev_distrib_delete", params)
+
+    def bdev_alceml_delete(self, name):
+        params = {"name": name}
+        return self._request2("bdev_alceml_delete", params)
+
+    def get_lvol_stats(self, uuid):
+        params = {"name": uuid}
+        return self._request("bdev_get_iostat", params)
+
+    def bdev_raid_create(self, name, bdevs_list):
+        params = {
+            "name": name,
+            "raid_level": "0",
+            "strip_size_kb": 4 * len(bdevs_list),
+            "base_bdevs": bdevs_list
+        }
+        return self._request("bdev_raid_create", params)
+
+    def bdev_set_qos_limit(self, name, rw_ios_per_sec, rw_mbytes_per_sec, r_mbytes_per_sec, w_mbytes_per_sec):
+        params = {
+            "name": name
+        }
+        if rw_ios_per_sec is not None and rw_ios_per_sec >= 0:
+            params['rw_ios_per_sec'] = rw_ios_per_sec
+        if rw_mbytes_per_sec is not None and rw_mbytes_per_sec >= 0:
+            params['rw_mbytes_per_sec'] = rw_mbytes_per_sec
+        if r_mbytes_per_sec is not None and r_mbytes_per_sec >= 0:
+            params['r_mbytes_per_sec'] = r_mbytes_per_sec
+        if w_mbytes_per_sec is not None and w_mbytes_per_sec >= 0:
+            params['w_mbytes_per_sec'] = w_mbytes_per_sec
+        return self._request("bdev_set_qos_limit", params)
+
+    def distr_send_cluster_map(self, params):
+        return self._request("distr_send_cluster_map", params)
+
+    def distr_get_cluster_map(self, name):
+        params = {"name": name}
+        return self._request("distr_dump_cluster_map", params)
+
+    def distr_add_nodes(self, params):
+        return self._request("distr_add_nodes", params)
+
+    def distr_status_events_update(self, params):
+        # ultra/DISTR_v2/src_code_app_spdk/specs/message_format_rpcs__distrib__v5.txt#L396C1-L396C27
+        return self._request("distr_status_events_update", params)
+
+    def bdev_nvme_attach_controller_tcp(self, name, nqn, ip, port):
+        params = {
+            "name": name,
+            "trtype": "tcp",
+            "traddr": ip,
+            "adrfam": "ipv4",
+            "trsvcid": str(port),
+            "subnqn": nqn,
+            "fabrics_connect_timeout_us": 100000,
+            "fast_io_fail_timeout_sec": 0,
+        }
+        return self._request("bdev_nvme_attach_controller", params)
+
+    def bdev_split(self, base_bdev, split_count):
+        params = {
+            "base_bdev": base_bdev,
+            "split_count": split_count
+        }
+        return self._request("bdev_split_create", params)
+
+    def bdev_PT_NoExcl_create(self, name, base_bdev_name):
+        params = {
+            "name": name,
+            "base_bdev_name": base_bdev_name
+        }
+        return self._request("bdev_ptnonexcl_create", params)
+
+    def bdev_PT_NoExcl_delete(self, name):
+        params = {
+            "name": name
+        }
+        return self._request("bdev_ptnonexcl_delete", params)
+
+    def bdev_passtest_create(self, name, base_name):
+        params = {
+            "base_name": base_name,
+            "pt_name": name
+        }
+        return self._request("bdev_passtest_create", params)
+
+    def bdev_passtest_mode(self, name, mode):
+        params = {
+            "pt_name": name,
+            "mode": mode
+        }
+        return self._request("bdev_passtest_mode", params)
+
+    def bdev_passtest_delete(self, name):
+        params = {
+            "pt_name": name
+        }
+        return self._request("bdev_passtest_delete", params)
+
+    def bdev_nvme_set_options(self):
+        params = {
+            "action_on_timeout": "none",
+            "ctrlr_loss_timeout_sec": 20,
+            "reconnect_delay_sec": 2,
+            # "timeout_us": 10000,
+            # "timeout_admin_us": 0,
+            # "keep_alive_timeout_ms": 250,
+            # "retry_count": 1,
+            "transport_retry_count": 1,
+            "bdev_retry_count": 1}
+        return self._request("bdev_nvme_set_options", params)
+
+    def bdev_set_options(self, bdev_io_pool_size, bdev_io_cache_size, iobuf_small_cache_size, iobuf_large_cache_size):
+        params = {}
+        if bdev_io_pool_size > 0:
+            params['bdev_io_pool_size'] = bdev_io_pool_size
+        if bdev_io_cache_size > 0:
+            params['bdev_io_cache_size'] = bdev_io_cache_size
+        if iobuf_small_cache_size > 0:
+            params['iobuf_small_cache_size'] = iobuf_small_cache_size
+        if iobuf_small_cache_size > 0:
+            params['iobuf_large_cache_size'] = iobuf_large_cache_size
+        if params:
+            return self._request("bdev_set_options", params)
+        else:
+            return False
+
+    def distr_status_events_get(self):
+        return self._request("distr_status_events_get")
+
+    def alceml_get_capacity(self, name):
+        params = {"name": name}
+        return self._request("alceml_get_pages_usage", params)
+
+    def bdev_ocf_create(self, name, mode, cache_name, core_name):
+        params = {
+            "name": name,
+            "mode": mode,
+            "cache_bdev_name": cache_name,
+            "core_bdev_name": core_name}
+        return self._request("bdev_ocf_create", params)
+
+    def bdev_ocf_delete(self, name):
+        params = {"name": name}
+        return self._request("bdev_ocf_delete", params)
+
+    def bdev_malloc_create(self, name, block_size, num_blocks):
+        params = {
+            "name": name,
+            "block_size": block_size,
+            "num_blocks": num_blocks,
+        }
+        return self._request("bdev_malloc_create", params)
