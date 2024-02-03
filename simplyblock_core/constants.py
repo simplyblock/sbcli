@@ -51,7 +51,7 @@ HEALTH_CHECK_INTERVAL_SEC = 15*60
 VERSION = "1.0.0"
 
 # SIMPLY_BLOCK_DOCKER_IMAGE = "hamdykhader/simplyblock:latest"
-SIMPLY_BLOCK_DOCKER_IMAGE = "simplyblock/simplyblock:v1.0.0"
+SIMPLY_BLOCK_DOCKER_IMAGE = "simplyblock/simplyblock:latest"
 
 SIMPLY_BLOCK_SPDK_CORE_IMAGE = "hamdykhader/spdk:core"
 SIMPLY_BLOCK_SPDK_ULTRA_IMAGE = "hamdykhader/spdk:latest"
