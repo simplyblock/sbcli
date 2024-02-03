@@ -347,6 +347,9 @@ def _connect_to_remote_devs(this_node):
             name = f"remote_{dev.alceml_bdev}"
             logger.info(f"Connecting to {name}")
             ret = rpc_client.bdev_nvme_attach_controller_tcp(name, dev.nvmf_nqn, dev.nvmf_ip, dev.nvmf_port)
+            if not ret:
+                logger.error(f"Failed to connect to device: {dev.get_id()}")
+                continue
             dev.remote_bdev = f"{name}n1"
             remote_devices.append(dev)
     return remote_devices
@@ -372,6 +375,21 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask,
         if node_info['cluster_id'] != cluster_id:
             logger.error(f"This node is part of another cluster: {node_info['cluster_id']}")
             return False
+
+    # check for memory
+    if "memory_details" in node_info and node_info['memory_details']:
+        memory_details = node_info['memory_details']
+        logger.info("Node Memory info")
+        logger.info(f"Total: {utils.humanbytes(memory_details['total'])}")
+        logger.info(f"Free: {utils.humanbytes(memory_details['free'])}")
+        logger.info(f"Hugepages Total: {utils.humanbytes(memory_details['huge_total'])}")
+        huge_free = memory_details['huge_free']
+        logger.info(f"Hugepages Free: {utils.humanbytes(huge_free)}")
+        if huge_free < 1 * 1024 * 1024:
+            logger.warning(f"Free hugepages are less than 1G: {utils.humanbytes(huge_free)}")
+        if not spdk_mem:
+            spdk_mem = huge_free
+            logger.info(f"Using the free hugepages for spdk memory: {utils.humanbytes(huge_free)}")
 
     logger.info("Deploying SPDK")
     results, err = snode_api.spdk_process_start(spdk_cpu_mask, spdk_mem, spdk_image, cmd_params)
@@ -1745,7 +1763,7 @@ def deploy(ifname):
     logger.info("Creating SNodeAPI container")
     container = node_docker.containers.run(
         constants.SIMPLY_BLOCK_DOCKER_IMAGE,
-        "python simplyblock_web/snode_app.py",
+        "python simplyblock_web/node_webapp.py storage_node",
         detach=True,
         privileged=True,
         name="SNodeAPI",
@@ -1759,7 +1777,9 @@ def deploy(ifname):
             '/sys:/sys'],
         restart_policy={"Name": "always"}
     )
-    logger.info("Pulling spdk images")
+    logger.info("Pulling SPDK images")
+    logger.debug(constants.SIMPLY_BLOCK_SPDK_CORE_IMAGE)
+    logger.debug(constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE)
     node_docker.images.pull(constants.SIMPLY_BLOCK_SPDK_CORE_IMAGE)
     node_docker.images.pull(constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE)
     return f"{dev_ip}:5000"

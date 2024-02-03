@@ -139,6 +139,21 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spd
     snode.memory = node_info['memory']
     snode.hugepages = node_info['hugepages']
 
+    # check for memory
+    if "memory_details" in node_info and node_info['memory_details']:
+        memory_details = node_info['memory_details']
+        logger.info("Node Memory info")
+        logger.info(f"Total: {utils.humanbytes(memory_details['total'])}")
+        logger.info(f"Free: {utils.humanbytes(memory_details['free'])}")
+        logger.info(f"Hugepages Total: {utils.humanbytes(memory_details['huge_total'])}")
+        huge_free = memory_details['huge_free']
+        logger.info(f"Hugepages Free: {utils.humanbytes(huge_free)}")
+        if huge_free < 1 * 1024 * 1024:
+            logger.warning(f"Free hugepages are less than 1G: {utils.humanbytes(huge_free)}")
+        if not spdk_mem:
+            spdk_mem = huge_free
+            logger.info(f"Using the free hugepages for spdk memory: {utils.humanbytes(huge_free)}")
+
     logger.info("Deploying SPDK")
     results, err = snode_api.spdk_process_start(
         spdk_cpu_mask, spdk_mem, spdk_image, snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
@@ -541,7 +556,7 @@ def deploy(ifname):
     logger.info("Creating CachingNodeAPI container")
     container = node_docker.containers.run(
         constants.SIMPLY_BLOCK_DOCKER_IMAGE,
-        "python simplyblock_web/caching_node_app.py",
+        "python simplyblock_web/node_webapp.py caching_docker_node",
         detach=True,
         privileged=True,
         name="CachingNodeAPI",
@@ -555,7 +570,7 @@ def deploy(ifname):
             '/sys:/sys'],
         restart_policy={"Name": "always"}
     )
-    logger.info("Pulling spdk image")
+    logger.info("Pulling SPDK images")
     node_docker.images.pull(constants.SIMPLY_BLOCK_SPDK_CORE_IMAGE)
     node_docker.images.pull(constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE)
     return f"{dev_ip}:5000"
