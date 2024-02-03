@@ -810,7 +810,7 @@ def restart_storage_node(
     node_info, _ = snode_api.info()
     logger.info(f"Node info: {node_info}")
 
-    logger.info("Deploying SPDK")
+    logger.info("Restarting SPDK")
     cpu = snode.spdk_cpu_mask
     if spdk_cpu_mask:
         cpu = spdk_cpu_mask
