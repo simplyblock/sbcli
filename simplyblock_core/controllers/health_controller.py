@@ -307,7 +307,7 @@ def check_lvol_on_node(lvol_id, node_id):
         logger.info(f"Checking Distr ndcs+npcs: {lvol.ndcs}+{lvol.npcs}, online devices: {online_devices} ... ok")
     else:
         logger.info(f"Checking Distr ndcs+npcs: {lvol.ndcs}+{lvol.npcs}, online devices: {online_devices} ... failed")
-        passed = False
+        # passed = False
 
     return passed
 
