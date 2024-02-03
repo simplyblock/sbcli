@@ -137,7 +137,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spd
     snode.cpu = node_info['cpu_count']
     snode.cpu_hz = node_info['cpu_hz']
     snode.memory = node_info['memory']
-    snode.hugepages = node_info['hugepages']
+    # snode.hugepages = node_info['hugepages']
 
     # check for memory
     if "memory_details" in node_info and node_info['memory_details']:
@@ -145,15 +145,15 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spd
         logger.info("Node Memory info")
         logger.info(f"Total: {utils.humanbytes(memory_details['total'])}")
         logger.info(f"Free: {utils.humanbytes(memory_details['free'])}")
-        logger.info(f"Hugepages Total: {utils.humanbytes(memory_details['huge_total'])}")
-        huge_free = memory_details['huge_free']
-        logger.info(f"Hugepages Free: {utils.humanbytes(huge_free)}")
-        if huge_free < 1 * 1024 * 1024:
-            logger.warning(f"Free hugepages are less than 1G: {utils.humanbytes(huge_free)}")
+        # logger.info(f"Hugepages Total: {utils.humanbytes(memory_details['huge_total'])}")
+        # huge_free = memory_details['huge_free']
+        # logger.info(f"Hugepages Free: {utils.humanbytes(huge_free)}")
+        # if huge_free < 1 * 1024 * 1024:
+        #     logger.warning(f"Free hugepages are less than 1G: {utils.humanbytes(huge_free)}")
         if not spdk_mem:
-            spdk_mem = huge_free
-            logger.info(f"Using the free hugepages for spdk memory: {utils.humanbytes(huge_free)}")
+            spdk_mem = memory_details['free']
 
+    logger.info(f"Trying to set hugepages for: {utils.humanbytes(spdk_mem)}")
     logger.info("Deploying SPDK")
     results, err = snode_api.spdk_process_start(
         spdk_cpu_mask, spdk_mem, spdk_image, snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
@@ -178,17 +178,12 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spd
 
     snode.nvme_devices = nvme_devs
     snode.write_to_db(db_controller.kv_store)
-
     ssd_dev = nvme_devs[0]
 
-    # get node hugepages memory
-    # mem = node_info['hugepages']
-    if spdk_mem:
-        mem = spdk_mem
-    else:
-        mem = node_info['hugepages']
+    mem = node_info['memory_details']['huge_free']
+    snode.hugepages = mem
+    logger.info(f"Free Hugepages detected: {utils.humanbytes(mem)}")
 
-    logger.info(f"Hugepages detected: {utils.humanbytes(mem)}")
     if mem < 1024*1024:
         logger.error("Hugepages must be larger than 1G")
         return False
@@ -222,9 +217,14 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spd
     # create tmp ocf
     logger.info(f"Creating first ocf bdev...")
 
-    # rpc_client.bdev_malloc_create("malloc_tmp", 512, int((100*1024*1024)/512))
-    # rpc_client.bdev_ocf_create("ocf_tmp", 'wt', cache_bdev, "malloc_tmp")
-
+    ret = rpc_client.bdev_malloc_create("malloc_tmp", 512, int((100*1024*1024)/512))
+    if not ret:
+        logger.error("Failed ot create tmp malloc")
+        return False
+    ret = rpc_client.bdev_ocf_create("ocf_tmp", 'wt', cache_bdev, "malloc_tmp")
+    if not ret:
+        logger.error("Failed ot create tmp OCF BDev")
+        return False
     logger.info("Setting node status to Active")
     snode.status = CachingNode.STATUS_ONLINE
     snode.write_to_db(kv_store)
@@ -264,13 +264,14 @@ def recreate(node_id):
         return False
 
     snode.nvme_devices = nvme_devs
-    snode.write_to_db(db_controller.kv_store)
+    # snode.write_to_db(db_controller.kv_store)
 
     ssd_dev = nvme_devs[0]
 
     # get node hugepages memory
-    mem = node_info['hugepages']
-    logger.info(f"Hugepages detected: {utils.humanbytes(mem)}")
+    mem = node_info['memory_details']['huge_free']
+    snode.hugepages = mem
+    logger.info(f"Free hugepages detected: {utils.humanbytes(mem)}")
     if mem < 1024*1024:
         logger.error("Hugepages must be larger than 1G")
         return False
@@ -283,7 +284,7 @@ def recreate(node_id):
     split_factor = math.ceil(ssd_size/supported_ssd_size)
 
     logger.info(f"Supported SSD size: {utils.humanbytes(supported_ssd_size)}")
-    logger.info(f"SSD size: {utils.humanbytes(ssd_size)}")
+    logger.info(f"Current SSD size: {utils.humanbytes(ssd_size)}")
 
     cache_size = 0
     cache_bdev = None
@@ -304,8 +305,14 @@ def recreate(node_id):
     # create tmp ocf
     logger.info(f"Creating first ocf bdev...")
 
-    rpc_client.bdev_malloc_create("malloc_tmp", 512, int((100*1024*1024)/512))
-    rpc_client.bdev_ocf_create("ocf_tmp", 'wt', cache_bdev, "malloc_tmp")
+    ret = rpc_client.bdev_malloc_create("malloc_tmp", 512, int((100 * 1024 * 1024) / 512))
+    if not ret:
+        logger.error("Failed ot create tmp malloc")
+        return False
+    ret = rpc_client.bdev_ocf_create("ocf_tmp", 'wt', cache_bdev, "malloc_tmp")
+    if not ret:
+        logger.error("Failed ot create tmp OCF BDev")
+        return False
 
     logger.info("Setting node status to Active")
     snode.status = CachingNode.STATUS_ONLINE
