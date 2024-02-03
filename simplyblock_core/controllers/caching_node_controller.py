@@ -166,7 +166,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spd
     rpc_client = RPCClient(
         snode.mgmt_ip, snode.rpc_port,
         snode.rpc_username, snode.rpc_password,
-        timeout=10, retry=5)
+        timeout=60*5, retry=5)
 
     # get new node info after starting spdk
     node_info, _ = snode_api.info()
@@ -181,7 +181,6 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spd
     ssd_dev = nvme_devs[0]
 
     mem = node_info['memory_details']['huge_free']
-    snode.hugepages = mem
     logger.info(f"Free Hugepages detected: {utils.humanbytes(mem)}")
 
     if mem < 1024*1024:
@@ -189,6 +188,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spd
         return False
 
     mem = int(mem*constants.CACHING_NODE_MEMORY_FACTOR)
+    snode.hugepages = mem
     logger.info(f"Hugepages to be used: {utils.humanbytes(mem)}")
 
     ssd_size = ssd_dev.size
@@ -253,7 +253,7 @@ def recreate(node_id):
     rpc_client = RPCClient(
         snode.mgmt_ip, snode.rpc_port,
         snode.rpc_username, snode.rpc_password,
-        timeout=10, retry=5)
+        timeout=60*5, retry=5)
 
     # get new node info after starting spdk
     node_info, _ = snode_api.info()
@@ -270,13 +270,13 @@ def recreate(node_id):
 
     # get node hugepages memory
     mem = node_info['memory_details']['huge_free']
-    snode.hugepages = mem
     logger.info(f"Free hugepages detected: {utils.humanbytes(mem)}")
     if mem < 1024*1024:
         logger.error("Hugepages must be larger than 1G")
         return False
 
     mem = int(mem*constants.CACHING_NODE_MEMORY_FACTOR)
+    snode.hugepages = mem
     logger.info(f"Hugepages to be used: {utils.humanbytes(mem)}")
 
     ssd_size = ssd_dev.size
@@ -361,7 +361,8 @@ def connect(caching_node_id, lvol_id):
     mini_id = lvol.get_id().split("-")[0]
     rem_name = f"rem_{mini_id}"
     rpc_client = RPCClient(
-        cnode.mgmt_ip, cnode.rpc_port, cnode.rpc_username, cnode.rpc_password, timeout=120)
+        cnode.mgmt_ip, cnode.rpc_port, cnode.rpc_username, cnode.rpc_password,
+        timeout=60*5, retry=5)
     # create nvmef connection
     if lvol.ha_type == 'single':
         snode = db_controller.get_storage_node_by_id(lvol.node_id)
