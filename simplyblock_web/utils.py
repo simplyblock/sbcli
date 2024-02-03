@@ -60,15 +60,18 @@ def parse_size(size_string: str):
         pass
     try:
         if size_string:
+            size_string = size_string.lower()
+            size_string = size_string.replace(" ", "")
+            size_string = size_string.replace("b", "")
             size_number = int(size_string[:-1])
-            size_v = size_string[-1].lower()
-            if size_v in ["k", "kb"]:
+            size_v = size_string[-1]
+            if size_v == "k":
                 return size_number * 1024
-            if size_v in ["m", "mb"]:
+            if size_v == "m":
                 return size_number * 1024 * 1024
-            elif size_v in ["g", "gb"]:
+            elif size_v == "g":
                 return size_number * 1024 * 1024 * 1024
-            elif size_v in ["t", "tb"]:
+            elif size_v == "t":
                 return size_number * 1024 * 1024 * 1024 * 1024
             else:
                 print(f"Error parsing size: {size_string}")
