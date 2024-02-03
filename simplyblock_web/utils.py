@@ -62,13 +62,13 @@ def parse_size(size_string: str):
         if size_string:
             size_number = int(size_string[:-1])
             size_v = size_string[-1].lower()
-            if size_v == "k":
+            if size_v in ["k", "kb"]:
                 return size_number * 1024
-            if size_v == "m":
+            if size_v in ["m", "mb"]:
                 return size_number * 1024 * 1024
-            elif size_v == "g":
+            elif size_v in ["g", "gb"]:
                 return size_number * 1024 * 1024 * 1024
-            elif size_v == "t":
+            elif size_v in ["t", "tb"]:
                 return size_number * 1024 * 1024 * 1024 * 1024
             else:
                 print(f"Error parsing size: {size_string}")

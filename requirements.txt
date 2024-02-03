@@ -8,3 +8,8 @@ psutil
 py-cpuinfo
 pytest
 mock
+setuptools
+flask
+kubernetes
+PyYAML
+urllib3

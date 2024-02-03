@@ -18,7 +18,7 @@ class CNodeClient:
 
     def __init__(self, ip_address):
         self.ip_address = ip_address
-        self.url = 'http://%s/cnode/' % self.ip_address
+        self.url = 'http://%s/' % self.ip_address
         self.timeout = 10
         self.session = requests.session()
         self.session.verify = False
@@ -79,14 +79,14 @@ class CNodeClient:
             "rpc_username": rpc_username,
             "rpc_password": rpc_password,
         }
-        return self._request("POST", "spdk_process_start", params)
+        return self._request("POST", "cnode/spdk_process_start", params)
 
     def join_db(self, db_connection):
         params = {"db_connection": db_connection}
-        return self._request("POST", "join_db", params)
+        return self._request("POST", "cnode/join_db", params)
 
     def spdk_process_kill(self):
-        return self._request("GET", "spdk_process_kill")
+        return self._request("GET", "cnode/spdk_process_kill")
 
     def connect_nvme(self, ip, port, nqn):
         params = {
