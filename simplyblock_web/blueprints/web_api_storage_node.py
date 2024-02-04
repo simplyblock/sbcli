@@ -105,13 +105,7 @@ def storage_node_port_io_stats(uuid):
     data = db_controller.get_port_stats(nd.get_id(), port.get_id())
     out = []
     for record in data:
-        out.append({
-            "Date": time.strftime("%H:%M:%S, %d/%m/%Y", time.gmtime(record.date)),
-            "bytes_sent": utils.humanbytes(record.bytes_sent),
-            "bytes_received": utils.humanbytes(record.bytes_received),
-            "out_speed": utils.humanbytes(record.out_speed),
-            "in_speed": utils.humanbytes(record.in_speed),
-        })
+        out.append(record.get_clean_dict())
     return utils.get_response(out)
 
 
