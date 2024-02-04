@@ -15,7 +15,6 @@ from simplyblock_core import utils
 from simplyblock_core.controllers import lvol_controller, storage_events, snapshot_controller
 from simplyblock_core.kv_store import DBController
 from simplyblock_core import shell_utils
-from simplyblock_core.models.device_stat import DeviceStat
 from simplyblock_core.models.iface import IFace
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
@@ -29,10 +28,6 @@ logger = log.getLogger()
 class StorageOpsException(Exception):
     def __init__(self, message):
         self.message = message
-
-
-def _get_ib_devices():
-    return _get_data_nics([])
 
 
 def _get_data_nics(data_nics):
@@ -124,41 +119,8 @@ def addNvmeDevices(cluster, rpc_client, devs, snode):
                     'nvme_bdev': nvme_bdev,
                     'alloc_bdev': nvme_bdev,
                     'node_id': snode.get_id(),
+                    'cluster_id': snode.cluster_id,
                     'status': 'online'
-                }))
-            sequential_number += device_partitions_count
-    return devices
-
-
-def _get_nvme_list_from_file(cluster):
-    devs = get_nvme_devices()
-    logger.info("Getting nvme devices")
-    logger.debug(devs)
-    sequential_number = 0
-    devices = []
-    for index, (pcie, vid) in enumerate(devs):
-        name = "nvme%s" % index
-        if vid in constants.SSD_VENDOR_WHITE_LIST:
-
-            model_number = 'Amazon EC2 NVMe Instance Storage'
-            if model_number not in cluster.model_ids:
-                logger.warning("Device model ID is not recognized: %s, "
-                               "skipping device", model_number)
-                continue
-            size = 7500000000000
-            device_partitions_count = int(size / (cluster.blk_size * cluster.page_size_in_blocks))
-            devices.append(
-                NVMeDevice({
-                    'uuid': str(uuid.uuid4()),
-                    'device_name': name,
-                    'sequential_number': sequential_number,
-                    'partitions_count': device_partitions_count,
-                    'capacity': size,
-                    'size': size,
-                    'pcie_address': pcie,
-                    'model_id': model_number,
-                    'serial_number': "AWS22A4E8CF2CD844ED9",
-                    'status': 'Active'
                 }))
             sequential_number += device_partitions_count
     return devices
@@ -212,21 +174,6 @@ def _get_nvme_list(cluster):
                 }))
             sequential_number += device_partitions_count
     return devices
-
-
-def create_partitions_arrays(global_settings, nvme_devs):
-    sequential_number = 0
-    device_to_partition = {}
-    for index, nvme in enumerate(nvme_devs):
-        device_number = index + 1
-        device_size = nvme.size
-        device_partitions_count = int(device_size / (global_settings.NS_LB_SIZE * global_settings.NS_SIZE_IN_LBS))
-        for device_partition_index in range(device_partitions_count):
-            device_to_partition[sequential_number + device_partition_index] = (
-                device_number, (global_settings.NS_SIZE_IN_LBS * device_partition_index))
-        sequential_number += device_partitions_count
-    status_ns = {i: 'Active' for i in range(sequential_number)}
-    return device_to_partition, status_ns
 
 
 def _run_nvme_smart_log(dev_name):
@@ -1414,18 +1361,14 @@ def replace_node(kv_store, old_node_name, iface_name):
     return "Not implemented!"
 
 
-def _get_device_capacity_data(device, records_number=1):
+def get_device(device_id):
     db_controller = DBController()
-    data = []
-    stats = db_controller.get_device_capacity(device, records_number)
-    for record in stats:
-        data.append({
-            "date": record.date,
-            "size_total": record.size_total,
-            "size_used": record.size_used,
-            "size_free": record.size_free,
-            "size_util": record.size_util})
-    return data
+    device = db_controller.get_storage_devices(device_id)
+    if not device:
+        logger.error("device not found")
+        return False
+    out = [device.get_clean_dict()]
+    return utils.print_table(out)
 
 
 def get_device_capacity(device_id, history, records_count=20, parse_sizes=True):
@@ -1441,7 +1384,7 @@ def get_device_capacity(device_id, history, records_count=20, parse_sizes=True):
     else:
         records_number = 20
 
-    records = _get_device_capacity_data(device, records_number)
+    records = db_controller.get_device_capacity(device, records_number)
     records_list = utils.process_records(records, records_count)
 
     if not parse_sizes:
@@ -1459,16 +1402,6 @@ def get_device_capacity(device_id, history, records_count=20, parse_sizes=True):
     return out
 
 
-def get_device(device_id):
-    db_controller = DBController()
-    device = db_controller.get_storage_devices(device_id)
-    if not device:
-        logger.error("device not found")
-        return False
-    out = [device.get_clean_dict()]
-    return utils.print_table(out)
-
-
 def get_device_iostats(device_id, history, records_count=20, parse_sizes=True):
     db_controller = DBController()
     device = db_controller.get_storage_devices(device_id)
@@ -1484,20 +1417,7 @@ def get_device_iostats(device_id, history, records_count=20, parse_sizes=True):
     else:
         records_number = 20
 
-    records = db_controller.get_device_stats(device, records_number)
-
-    records_list = []
-    for record in records:
-        data = {}
-        data["date"] = record.date
-        data["read_bytes_per_sec"] = record.read_bytes_per_sec
-        data["read_iops"] = record.read_iops
-        data["write_bytes_per_sec"] = record.write_bytes_per_sec
-        data["write_iops"] = record.write_iops
-        data["unmapped_bytes_per_sec"] = record.unmapped_bytes_per_sec
-        data["read_latency_ticks"] = record.read_latency_ticks
-        data["write_latency_ticks"] = record.write_latency_ticks
-        records_list.append(data)
+    records_list = db_controller.get_device_stats(device, records_number)
     new_records = utils.process_records(records_list, records_count)
 
     if not parse_sizes:
@@ -1517,23 +1437,6 @@ def get_device_iostats(device_id, history, records_count=20, parse_sizes=True):
     return out
 
 
-def _get_node_capacity_data(node, history):
-    db_controller = DBController()
-    data = []
-    stats = db_controller.get_node_capacity(node, history)
-    for record in stats:
-        data.append({
-            "date": record.date,
-            "size_total": record.size_total,
-            "size_used": record.size_used,
-            "size_free": record.size_free,
-            "size_util": record.size_util,
-            "size_prov": record.size_prov,
-            "size_prov_util": record.size_prov_util}
-        )
-    return data
-
-
 def get_node_capacity(node_id, history, records_count=20, parse_sizes=True):
     db_controller = DBController()
     this_node = db_controller.get_storage_node_by_id(node_id)
@@ -1549,7 +1452,7 @@ def get_node_capacity(node_id, history, records_count=20, parse_sizes=True):
     else:
         records_number = 20
 
-    records = _get_node_capacity_data(this_node, records_number)
+    records = db_controller.get_node_capacity(this_node, records_number)
     new_records = utils.process_records(records, records_count)
 
     if not parse_sizes:
@@ -1569,34 +1472,6 @@ def get_node_capacity(node_id, history, records_count=20, parse_sizes=True):
     return out
 
 
-def _get_node_io_data(node, history):
-    db_controller = DBController()
-    data = []
-    for dev in node.nvme_devices:
-        stats = db_controller.get_device_stats(dev, history)
-        for index, record in enumerate(stats):
-            # possible bug here :)
-            if index < len(data):
-                data[index]["read_bytes_per_sec"] += record.read_bytes_per_sec
-                data[index]["read_iops"] += record.read_iops
-                data[index]["write_bytes_per_sec"] += record.write_bytes_per_sec
-                data[index]["write_iops"] += record.write_iops
-                data[index]["unmapped_bytes_per_sec"] += record.unmapped_bytes_per_sec
-                data[index]["read_latency_ticks"] += record.read_latency_ticks
-                data[index]["write_latency_ticks"] += record.write_latency_ticks
-            else:
-                data.insert(index, {})
-                data[index]["date"] = record.date
-                data[index]["read_bytes_per_sec"] = record.read_bytes_per_sec
-                data[index]["read_iops"] = record.read_iops
-                data[index]["write_bytes_per_sec"] = record.write_bytes_per_sec
-                data[index]["write_iops"] = record.write_iops
-                data[index]["unmapped_bytes_per_sec"] = record.unmapped_bytes_per_sec
-                data[index]["read_latency_ticks"] = record.read_latency_ticks
-                data[index]["write_latency_ticks"] = record.write_latency_ticks
-    return data
-
-
 def get_node_iostats_history(node_id, history, records_count=20, parse_sizes=True):
     db_controller = DBController()
     node = db_controller.get_storage_node_by_id(node_id)
@@ -1612,7 +1487,7 @@ def get_node_iostats_history(node_id, history, records_count=20, parse_sizes=Tru
     else:
         records_number = 20
 
-    records = _get_node_io_data(node, records_number)
+    records = db_controller.get_node_stats(node, records_number)
     new_records = utils.process_records(records, records_count)
 
     if not parse_sizes:
@@ -1629,57 +1504,6 @@ def get_node_iostats_history(node_id, history, records_count=20, parse_sizes=Tru
             "Write IOPS": record["write_iops"],
             "Write lat": record["write_latency_ticks"],
         })
-    return out
-
-# deprecated
-def get_node_iostats(node_id):
-    db_controller = DBController()
-
-    node = db_controller.get_storage_node_by_id(node_id)
-    if not node:
-        logger.error("node not found")
-        return False
-
-    out = []
-    total_values = {
-        "read_bytes_per_sec": 0,
-        "read_iops": 0,
-        "write_bytes_per_sec": 0,
-        "write_iops": 0,
-        "unmapped_bytes_per_sec": 0,
-        "read_latency_ticks": 0,
-        "write_latency_ticks": 0,
-    }
-    for dev in node.nvme_devices:
-        record = DeviceStat(data={"uuid": dev.get_id(), "node_id": node.get_id()}).get_last(db_controller.kv_store)
-        if not record:
-            continue
-        out.append({
-            "Device": dev.device_name,
-            "Read speed": record.read_bytes_per_sec,
-            "Read IOPS": record.read_iops,
-            "Read lat": record.read_latency_ticks,
-            "Write speed": record.write_bytes_per_sec,
-            "Write IOPS": record.write_iops,
-            "Write lat": record.write_latency_ticks,
-        })
-        total_values["read_bytes_per_sec"] += record.read_bytes_per_sec
-        total_values["read_iops"] += record.read_iops
-        total_values["write_bytes_per_sec"] += record.write_bytes_per_sec
-        total_values["write_iops"] += record.write_iops
-        # total_values["unmapped_bytes_per_sec"] += record.unmapped_bytes_per_sec
-        total_values["read_latency_ticks"] += record.read_latency_ticks
-        total_values["write_latency_ticks"] += record.write_latency_ticks
-
-    out.append({
-        "Device": "Total",
-        "Read speed": utils.humanbytes(total_values['read_bytes_per_sec']),
-        "Read IOPS": total_values["read_iops"],
-        "Read lat": total_values["read_latency_ticks"],
-        "Write speed": utils.humanbytes(total_values["write_bytes_per_sec"]),
-        "Write IOPS": total_values["write_iops"],
-        "Write lat": total_values["write_latency_ticks"],
-    })
     return out
 
 

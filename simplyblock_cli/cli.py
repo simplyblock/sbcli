@@ -1008,16 +1008,21 @@ class CLIWrapper:
                 distr_chunk_bs = args.distr_chunk_bs
                 smoke_run = args.smoke_run
                 random_data = args.random_data
-                ret = lvol_controller.add_lvol_ha(name, size, host_id, ha_type, pool, comp, crypto,
-                                                  distr_vuid, distr_ndcs, distr_npcs,
-                                                  args.max_rw_iops,
-                                                  args.max_rw_mbytes,
-                                                  args.max_r_mbytes,
-                                                  args.max_w_mbytes,
-                                                  distr_bs,
-                                                  distr_chunk_bs,
-                                                  smoke_run,
-                                                  random_data)
+                results, error = lvol_controller.add_lvol_ha(
+                    name, size, host_id, ha_type, pool, comp, crypto,
+                    distr_vuid, distr_ndcs, distr_npcs,
+                    args.max_rw_iops,
+                    args.max_rw_mbytes,
+                    args.max_r_mbytes,
+                    args.max_w_mbytes,
+                    distr_bs,
+                    distr_chunk_bs,
+                    smoke_run,
+                    random_data)
+                if results:
+                    ret = results
+                else:
+                    ret = error
             elif sub_command == "add-distr":
                 pass
             elif sub_command == "qos-set":

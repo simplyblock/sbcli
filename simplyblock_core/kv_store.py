@@ -10,13 +10,14 @@ from simplyblock_core.models.cluster import ClusterMap
 
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.compute_node import ComputeNode
-from simplyblock_core.models.device_stat import DeviceStat, LVolStat, PortStat
+from simplyblock_core.models.device_stat import PortStat
 from simplyblock_core.models.events import EventObj
 from simplyblock_core.models.global_settings import GlobalSettings
 from simplyblock_core.models.mgmt_node import MgmtNode
 from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.snapshot import SnapShot
-from simplyblock_core.models.stats import CapacityStat
+from simplyblock_core.models.stats import DeviceStatObject, NodeStatObject, ClusterStatObject, LVolStatObject, \
+    PoolStatObject
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.models.lvol_model import LVol
 
@@ -122,21 +123,6 @@ class DBController:
             if node.hostname == hostname:
                 return node
 
-    def add_device_stats(self, node, nvme_device, stats_map):
-        ds = DeviceStat()
-        ds.node_id = node.get_id()
-        ds.device_id = nvme_device.get_id()
-        ds.date = int(time.time())
-
-        ds.read_iops = stats_map['read_iops']
-        ds.write_iops = stats_map['write_iops']
-        ds.read_bytes = stats_map['read_bytes']
-        ds.write_bytes = stats_map['write_bytes']
-        ds.queue_length = stats_map['queue_length']
-        ds.access_latency = stats_map['access_latency']
-        ds.capacity = stats_map['capacity']
-        ds.write_to_db(self.kv_store)
-
     def get_storage_devices(self, id=""):
         # workaround because nvme devices are stored inside the node object itself.
         nodes = self.get_storage_nodes()
@@ -177,7 +163,6 @@ class DBController:
             if pool.pool_name == name:
                 return pool
 
-
     def get_lvols(self):
         ret = LVol().read_from_db(self.kv_store)
         return ret
@@ -213,24 +198,35 @@ class DBController:
     def get_lvol_stats(self, lvol, limit=20):
         if isinstance(lvol, str):
             lvol = self.get_lvol_by_id(lvol)
-        stats = LVolStat().read_from_db(self.kv_store, id="%s/%s" % (lvol.node_id, lvol.uuid), limit=limit, reverse=True)
+        stats = LVolStatObject().read_from_db(self.kv_store, id="%s/%s" % (lvol.pool_uuid, lvol.uuid), limit=limit, reverse=True)
         return stats
+
+    def get_pool_stats(self, pool, limit=20):
+        stats = PoolStatObject().read_from_db(self.kv_store, id="%s/%s" % (pool.get_id(), pool.get_id()), limit=limit, reverse=True)
+        return stats
+
+    def get_cluster_stats(self, cluster, limit=20):
+        return self.get_cluster_capacity(cluster, limit)
+
+    def get_node_stats(self, node, limit=20):
+        return self.get_node_capacity(node, limit)
 
     def get_device_stats(self, device, limit=20):
-        stats = DeviceStat().read_from_db(self.kv_store, id="%s/%s" % (device.node_id, device.uuid), limit=limit, reverse=True)
-        return stats
+        return self.get_device_capacity(device, limit)
 
     def get_cluster_capacity(self, cl, limit=1):
-        stats = CapacityStat().read_from_db(self.kv_store, id="%s/%s" % (cl.get_id(), cl.get_id()), limit=limit, reverse=True)
+        stats = ClusterStatObject().read_from_db(
+            self.kv_store, id="%s/%s" % (cl.get_id(), cl.get_id()), limit=limit, reverse=True)
         return stats
 
     def get_node_capacity(self, node, limit=1):
-        stats = CapacityStat().read_from_db(self.kv_store, id="%s/%s" % (node.get_id(), node.get_id()), limit=limit, reverse=True)
+        stats = NodeStatObject().read_from_db(
+            self.kv_store, id="%s/%s" % (node.cluster_id, node.get_id()), limit=limit, reverse=True)
         return stats
 
     def get_device_capacity(self, device, limit=1):
-        stats = CapacityStat().read_from_db(
-            self.kv_store, id="%s/%s" % (device.node_id, device.get_id()), limit=limit, reverse=True)
+        stats = DeviceStatObject().read_from_db(
+            self.kv_store, id="%s/%s" % (device.cluster, device.get_id()), limit=limit, reverse=True)
         return stats
 
     def get_clusters(self, id=""):

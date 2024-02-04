@@ -121,9 +121,11 @@ class BaseModel(object):
         return self.to_str()
 
     def __eq__(self, other):
-        """Returns true if both objects are equal"""
         return self.get_id() == other.get_id()
 
     def __ne__(self, other):
-        """Returns true if both objects are not equal"""
         return not self == other
+
+    def __getitem__(self, item):
+        return self._attribute_map[item]
+
