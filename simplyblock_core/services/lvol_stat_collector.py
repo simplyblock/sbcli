@@ -75,7 +75,7 @@ def add_pool_stats(pool, records):
 
     records_sum = utils.sum_records(records)
 
-    data = records_sum.to_dict()
+    data = records_sum.get_clean_dict()
     data.update({
         "pool_id": pool.get_id(),
         "uuid": pool.get_id(),

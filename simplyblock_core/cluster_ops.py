@@ -499,7 +499,7 @@ def get_iostats_history(cluster_id, history_string, records_count=20, parse_size
     else:
         records_number = 20
 
-    records = db_controller.get_cluster_stats(cluster_id, records_number)
+    records = db_controller.get_cluster_stats(cl, records_number)
 
     # combine records
     new_records = utils.process_records(records, records_count)
@@ -511,12 +511,12 @@ def get_iostats_history(cluster_id, history_string, records_count=20, parse_size
     for record in new_records:
         out.append({
             "Date": time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(record['date'])),
-            "Read speed": utils.humanbytes(record['read_bytes_per_sec']),
-            "Read IOPS": record["read_iops"],
-            "Read lat": record["read_latency_ticks"],
-            "Write speed":  utils.humanbytes(record["write_bytes_per_sec"]),
-            "Write IOPS": record["write_iops"],
-            "Write lat": record["write_latency_ticks"],
+            "Read speed": utils.humanbytes(record['read_bytes_ps']),
+            "Read IOPS": record["read_io_ps"],
+            "Read lat": record["read_latency_ps"],
+            "Write speed": utils.humanbytes(record["write_bytes_ps"]),
+            "Write IOPS": record["write_io_ps"],
+            "Write lat": record["write_latency_ps"],
         })
     return out
 

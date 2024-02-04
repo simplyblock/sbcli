@@ -947,8 +947,7 @@ class CLIWrapper:
                     return False
 
             elif sub_command == "get-io-stats":
-                data = cluster_ops.get_iostats_history(
-                    args.cluster_id, args.history, args.records, random_data=args.random)
+                data = cluster_ops.get_iostats_history(args.cluster_id, args.history, args.records)
                 if data:
                     ret = utils.print_table(data)
                 else:

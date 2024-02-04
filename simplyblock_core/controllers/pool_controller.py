@@ -243,13 +243,13 @@ def get_io_stats(pool_id, history, records_count=20):
     out = []
     for record in new_records:
         out.append({
-            "Date": time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(record['Date'])),
-            "bytes_read (MB/s)": utils.humanbytes(record["bytes_read (MB/s)"]),
-            "num_read_ops (IOPS)": record["num_read_ops (IOPS)"],
-            "bytes_write (MB/s)": utils.humanbytes(record["bytes_write (MB/s)"]),
-            "num_write_ops (IOPS)": record["num_write_ops (IOPS)"],
-            "read_latency_ticks": record["read_latency_ticks"],
-            "write_latency_ticks": record["write_latency_ticks"],
+            "Date": time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(record['date'])),
+            "Read speed": utils.humanbytes(record['read_bytes_ps']),
+            "Read IOPS": record["read_io_ps"],
+            "Read lat": record["read_latency_ps"],
+            "Write speed": utils.humanbytes(record["write_bytes_ps"]),
+            "Write IOPS": record["write_io_ps"],
+            "Write lat": record["write_latency_ps"],
         })
     return utils.print_table(out)
 
