@@ -4,7 +4,7 @@ import logging
 import time
 import sys
 
-from simplyblock_core import constants, kv_store
+from simplyblock_core import constants, kv_store, utils
 from simplyblock_core.rpc_client import RPCClient
 from simplyblock_core.models.stats import DeviceStatObject, NodeStatObject, ClusterStatObject
 
@@ -87,7 +87,7 @@ def add_device_stats(cl, device, capacity_dict, stats_dict):
 def add_node_stats(node, records):
     if not records:
         return False
-    records_sum = sum(records)
+    records_sum = utils.sum_records(records)
 
     size_total = records_sum.size_total
     size_used = records_sum.size_used
@@ -123,7 +123,7 @@ def add_cluster_stats(cl, records):
     if not records:
         return False
 
-    records_sum = sum(records)
+    records_sum = utils.sum_records(records)
 
     size_util = 0
     size_prov_util = 0
