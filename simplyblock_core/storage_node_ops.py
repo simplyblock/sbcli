@@ -1427,12 +1427,12 @@ def get_device_iostats(device_id, history, records_count=20, parse_sizes=True):
     for record in new_records:
         out.append({
             "Date": time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(record['date'])),
-            "Read speed": utils.humanbytes(record['read_bytes_per_sec']),
-            "Read IOPS": record['read_iops'],
-            "Write speed": utils.humanbytes(record['write_bytes_per_sec']),
-            "Write IOPS": record['write_iops'],
-            "Read lat": record['read_latency_ticks'],
-            "Write lat": record['write_latency_ticks'],
+            "Read speed": utils.humanbytes(record['read_bytes_ps']),
+            "Read IOPS": record["read_io_ps"],
+            "Read lat": record["read_latency_ps"],
+            "Write speed": utils.humanbytes(record["write_bytes_ps"]),
+            "Write IOPS": record["write_io_ps"],
+            "Write lat": record["write_latency_ps"],
         })
     return out
 
@@ -1497,12 +1497,12 @@ def get_node_iostats_history(node_id, history, records_count=20, parse_sizes=Tru
     for record in new_records:
         out.append({
             "Date": time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(record['date'])),
-            "Read speed": utils.humanbytes(record['read_bytes_per_sec']),
-            "Read IOPS": record["read_iops"],
-            "Read lat": record["read_latency_ticks"],
-            "Write speed": utils.humanbytes(record["write_bytes_per_sec"]),
-            "Write IOPS": record["write_iops"],
-            "Write lat": record["write_latency_ticks"],
+            "Read speed": utils.humanbytes(record['read_bytes_ps']),
+            "Read IOPS": record["read_io_ps"],
+            "Read lat": record["read_latency_ps"],
+            "Write speed": utils.humanbytes(record["write_bytes_ps"]),
+            "Write IOPS": record["write_io_ps"],
+            "Write lat": record["write_latency_ps"],
         })
     return out
 

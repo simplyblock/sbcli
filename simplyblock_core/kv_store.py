@@ -226,7 +226,7 @@ class DBController:
 
     def get_device_capacity(self, device, limit=1):
         stats = DeviceStatObject().read_from_db(
-            self.kv_store, id="%s/%s" % (device.cluster, device.get_id()), limit=limit, reverse=True)
+            self.kv_store, id="%s/%s" % (device.cluster_id, device.get_id()), limit=limit, reverse=True)
         return stats
 
     def get_clusters(self, id=""):

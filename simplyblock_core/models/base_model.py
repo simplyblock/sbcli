@@ -72,8 +72,8 @@ class BaseModel(object):
 
     def get_clean_dict(self):
         data = self.to_dict()
-        # for key in ['name', 'object_type']:
-        #     del data[key]
+        for key in ['name', 'object_type']:
+            del data[key]
         return data
 
     def to_str(self):

@@ -103,7 +103,7 @@ def add_node_stats(node, records):
         size_util = int((size_used / size_total) * 100)
         size_prov_util = int((size_prov / size_total) * 100)
 
-    data = records_sum.to_dict()
+    data = records_sum.get_clean_dict()
     data.update({
         "cluster_id": cl.get_id(),
         "uuid": node.get_id(),
@@ -131,7 +131,7 @@ def add_cluster_stats(cl, records):
         size_util = int((records_sum.size_used / records_sum.size_total) * 100)
         size_prov_util = int((records_sum.size_prov / records_sum.size_total) * 100)
 
-    data = records_sum.to_dict()
+    data = records_sum.get_clean_dict()
     data.update({
         "cluster_id": cl.get_id(),
         "uuid": cl.get_id(),
