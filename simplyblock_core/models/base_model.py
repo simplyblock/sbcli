@@ -127,5 +127,6 @@ class BaseModel(object):
         return not self == other
 
     def __getitem__(self, item):
-        return self._attribute_map[item]
-
+        if isinstance(item, str) and item in self._attribute_map:
+            return getattr(self, item)
+        return False

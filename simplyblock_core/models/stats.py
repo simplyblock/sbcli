@@ -57,28 +57,28 @@ class StatsObject(BaseModel):
         return self.attributes
 
     def __add__(self, other):
+        data = {
+            "cluster_id": self.cluster_id,
+            "uuid": str(uuid.uuid4())}
         if isinstance(other, StatsObject):
-            data = {
-                "cluster_id": self.cluster_id,
-                "uuid": str(uuid.uuid4())}
             self_dict = self.to_dict()
             other_dict = other.to_dict()
             for attr in self.attributes:
                 if self.attributes[attr]['type'] in [int, float]:
                     data[attr] = self_dict[attr] + other_dict[attr]
-            return StatsObject(data)
+        return StatsObject(data)
 
     def __sub__(self, other):
+        data = {
+            "cluster_id": self.cluster_id,
+            "uuid": str(uuid.uuid4())}
         if isinstance(other, StatsObject):
-            data = {
-                "cluster_id": self.cluster_id,
-                "uuid": str(uuid.uuid4())}
             self_dict = self.to_dict()
             other_dict = other.to_dict()
             for attr in self.attributes:
                 if self.attributes[attr]['type'] in [int, float]:
                     data[attr] = self_dict[attr] - other_dict[attr]
-            return StatsObject(data)
+        return StatsObject(data)
 
 
 class DeviceStatObject(StatsObject):

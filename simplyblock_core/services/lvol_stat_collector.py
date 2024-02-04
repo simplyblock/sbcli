@@ -5,7 +5,7 @@ import time
 import sys
 
 
-from simplyblock_core import constants, kv_store
+from simplyblock_core import constants, kv_store, utils
 from simplyblock_core.models.stats import LVolStatObject, PoolStatObject
 from simplyblock_core.rpc_client import RPCClient
 
@@ -73,7 +73,7 @@ def add_pool_stats(pool, records):
     if not records:
         return False
 
-    records_sum = sum(records)
+    records_sum = utils.sum_records(records)
 
     data = records_sum.to_dict()
     data.update({

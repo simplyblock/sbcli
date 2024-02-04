@@ -264,3 +264,14 @@ def ping_host(ip):
     else:
         logger.debug(f"{ip} is DOWN")
         return False
+
+
+def sum_records(records):
+    if len(records) == 0:
+        return False
+    elif len(records) == 1:
+        return records[0]
+    elif len(records) == 2:
+        return records[0] + records[1]
+    else:
+        return records[0] + sum_records(records[1:])
