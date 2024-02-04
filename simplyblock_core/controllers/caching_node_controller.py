@@ -68,6 +68,7 @@ def addNvmeDevices(cluster, rpc_client, devs, snode):
                     'nvme_bdev': nvme_bdev,
                     'alloc_bdev': nvme_bdev,
                     'node_id': snode.get_id(),
+                    'cluster_id': snode.cluster_id,
                     'status': 'online'
                 }))
             sequential_number += device_partitions_count
@@ -170,6 +171,9 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spd
 
     # get new node info after starting spdk
     node_info, _ = snode_api.info()
+    mem = node_info['memory_details']['huge_free']
+    logger.info(f"Free Hugepages detected: {utils.humanbytes(mem)}")
+
     # adding devices
     nvme_devs = addNvmeDevices(cluster, rpc_client, node_info['spdk_pcie_list'], snode)
     if not nvme_devs:
@@ -179,9 +183,6 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spd
     snode.nvme_devices = nvme_devs
     snode.write_to_db(db_controller.kv_store)
     ssd_dev = nvme_devs[0]
-
-    mem = node_info['memory_details']['huge_free']
-    logger.info(f"Free Hugepages detected: {utils.humanbytes(mem)}")
 
     if mem < 1024*1024:
         logger.error("Hugepages must be larger than 1G")

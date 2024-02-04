@@ -88,15 +88,6 @@ services:
     volumes:
       - "/etc/foundationdb:/etc/foundationdb"
 
-  DeviceStatsCollector:
-    image: $SIMPLYBLOCK_DOCKER_IMAGE
-    command: "python simplyblock_core/services/device_stat_collector.py"
-    deploy:
-      placement:
-        constraints: [node.role == manager]
-    volumes:
-      - "/etc/foundationdb:/etc/foundationdb"
-
   PortStatsCollector:
     image: $SIMPLYBLOCK_DOCKER_IMAGE
     command: "python simplyblock_core/services/port_stat_collector.py"
@@ -144,14 +135,16 @@ services:
     volumes:
       - "$DIR/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg"
 
-  CapacityCollector:
+
+  CapacityAndStatsCollector:
     image: $SIMPLYBLOCK_DOCKER_IMAGE
-    command: "python simplyblock_core/services/capacity_collector.py"
+    command: "python simplyblock_core/services/capacity_and_stats_collector.py"
     deploy:
       placement:
         constraints: [node.role == manager]
     volumes:
       - "/etc/foundationdb:/etc/foundationdb"
+
 
   CapacityMonitor:
     image: $SIMPLYBLOCK_DOCKER_IMAGE

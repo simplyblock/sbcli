@@ -1,8 +1,6 @@
 # coding=utf-8
-import datetime
 import logging as lg
 import json
-import re
 import string
 import random
 import sys
@@ -16,7 +14,6 @@ from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.rpc_client import RPCClient
 
-import cpuinfo
 
 logger = lg.getLogger()
 db_controller = DBController()
@@ -365,37 +362,22 @@ def add_lvol(name, size, host_id_or_name, pool_id_or_name, use_comp, use_crypto,
     return lvol_id, None
 
 
-def _get_next_3_nodes(is_random=False):
+def _get_next_3_nodes():
     snodes = db_controller.get_storage_nodes()
     online_nodes = []
     node_stats = {}
     for node in snodes:
-        if is_random:
-            node_stats[node.get_id()] = {
-                "lvol": random.randint(0, 1000),
-                "cpu": random.randint(0, 999999),
-                "r_io": random.randint(0, 999999),
-                "w_io": random.randint(0, 999999),
-                "r_b": random.randint(0, 999999),
-                "w_b": random.randint(0, 999999)}
-            continue
-
-        node_st = {
-            "lvol": len(node.lvols),
-            "cpu": 1 + (node.cpu * node.cpu_hz),
-            "r_io": 0,
-            "w_io": 0,
-            "r_b": 0,
-            "w_b": 0}
         if node.status == node.STATUS_ONLINE:
             online_nodes.append(node)
-            for lvol_id in node.lvols:
-                stats = db_controller.get_lvol_stats(lvol_id, 1000)
-                for st in stats:
-                    node_st["r_io"] += st.read_iops
-                    node_st["w_io"] += st.write_iops
-                    node_st["r_b"] += st.read_bytes_per_sec
-                    node_st["w_b"] += st.write_bytes_per_sec
+            node_stat_list = db_controller.get_node_stats(node, limit=1000)
+            combined_record = sum(node_stat_list)
+            node_st = {
+                "lvol": len(node.lvols),
+                "cpu": 1 + (node.cpu * node.cpu_hz),
+                "r_io": combined_record.read_io_ps,
+                "w_io": combined_record.write_io_ps,
+                "r_b": combined_record.read_bytes_ps,
+                "w_b": combined_record.write_bytes_ps}
 
             node_stats[node.get_id()] = node_st
 
@@ -583,7 +565,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
         lvol.lvol_type += ',compress'
         lvol.top_bdev = lvol.comp_bdev
 
-    nodes = _get_next_3_nodes(is_random=random_data)
+    nodes = _get_next_3_nodes()
     if smoke_run:
         return True, None
     if host_node:

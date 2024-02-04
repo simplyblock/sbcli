@@ -39,6 +39,7 @@ class NVMeDevice(BaseModel):
         "testing_bdev": {"type": str, 'default': ""},
         "cluster_device_order": {"type": int, 'default': 0},
         "health_check": {"type": bool, "default": True},
+        "cluster_id": {"type": str, 'default': ""},
 
     }
 

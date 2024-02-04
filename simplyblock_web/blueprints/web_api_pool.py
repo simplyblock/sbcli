@@ -9,8 +9,7 @@ from simplyblock_web import utils
 from simplyblock_core.controllers import pool_controller
 
 from simplyblock_core.models.pool import Pool
-from simplyblock_core import kv_store
-from simplyblock_core.models.device_stat import LVolStat
+from simplyblock_core import kv_store, utils as core_utils
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
@@ -157,8 +156,9 @@ def pool_capacity(uuid):
     return utils.get_response(out)
 
 
-@bp.route('/pool/iostats/<string:uuid>', methods=['GET'])
-def pool_iostats(uuid):
+@bp.route('/pool/iostats/<string:uuid>/history/<string:history>', methods=['GET'])
+@bp.route('/pool/iostats/<string:uuid>', methods=['GET'], defaults={'history': None})
+def pool_iostats(uuid, history):
     pool = db_controller.get_pool_by_id(uuid)
     if not pool:
         return utils.get_response_error(f"Pool not found: {uuid}", 404)
@@ -168,49 +168,16 @@ def pool_iostats(uuid):
         if req_secret != pool.secret:
             return utils.get_response_error(f"Pool secret doesn't mach the value in the request header", 400)
 
-    out = []
-    total_values = {
-        "read_bytes_per_sec": 0,
-        "read_iops": 0,
-        "write_bytes_per_sec": 0,
-        "write_iops": 0,
-        "unmapped_bytes_per_sec": 0,
-        "read_latency_ticks": 0,
-        "write_latency_ticks": 0,
-    }
-    for lvol_id in pool.lvols:
-        lvol = db_controller.get_lvol_by_id(lvol_id)
-        record = LVolStat(data={"uuid": lvol.get_id(), "node_id": lvol.node_id}).get_last(db_controller.kv_store)
-        if not record:
-            continue
-        out.append({
-            "LVol name": lvol.lvol_name,
-            "bytes_read (MB/s)": record.read_bytes_per_sec,
-            "num_read_ops (IOPS)": record.read_iops,
-            "bytes_write (MB/s)": record.write_bytes_per_sec,
-            "num_write_ops (IOPS)": record.write_iops,
-            "bytes_unmapped (MB/s)": record.unmapped_bytes_per_sec,
-            "read_latency_ticks": record.read_latency_ticks,
-            "write_latency_ticks": record.write_latency_ticks,
-        })
-        total_values["read_bytes_per_sec"] += record.read_bytes_per_sec
-        total_values["read_iops"] += record.read_iops
-        total_values["write_bytes_per_sec"] += record.write_bytes_per_sec
-        total_values["write_iops"] += record.write_iops
-        total_values["unmapped_bytes_per_sec"] += record.unmapped_bytes_per_sec
-        total_values["read_latency_ticks"] += record.read_latency_ticks
-        total_values["write_latency_ticks"] += record.write_latency_ticks
+    if history:
+        records_number = core_utils.parse_history_param(history)
+        if not records_number:
+            logger.error(f"Error parsing history string: {history}")
+            return False
+    else:
+        records_number = 20
 
-    out.append({
-        "LVol name": "Total",
-        "bytes_read (MB/s)": total_values['read_bytes_per_sec'],
-        "num_read_ops (IOPS)": total_values["read_iops"],
-        "bytes_write (MB/s)": total_values["write_bytes_per_sec"],
-        "num_write_ops (IOPS)": total_values["write_iops"],
-        "bytes_unmapped (MB/s)": total_values["unmapped_bytes_per_sec"],
-        "read_latency_ticks": total_values["read_latency_ticks"],
-        "write_latency_ticks": total_values["write_latency_ticks"],
-    })
+    out = db_controller.get_pool_stats(pool, records_number)
+    records_count = 20
+    new_records = core_utils.process_records(out, records_count)
 
-    return utils.get_response(out)
-
+    return utils.get_response(new_records)

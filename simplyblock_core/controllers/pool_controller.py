@@ -223,7 +223,7 @@ def get_capacity(pool_id):
     return utils.print_table(out)
 
 
-def get_io_stats(pool_id, history, records_count=20, parse_sizes=True):
+def get_io_stats(pool_id, history, records_count=20):
     pool = db_controller.get_pool_by_id(pool_id)
     if not pool:
         logger.error(f"Pool not found {pool_id}")
@@ -237,28 +237,7 @@ def get_io_stats(pool_id, history, records_count=20, parse_sizes=True):
     else:
         records_number = 20
 
-    out = []
-    for lvol_id in pool.lvols:
-        lvol = db_controller.get_lvol_by_id(lvol_id)
-        records = db_controller.get_lvol_stats(lvol, records_number)
-        for index, record in enumerate(records):
-            if index < len(out):
-                out[index]["bytes_read (MB/s)"] += record.read_bytes_per_sec
-                out[index]["num_read_ops (IOPS)"] += record.read_iops
-                out[index]["bytes_write (MB/s)"] += record.write_bytes_per_sec
-                out[index]["num_write_ops (IOPS)"] += record.write_iops
-                out[index]["read_latency_ticks"] += record.read_latency_ticks
-                out[index]["write_latency_ticks"] += record.write_latency_ticks
-            else:
-                out.insert(index, {})
-                out[index]["Date"] = record.date
-                out[index]["bytes_read (MB/s)"] = record.read_bytes_per_sec
-                out[index]["num_read_ops (IOPS)"] = record.read_iops
-                out[index]["bytes_write (MB/s)"] = record.write_bytes_per_sec
-                out[index]["num_write_ops (IOPS)"] = record.write_iops
-                out[index]["read_latency_ticks"] = record.read_latency_ticks
-                out[index]["write_latency_ticks"] = record.write_latency_ticks
-
+    out = db_controller.get_pool_stats(pool, records_number)
     new_records = utils.process_records(out, records_count)
 
     out = []
