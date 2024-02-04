@@ -370,7 +370,7 @@ def _get_next_3_nodes():
         if node.status == node.STATUS_ONLINE:
             online_nodes.append(node)
             node_stat_list = db_controller.get_node_stats(node, limit=1000)
-            combined_record = sum(node_stat_list)
+            combined_record = utils.sum_records(node_stat_list)
             node_st = {
                 "lvol": len(node.lvols),
                 "cpu": 1 + (node.cpu * node.cpu_hz),
