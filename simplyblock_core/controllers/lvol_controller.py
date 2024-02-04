@@ -1078,23 +1078,7 @@ def get_io_stats(lvol_uuid, history, records_count=20, parse_sizes=True):
     else:
         records_number = 20
 
-    records = db_controller.get_lvol_stats(lvol, limit=records_number)
-
-    records_list = []
-    for record in records:
-        data = {}
-        data["date"] = record.date
-        data["bytes_read"] = record.stats['bytes_read']
-        data["bytes_written"] = record.stats['bytes_written']
-        # data["io_error"] = record.stats['io_error']
-        data["read_bytes_per_sec"] = record.read_bytes_per_sec
-        data["read_iops"] = record.read_iops
-        data["write_bytes_per_sec"] = record.write_bytes_per_sec
-        data["write_iops"] = record.write_iops
-        data["unmapped_bytes_per_sec"] = record.unmapped_bytes_per_sec
-        data["read_latency_ticks"] = record.read_latency_ticks
-        data["write_latency_ticks"] = record.write_latency_ticks
-        records_list.append(data)
+    records_list = db_controller.get_lvol_stats(lvol, limit=records_number)
     new_records = utils.process_records(records_list, records_count)
 
     if not parse_sizes:
@@ -1104,15 +1088,14 @@ def get_io_stats(lvol_uuid, history, records_count=20, parse_sizes=True):
     for record in new_records:
         out.append({
             "Date": time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(record['date'])),
-            "Read bytes": utils.humanbytes(record["bytes_read"]),
-            "Read speed": utils.humanbytes(record['read_bytes_per_sec']),
-            "Read IOPS": record['read_iops'],
-            "Read lat": record['read_latency_ticks'],
-            "Write bytes": utils.humanbytes(record["bytes_written"]),
-            "Write speed": utils.humanbytes(record['write_bytes_per_sec']),
-            "Write IOPS": record['write_iops'],
-            "Write lat": record['write_latency_ticks'],
-            # "IO Error": record["io_error"],
+            "Read bytes": utils.humanbytes(record["read_bytes"]),
+            "Read speed": utils.humanbytes(record['read_bytes_ps']),
+            "Read IOPS": record['read_io_ps'],
+            "Read lat": record['read_latency_ps'],
+            "Write bytes": utils.humanbytes(record["write_bytes"]),
+            "Write speed": utils.humanbytes(record['write_bytes_ps']),
+            "Write IOPS": record['write_io_ps'],
+            "Write lat": record['write_latency_ps'],
         })
     return out
 

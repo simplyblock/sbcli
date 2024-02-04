@@ -142,14 +142,14 @@ def pool_capacity(uuid):
         total_size += lvol.size
         out.append({
             "device name": lvol.lvol_name,
-            "provisioned": utils.humanbytes(lvol.size),
+            "provisioned": lvol.size,
             "util_percent": 0,
             "util": 0,
         })
     if pool.lvols:
         out.append({
             "device name": "Total",
-            "provisioned": utils.humanbytes(total_size),
+            "provisioned": total_size,
             "util_percent": 0,
             "util": 0,
         })
