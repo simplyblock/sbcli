@@ -180,7 +180,6 @@ def spdk_process_start():
             '/var/tmp:/var/tmp',
             '/dev:/dev',
             '/lib/modules/:/lib/modules/',
-            '/dev/hugepages:/mnt/huge',
             '/sys:/sys'],
         # restart_policy={"Name": "on-failure", "MaximumRetryCount": 99}
     )

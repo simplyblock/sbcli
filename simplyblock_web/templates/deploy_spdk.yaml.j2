@@ -1,17 +1,19 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: spdk-deployment
+  name: spdk-deployment-{{ HOSTNAME }}
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: spdk-app
+      app: spdk-app-{{ HOSTNAME }}
   template:
     metadata:
       labels:
-        app: spdk-app
+        app: spdk-app-{{ HOSTNAME }}
     spec:
+      nodeSelector:
+        kubernetes.io/hostname: {{ HOSTNAME }}
       hostNetwork: true
       volumes:
         - name: socket-dir
@@ -26,9 +28,6 @@ spec:
         - name: dev-vol
           hostPath:
             path: /dev
-        - name: mnt-huge
-          hostPath:
-            path: /mnt/huge
         - name: hugepage
           emptyDir:
             medium: HugePages
@@ -48,8 +47,6 @@ spec:
           mountPath: /lib/modules
         - name: dev-vol
           mountPath: /dev
-        - name: mnt-huge
-          mountPath: /mnt/huge
         resources:
           limits:
             hugepages-2Mi: 2Gi

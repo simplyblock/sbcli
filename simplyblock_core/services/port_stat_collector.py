@@ -9,7 +9,7 @@ import psutil
 
 
 from simplyblock_core import constants, kv_store, utils
-from simplyblock_core.models.device_stat import PortStat
+from simplyblock_core.models.port_stat import PortStat
 
 
 def update_port_stats(snode, nic, stats):
