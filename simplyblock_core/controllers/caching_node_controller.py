@@ -315,6 +315,14 @@ def recreate(node_id):
         logger.error("Failed ot create tmp OCF BDev")
         return False
 
+    if snode.lvols:
+        for lvol in snode.lvols:
+            ret = connect(snode.get_id(), lvol.lvol_id)
+            if ret:
+                logger.info(f"connecting lvol {lvol.lvol_id} ... ok")
+            else:
+                logger.error(f"connecting lvol {lvol.lvol_id} .. error")
+
     logger.info("Setting node status to Active")
     snode.status = CachingNode.STATUS_ONLINE
     snode.write_to_db(db_controller.kv_store)
@@ -452,7 +460,13 @@ def connect(caching_node_id, lvol_id):
     cached_lvol.ocf_bdev = cach_bdev
     cached_lvol.device_path = dev_path
 
-    cnode.lvols.append(cached_lvol)
+    tmp = []
+    for lv in cnode.lvols:
+        if lv.lvol_id != lvol.get_id():
+            tmp.append(lv)
+
+    tmp.append(cached_lvol)
+    cnode.lvols = tmp
     cnode.write_to_db(db_controller.kv_store)
 
     return dev_path
