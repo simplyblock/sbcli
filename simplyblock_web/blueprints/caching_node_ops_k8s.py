@@ -23,9 +23,11 @@ logger.setLevel(logging.DEBUG)
 bp = Blueprint("caching_node_k", __name__, url_prefix="/cnode")
 
 
+node_name = os.environ.get("HOSTNAME")
+deployment_name = f"spdk-deployment-{node_name}"
 namespace = 'default'
-deployment_name = 'spdk-deployment'
 pod_name = 'spdk-deployment'
+
 
 config.load_incluster_config()
 k8s_apps_v1 = client.AppsV1Api()

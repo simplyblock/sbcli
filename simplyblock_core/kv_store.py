@@ -10,7 +10,7 @@ from simplyblock_core.models.cluster import ClusterMap
 
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.compute_node import ComputeNode
-from simplyblock_core.models.device_stat import PortStat
+from simplyblock_core.models.port_stat import PortStat
 from simplyblock_core.models.events import EventObj
 from simplyblock_core.models.global_settings import GlobalSettings
 from simplyblock_core.models.mgmt_node import MgmtNode

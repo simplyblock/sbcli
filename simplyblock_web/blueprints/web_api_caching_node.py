@@ -40,8 +40,10 @@ def add_node_to_cluster():
     if 'spdk_mem' in cl_data:
         spdk_mem = cl_data['spdk_mem']
 
+    if 'spdk_image' in cl_data:
+        spdk_image = cl_data['spdk_image']
 
-    ret = caching_node_controller.add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spdk_mem)
+    ret = caching_node_controller.add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spdk_mem, spdk_image)
 
     return utils.get_response(ret)
 

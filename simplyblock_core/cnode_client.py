@@ -19,7 +19,7 @@ class CNodeClient:
     def __init__(self, ip_address):
         self.ip_address = ip_address
         self.url = 'http://%s/' % self.ip_address
-        self.timeout = 10
+        self.timeout = 120
         self.session = requests.session()
         self.session.verify = False
         self.session.timeout = self.timeout

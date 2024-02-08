@@ -271,7 +271,8 @@ def sum_records(records):
         return False
     elif len(records) == 1:
         return records[0]
-    elif len(records) == 2:
-        return records[0] + records[1]
     else:
-        return records[0] + sum_records(records[1:])
+        total = records[0]
+        for rec in records[1:]:
+            total += rec
+        return total

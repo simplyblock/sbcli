@@ -487,12 +487,15 @@ def disconnect(caching_node_id, lvol_id):
         logger.error("LVol is not connected.")
         return False
 
-    logger.info("Disconnecting LVol")
+    # logger.info("Disconnecting LVol")
     # disconnect local nvme
     cnode_client = CNodeClient(cnode.api_endpoint)
     subsystem_nqn = lvol.nqn
 
-    ret, _ = cnode_client.disconnect_nqn(subsystem_nqn)
+    try:
+        ret, _ = cnode_client.disconnect_nqn(subsystem_nqn)
+    except:
+        pass
     # if not ret:
     #     logger.error("failed to disconnect local connecting")
     #     return False
@@ -672,9 +675,11 @@ def remove_node(node_id, force=False):
     logger.info("Removing node")
 
 
-    snode_api = CNodeClient(snode.api_endpoint)
-    results, err = snode_api.spdk_process_kill()
-
+    try:
+        snode_api = CNodeClient(snode.api_endpoint)
+        results, err = snode_api.spdk_process_kill()
+    except:
+        pass
     snode.remove(db_controller.kv_store)
 
     # storage_events.snode_remove(snode)

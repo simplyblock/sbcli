@@ -111,6 +111,7 @@ while True:
         else:
             set_node_status(snode, StorageNode.STATUS_UNREACHABLE)
 
+        health_check_status = is_node_online
         if not node_rpc_check:
             logger.info("Skipping devices checks because RPC check failed")
         else:
@@ -137,7 +138,7 @@ while True:
                 node_remote_devices_check &= bool(ret)
 
             health_check_status = is_node_online and node_devices_check and node_remote_devices_check
-            set_node_health_check(snode, health_check_status)
+        set_node_health_check(snode, health_check_status)
 
     for lvol in db_controller.get_lvols():
         ret = health_controller.check_lvol(lvol.get_id())
