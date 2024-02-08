@@ -48,6 +48,6 @@ CACHING_NODE_MEMORY_FACTOR = 0.75
 HEALTH_CHECK_INTERVAL_SEC = 5*60
 
 
-SIMPLY_BLOCK_DOCKER_IMAGE = "simplyblock/simplyblock:dev"
+SIMPLY_BLOCK_DOCKER_IMAGE = "simplyblock/simplyblock:v1.0.1"
 SIMPLY_BLOCK_SPDK_CORE_IMAGE = "hamdykhader/spdk:core"
 SIMPLY_BLOCK_SPDK_ULTRA_IMAGE = "hamdykhader/spdk:latest"
