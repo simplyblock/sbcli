@@ -1,4 +1,5 @@
 # coding=utf-8
+import json
 import uuid
 
 from simplyblock_core.models.base_model import BaseModel
@@ -10,6 +11,10 @@ class StatsObject(BaseModel):
         "cluster_id": {"type": str, 'default': ""},
         "uuid": {"type": str, 'default': ""},
         "date": {"type": int, 'default': 0},
+
+        "record_duration": {"type": int, 'default': 2},
+        "record_start_time": {"type": int, 'default': 0},
+        "record_end_time": {"type": int, 'default': 0},
 
         # io stats
         "read_bytes": {"type": int, 'default': 0},
@@ -51,7 +56,7 @@ class StatsObject(BaseModel):
         self.object_type = "object"
 
     def get_id(self):
-        return "%s/%s/%s" % (self.cluster_id, self.uuid, self.date)
+        return f"{self.cluster_id}/{self.uuid}/{self.date}/{self.record_duration}"
 
     def keys(self):
         return self.attributes
@@ -79,6 +84,19 @@ class StatsObject(BaseModel):
                 if self.attributes[attr]['type'] in [int, float]:
                     data[attr] = self_dict[attr] - other_dict[attr]
         return StatsObject(data)
+
+    def get_range(self, kv_store, start_date, end_date):
+        try:
+            prefix = f"{self.object_type}/{self.name}/{self.cluster_id}/{self.uuid}"
+            start_key = f"{prefix}/{start_date}"
+            end_key = f"{prefix}/{end_date}"
+            objects = []
+            for k, v in kv_store.db.get_range(start_key.encode('utf-8'), end_key.encode('utf-8')):
+                objects.append(self.__class__().from_dict(json.loads(v)))
+            return objects
+        except Exception as e:
+            print(f"Error reading from FDB: {e}")
+            return []
 
 
 class DeviceStatObject(StatsObject):
