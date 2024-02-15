@@ -41,7 +41,6 @@ data_files = gen_data_files(
         "simplyblock_core/models",
         "simplyblock_core/scripts",
         "simplyblock_core/services",
-        "simplyblock_core/spdk_installer",
         "simplyblock_web/blueprints",
         "simplyblock_web/static",
         "simplyblock_web/templates")
@@ -57,7 +56,6 @@ setup(
         'simplyblock_core.models',
         'simplyblock_core.scripts',
         'simplyblock_core.services',
-        'simplyblock_core.spdk_installer',
         'simplyblock_cli', 'simplyblock_web', ],
     url='https://www.simplyblock.io/',
     author='Hamdy',
