@@ -1,5 +1,6 @@
 import argparse
 import logging
+import math
 import re
 import sys
 
@@ -1336,22 +1337,31 @@ class CLIWrapper:
         except Exception:
             pass
         try:
-            size_number = int(size_string[:-1])
-            size_v = size_string[-1].lower()
-            if size_v == "k":
-                return size_number * 1024
-            if size_v == "m":
-                return size_number * 1024 * 1024
-            elif size_v == "g":
-                return size_number * 1024 * 1024 * 1024
-            elif size_v == "t":
-                return size_number * 1024 * 1024 * 1024 * 1024
+            if size_string:
+                size_string = size_string.lower()
+                size_string = size_string.replace(" ", "")
+                size_string = size_string.replace("b", "")
+                size_number = int(size_string[:-1])
+                size_v = size_string[-1]
+                one_k = 1000
+                multi = 0
+                if size_v == "k":
+                    multi = 1
+                elif size_v == "m":
+                    multi = 2
+                elif size_v == "g":
+                    multi = 3
+                elif size_v == "t":
+                    multi = 4
+                else:
+                    print(f"Error parsing size: {size_string}")
+                    return -1
+                return size_number * math.pow(one_k, multi)
             else:
-                print(f"Error parsing size: {size_string}")
-                exit(-1)
+                return -1
         except:
             print(f"Error parsing size: {size_string}")
-            exit(-1)
+            return -1
 
     def validate_cpu_mask(self, spdk_cpu_mask):
         return re.match("^(0x|0X)?[a-fA-F0-9]+$", spdk_cpu_mask)

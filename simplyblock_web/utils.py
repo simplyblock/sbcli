@@ -1,3 +1,4 @@
+import math
 import random
 import re
 import string
@@ -65,17 +66,20 @@ def parse_size(size_string: str):
             size_string = size_string.replace("b", "")
             size_number = int(size_string[:-1])
             size_v = size_string[-1]
+            one_k = 1000
+            multi = 0
             if size_v == "k":
-                return size_number * 1024
-            if size_v == "m":
-                return size_number * 1024 * 1024
+                multi = 1
+            elif size_v == "m":
+                multi = 2
             elif size_v == "g":
-                return size_number * 1024 * 1024 * 1024
+                multi = 3
             elif size_v == "t":
-                return size_number * 1024 * 1024 * 1024 * 1024
+                multi = 4
             else:
                 print(f"Error parsing size: {size_string}")
                 return -1
+            return size_number * math.pow(one_k, multi)
         else:
             return -1
     except:
