@@ -507,10 +507,9 @@ class RPCClient:
 
     def bdev_nvme_set_options(self):
         params = {
-            "action_on_timeout": "reset",
+            "action_on_timeout": "none",
             "ctrlr_loss_timeout_sec": -1,
             "reconnect_delay_sec": 15,
-            "fast_io_fail_timeout_sec": 3,
             "transport_retry_count": 1,
             "bdev_retry_count": 1}
         return self._request("bdev_nvme_set_options", params)
