@@ -4,6 +4,10 @@ export CLI_SSH_PASS=$1
 export CLUSTER_IP=$2
 export SIMPLYBLOCK_DOCKER_IMAGE=$3
 
+# todo: use cluster secret
+export GRAYLOG_ROOT_PASSWORD_SHA2="5e884898da28047151d0e56f8dc6292773603d0d6aabbdd62a11ef721d1542d8"
+export GRAYLOG_PASSWORD_SECRET="is6SP2EdWg0NdmVGv6CEp5hRHNL7BKVMFem4t9pouMqDQnHwXMSomas1qcbKSt5yISr8eBHv4Y7Dbswhyz84Ut0TW6kqsiPs"
+
 export DIR="$(dirname "$(realpath "$0")")"
 
 if [ -s "/etc/foundationdb/fdb.cluster" ]

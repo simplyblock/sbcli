@@ -6,7 +6,8 @@ opt_h=0
 opt_l=""
 opt_r=0
 opt_s=5
-opt_t=120
+opt_t=240 # 4 min
+
 start_epoc=$(date +%s)
 cmd_min_timeout=15
 
