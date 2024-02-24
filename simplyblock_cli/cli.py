@@ -411,6 +411,10 @@ class CLIWrapper:
         sub_command.add_argument("--host_id", help='Primary storage node UUID or Hostname')
         sub_command.add_argument("--ha-type", help='LVol HA type (single, ha), default is cluster HA type',
                                  dest='ha_type', choices=["single", "ha", "default"], default='default')
+
+        sub_command.add_argument("--snapshot", help='Create a Snapshot capable LVol, Default: on',
+                                 dest='snapshot', choices=["on", "off"], default='on')
+
         sub_command.add_argument("--compress",
                                  help='Use inline data compression and de-compression on the logical volume',
                                  required=False, action='store_true')
@@ -435,10 +439,7 @@ class CLIWrapper:
                                  default=4096)
         sub_command.add_argument("--distr-chunk-bs", help='(Dev) distrb bdev chunk block size, default: 4096', type=int,
                                  default=4096)
-        sub_command.add_argument("--smoke-run", help='smoke run for the algorithm',
-                                 required=False, action='store_true', dest='smoke_run')
-        sub_command.add_argument("--random-data", help='generate random data for the algorithm',
-                                 required=False, action='store_true', dest='random_data')
+
 
         # set lvol params
         sub_command = self.add_sub_command(subparser, 'qos-set', 'Change qos settings for an active logical volume')
@@ -1006,8 +1007,7 @@ class CLIWrapper:
                 distr_npcs = args.distr_npcs
                 distr_bs = args.distr_bs
                 distr_chunk_bs = args.distr_chunk_bs
-                smoke_run = args.smoke_run
-                random_data = args.random_data
+                with_snapshot = args.snapshot == "on"
                 results, error = lvol_controller.add_lvol_ha(
                     name, size, host_id, ha_type, pool, comp, crypto,
                     distr_vuid, distr_ndcs, distr_npcs,
@@ -1017,8 +1017,7 @@ class CLIWrapper:
                     args.max_w_mbytes,
                     distr_bs,
                     distr_chunk_bs,
-                    smoke_run,
-                    random_data)
+                    with_snapshot)
                 if results:
                     ret = results
                 else:

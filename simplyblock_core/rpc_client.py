@@ -555,3 +555,36 @@ class RPCClient:
             "num_blocks": num_blocks,
         }
         return self._request("bdev_malloc_create", params)
+
+    def ultra21_lvol_bmap_init(self, bdev_name, num_blocks, block_len, page_len, max_num_blocks):
+        params = {
+            "base_bdev": bdev_name,
+            "blockcnt": num_blocks,
+            "blocklen": block_len,
+            "pagelen": page_len,
+            "maxblockcnt": max_num_blocks
+        }
+        return self._request("ultra21_lvol_bmap_init", params)
+
+    def ultra21_lvol_mount_snapshot(self, snapshot_name, lvol_bdev, base_bdev):
+        params = {
+            "modus": "SNAPSHOT",
+            "lvol_bdev": lvol_bdev,
+            "base_bdev": base_bdev,
+            "snapshot_bdev": snapshot_name
+        }
+        return self._request("ultra21_lvol_mount", params)
+
+    def ultra21_lvol_mount_lvol(self, lvol_name, base_bdev, label, desc):
+        params = {
+            "modus": "BASE",
+            "lvol_bdev": lvol_name,
+            "base_bdev": base_bdev,
+            "label": label,
+            "desc": desc
+        }
+        return self._request("ultra21_lvol_mount", params)
+
+
+
+
