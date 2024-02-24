@@ -639,21 +639,28 @@ def add_lvol_on_node(lvol, snode, ha_comm_addrs=None, ha_inode_self=None):
 
     if lvol.snapshot_name:
         logger.info("Creating Snapshot bdev")
-        snapshot_name = lvol.snapshot_name
         block_len = lvol.distr_bs
         page_len = int(lvol.distr_page_size / lvol.distr_bs)
         max_num_blocks = num_blocks * 10
-        ret = rpc_client.ultra21_lvol_bmap_init(snapshot_name, num_blocks, block_len, page_len, max_num_blocks)
+        ret = rpc_client.ultra21_lvol_bmap_init(lvol.base_bdev, num_blocks, block_len, page_len, max_num_blocks)
 
-        base_bdev = lvol.base_bdev
-        lvol_bdev = ""
-        ret = rpc_client.ultra21_lvol_mount_snapshot(snapshot_name, lvol_bdev, base_bdev)
+        if ret:
+            # lvol_bdev = f"base_{lvol.vuid}_{lvol.lvol_name}"
+            # ret = rpc_client.bdev_distrib_create(
+            #     lvol_bdev, lvol.vuid+1, lvol.ndcs, lvol.npcs, num_blocks,
+            #     lvol.distr_bs, names, lvol.distr_chunk_bs, ha_comm_addrs, ha_inode_self, lvol.distr_page_size)
 
-        lvol_name = f"lvol_{lvol.vuid}_{lvol.lvol_name}"
-        base_bdev = snapshot_name
-        label = "label"
-        desc = "desc"
-        ret = rpc_client.ultra21_lvol_mount_lvol(lvol_name, base_bdev, label, desc)
+            lvol_bdev = ""
+            snapshot_name = lvol.snapshot_name
+            base_bdev = lvol.base_bdev
+            ret = rpc_client.ultra21_lvol_mount_snapshot(snapshot_name, lvol_bdev, base_bdev)
+
+            if ret:
+                lvol_name = f"lvol_{lvol.vuid}_{lvol.lvol_name}"
+                base_bdev = snapshot_name
+                label = "label"
+                desc = "desc"
+                ret = rpc_client.ultra21_lvol_mount_lvol(lvol_name, base_bdev, label, desc)
 
 
 

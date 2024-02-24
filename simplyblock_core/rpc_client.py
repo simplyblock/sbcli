@@ -26,7 +26,7 @@ class RPCClient:
 
     # ref: https://spdk.io/doc/jsonrpc.html
 
-    def __init__(self, ip_address, port, username, password, timeout=5, retry=3):
+    def __init__(self, ip_address, port, username, password, timeout=30, retry=3):
         self.ip_address = ip_address
         self.port = port
         self.url = 'http://%s:%s/' % (self.ip_address, self.port)
@@ -52,6 +52,7 @@ class RPCClient:
             logger.debug("Requesting method: %s, params: %s", method, params)
             response = self.session.post(self.url, data=json.dumps(payload), timeout=self.timeout)
         except Exception as e:
+            logger.error(e)
             return False, str(e)
 
         logger.debug("Response: status_code: %s, content: %s",
