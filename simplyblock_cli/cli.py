@@ -125,8 +125,8 @@ class CLIWrapper:
         sub_command = self.add_sub_command(subparser, "device-testing-mode", 'set pt testing bdev mode')
         sub_command.add_argument("device_id", help='Device UUID')
         sub_command.add_argument("mode", help='Testing mode', choices=[
-            'full_pass_trhough', 'io_error_on_read', 'io_error_on_write'
-                                                     'io_error_on_unmap', 'io_error_on_all', 'discard_io_all',
+            'full_pass_trhough', 'io_error_on_read', 'io_error_on_write',
+            'io_error_on_unmap', 'io_error_on_all', 'discard_io_all',
             'hotplug_removal'], default='full_pass_trhough')
 
         sub_command = self.add_sub_command(subparser, "get-device", 'Get storage device by id')
