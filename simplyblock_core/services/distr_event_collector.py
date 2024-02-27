@@ -36,9 +36,9 @@ def process_event(event_id):
                         if dev.status != "online":
                             logger.info(f"The storage device is not online, skipping. status: {dev.status}")
                             return
-                        if node.get_id() != node_id:
-                            logger.info(f"The storage device not on this node, skipping. device node: {node.get_id()}")
-                            return
+                        # if node.get_id() != node_id:
+                        #     logger.info(f"The storage device not on this node, skipping. device node: {node.get_id()}")
+                        #     return
                         device_id = dev.get_id()
                         break
 

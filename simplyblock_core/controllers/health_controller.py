@@ -212,7 +212,10 @@ def check_device(device_id):
         logger.error(f"Failed to connect to node's SPDK: {e}")
         passed = False
 
-    return passed
+    if device.status == "online":
+        return passed
+    else:
+        return True
 
 
 def check_remote_device(device_id):
