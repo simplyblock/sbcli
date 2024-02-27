@@ -106,10 +106,10 @@ while True:
         logger.info(f"Check: node docker API {snode.mgmt_ip}:2375 ... {node_docker_check}")
 
         is_node_online = ping_check and node_api_check and node_rpc_check and node_docker_check
-        if is_node_online:
-            set_node_status(snode, StorageNode.STATUS_ONLINE)
-        else:
-            set_node_status(snode, StorageNode.STATUS_UNREACHABLE)
+        # if is_node_online:
+        #     set_node_status(snode, StorageNode.STATUS_ONLINE)
+        # else:
+        #     set_node_status(snode, StorageNode.STATUS_UNREACHABLE)
 
         health_check_status = is_node_online
         if not node_rpc_check:
