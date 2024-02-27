@@ -1677,6 +1677,10 @@ def device_remove(device_id):
 
     device.status = 'removed'
     snode.write_to_db(db_controller.kv_store)
+
+    for lvol in db_controller.get_lvols():
+        lvol_controller.send_cluster_map(lvol.get_id())
+
     return True
 
 
