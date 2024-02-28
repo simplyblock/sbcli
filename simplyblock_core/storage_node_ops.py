@@ -1924,3 +1924,15 @@ def health_check(node_id):
     except Exception as e:
         logger.error(f"Failed to connect to node's SPDK: {e}")
 
+
+def get_info(node_id):
+    db_controller = DBController()
+
+    snode = db_controller.get_storage_node_by_id(node_id)
+    if not snode:
+        logger.error(f"Can not find storage node: {node_id}")
+        return False
+
+    snode_api = SNodeClient(f"{snode.mgmt_ip}:5000")
+    node_info, _ = snode_api.info()
+    return json.dumps(node_info, indent=2)

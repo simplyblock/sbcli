@@ -251,6 +251,10 @@ class CLIWrapper:
         sub_command = self.add_sub_command(subparser, "check-device", 'Health check device')
         sub_command.add_argument("id", help='device UUID')
 
+        # node info
+        sub_command = self.add_sub_command(subparser, "info", 'Get node information')
+        sub_command.add_argument("id", help='Node UUID')
+
         # Initialize cluster parser
         subparser = self.add_command('cluster', 'Cluster commands')
 
@@ -913,6 +917,10 @@ class CLIWrapper:
             elif sub_command == "check-device":
                 device_id = args.id
                 ret = health_controller.check_device(device_id)
+
+            elif sub_command == "info":
+                node_id = args.id
+                ret = storage_ops.get_info(node_id)
 
             else:
                 self.parser.print_help()
