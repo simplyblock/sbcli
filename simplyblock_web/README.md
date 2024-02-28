@@ -636,16 +636,16 @@ Parameters
 | pool (required) | Pool UUID or name                                                           |
 | comp            | Create a new compress LVol                                                  |
 | crypto          | Create a new crypto LVol                                                    |
-| max-rw-iops     | Maximum Read Write IO Per Second                                            |
-| max-rw-mbytes   | Maximum Read Write Mega Bytes Per Second                                    |
-| max-r-mbytes    | Maximum Read Mega Bytes Per Second                                          |
-| max-w-mbytes    | Maximum Write Mega Bytes Per Second                                         |
-| ha-type         | LVol HA type, can be (single,ha,default=cluster's ha type), Default=default |
-| distr-vuid      | Distr bdev virtual unique ID, Default=0 means random                        |
-| distr-ndcs      | Distr bdev number of data chunks per stripe, Default=0 means auto set       |
-| distr-npcs      | Distr bdev number of parity chunks per stripe, Default=0 means auto set     |
-| distr-bs        | Distr bdev block size, Default=4096                                         |
-| distr-chunk-bs  | Distr bdev chunk block size, Default=4096                                   |
+| max_rw_iops     | Maximum Read Write IO Per Second                                            |
+| max_rw_mbytes   | Maximum Read Write Mega Bytes Per Second                                    |
+| max_r_mbytes    | Maximum Read Mega Bytes Per Second                                          |
+| max_w_mbytes    | Maximum Write Mega Bytes Per Second                                         |
+| ha_type         | LVol HA type, can be (single,ha,default=cluster's ha type), Default=default |
+| distr_vuid      | Distr bdev virtual unique ID, Default=0 means random                        |
+| distr_ndcs      | Distr bdev number of data chunks per stripe, Default=0 means auto set       |
+| distr_npcs      | Distr bdev number of parity chunks per stripe, Default=0 means auto set     |
+| distr_bs        | Distr bdev block size, Default=4096                                         |
+| distr_chunk_bs  | Distr bdev chunk block size, Default=4096                                   |
 
 Request
 

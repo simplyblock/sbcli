@@ -85,15 +85,15 @@ def add_lvol():
         | comp            | Create a new compress LVol
         | crypto          | Create a new crypto LVol
         | max-rw-iops     | Maximum Read Write IO Per Second
-        | max-rw-mbytes   | Maximum Read Write Mega Bytes Per Second
-        | max-r-mbytes    | Maximum Read Mega Bytes Per Second
-        | max-w-mbytes    | Maximum Write Mega Bytes Per Second
-        | ha-type         | LVol HA type, can be (single,ha,default=cluster's ha type), Default=default
-        | distr-vuid      | Distr bdev virtual unique ID, Default=0 means random
-        | distr-ndcs      | Distr bdev number of data chunks per stripe, Default=0 means auto set
-        | distr-npcs      | Distr bdev number of parity chunks per stripe, Default=0 means auto set
-        | distr-bs        | Distr bdev block size, Default=4096
-        | distr-chunk-bs  | Distr bdev chunk block size, Default=4096
+        | max_rw_mbytes   | Maximum Read Write Mega Bytes Per Second
+        | max_r_mbytes    | Maximum Read Mega Bytes Per Second
+        | max_w_mbytes    | Maximum Write Mega Bytes Per Second
+        | ha_type         | LVol HA type, can be (single,ha,default=cluster's ha type), Default=default
+        | distr_vuid      | Distr bdev virtual unique ID, Default=0 means random
+        | distr_ndcs      | Distr bdev number of data chunks per stripe, Default=0 means auto set
+        | distr_npcs      | Distr bdev number of parity chunks per stripe, Default=0 means auto set
+        | distr_bs        | Distr bdev block size, Default=4096
+        | distr_chunk_bs  | Distr bdev chunk block size, Default=4096
 
     """""
 
@@ -123,21 +123,21 @@ def add_lvol():
             if lvol.lvol_name == name:
                 return utils.get_csi_response(lvol.get_id())
 
-    rw_iops = utils.get_int_value_or_default(cl_data, "max-rw-iops", 0)
-    rw_mbytes = utils.get_int_value_or_default(cl_data, "max-rw-mbytes", 0)
-    r_mbytes = utils.get_int_value_or_default(cl_data, "max-r-mbytes", 0)
-    w_mbytes = utils.get_int_value_or_default(cl_data, "max-w-mbytes", 0)
+    rw_iops = utils.get_int_value_or_default(cl_data, "max_rw_iops", 0)
+    rw_mbytes = utils.get_int_value_or_default(cl_data, "max_rw_mbytes", 0)
+    r_mbytes = utils.get_int_value_or_default(cl_data, "max_r_mbytes", 0)
+    w_mbytes = utils.get_int_value_or_default(cl_data, "max_w_mbytes", 0)
 
     compression = utils.get_value_or_default(cl_data, "comp", False)
     encryption = utils.get_value_or_default(cl_data, "crypto", False)
 
-    ha_type = utils.get_value_or_default(cl_data, "ha-type", "default")
+    ha_type = utils.get_value_or_default(cl_data, "ha_type", "default")
 
-    distr_vuid = utils.get_int_value_or_default(cl_data, "distr-vuid", 0)
-    distr_ndcs = utils.get_int_value_or_default(cl_data, "distr-ndcs", 0)
-    distr_npcs = utils.get_int_value_or_default(cl_data, "distr-npcs", 0)
-    distr_bs = utils.get_int_value_or_default(cl_data, "distr-ps", 4096)
-    distr_chunk_bs = utils.get_int_value_or_default(cl_data, "distr-chunk-bs", 4096)
+    distr_vuid = utils.get_int_value_or_default(cl_data, "distr_vuid", 0)
+    distr_ndcs = utils.get_int_value_or_default(cl_data, "distr_ndcs", 0)
+    distr_npcs = utils.get_int_value_or_default(cl_data, "distr_npcs", 0)
+    distr_bs = utils.get_int_value_or_default(cl_data, "distr_ps", 4096)
+    distr_chunk_bs = utils.get_int_value_or_default(cl_data, "distr_chunk_bs", 4096)
 
     ret, error = lvol_controller.add_lvol_ha(
         name=name,
