@@ -729,9 +729,12 @@ def remove_storage_node(node_id, force_remove=False, force_migrate=False):
     except:
         pass
 
-    snode_api = SNodeClient(snode.api_endpoint, timeout=20)
-    snode_api.spdk_process_kill()
-    snode_api.leave_swarm()
+    try:
+        snode_api = SNodeClient(snode.api_endpoint)
+        snode_api.spdk_process_kill()
+        snode_api.leave_swarm()
+    except Exception as e:
+        logger.warning(f"Failed to remove SPDK process: {e}")
 
     snode.remove(db_controller.kv_store)
     storage_events.snode_remove(snode)
