@@ -7,18 +7,22 @@ import sys
 
 
 from simplyblock_core import constants, kv_store
-from simplyblock_core.controllers import health_controller
+from simplyblock_core.controllers import health_controller, storage_events
 from simplyblock_core.models.nvme_device import NVMeDevice
 
 
 def set_dev_status(dev, status):
     if dev.status != status:
-        dev = db_controller.get_storage_devices(dev.get_id())
-        old_status = dev.status
-        dev.status = status
-        # lvol.updated_at = str(datetime.now())
-        dev.write_to_db(db_store)
-        # storage_events.snode_status_change(snode, snode.status, old_status, caused_by="monitor")
+        nodes = db_controller.get_storage_nodes()
+        for node in nodes:
+            if node.nvme_devices:
+                for dev in node.nvme_devices:
+                    if dev.get_id() == dev.get_id():
+                        old_status = dev.status
+                        dev.status = status
+                        node.write_to_db(db_store)
+                        storage_events.device_status_change(dev.cluster_id, dev,  dev.status, old_status)
+                        return
 
 
 # configure logging

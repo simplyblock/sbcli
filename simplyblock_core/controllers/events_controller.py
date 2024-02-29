@@ -19,7 +19,7 @@ CAUSED_BY_API = "api"
 CAUSED_BY_MONITOR = "monitor"
 
 
-def log_distr_event(cluster_id, node_id, event_type, event_dict, status):
+def log_distr_event(cluster_id, node_id, event_dict):
 
     ds = EventObj()
     ds.uuid = str(uuid.uuid4())
@@ -31,11 +31,14 @@ def log_distr_event(cluster_id, node_id, event_type, event_dict, status):
     ds.caused_by = CAUSED_BY_MONITOR
     ds.status = 'new'
 
-    ds.event = event_type
-    ds.message = status
+    ds.event = event_dict['event_type']
+    ds.message = event_dict['status']
 
     if 'storage_ID' in event_dict:
         ds.storage_id = event_dict['storage_ID']
+
+    if 'vuid' in event_dict:
+        ds.vuid = event_dict['vuid']
 
     ds.object_dict = event_dict
 

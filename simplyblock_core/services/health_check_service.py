@@ -29,9 +29,9 @@ def set_node_status(snode, target_status):
 
 
 def set_node_health_check(snode, health_check_status):
+    snode = db_controller.get_storage_node_by_id(snode.get_id())
     if snode.health_check == health_check_status:
         return
-    snode = db_controller.get_storage_node_by_id(snode.get_id())
     old_status = snode.health_check
     snode.health_check = health_check_status
     snode.updated_at = str(datetime.now())
@@ -40,9 +40,9 @@ def set_node_health_check(snode, health_check_status):
 
 
 def set_device_health_check(cluster_id, device, health_check_status):
+    device = db_controller.get_storage_devices(device.get_id())
     if device.health_check == health_check_status:
         return
-    device = db_controller.get_storage_devices(device.get_id())
     old_status = device.health_check
     device.health_check = health_check_status
     device.updated_at = str(datetime.now())
@@ -52,9 +52,9 @@ def set_device_health_check(cluster_id, device, health_check_status):
 
 
 def set_lvol_health_check(cluster_id, lvol, health_check_status):
+    lvol = db_controller.get_lvol_by_id(lvol.get_id())
     if lvol.health_check == health_check_status:
         return
-    lvol = db_controller.get_lvol_by_id(lvol.get_id())
     old_status = lvol.health_check
     lvol.health_check = health_check_status
     lvol.updated_at = str(datetime.now())
@@ -106,10 +106,10 @@ while True:
         logger.info(f"Check: node docker API {snode.mgmt_ip}:2375 ... {node_docker_check}")
 
         is_node_online = ping_check and node_api_check and node_rpc_check and node_docker_check
-        if is_node_online:
-            set_node_status(snode, StorageNode.STATUS_ONLINE)
-        else:
-            set_node_status(snode, StorageNode.STATUS_UNREACHABLE)
+        # if is_node_online:
+        #     set_node_status(snode, StorageNode.STATUS_ONLINE)
+        # else:
+        #     set_node_status(snode, StorageNode.STATUS_UNREACHABLE)
 
         health_check_status = is_node_online
         if not node_rpc_check:

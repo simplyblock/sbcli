@@ -33,7 +33,7 @@ class CNodeClient:
             dt = None
             if params:
                 dt = json.dumps(params)
-            response = self.session.request(method, self.url+path, data=dt)
+            response = self.session.request(method, self.url+path, data=dt, timeout=self.timeout)
         except Exception as e:
             raise e
 

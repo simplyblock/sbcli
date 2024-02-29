@@ -38,7 +38,13 @@ def add_node_to_cluster():
         spdk_cpu_mask = cl_data['spdk_cpu_mask']
 
     if 'spdk_mem' in cl_data:
-        spdk_mem = cl_data['spdk_mem']
+        mem = cl_data['spdk_mem']
+        spdk_mem = utils.parse_size(mem)
+        if spdk_mem < 1 * 1024 * 1024:
+            return utils.get_response_error(f"SPDK memory:{mem} must be larger than 1G", 400)
+
+    if 'spdk_image' in cl_data:
+        spdk_image = cl_data['spdk_image']
 
     if 'spdk_image' in cl_data:
         spdk_image = cl_data['spdk_image']

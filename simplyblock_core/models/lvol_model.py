@@ -55,6 +55,8 @@ class LVol(BaseModel):
 
         "health_check": {"type": bool, "default": True},
 
+        "snapshot_name": {"type": str, 'default': ""},
+
     }
 
     def __init__(self, data=None):

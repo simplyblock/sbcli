@@ -26,7 +26,7 @@ class RPCClient:
 
     # ref: https://spdk.io/doc/jsonrpc.html
 
-    def __init__(self, ip_address, port, username, password, timeout=5, retry=3):
+    def __init__(self, ip_address, port, username, password, timeout=30, retry=3):
         self.ip_address = ip_address
         self.port = port
         self.url = 'http://%s:%s/' % (self.ip_address, self.port)
@@ -52,6 +52,7 @@ class RPCClient:
             logger.debug("Requesting method: %s, params: %s", method, params)
             response = self.session.post(self.url, data=json.dumps(payload), timeout=self.timeout)
         except Exception as e:
+            logger.error(e)
             return False, str(e)
 
         logger.debug("Response: status_code: %s, content: %s",
@@ -508,12 +509,8 @@ class RPCClient:
     def bdev_nvme_set_options(self):
         params = {
             "action_on_timeout": "none",
-            "ctrlr_loss_timeout_sec": 20,
-            "reconnect_delay_sec": 2,
-            # "timeout_us": 10000,
-            # "timeout_admin_us": 0,
-            # "keep_alive_timeout_ms": 250,
-            # "retry_count": 1,
+            "ctrlr_loss_timeout_sec": -1,
+            "reconnect_delay_sec": 15,
             "transport_retry_count": 1,
             "bdev_retry_count": 1}
         return self._request("bdev_nvme_set_options", params)
@@ -559,3 +556,36 @@ class RPCClient:
             "num_blocks": num_blocks,
         }
         return self._request("bdev_malloc_create", params)
+
+    def ultra21_lvol_bmap_init(self, bdev_name, num_blocks, block_len, page_len, max_num_blocks):
+        params = {
+            "base_bdev": bdev_name,
+            "blockcnt": num_blocks,
+            "blocklen": block_len,
+            "pagelen": page_len,
+            "maxblockcnt": max_num_blocks
+        }
+        return self._request("ultra21_lvol_bmap_init", params)
+
+    def ultra21_lvol_mount_snapshot(self, snapshot_name, lvol_bdev, base_bdev):
+        params = {
+            "modus": "SNAPSHOT",
+            "lvol_bdev": lvol_bdev,
+            "base_bdev": base_bdev,
+            "snapshot_bdev": snapshot_name
+        }
+        return self._request("ultra21_lvol_mount", params)
+
+    def ultra21_lvol_mount_lvol(self, lvol_name, base_bdev, label, desc):
+        params = {
+            "modus": "BASE",
+            "lvol_bdev": lvol_name,
+            "base_bdev": base_bdev,
+            "label": label,
+            "desc": desc
+        }
+        return self._request("ultra21_lvol_mount", params)
+
+
+
+

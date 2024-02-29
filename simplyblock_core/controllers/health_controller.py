@@ -65,7 +65,7 @@ def _check_node_rpc(rpc_ip, rpc_port, rpc_username, rpc_password):
     try:
         rpc_client = RPCClient(
             rpc_ip, rpc_port, rpc_username, rpc_password,
-            timeout=3, retry=1)
+            timeout=30, retry=3)
         ret = rpc_client.get_version()
         if ret:
             logger.debug(f"SPDK version: {ret['version']}")
@@ -206,13 +206,16 @@ def check_device(device_id):
         if device.status == NVMeDevice.STATUS_ONLINE:
             logger.info("Checking other node's connection to this device...")
             ret = check_remote_device(device_id)
-            passed |= ret
+            passed &= ret
 
     except Exception as e:
         logger.error(f"Failed to connect to node's SPDK: {e}")
         passed = False
 
-    return passed
+    if device.status == "online":
+        return passed
+    else:
+        return True
 
 
 def check_remote_device(device_id):

@@ -36,6 +36,7 @@ class EventObj(BaseModel):
         "caused_by": {"type": str, 'default': ""},
         "message": {"type": str, 'default': ""},
         "storage_id": {"type": int, 'default': -1},
+        "vuid": {"type": int, 'default': -1},
         "meta_data": {"type": str, 'default': ""},
         "status": {"type": str, 'default': ""},
 

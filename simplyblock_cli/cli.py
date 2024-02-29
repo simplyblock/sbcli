@@ -1,5 +1,6 @@
 import argparse
 import logging
+import math
 import re
 import sys
 
@@ -124,8 +125,8 @@ class CLIWrapper:
         sub_command = self.add_sub_command(subparser, "device-testing-mode", 'set pt testing bdev mode')
         sub_command.add_argument("device_id", help='Device UUID')
         sub_command.add_argument("mode", help='Testing mode', choices=[
-            'full_pass_trhough', 'io_error_on_read', 'io_error_on_write'
-                                                     'io_error_on_unmap', 'io_error_on_all', 'discard_io_all',
+            'full_pass_trhough', 'io_error_on_read', 'io_error_on_write',
+            'io_error_on_unmap', 'io_error_on_all', 'discard_io_all',
             'hotplug_removal'], default='full_pass_trhough')
 
         sub_command = self.add_sub_command(subparser, "get-device", 'Get storage device by id')
@@ -249,6 +250,10 @@ class CLIWrapper:
         # check device
         sub_command = self.add_sub_command(subparser, "check-device", 'Health check device')
         sub_command.add_argument("id", help='device UUID')
+
+        # node info
+        sub_command = self.add_sub_command(subparser, "info", 'Get node information')
+        sub_command.add_argument("id", help='Node UUID')
 
         # Initialize cluster parser
         subparser = self.add_command('cluster', 'Cluster commands')
@@ -410,6 +415,10 @@ class CLIWrapper:
         sub_command.add_argument("--host_id", help='Primary storage node UUID or Hostname')
         sub_command.add_argument("--ha-type", help='LVol HA type (single, ha), default is cluster HA type',
                                  dest='ha_type', choices=["single", "ha", "default"], default='default')
+
+        sub_command.add_argument("--snapshot", help='Create a Snapshot capable LVol, Default: on',
+                                 dest='snapshot', choices=["on", "off"], default='on')
+
         sub_command.add_argument("--compress",
                                  help='Use inline data compression and de-compression on the logical volume',
                                  required=False, action='store_true')
@@ -434,10 +443,7 @@ class CLIWrapper:
                                  default=4096)
         sub_command.add_argument("--distr-chunk-bs", help='(Dev) distrb bdev chunk block size, default: 4096', type=int,
                                  default=4096)
-        sub_command.add_argument("--smoke-run", help='smoke run for the algorithm',
-                                 required=False, action='store_true', dest='smoke_run')
-        sub_command.add_argument("--random-data", help='generate random data for the algorithm',
-                                 required=False, action='store_true', dest='random_data')
+
 
         # set lvol params
         sub_command = self.add_sub_command(subparser, 'qos-set', 'Change qos settings for an active logical volume')
@@ -912,6 +918,10 @@ class CLIWrapper:
                 device_id = args.id
                 ret = health_controller.check_device(device_id)
 
+            elif sub_command == "info":
+                node_id = args.id
+                ret = storage_ops.get_info(node_id)
+
             else:
                 self.parser.print_help()
 
@@ -1005,8 +1015,7 @@ class CLIWrapper:
                 distr_npcs = args.distr_npcs
                 distr_bs = args.distr_bs
                 distr_chunk_bs = args.distr_chunk_bs
-                smoke_run = args.smoke_run
-                random_data = args.random_data
+                with_snapshot = args.snapshot == "on"
                 results, error = lvol_controller.add_lvol_ha(
                     name, size, host_id, ha_type, pool, comp, crypto,
                     distr_vuid, distr_ndcs, distr_npcs,
@@ -1016,8 +1025,7 @@ class CLIWrapper:
                     args.max_w_mbytes,
                     distr_bs,
                     distr_chunk_bs,
-                    smoke_run,
-                    random_data)
+                    with_snapshot)
                 if results:
                     ret = results
                 else:
@@ -1336,22 +1344,31 @@ class CLIWrapper:
         except Exception:
             pass
         try:
-            size_number = int(size_string[:-1])
-            size_v = size_string[-1].lower()
-            if size_v == "k":
-                return size_number * 1024
-            if size_v == "m":
-                return size_number * 1024 * 1024
-            elif size_v == "g":
-                return size_number * 1024 * 1024 * 1024
-            elif size_v == "t":
-                return size_number * 1024 * 1024 * 1024 * 1024
+            if size_string:
+                size_string = size_string.lower()
+                size_string = size_string.replace(" ", "")
+                size_string = size_string.replace("b", "")
+                size_number = int(size_string[:-1])
+                size_v = size_string[-1]
+                one_k = 1000
+                multi = 0
+                if size_v == "k":
+                    multi = 1
+                elif size_v == "m":
+                    multi = 2
+                elif size_v == "g":
+                    multi = 3
+                elif size_v == "t":
+                    multi = 4
+                else:
+                    print(f"Error parsing size: {size_string}")
+                    return -1
+                return size_number * math.pow(one_k, multi)
             else:
-                print(f"Error parsing size: {size_string}")
-                exit(-1)
+                return -1
         except:
             print(f"Error parsing size: {size_string}")
-            exit(-1)
+            return -1
 
     def validate_cpu_mask(self, spdk_cpu_mask):
         return re.match("^(0x|0X)?[a-fA-F0-9]+$", spdk_cpu_mask)

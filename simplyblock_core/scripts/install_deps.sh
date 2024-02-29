@@ -30,4 +30,7 @@ sudo sed -i 's/#X11UseLocalhost yes/X11UseLocalhost no/g' /etc/ssh/sshd_config
 sudo service sshd restart
 sudo modprobe nvme-tcp
 
-sudo sysctl net.ipv6.conf.all.disable_ipv6=1
+sudo sysctl -w net.ipv6.conf.all.disable_ipv6=1
+
+# required for graylog
+sudo sysctl -w vm.max_map_count=262144

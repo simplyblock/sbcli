@@ -713,6 +713,12 @@ def remove_storage_node(node_id, force_remove=False, force_migrate=False):
             logger.error("Snapshots found on the storage node, use --force-remove or --force-migrate")
             return False
 
+    if snode.nvme_devices:
+        for dev in snode.nvme_devices:
+            if dev.status == 'online':
+                distr_controller.send_dev_status_event(dev.cluster_device_order, "unavailable")
+            distr_controller.disconnect_device(dev)
+
     logger.info("Removing storage node")
 
     logger.debug("Leaving swarm...")
@@ -723,9 +729,12 @@ def remove_storage_node(node_id, force_remove=False, force_migrate=False):
     except:
         pass
 
-    snode_api = SNodeClient(snode.api_endpoint, timeout=20)
-    snode_api.spdk_process_kill()
-    snode_api.leave_swarm()
+    try:
+        snode_api = SNodeClient(snode.api_endpoint, timeout=20)
+        snode_api.spdk_process_kill()
+        snode_api.leave_swarm()
+    except Exception as e:
+        logger.warning(f"Failed to remove SPDK process: {e}")
 
     snode.remove(db_controller.kv_store)
     storage_events.snode_remove(snode)
@@ -1671,6 +1680,10 @@ def device_remove(device_id):
 
     device.status = 'removed'
     snode.write_to_db(db_controller.kv_store)
+
+    for lvol in db_controller.get_lvols():
+        lvol_controller.send_cluster_map(lvol.get_id())
+
     return True
 
 
@@ -1914,3 +1927,37 @@ def health_check(node_id):
     except Exception as e:
         logger.error(f"Failed to connect to node's SPDK: {e}")
 
+
+def get_info(node_id):
+    db_controller = DBController()
+
+    snode = db_controller.get_storage_node_by_id(node_id)
+    if not snode:
+        logger.error(f"Can not find storage node: {node_id}")
+        return False
+
+    snode_api = SNodeClient(f"{snode.mgmt_ip}:5000")
+    node_info, _ = snode_api.info()
+    return json.dumps(node_info, indent=2)
+
+
+def device_set_read_only(device_id):
+    db_controller = DBController()
+    dev = db_controller.get_storage_devices(device_id)
+    if not dev:
+        logger.error("device not found")
+
+    snode = db_controller.get_storage_node_by_id(dev.node_id)
+    if not snode:
+        logger.error("node not found")
+        return False
+
+    for dev in snode.nvme_devices:
+        if dev.get_id() == device_id:
+            device = dev
+            break
+
+    device.status = device.STATUS_READONLY
+    distr_controller.send_dev_status_event(device.cluster_device_order, device.status)
+    snode.write_to_db(db_controller.kv_store)
+    return True
