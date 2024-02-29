@@ -163,6 +163,10 @@ def validate_add_lvol_func(name, size, host_id_or_name, pool_id_or_name,
     return True, ""
 
 
+def get_jm_names(snode):
+    return [f"jm_{snode.get_id()}"]
+
+
 def add_lvol(name, size, host_id_or_name, pool_id_or_name, use_comp, use_crypto,
              distr_vuid, distr_ndcs, distr_npcs,
              max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes,
@@ -237,12 +241,7 @@ def add_lvol(name, size, host_id_or_name, pool_id_or_name, use_comp, use_crypto,
         vuid = distr_vuid
 
     num_blocks = int(size / distr_bs)
-    alloc_names = []
-    for dev in snode.nvme_devices:
-        alloc_names.append(dev.alceml_bdev)
-    for dev in snode.remote_devices:
-        alloc_names.append(dev.remote_bdev)
-    names = ",".join(alloc_names)
+    jm_names = get_jm_names(snode)
 
     if distr_ndcs == 0 and distr_npcs == 0:
         if cl.ha_type == "single":
@@ -262,7 +261,7 @@ def add_lvol(name, size, host_id_or_name, pool_id_or_name, use_comp, use_crypto,
             distr_npcs = 1
 
     # name, vuid, ndcs, npcs, num_blocks, block_size, alloc_names
-    ret = rpc_client.bdev_distrib_create(f"distr_{name}", vuid, distr_ndcs, distr_npcs, num_blocks, distr_bs, names,
+    ret = rpc_client.bdev_distrib_create(f"distr_{name}", vuid, distr_ndcs, distr_npcs, num_blocks, distr_bs, jm_names,
                                          distr_chunk_bs)
     bdev_stack.append({"type": "distr", "name": f"distr_{name}"})
     if not ret:
@@ -612,21 +611,12 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
 
 
 def add_lvol_on_node(lvol, snode, ha_comm_addrs=None, ha_inode_self=None):
-    alloc_names = []
-    for dev in snode.nvme_devices:
-        alloc_names.append(dev.alceml_bdev)
-    for dev in snode.remote_devices:
-        alloc_names.append(dev.remote_bdev)
-    names = ",".join(alloc_names)
-
-    rpc_client = RPCClient(
-        snode.mgmt_ip, snode.rpc_port,
-        snode.rpc_username, snode.rpc_password)
-
+    jm_names = get_jm_names(snode)
+    rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
     num_blocks = int(lvol.size / lvol.distr_bs)
     ret = rpc_client.bdev_distrib_create(
         lvol.base_bdev, lvol.vuid, lvol.ndcs, lvol.npcs, num_blocks,
-        lvol.distr_bs, names, lvol.distr_chunk_bs, ha_comm_addrs, ha_inode_self, lvol.distr_page_size)
+        lvol.distr_bs, jm_names, lvol.distr_chunk_bs, ha_comm_addrs, ha_inode_self, lvol.distr_page_size)
     if not ret:
         logger.error("Failed to create Distr bdev")
         return False, "Failed to create Distr bdev"
