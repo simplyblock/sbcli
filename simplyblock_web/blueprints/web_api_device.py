@@ -45,7 +45,7 @@ def list_storage_devices(uuid):
 @bp.route('/device/capacity/<string:uuid>/history/<string:history>', methods=['GET'])
 @bp.route('/device/capacity/<string:uuid>', methods=['GET'], defaults={'history': None})
 def device_capacity(uuid, history):
-    device = db_controller.get_storage_devices(uuid)
+    device = db_controller.get_storage_node_by_id(uuid)
     if not device:
         return utils.get_response_error(f"devices not found: {uuid}", 404)
 
@@ -56,7 +56,7 @@ def device_capacity(uuid, history):
 @bp.route('/device/iostats/<string:uuid>/history/<string:history>', methods=['GET'])
 @bp.route('/device/iostats/<string:uuid>', methods=['GET'], defaults={'history': None})
 def device_iostats(uuid, history):
-    devices = db_controller.get_storage_devices(uuid)
+    devices = db_controller.get_storage_node_by_id(uuid)
     if not devices:
         return utils.get_response_error(f"devices not found: {uuid}", 404)
 
@@ -69,7 +69,7 @@ def device_iostats(uuid, history):
 
 @bp.route('/device/reset/<string:uuid>', methods=['GET'])
 def device_reset(uuid):
-    devices = db_controller.get_storage_devices(uuid)
+    devices = db_controller.get_storage_node_by_id(uuid)
     if not devices:
         return utils.get_response_error(f"devices not found: {uuid}", 404)
 
@@ -79,7 +79,7 @@ def device_reset(uuid):
 
 @bp.route('/device/remove/<string:uuid>', methods=['GET'])
 def device_remove(uuid):
-    devices = db_controller.get_storage_devices(uuid)
+    devices = db_controller.get_storage_node_by_id(uuid)
     if not devices:
         return utils.get_response_error(f"devices not found: {uuid}", 404)
 
