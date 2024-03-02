@@ -113,7 +113,9 @@ while True:
 
         health_check_status = is_node_online
         if not node_rpc_check:
-            logger.info("Skipping devices checks because RPC check failed")
+            logger.info("Putting all devices to unavailable state because RPC check failed")
+            for dev in snode.nvme_devices:
+                set_device_health_check(cluster_id, dev, False)
         else:
             logger.info(f"Node device count: {len(snode.nvme_devices)}")
             node_devices_check = True

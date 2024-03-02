@@ -779,10 +779,10 @@ def delete_lvol(uuid, force_delete=False):
     for snap in snaps:
         if snap.lvol.get_id() == uuid:
             logger.warning(f"Soft delete LVol that has snapshots. Snapshot:{snap.get_id()}")
-            lvol.deleted = True
-            lvol.write_to_db(db_controller.kv_store)
             ret = rpc_client.subsystem_delete(lvol.nqn)
             logger.debug(ret)
+            lvol.deleted = True
+            lvol.write_to_db(db_controller.kv_store)
             return True
 
     if lvol.ha_type == 'single':

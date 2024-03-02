@@ -11,13 +11,13 @@ from simplyblock_core.controllers import health_controller, storage_events
 from simplyblock_core.models.nvme_device import NVMeDevice
 
 
-def set_dev_status(dev, status):
-    if dev.status != status:
+def set_dev_status(device, status):
+    if device.status != status:
         nodes = db_controller.get_storage_nodes()
         for node in nodes:
             if node.nvme_devices:
                 for dev in node.nvme_devices:
-                    if dev.get_id() == dev.get_id():
+                    if dev.get_id() == device.get_id():
                         old_status = dev.status
                         dev.status = status
                         node.write_to_db(db_store)
