@@ -723,6 +723,8 @@ class CLIWrapper:
         args = self.parser.parse_args()
         if args.debug:
             self.logger.setLevel(logging.DEBUG)
+        logging.getLogger("urllib3.connectionpool").setLevel(logging.WARNING)
+
         args_dict = args.__dict__
         ret = ""
         if args.command in ['storage-node', 'sn']:
@@ -1371,7 +1373,7 @@ class CLIWrapper:
 
 def main():
     logger_handler = logging.StreamHandler()
-    logger_handler.setFormatter(logging.Formatter('%(asctime)s: %(levelname)s: %(message)s'))
+    logger_handler.setFormatter(logging.Formatter('%(asctime)s: %(levelname)s: %(filename)s:%(lineno)d: %(message)s'))
     logger = logging.getLogger()
     logger.addHandler(logger_handler)
 
