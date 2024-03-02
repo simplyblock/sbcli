@@ -370,7 +370,7 @@ class RPCClient:
         }
         return self._request2("bdev_alceml_create", params)
 
-    def bdev_distrib_create(self, name, vuid, ndcs, npcs, num_blocks, block_size, alloc_names,
+    def bdev_distrib_create(self, name, vuid, ndcs, npcs, num_blocks, block_size, jm_names,
                             chunk_size, ha_comm_addrs=None, ha_inode_self=None, pba_page_size=2097152):
         """"
             // Optional (not specified = no HA)
@@ -385,7 +385,7 @@ class RPCClient:
         """
         params = {
             "name": name,
-            # "alloc_names": alloc_names,
+            "jm_names": ",".join(jm_names),
             "vuid": vuid,
             "ndcs": ndcs,
             "npcs": npcs,
@@ -586,6 +586,16 @@ class RPCClient:
         }
         return self._request("ultra21_lvol_mount", params)
 
+    def bdev_jm_create(self, name, name_storage1, block_size=4096):
+        params = {
+            "name": name,
+            "name_storage1": name_storage1,
+            "block_size": block_size
+        }
+        return self._request("bdev_jm_create", params)
 
 
+    def bdev_jm_delete(self, name):
+        params = {"name": name}
+        return self._request("bdev_jm_delete", params)
 

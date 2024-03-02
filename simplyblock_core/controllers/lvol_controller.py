@@ -163,6 +163,10 @@ def validate_add_lvol_func(name, size, host_id_or_name, pool_id_or_name,
     return True, ""
 
 
+def get_jm_names(snode):
+    return [f"jm_{snode.get_id()}"]
+
+
 def add_lvol(name, size, host_id_or_name, pool_id_or_name, use_comp, use_crypto,
              distr_vuid, distr_ndcs, distr_npcs,
              max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes,
@@ -237,12 +241,7 @@ def add_lvol(name, size, host_id_or_name, pool_id_or_name, use_comp, use_crypto,
         vuid = distr_vuid
 
     num_blocks = int(size / distr_bs)
-    alloc_names = []
-    for dev in snode.nvme_devices:
-        alloc_names.append(dev.alceml_bdev)
-    for dev in snode.remote_devices:
-        alloc_names.append(dev.remote_bdev)
-    names = ",".join(alloc_names)
+    jm_names = get_jm_names(snode)
 
     if distr_ndcs == 0 and distr_npcs == 0:
         if cl.ha_type == "single":
@@ -262,7 +261,7 @@ def add_lvol(name, size, host_id_or_name, pool_id_or_name, use_comp, use_crypto,
             distr_npcs = 1
 
     # name, vuid, ndcs, npcs, num_blocks, block_size, alloc_names
-    ret = rpc_client.bdev_distrib_create(f"distr_{name}", vuid, distr_ndcs, distr_npcs, num_blocks, distr_bs, names,
+    ret = rpc_client.bdev_distrib_create(f"distr_{name}", vuid, distr_ndcs, distr_npcs, num_blocks, distr_bs, jm_names,
                                          distr_chunk_bs)
     bdev_stack.append({"type": "distr", "name": f"distr_{name}"})
     if not ret:
@@ -433,7 +432,7 @@ def _get_next_3_nodes():
 def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp, use_crypto,
                 distr_vuid, distr_ndcs, distr_npcs,
                 max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes,
-                distr_bs=None, distr_chunk_bs=None, with_snapshot=True):
+                distr_bs=None, distr_chunk_bs=None):
 
     logger.info(f"Adding LVol: {name}")
     host_node = None
@@ -548,9 +547,6 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
     lvol.base_bdev = f"distr_{lvol.vuid}_{name}"
     # lvol.top_bdev = lvol.lvol_bdev
     lvol.top_bdev = lvol.base_bdev
-    # if with_snapshot:
-    #     lvol.snapshot_name = f"snapshot_{lvol.vuid}_{name}"
-    #     lvol.top_bdev = f"lvol_{lvol.vuid}_{lvol.lvol_name}"
 
     lvol.bdev_stack.append({"type": "distr", "name": lvol.base_bdev})
     # lvol.bdev_stack.append({"type": "lvs", "name": lvol.lvs_name})
@@ -614,65 +610,18 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
 
 
 def add_lvol_on_node(lvol, snode, ha_comm_addrs=None, ha_inode_self=None):
-    alloc_names = []
-    for dev in snode.nvme_devices:
-        alloc_names.append(dev.alceml_bdev)
-    for dev in snode.remote_devices:
-        alloc_names.append(dev.remote_bdev)
-    names = ",".join(alloc_names)
-
-    rpc_client = RPCClient(
-        snode.mgmt_ip, snode.rpc_port,
-        snode.rpc_username, snode.rpc_password)
-
+    jm_names = get_jm_names(snode)
+    rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
     num_blocks = int(lvol.size / lvol.distr_bs)
     ret = rpc_client.bdev_distrib_create(
         lvol.base_bdev, lvol.vuid, lvol.ndcs, lvol.npcs, num_blocks,
-        lvol.distr_bs, names, lvol.distr_chunk_bs, ha_comm_addrs, ha_inode_self, lvol.distr_page_size)
+        lvol.distr_bs, jm_names, lvol.distr_chunk_bs, ha_comm_addrs, ha_inode_self, lvol.distr_page_size)
     if not ret:
         logger.error("Failed to create Distr bdev")
         return False, "Failed to create Distr bdev"
     if ret == "?":
         logger.error(f"Failed to create Distr bdev, ret={ret}")
         # return False
-
-    # if lvol.snapshot_name:
-    #     logger.info("Creating Snapshot bdev")
-    #     block_len = lvol.distr_bs
-    #     page_len = int(lvol.distr_page_size / lvol.distr_bs)
-    #     max_num_blocks = num_blocks * 10
-    #     ret = rpc_client.ultra21_lvol_bmap_init(lvol.base_bdev, num_blocks, block_len, page_len, max_num_blocks)
-    #
-    #     if ret:
-    #         # lvol_bdev = f"base_{lvol.vuid}_{lvol.lvol_name}"
-    #         # ret = rpc_client.bdev_distrib_create(
-    #         #     lvol_bdev, lvol.vuid+1, lvol.ndcs, lvol.npcs, num_blocks,
-    #         #     lvol.distr_bs, names, lvol.distr_chunk_bs, ha_comm_addrs, ha_inode_self, lvol.distr_page_size)
-    #
-    #         lvol_bdev = ""
-    #         snapshot_name = lvol.snapshot_name
-    #         base_bdev = lvol.base_bdev
-    #         ret = rpc_client.ultra21_lvol_mount_snapshot(snapshot_name, lvol_bdev, base_bdev)
-    #
-    #         if ret:
-    #             lvol_name = f"lvol_{lvol.vuid}_{lvol.lvol_name}"
-    #             base_bdev = snapshot_name
-    #             label = "label"
-    #             desc = "desc"
-    #             ret = rpc_client.ultra21_lvol_mount_lvol(lvol_name, base_bdev, label, desc)
-
-
-
-
-    # time.sleep(3)
-    # ret = rpc_client.create_lvstore(lvol.lvs_name, lvol.base_bdev)
-    # if not ret:
-    #     logger.error(f"Failed to create LVS: {lvol.lvs_name}")
-    #     return False
-    # ret = rpc_client.create_lvol(lvol.lvol_name, lvol.size, lvol.lvs_name)
-    # if not ret:
-    #     logger.error("failed to create LVol on the storage node")
-    #     return False, "failed to create LVol on the storage node"
 
     if lvol.crypto_bdev:
         crypto_bdev = _create_crypto_lvol(rpc_client, lvol.crypto_bdev, lvol.lvol_bdev)
@@ -829,10 +778,10 @@ def delete_lvol(uuid, force_delete=False):
     for snap in snaps:
         if snap.lvol.get_id() == uuid:
             logger.warning(f"Soft delete LVol that has snapshots. Snapshot:{snap.get_id()}")
-            lvol.deleted = True
-            lvol.write_to_db(db_controller.kv_store)
             ret = rpc_client.subsystem_delete(lvol.nqn)
             logger.debug(ret)
+            lvol.deleted = True
+            lvol.write_to_db(db_controller.kv_store)
             return True
 
     if lvol.ha_type == 'single':

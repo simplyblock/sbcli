@@ -416,9 +416,6 @@ class CLIWrapper:
         sub_command.add_argument("--ha-type", help='LVol HA type (single, ha), default is cluster HA type',
                                  dest='ha_type', choices=["single", "ha", "default"], default='default')
 
-        sub_command.add_argument("--snapshot", help='Create a Snapshot capable LVol, Default: on',
-                                 dest='snapshot', choices=["on", "off"], default='on')
-
         sub_command.add_argument("--compress",
                                  help='Use inline data compression and de-compression on the logical volume',
                                  required=False, action='store_true')
@@ -726,6 +723,8 @@ class CLIWrapper:
         args = self.parser.parse_args()
         if args.debug:
             self.logger.setLevel(logging.DEBUG)
+        logging.getLogger("urllib3.connectionpool").setLevel(logging.WARNING)
+
         args_dict = args.__dict__
         ret = ""
         if args.command in ['storage-node', 'sn']:
@@ -1015,7 +1014,6 @@ class CLIWrapper:
                 distr_npcs = args.distr_npcs
                 distr_bs = args.distr_bs
                 distr_chunk_bs = args.distr_chunk_bs
-                with_snapshot = args.snapshot == "on"
                 results, error = lvol_controller.add_lvol_ha(
                     name, size, host_id, ha_type, pool, comp, crypto,
                     distr_vuid, distr_ndcs, distr_npcs,
@@ -1024,8 +1022,7 @@ class CLIWrapper:
                     args.max_r_mbytes,
                     args.max_w_mbytes,
                     distr_bs,
-                    distr_chunk_bs,
-                    with_snapshot)
+                    distr_chunk_bs)
                 if results:
                     ret = results
                 else:
@@ -1376,7 +1373,7 @@ class CLIWrapper:
 
 def main():
     logger_handler = logging.StreamHandler()
-    logger_handler.setFormatter(logging.Formatter('%(asctime)s: %(levelname)s: %(message)s'))
+    logger_handler.setFormatter(logging.Formatter('%(asctime)s: %(levelname)s: %(filename)s:%(lineno)d: %(message)s'))
     logger = logging.getLogger()
     logger.addHandler(logger_handler)
 

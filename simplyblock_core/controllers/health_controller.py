@@ -65,7 +65,7 @@ def _check_node_rpc(rpc_ip, rpc_port, rpc_username, rpc_password):
     try:
         rpc_client = RPCClient(
             rpc_ip, rpc_port, rpc_username, rpc_password,
-            timeout=30, retry=3)
+            timeout=5, retry=3)
         ret = rpc_client.get_version()
         if ret:
             logger.debug(f"SPDK version: {ret['version']}")
@@ -212,10 +212,7 @@ def check_device(device_id):
         logger.error(f"Failed to connect to node's SPDK: {e}")
         passed = False
 
-    if device.status == "online":
-        return passed
-    else:
-        return True
+    return passed
 
 
 def check_remote_device(device_id):

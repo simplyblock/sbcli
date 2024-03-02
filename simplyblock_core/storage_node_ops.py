@@ -465,6 +465,9 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask,
         logger.error("Failed to prepare cluster devices")
         return False
 
+    # create jm
+    rpc_client.bdev_jm_create(f"jm_{snode.get_id()}", snode.nvme_devices[0].alceml_bdev)
+
     logger.info("Connecting to remote devices")
     remote_devices = _connect_to_remote_devs(snode)
     snode.remote_devices = remote_devices
@@ -856,6 +859,9 @@ def restart_storage_node(
         logger.error("Failed to prepare cluster devices")
         return False
 
+    # create jm
+    rpc_client.bdev_jm_create(f"jm_{snode.get_id()}", snode.nvme_devices[0].alceml_bdev)
+
     logger.info("Connecting to remote devices")
     remote_devices = _connect_to_remote_devs(snode)
     snode.remote_devices = remote_devices
@@ -1062,6 +1068,13 @@ def shutdown_storage_node(node_id, force=False):
     logger.info("disconnect all other nodes connections to this node")
     for dev in snode.nvme_devices:
         distr_controller.disconnect_device(dev)
+
+    rpc_client = RPCClient(
+        snode.mgmt_ip, snode.rpc_port,
+        snode.rpc_username, snode.rpc_password)
+
+    # delete jm
+    rpc_client.bdev_jm_delete(f"jm_{snode.get_id()}")
 
     logger.info("Stopping SPDK")
     snode_api = SNodeClient(snode.api_endpoint)

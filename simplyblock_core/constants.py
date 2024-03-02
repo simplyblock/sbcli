@@ -45,7 +45,7 @@ weights = {
 # To use 75% of hugepages to calculate ssd size to use for the ocf bdev
 CACHING_NODE_MEMORY_FACTOR = 0.75
 
-HEALTH_CHECK_INTERVAL_SEC = 5*60
+HEALTH_CHECK_INTERVAL_SEC = 60
 
 
 SIMPLY_BLOCK_DOCKER_IMAGE = "simplyblock/simplyblock:v1.0.2"

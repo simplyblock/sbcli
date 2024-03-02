@@ -32,9 +32,10 @@ def list_devices_by_node(uuid):
 def list_storage_devices(uuid):
     devices = []
     if uuid:
-        devices = db_controller.get_storage_devices(uuid)
-        if not devices:
+        dev = db_controller.get_storage_devices(uuid)
+        if not dev:
             return utils.get_response_error(f"device not found: {uuid}", 404)
+        devices = [dev]
     else:
         devices = db_controller.get_storage_devices()
     data = []
