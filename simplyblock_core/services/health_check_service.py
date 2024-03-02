@@ -40,15 +40,17 @@ def set_node_health_check(snode, health_check_status):
 
 
 def set_device_health_check(cluster_id, device, health_check_status):
-    device = db_controller.get_storage_devices(device.get_id())
     if device.health_check == health_check_status:
         return
-    old_status = device.health_check
-    device.health_check = health_check_status
-    device.updated_at = str(datetime.now())
-    device.write_to_db(db_store)
-    # todo: set device offline or online
-    storage_events.device_health_check_change(cluster_id, device, device.health_check, old_status, caused_by="monitor")
+    nodes = db_controller.get_storage_nodes()
+    for node in nodes:
+        if node.nvme_devices:
+            for dev in node.nvme_devices:
+                if dev.get_id() == device.get_id():
+                    old_status = dev.health_check
+                    dev.health_check = health_check_status
+                    node.write_to_db(db_store)
+                    storage_events.device_health_check_change(cluster_id, dev, dev.health_check, old_status, caused_by="monitor")
 
 
 def set_lvol_health_check(cluster_id, lvol, health_check_status):
