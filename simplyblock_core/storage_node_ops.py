@@ -1080,7 +1080,7 @@ def shutdown_storage_node(node_id, force=False):
     snode_api = SNodeClient(snode.api_endpoint)
     results, err = snode_api.spdk_process_kill()
 
-    distr_controller.send_node_status_event(snode.get_id(), "nst_offline")
+    distr_controller.send_node_status_event(snode.get_id(), StorageNode.STATUS_OFFLINE)
 
     logger.info("Setting node status to offline")
     old_status = snode.status
