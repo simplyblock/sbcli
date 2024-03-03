@@ -1,3 +1,4 @@
+import hashlib
 import logging
 import os
 import subprocess
@@ -29,8 +30,10 @@ def configure_docker(docker_ip):
     return __run_script(['bash', '-x', os.path.join(DIR_PATH, 'config_docker.sh'), docker_ip])
 
 
-def deploy_stack(cli_pass, dev_ip, image_name):
-    return __run_script(['sudo', 'bash', '-x', os.path.join(DIR_PATH, 'deploy_stack.sh'), cli_pass, dev_ip, image_name])
+def deploy_stack(cli_pass, dev_ip, image_name, graylog_password):
+    pass_hash = hashlib.sha256(graylog_password.encode('utf-8')).hexdigest()
+    return __run_script(
+        ['sudo', 'bash', '-x', os.path.join(DIR_PATH, 'deploy_stack.sh'), cli_pass, dev_ip, image_name, pass_hash])
 
 
 def deploy_cleaner():

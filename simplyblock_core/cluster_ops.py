@@ -17,6 +17,33 @@ from simplyblock_core.models.cluster import Cluster
 logger = logging.getLogger()
 
 
+def _add_graylog_input(cluster_ip, password):
+    url = f"http://{cluster_ip}:9000/api/system/inputs"
+    payload = json.dumps({
+        "title": "spdk log input",
+        "type": "org.graylog2.inputs.gelf.udp.GELFUDPInput",
+        "configuration": {
+            "bind_address": "0.0.0.0",
+            "port": 12201,
+            "recv_buffer_size": 262144,
+            "number_worker_threads": 2,
+            "override_source": None,
+            "charset_name": "UTF-8",
+            "decompress_size_limit": 8388608
+        },
+        "global": True
+    })
+    headers = {
+        'X-Requested-By': '',
+        'Content-Type': 'application/json',
+    }
+    session = requests.session()
+    session.auth = ("admin", password)
+    response = session.request("POST", url, headers=headers, data=payload)
+    logger.debug(response.text)
+    return response.status_code == 201
+
+
 def create_cluster(blk_size, page_size_in_blocks, ha_type, tls,
                    auth_hosts_only, cli_pass, model_ids,
                    cap_warn, cap_crit, prov_cap_warn, prov_cap_crit, ifname):
@@ -51,19 +78,6 @@ def create_cluster(blk_size, page_size_in_blocks, ha_type, tls,
     except Exception as e:
         print(e)
 
-    if not cli_pass:
-        cli_pass = utils.generate_string(10)
-
-    logger.info("Deploying swarm stack ...")
-    ret = scripts.deploy_stack(cli_pass, DEV_IP, constants.SIMPLY_BLOCK_DOCKER_IMAGE)
-    # print(f"Return code: {ret}")
-    logger.info("Deploying swarm stack > Done")
-
-    logger.info("Configuring DB...")
-    time.sleep(5)
-    out = scripts.set_db_config_single()
-    logger.info("Configuring DB > Done")
-
     db_controller = DBController()
 
     # validate cluster duplicate
@@ -88,6 +102,16 @@ def create_cluster(blk_size, page_size_in_blocks, ha_type, tls,
         c.prov_cap_warn = prov_cap_warn
     if prov_cap_crit and prov_cap_crit > 0:
         c.prov_cap_crit = prov_cap_crit
+
+    logger.info("Deploying swarm stack ...")
+    ret = scripts.deploy_stack(cli_pass, DEV_IP, constants.SIMPLY_BLOCK_DOCKER_IMAGE, c.secret)
+    logger.info("Deploying swarm stack > Done")
+
+    logger.info("Configuring DB...")
+    out = scripts.set_db_config_single()
+    logger.info("Configuring DB > Done")
+
+    _add_graylog_input(DEV_IP, c.secret)
 
     c.status = Cluster.STATUS_ACTIVE
     if ha_type == 'ha':
