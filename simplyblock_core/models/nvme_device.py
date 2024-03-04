@@ -8,7 +8,7 @@ class NVMeDevice(BaseModel):
     STATUS_ONLINE = 'online'
     STATUS_AVAILABLE = 'available'
     STATUS_UNAVAILABLE = 'unavailable'
-    STATUS_READONLY = 'read-only'
+    STATUS_READONLY = 'read_only'
     STATUS_OVERLOADED = 'overloaded'
     STATUS_FAILED = 'failed'
     STATUS_REMOVED = 'removed'

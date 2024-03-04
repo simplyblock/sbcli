@@ -12,17 +12,17 @@ from simplyblock_core.models.nvme_device import NVMeDevice
 
 
 def set_dev_status(device, status):
-    if device.status != status:
-        nodes = db_controller.get_storage_nodes()
-        for node in nodes:
-            if node.nvme_devices:
-                for dev in node.nvme_devices:
-                    if dev.get_id() == device.get_id():
+    nodes = db_controller.get_storage_nodes()
+    for node in nodes:
+        if node.nvme_devices:
+            for dev in node.nvme_devices:
+                if dev.get_id() == device.get_id():
+                    if dev.status != status:
                         old_status = dev.status
                         dev.status = status
                         node.write_to_db(db_store)
                         storage_events.device_status_change(dev.cluster_id, dev,  dev.status, old_status)
-                        return
+                    return
 
 
 # configure logging

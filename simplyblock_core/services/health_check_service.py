@@ -126,7 +126,8 @@ while True:
             for dev in snode.nvme_devices:
                 ret = health_controller.check_device(dev.get_id())
                 set_device_health_check(cluster_id, dev, ret)
-                node_devices_check &= ret
+                if dev.status == dev.STATUS_ONLINE:
+                    node_devices_check &= ret
 
             logger.info(f"Node remote device: {len(snode.remote_devices)}")
             rpc_client = RPCClient(
