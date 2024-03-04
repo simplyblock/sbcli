@@ -255,6 +255,10 @@ class CLIWrapper:
         sub_command = self.add_sub_command(subparser, "info", 'Get node information')
         sub_command.add_argument("id", help='Node UUID')
 
+        # node info-spdk
+        sub_command = self.add_sub_command(subparser, "info-spdk", 'Get SPDK memory information')
+        sub_command.add_argument("id", help='Node UUID')
+
         # Initialize cluster parser
         subparser = self.add_command('cluster', 'Cluster commands')
 
@@ -920,6 +924,10 @@ class CLIWrapper:
             elif sub_command == "info":
                 node_id = args.id
                 ret = storage_ops.get_info(node_id)
+
+            elif sub_command == "info-spdk":
+                node_id = args.id
+                ret = storage_ops.get_spdk_info(node_id)
 
             else:
                 self.parser.print_help()

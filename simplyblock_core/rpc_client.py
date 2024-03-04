@@ -594,8 +594,11 @@ class RPCClient:
         }
         return self._request("bdev_jm_create", params)
 
-
     def bdev_jm_delete(self, name):
         params = {"name": name}
         return self._request("bdev_jm_delete", params)
+
+    def ultra21_util_get_malloc_stats(self):
+        params = {"socket_id": 0}
+        return self._request("ultra21_util_get_malloc_stats", params)
 

@@ -1978,3 +1978,27 @@ def device_set_read_only(device_id):
     distr_controller.send_dev_status_event(device.cluster_device_order, device.status)
     snode.write_to_db(db_controller.kv_store)
     return True
+
+
+def get_spdk_info(node_id):
+    db_controller = DBController()
+
+    snode = db_controller.get_storage_node_by_id(node_id)
+    if not snode:
+        logger.error(f"Can not find storage node: {node_id}")
+        return False
+
+    rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
+    ret = rpc_client.ultra21_util_get_malloc_stats()
+    if not ret:
+        logger.error(f"Failed to get SPDK info for node {node_id}")
+        return False
+    data = []
+    for key in ret.keys():
+        data.append({
+            "Key": key,
+            "Value": ret[key],
+            "Parsed": utils.humanbytes(ret[key])
+        })
+    return utils.print_table(data)
+
