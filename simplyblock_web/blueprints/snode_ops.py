@@ -98,6 +98,12 @@ def spdk_process_start():
         spdk_image = data['spdk_image']
         node_docker.images.pull(spdk_image)
 
+    if "cluster_ip" in data and data['cluster_ip']:
+        cluster_ip = data['cluster_ip']
+        log_config = LogConfig(type=LogConfig.types.GELF, config={"gelf-address": f"udp://{cluster_ip}:12201"})
+    else:
+        log_config = LogConfig(type=LogConfig.types.JOURNALD)
+
     container = node_docker.containers.run(
         spdk_image,
         f"/root/scripts/run_distr.sh {spdk_cpu_mask} {spdk_mem} {params_line}",
@@ -105,7 +111,7 @@ def spdk_process_start():
         detach=True,
         privileged=True,
         network_mode="host",
-        log_config=LogConfig(type=LogConfig.types.JOURNALD),
+        log_config=log_config,
         volumes=[
             '/var/tmp:/var/tmp',
             '/dev:/dev',
@@ -119,7 +125,7 @@ def spdk_process_start():
         name="spdk_proxy",
         detach=True,
         network_mode="host",
-        log_config=LogConfig(type=LogConfig.types.JOURNALD),
+        log_config=log_config,
         volumes=[
             '/var/tmp:/var/tmp',
             '/etc/foundationdb:/etc/foundationdb'],

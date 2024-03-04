@@ -70,8 +70,8 @@ class SNodeClient:
     def info(self):
         return self._request("GET", "info")
 
-    def spdk_process_start(self, spdk_cpu_mask, spdk_mem, spdk_image=None, cmd_params=None):
-        params = {}
+    def spdk_process_start(self, spdk_cpu_mask, spdk_mem, spdk_image=None, cmd_params=None, cluster_ip=None):
+        params = {"cluster_ip": cluster_ip}
         if spdk_cpu_mask:
             params['spdk_cpu_mask'] = spdk_cpu_mask
         if spdk_mem:

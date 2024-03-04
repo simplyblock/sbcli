@@ -338,23 +338,24 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask,
             spdk_mem = huge_free
             logger.info(f"Using the free hugepages for spdk memory: {utils.humanbytes(huge_free)}")
 
-    logger.info("Deploying SPDK")
-    results, err = snode_api.spdk_process_start(spdk_cpu_mask, spdk_mem, spdk_image, cmd_params)
-    time.sleep(10)
-    if not results:
-        logger.error(f"Failed to start spdk: {err}")
-        return False
-
     logger.info("Joining docker swarm...")
     cluster_docker = utils.get_docker_client(cluster_id)
+    cluster_ip = cluster_docker.info()["Swarm"]["NodeAddr"]
     results, err = snode_api.join_swarm(
-        cluster_ip=cluster_docker.info()["Swarm"]["NodeAddr"],
+        cluster_ip=cluster_ip,
         join_token=cluster_docker.swarm.attrs['JoinTokens']['Worker'],
         db_connection=cluster.db_connection,
         cluster_id=cluster_id)
 
     if not results:
         logger.error(f"Failed to Join docker swarm: {err}")
+        return False
+
+    logger.info("Deploying SPDK")
+    results, err = snode_api.spdk_process_start(spdk_cpu_mask, spdk_mem, spdk_image, cmd_params, cluster_ip)
+    time.sleep(10)
+    if not results:
+        logger.error(f"Failed to start spdk: {err}")
         return False
 
     hostname = node_info['hostname']
@@ -786,8 +787,11 @@ def restart_storage_node(
     if cmd_params:
         params = cmd_params
         snode.cmd_params = params
-    results, err = snode_api.spdk_process_start(
-        cpu, mem, img, params)
+
+    cluster_docker = utils.get_docker_client(snode.cluster_id)
+    cluster_ip = cluster_docker.info()["Swarm"]["NodeAddr"]
+    results, err = snode_api.spdk_process_start(cpu, mem, img, params, cluster_ip)
+
     if not results:
         logger.error(f"Failed to start spdk: {err}")
         return False
@@ -1080,7 +1084,7 @@ def shutdown_storage_node(node_id, force=False):
     snode_api = SNodeClient(snode.api_endpoint)
     results, err = snode_api.spdk_process_kill()
 
-    distr_controller.send_node_status_event(snode.get_id(), "nst_offline")
+    distr_controller.send_node_status_event(snode.get_id(), StorageNode.STATUS_OFFLINE)
 
     logger.info("Setting node status to offline")
     old_status = snode.status
