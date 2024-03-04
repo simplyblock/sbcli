@@ -79,6 +79,8 @@ def create_cluster(blk_size, page_size_in_blocks, ha_type, tls,
         print(e)
 
     db_controller = DBController()
+    if not cli_pass:
+        cli_pass = utils.generate_string(10)
 
     # validate cluster duplicate
     logger.info("Adding new cluster object")
