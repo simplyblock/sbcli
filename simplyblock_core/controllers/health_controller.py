@@ -140,7 +140,8 @@ def check_node(node_id, with_devices=True):
         logger.info(f"Node device count: {len(snode.nvme_devices)}")
         for dev in snode.nvme_devices:
             ret = check_device(dev.get_id())
-            node_devices_check &= ret
+            if dev.status == NVMeDevice.STATUS_ONLINE:
+                node_devices_check &= ret
             print("*" * 100)
 
         logger.info(f"Node remote device: {len(snode.remote_devices)}")
@@ -212,10 +213,7 @@ def check_device(device_id):
         logger.error(f"Failed to connect to node's SPDK: {e}")
         passed = False
 
-    if device.status == NVMeDevice.STATUS_ONLINE:
-        return passed
-    else:
-        return True
+    return passed
 
 
 def check_remote_device(device_id):

@@ -9,6 +9,7 @@ import sys
 from simplyblock_core import constants, kv_store
 from simplyblock_core.controllers import health_controller, storage_events
 from simplyblock_core.models.nvme_device import NVMeDevice
+from simplyblock_core.models.storage_node import StorageNode
 
 
 def set_dev_status(device, status):
@@ -39,20 +40,21 @@ db_controller = kv_store.DBController()
 
 logger.info("Starting Device monitor...")
 while True:
-    devices = db_controller.get_storage_devices()
-    if not devices:
-        logger.error("devices list is empty")
-
-    for dev in devices:
-        if dev.status not in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_UNAVAILABLE]:
-            logger.warning(f"Device status is not online or unavailable, id: {dev.get_id()}, status: {dev.status}")
+    nodes = db_controller.get_storage_nodes()
+    for node in nodes:
+        if node.status != StorageNode.STATUS_ONLINE:
+            logger.warning(f"Node status is not online, id: {node.get_id()}, status: {node.status}")
             continue
+        for dev in node.nvme_devices:
+            if dev.status not in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_UNAVAILABLE]:
+                logger.warning(f"Device status is not online or unavailable, id: {dev.get_id()}, status: {dev.status}")
+                continue
 
-        ret = health_controller.check_device(dev.get_id())
-        logger.info(f"Device: {dev.get_id()}, is healthy: {ret}")
-        if ret:
-            set_dev_status(dev, NVMeDevice.STATUS_ONLINE)
-        else:
-            set_dev_status(dev, NVMeDevice.STATUS_UNAVAILABLE)
+            ret = health_controller.check_device(dev.get_id())
+            logger.info(f"Device: {dev.get_id()}, is healthy: {ret}")
+            if ret:
+                set_dev_status(dev, NVMeDevice.STATUS_ONLINE)
+            else:
+                set_dev_status(dev, NVMeDevice.STATUS_UNAVAILABLE)
 
     time.sleep(constants.DEV_MONITOR_INTERVAL_SEC)
