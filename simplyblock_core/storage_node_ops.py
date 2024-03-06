@@ -1651,8 +1651,8 @@ def device_set_unavailable(device_id):
             device = dev
             break
 
-    device.status = 'unavailable'
-    distr_controller.send_dev_status_event(device.cluster_device_order, "unavailable")
+    device.status = NVMeDevice.STATUS_UNAVAILABLE
+    distr_controller.send_dev_status_event(device.cluster_device_order, device.status)
     snode.write_to_db(db_controller.kv_store)
     return True
 

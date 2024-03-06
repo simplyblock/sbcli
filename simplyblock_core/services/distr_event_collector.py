@@ -47,6 +47,9 @@ def process_device_event(event):
             elif event.message == 'error_write':
                 logger.info(f"Setting device to read-only")
                 storage_node_ops.device_set_read_only(device_id)
+            else:
+                logger.info(f"Setting device to unavailable")
+                storage_node_ops.device_set_unavailable(device_id)
             event.status = 'processed'
 
         else:
