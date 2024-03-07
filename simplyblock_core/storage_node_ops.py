@@ -723,6 +723,9 @@ def remove_storage_node(node_id, force_remove=False, force_migrate=False):
                 distr_controller.send_dev_status_event(dev.cluster_device_order, "unavailable")
             distr_controller.disconnect_device(dev)
 
+        for lvol in db_controller.get_lvols():
+            lvol_controller.send_cluster_map(lvol.get_id())
+
     logger.info("Removing storage node")
 
     logger.debug("Leaving swarm...")
@@ -1765,15 +1768,17 @@ def restart_device(device_id):
     alceml_id_mini = alceml_id.split("-")[-1]
     alceml_name = f"node_{node_id_mini}_dev_{alceml_id_mini}"
     logger.info(f"adding {alceml_name}")
-    ret = rpc_client.bdev_alceml_create(alceml_name, test_name, alceml_id)
+    ret = rpc_client.bdev_alceml_create(alceml_name, test_name, alceml_id, pba_init_mode=2)
     if not ret:
         logger.error(f"Failed to create alceml bdev: {alceml_name}")
+        return False
 
     # add pass through
     pt_name = f"{alceml_name}_PT"
     ret = rpc_client.bdev_PT_NoExcl_create(pt_name, alceml_name)
     if not ret:
         logger.error(f"Failed to create pt noexcl bdev: {pt_name}")
+        return False
 
     subsystem_nqn = snode.subsystem + ":dev:" + alceml_id
     logger.info("Creating subsystem %s", subsystem_nqn)
@@ -1836,6 +1841,9 @@ def restart_device(device_id):
 
     logger.info("Sending device event")
     distr_controller.send_dev_status_event(device_obj.cluster_device_order, "online")
+
+    for lvol in db_controller.get_lvols():
+        lvol_controller.send_cluster_map(lvol.get_id())
 
     return "Done"
 
