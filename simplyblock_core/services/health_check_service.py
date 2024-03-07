@@ -88,7 +88,7 @@ while True:
         logger.error("storage nodes list is empty")
 
     for snode in snodes:
-        logger.info("Node: %s", snode.get_id())
+        logger.info("Node: %s, status %s", snode.get_id(), snode.status)
 
         # 1- check node ping
         ping_check = health_controller._check_node_ping(snode.mgmt_ip)
@@ -97,6 +97,10 @@ while True:
         # 2- check node API
         node_api_check = health_controller._check_node_api(snode.mgmt_ip)
         logger.info(f"Check: node API {snode.mgmt_ip}:5000 ... {node_api_check}")
+
+        if snode.status == StorageNode.STATUS_OFFLINE:
+            set_node_health_check(snode, ping_check & node_api_check)
+            continue
 
         # 3- check node RPC
         node_rpc_check = health_controller._check_node_rpc(
