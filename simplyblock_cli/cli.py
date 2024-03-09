@@ -169,6 +169,7 @@ class CLIWrapper:
                                         'auto-detection of removal did not work or if the device must be maintained '
                                         'otherwise while remaining inserted into the server. ')
         sub_command.add_argument("device_id", help='Storage device ID')
+        sub_command.add_argument("--force", help='Force device remove', required=False, action='store_true')
 
         sub_command = self.add_sub_command(subparser, 'set-ro-device', 'Set storage device read only')
         sub_command.add_argument("device_id", help='Storage device ID')
@@ -823,7 +824,7 @@ class CLIWrapper:
                 ret = storage_ops.set_device_testing_mode(args.device_id, args.mode)
 
             elif sub_command == "remove-device":
-                ret = storage_ops.device_remove(args.device_id)
+                ret = storage_ops.device_remove(args.device_id, args.force)
 
             elif sub_command == "shutdown":
                 # answer = self.query_yes_no("Are you sure?", default=None)

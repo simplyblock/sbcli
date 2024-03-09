@@ -467,7 +467,8 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask,
         return False
 
     # create jm
-    rpc_client.bdev_jm_create(f"jm_{snode.get_id()}", snode.nvme_devices[0].alceml_bdev)
+    snode.nvme_devices[0].jm_bdev = f"jm_{snode.get_id()}"
+    rpc_client.bdev_jm_create(snode.nvme_devices[0].jm_bdev, snode.nvme_devices[0].alceml_bdev)
 
     logger.info("Connecting to remote devices")
     remote_devices = _connect_to_remote_devs(snode)
@@ -1660,7 +1661,7 @@ def device_set_unavailable(device_id):
     return True
 
 
-def device_remove(device_id):
+def device_remove(device_id, force=True):
     db_controller = DBController()
     dev = db_controller.get_storage_devices(device_id)
     if not dev:
@@ -1676,11 +1677,6 @@ def device_remove(device_id):
             device = dev
             break
 
-    # 1- send events
-    # 2- make other nodes disconnect
-    # 3- remove nvmeof
-    # 4- remove pt, alceml, test
-
     logger.info("Sending device event")
     distr_controller.send_dev_status_event(device.cluster_device_order, "removed")
 
@@ -1691,12 +1687,37 @@ def device_remove(device_id):
     rpc_client = RPCClient(
         snode.mgmt_ip, snode.rpc_port,
         snode.rpc_username, snode.rpc_password)
+
     ret = rpc_client.subsystem_delete(device.nvmf_nqn)
+    if not ret:
+        logger.error(f"Failed to remove subsystem: {device.nvmf_nqn}")
+        # return False
+
+    if device.jm_bdev:
+        ret = rpc_client.bdev_jm_delete(f"jm_{snode.get_id()}")
+        if not ret:
+            logger.error(f"Failed to remove journal manager: jm_{snode.get_id()}")
+            if not force:
+                return False
 
     logger.info("Removing device bdevs")
     ret = rpc_client.bdev_PT_NoExcl_delete(f"{device.alceml_bdev}_PT")
+    if not ret:
+        logger.error(f"Failed to remove bdev: {device.alceml_bdev}_PT")
+        if not force:
+            return False
+
     ret = rpc_client.bdev_alceml_delete(device.alceml_bdev)
+    if not ret:
+        logger.error(f"Failed to remove bdev: {device.alceml_bdev}")
+        if not force:
+            return False
+
     ret = rpc_client.bdev_passtest_delete(device.testing_bdev)
+    if not ret:
+        logger.error(f"Failed to remove bdev: {device.testing_bdev}")
+        if not force:
+            return False
 
     device.status = 'removed'
     snode.write_to_db(db_controller.kv_store)
@@ -1762,6 +1783,9 @@ def restart_device(device_id):
     test_name = f"{device_obj.nvme_bdev}_test"
     # create testing bdev
     ret = rpc_client.bdev_passtest_create(test_name, device_obj.nvme_bdev)
+    if not ret:
+        logger.error(f"Failed to create bdev: {test_name}")
+        return False
 
     alceml_id = device_obj.get_id()
     node_id_mini = snode.get_id().split("-")[-1]
@@ -1801,6 +1825,12 @@ def restart_device(device_id):
             break
     logger.info(f"Adding {pt_name} to the subsystem")
     ret = rpc_client.nvmf_subsystem_add_ns(subsystem_nqn, pt_name)
+
+    if device_obj.jm_bdev:
+        ret = rpc_client.bdev_jm_create(device_obj.jm_bdev, device_obj.alceml_bdev)
+        if not ret:
+            logger.error(f"Failed to create bdev: {device_obj.jm_bdev}")
+            return False
 
     device_obj.testing_bdev = test_name
     device_obj.alceml_bdev = alceml_name

@@ -140,7 +140,7 @@ def check_node(node_id, with_devices=True):
         logger.info(f"Node device count: {len(snode.nvme_devices)}")
         for dev in snode.nvme_devices:
             ret = check_device(dev.get_id())
-            if dev.status == NVMeDevice.STATUS_ONLINE:
+            if dev.status in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_UNAVAILABLE]:
                 node_devices_check &= ret
             print("*" * 100)
 
@@ -173,12 +173,15 @@ def check_device(device_id):
         logger.error("node not found")
         return False
 
+    if device.status == NVMeDevice.STATUS_REMOVED:
+        logger.info(f"Skipping ,device status is {device.status}")
+        return True
+
     passed = True
     try:
         rpc_client = RPCClient(
             snode.mgmt_ip, snode.rpc_port,
-            snode.rpc_username, snode.rpc_password,
-            timeout=3, retry=1)
+            snode.rpc_username, snode.rpc_password)
 
         bdevs_stack = [device.nvme_bdev, device.testing_bdev, device.alceml_bdev, device.pt_bdev]
         logger.info(f"Checking Device: {device_id}, status:{device.status}")
