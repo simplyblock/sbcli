@@ -173,7 +173,11 @@ def check_device(device_id):
         logger.error("node not found")
         return False
 
-    if device.status == NVMeDevice.STATUS_REMOVED:
+    if snode.status in [StorageNode.STATUS_OFFLINE, StorageNode.STATUS_REMOVED]:
+        logger.info(f"Skipping ,node status is {snode.status}")
+        return True
+
+    if device.status in [NVMeDevice.STATUS_REMOVED, NVMeDevice.STATUS_UNRECOGNIZED]:
         logger.info(f"Skipping ,device status is {device.status}")
         return True
 

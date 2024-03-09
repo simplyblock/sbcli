@@ -868,7 +868,8 @@ def restart_storage_node(
         return False
 
     # create jm
-    rpc_client.bdev_jm_create(f"jm_{snode.get_id()}", snode.nvme_devices[0].alceml_bdev)
+    snode.nvme_devices[0].jm_bdev = f"jm_{snode.get_id()}"
+    rpc_client.bdev_jm_create(snode.nvme_devices[0].jm_bdev, snode.nvme_devices[0].alceml_bdev)
 
     logger.info("Connecting to remote devices")
     remote_devices = _connect_to_remote_devs(snode)
@@ -1691,7 +1692,8 @@ def device_remove(device_id, force=True):
     ret = rpc_client.subsystem_delete(device.nvmf_nqn)
     if not ret:
         logger.error(f"Failed to remove subsystem: {device.nvmf_nqn}")
-        # return False
+        if not force:
+            return False
 
     if device.jm_bdev:
         ret = rpc_client.bdev_jm_delete(f"jm_{snode.get_id()}")
@@ -1701,21 +1703,19 @@ def device_remove(device_id, force=True):
                 return False
 
     logger.info("Removing device bdevs")
+    ret = rpc_client.bdev_passtest_delete(device.testing_bdev)
+    if not ret:
+        logger.error(f"Failed to remove bdev: {device.testing_bdev}")
+        if not force:
+            return False
     ret = rpc_client.bdev_PT_NoExcl_delete(f"{device.alceml_bdev}_PT")
     if not ret:
         logger.error(f"Failed to remove bdev: {device.alceml_bdev}_PT")
         if not force:
             return False
-
     ret = rpc_client.bdev_alceml_delete(device.alceml_bdev)
     if not ret:
         logger.error(f"Failed to remove bdev: {device.alceml_bdev}")
-        if not force:
-            return False
-
-    ret = rpc_client.bdev_passtest_delete(device.testing_bdev)
-    if not ret:
-        logger.error(f"Failed to remove bdev: {device.testing_bdev}")
         if not force:
             return False
 
