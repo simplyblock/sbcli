@@ -688,6 +688,10 @@ def remove_storage_node(node_id, force_remove=False, force_migrate=False):
         logger.error(f"Can not find storage node: {node_id}")
         return False
 
+    if snode.status == StorageNode.STATUS_ONLINE:
+        logger.error(f"Can not remove online node: {node_id}")
+        return False
+
     if snode.lvols:
         if force_migrate:
             for lvol_id in snode.lvols:
