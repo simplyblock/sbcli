@@ -230,7 +230,7 @@ class DBController:
         return stats
 
     def get_clusters(self):
-        return Cluster().read_from_db(self.kv_store, id=id)
+        return Cluster().read_from_db(self.kv_store)
 
     def get_cluster_by_id(self, cluster_id):
         ret = Cluster().read_from_db(self.kv_store, id=cluster_id)
