@@ -9,6 +9,7 @@ from datetime import datetime
 
 from simplyblock_core import constants, kv_store, cluster_ops
 from simplyblock_core.controllers import storage_events, health_controller
+from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.storage_node import StorageNode
 
 
@@ -26,38 +27,38 @@ db_controller = kv_store.DBController(kv_store=db_store)
 
 
 def update_cluster_status(cluster_id):
-    cls = db_controller.get_clusters(id=cluster_id)
-    cl = cls[0]
+    cluster = db_controller.get_cluster_by_id(cluster_id)
+
     snodes = db_controller.get_storage_nodes()
     online_nodes = 0
     for node in snodes:
         if node.status == node.STATUS_ONLINE:
             online_nodes += 1
     other_nodes = len(snodes) - online_nodes
-    if cl.ha_type == "ha":
+    if cluster.ha_type == "ha":
         if online_nodes < 3:
-            if cl.status == cl.STATUS_ACTIVE:
+            if cluster.status == Cluster.STATUS_ACTIVE:
                 logger.warning(f"Cluster mode is HA=1 but online storage nodes are less than 3, "
                                f"suspending cluster: {cluster_id}")
                 cluster_ops.suspend_cluster(cluster_id)
         else:
-            if cl.status == cl.STATUS_SUSPENDED and other_nodes < 2:
+            if cluster.status == Cluster.STATUS_SUSPENDED and other_nodes < 2:
                 logger.info(f"Cluster mode is HA=1 and online storage nodes are 3 or more, "
                             f"resuming cluster: {cluster_id}")
                 cluster_ops.unsuspend_cluster(cluster_id)
 
         if other_nodes == 0:
-            if cl.status == cl.STATUS_DEGRADED:
+            if cluster.status == Cluster.STATUS_DEGRADED:
                 logger.info(f"Cluster mode is HA=1 and offline storage nodes is 0, "
                             f"setting cluster to active: {cluster_id}")
                 cluster_ops.unsuspend_cluster(cluster_id)
         elif other_nodes == 1:
-            if cl.status == cl.STATUS_ACTIVE:
+            if cluster.status == Cluster.STATUS_ACTIVE:
                 logger.warning(f"Cluster mode is HA=1 and offline storage nodes is 1, "
                                f"degrading cluster: {cluster_id}")
                 cluster_ops.degrade_cluster(cluster_id)
         elif other_nodes > 1:
-            if cl.status in [cl.STATUS_ACTIVE, cl.STATUS_DEGRADED]:
+            if cluster.status in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED]:
                 logger.warning(f"Cluster mode is HA=1 and offline storage nodes is more than 1, "
                                f"suspending cluster: {cluster_id}")
                 cluster_ops.suspend_cluster(cluster_id)

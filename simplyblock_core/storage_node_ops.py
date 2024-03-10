@@ -308,11 +308,10 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask,
     db_controller = DBController()
     kv_store = db_controller.kv_store
 
-    clusters = db_controller.get_clusters(cluster_id)
-    if not clusters:
+    cluster = db_controller.get_cluster_by_id(cluster_id)
+    if not cluster:
         logger.error("Cluster not found: %s", cluster_id)
         return False
-    cluster = clusters[0]
 
     logger.info(f"Adding Storage node: {node_ip}")
     snode_api = SNodeClient(node_ip)
@@ -543,11 +542,10 @@ def add_storage_node(cluster_id, iface_name, data_nics):
     db_controller = DBController()
     kv_store = db_controller.kv_store
 
-    clusters = db_controller.get_clusters(cluster_id)
-    if not clusters:
+    cluster = db_controller.get_cluster_by_id(cluster_id)
+    if not cluster:
         logger.error("Cluster not found: %s", cluster_id)
         return False
-    cluster = clusters[0]
 
     logger.info("Add Storage node")
 
@@ -803,8 +801,7 @@ def restart_storage_node(
 
     snode.write_to_db(db_controller.kv_store)
 
-    clusters = db_controller.get_clusters(snode.cluster_id)
-    cluster = clusters[0]
+    cluster = db_controller.get_cluster_by_id(snode.cluster_id)
     # creating RPCClient instance
     rpc_client = RPCClient(
         snode.mgmt_ip, snode.rpc_port,
@@ -1114,18 +1111,18 @@ def suspend_storage_node(node_id, force=False):
         logger.error("Node is not in online state")
         return False
 
-    cls = db_controller.get_clusters(id=snode.cluster_id)
+    cluster = db_controller.get_cluster_by_id(snode.cluster_id)
     snodes = db_controller.get_storage_nodes()
     online_nodes = 0
     for node in snodes:
         if node.status == node.STATUS_ONLINE:
             online_nodes += 1
-    if cls[0].ha_type == "ha" and online_nodes <= 3 and cls[0].status == cls[0].STATUS_ACTIVE:
+    if cluster.ha_type == "ha" and online_nodes <= 3 and cluster.status == cluster.STATUS_ACTIVE:
         logger.warning(f"Cluster mode is HA but online storage nodes are less than 3")
         if force is False:
             return False
 
-    if cls[0].ha_type == "ha" and cls[0].status == cls[0].STATUS_DEGRADED and force is False:
+    if cluster.ha_type == "ha" and cluster.status == cluster.STATUS_DEGRADED and force is False:
         logger.warning(f"Cluster status is degraded, use --force but this will suspend the cluster")
         return False
 
@@ -1277,11 +1274,10 @@ def run_test_storage_device(kv_store, dev_name):
 def add_storage_device(dev_name, node_id, cluster_id):
     db_controller = DBController()
     kv_store = db_controller.kv_store
-    clusters = db_controller.get_clusters(cluster_id)
-    if not clusters:
+    cluster = db_controller.get_cluster_by_id(cluster_id)
+    if not cluster:
         logger.error("Cluster not found: %s", cluster_id)
         return False
-    cluster = clusters[0]
 
     snode = db_controller.get_storage_node_by_id(node_id)
     if not snode:
@@ -1423,6 +1419,7 @@ def get_device_capacity(device_id, history, records_count=20, parse_sizes=True):
 
     out = []
     for record in records_list:
+        logger.debug(record)
         out.append({
             "Date": time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(record['date'])),
             "Absolut": utils.humanbytes(record['size_total']),
@@ -1639,27 +1636,6 @@ def deploy(ifname):
     node_docker.images.pull(constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE)
     return f"{dev_ip}:5000"
 
-
-def device_set_unavailable(device_id):
-    db_controller = DBController()
-    dev = db_controller.get_storage_devices(device_id)
-    if not dev:
-        logger.error("device not found")
-
-    snode = db_controller.get_storage_node_by_id(dev.node_id)
-    if not snode:
-        logger.error("node not found")
-        return False
-
-    for dev in snode.nvme_devices:
-        if dev.get_id() == device_id:
-            device = dev
-            break
-
-    device.status = NVMeDevice.STATUS_UNAVAILABLE
-    distr_controller.send_dev_status_event(device.cluster_device_order, device.status)
-    snode.write_to_db(db_controller.kv_store)
-    return True
 
 
 def device_remove(device_id, force=True):
@@ -1996,28 +1972,6 @@ def get_info(node_id):
     return json.dumps(node_info, indent=2)
 
 
-def device_set_read_only(device_id):
-    db_controller = DBController()
-    dev = db_controller.get_storage_devices(device_id)
-    if not dev:
-        logger.error("device not found")
-
-    snode = db_controller.get_storage_node_by_id(dev.node_id)
-    if not snode:
-        logger.error("node not found")
-        return False
-
-    for dev in snode.nvme_devices:
-        if dev.get_id() == device_id:
-            device = dev
-            break
-
-    device.status = device.STATUS_READONLY
-    distr_controller.send_dev_status_event(device.cluster_device_order, device.status)
-    snode.write_to_db(db_controller.kv_store)
-    return True
-
-
 def get_spdk_info(node_id):
     db_controller = DBController()
 
@@ -2039,4 +1993,43 @@ def get_spdk_info(node_id):
             "Parsed": utils.humanbytes(ret[key])
         })
     return utils.print_table(data)
+
+
+def device_set_state(device_id, state):
+    db_controller = DBController()
+    dev = db_controller.get_storage_devices(device_id)
+    if not dev:
+        logger.error("device not found")
+
+    snode = db_controller.get_storage_node_by_id(dev.node_id)
+    if not snode:
+        logger.error("node not found")
+        return False
+
+    for dev in snode.nvme_devices:
+        if dev.get_id() == device_id:
+            device = dev
+            break
+
+    if device.status == state:
+        return True
+
+    old_status = dev.status
+    device.status = state
+    distr_controller.send_dev_status_event(device.cluster_device_order, device.status)
+    snode.write_to_db(db_controller.kv_store)
+    storage_events.device_status_change(device.cluster_id, device, device.status, old_status)
+    return True
+
+
+def device_set_online(device_id):
+    return device_set_state(device_id, NVMeDevice.STATUS_ONLINE)
+
+
+def device_set_read_only(device_id):
+    return device_set_state(device_id, NVMeDevice.STATUS_READONLY)
+
+
+def device_set_unavailable(device_id):
+    return device_set_state(device_id, NVMeDevice.STATUS_UNAVAILABLE)
 

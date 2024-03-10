@@ -229,8 +229,13 @@ class DBController:
             self.kv_store, id="%s/%s" % (device.cluster_id, device.get_id()), limit=limit, reverse=True)
         return stats
 
-    def get_clusters(self, id=""):
+    def get_clusters(self):
         return Cluster().read_from_db(self.kv_store, id=id)
+
+    def get_cluster_by_id(self, cluster_id):
+        ret = Cluster().read_from_db(self.kv_store, id=cluster_id)
+        if ret:
+            return ret[0]
 
     def get_port_stats(self, node_id, port_id, limit=20):
         stats = PortStat().read_from_db(self.kv_store, id="%s/%s" % (node_id, port_id), limit=limit, reverse=True)

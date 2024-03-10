@@ -9,6 +9,7 @@ from simplyblock_core.models.storage_node import StorageNode
 class Cluster(BaseModel):
 
     STATUS_ACTIVE = "active"
+    STATUS_READONLY = 'read_only'
     STATUS_INACTIVE = "inactive"
     STATUS_SUSPENDED = "suspended"
     STATUS_DEGRADED = "degraded"

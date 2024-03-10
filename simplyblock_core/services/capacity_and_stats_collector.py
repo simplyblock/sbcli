@@ -19,7 +19,7 @@ def add_device_stats(cl, device, capacity_dict, stats_dict):
         "uuid": device.get_id(),
         "date": now}
 
-    if capacity_dict['res'] == 1:
+    if capacity_dict and capacity_dict['res'] == 1:
         size_total = int(capacity_dict['npages_nmax']*capacity_dict['pba_page_size'])
         size_used = int(capacity_dict['npages_used']*capacity_dict['pba_page_size'])
         size_free = size_total - size_used

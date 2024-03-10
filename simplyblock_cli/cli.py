@@ -316,6 +316,10 @@ class CLIWrapper:
             subparser, 'status', 'Show cluster status')
         sub_command.add_argument("cluster_id", help='the cluster UUID')
 
+        # show cluster info
+        sub_command = self.add_sub_command(subparser, 'get', 'Show cluster info')
+        sub_command.add_argument("id", help='the cluster UUID')
+
         sub_command = self.add_sub_command(
             subparser, 'suspend', 'Suspend cluster. The cluster will stop processing all IO. '
                                   'Attention! This will cause an "all paths down" event for nvmeof/iscsi volumes '
@@ -986,6 +990,8 @@ class CLIWrapper:
             elif sub_command == "check":
                 cluster_id = args.id
                 ret = health_controller.check_cluster(cluster_id)
+            elif sub_command == "get":
+                ret = cluster_ops.get_cluster(args.id)
             else:
                 self.parser.print_help()
 

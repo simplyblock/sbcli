@@ -187,7 +187,7 @@ def add_lvol(name, size, host_id_or_name, pool_id_or_name, use_comp, use_crypto,
     if not pool:
         return False, f"Pool not found: {pool_id_or_name}"
 
-    cl = db_controller.get_clusters(snode.cluster_id)[0]
+    cl = db_controller.get_cluster_by_id(snode.cluster_id)
     if cl.status not in [cl.STATUS_ACTIVE, cl.STATUS_DEGRADED]:
         return False, f"Cluster is not active, status: {cl.status}"
 
@@ -454,6 +454,17 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
     cl = db_controller.get_clusters()[0]
     if cl.status not in [cl.STATUS_ACTIVE, cl.STATUS_DEGRADED]:
         return False, f"Cluster is not active, status: {cl.status}"
+
+    records = db_controller.get_cluster_capacity(cl, 1)
+    if records:
+        size_prov = records[0].size_prov_util
+        if cl.prov_cap_crit and cl.prov_cap_crit < size_prov:
+            msg = f"Cluster provisioned cap critical, util: {size_prov}% of cluster util: {cl.prov_cap_crit}"
+            logger.error(msg)
+            return False, msg
+
+        elif cl.prov_cap_warn and cl.prov_cap_warn < size_prov:
+            logger.warning(f"Cluster provisioned cap warning, util: {size_prov}% of cluster util: {cl.prov_cap_warn}")
 
     if ha_type == "default":
         ha_type = cl.ha_type
