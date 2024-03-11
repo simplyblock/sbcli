@@ -465,6 +465,8 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
 
         elif cl.prov_cap_warn and cl.prov_cap_warn < size_prov:
             logger.warning(f"Cluster provisioned cap warning, util: {size_prov}% of cluster util: {cl.prov_cap_warn}")
+    else:
+        logger.warning("Cluster capacity records not found")
 
     if ha_type == "default":
         ha_type = cl.ha_type

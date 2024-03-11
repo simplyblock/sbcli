@@ -8,6 +8,7 @@ import sys
 
 from simplyblock_core import kv_store, constants, cluster_ops
 from simplyblock_core.controllers import cluster_events
+from simplyblock_core.models.cluster import Cluster
 
 # configure logging
 logger_handler = logging.StreamHandler(stream=sys.stdout)
@@ -39,7 +40,8 @@ while True:
                 cluster_events.cluster_cap_crit(cl, size_util)
                 cluster_ops.cluster_set_read_only(cl.get_id())
             else:
-                cluster_ops.cluster_set_active(cl.get_id())
+                if cl.status == Cluster.STATUS_READONLY:
+                    cluster_ops.cluster_set_active(cl.get_id())
 
         if cl.cap_warn:
             if cl.cap_warn < size_util < cl.cap_crit:

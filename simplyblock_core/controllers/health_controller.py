@@ -103,6 +103,10 @@ def check_node(node_id, with_devices=True):
         logger.error("node not found")
         return False
 
+    if snode.status in [StorageNode.STATUS_OFFLINE, StorageNode.STATUS_REMOVED]:
+        logger.info(f"Skipping ,node status is {snode.status}")
+        return True
+
     logger.info(f"Checking node {node_id}, status: {snode.status}")
 
     print("*" * 100)
