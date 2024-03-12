@@ -67,7 +67,7 @@ class CNodeClient:
         return self._request("GET", "")
 
     def info(self):
-        return self._request("GET", "info")
+        return self._request("GET", "cnode/info")
 
     def spdk_process_start(self, spdk_cpu_mask, spdk_mem, spdk_image, server_ip, rpc_port, rpc_username, rpc_password):
         params = {
@@ -93,15 +93,15 @@ class CNodeClient:
             "ip": ip,
             "port": port,
             "nqn": nqn}
-        return self._request("POST", "nvme_connect", params)
+        return self._request("POST", "cnode/nvme_connect", params)
 
     def disconnect_device(self, dev_path):
         params = {"dev_path": dev_path}
-        return self._request("POST", "disconnect_device", params)
+        return self._request("POST", "cnode/disconnect_device", params)
 
     def disconnect_nqn(self, nqn):
         params = {"nqn": nqn}
-        return self._request("POST", "disconnect_nqn", params)
+        return self._request("POST", "cnode/disconnect_nqn", params)
 
     def disconnect_all(self):
-        return self._request("POST", "disconnect_all")
+        return self._request("POST", "cnode/disconnect_all")
