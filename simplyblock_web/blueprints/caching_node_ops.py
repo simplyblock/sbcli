@@ -13,7 +13,7 @@ from docker.types import LogConfig
 from flask import Blueprint
 from flask import request
 
-from simplyblock_web import utils
+from simplyblock_web import utils, node_utils
 from simplyblock_core import scripts, constants
 
 logger = logging.getLogger(__name__)
@@ -294,6 +294,7 @@ def get_info():
 
         "memory": get_memory(),
         "hugepages": get_huge_memory(),
+        "memory_details": node_utils.get_memory_details(),
 
         "nvme_devices": _get_nvme_devices(),
         "nvme_pcie_list": _get_nvme_pcie_list(),
