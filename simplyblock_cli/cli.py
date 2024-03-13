@@ -522,10 +522,10 @@ class CLIWrapper:
 
         # lvol move
         sub_command = self.add_sub_command(
-            subparser, 'move', 'Moves a full copy of the logical volume between clusters')
-        sub_command.add_argument("id", help='LVol id')
-        sub_command.add_argument("cluster-id", help='Destination Cluster ID')
-        sub_command.add_argument("node-id", help='Destination Node ID')
+            subparser, 'move', 'Moves a full copy of the logical volume between nodes')
+        sub_command.add_argument("id", help='LVol UUID')
+        # sub_command.add_argument("cluster-id", help='Destination Cluster ID')
+        sub_command.add_argument("node_id", help='Destination Node UUID')
 
         # lvol replicate
         sub_command = self.add_sub_command(
@@ -1098,6 +1098,8 @@ class CLIWrapper:
             elif sub_command == "check":
                 id = args.id
                 ret = health_controller.check_lvol(id)
+            elif sub_command == 'move':
+                ret = lvol_controller.move(args.id, args.node_id)
             else:
                 self.parser.print_help()
 

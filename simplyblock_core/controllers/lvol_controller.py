@@ -12,6 +12,7 @@ from simplyblock_core.controllers import snapshot_controller, pool_controller
 from simplyblock_core.kv_store import DBController
 from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.lvol_model import LVol
+from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.rpc_client import RPCClient
 
 
@@ -1129,7 +1130,7 @@ def get_cluster_map(lvol_id):
     return utils.print_table(results)
 
 
-def migrate(lvol_id):
+def migrate(lvol_id, node_id):
 
     lvol = db_controller.get_lvol_by_id(lvol_id)
     if not lvol:
@@ -1137,6 +1138,9 @@ def migrate(lvol_id):
         return False
 
     nodes = _get_next_3_nodes()
+
+    if node_id:
+        nodes[0] = db_controller.get_storage_node_by_id(node_id)
 
     host_node = nodes[0]
     lvol.hostname = host_node.hostname
@@ -1167,3 +1171,24 @@ def migrate(lvol_id):
     host_node.write_to_db(db_controller.kv_store)
     lvol.write_to_db(db_controller.kv_store)
     return True
+
+
+def move(lvol_id, node_id):
+    lvol = db_controller.get_lvol_by_id(lvol_id)
+    if not lvol:
+        logger.error(f"lvol not found: {lvol_id}")
+        return False
+
+    snode = db_controller.get_storage_node_by_id(node_id)
+    if not snode:
+        logger.error(f"Node not found: {snode}")
+        return False
+
+    if lvol.node_id == snode.get_id():
+        return True
+
+    if snode.status != StorageNode.STATUS_ONLINE:
+        logger.error(f"Node is not online!: {snode}, status: {snode.status}")
+        return False
+
+    return migrate(lvol_id, node_id)
