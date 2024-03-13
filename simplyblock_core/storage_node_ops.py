@@ -467,7 +467,10 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask,
 
     # create jm
     snode.nvme_devices[0].jm_bdev = f"jm_{snode.get_id()}"
-    rpc_client.bdev_jm_create(snode.nvme_devices[0].jm_bdev, snode.nvme_devices[0].alceml_bdev)
+    ret = rpc_client.bdev_jm_create(snode.nvme_devices[0].jm_bdev, snode.nvme_devices[0].alceml_bdev)
+    if not ret:
+        logger.error(f"Failed to create bdev: {snode.nvme_devices[0].jm_bdev}")
+        return False
 
     logger.info("Connecting to remote devices")
     remote_devices = _connect_to_remote_devs(snode)
@@ -870,7 +873,10 @@ def restart_storage_node(
 
     # create jm
     snode.nvme_devices[0].jm_bdev = f"jm_{snode.get_id()}"
-    rpc_client.bdev_jm_create(snode.nvme_devices[0].jm_bdev, snode.nvme_devices[0].alceml_bdev)
+    ret = rpc_client.bdev_jm_create(snode.nvme_devices[0].jm_bdev, snode.nvme_devices[0].alceml_bdev)
+    if not ret:
+        logger.error(f"Failed to create JM bdev: {snode.nvme_devices[0].jm_bdev}")
+        return False
 
     logger.info("Connecting to remote devices")
     remote_devices = _connect_to_remote_devs(snode)
@@ -1647,6 +1653,7 @@ def device_remove(device_id, force=True):
     dev = db_controller.get_storage_devices(device_id)
     if not dev:
         logger.error("device not found")
+        return False
 
     snode = db_controller.get_storage_node_by_id(dev.node_id)
     if not snode:
