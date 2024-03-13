@@ -56,6 +56,7 @@ class LVol(BaseModel):
         "health_check": {"type": bool, "default": True},
 
         "snapshot_name": {"type": str, 'default': ""},
+        "io_error": {"type": bool, 'default': False},
 
     }
 

@@ -70,6 +70,7 @@ def process_lvol_event(event):
             logger.error(f"LVol with vuid {vuid} not found")
             return
 
+        lvol.io_error = True
         if lvol.status == LVol.STATUS_ONLINE:
             logger.info("Setting LVol to offline")
             old_status = lvol.status

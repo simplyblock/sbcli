@@ -949,6 +949,7 @@ def restart_storage_node(
             logger.error(f"Failed to create LVol: {lvol_id}")
             return False
         lvol.status = lvol.STATUS_ONLINE
+        lvol.io_error = False
         lvol.write_to_db(db_controller.kv_store)
 
     logger.info("Setting node status to Online")

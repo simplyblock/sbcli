@@ -4,7 +4,7 @@ import os
 
 import time
 import sys
-
+from datetime import datetime
 
 from simplyblock_core import constants, kv_store
 from simplyblock_core.models.lvol_model import LVol
@@ -19,6 +19,18 @@ def set_lvol_status(lvol, status):
         lvol.write_to_db(db_store)
         snode = db_controller.get_storage_node_by_id(lvol.node_id)
         storage_events.lvol_status_change(snode.cluster_id, lvol, lvol.status, old_status, caused_by="monitor")
+
+
+def set_lvol_health_check(lvol, health_check_status):
+    lvol = db_controller.get_lvol_by_id(lvol.get_id())
+    if lvol.health_check == health_check_status:
+        return
+    old_status = lvol.health_check
+    lvol.health_check = health_check_status
+    lvol.updated_at = str(datetime.now())
+    lvol.write_to_db(db_store)
+    snode = db_controller.get_storage_node_by_id(lvol.node_id)
+    storage_events.lvol_health_check_change(snode.cluster_id, lvol, lvol.health_check, old_status, caused_by="monitor")
 
 
 # configure logging
@@ -40,8 +52,12 @@ while True:
         logger.error("LVols list is empty")
 
     for lvol in lvols:
+        if lvol.io_error:
+            logger.debug(f"Skipping LVol health check because of io_error {lvol.get_id()}")
+            continue
         ret = health_controller.check_lvol(lvol.get_id())
         logger.info(f"LVol: {lvol.get_id()}, is healthy: {ret}")
+        set_lvol_health_check(lvol, ret)
         if ret:
             set_lvol_status(lvol, LVol.STATUS_ONLINE)
         else:
