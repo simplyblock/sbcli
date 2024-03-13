@@ -238,10 +238,7 @@ def check_remote_device(device_id):
         logger.error("node not found")
         return False
 
-    # if device.status is not NVMeDevice.STATUS_ONLINE:
-    #     logger.error("device is not online")
-    #     return False
-
+    result = True
     for node in db_controller.get_storage_nodes():
         if node.status == StorageNode.STATUS_ONLINE:
             if node.get_id() == snode.get_id():
@@ -254,9 +251,9 @@ def check_remote_device(device_id):
                 logger.info(f"Checking bdev: {device.alceml_bdev} ... ok")
             else:
                 logger.info(f"Checking bdev: {device.alceml_bdev} ... not found")
-                # return False
-    # logger.info("All good")
-    return True
+                result = False
+
+    return result
 
 
 def check_lvol_on_node(lvol_id, node_id):
