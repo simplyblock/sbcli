@@ -971,12 +971,16 @@ def list_storage_nodes(kv_store, is_json):
     for node in nodes:
         logger.debug(node)
         logger.debug("*" * 20)
+        total_devices = len(node.nvme_devices)
+        online_devices = 0
+        for dev in node.nvme_devices:
+            if dev.status == NVMeDevice.STATUS_ONLINE:
+                online_devices += 1
         data.append({
             "UUID": node.uuid,
             "Hostname": node.hostname,
             "Management IP": node.mgmt_ip,
-            # "Subsystem": node.subsystem,
-            "NVMe Devs": f"{len(node.nvme_devices)}",
+            "Devices": f"{total_devices}/{online_devices}",
             "LVOLs": f"{len(node.lvols)}",
             "Data NICs": "\n".join([d.if_name for d in node.data_nics]),
             "Status": node.status,

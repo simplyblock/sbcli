@@ -10,6 +10,7 @@ from datetime import datetime
 from simplyblock_core import constants, kv_store, cluster_ops
 from simplyblock_core.controllers import storage_events, health_controller
 from simplyblock_core.models.cluster import Cluster
+from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
 
 
@@ -33,7 +34,12 @@ def update_cluster_status(cluster_id):
     online_nodes = 0
     for node in snodes:
         if node.status == node.STATUS_ONLINE:
-            online_nodes += 1
+            online_devices = 0
+            for dev in node.nvme_devices:
+                if dev.status == NVMeDevice.STATUS_ONLINE:
+                    online_devices += 1
+            if online_devices > 0:
+                online_nodes += 1
     other_nodes = len(snodes) - online_nodes
     if cluster.ha_type == "ha":
         if online_nodes < 3:
