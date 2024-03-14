@@ -4,7 +4,7 @@ import logging as lg
 import time
 import uuid
 
-from simplyblock_core.controllers import lvol_controller
+from simplyblock_core.controllers import lvol_controller, snapshot_events
 
 from simplyblock_core import utils
 from simplyblock_core.kv_store import DBController
@@ -53,6 +53,7 @@ def add(lvol_id, snapshot_name):
     snap.lvol = lvol
     snap.write_to_db(db_controller.kv_store)
     logger.info("Done")
+    snapshot_events.snapshot_create(snap)
     return ret
 
 
@@ -106,6 +107,7 @@ def delete(snapshot_uuid):
         lvol_controller.delete_lvol(base_lvol.get_id())
 
     logger.info("Done")
+    snapshot_events.snapshot_delete(snap)
     return True
 
 
@@ -201,4 +203,6 @@ def clone(snapshot_id, clone_name):
     snode.lvols.append(lvol_id)
     snode.write_to_db(db_controller.kv_store)
     logger.info("Done")
+    snapshot_events.snapshot_clone(snap, lvol)
+
     return lvol_id
