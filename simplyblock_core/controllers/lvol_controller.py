@@ -895,14 +895,15 @@ def list_lvols(is_json):
             continue
         logger.debug(lvol)
         data.append({
-            "id": lvol.uuid,
-            "name": lvol.lvol_name,
-            "size": utils.humanbytes(lvol.size),
-            "pool": lvol.pool_uuid,
-            "hostname": lvol.hostname,
-            "ha type": lvol.ha_type,
-            "status": lvol.status,
-            "health": lvol.health_check,
+            "Id": lvol.uuid,
+            "Name": lvol.lvol_name,
+            "Size": utils.humanbytes(lvol.size),
+            "Hostname": lvol.hostname,
+            "HA": lvol.ha_type,
+            "VUID": lvol.vuid,
+            "Mod": f"{lvol.ndcs}x{lvol.npcs}",
+            "Status": lvol.status,
+            "Health": lvol.health_check,
         })
 
     if is_json:

@@ -14,6 +14,7 @@ class Pool(BaseModel):
     attributes = {
         "pool_name": {"type": str, 'default': ""},
         "id": {"type": str, 'default': ""},
+        "cluster_id": {"type": str, 'default': ""},
         "users": {"type": List[str], 'default': []},
         "groups": {"type": List[str], 'default': []},
         "pool_max_size": {"type": int, 'default': 0},
