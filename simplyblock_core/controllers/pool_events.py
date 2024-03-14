@@ -19,13 +19,13 @@ def _add(pool, msg):
 
 
 def pool_add(pool):
-    _add(pool, f"Pool created {pool.get_id()}")
+    _add(pool, f"Pool created {pool.pool_name}")
 
 
 def pool_remove(pool):
-    _add(pool, f"Pool deleted {pool.get_id()}")
+    _add(pool, f"Pool deleted {pool.pool_name}")
 
 
 def pool_updated(pool):
-    _add(pool, f"Pool updated {pool.get_id()}")
+    _add(pool, f"Pool updated {pool.pool_name}")
 
