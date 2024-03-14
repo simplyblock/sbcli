@@ -113,6 +113,7 @@ def spdk_process_start():
         network_mode="host",
         log_config=log_config,
         volumes=[
+            '/etc/simplyblock:/etc/simplyblock',
             '/var/tmp:/var/tmp',
             '/dev:/dev',
             '/lib/modules/:/lib/modules/',
