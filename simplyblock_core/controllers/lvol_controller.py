@@ -8,7 +8,7 @@ import time
 import uuid
 
 from simplyblock_core import utils, constants, distr_controller
-from simplyblock_core.controllers import snapshot_controller, pool_controller
+from simplyblock_core.controllers import snapshot_controller, pool_controller, lvol_events
 from simplyblock_core.kv_store import DBController
 from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.lvol_model import LVol
@@ -619,6 +619,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
     pool.write_to_db(db_controller.kv_store)
 
     lvol.write_to_db(db_controller.kv_store)
+    lvol_events.lvol_create(lvol)
 
     # set QOS
     if max_rw_iops or max_rw_mbytes or max_r_mbytes or max_w_mbytes:
@@ -832,6 +833,7 @@ def delete_lvol(uuid, force_delete=False):
             if lvols_count == 0:
                 snapshot_controller.delete(snap.get_id())
 
+    lvol_events.lvol_delete(lvol)
     logger.info("Done")
     return True
 
@@ -1031,9 +1033,12 @@ def set_read_only(id):
     if not ret:
         return "Error"
 
+    old_status = lvol.mode
     lvol.mode = 'read-only'
     lvol.write_to_db(db_controller.kv_store)
     logger.info("Done")
+    lvol_events.lvol_status_change(lvol, lvol.mode, old_status)
+
     return True
 
 
@@ -1138,6 +1143,7 @@ def migrate(lvol_id, node_id):
         logger.error(f"lvol not found: {lvol_id}")
         return False
 
+    old_node = lvol.node_id
     nodes = _get_next_3_nodes()
 
     if node_id:
@@ -1171,6 +1177,9 @@ def migrate(lvol_id, node_id):
     host_node.lvols.append(lvol.uuid)
     host_node.write_to_db(db_controller.kv_store)
     lvol.write_to_db(db_controller.kv_store)
+
+    lvol_events.lvol_migrate(lvol, old_node, lvol.node_id)
+
     return True
 
 

@@ -8,7 +8,7 @@ from datetime import datetime
 
 from simplyblock_core import constants, kv_store
 from simplyblock_core.models.lvol_model import LVol
-from simplyblock_core.controllers import health_controller, storage_events
+from simplyblock_core.controllers import health_controller, lvol_events
 
 
 def set_lvol_status(lvol, status):
@@ -17,8 +17,7 @@ def set_lvol_status(lvol, status):
         old_status = lvol.status
         lvol.status = status
         lvol.write_to_db(db_store)
-        snode = db_controller.get_storage_node_by_id(lvol.node_id)
-        storage_events.lvol_status_change(snode.cluster_id, lvol, lvol.status, old_status, caused_by="monitor")
+        lvol_events.lvol_status_change(lvol, lvol.status, old_status, caused_by="monitor")
 
 
 def set_lvol_health_check(lvol, health_check_status):
@@ -29,8 +28,7 @@ def set_lvol_health_check(lvol, health_check_status):
     lvol.health_check = health_check_status
     lvol.updated_at = str(datetime.now())
     lvol.write_to_db(db_store)
-    snode = db_controller.get_storage_node_by_id(lvol.node_id)
-    storage_events.lvol_health_check_change(snode.cluster_id, lvol, lvol.health_check, old_status, caused_by="monitor")
+    lvol_events.lvol_health_check_change(lvol, lvol.health_check, old_status, caused_by="monitor")
 
 
 # configure logging

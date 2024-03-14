@@ -62,28 +62,6 @@ def device_health_check_change(cluster_id, device, new_state, old_status, caused
         node_id=device.get_id())
 
 
-def lvol_health_check_change(cluster_id, lvol, new_state, old_status, caused_by=ec.CAUSED_BY_CLI):
-    ec.log_event_cluster(
-        cluster_id=cluster_id,
-        domain=ec.DOMAIN_CLUSTER,
-        event=ec.EVENT_STATUS_CHANGE,
-        db_object=lvol,
-        caused_by=caused_by,
-        message=f"LVol health check changed from: {old_status} to: {new_state}",
-        node_id=lvol.get_id())
-
-
-def lvol_status_change(cluster_id, lvol, new_state, old_status, caused_by=ec.CAUSED_BY_CLI):
-    ec.log_event_cluster(
-        cluster_id=cluster_id,
-        domain=ec.DOMAIN_CLUSTER,
-        event=ec.EVENT_STATUS_CHANGE,
-        db_object=lvol,
-        caused_by=caused_by,
-        message=f"LVol status changed from: {old_status} to: {new_state}",
-        node_id=lvol.get_id())
-
-
 def device_status_change(cluster_id, device, new_state, old_status, caused_by=ec.CAUSED_BY_CLI):
     ec.log_event_cluster(
         cluster_id=cluster_id,
