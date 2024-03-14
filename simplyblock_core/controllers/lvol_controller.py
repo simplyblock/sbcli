@@ -1174,22 +1174,30 @@ def migrate(lvol_id, node_id):
     return True
 
 
-def move(lvol_id, node_id):
+def move(lvol_id, node_id, force=False):
     lvol = db_controller.get_lvol_by_id(lvol_id)
     if not lvol:
         logger.error(f"lvol not found: {lvol_id}")
         return False
 
-    snode = db_controller.get_storage_node_by_id(node_id)
-    if not snode:
-        logger.error(f"Node not found: {snode}")
+    target_node = db_controller.get_storage_node_by_id(node_id)
+    if not target_node:
+        logger.error(f"Node not found: {target_node}")
         return False
 
-    if lvol.node_id == snode.get_id():
+    if lvol.node_id == target_node.get_id():
         return True
 
-    if snode.status != StorageNode.STATUS_ONLINE:
-        logger.error(f"Node is not online!: {snode}, status: {snode.status}")
+    if target_node.status != StorageNode.STATUS_ONLINE:
+        logger.error(f"Node is not online!: {target_node}, status: {target_node.status}")
         return False
+
+    src_node = db_controller.get_storage_node_by_id(lvol.node_id)
+
+    if src_node.status == StorageNode.STATUS_ONLINE:
+        if not force:
+            logger.error(f"Node is online!: {src_node.get_id()}, use --force to force move")
+            return False
+        delete_lvol(lvol_id)
 
     return migrate(lvol_id, node_id)

@@ -526,6 +526,7 @@ class CLIWrapper:
         sub_command.add_argument("id", help='LVol UUID')
         # sub_command.add_argument("cluster-id", help='Destination Cluster ID')
         sub_command.add_argument("node_id", help='Destination Node UUID')
+        sub_command.add_argument("--force", help='Force LVol delete from source node', required=False, action='store_true')
 
         # lvol replicate
         sub_command = self.add_sub_command(
@@ -1099,7 +1100,7 @@ class CLIWrapper:
                 id = args.id
                 ret = health_controller.check_lvol(id)
             elif sub_command == 'move':
-                ret = lvol_controller.move(args.id, args.node_id)
+                ret = lvol_controller.move(args.id, args.node_id, args.force)
             else:
                 self.parser.print_help()
 
