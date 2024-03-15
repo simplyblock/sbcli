@@ -13,21 +13,6 @@ from simplyblock_core.rpc_client import RPCClient
 from simplyblock_core import constants, kv_store
 
 
-# def set_node_status(snode, target_status):
-#     if target_status == StorageNode.STATUS_ONLINE:
-#         if snode.status == StorageNode.STATUS_ONLINE:
-#             return
-#     if target_status == StorageNode.STATUS_UNREACHABLE:
-#         if snode.status == StorageNode.STATUS_UNREACHABLE:
-#             return
-#     snode = db_controller.get_storage_node_by_id(snode.get_id())
-#     old_status = snode.status
-#     snode.status = target_status
-#     snode.updated_at = str(datetime.now())
-#     snode.write_to_db(db_store)
-#     storage_events.snode_status_change(snode, snode.status, old_status, caused_by="monitor")
-
-
 def set_node_health_check(snode, health_check_status):
     snode = db_controller.get_storage_node_by_id(snode.get_id())
     if snode.health_check == health_check_status:
@@ -42,6 +27,10 @@ def set_node_health_check(snode, health_check_status):
 def set_device_health_check(cluster_id, device, health_check_status):
     if device.health_check == health_check_status:
         return
+    node = db_controller.get_storage_node_by_id(device.node_id)
+    if node.status != StorageNode.STATUS_ONLINE:
+        logger.warning(f"Node status is not online, id: {node.get_id()}, status: {node.status}")
+        return
     nodes = db_controller.get_storage_nodes()
     for node in nodes:
         if node.nvme_devices:
@@ -50,19 +39,8 @@ def set_device_health_check(cluster_id, device, health_check_status):
                     old_status = dev.health_check
                     dev.health_check = health_check_status
                     node.write_to_db(db_store)
-                    storage_events.device_health_check_change(cluster_id, dev, dev.health_check, old_status, caused_by="monitor")
-
-
-# def set_lvol_health_check(cluster_id, lvol, health_check_status):
-#     lvol = db_controller.get_lvol_by_id(lvol.get_id())
-#     if lvol.health_check == health_check_status:
-#         return
-#     old_status = lvol.health_check
-#     lvol.health_check = health_check_status
-#     lvol.updated_at = str(datetime.now())
-#     lvol.write_to_db(db_store)
-#     # todo: set lvol offline or online
-#     storage_events.lvol_health_check_change(cluster_id, lvol, lvol.health_check, old_status, caused_by="monitor")
+                    storage_events.device_health_check_change(
+                        cluster_id, dev, dev.health_check, old_status, caused_by="monitor")
 
 
 # configure logging
@@ -112,10 +90,6 @@ while True:
         logger.info(f"Check: node docker API {snode.mgmt_ip}:2375 ... {node_docker_check}")
 
         is_node_online = ping_check and node_api_check and node_rpc_check and node_docker_check
-        # if is_node_online:
-        #     set_node_status(snode, StorageNode.STATUS_ONLINE)
-        # else:
-        #     set_node_status(snode, StorageNode.STATUS_UNREACHABLE)
 
         health_check_status = is_node_online
         if not node_rpc_check:
@@ -154,10 +128,6 @@ while True:
 
             health_check_status = is_node_online and node_devices_check and node_remote_devices_check
         set_node_health_check(snode, health_check_status)
-
-    # for lvol in db_controller.get_lvols():
-    #     ret = health_controller.check_lvol(lvol.get_id())
-    #     set_lvol_health_check(cluster_id, lvol, ret)
 
     time.sleep(constants.HEALTH_CHECK_INTERVAL_SEC)
 
