@@ -6,24 +6,21 @@ import time
 import sys
 
 
-from simplyblock_core import constants, kv_store
+from simplyblock_core import constants, kv_store, storage_node_ops
 from simplyblock_core.controllers import health_controller, storage_events
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
 
 
 def set_dev_status(device, status):
-    nodes = db_controller.get_storage_nodes()
-    for node in nodes:
-        if node.nvme_devices:
-            for dev in node.nvme_devices:
-                if dev.get_id() == device.get_id():
-                    if dev.status != status:
-                        old_status = dev.status
-                        dev.status = status
-                        node.write_to_db(db_store)
-                        storage_events.device_status_change(dev.cluster_id, dev,  dev.status, old_status)
-                    return
+    node = db_controller.get_storage_node_by_id(device.node_id)
+    if node.status != StorageNode.STATUS_ONLINE:
+        logger.error(f"Node is not online, {node.get_id()}, status: {node.status}, "
+                     f"skipping device status change")
+        return
+    if device.status != status:
+        storage_node_ops.device_set_state(device.get_id(), status)
+    return
 
 
 # configure logging

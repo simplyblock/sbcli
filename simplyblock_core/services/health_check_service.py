@@ -27,10 +27,6 @@ def set_node_health_check(snode, health_check_status):
 def set_device_health_check(cluster_id, device, health_check_status):
     if device.health_check == health_check_status:
         return
-    node = db_controller.get_storage_node_by_id(device.node_id)
-    if node.status != StorageNode.STATUS_ONLINE:
-        logger.warning(f"Node status is not online, id: {node.get_id()}, status: {node.status}")
-        return
     nodes = db_controller.get_storage_nodes()
     for node in nodes:
         if node.nvme_devices:
@@ -117,7 +113,7 @@ while True:
             rpc_client = RPCClient(
                 snode.mgmt_ip, snode.rpc_port,
                 snode.rpc_username, snode.rpc_password,
-                timeout=3, retry=1)
+                timeout=5, retry=3)
             for remote_device in snode.remote_devices:
                 ret = rpc_client.get_bdevs(remote_device.remote_bdev)
                 if ret:
