@@ -17,7 +17,7 @@ def _lvol_event(lvol, message, caused_by, event):
         db_object=lvol,
         caused_by=caused_by,
         message=message,
-        node_id=lvol.host_id)
+        node_id=lvol.node_id)
 
 
 def lvol_create(lvol, caused_by=ec.CAUSED_BY_CLI):
