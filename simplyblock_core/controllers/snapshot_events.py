@@ -17,7 +17,7 @@ def _snapshot_event(snapshot, message, caused_by, event):
         db_object=snapshot,
         caused_by=caused_by,
         message=message,
-        node_id=snapshot.lvol.host_id)
+        node_id=snapshot.lvol.node_id)
 
 
 def snapshot_create(snapshot, caused_by=ec.CAUSED_BY_CLI):
