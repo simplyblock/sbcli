@@ -49,6 +49,9 @@ while True:
             if dev.status not in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_UNAVAILABLE]:
                 logger.warning(f"Device status is not online or unavailable, id: {dev.get_id()}, status: {dev.status}")
                 continue
+            if dev.io_error:
+                logger.debug(f"Skipping Device check because of io_error {dev.get_id()}")
+                continue
 
             ret = health_controller.check_device(dev.get_id())
             logger.info(f"Device: {dev.get_id()}, is healthy: {ret}")

@@ -16,7 +16,7 @@ class SNodeClientException(Exception):
 
 class SNodeClient:
 
-    def __init__(self, ip_address, timeout=30, retry=3):
+    def __init__(self, ip_address, timeout=60, retry=5):
         self.ip_address = ip_address
         self.url = 'http://%s/snode/' % self.ip_address
         self.timeout = timeout
@@ -36,7 +36,7 @@ class SNodeClient:
                 dt = json.dumps(params)
             response = self.session.request(method, self.url+path, data=dt, timeout=self.timeout)
         except Exception as e:
-            raise e
+            return None, str(e)
 
         logger.debug("Response: status_code: %s, content: %s",
                      response.status_code, response.content)

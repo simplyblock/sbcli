@@ -33,28 +33,32 @@ def process_device_event(event):
                 if dev.cluster_device_order == storage_id:
                     if dev.status != "online":
                         logger.info(f"The storage device is not online, skipping. status: {dev.status}")
+                        event.status = 'skipped'
+                        event.write_to_db(db_controller.kv_store)
                         return
-                    # if node.get_id() != node_id:
-                    #     logger.info(f"The storage device not on this node, skipping. device node: {node.get_id()}")
-                    #     return
+
                     device_id = dev.get_id()
                     break
 
-        if device_id:
-            if event.message == 'SPDK_BDEV_EVENT_REMOVE':
-                logger.info(f"Removing storage id: {storage_id} from node: {node_id}")
-                storage_node_ops.device_remove(device_id)
-            elif event.message == 'error_write':
-                logger.info(f"Setting device to read-only")
-                storage_node_ops.device_set_read_only(device_id)
-            else:
-                logger.info(f"Setting device to unavailable")
-                storage_node_ops.device_set_unavailable(device_id)
-            event.status = 'processed'
-
-        else:
+        if not device_id:
             logger.info(f"Device not found!, storage id: {storage_id} from node: {node_id}")
             event.status = 'device_not_found'
+            event.write_to_db(db_controller.kv_store)
+            return
+
+        if event.message == 'SPDK_BDEV_EVENT_REMOVE':
+            logger.info(f"Removing storage id: {storage_id} from node: {node_id}")
+            storage_node_ops.device_remove(device_id)
+        elif event.message == 'error_write':
+            logger.info(f"Setting device to read-only")
+            storage_node_ops.device_set_read_only(device_id)
+            storage_node_ops.device_set_io_error(device_id, True)
+        else:
+            logger.info(f"Setting device to unavailable")
+            storage_node_ops.device_set_unavailable(device_id)
+            storage_node_ops.device_set_io_error(device_id, True)
+
+        event.status = 'processed'
         event.write_to_db(db_controller.kv_store)
 
 

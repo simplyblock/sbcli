@@ -1,4 +1,5 @@
 # coding=utf-8
+from typing import List
 
 from simplyblock_core.models.base_model import BaseModel
 
@@ -41,6 +42,10 @@ class NVMeDevice(BaseModel):
         "cluster_device_order": {"type": int, 'default': 0},
         "health_check": {"type": bool, "default": True},
         "cluster_id": {"type": str, 'default': ""},
+
+        "bdev_stack": {"type": List, 'default': []},
+
+        "io_error": {"type": bool, 'default': False},
 
     }
 

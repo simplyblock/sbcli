@@ -210,8 +210,8 @@ def _prepare_cluster_devices(snode, after_restart=False):
         snode.rpc_username, snode.rpc_password)
 
     for index, nvme in enumerate(snode.nvme_devices):
-        if nvme.status != NVMeDevice.STATUS_ONLINE:
-            logger.debug(f"Device is not online: {nvme.get_id()}, status: {nvme.status}")
+        if nvme.status not in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_UNAVAILABLE]:
+            logger.debug(f"Device is not online or unavailable: {nvme.get_id()}, status: {nvme.status}")
             continue
 
         test_name = f"{nvme.nvme_bdev}_test"
@@ -269,6 +269,7 @@ def _prepare_cluster_devices(snode, after_restart=False):
         nvme.nvmf_nqn = subsystem_nqn
         nvme.nvmf_ip = IP
         nvme.nvmf_port = 4420
+        nvme.io_error = False
         nvme.status = NVMeDevice.STATUS_ONLINE
     snode.write_to_db(db_controller.kv_store)
     return True
@@ -1831,6 +1832,7 @@ def restart_device(device_id):
     device_obj.nvmf_nqn = subsystem_nqn
     device_obj.nvmf_ip = IP
     device_obj.nvmf_port = 4420
+    device_obj.io_error = False
     device_obj.status = NVMeDevice.STATUS_ONLINE
     snode.write_to_db(db_controller.kv_store)
 
@@ -2050,3 +2052,29 @@ def device_set_read_only(device_id):
 def device_set_unavailable(device_id):
     return device_set_state(device_id, NVMeDevice.STATUS_UNAVAILABLE)
 
+
+def device_set_io_error(device_id, is_error):
+    db_controller = DBController()
+    dev = db_controller.get_storage_devices(device_id)
+    if not dev:
+        logger.error("device not found")
+
+    snode = db_controller.get_storage_node_by_id(dev.node_id)
+    if not snode:
+        logger.error("node not found")
+        return False
+
+    device = None
+    for dev in snode.nvme_devices:
+        if dev.get_id() == device_id:
+            device = dev
+            break
+
+    if not device:
+        logger.error("device not found")
+
+    if device.io_error == is_error:
+        return True
+
+    device.io_error = is_error
+    snode.write_to_db(db_controller.kv_store)
