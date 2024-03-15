@@ -120,6 +120,11 @@ def addNvmeDevices(cluster, rpc_client, devs, snode):
                     'alloc_bdev': nvme_bdev,
                     'node_id': snode.get_id(),
                     'cluster_id': snode.cluster_id,
+
+                    # 'nvmf_nqn': subsystem_nqn,
+                    # 'nvmf_ip': IP,
+                    # 'nvmf_port': 4420,
+
                     'status': 'online'
                 }))
             sequential_number += device_partitions_count
@@ -1220,22 +1225,31 @@ def reset_storage_device(dev_id):
     db_controller = DBController()
     device = db_controller.get_storage_devices(dev_id)
     if not device:
-        logger.error("device not found")
+        logger.error(f"Device not found: {dev_id}")
+        return False
+
+    if device.status not in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_UNAVAILABLE]:
+        logger.error(f"Device status: {device.status} is not online or unavailable")
         return False
 
     snode = db_controller.get_storage_node_by_id(device.node_id)
     if not snode:
-        logger.error("node not found")
+        logger.error(f"Node not found {device.node_id}")
         return False
 
     logger.info("Resetting device")
-
     rpc_client = RPCClient(
         snode.mgmt_ip, snode.rpc_port,
         snode.rpc_username, snode.rpc_password)
 
-    response = rpc_client.reset_device(device.nvme_bdev[:-2])
-    return response
+    response = rpc_client.reset_device(device.nvme_bdev)
+    if not response:
+        logger.error(f"Failed to reset bdev {device.nvme_bdev}")
+
+    device.io_error = False
+    device.status = NVMeDevice.STATUS_ONLINE
+    device.write_to_db(db_controller.kv_store)
+    return True
 
 
 def run_test_storage_device(kv_store, dev_name):
