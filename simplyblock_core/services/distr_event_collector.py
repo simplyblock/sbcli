@@ -34,7 +34,6 @@ def process_device_event(event):
                     if dev.status != "online":
                         logger.info(f"The storage device is not online, skipping. status: {dev.status}")
                         event.status = 'skipped'
-                        event.write_to_db(db_controller.kv_store)
                         return
 
                     device_id = dev.get_id()
@@ -43,7 +42,6 @@ def process_device_event(event):
         if not device_id:
             logger.info(f"Device not found!, storage id: {storage_id} from node: {node_id}")
             event.status = 'device_not_found'
-            event.write_to_db(db_controller.kv_store)
             return
 
         if event.message == 'SPDK_BDEV_EVENT_REMOVE':
@@ -59,7 +57,6 @@ def process_device_event(event):
             storage_node_ops.device_set_io_error(device_id, True)
 
         event.status = 'processed'
-        event.write_to_db(db_controller.kv_store)
 
 
 def process_lvol_event(event):
@@ -70,23 +67,22 @@ def process_lvol_event(event):
             if lv.vuid == vuid:
                 lvol = lv
                 break
+
         if not lvol:
             logger.error(f"LVol with vuid {vuid} not found")
-            return
-
-        lvol.io_error = True
-        if lvol.status == LVol.STATUS_ONLINE:
-            logger.info("Setting LVol to offline")
-            old_status = lvol.status
-            lvol.status = LVol.STATUS_OFFLINE
-            lvol.write_to_db(db_controller.kv_store)
-            storage_events.lvol_status_change(event.cluster_uuid, lvol, lvol.status, old_status, caused_by="monitor")
-
-        event.status = 'processed'
-        event.write_to_db(db_controller.kv_store)
-
+            event.status = 'lvol_not_found'
+        else:
+            lvol.io_error = True
+            if lvol.status == LVol.STATUS_ONLINE:
+                logger.info("Setting LVol to offline")
+                old_status = lvol.status
+                lvol.status = LVol.STATUS_OFFLINE
+                lvol.write_to_db(db_controller.kv_store)
+                storage_events.lvol_status_change(event.cluster_uuid, lvol, lvol.status, old_status, caused_by="monitor")
+            event.status = 'processed'
     else:
         logger.error(f"Unknown LVol event message: {event.message}")
+        event.status = "event_unknown"
 
 
 def process_event(event_id):
@@ -97,6 +93,8 @@ def process_event(event_id):
 
         if event.vuid >= 0:
             process_lvol_event(event)
+
+    event.write_to_db(db_controller.kv_store)
 
 
 hostname = utils.get_hostname()

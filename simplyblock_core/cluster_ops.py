@@ -394,6 +394,7 @@ def show_cluster(cl_id, is_json=False):
                 "Size": utils.humanbytes(dev.size),
                 "Hostname": node.hostname,
                 "Status": dev.status,
+                "IO Error": dev.io_error,
                 "Health": dev.health_check
             })
     data = sorted(data, key=lambda x: x["Storage ID"])
