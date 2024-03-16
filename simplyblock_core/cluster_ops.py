@@ -658,7 +658,7 @@ def update_cluster(cl_id):
         return False
 
     try:
-        out, _, ret_code = shell_utils.run_command("#pip install sbcli-dev --upgrade")
+        out, _, ret_code = shell_utils.run_command("pip install sbcli-dev --upgrade")
         if ret_code == 0:
             logger.info("sbcli-dev is upgraded")
     except Exception as e:
@@ -670,8 +670,9 @@ def update_cluster(cl_id):
         logger.info(f"Pulling image {constants.SIMPLY_BLOCK_DOCKER_IMAGE}")
         cluster_docker.images.pull(constants.SIMPLY_BLOCK_DOCKER_IMAGE)
         for service in cluster_docker.services.list():
-            logger.info(f"Updating service {service.name}")
-            service.update(image=constants.SIMPLY_BLOCK_DOCKER_IMAGE, force_update=True)
+            if service.attrs['Spec']['Labels']['com.docker.stack.image'] == constants.SIMPLY_BLOCK_DOCKER_IMAGE:
+                logger.info(f"Updating service {service.name}")
+                service.update(image=constants.SIMPLY_BLOCK_DOCKER_IMAGE, force_update=True)
         logger.info("Done")
     except Exception as e:
         print(e)
