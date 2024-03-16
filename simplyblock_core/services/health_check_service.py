@@ -1,13 +1,12 @@
 # coding=utf-8
 import logging
-import os
 
 import time
 import sys
 from datetime import datetime
 
 
-from simplyblock_core.controllers import health_controller, storage_events
+from simplyblock_core.controllers import health_controller, storage_events, device_events
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.rpc_client import RPCClient
 from simplyblock_core import constants, kv_store
@@ -35,8 +34,8 @@ def set_device_health_check(cluster_id, device, health_check_status):
                     old_status = dev.health_check
                     dev.health_check = health_check_status
                     node.write_to_db(db_store)
-                    storage_events.device_health_check_change(
-                        cluster_id, dev, dev.health_check, old_status, caused_by="monitor")
+                    device_events.device_health_check_change(
+                        dev, dev.health_check, old_status, caused_by="monitor")
 
 
 # configure logging

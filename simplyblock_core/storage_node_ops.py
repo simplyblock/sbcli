@@ -12,7 +12,7 @@ import docker
 
 from simplyblock_core import constants, scripts, distr_controller
 from simplyblock_core import utils
-from simplyblock_core.controllers import lvol_controller, storage_events, snapshot_controller
+from simplyblock_core.controllers import lvol_controller, storage_events, snapshot_controller, device_events
 from simplyblock_core.kv_store import DBController
 from simplyblock_core import shell_utils
 from simplyblock_core.models.iface import IFace
@@ -463,6 +463,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask,
     for index, nvme in enumerate(snode.nvme_devices):
         nvme.cluster_device_order = dev_order
         dev_order += 1
+        device_events.device_create(nvme)
     snode.write_to_db(db_controller.kv_store)
 
     # prepare devices
@@ -1249,6 +1250,7 @@ def reset_storage_device(dev_id):
     device.io_error = False
     device.status = NVMeDevice.STATUS_ONLINE
     device.write_to_db(db_controller.kv_store)
+    device_events.device_reset(device)
     return True
 
 
@@ -1730,6 +1732,7 @@ def device_remove(device_id, force=True):
 
     device.status = 'removed'
     snode.write_to_db(db_controller.kv_store)
+    device_events.device_delete(device)
 
     for lvol in db_controller.get_lvols():
         lvol_controller.send_cluster_map(lvol.get_id())
@@ -1881,6 +1884,7 @@ def restart_device(device_id):
 
     logger.info("Sending device event")
     distr_controller.send_dev_status_event(device_obj.cluster_device_order, "online")
+    device_events.device_restarted(device_obj)
 
     for lvol in db_controller.get_lvols():
         lvol_controller.send_cluster_map(lvol.get_id())
@@ -2052,7 +2056,7 @@ def device_set_state(device_id, state):
     device.status = state
     distr_controller.send_dev_status_event(device.cluster_device_order, device.status)
     snode.write_to_db(db_controller.kv_store)
-    storage_events.device_status_change(device.cluster_id, device, device.status, old_status)
+    device_events.device_status_change(device, device.status, old_status)
     return True
 
 
@@ -2093,3 +2097,4 @@ def device_set_io_error(device_id, is_error):
 
     device.io_error = is_error
     snode.write_to_db(db_controller.kv_store)
+    return True
