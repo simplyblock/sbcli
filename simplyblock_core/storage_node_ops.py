@@ -762,10 +762,16 @@ def remove_storage_node(node_id, force_remove=False, force_migrate=False):
 
 
 def restart_storage_node(
-        node_id, spdk_cpu_mask, spdk_mem,
-        spdk_image, set_spdk_debug,
-        bdev_io_pool_size, bdev_io_cache_size,
-        iobuf_small_cache_size, iobuf_large_cache_size):
+        node_id,
+        spdk_cpu_mask=None,
+        spdk_mem=None,
+        spdk_image=None,
+        set_spdk_debug=None,
+        bdev_io_pool_size=None,
+        bdev_io_cache_size=None,
+        iobuf_small_cache_size=None,
+        iobuf_large_cache_size=None):
+
     db_controller = DBController()
     kv_store = db_controller.kv_store
 

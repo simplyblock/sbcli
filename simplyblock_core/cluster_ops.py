@@ -9,7 +9,7 @@ import uuid
 import docker
 import requests
 
-from simplyblock_core import utils, scripts, constants, mgmt_node_ops, storage_node_ops
+from simplyblock_core import utils, scripts, constants, mgmt_node_ops, storage_node_ops, shell_utils
 from simplyblock_core.controllers import cluster_events
 from simplyblock_core.kv_store import DBController
 from simplyblock_core.models.cluster import Cluster
@@ -648,4 +648,40 @@ def get_cluster(cl_id):
         return False
 
     return json.dumps(cluster.get_clean_dict(), indent=2)
+
+
+def update_cluster(cl_id):
+    db_controller = DBController()
+    cluster = db_controller.get_cluster_by_id(cl_id)
+    if not cluster:
+        logger.error(f"Cluster not found {cl_id}")
+        return False
+
+    try:
+        out, _, ret_code = shell_utils.run_command("#pip install sbcli-dev --upgrade")
+        if ret_code == 0:
+            logger.info("sbcli-dev is upgraded")
+    except Exception as e:
+        logger.error(e)
+
+    try:
+        logger.info("Updating mgmt cluster")
+        cluster_docker = utils.get_docker_client(cl_id)
+        logger.info(f"Pulling image {constants.SIMPLY_BLOCK_DOCKER_IMAGE}")
+        cluster_docker.images.pull(constants.SIMPLY_BLOCK_DOCKER_IMAGE)
+        for service in cluster_docker.services.list():
+            logger.info(f"Updating service {service.name}")
+            service.update(image=constants.SIMPLY_BLOCK_DOCKER_IMAGE, force_update=True)
+        logger.info("Done")
+    except Exception as e:
+        print(e)
+
+    for node in db_controller.get_storage_nodes():
+        node_docker = docker.DockerClient(base_url=f"tcp://{node.mgmt_ip}:2375", version="auto")
+        logger.info(f"Pulling image {constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE}")
+        node_docker.images.pull(constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE)
+        storage_node_ops.restart_storage_node(node.get_id())
+
+    logger.info("Done")
+    return True
 
