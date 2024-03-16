@@ -6,7 +6,8 @@ KVD_DB_FILE_PATH = '/etc/foundationdb/fdb.cluster'
 KVD_DB_TIMEOUT_MS = 10000
 SPK_DIR = '/home/ec2-user/spdk'
 RPC_HTTP_PROXY_PORT = 8080
-LOG_LEVEL = logging.INFO
+LOG_LEVEL = logging.DEBUG
+LOG_WEB_DEBUG = True
 
 FILE_DIR = os.path.dirname(os.path.realpath(__file__))
 INSTALL_DIR = os.path.dirname(FILE_DIR)

@@ -733,6 +733,8 @@ class CLIWrapper:
         args = self.parser.parse_args()
         if args.debug:
             self.logger.setLevel(logging.DEBUG)
+        else:
+            self.logger.setLevel(constants.LOG_LEVEL)
         logging.getLogger("urllib3.connectionpool").setLevel(logging.WARNING)
 
         args_dict = args.__dict__
