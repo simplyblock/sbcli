@@ -14,6 +14,7 @@ from simplyblock_core.controllers import cluster_events
 from simplyblock_core.kv_store import DBController
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.nvme_device import NVMeDevice
+from simplyblock_core.models.storage_node import StorageNode
 
 logger = logging.getLogger()
 
@@ -681,6 +682,9 @@ def update_cluster(cl_id):
         node_docker = docker.DockerClient(base_url=f"tcp://{node.mgmt_ip}:2375", version="auto")
         logger.info(f"Pulling image {constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE}")
         node_docker.images.pull(constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE)
+        if node.status == StorageNode.STATUS_ONLINE:
+            storage_node_ops.shutdown_storage_node(node.get_id(), force=True)
+            time.sleep(3)
         storage_node_ops.restart_storage_node(node.get_id())
 
     logger.info("Done")

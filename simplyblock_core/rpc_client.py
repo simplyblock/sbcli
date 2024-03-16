@@ -368,7 +368,7 @@ class RPCClient:
             "use_optimized": True,
             "pba_nbalign": 4096
         }
-        return self._request2("bdev_alceml_create", params)
+        return self._request("bdev_alceml_create", params)
 
     def bdev_distrib_create(self, name, vuid, ndcs, npcs, num_blocks, block_size, jm_names,
                             chunk_size, ha_comm_addrs=None, ha_inode_self=None, pba_page_size=2097152):

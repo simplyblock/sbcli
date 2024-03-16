@@ -51,8 +51,8 @@ def spdk_process_start():
         data = {}
 
     set_debug = None
-    if 'set_debug' in data and data['set_debug']:
-        set_debug = data['set_debug']
+    if 'spdk_debug' in data and data['spdk_debug']:
+        set_debug = data['spdk_debug']
 
     spdk_cpu_mask = None
     if 'spdk_cpu_mask' in data:
