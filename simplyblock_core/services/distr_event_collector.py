@@ -6,8 +6,8 @@ import time
 import sys
 
 
-from simplyblock_core import constants, kv_store, utils, rpc_client, storage_node_ops
-from simplyblock_core.controllers import events_controller, storage_events
+from simplyblock_core import constants, kv_store, utils, rpc_client
+from simplyblock_core.controllers import events_controller, storage_events, device_controller
 from simplyblock_core.models.lvol_model import LVol
 
 # configure logging
@@ -46,15 +46,15 @@ def process_device_event(event):
 
         if event.message == 'SPDK_BDEV_EVENT_REMOVE':
             logger.info(f"Removing storage id: {storage_id} from node: {node_id}")
-            storage_node_ops.device_remove(device_id)
+            device_controller.device_remove(device_id)
         elif event.message == 'error_write':
             logger.info(f"Setting device to read-only")
-            storage_node_ops.device_set_read_only(device_id)
-            storage_node_ops.device_set_io_error(device_id, True)
+            device_controller.device_set_read_only(device_id)
+            device_controller.device_set_io_error(device_id, True)
         else:
             logger.info(f"Setting device to unavailable")
-            storage_node_ops.device_set_unavailable(device_id)
-            storage_node_ops.device_set_io_error(device_id, True)
+            device_controller.device_set_unavailable(device_id)
+            device_controller.device_set_io_error(device_id, True)
 
         event.status = 'processed'
 

@@ -10,7 +10,7 @@ from simplyblock_core import compute_node_ops as compute_ops
 from simplyblock_core import storage_node_ops as storage_ops
 from simplyblock_core import mgmt_node_ops as mgmt_ops
 from simplyblock_core import constants
-from simplyblock_core.controllers import pool_controller, lvol_controller, snapshot_controller
+from simplyblock_core.controllers import pool_controller, lvol_controller, snapshot_controller, device_controller
 from simplyblock_core.controllers import caching_node_controller, health_controller
 from simplyblock_core.models.pool import Pool
 
@@ -832,10 +832,10 @@ class CLIWrapper:
                 ret = self.storage_node_list_devices(args)
 
             elif sub_command == "device-testing-mode":
-                ret = storage_ops.set_device_testing_mode(args.device_id, args.mode)
+                ret = device_controller.set_device_testing_mode(args.device_id, args.mode)
 
             elif sub_command == "remove-device":
-                ret = storage_ops.device_remove(args.device_id, args.force)
+                ret = device_controller.device_remove(args.device_id, args.force)
 
             elif sub_command == "shutdown":
                 # answer = self.query_yes_no("Are you sure?", default=None)
@@ -849,10 +849,10 @@ class CLIWrapper:
                 ret = storage_ops.resume_storage_node(args.node_id)
 
             elif sub_command == "reset-device":
-                ret = storage_ops.reset_storage_device(args.device_id)
+                ret = device_controller.reset_storage_device(args.device_id)
 
             elif sub_command == "restart-device":
-                ret = storage_ops.restart_device(args.id)
+                ret = device_controller.restart_device(args.id)
 
             elif sub_command == "run-smart":
                 dev_name = args.name
@@ -872,19 +872,19 @@ class CLIWrapper:
             elif sub_command == "get-capacity-device":
                 device_id = args.device_id
                 history = args.history
-                data = storage_ops.get_device_capacity(device_id, history)
+                data = device_controller.get_device_capacity(device_id, history)
                 if data:
                     ret = utils.print_table(data)
                 else:
                     return False
             elif sub_command == "get-device":
                 device_id = args.device_id
-                ret = storage_ops.get_device(device_id)
+                ret = device_controller.get_device(device_id)
 
             elif sub_command == "get-io-stats-device":
                 device_id = args.device_id
                 history = args.history
-                data = storage_ops.get_device_iostats(device_id, history)
+                data = device_controller.get_device_iostats(device_id, history)
                 if data:
                     ret = utils.print_table(data)
                 else:

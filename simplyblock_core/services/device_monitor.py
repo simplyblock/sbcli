@@ -7,7 +7,7 @@ import sys
 
 
 from simplyblock_core import constants, kv_store, storage_node_ops
-from simplyblock_core.controllers import health_controller, storage_events
+from simplyblock_core.controllers import health_controller,  device_controller
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
 
@@ -19,7 +19,7 @@ def set_dev_status(device, status):
                      f"skipping device status change")
         return
     if device.status != status:
-        storage_node_ops.device_set_state(device.get_id(), status)
+        device_controller.device_set_state(device.get_id(), status)
     return
 
 

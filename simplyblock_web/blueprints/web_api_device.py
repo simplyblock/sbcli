@@ -5,9 +5,10 @@ import logging
 
 from flask import Blueprint
 
+from simplyblock_core.controllers import device_controller
 from simplyblock_web import utils
 
-from simplyblock_core import kv_store, storage_node_ops
+from simplyblock_core import kv_store
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
@@ -50,7 +51,7 @@ def device_capacity(uuid, history):
     if not device:
         return utils.get_response_error(f"devices not found: {uuid}", 404)
 
-    records = storage_node_ops.get_device_capacity(uuid, history, parse_sizes=False)
+    records = device_controller.get_device_capacity(uuid, history, parse_sizes=False)
     return utils.get_response(records)
 
 
@@ -61,7 +62,7 @@ def device_iostats(uuid, history):
     if not devices:
         return utils.get_response_error(f"devices not found: {uuid}", 404)
 
-    data = storage_node_ops.get_device_iostats(uuid, history, parse_sizes=False)
+    data = device_controller.get_device_iostats(uuid, history, parse_sizes=False)
     if data:
         return utils.get_response(data)
     else:
@@ -74,7 +75,7 @@ def device_reset(uuid):
     if not devices:
         return utils.get_response_error(f"devices not found: {uuid}", 404)
 
-    data = storage_node_ops.reset_storage_device(uuid)
+    data = device_controller.reset_storage_device(uuid)
     return utils.get_response(data)
 
 
@@ -84,5 +85,5 @@ def device_remove(uuid):
     if not devices:
         return utils.get_response_error(f"devices not found: {uuid}", 404)
 
-    data = storage_node_ops.device_remove(uuid)
+    data = device_controller.device_remove(uuid)
     return utils.get_response(data)

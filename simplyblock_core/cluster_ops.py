@@ -10,7 +10,7 @@ import docker
 import requests
 
 from simplyblock_core import utils, scripts, constants, mgmt_node_ops, storage_node_ops, shell_utils
-from simplyblock_core.controllers import cluster_events
+from simplyblock_core.controllers import cluster_events, device_controller
 from simplyblock_core.kv_store import DBController
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.nvme_device import NVMeDevice
@@ -450,7 +450,7 @@ def cluster_set_read_only(cl_id):
         for node in st:
             for dev in node.nvme_devices:
                 if dev.status == NVMeDevice.STATUS_ONLINE:
-                    storage_node_ops.device_set_read_only(dev.get_id())
+                    device_controller.device_set_read_only(dev.get_id())
     return True
 
 
@@ -470,7 +470,7 @@ def cluster_set_active(cl_id):
         for node in st:
             for dev in node.nvme_devices:
                 if dev.status == NVMeDevice.STATUS_READONLY:
-                    storage_node_ops.device_set_online(dev.get_id())
+                    device_controller.device_set_online(dev.get_id())
     return True
 
 
