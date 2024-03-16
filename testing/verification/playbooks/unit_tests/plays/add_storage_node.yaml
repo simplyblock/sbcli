@@ -9,7 +9,7 @@
       register: cluster_id
     - name: Add storage nodes
       shell:
-        cmd: "sbcli -d storage-node add-node {{ cluster_id.stdout }} {{ hostvars[item]['ansible_facts']['default_ipv4']['address'] }}:5000 eth0 --memory 16G --spdk-cmd-params 1 \"\" all"
+        cmd: "sbcli -d storage-node add-node {{ cluster_id.stdout }} {{ hostvars[item]['ansible_facts']['default_ipv4']['address'] }}:5000 eth0 --memory 16G --spdk-debug"
       loop: "{{ groups['storage'] }}"
       async: 3600
       poll: 30

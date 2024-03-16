@@ -70,7 +70,7 @@ class SNodeClient:
     def info(self):
         return self._request("GET", "info")
 
-    def spdk_process_start(self, spdk_cpu_mask, spdk_mem, spdk_image=None, cmd_params=None, cluster_ip=None):
+    def spdk_process_start(self, spdk_cpu_mask, spdk_mem, spdk_image=None, spdk_debug=None, cluster_ip=None):
         params = {"cluster_ip": cluster_ip}
         if spdk_cpu_mask:
             params['spdk_cpu_mask'] = spdk_cpu_mask
@@ -78,8 +78,8 @@ class SNodeClient:
             params['spdk_mem'] = spdk_mem
         if spdk_image:
             params['spdk_image'] = spdk_image
-        if cmd_params:
-            params['cmd_params'] = cmd_params
+        if spdk_debug:
+            params['spdk_debug'] = spdk_debug
         return self._request("POST", "spdk_process_start", params)
 
     def join_swarm(self, cluster_ip, join_token, db_connection, cluster_id):

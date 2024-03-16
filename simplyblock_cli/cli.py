@@ -47,7 +47,7 @@ class CLIWrapper:
         sub_command.add_argument("--dev-split", help='Split nvme devices by this factor, can be 2 or more',
                                  dest='dev_split', type=int, default=1)
         sub_command.add_argument("--spdk-image", help='SPDK image uri', dest='spdk_image')
-        sub_command.add_argument("--spdk-cmd-params", help='Extra params for SPDK app command', nargs='+', dest='cmd_params')
+        sub_command.add_argument("--spdk-debug", help='Enable spdk debug logs', dest='spdk_debug', required=False, action='store_true')
 
         sub_command.add_argument("--bdev_io_pool_size", help='bdev_set_options param', dest='bdev_io_pool_size',  type=int, default=0)
         sub_command.add_argument("--bdev_io_cache_size", help='bdev_set_options param', dest='bdev_io_cache_size',  type=int, default=0)
@@ -75,7 +75,7 @@ class CLIWrapper:
         sub_command.add_argument("--cpu-mask", help='SPDK app CPU mask, default is all cores found', dest='spdk_cpu_mask')
         sub_command.add_argument("--memory", help='SPDK huge memory allocation, default is 4G', dest='spdk_mem')
         sub_command.add_argument("--spdk-image", help='SPDK image uri', dest='spdk_image')
-        sub_command.add_argument("--spdk-cmd-params", help='Extra params for SPDK app command', nargs='+', dest='cmd_params')
+        sub_command.add_argument("--spdk-debug", help='Enable spdk debug logs', dest='spdk_debug', required=False, action='store_true')
 
         sub_command.add_argument("--bdev_io_pool_size", help='bdev_set_options param', dest='bdev_io_pool_size',  type=int, default=0)
         sub_command.add_argument("--bdev_io_cache_size", help='bdev_set_options param', dest='bdev_io_cache_size',  type=int, default=0)
@@ -762,7 +762,7 @@ class CLIWrapper:
                 data_nics = args.data_nics
                 dev_split = args.dev_split
                 spdk_image = args.spdk_image
-                cmd_params = args.cmd_params
+                spdk_debug = args.spdk_debug
 
                 bdev_io_pool_size = args.bdev_io_pool_size
                 bdev_io_cache_size = args.bdev_io_cache_size
@@ -783,7 +783,7 @@ class CLIWrapper:
                         return f"SPDK memory:{args.spdk_mem} must be larger than 1G"
 
                 out = storage_ops.add_node(
-                    cluster_id, node_ip, ifname, data_nics, spdk_cpu_mask, spdk_mem, dev_split, spdk_image, cmd_params,
+                    cluster_id, node_ip, ifname, data_nics, spdk_cpu_mask, spdk_mem, dev_split, spdk_image, spdk_debug,
                 bdev_io_pool_size, bdev_io_cache_size, iobuf_small_cache_size, iobuf_large_cache_size)
                 return out
 
@@ -797,7 +797,7 @@ class CLIWrapper:
                 node_id = args.node_id
 
                 spdk_image = args.spdk_image
-                cmd_params = args.cmd_params
+                spdk_debug = args.spdk_debug
 
                 cpu_mask = None
                 if args.spdk_cpu_mask:
@@ -820,7 +820,7 @@ class CLIWrapper:
 
                 ret = storage_ops.restart_storage_node(
                     node_id, cpu_mask, spdk_mem,
-                    spdk_image, cmd_params,
+                    spdk_image, spdk_debug,
                     bdev_io_pool_size, bdev_io_cache_size,
                     iobuf_small_cache_size, iobuf_large_cache_size)
 

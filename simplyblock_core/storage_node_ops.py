@@ -309,7 +309,7 @@ def _connect_to_remote_devs(this_node):
 
 
 def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask,
-             spdk_mem, dev_split=1, spdk_image=None, cmd_params=None,
+             spdk_mem, dev_split=1, spdk_image=None, spdk_debug=False,
              bdev_io_pool_size=0, bdev_io_cache_size=0, iobuf_small_cache_size=0, iobuf_large_cache_size=0):
     db_controller = DBController()
     kv_store = db_controller.kv_store
@@ -357,7 +357,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask,
         return False
 
     logger.info("Deploying SPDK")
-    results, err = snode_api.spdk_process_start(spdk_cpu_mask, spdk_mem, spdk_image, cmd_params, cluster_ip)
+    results, err = snode_api.spdk_process_start(spdk_cpu_mask, spdk_mem, spdk_image, spdk_debug, cluster_ip)
     time.sleep(10)
     if not results:
         logger.error(f"Failed to start spdk: {err}")
@@ -415,7 +415,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask,
     snode.spdk_cpu_mask = spdk_cpu_mask or ""
     snode.spdk_mem = spdk_mem or 0
     snode.spdk_image = spdk_image or ""
-    snode.cmd_params = cmd_params or []
+    snode.spdk_debug = spdk_debug or 0
     snode.write_to_db(kv_store)
 
     # creating RPCClient instance
@@ -762,7 +762,7 @@ def remove_storage_node(node_id, force_remove=False, force_migrate=False):
 
 def restart_storage_node(
         node_id, spdk_cpu_mask, spdk_mem,
-        spdk_image, cmd_params,
+        spdk_image, set_spdk_debug,
         bdev_io_pool_size, bdev_io_cache_size,
         iobuf_small_cache_size, iobuf_large_cache_size):
     db_controller = DBController()
@@ -798,14 +798,14 @@ def restart_storage_node(
     if spdk_image:
         img = spdk_image
         snode.spdk_image = img
-    params = snode.cmd_params
-    if cmd_params:
-        params = cmd_params
-        snode.cmd_params = params
+    spdk_debug = snode.spdk_debug
+    if set_spdk_debug:
+        spdk_debug = spdk_debug
+        snode.spdk_debug = spdk_debug
 
     cluster_docker = utils.get_docker_client(snode.cluster_id)
     cluster_ip = cluster_docker.info()["Swarm"]["NodeAddr"]
-    results, err = snode_api.spdk_process_start(cpu, mem, img, params, cluster_ip)
+    results, err = snode_api.spdk_process_start(cpu, mem, img, spdk_debug, cluster_ip)
 
     if not results:
         logger.error(f"Failed to start spdk: {err}")
