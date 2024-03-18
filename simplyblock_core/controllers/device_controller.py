@@ -1,12 +1,14 @@
 import time
+import logging
 
 from simplyblock_core import distr_controller, utils
 from simplyblock_core.controllers import device_events, lvol_controller
 from simplyblock_core.kv_store import DBController
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.rpc_client import RPCClient
-from simplyblock_core.storage_node_ops import logger
 
+
+logger = logging.getLogger()
 
 
 def device_set_state(device_id, state):
@@ -394,7 +396,7 @@ def reset_storage_device(dev_id):
 
     response = rpc_client.reset_device(device.nvme_bdev)
     if not response:
-        logger.error(f"Failed to reset bdev {device.nvme_bdev}")
+        logger.error(f"Failed to reset bdev {device.nvme_bdev[:-2]}")
 
     device.io_error = False
     device.status = NVMeDevice.STATUS_ONLINE
