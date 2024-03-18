@@ -7,7 +7,7 @@ import sys
 
 
 from simplyblock_core import constants, kv_store, utils, rpc_client
-from simplyblock_core.controllers import events_controller, storage_events, device_controller
+from simplyblock_core.controllers import events_controller, device_controller, lvol_events
 from simplyblock_core.models.lvol_model import LVol
 
 # configure logging
@@ -78,7 +78,7 @@ def process_lvol_event(event):
                 old_status = lvol.status
                 lvol.status = LVol.STATUS_OFFLINE
                 lvol.write_to_db(db_controller.kv_store)
-                storage_events.lvol_status_change(event.cluster_uuid, lvol, lvol.status, old_status, caused_by="monitor")
+                lvol_events.lvol_status_change(lvol, lvol.status, old_status, caused_by="monitor")
             event.status = 'processed'
     else:
         logger.error(f"Unknown LVol event message: {event.message}")
