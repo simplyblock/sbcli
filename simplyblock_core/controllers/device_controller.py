@@ -394,9 +394,11 @@ def reset_storage_device(dev_id):
         snode.mgmt_ip, snode.rpc_port,
         snode.rpc_username, snode.rpc_password)
 
-    response = rpc_client.reset_device(device.nvme_bdev)
+    controller_name = device.nvme_bdev[:-2]
+    response = rpc_client.reset_device(controller_name)
     if not response:
-        logger.error(f"Failed to reset bdev {device.nvme_bdev[:-2]}")
+        logger.error(f"Failed to reset NVMe BDev {controller_name}")
+        return False
 
     device.io_error = False
     device.status = NVMeDevice.STATUS_ONLINE
