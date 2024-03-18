@@ -12,7 +12,8 @@ import docker
 
 from simplyblock_core import constants, scripts, distr_controller
 from simplyblock_core import utils
-from simplyblock_core.controllers import lvol_controller, storage_events, snapshot_controller, device_events
+from simplyblock_core.controllers import lvol_controller, storage_events, snapshot_controller, device_events, \
+    device_controller
 from simplyblock_core.kv_store import DBController
 from simplyblock_core import shell_utils
 from simplyblock_core.models.iface import IFace
@@ -1162,8 +1163,8 @@ def suspend_storage_node(node_id, force=False):
     logger.info("Suspending node")
     distr_controller.send_node_status_event(snode.get_id(), "suspended")
     for dev in snode.nvme_devices:
-        dev.status = 'unavailable'
-        distr_controller.send_dev_status_event(dev.cluster_device_order, "unavailable")
+        if dev.status == NVMeDevice.STATUS_ONLINE:
+            device_controller.device_set_unavailable(dev.get_id())
 
     rpc_client = RPCClient(
         snode.mgmt_ip, snode.rpc_port,

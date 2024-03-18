@@ -36,7 +36,6 @@ def device_set_state(device_id, state):
     return True
 
 
-
 def device_set_io_error(device_id, is_error):
     db_controller = DBController()
     dev = db_controller.get_storage_devices(device_id)
@@ -73,10 +72,8 @@ def device_set_read_only(device_id):
     return device_set_state(device_id, NVMeDevice.STATUS_READONLY)
 
 
-
 def device_set_online(device_id):
     return device_set_state(device_id, NVMeDevice.STATUS_ONLINE)
-
 
 
 def restart_device(device_id):
@@ -207,8 +204,6 @@ def restart_device(device_id):
     return "Done"
 
 
-
-
 def set_device_testing_mode(device_id, mode):
     db_controller = DBController()
     device = db_controller.get_storage_devices(device_id)
@@ -228,7 +223,6 @@ def set_device_testing_mode(device_id, mode):
 
     ret = rpc_client.bdev_passtest_mode(device.testing_bdev, mode)
     return ret
-
 
 
 def device_remove(device_id, force=True):
@@ -300,7 +294,6 @@ def device_remove(device_id, force=True):
     return True
 
 
-
 def get_device(device_id):
     db_controller = DBController()
     device = db_controller.get_storage_devices(device_id)
@@ -309,7 +302,6 @@ def get_device(device_id):
         return False
     out = [device.get_clean_dict()]
     return utils.print_table(out)
-
 
 
 def get_device_capacity(device_id, history, records_count=20, parse_sizes=True):
@@ -342,7 +334,6 @@ def get_device_capacity(device_id, history, records_count=20, parse_sizes=True):
             "Util %": f"{record['size_util']}%",
         })
     return out
-
 
 
 def get_device_iostats(device_id, history, records_count=20, parse_sizes=True):
@@ -380,7 +371,6 @@ def get_device_iostats(device_id, history, records_count=20, parse_sizes=True):
     return out
 
 
-
 def reset_storage_device(dev_id):
     db_controller = DBController()
     device = db_controller.get_storage_devices(dev_id)
@@ -411,4 +401,3 @@ def reset_storage_device(dev_id):
     device.write_to_db(db_controller.kv_store)
     device_events.device_reset(device)
     return True
-
