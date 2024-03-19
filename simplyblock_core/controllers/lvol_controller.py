@@ -516,26 +516,22 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
     else:
         vuid = distr_vuid
 
-    node_count = 0
-    for node in db_controller.get_storage_nodes():
-        if node.status == node.STATUS_ONLINE:
-            node_count += 1
     if distr_ndcs == 0 and distr_npcs == 0:
         if ha_type == "single":
             distr_ndcs = 4
             distr_npcs = 1
         else:
 
-            if node_count == 3:
+            if dev_count == 3:
                 distr_ndcs = 1
-            elif node_count in [4, 5]:
+            elif dev_count in [4, 5]:
                 distr_ndcs = 2
-            elif node_count >= 6:
+            elif dev_count >= 6:
                 distr_ndcs = 4
             distr_npcs = 1
     else:
-        if distr_ndcs + distr_npcs >= node_count:
-            return False, f"ndcs+npcs: {distr_ndcs+distr_npcs} must be less than online node count: {node_count}"
+        if distr_ndcs + distr_npcs >= dev_count:
+            return False, f"ndcs+npcs: {distr_ndcs+distr_npcs} must be less than online devices count: {dev_count}"
 
     lvol = LVol()
     lvol.lvol_name = name
