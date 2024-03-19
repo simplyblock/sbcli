@@ -380,8 +380,8 @@ def reset_storage_device(dev_id):
         logger.error(f"Device not found: {dev_id}")
         return False
 
-    if device.status not in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_UNAVAILABLE]:
-        logger.error(f"Device status: {device.status} is not online or unavailable")
+    if device.status == NVMeDevice.STATUS_REMOVED:
+        logger.error(f"Device status: {device.status} is removed")
         return False
 
     snode = db_controller.get_storage_node_by_id(device.node_id)
