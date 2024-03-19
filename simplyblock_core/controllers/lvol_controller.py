@@ -10,6 +10,7 @@ import uuid
 from simplyblock_core import utils, constants, distr_controller
 from simplyblock_core.controllers import snapshot_controller, pool_controller, lvol_events
 from simplyblock_core.kv_store import DBController
+from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.storage_node import StorageNode
@@ -456,21 +457,6 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
     if cl.status not in [cl.STATUS_ACTIVE, cl.STATUS_DEGRADED]:
         return False, f"Cluster is not active, status: {cl.status}"
 
-    records = db_controller.get_cluster_capacity(cl, 1)
-    if records:
-        record = records[0]
-        size_prov_util = int(((record.size_prov+size) / record.size_total) * 100)
-
-        if cl.prov_cap_crit and cl.prov_cap_crit < size_prov_util:
-            msg = f"Cluster provisioned cap critical, util: {size_prov_util}% of cluster util: {cl.prov_cap_crit}"
-            logger.error(msg)
-            return False, msg
-
-        elif cl.prov_cap_warn and cl.prov_cap_warn < size_prov_util:
-            logger.warning(f"Cluster provisioned cap warning, util: {size_prov_util}% of cluster util: {cl.prov_cap_warn}")
-    else:
-        logger.warning("Cluster capacity records not found")
-
     if ha_type == "default":
         ha_type = cl.ha_type
 
@@ -510,6 +496,25 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
     if len(online_nodes) == 0:
         logger.error("No online Storage nodes found")
         return False, "No online Storage nodes found"
+
+    cluster_size_prov = 0
+    cluster_size_total = 0
+    for lvol in db_controller.get_lvols():
+        cluster_size_prov += lvol.size
+
+    for dev in db_controller.get_storage_devices():
+        if dev.status == NVMeDevice.STATUS_ONLINE:
+            cluster_size_total += dev.size
+
+    cluster_size_prov_util = int(((cluster_size_prov+size) / cluster_size_total) * 100)
+
+    if cl.prov_cap_crit and cl.prov_cap_crit < cluster_size_prov_util:
+        msg = f"Cluster provisioned cap critical would be, util: {cluster_size_prov_util}% of cluster util: {cl.prov_cap_crit}"
+        logger.error(msg)
+        return False, msg
+
+    elif cl.prov_cap_warn and cl.prov_cap_warn < cluster_size_prov_util:
+        logger.warning(f"Cluster provisioned cap warning, util: {cluster_size_prov_util}% of cluster util: {cl.prov_cap_warn}")
 
     if distr_vuid == 0:
         vuid = 1 + int(random.random() * 10000)
