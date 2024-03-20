@@ -321,7 +321,10 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask,
         return False
 
     logger.info(f"Adding Storage node: {node_ip}")
-    snode_api = SNodeClient(node_ip)
+    timeout = 60
+    if spdk_image:
+        timeout = 5*60
+    snode_api = SNodeClient(node_ip, timeout=timeout)
     node_info, _ = snode_api.info()
     logger.info(f"Node found: {node_info['hostname']}")
     if "cluster_id" in node_info and node_info['cluster_id']:
