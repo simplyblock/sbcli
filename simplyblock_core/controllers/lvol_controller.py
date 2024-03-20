@@ -919,7 +919,7 @@ def list_lvols(is_json):
 def get_lvol(lvol_id_or_name, is_json):
     lvol = None
     for lv in db_controller.get_lvols():
-        if lv.get_id() == lvol_id_or_name or lv.get_name() == lvol_id_or_name:
+        if lv.get_id() == lvol_id_or_name or lv.lvol_name == lvol_id_or_name:
             lvol = lv
             break
 
