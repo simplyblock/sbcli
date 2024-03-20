@@ -1040,7 +1040,7 @@ def list_storage_devices(kv_store, node_id, sort, is_json):
             "Serial Number": device.serial_number,
             "PCIe": device.pcie_address,
             "Status": device.status,
-            "IO Error": device.io_error,
+            "IO Err": device.io_error,
             "Health": device.health_check,
 
         })

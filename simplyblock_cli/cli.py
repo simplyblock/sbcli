@@ -469,7 +469,7 @@ class CLIWrapper:
         sub_command.add_argument("--json", help='Print outputs in json format', required=False, action='store_true')
         # get lvol
         sub_command = self.add_sub_command(subparser, 'get', 'Get LVol details')
-        sub_command.add_argument("id", help='LVol id')
+        sub_command.add_argument("id", help='LVol id or name')
         sub_command.add_argument("--json", help='Print outputs in json format', required=False, action='store_true')
         # delete lvol
         sub_command = self.add_sub_command(

@@ -906,6 +906,7 @@ def list_lvols(is_json):
             "VUID": lvol.vuid,
             "Mod": f"{lvol.ndcs}x{lvol.npcs}",
             "Status": lvol.status,
+            "IO Err": lvol.io_error,
             "Health": lvol.health_check,
         })
 
@@ -915,10 +916,15 @@ def list_lvols(is_json):
         return utils.print_table(data)
 
 
-def get_lvol(lvol_id, is_json):
-    lvol = db_controller.get_lvol_by_id(lvol_id)
+def get_lvol(lvol_id_or_name, is_json):
+    lvol = None
+    for lv in db_controller.get_lvols():
+        if lv.get_id() == lvol_id_or_name or lv.get_name() == lvol_id_or_name:
+            lvol = lv
+            break
+
     if not lvol:
-        logger.error(f"lvol not found: {lvol_id}")
+        logger.error(f"LVol id or name not found: {lvol_id_or_name}")
         return False
 
     data = lvol.get_clean_dict()
