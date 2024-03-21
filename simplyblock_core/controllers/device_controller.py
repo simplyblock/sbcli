@@ -244,6 +244,13 @@ def device_remove(device_id, force=True):
             device = dev
             break
 
+    if device.jm_bdev:
+        if snode.lvols:
+            logger.error(f"Failed to remove device: {device.get_id()}, "
+                         f"there are LVols that uses JM from this device, use --force to force removal")
+            if not force:
+                return False
+
     logger.info("Sending device event")
     distr_controller.send_dev_status_event(device.cluster_device_order, "removed")
 
