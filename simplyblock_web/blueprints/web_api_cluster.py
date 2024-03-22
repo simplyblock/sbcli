@@ -93,7 +93,7 @@ def list_clusters(uuid):
 @bp.route('/cluster/capacity/<string:uuid>/history/<string:history>', methods=['GET'])
 @bp.route('/cluster/capacity/<string:uuid>', methods=['GET'], defaults={'history': None})
 def cluster_capacity(uuid, history):
-    cluster = db_controller.get_cluster_by_id(id=uuid)
+    cluster = db_controller.get_cluster_by_id(uuid)
     if not cluster:
         logger.error(f"Cluster not found {uuid}")
         return utils.get_response_error(f"Cluster not found: {uuid}", 404)
@@ -105,7 +105,7 @@ def cluster_capacity(uuid, history):
 @bp.route('/cluster/iostats/<string:uuid>/history/<string:history>', methods=['GET'])
 @bp.route('/cluster/iostats/<string:uuid>', methods=['GET'], defaults={'history': None})
 def cluster_iostats(uuid, history):
-    cluster = db_controller.get_cluster_by_id(id=uuid)
+    cluster = db_controller.get_cluster_by_id(uuid)
     if not cluster:
         logger.error(f"Cluster not found {uuid}")
         return utils.get_response_error(f"Cluster not found: {uuid}", 404)
@@ -116,7 +116,7 @@ def cluster_iostats(uuid, history):
 
 @bp.route('/cluster/status/<string:uuid>', methods=['GET'])
 def cluster_status(uuid):
-    cluster = db_controller.get_cluster_by_id(id=uuid)
+    cluster = db_controller.get_cluster_by_id(uuid)
     if not cluster:
         logger.error(f"Cluster not found {uuid}")
         return utils.get_response_error(f"Cluster not found: {uuid}", 404)
@@ -136,7 +136,7 @@ def cluster_disable(uuid):
 
 @bp.route('/cluster/get-logs/<string:uuid>', methods=['GET'])
 def cluster_get_logs(uuid):
-    cluster = db_controller.get_cluster_by_id(id=uuid)
+    cluster = db_controller.get_cluster_by_id(uuid)
     if not cluster:
         return utils.get_response_error(f"Cluster not found: {uuid}", 404)
     if cluster.status == Cluster.STATUS_INACTIVE:
