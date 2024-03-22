@@ -5,4 +5,3 @@ SIMPLY_BLOCK_VERSION=1.7.9
 SIMPLY_BLOCK_DOCKER_IMAGE=simplyblock/simplyblock:dev
 
 DOCKER_USER=hamdysimplyblock
-DOCKER_PASS='T4$EFjf@^rfvwxt'
