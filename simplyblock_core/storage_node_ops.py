@@ -93,7 +93,7 @@ def addNvmeDevices(cluster, rpc_client, devs, snode):
         if pcie in ctr_map:
             nvme_bdev = ctr_map[pcie] + "n1"
         else:
-            name = "nvme_%s" % pcie.split(":")[2].split(".")[0]
+            name = "nvme_%s" % index
             ret, err = rpc_client.bdev_nvme_controller_attach(name, pcie)
             time.sleep(2)
             nvme_bdev = f"{name}n1"
@@ -1197,12 +1197,12 @@ def resume_storage_node(node_id):
     snode = db_controller.get_storage_node_by_id(node_id)
     if not snode:
         logger.error("This storage node is not part of the cluster")
-        exit(1)
+        return False
 
     logger.info("Node found: %s in state: %s", snode.hostname, snode.status)
     if snode.status != StorageNode.STATUS_SUSPENDED:
         logger.error("Node is not in suspended state")
-        exit(1)
+        return False
 
     logger.info("Resuming node")
 
@@ -1210,8 +1210,8 @@ def resume_storage_node(node_id):
     distr_controller.send_node_status_event(snode.get_id(), "online")
 
     for dev in snode.nvme_devices:
-        dev.status = 'online'
-        distr_controller.send_dev_status_event(dev.cluster_device_order, "online")
+        if dev.status == NVMeDevice.STATUS_UNAVAILABLE:
+            device_controller.device_set_online(dev.get_id())
 
     rpc_client = RPCClient(
         snode.mgmt_ip, snode.rpc_port,
