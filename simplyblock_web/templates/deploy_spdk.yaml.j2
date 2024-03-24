@@ -31,11 +31,40 @@ spec:
         - name: hugepage
           emptyDir:
             medium: HugePages
+        - name: script-volume
+          emptyDir: {}
+        - name: script-config
+          configMap:
+            name: caching-node-restart-script-cm
+      initContainers:
+        - name: copy-script
+          image: busybox
+          command: ["sh", "-c", "cp /config/restart_script.py /script/restart_script.py"]
+          volumeMounts:
+            - name: script-volume
+              mountPath: /script
+            - name: script-config
+              mountPath: /config
       containers:
       - name: spdk-container
         image: {{ SPDK_IMAGE }}
         imagePullPolicy: "Always"
         command: ["/root/scripts/run_spdk_tgt.sh", "{{ SPDK_CPU_MASK }}", "{{ SPDK_MEM }}"]
+        lifecycle:
+          postStart:
+            exec:
+              command: ["/usr/bin/python3", "/script/restart_script.py"]
+        env:
+          - name: SPDKCSI_SECRET
+            valueFrom:
+              secretKeyRef:
+                name: spdkcsi-secret
+                key: secret.json
+          - name: CLUSTER_CONFIG
+            valueFrom:
+              configMapKeyRef:
+                name: spdkcsi-cm
+                key: config.json
         securityContext:
           privileged: true
         volumeMounts:
@@ -47,6 +76,8 @@ spec:
           mountPath: /lib/modules
         - name: dev-vol
           mountPath: /dev
+        - name: script-volume
+          mountPath: /script
         resources:
           limits:
             hugepages-2Mi: 2Gi
