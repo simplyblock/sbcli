@@ -1214,6 +1214,20 @@ def move(lvol_id, node_id, force=False):
         if not force:
             logger.error(f"Node is online!: {src_node.get_id()}, use --force to force move")
             return False
-        delete_lvol(lvol_id)
 
-    return migrate(lvol_id, node_id)
+    if migrate(lvol_id, node_id):
+        if src_node.status == StorageNode.STATUS_ONLINE:
+            # delete lvol
+            if lvol.ha_type == 'single':
+                delete_lvol_from_node(lvol, lvol.node_id)
+            elif lvol.ha_type == "ha":
+                for nodes_id in lvol.nodes:
+                    delete_lvol_from_node(lvol, nodes_id)
+
+            # remove from storage node
+            src_node.lvols.remove(lvol_id)
+            src_node.write_to_db(db_controller.kv_store)
+        return True
+    else:
+        logger.error("Failed to migrate lvol")
+        return False
