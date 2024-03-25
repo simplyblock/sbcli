@@ -201,8 +201,8 @@ services:
       - "plugins.security.ssl.http.enabled=false"
       - "plugins.security.disabled=true"
     ports:
-    - "9200:9200"
-    - "9600:9600"  # required for Performance Analyzer
+      - "9200:9200"
+      - "9600:9600"  # required for Performance Analyzer
     volumes:
       - "os_data:/usr/share/opensearch/data"
     deploy:
