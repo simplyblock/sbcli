@@ -1724,3 +1724,18 @@ def get_spdk_info(node_id):
     return utils.print_table(data)
 
 
+def update(node_id, key, value):
+    db_controller = DBController()
+
+    snode = db_controller.get_storage_node_by_id(node_id)
+    if not snode:
+        logger.error(f"Can not find storage node: {node_id}")
+        return False
+
+    if key in snode._attribute_map:
+        setattr(snode, key, value)
+        snode.write_to_db(db_controller.kv_store)
+        return True
+    else:
+        logger.error("Key not found")
+        return False
