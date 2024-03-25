@@ -1739,3 +1739,15 @@ def update(node_id, key, value):
     else:
         logger.error("Key not found")
         return False
+
+
+def get(node_id):
+    db_controller = DBController()
+
+    snode = db_controller.get_storage_node_by_id(node_id)
+    if not snode:
+        logger.error(f"Can not find storage node: {node_id}")
+        return False
+
+    data = snode.get_clean_dict()
+    return json.dumps(data, indent=2)

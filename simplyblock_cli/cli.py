@@ -66,6 +66,9 @@ class CLIWrapper:
         sub_command.add_argument("--cluster-id", help='id of the cluster for which nodes are listed')
         sub_command.add_argument("--json", help='Print outputs in json format', action='store_true')
 
+        sub_command = self.add_sub_command(subparser, "get", 'Get storage node info')
+        sub_command.add_argument("id", help='UUID of storage node')
+
         sub_command = self.add_sub_command(subparser, "update", 'Update storage node db info')
         sub_command.add_argument("id", help='UUID of storage node')
         sub_command.add_argument("key", help='Key')
@@ -948,6 +951,10 @@ class CLIWrapper:
 
             elif sub_command == "update":
                 ret = storage_ops.update(args.id, args.key, args.value)
+
+            elif sub_command == "get":
+                ret = storage_ops.get(args.id)
+
             else:
                 self.parser.print_help()
 
