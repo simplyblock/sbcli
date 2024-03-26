@@ -11,12 +11,12 @@ from simplyblock_core.controllers import events_controller, device_controller, l
 from simplyblock_core.models.lvol_model import LVol
 
 # Import the GELF logger
-from graypy import GELFHandler
+from graypy import GELFUDPHandler
 
 # configure logging
 logger_handler = logging.StreamHandler(stream=sys.stdout)
 logger_handler.setFormatter(logging.Formatter('%(asctime)s: %(levelname)s: %(message)s'))
-gelf_handler = GELFHandler('0.0.0.0', 12201)
+gelf_handler = GELFUDPHandler('0.0.0.0', 12201)
 logger = logging.getLogger()
 logger.addHandler(gelf_handler)
 logger.addHandler(logger_handler)
