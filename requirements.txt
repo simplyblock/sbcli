@@ -13,3 +13,4 @@ flask
 kubernetes
 PyYAML
 urllib3
+graypy==2.1.0
