@@ -27,47 +27,80 @@ db_store = kv_store.KVStore()
 db_controller = kv_store.DBController(kv_store=db_store)
 
 
+def get_cluster_target_status(cluster):
+    snodes = db_controller.get_storage_nodes()
+
+    online_nodes = 0
+    offline_nodes = 0
+    affected_nodes = 0
+    online_devices = 0
+    offline_devices = 0
+
+    for node in snodes:
+        if node.status == node.STATUS_ONLINE:
+            online_nodes += 1
+            node_online_devices = 0
+            node_offline_devices = 0
+            for dev in node.nvme_devices:
+                if dev.status == NVMeDevice.STATUS_ONLINE:
+                    node_online_devices += 1
+                else:
+                    node_offline_devices += 1
+
+            if node_offline_devices > 0 or node_online_devices == 0:
+                affected_nodes += 1
+
+            online_devices += node_online_devices
+            offline_devices += node_offline_devices
+
+        else:
+            offline_nodes += 1
+
+    logger.debug(f"online_nodes: {online_nodes}")
+    logger.debug(f"offline_nodes: {offline_nodes}")
+    logger.debug(f"affected_nodes: {affected_nodes}")
+    logger.debug(f"online_devices: {online_devices}")
+    logger.debug(f"offline_devices: {offline_devices}")
+
+    # if less than 3 online nodes then suspend
+    if affected_nodes > 2:
+        return Cluster.STATUS_SUSPENDED
+
+    # if more than two affected modes then cluster is suspended
+    if affected_nodes > 2:
+        return Cluster.STATUS_SUSPENDED
+
+    # if any device goes offline then cluster is degraded
+    if offline_devices > 0:
+        return Cluster.STATUS_DEGRADED
+
+    # if any node goes offline then cluster is degraded
+    if offline_nodes > 0:
+        return Cluster.STATUS_DEGRADED
+
+    return Cluster.STATUS_ACTIVE
+
+
 def update_cluster_status(cluster_id):
     cluster = db_controller.get_cluster_by_id(cluster_id)
 
-    snodes = db_controller.get_storage_nodes()
-    online_nodes = 0
-    for node in snodes:
-        if node.status == node.STATUS_ONLINE:
-            online_devices = 0
-            for dev in node.nvme_devices:
-                if dev.status == NVMeDevice.STATUS_ONLINE:
-                    online_devices += 1
-            if online_devices > 0:
-                online_nodes += 1
-    other_nodes = len(snodes) - online_nodes
     if cluster.ha_type == "ha":
-        if online_nodes < 3:
-            if cluster.status == Cluster.STATUS_ACTIVE:
-                logger.warning(f"Cluster mode is HA=1 but online storage nodes are less than 3, "
-                               f"suspending cluster: {cluster_id}")
-                cluster_ops.suspend_cluster(cluster_id)
-        else:
-            if cluster.status == Cluster.STATUS_SUSPENDED and other_nodes < 2:
-                logger.info(f"Cluster mode is HA=1 and online storage nodes are 3 or more, "
-                            f"resuming cluster: {cluster_id}")
-                cluster_ops.unsuspend_cluster(cluster_id)
+        cluster_target_status = get_cluster_target_status(cluster)
+        logger.info(f"Target cluster status {cluster_target_status}, current status: {cluster.status}")
+        if cluster.status == cluster_target_status:
+            return
 
-        if other_nodes == 0:
-            if cluster.status == Cluster.STATUS_DEGRADED:
-                logger.info(f"Cluster mode is HA=1 and offline storage nodes is 0, "
-                            f"setting cluster to active: {cluster_id}")
-                cluster_ops.unsuspend_cluster(cluster_id)
-        elif other_nodes == 1:
-            if cluster.status == Cluster.STATUS_ACTIVE:
-                logger.warning(f"Cluster mode is HA=1 and offline storage nodes is 1, "
-                               f"degrading cluster: {cluster_id}")
-                cluster_ops.degrade_cluster(cluster_id)
-        elif other_nodes > 1:
-            if cluster.status in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED]:
-                logger.warning(f"Cluster mode is HA=1 and offline storage nodes is more than 1, "
-                               f"suspending cluster: {cluster_id}")
-                cluster_ops.suspend_cluster(cluster_id)
+        if cluster_target_status == Cluster.STATUS_ACTIVE:
+            logger.info(f"Resuming cluster: {cluster_id}")
+            cluster_ops.unsuspend_cluster(cluster_id)
+
+        elif cluster_target_status == Cluster.STATUS_SUSPENDED:
+            logger.warning(f"Suspending cluster: {cluster_id}")
+            cluster_ops.suspend_cluster(cluster_id)
+
+        elif cluster_target_status == Cluster.STATUS_DEGRADED:
+            logger.warning(f"Degrading cluster: {cluster_id}")
+            cluster_ops.degrade_cluster(cluster_id)
 
 
 def set_node_online(node):
