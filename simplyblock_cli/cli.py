@@ -49,10 +49,10 @@ class CLIWrapper:
         sub_command.add_argument("--spdk-image", help='SPDK image uri', dest='spdk_image')
         sub_command.add_argument("--spdk-debug", help='Enable spdk debug logs', dest='spdk_debug', required=False, action='store_true')
 
-        sub_command.add_argument("--bdev_io_pool_size", help='bdev_set_options param', dest='bdev_io_pool_size',  type=int, default=0)
-        sub_command.add_argument("--bdev_io_cache_size", help='bdev_set_options param', dest='bdev_io_cache_size',  type=int, default=0)
-        sub_command.add_argument("--iobuf_small_cache_size", help='bdev_set_options param', dest='iobuf_small_cache_size',  type=int, default=0)
-        sub_command.add_argument("--iobuf_large_cache_size", help='bdev_set_options param', dest='iobuf_large_cache_size',  type=int, default=0)
+        sub_command.add_argument("--iobuf_small_pool_count", help='bdev_set_options param', dest='small_pool_count',  type=int, default=0)
+        sub_command.add_argument("--iobuf_large_pool_count", help='bdev_set_options param', dest='large_pool_count',  type=int, default=0)
+        sub_command.add_argument("--iobuf_small_bufsize", help='bdev_set_options param', dest='small_bufsize',  type=int, default=0)
+        sub_command.add_argument("--iobuf_large_bufsize", help='bdev_set_options param', dest='large_bufsize',  type=int, default=0)
 
         # remove storage node
         sub_command = self.add_sub_command(subparser, "remove", 'Remove storage node')
@@ -85,10 +85,10 @@ class CLIWrapper:
         sub_command.add_argument("--spdk-image", help='SPDK image uri', dest='spdk_image')
         sub_command.add_argument("--spdk-debug", help='Enable spdk debug logs', dest='spdk_debug', required=False, action='store_true')
 
-        sub_command.add_argument("--bdev_io_pool_size", help='bdev_set_options param', dest='bdev_io_pool_size',  type=int, default=0)
-        sub_command.add_argument("--bdev_io_cache_size", help='bdev_set_options param', dest='bdev_io_cache_size',  type=int, default=0)
-        sub_command.add_argument("--iobuf_small_cache_size", help='bdev_set_options param', dest='iobuf_small_cache_size',  type=int, default=0)
-        sub_command.add_argument("--iobuf_large_cache_size", help='bdev_set_options param', dest='iobuf_large_cache_size',  type=int, default=0)
+        sub_command.add_argument("--iobuf_small_pool_count", help='bdev_set_options param', dest='small_pool_count',  type=int, default=0)
+        sub_command.add_argument("--iobuf_large_pool_count", help='bdev_set_options param', dest='large_pool_count',  type=int, default=0)
+        sub_command.add_argument("--iobuf_small_bufsize", help='bdev_set_options param', dest='small_bufsize',  type=int, default=0)
+        sub_command.add_argument("--iobuf_large_bufsize", help='bdev_set_options param', dest='large_bufsize',  type=int, default=0)
 
         # sub_command.add_argument("-t", '--test', help='Run smart test on the NVMe devices', action='store_true')
 
@@ -776,10 +776,10 @@ class CLIWrapper:
                 spdk_image = args.spdk_image
                 spdk_debug = args.spdk_debug
 
-                bdev_io_pool_size = args.bdev_io_pool_size
-                bdev_io_cache_size = args.bdev_io_cache_size
-                iobuf_small_cache_size = args.iobuf_small_cache_size
-                iobuf_large_cache_size = args.iobuf_large_cache_size
+                small_pool_count = args.small_pool_count
+                large_pool_count = args.large_pool_count
+                small_bufsize = args.small_bufsize
+                large_bufsize = args.large_bufsize
 
                 spdk_cpu_mask = None
                 if args.spdk_cpu_mask:
@@ -796,7 +796,7 @@ class CLIWrapper:
 
                 out = storage_ops.add_node(
                     cluster_id, node_ip, ifname, data_nics, spdk_cpu_mask, spdk_mem, dev_split, spdk_image, spdk_debug,
-                bdev_io_pool_size, bdev_io_cache_size, iobuf_small_cache_size, iobuf_large_cache_size)
+                    small_pool_count, large_pool_count, small_bufsize, large_bufsize)
                 return out
 
             elif sub_command == "list":
@@ -825,16 +825,16 @@ class CLIWrapper:
                         return f"SPDK memory:{args.spdk_mem} must be larger than 1G"
 
 
-                bdev_io_pool_size = args.bdev_io_pool_size
-                bdev_io_cache_size = args.bdev_io_cache_size
-                iobuf_small_cache_size = args.iobuf_small_cache_size
-                iobuf_large_cache_size = args.iobuf_large_cache_size
+                small_pool_count = args.small_pool_count
+                large_pool_count = args.large_pool_count
+                small_bufsize = args.small_bufsize
+                large_bufsize = args.large_bufsize
 
                 ret = storage_ops.restart_storage_node(
                     node_id, cpu_mask, spdk_mem,
                     spdk_image, spdk_debug,
-                    bdev_io_pool_size, bdev_io_cache_size,
-                    iobuf_small_cache_size, iobuf_large_cache_size)
+                    small_pool_count, large_pool_count,
+                    small_bufsize, large_bufsize)
 
             elif sub_command == "list-devices":
                 ret = self.storage_node_list_devices(args)

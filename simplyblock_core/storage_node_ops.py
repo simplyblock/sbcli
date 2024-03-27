@@ -311,7 +311,7 @@ def _connect_to_remote_devs(this_node):
 
 def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask,
              spdk_mem, dev_split=1, spdk_image=None, spdk_debug=False,
-             bdev_io_pool_size=0, bdev_io_cache_size=0, iobuf_small_cache_size=0, iobuf_large_cache_size=0):
+             small_pool_count=0, large_pool_count=0, small_bufsize=0, large_bufsize=0):
     db_controller = DBController()
     kv_store = db_controller.kv_store
 
@@ -427,13 +427,16 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask,
         snode.mgmt_ip, snode.rpc_port,
         snode.rpc_username, snode.rpc_password)
 
-    bdev_io_pool_size = bdev_io_pool_size or 0
-    bdev_io_cache_size = bdev_io_cache_size or 0
-    iobuf_small_cache_size = iobuf_small_cache_size or 0
-    iobuf_large_cache_size = iobuf_large_cache_size or 0
+    small_pool_count = small_pool_count or 0
+    large_pool_count = large_pool_count or 0
+    small_bufsize = small_bufsize or 0
+    large_bufsize = large_bufsize or 0
     # set bdev options
-    rpc_client.bdev_set_options(
-        bdev_io_pool_size, bdev_io_cache_size, iobuf_small_cache_size, iobuf_large_cache_size)
+    # rpc_client.bdev_set_options(
+    #     bdev_io_pool_size, bdev_io_cache_size, iobuf_small_cache_size, iobuf_large_cache_size)
+
+    rpc_client.iobuf_set_options(
+        small_pool_count, large_pool_count, small_bufsize, large_bufsize)
 
     # set nvme bdev options
     rpc_client.bdev_nvme_set_options()
@@ -771,10 +774,8 @@ def restart_storage_node(
         spdk_mem=None,
         spdk_image=None,
         set_spdk_debug=None,
-        bdev_io_pool_size=None,
-        bdev_io_cache_size=None,
-        iobuf_small_cache_size=None,
-        iobuf_large_cache_size=None):
+        small_pool_count=0, large_pool_count=0,
+        small_bufsize=0, large_bufsize=0):
 
     db_controller = DBController()
     kv_store = db_controller.kv_store
@@ -836,13 +837,15 @@ def restart_storage_node(
         snode.rpc_username, snode.rpc_password,
         timeout=10 * 60, retry=5)
 
-    bdev_io_pool_size = bdev_io_pool_size or 0
-    bdev_io_cache_size = bdev_io_cache_size or 0
-    iobuf_small_cache_size = iobuf_small_cache_size or 0
-    iobuf_large_cache_size = iobuf_large_cache_size or 0
+    small_pool_count = small_pool_count or 0
+    large_pool_count = large_pool_count or 0
+    small_bufsize = small_bufsize or 0
+    large_bufsize = large_bufsize or 0
     # set bdev options
-    rpc_client.bdev_set_options(
-        bdev_io_pool_size, bdev_io_cache_size, iobuf_small_cache_size, iobuf_large_cache_size)
+    # rpc_client.bdev_set_options(
+    #     bdev_io_pool_size, bdev_io_cache_size, iobuf_small_cache_size, iobuf_large_cache_size)
+    rpc_client.iobuf_set_options(
+        small_pool_count, large_pool_count, small_bufsize, large_bufsize)
 
     # set nvme bdev options
     rpc_client.bdev_nvme_set_options()

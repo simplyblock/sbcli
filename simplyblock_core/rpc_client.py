@@ -530,6 +530,22 @@ class RPCClient:
         else:
             return False
 
+    def iobuf_set_options(self, small_pool_count, large_pool_count, small_bufsize, large_bufsize):
+        params = {}
+        if small_pool_count > 0:
+            params['small_pool_count'] = small_pool_count
+        if large_pool_count > 0:
+            params['large_pool_count'] = large_pool_count
+        if small_bufsize > 0:
+            params['small_bufsize'] = small_bufsize
+        if large_bufsize > 0:
+            params['large_bufsize'] = large_bufsize
+        if params:
+            return self._request("iobuf_set_options", params)
+        else:
+            return False
+
+
     def distr_status_events_get(self):
         return self._request("distr_status_events_get")
 
