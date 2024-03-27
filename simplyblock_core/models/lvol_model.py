@@ -10,6 +10,7 @@ class LVol(BaseModel):
 
     STATUS_ONLINE = 'online'
     STATUS_OFFLINE = 'offline'
+    STATUS_IN_DELETION = 'in_deletion'
 
     attributes = {
         "lvol_name": {"type": str, 'default': ""},
@@ -57,6 +58,8 @@ class LVol(BaseModel):
 
         "snapshot_name": {"type": str, 'default': ""},
         "io_error": {"type": bool, 'default': False},
+
+        "deletion_status": {"type": str, 'default': ""},
 
     }
 

@@ -602,3 +602,11 @@ class RPCClient:
         params = {"socket_id": 0}
         return self._request("ultra21_util_get_malloc_stats", params)
 
+    def alceml_unmap_vuid(self, name, vuid):
+        params = {"name": name, "vuid": vuid}
+        return self._request("alceml_unmap_vuid", params)
+
+    def jm_delete(self):
+        params = {"name": 0, "vuid": 0}
+        return self._request("jm_delete", params)
+

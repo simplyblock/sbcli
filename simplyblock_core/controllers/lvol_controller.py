@@ -169,6 +169,7 @@ def get_jm_names(snode):
     return [f"jm_{snode.get_id()}"]
 
 
+# Deprecated
 def add_lvol(name, size, host_id_or_name, pool_id_or_name, use_comp, use_crypto,
              distr_vuid, distr_ndcs, distr_npcs,
              max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes,
@@ -556,28 +557,56 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
     lvol.mode = 'read-write'
     lvol.lvol_type = 'lvol'
     lvol.nqn = cl.nqn + ":lvol:" + lvol.uuid
+
     lvol.ndcs = distr_ndcs
     lvol.npcs = distr_npcs
     lvol.distr_bs = distr_bs
     lvol.distr_chunk_bs = distr_chunk_bs
     lvol.distr_page_size = cl.page_size_in_blocks
+
     lvol.base_bdev = f"distr_{lvol.vuid}_{name}"
-    # lvol.top_bdev = lvol.lvol_bdev
     lvol.top_bdev = lvol.base_bdev
 
-    lvol.bdev_stack.append({"type": "distr", "name": lvol.base_bdev})
-    # lvol.bdev_stack.append({"type": "lvs", "name": lvol.lvs_name})
-    # lvol.bdev_stack.append({"type": "lvol", "name": lvol.lvol_bdev})
+    lvol.bdev_stack.append({
+        "type": "distr",
+        "name": lvol.base_bdev,
+        "params": {
+            "name": lvol.base_bdev,
+            "vuid": lvol.vuid,
+            "ndcs": lvol.ndcs,
+            "npcs": lvol.npcs,
+            "num_blocks": int(lvol.size / lvol.distr_bs),
+            "block_size": lvol.distr_bs,
+            "chunk_size": lvol.distr_chunk_bs,
+            "pba_page_size":  lvol.distr_page_size,
+        }
+    })
 
     if use_crypto is True:
         lvol.crypto_bdev = f"crypto_{lvol.lvol_name}"
-        lvol.bdev_stack.append({"type": "crypto", "name": lvol.crypto_bdev})
+        lvol.bdev_stack.append({
+            "type": "crypto",
+            "name": lvol.crypto_bdev,
+            "params": {
+                "name": lvol.crypto_bdev,
+                "base_name": lvol.lvol_bdev
+            }
+        })
         lvol.lvol_type += ',crypto'
         lvol.top_bdev = lvol.crypto_bdev
 
     if use_comp is True:
+        base_bdev = lvol.lvol_bdev
+        if lvol.crypto_bdev:
+            base_bdev = lvol.crypto_bdev
         lvol.comp_bdev = f"comp_{lvol.lvol_name}"
-        lvol.bdev_stack.append({"type": "comp", "name": lvol.comp_bdev})
+        lvol.bdev_stack.append({
+            "type": "comp",
+            "name": lvol.comp_bdev,
+            "params": {
+                "base_bdev_name": base_bdev
+            }
+        })
         lvol.lvol_type += ',compress'
         lvol.top_bdev = lvol.comp_bdev
 
@@ -628,34 +657,52 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
     return lvol.uuid, None
 
 
-def add_lvol_on_node(lvol, snode, ha_comm_addrs=None, ha_inode_self=None):
-    jm_names = get_jm_names(snode)
+def _create_bdev_stack(lvol, snode, ha_comm_addrs, ha_inode_self):
     rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
-    num_blocks = int(lvol.size / lvol.distr_bs)
-    ret = rpc_client.bdev_distrib_create(
-        lvol.base_bdev, lvol.vuid, lvol.ndcs, lvol.npcs, num_blocks,
-        lvol.distr_bs, jm_names, lvol.distr_chunk_bs, ha_comm_addrs, ha_inode_self, lvol.distr_page_size)
+    created_bdevs = []
+    for bdev in lvol.bdev_stack:
+        if bdev['status'] == 'created':
+            continue
+
+        type = bdev['type']
+        name = bdev['name']
+        params = bdev['params']
+        ret = None
+
+        if type == "distr":
+            params['jm_names'] = get_jm_names(snode)
+            params['ha_comm_addrs'] = ha_comm_addrs
+            params['ha_inode_self'] = ha_inode_self
+            ret = rpc_client.bdev_distrib_create(**params)
+
+        elif type == "crypto":
+            ret = _create_crypto_lvol(rpc_client, **params)
+
+        elif type == "comp":
+            ret = _create_compress_lvol(rpc_client, **params)
+
+        else:
+            return False, f"Unknown BDev type: {type}"
+
+        if ret:
+            bdev['status'] = "created"
+            created_bdevs.append(bdev)
+        else:
+            if created_bdevs:
+                # rollback
+                _remove_bdev_stack(created_bdevs, rpc_client)
+            return False, f"Failed to create BDev: {name}"
+
+    return True, None
+
+
+def add_lvol_on_node(lvol, snode, ha_comm_addrs, ha_inode_self):
+
+    ret, msg = _create_bdev_stack(lvol, snode, ha_comm_addrs, ha_inode_self)
     if not ret:
-        logger.error("Failed to create Distr bdev")
-        return False, "Failed to create Distr bdev"
-    if ret == "?":
-        logger.error(f"Failed to create Distr bdev, ret={ret}")
-        # return False
+        return False, msg
 
-    if lvol.crypto_bdev:
-        crypto_bdev = _create_crypto_lvol(rpc_client, lvol.crypto_bdev, lvol.lvol_bdev)
-        if not crypto_bdev:
-            return False, "Error creating crypto bdev"
-
-    if lvol.comp_bdev:
-        base_bdev = lvol.lvol_bdev
-        if lvol.crypto_bdev:
-            base_bdev = lvol.crypto_bdev
-
-        comp_bdev = _create_compress_lvol(rpc_client, base_bdev)
-        if not comp_bdev:
-            return False, "Error creating comp bdev"
-
+    rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
     logger.info("creating subsystem %s", lvol.nqn)
     ret = rpc_client.subsystem_create(lvol.nqn, 'sbcli-cn', lvol.uuid)
     logger.debug(ret)
@@ -682,10 +729,12 @@ def add_lvol_on_node(lvol, snode, ha_comm_addrs=None, ha_inode_self=None):
             ret = rpc_client.nvmf_subsystem_listener_set_ana_state(
                 lvol.nqn, iface.ip4_address, "4420", is_optimized)
 
-    logger.info("add lvol to subsystem")
+    logger.info("Add BDev to subsystem")
     ret = rpc_client.nvmf_subsystem_add_ns(lvol.nqn, lvol.top_bdev, lvol.uuid, lvol.guid)
+    if not ret:
+        return False, "Failed to add bdev to subsystem"
 
-    logger.info("Sending cluster map to the lvol")
+    logger.info("Sending cluster map to LVol")
     snodes = db_controller.get_storage_nodes()
     cluster_map_data = distr_controller.get_distr_cluster_map(snodes, snode)
     cluster_map_data['UUID_node_target'] = snode.get_id()
@@ -722,53 +771,63 @@ def recreate_lvol(lvol_id, snode):
     return lvol
 
 
+def _remove_bdev_stack(bdev_stack, rpc_client):
+    for bdev in bdev_stack:
+        if bdev['status'] == 'deleted':
+            continue
+
+        type = bdev['type']
+        name = bdev['name']
+        ret = None
+        # if type == "alceml":
+        #     ret = rpc_client.bdev_alceml_delete(name)
+        if type == "distr":
+            ret = rpc_client.bdev_distrib_delete(name)
+        # elif type == "lvs":
+        #     ret = rpc_client.bdev_lvol_delete_lvstore(name)
+        # elif type == "lvol":
+        #     ret = rpc_client.delete_lvol(name)
+        # elif type == "ultra_pt":
+        #     ret = rpc_client.ultra21_bdev_pass_delete(name)
+        elif type == "comp":
+            ret = rpc_client.lvol_compress_delete(name)
+        elif type == "crypto":
+            ret = rpc_client.lvol_crypto_delete(name)
+        else:
+            logger.error(f"Unknown BDev type: {type}")
+
+        if not ret:
+            logger.error(f"Failed to delete BDev {name}")
+
+        bdev['status'] = 'deleted'
+
+
 def delete_lvol_from_node(lvol, node_id):
     snode = db_controller.get_storage_node_by_id(node_id)
     logger.debug(f"Deleting LVol:{lvol.get_id()} from node:{snode.get_id()}")
-    rpc_client = RPCClient(
-        snode.mgmt_ip, snode.rpc_port,
-        snode.rpc_username, snode.rpc_password)
+    rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
 
-    for bdev in lvol.bdev_stack[::-1]:
-        type = bdev['type']
-        name = bdev['name']
-        if type == "alceml":
-            ret = rpc_client.bdev_alceml_delete(name)
-            if not ret:
-                logger.error(f"failed to delete alceml: {name}")
-            continue
-        if type == "distr":
-            ret = rpc_client.bdev_distrib_delete(name)
-            if not ret:
-                logger.error(f"failed to delete distr: {name}")
-            continue
-        if type == "lvs":
-            ret = rpc_client.bdev_lvol_delete_lvstore(name)
-            if not ret:
-                logger.error(f"failed to delete lvs: {name}")
-            continue
-        if type == "lvol":
-            ret = rpc_client.delete_lvol(name)
-            if not ret:
-                logger.error(f"failed to delete lvol bdev {name}")
-            continue
-        if type == "ultra_pt":
-            ret = rpc_client.ultra21_bdev_pass_delete(name)
-            if not ret:
-                logger.error(f"failed to delete ultra pt {name}")
-            continue
-        if type == "comp":
-            ret = rpc_client.lvol_compress_delete(name)
-            if not ret:
-                logger.error(f"failed to delete comp bdev {name}")
-            continue
-        if type == "crypto":
-            ret = rpc_client.lvol_crypto_delete(name)
-            if not ret:
-                logger.error(f"failed to delete crypto bdev {name}")
-            continue
+    # 1- remove bdevs
+    _remove_bdev_stack(lvol.bdev_stack[::-1], rpc_client)
+    lvol.deletion_status = 'bdevs_deleted'
+    lvol.write_to_db(db_controller.kv_store)
 
+    # 2- remove subsystem
     ret = rpc_client.subsystem_delete(lvol.nqn)
+
+    # 3- clear alceml devices
+    for node in db_controller.get_storage_nodes():
+        if node.status == StorageNode.STATUS_ONLINE:
+            for dev in node.nvme_devices:
+                ret = rpc_client.alceml_unmap_vuid(dev.alceml_bdev, lvol.vuid)
+    lvol.deletion_status = 'alceml_unmapped'
+    lvol.write_to_db(db_controller.kv_store)
+
+    # 4- clear JM
+    # ret = rpc_client.alceml_unmap_vuid(name, lvol.vuid)
+    # lvol.deletion_status = 'jm_unmapped'
+    lvol.write_to_db(db_controller.kv_store)
+
     return True
 
 
@@ -802,6 +861,10 @@ def delete_lvol(uuid, force_delete=False):
             lvol.deleted = True
             lvol.write_to_db(db_controller.kv_store)
             return True
+
+    # set status
+    lvol.status = LVol.STATUS_IN_DELETION
+    lvol.write_to_db(db_controller.kv_store)
 
     if lvol.ha_type == 'single':
         ret = delete_lvol_from_node(lvol, lvol.node_id)
