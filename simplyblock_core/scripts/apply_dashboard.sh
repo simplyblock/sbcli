@@ -1,6 +1,6 @@
 #!/bin/bash
 
-export escapedPassword=$1
+export grafanaPassword=$1
 # gfpassword
 GF_ADMIN_USER=admin
 HOST=0.0.0.0:3000
@@ -10,7 +10,7 @@ for dashboard in "${DASHBOARDS}/cluster.json" "${DASHBOARDS}/devices.json" "${DA
     echo -e "\nUploading dashboard: ${dashboard}"
     curl -X POST -H "Content-Type: application/json" \
         -d "@${dashboard}" \
-        "http://${GF_ADMIN_USER}:${escapedPassword}@${HOST}/api/dashboards/import"
+        "http://${GF_ADMIN_USER}:${grafanaPassword}@${HOST}/api/dashboards/import"
     echo ""
 done
 
