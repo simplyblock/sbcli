@@ -661,7 +661,7 @@ def _create_bdev_stack(lvol, snode, ha_comm_addrs, ha_inode_self):
     rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
     created_bdevs = []
     for bdev in lvol.bdev_stack:
-        if bdev['status'] == 'created':
+        if 'status' in bdev and bdev['status'] == 'created':
             continue
 
         type = bdev['type']
@@ -696,7 +696,7 @@ def _create_bdev_stack(lvol, snode, ha_comm_addrs, ha_inode_self):
     return True, None
 
 
-def add_lvol_on_node(lvol, snode, ha_comm_addrs, ha_inode_self):
+def add_lvol_on_node(lvol, snode, ha_comm_addrs=None, ha_inode_self=None):
 
     ret, msg = _create_bdev_stack(lvol, snode, ha_comm_addrs, ha_inode_self)
     if not ret:
@@ -773,7 +773,7 @@ def recreate_lvol(lvol_id, snode):
 
 def _remove_bdev_stack(bdev_stack, rpc_client):
     for bdev in bdev_stack:
-        if bdev['status'] == 'deleted':
+        if 'status' in bdev and bdev['status'] == 'deleted':
             continue
 
         type = bdev['type']
