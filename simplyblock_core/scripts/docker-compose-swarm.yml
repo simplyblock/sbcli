@@ -242,9 +242,9 @@ services:
   promagent:
     image: simplyblock/promagent
     environment:
-      ClusterID: "6227d9ba-051f-4cc7-ad91-bc065dcbb158"
-      ClusterIP: "44.192.4.240"
-      ClusterSecret: "t7CMMOismSoH9b9kB8yC"
+      ClusterID: "${CLUSTER_ID}"
+      ClusterIP: "${CLUSTER_IP}"
+      ClusterSecret: "${CLUSTER_SECRET}"
     deploy:
       placement:
         constraints: [node.role == manager]
@@ -291,7 +291,7 @@ services:
     image: grafana/grafana:10.0.12
     environment:
       GF_SECURITY_ADMIN_USER: "admin"
-      GF_SECURITY_ADMIN_PASSWORD: "gfpassword"
+      GF_SECURITY_ADMIN_PASSWORD: "${CLUSTER_SECRET}"
     volumes:
       - ./datasource.yml:/etc/grafana/provisioning/datasources/datasource.yaml
       - grafana_data:/var/lib/grafana

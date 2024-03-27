@@ -108,7 +108,7 @@ def create_cluster(blk_size, page_size_in_blocks, ha_type, tls,
         c.prov_cap_crit = prov_cap_crit
 
     logger.info("Deploying swarm stack ...")
-    ret = scripts.deploy_stack(cli_pass, DEV_IP, constants.SIMPLY_BLOCK_DOCKER_IMAGE, c.secret)
+    ret = scripts.deploy_stack(cli_pass, DEV_IP, constants.SIMPLY_BLOCK_DOCKER_IMAGE, c.secret, c.uuid)
     logger.info("Deploying swarm stack > Done")
 
     logger.info("Configuring DB...")
