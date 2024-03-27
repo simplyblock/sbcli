@@ -11,6 +11,8 @@ import psutil
 from simplyblock_core import constants, kv_store, utils
 from simplyblock_core.models.port_stat import PortStat
 
+# Import the GELF logger
+from graypy import GELFUDPHandler
 
 def update_port_stats(snode, nic, stats):
     now = int(time.time())
@@ -41,7 +43,9 @@ def update_port_stats(snode, nic, stats):
 # configure logging
 logger_handler = logging.StreamHandler(stream=sys.stdout)
 logger_handler.setFormatter(logging.Formatter('%(asctime)s: %(levelname)s: %(message)s'))
+gelf_handler = GELFUDPHandler('0.0.0.0', 12201)
 logger = logging.getLogger()
+logger.addHandler(gelf_handler)
 logger.addHandler(logger_handler)
 logger.setLevel(logging.DEBUG)
 
