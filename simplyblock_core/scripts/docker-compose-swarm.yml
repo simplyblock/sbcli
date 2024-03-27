@@ -239,11 +239,77 @@ services:
       placement:
         constraints: [node.role == manager]
 
+  promagent:
+    image: simplyblock/promagent
+    environment:
+      ClusterID: "6227d9ba-051f-4cc7-ad91-bc065dcbb158"
+      ClusterIP: "44.192.4.240"
+      ClusterSecret: "t7CMMOismSoH9b9kB8yC"
+    deploy:
+      placement:
+        constraints: [node.role == manager]
+
+  pushgateway:
+    image: prom/pushgateway
+    ports:
+      - 9091:9091
+    deploy:
+      placement:
+        constraints: [node.role == manager]
+
+  prometheus:
+    image: prom/prometheus:v2.44.0
+    user: root
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+      - ./alert-rules.yml:/etc/prometheus/alert-rules.yml
+      - prometheus_data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+    restart: "always"
+    ports:
+      - 9000:9000
+      - 9090:9090
+    deploy:
+      placement:
+        constraints: [node.role == manager]
+  alertmanager:
+    image: prom/alertmanager:v0.25.0
+    ports:
+      - "9093:9093"
+    volumes:
+      - ./alertmanager_data:/data
+      - ./alertmanager.yml:/config/alertmanager.yml
+    command: 
+      - "--config.file=/config/alertmanager.yml"
+      - "--web.external-url=http://18.209.226.254:9093"
+    deploy:
+      placement:
+        constraints: [node.role == manager]
+  grafana:
+    image: grafana/grafana:10.0.12
+    environment:
+      GF_SECURITY_ADMIN_USER: "admin"
+      GF_SECURITY_ADMIN_PASSWORD: "gfpassword"
+    volumes:
+      - ./datasource.yml:/etc/grafana/provisioning/datasources/datasource.yaml
+      - grafana_data:/var/lib/grafana
+    restart: "always"
+    ports:
+      - 3000:3000
+    deploy:
+      placement:
+        constraints: [node.role == manager]
+
 volumes:
   mongodb_data:
   os_data:
   graylog_data:
   graylog_journal:
+  grafana_data:
+  prometheus_data:
+  alertmanager_data:
 
 networks:
   hostnet:

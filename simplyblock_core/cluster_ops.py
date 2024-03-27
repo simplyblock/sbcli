@@ -127,6 +127,10 @@ def create_cluster(blk_size, page_size_in_blocks, ha_type, tls,
 
     mgmt_node_ops.add_mgmt_node(DEV_IP, c.uuid)
 
+    logger.info("Applying dashboard...")
+    ret = scripts.apply_dashboard(c.secret)
+    logger.info("Applying dashboard > Done")
+
     logger.info("New Cluster has been created")
     logger.info(c.uuid)
     return c.uuid
