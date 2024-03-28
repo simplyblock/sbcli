@@ -1,6 +1,6 @@
 policies:
   - orgId: 1
-    receiver: '#general'
+    receiver: grafana-alerts
     group_by: ['grafana_folder', 'alertname']
     routes:
       - receiver: grafana-alerts
