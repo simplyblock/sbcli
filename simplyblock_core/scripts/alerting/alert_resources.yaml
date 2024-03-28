@@ -1,0 +1,61 @@
+policies:
+  - orgId: 1
+    receiver: '#general'
+    group_by: ['grafana_folder', 'alertname']
+    routes:
+      - receiver: grafana-alerts
+        object_matchers:
+          - ['app', '=', 'demo-app']
+
+contactPoints:
+  - orgId: 1
+    name: grafana-alerts
+    receivers:
+      - uid: grafana
+        type: slack
+        settings:
+          username: grafana_bot
+          url: 'https://hooks.slack.com/services/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'
+          title: |
+            {{ template "slack.title" . }}
+          text: |
+            {{ template "slack.message" . }}
+
+templates:
+  - orgID: 1
+    name: slack.message
+    template: |-
+      {{ define "slack.print_alert" -}}
+      *Alert*: {{ .Labels.alertname }}
+      {{ if .Annotations -}}
+      *Summary*: {{ .Annotations.summary}}
+      *Description*: {{ .Annotations.description }}
+      {{ end -}}
+      *Log message*: {{ index .Labels "message" }}
+      *Explore logs:* https://grafanaURL.com/explore?orgId=1
+      {{ if .DashboardURL -}}
+      *Go to dashboard:* {{ .DashboardURL }}
+      {{- end }}
+      {{ if .PanelURL -}}
+      *Go to panel:* {{ .PanelURL }}
+      {{- end }}
+
+      *Details:*
+      {{ range .Labels.SortedPairs -}}
+      - *{{ .Name }}:* `{{ .Value }}`
+      {{ end -}}
+
+      {{ if .SilenceURL -}}
+      *Silence this alert:* {{ .SilenceURL }}
+      {{- end }}
+      {{- end }}
+
+      {{ define "slack.message" -}}
+      {{ if .Alerts.Firing -}}
+      {{ len .Alerts.Firing }} firing alert(s):
+      {{ range .Alerts.Firing }}
+      {{ template "slack.print_alert" . }}
+      {{ end -}}
+      {{ end }}
+
+      {{- end }}

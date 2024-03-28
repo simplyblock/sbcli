@@ -262,7 +262,7 @@ services:
     user: root
     volumes:
       - ./prometheus.yml:/etc/prometheus/prometheus.yml
-      - ./alert-rules.yml:/etc/prometheus/alert-rules.yml
+     # - ./alert-rules.yml:/etc/prometheus/alert-rules.yml
       - prometheus_data:/prometheus
     command:
       - "--config.file=/etc/prometheus/prometheus.yml"
@@ -292,9 +292,12 @@ services:
     environment:
       GF_SECURITY_ADMIN_USER: "admin"
       GF_SECURITY_ADMIN_PASSWORD: "${CLUSTER_SECRET}"
+      GF_ALERTING_ENABLED: "true"
+      GF_PATHS_PROVISIONING: "/etc/grafana/provisioning"
     volumes:
       - ./datasource.yml:/etc/grafana/provisioning/datasources/datasource.yaml
       - grafana_data:/var/lib/grafana
+      - ./alerting:/etc/grafana/provisioning/alerting
     restart: "always"
     ports:
       - 3000:3000

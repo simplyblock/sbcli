@@ -8,10 +8,10 @@ scrape_configs:
     static_configs:
       - targets: ['pushgateway:9091']
 
-rule_files:
-  - 'alert-rules.yml'
-alerting:
-  alertmanagers:
-    - scheme: http
-    - static_configs:
-        - targets: ['alertmanager:9093']
+# rule_files:
+#   - 'alert-rules.yml'
+# alerting:
+#   alertmanagers:
+#     - scheme: http
+#     - static_configs:
+#         - targets: ['alertmanager:9093']
