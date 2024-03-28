@@ -22,7 +22,7 @@ contactPoints:
             {{ template "slack.message" . }}
 
 templates:
-  - orgID: 1
+  - orgId: 1
     name: slack.message
     template: |-
       {{ define "slack.print_alert" -}}
