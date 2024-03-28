@@ -5,12 +5,14 @@ datasources:
   url: http://prometheus:9090
   isDefault: true
   access: proxy
+  uid: prometheus_uid
   editable: true
 - name: GRAYLOG
   type: elasticsearch
   url: http://opensearch:9200
   isDefault: false
   access: proxy
+  uid: graylog_uid
   editable: true
   jsonData:
     index: '*'
