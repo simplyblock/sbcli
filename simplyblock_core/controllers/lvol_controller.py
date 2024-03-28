@@ -682,7 +682,8 @@ def _create_bdev_stack(lvol, snode, ha_comm_addrs, ha_inode_self):
             ret = _create_compress_lvol(rpc_client, **params)
 
         else:
-            return False, f"Unknown BDev type: {type}"
+            logger.debug(f"Unknown BDev type: {type}")
+            continue
 
         if ret:
             bdev['status'] = "created"
@@ -794,7 +795,7 @@ def _remove_bdev_stack(bdev_stack, rpc_client):
         elif type == "crypto":
             ret = rpc_client.lvol_crypto_delete(name)
         else:
-            logger.error(f"Unknown BDev type: {type}")
+            logger.debug(f"Unknown BDev type: {type}")
 
         if not ret:
             logger.error(f"Failed to delete BDev {name}")
