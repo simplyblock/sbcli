@@ -274,19 +274,19 @@ services:
     deploy:
       placement:
         constraints: [node.role == manager]
-  alertmanager:
-    image: prom/alertmanager:v0.25.0
-    ports:
-      - "9093:9093"
-    volumes:
-      - ./alertmanager_data:/data
-      - ./alertmanager.yml:/config/alertmanager.yml
-    command: 
-      - "--config.file=/config/alertmanager.yml"
-      - "--web.external-url=http://18.209.226.254:9093"
-    deploy:
-      placement:
-        constraints: [node.role == manager]
+  # alertmanager:
+  #   image: prom/alertmanager:v0.25.0
+  #   ports:
+  #     - "9093:9093"
+  #   volumes:
+  #     - ./alertmanager_data:/data
+  #     - ./alertmanager.yml:/config/alertmanager.yml
+  #   command: 
+  #     - "--config.file=/config/alertmanager.yml"
+  #     - "--web.external-url=http://18.209.226.254:9093"
+  #   deploy:
+  #     placement:
+  #       constraints: [node.role == manager]
   grafana:
     image: grafana/grafana:10.0.12
     environment:
