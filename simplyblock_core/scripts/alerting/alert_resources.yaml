@@ -23,6 +23,12 @@ contactPoints:
 
 templates:
   - orgId: 1
+    name: slack.title
+    template: |-
+      {{ define "slack.title" -}}
+      [{{ .Status | toUpper }}{{ if eq .Status "firing" }}:{{ .Alerts.Firing | len }}{{ end }}] Grafana Alerting Notification
+      {{- end -}}
+  - orgId: 1
     name: slack.message
     template: |-
       {{ define "slack.print_alert" -}}
