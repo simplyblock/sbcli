@@ -67,6 +67,10 @@ while True:
     for snode in snodes:
         logger.info("Node: %s, status %s", snode.get_id(), snode.status)
 
+        if snode.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_UNREACHABLE]:
+            logger.info(f"Node status is: {snode.status}, skipping")
+            continue
+
         # 1- check node ping
         ping_check = health_controller._check_node_ping(snode.mgmt_ip)
         logger.info(f"Check: ping mgmt ip {snode.mgmt_ip} ... {ping_check}")

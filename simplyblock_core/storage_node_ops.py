@@ -1186,6 +1186,7 @@ def suspend_storage_node(node_id, force=False):
             lvol.write_to_db(db_controller.kv_store)
 
     logger.info("Setting node status to suspended")
+    snode = db_controller.get_storage_node_by_id(node_id)
     old_status = snode.status
     snode.status = StorageNode.STATUS_SUSPENDED
     snode.write_to_db(db_controller.kv_store)
@@ -1230,6 +1231,7 @@ def resume_storage_node(node_id):
             lvol.write_to_db(db_controller.kv_store)
 
     logger.info("Setting node status to online")
+    snode = db_controller.get_storage_node_by_id(node_id)
     old_status = snode.status
     snode.status = StorageNode.STATUS_ONLINE
     snode.write_to_db(db_controller.kv_store)
