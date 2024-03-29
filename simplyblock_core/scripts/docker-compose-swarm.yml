@@ -277,7 +277,6 @@ services:
     ports:
       #- 3000:3000
       - target: 3000
-        host_ip: 127.0.0.1
         published: 3000
         protocol: tcp
         mode: host
