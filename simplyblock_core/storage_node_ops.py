@@ -269,6 +269,13 @@ def _prepare_cluster_devices(snode, after_restart=False):
             logger.error(f"Failed to add: {pt_name} to the subsystem: {subsystem_nqn}")
             return False
 
+        # create jm
+        if nvme.jm_bdev:
+            ret = rpc_client.bdev_jm_create(nvme.jm_bdev, nvme.alceml_bdev)
+            if not ret:
+                logger.error(f"Failed to create JM bdev: {snode.nvme_devices[0].jm_bdev}")
+                return False
+
         nvme.testing_bdev = test_name
         nvme.alceml_bdev = alceml_name
         nvme.pt_bdev = pt_name
@@ -471,19 +478,17 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask,
         nvme.cluster_device_order = dev_order
         dev_order += 1
         device_events.device_create(nvme)
+
+    # create jm
+    snode.nvme_devices[0].jm_bdev = f"jm_{snode.get_id()}"
+
+    # save object
     snode.write_to_db(db_controller.kv_store)
 
     # prepare devices
     ret = _prepare_cluster_devices(snode)
     if not ret:
         logger.error("Failed to prepare cluster devices")
-        return False
-
-    # create jm
-    snode.nvme_devices[0].jm_bdev = f"jm_{snode.get_id()}"
-    ret = rpc_client.bdev_jm_create(snode.nvme_devices[0].jm_bdev, snode.nvme_devices[0].alceml_bdev)
-    if not ret:
-        logger.error(f"Failed to create bdev: {snode.nvme_devices[0].jm_bdev}")
         return False
 
     logger.info("Connecting to remote devices")
@@ -896,13 +901,6 @@ def restart_storage_node(
         logger.error("Failed to prepare cluster devices")
         return False
 
-    # create jm
-    snode.nvme_devices[0].jm_bdev = f"jm_{snode.get_id()}"
-    ret = rpc_client.bdev_jm_create(snode.nvme_devices[0].jm_bdev, snode.nvme_devices[0].alceml_bdev)
-    if not ret:
-        logger.error(f"Failed to create JM bdev: {snode.nvme_devices[0].jm_bdev}")
-        return False
-
     logger.info("Connecting to remote devices")
     remote_devices = _connect_to_remote_devs(snode)
     snode.remote_devices = remote_devices
@@ -1132,6 +1130,7 @@ def shutdown_storage_node(node_id, force=False):
     distr_controller.send_node_status_event(snode.get_id(), StorageNode.STATUS_OFFLINE)
 
     logger.info("Setting node status to offline")
+    snode = db_controller.get_storage_node_by_id(node_id)
     old_status = snode.status
     snode.status = StorageNode.STATUS_OFFLINE
     snode.write_to_db(db_controller.kv_store)
