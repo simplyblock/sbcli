@@ -1,12 +1,13 @@
 # coding=utf-8
 import datetime
+import json
 import logging as lg
 import time
 import uuid
 
 from simplyblock_core.controllers import lvol_controller, snapshot_events
 
-from simplyblock_core import utils
+from simplyblock_core import utils, distr_controller
 from simplyblock_core.kv_store import DBController
 from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.snapshot import SnapShot
@@ -33,28 +34,61 @@ def add(lvol_id, snapshot_name):
 
     snode = db_controller.get_storage_node_by_id(lvol.node_id)
 
-    # creating RPCClient instance
-    rpc_client = RPCClient(
-        snode.mgmt_ip,
-        snode.rpc_port,
-        snode.rpc_username,
-        snode.rpc_password)
 
-    ret = rpc_client.lvol_create_snapshot(lvol_id, snapshot_name)
+##############################################################################
+    rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
+    spdk_mem_info_before = rpc_client.ultra21_util_get_malloc_stats()
+
+    num_blocks = int(lvol.size / lvol.distr_bs)
+    new_vuid = utils.get_random_vuid()
+    base_name = f"distr_{new_vuid}_base"
+    ret = rpc_client.bdev_distrib_create(
+        base_name, new_vuid, lvol.ndcs, lvol.npcs, num_blocks,
+        lvol.distr_bs, lvol_controller.get_jm_names(snode), lvol.distr_chunk_bs,
+        None, None, lvol.distr_page_size)
     if not ret:
-        logger.error(f"Error creating snapshot")
-        return False
+        logger.error("Failed to create Distr bdev")
+        return False, "Failed to create Distr bdev"
 
+    snodes = db_controller.get_storage_nodes()
+    cluster_map_data = distr_controller.get_distr_cluster_map(snodes, snode)
+    cluster_map_data['UUID_node_target'] = snode.get_id()
+    rpc_client.distr_send_cluster_map(cluster_map_data)
+
+    ret = rpc_client.ultra21_lvol_bmap_init(
+        base_name, num_blocks, lvol.distr_bs, int(lvol.distr_page_size / lvol.distr_bs), num_blocks * 10)
+    if not ret:
+        return False, "Failed to init distr bdev"
+
+    logger.info("Creating Snapshot bdev")
+    lvol_name = f"lvol_{lvol.vuid}_{lvol.lvol_name}"
+    ret = rpc_client.ultra21_lvol_mount_snapshot(lvol.snapshot_name, lvol_name, base_name)
+    if not ret:
+        return False, "Failed to create snapshot lvol bdev"
+
+##############################################################################
     snap = SnapShot()
-    snap.uuid = ret
+    snap.uuid = str(uuid.uuid4())
     snap.snap_name = snapshot_name
-    snap.snap_bdev = lvol.lvol_bdev.split("/")[0]+"/"+snapshot_name
+    snap.base_bdev = base_name
+    snap.snap_bdev = lvol.snapshot_name
     snap.created_at = int(time.time())
     snap.lvol = lvol
+
+
+    spdk_mem_info_after = rpc_client.ultra21_util_get_malloc_stats()
+    logger.debug("ultra21_util_get_malloc_stats:")
+    logger.debug(spdk_mem_info_after)
+    diff = {}
+    for key in spdk_mem_info_after.keys():
+        diff[key] = spdk_mem_info_after[key] - spdk_mem_info_before[key]
+    logger.info("spdk mem diff:")
+    logger.info(json.dumps(diff, indent=2))
+    snap.mem_diff = diff
     snap.write_to_db(db_controller.kv_store)
     logger.info("Done")
     snapshot_events.snapshot_create(snap)
-    return ret
+    return snap.uuid
 
 
 def list():
@@ -99,7 +133,16 @@ def delete(snapshot_uuid):
         snode.rpc_username,
         snode.rpc_password)
 
-    ret = rpc_client.delete_lvol(snap.snap_bdev)
+    ret = rpc_client.bdev_distrib_delete(snap.base_bdev)
+    if not ret:
+        logger.error(f"Failed to delete BDev {snap.base_bdev}")
+        return False
+
+    ret = rpc_client.ultra21_lvol_dismount(snap.snap_bdev)
+    if not ret:
+        logger.error(f"Failed to delete BDev {snap.snap_bdev}")
+        return False
+
     snap.remove(db_controller.kv_store)
 
     base_lvol = db_controller.get_lvol_by_id(snap.lvol.get_id())
@@ -156,19 +199,61 @@ def clone(snapshot_id, clone_name):
     lvol = LVol()
     lvol.lvol_name = clone_name
     lvol.size = snap.lvol.size
+    lvol.distr_bs = snap.lvol.distr_bs
+    lvol.vuid = snap.lvol.vuid
+    lvol.ndcs = snap.lvol.ndcs
+    lvol.npcs = snap.lvol.npcs
+    lvol.distr_chunk_bs = snap.lvol.distr_chunk_bs
+    lvol.distr_page_size = snap.lvol.distr_page_size
+    lvol.distr_page_size = snap.lvol.distr_page_size
+
     bdev_stack = []
 
-    ret = rpc_client.lvol_clone(snap.snap_bdev, clone_name)
-    if not ret:
-        logger.error("failed to clone snapshot on the storage node")
-        return False
+    ##############################################################################
+    jm_names = get_jm_names(snode)
+    rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
+    spdk_mem_info_before = rpc_client.ultra21_util_get_malloc_stats()
 
-    lvol_id = ret
-    lvs_name = snap.lvol.lvol_bdev.split("/")[0]
-    lvol_bdev = f"{lvs_name}/{clone_name}"
-    bdev_stack.append({"type": "lvol", "name": lvol_bdev})
+    num_blocks = int(lvol.size / lvol.distr_bs)
+    new_vuid = utils.get_random_vuid()
+    name = f"distr_{new_vuid}_1"
+    ret = rpc_client.bdev_distrib_create(
+        name, new_vuid, lvol.ndcs, lvol.npcs, num_blocks,
+        lvol.distr_bs, jm_names, lvol.distr_chunk_bs, None, None, lvol.distr_page_size)
+    if not ret:
+        logger.error("Failed to create Distr bdev")
+        return False, "Failed to create Distr bdev"
+    if ret == "?":
+        logger.error(f"Failed to create Distr bdev, ret={ret}")
+        # return False
+
+    logger.info("Sending cluster map to the lvol")
+    snodes = db_controller.get_storage_nodes()
+    cluster_map_data = distr_controller.get_distr_cluster_map(snodes, snode)
+    cluster_map_data['UUID_node_target'] = snode.get_id()
+    ret = rpc_client.distr_send_cluster_map(cluster_map_data)
+
+    logger.info("Creating clone bdev")
+    block_len = lvol.distr_bs
+    page_len = int(lvol.distr_page_size / lvol.distr_bs)
+    max_num_blocks = num_blocks * 10
+    ret = rpc_client.ultra21_lvol_bmap_init(name, num_blocks, block_len, page_len, max_num_blocks)
+    if not ret:
+        return False, "Failed to init distr bdev"
+
+    lvol_name = f"clone_{lvol.vuid+2}_{lvol.lvol_name}"
+    ret = rpc_client.ultra21_lvol_mount_clone(lvol_name, snap.snap_bdev, name)
+    if not ret:
+        return False, "Failed to create clone lvol bdev"
+
+    ##############################################################################
+
+    lvol_id = str(uuid.uuid4())
+    # lvs_name = snap.lvol.lvol_bdev.split("/")[0]
+    # lvol_bdev = f"{lvs_name}/{clone_name}"
+    bdev_stack.append({"type": "ultra_lvol", "name": lvol_name})
     lvol_type = 'lvol'
-    top_bdev = lvol_bdev
+    top_bdev = lvol_name
 
     subsystem_nqn = snode.subsystem + ":lvol:" + lvol_id
     logger.info("creating subsystem %s", subsystem_nqn)
@@ -189,7 +274,7 @@ def clone(snapshot_id, clone_name):
 
     lvol.bdev_stack = bdev_stack
     lvol.uuid = lvol_id
-    lvol.lvol_bdev = lvol_bdev
+    lvol.lvol_bdev = lvol_name
     lvol.hostname = snode.hostname
     lvol.node_id = snode.get_id()
     lvol.mode = 'read-write'
@@ -197,6 +282,21 @@ def clone(snapshot_id, clone_name):
     lvol.cloned_from_snap = snapshot_id
     lvol.nqn = subsystem_nqn
     lvol.pool_uuid = pool.id
+
+    spdk_mem_info_after = rpc_client.ultra21_util_get_malloc_stats()
+    logger.debug("ultra21_util_get_malloc_stats:")
+    logger.debug(spdk_mem_info_after)
+
+    diff = {}
+    for key in spdk_mem_info_after.keys():
+        diff[key] = spdk_mem_info_after[key] - spdk_mem_info_before[key]
+
+    logger.info("spdk mem diff:")
+    logger.info(json.dumps(diff, indent=2))
+    lvol.mem_diff = diff
+
+
+
     pool.lvols.append(lvol_id)
     pool.write_to_db(db_controller.kv_store)
     lvol.write_to_db(db_controller.kv_store)

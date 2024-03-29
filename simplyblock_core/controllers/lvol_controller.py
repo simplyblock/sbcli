@@ -10,6 +10,7 @@ import uuid
 from simplyblock_core import utils, constants, distr_controller
 from simplyblock_core.controllers import snapshot_controller, pool_controller, lvol_events
 from simplyblock_core.kv_store import DBController
+from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.lvol_model import LVol
@@ -435,7 +436,7 @@ def _get_next_3_nodes():
 def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp, use_crypto,
                 distr_vuid, distr_ndcs, distr_npcs,
                 max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes,
-                distr_bs=None, distr_chunk_bs=None):
+                distr_bs=None, distr_chunk_bs=None, with_snapshot=False, max_size=0):
 
     logger.info(f"Adding LVol: {name}")
     host_node = None
@@ -518,7 +519,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
         logger.warning(f"Cluster provisioned cap warning, util: {cluster_size_prov_util}% of cluster util: {cl.prov_cap_warn}")
 
     if distr_vuid == 0:
-        vuid = 1 + int(random.random() * 10000)
+        vuid = utils.get_random_vuid()
     else:
         vuid = distr_vuid
 
@@ -539,9 +540,21 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
         if distr_ndcs + distr_npcs >= dev_count:
             return False, f"ndcs+npcs: {distr_ndcs+distr_npcs} must be less than online devices count: {dev_count}"
 
+    if max_size:
+        if max_size < size:
+            return False, f"Max size:{max_size} must be larger than size {size}"
+    else:
+        records = db_controller.get_cluster_capacity(cl)
+        if records:
+            max_size = records[0]['size_total']
+        else:
+            max_size = size * 10
+
+    logger.info(f"Max size: {utils.humanbytes(max_size)}")
     lvol = LVol()
     lvol.lvol_name = name
     lvol.size = size
+    lvol.max_size = max_size
     lvol.status = LVol.STATUS_ONLINE
     lvol.ha_type = ha_type
     lvol.bdev_stack = []
@@ -568,7 +581,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
     lvol.top_bdev = lvol.base_bdev
 
     lvol.bdev_stack.append({
-        "type": "distr",
+        "type": "bdev_distr",
         "name": lvol.base_bdev,
         "params": {
             "name": lvol.base_bdev,
@@ -581,6 +594,31 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
             "pba_page_size":  lvol.distr_page_size,
         }
     })
+
+    if with_snapshot:
+        lvol.bdev_stack.append({
+            "type": "bmap_init",
+            "name": lvol.base_bdev,
+            "params": {
+                "bdev_name": lvol.base_bdev,
+                "num_blocks": int(lvol.size / lvol.distr_bs),
+                "block_len": lvol.distr_bs,
+                "page_len": int(lvol.distr_page_size / lvol.distr_bs),
+                "max_num_blocks": int(lvol.max_size / lvol.distr_bs)
+            }
+        })
+        lvol.snapshot_name = f"snapshot_{lvol.vuid}_{name}"
+        lvol.top_bdev = f"lvol_{lvol.vuid}_{lvol.lvol_name}"
+        lvol.bdev_stack.append({
+            "type": "ultra_lvol",
+            "name": lvol.top_bdev,
+            "params": {
+                "lvol_name": lvol.top_bdev,
+                "base_bdev": lvol.base_bdev,
+                "label": "label",
+                "desc": "desc"
+            }
+        })
 
     if use_crypto is True:
         lvol.crypto_bdev = f"crypto_{lvol.lvol_name}"
@@ -659,6 +697,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
 
 def _create_bdev_stack(lvol, snode, ha_comm_addrs, ha_inode_self):
     rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
+
     created_bdevs = []
     for bdev in lvol.bdev_stack:
         # if 'status' in bdev and bdev['status'] == 'created':
@@ -669,11 +708,22 @@ def _create_bdev_stack(lvol, snode, ha_comm_addrs, ha_inode_self):
         params = bdev['params']
         ret = None
 
-        if type == "distr":
+        if type == "bdev_distr":
             params['jm_names'] = get_jm_names(snode)
             params['ha_comm_addrs'] = ha_comm_addrs
             params['ha_inode_self'] = ha_inode_self
             ret = rpc_client.bdev_distrib_create(**params)
+
+            snodes = db_controller.get_storage_nodes()
+            cluster_map_data = distr_controller.get_distr_cluster_map(snodes, snode)
+            cluster_map_data['UUID_node_target'] = snode.get_id()
+            rpc_client.distr_send_cluster_map(cluster_map_data)
+
+        elif type == "bmap_init":
+            ret = rpc_client.ultra21_lvol_bmap_init(**params)
+
+        elif type == "ultra_lvol":
+            ret = rpc_client.ultra21_lvol_mount_lvol(**params)
 
         elif type == "crypto":
             ret = _create_crypto_lvol(rpc_client, **params)
@@ -698,12 +748,13 @@ def _create_bdev_stack(lvol, snode, ha_comm_addrs, ha_inode_self):
 
 
 def add_lvol_on_node(lvol, snode, ha_comm_addrs=None, ha_inode_self=None):
+    rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
+    spdk_mem_info_before = rpc_client.ultra21_util_get_malloc_stats()
 
     ret, msg = _create_bdev_stack(lvol, snode, ha_comm_addrs, ha_inode_self)
     if not ret:
         return False, msg
 
-    rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
     logger.info("creating subsystem %s", lvol.nqn)
     ret = rpc_client.subsystem_create(lvol.nqn, 'sbcli-cn', lvol.uuid)
     logger.debug(ret)
@@ -740,6 +791,18 @@ def add_lvol_on_node(lvol, snode, ha_comm_addrs=None, ha_inode_self=None):
     cluster_map_data = distr_controller.get_distr_cluster_map(snodes, snode)
     cluster_map_data['UUID_node_target'] = snode.get_id()
     ret = rpc_client.distr_send_cluster_map(cluster_map_data)
+
+    spdk_mem_info_after = rpc_client.ultra21_util_get_malloc_stats()
+    logger.debug("ultra21_util_get_malloc_stats:")
+    logger.debug(spdk_mem_info_after)
+
+    diff = {}
+    for key in spdk_mem_info_after.keys():
+        diff[key] = spdk_mem_info_after[key] - spdk_mem_info_before[key]
+
+    logger.info("spdk mem diff:")
+    logger.info(json.dumps(diff, indent=2))
+    lvol.mem_diff = diff
 
     return True, None
 
@@ -782,7 +845,7 @@ def _remove_bdev_stack(bdev_stack, rpc_client):
         ret = None
         # if type == "alceml":
         #     ret = rpc_client.bdev_alceml_delete(name)
-        if type == "distr":
+        if type == "bdev_distr":
             ret = rpc_client.bdev_distrib_delete(name)
         # elif type == "lvs":
         #     ret = rpc_client.bdev_lvol_delete_lvstore(name)
@@ -790,6 +853,8 @@ def _remove_bdev_stack(bdev_stack, rpc_client):
         #     ret = rpc_client.delete_lvol(name)
         # elif type == "ultra_pt":
         #     ret = rpc_client.ultra21_bdev_pass_delete(name)
+        elif type == "ultra_lvol":
+            ret = rpc_client.ultra21_lvol_dismount(name)
         elif type == "comp":
             ret = rpc_client.lvol_compress_delete(name)
         elif type == "crypto":
@@ -978,6 +1043,30 @@ def list_lvols(is_json):
 
     if is_json:
         return json.dumps(data, indent=2)
+    else:
+        return utils.print_table(data)
+
+
+def list_lvols_mem(is_json, is_csv):
+    lvols = db_controller.get_lvols()
+    data = []
+    for lvol in lvols:
+        if lvol.deleted is True:
+            continue
+        logger.debug(lvol)
+        data.append({
+            "id": lvol.uuid,
+            "size": utils.humanbytes(lvol.size),
+            "max_size": utils.humanbytes(lvol.max_size),
+            **lvol.mem_diff
+        })
+
+    if is_json:
+        return json.dumps(data, indent=2)
+    elif is_csv:
+        print(";".join(data[0].keys()))
+        for d in data:
+            print(";".join([str(v) for v in d.values()]))
     else:
         return utils.print_table(data)
 

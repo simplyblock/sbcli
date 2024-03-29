@@ -276,3 +276,7 @@ def sum_records(records):
         for rec in records[1:]:
             total += rec
         return total
+
+
+def get_random_vuid():
+    return 1 + int(random.random() * 10000)

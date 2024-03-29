@@ -433,7 +433,10 @@ class CLIWrapper:
         sub_command.add_argument("name", help='LVol name or id')
         sub_command.add_argument("size", help='LVol size: 10M, 10G, 10(bytes)')
         sub_command.add_argument("pool", help='Pool UUID or name')
-        sub_command.add_argument("--host_id", help='Primary storage node UUID or Hostname')
+        sub_command.add_argument("--snapshot", "-s", help='Make LVol with snapshot capability, default is False',
+                                 required=False, action='store_true')
+        sub_command.add_argument("--max-size", help='LVol max size', dest='max_size', default="0")
+        sub_command.add_argument("--host-id", help='Primary storage node UUID or Hostname', dest='host_id')
         sub_command.add_argument("--ha-type", help='LVol HA type (single, ha), default is cluster HA type',
                                  dest='ha_type', choices=["single", "ha", "default"], default='default')
 
@@ -475,6 +478,10 @@ class CLIWrapper:
         sub_command = self.add_sub_command(subparser, 'list', 'List all LVols')
         sub_command.add_argument("--cluster-id", help='List LVols in particular cluster')
         sub_command.add_argument("--json", help='Print outputs in json format', required=False, action='store_true')
+        # list lvols
+        sub_command = self.add_sub_command(subparser, 'list-mem', 'List all LVols')
+        sub_command.add_argument("--json", help='Print outputs in json format', required=False, action='store_true')
+        sub_command.add_argument("--csv", help='Print outputs in csv format', required=False, action='store_true')
         # get lvol
         sub_command = self.add_sub_command(subparser, 'get', 'Get LVol details')
         sub_command.add_argument("id", help='LVol id or name')
@@ -1042,6 +1049,7 @@ class CLIWrapper:
             if sub_command == "add":
                 name = args.name
                 size = self.parse_size(args.size)
+                max_size = self.parse_size(args.max_size)
                 host_id = args.host_id
                 ha_type = args.ha_type
                 pool = args.pool
@@ -1052,6 +1060,7 @@ class CLIWrapper:
                 distr_npcs = args.distr_npcs
                 distr_bs = args.distr_bs
                 distr_chunk_bs = args.distr_chunk_bs
+                with_snapshot = args.snapshot
                 results, error = lvol_controller.add_lvol_ha(
                     name, size, host_id, ha_type, pool, comp, crypto,
                     distr_vuid, distr_ndcs, distr_npcs,
@@ -1060,7 +1069,9 @@ class CLIWrapper:
                     args.max_r_mbytes,
                     args.max_w_mbytes,
                     distr_bs,
-                    distr_chunk_bs)
+                    distr_chunk_bs,
+                    with_snapshot=with_snapshot,
+                    max_size=max_size)
                 if results:
                     ret = results
                 else:
@@ -1073,6 +1084,8 @@ class CLIWrapper:
                     args.max_r_mbytes, args.max_w_mbytes)
             elif sub_command == "list":
                 ret = lvol_controller.list_lvols(args.json)
+            elif sub_command == "list-mem":
+                ret = lvol_controller.list_lvols_mem(args.json, args.csv)
             elif sub_command == "get":
                 ret = lvol_controller.get_lvol(args.id, args.json)
             elif sub_command == "delete":
