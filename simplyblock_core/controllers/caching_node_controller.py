@@ -96,9 +96,8 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spd
         logger.error("Node already exists, try remove it first.")
         return False
 
-
     node_info, _ = snode_api.info()
-    # results, err = snode_api.join_db(db_connection=cluster.db_connection)
+    results, err = snode_api.join_db(db_connection=cluster.db_connection)
 
     data_nics = []
     names = data_nics_list or [iface_name]

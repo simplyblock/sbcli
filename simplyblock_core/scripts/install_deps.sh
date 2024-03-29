@@ -37,3 +37,5 @@ sudo sysctl -w vm.max_map_count=262144
 
 sudo mkdir -p /etc/simplyblock
 sudo chmod 777 /etc/simplyblock
+
+sudo sh -c 'echo 1 >  /proc/sys/vm/drop_caches'
