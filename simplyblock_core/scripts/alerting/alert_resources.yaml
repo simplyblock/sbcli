@@ -15,7 +15,7 @@ contactPoints:
         type: slack
         settings:
           username: grafana_bot
-          url: 'https://hooks.slack.com/services/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'
+          url: 'https://hooks.slack.com/services/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'
           title: |
             {{ template "slack.title" . }}
           text: |
