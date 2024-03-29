@@ -661,8 +661,8 @@ def _create_bdev_stack(lvol, snode, ha_comm_addrs, ha_inode_self):
     rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
     created_bdevs = []
     for bdev in lvol.bdev_stack:
-        if 'status' in bdev and bdev['status'] == 'created':
-            continue
+        # if 'status' in bdev and bdev['status'] == 'created':
+        #     continue
 
         type = bdev['type']
         name = bdev['name']

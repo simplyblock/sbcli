@@ -382,18 +382,25 @@ def get_device_iostats(device_id, history, records_count=20, parse_sizes=True):
 
 def reset_storage_device(dev_id):
     db_controller = DBController()
-    device = db_controller.get_storage_devices(dev_id)
+    device = None
+    snode = None
+    for node in db_controller.get_storage_nodes():
+        for dev in node.nvme_devices:
+            if dev.get_id() == dev_id:
+                device = dev
+                snode = node
+                break
+
     if not device:
         logger.error(f"Device not found: {dev_id}")
         return False
 
-    if device.status == NVMeDevice.STATUS_REMOVED:
-        logger.error(f"Device status: {device.status} is removed")
-        return False
-
-    snode = db_controller.get_storage_node_by_id(device.node_id)
     if not snode:
         logger.error(f"Node not found {device.node_id}")
+        return False
+
+    if device.status == NVMeDevice.STATUS_REMOVED:
+        logger.error(f"Device status: {device.status} is removed")
         return False
 
     logger.info("Resetting device")
@@ -409,6 +416,6 @@ def reset_storage_device(dev_id):
 
     device.io_error = False
     device.status = NVMeDevice.STATUS_ONLINE
-    device.write_to_db(db_controller.kv_store)
+    snode.write_to_db(db_controller.kv_store)
     device_events.device_reset(device)
     return True
