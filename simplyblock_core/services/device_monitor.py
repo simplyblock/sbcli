@@ -20,8 +20,12 @@ def set_dev_status(device, status):
         logger.error(f"Node is not online, {node.get_id()}, status: {node.status}, "
                      f"skipping device status change")
         return
-    if device.status != status:
-        device_controller.device_set_state(device.get_id(), status)
+
+    for dev in node.nvme_devices:
+        if dev.get_id() == device.get_id():
+            if dev.status in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_UNAVAILABLE]:
+                device_controller.device_set_state(device.get_id(), status)
+            break
     return
 
 
