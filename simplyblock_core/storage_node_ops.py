@@ -269,6 +269,13 @@ def _prepare_cluster_devices(snode, after_restart=False):
             logger.error(f"Failed to add: {pt_name} to the subsystem: {subsystem_nqn}")
             return False
 
+        # create jm
+        if nvme.jm_bdev:
+            ret = rpc_client.bdev_jm_create(nvme.jm_bdev, nvme.alceml_bdev)
+            if not ret:
+                logger.error(f"Failed to create JM bdev: {snode.nvme_devices[0].jm_bdev}")
+                return False
+
         nvme.testing_bdev = test_name
         nvme.alceml_bdev = alceml_name
         nvme.pt_bdev = pt_name
@@ -471,19 +478,17 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask,
         nvme.cluster_device_order = dev_order
         dev_order += 1
         device_events.device_create(nvme)
+
+    # create jm
+    snode.nvme_devices[0].jm_bdev = f"jm_{snode.get_id()}"
+
+    # save object
     snode.write_to_db(db_controller.kv_store)
 
     # prepare devices
     ret = _prepare_cluster_devices(snode)
     if not ret:
         logger.error("Failed to prepare cluster devices")
-        return False
-
-    # create jm
-    snode.nvme_devices[0].jm_bdev = f"jm_{snode.get_id()}"
-    ret = rpc_client.bdev_jm_create(snode.nvme_devices[0].jm_bdev, snode.nvme_devices[0].alceml_bdev)
-    if not ret:
-        logger.error(f"Failed to create bdev: {snode.nvme_devices[0].jm_bdev}")
         return False
 
     logger.info("Connecting to remote devices")
@@ -871,7 +876,8 @@ def restart_storage_node(
         if db_dev.serial_number in devices_sn:
             logger.info(f"Device found: {db_dev.get_id()}")
             active_devices.append(db_dev)
-            db_dev.status = NVMeDevice.STATUS_ONLINE
+            if db_dev.status == NVMeDevice.STATUS_UNAVAILABLE:
+                db_dev.status = NVMeDevice.STATUS_ONLINE
         else:
             logger.info(f"Device not found: {db_dev.get_id()}")
             db_dev.status = NVMeDevice.STATUS_REMOVED
@@ -893,13 +899,6 @@ def restart_storage_node(
     ret = _prepare_cluster_devices(snode, after_restart=True)
     if not ret:
         logger.error("Failed to prepare cluster devices")
-        return False
-
-    # create jm
-    snode.nvme_devices[0].jm_bdev = f"jm_{snode.get_id()}"
-    ret = rpc_client.bdev_jm_create(snode.nvme_devices[0].jm_bdev, snode.nvme_devices[0].alceml_bdev)
-    if not ret:
-        logger.error(f"Failed to create JM bdev: {snode.nvme_devices[0].jm_bdev}")
         return False
 
     logger.info("Connecting to remote devices")
@@ -1093,8 +1092,10 @@ def shutdown_storage_node(node_id, force=False):
     #         return False
 
     logger.info("Shutting down node")
+    old_status = snode.status
     snode.status = StorageNode.STATUS_IN_SHUTDOWN
     snode.write_to_db(db_controller.kv_store)
+    storage_events.snode_status_change(snode, snode.status, old_status)
 
     logger.debug("Setting LVols to offline")
     for lvol_id in snode.lvols:
@@ -1106,8 +1107,8 @@ def shutdown_storage_node(node_id, force=False):
 
     distr_controller.send_node_status_event(snode.get_id(), "in_shutdown")
     for dev in snode.nvme_devices:
-        dev.status = 'unavailable'
-        distr_controller.send_dev_status_event(dev.cluster_device_order, "unavailable")
+        if dev.status == NVMeDevice.STATUS_ONLINE:
+            device_controller.device_set_unavailable(dev.get_id())
 
     # shutdown node
     # make other nodes disconnect from this node
@@ -1129,6 +1130,7 @@ def shutdown_storage_node(node_id, force=False):
     distr_controller.send_node_status_event(snode.get_id(), StorageNode.STATUS_OFFLINE)
 
     logger.info("Setting node status to offline")
+    snode = db_controller.get_storage_node_by_id(node_id)
     old_status = snode.status
     snode.status = StorageNode.STATUS_OFFLINE
     snode.write_to_db(db_controller.kv_store)
