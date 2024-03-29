@@ -271,7 +271,7 @@ def _prepare_cluster_devices(snode, after_restart=False):
 
         # create jm
         if nvme.jm_bdev:
-            ret = rpc_client.bdev_jm_create(nvme.jm_bdev, nvme.alceml_bdev)
+            ret = rpc_client.bdev_jm_create(nvme.jm_bdev, alceml_name)
             if not ret:
                 logger.error(f"Failed to create JM bdev: {snode.nvme_devices[0].jm_bdev}")
                 return False
