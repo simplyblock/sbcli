@@ -17,7 +17,7 @@ def _device_event(device, message, caused_by, event):
         db_object=device,
         caused_by=caused_by,
         message=message,
-        node_id=device.node_id)
+        node_id=device.get_id())
 
 
 def device_create(device, caused_by=ec.CAUSED_BY_CLI):
