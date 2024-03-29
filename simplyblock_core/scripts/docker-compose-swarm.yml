@@ -276,6 +276,8 @@ services:
     restart: "always"
     ports:
       - 3000:3000
+    networks:
+      - hostnet
     deploy:
       placement:
         constraints: [node.role == manager]
