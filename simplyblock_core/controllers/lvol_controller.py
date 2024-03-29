@@ -861,11 +861,13 @@ def _remove_bdev_stack(bdev_stack, rpc_client):
             ret = rpc_client.lvol_crypto_delete(name)
         else:
             logger.debug(f"Unknown BDev type: {type}")
+            continue
 
         if not ret:
             logger.error(f"Failed to delete BDev {name}")
 
         bdev['status'] = 'deleted'
+        time.sleep(1)
 
 
 def delete_lvol_from_node(lvol, node_id):
