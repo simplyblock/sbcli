@@ -871,7 +871,8 @@ def restart_storage_node(
         if db_dev.serial_number in devices_sn:
             logger.info(f"Device found: {db_dev.get_id()}")
             active_devices.append(db_dev)
-            db_dev.status = NVMeDevice.STATUS_ONLINE
+            if db_dev.status == NVMeDevice.STATUS_UNAVAILABLE:
+                db_dev.status = NVMeDevice.STATUS_ONLINE
         else:
             logger.info(f"Device not found: {db_dev.get_id()}")
             db_dev.status = NVMeDevice.STATUS_REMOVED
@@ -1093,8 +1094,10 @@ def shutdown_storage_node(node_id, force=False):
     #         return False
 
     logger.info("Shutting down node")
+    old_status = snode.status
     snode.status = StorageNode.STATUS_IN_SHUTDOWN
     snode.write_to_db(db_controller.kv_store)
+    storage_events.snode_status_change(snode, snode.status, old_status)
 
     logger.debug("Setting LVols to offline")
     for lvol_id in snode.lvols:
@@ -1106,8 +1109,8 @@ def shutdown_storage_node(node_id, force=False):
 
     distr_controller.send_node_status_event(snode.get_id(), "in_shutdown")
     for dev in snode.nvme_devices:
-        dev.status = 'unavailable'
-        distr_controller.send_dev_status_event(dev.cluster_device_order, "unavailable")
+        if dev.status == NVMeDevice.STATUS_ONLINE:
+            device_controller.device_set_unavailable(dev.get_id())
 
     # shutdown node
     # make other nodes disconnect from this node
