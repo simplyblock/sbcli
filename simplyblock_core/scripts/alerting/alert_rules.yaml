@@ -13,7 +13,7 @@ groups:
               relativeTimeRange:
                 from: 600
                 to: 0
-              datasourceUid: prometheus_uid
+              datasourceUid: PBFA97CFB590B2093
               model:
                 editorMode: builder
                 expr: sum(cluster_size_total)
