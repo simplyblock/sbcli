@@ -275,9 +275,12 @@ services:
       - ./alerting:/etc/grafana/provisioning/alerting
     restart: "always"
     ports:
-      - 3000:3000
-    networks:
-      - hostnet
+      #- 3000:3000
+      - target: 3000
+        host_ip: 127.0.0.1
+        published: 3000
+        protocol: tcp
+        mode: host
     deploy:
       placement:
         constraints: [node.role == manager]
