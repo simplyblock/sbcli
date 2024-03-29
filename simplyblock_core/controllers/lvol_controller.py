@@ -819,8 +819,10 @@ def delete_lvol_from_node(lvol, node_id):
     # 3- clear alceml devices
     for node in db_controller.get_storage_nodes():
         if node.status == StorageNode.STATUS_ONLINE:
+            rpc_node = RPCClient(node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password)
             for dev in node.nvme_devices:
-                ret = rpc_client.alceml_unmap_vuid(dev.alceml_bdev, lvol.vuid)
+                ret = rpc_node.alceml_unmap_vuid(dev.alceml_bdev, lvol.vuid)
+
     lvol.deletion_status = 'alceml_unmapped'
     lvol.write_to_db(db_controller.kv_store)
 
