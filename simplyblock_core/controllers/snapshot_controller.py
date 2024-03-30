@@ -31,17 +31,21 @@ def add(lvol_id, snapshot_name):
         return False
 
     logger.info(f"Creating snapshot: {snapshot_name} from LVol: {lvol.id}")
-
     snode = db_controller.get_storage_node_by_id(lvol.node_id)
 
 
 ##############################################################################
+    snap_count = 0
+    for sn in db_controller.get_snapshots():
+        if sn.lvol_id == lvol_id:
+            snap_count += 1
+
     rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
     spdk_mem_info_before = rpc_client.ultra21_util_get_malloc_stats()
 
     num_blocks = int(lvol.size / lvol.distr_bs)
     new_vuid = utils.get_random_vuid()
-    base_name = f"distr_{new_vuid}_base"
+    base_name = f"distr_{new_vuid}_{snap_count}"
     ret = rpc_client.bdev_distrib_create(
         base_name, new_vuid, lvol.ndcs, lvol.npcs, num_blocks,
         lvol.distr_bs, lvol_controller.get_jm_names(snode), lvol.distr_chunk_bs,
@@ -62,7 +66,8 @@ def add(lvol_id, snapshot_name):
 
     logger.info("Creating Snapshot bdev")
     lvol_name = f"lvol_{lvol.vuid}_{lvol.lvol_name}"
-    ret = rpc_client.ultra21_lvol_mount_snapshot(lvol.snapshot_name, lvol_name, base_name)
+    snap_name = f"{lvol.snapshot_name}_{snap_count}"
+    ret = rpc_client.ultra21_lvol_mount_snapshot(snap_name, lvol_name, base_name)
     if not ret:
         return False, "Failed to create snapshot lvol bdev"
 
@@ -71,7 +76,7 @@ def add(lvol_id, snapshot_name):
     snap.uuid = str(uuid.uuid4())
     snap.snap_name = snapshot_name
     snap.base_bdev = base_name
-    snap.snap_bdev = lvol.snapshot_name
+    snap.snap_bdev = snap_name
     snap.created_at = int(time.time())
     snap.lvol = lvol
 
@@ -210,7 +215,7 @@ def clone(snapshot_id, clone_name):
     bdev_stack = []
 
     ##############################################################################
-    jm_names = get_jm_names(snode)
+    jm_names = lvol_controller.get_jm_names(snode)
     rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
     spdk_mem_info_before = rpc_client.ultra21_util_get_malloc_stats()
 
