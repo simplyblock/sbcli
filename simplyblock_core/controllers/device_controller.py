@@ -211,6 +211,7 @@ def set_device_testing_mode(device_id, mode):
     device = db_controller.get_storage_devices(device_id)
     if not device:
         logger.error("device not found")
+        return False
 
     snode = db_controller.get_storage_node_by_id(device.node_id)
     if not snode:
