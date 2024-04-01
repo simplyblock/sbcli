@@ -9,7 +9,7 @@ from simplyblock_core.rpc_client import RPCClient
 from simplyblock_core.models.stats import DeviceStatObject, NodeStatObject, ClusterStatObject
 
 # Import the GELF logger
-from graypy import GELFUDPHandler
+from graypy import GELFTCPHandler
 
 last_object_record = {}
 
@@ -151,7 +151,7 @@ def add_cluster_stats(cl, records):
 # configure logging
 logger_handler = logging.StreamHandler(stream=sys.stdout)
 logger_handler.setFormatter(logging.Formatter('%(asctime)s: %(levelname)s: %(message)s'))
-gelf_handler = GELFUDPHandler('0.0.0.0', constants.GELF_PORT)
+gelf_handler = GELFTCPHandler('0.0.0.0', constants.GELF_PORT)
 logger = logging.getLogger()
 logger.addHandler(gelf_handler)
 logger.addHandler(logger_handler)

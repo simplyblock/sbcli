@@ -598,10 +598,16 @@ class RPCClient:
             "modus": "BASE",
             "lvol_bdev": lvol_name,
             "base_bdev": base_bdev,
-            "label": label,
-            "desc": desc
+            # "label": label,
+            # "desc": desc
         }
         return self._request("ultra21_lvol_mount", params)
+
+    def ultra21_lvol_dismount(self, lvol_name):
+        params = {
+            "lvol_bdev": lvol_name
+        }
+        return self._request("ultra21_lvol_dismount", params)
 
     def bdev_jm_create(self, name, name_storage1, block_size=4096):
         params = {
@@ -618,6 +624,15 @@ class RPCClient:
     def ultra21_util_get_malloc_stats(self):
         params = {"socket_id": 0}
         return self._request("ultra21_util_get_malloc_stats", params)
+
+    def ultra21_lvol_mount_clone(self, clone_name, snap_bdev, base_bdev):
+        params = {
+            "modus": "CLONE",
+            "lvol_bdev": clone_name,
+            "base_bdev": base_bdev,
+            "snapshot_bdev": snap_bdev
+        }
+        return self._request("ultra21_lvol_mount", params)
 
     def alceml_unmap_vuid(self, name, vuid):
         params = {"name": name, "vuid": vuid}

@@ -15,6 +15,7 @@ class LVol(BaseModel):
     attributes = {
         "lvol_name": {"type": str, 'default': ""},
         "size": {"type": int, 'default': 0},
+        "max_size": {"type": int, 'default': 0},
         "uuid": {"type": str, 'default': ""},
         "guid": {"type": str, 'default': ""},
         "ha_type": {"type": str, 'default': ""},
@@ -57,6 +58,7 @@ class LVol(BaseModel):
         "health_check": {"type": bool, "default": True},
 
         "snapshot_name": {"type": str, 'default': ""},
+        "mem_diff": {"type": dict, 'default': {}},
         "io_error": {"type": bool, 'default': False},
 
         "deletion_status": {"type": str, 'default': ""},

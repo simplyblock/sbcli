@@ -45,6 +45,31 @@ def _add_graylog_input(cluster_ip, password):
     logger.debug(response.text)
     return response.status_code == 201
 
+def _add_graylog_input_tcp(cluster_ip, password):
+    url = f"http://{cluster_ip}:9000/api/system/inputs"
+    payload = json.dumps({
+        "title": "spdk log input",
+        "type": "org.graylog2.inputs.gelf.tcp.GELFTCPInput",
+        "configuration": {
+            "bind_address": "0.0.0.0",
+            "port": 12201,
+            "recv_buffer_size": 262144,
+            "number_worker_threads": 2,
+            "override_source": None,
+            "charset_name": "UTF-8",
+            "decompress_size_limit": 8388608
+        },
+        "global": True
+    })
+    headers = {
+        'X-Requested-By': '',
+        'Content-Type': 'application/json',
+    }
+    session = requests.session()
+    session.auth = ("admin", password)
+    response = session.request("POST", url, headers=headers, data=payload)
+    logger.debug(response.text)
+    return response.status_code == 201
 
 def create_cluster(blk_size, page_size_in_blocks, ha_type, tls,
                    auth_hosts_only, cli_pass, model_ids,
@@ -116,6 +141,7 @@ def create_cluster(blk_size, page_size_in_blocks, ha_type, tls,
     logger.info("Configuring DB > Done")
 
     _add_graylog_input(DEV_IP, c.secret)
+    _add_graylog_input_tcp(DEV_IP, c.secret)
 
     c.status = Cluster.STATUS_ACTIVE
     if ha_type == 'ha':

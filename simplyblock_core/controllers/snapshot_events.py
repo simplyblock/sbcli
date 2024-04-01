@@ -9,7 +9,7 @@ db_controller = DBController()
 
 
 def _snapshot_event(snapshot, message, caused_by, event):
-    snode = db_controller.get_storage_node_by_id(snapshot.lvol.hostname)
+    snode = db_controller.get_storage_node_by_id(snapshot.lvol.node_id)
     ec.log_event_cluster(
         cluster_id=snode.cluster_id,
         domain=ec.DOMAIN_CLUSTER,
