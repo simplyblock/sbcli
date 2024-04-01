@@ -12,7 +12,7 @@ from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
 
 # Import the GELF logger
-from graypy import GELFTCPHandler
+from graypy import GELFUDPHandler
 
 def set_dev_status(device, status):
     node = db_controller.get_storage_node_by_id(device.node_id)
@@ -32,7 +32,7 @@ def set_dev_status(device, status):
 # configure logging
 logger_handler = logging.StreamHandler(stream=sys.stdout)
 logger_handler.setFormatter(logging.Formatter('%(asctime)s: %(levelname)s: %(message)s'))
-gelf_handler = GELFTCPHandler('0.0.0.0', constants.GELF_PORT)
+gelf_handler = GELFUDPHandler('0.0.0.0', constants.GELF_PORT)
 logger = logging.getLogger()
 logger.addHandler(gelf_handler)
 logger.addHandler(logger_handler)
