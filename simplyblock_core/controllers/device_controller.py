@@ -416,7 +416,6 @@ def reset_storage_device(dev_id):
         return False
 
     device.io_error = False
-    device.status = NVMeDevice.STATUS_ONLINE
-    snode.write_to_db(db_controller.kv_store)
     device_events.device_reset(device)
+    device_set_online(dev_id)
     return True
