@@ -37,7 +37,7 @@ def add(lvol_id, snapshot_name):
 ##############################################################################
     snap_count = 0
     for sn in db_controller.get_snapshots():
-        if sn.lvol_id == lvol_id:
+        if sn.lvol.get_id() == lvol_id:
             snap_count += 1
 
     rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
