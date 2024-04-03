@@ -508,12 +508,12 @@ class RPCClient:
 
     def bdev_nvme_set_options(self):
         params = {
-            "action_on_timeout": "abort",
-            "timeout_us": 250000,
+            "bdev_retry_count": 0,
+            "transport_retry_count": 0,
             "ctrlr_loss_timeout_sec": -1,
-            "reconnect_delay_sec": 15,
-            "transport_retry_count": 1,
-            "bdev_retry_count": 1}
+            "fast_io_fail_timeout_sec": 5,
+            "reconnect_delay_sec": 5,
+        }
         return self._request("bdev_nvme_set_options", params)
 
     def bdev_set_options(self, bdev_io_pool_size, bdev_io_cache_size, iobuf_small_cache_size, iobuf_large_cache_size):
