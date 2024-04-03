@@ -642,3 +642,6 @@ class RPCClient:
         params = {"name": 0, "vuid": 0}
         return self._request("jm_delete", params)
 
+    def framework_start_init(self):
+        return self._request("framework_start_init")
+
