@@ -84,7 +84,7 @@ def get_iface_ip(ifname):
 
 def print_table(data: list):
     if data:
-        x = PrettyTable(field_names=data[0].keys())
+        x = PrettyTable(field_names=data[0].keys(), max_width=70)
         x.align = 'l'
         for node_data in data:
             row = []

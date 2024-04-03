@@ -33,7 +33,7 @@ def lvol_status_change(lvol, new_state, old_status, caused_by=ec.CAUSED_BY_CLI):
 
 
 def lvol_migrate(lvol, old_node, new_node, caused_by=ec.CAUSED_BY_CLI):
-    _lvol_event(lvol, f"LVol migrated from: {old_node}, to {new_node}", caused_by, ec.EVENT_STATUS_CHANGE)
+    _lvol_event(lvol, f"LVol migrated from: {old_node}, \nto {new_node}", caused_by, ec.EVENT_STATUS_CHANGE)
 
 
 def lvol_health_check_change(lvol, new_state, old_status, caused_by=ec.CAUSED_BY_CLI):
