@@ -494,7 +494,7 @@ def list():
     return utils.print_table(data)
 
 
-def get_capacity(cluster_id, history, records_count=20, parse_sizes=True):
+def get_capacity(cluster_id, history, records_count=20, is_json=False):
     db_controller = DBController()
     cluster = db_controller.get_cluster_by_id(cluster_id)
     if not cluster:
@@ -513,8 +513,8 @@ def get_capacity(cluster_id, history, records_count=20, parse_sizes=True):
 
     new_records = utils.process_records(records, records_count)
 
-    if not parse_sizes:
-        return new_records
+    if is_json:
+        return json.dumps(new_records, indent=2)
 
     out = []
     for record in new_records:

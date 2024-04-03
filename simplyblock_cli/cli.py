@@ -376,6 +376,7 @@ class CLIWrapper:
                                        '(in percent and absolute) and provisioned capacity (in percent and absolute) '
                                        'in GB in the cluster.')
         sub_command.add_argument("cluster_id", help='the cluster UUID')
+        sub_command.add_argument("--json", help='Print json output', required=False, action='store_true')
         sub_command.add_argument("--history", help='(XXdYYh), list history records (one for every 15 minutes) '
                                                    'for XX days and YY hours (up to 10 days in total).')
 
@@ -990,11 +991,12 @@ class CLIWrapper:
             elif sub_command == "get-capacity":
                 cluster_id = args.cluster_id
                 history = args.history
-                data = cluster_ops.get_capacity(cluster_id, history)
-                if data:
-                    ret = utils.print_table(data)
+                is_json = args.json
+                data = cluster_ops.get_capacity(cluster_id, history, is_json=is_json)
+                if is_json:
+                    ret = data
                 else:
-                    return False
+                    ret = utils.print_table(data)
 
             elif sub_command == "get-io-stats":
                 data = cluster_ops.get_iostats_history(args.cluster_id, args.history, args.records)
