@@ -7,6 +7,8 @@ export SIMPLYBLOCK_DOCKER_IMAGE=$3
 export GRAYLOG_ROOT_PASSWORD_SHA2=$4
 export GRAYLOG_PASSWORD_SECRET="is6SP2EdWg0NdmVGv6CEp5hRHNL7BKVMFem4t9pouMqDQnHwXMSomas1qcbKSt5yISr8eBHv4Y7Dbswhyz84Ut0TW6kqsiPs"
 
+export CLUSTER_SECRET=$5
+export CLUSTER_ID=$6
 export DIR="$(dirname "$(realpath "$0")")"
 
 if [ -s "/etc/foundationdb/fdb.cluster" ]

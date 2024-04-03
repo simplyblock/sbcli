@@ -45,7 +45,6 @@ def _add_graylog_input(cluster_ip, password):
     logger.debug(response.text)
     return response.status_code == 201
 
-
 def create_cluster(blk_size, page_size_in_blocks, ha_type, tls,
                    auth_hosts_only, cli_pass, model_ids,
                    cap_warn, cap_crit, prov_cap_warn, prov_cap_crit, ifname):
@@ -108,7 +107,7 @@ def create_cluster(blk_size, page_size_in_blocks, ha_type, tls,
         c.prov_cap_crit = prov_cap_crit
 
     logger.info("Deploying swarm stack ...")
-    ret = scripts.deploy_stack(cli_pass, DEV_IP, constants.SIMPLY_BLOCK_DOCKER_IMAGE, c.secret)
+    ret = scripts.deploy_stack(cli_pass, DEV_IP, constants.SIMPLY_BLOCK_DOCKER_IMAGE, c.secret, c.uuid)
     logger.info("Deploying swarm stack > Done")
 
     logger.info("Configuring DB...")
@@ -126,6 +125,10 @@ def create_cluster(blk_size, page_size_in_blocks, ha_type, tls,
     cluster_events.cluster_create(c)
 
     mgmt_node_ops.add_mgmt_node(DEV_IP, c.uuid)
+
+    logger.info("Applying dashboard...")
+    ret = scripts.apply_dashboard(c.secret)
+    logger.info("Applying dashboard > Done")
 
     logger.info("New Cluster has been created")
     logger.info(c.uuid)

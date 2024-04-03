@@ -22,6 +22,7 @@ logger.addHandler(gelf_handler)
 logger.addHandler(logger_handler)
 logger.setLevel(logging.DEBUG)
 
+### script to test connection once connection is ascertain
 # get DB controller
 db_controller = kv_store.DBController()
 
