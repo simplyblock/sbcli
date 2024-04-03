@@ -870,7 +870,8 @@ def _remove_bdev_stack(bdev_stack, rpc_client):
         time.sleep(1)
 
 
-def delete_lvol_from_node(lvol, node_id):
+def delete_lvol_from_node(lvol_id, node_id, clear_data=True):
+    lvol = db_controller.get_lvol_by_id(lvol_id)
     snode = db_controller.get_storage_node_by_id(node_id)
     logger.debug(f"Deleting LVol:{lvol.get_id()} from node:{snode.get_id()}")
     rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
@@ -884,11 +885,12 @@ def delete_lvol_from_node(lvol, node_id):
     ret = rpc_client.subsystem_delete(lvol.nqn)
 
     # 3- clear alceml devices
-    for node in db_controller.get_storage_nodes():
-        if node.status == StorageNode.STATUS_ONLINE:
-            rpc_node = RPCClient(node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password)
-            for dev in node.nvme_devices:
-                ret = rpc_node.alceml_unmap_vuid(dev.alceml_bdev, lvol.vuid)
+    if clear_data:
+        for node in db_controller.get_storage_nodes():
+            if node.status == StorageNode.STATUS_ONLINE:
+                rpc_node = RPCClient(node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password)
+                for dev in node.nvme_devices:
+                    ret = rpc_node.alceml_unmap_vuid(dev.alceml_bdev, lvol.vuid)
 
     lvol.deletion_status = 'alceml_unmapped'
     lvol.write_to_db(db_controller.kv_store)
@@ -937,12 +939,12 @@ def delete_lvol(uuid, force_delete=False):
     lvol.write_to_db(db_controller.kv_store)
 
     if lvol.ha_type == 'single':
-        ret = delete_lvol_from_node(lvol, lvol.node_id)
+        ret = delete_lvol_from_node(lvol.get_id(), lvol.node_id)
         if not ret:
             return False
     elif lvol.ha_type == "ha":
         for nodes_id in lvol.nodes:
-            ret = delete_lvol_from_node(lvol, nodes_id)
+            ret = delete_lvol_from_node(lvol.get_id(), nodes_id)
             if not ret:
                 return False
 
@@ -1376,10 +1378,10 @@ def move(lvol_id, node_id, force=False):
         if src_node.status == StorageNode.STATUS_ONLINE:
             # delete lvol
             if lvol.ha_type == 'single':
-                delete_lvol_from_node(lvol, lvol.node_id)
+                delete_lvol_from_node(lvol_id, lvol.node_id, clear_data=False)
             elif lvol.ha_type == "ha":
                 for nodes_id in lvol.nodes:
-                    delete_lvol_from_node(lvol, nodes_id)
+                    delete_lvol_from_node(lvol_id, nodes_id, clear_data=False)
 
             # remove from storage node
             src_node.lvols.remove(lvol_id)

@@ -442,10 +442,14 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask,
     # rpc_client.bdev_set_options(
     #     bdev_io_pool_size, bdev_io_cache_size, iobuf_small_cache_size, iobuf_large_cache_size)
 
+    # 1- set iobuf options
     rpc_client.iobuf_set_options(
         small_pool_count, large_pool_count, small_bufsize, large_bufsize)
 
-    # set nvme bdev options
+    # 2- start spdk framework
+    rpc_client.framework_start_init()
+
+    # 3- set nvme bdev options
     rpc_client.bdev_nvme_set_options()
 
     # get new node info after starting spdk
@@ -846,13 +850,15 @@ def restart_storage_node(
     large_pool_count = large_pool_count or 0
     small_bufsize = small_bufsize or 0
     large_bufsize = large_bufsize or 0
-    # set bdev options
-    # rpc_client.bdev_set_options(
-    #     bdev_io_pool_size, bdev_io_cache_size, iobuf_small_cache_size, iobuf_large_cache_size)
+
+    # 1- set iobuf options
     rpc_client.iobuf_set_options(
         small_pool_count, large_pool_count, small_bufsize, large_bufsize)
 
-    # set nvme bdev options
+    # 2- start spdk framework
+    rpc_client.framework_start_init()
+
+    # 3- set nvme bdev options
     rpc_client.bdev_nvme_set_options()
 
     node_info, _ = snode_api.info()
