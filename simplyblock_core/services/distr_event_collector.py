@@ -41,6 +41,11 @@ def process_device_event(event):
                         event.status = 'skipped'
                         return
 
+                    if node.get_id() != node_id:
+                        logger.info(f"The storage device is remote, skipping")
+                        event.status = 'skipped-remote'
+                        return
+
                     device_id = dev.get_id()
                     break
 
