@@ -103,6 +103,10 @@ def check_node(node_id, with_devices=True):
         logger.error("node not found")
         return False
 
+    if snode.status in [StorageNode.STATUS_OFFLINE, StorageNode.STATUS_REMOVED]:
+        logger.info(f"Skipping ,node status is {snode.status}")
+        return True
+
     logger.info(f"Checking node {node_id}, status: {snode.status}")
 
     print("*" * 100)
@@ -140,7 +144,8 @@ def check_node(node_id, with_devices=True):
         logger.info(f"Node device count: {len(snode.nvme_devices)}")
         for dev in snode.nvme_devices:
             ret = check_device(dev.get_id())
-            node_devices_check &= ret
+            if dev.status in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_UNAVAILABLE]:
+                node_devices_check &= ret
             print("*" * 100)
 
         logger.info(f"Node remote device: {len(snode.remote_devices)}")
@@ -172,14 +177,23 @@ def check_device(device_id):
         logger.error("node not found")
         return False
 
+    if snode.status in [StorageNode.STATUS_OFFLINE, StorageNode.STATUS_REMOVED]:
+        logger.info(f"Skipping ,node status is {snode.status}")
+        return True
+
+    if device.status in [NVMeDevice.STATUS_REMOVED, NVMeDevice.STATUS_UNRECOGNIZED]:
+        logger.info(f"Skipping ,device status is {device.status}")
+        return True
+
     passed = True
     try:
         rpc_client = RPCClient(
             snode.mgmt_ip, snode.rpc_port,
-            snode.rpc_username, snode.rpc_password,
-            timeout=3, retry=1)
+            snode.rpc_username, snode.rpc_password)
 
         bdevs_stack = [device.nvme_bdev, device.testing_bdev, device.alceml_bdev, device.pt_bdev]
+        if device.jm_bdev:
+            bdevs_stack.append(device.jm_bdev)
         logger.info(f"Checking Device: {device_id}, status:{device.status}")
         problems = 0
         for bdev in bdevs_stack:
@@ -226,10 +240,7 @@ def check_remote_device(device_id):
         logger.error("node not found")
         return False
 
-    # if device.status is not NVMeDevice.STATUS_ONLINE:
-    #     logger.error("device is not online")
-    #     return False
-
+    result = True
     for node in db_controller.get_storage_nodes():
         if node.status == StorageNode.STATUS_ONLINE:
             if node.get_id() == snode.get_id():
@@ -242,9 +253,9 @@ def check_remote_device(device_id):
                 logger.info(f"Checking bdev: {device.alceml_bdev} ... ok")
             else:
                 logger.info(f"Checking bdev: {device.alceml_bdev} ... not found")
-                # return False
-    # logger.info("All good")
-    return True
+                result = False
+
+    return result
 
 
 def check_lvol_on_node(lvol_id, node_id):
@@ -266,17 +277,17 @@ def check_lvol_on_node(lvol_id, node_id):
             bdev_name = bdev_info['name']
             ret = rpc_client.get_bdevs(bdev_name)
             if ret:
-                logger.info(f"Checking LVol: {lvol_id} ... ok")
+                logger.info(f"Checking bdev: {bdev_name} ... ok")
             else:
-                logger.error(f"Checking LVol: {lvol_id} ... failed")
+                logger.error(f"Checking LVol: {bdev_name} ... failed")
                 passed = False
 
-            ret = rpc_client.subsystem_list(lvol.nqn)
-            if ret:
-                logger.info(f"Checking subsystem ... ok")
-            else:
-                logger.info(f"Checking subsystem ... not found")
-                passed = False
+        ret = rpc_client.subsystem_list(lvol.nqn)
+        if ret:
+            logger.info(f"Checking subsystem ... ok")
+        else:
+            logger.info(f"Checking subsystem ... not found")
+            passed = False
 
         logger.info("Checking Distr map ...")
         ret = rpc_client.distr_get_cluster_map(lvol.base_bdev)
@@ -303,11 +314,11 @@ def check_lvol_on_node(lvol_id, node_id):
             if dev.status == dev.STATUS_ONLINE:
                 online_devices += 1
 
-    if lvol.ndcs + lvol.npcs < online_devices:
-        logger.info(f"Checking Distr ndcs+npcs: {lvol.ndcs}+{lvol.npcs}, online devices: {online_devices} ... ok")
-    else:
-        logger.info(f"Checking Distr ndcs+npcs: {lvol.ndcs}+{lvol.npcs}, online devices: {online_devices} ... failed")
-        passed = False
+    # if lvol.ndcs + lvol.npcs < online_devices:
+    #     logger.info(f"Checking Distr ndcs+npcs: {lvol.ndcs}+{lvol.npcs}, online devices: {online_devices} ... ok")
+    # else:
+    #     logger.info(f"Checking Distr ndcs+npcs: {lvol.ndcs}+{lvol.npcs}, online devices: {online_devices} ... failed")
+        # passed = False
 
     return passed
 

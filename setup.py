@@ -40,6 +40,8 @@ data_files = gen_data_files(
         "simplyblock_core/controllers",
         "simplyblock_core/models",
         "simplyblock_core/scripts",
+        "simplyblock_core/scripts/alerting",
+        "simplyblock_core/scripts/dashboards",
         "simplyblock_core/services",
         "simplyblock_web/blueprints",
         "simplyblock_web/static",

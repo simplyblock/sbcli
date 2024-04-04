@@ -16,7 +16,7 @@ class SNodeClientException(Exception):
 
 class SNodeClient:
 
-    def __init__(self, ip_address, timeout=30, retry=3):
+    def __init__(self, ip_address, timeout=60, retry=5):
         self.ip_address = ip_address
         self.url = 'http://%s/snode/' % self.ip_address
         self.timeout = timeout
@@ -36,7 +36,7 @@ class SNodeClient:
                 dt = json.dumps(params)
             response = self.session.request(method, self.url+path, data=dt, timeout=self.timeout)
         except Exception as e:
-            raise e
+            return None, str(e)
 
         logger.debug("Response: status_code: %s, content: %s",
                      response.status_code, response.content)
@@ -70,7 +70,7 @@ class SNodeClient:
     def info(self):
         return self._request("GET", "info")
 
-    def spdk_process_start(self, spdk_cpu_mask, spdk_mem, spdk_image=None, cmd_params=None, cluster_ip=None):
+    def spdk_process_start(self, spdk_cpu_mask, spdk_mem, spdk_image=None, spdk_debug=None, cluster_ip=None):
         params = {"cluster_ip": cluster_ip}
         if spdk_cpu_mask:
             params['spdk_cpu_mask'] = spdk_cpu_mask
@@ -78,8 +78,8 @@ class SNodeClient:
             params['spdk_mem'] = spdk_mem
         if spdk_image:
             params['spdk_image'] = spdk_image
-        if cmd_params:
-            params['cmd_params'] = cmd_params
+        if spdk_debug:
+            params['spdk_debug'] = spdk_debug
         return self._request("POST", "spdk_process_start", params)
 
     def join_swarm(self, cluster_ip, join_token, db_connection, cluster_id):

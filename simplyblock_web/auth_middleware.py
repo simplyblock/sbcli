@@ -29,14 +29,14 @@ def token_required(f):
             }, 401
         try:
             db_controller = kv_store.DBController()
-            cls = db_controller.get_clusters(cluster_id)
-            if not cls:
+            cluster = db_controller.get_cluster_by_id(cluster_id)
+            if not cluster:
                 return {
                     "message": "Invalid Cluster ID",
                     "data": None,
                     "error": "Unauthorized"
                 }, 401
-            if cls[0].secret != cluster_secret:
+            if cluster.secret != cluster_secret:
                 return {
                     "message": "Invalid Cluster secret",
                     "data": None,

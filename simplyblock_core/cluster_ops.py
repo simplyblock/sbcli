@@ -9,10 +9,12 @@ import uuid
 import docker
 import requests
 
-from simplyblock_core import utils, scripts, constants, mgmt_node_ops, storage_node_ops
-from simplyblock_core.controllers import cluster_events
+from simplyblock_core import utils, scripts, constants, mgmt_node_ops, storage_node_ops, shell_utils
+from simplyblock_core.controllers import cluster_events, device_controller
 from simplyblock_core.kv_store import DBController
 from simplyblock_core.models.cluster import Cluster
+from simplyblock_core.models.nvme_device import NVMeDevice
+from simplyblock_core.models.storage_node import StorageNode
 
 logger = logging.getLogger()
 
@@ -42,7 +44,6 @@ def _add_graylog_input(cluster_ip, password):
     response = session.request("POST", url, headers=headers, data=payload)
     logger.debug(response.text)
     return response.status_code == 201
-
 
 def create_cluster(blk_size, page_size_in_blocks, ha_type, tls,
                    auth_hosts_only, cli_pass, model_ids,
@@ -106,7 +107,7 @@ def create_cluster(blk_size, page_size_in_blocks, ha_type, tls,
         c.prov_cap_crit = prov_cap_crit
 
     logger.info("Deploying swarm stack ...")
-    ret = scripts.deploy_stack(cli_pass, DEV_IP, constants.SIMPLY_BLOCK_DOCKER_IMAGE, c.secret)
+    ret = scripts.deploy_stack(cli_pass, DEV_IP, constants.SIMPLY_BLOCK_DOCKER_IMAGE, c.secret, c.uuid)
     logger.info("Deploying swarm stack > Done")
 
     logger.info("Configuring DB...")
@@ -124,6 +125,10 @@ def create_cluster(blk_size, page_size_in_blocks, ha_type, tls,
     cluster_events.cluster_create(c)
 
     mgmt_node_ops.add_mgmt_node(DEV_IP, c.uuid)
+
+    logger.info("Applying dashboard...")
+    ret = scripts.apply_dashboard(c.secret)
+    logger.info("Applying dashboard > Done")
 
     logger.info("New Cluster has been created")
     logger.info(c.uuid)
@@ -272,7 +277,7 @@ def join_cluster(cluster_ip, cluster_id, role, ifname, data_nics,  spdk_cpu_mask
 
     if role == 'management':
         mgmt_node_ops.add_mgmt_node(DEV_IP, cluster_id)
-        cluster_obj = db_controller.get_clusters(cluster_id)[0]
+        cluster_obj = db_controller.get_cluster_by_id(cluster_id)
         nodes = db_controller.get_mgmt_nodes(cluster_id=cluster_id)
         if len(nodes) >= 3:
             logger.info("Waiting for FDB container to be active...")
@@ -378,12 +383,11 @@ def add_cluster(blk_size, page_size_in_blocks, model_ids, ha_type, tls,
 
 def show_cluster(cl_id, is_json=False):
     db_controller = DBController()
-    cls = db_controller.get_clusters(id=cl_id)
-    if not cls:
+    cluster = db_controller.get_cluster_by_id(cl_id)
+    if not cluster:
         logger.error(f"Cluster not found {cl_id}")
         return False
 
-    cluster = cls[0]
     st = db_controller.get_storage_nodes()
     data = []
     for node in st:
@@ -393,7 +397,9 @@ def show_cluster(cl_id, is_json=False):
                 "Storage ID": dev.cluster_device_order,
                 "Size": utils.humanbytes(dev.size),
                 "Hostname": node.hostname,
-                "Status": dev.status
+                "Status": dev.status,
+                "IO Error": dev.io_error,
+                "Health": dev.health_check
             })
     data = sorted(data, key=lambda x: x["Storage ID"])
     if is_json:
@@ -402,49 +408,73 @@ def show_cluster(cl_id, is_json=False):
         return utils.print_table(data)
 
 
-def suspend_cluster(cl_id):
+def set_cluster_status(cl_id, status):
     db_controller = DBController()
-    cls = db_controller.get_clusters(id=cl_id)
-    if not cls:
+    cluster = db_controller.get_cluster_by_id(cl_id)
+    if not cluster:
         logger.error(f"Cluster not found {cl_id}")
         return False
-    cl = cls[0]
-    old_status = cl.status
-    cl.status = Cluster.STATUS_SUSPENDED
-    cl.write_to_db(db_controller.kv_store)
 
-    cluster_events.cluster_status_change(cl, cl.status, old_status)
-    return "Done"
+    if cluster.status == status:
+        return True
+
+    old_status = cluster.status
+    cluster.status = status
+    cluster.write_to_db(db_controller.kv_store)
+    cluster_events.cluster_status_change(cluster, cluster.status, old_status)
+    return True
+
+
+def suspend_cluster(cl_id):
+    return set_cluster_status(cl_id, Cluster.STATUS_SUSPENDED)
 
 
 def unsuspend_cluster(cl_id):
-    db_controller = DBController()
-    cls = db_controller.get_clusters(id=cl_id)
-    if not cls:
-        logger.error(f"Cluster not found {cl_id}")
-        return False
-    cl = cls[0]
-    old_status = cl.status
-    cl.status = Cluster.STATUS_ACTIVE
-    cl.write_to_db(db_controller.kv_store)
-
-    cluster_events.cluster_status_change(cl, cl.status, old_status)
-    return "Done"
+    return set_cluster_status(cl_id, Cluster.STATUS_ACTIVE)
 
 
 def degrade_cluster(cl_id):
+    return set_cluster_status(cl_id, Cluster.STATUS_DEGRADED)
+
+
+def cluster_set_read_only(cl_id):
     db_controller = DBController()
-    cls = db_controller.get_clusters(id=cl_id)
-    if not cls:
+    cluster = db_controller.get_cluster_by_id(cl_id)
+    if not cluster:
         logger.error(f"Cluster not found {cl_id}")
         return False
-    cl = cls[0]
-    old_status = cl.status
-    cl.status = Cluster.STATUS_DEGRADED
-    cl.write_to_db(db_controller.kv_store)
 
-    cluster_events.cluster_status_change(cl, cl.status, old_status)
-    return "Done"
+    if cluster.status == Cluster.STATUS_READONLY:
+        return True
+
+    ret = set_cluster_status(cl_id, Cluster.STATUS_READONLY)
+    if ret:
+        st = db_controller.get_storage_nodes()
+        for node in st:
+            for dev in node.nvme_devices:
+                if dev.status == NVMeDevice.STATUS_ONLINE:
+                    device_controller.device_set_read_only(dev.get_id())
+    return True
+
+
+def cluster_set_active(cl_id):
+    db_controller = DBController()
+    cluster = db_controller.get_cluster_by_id(cl_id)
+    if not cluster:
+        logger.error(f"Cluster not found {cl_id}")
+        return False
+
+    if cluster.status == Cluster.STATUS_ACTIVE:
+        return True
+
+    ret = set_cluster_status(cl_id, Cluster.STATUS_ACTIVE)
+    if ret:
+        st = db_controller.get_storage_nodes()
+        for node in st:
+            for dev in node.nvme_devices:
+                if dev.status == NVMeDevice.STATUS_READONLY:
+                    device_controller.device_set_online(dev.get_id())
+    return True
 
 
 def list():
@@ -467,13 +497,12 @@ def list():
     return utils.print_table(data)
 
 
-def get_capacity(cluster_id, history, records_count=20, parse_sizes=True):
+def get_capacity(cluster_id, history, records_count=20, is_json=False):
     db_controller = DBController()
-    cls = db_controller.get_clusters(id=cluster_id)
-    if not cls:
+    cluster = db_controller.get_cluster_by_id(cluster_id)
+    if not cluster:
         logger.error(f"Cluster not found {cluster_id}")
         return False
-    cl = cls[0]
 
     if history:
         records_number = utils.parse_history_param(history)
@@ -483,12 +512,12 @@ def get_capacity(cluster_id, history, records_count=20, parse_sizes=True):
     else:
         records_number = 20
 
-    records = db_controller.get_cluster_capacity(cl, records_number)
+    records = db_controller.get_cluster_capacity(cluster, records_number)
 
     new_records = utils.process_records(records, records_count)
 
-    if not parse_sizes:
-        return new_records
+    if is_json:
+        return json.dumps(new_records, indent=2)
 
     out = []
     for record in new_records:
@@ -506,11 +535,10 @@ def get_capacity(cluster_id, history, records_count=20, parse_sizes=True):
 
 def get_iostats_history(cluster_id, history_string, records_count=20, parse_sizes=True):
     db_controller = DBController()
-    cls = db_controller.get_clusters(id=cluster_id)
-    if not cls:
+    cluster = db_controller.get_cluster_by_id(cluster_id)
+    if not cluster:
         logger.error(f"Cluster not found {cluster_id}")
         return False
-    cl = cls[0]
 
     nodes = db_controller.get_storage_nodes_by_cluster_id(cluster_id)
     if not nodes:
@@ -525,7 +553,7 @@ def get_iostats_history(cluster_id, history_string, records_count=20, parse_size
     else:
         records_number = 20
 
-    records = db_controller.get_cluster_stats(cl, records_number)
+    records = db_controller.get_cluster_stats(cluster, records_number)
 
     # combine records
     new_records = utils.process_records(records, records_count)
@@ -549,48 +577,44 @@ def get_iostats_history(cluster_id, history_string, records_count=20, parse_size
 
 def get_ssh_pass(cluster_id):
     db_controller = DBController()
-    cls = db_controller.get_clusters(id=cluster_id)
-    if not cls:
+    cluster = db_controller.get_cluster_by_id(cluster_id)
+    if not cluster:
         logger.error(f"Cluster not found {cluster_id}")
         return False
-    cl = cls[0]
-    return cl.cli_pass
+    return cluster.cli_pass
 
 
 def get_secret(cluster_id):
     db_controller = DBController()
-    cls = db_controller.get_clusters(id=cluster_id)
-    if not cls:
+    cluster = db_controller.get_cluster_by_id(cluster_id)
+    if not cluster:
         logger.error(f"Cluster not found {cluster_id}")
         return False
-    cl = cls[0]
-    return cl.secret
+    return cluster.secret
 
 
 def set_secret(cluster_id, secret):
     db_controller = DBController()
-    cls = db_controller.get_clusters(cluster_id)
-    if not cls:
+    cluster = db_controller.get_cluster_by_id(cluster_id)
+    if not cluster:
         logger.error(f"Cluster not found {cluster_id}")
         return False
-    cl = cls[0]
 
     secret = secret.strip()
     if len(secret) < 20:
         return "Secret must be at least 20 char"
 
-    cl.secret = secret
-    cl.write_to_db(db_controller.kv_store)
+    cluster.secret = secret
+    cluster.write_to_db(db_controller.kv_store)
     return "Done"
 
 
 def get_logs(cluster_id, is_json=False):
     db_controller = DBController()
-    cls = db_controller.get_clusters(cluster_id)
-    if not cls:
+    cluster = db_controller.get_cluster_by_id(cluster_id)
+    if not cluster:
         logger.error(f"Cluster not found {cluster_id}")
         return False
-    cl = cls[0]
 
     events = db_controller.get_events(cluster_id)
     out = []
@@ -618,3 +642,54 @@ def get_logs(cluster_id, is_json=False):
         return json.dumps(out, indent=2)
     else:
         return utils.print_table(out)
+
+
+def get_cluster(cl_id):
+    db_controller = DBController()
+    cluster = db_controller.get_cluster_by_id(cl_id)
+    if not cluster:
+        logger.error(f"Cluster not found {cl_id}")
+        return False
+
+    return json.dumps(cluster.get_clean_dict(), indent=2)
+
+
+def update_cluster(cl_id):
+    db_controller = DBController()
+    cluster = db_controller.get_cluster_by_id(cl_id)
+    if not cluster:
+        logger.error(f"Cluster not found {cl_id}")
+        return False
+
+    try:
+        out, _, ret_code = shell_utils.run_command("pip install sbcli-dev --upgrade")
+        if ret_code == 0:
+            logger.info("sbcli-dev is upgraded")
+    except Exception as e:
+        logger.error(e)
+
+    try:
+        logger.info("Updating mgmt cluster")
+        cluster_docker = utils.get_docker_client(cl_id)
+        logger.info(f"Pulling image {constants.SIMPLY_BLOCK_DOCKER_IMAGE}")
+        cluster_docker.images.pull(constants.SIMPLY_BLOCK_DOCKER_IMAGE)
+        for service in cluster_docker.services.list():
+            if service.attrs['Spec']['Labels']['com.docker.stack.image'] == constants.SIMPLY_BLOCK_DOCKER_IMAGE:
+                logger.info(f"Updating service {service.name}")
+                service.update(image=constants.SIMPLY_BLOCK_DOCKER_IMAGE, force_update=True)
+        logger.info("Done")
+    except Exception as e:
+        print(e)
+
+    for node in db_controller.get_storage_nodes():
+        node_docker = docker.DockerClient(base_url=f"tcp://{node.mgmt_ip}:2375", version="auto")
+        logger.info(f"Pulling image {constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE}")
+        node_docker.images.pull(constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE)
+        if node.status == StorageNode.STATUS_ONLINE:
+            storage_node_ops.shutdown_storage_node(node.get_id(), force=True)
+            time.sleep(3)
+        storage_node_ops.restart_storage_node(node.get_id())
+
+    logger.info("Done")
+    return True
+

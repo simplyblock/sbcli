@@ -8,10 +8,13 @@ import time
 import uuid
 
 from simplyblock_core import utils, constants, distr_controller
-from simplyblock_core.controllers import snapshot_controller, pool_controller
+from simplyblock_core.controllers import snapshot_controller, pool_controller, lvol_events
 from simplyblock_core.kv_store import DBController
+from simplyblock_core.models.cluster import Cluster
+from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.lvol_model import LVol
+from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.rpc_client import RPCClient
 
 
@@ -167,6 +170,7 @@ def get_jm_names(snode):
     return [f"jm_{snode.get_id()}"]
 
 
+# Deprecated
 def add_lvol(name, size, host_id_or_name, pool_id_or_name, use_comp, use_crypto,
              distr_vuid, distr_ndcs, distr_npcs,
              max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes,
@@ -187,7 +191,7 @@ def add_lvol(name, size, host_id_or_name, pool_id_or_name, use_comp, use_crypto,
     if not pool:
         return False, f"Pool not found: {pool_id_or_name}"
 
-    cl = db_controller.get_clusters(snode.cluster_id)[0]
+    cl = db_controller.get_cluster_by_id(snode.cluster_id)
     if cl.status not in [cl.STATUS_ACTIVE, cl.STATUS_DEGRADED]:
         return False, f"Cluster is not active, status: {cl.status}"
 
@@ -432,7 +436,7 @@ def _get_next_3_nodes():
 def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp, use_crypto,
                 distr_vuid, distr_ndcs, distr_npcs,
                 max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes,
-                distr_bs=None, distr_chunk_bs=None):
+                distr_bs=None, distr_chunk_bs=None, with_snapshot=False, max_size=0):
 
     logger.info(f"Adding LVol: {name}")
     host_node = None
@@ -495,35 +499,62 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
         logger.error("No online Storage nodes found")
         return False, "No online Storage nodes found"
 
+    cluster_size_prov = 0
+    cluster_size_total = 0
+    for lvol in db_controller.get_lvols():
+        cluster_size_prov += lvol.size
+
+    for dev in db_controller.get_storage_devices():
+        if dev.status == NVMeDevice.STATUS_ONLINE:
+            cluster_size_total += dev.size
+
+    cluster_size_prov_util = int(((cluster_size_prov+size) / cluster_size_total) * 100)
+
+    if cl.prov_cap_crit and cl.prov_cap_crit < cluster_size_prov_util:
+        msg = f"Cluster provisioned cap critical would be, util: {cluster_size_prov_util}% of cluster util: {cl.prov_cap_crit}"
+        logger.error(msg)
+        return False, msg
+
+    elif cl.prov_cap_warn and cl.prov_cap_warn < cluster_size_prov_util:
+        logger.warning(f"Cluster provisioned cap warning, util: {cluster_size_prov_util}% of cluster util: {cl.prov_cap_warn}")
+
     if distr_vuid == 0:
-        vuid = 1 + int(random.random() * 10000)
+        vuid = utils.get_random_vuid()
     else:
         vuid = distr_vuid
 
-    node_count = 0
-    for node in db_controller.get_storage_nodes():
-        if node.status == node.STATUS_ONLINE:
-            node_count += 1
     if distr_ndcs == 0 and distr_npcs == 0:
         if ha_type == "single":
             distr_ndcs = 4
             distr_npcs = 1
         else:
 
-            if node_count == 3:
+            if dev_count == 3:
                 distr_ndcs = 1
-            elif node_count in [4, 5]:
+            elif dev_count in [4, 5]:
                 distr_ndcs = 2
-            elif node_count >= 6:
+            elif dev_count >= 6:
                 distr_ndcs = 4
             distr_npcs = 1
     else:
-        if distr_ndcs + distr_npcs >= node_count:
-            return False, f"ndcs+npcs: {distr_ndcs+distr_npcs} must be less than online node count: {node_count}"
+        if distr_ndcs + distr_npcs >= dev_count:
+            return False, f"ndcs+npcs: {distr_ndcs+distr_npcs} must be less than online devices count: {dev_count}"
 
+    if max_size:
+        if max_size < size:
+            return False, f"Max size:{max_size} must be larger than size {size}"
+    else:
+        records = db_controller.get_cluster_capacity(cl)
+        if records:
+            max_size = records[0]['size_total']
+        else:
+            max_size = size * 10
+
+    logger.info(f"Max size: {utils.humanbytes(max_size)}")
     lvol = LVol()
     lvol.lvol_name = name
     lvol.size = size
+    lvol.max_size = max_size
     lvol.status = LVol.STATUS_ONLINE
     lvol.ha_type = ha_type
     lvol.bdev_stack = []
@@ -539,28 +570,81 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
     lvol.mode = 'read-write'
     lvol.lvol_type = 'lvol'
     lvol.nqn = cl.nqn + ":lvol:" + lvol.uuid
+
     lvol.ndcs = distr_ndcs
     lvol.npcs = distr_npcs
     lvol.distr_bs = distr_bs
     lvol.distr_chunk_bs = distr_chunk_bs
     lvol.distr_page_size = cl.page_size_in_blocks
+
     lvol.base_bdev = f"distr_{lvol.vuid}_{name}"
-    # lvol.top_bdev = lvol.lvol_bdev
     lvol.top_bdev = lvol.base_bdev
 
-    lvol.bdev_stack.append({"type": "distr", "name": lvol.base_bdev})
-    # lvol.bdev_stack.append({"type": "lvs", "name": lvol.lvs_name})
-    # lvol.bdev_stack.append({"type": "lvol", "name": lvol.lvol_bdev})
+    lvol.bdev_stack.append({
+        "type": "bdev_distr",
+        "name": lvol.base_bdev,
+        "params": {
+            "name": lvol.base_bdev,
+            "vuid": lvol.vuid,
+            "ndcs": lvol.ndcs,
+            "npcs": lvol.npcs,
+            "num_blocks": int(lvol.size / lvol.distr_bs),
+            "block_size": lvol.distr_bs,
+            "chunk_size": lvol.distr_chunk_bs,
+            "pba_page_size":  lvol.distr_page_size,
+        }
+    })
+
+    if with_snapshot:
+        lvol.bdev_stack.append({
+            "type": "bmap_init",
+            "name": lvol.base_bdev,
+            "params": {
+                "bdev_name": lvol.base_bdev,
+                "num_blocks": int(lvol.size / lvol.distr_bs),
+                "block_len": lvol.distr_bs,
+                "page_len": int(lvol.distr_page_size / lvol.distr_bs),
+                "max_num_blocks": int(lvol.max_size / lvol.distr_bs)
+            }
+        })
+        lvol.snapshot_name = f"snapshot_{lvol.vuid}_{name}"
+        lvol.top_bdev = f"lvol_{lvol.vuid}_{lvol.lvol_name}"
+        lvol.bdev_stack.append({
+            "type": "ultra_lvol",
+            "name": lvol.top_bdev,
+            "params": {
+                "lvol_name": lvol.top_bdev,
+                "base_bdev": lvol.base_bdev,
+                "label": "label",
+                "desc": "desc"
+            }
+        })
 
     if use_crypto is True:
         lvol.crypto_bdev = f"crypto_{lvol.lvol_name}"
-        lvol.bdev_stack.append({"type": "crypto", "name": lvol.crypto_bdev})
+        lvol.bdev_stack.append({
+            "type": "crypto",
+            "name": lvol.crypto_bdev,
+            "params": {
+                "name": lvol.crypto_bdev,
+                "base_name": lvol.lvol_bdev
+            }
+        })
         lvol.lvol_type += ',crypto'
         lvol.top_bdev = lvol.crypto_bdev
 
     if use_comp is True:
+        base_bdev = lvol.lvol_bdev
+        if lvol.crypto_bdev:
+            base_bdev = lvol.crypto_bdev
         lvol.comp_bdev = f"comp_{lvol.lvol_name}"
-        lvol.bdev_stack.append({"type": "comp", "name": lvol.comp_bdev})
+        lvol.bdev_stack.append({
+            "type": "comp",
+            "name": lvol.comp_bdev,
+            "params": {
+                "base_bdev_name": base_bdev
+            }
+        })
         lvol.lvol_type += ',compress'
         lvol.top_bdev = lvol.comp_bdev
 
@@ -602,6 +686,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
     pool.write_to_db(db_controller.kv_store)
 
     lvol.write_to_db(db_controller.kv_store)
+    lvol_events.lvol_create(lvol)
 
     # set QOS
     if max_rw_iops or max_rw_mbytes or max_r_mbytes or max_w_mbytes:
@@ -609,33 +694,65 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
     return lvol.uuid, None
 
 
-def add_lvol_on_node(lvol, snode, ha_comm_addrs=None, ha_inode_self=None):
-    jm_names = get_jm_names(snode)
+def _create_bdev_stack(lvol, snode, ha_comm_addrs, ha_inode_self):
     rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
-    num_blocks = int(lvol.size / lvol.distr_bs)
-    ret = rpc_client.bdev_distrib_create(
-        lvol.base_bdev, lvol.vuid, lvol.ndcs, lvol.npcs, num_blocks,
-        lvol.distr_bs, jm_names, lvol.distr_chunk_bs, ha_comm_addrs, ha_inode_self, lvol.distr_page_size)
+
+    created_bdevs = []
+    for bdev in lvol.bdev_stack:
+        # if 'status' in bdev and bdev['status'] == 'created':
+        #     continue
+
+        type = bdev['type']
+        name = bdev['name']
+        params = bdev['params']
+        ret = None
+
+        if type == "bdev_distr":
+            params['jm_names'] = get_jm_names(snode)
+            params['ha_comm_addrs'] = ha_comm_addrs
+            params['ha_inode_self'] = ha_inode_self
+            ret = rpc_client.bdev_distrib_create(**params)
+
+            snodes = db_controller.get_storage_nodes()
+            cluster_map_data = distr_controller.get_distr_cluster_map(snodes, snode)
+            cluster_map_data['UUID_node_target'] = snode.get_id()
+            rpc_client.distr_send_cluster_map(cluster_map_data)
+
+        elif type == "bmap_init":
+            ret = rpc_client.ultra21_lvol_bmap_init(**params)
+
+        elif type == "ultra_lvol":
+            ret = rpc_client.ultra21_lvol_mount_lvol(**params)
+
+        elif type == "crypto":
+            ret = _create_crypto_lvol(rpc_client, **params)
+
+        elif type == "comp":
+            ret = _create_compress_lvol(rpc_client, **params)
+
+        else:
+            logger.debug(f"Unknown BDev type: {type}")
+            continue
+
+        if ret:
+            bdev['status'] = "created"
+            created_bdevs.append(bdev)
+        else:
+            if created_bdevs:
+                # rollback
+                _remove_bdev_stack(created_bdevs, rpc_client)
+            return False, f"Failed to create BDev: {name}"
+
+    return True, None
+
+
+def add_lvol_on_node(lvol, snode, ha_comm_addrs=None, ha_inode_self=None):
+    rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
+    spdk_mem_info_before = rpc_client.ultra21_util_get_malloc_stats()
+
+    ret, msg = _create_bdev_stack(lvol, snode, ha_comm_addrs, ha_inode_self)
     if not ret:
-        logger.error("Failed to create Distr bdev")
-        return False, "Failed to create Distr bdev"
-    if ret == "?":
-        logger.error(f"Failed to create Distr bdev, ret={ret}")
-        # return False
-
-    if lvol.crypto_bdev:
-        crypto_bdev = _create_crypto_lvol(rpc_client, lvol.crypto_bdev, lvol.lvol_bdev)
-        if not crypto_bdev:
-            return False, "Error creating crypto bdev"
-
-    if lvol.comp_bdev:
-        base_bdev = lvol.lvol_bdev
-        if lvol.crypto_bdev:
-            base_bdev = lvol.crypto_bdev
-
-        comp_bdev = _create_compress_lvol(rpc_client, base_bdev)
-        if not comp_bdev:
-            return False, "Error creating comp bdev"
+        return False, msg
 
     logger.info("creating subsystem %s", lvol.nqn)
     ret = rpc_client.subsystem_create(lvol.nqn, 'sbcli-cn', lvol.uuid)
@@ -663,14 +780,28 @@ def add_lvol_on_node(lvol, snode, ha_comm_addrs=None, ha_inode_self=None):
             ret = rpc_client.nvmf_subsystem_listener_set_ana_state(
                 lvol.nqn, iface.ip4_address, "4420", is_optimized)
 
-    logger.info("add lvol to subsystem")
+    logger.info("Add BDev to subsystem")
     ret = rpc_client.nvmf_subsystem_add_ns(lvol.nqn, lvol.top_bdev, lvol.uuid, lvol.guid)
+    if not ret:
+        return False, "Failed to add bdev to subsystem"
 
-    logger.info("Sending cluster map to the lvol")
+    logger.info("Sending cluster map to LVol")
     snodes = db_controller.get_storage_nodes()
     cluster_map_data = distr_controller.get_distr_cluster_map(snodes, snode)
     cluster_map_data['UUID_node_target'] = snode.get_id()
     ret = rpc_client.distr_send_cluster_map(cluster_map_data)
+
+    spdk_mem_info_after = rpc_client.ultra21_util_get_malloc_stats()
+    logger.debug("ultra21_util_get_malloc_stats:")
+    logger.debug(spdk_mem_info_after)
+
+    diff = {}
+    for key in spdk_mem_info_after.keys():
+        diff[key] = spdk_mem_info_after[key] - spdk_mem_info_before[key]
+
+    logger.info("spdk mem diff:")
+    logger.info(json.dumps(diff, indent=2))
+    lvol.mem_diff = diff
 
     return True, None
 
@@ -703,53 +834,71 @@ def recreate_lvol(lvol_id, snode):
     return lvol
 
 
-def delete_lvol_from_node(lvol, node_id):
-    snode = db_controller.get_storage_node_by_id(node_id)
-    logger.debug(f"Deleting LVol:{lvol.get_id()} from node:{snode.get_id()}")
-    rpc_client = RPCClient(
-        snode.mgmt_ip, snode.rpc_port,
-        snode.rpc_username, snode.rpc_password)
+def _remove_bdev_stack(bdev_stack, rpc_client):
+    for bdev in bdev_stack:
+        if 'status' in bdev and bdev['status'] == 'deleted':
+            continue
 
-    for bdev in lvol.bdev_stack[::-1]:
         type = bdev['type']
         name = bdev['name']
-        if type == "alceml":
-            ret = rpc_client.bdev_alceml_delete(name)
-            if not ret:
-                logger.error(f"failed to delete alceml: {name}")
-            continue
-        if type == "distr":
+        ret = None
+        # if type == "alceml":
+        #     ret = rpc_client.bdev_alceml_delete(name)
+        if type == "bdev_distr":
             ret = rpc_client.bdev_distrib_delete(name)
-            if not ret:
-                logger.error(f"failed to delete distr: {name}")
-            continue
-        if type == "lvs":
-            ret = rpc_client.bdev_lvol_delete_lvstore(name)
-            if not ret:
-                logger.error(f"failed to delete lvs: {name}")
-            continue
-        if type == "lvol":
-            ret = rpc_client.delete_lvol(name)
-            if not ret:
-                logger.error(f"failed to delete lvol bdev {name}")
-            continue
-        if type == "ultra_pt":
-            ret = rpc_client.ultra21_bdev_pass_delete(name)
-            if not ret:
-                logger.error(f"failed to delete ultra pt {name}")
-            continue
-        if type == "comp":
+        # elif type == "lvs":
+        #     ret = rpc_client.bdev_lvol_delete_lvstore(name)
+        # elif type == "lvol":
+        #     ret = rpc_client.delete_lvol(name)
+        # elif type == "ultra_pt":
+        #     ret = rpc_client.ultra21_bdev_pass_delete(name)
+        elif type == "ultra_lvol":
+            ret = rpc_client.ultra21_lvol_dismount(name)
+        elif type == "comp":
             ret = rpc_client.lvol_compress_delete(name)
-            if not ret:
-                logger.error(f"failed to delete comp bdev {name}")
-            continue
-        if type == "crypto":
+        elif type == "crypto":
             ret = rpc_client.lvol_crypto_delete(name)
-            if not ret:
-                logger.error(f"failed to delete crypto bdev {name}")
+        else:
+            logger.debug(f"Unknown BDev type: {type}")
             continue
 
+        if not ret:
+            logger.error(f"Failed to delete BDev {name}")
+
+        bdev['status'] = 'deleted'
+        time.sleep(1)
+
+
+def delete_lvol_from_node(lvol_id, node_id, clear_data=True):
+    lvol = db_controller.get_lvol_by_id(lvol_id)
+    snode = db_controller.get_storage_node_by_id(node_id)
+    logger.debug(f"Deleting LVol:{lvol.get_id()} from node:{snode.get_id()}")
+    rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
+
+    # 1- remove bdevs
+    _remove_bdev_stack(lvol.bdev_stack[::-1], rpc_client)
+    lvol.deletion_status = 'bdevs_deleted'
+    lvol.write_to_db(db_controller.kv_store)
+
+    # 2- remove subsystem
     ret = rpc_client.subsystem_delete(lvol.nqn)
+
+    # 3- clear alceml devices
+    if clear_data:
+        for node in db_controller.get_storage_nodes():
+            if node.status == StorageNode.STATUS_ONLINE:
+                rpc_node = RPCClient(node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password)
+                for dev in node.nvme_devices:
+                    ret = rpc_node.alceml_unmap_vuid(dev.alceml_bdev, lvol.vuid)
+
+    lvol.deletion_status = 'alceml_unmapped'
+    lvol.write_to_db(db_controller.kv_store)
+
+    # 4- clear JM
+    # ret = rpc_client.alceml_unmap_vuid(name, lvol.vuid)
+    # lvol.deletion_status = 'jm_unmapped'
+    lvol.write_to_db(db_controller.kv_store)
+
     return True
 
 
@@ -784,13 +933,17 @@ def delete_lvol(uuid, force_delete=False):
             lvol.write_to_db(db_controller.kv_store)
             return True
 
+    # set status
+    lvol.status = LVol.STATUS_IN_DELETION
+    lvol.write_to_db(db_controller.kv_store)
+
     if lvol.ha_type == 'single':
-        ret = delete_lvol_from_node(lvol, lvol.node_id)
+        ret = delete_lvol_from_node(lvol.get_id(), lvol.node_id)
         if not ret:
             return False
     elif lvol.ha_type == "ha":
         for nodes_id in lvol.nodes:
-            ret = delete_lvol_from_node(lvol, nodes_id)
+            ret = delete_lvol_from_node(lvol.get_id(), nodes_id)
             if not ret:
                 return False
 
@@ -815,6 +968,7 @@ def delete_lvol(uuid, force_delete=False):
             if lvols_count == 0:
                 snapshot_controller.delete(snap.get_id())
 
+    lvol_events.lvol_delete(lvol)
     logger.info("Done")
     return True
 
@@ -878,14 +1032,16 @@ def list_lvols(is_json):
             continue
         logger.debug(lvol)
         data.append({
-            "id": lvol.uuid,
-            "name": lvol.lvol_name,
-            "size": utils.humanbytes(lvol.size),
-            "pool": lvol.pool_uuid,
-            "hostname": lvol.hostname,
-            "ha type": lvol.ha_type,
-            "status": lvol.status,
-            "health": lvol.health_check,
+            "Id": lvol.uuid,
+            "Name": lvol.lvol_name,
+            "Size": utils.humanbytes(lvol.size),
+            "Hostname": lvol.hostname,
+            "HA": lvol.ha_type,
+            "VUID": lvol.vuid,
+            "Mod": f"{lvol.ndcs}x{lvol.npcs}",
+            "Status": lvol.status,
+            "IO Err": lvol.io_error,
+            "Health": lvol.health_check,
         })
 
     if is_json:
@@ -894,10 +1050,39 @@ def list_lvols(is_json):
         return utils.print_table(data)
 
 
-def get_lvol(lvol_id, is_json):
-    lvol = db_controller.get_lvol_by_id(lvol_id)
+def list_lvols_mem(is_json, is_csv):
+    lvols = db_controller.get_lvols()
+    data = []
+    for lvol in lvols:
+        if lvol.deleted is True:
+            continue
+        logger.debug(lvol)
+        data.append({
+            "id": lvol.uuid,
+            "size": utils.humanbytes(lvol.size),
+            "max_size": utils.humanbytes(lvol.max_size),
+            **lvol.mem_diff
+        })
+
+    if is_json:
+        return json.dumps(data, indent=2)
+    elif is_csv:
+        print(";".join(data[0].keys()))
+        for d in data:
+            print(";".join([str(v) for v in d.values()]))
+    else:
+        return utils.print_table(data)
+
+
+def get_lvol(lvol_id_or_name, is_json):
+    lvol = None
+    for lv in db_controller.get_lvols():
+        if lv.get_id() == lvol_id_or_name or lv.lvol_name == lvol_id_or_name:
+            lvol = lv
+            break
+
     if not lvol:
-        logger.error(f"lvol not found: {lvol_id}")
+        logger.error(f"LVol id or name not found: {lvol_id_or_name}")
         return False
 
     data = lvol.get_clean_dict()
@@ -1013,9 +1198,12 @@ def set_read_only(id):
     if not ret:
         return "Error"
 
+    old_status = lvol.mode
     lvol.mode = 'read-only'
     lvol.write_to_db(db_controller.kv_store)
     logger.info("Done")
+    lvol_events.lvol_status_change(lvol, lvol.mode, old_status)
+
     return True
 
 
@@ -1113,14 +1301,18 @@ def get_cluster_map(lvol_id):
     return utils.print_table(results)
 
 
-def migrate(lvol_id):
+def migrate(lvol_id, node_id):
 
     lvol = db_controller.get_lvol_by_id(lvol_id)
     if not lvol:
         logger.error(f"lvol not found: {lvol_id}")
         return False
 
+    old_node = lvol.node_id
     nodes = _get_next_3_nodes()
+
+    if node_id:
+        nodes[0] = db_controller.get_storage_node_by_id(node_id)
 
     host_node = nodes[0]
     lvol.hostname = host_node.hostname
@@ -1150,4 +1342,50 @@ def migrate(lvol_id):
     host_node.lvols.append(lvol.uuid)
     host_node.write_to_db(db_controller.kv_store)
     lvol.write_to_db(db_controller.kv_store)
+
+    lvol_events.lvol_migrate(lvol, old_node, lvol.node_id)
+
     return True
+
+
+def move(lvol_id, node_id, force=False):
+    lvol = db_controller.get_lvol_by_id(lvol_id)
+    if not lvol:
+        logger.error(f"lvol not found: {lvol_id}")
+        return False
+
+    target_node = db_controller.get_storage_node_by_id(node_id)
+    if not target_node:
+        logger.error(f"Node not found: {target_node}")
+        return False
+
+    if lvol.node_id == target_node.get_id():
+        return True
+
+    if target_node.status != StorageNode.STATUS_ONLINE:
+        logger.error(f"Node is not online!: {target_node}, status: {target_node.status}")
+        return False
+
+    src_node = db_controller.get_storage_node_by_id(lvol.node_id)
+
+    if src_node.status == StorageNode.STATUS_ONLINE:
+        if not force:
+            logger.error(f"Node is online!: {src_node.get_id()}, use --force to force move")
+            return False
+
+    if migrate(lvol_id, node_id):
+        if src_node.status == StorageNode.STATUS_ONLINE:
+            # delete lvol
+            if lvol.ha_type == 'single':
+                delete_lvol_from_node(lvol_id, lvol.node_id, clear_data=False)
+            elif lvol.ha_type == "ha":
+                for nodes_id in lvol.nodes:
+                    delete_lvol_from_node(lvol_id, nodes_id, clear_data=False)
+
+            # remove from storage node
+            src_node.lvols.remove(lvol_id)
+            src_node.write_to_db(db_controller.kv_store)
+        return True
+    else:
+        logger.error("Failed to migrate lvol")
+        return False

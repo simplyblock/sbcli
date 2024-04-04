@@ -1,4 +1,5 @@
 # coding=utf-8
+from typing import List
 
 from simplyblock_core.models.base_model import BaseModel
 
@@ -8,7 +9,7 @@ class NVMeDevice(BaseModel):
     STATUS_ONLINE = 'online'
     STATUS_AVAILABLE = 'available'
     STATUS_UNAVAILABLE = 'unavailable'
-    STATUS_READONLY = 'read-only'
+    STATUS_READONLY = 'read_only'
     STATUS_OVERLOADED = 'overloaded'
     STATUS_FAILED = 'failed'
     STATUS_REMOVED = 'removed'
@@ -37,9 +38,14 @@ class NVMeDevice(BaseModel):
         "nvmf_port": {"type": int, 'default': 0},
         "remote_bdev": {"type": str, 'default': ""},
         "testing_bdev": {"type": str, 'default': ""},
+        "jm_bdev": {"type": str, 'default': ""},
         "cluster_device_order": {"type": int, 'default': 0},
         "health_check": {"type": bool, "default": True},
         "cluster_id": {"type": str, 'default': ""},
+
+        "bdev_stack": {"type": List, 'default': []},
+
+        "io_error": {"type": bool, 'default': False},
 
     }
 

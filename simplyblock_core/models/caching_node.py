@@ -85,6 +85,7 @@ class CachingNode(BaseModel):
 
         "cache_bdev": {"type": str, "default": ""},
         "cache_size": {"type": int, "default": 0},
+        "cache_split_factor": {"type": int, "default": 0},
         "cpu": {"type": int, "default": 0},
         "cpu_hz": {"type": int, "default": 0},
         "memory": {"type": int, "default": 0},

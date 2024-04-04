@@ -7,6 +7,7 @@ KVD_DB_TIMEOUT_MS = 10000
 SPK_DIR = '/home/ec2-user/spdk'
 RPC_HTTP_PROXY_PORT = 8080
 LOG_LEVEL = logging.INFO
+LOG_WEB_DEBUG = True
 
 FILE_DIR = os.path.dirname(os.path.realpath(__file__))
 INSTALL_DIR = os.path.dirname(FILE_DIR)
@@ -21,6 +22,7 @@ DEV_MONITOR_INTERVAL_SEC = 10
 DEV_STAT_COLLECTOR_INTERVAL_SEC = 2
 PROT_STAT_COLLECTOR_INTERVAL_SEC = 2
 DISTR_EVENT_COLLECTOR_INTERVAL_SEC = 2
+CAP_MONITOR_INTERVAL_SEC = 30
 SSD_VENDOR_WHITE_LIST = ["1d0f:cd01", "1d0f:cd00"]
 
 PMEM_DIR = '/tmp/pmem'
@@ -49,5 +51,7 @@ HEALTH_CHECK_INTERVAL_SEC = 60
 
 
 SIMPLY_BLOCK_DOCKER_IMAGE = "simplyblock/simplyblock:v1.0.4"
-SIMPLY_BLOCK_SPDK_CORE_IMAGE = "hamdykhader/spdk:core"
-SIMPLY_BLOCK_SPDK_ULTRA_IMAGE = "hamdykhader/spdk:latest"
+SIMPLY_BLOCK_SPDK_CORE_IMAGE = "simplyblock/spdk-core:latest"
+SIMPLY_BLOCK_SPDK_ULTRA_IMAGE = "simplyblock/spdk:main-latest"
+
+GELF_PORT = 12201

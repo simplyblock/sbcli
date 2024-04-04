@@ -26,7 +26,7 @@ class RPCClient:
 
     # ref: https://spdk.io/doc/jsonrpc.html
 
-    def __init__(self, ip_address, port, username, password, timeout=30, retry=3):
+    def __init__(self, ip_address, port, username, password, timeout=60, retry=10):
         self.ip_address = ip_address
         self.port = port
         self.url = 'http://%s:%s/' % (self.ip_address, self.port)
@@ -368,7 +368,7 @@ class RPCClient:
             "use_optimized": True,
             "pba_nbalign": 4096
         }
-        return self._request2("bdev_alceml_create", params)
+        return self._request("bdev_alceml_create", params)
 
     def bdev_distrib_create(self, name, vuid, ndcs, npcs, num_blocks, block_size, jm_names,
                             chunk_size, ha_comm_addrs=None, ha_inode_self=None, pba_page_size=2097152):
@@ -508,11 +508,12 @@ class RPCClient:
 
     def bdev_nvme_set_options(self):
         params = {
-            "action_on_timeout": "none",
+            "bdev_retry_count": 0,
+            "transport_retry_count": 0,
             "ctrlr_loss_timeout_sec": -1,
-            "reconnect_delay_sec": 15,
-            "transport_retry_count": 1,
-            "bdev_retry_count": 1}
+            "fast_io_fail_timeout_sec": 5,
+            "reconnect_delay_sec": 5,
+        }
         return self._request("bdev_nvme_set_options", params)
 
     def bdev_set_options(self, bdev_io_pool_size, bdev_io_cache_size, iobuf_small_cache_size, iobuf_large_cache_size):
@@ -529,6 +530,22 @@ class RPCClient:
             return self._request("bdev_set_options", params)
         else:
             return False
+
+    def iobuf_set_options(self, small_pool_count, large_pool_count, small_bufsize, large_bufsize):
+        params = {}
+        if small_pool_count > 0:
+            params['small_pool_count'] = small_pool_count
+        if large_pool_count > 0:
+            params['large_pool_count'] = large_pool_count
+        if small_bufsize > 0:
+            params['small_bufsize'] = small_bufsize
+        if large_bufsize > 0:
+            params['large_bufsize'] = large_bufsize
+        if params:
+            return self._request("iobuf_set_options", params)
+        else:
+            return False
+
 
     def distr_status_events_get(self):
         return self._request("distr_status_events_get")
@@ -581,10 +598,16 @@ class RPCClient:
             "modus": "BASE",
             "lvol_bdev": lvol_name,
             "base_bdev": base_bdev,
-            "label": label,
-            "desc": desc
+            # "label": label,
+            # "desc": desc
         }
         return self._request("ultra21_lvol_mount", params)
+
+    def ultra21_lvol_dismount(self, lvol_name):
+        params = {
+            "lvol_bdev": lvol_name
+        }
+        return self._request("ultra21_lvol_dismount", params)
 
     def bdev_jm_create(self, name, name_storage1, block_size=4096):
         params = {
@@ -594,8 +617,31 @@ class RPCClient:
         }
         return self._request("bdev_jm_create", params)
 
-
     def bdev_jm_delete(self, name):
         params = {"name": name}
         return self._request("bdev_jm_delete", params)
+
+    def ultra21_util_get_malloc_stats(self):
+        params = {"socket_id": 0}
+        return self._request("ultra21_util_get_malloc_stats", params)
+
+    def ultra21_lvol_mount_clone(self, clone_name, snap_bdev, base_bdev):
+        params = {
+            "modus": "CLONE",
+            "lvol_bdev": clone_name,
+            "base_bdev": base_bdev,
+            "snapshot_bdev": snap_bdev
+        }
+        return self._request("ultra21_lvol_mount", params)
+
+    def alceml_unmap_vuid(self, name, vuid):
+        params = {"name": name, "vuid": vuid}
+        return self._request("alceml_unmap_vuid", params)
+
+    def jm_delete(self):
+        params = {"name": 0, "vuid": 0}
+        return self._request("jm_delete", params)
+
+    def framework_start_init(self):
+        return self._request("framework_start_init")
 

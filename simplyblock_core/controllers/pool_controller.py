@@ -9,6 +9,7 @@ import time
 import uuid
 
 from simplyblock_core import utils
+from simplyblock_core.controllers import pool_events
 from simplyblock_core.kv_store import DBController
 from simplyblock_core.models.pool import Pool
 
@@ -45,9 +46,11 @@ def add_pool(name, pool_max, lvol_max, max_rw_iops, max_rw_mbytes, max_r_mbytes,
             logger.error("max_rw_mbytes must be greater than max_w_mbytes and max_r_mbytes")
             return False
 
+    cluster = db_controller.get_clusters()[0]
     logger.info("Adding pool")
     pool = Pool()
     pool.id = str(uuid.uuid4())
+    pool.cluster_id = cluster.get_id()
     pool.pool_name = name
     if has_secret:
         pool.secret = _generate_string(20)
@@ -59,6 +62,8 @@ def add_pool(name, pool_max, lvol_max, max_rw_iops, max_rw_mbytes, max_r_mbytes,
     pool.max_w_mbytes_per_sec = max_w_mbytes
     pool.status = "active"
     pool.write_to_db(db_controller.kv_store)
+
+    pool_events.pool_add(pool)
     logger.info("Done")
     return pool.id
 
@@ -106,6 +111,7 @@ def set_pool(uuid, pool_max, lvol_max, max_rw_iops,
             return False
 
     pool.write_to_db(db_controller.kv_store)
+    pool_events.pool_updated(pool)
     logger.info("Done")
     return True
 
@@ -124,6 +130,7 @@ def delete_pool(uuid):
         return False
 
     logger.info(f"Deleting pool {pool.id}")
+    pool_events.pool_remove(pool)
     pool.remove(db_controller.kv_store)
     logger.info("Done")
     return True

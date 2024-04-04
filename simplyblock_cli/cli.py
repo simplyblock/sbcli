@@ -10,7 +10,7 @@ from simplyblock_core import compute_node_ops as compute_ops
 from simplyblock_core import storage_node_ops as storage_ops
 from simplyblock_core import mgmt_node_ops as mgmt_ops
 from simplyblock_core import constants
-from simplyblock_core.controllers import pool_controller, lvol_controller, snapshot_controller
+from simplyblock_core.controllers import pool_controller, lvol_controller, snapshot_controller, device_controller
 from simplyblock_core.controllers import caching_node_controller, health_controller
 from simplyblock_core.models.pool import Pool
 
@@ -47,12 +47,12 @@ class CLIWrapper:
         sub_command.add_argument("--dev-split", help='Split nvme devices by this factor, can be 2 or more',
                                  dest='dev_split', type=int, default=1)
         sub_command.add_argument("--spdk-image", help='SPDK image uri', dest='spdk_image')
-        sub_command.add_argument("--spdk-cmd-params", help='Extra params for SPDK app command', nargs='+', dest='cmd_params')
+        sub_command.add_argument("--spdk-debug", help='Enable spdk debug logs', dest='spdk_debug', required=False, action='store_true')
 
-        sub_command.add_argument("--bdev_io_pool_size", help='bdev_set_options param', dest='bdev_io_pool_size',  type=int, default=0)
-        sub_command.add_argument("--bdev_io_cache_size", help='bdev_set_options param', dest='bdev_io_cache_size',  type=int, default=0)
-        sub_command.add_argument("--iobuf_small_cache_size", help='bdev_set_options param', dest='iobuf_small_cache_size',  type=int, default=0)
-        sub_command.add_argument("--iobuf_large_cache_size", help='bdev_set_options param', dest='iobuf_large_cache_size',  type=int, default=0)
+        sub_command.add_argument("--iobuf_small_pool_count", help='bdev_set_options param', dest='small_pool_count',  type=int, default=0)
+        sub_command.add_argument("--iobuf_large_pool_count", help='bdev_set_options param', dest='large_pool_count',  type=int, default=0)
+        sub_command.add_argument("--iobuf_small_bufsize", help='bdev_set_options param', dest='small_bufsize',  type=int, default=0)
+        sub_command.add_argument("--iobuf_large_bufsize", help='bdev_set_options param', dest='large_bufsize',  type=int, default=0)
 
         # remove storage node
         sub_command = self.add_sub_command(subparser, "remove", 'Remove storage node')
@@ -66,6 +66,14 @@ class CLIWrapper:
         sub_command.add_argument("--cluster-id", help='id of the cluster for which nodes are listed')
         sub_command.add_argument("--json", help='Print outputs in json format', action='store_true')
 
+        sub_command = self.add_sub_command(subparser, "get", 'Get storage node info')
+        sub_command.add_argument("id", help='UUID of storage node')
+
+        sub_command = self.add_sub_command(subparser, "update", 'Update storage node db info')
+        sub_command.add_argument("id", help='UUID of storage node')
+        sub_command.add_argument("key", help='Key')
+        sub_command.add_argument("value", help='Value')
+
         # Restart storage node
         sub_command = self.add_sub_command(
             subparser, "restart", 'Restart a storage node. All functions and device drivers will be reset. '
@@ -75,12 +83,12 @@ class CLIWrapper:
         sub_command.add_argument("--cpu-mask", help='SPDK app CPU mask, default is all cores found', dest='spdk_cpu_mask')
         sub_command.add_argument("--memory", help='SPDK huge memory allocation, default is 4G', dest='spdk_mem')
         sub_command.add_argument("--spdk-image", help='SPDK image uri', dest='spdk_image')
-        sub_command.add_argument("--spdk-cmd-params", help='Extra params for SPDK app command', nargs='+', dest='cmd_params')
+        sub_command.add_argument("--spdk-debug", help='Enable spdk debug logs', dest='spdk_debug', required=False, action='store_true')
 
-        sub_command.add_argument("--bdev_io_pool_size", help='bdev_set_options param', dest='bdev_io_pool_size',  type=int, default=0)
-        sub_command.add_argument("--bdev_io_cache_size", help='bdev_set_options param', dest='bdev_io_cache_size',  type=int, default=0)
-        sub_command.add_argument("--iobuf_small_cache_size", help='bdev_set_options param', dest='iobuf_small_cache_size',  type=int, default=0)
-        sub_command.add_argument("--iobuf_large_cache_size", help='bdev_set_options param', dest='iobuf_large_cache_size',  type=int, default=0)
+        sub_command.add_argument("--iobuf_small_pool_count", help='bdev_set_options param', dest='small_pool_count',  type=int, default=0)
+        sub_command.add_argument("--iobuf_large_pool_count", help='bdev_set_options param', dest='large_pool_count',  type=int, default=0)
+        sub_command.add_argument("--iobuf_small_bufsize", help='bdev_set_options param', dest='small_bufsize',  type=int, default=0)
+        sub_command.add_argument("--iobuf_large_bufsize", help='bdev_set_options param', dest='large_bufsize',  type=int, default=0)
 
         # sub_command.add_argument("-t", '--test', help='Run smart test on the NVMe devices', action='store_true')
 
@@ -169,6 +177,7 @@ class CLIWrapper:
                                         'auto-detection of removal did not work or if the device must be maintained '
                                         'otherwise while remaining inserted into the server. ')
         sub_command.add_argument("device_id", help='Storage device ID')
+        sub_command.add_argument("--force", help='Force device remove', required=False, action='store_true')
 
         sub_command = self.add_sub_command(subparser, 'set-ro-device', 'Set storage device read only')
         sub_command.add_argument("device_id", help='Storage device ID')
@@ -255,6 +264,10 @@ class CLIWrapper:
         sub_command = self.add_sub_command(subparser, "info", 'Get node information')
         sub_command.add_argument("id", help='Node UUID')
 
+        # node info-spdk
+        sub_command = self.add_sub_command(subparser, "info-spdk", 'Get SPDK memory information')
+        sub_command.add_argument("id", help='Node UUID')
+
         # Initialize cluster parser
         subparser = self.add_command('cluster', 'Cluster commands')
 
@@ -311,6 +324,10 @@ class CLIWrapper:
             subparser, 'status', 'Show cluster status')
         sub_command.add_argument("cluster_id", help='the cluster UUID')
 
+        # show cluster info
+        sub_command = self.add_sub_command(subparser, 'get', 'Show cluster info')
+        sub_command.add_argument("id", help='the cluster UUID')
+
         sub_command = self.add_sub_command(
             subparser, 'suspend', 'Suspend cluster. The cluster will stop processing all IO. '
                                   'Attention! This will cause an "all paths down" event for nvmeof/iscsi volumes '
@@ -359,6 +376,7 @@ class CLIWrapper:
                                        '(in percent and absolute) and provisioned capacity (in percent and absolute) '
                                        'in GB in the cluster.')
         sub_command.add_argument("cluster_id", help='the cluster UUID')
+        sub_command.add_argument("--json", help='Print json output', required=False, action='store_true')
         sub_command.add_argument("--history", help='(XXdYYh), list history records (one for every 15 minutes) '
                                                    'for XX days and YY hours (up to 10 days in total).')
 
@@ -405,6 +423,10 @@ class CLIWrapper:
         sub_command = self.add_sub_command(subparser, "check", 'Health check cluster')
         sub_command.add_argument("id", help='cluster UUID')
 
+        # update cluster
+        sub_command = self.add_sub_command(subparser, "update", 'Update cluster mgmt services')
+        sub_command.add_argument("id", help='cluster UUID')
+
         # lvol ops
         subparser = self.add_command('lvol', 'LVol commands')
         # add lvol
@@ -412,7 +434,10 @@ class CLIWrapper:
         sub_command.add_argument("name", help='LVol name or id')
         sub_command.add_argument("size", help='LVol size: 10M, 10G, 10(bytes)')
         sub_command.add_argument("pool", help='Pool UUID or name')
-        sub_command.add_argument("--host_id", help='Primary storage node UUID or Hostname')
+        sub_command.add_argument("--snapshot", "-s", help='Make LVol with snapshot capability, default is False',
+                                 required=False, action='store_true')
+        sub_command.add_argument("--max-size", help='LVol max size', dest='max_size', default="0")
+        sub_command.add_argument("--host-id", help='Primary storage node UUID or Hostname', dest='host_id')
         sub_command.add_argument("--ha-type", help='LVol HA type (single, ha), default is cluster HA type',
                                  dest='ha_type', choices=["single", "ha", "default"], default='default')
 
@@ -454,9 +479,13 @@ class CLIWrapper:
         sub_command = self.add_sub_command(subparser, 'list', 'List all LVols')
         sub_command.add_argument("--cluster-id", help='List LVols in particular cluster')
         sub_command.add_argument("--json", help='Print outputs in json format', required=False, action='store_true')
+        # list lvols
+        sub_command = self.add_sub_command(subparser, 'list-mem', 'List all LVols')
+        sub_command.add_argument("--json", help='Print outputs in json format', required=False, action='store_true')
+        sub_command.add_argument("--csv", help='Print outputs in csv format', required=False, action='store_true')
         # get lvol
         sub_command = self.add_sub_command(subparser, 'get', 'Get LVol details')
-        sub_command.add_argument("id", help='LVol id')
+        sub_command.add_argument("id", help='LVol id or name')
         sub_command.add_argument("--json", help='Print outputs in json format', required=False, action='store_true')
         # delete lvol
         sub_command = self.add_sub_command(
@@ -513,10 +542,11 @@ class CLIWrapper:
 
         # lvol move
         sub_command = self.add_sub_command(
-            subparser, 'move', 'Moves a full copy of the logical volume between clusters')
-        sub_command.add_argument("id", help='LVol id')
-        sub_command.add_argument("cluster-id", help='Destination Cluster ID')
-        sub_command.add_argument("node-id", help='Destination Node ID')
+            subparser, 'move', 'Moves a full copy of the logical volume between nodes')
+        sub_command.add_argument("id", help='LVol UUID')
+        # sub_command.add_argument("cluster-id", help='Destination Cluster ID')
+        sub_command.add_argument("node_id", help='Destination Node UUID')
+        sub_command.add_argument("--force", help='Force LVol delete from source node', required=False, action='store_true')
 
         # lvol replicate
         sub_command = self.add_sub_command(
@@ -723,6 +753,8 @@ class CLIWrapper:
         args = self.parser.parse_args()
         if args.debug:
             self.logger.setLevel(logging.DEBUG)
+        else:
+            self.logger.setLevel(constants.LOG_LEVEL)
         logging.getLogger("urllib3.connectionpool").setLevel(logging.WARNING)
 
         args_dict = args.__dict__
@@ -750,12 +782,12 @@ class CLIWrapper:
                 data_nics = args.data_nics
                 dev_split = args.dev_split
                 spdk_image = args.spdk_image
-                cmd_params = args.cmd_params
+                spdk_debug = args.spdk_debug
 
-                bdev_io_pool_size = args.bdev_io_pool_size
-                bdev_io_cache_size = args.bdev_io_cache_size
-                iobuf_small_cache_size = args.iobuf_small_cache_size
-                iobuf_large_cache_size = args.iobuf_large_cache_size
+                small_pool_count = args.small_pool_count
+                large_pool_count = args.large_pool_count
+                small_bufsize = args.small_bufsize
+                large_bufsize = args.large_bufsize
 
                 spdk_cpu_mask = None
                 if args.spdk_cpu_mask:
@@ -771,8 +803,8 @@ class CLIWrapper:
                         return f"SPDK memory:{args.spdk_mem} must be larger than 1G"
 
                 out = storage_ops.add_node(
-                    cluster_id, node_ip, ifname, data_nics, spdk_cpu_mask, spdk_mem, dev_split, spdk_image, cmd_params,
-                bdev_io_pool_size, bdev_io_cache_size, iobuf_small_cache_size, iobuf_large_cache_size)
+                    cluster_id, node_ip, ifname, data_nics, spdk_cpu_mask, spdk_mem, dev_split, spdk_image, spdk_debug,
+                    small_pool_count, large_pool_count, small_bufsize, large_bufsize)
                 return out
 
             elif sub_command == "list":
@@ -785,7 +817,7 @@ class CLIWrapper:
                 node_id = args.node_id
 
                 spdk_image = args.spdk_image
-                cmd_params = args.cmd_params
+                spdk_debug = args.spdk_debug
 
                 cpu_mask = None
                 if args.spdk_cpu_mask:
@@ -801,25 +833,25 @@ class CLIWrapper:
                         return f"SPDK memory:{args.spdk_mem} must be larger than 1G"
 
 
-                bdev_io_pool_size = args.bdev_io_pool_size
-                bdev_io_cache_size = args.bdev_io_cache_size
-                iobuf_small_cache_size = args.iobuf_small_cache_size
-                iobuf_large_cache_size = args.iobuf_large_cache_size
+                small_pool_count = args.small_pool_count
+                large_pool_count = args.large_pool_count
+                small_bufsize = args.small_bufsize
+                large_bufsize = args.large_bufsize
 
                 ret = storage_ops.restart_storage_node(
                     node_id, cpu_mask, spdk_mem,
-                    spdk_image, cmd_params,
-                    bdev_io_pool_size, bdev_io_cache_size,
-                    iobuf_small_cache_size, iobuf_large_cache_size)
+                    spdk_image, spdk_debug,
+                    small_pool_count, large_pool_count,
+                    small_bufsize, large_bufsize)
 
             elif sub_command == "list-devices":
                 ret = self.storage_node_list_devices(args)
 
             elif sub_command == "device-testing-mode":
-                ret = storage_ops.set_device_testing_mode(args.device_id, args.mode)
+                ret = device_controller.set_device_testing_mode(args.device_id, args.mode)
 
             elif sub_command == "remove-device":
-                ret = storage_ops.device_remove(args.device_id)
+                ret = device_controller.device_remove(args.device_id, args.force)
 
             elif sub_command == "shutdown":
                 # answer = self.query_yes_no("Are you sure?", default=None)
@@ -833,10 +865,10 @@ class CLIWrapper:
                 ret = storage_ops.resume_storage_node(args.node_id)
 
             elif sub_command == "reset-device":
-                ret = storage_ops.reset_storage_device(args.device_id)
+                ret = device_controller.reset_storage_device(args.device_id)
 
             elif sub_command == "restart-device":
-                ret = storage_ops.restart_device(args.id)
+                ret = device_controller.restart_device(args.id)
 
             elif sub_command == "run-smart":
                 dev_name = args.name
@@ -856,19 +888,19 @@ class CLIWrapper:
             elif sub_command == "get-capacity-device":
                 device_id = args.device_id
                 history = args.history
-                data = storage_ops.get_device_capacity(device_id, history)
+                data = device_controller.get_device_capacity(device_id, history)
                 if data:
                     ret = utils.print_table(data)
                 else:
                     return False
             elif sub_command == "get-device":
                 device_id = args.device_id
-                ret = storage_ops.get_device(device_id)
+                ret = device_controller.get_device(device_id)
 
             elif sub_command == "get-io-stats-device":
                 device_id = args.device_id
                 history = args.history
-                data = storage_ops.get_device_iostats(device_id, history)
+                data = device_controller.get_device_iostats(device_id, history)
                 if data:
                     ret = utils.print_table(data)
                 else:
@@ -921,6 +953,16 @@ class CLIWrapper:
                 node_id = args.id
                 ret = storage_ops.get_info(node_id)
 
+            elif sub_command == "info-spdk":
+                node_id = args.id
+                ret = storage_ops.get_spdk_info(node_id)
+
+            elif sub_command == "update":
+                ret = storage_ops.update(args.id, args.key, args.value)
+
+            elif sub_command == "get":
+                ret = storage_ops.get(args.id)
+
             else:
                 self.parser.print_help()
 
@@ -949,11 +991,12 @@ class CLIWrapper:
             elif sub_command == "get-capacity":
                 cluster_id = args.cluster_id
                 history = args.history
-                data = cluster_ops.get_capacity(cluster_id, history)
-                if data:
-                    ret = utils.print_table(data)
+                is_json = args.json
+                data = cluster_ops.get_capacity(cluster_id, history, is_json=is_json)
+                if is_json:
+                    ret = data
                 else:
-                    return False
+                    ret = utils.print_table(data)
 
             elif sub_command == "get-io-stats":
                 data = cluster_ops.get_iostats_history(args.cluster_id, args.history, args.records)
@@ -977,6 +1020,10 @@ class CLIWrapper:
             elif sub_command == "check":
                 cluster_id = args.id
                 ret = health_controller.check_cluster(cluster_id)
+            elif sub_command == "get":
+                ret = cluster_ops.get_cluster(args.id)
+            elif sub_command == "update":
+                ret = cluster_ops.update_cluster(args.id)
             else:
                 self.parser.print_help()
 
@@ -1004,6 +1051,7 @@ class CLIWrapper:
             if sub_command == "add":
                 name = args.name
                 size = self.parse_size(args.size)
+                max_size = self.parse_size(args.max_size)
                 host_id = args.host_id
                 ha_type = args.ha_type
                 pool = args.pool
@@ -1014,6 +1062,7 @@ class CLIWrapper:
                 distr_npcs = args.distr_npcs
                 distr_bs = args.distr_bs
                 distr_chunk_bs = args.distr_chunk_bs
+                with_snapshot = args.snapshot
                 results, error = lvol_controller.add_lvol_ha(
                     name, size, host_id, ha_type, pool, comp, crypto,
                     distr_vuid, distr_ndcs, distr_npcs,
@@ -1022,7 +1071,9 @@ class CLIWrapper:
                     args.max_r_mbytes,
                     args.max_w_mbytes,
                     distr_bs,
-                    distr_chunk_bs)
+                    distr_chunk_bs,
+                    with_snapshot=with_snapshot,
+                    max_size=max_size)
                 if results:
                     ret = results
                 else:
@@ -1035,6 +1086,8 @@ class CLIWrapper:
                     args.max_r_mbytes, args.max_w_mbytes)
             elif sub_command == "list":
                 ret = lvol_controller.list_lvols(args.json)
+            elif sub_command == "list-mem":
+                ret = lvol_controller.list_lvols_mem(args.json, args.csv)
             elif sub_command == "get":
                 ret = lvol_controller.get_lvol(args.id, args.json)
             elif sub_command == "delete":
@@ -1083,6 +1136,8 @@ class CLIWrapper:
             elif sub_command == "check":
                 id = args.id
                 ret = health_controller.check_lvol(id)
+            elif sub_command == 'move':
+                ret = lvol_controller.move(args.id, args.node_id, args.force)
             else:
                 self.parser.print_help()
 

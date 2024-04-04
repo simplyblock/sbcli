@@ -92,6 +92,9 @@ def spdk_process_start():
         logger.info("SPDK deployment found, removing...")
         spdk_process_kill()
 
+    node_name = os.environ.get("HOSTNAME")
+    logger.debug(f"deploying caching node spdk on worker: {node_name}")
+
     env = Environment(loader=FileSystemLoader(os.path.join(TOP_DIR, 'templates')), trim_blocks=True, lstrip_blocks=True)
     template = env.get_template('deploy_spdk.yaml.j2')
     values = {
@@ -102,6 +105,7 @@ def spdk_process_start():
         'RPC_PORT': data['rpc_port'],
         'RPC_USERNAME': data['rpc_username'],
         'RPC_PASSWORD': data['rpc_password'],
+        'HOSTNAME': node_name,
     }
     dep = yaml.safe_load(template.render(values))
     resp = k8s_apps_v1.create_namespaced_deployment(body=dep, namespace=namespace)

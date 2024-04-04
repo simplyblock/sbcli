@@ -71,7 +71,7 @@ class StorageNode(BaseModel):
         "spdk_cpu_mask": {"type": str, "default": ""},
         "spdk_mem": {"type": int, "default": 0},
         "spdk_image": {"type": str, "default": ""},
-        "cmd_params": {"type": List, "default": []},
+        "spdk_debug": {"type": bool, "default": False},
     }
 
     def __init__(self, data=None):

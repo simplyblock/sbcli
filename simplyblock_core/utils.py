@@ -84,7 +84,7 @@ def get_iface_ip(ifname):
 
 def print_table(data: list):
     if data:
-        x = PrettyTable(field_names=data[0].keys())
+        x = PrettyTable(field_names=data[0].keys(), max_width=70)
         x.align = 'l'
         for node_data in data:
             row = []
@@ -276,3 +276,7 @@ def sum_records(records):
         for rec in records[1:]:
             total += rec
         return total
+
+
+def get_random_vuid():
+    return 1 + int(random.random() * 10000)

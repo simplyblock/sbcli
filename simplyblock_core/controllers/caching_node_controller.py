@@ -79,11 +79,10 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spd
     db_controller = DBController()
     kv_store = db_controller.kv_store
 
-    clusters = db_controller.get_clusters(cluster_id)
-    if not clusters:
+    cluster = db_controller.get_cluster_by_id(cluster_id)
+    if not cluster:
         logger.error("Cluster not found: %s", cluster_id)
         return False
-    cluster = clusters[0]
 
     logger.info(f"Add Caching node: {node_ip}")
     snode_api = CNodeClient(node_ip)
@@ -97,9 +96,8 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spd
         logger.error("Node already exists, try remove it first.")
         return False
 
-
     node_info, _ = snode_api.info()
-    # results, err = snode_api.join_db(db_connection=cluster.db_connection)
+    results, err = snode_api.join_db(db_connection=cluster.db_connection)
 
     data_nics = []
     names = data_nics_list or [iface_name]
@@ -206,7 +204,9 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spd
         ret = rpc_client.bdev_split(ssd_dev.nvme_bdev, split_factor)
         cache_bdev = ret[0]
         cache_size = int(ssd_dev.size/split_factor)
+        snode.cache_split_factor = split_factor
     else:
+        snode.cache_split_factor = 0
         cache_bdev = ssd_dev.nvme_bdev
         cache_size = ssd_dev.size
 
@@ -241,11 +241,10 @@ def recreate(node_id):
         logger.error(f"Can not find caching node: {node_id}")
         return False
 
-    clusters = db_controller.get_clusters(snode.cluster_id)
-    if not clusters:
+    cluster = db_controller.get_cluster_by_id(snode.cluster_id)
+    if not cluster:
         logger.error("Cluster not found: %s", snode.cluster_id)
         return False
-    cluster = clusters[0]
 
     logger.info(f"Recreating caching node: {node_id}, status: {snode.status}")
     snode_api = CNodeClient(f"{snode.mgmt_ip}:5000")
@@ -269,39 +268,10 @@ def recreate(node_id):
 
     ssd_dev = nvme_devs[0]
 
-    # get node hugepages memory
-    mem = node_info['memory_details']['huge_free']
-    logger.info(f"Free hugepages detected: {utils.humanbytes(mem)}")
-    if mem < 1024*1024:
-        logger.error("Hugepages must be larger than 1G")
-        return False
+    if snode.cache_split_factor > 1:
+        ret = rpc_client.bdev_split(ssd_dev.nvme_bdev, snode.cache_split_factor)
 
-    mem = int(mem*constants.CACHING_NODE_MEMORY_FACTOR)
-    snode.hugepages = mem
-    logger.info(f"Hugepages to be used: {utils.humanbytes(mem)}")
-
-    ssd_size = ssd_dev.size
-    supported_ssd_size = mem * 100 / 2
-    split_factor = math.ceil(ssd_size/supported_ssd_size)
-
-    logger.info(f"Supported SSD size: {utils.humanbytes(supported_ssd_size)}")
-    logger.info(f"Current SSD size: {utils.humanbytes(ssd_size)}")
-
-    cache_size = 0
-    cache_bdev = None
-    if supported_ssd_size < ssd_size:
-        logger.info(f"SSD size is bigger than the supported size, will use split bdev: {split_factor}")
-        ret = rpc_client.bdev_split(ssd_dev.nvme_bdev, split_factor)
-        cache_bdev = ret[0]
-        cache_size = int(ssd_dev.size/split_factor)
-    else:
-        cache_bdev = ssd_dev.nvme_bdev
-        cache_size = ssd_dev.size
-
-    logger.info(f"Cache size: {utils.humanbytes(cache_size)}")
-
-    snode.cache_bdev = cache_bdev
-    snode.cache_size = cache_size
+    logger.info(f"Cache size: {utils.humanbytes(snode.cache_size)}")
 
     # create tmp ocf
     logger.info(f"Creating first ocf bdev...")
@@ -310,7 +280,7 @@ def recreate(node_id):
     if not ret:
         logger.error("Failed ot create tmp malloc")
         return False
-    ret = rpc_client.bdev_ocf_create("ocf_tmp", 'wt', cache_bdev, "malloc_tmp")
+    ret = rpc_client.bdev_ocf_create("ocf_tmp", 'wt', snode.cache_bdev, "malloc_tmp")
     if not ret:
         logger.error("Failed ot create tmp OCF BDev")
         return False
@@ -329,7 +299,6 @@ def recreate(node_id):
 
     logger.info("Done")
     return True
-
 
 
 def connect(caching_node_id, lvol_id):
@@ -582,7 +551,7 @@ def deploy(ifname):
     logger.info("Creating CachingNodeAPI container")
     container = node_docker.containers.run(
         constants.SIMPLY_BLOCK_DOCKER_IMAGE,
-        "python simplyblock_web/node_webapp.py caching_docker_node",
+        "python simplyblock_web/caching_node_app.py",
         detach=True,
         privileged=True,
         name="CachingNodeAPI",

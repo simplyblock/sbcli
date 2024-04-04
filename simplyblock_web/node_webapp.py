@@ -6,7 +6,7 @@ import logging
 from flask import Flask
 
 import utils
-
+from simplyblock_core import constants
 
 logger_handler = logging.StreamHandler()
 logger_handler.setFormatter(logging.Formatter('%(asctime)s: %(levelname)s: %(message)s'))
@@ -53,4 +53,4 @@ if __name__ == '__main__':
         from blueprints import snode_ops
         app.register_blueprint(snode_ops.bp)
 
-    app.run(host='0.0.0.0', debug=True)
+    app.run(host='0.0.0.0', debug=constants.LOG_WEB_DEBUG)

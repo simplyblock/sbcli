@@ -50,9 +50,9 @@ def spdk_process_start():
     except:
         data = {}
 
-    cmd_params = None
-    if 'cmd_params' in data and data['cmd_params']:
-        cmd_params = data['cmd_params']
+    set_debug = None
+    if 'spdk_debug' in data and data['spdk_debug']:
+        set_debug = data['spdk_debug']
 
     spdk_cpu_mask = None
     if 'spdk_cpu_mask' in data:
@@ -89,14 +89,14 @@ def spdk_process_start():
             node.remove(force=True)
             time.sleep(2)
 
-    params_line = ""
-    if cmd_params:
-        params_line = " ".join(cmd_params)
+    spdk_debug = 0
+    if set_debug:
+        spdk_debug = 1
 
     spdk_image = constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE
     if 'spdk_image' in data and data['spdk_image']:
         spdk_image = data['spdk_image']
-        node_docker.images.pull(spdk_image)
+        # node_docker.images.pull(spdk_image)
 
     if "cluster_ip" in data and data['cluster_ip']:
         cluster_ip = data['cluster_ip']
@@ -106,16 +106,18 @@ def spdk_process_start():
 
     container = node_docker.containers.run(
         spdk_image,
-        f"/root/scripts/run_distr.sh {spdk_cpu_mask} {spdk_mem} {params_line}",
+        f"/root/scripts/run_distr.sh {spdk_cpu_mask} {spdk_mem} {spdk_debug}",
         name="spdk",
         detach=True,
         privileged=True,
         network_mode="host",
         log_config=log_config,
         volumes=[
+            '/etc/simplyblock:/etc/simplyblock',
             '/var/tmp:/var/tmp',
             '/dev:/dev',
             '/lib/modules/:/lib/modules/',
+            '/var/lib/systemd/coredump/:/var/lib/systemd/coredump/',
             '/sys:/sys'],
         # restart_policy={"Name": "on-failure", "MaximumRetryCount": 99}
     )

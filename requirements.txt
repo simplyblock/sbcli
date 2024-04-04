@@ -2,7 +2,7 @@ foundationdb
 requests
 numpy
 typing
-prettytable
+prettytable>=3.10.0
 docker
 psutil
 py-cpuinfo
@@ -13,3 +13,4 @@ flask
 kubernetes
 PyYAML
 urllib3
+graypy==2.1.0

@@ -170,9 +170,9 @@ def storage_node_add():
     if 'spdk_image' in req_data:
         spdk_image = req_data['spdk_image']
 
-    cmd_params = None
-    if 'cmd_params' in req_data:
-        cmd_params = req_data['cmd_params']
+    spdk_debug = None
+    if 'spdk_debug' in req_data:
+        spdk_debug = req_data['spdk_debug']
 
     data_nics = None
     if 'data_nics' in req_data:
@@ -196,6 +196,6 @@ def storage_node_add():
 
     out = storage_node_ops.add_node(
         cluster_id, node_ip, ifname, data_nics, spdk_cpu_mask, spdk_mem,
-        spdk_image=spdk_image, cmd_params=cmd_params)
+        spdk_image=spdk_image, spdk_debug=spdk_debug)
 
     return utils.get_response(out)

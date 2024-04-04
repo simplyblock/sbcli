@@ -8,6 +8,7 @@ import utils
 from blueprints import csi, web_api_cluster, web_api_mgmt_node, web_api_device, \
     web_api_lvol, web_api_storage_node, web_api_pool, web_api_caching_node
 from auth_middleware import token_required
+from simplyblock_core import constants
 
 logger_handler = logging.StreamHandler()
 logger_handler.setFormatter(logging.Formatter('%(asctime)s: %(levelname)s: %(message)s'))
@@ -44,4 +45,4 @@ def status():
 
 app.config['JSONIFY_PRETTYPRINT_REGULAR'] = True
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', debug=True)
+    app.run(host='0.0.0.0', debug=constants.LOG_WEB_DEBUG)

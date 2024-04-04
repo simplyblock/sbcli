@@ -67,11 +67,11 @@ def validate_header_data():
     if not secret:
         logger.error("no 'secret' key found in the request headers")
         return False
-    cluster = db_controller.get_clusters(cl_id)
+    cluster = db_controller.get_cluster_by_id(cl_id)
     if not cluster:
         logger.error(f"Cluster not found: {cl_id}")
         return False
-    if cluster[0].secret == secret:
+    if cluster.secret == secret:
         return True
 
 
