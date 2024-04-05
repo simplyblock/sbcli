@@ -13,6 +13,8 @@ from simplyblock_core.models.lvol_model import LVol
 # Import the GELF logger
 from graypy import GELFUDPHandler
 
+from simplyblock_core.models.nvme_device import NVMeDevice
+
 # configure logging
 logger_handler = logging.StreamHandler(stream=sys.stdout)
 logger_handler.setFormatter(logging.Formatter('%(asctime)s: %(levelname)s: %(message)s'))
@@ -36,7 +38,7 @@ def process_device_event(event):
         for node in nodes:
             for dev in node.nvme_devices:
                 if dev.cluster_device_order == storage_id:
-                    if dev.status != "online":
+                    if dev.status not in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_READONLY]:
                         logger.info(f"The storage device is not online, skipping. status: {dev.status}")
                         event.status = 'skipped'
                         return
