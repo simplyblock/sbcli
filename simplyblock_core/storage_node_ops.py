@@ -216,7 +216,7 @@ def _prepare_cluster_devices(snode, after_restart=False):
         snode.rpc_username, snode.rpc_password)
 
     for index, nvme in enumerate(snode.nvme_devices):
-        if nvme.status not in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_UNAVAILABLE]:
+        if nvme.status not in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_UNAVAILABLE, NVMeDevice.STATUS_JM]:
             logger.debug(f"Device is not online or unavailable: {nvme.get_id()}, status: {nvme.status}")
             continue
 
@@ -225,9 +225,7 @@ def _prepare_cluster_devices(snode, after_restart=False):
         ret = rpc_client.bdev_passtest_create(test_name, nvme.nvme_bdev)
 
         alceml_id = nvme.get_id()
-        node_id_mini = snode.get_id().split("-")[-1]
-        alceml_id_mini = alceml_id.split("-")[-1]
-        alceml_name = f"node_{node_id_mini}_dev_{alceml_id_mini}"
+        alceml_name = f"alceml_{alceml_id}"
         logger.info(f"adding {alceml_name}")
         pba_init_mode = 3
         if after_restart:
@@ -236,6 +234,18 @@ def _prepare_cluster_devices(snode, after_restart=False):
         if not ret:
             logger.error(f"Failed to create alceml bdev: {alceml_name}")
             return False
+
+        # create jm
+        if nvme.jm_bdev:
+            ret = rpc_client.bdev_jm_create(nvme.jm_bdev, alceml_name)
+            if not ret:
+                logger.error(f"Failed to create JM bdev: {snode.nvme_devices[0].jm_bdev}")
+                return False
+            nvme.testing_bdev = test_name
+            nvme.alceml_bdev = alceml_name
+            nvme.io_error = True
+            nvme.status = NVMeDevice.STATUS_JM
+            continue
 
         # add pass through
         pt_name = f"{alceml_name}_PT"
@@ -268,13 +278,6 @@ def _prepare_cluster_devices(snode, after_restart=False):
         if not ret:
             logger.error(f"Failed to add: {pt_name} to the subsystem: {subsystem_nqn}")
             return False
-
-        # create jm
-        if nvme.jm_bdev:
-            ret = rpc_client.bdev_jm_create(nvme.jm_bdev, alceml_name)
-            if not ret:
-                logger.error(f"Failed to create JM bdev: {snode.nvme_devices[0].jm_bdev}")
-                return False
 
         nvme.testing_bdev = test_name
         nvme.alceml_bdev = alceml_name
@@ -318,7 +321,7 @@ def _connect_to_remote_devs(this_node):
 
 def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask,
              spdk_mem, dev_split=1, spdk_image=None, spdk_debug=False,
-             small_pool_count=0, large_pool_count=0, small_bufsize=0, large_bufsize=0):
+             small_pool_count=0, large_pool_count=0, small_bufsize=0, large_bufsize=0, jm_device_pcie=None):
     db_controller = DBController()
     kv_store = db_controller.kv_store
 
@@ -476,15 +479,19 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask,
     else:
         snode.nvme_devices = nvme_devs
 
+    jm_index = 0
     # Set device cluster order
     dev_order = get_next_cluster_device_order(db_controller)
     for index, nvme in enumerate(snode.nvme_devices):
         nvme.cluster_device_order = dev_order
         dev_order += 1
+        if jm_device_pcie and nvme.pcie_address == jm_device_pcie:
+            jm_index = index
         device_events.device_create(nvme)
 
     # create jm
-    snode.nvme_devices[0].jm_bdev = f"jm_{snode.get_id()}"
+    logger.info(f"Using device for JM: {snode.nvme_devices[jm_index].get_id()}")
+    snode.nvme_devices[jm_index].jm_bdev = f"jm_{snode.get_id()}"
 
     # save object
     snode.write_to_db(db_controller.kv_store)
@@ -1554,6 +1561,11 @@ def deploy(ifname):
 
     logger.info(f"Node IP: {dev_ip}")
     ret = scripts.configure_docker(dev_ip)
+
+    logger.info("NVMe SSD devices found on node:")
+    out, _, _ = shell_utils.run_command("lspci -Dnn | grep -i nvme")
+    for l in out.split():
+        logger.info(l)
 
     node_docker = docker.DockerClient(base_url=f"tcp://{dev_ip}:2375", version="auto", timeout=60 * 5)
     # create the api container
