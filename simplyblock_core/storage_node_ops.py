@@ -2,6 +2,7 @@
 import datetime
 import json
 import logging as log
+import os
 
 import pprint
 
@@ -1551,9 +1552,6 @@ def deploy(ifname):
     if not ifname:
         ifname = "eth0"
 
-    logger.info("Installing dependencies...")
-    ret = scripts.install_deps()
-
     dev_ip = utils.get_iface_ip(ifname)
     if not dev_ip:
         logger.error(f"Error getting interface ip: {ifname}")
@@ -1563,9 +1561,12 @@ def deploy(ifname):
     ret = scripts.configure_docker(dev_ip)
 
     logger.info("NVMe SSD devices found on node:")
-    out, _, _ = shell_utils.run_command("lspci -Dnn | grep -i nvme")
-    for l in out.split():
-        logger.info(l)
+    stream = os.popen("lspci -Dnn | grep -i nvme")
+    for l in stream.readlines():
+        logger.info(l.strip())
+
+    logger.info("Installing dependencies...")
+    ret = scripts.install_deps()
 
     node_docker = docker.DockerClient(base_url=f"tcp://{dev_ip}:2375", version="auto", timeout=60 * 5)
     # create the api container
@@ -1628,7 +1629,7 @@ def get_ctrl_secret(node_id):
     return node.ctrl_secret
 
 
-def health_check(node_id):
+def health_checkk(node_id):
     db_controller = DBController()
     snode = db_controller.get_storage_node_by_id(node_id)
     if not snode:
