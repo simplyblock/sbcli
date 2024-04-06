@@ -1629,7 +1629,7 @@ def get_ctrl_secret(node_id):
     return node.ctrl_secret
 
 
-def health_checkk(node_id):
+def health_check(node_id):
     db_controller = DBController()
     snode = db_controller.get_storage_node_by_id(node_id)
     if not snode:
