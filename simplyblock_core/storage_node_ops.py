@@ -1557,9 +1557,6 @@ def deploy(ifname):
         logger.error(f"Error getting interface ip: {ifname}")
         return False
 
-    logger.info(f"Node IP: {dev_ip}")
-    ret = scripts.configure_docker(dev_ip)
-
     logger.info("NVMe SSD devices found on node:")
     stream = os.popen("lspci -Dnn | grep -i nvme")
     for l in stream.readlines():
@@ -1567,6 +1564,9 @@ def deploy(ifname):
 
     logger.info("Installing dependencies...")
     ret = scripts.install_deps()
+
+    logger.info(f"Node IP: {dev_ip}")
+    ret = scripts.configure_docker(dev_ip)
 
     node_docker = docker.DockerClient(base_url=f"tcp://{dev_ip}:2375", version="auto", timeout=60 * 5)
     # create the api container
