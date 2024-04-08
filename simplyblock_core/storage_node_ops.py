@@ -246,7 +246,6 @@ def _prepare_cluster_devices(snode, after_restart=False):
             nvme.alceml_bdev = alceml_name
             nvme.io_error = True
             nvme.status = NVMeDevice.STATUS_JM
-            continue
 
         # add pass through
         pt_name = f"{alceml_name}_PT"
