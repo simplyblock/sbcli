@@ -620,14 +620,14 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
             }
         })
 
-    if use_crypto is True:
+    if use_crypto:
         lvol.crypto_bdev = f"crypto_{lvol.lvol_name}"
         lvol.bdev_stack.append({
             "type": "crypto",
             "name": lvol.crypto_bdev,
             "params": {
                 "name": lvol.crypto_bdev,
-                "base_name": lvol.lvol_bdev
+                "base_name": lvol.base_bdev
             }
         })
         lvol.lvol_type += ',crypto'
