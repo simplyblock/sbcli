@@ -188,11 +188,11 @@ class RPCClient:
             }
         }
 
-        if uuid:
-            params['namespace']['uuid'] = uuid
+        # if uuid:
+        #     params['namespace']['uuid'] = uuid
 
-        if nguid:
-            params['namespace']['nguid'] = nguid
+        # if nguid:
+        #     params['namespace']['nguid'] = nguid
 
         return self._request("nvmf_subsystem_add_ns", params)
 
