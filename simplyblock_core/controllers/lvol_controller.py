@@ -30,10 +30,8 @@ def _generate_hex_string(length):
     return _generate_string(length).encode('utf-8').hex()
 
 
-def _create_crypto_lvol(rpc_client, name, base_name):
+def _create_crypto_lvol(rpc_client, name, base_name, key1, key2):
     key_name = f'key_{name}'
-    key1 = _generate_hex_string(32)
-    key2 = _generate_hex_string(32)
     ret = rpc_client.lvol_crypto_key_create(key_name, key1, key2)
     if not ret:
         logger.warning("failed to create crypto key")
@@ -436,7 +434,7 @@ def _get_next_3_nodes():
 def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp, use_crypto,
                 distr_vuid, distr_ndcs, distr_npcs,
                 max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes,
-                distr_bs=None, distr_chunk_bs=None, with_snapshot=False, max_size=0):
+                distr_bs=None, distr_chunk_bs=None, with_snapshot=False, max_size=0, key1=None, key2=None):
 
     logger.info(f"Adding LVol: {name}")
     host_node = None
@@ -528,7 +526,6 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
             distr_ndcs = 4
             distr_npcs = 1
         else:
-
             if dev_count == 3:
                 distr_ndcs = 1
             elif dev_count in [4, 5]:
@@ -621,13 +618,18 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
         })
 
     if use_crypto:
+        if key1 == None or key2 == None:
+            return False, "encryption keys for lvol not provided"
+
         lvol.crypto_bdev = f"crypto_{lvol.lvol_name}"
         lvol.bdev_stack.append({
             "type": "crypto",
             "name": lvol.crypto_bdev,
             "params": {
                 "name": lvol.crypto_bdev,
-                "base_name": lvol.base_bdev
+                "base_name": lvol.base_bdev,
+                "key1": key1,
+                "key2": key2,
             }
         })
         lvol.lvol_type += ',crypto'
