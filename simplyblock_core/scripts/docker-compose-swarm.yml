@@ -264,7 +264,10 @@ services:
 
   node-exporter:
     image: prom/node-exporter:v1.7.0
+    networks:
+      - hostnet
     deploy:
+      mode: global
       placement:
         constraints: [node.role == worker]
         
