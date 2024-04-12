@@ -448,9 +448,9 @@ class CLIWrapper:
         sub_command.add_argument("--encrypt", help='Use inline data encryption and de-cryption on the logical volume',
                                  required=False, action='store_true')
         sub_command.add_argument("--key1", help='the hex value of key1 to be used for lvol encryption',
-                                 required=False, action='store_true')
+                                 dest='key1', default=None)
         sub_command.add_argument("--key2", help='the hex value of key2 to be used for lvol encryption',
-                                 required=False, action='store_true')
+                                 dest='key2', default=None)
         sub_command.add_argument("--thick", help='Deactivate thin provisioning', required=False, action='store_true')
         sub_command.add_argument("--node-ha",
                                  help='The maximum amount of concurrent node failures accepted without interruption of operations',
