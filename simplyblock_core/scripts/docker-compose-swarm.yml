@@ -262,6 +262,12 @@ services:
       placement:
         constraints: [node.role == manager]
 
+  node-exporter:
+    image: prom/node-exporter:v1.7.0
+    deploy:
+      placement:
+        constraints: [node.role == worker]
+
   grafana:
     image: grafana/grafana:10.0.12
     environment:
