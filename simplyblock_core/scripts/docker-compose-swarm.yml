@@ -262,22 +262,11 @@ services:
       placement:
         constraints: [node.role == manager]
 
-  node-exporter:
-    image: prom/node-exporter:v1.7.0
-    user: root
-    volumes:
-      - /proc:/host/proc:ro
-      - /sys:/host/sys:ro
-      - /:/rootfs:ro
-    command:
-      - '--path.procfs=/host/proc'
-      - '--path.rootfs=/rootfs'
-      - '--path.sysfs=/host/sys'
-      - '--collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)'
-    restart: "always"
-    deploy:
-      placement:
-        constraints: [node.role == worker]
+  # node-exporter:
+  #   image: prom/node-exporter:v1.7.0
+  #   deploy:
+  #     placement:
+  #       constraints: [node.role == worker]
 
   grafana:
     image: grafana/grafana:10.0.12
