@@ -264,6 +264,16 @@ services:
 
   node-exporter:
     image: prom/node-exporter:v1.7.0
+    user: root
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+    command:
+      - '--path.procfs=/host/proc'
+      - '--path.sysfs=/host/sys'
+      - '--collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)'
+      
+    restart: "always"
     networks:
       - hostnet
     deploy:
