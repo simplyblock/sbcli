@@ -278,8 +278,6 @@ services:
       - '--collector.filesystem.ignored-fs-types="^(sys|proc|auto|cgroup|devpts|ns|au|fuse\.lxc|mqueue)(fs|)$$"'
       - '--no-collector.ipvs'
     restart: "always"
-    ports:
-      - 9100:9100
     deploy:
       mode: global
       placement:
