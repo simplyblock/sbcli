@@ -1,8 +1,18 @@
 import time
 import uuid
+import json
+import logging
 
 from simplyblock_core.models.events import EventObj
 from simplyblock_core.kv_store import DBController
+from simplyblock_core import constants
+
+from graypy import GELFUDPHandler
+
+# configure logging
+gelf_handler = GELFUDPHandler('0.0.0.0', constants.GELF_PORT)
+logger = logging.getLogger()
+logger.addHandler(gelf_handler)
 
 EVENT_STATUS_CHANGE = "STATUS_CHANGE"
 EVENT_OBJ_CREATED = "OBJ_CREATED"
@@ -44,6 +54,7 @@ def log_distr_event(cluster_id, node_id, event_dict):
 
     db_controller = DBController()
     ds.write_to_db(db_controller.kv_store)
+    logger.info(log_event_to_json(ds))
     return ds.get_id()
 
 
@@ -78,3 +89,10 @@ def log_event_cluster(cluster_id, domain, event, db_object, caused_by, message,
 
     db_controller = DBController()
     ds.write_to_db(db_controller.kv_store)
+    logger.info(log_event_to_json(ds))
+
+def log_event_to_json(event_obj):
+    """
+    Log event to JSON format.
+    """
+    return json.dumps(event_obj.to_dict())
