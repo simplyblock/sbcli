@@ -90,8 +90,8 @@ services:
   PortStatsCollector:
     image: $SIMPLYBLOCK_DOCKER_IMAGE
     command: "python simplyblock_core/services/port_stat_collector.py"
-    networks:
-      - hostnet
+    # networks:
+    #   - hostnet
     deploy:
       mode: global
       placement:
@@ -102,8 +102,8 @@ services:
   DistrEventCollector:
     image: $SIMPLYBLOCK_DOCKER_IMAGE
     command: "python simplyblock_core/services/distr_event_collector.py"
-    networks:
-      - hostnet
+    # networks:
+    #   - hostnet
     deploy:
       mode: global
       placement:
