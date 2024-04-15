@@ -16,4 +16,5 @@ datasources:
   jsonData:
     index: '*'
     interval: Hourly
-    timeField: 'timestamp'
+    esVersion: 7.16.1
+    timeField: '@timestamp'
