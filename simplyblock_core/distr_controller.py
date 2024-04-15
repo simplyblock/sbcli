@@ -78,6 +78,8 @@ def get_distr_cluster_map(snodes, target_node):
 
         for i, dev in enumerate(snode.nvme_devices):
             logger.debug(f"Device: {dev.get_id()}, status: {dev.status}")
+            if dev.status == "JM_DEV":
+                continue
             dev_w = int(dev.size/(1024*1024*1024)) or 1
             node_w += dev_w
             name = None
