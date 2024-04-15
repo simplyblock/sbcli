@@ -77,9 +77,7 @@ def get_distr_cluster_map(snodes, target_node):
         node_w = 0
 
         for i, dev in enumerate(snode.nvme_devices):
-            if dev.status != "online":
-                logger.debug(f"Device is not online: {dev.get_id()}, status: {dev.status}")
-                continue
+            logger.debug(f"Device: {dev.get_id()}, status: {dev.status}")
             dev_w = int(dev.size/(1024*1024*1024)) or 1
             node_w += dev_w
             name = None
@@ -95,14 +93,13 @@ def get_distr_cluster_map(snodes, target_node):
             dev_map[dev.cluster_device_order] = {
                 "UUID": dev.get_id(),
                 "bdev_name": name,
-                "status": "online"}
+                "status": dev.status}
             dev_w_map.append({
                 "weight": dev_w,
                 "id": dev.cluster_device_order})
         map_cluster[snode.get_id()] = {
-                # "availability_group": 0,
-                "status": "online",
-                "devices": dev_map}
+            "status": snode.status,
+            "devices": dev_map}
         map_prob.append({
             "weight": node_w,
             "items": dev_w_map
