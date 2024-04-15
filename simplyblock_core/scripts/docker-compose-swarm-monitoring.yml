@@ -131,7 +131,7 @@ services:
 
 volumes:
   mongodb_data:
-  os_data:
+  #os_data:
   graylog_data:
   graylog_journal:
   grafana_data:

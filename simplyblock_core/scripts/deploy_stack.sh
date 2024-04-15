@@ -20,8 +20,7 @@ fi
 docker stack deploy --compose-file="$DIR"/docker-compose-swarm-monitoring.yml monitoring
 
 # wait for the services to become online
-#bash "$DIR"/stack_deploy_wait.sh monitoring
-sleep 5
+bash "$DIR"/stack_deploy_wait.sh monitoring
 
 docker stack deploy --compose-file="$DIR"/docker-compose-swarm.yml app
 

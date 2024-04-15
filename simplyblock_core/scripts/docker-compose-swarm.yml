@@ -304,8 +304,6 @@ services:
       placement:
         constraints: [node.role == manager]
 
-  ### monitoring ###
-
 volumes:
   os_data:
 
