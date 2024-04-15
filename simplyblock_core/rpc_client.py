@@ -149,7 +149,12 @@ class RPCClient:
         return self._request("bdev_nvme_get_controllers", params)
 
     def bdev_nvme_controller_attach(self, name, pci_addr):
-        params = {"name": name, "trtype": "pcie", "traddr": pci_addr}
+        params = {
+            "name": name,
+            "trtype": "pcie",
+            "traddr": pci_addr,
+            "se": 8192,
+        }
         return self._request2("bdev_nvme_attach_controller", params)
 
     def alloc_bdev_controller_attach(self, name, pci_addr):
@@ -463,6 +468,7 @@ class RPCClient:
             "subnqn": nqn,
             "fabrics_connect_timeout_us": 100000,
             "fast_io_fail_timeout_sec": 0,
+            "num_io_queues": 8192,
         }
         return self._request("bdev_nvme_attach_controller", params)
 
