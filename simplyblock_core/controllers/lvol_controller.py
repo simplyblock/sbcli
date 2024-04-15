@@ -443,12 +443,15 @@ def is_hex(s: str) -> bool:
 
 def validate_aes_xts_keys(key1: str, key2: str) -> tuple[bool, str]:
     """
-    Key Length: The total key length for AES-XTS is typically either 256 bits or 512 bits.
-    since expect the hex values of the keys, the key lengths should be 32 or 64
+    Key Length: each key should be either 128 or 256 bits long.
+    since hex values of the keys are expected, the key lengths should be either 32 or 64
     """
 
+    if len(key1) != len(key2):
+        return False, "both the keys should be of the same length"
+
     if len(key1) not in [32, 64] or len(key2) not in [32, 64]:
-        return False, "The total key length for AES-XTS is typically either 256 bits or 512 bits"
+        return False, "each key should be either 128 or 256 bits long"
 
     if not is_hex(key1):
         return False, "please provide hex encoded value for crypto_key1"
