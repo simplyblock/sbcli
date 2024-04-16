@@ -216,15 +216,27 @@ def _prepare_cluster_devices(snode, after_restart=False):
         snode.mgmt_ip, snode.rpc_port,
         snode.rpc_username, snode.rpc_password)
 
+    jm_nvme_bdevs = []
     for index, nvme in enumerate(snode.nvme_devices):
-        if nvme.status not in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_UNAVAILABLE, NVMeDevice.STATUS_JM]:
+        if nvme.status not in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_UNAVAILABLE]:
             logger.debug(f"Device is not online or unavailable: {nvme.get_id()}, status: {nvme.status}")
             continue
 
+        ret = rpc_client.bdev_split(nvme.nvme_bdev, 10)
+        if not ret:
+            logger.error(f"Failed to split nvme bdev: {nvme.nvme_bdev}")
+            return False
+        jm_nvme_bdevs.append(f"{nvme.nvme_bdev}p0")
+        ret = rpc_client.bdev_raid_create(f"raid_{nvme.nvme_bdev}", [f"{nvme.nvme_bdev}p{i}" for i in range(1,10)])
+        if not ret:
+            logger.error(f"Failed to create raid_{nvme.nvme_bdev}")
+            return False
         test_name = f"{nvme.nvme_bdev}_test"
         # create testing bdev
-        ret = rpc_client.bdev_passtest_create(test_name, nvme.nvme_bdev)
-
+        ret = rpc_client.bdev_passtest_create(test_name, f"raid_{nvme.nvme_bdev}")
+        if not ret:
+            logger.error(f"Failed to create passtest bdev {test_name}")
+            return False
         alceml_id = nvme.get_id()
         alceml_name = f"alceml_{alceml_id}"
         logger.info(f"adding {alceml_name}")
@@ -235,18 +247,6 @@ def _prepare_cluster_devices(snode, after_restart=False):
         if not ret:
             logger.error(f"Failed to create alceml bdev: {alceml_name}")
             return False
-
-        # create jm
-        if nvme.jm_bdev:
-            ret = rpc_client.bdev_jm_create(nvme.jm_bdev, alceml_name)
-            if not ret:
-                logger.error(f"Failed to create JM bdev: {snode.nvme_devices[0].jm_bdev}")
-                return False
-            nvme.testing_bdev = test_name
-            nvme.alceml_bdev = alceml_name
-            nvme.io_error = True
-            nvme.status = NVMeDevice.STATUS_JM
-            continue
 
         # add pass through
         pt_name = f"{alceml_name}_PT"
@@ -288,6 +288,26 @@ def _prepare_cluster_devices(snode, after_restart=False):
         nvme.nvmf_port = 4420
         nvme.io_error = False
         nvme.status = NVMeDevice.STATUS_ONLINE
+
+    if jm_nvme_bdevs:
+        ret = rpc_client.bdev_raid_create(f"raid_jm_{snode.get_id()}", jm_nvme_bdevs)
+        if not ret:
+            logger.error(f"Failed to create raid_jm_{snode.get_id()}")
+            return False
+        alceml_name = f"alceml_jm_{snode.get_id()}"
+        pba_init_mode = 3
+        if after_restart:
+            pba_init_mode = 2
+        ret = rpc_client.bdev_alceml_create(alceml_name, f"raid_jm_{snode.get_id()}", str(uuid.uuid4()), pba_init_mode=pba_init_mode)
+        if not ret:
+            logger.error(f"Failed to create alceml bdev: {alceml_name}")
+            return False
+
+        ret = rpc_client.bdev_jm_create(f"jm_{snode.get_id()}", alceml_name)
+        if not ret:
+            logger.error(f"Failed to create jm_{snode.get_id()}")
+            return False
+
     snode.write_to_db(db_controller.kv_store)
     return True
 
@@ -322,7 +342,7 @@ def _connect_to_remote_devs(this_node):
 
 def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask,
              spdk_mem, dev_split=1, spdk_image=None, spdk_debug=False,
-             small_pool_count=0, large_pool_count=0, small_bufsize=0, large_bufsize=0, jm_device_pcie=None):
+             small_pool_count=0, large_pool_count=0, small_bufsize=0, large_bufsize=0):
     db_controller = DBController()
     kv_store = db_controller.kv_store
 
@@ -480,19 +500,12 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask,
     else:
         snode.nvme_devices = nvme_devs
 
-    jm_index = 0
     # Set device cluster order
     dev_order = get_next_cluster_device_order(db_controller)
     for index, nvme in enumerate(snode.nvme_devices):
         nvme.cluster_device_order = dev_order
         dev_order += 1
-        if jm_device_pcie and nvme.pcie_address == jm_device_pcie:
-            jm_index = index
         device_events.device_create(nvme)
-
-    # create jm
-    logger.info(f"Using device for JM: {snode.nvme_devices[jm_index].get_id()}")
-    snode.nvme_devices[jm_index].jm_bdev = f"jm_{snode.get_id()}"
 
     # save object
     snode.write_to_db(db_controller.kv_store)
@@ -1606,7 +1619,6 @@ def deploy(ifname):
 def deploy_cleaner():
     scripts.deploy_cleaner()
     return True
-
 
 
 def get_host_secret(node_id):

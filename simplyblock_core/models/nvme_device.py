@@ -6,7 +6,6 @@ from simplyblock_core.models.base_model import BaseModel
 
 class NVMeDevice(BaseModel):
 
-    STATUS_JM = "JM_DEV"
     STATUS_ONLINE = 'online'
     STATUS_AVAILABLE = 'available'
     STATUS_UNAVAILABLE = 'unavailable'

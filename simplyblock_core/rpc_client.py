@@ -420,7 +420,7 @@ class RPCClient:
         params = {
             "name": name,
             "raid_level": "0",
-            "strip_size_kb": 4 * len(bdevs_list),
+            "strip_size_kb": 4,
             "base_bdevs": bdevs_list
         }
         return self._request("bdev_raid_create", params)
