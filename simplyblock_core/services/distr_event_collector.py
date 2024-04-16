@@ -61,12 +61,12 @@ def process_device_event(event):
             device_controller.device_remove(device_id)
         elif event.message == 'error_write':
             logger.info(f"Setting device to read-only")
-            device_controller.device_set_read_only(device_id)
             device_controller.device_set_io_error(device_id, True)
+            device_controller.device_set_read_only(device_id)
         else:
             logger.info(f"Setting device to unavailable")
-            device_controller.device_set_unavailable(device_id)
             device_controller.device_set_io_error(device_id, True)
+            device_controller.device_set_unavailable(device_id)
 
         event.status = 'processed'
 
