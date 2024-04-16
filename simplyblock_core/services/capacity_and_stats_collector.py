@@ -95,7 +95,7 @@ def add_node_stats(node, records):
         records_sum = utils.sum_records(records)
         size_total = records_sum.size_total
         size_used = records_sum.size_used
-        data = records_sum.get_clean_dict()
+        data.update(records_sum.get_clean_dict())
 
     size_prov = 0
     for lvol_id in node.lvols:
@@ -109,18 +109,15 @@ def add_node_stats(node, records):
         size_util = int((size_used / size_total) * 100)
         size_prov_util = int((size_prov / size_total) * 100)
 
-    node_data = {
+    data.update({
         "cluster_id": cl.get_id(),
         "uuid": node.get_id(),
         "date": int(time.time()),
-
         "size_util": size_util,
         "size_prov": size_prov,
         "size_prov_util": size_prov_util
-    }
-    if data:
-        node_data.update(data)
-    stat_obj = NodeStatObject(data=node_data)
+    })
+    stat_obj = NodeStatObject(data=data)
     stat_obj.write_to_db(db_controller.kv_store)
     return stat_obj
 
