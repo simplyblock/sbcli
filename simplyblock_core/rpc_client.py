@@ -153,7 +153,7 @@ class RPCClient:
             "name": name,
             "trtype": "pcie",
             "traddr": pci_addr,
-            "se": 8192,
+            "num_io_queues": 8192,
         }
         return self._request2("bdev_nvme_attach_controller", params)
 
