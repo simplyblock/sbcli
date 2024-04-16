@@ -224,7 +224,9 @@ def _prepare_cluster_devices(snode, after_restart=False):
         test_name = f"{nvme.nvme_bdev}_test"
         # create testing bdev
         ret = rpc_client.bdev_passtest_create(test_name, nvme.nvme_bdev)
-
+        if not ret:
+            logger.error(f"Failed to create bdev: {test_name}")
+            return False
         alceml_id = nvme.get_id()
         alceml_name = f"alceml_{alceml_id}"
         logger.info(f"adding {alceml_name}")

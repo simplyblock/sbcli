@@ -5,6 +5,7 @@ import time
 import sys
 
 from simplyblock_core import constants, kv_store, utils
+from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.rpc_client import RPCClient
 from simplyblock_core.models.stats import DeviceStatObject, NodeStatObject, ClusterStatObject
 
@@ -87,35 +88,39 @@ def add_device_stats(cl, device, capacity_dict, stats_dict):
 
 
 def add_node_stats(node, records):
-    if not records:
-        return False
-    records_sum = utils.sum_records(records)
-
-    size_total = records_sum.size_total
-    size_used = records_sum.size_used
+    size_used = 0
+    size_total = 0
+    data = {}
+    if records:
+        records_sum = utils.sum_records(records)
+        size_total = records_sum.size_total
+        size_used = records_sum.size_used
+        data = records_sum.get_clean_dict()
 
     size_prov = 0
     for lvol_id in node.lvols:
         lvol = db_controller.get_lvol_by_id(lvol_id)
         if lvol:
             size_prov += lvol.size
+
     size_util = 0
     size_prov_util = 0
     if size_total > 0:
         size_util = int((size_used / size_total) * 100)
         size_prov_util = int((size_prov / size_total) * 100)
 
-    data = records_sum.get_clean_dict()
-    data.update({
+    node_data = {
         "cluster_id": cl.get_id(),
         "uuid": node.get_id(),
         "date": int(time.time()),
 
         "size_util": size_util,
         "size_prov": size_prov,
-        "size_prov_util": size_prov_util })
-
-    stat_obj = NodeStatObject(data=data)
+        "size_prov_util": size_prov_util
+    }
+    if data:
+        node_data.update(data)
+    stat_obj = NodeStatObject(data=node_data)
     stat_obj.write_to_db(db_controller.kv_store)
     return stat_obj
 
@@ -187,13 +192,14 @@ while True:
             devices_records = []
             for device in node.nvme_devices:
                 logger.info("Getting device stats: %s", device.uuid)
-                if device.status != 'online':
-                    logger.info("Device is not online, skipping")
+                if device.status not in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_READONLY]:
+                    logger.info(f"Device is skipped: {device.get_id()} status: {device.status}")
                     continue
                 capacity_dict = rpc_client.alceml_get_capacity(device.alceml_bdev)
                 stats_dict = rpc_client.get_device_stats(device.alloc_bdev)
                 record = add_device_stats(cl, device, capacity_dict, stats_dict)
-                devices_records.append(record)
+                if record:
+                    devices_records.append(record)
 
             node_record = add_node_stats(node, devices_records)
             node_records.append(node_record)
