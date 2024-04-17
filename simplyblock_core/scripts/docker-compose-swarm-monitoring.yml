@@ -113,6 +113,7 @@ services:
       GF_SECURITY_ADMIN_PASSWORD: "${CLUSTER_SECRET}"
       GF_ALERTING_ENABLED: "true"
       GF_PATHS_PROVISIONING: "/etc/grafana/provisioning"
+      GF_INSTALL_PLUGINS: "grafana-opensearch-datasource"
     volumes:
       - ./datasource.yml:/etc/grafana/provisioning/datasources/datasource.yaml
       - grafana_data:/var/lib/grafana
