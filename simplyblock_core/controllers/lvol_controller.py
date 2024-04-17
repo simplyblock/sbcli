@@ -716,11 +716,10 @@ def _create_bdev_stack(lvol, snode, ha_comm_addrs, ha_inode_self):
             params['ha_comm_addrs'] = ha_comm_addrs
             params['ha_inode_self'] = ha_inode_self
             ret = rpc_client.bdev_distrib_create(**params)
-
-            snodes = db_controller.get_storage_nodes()
-            cluster_map_data = distr_controller.get_distr_cluster_map(snodes, snode)
-            cluster_map_data['UUID_node_target'] = snode.get_id()
-            rpc_client.distr_send_cluster_map(cluster_map_data)
+            if ret:
+                ret = distr_controller.send_cluster_map_to_node(snode)
+                if not ret:
+                    return False, "Failed to send cluster map"
 
         elif type == "bmap_init":
             ret = rpc_client.ultra21_lvol_bmap_init(**params)
@@ -790,10 +789,9 @@ def add_lvol_on_node(lvol, snode, ha_comm_addrs=None, ha_inode_self=None):
         return False, "Failed to add bdev to subsystem"
 
     logger.info("Sending cluster map to LVol")
-    snodes = db_controller.get_storage_nodes()
-    cluster_map_data = distr_controller.get_distr_cluster_map(snodes, snode)
-    cluster_map_data['UUID_node_target'] = snode.get_id()
-    ret = rpc_client.distr_send_cluster_map(cluster_map_data)
+    ret = distr_controller.send_cluster_map_to_node(snode)
+    if not ret:
+        return False, "Failed to send cluster map"
 
     spdk_mem_info_after = rpc_client.ultra21_util_get_malloc_stats()
     logger.debug("ultra21_util_get_malloc_stats:")
@@ -1278,13 +1276,7 @@ def send_cluster_map(lvol_id):
 
     snode = db_controller.get_storage_node_by_id(lvol.node_id)
     logger.info("Sending cluster map")
-    snodes = db_controller.get_storage_nodes()
-    logger.info(f"Sending to: {snode.get_id()}")
-    rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
-    cluster_map_data = distr_controller.get_distr_cluster_map(snodes, snode)
-    cluster_map_data['UUID_node_target'] = snode.get_id()
-    ret = rpc_client.distr_send_cluster_map(cluster_map_data)
-    return ret
+    return distr_controller.send_cluster_map_to_node(snode)
 
 
 def get_cluster_map(lvol_id):
