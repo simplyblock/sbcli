@@ -57,7 +57,7 @@ def _get_nvme_devices():
     logger.debug(data)
 
     devices = []
-    if data and 'Devices' in data:
+    if data and 'Devices' in data and data['Devices']:
         for dev in data['Devices'][0]['Subsystems']:
             if 'Controllers' in dev and dev['Controllers']:
                 controller = dev['Controllers'][0]

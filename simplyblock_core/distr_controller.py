@@ -3,6 +3,7 @@ import datetime
 import logging
 import re
 
+from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.rpc_client import RPCClient
 from simplyblock_core.kv_store import DBController
 
@@ -69,15 +70,14 @@ def get_distr_cluster_map(snodes, target_node):
     map_cluster = {}
     map_prob = []
     for snode in snodes:
-        if snode.status not in [snode.STATUS_ONLINE, snode.STATUS_RESTARTING]:
-            logger.debug(f"Node is not online: {snode.get_id()}, status: {snode.status}")
-            continue
         dev_map = {}
         dev_w_map = []
         node_w = 0
-
         for i, dev in enumerate(snode.nvme_devices):
             logger.debug(f"Device: {dev.get_id()}, status: {dev.status}")
+            if dev.status == NVMeDevice.STATUS_JM:
+                continue
+
             dev_w = int(dev.size/(1024*1024*1024)) or 1
             node_w += dev_w
             name = None
@@ -89,7 +89,7 @@ def get_distr_cluster_map(snodes, target_node):
                         name = dev2.remote_bdev
                         break
             if not name:
-                continue
+                name = "temp_dev_name"
             dev_map[dev.cluster_device_order] = {
                 "UUID": dev.get_id(),
                 "bdev_name": name,
@@ -169,3 +169,38 @@ def parse_distr_cluster_map(map_string):
                 passed = False
             results.append(data)
     return results, passed
+
+
+def send_cluster_map_to_node(node):
+    db_controller = DBController()
+    snodes = db_controller.get_storage_nodes()
+    rpc_client = RPCClient(node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password)
+    cluster_map_data = get_distr_cluster_map(snodes, node)
+    cluster_map_data['UUID_node_target'] = node.get_id()
+    ret = rpc_client.distr_send_cluster_map(cluster_map_data)
+    if not ret:
+        logger.error("Failed to send cluster map")
+        logger.info(cluster_map_data)
+        return False
+    return True
+
+
+def send_cluster_map_add_node(snode):
+    db_controller = DBController()
+    snodes = db_controller.get_storage_nodes()
+    for node in snodes:
+        if node.status != node.STATUS_ONLINE:
+            continue
+        logger.info(f"Sending to: {node.get_id()}")
+        rpc_client = RPCClient(node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password)
+
+        cluster_map_data = get_distr_cluster_map([snode], node)
+        cl_map = {
+            "map_cluster": cluster_map_data['map_cluster'],
+            "map_prob": cluster_map_data['map_prob']}
+        ret = rpc_client.distr_add_nodes(cl_map)
+        if not ret:
+            logger.error("Failed to send cluster map")
+            logger.info(cl_map)
+            return False
+    return True
