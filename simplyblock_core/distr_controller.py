@@ -89,7 +89,7 @@ def get_distr_cluster_map(snodes, target_node):
                         name = dev2.remote_bdev
                         break
             if not name:
-                name = "temp_dev_name"
+                name = f"remote_{dev.alceml_bdev}n1"
             dev_map[dev.cluster_device_order] = {
                 "UUID": dev.get_id(),
                 "bdev_name": name,
