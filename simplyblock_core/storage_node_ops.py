@@ -937,9 +937,6 @@ def restart_storage_node(
     ret = distr_controller.send_cluster_map_to_node(snode)
     if not ret:
         return False, "Failed to send cluster map"
-    ret = distr_controller.send_cluster_map_add_node(snode)
-    if not ret:
-        return False, "Failed to send cluster map add node"
     time.sleep(3)
 
     logger.info("Sending node event update")
