@@ -2,8 +2,16 @@
 import pprint
 
 import json
+import logging
 from typing import Mapping
+from simplyblock_core import constants
 
+from graypy import GELFUDPHandler
+
+# configure logging
+gelf_handler = GELFUDPHandler('0.0.0.0', constants.GELF_PORT)
+logger = logging.getLogger()
+logger.addHandler(gelf_handler)
 
 class BaseModel(object):
     def __init__(self):
@@ -105,6 +113,7 @@ class BaseModel(object):
         try:
             prefix = "%s/%s/%s" % (self.object_type, self.name, self.get_id())
             st = json.dumps(self.to_dict())
+            logger.info(st)
             kv_store.db.set(prefix.encode(), st.encode())
             return True
         except Exception as e:
