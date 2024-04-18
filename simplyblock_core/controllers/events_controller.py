@@ -87,9 +87,10 @@ def log_event_cluster(cluster_id, domain, event, db_object, caused_by, message,
     ds.caused_by = caused_by
     ds.message = message
 
+    logger.info(log_event_to_json(ds))
+
     db_controller = DBController()
     ds.write_to_db(db_controller.kv_store)
-    logger.info(log_event_to_json(ds))
 
 def log_event_to_json(event_obj):
     """
