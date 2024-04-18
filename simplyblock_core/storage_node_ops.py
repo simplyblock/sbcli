@@ -290,8 +290,11 @@ def _prepare_cluster_devices(snode, after_restart=False):
         nvme.nvmf_ip = IP
         nvme.nvmf_port = 4420
         nvme.io_error = False
+        old_status = nvme.status
         nvme.status = NVMeDevice.STATUS_ONLINE
-    snode.write_to_db(db_controller.kv_store)
+        device_events.device_status_change(nvme, nvme.status, old_status)
+        snode.write_to_db(db_controller.kv_store)
+
     return True
 
 
@@ -792,14 +795,16 @@ def restart_storage_node(
         return False
 
     logger.info("Setting node state to restarting")
+    old_status = snode.status
     snode.status = StorageNode.STATUS_RESTARTING
     snode.write_to_db(kv_store)
     logger.info("Sending node event update")
     distr_controller.send_node_status_event(snode.get_id(), snode.status)
+    storage_events.snode_status_change(snode, snode.status, old_status)
 
     logger.info(f"Restarting Storage node: {snode.mgmt_ip}")
-    snode_api = SNodeClient(snode.api_endpoint)
 
+    snode_api = SNodeClient(snode.api_endpoint)
     node_info, _ = snode_api.info()
     logger.info(f"Node info: {node_info}")
 
@@ -875,8 +880,6 @@ def restart_storage_node(
         if db_dev.serial_number in devices_sn:
             logger.info(f"Device found: {db_dev.get_id()}")
             active_devices.append(db_dev)
-            if db_dev.status == NVMeDevice.STATUS_UNAVAILABLE:
-                db_dev.status = NVMeDevice.STATUS_ONLINE
         else:
             logger.info(f"Device not found: {db_dev.get_id()}")
             db_dev.status = NVMeDevice.STATUS_REMOVED
@@ -947,10 +950,10 @@ def restart_storage_node(
 
     logger.info("Sending devices event updates")
     for dev in snode.nvme_devices:
-        if dev.status != "online":
+        if dev.status != NVMeDevice.STATUS_ONLINE:
             logger.debug(f"Device is not online: {dev.get_id()}, status: {dev.status}")
             continue
-        distr_controller.send_dev_status_event(dev.cluster_device_order, "online")
+        distr_controller.send_dev_status_event(dev.cluster_device_order, NVMeDevice.STATUS_ONLINE)
 
     for lvol_id in snode.lvols:
         lvol = lvol_controller.recreate_lvol(lvol_id, snode)
