@@ -451,7 +451,7 @@ def validate_aes_xts_keys(key1: str, key2: str) -> tuple[bool, str]:
         return False, "both the keys should be of the same length"
 
     if len(key1) not in [32, 64] or len(key2) not in [32, 64]:
-        return False, "each key should be either 128 or 256 bits long"
+        return False, "each key should be either 16 or 32 bytes long"
 
     if not is_hex(key1):
         return False, "please provide hex encoded value for crypto_key1"
