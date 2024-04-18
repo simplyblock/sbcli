@@ -5,7 +5,7 @@ policies:
     routes:
       - receiver: grafana-alerts
         object_matchers:
-          - ['app', '=', 'demo-app']
+          - ['app', '=', 'simplyblock']
 
 contactPoints:
   - orgId: 1
