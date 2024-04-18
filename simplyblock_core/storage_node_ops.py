@@ -217,7 +217,8 @@ def _prepare_cluster_devices(snode, after_restart=False):
         snode.rpc_username, snode.rpc_password)
 
     for index, nvme in enumerate(snode.nvme_devices):
-        if nvme.status not in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_UNAVAILABLE, NVMeDevice.STATUS_JM]:
+        if nvme.status not in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_UNAVAILABLE,
+                               NVMeDevice.STATUS_JM, NVMeDevice.STATUS_READONLY]:
             logger.debug(f"Device is not online or unavailable: {nvme.get_id()}, status: {nvme.status}")
             continue
 
@@ -793,6 +794,8 @@ def restart_storage_node(
     logger.info("Setting node state to restarting")
     snode.status = StorageNode.STATUS_RESTARTING
     snode.write_to_db(kv_store)
+    logger.info("Sending node event update")
+    distr_controller.send_node_status_event(snode.get_id(), snode.status)
 
     logger.info(f"Restarting Storage node: {snode.mgmt_ip}")
     snode_api = SNodeClient(snode.api_endpoint)
@@ -937,9 +940,6 @@ def restart_storage_node(
     ret = distr_controller.send_cluster_map_to_node(snode)
     if not ret:
         return False, "Failed to send cluster map"
-    ret = distr_controller.send_cluster_map_add_node(snode)
-    if not ret:
-        return False, "Failed to send cluster map add node"
     time.sleep(3)
 
     logger.info("Sending node event update")
