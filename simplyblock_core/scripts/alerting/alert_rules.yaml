@@ -82,7 +82,7 @@ groups:
                 refId: C
                 type: threshold
           noDataState: OK
-          execErrState: Error
+          execErrState: OK
           for: 10s
           annotations:
             description: This is prometheus alert description
@@ -186,7 +186,7 @@ groups:
                 refId: C
                 type: threshold
           noDataState: OK
-          execErrState: Error
+          execErrState: OK
           for: 2m
           annotations:
             description: Device status changed
@@ -285,7 +285,7 @@ groups:
                 refId: C
                 type: threshold
           noDataState: OK
-          execErrState: Error
+          execErrState: OK
           for: 2m
           annotations:
             description: Cluster status changed
@@ -384,7 +384,7 @@ groups:
                 refId: C
                 type: threshold
           noDataState: OK
-          execErrState: Error
+          execErrState: OK
           for: 2m
           annotations:
             description: LVol status changed
@@ -483,7 +483,7 @@ groups:
                 refId: C
                 type: threshold
           noDataState: OK
-          execErrState: Error
+          execErrState: OK
           for: 2m
           annotations:
             description: Management node status changed
@@ -582,7 +582,7 @@ groups:
                 refId: C
                 type: threshold
           noDataState: OK
-          execErrState: Error
+          execErrState: OK
           for: 2m
           annotations:
             description: Storage node status changed
