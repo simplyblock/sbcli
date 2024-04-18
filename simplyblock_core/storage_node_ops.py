@@ -743,8 +743,11 @@ def remove_storage_node(node_id, force_remove=False, force_migrate=False):
     if snode.nvme_devices:
         for dev in snode.nvme_devices:
             if dev.status == 'online':
-                distr_controller.send_dev_status_event(dev.cluster_device_order, "unavailable")
-            distr_controller.disconnect_device(dev)
+                distr_controller.disconnect_device(dev)
+            old_status = dev.status
+            dev.status = NVMeDevice.STATUS_FAILED
+            distr_controller.send_dev_status_event(dev.cluster_device_order, NVMeDevice.STATUS_FAILED)
+            device_events.device_status_change(dev, NVMeDevice.STATUS_FAILED, old_status)
 
     for lvol in db_controller.get_lvols():
         lvol_controller.send_cluster_map(lvol.get_id())
@@ -766,7 +769,10 @@ def remove_storage_node(node_id, force_remove=False, force_migrate=False):
     except Exception as e:
         logger.warning(f"Failed to remove SPDK process: {e}")
 
-    snode.remove(db_controller.kv_store)
+    snode.status = StorageNode.STATUS_REMOVED
+    snode.write_to_db(db_controller.kv_store)
+    logger.info("Sending node event update")
+    distr_controller.send_node_status_event(snode.get_id(), snode.status)
     storage_events.snode_remove(snode)
     logger.info("done")
 
