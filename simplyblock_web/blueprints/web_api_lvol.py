@@ -94,8 +94,8 @@ def add_lvol():
         | distr_npcs      | Distr bdev number of parity chunks per stripe, Default=0 means auto set
         | distr_bs        | Distr bdev block size, Default=4096
         | distr_chunk_bs  | Distr bdev chunk block size, Default=4096
-        | key1            | the hex value of key1 to be used for lvol encryption
-        | key2            | the hex value of key2 to be used for lvol encryption
+        | crypto_key1     | the hex value of key1 to be used for lvol encryption
+        | crypto_key2     | the hex value of key2 to be used for lvol encryption
     """""
 
     cl_data = request.get_json()
@@ -139,13 +139,8 @@ def add_lvol():
     distr_npcs = utils.get_int_value_or_default(cl_data, "distr_npcs", 0)
     distr_bs = utils.get_int_value_or_default(cl_data, "distr_ps", 4096)
     distr_chunk_bs = utils.get_int_value_or_default(cl_data, "distr_chunk_bs", 4096)
-<<<<<<< HEAD
     crypto_key1 = utils.get_value_or_default(cl_data, "crypto_key1", None)
     crypto_key2 = utils.get_value_or_default(cl_data, "crypto_key2", None)
-=======
-    key1 = utils.get_value_or_default(cl_data, "key1", None)
-    key2 = utils.get_value_or_default(cl_data, "key2", None)
->>>>>>> 85a66ed (pass keys externally for lvol encryption)
 
     ret, error = lvol_controller.add_lvol_ha(
         name=name,
@@ -167,13 +162,8 @@ def add_lvol():
         distr_npcs=distr_npcs,
         distr_bs=distr_bs,
         distr_chunk_bs=distr_chunk_bs,
-<<<<<<< HEAD
         crypto_key1=crypto_key1,
         crypto_key2=crypto_key2,
-=======
-        key1=key1,
-        key2=key2,
->>>>>>> 85a66ed (pass keys externally for lvol encryption)
     )
 
     return utils.get_csi_response(ret, error)
@@ -260,4 +250,3 @@ def connect_lvol(uuid):
 
     ret = lvol_controller.connect_lvol(uuid)
     return utils.get_csi_response(ret)
-
