@@ -1,7 +1,7 @@
 
 SIMPLY_BLOCK_COMMAND_NAME=sbcli-mig
-SIMPLY_BLOCK_VERSION=1.0.55
+SIMPLY_BLOCK_VERSION=1.0.56
 
-SIMPLY_BLOCK_DOCKER_IMAGE=simplyblock/simplyblock:mig
+SIMPLY_BLOCK_DOCKER_IMAGE=simplyblock/simplyblock:dev
 
 DOCKER_USER=hamdysimplyblock
