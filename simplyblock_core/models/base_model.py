@@ -113,7 +113,6 @@ class BaseModel(object):
         try:
             prefix = "%s/%s/%s" % (self.object_type, self.name, self.get_id())
             st = json.dumps(self.to_dict())
-            logger.info(st)
             kv_store.db.set(prefix.encode(), st.encode())
             return True
         except Exception as e:
