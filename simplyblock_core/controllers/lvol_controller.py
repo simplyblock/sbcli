@@ -459,6 +459,7 @@ def validate_aes_xts_keys(key1: str, key2: str) -> tuple[bool, str]:
     if not is_hex(key2):
         return False, "please provide hex encoded value for crypto_key2"
 
+    return True, ""
 
 def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp, use_crypto,
                 distr_vuid, distr_ndcs, distr_npcs,
