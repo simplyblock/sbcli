@@ -51,10 +51,10 @@ def log_distr_event(cluster_id, node_id, event_dict):
         ds.vuid = event_dict['vuid']
 
     ds.object_dict = event_dict
+    logger.info(log_event_to_json(ds))
 
     db_controller = DBController()
     ds.write_to_db(db_controller.kv_store)
-    logger.info(log_event_to_json(ds))
     return ds.get_id()
 
 
