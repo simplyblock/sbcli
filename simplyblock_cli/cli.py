@@ -447,10 +447,10 @@ class CLIWrapper:
                                  required=False, action='store_true')
         sub_command.add_argument("--encrypt", help='Use inline data encryption and de-cryption on the logical volume',
                                  required=False, action='store_true')
-        sub_command.add_argument("--key1", help='the hex value of key1 to be used for lvol encryption',
-                                 dest='key1', default=None)
-        sub_command.add_argument("--key2", help='the hex value of key2 to be used for lvol encryption',
-                                 dest='key2', default=None)
+        sub_command.add_argument("--crypto-key1", help='the hex value of key1 to be used for lvol encryption',
+                                 dest='crypto_key1', default=None)
+        sub_command.add_argument("--crypto-key2", help='the hex value of key2 to be used for lvol encryption',
+                                 dest='crypto_key2', default=None)
         sub_command.add_argument("--thick", help='Deactivate thin provisioning', required=False, action='store_true')
         sub_command.add_argument("--node-ha",
                                  help='The maximum amount of concurrent node failures accepted without interruption of operations',
@@ -1079,8 +1079,8 @@ class CLIWrapper:
                     distr_chunk_bs,
                     with_snapshot=with_snapshot,
                     max_size=max_size,
-                    key1=args.key1,
-                    key2=args.key2)
+                    crypto_key1=args.crypto_key1,
+                    crypto_key2=args.crypto_key2)
                 if results:
                     ret = results
                 else:
