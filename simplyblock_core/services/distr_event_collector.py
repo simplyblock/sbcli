@@ -61,12 +61,12 @@ def process_device_event(event):
             device_controller.device_remove(device_id)
         elif event.message == 'error_write':
             logger.info(f"Setting device to read-only")
-            device_controller.device_set_read_only(device_id)
             device_controller.device_set_io_error(device_id, True)
+            device_controller.device_set_read_only(device_id)
         else:
             logger.info(f"Setting device to unavailable")
-            device_controller.device_set_unavailable(device_id)
             device_controller.device_set_io_error(device_id, True)
+            device_controller.device_set_unavailable(device_id)
 
         event.status = 'processed'
 
@@ -91,7 +91,10 @@ def process_lvol_event(event):
                 lvol.status = LVol.STATUS_OFFLINE
                 lvol.write_to_db(db_controller.kv_store)
                 lvol_events.lvol_status_change(lvol, lvol.status, old_status, caused_by="monitor")
-            event.status = 'processed'
+                lvol_events.lvol_io_error_change(lvol, True, False, caused_by="monitor")
+                event.status = 'processed'
+            else:
+                event.status = 'skipped'
     else:
         logger.error(f"Unknown LVol event message: {event.message}")
         event.status = "event_unknown"

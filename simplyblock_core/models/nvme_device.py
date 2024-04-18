@@ -6,15 +6,13 @@ from simplyblock_core.models.base_model import BaseModel
 
 class NVMeDevice(BaseModel):
 
+    STATUS_JM = "JM_DEV"
+
     STATUS_ONLINE = 'online'
-    STATUS_AVAILABLE = 'available'
     STATUS_UNAVAILABLE = 'unavailable'
-    STATUS_READONLY = 'read_only'
-    STATUS_OVERLOADED = 'overloaded'
-    STATUS_FAILED = 'failed'
     STATUS_REMOVED = 'removed'
-    STATUS_RESETTING = 'resetting'
-    STATUS_UNRECOGNIZED = 'unrecognized'
+    STATUS_FAILED = 'failed'
+    STATUS_READONLY = 'read_only'
 
     attributes = {
         "uuid": {"type": str, 'default': ""},
