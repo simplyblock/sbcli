@@ -81,7 +81,7 @@ groups:
                 maxDataPoints: 43200
                 refId: C
                 type: threshold
-          noDataState: NoData
+          noDataState: OK
           execErrState: Error
           for: 10s
           annotations:
@@ -185,7 +185,7 @@ groups:
                 maxDataPoints: 43200
                 refId: C
                 type: threshold
-          noDataState: NoData
+          noDataState: OK
           execErrState: Error
           for: 2m
           annotations:
@@ -284,7 +284,7 @@ groups:
                 maxDataPoints: 43200
                 refId: C
                 type: threshold
-          noDataState: NoData
+          noDataState: OK
           execErrState: Error
           for: 2m
           annotations:
@@ -383,7 +383,7 @@ groups:
                 maxDataPoints: 43200
                 refId: C
                 type: threshold
-          noDataState: NoData
+          noDataState: OK
           execErrState: Error
           for: 2m
           annotations:
@@ -482,7 +482,7 @@ groups:
                 maxDataPoints: 43200
                 refId: C
                 type: threshold
-          noDataState: NoData
+          noDataState: OK
           execErrState: Error
           for: 2m
           annotations:
@@ -581,7 +581,7 @@ groups:
                 maxDataPoints: 43200
                 refId: C
                 type: threshold
-          noDataState: NoData
+          noDataState: OK
           execErrState: Error
           for: 2m
           annotations:
