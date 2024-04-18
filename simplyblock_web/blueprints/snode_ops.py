@@ -292,3 +292,25 @@ def leave_swarm():
     except:
         pass
     return utils.get_response(True)
+
+
+@bp.route('/make_gpt_partitions', methods=['POST'])
+def make_gpt_partitions_for_nbd():
+    nbd_device = '/dev/nbd0'
+    jm_percent = '3'
+
+    try:
+        data = request.get_json()
+        nbd_device = data['nbd_device']
+        jm_percent = data['jm_percent']
+    except:
+        pass
+
+    os.popen("modprobe nbd")
+    os.popen(f"parted -s {nbd_device} mklabel gpt")
+    os.popen(f"parted -s {nbd_device} mkpart journal '0%' '{jm_percent}%'")
+    os.popen(f"parted -s {nbd_device} mkpart main '{jm_percent}%' '100%'")
+    os.popen(f"sgdisk -t 1:6527994e-2c5a-4eec-9613-8f5944074e8b {nbd_device}")
+    os.popen(f"sgdisk -t 2:6527994e-2c5a-4eec-9613-8f5944074e8b {nbd_device}")
+
+    return utils.get_response(True)

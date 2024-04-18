@@ -193,7 +193,7 @@ while True:
                     logger.info(f"Device is skipped: {device.get_id()} status: {device.status}")
                     continue
                 capacity_dict = rpc_client.alceml_get_capacity(device.alceml_bdev)
-                stats_dict = rpc_client.get_device_stats(device.alloc_bdev)
+                stats_dict = rpc_client.get_device_stats(device.nvme_bdev)
                 record = add_device_stats(cl, device, capacity_dict, stats_dict)
                 if record:
                     devices_records.append(record)

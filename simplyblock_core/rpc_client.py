@@ -341,9 +341,9 @@ class RPCClient:
         params = {"name": name}
         return self._request("bdev_compress_delete", params)
 
-    def ultra21_bdev_pass_create(self, alloc_bdev, vuid, pt_name):
+    def ultra21_bdev_pass_create(self, base_bdev, vuid, pt_name):
         params = {
-            "base_bdev": alloc_bdev,
+            "base_bdev": base_bdev,
             "vuid": vuid,
             "pt_bdev": pt_name
         }
@@ -645,4 +645,21 @@ class RPCClient:
 
     def framework_start_init(self):
         return self._request("framework_start_init")
+
+    def bdev_examine(self, name):
+        params = {"name": name}
+        return self._request("bdev_examine", params)
+
+    def nbd_start_disk(self, bdev_name, nbd_device="/dev/nbd0"):
+        params = {
+            "bdev_name": bdev_name,
+            "nbd_device": nbd_device,
+        }
+        return self._request("nbd_start_disk", params)
+
+    def nbd_stop_disk(self, nbd_device):
+        params = {
+            "nbd_device": nbd_device
+        }
+        return self._request("nbd_stop_disk", params)
 

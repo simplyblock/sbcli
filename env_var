@@ -1,6 +1,6 @@
 SIMPLY_BLOCK_COMMAND_NAME=sbcli-jm
-SIMPLY_BLOCK_VERSION=3.0.0
+SIMPLY_BLOCK_VERSION=4.0.0
 
-SIMPLY_BLOCK_DOCKER_IMAGE=simplyblock/simplyblock:dev
+SIMPLY_BLOCK_DOCKER_IMAGE=simplyblock/simplyblock:jm_4.0.0
 
 DOCKER_USER=hamdysimplyblock

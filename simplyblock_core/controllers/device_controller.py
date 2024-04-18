@@ -152,12 +152,6 @@ def restart_device(device_id):
     logger.info(f"Adding {pt_name} to the subsystem")
     ret = rpc_client.nvmf_subsystem_add_ns(subsystem_nqn, pt_name)
 
-    if device_obj.jm_bdev:
-        ret = rpc_client.bdev_jm_create(device_obj.jm_bdev, device_obj.alceml_bdev)
-        if not ret:
-            logger.error(f"Failed to create bdev: {device_obj.jm_bdev}")
-            return False
-
     device_obj.testing_bdev = test_name
     device_obj.alceml_bdev = alceml_name
     device_obj.pt_bdev = pt_name
@@ -245,13 +239,6 @@ def device_remove(device_id, force=True):
             device = dev
             break
 
-    if device.jm_bdev:
-        if snode.lvols:
-            logger.error(f"Failed to remove device: {device.get_id()}, "
-                         f"there are LVols that uses JM from this device, delete LVol to continue")
-            # if not force:
-            return False
-
     logger.info("Sending device event")
     distr_controller.send_dev_status_event(device.cluster_device_order, "removed")
 
@@ -268,13 +255,6 @@ def device_remove(device_id, force=True):
         logger.error(f"Failed to remove subsystem: {device.nvmf_nqn}")
         if not force:
             return False
-
-    if device.jm_bdev:
-        ret = rpc_client.bdev_jm_delete(f"jm_{snode.get_id()}")
-        if not ret:
-            logger.error(f"Failed to remove journal manager: jm_{snode.get_id()}")
-            if not force:
-                return False
 
     logger.info("Removing device bdevs")
     ret = rpc_client.bdev_PT_NoExcl_delete(f"{device.alceml_bdev}_PT")
