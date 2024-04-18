@@ -73,6 +73,11 @@ class StorageNode(BaseModel):
         "spdk_mem": {"type": int, "default": 0},
         "spdk_image": {"type": str, "default": ""},
         "spdk_debug": {"type": bool, "default": False},
+
+        "ec2_metadata": {"type": dict, "default": {}},
+        "ec2_instance_id": {"type": str, "default": ""},
+        "ec2_public_ip": {"type": str, "default": ""},
+
     }
 
     def __init__(self, data=None):

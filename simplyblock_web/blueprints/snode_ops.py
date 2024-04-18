@@ -236,9 +236,9 @@ def get_info():
 
         "network_interface": node_utils.get_nics_data(),
 
-        "ec2-metadata": get_ec2_meta(),
+        "ec2_metadata": get_ec2_meta(),
 
-        "ec2-public-ip": get_ec2_public_ip(),
+        "ec2_public_ip": get_ec2_public_ip(),
     }
     return utils.get_response(out)
 

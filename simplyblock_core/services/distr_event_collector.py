@@ -91,6 +91,7 @@ def process_lvol_event(event):
                 lvol.status = LVol.STATUS_OFFLINE
                 lvol.write_to_db(db_controller.kv_store)
                 lvol_events.lvol_status_change(lvol, lvol.status, old_status, caused_by="monitor")
+                lvol_events.lvol_io_error_change(lvol, True, False, caused_by="monitor")
                 event.status = 'processed'
             else:
                 event.status = 'skipped'

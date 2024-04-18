@@ -349,6 +349,41 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask,
             logger.error(f"This node is part of another cluster: {node_info['cluster_id']}")
             return False
 
+    ec2_metadata = None
+    if "ec2_metadata" in node_info and node_info['ec2_metadata']:
+        ec2_metadata = node_info['ec2_metadata']
+        """"
+         "ec2_metadata": {
+              "accountId": "565979732541",
+              "architecture": "x86_64",
+              "availabilityZone": "eu-west-1a",
+              "billingProducts": [
+                "bp-6fa54006"
+              ],
+              "devpayProductCodes": null,
+              "imageId": "ami-08e592fbb0f535224",
+              "instanceId": "i-0ba9e766df57bc62c",
+              "instanceType": "m6id.large",
+              "kernelId": null,
+              "marketplaceProductCodes": null,
+              "pendingTime": "2024-03-24T19:39:14Z",
+              "privateIp": "172.31.23.236",
+              "ramdiskId": null,
+              "region": "eu-west-1",
+              "version": "2017-09-30"
+        }
+        """""
+        logger.debug(json.dumps(ec2_metadata,indent=2))
+        logger.info(f"EC2 Instance found: {ec2_metadata['instanceId']}")
+        logger.info(f"EC2 Instance type: {ec2_metadata['instanceType']}")
+        logger.info(f"EC2 Instance privateIp: {ec2_metadata['privateIp']}")
+        logger.info(f"EC2 Instance region: {ec2_metadata['region']}")
+
+        for node in db_controller.get_storage_nodes():
+            if node.ec2_instance_id and node.ec2_instance_id == ec2_metadata['instanceId']:
+                logger.error(f"Node already exists, try remove it first: {ec2_metadata['instanceId']}")
+                return False
+
     # check for memory
     if "memory_details" in node_info and node_info['memory_details']:
         memory_details = node_info['memory_details']
@@ -384,12 +419,6 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask,
         logger.error(f"Failed to start spdk: {err}")
         return False
 
-    hostname = node_info['hostname']
-    snode = db_controller.get_storage_node_by_hostname(hostname)
-    if snode:
-        logger.error("Node already exists, try remove it first.")
-        return False
-
     data_nics = []
     names = data_nics_list or [iface_name]
     for nic in names:
@@ -402,6 +431,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask,
                 'status': device['status'],
                 'net_type': device['net_type']}))
 
+    hostname = node_info['hostname']
     rpc_user, rpc_pass = utils.generate_rpc_user_and_pass()
     BASE_NQN = cluster.nqn.split(":")[0]
     subsystem_nqn = f"{BASE_NQN}:{hostname}"
@@ -411,6 +441,14 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask,
     snode.status = StorageNode.STATUS_IN_CREATION
     snode.baseboard_sn = node_info['system_id']
     snode.system_uuid = node_info['system_id']
+
+    if ec2_metadata:
+        snode.ec2_metadata = ec2_metadata
+        snode.ec2_instance_id = ec2_metadata['instanceId']
+
+    if "ec2_public_ip" in node_info and node_info['ec2_public_ip']:
+        snode.ec2_public_ip = node_info['ec2_public_ip']
+
     snode.hostname = hostname
     snode.host_nqn = subsystem_nqn
     snode.subsystem = subsystem_nqn
@@ -999,13 +1037,17 @@ def list_storage_nodes(kv_store, is_json):
             "Hostname": node.hostname,
             "Management IP": node.mgmt_ip,
             "Devices": f"{total_devices}/{online_devices}",
-            "LVOLs": f"{len(node.lvols)}",
-            "Data NICs": "\n".join([d.if_name for d in node.data_nics]),
+            "LVols": f"{len(node.lvols)}",
+            # "Data NICs": "\n".join([d.if_name for d in node.data_nics]),
             "Status": node.status,
             "Health": node.health_check,
 
-            "Updated At": datetime.datetime.strptime(node.updated_at, "%Y-%m-%d %H:%M:%S.%f").strftime(
-                "%H:%M:%S, %d/%m/%Y"),
+            "EC2 ID": node.ec2_instance_id,
+            "EC2 Type": node.ec2_metadata['instanceType'] if node.ec2_metadata else "",
+            "EC2 Ext IP": node.ec2_public_ip,
+
+            # "Updated At": datetime.datetime.strptime(node.updated_at, "%Y-%m-%d %H:%M:%S.%f").strftime(
+            #     "%H:%M:%S, %d/%m/%Y"),
         })
 
     if not data:
