@@ -15,6 +15,7 @@ from flask import request
 from simplyblock_web import utils, node_utils
 
 from simplyblock_core import scripts, constants
+from ec2_metadata import ec2_metadata
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
@@ -22,11 +23,24 @@ bp = Blueprint("snode", __name__, url_prefix="/snode")
 
 cluster_id_file = "/etc/foundationdb/sbcli_cluster_id"
 
-cpu_info = cpuinfo.get_cpu_info()
-hostname, _, _ = node_utils.run_command("hostname -s")
-system_id = ""
+CPU_INFO = cpuinfo.get_cpu_info()
+HOSTNAME, _, _ = node_utils.run_command("hostname -s")
+SYSTEM_ID = ""
+EC2_PUBLIC_IP = ""
+EC2_MD = ""
+
 try:
-    system_id, _, _ = node_utils.run_command("dmidecode -s system-uuid")
+    SYSTEM_ID = ec2_metadata.instance_id
+except:
+    SYSTEM_ID, _, _ = node_utils.run_command("dmidecode -s system-uuid")
+
+try:
+    EC2_PUBLIC_IP = ec2_metadata.public_ipv4
+except:
+    pass
+
+try:
+    EC2_MD = ec2_metadata.instance_identity_document
 except:
     pass
 
@@ -192,37 +206,17 @@ def delete_cluster_id():
     return out
 
 
-def get_ec2_meta():
-    stream = os.popen('curl -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600"')
-    token = stream.read()
-    stream = os.popen(f"curl -H \"X-aws-ec2-metadata-token: {token}\" http://169.254.169.254/latest/dynamic/instance-identity/document")
-    out = stream.read()
-    try:
-        data = json.loads(out)
-        return data
-    except:
-        return {}
-
-
-def get_ec2_public_ip():
-    stream = os.popen('curl -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600"')
-    token = stream.read()
-    stream = os.popen(f"curl -H \"X-aws-ec2-metadata-token: {token}\" http://169.254.169.254/latest/meta-data/public-ipv4")
-    out = stream.read()
-    return out
-
-
 @bp.route('/info', methods=['GET'])
 def get_info():
 
     out = {
         "cluster_id": get_cluster_id(),
 
-        "hostname": hostname,
-        "system_id": system_id,
+        "hostname": HOSTNAME,
+        "system_id": SYSTEM_ID,
 
-        "cpu_count": cpu_info['count'],
-        "cpu_hz": cpu_info['hz_advertised'][0],
+        "cpu_count": CPU_INFO['count'],
+        "cpu_hz": CPU_INFO['hz_advertised'][0],
 
         "memory": node_utils.get_memory(),
         "hugepages": node_utils.get_huge_memory(),
@@ -236,9 +230,9 @@ def get_info():
 
         "network_interface": node_utils.get_nics_data(),
 
-        "ec2_metadata": get_ec2_meta(),
+        "ec2_metadata": EC2_MD,
 
-        "ec2_public_ip": get_ec2_public_ip(),
+        "ec2_public_ip": EC2_PUBLIC_IP,
     }
     return utils.get_response(out)
 
