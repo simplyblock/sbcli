@@ -14,7 +14,8 @@ COPY README.md README.md
 COPY requirements.txt requirements.txt
 COPY ./docker/motd /etc/motd
 
-RUN dnf update -y ; dnf install -y python3-pip kmod parted gdisk pkg-config wget vim dmidecode nvme-cli iproute pciutils openssh-server iputils
+RUN dnf update -y ; dnf install -y python3-pip kmod parted gdisk pkg-config wget vim dmidecode nvme-cli \
+    iproute pciutils openssh-server iputils hostname
 
 RUN wget https://github.com/apple/foundationdb/releases/download/7.3.3/foundationdb-clients-7.3.3-1.el7.x86_64.rpm
 RUN rpm -Uvh foundationdb-clients-7.3.3-1.el7.x86_64.rpm
