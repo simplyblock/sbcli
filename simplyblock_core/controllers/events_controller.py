@@ -99,7 +99,6 @@ def log_event_cluster(cluster_id, domain, event, db_object, caused_by, message,
     "object_name": db_object.name,
     "message": message
     })
-    
     logger.info(event)
 
     db_controller = DBController()
