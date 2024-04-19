@@ -306,11 +306,15 @@ def make_gpt_partitions_for_nbd():
     except:
         pass
 
-    os.popen("modprobe nbd")
+
     os.popen(f"parted -s {nbd_device} mklabel gpt")
-    os.popen(f"parted -s {nbd_device} mkpart journal '0%' '{jm_percent}%'")
-    os.popen(f"parted -s {nbd_device} mkpart main '{jm_percent}%' '100%'")
+    time.sleep(1)
+    os.popen(f"parted -s {nbd_device} mkpart journal \"0%\" \"{jm_percent}%\"")
+    time.sleep(1)
+    os.popen(f"parted -s {nbd_device} mkpart main \"{jm_percent}%\" \"100%\"")
+    time.sleep(1)
     os.popen(f"sgdisk -t 1:6527994e-2c5a-4eec-9613-8f5944074e8b {nbd_device}")
+    time.sleep(1)
     os.popen(f"sgdisk -t 2:6527994e-2c5a-4eec-9613-8f5944074e8b {nbd_device}")
 
     return utils.get_response(True)
