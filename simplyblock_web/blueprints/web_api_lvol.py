@@ -1,3 +1,4 @@
+
 #!/usr/bin/env python
 # encoding: utf-8
 
@@ -94,8 +95,8 @@ def add_lvol():
         | distr_npcs      | Distr bdev number of parity chunks per stripe, Default=0 means auto set
         | distr_bs        | Distr bdev block size, Default=4096
         | distr_chunk_bs  | Distr bdev chunk block size, Default=4096
-        | key1            | the hex value of key1 to be used for lvol encryption
-        | key2            | the hex value of key2 to be used for lvol encryption
+        | crypto_key1     | the hex value of key1 to be used for lvol encryption
+        | crypto_key2     | the hex value of key2 to be used for lvol encryption
     """""
 
     cl_data = request.get_json()
