@@ -208,7 +208,8 @@ def get_ec2_public_ip():
     stream = os.popen('curl -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600"')
     token = stream.read()
     stream = os.popen(f"curl -H \"X-aws-ec2-metadata-token: {token}\" http://169.254.169.254/latest/meta-data/public-ipv4")
-    out = stream.read()
+    response = stream.read()
+    out = response if "404" not in response else None
     return out
 
 
