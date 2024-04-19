@@ -51,7 +51,13 @@ def log_distr_event(cluster_id, node_id, event_dict):
         ds.vuid = event_dict['vuid']
 
     ds.object_dict = event_dict
-    log_event_to_json(ds)
+    #logger.info(log_event_to_json(ds))
+    logger.info({
+    "event": event_dict['event_type'],
+    "domain": DOMAIN_DISTR,
+    "message": event_dict['status']
+    })
+    logger.info(event_dict['event_type'])
 
     db_controller = DBController()
     ds.write_to_db(db_controller.kv_store)
@@ -87,7 +93,14 @@ def log_event_cluster(cluster_id, domain, event, db_object, caused_by, message,
     ds.caused_by = caused_by
     ds.message = message
 
-    log_event_to_json(ds)
+    #logger.info(log_event_to_json(ds))
+    logger.info({
+    "event": event,
+    "object_name": db_object.name,
+    "message": message
+    })
+    
+    logger.info(event)
 
     db_controller = DBController()
     ds.write_to_db(db_controller.kv_store)
@@ -96,9 +109,4 @@ def log_event_to_json(event_obj):
     """
     Log event to JSON format.
     """
-    try:
-        json_str = json.dumps(event_obj.to_dict())
-        logger.info(json_str)
-    except Exception as e:
-        logger.error(f"Error logging JSON data: {e}")
-    return
+    return json.dumps(event_obj.to_dict())
