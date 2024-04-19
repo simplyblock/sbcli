@@ -51,12 +51,15 @@ def log_distr_event(cluster_id, node_id, event_dict):
         ds.vuid = event_dict['vuid']
 
     ds.object_dict = event_dict
+    
     #logger.info(log_event_to_json(ds))
-    logger.info({
+    json_str = json.dumps({
     "event": event_dict['event_type'],
     "domain": DOMAIN_DISTR,
     "message": event_dict['status']
     })
+
+    logger.info(json_str)
     logger.info(event_dict['event_type'])
 
     db_controller = DBController()
@@ -94,11 +97,12 @@ def log_event_cluster(cluster_id, domain, event, db_object, caused_by, message,
     ds.message = message
 
     #logger.info(log_event_to_json(ds))
-    logger.info({
+    json_str = json.dumps({
     "event": event,
     "object_name": db_object.name,
     "message": message
     })
+    logger.info(json_str)
     logger.info(event)
 
     db_controller = DBController()
