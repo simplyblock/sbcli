@@ -6,6 +6,7 @@ import random
 import sys
 import time
 import uuid
+from typing import Tuple
 
 from simplyblock_core import utils, constants, distr_controller
 from simplyblock_core.controllers import snapshot_controller, pool_controller, lvol_events
@@ -441,7 +442,7 @@ def is_hex(s: str) -> bool:
     except ValueError:
         return False
 
-def validate_aes_xts_keys(key1: str, key2: str) -> tuple[bool, str]:
+def validate_aes_xts_keys(key1: str, key2: str) -> Tuple[bool, str]:
     """
     Key Length: each key should be either 128 or 256 bits long.
     since hex values of the keys are expected, the key lengths should be either 32 or 64
