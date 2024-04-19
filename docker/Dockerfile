@@ -23,7 +23,7 @@ RUN rm -f foundationdb-clients-7.3.3-1.el7.x86_64.rpm
 
 RUN pip3 install -r requirements.txt
 RUN pip3 install -r simplyblock_web/requirements.txt
-
+RUN ln -s /usr/bin/python3 /usr/bin/python
 RUN python setup.py install
 
 # Configure the SSH server
