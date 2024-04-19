@@ -2,16 +2,8 @@
 import pprint
 
 import json
-import logging
 from typing import Mapping
-from simplyblock_core import constants
 
-from graypy import GELFUDPHandler
-
-# configure logging
-gelf_handler = GELFUDPHandler('0.0.0.0', constants.GELF_PORT)
-logger = logging.getLogger()
-logger.addHandler(gelf_handler)
 
 class BaseModel(object):
     def __init__(self):
