@@ -14,7 +14,7 @@ from flask import request
 
 from simplyblock_web import utils, node_utils
 
-from simplyblock_core import scripts, constants
+from simplyblock_core import scripts, constants, shell_utils
 from ec2_metadata import ec2_metadata
 
 logger = logging.getLogger(__name__)
@@ -300,15 +300,22 @@ def make_gpt_partitions_for_nbd():
     except:
         pass
 
+    cmd_list = [
+        f"parted -sf {nbd_device} mklabel gpt",
+        f"parted -sf {nbd_device} mkpart journal \"0%\" \"{jm_percent}%\"",
+        f"parted -sf {nbd_device} mkpart main \"{jm_percent}%\" \"100%\"",
+        f"sgdisk -t 1:6527994e-2c5a-4eec-9613-8f5944074e8b {nbd_device}",
+        f"sgdisk -t 2:6527994e-2c5a-4eec-9613-8f5944074e8b {nbd_device}"
+    ]
 
-    os.popen(f"parted -s {nbd_device} mklabel gpt")
-    time.sleep(1)
-    os.popen(f"parted -s {nbd_device} mkpart journal \"0%\" \"{jm_percent}%\"")
-    time.sleep(1)
-    os.popen(f"parted -s {nbd_device} mkpart main \"{jm_percent}%\" \"100%\"")
-    time.sleep(1)
-    os.popen(f"sgdisk -t 1:6527994e-2c5a-4eec-9613-8f5944074e8b {nbd_device}")
-    time.sleep(1)
-    os.popen(f"sgdisk -t 2:6527994e-2c5a-4eec-9613-8f5944074e8b {nbd_device}")
+    for cmd in cmd_list:
+        logger.debug(cmd)
+        out, err, ret_code = shell_utils.run_command(cmd)
+        logger.debug(out)
+        logger.debug(ret_code)
+        if ret_code != 0:
+            logger.error(err)
+            return utils.get_response(False,f"Error running cmd: {cmd}, returncode: {ret_code}, output: {out}, err: {err}")
+        time.sleep(1)
 
     return utils.get_response(True)

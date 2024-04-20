@@ -100,6 +100,7 @@ def addNvmeDevices(cluster, rpc_client, devs, snode):
 
         nvme_bdev = f"{nvme_controller}n1"
         rpc_client.bdev_examine(nvme_bdev)
+        time.sleep(5)
         ret = rpc_client.get_bdevs(nvme_bdev)
         nvme_dict = ret[0]
         nvme_driver_data = nvme_dict['driver_specific']['nvme'][0]
