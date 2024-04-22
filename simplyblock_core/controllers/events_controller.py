@@ -52,15 +52,8 @@ def log_distr_event(cluster_id, node_id, event_dict):
 
     ds.object_dict = event_dict
 
-    json_str = json.dumps({
-    "cluster_id": cluster_id,
-    "event": event_dict['event_type'],
-    "domain": DOMAIN_DISTR,
-    "message": event_dict['status'],
-    "caused_by": CAUSED_BY_MONITOR
-    })
-
-    logger.info(json_str)
+    log_event_based_on_level(cluster_id, event_dict['event_type'], DOMAIN_DISTR,
+                         event_dict['status'], CAUSED_BY_MONITOR, EventObj.LEVEL_ERROR)
 
     db_controller = DBController()
     ds.write_to_db(db_controller.kv_store)
@@ -96,14 +89,25 @@ def log_event_cluster(cluster_id, domain, event, db_object, caused_by, message,
     ds.caused_by = caused_by
     ds.message = message
 
-    json_str = json.dumps({
-    "cluster_id": cluster_id,
-    "event": event,
-    "object_name": db_object.name,
-    "message": message,
-    "caused_by": caused_by
-    })
-    logger.info(json_str)
+    log_event_based_on_level(cluster_id, event, db_object.name, message, caused_by, event_level)
 
     db_controller = DBController()
     ds.write_to_db(db_controller.kv_store)
+
+def log_event_based_on_level(cluster_id, event, db_object, message, caused_by, event_level):
+    json_str = json.dumps({
+        "cluster_id": cluster_id,
+        "event": event,
+        "object_name": db_object,
+        "message": message,
+        "caused_by": caused_by
+    })
+
+    if event_level == EventObj.LEVEL_CRITICAL:
+        logger.critical(json_str)
+    elif event_level == EventObj.LEVEL_WARN:
+        logger.warning(json_str)
+    elif event_level == EventObj.LEVEL_ERROR:
+        logger.error(json_str)
+    else:
+        logger.info(json_str)
