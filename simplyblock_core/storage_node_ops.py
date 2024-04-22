@@ -1157,10 +1157,10 @@ def shutdown_storage_node(node_id, force=False):
             lvol.status = lvol.STATUS_OFFLINE
             lvol.write_to_db(db_controller.kv_store)
 
-    distr_controller.send_node_status_event(snode.get_id(), "in_shutdown")
     for dev in snode.nvme_devices:
-        if dev.status == NVMeDevice.STATUS_ONLINE:
+        if dev.status in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_READONLY]:
             device_controller.device_set_unavailable(dev.get_id())
+    distr_controller.send_node_status_event(snode.get_id(), "in_shutdown")
 
     # shutdown node
     # make other nodes disconnect from this node
