@@ -739,6 +739,21 @@ def add_storage_node(cluster_id, iface_name, data_nics):
     return "Success"
 
 
+def delete_storage_node(node_id):
+    db_controller = DBController()
+    snode = db_controller.get_storage_node_by_id(node_id)
+    if not snode:
+        logger.error(f"Can not find storage node: {node_id}")
+        return False
+
+    if snode.status != StorageNode.STATUS_REMOVED:
+        logger.error(f"Node must be in removed status")
+        return False
+
+    snode.remove(db_controller.kv_store)
+    logger.info("done")
+
+
 def remove_storage_node(node_id, force_remove=False, force_migrate=False):
     db_controller = DBController()
     snode = db_controller.get_storage_node_by_id(node_id)
