@@ -11,7 +11,7 @@ from simplyblock_core.controllers import cluster_events
 from simplyblock_core.models.cluster import Cluster
 
 # Import the GELF logger
-#from graypy import GELFUDPHandler
+from graypy import GELFUDPHandler
 
 # configure logging
 logger_handler = logging.StreamHandler(stream=sys.stdout)
