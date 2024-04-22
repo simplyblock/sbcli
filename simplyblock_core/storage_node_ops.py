@@ -937,7 +937,9 @@ def restart_storage_node(
     for db_dev in snode.nvme_devices:
         known_devices_sn.append(db_dev.serial_number)
         if db_dev.serial_number in devices_sn:
-            logger.info(f"Device found: {db_dev.get_id()}")
+            logger.info(f"Device found: {db_dev.get_id()}, status {db_dev.status}")
+            if db_dev.status != NVMeDevice.STATUS_JM:
+                db_dev.status = NVMeDevice.STATUS_ONLINE
             active_devices.append(db_dev)
         else:
             logger.info(f"Device not found: {db_dev.get_id()}")
