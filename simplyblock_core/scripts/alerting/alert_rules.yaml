@@ -590,3 +590,201 @@ groups:
           labels:
             app: simplyblock
           isPaused: false
+        - uid: f49f9a2c-32fc-4f66-b4dc-1d2778717825
+          title: Cluster_provisioned_capacity_reached
+          condition: C
+          data:
+            - refId: A
+              relativeTimeRange:
+                from: 600
+                to: 0
+              datasourceUid: graylog_uid
+              model:
+                alias: ""
+                bucketAggs:
+                    - field: function
+                      id: "2"
+                      settings:
+                        min_doc_count: "1"
+                        order: desc
+                        orderBy: _term
+                        size: "10"
+                      type: terms
+                datasource:
+                    type: elasticsearch
+                    uid: graylog_uid
+                hide: false
+                intervalMs: 1000
+                maxDataPoints: 43200
+                metrics:
+                    - id: "1"
+                      type: count
+                query: '"event: CAPACITY" AND "object_name: Cluster" AND "message: Cluster provisioned capacity reached"'
+                refId: A
+                timeField: timestamp
+            - refId: B
+              relativeTimeRange:
+                from: 600
+                to: 0
+              datasourceUid: __expr__
+              model:
+                conditions:
+                    - evaluator:
+                        params: []
+                        type: gt
+                      operator:
+                        type: and
+                      query:
+                        params:
+                            - B
+                      reducer:
+                        params: []
+                        type: last
+                      type: query
+                datasource:
+                    type: __expr__
+                    uid: __expr__
+                expression: A
+                hide: false
+                intervalMs: 1000
+                maxDataPoints: 43200
+                reducer: count
+                refId: B
+                type: reduce
+            - refId: C
+              relativeTimeRange:
+                from: 600
+                to: 0
+              datasourceUid: __expr__
+              model:
+                conditions:
+                    - evaluator:
+                        params:
+                            - 0
+                        type: gt
+                      operator:
+                        type: and
+                      query:
+                        params:
+                            - C
+                      reducer:
+                        params: []
+                        type: last
+                      type: query
+                datasource:
+                    type: __expr__
+                    uid: __expr__
+                expression: B
+                hide: false
+                intervalMs: 1000
+                maxDataPoints: 43200
+                refId: C
+                type: threshold
+          noDataState: OK
+          execErrState: OK
+          for: 2m
+          annotations:
+            description: Cluster provisioned capacity reached
+            summary: 'Cluster provisioned capacity reached'
+          labels:
+            app: simplyblock
+          isPaused: false
+        - uid: b49b9d2c-33bc-4b56-b4dc-1d5078717867
+          title: Cluster_absolute_capacity_reached
+          condition: C
+          data:
+            - refId: A
+              relativeTimeRange:
+                from: 600
+                to: 0
+              datasourceUid: graylog_uid
+              model:
+                alias: ""
+                bucketAggs:
+                    - field: function
+                      id: "2"
+                      settings:
+                        min_doc_count: "1"
+                        order: desc
+                        orderBy: _term
+                        size: "10"
+                      type: terms
+                datasource:
+                    type: elasticsearch
+                    uid: graylog_uid
+                hide: false
+                intervalMs: 1000
+                maxDataPoints: 43200
+                metrics:
+                    - id: "1"
+                      type: count
+                query: '"event: CAPACITY" AND "object_name: Cluster" AND "message: Cluster absolute capacity reached"'
+                refId: A
+                timeField: timestamp
+            - refId: B
+              relativeTimeRange:
+                from: 600
+                to: 0
+              datasourceUid: __expr__
+              model:
+                conditions:
+                    - evaluator:
+                        params: []
+                        type: gt
+                      operator:
+                        type: and
+                      query:
+                        params:
+                            - B
+                      reducer:
+                        params: []
+                        type: last
+                      type: query
+                datasource:
+                    type: __expr__
+                    uid: __expr__
+                expression: A
+                hide: false
+                intervalMs: 1000
+                maxDataPoints: 43200
+                reducer: count
+                refId: B
+                type: reduce
+            - refId: C
+              relativeTimeRange:
+                from: 600
+                to: 0
+              datasourceUid: __expr__
+              model:
+                conditions:
+                    - evaluator:
+                        params:
+                            - 0
+                        type: gt
+                      operator:
+                        type: and
+                      query:
+                        params:
+                            - C
+                      reducer:
+                        params: []
+                        type: last
+                      type: query
+                datasource:
+                    type: __expr__
+                    uid: __expr__
+                expression: B
+                hide: false
+                intervalMs: 1000
+                maxDataPoints: 43200
+                refId: C
+                type: threshold
+          noDataState: OK
+          execErrState: OK
+          for: 2m
+          annotations:
+            description: Cluster absolute capacity reached
+            summary: 'Cluster absolute capacity reached'
+          labels:
+            app: simplyblock
+          isPaused: false

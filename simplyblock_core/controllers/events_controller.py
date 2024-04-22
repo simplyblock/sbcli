@@ -10,6 +10,7 @@ from simplyblock_core import constants
 from graypy import GELFUDPHandler
 
 # configure logging
+logging.captureWarnings(True)
 gelf_handler = GELFUDPHandler('0.0.0.0', constants.GELF_PORT)
 logger = logging.getLogger()
 logger.setLevel(logging.DEBUG)
@@ -105,14 +106,13 @@ def log_event_based_on_level(cluster_id, event, db_object, message, caused_by, e
         "object_name": db_object,
         "message": message,
         "caused_by": caused_by
-    })   
-    logger.info(json_str)
-    logger.warning(json_str)
-    # if event_level == EventObj.LEVEL_CRITICAL:
-    #     logger.critical(json_str)
-    # elif event_level == EventObj.LEVEL_WARN:
-    #     logger.warning(json_str)
-    # elif event_level == EventObj.LEVEL_ERROR:
-    #     logger.error(json_str)
-    # else:
-    #     logger.info(json_str)
+    })
+
+    if event_level == EventObj.LEVEL_CRITICAL:
+        logger.critical(json_str)
+    elif event_level == EventObj.LEVEL_WARN:
+        logger.warning(json_str)
+    elif event_level == EventObj.LEVEL_ERROR:
+        logger.error(json_str)
+    else:
+        logger.info(json_str)
