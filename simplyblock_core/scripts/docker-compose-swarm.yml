@@ -150,6 +150,8 @@ services:
         constraints: [node.role == manager]
     volumes:
       - "/etc/foundationdb:/etc/foundationdb"
+    networks:
+      - hostnet
 
   HealthCheck:
     image: $SIMPLYBLOCK_DOCKER_IMAGE
