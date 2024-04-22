@@ -17,15 +17,3 @@ datasources:
     index: '*'
     interval: Hourly
     timeField: 'timestamp'
-# - name: GRAYLOG2
-#   type: grafana-opensearch-datasource
-#   url: http://opensearch:9200
-#   isDefault: false
-#   access: proxy
-#   editable: true
-#   jsonData:
-#     index: '*'
-#     interval: Hourly
-#     timeField: 'timestamp'
-#     version: '7.0.0'
-#     flavor: 'elasticsearch'
