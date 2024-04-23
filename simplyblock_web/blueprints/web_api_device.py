@@ -7,6 +7,7 @@ from flask import Blueprint
 
 from simplyblock_core.controllers import device_controller
 from simplyblock_web import utils
+from simplyblock_core.storage_node_ops import suspend_storage_node, resume_storage_node
 
 from simplyblock_core import kv_store
 

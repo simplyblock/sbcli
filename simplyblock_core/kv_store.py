@@ -3,7 +3,7 @@ import logging
 
 import fdb
 import time
-
+from typing import List
 from simplyblock_core import constants
 from simplyblock_core.models.caching_node import CachingNode
 from simplyblock_core.models.cluster import ClusterMap
@@ -123,7 +123,7 @@ class DBController:
             if node.hostname == hostname:
                 return node
 
-    def get_storage_devices(self, id=""):
+    def get_storage_devices(self, id="") -> List[str]:
         # workaround because nvme devices are stored inside the node object itself.
         nodes = self.get_storage_nodes()
         devices = []

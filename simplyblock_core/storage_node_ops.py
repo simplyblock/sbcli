@@ -1195,7 +1195,10 @@ def shutdown_storage_node(node_id, force=False):
     return True
 
 
-def suspend_storage_node(node_id, force=False):
+def suspend_storage_node(node_id, force=False) -> bool:
+    """
+    Given a storage nodes, suspends the storage node and returns the status
+    """
     db_controller = DBController()
     snode = db_controller.get_storage_node_by_id(node_id)
     if not snode:
@@ -1252,7 +1255,10 @@ def suspend_storage_node(node_id, force=False):
     return True
 
 
-def resume_storage_node(node_id):
+def resume_storage_node(node_id) -> bool:
+    """
+    given a storage node UUID, tries to suspend and returns the status
+    """
     db_controller = DBController()
     snode = db_controller.get_storage_node_by_id(node_id)
     if not snode:
