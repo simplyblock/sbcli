@@ -739,6 +739,21 @@ def add_storage_node(cluster_id, iface_name, data_nics):
     return "Success"
 
 
+def delete_storage_node(node_id):
+    db_controller = DBController()
+    snode = db_controller.get_storage_node_by_id(node_id)
+    if not snode:
+        logger.error(f"Can not find storage node: {node_id}")
+        return False
+
+    if snode.status != StorageNode.STATUS_REMOVED:
+        logger.error(f"Node must be in removed status")
+        return False
+
+    snode.remove(db_controller.kv_store)
+    logger.info("done")
+
+
 def remove_storage_node(node_id, force_remove=False, force_migrate=False):
     db_controller = DBController()
     snode = db_controller.get_storage_node_by_id(node_id)
@@ -922,7 +937,9 @@ def restart_storage_node(
     for db_dev in snode.nvme_devices:
         known_devices_sn.append(db_dev.serial_number)
         if db_dev.serial_number in devices_sn:
-            logger.info(f"Device found: {db_dev.get_id()}")
+            logger.info(f"Device found: {db_dev.get_id()}, status {db_dev.status}")
+            if db_dev.status != NVMeDevice.STATUS_JM:
+                db_dev.status = NVMeDevice.STATUS_ONLINE
             active_devices.append(db_dev)
         else:
             logger.info(f"Device not found: {db_dev.get_id()}")
@@ -1142,10 +1159,10 @@ def shutdown_storage_node(node_id, force=False):
             lvol.status = lvol.STATUS_OFFLINE
             lvol.write_to_db(db_controller.kv_store)
 
-    distr_controller.send_node_status_event(snode.get_id(), "in_shutdown")
     for dev in snode.nvme_devices:
-        if dev.status == NVMeDevice.STATUS_ONLINE:
+        if dev.status in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_READONLY]:
             device_controller.device_set_unavailable(dev.get_id())
+    distr_controller.send_node_status_event(snode.get_id(), "in_shutdown")
 
     # shutdown node
     # make other nodes disconnect from this node
