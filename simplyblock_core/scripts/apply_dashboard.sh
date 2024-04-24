@@ -3,12 +3,12 @@
 TD=$(dirname -- "$(readlink -f -- "$0")")
 
 # Grafana Password
-export grafanaPassword=$1
+export grafanaPassword=FKA1QNCsqdLBrjea1ZYw
 
 # Grafana username
 GF_ADMIN_USER=admin
 
-HOST=0.0.0.0:3000
+HOST=3.237.189.214:3000
 
 DASHBOARDS="${TD}/dashboards"
 for dashboard in "${DASHBOARDS}/cluster.json" "${DASHBOARDS}/devices.json" "${DASHBOARDS}/nodes.json" "${DASHBOARDS}/lvols.json" "${DASHBOARDS}/pools.json"; do
