@@ -326,15 +326,15 @@ def _prepare_cluster_devices(snode, after_restart=False):
         snode.write_to_db(db_controller.kv_store)
 
     if jm_nvme_bdevs:
-        # ret = rpc_client.bdev_raid_create(f"raid_jm_{snode.get_id()}", jm_nvme_bdevs)
-        # if not ret:
-        #     logger.error(f"Failed to create raid_jm_{snode.get_id()}")
-        #     return False
+        ret = rpc_client.bdev_raid_create(f"raid_jm_{snode.get_id()}", jm_nvme_bdevs)
+        if not ret:
+            logger.error(f"Failed to create raid_jm_{snode.get_id()}")
+            return False
         alceml_name = f"alceml_jm_{snode.get_id()}"
         pba_init_mode = 3
         if after_restart:
             pba_init_mode = 2
-        ret = rpc_client.bdev_alceml_create(alceml_name, jm_nvme_bdevs[0], str(uuid.uuid4()), pba_init_mode=pba_init_mode)
+        ret = rpc_client.bdev_alceml_create(alceml_name, f"raid_jm_{snode.get_id()}", str(uuid.uuid4()), pba_init_mode=pba_init_mode)
         if not ret:
             logger.error(f"Failed to create alceml bdev: {alceml_name}")
             return False
