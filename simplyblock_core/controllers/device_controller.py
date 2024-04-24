@@ -84,6 +84,10 @@ def restart_device(device_id):
     if not dev:
         logger.error("device not found")
 
+    if dev.status != NVMeDevice.STATUS_REMOVED:
+        logger.error("Device must be in removed status")
+        return False
+
     snode = db_controller.get_storage_node_by_id(dev.node_id)
     if not snode:
         logger.error("node not found")
@@ -401,6 +405,13 @@ def reset_storage_device(dev_id):
     if device.status == NVMeDevice.STATUS_REMOVED:
         logger.error(f"Device status: {device.status} is removed")
         return False
+
+    logger.info("Setting device to unavailable")
+    old_status = device.status
+    device.status = NVMeDevice.STATUS_UNAVAILABLE
+    distr_controller.send_dev_status_event(device.cluster_device_order, device.status)
+    snode.write_to_db(db_controller.kv_store)
+    device_events.device_status_change(device, device.status, old_status)
 
     logger.info("Resetting device")
     rpc_client = RPCClient(
