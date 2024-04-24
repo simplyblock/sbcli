@@ -195,13 +195,11 @@ def restart_device(device_id):
         else:
             node.remote_devices.append(device_obj)
         node.write_to_db(db_controller.kv_store)
+        time.sleep(3)
 
     logger.info("Sending device event")
     distr_controller.send_dev_status_event(device_obj.cluster_device_order, "online")
     device_events.device_restarted(device_obj)
-
-    for lvol in db_controller.get_lvols():
-        lvol_controller.send_cluster_map(lvol.get_id())
 
     return "Done"
 
