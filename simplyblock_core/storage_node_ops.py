@@ -752,6 +752,11 @@ def delete_storage_node(node_id):
         return False
 
     snode.remove(db_controller.kv_store)
+
+    for lvol in db_controller.get_lvols():
+        logger.info(f"Sending cluster map to LVol: {lvol.get_id()}")
+        lvol_controller.send_cluster_map(lvol.get_id())
+
     logger.info("done")
 
 
