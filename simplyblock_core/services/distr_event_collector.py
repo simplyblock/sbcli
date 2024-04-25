@@ -59,7 +59,7 @@ def process_device_event(event):
         if event.message == 'SPDK_BDEV_EVENT_REMOVE':
             logger.info(f"Removing storage id: {storage_id} from node: {node_id}")
             device_controller.device_remove(device_id)
-        elif event.message == 'error_write':
+        elif event.message in ['error_write', 'error_unmap']:
             logger.info(f"Setting device to read-only")
             device_controller.device_set_io_error(device_id, True)
             device_controller.device_set_read_only(device_id)
