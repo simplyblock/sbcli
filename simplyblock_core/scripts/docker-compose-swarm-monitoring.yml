@@ -132,7 +132,7 @@ services:
   CleanupGraylog:
     image: $SIMPLYBLOCK_DOCKER_IMAGE
     environment:
-      LOG_DELETION_INTERVAL: "10m"
+      LOG_DELETION_INTERVAL: "${LOG_DELETION_INTERVAL}"
     command: "python simplyblock_core/services/cleanup_graylog.py"
     deploy:
       placement:
