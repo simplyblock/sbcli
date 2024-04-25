@@ -124,7 +124,7 @@ def restart_device(device_id):
         return False
 
     alceml_id = device_obj.get_id()
-    alceml_name = get_alceml_name(snode, device_obj)
+    alceml_name = distr_controller.get_alceml_name(snode, alceml_id)
     logger.info(f"adding {alceml_name}")
     ret = rpc_client.bdev_alceml_create(alceml_name, test_name, alceml_id, pba_init_mode=2)
     if not ret:
