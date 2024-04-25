@@ -55,6 +55,10 @@ class CLIWrapper:
         sub_command.add_argument("--iobuf_large_bufsize", help='bdev_set_options param', dest='large_bufsize',  type=int, default=0)
 
         # remove storage node
+        sub_command = self.add_sub_command(subparser, "delete", 'Delete storage node')
+        sub_command.add_argument("node_id", help='UUID of storage node')
+
+        # remove storage node
         sub_command = self.add_sub_command(subparser, "remove", 'Remove storage node')
         sub_command.add_argument("node_id", help='UUID of storage node')
         sub_command.add_argument("--force-remove", help='Force remove all LVols and snapshots',
@@ -816,6 +820,9 @@ class CLIWrapper:
 
             elif sub_command == "remove":
                 ret = storage_ops.remove_storage_node(args.node_id, args.force_remove, args.force_migrate)
+
+            elif sub_command == "delete":
+                ret = storage_ops.delete_storage_node(args.node_id)
 
             elif sub_command == "restart":
                 node_id = args.node_id
