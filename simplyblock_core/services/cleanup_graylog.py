@@ -20,17 +20,17 @@ logger.setLevel(logging.DEBUG)
 deletion_interval = os.getenv('LOG_DELETION_INTERVAL', '10m')
 
 while True:
-    delete_query = '''
+    delete_query = f'''
     curl -X POST "http://opensearch:9200/graylog_*/_delete_by_query" -H 'Content-Type: application/json' -d'
-    {
-      "query": {
-        "range": {
-          "timestamp": {
+    {{
+      "query": {{
+        "range": {{
+          "timestamp": {{
             "lt": "now-{deletion_interval}"
-          }
-        }
-      }
-    }'
+          }}
+        }}
+      }}
+    }}'
     '''
     try:
         result = subprocess.run(delete_query, shell=True, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
