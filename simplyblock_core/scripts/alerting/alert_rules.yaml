@@ -81,18 +81,23 @@ groups:
                 maxDataPoints: 43200
                 refId: C
                 type: threshold
-          noDataState: NoData
-          execErrState: Error
+          noDataState: OK
+          execErrState: OK
           for: 10s
           annotations:
             description: This is prometheus alert description
-            summary: Exception occured in the demo app project
+            summary: Exception occured in the simplyblock project
           labels:
             alertname: prometheus_alert
-            app: demo-app
+            app: simplyblock
           isPaused: false
-        - uid: e834b072-9c12-4c93-9ce9-d7defc512f41
-          title: graylog_alert
+    - orgId: 1
+      name: grafana_folder
+      folder: grafana_folder
+      interval: 1m
+      rules:
+        - uid: e392f59c-02dc-4b55-830c-f77f71d08720
+          title: Device_status_online_to_unavailable
           condition: C
           data:
             - refId: A
@@ -103,11 +108,13 @@ groups:
               model:
                 alias: ""
                 bucketAggs:
-                    - field: timestamp
-                      id: "2"
+                    - id: "2"
                       settings:
-                        interval: auto
-                      type: date_histogram
+                        min_doc_count: "1"
+                        order: desc
+                        orderBy: _term
+                        size: "10"
+                      type: terms
                 datasource:
                     type: elasticsearch
                     uid: graylog_uid
@@ -117,7 +124,7 @@ groups:
                 metrics:
                     - id: "1"
                       type: count
-                query: distr_status_events_get
+                query: '"event: STATUS_CHANGE" AND "object_name: NVMeDevice" AND "message: Device status changed from: online to: unavailable"'
                 refId: A
                 timeField: timestamp
             - refId: B
@@ -158,7 +165,7 @@ groups:
                 conditions:
                     - evaluator:
                         params:
-                            - 2
+                            - 0
                         type: gt
                       operator:
                         type: and
@@ -178,13 +185,606 @@ groups:
                 maxDataPoints: 43200
                 refId: C
                 type: threshold
-          noDataState: NoData
-          execErrState: Error
-          for: 10s
+          noDataState: OK
+          execErrState: OK
+          for: 2m
           annotations:
-            description: This is graylog alert description
-            summary: Exception occured in the demo app project
+            description: Device status changed
+            summary: 'Device status changed from: online to: unavailable'
           labels:
-            alertname: graylog_alert
-            app: demo-app
+            app: simplyblock
+          isPaused: false
+        - uid: a201d0f1-5545-4b7d-ba47-95415c707aeb
+          title: Device_status_online_to_read_only
+          condition: C
+          data:
+            - refId: A
+              relativeTimeRange:
+                from: 600
+                to: 0
+              datasourceUid: graylog_uid
+              model:
+                alias: ""
+                bucketAggs:
+                    - field: function
+                      id: "2"
+                      settings:
+                        min_doc_count: "1"
+                        order: desc
+                        orderBy: _term
+                        size: "10"
+                      type: terms
+                datasource:
+                    type: elasticsearch
+                    uid: graylog_uid
+                hide: false
+                intervalMs: 1000
+                maxDataPoints: 43200
+                metrics:
+                    - id: "1"
+                      type: count
+                query: '"event: STATUS_CHANGE" AND "object_name: NVMeDevice" AND "message: Device status changed from: online to: read_only"'
+                refId: A
+                timeField: timestamp
+            - refId: B
+              relativeTimeRange:
+                from: 600
+                to: 0
+              datasourceUid: __expr__
+              model:
+                conditions:
+                    - evaluator:
+                        params: []
+                        type: gt
+                      operator:
+                        type: and
+                      query:
+                        params:
+                            - B
+                      reducer:
+                        params: []
+                        type: last
+                      type: query
+                datasource:
+                    type: __expr__
+                    uid: __expr__
+                expression: A
+                hide: false
+                intervalMs: 1000
+                maxDataPoints: 43200
+                reducer: count
+                refId: B
+                type: reduce
+            - refId: C
+              relativeTimeRange:
+                from: 600
+                to: 0
+              datasourceUid: __expr__
+              model:
+                conditions:
+                    - evaluator:
+                        params:
+                            - 0
+                        type: gt
+                      operator:
+                        type: and
+                      query:
+                        params:
+                            - C
+                      reducer:
+                        params: []
+                        type: last
+                      type: query
+                datasource:
+                    type: __expr__
+                    uid: __expr__
+                expression: B
+                hide: false
+                intervalMs: 1000
+                maxDataPoints: 43200
+                refId: C
+                type: threshold
+          noDataState: OK
+          execErrState: OK
+          for: 2m
+          annotations:
+            description: Device status changed
+            summary: 'Device status changed from: online to: read_only'
+          labels:
+            app: simplyblock
+          isPaused: false
+        - uid: b7f0f94d-9677-4af5-95e1-c8ac0057a0c8
+          title: Cluster_status_online_to_degraded
+          condition: C
+          data:
+            - refId: A
+              relativeTimeRange:
+                from: 600
+                to: 0
+              datasourceUid: graylog_uid
+              model:
+                alias: ""
+                bucketAggs:
+                    - field: function
+                      id: "2"
+                      settings:
+                        min_doc_count: "1"
+                        order: desc
+                        orderBy: _term
+                        size: "10"
+                      type: terms
+                datasource:
+                    type: elasticsearch
+                    uid: graylog_uid
+                hide: false
+                intervalMs: 1000
+                maxDataPoints: 43200
+                metrics:
+                    - id: "1"
+                      type: count
+                query: '"event: STATUS_CHANGE" AND "object_name: Cluster" AND "message: Cluster status changed from: online to: degraded"'
+                refId: A
+                timeField: timestamp
+            - refId: B
+              relativeTimeRange:
+                from: 600
+                to: 0
+              datasourceUid: __expr__
+              model:
+                conditions:
+                    - evaluator:
+                        params: []
+                        type: gt
+                      operator:
+                        type: and
+                      query:
+                        params:
+                            - B
+                      reducer:
+                        params: []
+                        type: last
+                      type: query
+                datasource:
+                    type: __expr__
+                    uid: __expr__
+                expression: A
+                hide: false
+                intervalMs: 1000
+                maxDataPoints: 43200
+                reducer: count
+                refId: B
+                type: reduce
+            - refId: C
+              relativeTimeRange:
+                from: 600
+                to: 0
+              datasourceUid: __expr__
+              model:
+                conditions:
+                    - evaluator:
+                        params:
+                            - 0
+                        type: gt
+                      operator:
+                        type: and
+                      query:
+                        params:
+                            - C
+                      reducer:
+                        params: []
+                        type: last
+                      type: query
+                datasource:
+                    type: __expr__
+                    uid: __expr__
+                expression: B
+                hide: false
+                intervalMs: 1000
+                maxDataPoints: 43200
+                refId: C
+                type: threshold
+          noDataState: OK
+          execErrState: OK
+          for: 2m
+          annotations:
+            description: Cluster status changed
+            summary: 'Cluster status changed from: online to: degraded'
+          labels:
+            app: simplyblock
+          isPaused: false
+        - uid: faad6bd6-63ef-4a21-9567-2496c2e0df66
+          title: Cluster_status_online_to_suspended
+          condition: C
+          data:
+            - refId: A
+              relativeTimeRange:
+                from: 600
+                to: 0
+              datasourceUid: graylog_uid
+              model:
+                alias: ""
+                bucketAggs:
+                    - field: function
+                      id: "2"
+                      settings:
+                        min_doc_count: "1"
+                        order: desc
+                        orderBy: _term
+                        size: "10"
+                      type: terms
+                datasource:
+                    type: elasticsearch
+                    uid: graylog_uid
+                hide: false
+                intervalMs: 1000
+                maxDataPoints: 43200
+                metrics:
+                    - id: "1"
+                      type: count
+                query: '"event: STATUS_CHANGE" AND "object_name: Cluster" AND "message: Cluster status changed from: online to: suspended"'
+                refId: A
+                timeField: timestamp
+            - refId: B
+              relativeTimeRange:
+                from: 600
+                to: 0
+              datasourceUid: __expr__
+              model:
+                conditions:
+                    - evaluator:
+                        params: []
+                        type: gt
+                      operator:
+                        type: and
+                      query:
+                        params:
+                            - B
+                      reducer:
+                        params: []
+                        type: last
+                      type: query
+                datasource:
+                    type: __expr__
+                    uid: __expr__
+                expression: A
+                hide: false
+                intervalMs: 1000
+                maxDataPoints: 43200
+                reducer: count
+                refId: B
+                type: reduce
+            - refId: C
+              relativeTimeRange:
+                from: 600
+                to: 0
+              datasourceUid: __expr__
+              model:
+                conditions:
+                    - evaluator:
+                        params:
+                            - 0
+                        type: gt
+                      operator:
+                        type: and
+                      query:
+                        params:
+                            - C
+                      reducer:
+                        params: []
+                        type: last
+                      type: query
+                datasource:
+                    type: __expr__
+                    uid: __expr__
+                expression: B
+                hide: false
+                intervalMs: 1000
+                maxDataPoints: 43200
+                refId: C
+                type: threshold
+          noDataState: OK
+          execErrState: OK
+          for: 2m
+          annotations:
+            description: Cluster status changed
+            summary: 'Cluster status changed from: online to: suspended'
+          labels:
+            app: simplyblock
+          isPaused: false
+        - uid: f79f9a2c-92fc-4f66-b3dc-1d2778717820
+          title: StorageNode_status_online_to_unreachable
+          condition: C
+          data:
+            - refId: A
+              relativeTimeRange:
+                from: 600
+                to: 0
+              datasourceUid: graylog_uid
+              model:
+                alias: ""
+                bucketAggs:
+                    - field: function
+                      id: "2"
+                      settings:
+                        min_doc_count: "1"
+                        order: desc
+                        orderBy: _term
+                        size: "10"
+                      type: terms
+                datasource:
+                    type: elasticsearch
+                    uid: graylog_uid
+                hide: false
+                intervalMs: 1000
+                maxDataPoints: 43200
+                metrics:
+                    - id: "1"
+                      type: count
+                query: '"event: STATUS_CHANGE" AND "object_name: StorageNode" AND "message: Storage node status changed from: online to: offline"'
+                refId: A
+                timeField: timestamp
+            - refId: B
+              relativeTimeRange:
+                from: 600
+                to: 0
+              datasourceUid: __expr__
+              model:
+                conditions:
+                    - evaluator:
+                        params: []
+                        type: gt
+                      operator:
+                        type: and
+                      query:
+                        params:
+                            - B
+                      reducer:
+                        params: []
+                        type: last
+                      type: query
+                datasource:
+                    type: __expr__
+                    uid: __expr__
+                expression: A
+                hide: false
+                intervalMs: 1000
+                maxDataPoints: 43200
+                reducer: count
+                refId: B
+                type: reduce
+            - refId: C
+              relativeTimeRange:
+                from: 600
+                to: 0
+              datasourceUid: __expr__
+              model:
+                conditions:
+                    - evaluator:
+                        params:
+                            - 0
+                        type: gt
+                      operator:
+                        type: and
+                      query:
+                        params:
+                            - C
+                      reducer:
+                        params: []
+                        type: last
+                      type: query
+                datasource:
+                    type: __expr__
+                    uid: __expr__
+                expression: B
+                hide: false
+                intervalMs: 1000
+                maxDataPoints: 43200
+                refId: C
+                type: threshold
+          noDataState: OK
+          execErrState: OK
+          for: 2m
+          annotations:
+            description: Storage node status changed
+            summary: 'Storage node status changed from: online to: unreachable'
+          labels:
+            app: simplyblock
+          isPaused: false
+        - uid: f49f9a2c-32fc-4f66-b4dc-1d2778717825
+          title: Cluster_provisioned_capacity_reached
+          condition: C
+          data:
+            - refId: A
+              relativeTimeRange:
+                from: 600
+                to: 0
+              datasourceUid: graylog_uid
+              model:
+                alias: ""
+                bucketAggs:
+                    - field: function
+                      id: "2"
+                      settings:
+                        min_doc_count: "1"
+                        order: desc
+                        orderBy: _term
+                        size: "10"
+                      type: terms
+                datasource:
+                    type: elasticsearch
+                    uid: graylog_uid
+                hide: false
+                intervalMs: 1000
+                maxDataPoints: 43200
+                metrics:
+                    - id: "1"
+                      type: count
+                query: '"event: CAPACITY" AND "object_name: Cluster" AND "message: Cluster provisioned capacity reached"'
+                refId: A
+                timeField: timestamp
+            - refId: B
+              relativeTimeRange:
+                from: 600
+                to: 0
+              datasourceUid: __expr__
+              model:
+                conditions:
+                    - evaluator:
+                        params: []
+                        type: gt
+                      operator:
+                        type: and
+                      query:
+                        params:
+                            - B
+                      reducer:
+                        params: []
+                        type: last
+                      type: query
+                datasource:
+                    type: __expr__
+                    uid: __expr__
+                expression: A
+                hide: false
+                intervalMs: 1000
+                maxDataPoints: 43200
+                reducer: count
+                refId: B
+                type: reduce
+            - refId: C
+              relativeTimeRange:
+                from: 600
+                to: 0
+              datasourceUid: __expr__
+              model:
+                conditions:
+                    - evaluator:
+                        params:
+                            - 0
+                        type: gt
+                      operator:
+                        type: and
+                      query:
+                        params:
+                            - C
+                      reducer:
+                        params: []
+                        type: last
+                      type: query
+                datasource:
+                    type: __expr__
+                    uid: __expr__
+                expression: B
+                hide: false
+                intervalMs: 1000
+                maxDataPoints: 43200
+                refId: C
+                type: threshold
+          noDataState: OK
+          execErrState: OK
+          for: 2m
+          annotations:
+            description: Cluster provisioned capacity reached
+            summary: 'Cluster provisioned capacity reached'
+          labels:
+            app: simplyblock
+          isPaused: false
+        - uid: b49b9d2c-33bc-4b56-b4dc-1d5078717867
+          title: Cluster_absolute_capacity_reached
+          condition: C
+          data:
+            - refId: A
+              relativeTimeRange:
+                from: 600
+                to: 0
+              datasourceUid: graylog_uid
+              model:
+                alias: ""
+                bucketAggs:
+                    - field: function
+                      id: "2"
+                      settings:
+                        min_doc_count: "1"
+                        order: desc
+                        orderBy: _term
+                        size: "10"
+                      type: terms
+                datasource:
+                    type: elasticsearch
+                    uid: graylog_uid
+                hide: false
+                intervalMs: 1000
+                maxDataPoints: 43200
+                metrics:
+                    - id: "1"
+                      type: count
+                query: '"event: CAPACITY" AND "object_name: Cluster" AND "message: Cluster absolute capacity reached"'
+                refId: A
+                timeField: timestamp
+            - refId: B
+              relativeTimeRange:
+                from: 600
+                to: 0
+              datasourceUid: __expr__
+              model:
+                conditions:
+                    - evaluator:
+                        params: []
+                        type: gt
+                      operator:
+                        type: and
+                      query:
+                        params:
+                            - B
+                      reducer:
+                        params: []
+                        type: last
+                      type: query
+                datasource:
+                    type: __expr__
+                    uid: __expr__
+                expression: A
+                hide: false
+                intervalMs: 1000
+                maxDataPoints: 43200
+                reducer: count
+                refId: B
+                type: reduce
+            - refId: C
+              relativeTimeRange:
+                from: 600
+                to: 0
+              datasourceUid: __expr__
+              model:
+                conditions:
+                    - evaluator:
+                        params:
+                            - 0
+                        type: gt
+                      operator:
+                        type: and
+                      query:
+                        params:
+                            - C
+                      reducer:
+                        params: []
+                        type: last
+                      type: query
+                datasource:
+                    type: __expr__
+                    uid: __expr__
+                expression: B
+                hide: false
+                intervalMs: 1000
+                maxDataPoints: 43200
+                refId: C
+                type: threshold
+          noDataState: OK
+          execErrState: OK
+          for: 2m
+          annotations:
+            description: Cluster absolute capacity reached
+            summary: 'Cluster absolute capacity reached'
+          labels:
+            app: simplyblock
           isPaused: false
