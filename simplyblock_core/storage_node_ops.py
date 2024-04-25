@@ -584,6 +584,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask,
             count += 1
         node.write_to_db(kv_store)
         logger.info(f"connected to devices count: {count}")
+        time.sleep(3)
 
     logger.info("Sending cluster map")
     ret = distr_controller.send_cluster_map_to_node(snode)
@@ -751,6 +752,11 @@ def delete_storage_node(node_id):
         return False
 
     snode.remove(db_controller.kv_store)
+
+    for lvol in db_controller.get_lvols():
+        logger.info(f"Sending cluster map to LVol: {lvol.get_id()}")
+        lvol_controller.send_cluster_map(lvol.get_id())
+
     logger.info("done")
 
 
@@ -999,6 +1005,7 @@ def restart_storage_node(
             count += 1
         node.write_to_db(kv_store)
         logger.info(f"connected to devices count: {count}")
+        time.sleep(3)
 
     logger.info("Sending cluster map")
     ret = distr_controller.send_cluster_map_to_node(snode)
