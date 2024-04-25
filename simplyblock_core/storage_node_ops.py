@@ -801,15 +801,14 @@ def remove_storage_node(node_id, force_remove=False, force_migrate=False):
 
     if snode.nvme_devices:
         for dev in snode.nvme_devices:
+            if dev.status == NVMeDevice.STATUS_JM:
+                continue
             if dev.status == 'online':
                 distr_controller.disconnect_device(dev)
             old_status = dev.status
             dev.status = NVMeDevice.STATUS_FAILED
             distr_controller.send_dev_status_event(dev.cluster_device_order, NVMeDevice.STATUS_FAILED)
             device_events.device_status_change(dev, NVMeDevice.STATUS_FAILED, old_status)
-
-    for lvol in db_controller.get_lvols():
-        lvol_controller.send_cluster_map(lvol.get_id())
 
     logger.info("Removing storage node")
 
