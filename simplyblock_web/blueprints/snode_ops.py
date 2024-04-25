@@ -301,9 +301,9 @@ def make_gpt_partitions_for_nbd():
         pass
 
     cmd_list = [
-        f"parted -sf {nbd_device} mklabel gpt",
-        f"parted -sf {nbd_device} mkpart journal \"0%\" \"{jm_percent}%\"",
-        f"parted -sf {nbd_device} mkpart main \"{jm_percent}%\" \"100%\"",
+        f"parted -f {nbd_device} mklabel gpt",
+        f"parted -f {nbd_device} mkpart journal \"0%\" \"{jm_percent}%\"",
+        f"parted -f {nbd_device} mkpart main \"{jm_percent}%\" \"100%\"",
         f"sgdisk -t 1:6527994e-2c5a-4eec-9613-8f5944074e8b {nbd_device}",
         f"sgdisk -t 2:6527994e-2c5a-4eec-9613-8f5944074e8b {nbd_device}"
     ]
