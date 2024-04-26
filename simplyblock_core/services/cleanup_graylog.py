@@ -17,7 +17,7 @@ logger.addHandler(gelf_handler)
 logger.addHandler(logger_handler)
 logger.setLevel(logging.DEBUG)
 
-deletion_interval = os.getenv('LOG_DELETION_INTERVAL', '10m')
+deletion_interval = os.getenv('LOG_DELETION_INTERVAL', '24h')
 
 while True:
     delete_query = f'''

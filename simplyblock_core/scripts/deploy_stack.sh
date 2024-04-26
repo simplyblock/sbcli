@@ -10,6 +10,7 @@ export GRAYLOG_PASSWORD_SECRET="is6SP2EdWg0NdmVGv6CEp5hRHNL7BKVMFem4t9pouMqDQnHw
 export CLUSTER_SECRET=$5
 export CLUSTER_ID=$6
 export LOG_DELETION_INTERVAL=$7
+export RETENTION_PERIOD=$8
 export DIR="$(dirname "$(realpath "$0")")"
 
 if [ -s "/etc/foundationdb/fdb.cluster" ]
