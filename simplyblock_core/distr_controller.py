@@ -46,6 +46,8 @@ def send_dev_status_event(storage_ID, dev_status):
         logger.info(f"Sending to: {node.get_id()}")
         rpc_client = RPCClient(node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password)
         ret = rpc_client.distr_status_events_update(events)
+        if not ret:
+            logger.warning("Failed to send event update")
 
 
 def disconnect_device(device):

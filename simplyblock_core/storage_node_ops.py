@@ -584,6 +584,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask,
             count += 1
         node.write_to_db(kv_store)
         logger.info(f"connected to devices count: {count}")
+        time.sleep(3)
 
     logger.info("Sending cluster map")
     ret = distr_controller.send_cluster_map_to_node(snode)
@@ -751,6 +752,11 @@ def delete_storage_node(node_id):
         return False
 
     snode.remove(db_controller.kv_store)
+
+    for lvol in db_controller.get_lvols():
+        logger.info(f"Sending cluster map to LVol: {lvol.get_id()}")
+        lvol_controller.send_cluster_map(lvol.get_id())
+
     logger.info("done")
 
 
@@ -795,15 +801,14 @@ def remove_storage_node(node_id, force_remove=False, force_migrate=False):
 
     if snode.nvme_devices:
         for dev in snode.nvme_devices:
+            if dev.status == NVMeDevice.STATUS_JM:
+                continue
             if dev.status == 'online':
                 distr_controller.disconnect_device(dev)
             old_status = dev.status
             dev.status = NVMeDevice.STATUS_FAILED
             distr_controller.send_dev_status_event(dev.cluster_device_order, NVMeDevice.STATUS_FAILED)
             device_events.device_status_change(dev, NVMeDevice.STATUS_FAILED, old_status)
-
-    for lvol in db_controller.get_lvols():
-        lvol_controller.send_cluster_map(lvol.get_id())
 
     logger.info("Removing storage node")
 
@@ -999,6 +1004,7 @@ def restart_storage_node(
             count += 1
         node.write_to_db(kv_store)
         logger.info(f"connected to devices count: {count}")
+        time.sleep(3)
 
     logger.info("Sending cluster map")
     ret = distr_controller.send_cluster_map_to_node(snode)

@@ -14,6 +14,7 @@ from simplyblock_core.models.storage_node import StorageNode
 # Import the GELF logger
 from graypy import GELFUDPHandler
 
+
 def set_dev_status(device, status):
     node = db_controller.get_storage_node_by_id(device.node_id)
     if node.status != StorageNode.STATUS_ONLINE:
@@ -60,9 +61,9 @@ while True:
 
             ret = health_controller.check_device(dev.get_id())
             logger.info(f"Device: {dev.get_id()}, is healthy: {ret}")
-            if ret:
-                set_dev_status(dev, NVMeDevice.STATUS_ONLINE)
-            else:
-                set_dev_status(dev, NVMeDevice.STATUS_UNAVAILABLE)
+            # if ret:
+            #     set_dev_status(dev, NVMeDevice.STATUS_ONLINE)
+            # else:
+            #     set_dev_status(dev, NVMeDevice.STATUS_UNAVAILABLE)
 
     time.sleep(constants.DEV_MONITOR_INTERVAL_SEC)
