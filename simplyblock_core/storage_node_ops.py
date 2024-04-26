@@ -477,25 +477,27 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask,
     snode.spdk_debug = spdk_debug or 0
     snode.write_to_db(kv_store)
 
+    snode.iobuf_small_pool_count = small_pool_count or 0
+    snode.iobuf_large_pool_count = large_pool_count or 0
+    snode.iobuf_small_bufsize = small_bufsize or 0
+    snode.iobuf_large_bufsize = large_bufsize or 0
+
+    snode.write_to_db(kv_store)
+
     # creating RPCClient instance
     rpc_client = RPCClient(
         snode.mgmt_ip, snode.rpc_port,
         snode.rpc_username, snode.rpc_password)
 
-    small_pool_count = small_pool_count or 0
-    large_pool_count = large_pool_count or 0
-    small_bufsize = small_bufsize or 0
-    large_bufsize = large_bufsize or 0
-    # set bdev options
-    # rpc_client.bdev_set_options(
-    #     bdev_io_pool_size, bdev_io_cache_size, iobuf_small_cache_size, iobuf_large_cache_size)
-
     # 1- set iobuf options
-    ret = rpc_client.iobuf_set_options(
-        small_pool_count, large_pool_count, small_bufsize, large_bufsize)
-    if not ret:
-        logger.error("Failed to set iobuf options")
-        return False
+    if (snode.iobuf_small_pool_count or snode.iobuf_large_pool_count or
+            snode.iobuf_small_bufsize or snode.iobuf_large_bufsize):
+        ret = rpc_client.iobuf_set_options(
+            snode.iobuf_small_pool_count, snode.iobuf_large_pool_count,
+            snode.iobuf_small_bufsize, snode.iobuf_large_bufsize)
+        if not ret:
+            logger.error("Failed to set iobuf options")
+            return False
 
     # 2- start spdk framework
     ret = rpc_client.framework_start_init()
@@ -908,26 +910,31 @@ def restart_storage_node(
         return False
     time.sleep(3)
 
+    if small_pool_count:
+        snode.iobuf_small_pool_count = small_pool_count
+    if large_pool_count:
+        snode.iobuf_large_pool_count = large_pool_count
+    if small_bufsize:
+        snode.iobuf_small_bufsize = small_bufsize
+    if large_bufsize:
+        snode.iobuf_large_bufsize = large_bufsize
+
     snode.write_to_db(db_controller.kv_store)
 
-    cluster = db_controller.get_cluster_by_id(snode.cluster_id)
     # creating RPCClient instance
     rpc_client = RPCClient(
         snode.mgmt_ip, snode.rpc_port,
         snode.rpc_username, snode.rpc_password,
         timeout=10 * 60, retry=5)
 
-    small_pool_count = small_pool_count or 0
-    large_pool_count = large_pool_count or 0
-    small_bufsize = small_bufsize or 0
-    large_bufsize = large_bufsize or 0
-
     # 1- set iobuf options
-    ret = rpc_client.iobuf_set_options(
-        small_pool_count, large_pool_count, small_bufsize, large_bufsize)
-    if not ret:
-        logger.error("Failed to set iobuf options")
-        return False
+    if (snode.iobuf_small_pool_count or snode.iobuf_large_pool_count or
+            snode.iobuf_small_bufsize or snode.iobuf_large_bufsize):
+        ret = rpc_client.iobuf_set_options(
+            small_pool_count, large_pool_count, small_bufsize, large_bufsize)
+        if not ret:
+            logger.error("Failed to set iobuf options")
+            return False
 
     # 2- start spdk framework
     ret = rpc_client.framework_start_init()
@@ -941,6 +948,7 @@ def restart_storage_node(
         logger.error("Failed to set nvme options")
         return False
 
+    cluster = db_controller.get_cluster_by_id(snode.cluster_id)
     node_info, _ = snode_api.info()
     nvme_devs = addNvmeDevices(cluster, rpc_client, node_info['spdk_pcie_list'], snode)
     if not nvme_devs:
