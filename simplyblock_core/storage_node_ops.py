@@ -491,14 +491,23 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask,
     #     bdev_io_pool_size, bdev_io_cache_size, iobuf_small_cache_size, iobuf_large_cache_size)
 
     # 1- set iobuf options
-    rpc_client.iobuf_set_options(
+    ret = rpc_client.iobuf_set_options(
         small_pool_count, large_pool_count, small_bufsize, large_bufsize)
+    if not ret:
+        logger.error("Failed to set iobuf options")
+        return False
 
     # 2- start spdk framework
-    rpc_client.framework_start_init()
+    ret = rpc_client.framework_start_init()
+    if not ret:
+        logger.error("Failed to start framework")
+        return False
 
     # 3- set nvme bdev options
-    rpc_client.bdev_nvme_set_options()
+    ret = rpc_client.bdev_nvme_set_options()
+    if not ret:
+        logger.error("Failed to set nvme options")
+        return False
 
     # get new node info after starting spdk
     node_info, _ = snode_api.info()
@@ -914,14 +923,23 @@ def restart_storage_node(
     large_bufsize = large_bufsize or 0
 
     # 1- set iobuf options
-    rpc_client.iobuf_set_options(
+    ret = rpc_client.iobuf_set_options(
         small_pool_count, large_pool_count, small_bufsize, large_bufsize)
+    if not ret:
+        logger.error("Failed to set iobuf options")
+        return False
 
     # 2- start spdk framework
-    rpc_client.framework_start_init()
+    ret = rpc_client.framework_start_init()
+    if not ret:
+        logger.error("Failed to start framework")
+        return False
 
     # 3- set nvme bdev options
-    rpc_client.bdev_nvme_set_options()
+    ret = rpc_client.bdev_nvme_set_options()
+    if not ret:
+        logger.error("Failed to set nvme options")
+        return False
 
     node_info, _ = snode_api.info()
     nvme_devs = addNvmeDevices(cluster, rpc_client, node_info['spdk_pcie_list'], snode)
