@@ -229,7 +229,7 @@ def _prepare_cluster_devices(snode, after_restart=False):
             logger.error(f"Failed to create bdev: {test_name}")
             return False
         alceml_id = nvme.get_id()
-        alceml_name = device_controller.get_alceml_name(snode, alceml_id)
+        alceml_name = device_controller.get_alceml_name(alceml_id)
         logger.info(f"adding {alceml_name}")
         pba_init_mode = 3
         if after_restart:
