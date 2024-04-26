@@ -73,6 +73,7 @@ setup(
         "docker",
         "psutil",
         "py-cpuinfo",
+        "graypy",
     ],
     entry_points={
         'console_scripts': [
