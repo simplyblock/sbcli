@@ -78,6 +78,12 @@ class StorageNode(BaseModel):
         "ec2_instance_id": {"type": str, "default": ""},
         "ec2_public_ip": {"type": str, "default": ""},
 
+        # IO buffer options
+        "iobuf_small_pool_count": {"type": int, "default": 0},
+        "iobuf_large_pool_count": {"type": int, "default": 0},
+        "iobuf_small_bufsize": {"type": int, "default": 0},
+        "iobuf_large_bufsize": {"type": int, "default": 0},
+
     }
 
     def __init__(self, data=None):

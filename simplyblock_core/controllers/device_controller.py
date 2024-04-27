@@ -78,6 +78,10 @@ def device_set_online(device_id):
     return device_set_state(device_id, NVMeDevice.STATUS_ONLINE)
 
 
+def get_alceml_name(alceml_id):
+    return f"alceml_{alceml_id}"
+
+
 def restart_device(device_id):
     db_controller = DBController()
     dev = db_controller.get_storage_devices(device_id)
@@ -118,9 +122,7 @@ def restart_device(device_id):
         return False
 
     alceml_id = device_obj.get_id()
-    node_id_mini = snode.get_id().split("-")[-1]
-    alceml_id_mini = alceml_id.split("-")[-1]
-    alceml_name = f"node_{node_id_mini}_dev_{alceml_id_mini}"
+    alceml_name = get_alceml_name(alceml_id)
     logger.info(f"adding {alceml_name}")
     ret = rpc_client.bdev_alceml_create(alceml_name, test_name, alceml_id, pba_init_mode=2)
     if not ret:
