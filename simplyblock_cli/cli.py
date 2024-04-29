@@ -310,6 +310,10 @@ class CLIWrapper:
         sub_command.add_argument("--prov-cap-crit", help='Capacity critical level in percent, default=190',
                                  type=int, required=False, dest="prov_cap_crit")
         sub_command.add_argument("--ifname", help='Management interface name, default: eth0')
+        sub_command.add_argument("--log-del-interval", help='graylog deletion interval, default: 24h',
+                                 dest='log_del_interval', default='24h')
+        sub_command.add_argument("--metrics-retention-period", help='retention period for prometheus metrics, default: 7d',
+                                 dest='metrics_retention_period', default='7d')
 
         # show cluster list
         sub_command = self.add_sub_command(subparser, 'list', 'Show clusters list')
@@ -1345,12 +1349,14 @@ class CLIWrapper:
         prov_cap_warn = args.prov_cap_warn
         prov_cap_crit = args.prov_cap_crit
         ifname = args.ifname
+        log_del_interval = args.log_del_interval
+        metrics_retention_period = args.metrics_retention_period
 
         # TODO: Validate the inputs
         return cluster_ops.create_cluster(
             blk_size, page_size_in_blocks, ha_type, tls,
             auth_hosts_only, CLI_PASS, model_ids, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
-            ifname)
+            ifname, log_del_interval, metrics_retention_period)
 
     def cluster_join(self, args):
         cluster_id = args.cluster_id
