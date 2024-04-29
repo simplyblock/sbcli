@@ -248,14 +248,18 @@ def _prepare_cluster_devices(snode, after_restart=False):
                 return False
             snode_api = SNodeClient(snode.api_endpoint)
             ret = snode_api.make_gpt_partitions(nbd_device, "3")
-            if not ret:
+            if not ret['status']:
                 logger.error(f"Failed to make partitions")
                 return False
-            rpc_client.nbd_stop_disk(nbd_device)
-            rpc_client.bdev_nvme_detach_controller(nvme.nvme_controller)
             time.sleep(3)
+            rpc_client.nbd_stop_disk(nbd_device)
+            time.sleep(1)
+            rpc_client.bdev_nvme_detach_controller(nvme.nvme_controller)
+            time.sleep(1)
             rpc_client.bdev_nvme_controller_attach(nvme.nvme_controller, nvme.pcie_address)
+            time.sleep(1)
             rpc_client.bdev_examine(nvme.nvme_bdev)
+            time.sleep(1)
 
             # look for partitions
             for bdev in rpc_client.get_bdevs():
@@ -354,7 +358,7 @@ def _prepare_cluster_devices(snode, after_restart=False):
         if not ret:
             logger.error(f"Failed to create {jm_bdev}")
             return False
-        ret = rpc_client.get_bdevs(jm_bdev)
+        ret = rpc_client.get_bdevs(raid_bdev)
 
         snode.jm_device = JMDevice({
                 'uuid': str(uuid.uuid4()),
@@ -1166,7 +1170,7 @@ def list_storage_devices(kv_store, node_id, sort, is_json):
             "Health": snode.jm_device.health_check
         })
 
-    for device in snode.nvme_devices:
+    for device in snode.remote_devices:
         logger.debug(device)
         logger.debug("*" * 20)
         remote_devices.append({
