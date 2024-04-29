@@ -310,8 +310,10 @@ class CLIWrapper:
         sub_command.add_argument("--prov-cap-crit", help='Capacity critical level in percent, default=190',
                                  type=int, required=False, dest="prov_cap_crit")
         sub_command.add_argument("--ifname", help='Management interface name, default: eth0')
-        sub_command.add_argument("--log-del-interval", help='graylog deletion interval', dest='log_del_interval', default='24h')
-        sub_command.add_argument("--metrics-retention-period", help='retention period for prometheus metrics', dest='metrics_retention_period', default='7d')
+        sub_command.add_argument("--log-del-interval", help='graylog deletion interval, default: 24h',
+                                 dest='log_del_interval', default='24h')
+        sub_command.add_argument("--metrics-retention-period", help='retention period for prometheus metrics, default: 7d',
+                                 dest='metrics_retention_period', default='7d')
 
         # show cluster list
         sub_command = self.add_sub_command(subparser, 'list', 'Show clusters list')

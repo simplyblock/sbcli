@@ -35,7 +35,9 @@ delete_query = f'''
 while True:
     logger.info('Deleting gray log entries...')
     try:
-        response = requests.post("http://opensearch:9200/graylog_*/_delete_by_query", data=delete_query)
+        headers = {'Content-Type':  "application/json"}
+        response = requests.post("http://opensearch:9200/graylog_*/_delete_by_query",
+                                 data=delete_query, headers=headers)
         logger.info(f"response.status_code: {response.status_code}")
         logger.info(f"response.text: {response.text}")
         if response.status_code != 200:
