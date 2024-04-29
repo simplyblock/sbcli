@@ -27,7 +27,6 @@ class NVMeDevice(BaseModel):
         "serial_number": {"type": str, 'default': ""},
         "overload_percentage": {"type": int, 'default': 0},
         "nvme_bdev": {"type": str, 'default': ""},
-        "nvme_main_bdev": {"type": str, 'default': ""},
         "nvme_controller": {"type": str, 'default': ""},
         "alceml_bdev": {"type": str, 'default': ""},
         "node_id": {"type": str, 'default': ""},
@@ -37,7 +36,6 @@ class NVMeDevice(BaseModel):
         "nvmf_port": {"type": int, 'default': 0},
         "remote_bdev": {"type": str, 'default': ""},
         "testing_bdev": {"type": str, 'default': ""},
-        "jm_bdev": {"type": str, 'default': ""},
         "cluster_device_order": {"type": int, 'default': 0},
         "health_check": {"type": bool, "default": True},
         "cluster_id": {"type": str, 'default': ""},
@@ -45,6 +43,11 @@ class NVMeDevice(BaseModel):
         "bdev_stack": {"type": List, 'default': []},
 
         "io_error": {"type": bool, 'default': False},
+
+        "partition_main_bdev": {"type": str, 'default': ""},
+        "partition_main_size": {"type": int, 'default': 0},
+        "partition_jm_bdev": {"type": str, 'default': ""},
+        "partition_jm_size": {"type": int, 'default': 0},
 
     }
 

@@ -192,8 +192,8 @@ def check_device(device_id):
             snode.rpc_username, snode.rpc_password)
 
         bdevs_stack = [device.nvme_bdev, device.testing_bdev, device.alceml_bdev, device.pt_bdev]
-        if device.jm_bdev:
-            bdevs_stack.append(device.jm_bdev)
+        # if device.jm_bdev:
+        #     bdevs_stack.append(device.jm_bdev)
         logger.info(f"Checking Device: {device_id}, status:{device.status}")
         problems = 0
         for bdev in bdevs_stack:
