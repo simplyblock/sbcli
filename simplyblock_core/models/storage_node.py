@@ -78,6 +78,7 @@ class StorageNode(BaseModel):
         "ec2_instance_id": {"type": str, "default": ""},
         "ec2_public_ip": {"type": str, "default": ""},
 
+        "jm_device": {"type": NVMeDevice, "default": None},
         "jm_bdev": {"type": str, "default": ""},
 
     }

@@ -18,7 +18,7 @@ from simplyblock_core.controllers import lvol_controller, storage_events, snapsh
 from simplyblock_core.kv_store import DBController
 from simplyblock_core import shell_utils
 from simplyblock_core.models.iface import IFace
-from simplyblock_core.models.nvme_device import NVMeDevice
+from simplyblock_core.models.nvme_device import NVMeDevice, JMDevice
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.pci_utils import get_nvme_devices, bind_spdk_driver
 from simplyblock_core.rpc_client import RPCClient
@@ -84,10 +84,12 @@ def addNvmeDevices(cluster, rpc_client, devs, snode):
     sequential_number = 0
     devices = []
     ret = rpc_client.bdev_nvme_controller_list()
-    if ret:
-        ctr_map = {i["ctrlrs"][0]['trid']['traddr']: i["name"] for i in ret}
-    else:
-        ctr_map = {}
+    ctr_map = {}
+    try:
+        if ret:
+            ctr_map = {i["ctrlrs"][0]['trid']['traddr']: i["name"] for i in ret}
+    except:
+        pass
 
     for index, pcie in enumerate(devs):
 
@@ -132,12 +134,7 @@ def addNvmeDevices(cluster, rpc_client, devs, snode):
                 'cluster_id': snode.cluster_id,
                 'jm_bdev': jm_bdev,
                 'nvme_main_bdev': nvme_main_bdev,
-
-                # 'nvmf_nqn': subsystem_nqn,
-                # 'nvmf_ip': IP,
-                # 'nvmf_port': 4420,
-
-                'status': 'online'
+                'status': NVMeDevice.STATUS_ONLINE
         }))
         sequential_number += device_partitions_count
     return devices
@@ -326,7 +323,8 @@ def _prepare_cluster_devices(snode, after_restart=False):
         snode.write_to_db(db_controller.kv_store)
 
     if jm_nvme_bdevs:
-        ret = rpc_client.bdev_raid_create(f"raid_jm_{snode.get_id()}", jm_nvme_bdevs)
+        raid_bdev = f"raid_jm_{snode.get_id()}"
+        ret = rpc_client.bdev_raid_create(raid_bdev, jm_nvme_bdevs)
         if not ret:
             logger.error(f"Failed to create raid_jm_{snode.get_id()}")
             return False
@@ -334,7 +332,7 @@ def _prepare_cluster_devices(snode, after_restart=False):
         pba_init_mode = 3
         if after_restart:
             pba_init_mode = 2
-        ret = rpc_client.bdev_alceml_create(alceml_name, f"raid_jm_{snode.get_id()}", str(uuid.uuid4()), pba_init_mode=pba_init_mode)
+        ret = rpc_client.bdev_alceml_create(alceml_name, raid_bdev, str(uuid.uuid4()), pba_init_mode=pba_init_mode)
         if not ret:
             logger.error(f"Failed to create alceml bdev: {alceml_name}")
             return False
@@ -345,6 +343,17 @@ def _prepare_cluster_devices(snode, after_restart=False):
             logger.error(f"Failed to create {jm_bdev}")
             return False
         snode.jm_bdev = jm_bdev
+        snode.jm_device = JMDevice({
+                'uuid': str(uuid.uuid4()),
+                'device_name': jm_bdev,
+                'size': 0,
+                'status': JMDevice.STATUS_ONLINE,
+
+                'jm_nvme_bdev_list': jm_nvme_bdevs,
+                'raid_bdev': raid_bdev,
+                'alceml_bdev': alceml_name,
+                'jm_bdev': jm_bdev
+            })
 
     snode.write_to_db(db_controller.kv_store)
     return True
@@ -379,7 +388,7 @@ def _connect_to_remote_devs(this_node):
 
 
 def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask,
-             spdk_mem, dev_split=1, spdk_image=None, spdk_debug=False,
+             spdk_mem, spdk_image=None, spdk_debug=False,
              small_pool_count=0, large_pool_count=0, small_bufsize=0, large_bufsize=0):
     db_controller = DBController()
     kv_store = db_controller.kv_store
@@ -560,21 +569,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask,
         logger.error("No NVMe devices was found!")
         return False
 
-    if dev_split > 1:
-        # split devices
-        new_devices = []
-        for dev in nvme_devs:
-            ret = rpc_client.bdev_split(dev.nvme_bdev, dev_split)
-            for pt in ret:
-                dev_dict = dev.get_clean_dict()
-                dev_dict['uuid'] = str(uuid.uuid4())
-                dev_dict['device_name'] = pt
-                dev_dict['nvme_bdev'] = pt
-                dev_dict['size'] = int(dev.size / dev_split)
-                new_devices.append(NVMeDevice(dev_dict))
-        snode.nvme_devices = new_devices
-    else:
-        snode.nvme_devices = nvme_devs
+    snode.nvme_devices = nvme_devs
 
     # Set device cluster order
     dev_order = get_next_cluster_device_order(db_controller)
@@ -1139,19 +1134,25 @@ def list_storage_devices(kv_store, node_id, sort, is_json):
         data.append({
             "UUID": device.uuid,
             "Name": device.device_name,
-            "Hostname": snode.hostname,
             "Size": utils.humanbytes(device.size),
-            # "Sequential Number": device.sequential_number,
-            # "Partitions Count": device.partitions_count,
-            # "Model ID": device.model_id,
             "Serial Number": device.serial_number,
             "PCIe": device.pcie_address,
             "Status": device.status,
             "IO Err": device.io_error,
-            "Health": device.health_check,
-
+            "Health": device.health_check
         })
 
+    if snode.jm_device:
+        data.append({
+            "UUID": snode.jm_device.uuid,
+            "Name": snode.jm_device.device_name,
+            "Size": utils.humanbytes(snode.jm_device.size),
+            "Serial Number": "JM_DEVICE",
+            "PCIe": "JM_DEVICE",
+            "Status": snode.jm_device.status,
+            "IO Err": snode.jm_device.io_error,
+            "Health": snode.jm_device.health_check
+        })
     if sort and sort in ['node-seq', 'dev-seq', 'serial']:
         if sort == 'serial':
             sort_key = "Serial Number"
