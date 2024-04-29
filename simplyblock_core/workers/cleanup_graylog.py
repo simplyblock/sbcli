@@ -1,8 +1,9 @@
-import subprocess
+import requests
 import time
 import os
 import sys
 import logging
+
 
 from simplyblock_core import constants
 
@@ -19,25 +20,30 @@ logger.setLevel(logging.DEBUG)
 
 deletion_interval = os.getenv('LOG_DELETION_INTERVAL', '24h')
 
-while True:
-    delete_query = f'''
-    curl -X POST "http://opensearch:9200/graylog_*/_delete_by_query" -H 'Content-Type: application/json' -d'
-    {{
-      "query": {{
-        "range": {{
-          "timestamp": {{
-            "lt": "now-{deletion_interval}"
-          }}
-        }}
+delete_query = f'''
+{{
+  "query": {{
+    "range": {{
+      "timestamp": {{
+        "lt": "now-{deletion_interval}"
       }}
-    }}'
-    '''
+    }}
+  }}
+}}
+'''
+
+while True:
+    logger.info('Deleting gray log entries...')
     try:
-        result = subprocess.run(delete_query, shell=True, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        logger.info("Logs deleted successfully.")
-        logger.info(result.stdout.decode())
-    except subprocess.CalledProcessError as e:
+        response = requests.post("http://opensearch:9200/graylog_*/_delete_by_query", data=delete_query)
+        logger.info(f"response.status_code: {response.status_code}")
+        logger.info(f"response.text: {response.text}")
+        if response.status_code != 200:
+            logger.error("Failed to delete logs.")
+        else:
+            logger.info("Logs deleted successfully.")
+    except Exception as e:
         logger.error("Failed to delete logs.")
-        logger.error(e.stderr.decode())
-    
+        logger.error(e)
+
     time.sleep(constants.GRAYLOG_CHECK_INTERVAL_SEC)
