@@ -1139,11 +1139,13 @@ def list_storage_devices(kv_store, node_id, sort, is_json):
         logger.error("This storage node is not part of the cluster")
         return False
 
-    data = []
+    storage_devices = []
+    jm_devices = []
+    remote_devices = []
     for device in snode.nvme_devices:
         logger.debug(device)
         logger.debug("*" * 20)
-        data.append({
+        storage_devices.append({
             "UUID": device.uuid,
             "Name": device.device_name,
             "Size": utils.humanbytes(device.size),
@@ -1155,15 +1157,24 @@ def list_storage_devices(kv_store, node_id, sort, is_json):
         })
 
     if snode.jm_device:
-        data.append({
+        jm_devices.append({
             "UUID": snode.jm_device.uuid,
             "Name": snode.jm_device.device_name,
             "Size": utils.humanbytes(snode.jm_device.size),
-            "Serial Number": "JM_DEVICE",
-            "PCIe": "JM_DEVICE",
             "Status": snode.jm_device.status,
             "IO Err": snode.jm_device.io_error,
             "Health": snode.jm_device.health_check
+        })
+
+    for device in snode.nvme_devices:
+        logger.debug(device)
+        logger.debug("*" * 20)
+        remote_devices.append({
+            "UUID": device.uuid,
+            "Name": device.device_name,
+            "Size": utils.humanbytes(device.size),
+            "Serial Number": device.serial_number,
+            "Node ID": device.node_id,
         })
     if sort and sort in ['node-seq', 'dev-seq', 'serial']:
         if sort == 'serial':
@@ -1173,13 +1184,20 @@ def list_storage_devices(kv_store, node_id, sort, is_json):
         elif sort == 'node-seq':
             # TODO: check this key
             sort_key = "Sequential Number"
-        sorted_data = sorted(data, key=lambda d: d[sort_key])
-        data = sorted_data
+        storage_devices = sorted(storage_devices, key=lambda d: d[sort_key])
 
+    data = {
+        "Storage Devices": storage_devices,
+        "JM Devices": jm_devices,
+        "Remote Devices": remote_devices,
+    }
     if is_json:
         return json.dumps(data, indent=2)
     else:
-        return utils.print_table(data)
+        out = ""
+        for d in data:
+            out += f"{d}\n{utils.print_table(data[d])}\n\n"
+        return out
 
 
 def shutdown_storage_node(node_id, force=False):
