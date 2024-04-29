@@ -247,9 +247,11 @@ def _prepare_cluster_devices(snode, after_restart=False):
                 logger.error(f"Failed to start nbd dev")
                 return False
             snode_api = SNodeClient(snode.api_endpoint)
-            ret = snode_api.make_gpt_partitions(nbd_device, "3")
-            if not ret['status']:
+            result, error = snode_api.make_gpt_partitions(nbd_device, "3")
+            if error:
                 logger.error(f"Failed to make partitions")
+                logger.error(error)
+                input("exit?")
                 return False
             time.sleep(3)
             rpc_client.nbd_stop_disk(nbd_device)
