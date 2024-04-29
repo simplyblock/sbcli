@@ -243,6 +243,7 @@ def _prepare_cluster_devices(snode, after_restart=False):
             logger.info(f"Creating partitions for {nvme.nvme_bdev}")
 
             nbd_device = rpc_client.nbd_start_disk(nvme.nvme_bdev)
+            time.sleep(3)
             if not nbd_device:
                 logger.error(f"Failed to start nbd dev")
                 return False
