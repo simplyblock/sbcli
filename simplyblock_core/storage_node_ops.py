@@ -931,7 +931,8 @@ def restart_storage_node(
     if (snode.iobuf_small_pool_count or snode.iobuf_large_pool_count or
             snode.iobuf_small_bufsize or snode.iobuf_large_bufsize):
         ret = rpc_client.iobuf_set_options(
-            small_pool_count, large_pool_count, small_bufsize, large_bufsize)
+            snode.iobuf_small_pool_count, snode.iobuf_large_pool_count,
+            snode.iobuf_small_bufsize, snode.iobuf_large_bufsize)
         if not ret:
             logger.error("Failed to set iobuf options")
             return False
