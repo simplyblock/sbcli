@@ -66,7 +66,6 @@ def addNvmeDevices(cluster, rpc_client, devs, snode):
                     'model_id': model_number,
                     'serial_number': nvme_driver_data['ctrlr_data']['serial_number'],
                     'nvme_bdev': nvme_bdev,
-                    'alloc_bdev': nvme_bdev,
                     'node_id': snode.get_id(),
                     'cluster_id': snode.cluster_id,
                     'status': 'online'

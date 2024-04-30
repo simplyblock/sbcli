@@ -167,7 +167,7 @@ def validate_add_lvol_func(name, size, host_id_or_name, pool_id_or_name,
 
 
 def get_jm_names(snode):
-    return [f"jm_{snode.get_id()}"]
+    return [snode.jm_device.jm_bdev] if snode.jm_device else []
 
 
 # Deprecated
