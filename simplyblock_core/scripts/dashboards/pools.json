@@ -120,13 +120,13 @@
                             "uid": "PBFA97CFB590B2093"
                         },
                         "editorMode": "builder",
-                        "expr": "snode_size_total",
+                        "expr": "pool_size_total",
                         "legendFormat": "__auto",
                         "range": true,
                         "refId": "A"
                     }
                 ],
-                "title": "snode_size_total",
+                "title": "pool_size_total",
                 "type": "timeseries"
             },
             {
@@ -213,13 +213,13 @@
                             "uid": "PBFA97CFB590B2093"
                         },
                         "editorMode": "builder",
-                        "expr": "snode_size_free",
+                        "expr": "pool_size_free",
                         "legendFormat": "__auto",
                         "range": true,
                         "refId": "A"
                     }
                 ],
-                "title": "snode_size_free",
+                "title": "pool_size_free",
                 "type": "timeseries"
             },
             {
@@ -306,13 +306,13 @@
                             "uid": "PBFA97CFB590B2093"
                         },
                         "editorMode": "builder",
-                        "expr": "snode_size_used",
+                        "expr": "pool_size_used",
                         "legendFormat": "__auto",
                         "range": true,
                         "refId": "A"
                     }
                 ],
-                "title": "snode_size_used",
+                "title": "pool_size_used",
                 "type": "timeseries"
             },
             {
@@ -399,13 +399,13 @@
                             "uid": "PBFA97CFB590B2093"
                         },
                         "editorMode": "builder",
-                        "expr": "snode_size_prov",
+                        "expr": "pool_size_prov",
                         "legendFormat": "__auto",
                         "range": true,
                         "refId": "A"
                     }
                 ],
-                "title": "snode_size_prov",
+                "title": "pool_size_prov",
                 "type": "timeseries"
             },
             {
@@ -492,13 +492,13 @@
                             "uid": "PBFA97CFB590B2093"
                         },
                         "editorMode": "builder",
-                        "expr": "snode_size_prov_util",
+                        "expr": "pool_size_prov_util",
                         "legendFormat": "__auto",
                         "range": true,
                         "refId": "A"
                     }
                 ],
-                "title": "snode_size_prov_util",
+                "title": "pool_size_prov_util",
                 "type": "timeseries"
             },
             {
@@ -585,13 +585,13 @@
                             "uid": "PBFA97CFB590B2093"
                         },
                         "editorMode": "builder",
-                        "expr": "snode_size_util",
+                        "expr": "pool_size_util",
                         "legendFormat": "__auto",
                         "range": true,
                         "refId": "A"
                     }
                 ],
-                "title": "snode_size_util",
+                "title": "pool_size_util",
                 "type": "timeseries"
             },
             {
@@ -666,7 +666,7 @@
                     "overrides": []
                 },
                 "gridPos": {
-                    "h": 7,
+                    "h": 8,
                     "w": 7,
                     "x": 0,
                     "y": 16
@@ -691,13 +691,13 @@
                             "uid": "PBFA97CFB590B2093"
                         },
                         "editorMode": "builder",
-                        "expr": "snode_write_bytes",
+                        "expr": "pool_write_bytes",
                         "legendFormat": "__auto",
                         "range": true,
                         "refId": "A"
                     }
                 ],
-                "title": "snode_write_bytes",
+                "title": "pool_write_bytes",
                 "type": "timeseries"
             },
             {
@@ -759,7 +759,7 @@
                     "overrides": []
                 },
                 "gridPos": {
-                    "h": 7,
+                    "h": 8,
                     "w": 7,
                     "x": 7,
                     "y": 16
@@ -784,7 +784,7 @@
                             "uid": "PBFA97CFB590B2093"
                         },
                         "editorMode": "builder",
-                        "expr": "snode_write_bytes_ps",
+                        "expr": "pool_write_bytes_ps",
                         "legendFormat": "__auto",
                         "range": true,
                         "refId": "A"
@@ -851,7 +851,7 @@
                     "overrides": []
                 },
                 "gridPos": {
-                    "h": 7,
+                    "h": 8,
                     "w": 7,
                     "x": 14,
                     "y": 16
@@ -876,13 +876,13 @@
                             "uid": "PBFA97CFB590B2093"
                         },
                         "editorMode": "builder",
-                        "expr": "snode_write_latency_ticks",
+                        "expr": "pool_write_latency_ticks",
                         "legendFormat": "__auto",
                         "range": true,
                         "refId": "A"
                     }
                 ],
-                "title": "snode_wite_latency_ticks",
+                "title": "pool_wite_latency_ticks",
                 "type": "timeseries"
             },
             {
@@ -946,7 +946,7 @@
                     "h": 8,
                     "w": 7,
                     "x": 0,
-                    "y": 23
+                    "y": 24
                 },
                 "id": 24,
                 "options": {
@@ -968,13 +968,13 @@
                             "uid": "PBFA97CFB590B2093"
                         },
                         "editorMode": "builder",
-                        "expr": "snode_write_io",
+                        "expr": "pool_write_io",
                         "legendFormat": "__auto",
                         "range": true,
                         "refId": "A"
                     }
                 ],
-                "title": "snode_write_io",
+                "title": "pool_write_io",
                 "type": "timeseries"
             },
             {
@@ -1038,7 +1038,7 @@
                     "h": 8,
                     "w": 7,
                     "x": 7,
-                    "y": 23
+                    "y": 24
                 },
                 "id": 25,
                 "options": {
@@ -1060,7 +1060,7 @@
                             "uid": "PBFA97CFB590B2093"
                         },
                         "editorMode": "builder",
-                        "expr": "snode_write_io_ps",
+                        "expr": "pool_write_io_ps",
                         "legendFormat": "__auto",
                         "range": true,
                         "refId": "A"
@@ -1131,7 +1131,7 @@
                     "h": 8,
                     "w": 7,
                     "x": 14,
-                    "y": 23
+                    "y": 24
                 },
                 "id": 26,
                 "options": {
@@ -1153,13 +1153,13 @@
                             "uid": "PBFA97CFB590B2093"
                         },
                         "editorMode": "builder",
-                        "expr": "snode_write_latency_ps / 1000",
+                        "expr": "pool_write_latency_ps / 1000",
                         "legendFormat": "__auto",
                         "range": true,
                         "refId": "A"
                     }
                 ],
-                "title": "snode_write_latency_ps",
+                "title": "pool_write_latency_ps",
                 "type": "timeseries"
             },
             {
@@ -1168,7 +1168,7 @@
                     "h": 1,
                     "w": 24,
                     "x": 0,
-                    "y": 31
+                    "y": 32
                 },
                 "id": 30,
                 "panels": [],
@@ -1237,7 +1237,7 @@
                     "h": 8,
                     "w": 7,
                     "x": 0,
-                    "y": 32
+                    "y": 33
                 },
                 "id": 1,
                 "options": {
@@ -1259,13 +1259,13 @@
                             "uid": "PBFA97CFB590B2093"
                         },
                         "editorMode": "builder",
-                        "expr": "snode_read_bytes",
+                        "expr": "pool_read_bytes",
                         "legendFormat": "__auto",
                         "range": true,
                         "refId": "A"
                     }
                 ],
-                "title": "snode_read_bytes",
+                "title": "pool_read_bytes",
                 "type": "timeseries"
             },
             {
@@ -1330,7 +1330,7 @@
                     "h": 8,
                     "w": 7,
                     "x": 7,
-                    "y": 32
+                    "y": 33
                 },
                 "id": 2,
                 "options": {
@@ -1352,7 +1352,7 @@
                             "uid": "PBFA97CFB590B2093"
                         },
                         "editorMode": "builder",
-                        "expr": "snode_read_bytes_ps",
+                        "expr": "pool_read_bytes_ps",
                         "legendFormat": "__auto",
                         "range": true,
                         "refId": "A"
@@ -1422,7 +1422,7 @@
                     "h": 8,
                     "w": 7,
                     "x": 14,
-                    "y": 32
+                    "y": 33
                 },
                 "id": 5,
                 "options": {
@@ -1444,13 +1444,13 @@
                             "uid": "PBFA97CFB590B2093"
                         },
                         "editorMode": "builder",
-                        "expr": "snode_read_latency_ps",
+                        "expr": "pool_read_latency_ps",
                         "legendFormat": "__auto",
                         "range": true,
                         "refId": "A"
                     }
                 ],
-                "title": "snode_read_latency_ps",
+                "title": "pool_read_latency_ps",
                 "type": "timeseries"
             },
             {
@@ -1514,7 +1514,7 @@
                     "h": 7,
                     "w": 7,
                     "x": 0,
-                    "y": 40
+                    "y": 41
                 },
                 "id": 3,
                 "options": {
@@ -1536,13 +1536,13 @@
                             "uid": "PBFA97CFB590B2093"
                         },
                         "editorMode": "builder",
-                        "expr": "snode_read_io",
+                        "expr": "pool_read_io",
                         "legendFormat": "__auto",
                         "range": true,
                         "refId": "A"
                     }
                 ],
-                "title": "snode_read_io",
+                "title": "pool_read_io",
                 "type": "timeseries"
             },
             {
@@ -1606,7 +1606,7 @@
                     "h": 7,
                     "w": 7,
                     "x": 7,
-                    "y": 40
+                    "y": 41
                 },
                 "id": 4,
                 "options": {
@@ -1628,7 +1628,7 @@
                             "uid": "PBFA97CFB590B2093"
                         },
                         "editorMode": "builder",
-                        "expr": "snode_read_io_ps",
+                        "expr": "pool_read_io_ps",
                         "legendFormat": "__auto",
                         "range": true,
                         "refId": "A"
@@ -1698,7 +1698,7 @@
                     "h": 7,
                     "w": 7,
                     "x": 14,
-                    "y": 40
+                    "y": 41
                 },
                 "id": 6,
                 "options": {
@@ -1720,13 +1720,13 @@
                             "uid": "PBFA97CFB590B2093"
                         },
                         "editorMode": "builder",
-                        "expr": "snode_read_latency_ticks",
+                        "expr": "pool_read_latency_ticks",
                         "legendFormat": "__auto",
                         "range": true,
                         "refId": "A"
                     }
                 ],
-                "title": "snode_read_latency_ticks",
+                "title": "pool_read_latency_ticks",
                 "type": "timeseries"
             },
             {
@@ -1735,7 +1735,7 @@
                     "h": 1,
                     "w": 24,
                     "x": 0,
-                    "y": 47
+                    "y": 48
                 },
                 "id": 29,
                 "panels": [],
@@ -1803,7 +1803,7 @@
                     "h": 7,
                     "w": 7,
                     "x": 0,
-                    "y": 48
+                    "y": 49
                 },
                 "id": 21,
                 "options": {
@@ -1825,13 +1825,13 @@
                             "uid": "PBFA97CFB590B2093"
                         },
                         "editorMode": "builder",
-                        "expr": "snode_unmap_latency_ticks",
+                        "expr": "pool_unmap_latency_ticks",
                         "legendFormat": "__auto",
                         "range": true,
                         "refId": "A"
                     }
                 ],
-                "title": "snode_unmap_latency_ticks",
+                "title": "pool_unmap_latency_ticks",
                 "type": "timeseries"
             },
             {
@@ -1896,7 +1896,7 @@
                     "h": 7,
                     "w": 7,
                     "x": 7,
-                    "y": 48
+                    "y": 49
                 },
                 "id": 17,
                 "options": {
@@ -1918,13 +1918,13 @@
                             "uid": "PBFA97CFB590B2093"
                         },
                         "editorMode": "builder",
-                        "expr": "snode_unmap_bytes_ps",
+                        "expr": "pool_unmap_bytes_ps",
                         "legendFormat": "__auto",
                         "range": true,
                         "refId": "A"
                     }
                 ],
-                "title": "snode_unmap_bytes_ps",
+                "title": "pool_unmap_bytes_ps",
                 "type": "timeseries"
             },
             {
@@ -1989,7 +1989,7 @@
                     "h": 7,
                     "w": 7,
                     "x": 14,
-                    "y": 48
+                    "y": 49
                 },
                 "id": 20,
                 "options": {
@@ -2011,13 +2011,13 @@
                             "uid": "PBFA97CFB590B2093"
                         },
                         "editorMode": "builder",
-                        "expr": "snode_unmap_latency_ps",
+                        "expr": "pool_unmap_latency_ps",
                         "legendFormat": "__auto",
                         "range": true,
                         "refId": "A"
                     }
                 ],
-                "title": "snode_unmap_latency_ps",
+                "title": "pool_unmap_latency_ps",
                 "type": "timeseries"
             },
             {
@@ -2083,7 +2083,7 @@
                                 "options": {
                                     "mode": "exclude",
                                     "names": [
-                                        "{__name__=\"snode_unmap_io_ps\", cluster=\"c3663938-6610-44d5-9897-d7bfa60a43e1\", exported_job=\"collector\", instance=\"192.168.178.52:9091\", job=\"metricsgateway\"}"
+                                        "{__name__=\"pool_unmap_io_ps\", cluster=\"c3663938-6610-44d5-9897-d7bfa60a43e1\", exported_job=\"collector\", instance=\"192.168.178.52:9091\", job=\"metricsgateway\"}"
                                     ],
                                     "prefix": "All except:",
                                     "readOnly": true
@@ -2106,7 +2106,7 @@
                     "h": 7,
                     "w": 7,
                     "x": 0,
-                    "y": 55
+                    "y": 56
                 },
                 "id": 19,
                 "options": {
@@ -2128,13 +2128,13 @@
                             "uid": "PBFA97CFB590B2093"
                         },
                         "editorMode": "builder",
-                        "expr": "snode_unmap_io_ps",
+                        "expr": "pool_unmap_io_ps",
                         "legendFormat": "__auto",
                         "range": true,
                         "refId": "A"
                     }
                 ],
-                "title": "snode_unmap_io_ps",
+                "title": "pool_unmap_io_ps",
                 "type": "timeseries"
             },
             {
@@ -2198,7 +2198,7 @@
                     "h": 7,
                     "w": 7,
                     "x": 7,
-                    "y": 55
+                    "y": 56
                 },
                 "id": 18,
                 "options": {
@@ -2220,13 +2220,13 @@
                             "uid": "PBFA97CFB590B2093"
                         },
                         "editorMode": "builder",
-                        "expr": "snode_unmap_io",
+                        "expr": "pool_unmap_io",
                         "legendFormat": "__auto",
                         "range": true,
                         "refId": "A"
                     }
                 ],
-                "title": "snode_unmap_io",
+                "title": "pool_unmap_io",
                 "type": "timeseries"
             },
             {
@@ -2291,7 +2291,7 @@
                     "h": 7,
                     "w": 7,
                     "x": 14,
-                    "y": 55
+                    "y": 56
                 },
                 "id": 16,
                 "options": {
@@ -2313,13 +2313,13 @@
                             "uid": "PBFA97CFB590B2093"
                         },
                         "editorMode": "builder",
-                        "expr": "snode_unmap_bytes",
+                        "expr": "pool_unmap_bytes",
                         "legendFormat": "__auto",
                         "range": true,
                         "refId": "A"
                     }
                 ],
-                "title": "snode_unmap_bytes",
+                "title": "pool_unmap_bytes",
                 "type": "timeseries"
             },
             {
@@ -2328,7 +2328,7 @@
                     "h": 1,
                     "w": 24,
                     "x": 0,
-                    "y": 62
+                    "y": 63
                 },
                 "id": 32,
                 "panels": [],
@@ -2396,7 +2396,7 @@
                     "h": 7,
                     "w": 7,
                     "x": 0,
-                    "y": 63
+                    "y": 64
                 },
                 "id": 8,
                 "options": {
@@ -2418,13 +2418,13 @@
                             "uid": "PBFA97CFB590B2093"
                         },
                         "editorMode": "builder",
-                        "expr": "snode_record_end_time",
+                        "expr": "pool_record_end_time",
                         "legendFormat": "__auto",
                         "range": true,
                         "refId": "A"
                     }
                 ],
-                "title": "snode_record_end_time",
+                "title": "pool_record_end_time",
                 "type": "timeseries"
             },
             {
@@ -2489,7 +2489,7 @@
                     "h": 7,
                     "w": 7,
                     "x": 7,
-                    "y": 63
+                    "y": 64
                 },
                 "id": 7,
                 "options": {
@@ -2511,13 +2511,13 @@
                             "uid": "PBFA97CFB590B2093"
                         },
                         "editorMode": "builder",
-                        "expr": "snode_record_duration",
+                        "expr": "pool_record_duration",
                         "legendFormat": "__auto",
                         "range": true,
                         "refId": "A"
                     }
                 ],
-                "title": "snode_record_duration",
+                "title": "pool_record_duration",
                 "type": "timeseries"
             },
             {
@@ -2582,7 +2582,7 @@
                     "h": 7,
                     "w": 7,
                     "x": 14,
-                    "y": 63
+                    "y": 64
                 },
                 "id": 9,
                 "options": {
@@ -2604,13 +2604,13 @@
                             "uid": "PBFA97CFB590B2093"
                         },
                         "editorMode": "builder",
-                        "expr": "snode_record_start_time",
+                        "expr": "pool_record_start_time",
                         "legendFormat": "__auto",
                         "range": true,
                         "refId": "A"
                     }
                 ],
-                "title": "snode_record_start_time",
+                "title": "pool_record_start_time",
                 "type": "timeseries"
             }
         ],
@@ -2627,8 +2627,8 @@
         },
         "timepicker": {},
         "timezone": "",
-        "title": "NodesDashboard",
-        "uid": "d56e0ae7-48d5-481d-a2ea-3192da4d9e37",
+        "title": "PoolsDashboard",
+        "uid": "d56e0ae7-48d5-481d-a2ea-3192da4d9e40",
         "version": 5,
         "weekStart": ""
     }

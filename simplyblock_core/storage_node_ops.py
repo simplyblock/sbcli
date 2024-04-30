@@ -2,6 +2,7 @@
 import datetime
 import json
 import logging as log
+import os
 
 import pprint
 
@@ -216,18 +217,19 @@ def _prepare_cluster_devices(snode, after_restart=False):
         snode.rpc_username, snode.rpc_password)
 
     for index, nvme in enumerate(snode.nvme_devices):
-        if nvme.status not in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_UNAVAILABLE]:
+        if nvme.status not in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_UNAVAILABLE,
+                               NVMeDevice.STATUS_JM, NVMeDevice.STATUS_READONLY]:
             logger.debug(f"Device is not online or unavailable: {nvme.get_id()}, status: {nvme.status}")
             continue
 
         test_name = f"{nvme.nvme_bdev}_test"
         # create testing bdev
         ret = rpc_client.bdev_passtest_create(test_name, nvme.nvme_bdev)
-
+        if not ret:
+            logger.error(f"Failed to create bdev: {test_name}")
+            return False
         alceml_id = nvme.get_id()
-        node_id_mini = snode.get_id().split("-")[-1]
-        alceml_id_mini = alceml_id.split("-")[-1]
-        alceml_name = f"node_{node_id_mini}_dev_{alceml_id_mini}"
+        alceml_name = device_controller.get_alceml_name(alceml_id)
         logger.info(f"adding {alceml_name}")
         pba_init_mode = 3
         if after_restart:
@@ -236,6 +238,18 @@ def _prepare_cluster_devices(snode, after_restart=False):
         if not ret:
             logger.error(f"Failed to create alceml bdev: {alceml_name}")
             return False
+
+        # create jm
+        if nvme.jm_bdev:
+            ret = rpc_client.bdev_jm_create(nvme.jm_bdev, alceml_name)
+            if not ret:
+                logger.error(f"Failed to create JM bdev: {snode.nvme_devices[0].jm_bdev}")
+                return False
+            nvme.testing_bdev = test_name
+            nvme.alceml_bdev = alceml_name
+            nvme.io_error = True
+            nvme.status = NVMeDevice.STATUS_JM
+            continue
 
         # add pass through
         pt_name = f"{alceml_name}_PT"
@@ -269,13 +283,6 @@ def _prepare_cluster_devices(snode, after_restart=False):
             logger.error(f"Failed to add: {pt_name} to the subsystem: {subsystem_nqn}")
             return False
 
-        # create jm
-        if nvme.jm_bdev:
-            ret = rpc_client.bdev_jm_create(nvme.jm_bdev, alceml_name)
-            if not ret:
-                logger.error(f"Failed to create JM bdev: {snode.nvme_devices[0].jm_bdev}")
-                return False
-
         nvme.testing_bdev = test_name
         nvme.alceml_bdev = alceml_name
         nvme.pt_bdev = pt_name
@@ -283,8 +290,11 @@ def _prepare_cluster_devices(snode, after_restart=False):
         nvme.nvmf_ip = IP
         nvme.nvmf_port = 4420
         nvme.io_error = False
+        old_status = nvme.status
         nvme.status = NVMeDevice.STATUS_ONLINE
-    snode.write_to_db(db_controller.kv_store)
+        device_events.device_status_change(nvme, nvme.status, old_status)
+        snode.write_to_db(db_controller.kv_store)
+
     return True
 
 
@@ -318,7 +328,7 @@ def _connect_to_remote_devs(this_node):
 
 def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask,
              spdk_mem, dev_split=1, spdk_image=None, spdk_debug=False,
-             small_pool_count=0, large_pool_count=0, small_bufsize=0, large_bufsize=0):
+             small_pool_count=0, large_pool_count=0, small_bufsize=0, large_bufsize=0, jm_device_pcie=None):
     db_controller = DBController()
     kv_store = db_controller.kv_store
 
@@ -338,6 +348,41 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask,
         if node_info['cluster_id'] != cluster_id:
             logger.error(f"This node is part of another cluster: {node_info['cluster_id']}")
             return False
+
+    ec2_metadata = None
+    if "ec2_metadata" in node_info and node_info['ec2_metadata']:
+        ec2_metadata = node_info['ec2_metadata']
+        """"
+         "ec2_metadata": {
+              "accountId": "565979732541",
+              "architecture": "x86_64",
+              "availabilityZone": "eu-west-1a",
+              "billingProducts": [
+                "bp-6fa54006"
+              ],
+              "devpayProductCodes": null,
+              "imageId": "ami-08e592fbb0f535224",
+              "instanceId": "i-0ba9e766df57bc62c",
+              "instanceType": "m6id.large",
+              "kernelId": null,
+              "marketplaceProductCodes": null,
+              "pendingTime": "2024-03-24T19:39:14Z",
+              "privateIp": "172.31.23.236",
+              "ramdiskId": null,
+              "region": "eu-west-1",
+              "version": "2017-09-30"
+        }
+        """""
+        logger.debug(json.dumps(ec2_metadata,indent=2))
+        logger.info(f"EC2 Instance found: {ec2_metadata['instanceId']}")
+        logger.info(f"EC2 Instance type: {ec2_metadata['instanceType']}")
+        logger.info(f"EC2 Instance privateIp: {ec2_metadata['privateIp']}")
+        logger.info(f"EC2 Instance region: {ec2_metadata['region']}")
+
+        for node in db_controller.get_storage_nodes():
+            if node.ec2_instance_id and node.ec2_instance_id == ec2_metadata['instanceId']:
+                logger.error(f"Node already exists, try remove it first: {ec2_metadata['instanceId']}")
+                return False
 
     # check for memory
     if "memory_details" in node_info and node_info['memory_details']:
@@ -374,12 +419,6 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask,
         logger.error(f"Failed to start spdk: {err}")
         return False
 
-    hostname = node_info['hostname']
-    snode = db_controller.get_storage_node_by_hostname(hostname)
-    if snode:
-        logger.error("Node already exists, try remove it first.")
-        return False
-
     data_nics = []
     names = data_nics_list or [iface_name]
     for nic in names:
@@ -392,6 +431,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask,
                 'status': device['status'],
                 'net_type': device['net_type']}))
 
+    hostname = node_info['hostname']
     rpc_user, rpc_pass = utils.generate_rpc_user_and_pass()
     BASE_NQN = cluster.nqn.split(":")[0]
     subsystem_nqn = f"{BASE_NQN}:{hostname}"
@@ -401,6 +441,14 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask,
     snode.status = StorageNode.STATUS_IN_CREATION
     snode.baseboard_sn = node_info['system_id']
     snode.system_uuid = node_info['system_id']
+
+    if ec2_metadata:
+        snode.ec2_metadata = ec2_metadata
+        snode.ec2_instance_id = ec2_metadata['instanceId']
+
+    if "ec2_public_ip" in node_info and node_info['ec2_public_ip']:
+        snode.ec2_public_ip = node_info['ec2_public_ip']
+
     snode.hostname = hostname
     snode.host_nqn = subsystem_nqn
     snode.subsystem = subsystem_nqn
@@ -429,28 +477,39 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask,
     snode.spdk_debug = spdk_debug or 0
     snode.write_to_db(kv_store)
 
+    snode.iobuf_small_pool_count = small_pool_count or 0
+    snode.iobuf_large_pool_count = large_pool_count or 0
+    snode.iobuf_small_bufsize = small_bufsize or 0
+    snode.iobuf_large_bufsize = large_bufsize or 0
+
+    snode.write_to_db(kv_store)
+
     # creating RPCClient instance
     rpc_client = RPCClient(
         snode.mgmt_ip, snode.rpc_port,
         snode.rpc_username, snode.rpc_password)
 
-    small_pool_count = small_pool_count or 0
-    large_pool_count = large_pool_count or 0
-    small_bufsize = small_bufsize or 0
-    large_bufsize = large_bufsize or 0
-    # set bdev options
-    # rpc_client.bdev_set_options(
-    #     bdev_io_pool_size, bdev_io_cache_size, iobuf_small_cache_size, iobuf_large_cache_size)
-
     # 1- set iobuf options
-    rpc_client.iobuf_set_options(
-        small_pool_count, large_pool_count, small_bufsize, large_bufsize)
+    if (snode.iobuf_small_pool_count or snode.iobuf_large_pool_count or
+            snode.iobuf_small_bufsize or snode.iobuf_large_bufsize):
+        ret = rpc_client.iobuf_set_options(
+            snode.iobuf_small_pool_count, snode.iobuf_large_pool_count,
+            snode.iobuf_small_bufsize, snode.iobuf_large_bufsize)
+        if not ret:
+            logger.error("Failed to set iobuf options")
+            return False
 
     # 2- start spdk framework
-    rpc_client.framework_start_init()
+    ret = rpc_client.framework_start_init()
+    if not ret:
+        logger.error("Failed to start framework")
+        return False
 
     # 3- set nvme bdev options
-    rpc_client.bdev_nvme_set_options()
+    ret = rpc_client.bdev_nvme_set_options()
+    if not ret:
+        logger.error("Failed to set nvme options")
+        return False
 
     # get new node info after starting spdk
     node_info, _ = snode_api.info()
@@ -476,15 +535,19 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask,
     else:
         snode.nvme_devices = nvme_devs
 
+    jm_index = 0
     # Set device cluster order
     dev_order = get_next_cluster_device_order(db_controller)
     for index, nvme in enumerate(snode.nvme_devices):
         nvme.cluster_device_order = dev_order
         dev_order += 1
+        if jm_device_pcie and nvme.pcie_address == jm_device_pcie:
+            jm_index = index
         device_events.device_create(nvme)
 
     # create jm
-    snode.nvme_devices[0].jm_bdev = f"jm_{snode.get_id()}"
+    logger.info(f"Using device for JM: {snode.nvme_devices[jm_index].get_id()}")
+    snode.nvme_devices[jm_index].jm_bdev = f"jm_{snode.get_id()}"
 
     # save object
     snode.write_to_db(db_controller.kv_store)
@@ -532,25 +595,16 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask,
             count += 1
         node.write_to_db(kv_store)
         logger.info(f"connected to devices count: {count}")
+        time.sleep(3)
 
     logger.info("Sending cluster map")
-    snodes = db_controller.get_storage_nodes()
-    for node in snodes:
-        if node.status != node.STATUS_ONLINE:
-            continue
-        logger.info(f"Sending to: {node.get_id()}")
-        rpc_client = RPCClient(node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password)
-        if node.get_id() == snode.get_id():
-            cluster_map_data = distr_controller.get_distr_cluster_map(snodes, node)
-            cluster_map_data['UUID_node_target'] = node.get_id()
-            ret = rpc_client.distr_send_cluster_map(cluster_map_data)
-        else:
-            cluster_map_data = distr_controller.get_distr_cluster_map([snode], node)
-            cl_map = {
-                "map_cluster": cluster_map_data['map_cluster'],
-                "map_prob": cluster_map_data['map_prob']}
-            ret = rpc_client.distr_add_nodes(cl_map)
-        time.sleep(3)
+    ret = distr_controller.send_cluster_map_to_node(snode)
+    if not ret:
+        return False, "Failed to send cluster map"
+    ret = distr_controller.send_cluster_map_add_node(snode)
+    if not ret:
+        return False, "Failed to send cluster map add node"
+    time.sleep(3)
 
     logger.info("Sending cluster event updates")
     distr_controller.send_node_status_event(snode.get_id(), "online")
@@ -679,23 +733,13 @@ def add_storage_node(cluster_id, iface_name, data_nics):
         logger.info(f"connected to devices count: {count}")
 
     logger.info("Sending cluster map")
-    snodes = db_controller.get_storage_nodes()
-    for node in snodes:
-        if node.status != node.STATUS_ONLINE:
-            continue
-        logger.info(f"Sending to: {node.get_id()}")
-        rpc_client = RPCClient(node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password)
-        if node.get_id() == snode.get_id():
-            cluster_map_data = distr_controller.get_distr_cluster_map(snodes, node)
-            cluster_map_data['UUID_node_target'] = node.get_id()
-            ret = rpc_client.distr_send_cluster_map(cluster_map_data)
-        else:
-            cluster_map_data = distr_controller.get_distr_cluster_map([snode], node)
-            cl_map = {
-                "map_cluster": cluster_map_data['map_cluster'],
-                "map_prob": cluster_map_data['map_prob']}
-            ret = rpc_client.distr_add_nodes(cl_map)
-        time.sleep(3)
+    ret = distr_controller.send_cluster_map_to_node(snode)
+    if not ret:
+        return False, "Failed to send cluster map"
+    ret = distr_controller.send_cluster_map_add_node(snode)
+    if not ret:
+        return False, "Failed to send cluster map add node"
+    time.sleep(3)
 
     logger.info("Sending cluster event updates")
     distr_controller.send_node_status_event(snode.get_id(), "online")
@@ -705,6 +749,26 @@ def add_storage_node(cluster_id, iface_name, data_nics):
 
     logger.info("Done")
     return "Success"
+
+
+def delete_storage_node(node_id):
+    db_controller = DBController()
+    snode = db_controller.get_storage_node_by_id(node_id)
+    if not snode:
+        logger.error(f"Can not find storage node: {node_id}")
+        return False
+
+    if snode.status != StorageNode.STATUS_REMOVED:
+        logger.error(f"Node must be in removed status")
+        return False
+
+    snode.remove(db_controller.kv_store)
+
+    for lvol in db_controller.get_lvols():
+        logger.info(f"Sending cluster map to LVol: {lvol.get_id()}")
+        lvol_controller.send_cluster_map(lvol.get_id())
+
+    logger.info("done")
 
 
 def remove_storage_node(node_id, force_remove=False, force_migrate=False):
@@ -748,12 +812,14 @@ def remove_storage_node(node_id, force_remove=False, force_migrate=False):
 
     if snode.nvme_devices:
         for dev in snode.nvme_devices:
+            if dev.status == NVMeDevice.STATUS_JM:
+                continue
             if dev.status == 'online':
-                distr_controller.send_dev_status_event(dev.cluster_device_order, "unavailable")
-            distr_controller.disconnect_device(dev)
-
-    for lvol in db_controller.get_lvols():
-        lvol_controller.send_cluster_map(lvol.get_id())
+                distr_controller.disconnect_device(dev)
+            old_status = dev.status
+            dev.status = NVMeDevice.STATUS_FAILED
+            distr_controller.send_dev_status_event(dev.cluster_device_order, NVMeDevice.STATUS_FAILED)
+            device_events.device_status_change(dev, NVMeDevice.STATUS_FAILED, old_status)
 
     logger.info("Removing storage node")
 
@@ -772,7 +838,10 @@ def remove_storage_node(node_id, force_remove=False, force_migrate=False):
     except Exception as e:
         logger.warning(f"Failed to remove SPDK process: {e}")
 
-    snode.remove(db_controller.kv_store)
+    snode.status = StorageNode.STATUS_REMOVED
+    snode.write_to_db(db_controller.kv_store)
+    logger.info("Sending node event update")
+    distr_controller.send_node_status_event(snode.get_id(), snode.status)
     storage_events.snode_remove(snode)
     logger.info("done")
 
@@ -801,12 +870,16 @@ def restart_storage_node(
         return False
 
     logger.info("Setting node state to restarting")
+    old_status = snode.status
     snode.status = StorageNode.STATUS_RESTARTING
     snode.write_to_db(kv_store)
+    logger.info("Sending node event update")
+    distr_controller.send_node_status_event(snode.get_id(), snode.status)
+    storage_events.snode_status_change(snode, snode.status, old_status)
 
     logger.info(f"Restarting Storage node: {snode.mgmt_ip}")
-    snode_api = SNodeClient(snode.api_endpoint)
 
+    snode_api = SNodeClient(snode.api_endpoint)
     node_info, _ = snode_api.info()
     logger.info(f"Node info: {node_info}")
 
@@ -837,30 +910,46 @@ def restart_storage_node(
         return False
     time.sleep(3)
 
+    if small_pool_count:
+        snode.iobuf_small_pool_count = small_pool_count
+    if large_pool_count:
+        snode.iobuf_large_pool_count = large_pool_count
+    if small_bufsize:
+        snode.iobuf_small_bufsize = small_bufsize
+    if large_bufsize:
+        snode.iobuf_large_bufsize = large_bufsize
+
     snode.write_to_db(db_controller.kv_store)
 
-    cluster = db_controller.get_cluster_by_id(snode.cluster_id)
     # creating RPCClient instance
     rpc_client = RPCClient(
         snode.mgmt_ip, snode.rpc_port,
         snode.rpc_username, snode.rpc_password,
         timeout=10 * 60, retry=5)
 
-    small_pool_count = small_pool_count or 0
-    large_pool_count = large_pool_count or 0
-    small_bufsize = small_bufsize or 0
-    large_bufsize = large_bufsize or 0
-
     # 1- set iobuf options
-    rpc_client.iobuf_set_options(
-        small_pool_count, large_pool_count, small_bufsize, large_bufsize)
+    if (snode.iobuf_small_pool_count or snode.iobuf_large_pool_count or
+            snode.iobuf_small_bufsize or snode.iobuf_large_bufsize):
+        ret = rpc_client.iobuf_set_options(
+            snode.iobuf_small_pool_count, snode.iobuf_large_pool_count,
+            snode.iobuf_small_bufsize, snode.iobuf_large_bufsize)
+        if not ret:
+            logger.error("Failed to set iobuf options")
+            return False
 
     # 2- start spdk framework
-    rpc_client.framework_start_init()
+    ret = rpc_client.framework_start_init()
+    if not ret:
+        logger.error("Failed to start framework")
+        return False
 
     # 3- set nvme bdev options
-    rpc_client.bdev_nvme_set_options()
+    ret = rpc_client.bdev_nvme_set_options()
+    if not ret:
+        logger.error("Failed to set nvme options")
+        return False
 
+    cluster = db_controller.get_cluster_by_id(snode.cluster_id)
     node_info, _ = snode_api.info()
     nvme_devs = addNvmeDevices(cluster, rpc_client, node_info['spdk_pcie_list'], snode)
     if not nvme_devs:
@@ -880,10 +969,10 @@ def restart_storage_node(
     for db_dev in snode.nvme_devices:
         known_devices_sn.append(db_dev.serial_number)
         if db_dev.serial_number in devices_sn:
-            logger.info(f"Device found: {db_dev.get_id()}")
-            active_devices.append(db_dev)
-            if db_dev.status == NVMeDevice.STATUS_UNAVAILABLE:
+            logger.info(f"Device found: {db_dev.get_id()}, status {db_dev.status}")
+            if db_dev.status != NVMeDevice.STATUS_JM:
                 db_dev.status = NVMeDevice.STATUS_ONLINE
+            active_devices.append(db_dev)
         else:
             logger.info(f"Device not found: {db_dev.get_id()}")
             db_dev.status = NVMeDevice.STATUS_REMOVED
@@ -942,35 +1031,23 @@ def restart_storage_node(
             count += 1
         node.write_to_db(kv_store)
         logger.info(f"connected to devices count: {count}")
+        time.sleep(3)
 
     logger.info("Sending cluster map")
-    snodes = db_controller.get_storage_nodes()
-    for node in snodes:
-        if node.status != node.STATUS_ONLINE:
-            continue
-        logger.info(f"Sending to: {node.get_id()}")
-        rpc_client = RPCClient(node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password)
-        if node.get_id() == snode.get_id():
-            cluster_map_data = distr_controller.get_distr_cluster_map(snodes, node)
-            cluster_map_data['UUID_node_target'] = node.get_id()
-            ret = rpc_client.distr_send_cluster_map(cluster_map_data)
-        else:
-            cluster_map_data = distr_controller.get_distr_cluster_map([snode], node)
-            cl_map = {
-                "map_cluster": cluster_map_data['map_cluster'],
-                "map_prob": cluster_map_data['map_prob']}
-            ret = rpc_client.distr_add_nodes(cl_map)
-        time.sleep(3)
+    ret = distr_controller.send_cluster_map_to_node(snode)
+    if not ret:
+        return False, "Failed to send cluster map"
+    time.sleep(3)
 
     logger.info("Sending node event update")
     distr_controller.send_node_status_event(snode.get_id(), "online")
 
     logger.info("Sending devices event updates")
     for dev in snode.nvme_devices:
-        if dev.status != "online":
+        if dev.status != NVMeDevice.STATUS_ONLINE:
             logger.debug(f"Device is not online: {dev.get_id()}, status: {dev.status}")
             continue
-        distr_controller.send_dev_status_event(dev.cluster_device_order, "online")
+        distr_controller.send_dev_status_event(dev.cluster_device_order, NVMeDevice.STATUS_ONLINE)
 
     for lvol_id in snode.lvols:
         lvol = lvol_controller.recreate_lvol(lvol_id, snode)
@@ -1010,13 +1087,17 @@ def list_storage_nodes(kv_store, is_json):
             "Hostname": node.hostname,
             "Management IP": node.mgmt_ip,
             "Devices": f"{total_devices}/{online_devices}",
-            "LVOLs": f"{len(node.lvols)}",
-            "Data NICs": "\n".join([d.if_name for d in node.data_nics]),
+            "LVols": f"{len(node.lvols)}",
+            # "Data NICs": "\n".join([d.if_name for d in node.data_nics]),
             "Status": node.status,
             "Health": node.health_check,
 
-            "Updated At": datetime.datetime.strptime(node.updated_at, "%Y-%m-%d %H:%M:%S.%f").strftime(
-                "%H:%M:%S, %d/%m/%Y"),
+            "EC2 ID": node.ec2_instance_id,
+            "EC2 Type": node.ec2_metadata['instanceType'] if node.ec2_metadata else "",
+            "EC2 Ext IP": node.ec2_public_ip,
+
+            # "Updated At": datetime.datetime.strptime(node.updated_at, "%Y-%m-%d %H:%M:%S.%f").strftime(
+            #     "%H:%M:%S, %d/%m/%Y"),
         })
 
     if not data:
@@ -1111,10 +1192,10 @@ def shutdown_storage_node(node_id, force=False):
             lvol.status = lvol.STATUS_OFFLINE
             lvol.write_to_db(db_controller.kv_store)
 
-    distr_controller.send_node_status_event(snode.get_id(), "in_shutdown")
     for dev in snode.nvme_devices:
-        if dev.status == NVMeDevice.STATUS_ONLINE:
+        if dev.status in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_READONLY]:
             device_controller.device_set_unavailable(dev.get_id())
+    distr_controller.send_node_status_event(snode.get_id(), "in_shutdown")
 
     # shutdown node
     # make other nodes disconnect from this node
@@ -1544,13 +1625,18 @@ def deploy(ifname):
     if not ifname:
         ifname = "eth0"
 
-    logger.info("Installing dependencies...")
-    ret = scripts.install_deps()
-
     dev_ip = utils.get_iface_ip(ifname)
     if not dev_ip:
         logger.error(f"Error getting interface ip: {ifname}")
         return False
+
+    logger.info("NVMe SSD devices found on node:")
+    stream = os.popen("lspci -Dnn | grep -i nvme")
+    for l in stream.readlines():
+        logger.info(l.strip())
+
+    logger.info("Installing dependencies...")
+    ret = scripts.install_deps()
 
     logger.info(f"Node IP: {dev_ip}")
     ret = scripts.configure_docker(dev_ip)

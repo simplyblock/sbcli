@@ -7,7 +7,7 @@ import sys
 from datetime import datetime
 
 
-from simplyblock_core import constants, kv_store, cluster_ops
+from simplyblock_core import constants, kv_store, cluster_ops, storage_node_ops, distr_controller
 from simplyblock_core.controllers import storage_events, health_controller
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.nvme_device import NVMeDevice
@@ -116,6 +116,10 @@ def set_node_online(node):
         snode.updated_at = str(datetime.now())
         snode.write_to_db(db_store)
         storage_events.snode_status_change(snode, snode.status, old_status, caused_by="monitor")
+        distr_controller.send_node_status_event(snode.get_id(), StorageNode.STATUS_ONLINE)
+
+        logger.info("Connecting to remote devices")
+        storage_node_ops._connect_to_remote_devs(snode)
 
 
 def set_node_offline(node):
@@ -131,6 +135,7 @@ def set_node_offline(node):
         snode.updated_at = str(datetime.now())
         snode.write_to_db(db_store)
         storage_events.snode_status_change(snode, snode.status, old_status, caused_by="monitor")
+        distr_controller.send_node_status_event(snode.get_id(), StorageNode.STATUS_UNREACHABLE)
 
 
 logger.info("Starting node monitor")

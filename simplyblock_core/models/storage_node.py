@@ -13,11 +13,12 @@ class StorageNode(BaseModel):
     STATUS_ONLINE = 'online'
     STATUS_OFFLINE = 'offline'
     STATUS_SUSPENDED = 'suspended'
-    STATUS_IN_CREATION = 'in_creation'
     STATUS_IN_SHUTDOWN = 'in_shutdown'
-    STATUS_RESTARTING = 'restarting'
-    STATUS_UNREACHABLE = 'unreachable'
     STATUS_REMOVED = 'removed'
+    STATUS_RESTARTING = 'in_restart'
+
+    STATUS_IN_CREATION = 'in_restart'  # 'in_creation'
+    STATUS_UNREACHABLE = 'offline'  # 'unreachable'
 
     STATUS_CODE_MAP = {
         STATUS_ONLINE: 0,
@@ -72,6 +73,17 @@ class StorageNode(BaseModel):
         "spdk_mem": {"type": int, "default": 0},
         "spdk_image": {"type": str, "default": ""},
         "spdk_debug": {"type": bool, "default": False},
+
+        "ec2_metadata": {"type": dict, "default": {}},
+        "ec2_instance_id": {"type": str, "default": ""},
+        "ec2_public_ip": {"type": str, "default": ""},
+
+        # IO buffer options
+        "iobuf_small_pool_count": {"type": int, "default": 0},
+        "iobuf_large_pool_count": {"type": int, "default": 0},
+        "iobuf_small_bufsize": {"type": int, "default": 0},
+        "iobuf_large_bufsize": {"type": int, "default": 0},
+
     }
 
     def __init__(self, data=None):

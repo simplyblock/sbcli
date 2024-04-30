@@ -192,6 +192,27 @@ def delete_cluster_id():
     return out
 
 
+def get_ec2_meta():
+    stream = os.popen('curl -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600"')
+    token = stream.read()
+    stream = os.popen(f"curl -H \"X-aws-ec2-metadata-token: {token}\" http://169.254.169.254/latest/dynamic/instance-identity/document")
+    out = stream.read()
+    try:
+        data = json.loads(out)
+        return data
+    except:
+        return {}
+
+
+def get_ec2_public_ip():
+    stream = os.popen('curl -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600"')
+    token = stream.read()
+    stream = os.popen(f"curl -H \"X-aws-ec2-metadata-token: {token}\" http://169.254.169.254/latest/meta-data/public-ipv4")
+    response = stream.read()
+    out = response if "404" not in response else None
+    return out
+
+
 @bp.route('/info', methods=['GET'])
 def get_info():
 
@@ -214,7 +235,11 @@ def get_info():
         "spdk_devices": node_utils._get_spdk_devices(),
         "spdk_pcie_list": node_utils._get_spdk_pcie_list(),
 
-        "network_interface": node_utils.get_nics_data()
+        "network_interface": node_utils.get_nics_data(),
+
+        "ec2_metadata": get_ec2_meta(),
+
+        "ec2_public_ip": get_ec2_public_ip(),
     }
     return utils.get_response(out)
 

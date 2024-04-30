@@ -1,3 +1,4 @@
+
 #!/usr/bin/env python
 # encoding: utf-8
 
@@ -94,7 +95,8 @@ def add_lvol():
         | distr_npcs      | Distr bdev number of parity chunks per stripe, Default=0 means auto set
         | distr_bs        | Distr bdev block size, Default=4096
         | distr_chunk_bs  | Distr bdev chunk block size, Default=4096
-
+        | crypto_key1     | the hex value of key1 to be used for lvol encryption
+        | crypto_key2     | the hex value of key2 to be used for lvol encryption
     """""
 
     cl_data = request.get_json()
@@ -138,6 +140,8 @@ def add_lvol():
     distr_npcs = utils.get_int_value_or_default(cl_data, "distr_npcs", 0)
     distr_bs = utils.get_int_value_or_default(cl_data, "distr_ps", 4096)
     distr_chunk_bs = utils.get_int_value_or_default(cl_data, "distr_chunk_bs", 4096)
+    crypto_key1 = utils.get_value_or_default(cl_data, "crypto_key1", None)
+    crypto_key2 = utils.get_value_or_default(cl_data, "crypto_key2", None)
 
     ret, error = lvol_controller.add_lvol_ha(
         name=name,
@@ -158,7 +162,9 @@ def add_lvol():
         distr_ndcs=distr_ndcs,
         distr_npcs=distr_npcs,
         distr_bs=distr_bs,
-        distr_chunk_bs=distr_chunk_bs
+        distr_chunk_bs=distr_chunk_bs,
+        crypto_key1=crypto_key1,
+        crypto_key2=crypto_key2,
     )
 
     return utils.get_csi_response(ret, error)
@@ -245,4 +251,3 @@ def connect_lvol(uuid):
 
     ret = lvol_controller.connect_lvol(uuid)
     return utils.get_csi_response(ret)
-

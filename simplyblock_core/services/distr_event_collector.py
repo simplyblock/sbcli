@@ -13,6 +13,8 @@ from simplyblock_core.models.lvol_model import LVol
 # Import the GELF logger
 from graypy import GELFUDPHandler
 
+from simplyblock_core.models.nvme_device import NVMeDevice
+
 # configure logging
 logger_handler = logging.StreamHandler(stream=sys.stdout)
 logger_handler.setFormatter(logging.Formatter('%(asctime)s: %(levelname)s: %(message)s'))
@@ -36,15 +38,15 @@ def process_device_event(event):
         for node in nodes:
             for dev in node.nvme_devices:
                 if dev.cluster_device_order == storage_id:
-                    if dev.status != "online":
+                    if dev.status not in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_READONLY]:
                         logger.info(f"The storage device is not online, skipping. status: {dev.status}")
                         event.status = 'skipped'
                         return
 
-                    if node.get_id() != node_id:
-                        logger.info(f"The storage device is remote, skipping")
-                        event.status = 'skipped-remote'
-                        return
+                    # if node.get_id() != node_id:
+                    #     logger.info(f"The storage device is remote, skipping")
+                    #     event.status = 'skipped-remote'
+                    #     return
 
                     device_id = dev.get_id()
                     break
@@ -57,14 +59,14 @@ def process_device_event(event):
         if event.message == 'SPDK_BDEV_EVENT_REMOVE':
             logger.info(f"Removing storage id: {storage_id} from node: {node_id}")
             device_controller.device_remove(device_id)
-        elif event.message == 'error_write':
+        elif event.message in ['error_write', 'error_unmap']:
             logger.info(f"Setting device to read-only")
-            device_controller.device_set_read_only(device_id)
             device_controller.device_set_io_error(device_id, True)
+            device_controller.device_set_read_only(device_id)
         else:
             logger.info(f"Setting device to unavailable")
-            device_controller.device_set_unavailable(device_id)
             device_controller.device_set_io_error(device_id, True)
+            device_controller.device_set_unavailable(device_id)
 
         event.status = 'processed'
 
@@ -89,7 +91,10 @@ def process_lvol_event(event):
                 lvol.status = LVol.STATUS_OFFLINE
                 lvol.write_to_db(db_controller.kv_store)
                 lvol_events.lvol_status_change(lvol, lvol.status, old_status, caused_by="monitor")
-            event.status = 'processed'
+                lvol_events.lvol_io_error_change(lvol, True, False, caused_by="monitor")
+                event.status = 'processed'
+            else:
+                event.status = 'skipped'
     else:
         logger.error(f"Unknown LVol event message: {event.message}")
         event.status = "event_unknown"

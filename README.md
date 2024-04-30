@@ -6,9 +6,15 @@
 
  
 ## Install
+Add the package repo from AWS CodeArtifact using [awscli](https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html)
+
 ```bash
-pip install sbcli-dev
- ```
+aws codeartifact login --tool pip --repository sbcli --domain simplyblock --domain-owner 565979732541 --region eu-west-1
+```
+Install package
+```bash
+pip install --extra-index-url https://pypi.org/simple sbcli-dev
+```
 
 # Components 
 
@@ -17,12 +23,12 @@ Contains core logic and controllers for the simplyblock cluster
 
 ## Simply Block CLI
 Please see this document 
-[README.md](../simplyblock_cli/README.md)
+[README.md](../main/simplyblock_cli/README.md)
 
 
 ## Simply Block Web API
 Please see this document 
-[README.md](../simplyblock_web/README.md)
+[README.md](../main/simplyblock_web/README.md)
 
 
 

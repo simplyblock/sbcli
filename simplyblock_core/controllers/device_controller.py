@@ -78,11 +78,19 @@ def device_set_online(device_id):
     return device_set_state(device_id, NVMeDevice.STATUS_ONLINE)
 
 
+def get_alceml_name(alceml_id):
+    return f"alceml_{alceml_id}"
+
+
 def restart_device(device_id):
     db_controller = DBController()
     dev = db_controller.get_storage_devices(device_id)
     if not dev:
         logger.error("device not found")
+
+    if dev.status != NVMeDevice.STATUS_REMOVED:
+        logger.error("Device must be in removed status")
+        return False
 
     snode = db_controller.get_storage_node_by_id(dev.node_id)
     if not snode:
@@ -114,9 +122,7 @@ def restart_device(device_id):
         return False
 
     alceml_id = device_obj.get_id()
-    node_id_mini = snode.get_id().split("-")[-1]
-    alceml_id_mini = alceml_id.split("-")[-1]
-    alceml_name = f"node_{node_id_mini}_dev_{alceml_id_mini}"
+    alceml_name = get_alceml_name(alceml_id)
     logger.info(f"adding {alceml_name}")
     ret = rpc_client.bdev_alceml_create(alceml_name, test_name, alceml_id, pba_init_mode=2)
     if not ret:
@@ -195,13 +201,11 @@ def restart_device(device_id):
         else:
             node.remote_devices.append(device_obj)
         node.write_to_db(db_controller.kv_store)
+        time.sleep(3)
 
     logger.info("Sending device event")
     distr_controller.send_dev_status_event(device_obj.cluster_device_order, "online")
     device_events.device_restarted(device_obj)
-
-    for lvol in db_controller.get_lvols():
-        lvol_controller.send_cluster_map(lvol.get_id())
 
     return "Done"
 
@@ -403,6 +407,13 @@ def reset_storage_device(dev_id):
     if device.status == NVMeDevice.STATUS_REMOVED:
         logger.error(f"Device status: {device.status} is removed")
         return False
+
+    logger.info("Setting device to unavailable")
+    old_status = device.status
+    device.status = NVMeDevice.STATUS_UNAVAILABLE
+    distr_controller.send_dev_status_event(device.cluster_device_order, device.status)
+    snode.write_to_db(db_controller.kv_store)
+    device_events.device_status_change(device, device.status, old_status)
 
     logger.info("Resetting device")
     rpc_client = RPCClient(

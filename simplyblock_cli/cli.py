@@ -40,6 +40,7 @@ class CLIWrapper:
         sub_command.add_argument("cluster_id", help='UUID of the cluster to which the node will belong')
         sub_command.add_argument("node_ip", help='IP of storage node to add')
         sub_command.add_argument("ifname", help='Management interface name')
+        sub_command.add_argument("--jm-pcie", help='JM device address', dest='jm_pcie')
         sub_command.add_argument("--data-nics", help='Data interface names', nargs='+', dest='data_nics')
         sub_command.add_argument("--cpu-mask", help='SPDK app CPU mask, default is all cores found',
                                  dest='spdk_cpu_mask')
@@ -53,6 +54,10 @@ class CLIWrapper:
         sub_command.add_argument("--iobuf_large_pool_count", help='bdev_set_options param', dest='large_pool_count',  type=int, default=0)
         sub_command.add_argument("--iobuf_small_bufsize", help='bdev_set_options param', dest='small_bufsize',  type=int, default=0)
         sub_command.add_argument("--iobuf_large_bufsize", help='bdev_set_options param', dest='large_bufsize',  type=int, default=0)
+
+        # delete storage node
+        sub_command = self.add_sub_command(subparser, "delete", 'Delete storage node obj')
+        sub_command.add_argument("node_id", help='UUID of storage node')
 
         # remove storage node
         sub_command = self.add_sub_command(subparser, "remove", 'Remove storage node')
@@ -305,6 +310,10 @@ class CLIWrapper:
         sub_command.add_argument("--prov-cap-crit", help='Capacity critical level in percent, default=190',
                                  type=int, required=False, dest="prov_cap_crit")
         sub_command.add_argument("--ifname", help='Management interface name, default: eth0')
+        sub_command.add_argument("--log-del-interval", help='graylog deletion interval, default: 24h',
+                                 dest='log_del_interval', default='24h')
+        sub_command.add_argument("--metrics-retention-period", help='retention period for prometheus metrics, default: 7d',
+                                 dest='metrics_retention_period', default='7d')
 
         # show cluster list
         sub_command = self.add_sub_command(subparser, 'list', 'Show clusters list')
@@ -446,6 +455,10 @@ class CLIWrapper:
                                  required=False, action='store_true')
         sub_command.add_argument("--encrypt", help='Use inline data encryption and de-cryption on the logical volume',
                                  required=False, action='store_true')
+        sub_command.add_argument("--crypto-key1", help='the hex value of key1 to be used for lvol encryption',
+                                 dest='crypto_key1', default=None)
+        sub_command.add_argument("--crypto-key2", help='the hex value of key2 to be used for lvol encryption',
+                                 dest='crypto_key2', default=None)
         sub_command.add_argument("--thick", help='Deactivate thin provisioning', required=False, action='store_true')
         sub_command.add_argument("--node-ha",
                                  help='The maximum amount of concurrent node failures accepted without interruption of operations',
@@ -804,7 +817,7 @@ class CLIWrapper:
 
                 out = storage_ops.add_node(
                     cluster_id, node_ip, ifname, data_nics, spdk_cpu_mask, spdk_mem, dev_split, spdk_image, spdk_debug,
-                    small_pool_count, large_pool_count, small_bufsize, large_bufsize)
+                    small_pool_count, large_pool_count, small_bufsize, large_bufsize, args.jm_pcie)
                 return out
 
             elif sub_command == "list":
@@ -812,6 +825,9 @@ class CLIWrapper:
 
             elif sub_command == "remove":
                 ret = storage_ops.remove_storage_node(args.node_id, args.force_remove, args.force_migrate)
+
+            elif sub_command == "delete":
+                ret = storage_ops.delete_storage_node(args.node_id)
 
             elif sub_command == "restart":
                 node_id = args.node_id
@@ -1073,7 +1089,9 @@ class CLIWrapper:
                     distr_bs,
                     distr_chunk_bs,
                     with_snapshot=with_snapshot,
-                    max_size=max_size)
+                    max_size=max_size,
+                    crypto_key1=args.crypto_key1,
+                    crypto_key2=args.crypto_key2)
                 if results:
                     ret = results
                 else:
@@ -1331,12 +1349,14 @@ class CLIWrapper:
         prov_cap_warn = args.prov_cap_warn
         prov_cap_crit = args.prov_cap_crit
         ifname = args.ifname
+        log_del_interval = args.log_del_interval
+        metrics_retention_period = args.metrics_retention_period
 
         # TODO: Validate the inputs
         return cluster_ops.create_cluster(
             blk_size, page_size_in_blocks, ha_type, tls,
             auth_hosts_only, CLI_PASS, model_ids, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
-            ifname)
+            ifname, log_del_interval, metrics_retention_period)
 
     def cluster_join(self, args):
         cluster_id = args.cluster_id
