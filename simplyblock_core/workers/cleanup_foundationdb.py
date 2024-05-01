@@ -82,4 +82,5 @@ while True:
     DeviceStatObject(clusters,st_date,end_date)
     NodeStatObject(clusters, st_date, end_date)
     ClusterStatObject(clusters, st_date, end_date)
+    
     time.sleep(constants.FDB_CHECK_INTERVAL_SEC)
