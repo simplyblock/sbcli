@@ -768,6 +768,7 @@ def delete_storage_node(node_id):
         logger.info(f"Sending cluster map to LVol: {lvol.get_id()}")
         lvol_controller.send_cluster_map(lvol.get_id())
 
+    storage_events.snode_delete(snode)
     logger.info("done")
 
 
@@ -838,11 +839,12 @@ def remove_storage_node(node_id, force_remove=False, force_migrate=False):
     except Exception as e:
         logger.warning(f"Failed to remove SPDK process: {e}")
 
+    old_status = snode.status
     snode.status = StorageNode.STATUS_REMOVED
     snode.write_to_db(db_controller.kv_store)
     logger.info("Sending node event update")
     distr_controller.send_node_status_event(snode.get_id(), snode.status)
-    storage_events.snode_remove(snode)
+    storage_events.snode_status_change(snode, StorageNode.STATUS_REMOVED, old_status)
     logger.info("done")
 
 
