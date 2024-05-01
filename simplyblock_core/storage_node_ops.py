@@ -1039,16 +1039,6 @@ def restart_storage_node(
         return False, "Failed to send cluster map"
     time.sleep(3)
 
-    logger.info("Sending node event update")
-    distr_controller.send_node_status_event(snode.get_id(), "online")
-
-    logger.info("Sending devices event updates")
-    for dev in snode.nvme_devices:
-        if dev.status != NVMeDevice.STATUS_ONLINE:
-            logger.debug(f"Device is not online: {dev.get_id()}, status: {dev.status}")
-            continue
-        distr_controller.send_dev_status_event(dev.cluster_device_order, NVMeDevice.STATUS_ONLINE)
-
     for lvol_id in snode.lvols:
         lvol = lvol_controller.recreate_lvol(lvol_id, snode)
         if not lvol:
@@ -1062,8 +1052,18 @@ def restart_storage_node(
     old_status = snode.status
     snode.status = StorageNode.STATUS_ONLINE
     snode.write_to_db(kv_store)
-
     storage_events.snode_status_change(snode, snode.status, old_status)
+
+    logger.info("Sending node event update")
+    distr_controller.send_node_status_event(snode.get_id(), NVMeDevice.STATUS_ONLINE)
+
+    logger.info("Sending devices event updates")
+    for dev in snode.nvme_devices:
+        if dev.status != NVMeDevice.STATUS_ONLINE:
+            logger.debug(f"Device is not online: {dev.get_id()}, status: {dev.status}")
+            continue
+        distr_controller.send_dev_status_event(dev.cluster_device_order, NVMeDevice.STATUS_ONLINE)
+
     logger.info("Done")
     return "Success"
 
