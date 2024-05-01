@@ -12,7 +12,7 @@ COPY README.md README.md
 COPY requirements.txt requirements.txt
 COPY ./docker/motd /etc/motd
 
-RUN apt-get update -y; apt-get install -y wget libc6 inetutils-ping vim dmidecode nvme-cli iproute2 pciutils sudo
+RUN apt-get update -y; apt-get install -y wget libc6 inetutils-ping vim dmidecode nvme-cli iproute2 pciutils sudo nano
 
 RUN pip3 install -r requirements.txt
 RUN pip3 install -r simplyblock_web/requirements.txt
