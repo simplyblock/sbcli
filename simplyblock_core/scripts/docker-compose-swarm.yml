@@ -199,6 +199,8 @@ services:
         constraints: [node.role == manager]
     volumes:
       - "/etc/foundationdb:/etc/foundationdb"
+    networks:
+      - hostnet
 volumes:
   os_data:
 
