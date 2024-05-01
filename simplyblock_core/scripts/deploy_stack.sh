@@ -11,7 +11,6 @@ export CLUSTER_SECRET=$5
 export CLUSTER_ID=$6
 export LOG_DELETION_INTERVAL=$7
 export RETENTION_PERIOD=$8
-export START_TIME_SEC=$(date +%s)
 export DIR="$(dirname "$(realpath "$0")")"
 
 if [ -s "/etc/foundationdb/fdb.cluster" ]
