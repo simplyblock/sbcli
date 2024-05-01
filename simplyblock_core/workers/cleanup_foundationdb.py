@@ -92,15 +92,17 @@ def ClusterStatObject(clusters, st_date, end_date):
         except Exception as e:
             logger.error(f"Failed to clear ClusterStatObject for {cluster_id}: {e}")
 
+days_back = 3
+
 while True:
     try:
         clusters = db_controller.get_clusters()
         lvols = db_controller.get_lvols()
         logger.info("Clusters and logical volumes successfully retrieved for cleanup.")
         
-        st_date = time.time()  # seconds
-        end_date = st_date - datetime.timedelta(days=1)
-
+        st_date = int(time.time())  # seconds
+        end_date = int(st_date - (days_back * 86400))
+        
         LVolStatObject(lvols, st_date, end_date)
         PoolStatObject(lvols, st_date, end_date)  
         DeviceStatObject(clusters, st_date, end_date)
