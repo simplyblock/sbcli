@@ -1,5 +1,5 @@
 import time
-import datetime
+import os
 import logging
 import sys
 
@@ -21,6 +21,8 @@ logger.info("Starting FDB cleanup script...")
 
 db_controller = DBController()
 logger.debug("Database controller initialized.")
+
+deletion_interval = os.getenv('LOG_DELETION_INTERVAL', '24h')
 
 def PoolStatObject(lvols, st_date, end_date):
     for lvol in lvols:
@@ -92,7 +94,19 @@ def ClusterStatObject(clusters, st_date, end_date):
         except Exception as e:
             logger.error(f"Failed to clear ClusterStatObject for {cluster_id}: {e}")
 
-days_back = 3
+def convert_to_seconds(time_string):
+    num = int(''.join(filter(str.isdigit, time_string)))
+    unit = ''.join(filter(str.isalpha, time_string))
+
+    if unit == 'h':
+        return num * 3600  # hours to seconds
+    elif unit == 'm':
+        return num * 60    # minutes to seconds
+    elif unit == 'd':
+        return num * 86400 # days to seconds
+    else:
+        raise ValueError("Unsupported time unit")
+
 
 while True:
     try:
@@ -101,7 +115,7 @@ while True:
         logger.info("Clusters and logical volumes successfully retrieved for cleanup.")
         
         st_date = int(time.time())  # seconds
-        end_date = int(st_date - (days_back * 86400))
+        end_date = st_date - convert_to_seconds(deletion_interval)
         
         LVolStatObject(lvols, st_date, end_date)
         PoolStatObject(lvols, st_date, end_date)  
