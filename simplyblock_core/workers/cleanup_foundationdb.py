@@ -23,6 +23,7 @@ db_controller = DBController()
 logger.debug("Database controller initialized.")
 
 deletion_interval = os.getenv('LOG_DELETION_INTERVAL', '24h')
+start_time = os.getenv('START_TIME_SEC')
 
 def PoolStatObject(lvols, st_date, end_date):
     for lvol in lvols:
@@ -114,8 +115,8 @@ while True:
         lvols = db_controller.get_lvols()
         logger.info("Clusters and logical volumes successfully retrieved for cleanup.")
         
-        st_date = int(time.time())  # seconds
-        end_date = st_date - convert_to_seconds(deletion_interval)
+        st_date = int(start_time) # seconds
+        end_date = int(time.time()) - convert_to_seconds(deletion_interval)
         
         LVolStatObject(lvols, st_date, end_date)
         PoolStatObject(lvols, st_date, end_date)  

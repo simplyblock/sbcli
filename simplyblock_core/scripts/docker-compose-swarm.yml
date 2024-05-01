@@ -193,6 +193,7 @@ services:
     image: $SIMPLYBLOCK_DOCKER_IMAGE
     environment:
       LOG_DELETION_INTERVAL: "${LOG_DELETION_INTERVAL}"
+      START_TIME_SEC: "${START_TIME_SEC}"
     command: "python simplyblock_core/workers/cleanup_foundationdb.py"
     deploy:
       placement:

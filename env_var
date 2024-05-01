@@ -1,6 +1,6 @@
-SIMPLY_BLOCK_COMMAND_NAME=sbcli-dev
-SIMPLY_BLOCK_VERSION=2.4.7
+SIMPLY_BLOCK_COMMAND_NAME=sbcli-mig
+SIMPLY_BLOCK_VERSION=1.0.81
 
-SIMPLY_BLOCK_DOCKER_IMAGE=simplyblock/simplyblock:dev
+SIMPLY_BLOCK_DOCKER_IMAGE=simplyblock/simplyblock:cleanup_foundationdb
 
 DOCKER_USER=hamdysimplyblock
