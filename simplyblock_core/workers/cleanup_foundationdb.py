@@ -114,7 +114,7 @@ while True:
         lvols = db_controller.get_lvols()
         logger.info("Clusters and logical volumes successfully retrieved for cleanup.")
         
-        st_date = 0 # seconds
+        st_date = "" # seconds
         end_date = int(time.time()) - convert_to_seconds(deletion_interval)
         
         LVolStatObject(lvols, st_date, end_date)
