@@ -28,8 +28,8 @@ start_time = os.getenv('START_TIME_SEC')
 def PoolStatObject(lvols, st_date, end_date):
     for lvol in lvols:
         index = "object/PoolStatObject/%s/%s/" % (lvol.pool_uuid, lvol.pool_uuid)
-        start = index + st_date
-        end = index + end_date
+        start = index + str(st_date)
+        end = index + str(end_date)
         try:
             fdb = KVStore()
             fdb.db.clear_range(start, end)
@@ -40,8 +40,8 @@ def PoolStatObject(lvols, st_date, end_date):
 def LVolStatObject(lvols, st_date, end_date):
     for lvol in lvols:
         index = "object/LVolStatObject/%s/%s/" % (lvol.pool_uuid, lvol.uuid)
-        start = index + st_date
-        end = index + end_date
+        start = index + str(st_date)
+        end = index + str(end_date)
         try:
             fdb = KVStore()
             fdb.db.clear_range(start, end)
@@ -52,13 +52,13 @@ def LVolStatObject(lvols, st_date, end_date):
 def DeviceStatObject(clusters, st_date, end_date):
     for cl in clusters:
         cluster_id = cl.get_id()
-        snodes = db_controller.get_storage_nodes_by_cluster_id(cl.get_id())
+        snodes = db_controller.get_storage_nodes_by_cluster_id(cluster_id)
         for node in snodes:
             for device in node.nvme_devices:
                 device_id = device.get_id()
                 index = "object/DeviceStatObject/%s/%s/" % (cluster_id, device_id)
-                start = index + st_date
-                end = index + end_date
+                start = index + str(st_date)
+                end = index + str(end_date)
                 try:
                     fdb = KVStore()
                     fdb.db.clear_range(start, end)
@@ -69,12 +69,12 @@ def DeviceStatObject(clusters, st_date, end_date):
 def NodeStatObject(clusters, st_date, end_date):
     for cl in clusters:
         cluster_id = cl.get_id()
-        snodes = db_controller.get_storage_nodes_by_cluster_id(cl.get_id())
+        snodes = db_controller.get_storage_nodes_by_cluster_id(cluster_id)
         for node in snodes:
             node_id = node.get_id()
             index = "object/NodeStatObject/%s/%s/" % (cluster_id, node_id)
-            start = index + st_date
-            end = index + end_date
+            start = index + str(st_date)
+            end = index + str(end_date)
             try:
                 fdb = KVStore()
                 fdb.db.clear_range(start, end)
@@ -86,8 +86,8 @@ def ClusterStatObject(clusters, st_date, end_date):
     for cl in clusters:
         cluster_id = cl.get_id()
         index = "object/ClusterStatObject/%s/%s/" % (cluster_id, cluster_id)
-        start = index + st_date
-        end = index + end_date
+        start = index + str(st_date)
+        end = index + str(end_date)
         try:
             fdb = KVStore()
             fdb.db.clear_range(start, end)
@@ -107,7 +107,6 @@ def convert_to_seconds(time_string):
         return num * 86400 # days to seconds
     else:
         raise ValueError("Unsupported time unit")
-
 
 while True:
     try:
