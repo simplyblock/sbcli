@@ -110,7 +110,9 @@ def create_cluster(blk_size, page_size_in_blocks, ha_type, tls,
     if prov_cap_crit and prov_cap_crit > 0:
         c.prov_cap_crit = prov_cap_crit
 
-    env = Environment(loader=FileSystemLoader(os.path.join(TOP_DIR, 'scripts/alerting')), trim_blocks=True, lstrip_blocks=True)
+    alerts_template_folder = os.path.join(TOP_DIR, "simplyblock_core/scripts/alerting/")
+
+    env = Environment(loader=FileSystemLoader(alerts_template_folder), trim_blocks=True, lstrip_blocks=True)
     alert_resources_file = "alert_resources.yaml"
     template = env.get_template(f'{alert_resources_file}.j2')
     values = {
@@ -118,7 +120,7 @@ def create_cluster(blk_size, page_size_in_blocks, ha_type, tls,
         'GRAFANA_ENDPOINT': grafana_endpoint,
     }
 
-    with open(f"{TOP_DIR}/scripts/alerting/{alert_resources_file}", 'w') as file:
+    with open(os.path.join(alerts_template_folder, alert_resources_file), 'w') as file:
         file.write(template.render(values))
 
     logger.info("Deploying swarm stack ...")
@@ -707,4 +709,3 @@ def update_cluster(cl_id):
 
     logger.info("Done")
     return True
-
