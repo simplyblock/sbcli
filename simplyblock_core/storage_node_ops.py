@@ -827,6 +827,7 @@ def delete_storage_node(node_id):
         logger.info(f"Sending cluster map to LVol: {lvol.get_id()}")
         lvol_controller.send_cluster_map(lvol.get_id())
 
+    storage_events.snode_delete(snode)
     logger.info("done")
 
 
@@ -897,11 +898,12 @@ def remove_storage_node(node_id, force_remove=False, force_migrate=False):
     except Exception as e:
         logger.warning(f"Failed to remove SPDK process: {e}")
 
+    old_status = snode.status
     snode.status = StorageNode.STATUS_REMOVED
     snode.write_to_db(db_controller.kv_store)
     logger.info("Sending node event update")
     distr_controller.send_node_status_event(snode.get_id(), snode.status)
-    storage_events.snode_remove(snode)
+    storage_events.snode_status_change(snode, StorageNode.STATUS_REMOVED, old_status)
     logger.info("done")
 
 
@@ -1098,16 +1100,6 @@ def restart_storage_node(
         return False, "Failed to send cluster map"
     time.sleep(3)
 
-    logger.info("Sending node event update")
-    distr_controller.send_node_status_event(snode.get_id(), "online")
-
-    logger.info("Sending devices event updates")
-    for dev in snode.nvme_devices:
-        if dev.status != NVMeDevice.STATUS_ONLINE:
-            logger.debug(f"Device is not online: {dev.get_id()}, status: {dev.status}")
-            continue
-        distr_controller.send_dev_status_event(dev.cluster_device_order, NVMeDevice.STATUS_ONLINE)
-
     for lvol_id in snode.lvols:
         lvol = lvol_controller.recreate_lvol(lvol_id, snode)
         if not lvol:
@@ -1121,8 +1113,18 @@ def restart_storage_node(
     old_status = snode.status
     snode.status = StorageNode.STATUS_ONLINE
     snode.write_to_db(kv_store)
-
     storage_events.snode_status_change(snode, snode.status, old_status)
+
+    logger.info("Sending node event update")
+    distr_controller.send_node_status_event(snode.get_id(), NVMeDevice.STATUS_ONLINE)
+
+    logger.info("Sending devices event updates")
+    for dev in snode.nvme_devices:
+        if dev.status != NVMeDevice.STATUS_ONLINE:
+            logger.debug(f"Device is not online: {dev.get_id()}, status: {dev.status}")
+            continue
+        distr_controller.send_dev_status_event(dev.cluster_device_order, NVMeDevice.STATUS_ONLINE)
+
     logger.info("Done")
     return "Success"
 

@@ -18,7 +18,7 @@ def snode_add(node):
         node_id=node.get_id())
 
 
-def snode_remove(node):
+def snode_delete(node):
     ec.log_event_cluster(
         cluster_id=node.cluster_id,
         domain=ec.DOMAIN_CLUSTER,
