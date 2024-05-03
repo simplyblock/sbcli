@@ -8,6 +8,7 @@ class NVMeDevice(BaseModel):
 
     STATUS_JM = "JM_DEV"
 
+    STATUS_NEW = "new"
     STATUS_ONLINE = 'online'
     STATUS_UNAVAILABLE = 'unavailable'
     STATUS_REMOVED = 'removed'
