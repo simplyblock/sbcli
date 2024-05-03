@@ -23,7 +23,7 @@ logger.info("Starting FDB cleanup script...")
 db_controller = DBController()
 logger.debug("Database controller initialized.")
 
-deletion_interval = os.getenv('LOG_DELETION_INTERVAL', '24h')
+deletion_interval = os.getenv('LOG_DELETION_INTERVAL', '7d')
 
 def PoolStatObject(lvols, st_date, end_date):
     for lvol in lvols:
