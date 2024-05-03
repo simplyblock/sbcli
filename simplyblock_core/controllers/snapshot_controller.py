@@ -137,14 +137,14 @@ def delete(snapshot_uuid):
         snode.rpc_username,
         snode.rpc_password)
 
-    ret = rpc_client.bdev_distrib_delete(snap.base_bdev)
-    if not ret:
-        logger.error(f"Failed to delete BDev {snap.base_bdev}")
-        return False
-
     ret = rpc_client.ultra21_lvol_dismount(snap.snap_bdev)
     if not ret:
         logger.error(f"Failed to delete BDev {snap.snap_bdev}")
+        return False
+
+    ret = rpc_client.bdev_distrib_delete(snap.base_bdev)
+    if not ret:
+        logger.error(f"Failed to delete BDev {snap.base_bdev}")
         return False
 
     snap.remove(db_controller.kv_store)
