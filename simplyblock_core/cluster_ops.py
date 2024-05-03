@@ -110,18 +110,23 @@ def create_cluster(blk_size, page_size_in_blocks, ha_type, tls,
     if prov_cap_crit and prov_cap_crit > 0:
         c.prov_cap_crit = prov_cap_crit
 
-    alerts_template_folder = os.path.join(TOP_DIR, "simplyblock_core/scripts/alerting/")
+    if slack_webhook or grafana_endpoint: 
+        alerts_template_folder = os.path.join(TOP_DIR, "simplyblock_core/scripts/alerting/")
 
-    env = Environment(loader=FileSystemLoader(alerts_template_folder), trim_blocks=True, lstrip_blocks=True)
-    alert_resources_file = "alert_resources.yaml"
-    template = env.get_template(f'{alert_resources_file}.j2')
-    values = {
-        'SLACK_WEBHOOK': slack_webhook,
-        'GRAFANA_ENDPOINT': grafana_endpoint,
-    }
+        env = Environment(loader=FileSystemLoader(alerts_template_folder), trim_blocks=True, lstrip_blocks=True)
+        alert_resources_file = "alert_resources.yaml"
+        template = env.get_template(f'{alert_resources_file}.j2')
+        values = {
+            'SLACK_WEBHOOK': slack_webhook,
+            'GRAFANA_ENDPOINT': grafana_endpoint,
+        }
+        try: 
+            with open(os.path.join(alerts_template_folder, alert_resources_file), 'w') as file:
+                file.write(template.render(values))
+        except Exception as e:
+            logger.error("Error writing values to alert_resources.yaml")
+            logger.error(e)
 
-    with open(os.path.join(alerts_template_folder, alert_resources_file), 'w') as file:
-        file.write(template.render(values))
 
     logger.info("Deploying swarm stack ...")
     ret = scripts.deploy_stack(cli_pass, DEV_IP, constants.SIMPLY_BLOCK_DOCKER_IMAGE, c.secret, c.uuid, log_del_interval, metrics_retention_period)
