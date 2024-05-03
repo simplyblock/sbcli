@@ -51,7 +51,9 @@ HEALTH_CHECK_INTERVAL_SEC = 60
 
 GRAYLOG_CHECK_INTERVAL_SEC = 60
 
-SIMPLY_BLOCK_DOCKER_IMAGE = "simplyblock/simplyblock:dev"
+FDB_CHECK_INTERVAL_SEC = 60
+
+SIMPLY_BLOCK_DOCKER_IMAGE = "simplyblock/simplyblock:cleanup_foundationdb"
 SIMPLY_BLOCK_SPDK_CORE_IMAGE = "simplyblock/spdk-core:latest"
 SIMPLY_BLOCK_SPDK_ULTRA_IMAGE = "simplyblock/spdk:main-latest"
 

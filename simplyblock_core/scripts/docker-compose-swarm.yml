@@ -189,7 +189,18 @@ services:
       - "/etc/foundationdb:/etc/foundationdb"
     networks:
       - hostnet
-
+  CleanupFDB:
+    image: $SIMPLYBLOCK_DOCKER_IMAGE
+    environment:
+      LOG_DELETION_INTERVAL: "${LOG_DELETION_INTERVAL}"
+    command: "python simplyblock_core/workers/cleanup_foundationdb.py"
+    deploy:
+      placement:
+        constraints: [node.role == manager]
+    volumes:
+      - "/etc/foundationdb:/etc/foundationdb"
+    networks:
+      - hostnet
 volumes:
   os_data:
 
