@@ -2,6 +2,7 @@
 # encoding: utf-8
 
 import logging
+import threading
 
 from flask import Blueprint, request
 
@@ -51,10 +52,12 @@ def add_node_to_cluster():
     if 'namespace' in cl_data:
         namespace = cl_data['namespace']
 
-    ret = caching_node_controller.add_node(
-        cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spdk_mem, spdk_image, namespace)
+    t = threading.Thread(
+        target=caching_node_controller.add_node,
+        args=(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spdk_mem, spdk_image, namespace))
+    t.start()
 
-    return utils.get_response(ret)
+    return utils.get_response(True)
 
 
 @bp.route('/cachingnode', methods=['GET'], defaults={'uuid': None})
