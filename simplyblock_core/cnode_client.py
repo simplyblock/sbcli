@@ -91,6 +91,9 @@ class CNodeClient:
     def spdk_process_kill(self):
         return self._request("GET", "cnode/spdk_process_kill")
 
+    def spdk_process_is_up(self):
+        return self._request("GET", "cnode/spdk_process_is_up")
+
     def connect_nvme(self, ip, port, nqn):
         params = {
             "ip": ip,
