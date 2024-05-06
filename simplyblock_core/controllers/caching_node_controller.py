@@ -160,7 +160,21 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spd
     if not results:
         logger.error(f"Failed to start spdk: {err}")
         return False
-    time.sleep(5)
+
+    retries = 20
+    while retries > 0:
+        resp, _ = snode_api.spdk_process_is_up()
+        if resp:
+            logger.info(f"Pod is up")
+            break
+        else:
+            logger.info("Pod is not running, waiting...")
+            time.sleep(3)
+            retries -= 1
+
+    if retries == 0:
+        logger.error("Pod is not running, exiting")
+        return False
 
     # creating RPCClient instance
     rpc_client = RPCClient(

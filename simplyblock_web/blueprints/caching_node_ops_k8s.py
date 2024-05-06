@@ -4,6 +4,7 @@ import logging
 import math
 import os
 import time
+import traceback
 
 import cpuinfo
 import yaml
@@ -99,52 +100,29 @@ def spdk_process_start():
     node_name = os.environ.get("HOSTNAME")
     logger.debug(f"deploying caching node spdk on worker: {node_name}")
 
-    env = Environment(loader=FileSystemLoader(os.path.join(TOP_DIR, 'templates')), trim_blocks=True, lstrip_blocks=True)
-    template = env.get_template('deploy_spdk.yaml.j2')
-    values = {
-        'SPDK_IMAGE': spdk_image,
-        'SPDK_CPU_MASK': spdk_cpu_mask,
-        'SPDK_MEM': spdk_mem,
-        'SERVER_IP': data['server_ip'],
-        'RPC_PORT': data['rpc_port'],
-        'RPC_USERNAME': data['rpc_username'],
-        'RPC_PASSWORD': data['rpc_password'],
-        'HOSTNAME': node_name,
-        'NAMESPACE': namespace,
-    }
-    dep = yaml.safe_load(template.render(values))
-    logger.debug(dep)
-    resp = k8s_apps_v1.create_namespaced_deployment(body=dep, namespace=namespace)
-    logger.info(f"Deployment created: '{resp.metadata.name}'")
+    try:
+        env = Environment(loader=FileSystemLoader(os.path.join(TOP_DIR, 'templates')), trim_blocks=True, lstrip_blocks=True)
+        template = env.get_template('deploy_spdk.yaml.j2')
+        values = {
+            'SPDK_IMAGE': spdk_image,
+            'SPDK_CPU_MASK': spdk_cpu_mask,
+            'SPDK_MEM': spdk_mem,
+            'SERVER_IP': data['server_ip'],
+            'RPC_PORT': data['rpc_port'],
+            'RPC_USERNAME': data['rpc_username'],
+            'RPC_PASSWORD': data['rpc_password'],
+            'HOSTNAME': node_name,
+            'NAMESPACE': namespace,
+        }
+        dep = yaml.safe_load(template.render(values))
+        logger.debug(dep)
+        resp = k8s_apps_v1.create_namespaced_deployment(body=dep, namespace=namespace)
+        msg = f"Deployment created: '{resp.metadata.name}' in namespace '{namespace}"
+        logger.info(msg)
+    except:
+        return utils.get_response(False, f"Deployment failed:\n{traceback.format_exc()}")
 
-    retries = 20
-    while retries > 0:
-        resp = k8s_core_v1.list_namespaced_pod(namespace)
-        new_pod = None
-        for pod in resp.items:
-            if pod.metadata.name.startswith(pod_name):
-                new_pod = pod
-                break
-
-        if not new_pod:
-            logger.info("Container is not running, waiting...")
-            time.sleep(3)
-            retries -= 1
-            continue
-
-        status = new_pod.status.phase
-        logger.info(f"pod: {pod_name} status: {status}")
-
-        if status == "Running":
-            logger.info(f"Container status: {status}")
-            return utils.get_response(True)
-        else:
-            logger.info("Container is not running, waiting...")
-            time.sleep(3)
-            retries -= 1
-
-    return utils.get_response(
-        False, f"Deployment create max retries reached")
+    return utils.get_response(msg)
 
 
 @bp.route('/spdk_process_kill', methods=['GET'])
