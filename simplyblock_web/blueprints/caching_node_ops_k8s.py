@@ -69,6 +69,10 @@ def spdk_process_start():
         spdk_mem = data['spdk_mem']
     node_cpu_count = os.cpu_count()
 
+    global namespace
+    if 'namespace' in data:
+        namespace = data['namespace']
+
     if spdk_cpu_mask:
         requested_cpu_count = len(format(int(spdk_cpu_mask, 16), 'b'))
         if requested_cpu_count > node_cpu_count:
@@ -106,8 +110,10 @@ def spdk_process_start():
         'RPC_USERNAME': data['rpc_username'],
         'RPC_PASSWORD': data['rpc_password'],
         'HOSTNAME': node_name,
+        'NAMESPACE': namespace,
     }
     dep = yaml.safe_load(template.render(values))
+    logger.debug(dep)
     resp = k8s_apps_v1.create_namespaced_deployment(body=dep, namespace=namespace)
     logger.info(f"Deployment created: '{resp.metadata.name}'")
 
