@@ -25,7 +25,8 @@ bp = Blueprint("caching_node_k", __name__, url_prefix="/cnode")
 
 node_name = os.environ.get("HOSTNAME")
 deployment_name = f"spdk-deployment-{node_name}"
-namespace = 'default'
+default_namespace = 'default'
+namespace_id_file = '/etc/simplyblock/namespace'
 pod_name = 'spdk-deployment'
 
 
@@ -44,6 +45,26 @@ try:
     system_id, _, _ = node_utils.run_command("dmidecode -s system-uuid")
 except:
     pass
+
+
+def get_namespace():
+    if os.path.exists(namespace_id_file):
+        with open(namespace_id_file, 'r') as f:
+            out = f.read()
+            return out
+    return default_namespace
+
+
+def set_namespace(namespace):
+    if not os.path.exists(namespace_id_file):
+        try:
+            os.makedirs(os.path.dirname(namespace_id_file), exist_ok=True)
+        except:
+            logger.error(traceback.format_exc())
+            return False
+    with open(namespace_id_file, "w+") as f:
+        f.write(namespace)
+    return True
 
 
 @bp.route('/scan_devices', methods=['GET'])
@@ -70,9 +91,10 @@ def spdk_process_start():
         spdk_mem = data['spdk_mem']
     node_cpu_count = os.cpu_count()
 
-    global namespace
+    namespace = get_namespace()
     if 'namespace' in data:
         namespace = data['namespace']
+        set_namespace(namespace)
 
     if spdk_cpu_mask:
         requested_cpu_count = len(format(int(spdk_cpu_mask, 16), 'b'))
@@ -129,8 +151,8 @@ def spdk_process_start():
 def spdk_process_kill():
 
     try:
+        namespace = get_namespace()
         resp = k8s_apps_v1.delete_namespaced_deployment(deployment_name, namespace)
-
         retries = 20
         while retries > 0:
             resp = k8s_core_v1.list_namespaced_pod(namespace)
@@ -153,7 +175,7 @@ def spdk_process_kill():
 
 
 def _is_pod_up():
-    resp = k8s_core_v1.list_namespaced_pod(namespace)
+    resp = k8s_core_v1.list_namespaced_pod(get_namespace())
     for pod in resp.items:
         if pod.metadata.name.startswith(pod_name):
             status = pod.status.phase
