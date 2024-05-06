@@ -314,10 +314,6 @@ class CLIWrapper:
                                  dest='log_del_interval', default='7d')
         sub_command.add_argument("--metrics-retention-period", help='retention period for prometheus metrics, default: 7d',
                                  dest='metrics_retention_period', default='7d')
-        sub_command.add_argument("--slack-webhook", help='the slack webhook url to be used for alerting',
-                                 dest='slack_webhook', default='')
-        sub_command.add_argument("--grafana-endpoint", help='the endpoint url for grafana',
-                                 dest='grafana_endpoint', default='')
 
         # show cluster list
         sub_command = self.add_sub_command(subparser, 'list', 'Show clusters list')
@@ -1355,14 +1351,12 @@ class CLIWrapper:
         ifname = args.ifname
         log_del_interval = args.log_del_interval
         metrics_retention_period = args.metrics_retention_period
-        slack_webhook = args.slack_webhook
-        grafana_endpoint = args.grafana_endpoint
 
         # TODO: Validate the inputs
         return cluster_ops.create_cluster(
             blk_size, page_size_in_blocks, ha_type, tls,
             auth_hosts_only, CLI_PASS, model_ids, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
-            ifname, log_del_interval, metrics_retention_period, slack_webhook, grafana_endpoint)
+            ifname, log_del_interval, metrics_retention_period)
 
     def cluster_join(self, args):
         cluster_id = args.cluster_id
