@@ -726,6 +726,7 @@ class CLIWrapper:
                                  dest='spdk_cpu_mask')
         sub_command.add_argument("--memory", help='SPDK huge memory allocation, default is Max hugepages available', dest='spdk_mem')
         sub_command.add_argument("--spdk-image", help='SPDK image uri', dest='spdk_image')
+        sub_command.add_argument("--namespace", help='k8s namespace to deploy on',)
 
         sub_command = self.add_sub_command(subparser, 'list', 'List Caching nodes')
 
@@ -1262,6 +1263,7 @@ class CLIWrapper:
                 ifname = args.ifname
                 data_nics = []
                 spdk_image = args.spdk_image
+                namespace = args.namespace
 
                 spdk_cpu_mask = None
                 if args.spdk_cpu_mask:
@@ -1277,7 +1279,7 @@ class CLIWrapper:
                         return f"SPDK memory:{args.spdk_mem} must be larger than 1G"
 
                 ret = caching_node_controller.add_node(
-                    cluster_id, node_ip, ifname, data_nics, spdk_cpu_mask, spdk_mem, spdk_image)
+                    cluster_id, node_ip, ifname, data_nics, spdk_cpu_mask, spdk_mem, spdk_image, namespace)
 
             if sub_command == "list":
                 #cluster_id
