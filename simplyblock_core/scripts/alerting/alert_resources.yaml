@@ -15,15 +15,12 @@ contactPoints:
         type: slack
         settings:
           username: grafana_bot
-          url: '{{ SLACK_WEBHOOK }}'
+          url: 'https://hooks.slack.com/services/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'
           title: |
-            {% raw %}
             {{ template "slack.title" . }}
           text: |
             {{ template "slack.message" . }}
-            {% endraw %}
 
-{% raw %}
 templates:
   - orgId: 1
     name: slack.title
@@ -41,9 +38,7 @@ templates:
       *Description*: {{ .Annotations.description }}
       {{ end -}}
       *Log message*: {{ index .Labels "message" }}
-      {% endraw %}
-      *Explore logs:* {{ GRAFANA_ENDPOINT }}
-      {% raw %}
+      *Explore logs:* https://grafanaURL.com/explore?orgId=1
       {{ if .DashboardURL -}}
       *Go to dashboard:* {{ .DashboardURL }}
       {{- end }}
@@ -70,4 +65,3 @@ templates:
       {{ end }}
 
       {{- end }}
-      {% endraw %}
