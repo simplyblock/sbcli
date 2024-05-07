@@ -69,7 +69,8 @@ class CNodeClient:
     def info(self):
         return self._request("GET", "cnode/info")
 
-    def spdk_process_start(self, spdk_cpu_mask, spdk_mem, spdk_image, server_ip, rpc_port, rpc_username, rpc_password):
+    def spdk_process_start(
+            self, spdk_cpu_mask, spdk_mem, spdk_image, server_ip, rpc_port, rpc_username, rpc_password, namespace=None):
         params = {
             "spdk_cpu_mask": spdk_cpu_mask,
             "spdk_mem": spdk_mem,
@@ -79,6 +80,8 @@ class CNodeClient:
             "rpc_username": rpc_username,
             "rpc_password": rpc_password,
         }
+        if namespace:
+            params["namespace"] = namespace
         return self._request("POST", "cnode/spdk_process_start", params)
 
     def join_db(self, db_connection):
@@ -87,6 +90,9 @@ class CNodeClient:
 
     def spdk_process_kill(self):
         return self._request("GET", "cnode/spdk_process_kill")
+
+    def spdk_process_is_up(self):
+        return self._request("GET", "cnode/spdk_process_is_up")
 
     def connect_nvme(self, ip, port, nqn):
         params = {

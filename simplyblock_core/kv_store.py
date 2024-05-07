@@ -181,6 +181,11 @@ class DBController:
         if ret:
             return ret[0]
 
+    def get_lvol_by_name(self, lvol_name):
+        for lvol in self.get_lvols():
+            if lvol.lvol_name == lvol_name:
+                return lvol
+
     def get_mgmt_node_by_id(self, id):
         ret = MgmtNode().read_from_db(self.kv_store, id)
         if ret:

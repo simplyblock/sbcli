@@ -44,6 +44,10 @@ def spdk_process_start():
         spdk_mem = data['spdk_mem']
     node_cpu_count = os.cpu_count()
 
+    global namespace
+    if 'namespace' in data:
+        namespace = data['namespace']
+
     if spdk_cpu_mask:
         requested_cpu_count = len(format(int(spdk_cpu_mask, 16), 'b'))
         if requested_cpu_count > node_cpu_count:

@@ -14,6 +14,7 @@ COPY README.md README.md
 COPY requirements.txt requirements.txt
 COPY ./docker/motd /etc/motd
 
+
 RUN dnf update -y ; dnf install -y python3-pip kmod parted gdisk pkg-config wget vim dmidecode nvme-cli \
     iproute pciutils openssh-server iputils hostname
 

@@ -937,11 +937,13 @@ def delete_lvol_from_node(lvol_id, node_id, clear_data=True):
     return True
 
 
-def delete_lvol(uuid, force_delete=False):
-    lvol = db_controller.get_lvol_by_id(uuid)
+def delete_lvol(id_or_name, force_delete=False):
+    lvol = db_controller.get_lvol_by_id(id_or_name)
     if not lvol:
-        logger.error(f"lvol not found: {uuid}")
-        return False
+        lvol = db_controller.get_lvol_by_name(id_or_name)
+        if not lvol:
+            logger.error(f"lvol not found: {id_or_name}")
+            return False
 
     pool = db_controller.get_pool_by_id(lvol.pool_uuid)
     if pool.status == Pool.STATUS_INACTIVE:
@@ -960,7 +962,7 @@ def delete_lvol(uuid, force_delete=False):
     # soft delete LVol if it has snapshots
     snaps = db_controller.get_snapshots()
     for snap in snaps:
-        if snap.lvol.get_id() == uuid:
+        if snap.lvol.get_id() == lvol.get_id():
             logger.warning(f"Soft delete LVol that has snapshots. Snapshot:{snap.get_id()}")
             ret = rpc_client.subsystem_delete(lvol.nqn)
             logger.debug(ret)
@@ -983,11 +985,11 @@ def delete_lvol(uuid, force_delete=False):
                 return False
 
     # remove from storage node
-    snode.lvols.remove(uuid)
+    snode.lvols.remove(lvol.get_id())
     snode.write_to_db(db_controller.kv_store)
 
     # remove from pool
-    pool.lvols.remove(uuid)
+    pool.lvols.remove(lvol.get_id())
     pool.write_to_db(db_controller.kv_store)
 
     lvol.remove(db_controller.kv_store)
