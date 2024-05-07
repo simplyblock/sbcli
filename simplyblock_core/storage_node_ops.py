@@ -18,7 +18,7 @@ from simplyblock_core.controllers import lvol_controller, storage_events, snapsh
 from simplyblock_core.kv_store import DBController
 from simplyblock_core import shell_utils
 from simplyblock_core.models.iface import IFace
-from simplyblock_core.models.nvme_device import NVMeDevice
+from simplyblock_core.models.nvme_device import NVMeDevice, JMDevice
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.pci_utils import get_nvme_devices, bind_spdk_driver
 from simplyblock_core.rpc_client import RPCClient
@@ -84,52 +84,67 @@ def addNvmeDevices(cluster, rpc_client, devs, snode):
     sequential_number = 0
     devices = []
     ret = rpc_client.bdev_nvme_controller_list()
-    if ret:
-        ctr_map = {i["ctrlrs"][0]['trid']['traddr']: i["name"] for i in ret}
-    else:
-        ctr_map = {}
+    ctr_map = {}
+    try:
+        if ret:
+            ctr_map = {i["ctrlrs"][0]['trid']['traddr']: i["name"] for i in ret}
+    except:
+        pass
 
     for index, pcie in enumerate(devs):
 
         if pcie in ctr_map:
-            nvme_bdev = ctr_map[pcie] + "n1"
+            nvme_controller = ctr_map[pcie]
         else:
-            name = "nvme_%s" % index
-            ret, err = rpc_client.bdev_nvme_controller_attach(name, pcie)
+            nvme_controller = "nvme_%s" % index
+            ret, err = rpc_client.bdev_nvme_controller_attach(nvme_controller, pcie)
             time.sleep(2)
-            nvme_bdev = f"{name}n1"
 
+        nvme_bdev = f"{nvme_controller}n1"
+        rpc_client.bdev_examine(nvme_bdev)
+        time.sleep(5)
         ret = rpc_client.get_bdevs(nvme_bdev)
-        if ret:
-            nvme_dict = ret[0]
-            nvme_driver_data = nvme_dict['driver_specific']['nvme'][0]
-            model_number = nvme_driver_data['ctrlr_data']['model_number']
+        nvme_dict = ret[0]
+        nvme_driver_data = nvme_dict['driver_specific']['nvme'][0]
+        model_number = nvme_driver_data['ctrlr_data']['model_number']
+        total_size = nvme_dict['block_size'] * nvme_dict['num_blocks']
+        device_partitions_count = int(total_size / (cluster.blk_size * cluster.page_size_in_blocks))
 
-            size = nvme_dict['block_size'] * nvme_dict['num_blocks']
-            device_partitions_count = int(size / (cluster.blk_size * cluster.page_size_in_blocks))
-            devices.append(
-                NVMeDevice({
-                    'uuid': str(uuid.uuid4()),
-                    'device_name': nvme_dict['name'],
-                    'sequential_number': sequential_number,
-                    'partitions_count': device_partitions_count,
-                    'capacity': size,
-                    'size': size,
-                    'pcie_address': nvme_driver_data['pci_address'],
-                    'model_id': model_number,
-                    'serial_number': nvme_driver_data['ctrlr_data']['serial_number'],
-                    'nvme_bdev': nvme_bdev,
-                    'alloc_bdev': nvme_bdev,
-                    'node_id': snode.get_id(),
-                    'cluster_id': snode.cluster_id,
+        # look for partitions
+        jm_bdev = ""
+        jm_bdev_size = 0
+        nvme_main_bdev = ""
+        nvme_main_size = 0
+        for bdev in rpc_client.get_bdevs():
+            if bdev['name'] == f"{nvme_bdev}p1":
+                jm_bdev = bdev['name']
+                jm_bdev_size = bdev['block_size'] * bdev['num_blocks']
+            elif bdev['name'] == f"{nvme_bdev}p2":
+                nvme_main_bdev = bdev['name']
+                nvme_main_size = bdev['block_size'] * bdev['num_blocks']
 
-                    # 'nvmf_nqn': subsystem_nqn,
-                    # 'nvmf_ip': IP,
-                    # 'nvmf_port': 4420,
-
-                    'status': 'online'
-                }))
-            sequential_number += device_partitions_count
+        devices.append(
+            NVMeDevice({
+                'uuid': str(uuid.uuid4()),
+                'device_name': nvme_dict['name'],
+                'sequential_number': sequential_number,
+                'partitions_count': device_partitions_count,
+                'capacity': total_size,
+                'size': nvme_main_size if nvme_main_size else total_size,
+                'pcie_address': nvme_driver_data['pci_address'],
+                'model_id': model_number,
+                'serial_number': nvme_driver_data['ctrlr_data']['serial_number'],
+                'nvme_bdev': nvme_bdev,
+                'nvme_controller': nvme_controller,
+                'node_id': snode.get_id(),
+                'cluster_id': snode.cluster_id,
+                'partition_jm_bdev': jm_bdev,
+                'partition_jm_size': jm_bdev_size,
+                'partition_main_bdev': nvme_main_bdev,
+                'partition_main_size': nvme_main_size,
+                'status': NVMeDevice.STATUS_ONLINE
+        }))
+        sequential_number += device_partitions_count
     return devices
 
 
@@ -216,17 +231,60 @@ def _prepare_cluster_devices(snode, after_restart=False):
         snode.mgmt_ip, snode.rpc_port,
         snode.rpc_username, snode.rpc_password)
 
+    jm_nvme_bdevs = []
     for index, nvme in enumerate(snode.nvme_devices):
-        if nvme.status not in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_UNAVAILABLE,
-                               NVMeDevice.STATUS_JM, NVMeDevice.STATUS_READONLY]:
-            logger.debug(f"Device is not online or unavailable: {nvme.get_id()}, status: {nvme.status}")
+        if nvme.status not in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_UNAVAILABLE, NVMeDevice.STATUS_READONLY]:
+            logger.debug(f"Device is skipped: {nvme.get_id()}, status: {nvme.status}")
             continue
 
+        if nvme.partition_main_bdev and nvme.partition_jm_bdev:
+            logger.info(f"Device partitions found, JM: {nvme.partition_jm_bdev}, main: {nvme.partition_main_bdev}")
+        else:
+            logger.info(f"Creating partitions for {nvme.nvme_bdev}")
+
+            nbd_device = rpc_client.nbd_start_disk(nvme.nvme_bdev)
+            time.sleep(3)
+            if not nbd_device:
+                logger.error(f"Failed to start nbd dev")
+                return False
+            snode_api = SNodeClient(snode.api_endpoint)
+            result, error = snode_api.make_gpt_partitions(nbd_device, "3")
+            if error:
+                logger.error(f"Failed to make partitions")
+                logger.error(error)
+                input("exit?")
+                return False
+            time.sleep(3)
+            rpc_client.nbd_stop_disk(nbd_device)
+            time.sleep(1)
+            rpc_client.bdev_nvme_detach_controller(nvme.nvme_controller)
+            time.sleep(1)
+            rpc_client.bdev_nvme_controller_attach(nvme.nvme_controller, nvme.pcie_address)
+            time.sleep(1)
+            rpc_client.bdev_examine(nvme.nvme_bdev)
+            time.sleep(1)
+
+            # look for partitions
+            for bdev in rpc_client.get_bdevs():
+                if bdev['name'] == f"{nvme.nvme_bdev}p1":
+                    nvme.partition_jm_bdev = bdev['name']
+                    nvme.partition_jm_size = bdev['block_size'] * bdev['num_blocks']
+                elif bdev['name'] == f"{nvme.nvme_bdev}p2":
+                    nvme.partition_main_bdev = bdev['name']
+                    nvme.partition_main_size = bdev['block_size'] * bdev['num_blocks']
+                    nvme.size = bdev['block_size'] * bdev['num_blocks']
+
+            if nvme.partition_main_bdev and nvme.partition_jm_bdev:
+                logger.info(f"Device partitions created, JM: {nvme.partition_jm_bdev}, main: {nvme.partition_main_bdev}")
+            else:
+                logger.error("Failed to create partitions")
+                return False
+
+        jm_nvme_bdevs.append(nvme.partition_jm_bdev)
         test_name = f"{nvme.nvme_bdev}_test"
-        # create testing bdev
-        ret = rpc_client.bdev_passtest_create(test_name, nvme.nvme_bdev)
+        ret = rpc_client.bdev_passtest_create(test_name, nvme.partition_main_bdev)
         if not ret:
-            logger.error(f"Failed to create bdev: {test_name}")
+            logger.error(f"Failed to create passtest bdev {test_name}")
             return False
         alceml_id = nvme.get_id()
         alceml_name = device_controller.get_alceml_name(alceml_id)
@@ -238,18 +296,6 @@ def _prepare_cluster_devices(snode, after_restart=False):
         if not ret:
             logger.error(f"Failed to create alceml bdev: {alceml_name}")
             return False
-
-        # create jm
-        if nvme.jm_bdev:
-            ret = rpc_client.bdev_jm_create(nvme.jm_bdev, alceml_name)
-            if not ret:
-                logger.error(f"Failed to create JM bdev: {snode.nvme_devices[0].jm_bdev}")
-                return False
-            nvme.testing_bdev = test_name
-            nvme.alceml_bdev = alceml_name
-            nvme.io_error = True
-            nvme.status = NVMeDevice.STATUS_JM
-            continue
 
         # add pass through
         pt_name = f"{alceml_name}_PT"
@@ -295,6 +341,40 @@ def _prepare_cluster_devices(snode, after_restart=False):
         device_events.device_status_change(nvme, nvme.status, old_status)
         snode.write_to_db(db_controller.kv_store)
 
+    if jm_nvme_bdevs:
+        raid_bdev = f"raid_jm_{snode.get_id()}"
+        ret = rpc_client.bdev_raid_create(raid_bdev, jm_nvme_bdevs)
+        if not ret:
+            logger.error(f"Failed to create raid_jm_{snode.get_id()}")
+            return False
+        alceml_name = f"alceml_jm_{snode.get_id()}"
+        pba_init_mode = 3
+        if after_restart:
+            pba_init_mode = 2
+        ret = rpc_client.bdev_alceml_create(alceml_name, raid_bdev, str(uuid.uuid4()), pba_init_mode=pba_init_mode)
+        if not ret:
+            logger.error(f"Failed to create alceml bdev: {alceml_name}")
+            return False
+
+        jm_bdev = f"jm_{snode.get_id()}"
+        ret = rpc_client.bdev_jm_create(jm_bdev, alceml_name)
+        if not ret:
+            logger.error(f"Failed to create {jm_bdev}")
+            return False
+        ret = rpc_client.get_bdevs(raid_bdev)
+
+        snode.jm_device = JMDevice({
+                'uuid': str(uuid.uuid4()),
+                'device_name': jm_bdev,
+                'size': ret[0]["block_size"] * ret[0]["num_blocks"],
+                'status': JMDevice.STATUS_ONLINE,
+                'jm_nvme_bdev_list': jm_nvme_bdevs,
+                'raid_bdev': raid_bdev,
+                'alceml_bdev': alceml_name,
+                'jm_bdev': jm_bdev
+            })
+
+    snode.write_to_db(db_controller.kv_store)
     return True
 
 
@@ -327,8 +407,8 @@ def _connect_to_remote_devs(this_node):
 
 
 def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask,
-             spdk_mem, dev_split=1, spdk_image=None, spdk_debug=False,
-             small_pool_count=0, large_pool_count=0, small_bufsize=0, large_bufsize=0, jm_device_pcie=None):
+             spdk_mem, spdk_image=None, spdk_debug=False,
+             small_pool_count=0, large_pool_count=0, small_bufsize=0, large_bufsize=0):
     db_controller = DBController()
     kv_store = db_controller.kv_store
 
@@ -519,35 +599,14 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask,
         logger.error("No NVMe devices was found!")
         return False
 
-    if dev_split > 1:
-        # split devices
-        new_devices = []
-        for dev in nvme_devs:
-            ret = rpc_client.bdev_split(dev.nvme_bdev, dev_split)
-            for pt in ret:
-                dev_dict = dev.get_clean_dict()
-                dev_dict['uuid'] = str(uuid.uuid4())
-                dev_dict['device_name'] = pt
-                dev_dict['nvme_bdev'] = pt
-                dev_dict['size'] = int(dev.size / dev_split)
-                new_devices.append(NVMeDevice(dev_dict))
-        snode.nvme_devices = new_devices
-    else:
-        snode.nvme_devices = nvme_devs
+    snode.nvme_devices = nvme_devs
 
-    jm_index = 0
     # Set device cluster order
     dev_order = get_next_cluster_device_order(db_controller)
     for index, nvme in enumerate(snode.nvme_devices):
         nvme.cluster_device_order = dev_order
         dev_order += 1
-        if jm_device_pcie and nvme.pcie_address == jm_device_pcie:
-            jm_index = index
         device_events.device_create(nvme)
-
-    # create jm
-    logger.info(f"Using device for JM: {snode.nvme_devices[jm_index].get_id()}")
-    snode.nvme_devices[jm_index].jm_bdev = f"jm_{snode.get_id()}"
 
     # save object
     snode.write_to_db(db_controller.kv_store)
@@ -833,7 +892,7 @@ def remove_storage_node(node_id, force_remove=False, force_migrate=False):
         pass
 
     try:
-        snode_api = SNodeClient(snode.api_endpoint)
+        snode_api = SNodeClient(snode.api_endpoint, timeout=20)
         snode_api.spdk_process_kill()
         snode_api.leave_swarm()
     except Exception as e:
@@ -1119,26 +1178,43 @@ def list_storage_devices(kv_store, node_id, sort, is_json):
         logger.error("This storage node is not part of the cluster")
         return False
 
-    data = []
+    storage_devices = []
+    jm_devices = []
+    remote_devices = []
     for device in snode.nvme_devices:
         logger.debug(device)
         logger.debug("*" * 20)
-        data.append({
+        storage_devices.append({
             "UUID": device.uuid,
             "Name": device.device_name,
-            "Hostname": snode.hostname,
             "Size": utils.humanbytes(device.size),
-            # "Sequential Number": device.sequential_number,
-            # "Partitions Count": device.partitions_count,
-            # "Model ID": device.model_id,
             "Serial Number": device.serial_number,
             "PCIe": device.pcie_address,
             "Status": device.status,
             "IO Err": device.io_error,
-            "Health": device.health_check,
-
+            "Health": device.health_check
         })
 
+    if snode.jm_device:
+        jm_devices.append({
+            "UUID": snode.jm_device.uuid,
+            "Name": snode.jm_device.device_name,
+            "Size": utils.humanbytes(snode.jm_device.size),
+            "Status": snode.jm_device.status,
+            "IO Err": snode.jm_device.io_error,
+            "Health": snode.jm_device.health_check
+        })
+
+    for device in snode.remote_devices:
+        logger.debug(device)
+        logger.debug("*" * 20)
+        remote_devices.append({
+            "UUID": device.uuid,
+            "Name": device.device_name,
+            "Size": utils.humanbytes(device.size),
+            "Serial Number": device.serial_number,
+            "Node ID": device.node_id,
+        })
     if sort and sort in ['node-seq', 'dev-seq', 'serial']:
         if sort == 'serial':
             sort_key = "Serial Number"
@@ -1147,13 +1223,20 @@ def list_storage_devices(kv_store, node_id, sort, is_json):
         elif sort == 'node-seq':
             # TODO: check this key
             sort_key = "Sequential Number"
-        sorted_data = sorted(data, key=lambda d: d[sort_key])
-        data = sorted_data
+        storage_devices = sorted(storage_devices, key=lambda d: d[sort_key])
 
+    data = {
+        "Storage Devices": storage_devices,
+        "JM Devices": jm_devices,
+        "Remote Devices": remote_devices,
+    }
     if is_json:
         return json.dumps(data, indent=2)
     else:
-        return utils.print_table(data)
+        out = ""
+        for d in data:
+            out += f"{d}\n{utils.print_table(data[d])}\n\n"
+        return out
 
 
 def shutdown_storage_node(node_id, force=False):
@@ -1681,7 +1764,6 @@ def deploy(ifname):
 def deploy_cleaner():
     scripts.deploy_cleaner()
     return True
-
 
 
 def get_host_secret(node_id):

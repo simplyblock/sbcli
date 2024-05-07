@@ -1,6 +1,5 @@
-SIMPLY_BLOCK_COMMAND_NAME=sbcli-dev
-SIMPLY_BLOCK_VERSION=2.5.5
-
-SIMPLY_BLOCK_DOCKER_IMAGE=simplyblock/simplyblock:dev
-
 DOCKER_USER=hamdysimplyblock
+
+SIMPLY_BLOCK_VERSION=1.1.1
+SIMPLY_BLOCK_COMMAND_NAME=sbcli-release
+SIMPLY_BLOCK_DOCKER_IMAGE=simplyblock/simplyblock:release_v1

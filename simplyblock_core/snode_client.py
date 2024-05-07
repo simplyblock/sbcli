@@ -95,3 +95,9 @@ class SNodeClient:
 
     def leave_swarm(self):
         return self._request("GET", "leave_swarm")
+
+    def make_gpt_partitions(self, nbd_device, jm_percent):
+        params = {
+            "nbd_device": nbd_device,
+            "jm_percent": jm_percent}
+        return self._request("POST", "make_gpt_partitions", params)
