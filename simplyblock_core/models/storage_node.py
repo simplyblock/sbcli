@@ -99,3 +99,12 @@ class StorageNode(BaseModel):
             return self.STATUS_CODE_MAP[self.status]
         else:
             return -1
+
+    def get_lowest_size_nvme_idx(self):
+        lowest_size_idx = 0
+        size = 0
+        for idx, nvme in enumerate(self.nvme_devices):
+            if size == 0 or nvme.size < size:
+                size = nvme.size
+                lowest_size_idx = idx
+        return lowest_size_idx

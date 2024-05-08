@@ -2,7 +2,7 @@
 import datetime
 import json
 import logging as log
-import os
+import os, sys
 
 import pprint
 
@@ -544,6 +544,9 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask,
         if jm_device_pcie and nvme.pcie_address == jm_device_pcie:
             jm_index = index
         device_events.device_create(nvme)
+
+    if not jm_device_pcie:
+        jm_index = snode.get_lowest_size_nvme_idx()
 
     # create jm
     logger.info(f"Using device for JM: {snode.nvme_devices[jm_index].get_id()}")
