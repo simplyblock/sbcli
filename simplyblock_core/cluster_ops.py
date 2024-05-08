@@ -19,11 +19,11 @@ from simplyblock_core.models.storage_node import StorageNode
 
 logger = logging.getLogger()
 
-session = boto3.session.Session()
-region = session.region_name
-if not region:
-    region = 'us-east-1'
-ec2 = boto3.resource('ec2', region_name=region)
+def setup_boto():
+    session = boto3.session.Session()
+    region = session.region_name
+    ec2 = boto3.resource('ec2', region_name=region)
+    return ec2
 
 def _add_graylog_input(cluster_ip, password):
     url = f"http://{cluster_ip}:9000/api/system/inputs"
@@ -703,6 +703,7 @@ def update_cluster(cl_id):
 def cluster_grace_startup(cl_id):
     db_controller = DBController()
     cluster = db_controller.get_cluster_by_id(cl_id)
+    ec2 = setup_boto()
     if not cluster:
         logger.error(f"Cluster not found {cl_id}")
         return False
@@ -726,6 +727,7 @@ def cluster_grace_startup(cl_id):
 def cluster_grace_shutdown(cl_id):
     db_controller = DBController()
     cluster = db_controller.get_cluster_by_id(cl_id)
+    ec2 = setup_boto()
     if not cluster:
         logger.error(f"Cluster not found {cl_id}")
         return False
