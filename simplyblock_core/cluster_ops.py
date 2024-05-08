@@ -18,7 +18,8 @@ from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
 
 logger = logging.getLogger()
-region = os.getenv('AWS_DEFAULT_REGION', 'us-east-1')
+session = boto3.session.Session()
+region = session.region_name
 ec2 = boto3.resource('ec2', region_name=region)
 
 def _add_graylog_input(cluster_ip, password):
