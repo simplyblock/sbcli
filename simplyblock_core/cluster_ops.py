@@ -693,3 +693,16 @@ def update_cluster(cl_id):
     logger.info("Done")
     return True
 
+
+def cluster_grace_shutdown(cl_id):
+    db_controller = DBController()
+    cluster = db_controller.get_cluster_by_id(cl_id)
+    if not cluster:
+        logger.error(f"Cluster not found {cl_id}")
+        return False
+
+    st = db_controller.get_storage_nodes()
+    for node in st:
+        storage_node_ops.suspend_storage_node(node.get_id())
+        storage_node_ops.shutdown_storage_node(node.get_id())
+        #awscli.boto3.stop_instance(node.ec2_instance_id)
