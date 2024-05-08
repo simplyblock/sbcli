@@ -145,3 +145,12 @@ def cluster_get_logs(uuid):
     data = cluster_ops.get_logs(uuid, is_json=True)
     return utils.get_response(json.loads(data))
 
+
+@bp.route('/cluster/gracefulshutdown/<string:uuid>', methods=['PUT'])
+def cluster_gshut(uuid):
+    cluster = db_controller.get_cluster_by_id(uuid)
+    if not cluster:
+        return utils.get_response_error(f"Cluster not found: {uuid}", 404)
+    ret = cluster_ops.cluster_grace_shutdown(uuid)
+    return utils.get_response(ret)
+
