@@ -535,19 +535,22 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask,
     else:
         snode.nvme_devices = nvme_devs
 
-    jm_index = 0
+    jm_device = snode.nvme_devices[0]
     # Set device cluster order
     dev_order = get_next_cluster_device_order(db_controller)
     for index, nvme in enumerate(snode.nvme_devices):
         nvme.cluster_device_order = dev_order
         dev_order += 1
-        if jm_device_pcie and nvme.pcie_address == jm_device_pcie:
-            jm_index = index
+        if jm_device_pcie:
+            if nvme.pcie_address == jm_device_pcie:
+                jm_device = nvme
+        elif nvme.size < jm_device.size:
+            jm_device = nvme
         device_events.device_create(nvme)
 
     # create jm
-    logger.info(f"Using device for JM: {snode.nvme_devices[jm_index].get_id()}")
-    snode.nvme_devices[jm_index].jm_bdev = f"jm_{snode.get_id()}"
+    logger.info(f"Using device for JM: {jm_device.get_id()}")
+    jm_device.jm_bdev = f"jm_{snode.get_id()}"
 
     # save object
     snode.write_to_db(db_controller.kv_store)
