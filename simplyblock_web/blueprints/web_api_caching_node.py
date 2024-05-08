@@ -34,6 +34,7 @@ def add_node_to_cluster():
     spdk_cpu_mask = None
     spdk_mem = None
     spdk_image = None
+    namespace = None
 
     if 'spdk_cpu_mask' in cl_data:
         spdk_cpu_mask = cl_data['spdk_cpu_mask']
@@ -44,12 +45,14 @@ def add_node_to_cluster():
         if spdk_mem < 1 * 1024 * 1024:
             return utils.get_response_error(f"SPDK memory:{mem} must be larger than 1G", 400)
 
-
     if 'spdk_image' in cl_data:
         spdk_image = cl_data['spdk_image']
 
+    if 'namespace' in cl_data:
+        namespace = cl_data['namespace']
+
     ret = caching_node_controller.add_node(
-        cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spdk_mem, spdk_image)
+        cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spdk_mem, spdk_image, namespace)
 
     return utils.get_response(ret)
 

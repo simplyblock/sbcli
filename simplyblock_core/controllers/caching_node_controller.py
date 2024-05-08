@@ -75,7 +75,7 @@ def addNvmeDevices(cluster, rpc_client, devs, snode):
     return devices
 
 
-def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spdk_mem, spdk_image=None):
+def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spdk_mem, spdk_image=None, namespace=None):
     db_controller = DBController()
     kv_store = db_controller.kv_store
 
@@ -155,7 +155,8 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spd
     logger.info(f"Trying to set hugepages for: {utils.humanbytes(spdk_mem)}")
     logger.info("Deploying SPDK")
     results, err = snode_api.spdk_process_start(
-        spdk_cpu_mask, spdk_mem, spdk_image, snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
+        spdk_cpu_mask, spdk_mem, spdk_image, snode.mgmt_ip,
+        snode.rpc_port, snode.rpc_username, snode.rpc_password, namespace)
     if not results:
         logger.error(f"Failed to start spdk: {err}")
         return False
