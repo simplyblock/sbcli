@@ -2,7 +2,7 @@
 import datetime
 import json
 import logging as log
-import os, sys
+import os
 
 import pprint
 
