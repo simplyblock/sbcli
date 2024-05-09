@@ -8,7 +8,6 @@ import uuid
 
 import docker
 import requests
-import boto3
 
 from simplyblock_core import utils, scripts, constants, mgmt_node_ops, storage_node_ops, shell_utils
 from simplyblock_core.controllers import cluster_events, device_controller
@@ -18,14 +17,6 @@ from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
 
 logger = logging.getLogger()
-
-def setup_boto():
-    session = boto3.session.Session()
-    region = session.region_name
-    if not region:
-        region = os.getenv("AWS_DEFAULT_REGION")
-    ec2 = boto3.resource('ec2', region_name=region)
-    return ec2
 
 def _add_graylog_input(cluster_ip, password):
     url = f"http://{cluster_ip}:9000/api/system/inputs"
@@ -705,19 +696,15 @@ def update_cluster(cl_id):
 def cluster_grace_startup(cl_id):
     db_controller = DBController()
     cluster = db_controller.get_cluster_by_id(cl_id)
-    ec2 = setup_boto()
     if not cluster:
         logger.error(f"Cluster not found {cl_id}")
         return False
+    logger.info(f"Unsuspending cluster: {cl_id}")
     unsuspend_cluster(cl_id)
 
     st = db_controller.get_storage_nodes()
     for node in st:
-        instance = ec2.Instance(node.ec2_instance_id)
-        response = instance.start()
-        logger.info(f"Starting instance: {node.ec2_instance_id}")
-        logger.info(response)
-        time.sleep(10)
+        logger.info(f"Restarting node: {node.get_id()}")
         storage_node_ops.restart_storage_node(node.get_id())
         time.sleep(5)
         get_node = db_controller.get_storage_node_by_id(node.get_id())
@@ -729,19 +716,17 @@ def cluster_grace_startup(cl_id):
 def cluster_grace_shutdown(cl_id):
     db_controller = DBController()
     cluster = db_controller.get_cluster_by_id(cl_id)
-    ec2 = setup_boto()
     if not cluster:
         logger.error(f"Cluster not found {cl_id}")
         return False
 
     st = db_controller.get_storage_nodes()
     for node in st:
+        logger.info(f"Suspending node: {node.get_id()}")
         storage_node_ops.suspend_storage_node(node.get_id())
+        logger.info(f"Shutingdown node: {node.get_id()}")
         storage_node_ops.shutdown_storage_node(node.get_id())
-        instance = ec2.Instance(node.ec2_instance_id)
-        response = instance.stop()
-        logger.info(f"Stopping instance: {node.ec2_instance_id}")
-        logger.info(response)
-
+       
+    logger.info(f"Suspending cluster: {cl_id}")
     suspend_cluster(cl_id)
     return True

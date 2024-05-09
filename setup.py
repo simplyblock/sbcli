@@ -74,7 +74,6 @@ setup(
         "psutil",
         "py-cpuinfo",
         "graypy",
-        "boto3",
     ],
     entry_points={
         'console_scripts': [

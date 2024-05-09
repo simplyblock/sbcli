@@ -1,0 +1,2 @@
+[console_scripts]
+sbcli-mig = simplyblock_cli.cli:main
