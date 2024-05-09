@@ -22,6 +22,8 @@ logger = logging.getLogger()
 def setup_boto():
     session = boto3.session.Session()
     region = session.region_name
+    if not region:
+        region = os.getenv("AWS_DEFAULT_REGION")
     ec2 = boto3.resource('ec2', region_name=region)
     return ec2
 
