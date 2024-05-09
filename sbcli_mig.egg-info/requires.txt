@@ -1,8 +1,0 @@
-foundationdb
-requests
-typing
-prettytable
-docker
-psutil
-py-cpuinfo
-graypy
