@@ -147,17 +147,17 @@ def cluster_get_logs(uuid):
 
 
 @bp.route('/cluster/gracefulshutdown/<string:uuid>', methods=['PUT'])
-def cluster_grace_shutdown(uuid):
+async def cluster_grace_shutdown(uuid):
     cluster = db_controller.get_cluster_by_id(uuid)
     if not cluster:
         return utils.get_response_error(f"Cluster not found: {uuid}", 404)
-    ret = cluster_ops.cluster_grace_shutdown(uuid)
+    ret = await cluster_ops.cluster_grace_shutdown(uuid)
     return utils.get_response(ret)
 
 @bp.route('/cluster/gracefulstartup/<string:uuid>', methods=['PUT'])
-def cluster_grace_startup(uuid):
+async def cluster_grace_startup(uuid):
     cluster = db_controller.get_cluster_by_id(uuid)
     if not cluster:
         return utils.get_response_error(f"Cluster not found: {uuid}", 404)
-    ret = cluster_ops.cluster_grace_startup(uuid)
+    ret = await cluster_ops.cluster_grace_startup(uuid)
     return utils.get_response(ret)

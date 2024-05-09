@@ -693,7 +693,7 @@ def update_cluster(cl_id):
     return True
 
 
-def cluster_grace_startup(cl_id):
+async def cluster_grace_startup(cl_id):
     db_controller = DBController()
     cluster = db_controller.get_cluster_by_id(cl_id)
     if not cluster:
@@ -713,7 +713,7 @@ def cluster_grace_startup(cl_id):
     
     return True
 
-def cluster_grace_shutdown(cl_id):
+async def cluster_grace_shutdown(cl_id):
     db_controller = DBController()
     cluster = db_controller.get_cluster_by_id(cl_id)
     if not cluster:
