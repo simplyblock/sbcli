@@ -2,6 +2,7 @@
 # encoding: utf-8
 import json
 import logging
+import threading
 import time
 import uuid
 
@@ -147,17 +148,23 @@ def cluster_get_logs(uuid):
 
 
 @bp.route('/cluster/gracefulshutdown/<string:uuid>', methods=['PUT'])
-async def cluster_grace_shutdown(uuid):
+def cluster_grace_shutdown(uuid):
     cluster = db_controller.get_cluster_by_id(uuid)
     if not cluster:
         return utils.get_response_error(f"Cluster not found: {uuid}", 404)
-    ret = await cluster_ops.cluster_grace_shutdown(uuid)
-    return utils.get_response(ret)
+    t = threading.Thread(
+        target=cluster_ops.cluster_grace_shutdown,
+        args=(uuid))
+    t.start()
+    return utils.get_response(True)
 
 @bp.route('/cluster/gracefulstartup/<string:uuid>', methods=['PUT'])
-async def cluster_grace_startup(uuid):
+def cluster_grace_startup(uuid):
     cluster = db_controller.get_cluster_by_id(uuid)
     if not cluster:
         return utils.get_response_error(f"Cluster not found: {uuid}", 404)
-    ret = await cluster_ops.cluster_grace_startup(uuid)
-    return utils.get_response(ret)
+    t = threading.Thread(
+        target=cluster_ops.cluster_grace_startup,
+        args=(uuid))
+    t.start()
+    return utils.get_response(True)
