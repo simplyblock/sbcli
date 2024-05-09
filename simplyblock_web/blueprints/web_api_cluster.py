@@ -154,7 +154,7 @@ def cluster_grace_shutdown(uuid):
         return utils.get_response_error(f"Cluster not found: {uuid}", 404)
     t = threading.Thread(
         target=cluster_ops.cluster_grace_shutdown,
-        args=(uuid))
+        args=(uuid,))
     t.start()
     return utils.get_response(True)
 
@@ -165,6 +165,6 @@ def cluster_grace_startup(uuid):
         return utils.get_response_error(f"Cluster not found: {uuid}", 404)
     t = threading.Thread(
         target=cluster_ops.cluster_grace_startup,
-        args=(uuid))
+        args=(uuid,))
     t.start()
     return utils.get_response(True)
