@@ -1,11 +1,3 @@
-
-# Simply Block CLI
-
-## Install
-```bash
-pip install sbcli-dev
- ```
-
 ## Command Line Interface
 ```bash
 $ sbcli --help
@@ -1096,7 +1088,7 @@ positional arguments:
     get                 get pool details
     delete              delete pool. It is only possible to delete a pool if it is empty (no provisioned logical volumes contained).
     enable              Set pool status to Active
-    disable             Set pool status to Inactive. Attention! This will suspend all new IO to the pool! IO in flight processing will be completed.
+    disable             Set pool status to Inactive. Attention! This will suspend all new IO to the pool! IO in flight processing will be completed.       
     get-secret          Returns auto generated, 20 characters secret.
     set-secret          Updates the secret (replaces the existing one with a new one) and returns the new one.
 
@@ -1343,6 +1335,156 @@ Create LVol from snapshot
 positional arguments:
   id          snapshot UUID
   lvol_name   LVol name
+
+optional arguments:
+  -h, --help  show this help message and exit
+
+```
+
+## Caching client node commands
+```bash
+$ sbcli caching-node -h
+usage: sbcli caching-node [-h] {deploy,add-node,list,list-lvols,remove,connect,disconnect,recreate} ...
+
+Caching client node commands
+
+positional arguments:
+  {deploy,add-node,list,list-lvols,remove,connect,disconnect,recreate}
+    deploy              Deploy caching node on this machine (local exec)
+    add-node            Add new Caching node to the cluster
+    list                List Caching nodes
+    list-lvols          List connected lvols
+    remove              Remove Caching node from the cluster
+    connect             Connect to LVol
+    disconnect          Disconnect LVol from Caching node
+    recreate            recreate Caching node bdevs
+
+optional arguments:
+  -h, --help            show this help message and exit
+
+
+```
+
+### Deploy Caching node
+```bash
+$ sbcli caching-node deploy -h
+usage: sbcli caching-node deploy [-h]
+
+Deploy Caching node
+
+optional arguments:
+  --ifname Management interface name, default: eth0
+  -h, --help  show this help message and exit
+
+```
+
+### Add Caching Node to the Cluster
+```bash
+$ sbcli caching-node add-node -h
+usage: sbcli caching-node add-node [-h] cluster_id node_ip ifname [--cpu-mask SPDK_CPU_MASK] [--memory SPDK_MEM] [--spdk-image SPDK_IMAGE] [--namespace NAMESPACE]
+
+Add new Caching node to the cluster
+
+positional arguments:
+  cluster_id            UUID of the cluster to which the node will belong
+  node_ip               IP of caching node to add
+  ifname                Management interface name
+
+optional arguments:
+  --cpu-mask SPDK_CPU_MASK
+                        SPDK app CPU mask, default is all cores found
+  --memory SPDK_MEM     SPDK huge memory allocation, default is Max hugepages available
+  --spdk-image SPDK_IMAGE
+                        SPDK image uri
+  --namespace NAMESPACE
+                        k8s namespace to deploy on
+  -h, --help            show this help message and exit
+
+```
+
+### List Caching Nodes
+```bash
+$ sbcli caching-node list -h
+usage: sbcli caching-node list [-h]
+
+List Caching nodes
+
+optional arguments:
+  -h, --help  show this help message and exit
+
+```
+
+### List Connected LVols
+```bash
+$ sbcli caching-node list-lvols -h
+usage: sbcli caching-node list-lvols [-h] id
+
+List connected lvols
+
+positional arguments:
+  id          Caching Node UUID
+
+optional arguments:
+  -h, --help  show this help message and exit
+
+```
+
+### Remove Caching Node from the Cluster
+```bash
+$ sbcli caching-node remove -h
+usage: sbcli caching-node remove [-h] id [--force]
+
+Remove Caching node from the cluster
+
+positional arguments:
+  id            Caching Node UUID
+
+optional arguments:
+  --force       Force remove
+  -h, --help    show this help message and exit
+
+```
+### Connect to LVol
+```bash
+$ sbcli caching-node connect -h
+usage: sbcli caching-node connect [-h] node_id lvol_id
+
+Connect to LVol
+
+positional arguments:
+  node_id     Caching node UUID
+  lvol_id     LVol UUID
+
+optional arguments:
+  -h, --help  show this help message and exit
+
+```
+
+### Disconnect LVol from Caching Node
+```bash
+$ sbcli caching-node disconnect -h
+usage: sbcli caching-node disconnect [-h] node_id lvol_id
+
+Disconnect LVol from Caching node
+
+positional arguments:
+  node_id     Caching node UUID
+  lvol_id     LVol UUID
+
+optional arguments:
+  -h, --help  show this help message and exit
+
+```
+
+### Recreate Caching Node BDevs
+```bash
+$ sbcli caching-node recreate -h
+usage: sbcli caching-node recreate [-h] node_id
+
+recreate Caching node bdevs
+
+positional arguments:
+  node_id     Caching node UUID
 
 optional arguments:
   -h, --help  show this help message and exit
