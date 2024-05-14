@@ -101,7 +101,7 @@ usage: sbcli cluster create [-h] [--blk_size {512,4096}] [--page_size PAGE_SIZE]
 Create a new cluster with this node as management (local run)
 
 optional arguments:
-  --blk_size {512,4096}              The block size in bytes
+  --blk_size {512,4096}               The block size in bytes
   --page_size PAGE_SIZE               The size of a data page in bytes
   --ha_type {single,ha}               Can be "single" for single node clusters or "HA" for multi-node clusters
   --tls {on,off}                      TCP/IP transport security can be turned on or off
