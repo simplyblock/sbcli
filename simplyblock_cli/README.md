@@ -1,3 +1,10 @@
+# Simply Block CLI
+
+## Install
+```bash
+pip install sbcli
+```
+
 ## Command Line Interface
 ```bash
 $ sbcli --help
