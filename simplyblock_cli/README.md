@@ -30,14 +30,17 @@ optional arguments:
 ## Cluster commands
 ```bash
 $ sbcli cluster  -h
-usage: sbcli cluster [-h] {init,status,suspend,unsuspend,add-dev-model,rm-dev-model,add-host-auth,rm-host-auth,get-capacity,get-io-stats,set-log-level,get-event-log} ...
+usage: sbcli cluster [-h] {init,create,list,status,get,suspend,unsuspend,add-dev-model,rm-dev-model,add-host-auth,rm-host-auth,get-capacity,get-io-stats,set-log-level,get-event-log} ...
 
 Cluster commands
 
 positional arguments:
-  {init,status,suspend,unsuspend,add-dev-model,rm-dev-model,add-host-auth,rm-host-auth,get-capacity,get-io-stats,set-log-level,get-event-log}
+  {init,create,list,status,get,suspend,unsuspend,add-dev-model,rm-dev-model,add-host-auth,rm-host-auth,get-capacity,get-io-stats,set-log-level,get-event-log}
     init                Create an empty cluster
+    create              Create a new cluster with this node as management (local run)
+    list                Show clusters list
     status              Show cluster status
+    get                 Show cluster info
     suspend             Suspend cluster. The cluster will stop processing all IO. Attention! This will cause an "all paths down" event for nvmeof/iscsi volumes on all hosts connected to
                         the cluster.
     unsuspend           Unsuspend cluster. The cluster will start processing IO again.
@@ -90,6 +93,45 @@ optional arguments:
 
 ```
 
+### Create Cluster
+```bash
+$ sbcli cluster create -h
+usage: sbcli cluster create [-h] [--blk_size {512,4096}] [--page_size PAGE_SIZE] [--ha_type {single,ha}] [--tls {on,off}] [--auth-hosts-only {on,off}] [--model_ids MODEL_IDS [MODEL_IDS ...]] [--CLI_PASS CLI_PASS] [--cap-warn CAP_WARN] [--cap-crit CAP_CRIT] [--prov-cap-warn PROV_CAP_WARN] [--prov-cap-crit PROV_CAP_CRIT] [--ifname IFNAME] [--log-del-interval LOG_DEL_INTERVAL] [--metrics-retention-period METRICS_RETENTION_PERIOD]
+
+Create a new cluster with this node as management (local run)
+
+optional arguments:
+  --blk_size {512,4096}              The block size in bytes
+  --page_size PAGE_SIZE               The size of a data page in bytes
+  --ha_type {single,ha}               Can be "single" for single node clusters or "HA" for multi-node clusters
+  --tls {on,off}                      TCP/IP transport security can be turned on or off
+  --auth-hosts-only {on,off}          If turned on, hosts must be explicitly added to the cluster to connect to any NVMeoF subsystem
+  --model_ids MODEL_IDS [MODEL_IDS ...]
+                                      A list of supported NVMe device model-ids
+  --CLI_PASS CLI_PASS                 Password for CLI SSH connection
+  --cap-warn CAP_WARN                 Capacity warning level in percent
+  --cap-crit CAP_CRIT                 Capacity critical level in percent
+  --prov-cap-warn PROV_CAP_WARN       Provisioned capacity warning level in percent
+  --prov-cap-crit PROV_CAP_CRIT       Provisioned capacity critical level in percent
+  --ifname IFNAME                     Management interface name
+  --log-del-interval LOG_DEL_INTERVAL Graylog deletion interval
+  --metrics-retention-period METRICS_RETENTION_PERIOD
+                                      Retention period for Prometheus metrics
+  -h, --help                          show this help message and exit
+
+```
+
+### List Clusters
+```bash
+$ sbcli cluster list -h
+usage: sbcli cluster list [-h]
+
+Show clusters list
+
+optional arguments:
+  -h, --help  show this help message and exit
+
+```
 ### Show cluster status
 ```bash
 $ sbcli cluster status -h
@@ -102,6 +144,21 @@ positional arguments:
 
 optional arguments:
   -h, --help  show this help message and exit
+```
+
+### Show Cluster Info
+```bash
+$ sbcli cluster get -h
+usage: sbcli cluster get [-h] id
+
+Show cluster info
+
+positional arguments:
+  id          The cluster UUID
+
+optional arguments:
+  -h, --help  show this help message and exit
+
 ```
 
 ### Suspend cluster 
