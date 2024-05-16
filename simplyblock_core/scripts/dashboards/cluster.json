@@ -90,7 +90,7 @@
                                 }
                             ]
                         },
-                        "unit": "decbytes"
+                        "unit": "bytes"
                     },
                     "overrides": []
                 },
@@ -183,7 +183,7 @@
                                 }
                             ]
                         },
-                        "unit": "decbytes"
+                        "unit": "bytes"
                     },
                     "overrides": []
                 },
@@ -276,7 +276,7 @@
                                 }
                             ]
                         },
-                        "unit": "decbytes"
+                        "unit": "bytes"
                     },
                     "overrides": []
                 },
@@ -369,7 +369,7 @@
                                 }
                             ]
                         },
-                        "unit": "decbytes"
+                        "unit": "bytes"
                     },
                     "overrides": []
                 },
@@ -462,7 +462,7 @@
                                 }
                             ]
                         },
-                        "unit": "decbytes"
+                        "unit": "percent"
                     },
                     "overrides": []
                 },
@@ -555,7 +555,7 @@
                                 }
                             ]
                         },
-                        "unit": "decbytes"
+                        "unit": "percent"
                     },
                     "overrides": []
                 },
@@ -661,7 +661,7 @@
                                 }
                             ]
                         },
-                        "unit": "decbytes"
+                        "unit": "bytes"
                     },
                     "overrides": []
                 },
@@ -754,7 +754,7 @@
                                 }
                             ]
                         },
-                        "unit": "Bps"
+                        "unit": "binBps"
                     },
                     "overrides": []
                 },
@@ -847,7 +847,7 @@
                                 }
                             ]
                         },
-                        "unit": "ns"
+                        "unit": "µs"
                     },
                     "overrides": []
                 },
@@ -1229,7 +1229,7 @@
                                 }
                             ]
                         },
-                        "unit": "decbytes"
+                        "unit": "bytes"
                     },
                     "overrides": []
                 },
@@ -1322,7 +1322,7 @@
                                 }
                             ]
                         },
-                        "unit": "Bps"
+                        "unit": "bytes"
                     },
                     "overrides": []
                 },
@@ -1414,7 +1414,8 @@
                                     "value": 80
                                 }
                             ]
-                        }
+                        },
+                        "unit": "µs"
                     },
                     "overrides": []
                 },
@@ -1888,7 +1889,7 @@
                                 }
                             ]
                         },
-                        "unit": "decbytes"
+                        "unit": "bytes"
                     },
                     "overrides": []
                 },
@@ -1981,7 +1982,8 @@
                                     "value": 80
                                 }
                             ]
-                        }
+                        },
+                        "unit": "µs"
                     },
                     "overrides": []
                 },
@@ -2283,7 +2285,7 @@
                                 }
                             ]
                         },
-                        "unit": "decbytes"
+                        "unit": "bytes"
                     },
                     "overrides": []
                 },
@@ -2320,297 +2322,6 @@
                     }
                 ],
                 "title": "cluster_unmap_bytes",
-                "type": "timeseries"
-            },
-            {
-                "collapsed": false,
-                "gridPos": {
-                    "h": 1,
-                    "w": 24,
-                    "x": 0,
-                    "y": 61
-                },
-                "id": 32,
-                "panels": [],
-                "title": "others",
-                "type": "row"
-            },
-            {
-                "datasource": {
-                    "type": "prometheus",
-                    "uid": "PBFA97CFB590B2093"
-                },
-                "fieldConfig": {
-                    "defaults": {
-                        "color": {
-                            "mode": "palette-classic"
-                        },
-                        "custom": {
-                            "axisCenteredZero": false,
-                            "axisColorMode": "text",
-                            "axisLabel": "",
-                            "axisPlacement": "auto",
-                            "barAlignment": 0,
-                            "drawStyle": "line",
-                            "fillOpacity": 0,
-                            "gradientMode": "none",
-                            "hideFrom": {
-                                "legend": false,
-                                "tooltip": false,
-                                "viz": false
-                            },
-                            "lineInterpolation": "linear",
-                            "lineWidth": 1,
-                            "pointSize": 5,
-                            "scaleDistribution": {
-                                "type": "linear"
-                            },
-                            "showPoints": "auto",
-                            "spanNulls": false,
-                            "stacking": {
-                                "group": "A",
-                                "mode": "none"
-                            },
-                            "thresholdsStyle": {
-                                "mode": "off"
-                            }
-                        },
-                        "mappings": [],
-                        "thresholds": {
-                            "mode": "absolute",
-                            "steps": [
-                                {
-                                    "color": "green",
-                                    "value": null
-                                },
-                                {
-                                    "color": "red",
-                                    "value": 80
-                                }
-                            ]
-                        }
-                    },
-                    "overrides": []
-                },
-                "gridPos": {
-                    "h": 7,
-                    "w": 7,
-                    "x": 0,
-                    "y": 62
-                },
-                "id": 8,
-                "options": {
-                    "legend": {
-                        "calcs": [],
-                        "displayMode": "list",
-                        "placement": "bottom",
-                        "showLegend": true
-                    },
-                    "tooltip": {
-                        "mode": "single",
-                        "sort": "none"
-                    }
-                },
-                "targets": [
-                    {
-                        "datasource": {
-                            "type": "prometheus",
-                            "uid": "PBFA97CFB590B2093"
-                        },
-                        "editorMode": "builder",
-                        "expr": "cluster_record_end_time",
-                        "legendFormat": "__auto",
-                        "range": true,
-                        "refId": "A"
-                    }
-                ],
-                "title": "cluster_record_end_time",
-                "type": "timeseries"
-            },
-            {
-                "datasource": {
-                    "type": "prometheus",
-                    "uid": "PBFA97CFB590B2093"
-                },
-                "description": "",
-                "fieldConfig": {
-                    "defaults": {
-                        "color": {
-                            "mode": "palette-classic"
-                        },
-                        "custom": {
-                            "axisCenteredZero": false,
-                            "axisColorMode": "text",
-                            "axisLabel": "",
-                            "axisPlacement": "auto",
-                            "barAlignment": 0,
-                            "drawStyle": "line",
-                            "fillOpacity": 0,
-                            "gradientMode": "none",
-                            "hideFrom": {
-                                "legend": false,
-                                "tooltip": false,
-                                "viz": false
-                            },
-                            "lineInterpolation": "linear",
-                            "lineWidth": 1,
-                            "pointSize": 5,
-                            "scaleDistribution": {
-                                "type": "linear"
-                            },
-                            "showPoints": "auto",
-                            "spanNulls": false,
-                            "stacking": {
-                                "group": "A",
-                                "mode": "none"
-                            },
-                            "thresholdsStyle": {
-                                "mode": "off"
-                            }
-                        },
-                        "mappings": [],
-                        "thresholds": {
-                            "mode": "absolute",
-                            "steps": [
-                                {
-                                    "color": "green",
-                                    "value": null
-                                },
-                                {
-                                    "color": "red",
-                                    "value": 80
-                                }
-                            ]
-                        }
-                    },
-                    "overrides": []
-                },
-                "gridPos": {
-                    "h": 7,
-                    "w": 7,
-                    "x": 7,
-                    "y": 62
-                },
-                "id": 7,
-                "options": {
-                    "legend": {
-                        "calcs": [],
-                        "displayMode": "list",
-                        "placement": "bottom",
-                        "showLegend": true
-                    },
-                    "tooltip": {
-                        "mode": "single",
-                        "sort": "none"
-                    }
-                },
-                "targets": [
-                    {
-                        "datasource": {
-                            "type": "prometheus",
-                            "uid": "PBFA97CFB590B2093"
-                        },
-                        "editorMode": "builder",
-                        "expr": "cluster_record_duration",
-                        "legendFormat": "__auto",
-                        "range": true,
-                        "refId": "A"
-                    }
-                ],
-                "title": "cluster_record_duration",
-                "type": "timeseries"
-            },
-            {
-                "datasource": {
-                    "type": "prometheus",
-                    "uid": "PBFA97CFB590B2093"
-                },
-                "fieldConfig": {
-                    "defaults": {
-                        "color": {
-                            "mode": "palette-classic"
-                        },
-                        "custom": {
-                            "axisCenteredZero": false,
-                            "axisColorMode": "text",
-                            "axisLabel": "",
-                            "axisPlacement": "auto",
-                            "barAlignment": 0,
-                            "drawStyle": "line",
-                            "fillOpacity": 0,
-                            "gradientMode": "none",
-                            "hideFrom": {
-                                "legend": false,
-                                "tooltip": false,
-                                "viz": false
-                            },
-                            "lineInterpolation": "linear",
-                            "lineWidth": 1,
-                            "pointSize": 5,
-                            "scaleDistribution": {
-                                "type": "linear"
-                            },
-                            "showPoints": "auto",
-                            "spanNulls": false,
-                            "stacking": {
-                                "group": "A",
-                                "mode": "none"
-                            },
-                            "thresholdsStyle": {
-                                "mode": "off"
-                            }
-                        },
-                        "mappings": [],
-                        "thresholds": {
-                            "mode": "absolute",
-                            "steps": [
-                                {
-                                    "color": "green",
-                                    "value": null
-                                },
-                                {
-                                    "color": "red",
-                                    "value": 80
-                                }
-                            ]
-                        },
-                        "unit": "decbytes"
-                    },
-                    "overrides": []
-                },
-                "gridPos": {
-                    "h": 7,
-                    "w": 7,
-                    "x": 14,
-                    "y": 62
-                },
-                "id": 9,
-                "options": {
-                    "legend": {
-                        "calcs": [],
-                        "displayMode": "list",
-                        "placement": "bottom",
-                        "showLegend": true
-                    },
-                    "tooltip": {
-                        "mode": "single",
-                        "sort": "none"
-                    }
-                },
-                "targets": [
-                    {
-                        "datasource": {
-                            "type": "prometheus",
-                            "uid": "PBFA97CFB590B2093"
-                        },
-                        "editorMode": "builder",
-                        "expr": "cluster_record_start_time",
-                        "legendFormat": "__auto",
-                        "range": true,
-                        "refId": "A"
-                    }
-                ],
-                "title": "cluster_record_start_time",
                 "type": "timeseries"
             }
         ],
