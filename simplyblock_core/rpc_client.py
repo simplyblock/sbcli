@@ -646,3 +646,7 @@ class RPCClient:
 
     def framework_start_init(self):
         return self._request("framework_start_init")
+
+    def bdev_jm_unmap_vuid(self, name, vuid):
+        params = {"name": name, "vuid": vuid}
+        return self._request("bdev_jm_unmap_vuid", params)
