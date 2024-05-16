@@ -1189,13 +1189,10 @@ def shutdown_storage_node(node_id, force=False):
     snode.write_to_db(db_controller.kv_store)
     storage_events.snode_status_change(snode, snode.status, old_status)
 
-    logger.debug("Setting LVols to offline")
+    logger.debug("Removing LVols")
     for lvol_id in snode.lvols:
         logger.debug(lvol_id)
-        lvol = db_controller.get_lvol_by_id(lvol_id)
-        if lvol:
-            lvol.status = lvol.STATUS_OFFLINE
-            lvol.write_to_db(db_controller.kv_store)
+        lvol_controller.delete_lvol_from_node(lvol_id, snode.get_id(), clear_data=False)
 
     for dev in snode.nvme_devices:
         if dev.status in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_READONLY]:
@@ -1213,6 +1210,7 @@ def shutdown_storage_node(node_id, force=False):
         snode.rpc_username, snode.rpc_password)
 
     # delete jm
+    logger.info("Removing JM")
     rpc_client.bdev_jm_delete(f"jm_{snode.get_id()}")
 
     logger.info("Stopping SPDK")
