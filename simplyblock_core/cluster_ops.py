@@ -18,6 +18,7 @@ from simplyblock_core.models.storage_node import StorageNode
 
 logger = logging.getLogger()
 
+
 def _add_graylog_input(cluster_ip, password):
     url = f"http://{cluster_ip}:9000/api/system/inputs"
     payload = json.dumps({
@@ -713,6 +714,7 @@ def cluster_grace_startup(cl_id):
     
     return True
 
+
 def cluster_grace_shutdown(cl_id):
     db_controller = DBController()
     cluster = db_controller.get_cluster_by_id(cl_id)
@@ -724,7 +726,7 @@ def cluster_grace_shutdown(cl_id):
     for node in st:
         logger.info(f"Suspending node: {node.get_id()}")
         storage_node_ops.suspend_storage_node(node.get_id())
-        logger.info(f"Shutingdown node: {node.get_id()}")
+        logger.info(f"Shutting down node: {node.get_id()}")
         storage_node_ops.shutdown_storage_node(node.get_id())
        
     logger.info(f"Suspending cluster: {cl_id}")

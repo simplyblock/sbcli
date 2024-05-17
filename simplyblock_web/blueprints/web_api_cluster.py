@@ -159,6 +159,7 @@ def cluster_grace_shutdown(uuid):
     # FIXME: Any failure within the thread are not handled
     return utils.get_response(True)
 
+
 @bp.route('/cluster/gracefulstartup/<string:uuid>', methods=['PUT'])
 def cluster_grace_startup(uuid):
     cluster = db_controller.get_cluster_by_id(uuid)
