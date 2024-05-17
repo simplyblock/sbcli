@@ -278,6 +278,7 @@ def clone(snapshot_id, clone_name):
     lvol.bdev_stack = bdev_stack
     lvol.uuid = lvol_id
     lvol.lvol_bdev = lvol_name
+    lvol.top_bdev = top_bdev
     lvol.hostname = snode.hostname
     lvol.node_id = snode.get_id()
     lvol.mode = 'read-write'

@@ -608,22 +608,22 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
     lvol.base_bdev = f"distr_{lvol.vuid}_{name}"
     lvol.top_bdev = lvol.base_bdev
 
-    lvol.bdev_stack.append({
-        "type": "bdev_distr",
-        "name": lvol.base_bdev,
-        "params": {
-            "name": lvol.base_bdev,
-            "vuid": lvol.vuid,
-            "ndcs": lvol.ndcs,
-            "npcs": lvol.npcs,
-            "num_blocks": int(lvol.size / lvol.distr_bs),
-            "block_size": lvol.distr_bs,
-            "chunk_size": lvol.distr_chunk_bs,
-            "pba_page_size":  lvol.distr_page_size,
-        }
-    })
-
     if with_snapshot:
+        lvol.bdev_stack.append({
+            "type": "bdev_distr",
+            "name": lvol.base_bdev,
+            "params": {
+                "name": lvol.base_bdev,
+                "vuid": lvol.vuid,
+                "ndcs": lvol.ndcs,
+                "npcs": lvol.npcs,
+                "num_blocks": int(lvol.max_size / lvol.distr_bs),
+                "block_size": lvol.distr_bs,
+                "chunk_size": lvol.distr_chunk_bs,
+                "pba_page_size": lvol.distr_page_size,
+            }
+        })
+
         lvol.bdev_stack.append({
             "type": "bmap_init",
             "name": lvol.base_bdev,
@@ -645,6 +645,21 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
                 "base_bdev": lvol.base_bdev,
                 "label": "label",
                 "desc": "desc"
+            }
+        })
+    else:
+        lvol.bdev_stack.append({
+            "type": "bdev_distr",
+            "name": lvol.base_bdev,
+            "params": {
+                "name": lvol.base_bdev,
+                "vuid": lvol.vuid,
+                "ndcs": lvol.ndcs,
+                "npcs": lvol.npcs,
+                "num_blocks": int(lvol.size / lvol.distr_bs),
+                "block_size": lvol.distr_bs,
+                "chunk_size": lvol.distr_chunk_bs,
+                "pba_page_size": lvol.distr_page_size,
             }
         })
 
@@ -1194,14 +1209,13 @@ def resize_lvol(id, new_size):
         logger.error(f"New size {new_size} must be higher than the original size {lvol.size}")
         return False
 
+    if lvol.max_size < new_size:
+        logger.error(f"New size {new_size} must be smaller than the max size {lvol.max_size}")
+        return False
+
     logger.info(f"Resizing LVol: {lvol.id}, new size: {lvol.size}")
 
-    # if lvol.pool_uuid:
-    #     pool = db_controller.get_pool_by_id(lvol.pool_uuid)
-    #     if pool:
-    #         print(pool)
-
-    snode = db_controller.get_storage_node_by_hostname(lvol.hostname)
+    snode = db_controller.get_storage_node_by_id(lvol.node_id)
 
     # creating RPCClient instance
     rpc_client = RPCClient(
@@ -1210,19 +1224,25 @@ def resize_lvol(id, new_size):
         snode.rpc_username,
         snode.rpc_password)
 
-    # ret = rpc_client.get_bdevs(lvol.lvol_name)
-    # bdev_data = ret[0]
-    # logger.debug(json.dumps(ret, indent=2))
-    # print("is claimed:", bdev_data['claimed'])
-    size_mb = int(new_size / (1024 * 1024))
-    ret = rpc_client.resize_lvol(lvol.lvol_bdev, size_mb)
-    if not ret:
-        return "Error"
+    num_blocks = int(new_size / lvol.distr_bs)
+    if lvol.snapshot_name:
+        ret = rpc_client.resize_lvol(lvol.top_bdev, num_blocks)
+        if not ret:
+            logger.error("Error resizing lvol")
+            return False
+    elif lvol.cloned_from_snap:
+        ret = rpc_client.resize_clone(lvol.top_bdev, num_blocks)
+        if not ret:
+            logger.error("Error resizing clone")
+            return False
+    else:
+        logger.error("Can not resize distr")
+        return False
 
     lvol.size = new_size
     lvol.write_to_db(db_controller.kv_store)
     logger.info("Done")
-    return ret
+    return True
 
 
 def set_read_only(id):
