@@ -5,7 +5,7 @@ import logging
 from flask import Flask
 
 import utils
-from blueprints import csi, web_api_cluster, web_api_mgmt_node, web_api_device, \
+from blueprints import web_api_cluster, web_api_mgmt_node, web_api_device, \
     web_api_lvol, web_api_storage_node, web_api_pool, web_api_caching_node, web_api_snapshot
 from auth_middleware import token_required
 from simplyblock_core import constants
@@ -22,7 +22,6 @@ app.url_map.strict_slashes = False
 
 
 # Add routes
-app.register_blueprint(csi.bp)
 app.register_blueprint(web_api_cluster.bp)
 app.register_blueprint(web_api_mgmt_node.bp)
 app.register_blueprint(web_api_device.bp)
