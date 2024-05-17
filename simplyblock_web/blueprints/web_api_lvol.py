@@ -257,7 +257,6 @@ def connect_lvol(uuid):
     return utils.get_csi_response(ret)
 
 
-
 @bp.route('/lvol/create_snapshot', methods=['POST'])
 def create_snapshot():
     cl_data = request.get_json()
@@ -269,4 +268,4 @@ def create_snapshot():
     snapID = snapshot_controller.add(
         cl_data['lvol_id'],
         cl_data['snapshot_name'])
-    return utils.get_csi_response(snapID)
+    return utils.get_response(snapID)
