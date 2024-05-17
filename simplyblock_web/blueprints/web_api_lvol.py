@@ -85,7 +85,7 @@ def add_lvol():
         | pool (required) | Pool UUID or name
         | comp            | Create a new compress LVol
         | crypto          | Create a new crypto LVol
-        | snap            | Create a Lvol with snapshot capability
+        | snapshot        | Create a Lvol with snapshot capability
         | max-rw-iops     | Maximum Read Write IO Per Second
         | max_rw_mbytes   | Maximum Read Write Mega Bytes Per Second
         | max_r_mbytes    | Maximum Read Mega Bytes Per Second
@@ -133,7 +133,7 @@ def add_lvol():
 
     compression = utils.get_value_or_default(cl_data, "comp", False)
     encryption = utils.get_value_or_default(cl_data, "crypto", False)
-    snapshot = utils.get_value_or_default(cl_data, "snap", False)
+    snapshot = utils.get_value_or_default(cl_data, "snapshot", False)
 
 
     ha_type = utils.get_value_or_default(cl_data, "ha_type", "default")
