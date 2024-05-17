@@ -181,3 +181,23 @@ def pool_iostats(uuid, history):
     new_records = core_utils.process_records(out, records_count)
 
     return utils.get_response(new_records)
+
+@bp.route('/pool/get_pools', methods=['GET'])
+def get_pools():
+    pools = db_controller.get_pools()
+    data = []
+    cluster_size = 512
+    for pool in pools:
+        total_size = 0
+        for lvol_id in pool.lvols:
+            lvol = db_controller.get_lvol_by_id(lvol_id)
+            total_size += lvol.size
+
+        data.append({
+            "free_clusters": int((pool.pool_max_size - total_size) / cluster_size),
+            "cluster_size": cluster_size,
+            "total_data_clusters": int(total_size / cluster_size),
+            "name": pool.pool_name,
+            "uuid": pool.id,
+        })
+    return utils.get_csi_response(data)
