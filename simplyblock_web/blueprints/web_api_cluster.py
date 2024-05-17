@@ -156,6 +156,7 @@ def cluster_grace_shutdown(uuid):
         target=cluster_ops.cluster_grace_shutdown,
         args=(uuid,))
     t.start()
+    # FIXME: Any failure within the thread are not handled
     return utils.get_response(True)
 
 @bp.route('/cluster/gracefulstartup/<string:uuid>', methods=['PUT'])
@@ -167,4 +168,5 @@ def cluster_grace_startup(uuid):
         target=cluster_ops.cluster_grace_startup,
         args=(uuid,))
     t.start()
+    # FIXME: Any failure within the thread are not handled
     return utils.get_response(True)
