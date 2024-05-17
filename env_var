@@ -1,6 +1,6 @@
-SIMPLY_BLOCK_COMMAND_NAME=sbcli-dev
-SIMPLY_BLOCK_VERSION=2.5.9
+SIMPLY_BLOCK_COMMAND_NAME=sbcli-mig
+SIMPLY_BLOCK_VERSION=1.0.101
 
-SIMPLY_BLOCK_DOCKER_IMAGE=simplyblock/simplyblock:dev
+SIMPLY_BLOCK_DOCKER_IMAGE=simplyblock/simplyblock:add_with_snapshot_lvol_api
 
 DOCKER_USER=hamdysimplyblock
