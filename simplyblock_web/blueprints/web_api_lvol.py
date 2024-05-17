@@ -7,7 +7,7 @@ import logging
 from flask import Blueprint
 from flask import request
 
-from simplyblock_core.controllers import lvol_controller
+from simplyblock_core.controllers import lvol_controller, snapshot_controller
 
 from simplyblock_web import utils
 
@@ -255,3 +255,18 @@ def connect_lvol(uuid):
 
     ret = lvol_controller.connect_lvol(uuid)
     return utils.get_csi_response(ret)
+
+
+
+@bp.route('/lvol/create_snapshot', methods=['POST'])
+def create_snapshot():
+    cl_data = request.get_json()
+    if 'lvol_id' not in cl_data:
+        return utils.get_csi_response(None, "missing required param: lvol_id", 400)
+    if 'snapshot_name' not in cl_data:
+        return utils.get_csi_response(None, "missing required param: snapshot_name", 400)
+
+    snapID = snapshot_controller.add(
+        cl_data['lvol_id'],
+        cl_data['snapshot_name'])
+    return utils.get_csi_response(snapID)
