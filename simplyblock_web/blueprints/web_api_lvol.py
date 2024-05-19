@@ -306,37 +306,3 @@ def unpublish_volume(uuid):
         bool
     """
     return utils.get_csi_response(True)
-
-@bp.route('/lvol/get_volume_info/<string:pool_name>/<string:lvol_name>', methods=['GET'])
-def get_volume_info_by_name(pool_name, lvol_name):
-    for lv in db_controller.get_lvols():
-        if lv.lvol_name == lvol_name:
-            return get_volume_info(lv.get_id())
-    return utils.get_csi_response(None, "lvol not found")
-
-
-@bp.route('/lvol/get_volume_info/<string:uuid>', methods=['GET'])
-def get_volume_info(uuid):
-    lvol = db_controller.get_lvol_by_id(uuid)
-    if not lvol:
-        return utils.get_csi_response(None, "lvol not found")
-    else:
-        snode = db_controller.get_storage_node_by_id(lvol.node_id)
-
-        out = [{
-            "name": lvol.lvol_name,
-            "uuid": lvol.uuid,
-            "block_size": 512,
-            "num_blocks": int(lvol.size / 512),
-            "driver_specific": {"lvol": {"lvol_store_uuid": lvol.pool_uuid}},
-            "pool_id": lvol.pool_uuid,
-
-            "targetType": "TCP",
-            "targetAddr": snode.data_nics[0].ip4_address,
-            "targetPort": "4420",
-            "nqn": snode.subsystem + ":lvol:" + lvol.get_id(),
-            "model": lvol.get_id(),
-            "lvolSize": lvol.size,
-        }]
-
-        return utils.get_csi_response(out)
