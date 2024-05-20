@@ -604,7 +604,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
     lvol.distr_chunk_bs = distr_chunk_bs
     lvol.distr_page_size = cl.page_size_in_blocks
 
-    lvol.base_bdev = f"distr_{lvol.vuid}_{name}"
+    lvol.base_bdev = f"distr_{lvol.vuid}"
     lvol.top_bdev = lvol.base_bdev
 
     if with_snapshot:
@@ -635,7 +635,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
             }
         })
         lvol.snapshot_name = f"snapshot_{lvol.vuid}_{name}"
-        lvol.top_bdev = f"lvol_{lvol.vuid}"
+        lvol.top_bdev = f"lvol_{lvol.vuid}_{lvol.vuid}"
         lvol.bdev_stack.append({
             "type": "ultra_lvol",
             "name": lvol.top_bdev,
