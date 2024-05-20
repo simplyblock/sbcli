@@ -487,12 +487,12 @@ optional arguments:
 - must be run on the storage node itself
 ```bash
 $ sbcli storage-node restart -h
-usage: sbcli storage-node restart [-h] [-t] cluster_id
+usage: sbcli storage-node restart [-h] [-t] node_id
 
 Restart a storage node. All functions and device drivers will be reset. During restart, the node does not accept IO. In a high-availability setup, this will not impact operations.
 
 positional arguments:
-  cluster_id  the cluster UUID to which the node belongs
+  node_id  UUID of storage node
 
 optional arguments:
   -h, --help  show this help message and exit
@@ -503,13 +503,13 @@ optional arguments:
 ### Shutdown a storage node
 ```bash
 $ sbcli storage-node shutdown -h
-usage: sbcli storage-node shutdown [-h] cluster_id
+usage: sbcli storage-node shutdown [-h] node_id
 
 Shutdown a storage node. Once the command is issued, the node will stop accepting IO,but IO, which was previously received, will still be processed. In a high-availability setup, this will
 not impact operations.
 
 positional arguments:
-  cluster_id  the cluster UUID to which the node belongs
+  node_id  UUID of storage node
 
 optional arguments:
   -h, --help  show this help message and exit
@@ -519,12 +519,12 @@ optional arguments:
 ### Suspend a storage node
 ```bash
 $ sbcli storage-node suspend -h
-usage: sbcli storage-node suspend [-h] cluster_id
+usage: sbcli storage-node suspend [-h] node_id
 
 Suspend a storage node. The node will stop accepting new IO, but will finish processing any IO, which has been received already.
 
 positional arguments:
-  cluster_id  the cluster UUID to which the node belongs
+  node_id  UUID of storage node
 
 optional arguments:
   -h, --help  show this help message and exit
@@ -534,12 +534,12 @@ optional arguments:
 ### Resume a storage node
 ```bash
 $ sbcli storage-node resume -h
-usage: sbcli storage-node resume [-h] cluster_id
+usage: sbcli storage-node resume [-h] node_id
 
 Resume a storage node
 
 positional arguments:
-  cluster_id  the cluster UUID to which the node belongs
+  node_id  UUID of storage node
 
 optional arguments:
   -h, --help  show this help message and exit
@@ -548,12 +548,12 @@ optional arguments:
 ### Returns the current io statistics of a node
 ```bash
 $ sbcli storage-node get-io-stats -h
-usage: sbcli storage-node get-io-stats [-h] cluster_id
+usage: sbcli storage-node get-io-stats [-h] node_id
 
 Returns the current io statistics of a node
 
 positional arguments:
-  cluster_id  the cluster UUID
+  node_id  UUID of storage node
 
 optional arguments:
   -h, --help  show this help message and exit
