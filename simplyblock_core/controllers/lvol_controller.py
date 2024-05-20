@@ -176,7 +176,6 @@ def add_lvol(name, size, host_id_or_name, pool_id_or_name, use_comp, use_crypto,
              max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes,
              distr_bs=None, distr_chunk_bs=None):
     logger.info("adding LVol")
-
     snode = db_controller.get_storage_node_by_id(host_id_or_name)
     if not snode:
         snode = db_controller.get_storage_node_by_hostname(host_id_or_name)
@@ -636,7 +635,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
             }
         })
         lvol.snapshot_name = f"snapshot_{lvol.vuid}_{name}"
-        lvol.top_bdev = f"lvol_{lvol.vuid}_{lvol.lvol_name}"
+        lvol.top_bdev = f"lvol_{lvol.vuid}"
         lvol.bdev_stack.append({
             "type": "ultra_lvol",
             "name": lvol.top_bdev,
