@@ -97,6 +97,7 @@ def add_lvol():
         | distr_chunk_bs  | Distr bdev chunk block size, Default=4096
         | crypto_key1     | the hex value of key1 to be used for lvol encryption
         | crypto_key2     | the hex value of key2 to be used for lvol encryption
+        | host_id         | the hostID on which the lvol is created
     """""
 
     cl_data = request.get_json()
@@ -142,6 +143,7 @@ def add_lvol():
     distr_chunk_bs = utils.get_int_value_or_default(cl_data, "distr_chunk_bs", 4096)
     crypto_key1 = utils.get_value_or_default(cl_data, "crypto_key1", None)
     crypto_key2 = utils.get_value_or_default(cl_data, "crypto_key2", None)
+    host_id = utils.get_value_or_default(cl_data, "host_id", None)
 
     ret, error = lvol_controller.add_lvol_ha(
         name=name,
@@ -156,7 +158,7 @@ def add_lvol():
         max_r_mbytes=r_mbytes,
         max_w_mbytes=w_mbytes,
 
-        host_id_or_name=None,
+        host_id_or_name=host_id,
         ha_type=ha_type,
         distr_vuid=distr_vuid,
         distr_ndcs=distr_ndcs,
