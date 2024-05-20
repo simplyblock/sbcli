@@ -519,7 +519,7 @@ optional arguments:
 ### Suspend a storage node
 ```bash
 $ sbcli storage-node suspend -h
-usage: sbcli storage-node suspend [-h] node_id
+usage: sbcli storage-node suspend [-h] [--force] node_id
 
 Suspend a storage node. The node will stop accepting new IO, but will finish processing any IO, which has been received already.
 
