@@ -31,6 +31,16 @@ except:
     pass
 
 
+def get_docker_client():
+    ip = os.getenv("DOCKER_IP")
+    if not ip:
+        for ifname in node_utils.get_nics_data():
+            if ifname in ["eth0", "ens0"]:
+                ip = node_utils.get_nics_data()[ifname]['ip']
+                break
+    return docker.DockerClient(base_url=f"tcp://{ip}:2375", version="auto", timeout=60 * 5)
+
+
 @bp.route('/scan_devices', methods=['GET'])
 def scan_devices():
     run_health_check = request.args.get('run_health_check', default=False, type=bool)
@@ -80,7 +90,7 @@ def spdk_process_start():
     else:
         spdk_mem = 4000
 
-    node_docker = docker.DockerClient(base_url='unix://var/run/docker.sock')
+    node_docker = get_docker_client()
     nodes = node_docker.containers.list(all=True)
     for node in nodes:
         if node.attrs["Name"] in ["/spdk", "/spdk_proxy"]:
@@ -153,7 +163,7 @@ def spdk_process_start():
 @bp.route('/spdk_process_kill', methods=['GET'])
 def spdk_process_kill():
     force = request.args.get('force', default=False, type=bool)
-    node_docker = docker.DockerClient(base_url='unix://var/run/docker.sock')
+    node_docker = get_docker_client()
     for cont in node_docker.containers.list(all=True):
         logger.debug(cont.attrs)
         if cont.attrs['Name'] == "/spdk" or cont.attrs['Name'] == "/spdk_proxy":
@@ -164,7 +174,7 @@ def spdk_process_kill():
 
 @bp.route('/spdk_process_is_up', methods=['GET'])
 def spdk_process_is_up():
-    node_docker = docker.DockerClient(base_url='unix://var/run/docker.sock')
+    node_docker = get_docker_client()
     for cont in node_docker.containers.list(all=True):
         logger.debug(cont.attrs)
         if cont.attrs['Name'] == "/spdk":
@@ -257,7 +267,7 @@ def join_swarm():
     set_cluster_id(cluster_id)
 
     logger.info("Joining Swarm")
-    node_docker = docker.DockerClient(base_url='unix://var/run/docker.sock')
+    node_docker = get_docker_client()
     if node_docker.info()["Swarm"]["LocalNodeState"] == "active":
         logger.info("Node is part of another swarm, leaving swarm")
         node_docker.swarm.leave(force=True)
@@ -288,7 +298,7 @@ def join_swarm():
 def leave_swarm():
     delete_cluster_id()
     try:
-        node_docker = docker.DockerClient(base_url='unix://var/run/docker.sock')
+        node_docker = get_docker_client()
         node_docker.swarm.leave(force=True)
     except:
         pass

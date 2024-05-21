@@ -120,8 +120,8 @@ class RPCClient:
     def transport_create(self, trtype):
         params = {
             "trtype": trtype,
-            "max_io_qpairs_per_ctrlr": 65000,
-            "max_queue_depth": 65000,
+#            "max_io_qpairs_per_ctrlr": 65000,
+#            "max_queue_depth": 65000,
         }
         return self._request("nvmf_create_transport", params)
 
