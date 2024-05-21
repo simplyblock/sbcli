@@ -338,7 +338,7 @@ def get_volume_info(uuid):
             "targetPort": "4420",
             "nqn": snode.subsystem + ":lvol:" + lvol.get_id(),
             "model": lvol.get_id(),
-            "lvol_size": lvol.size,
+            "lvol_size": int(lvol.size),
         }]
 
         return utils.get_csi_response(out)
