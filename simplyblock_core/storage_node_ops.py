@@ -312,7 +312,7 @@ def _connect_to_remote_devs(this_node):
         if node.get_id() == this_node.get_id() or node.status == node.STATUS_OFFLINE:
             continue
         for index, dev in enumerate(node.nvme_devices):
-            if dev.status != 'online':
+            if dev.status != NVMeDevice.STATUS_ONLINE:
                 logger.debug(f"Device is not online: {dev.get_id()}, status: {dev.status}")
                 continue
             name = f"remote_{dev.alceml_bdev}"
@@ -579,6 +579,9 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask,
         rpc_client = RPCClient(node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password)
         count = 0
         for dev in snode.nvme_devices:
+            if dev.status != NVMeDevice.STATUS_ONLINE:
+                logger.debug(f"Device is not online: {dev.get_id()}, status: {dev.status}")
+                continue
             name = f"remote_{dev.alceml_bdev}"
             ret = rpc_client.bdev_nvme_attach_controller_tcp(name, dev.nvmf_nqn, dev.nvmf_ip, dev.nvmf_port)
             if not ret:
