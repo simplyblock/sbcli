@@ -578,7 +578,10 @@ def deploy(ifname):
             '/dev:/dev',
             '/lib/modules/:/lib/modules/',
             '/sys:/sys'],
-        restart_policy={"Name": "always"}
+        restart_policy={"Name": "always"},
+        environment=[
+            f"DOCKER_IP={dev_ip}"
+        ]
     )
     logger.info("Pulling SPDK images")
     node_docker.images.pull(constants.SIMPLY_BLOCK_SPDK_CORE_IMAGE)
