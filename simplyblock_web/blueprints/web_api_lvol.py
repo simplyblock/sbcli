@@ -330,15 +330,15 @@ def get_volume_info(uuid):
             "uuid": lvol.uuid,
             "block_size": 512,
             "num_blocks": int(lvol.size / 512),
+            "lvol_size": int(lvol.size),
             "driver_specific": {"lvol": {"lvol_store_uuid": lvol.pool_uuid}},
             "pool_id": lvol.pool_uuid,
-
+            
             "targetType": "TCP",
             "targetAddr": snode.data_nics[0].ip4_address,
             "targetPort": "4420",
             "nqn": snode.subsystem + ":lvol:" + lvol.get_id(),
             "model": lvol.get_id(),
-            "lvol_size": int(lvol.size),
         }]
 
         return utils.get_csi_response(out)
