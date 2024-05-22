@@ -90,6 +90,7 @@ def add_lvol():
         | max_rw_mbytes   | Maximum Read Write Mega Bytes Per Second
         | max_r_mbytes    | Maximum Read Mega Bytes Per Second
         | max_w_mbytes    | Maximum Write Mega Bytes Per Second
+        | max_size        | Maximum LVol size: 10M, 10G, 10(bytes)
         | ha_type         | LVol HA type, can be (single,ha,default=cluster's ha type), Default=default
         | distr_vuid      | Distr bdev virtual unique ID, Default=0 means random
         | distr_ndcs      | Distr bdev number of data chunks per stripe, Default=0 means auto set
@@ -131,6 +132,7 @@ def add_lvol():
     rw_mbytes = utils.get_int_value_or_default(cl_data, "max_rw_mbytes", 0)
     r_mbytes = utils.get_int_value_or_default(cl_data, "max_r_mbytes", 0)
     w_mbytes = utils.get_int_value_or_default(cl_data, "max_w_mbytes", 0)
+    max_size = utils.get_int_value_or_default(cl_data, "max_size", 0)
 
     compression = utils.get_value_or_default(cl_data, "comp", False)
     encryption = utils.get_value_or_default(cl_data, "crypto", False)
@@ -157,6 +159,7 @@ def add_lvol():
         use_crypto=encryption,
         with_snapshot=snapshot,
 
+        max_size=max_size,
         max_rw_iops=rw_iops,
         max_rw_mbytes=rw_mbytes,
         max_r_mbytes=r_mbytes,
