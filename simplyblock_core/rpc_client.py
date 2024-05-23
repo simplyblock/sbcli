@@ -638,12 +638,13 @@ class RPCClient:
         params = {"socket_id": 0}
         return self._request("ultra21_util_get_malloc_stats", params)
 
-    def ultra21_lvol_mount_clone(self, clone_name, snap_bdev, base_bdev):
+    def ultra21_lvol_mount_clone(self, clone_name, snap_bdev, base_bdev, blockcnt):
         params = {
             "modus": "CLONE",
             "clone_bdev": clone_name,
             "base_bdev": base_bdev,
-            "lvol_bdev": snap_bdev
+            "lvol_bdev": snap_bdev,
+            "blockcnt": blockcnt,
         }
         return self._request("ultra21_lvol_mount", params)
 

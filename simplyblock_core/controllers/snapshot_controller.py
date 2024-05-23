@@ -245,7 +245,7 @@ def clone(snapshot_id, clone_name):
         return False, "Failed to init distr bdev"
 
     lvol_name = f"clone_{lvol.vuid+2}_{lvol.lvol_name}"
-    ret = rpc_client.ultra21_lvol_mount_clone(lvol_name, snap.snap_bdev, name)
+    ret = rpc_client.ultra21_lvol_mount_clone(lvol_name, snap.snap_bdev, name, num_blocks)
     if not ret:
         return False, "Failed to create clone lvol bdev"
 
