@@ -33,7 +33,7 @@ def process_device_event(event):
         node_id = event.node_id
         storage_id = event.storage_id
 
-        nodes = db_controller.get_storage_nodes()
+        nodes = db_controller.get_storage_nodes_by_cluster_id(event.cluster_uuid)
         device_id = None
         for node in nodes:
             for dev in node.nvme_devices:
@@ -112,15 +112,14 @@ def process_event(event_id):
     event.write_to_db(db_controller.kv_store)
 
 
-hostname = utils.get_hostname()
+system_id = utils.get_system_id()
 logger.info("Starting Distr event collector...")
-logger.info(f"Node:{hostname}")
 while True:
     time.sleep(constants.DISTR_EVENT_COLLECTOR_INTERVAL_SEC)
 
-    snode = db_controller.get_storage_node_by_hostname(hostname)
+    snode = db_controller.get_storage_node_by_system_id(system_id)
     if not snode:
-        logger.error("This node is not part of the cluster, hostname: %s" % hostname)
+        logger.error("This node is not part of any cluster, system_id: %s" % system_id)
         continue
 
     client = rpc_client.RPCClient(

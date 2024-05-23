@@ -84,6 +84,7 @@ class DBController:
         cmap = ClusterMap().read_from_db(self.kv_store)
         return cmap[0] if cmap else None
 
+    # todo: change this function for multi cluster
     def get_storage_nodes(self):
         ret = StorageNode().read_from_db(self.kv_store)
         ret = sorted(ret, key=lambda x: x.create_dt)
@@ -97,11 +98,19 @@ class DBController:
                 nodes.append(n)
         return sorted(nodes, key=lambda x: x.create_dt)
 
+    def get_storage_node_by_system_id(self, system_id):
+        nodes = StorageNode().read_from_db(self.kv_store)
+        for node in nodes:
+            if node.system_uuid == system_id:
+                return node
+        return None
+
     def get_storage_node_by_id(self, id):
         ret = StorageNode().read_from_db(self.kv_store, id)
         if ret:
             return ret[0]
 
+    # todo: change this function for multi cluster
     def get_caching_nodes(self):
         ret = CachingNode().read_from_db(self.kv_store)
         ret = sorted(ret, key=lambda x: x.create_dt)
@@ -111,6 +120,12 @@ class DBController:
         ret = CachingNode().read_from_db(self.kv_store, id)
         if ret:
             return ret[0]
+
+    def get_caching_node_by_system_id(self, system_id):
+        nodes = CachingNode().read_from_db(self.kv_store)
+        for node in nodes:
+            if node.system_uuid == system_id:
+                return node
 
     def get_caching_node_by_hostname(self, hostname):
         nodes = self.get_caching_nodes()
@@ -124,6 +139,7 @@ class DBController:
             if node.hostname == hostname:
                 return node
 
+    # todo: change this function for multi cluster
     def get_storage_devices(self, id=""):
         # workaround because nvme devices are stored inside the node object itself.
         nodes = self.get_storage_nodes()
