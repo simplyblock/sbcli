@@ -82,7 +82,7 @@ def get_alceml_name(alceml_id):
     return f"alceml_{alceml_id}"
 
 
-def restart_device(device_id):
+def restart_device(device_id, force=False):
     db_controller = DBController()
     dev = db_controller.get_storage_devices(device_id)
     if not dev:
@@ -90,7 +90,8 @@ def restart_device(device_id):
 
     if dev.status != NVMeDevice.STATUS_REMOVED:
         logger.error("Device must be in removed status")
-        return False
+        if not force:
+            return False
 
     snode = db_controller.get_storage_node_by_id(dev.node_id)
     if not snode:
