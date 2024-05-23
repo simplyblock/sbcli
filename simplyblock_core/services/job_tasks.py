@@ -37,6 +37,8 @@ def task_runner(task):
         task.write_to_db(db_controller.kv_store)
         return
 
+    task.status = JobSchedule.STATUS_RUNNING
+    task.write_to_db(db_controller.kv_store)
     device = _get_device(task)
     if device.status == NVMeDevice.STATUS_ONLINE and device.io_error is False:
         logger.info(f"Device is online: {device.get_id()}, no restart needed")
