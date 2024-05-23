@@ -23,7 +23,7 @@ def _generate_string(length):
         string.ascii_letters + string.digits) for _ in range(length))
 
 
-def add_pool(name, pool_max, lvol_max, max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes, has_secret):
+def add_pool(name, pool_max, lvol_max, max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes, has_secret, cluster_id):
 
     if not name:
         logger.error("Pool name is empty!")
@@ -33,6 +33,15 @@ def add_pool(name, pool_max, lvol_max, max_rw_iops, max_rw_mbytes, max_r_mbytes,
         if p.pool_name == name:
             logger.error(f"Pool found with the same name: {name}")
             return False
+
+    if cluster_id:
+        cluster = db_controller.get_cluster_by_id(cluster_id)
+        if not cluster:
+            logger.error(f"Cluster not found: {cluster_id}")
+            return False
+    else:
+        cluster = db_controller.get_clusters()[0]
+
 
     pool_max = pool_max or 0
     lvol_max = lvol_max or 0
@@ -46,7 +55,6 @@ def add_pool(name, pool_max, lvol_max, max_rw_iops, max_rw_mbytes, max_r_mbytes,
             logger.error("max_rw_mbytes must be greater than max_w_mbytes and max_r_mbytes")
             return False
 
-    cluster = db_controller.get_clusters()[0]
     logger.info("Adding pool")
     pool = Pool()
     pool.id = str(uuid.uuid4())
