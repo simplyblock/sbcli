@@ -273,11 +273,6 @@ class CLIWrapper:
         sub_command = self.add_sub_command(subparser, "info-spdk", 'Get SPDK memory information')
         sub_command.add_argument("id", help='Node UUID')
 
-        # get tasks list
-        sub_command = self.add_sub_command(subparser, "list-tasks", 'List tasks by cluster ID')
-        sub_command.add_argument("cluster_id", help='UUID of the cluster')
-
-
         # Initialize cluster parser
         subparser = self.add_command('cluster', 'Cluster commands')
 
@@ -440,6 +435,11 @@ class CLIWrapper:
         # update cluster
         sub_command = self.add_sub_command(subparser, "update", 'Update cluster mgmt services')
         sub_command.add_argument("id", help='cluster UUID')
+
+        # get tasks list
+        sub_command = self.add_sub_command(subparser, "list-tasks", 'List tasks by cluster ID')
+        sub_command.add_argument("cluster_id", help='UUID of the cluster')
+
 
         # lvol ops
         subparser = self.add_command('lvol', 'LVol commands')
@@ -985,9 +985,6 @@ class CLIWrapper:
             elif sub_command == "get":
                 ret = storage_ops.get(args.id)
 
-            elif sub_command == "list-tasks":
-                ret = storage_ops.list_tasks(args.cluster_id)
-
             else:
                 self.parser.print_help()
 
@@ -1049,6 +1046,10 @@ class CLIWrapper:
                 ret = cluster_ops.get_cluster(args.id)
             elif sub_command == "update":
                 ret = cluster_ops.update_cluster(args.id)
+
+            elif sub_command == "list-tasks":
+                ret = cluster_ops.list_tasks(args.cluster_id)
+
             else:
                 self.parser.print_help()
 
