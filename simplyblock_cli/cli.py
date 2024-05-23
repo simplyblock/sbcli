@@ -68,7 +68,7 @@ class CLIWrapper:
                                  dest='force_migrate', required=False, action='store_true')
         # List all storage nodes
         sub_command = self.add_sub_command(subparser, "list", 'List storage nodes')
-        sub_command.add_argument("--cluster-id", help='id of the cluster for which nodes are listed')
+        sub_command.add_argument("--cluster-id", help='id of the cluster for which nodes are listed', dest='cluster_id')
         sub_command.add_argument("--json", help='Print outputs in json format', action='store_true')
 
         sub_command = self.add_sub_command(subparser, "get", 'Get storage node info')
@@ -638,6 +638,7 @@ class CLIWrapper:
         # add pool
         sub_command = self.add_sub_command(subparser, 'add', 'Add a new Pool')
         sub_command.add_argument("name", help='Pool name')
+        sub_command.add_argument("--cluster-id", help='id of the cluster', dest='cluster_id')
         sub_command.add_argument("--pool-max", help='Pool maximum size: 20M, 20G, 0(default)', default="0")
         sub_command.add_argument("--lvol-max", help='LVol maximum size: 20M, 20G, 0(default)', default="0")
         sub_command.add_argument("--max-rw-iops", help='Maximum Read Write IO Per Second', type=int)
@@ -834,7 +835,7 @@ class CLIWrapper:
                 return out
 
             elif sub_command == "list":
-                ret = storage_ops.list_storage_nodes(self.db_store, args.json)
+                ret = storage_ops.list_storage_nodes(args.json, args.cluster_id)
 
             elif sub_command == "remove":
                 ret = storage_ops.remove_storage_node(args.node_id, args.force_remove, args.force_migrate)
@@ -1211,7 +1212,9 @@ class CLIWrapper:
                     args.max_rw_mbytes,
                     args.max_r_mbytes,
                     args.max_w_mbytes,
-                    args.has_secret)
+                    args.has_secret,
+                    args.cluster_id
+                )
 
             elif sub_command == "set":
                 pool_max = None

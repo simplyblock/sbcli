@@ -365,8 +365,8 @@ def add_lvol(name, size, host_id_or_name, pool_id_or_name, use_comp, use_crypto,
     return lvol_id, None
 
 
-def _get_next_3_nodes():
-    snodes = db_controller.get_storage_nodes()
+def _get_next_3_nodes(cluster_id):
+    snodes = db_controller.get_storage_nodes_by_cluster_id(cluster_id)
     online_nodes = []
     node_stats = {}
     for node in snodes:
@@ -462,6 +462,7 @@ def validate_aes_xts_keys(key1: str, key2: str) -> Tuple[bool, str]:
 
     return True, ""
 
+
 def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp, use_crypto,
                 distr_vuid, distr_ndcs, distr_npcs,
                 max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes,
@@ -484,7 +485,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
     if not pool:
         return False, f"Pool not found: {pool_id_or_name}"
 
-    cl = db_controller.get_clusters()[0]
+    cl = db_controller.get_cluster_by_id(pool.cluster_id)
     if cl.status not in [cl.STATUS_ACTIVE, cl.STATUS_DEGRADED]:
         return False, f"Cluster is not active, status: {cl.status}"
 
@@ -504,7 +505,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
         return False, error
 
     dev_count = 0
-    snodes = db_controller.get_storage_nodes()
+    snodes = db_controller.get_storage_nodes_by_cluster_id(cl.get_id())
     online_nodes = []
     for node in snodes:
         if node.status == node.STATUS_ONLINE:
@@ -700,7 +701,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
         lvol.lvol_type += ',compress'
         lvol.top_bdev = lvol.comp_bdev
 
-    nodes = _get_next_3_nodes()
+    nodes = _get_next_3_nodes(cl.get_id())
 
     if host_node:
         nodes.insert(0, host_node)
@@ -939,7 +940,7 @@ def delete_lvol_from_node(lvol_id, node_id, clear_data=True):
     # 3- clear alceml devices
     if clear_data:
         logger.info(f"Clearing Alceml devices")
-        for node in db_controller.get_storage_nodes():
+        for node in db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id):
             if node.status == StorageNode.STATUS_ONLINE:
                 rpc_node = RPCClient(node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password)
                 for dev in node.nvme_devices:

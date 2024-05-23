@@ -197,10 +197,10 @@ def _run_nvme_smart_log_add(dev_name):
     return data
 
 
-def get_next_cluster_device_order(db_controller):
+def get_next_cluster_device_order(db_controller, cluster_id):
     max_order = 0
     found = False
-    for node in db_controller.get_storage_nodes():
+    for node in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
         for dev in node.nvme_devices:
             found = True
             max_order = max(max_order, dev.cluster_device_order)
@@ -537,7 +537,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask,
 
     jm_device = snode.nvme_devices[0]
     # Set device cluster order
-    dev_order = get_next_cluster_device_order(db_controller)
+    dev_order = get_next_cluster_device_order(db_controller, cluster_id)
     for index, nvme in enumerate(snode.nvme_devices):
         nvme.cluster_device_order = dev_order
         dev_order += 1
@@ -691,7 +691,7 @@ def add_storage_node(cluster_id, iface_name, data_nics):
     snode.nvme_devices = nvme_devs
 
     # Set device cluster order
-    dev_order = get_next_cluster_device_order(db_controller)
+    dev_order = get_next_cluster_device_order(db_controller, cluster_id)
     for index, nvme in enumerate(snode.nvme_devices):
         nvme.cluster_device_order = dev_order
         dev_order += 1
@@ -993,7 +993,7 @@ def restart_storage_node(
             new_devices.append(dev)
             snode.nvme_devices.append(dev)
 
-    dev_order = get_next_cluster_device_order(db_controller)
+    dev_order = get_next_cluster_device_order(db_controller, snode.cluster_id)
     for index, nvme in enumerate(new_devices):
         nvme.cluster_device_order = dev_order
         dev_order += 1
@@ -1076,9 +1076,12 @@ def restart_storage_node(
     return "Success"
 
 
-def list_storage_nodes(kv_store, is_json):
-    db_controller = DBController(kv_store)
-    nodes = db_controller.get_storage_nodes()
+def list_storage_nodes(is_json, cluster_id=None):
+    db_controller = DBController()
+    if cluster_id:
+        nodes = db_controller.get_storage_nodes_by_cluster_id(cluster_id)
+    else:
+        nodes = db_controller.get_storage_nodes()
     data = []
     output = ""
 

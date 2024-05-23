@@ -388,7 +388,7 @@ def show_cluster(cl_id, is_json=False):
         logger.error(f"Cluster not found {cl_id}")
         return False
 
-    st = db_controller.get_storage_nodes()
+    st = db_controller.get_storage_nodes_by_cluster_id(cl_id)
     data = []
     for node in st:
         for dev in node.nvme_devices:
@@ -449,7 +449,7 @@ def cluster_set_read_only(cl_id):
 
     ret = set_cluster_status(cl_id, Cluster.STATUS_READONLY)
     if ret:
-        st = db_controller.get_storage_nodes()
+        st = db_controller.get_storage_nodes_by_cluster_id(cl_id)
         for node in st:
             for dev in node.nvme_devices:
                 if dev.status == NVMeDevice.STATUS_ONLINE:
@@ -469,7 +469,7 @@ def cluster_set_active(cl_id):
 
     ret = set_cluster_status(cl_id, Cluster.STATUS_ACTIVE)
     if ret:
-        st = db_controller.get_storage_nodes()
+        st = db_controller.get_storage_nodes_by_cluster_id(cl_id)
         for node in st:
             for dev in node.nvme_devices:
                 if dev.status == NVMeDevice.STATUS_READONLY:
@@ -480,11 +480,11 @@ def cluster_set_active(cl_id):
 def list():
     db_controller = DBController()
     cls = db_controller.get_clusters()
-    st = db_controller.get_storage_nodes()
     mt = db_controller.get_mgmt_nodes()
 
     data = []
     for cl in cls:
+        st = db_controller.get_storage_nodes_by_cluster_id(cl.get_id())
         data.append({
             "UUID": cl.id,
             "NQN": cl.nqn,
@@ -661,12 +661,12 @@ def update_cluster(cl_id):
         logger.error(f"Cluster not found {cl_id}")
         return False
 
-    try:
-        out, _, ret_code = shell_utils.run_command("pip install sbcli-dev --upgrade")
-        if ret_code == 0:
-            logger.info("sbcli-dev is upgraded")
-    except Exception as e:
-        logger.error(e)
+    # try:
+    #     out, _, ret_code = shell_utils.run_command("pip install sbcli-dev --upgrade")
+    #     if ret_code == 0:
+    #         logger.info("sbcli-dev is upgraded")
+    # except Exception as e:
+    #     logger.error(e)
 
     try:
         logger.info("Updating mgmt cluster")
@@ -681,7 +681,7 @@ def update_cluster(cl_id):
     except Exception as e:
         print(e)
 
-    for node in db_controller.get_storage_nodes():
+    for node in db_controller.get_storage_nodes_by_cluster_id(cl_id):
         node_docker = docker.DockerClient(base_url=f"tcp://{node.mgmt_ip}:2375", version="auto")
         logger.info(f"Pulling image {constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE}")
         node_docker.images.pull(constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE)
@@ -725,7 +725,7 @@ def cluster_grace_startup(cl_id):
     logger.info(f"Unsuspending cluster: {cl_id}")
     unsuspend_cluster(cl_id)
 
-    st = db_controller.get_storage_nodes()
+    st = db_controller.get_storage_nodes_by_cluster_id(cl_id)
     for node in st:
         logger.info(f"Restarting node: {node.get_id()}")
         storage_node_ops.restart_storage_node(node.get_id())
@@ -744,7 +744,7 @@ def cluster_grace_shutdown(cl_id):
         logger.error(f"Cluster not found {cl_id}")
         return False
 
-    st = db_controller.get_storage_nodes()
+    st = db_controller.get_storage_nodes_by_cluster_id(cl_id)
     for node in st:
         logger.info(f"Suspending node: {node.get_id()}")
         storage_node_ops.suspend_storage_node(node.get_id())
