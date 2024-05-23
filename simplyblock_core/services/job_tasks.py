@@ -37,8 +37,6 @@ def task_runner(task):
         task.write_to_db(db_controller.kv_store)
         return
 
-    task.status = JobSchedule.STATUS_RUNNING
-    task.write_to_db(db_controller.kv_store)
     device = _get_device(task)
     if device.status == NVMeDevice.STATUS_ONLINE and device.io_error is False:
         logger.info(f"Device is online: {device.get_id()}, no restart needed")
@@ -46,6 +44,9 @@ def task_runner(task):
         task.status = JobSchedule.STATUS_DONE
         task.write_to_db(db_controller.kv_store)
         return
+
+    task.status = JobSchedule.STATUS_RUNNING
+    task.write_to_db(db_controller.kv_store)
 
     # resetting device
     logger.info(f"Resetting device {device.get_id()}")
@@ -60,7 +61,7 @@ def task_runner(task):
         return
 
     logger.info(f"Restarting device {device.get_id()}")
-    res = device_controller.restart_device(device.get_id())
+    res = device_controller.restart_device(device.get_id(), force=True)
     time.sleep(5)
     device = _get_device(task)
     if device.status == NVMeDevice.STATUS_ONLINE and device.io_error is False:
@@ -97,7 +98,7 @@ while True:
         for cl in clusters:
             tasks = db_controller.get_job_tasks(cl.get_id())
             for task in tasks:
-                if task.status == JobSchedule.STATUS_NEW:
+                if task.status != JobSchedule.STATUS_DONE:
                     res = task_runner(task)
 
     time.sleep(5)
