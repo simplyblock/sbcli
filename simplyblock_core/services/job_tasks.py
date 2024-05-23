@@ -1,44 +1,75 @@
 # coding=utf-8
 import logging
-import os
-
 import time
 import sys
 
-import psutil
 
-
-from simplyblock_core import constants, kv_store, utils
+from simplyblock_core import constants, kv_store
+from simplyblock_core.controllers import device_controller
 from simplyblock_core.models.job_schedule import JobSchedule
-from simplyblock_core.models.port_stat import PortStat
+from simplyblock_core.models.nvme_device import NVMeDevice
 
 # Import the GELF logger
 from graypy import GELFUDPHandler
 
+from simplyblock_core.models.storage_node import StorageNode
+
+
+def _get_device(task):
+    node = db_controller.get_storage_node_by_id(task.node_id)
+    for dev in node.nvme_devices:
+        if dev.get_id() == task.device_id:
+            return dev
+
 
 def task_runner(task):
-    now = int(time.time())
-    data = {
-        "uuid": nic.get_id(),
-        "node_id": snode.get_id(),
-        "date": now,
-        "bytes_sent": stats.bytes_sent,
-        "bytes_received": stats.bytes_recv,
-        "packets_sent": stats.packets_sent,
-        "packets_received": stats.packets_recv,
-        "errin": stats.errin,
-        "errout": stats.errout,
-        "dropin": stats.dropin,
-        "dropout": stats.dropout,
-    }
-    last_stat = PortStat(data={"uuid": nic.get_id(), "node_id": snode.get_id()}).get_last(db_controller.kv_store)
-    if last_stat:
-        data.update({
-            "out_speed": int((stats.bytes_sent - last_stat.bytes_sent) / (now - last_stat.date)),
-            "in_speed": int((stats.bytes_recv - last_stat.bytes_received) / (now - last_stat.date)),
-        })
-    stat_obj = PortStat(data=data)
-    stat_obj.write_to_db(db_controller.kv_store)
+    if task.retry <= 0:
+        task.function_result = "timeout"
+        task.status = JobSchedule.STATUS_DONE
+        task.write_to_db(db_controller.kv_store)
+        return
+
+    node = db_controller.get_storage_node_by_id(task.node_id)
+    if node.status != StorageNode.STATUS_ONLINE:
+        logger.error(f"Node is not online: {node.get_id()} , skipping task: {task.get_id()}")
+        task.function_result = "Node is offline"
+        task.retry -= 1
+        task.write_to_db(db_controller.kv_store)
+        return
+
+    device = _get_device(task)
+    if device.status == NVMeDevice.STATUS_ONLINE and device.io_error is False:
+        logger.info(f"Device is online: {device.get_id()}, no restart needed")
+        task.function_result = "skipped because dev is online"
+        task.status = JobSchedule.STATUS_DONE
+        task.write_to_db(db_controller.kv_store)
+        return
+
+    # resetting device
+    logger.info(f"Resetting device {device.get_id()}")
+    res = device_controller.reset_storage_device(device.get_id())
+    time.sleep(5)
+    device = _get_device(task)
+    if device.status == NVMeDevice.STATUS_ONLINE and device.io_error is False:
+        logger.info(f"Device is online: {device.get_id()}")
+        task.function_result = "done"
+        task.status = JobSchedule.STATUS_DONE
+        task.write_to_db(db_controller.kv_store)
+        return
+
+    logger.info(f"Restarting device {device.get_id()}")
+    res = device_controller.restart_device(device.get_id())
+    time.sleep(5)
+    device = _get_device(task)
+    if device.status == NVMeDevice.STATUS_ONLINE and device.io_error is False:
+        logger.info(f"Device is online: {device.get_id()}")
+        task.function_result = "done"
+        task.status = JobSchedule.STATUS_DONE
+        task.write_to_db(db_controller.kv_store)
+        return
+
+    task.retry -= 1
+    task.write_to_db(db_controller.kv_store)
     return
 
 
@@ -67,4 +98,4 @@ while True:
                 if task.status == JobSchedule.STATUS_NEW:
                     res = task_runner(task)
 
-    time.sleep(3)
+    time.sleep(5)

@@ -10,6 +10,7 @@ from simplyblock_core.models.cluster import ClusterMap
 
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.compute_node import ComputeNode
+from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.port_stat import PortStat
 from simplyblock_core.models.events import EventObj
 from simplyblock_core.models.global_settings import GlobalSettings
@@ -250,4 +251,4 @@ class DBController:
         return EventObj().read_from_db(self.kv_store, id=event_id)
 
     def get_job_tasks(self, cluster_id):
-        return EventObj().read_from_db(self.kv_store, id=cluster_id, reverse=True)
+        return JobSchedule().read_from_db(self.kv_store, id=cluster_id, reverse=True)
