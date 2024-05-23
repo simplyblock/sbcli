@@ -10,12 +10,22 @@ from docker.types import LogConfig
 from flask import Blueprint
 from flask import request
 
-from simplyblock_web import utils
+from simplyblock_web import utils, node_utils
 from simplyblock_core import scripts, constants
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 bp = Blueprint("node_api_caching_docker", __name__, url_prefix="/cnode")
+
+
+def get_docker_client():
+    ip = os.getenv("DOCKER_IP")
+    if not ip:
+        for ifname in node_utils.get_nics_data():
+            if ifname in ["eth0", "ens0"]:
+                ip = node_utils.get_nics_data()[ifname]['ip']
+                break
+    return docker.DockerClient(base_url=f"tcp://{ip}:2375", version="auto", timeout=60 * 5)
 
 
 @bp.route('/spdk_process_start', methods=['POST'])
@@ -45,7 +55,7 @@ def spdk_process_start():
     else:
         spdk_mem = 64096
 
-    node_docker = docker.DockerClient(base_url='unix://var/run/docker.sock')
+    node_docker = get_docker_client()
     nodes = node_docker.containers.list(all=True)
     for node in nodes:
         if node.attrs["Name"] in ["/spdk", "/spdk_proxy"]:
@@ -119,7 +129,7 @@ def spdk_process_start():
 @bp.route('/spdk_process_kill', methods=['GET'])
 def spdk_process_kill():
     force = request.args.get('force', default=False, type=bool)
-    node_docker = docker.DockerClient(base_url='unix://var/run/docker.sock')
+    node_docker = get_docker_client()
     for cont in node_docker.containers.list(all=True):
         logger.debug(cont.attrs)
         if cont.attrs['Name'] == "/spdk" or cont.attrs['Name'] == "/spdk_proxy":
@@ -130,7 +140,7 @@ def spdk_process_kill():
 
 @bp.route('/spdk_process_is_up', methods=['GET'])
 def spdk_process_is_up():
-    node_docker = docker.DockerClient(base_url='unix://var/run/docker.sock')
+    node_docker = get_docker_client()
     for cont in node_docker.containers.list(all=True):
         logger.debug(cont.attrs)
         if cont.attrs['Name'] == "/spdk":
@@ -152,7 +162,7 @@ def join_db():
     ret = scripts.set_db_config(db_connection)
 
     try:
-        node_docker = docker.DockerClient(base_url='unix://var/run/docker.sock')
+        node_docker = get_docker_client()
         nodes = node_docker.containers.list(all=True)
         for node in nodes:
             if node.attrs["Name"] == "/spdk_proxy":

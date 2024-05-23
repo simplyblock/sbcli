@@ -166,7 +166,119 @@ Response
 }
 ```
 
+### Get Storage node suspend
 
+**GET** http://<CLUSTER_IP>/storagenode/suspend/<NODE_ID>
+
+Request
+
+```curl
+curl -X GET http://127.0.0.1/storagenode/suspend/31efa55b-d41f-478c-9baf-34a530242d8d
+```
+
+Response
+
+```json
+{
+  "error": "",
+  "results": [],
+  "status": true
+}
+```
+
+### Get Storage node resume
+
+**GET** http://<CLUSTER_IP>/storagenode/resume/<NODE_ID>
+
+Request
+
+```curl
+curl -X GET http://127.0.0.1/storagenode/resume/31efa55b-d41f-478c-9baf-34a530242d8d
+```
+
+Response
+
+```json
+{
+  "error": "",
+  "results": [],
+  "status": true
+}
+```
+
+### Get Storage node shutdown
+
+**GET** http://<CLUSTER_IP>/storagenode/shutdown/<NODE_ID>
+
+Request
+
+```curl
+curl -X GET http://127.0.0.1/storagenode/shutdown/31efa55b-d41f-478c-9baf-34a530242d8d
+```
+
+Response
+
+```json
+{
+  "error": "",
+  "results": [],
+  "status": true
+}
+```
+
+### Get Storage node restart
+
+**GET** http://<CLUSTER_IP>/storagenode/restart/<NODE_ID>
+
+Request
+
+```curl
+curl -X GET http://127.0.0.1/storagenode/restart/31efa55b-d41f-478c-9baf-34a530242d8d
+```
+
+Response
+
+```json
+{
+  "error": "",
+  "results": [],
+  "status": true
+}
+```
+
+### Add Storage node
+
+**POST** http://<CLUSTER_IP>/storagenode/add
+
+Parameters
+
+| Parameter             | Description                                  |
+|-----------------------|----------------------------------------------|
+| cluster_id (required) | Cluster UUID                                 |
+| node_ip (required)    | IP of storage node to add                    |
+| ifname (required)     | Management interface name                    |
+| spdk_image            | SPDK image uri                               |
+| spdk_debug            | Enable spdk debug logs                       |
+| data_nics             | Data interface names                         |
+| spdk_cpu_mask         | Maximum Write Mega Bytes Per Second          |
+| spdk_mem              | SPDK huge memory allocation 4G(default)      |
+
+Request
+
+```curl
+curl -X POST http://127.0.0.1/storagenode/add \
+      -d '{"cluster_id":"cluster_id", "node_ip":"node_ip", "ifname":"eth0"}'
+```
+
+Response
+
+```json
+{
+  "error": "",
+  "results": [],
+  "status": true
+}
+```
 
 ## Pool endpoint (/pool)
 
@@ -431,7 +543,7 @@ Response
 }
 ```
 
-### Get cluster details
+### Get clusters and their details
 
 **GET** http://<CLUSTER_IP>/cluster
 
@@ -439,6 +551,27 @@ Request
 
 ```curl
 curl -X GET http://127.0.0.1/cluster
+```
+
+Response
+
+```json
+{
+  "error": "",
+  "results": {
+  },
+  "status": true
+}
+```
+
+### Get cluster details
+
+**GET** http://<CLUSTER_IP>/cluster/<CLUSTER_ID>
+
+Request
+
+```curl
+curl -X GET http://127.0.0.1/cluster/10b8b609-7b28-4797-a3a1-0a64fed1fad2
 ```
 
 Response

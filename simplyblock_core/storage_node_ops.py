@@ -243,7 +243,7 @@ def _prepare_cluster_devices(snode, after_restart=False):
         if nvme.jm_bdev:
             ret = rpc_client.bdev_jm_create(nvme.jm_bdev, alceml_name)
             if not ret:
-                logger.error(f"Failed to create JM bdev: {snode.nvme_devices[0].jm_bdev}")
+                logger.error(f"Failed to create JM bdev: {nvme.jm_bdev}")
                 return False
             nvme.testing_bdev = test_name
             nvme.alceml_bdev = alceml_name
@@ -312,7 +312,7 @@ def _connect_to_remote_devs(this_node):
         if node.get_id() == this_node.get_id() or node.status == node.STATUS_OFFLINE:
             continue
         for index, dev in enumerate(node.nvme_devices):
-            if dev.status != 'online':
+            if dev.status != NVMeDevice.STATUS_ONLINE:
                 logger.debug(f"Device is not online: {dev.get_id()}, status: {dev.status}")
                 continue
             name = f"remote_{dev.alceml_bdev}"
@@ -579,6 +579,9 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask,
         rpc_client = RPCClient(node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password)
         count = 0
         for dev in snode.nvme_devices:
+            if dev.status != NVMeDevice.STATUS_ONLINE:
+                logger.debug(f"Device is not online: {dev.get_id()}, status: {dev.status}")
+                continue
             name = f"remote_{dev.alceml_bdev}"
             ret = rpc_client.bdev_nvme_attach_controller_tcp(name, dev.nvmf_nqn, dev.nvmf_ip, dev.nvmf_port)
             if not ret:
@@ -1189,13 +1192,10 @@ def shutdown_storage_node(node_id, force=False):
     snode.write_to_db(db_controller.kv_store)
     storage_events.snode_status_change(snode, snode.status, old_status)
 
-    logger.debug("Setting LVols to offline")
+    logger.debug("Removing LVols")
     for lvol_id in snode.lvols:
         logger.debug(lvol_id)
-        lvol = db_controller.get_lvol_by_id(lvol_id)
-        if lvol:
-            lvol.status = lvol.STATUS_OFFLINE
-            lvol.write_to_db(db_controller.kv_store)
+        lvol_controller.delete_lvol_from_node(lvol_id, snode.get_id(), clear_data=False)
 
     for dev in snode.nvme_devices:
         if dev.status in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_READONLY]:
@@ -1213,6 +1213,7 @@ def shutdown_storage_node(node_id, force=False):
         snode.rpc_username, snode.rpc_password)
 
     # delete jm
+    logger.info("Removing JM")
     rpc_client.bdev_jm_delete(f"jm_{snode.get_id()}")
 
     logger.info("Stopping SPDK")
@@ -1671,7 +1672,10 @@ def deploy(ifname):
             '/dev:/dev',
             '/lib/modules/:/lib/modules/',
             '/sys:/sys'],
-        restart_policy={"Name": "always"}
+        restart_policy={"Name": "always"},
+        environment=[
+            f"DOCKER_IP={dev_ip}"
+        ]
     )
     logger.info("Pulling SPDK images")
     logger.debug(constants.SIMPLY_BLOCK_SPDK_CORE_IMAGE)

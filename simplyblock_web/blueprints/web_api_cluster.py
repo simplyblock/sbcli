@@ -2,6 +2,7 @@
 # encoding: utf-8
 import json
 import logging
+import threading
 import time
 import uuid
 
@@ -145,3 +146,28 @@ def cluster_get_logs(uuid):
     data = cluster_ops.get_logs(uuid, is_json=True)
     return utils.get_response(json.loads(data))
 
+
+@bp.route('/cluster/gracefulshutdown/<string:uuid>', methods=['PUT'])
+def cluster_grace_shutdown(uuid):
+    cluster = db_controller.get_cluster_by_id(uuid)
+    if not cluster:
+        return utils.get_response_error(f"Cluster not found: {uuid}", 404)
+    t = threading.Thread(
+        target=cluster_ops.cluster_grace_shutdown,
+        args=(uuid,))
+    t.start()
+    # FIXME: Any failure within the thread are not handled
+    return utils.get_response(True)
+
+
+@bp.route('/cluster/gracefulstartup/<string:uuid>', methods=['PUT'])
+def cluster_grace_startup(uuid):
+    cluster = db_controller.get_cluster_by_id(uuid)
+    if not cluster:
+        return utils.get_response_error(f"Cluster not found: {uuid}", 404)
+    t = threading.Thread(
+        target=cluster_ops.cluster_grace_startup,
+        args=(uuid,))
+    t.start()
+    # FIXME: Any failure within the thread are not handled
+    return utils.get_response(True)

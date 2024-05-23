@@ -608,22 +608,22 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
     lvol.base_bdev = f"distr_{lvol.vuid}_{name}"
     lvol.top_bdev = lvol.base_bdev
 
-    lvol.bdev_stack.append({
-        "type": "bdev_distr",
-        "name": lvol.base_bdev,
-        "params": {
-            "name": lvol.base_bdev,
-            "vuid": lvol.vuid,
-            "ndcs": lvol.ndcs,
-            "npcs": lvol.npcs,
-            "num_blocks": int(lvol.size / lvol.distr_bs),
-            "block_size": lvol.distr_bs,
-            "chunk_size": lvol.distr_chunk_bs,
-            "pba_page_size":  lvol.distr_page_size,
-        }
-    })
-
     if with_snapshot:
+        lvol.bdev_stack.append({
+            "type": "bdev_distr",
+            "name": lvol.base_bdev,
+            "params": {
+                "name": lvol.base_bdev,
+                "vuid": lvol.vuid,
+                "ndcs": lvol.ndcs,
+                "npcs": lvol.npcs,
+                "num_blocks": int(lvol.max_size / lvol.distr_bs),
+                "block_size": lvol.distr_bs,
+                "chunk_size": lvol.distr_chunk_bs,
+                "pba_page_size": lvol.distr_page_size,
+            }
+        })
+
         lvol.bdev_stack.append({
             "type": "bmap_init",
             "name": lvol.base_bdev,
@@ -645,6 +645,21 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
                 "base_bdev": lvol.base_bdev,
                 "label": "label",
                 "desc": "desc"
+            }
+        })
+    else:
+        lvol.bdev_stack.append({
+            "type": "bdev_distr",
+            "name": lvol.base_bdev,
+            "params": {
+                "name": lvol.base_bdev,
+                "vuid": lvol.vuid,
+                "ndcs": lvol.ndcs,
+                "npcs": lvol.npcs,
+                "num_blocks": int(lvol.size / lvol.distr_bs),
+                "block_size": lvol.distr_bs,
+                "chunk_size": lvol.distr_chunk_bs,
+                "pba_page_size": lvol.distr_page_size,
             }
         })
 
@@ -908,19 +923,22 @@ def _remove_bdev_stack(bdev_stack, rpc_client):
 def delete_lvol_from_node(lvol_id, node_id, clear_data=True):
     lvol = db_controller.get_lvol_by_id(lvol_id)
     snode = db_controller.get_storage_node_by_id(node_id)
-    logger.debug(f"Deleting LVol:{lvol.get_id()} from node:{snode.get_id()}")
+    logger.info(f"Deleting LVol:{lvol.get_id()} from node:{snode.get_id()}")
     rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
 
-    # 1- remove bdevs
+    # 1- remove subsystem
+    logger.info(f"Removing subsystem")
+    ret = rpc_client.subsystem_delete(lvol.nqn)
+
+    # 2- remove bdevs
+    logger.info(f"Removing bdev stack")
     _remove_bdev_stack(lvol.bdev_stack[::-1], rpc_client)
     lvol.deletion_status = 'bdevs_deleted'
     lvol.write_to_db(db_controller.kv_store)
 
-    # 2- remove subsystem
-    ret = rpc_client.subsystem_delete(lvol.nqn)
-
     # 3- clear alceml devices
     if clear_data:
+        logger.info(f"Clearing Alceml devices")
         for node in db_controller.get_storage_nodes():
             if node.status == StorageNode.STATUS_ONLINE:
                 rpc_node = RPCClient(node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password)
@@ -928,13 +946,24 @@ def delete_lvol_from_node(lvol_id, node_id, clear_data=True):
                     if dev.status != NVMeDevice.STATUS_JM:
                         ret = rpc_node.alceml_unmap_vuid(dev.alceml_bdev, lvol.vuid)
 
-    lvol.deletion_status = 'alceml_unmapped'
-    lvol.write_to_db(db_controller.kv_store)
+        lvol.deletion_status = 'alceml_unmapped'
+        lvol.write_to_db(db_controller.kv_store)
 
-    # 4- clear JM
-    # ret = rpc_client.alceml_unmap_vuid(name, lvol.vuid)
-    # lvol.deletion_status = 'jm_unmapped'
-    lvol.write_to_db(db_controller.kv_store)
+        # 4- clear JM
+        jm_device = None
+        for dev in snode.nvme_devices:
+            if dev.status == NVMeDevice.STATUS_JM:
+                jm_device = dev
+                break
+        ret = rpc_client.alceml_unmap_vuid(jm_device.alceml_bdev, lvol.vuid)
+        if not ret:
+            logger.error(f"Failed to unmap jm alceml {jm_device.alceml_bdev} with vuid {lvol.vuid}")
+        ret = rpc_client.bdev_jm_unmap_vuid(jm_device.jm_bdev, lvol.vuid)
+        if not ret:
+            logger.error(f"Failed to unmap jm {jm_device.jm_bdev} with vuid {lvol.vuid}")
+
+        lvol.deletion_status = 'jm_unmapped'
+        lvol.write_to_db(db_controller.kv_store)
 
     return True
 
@@ -1180,14 +1209,13 @@ def resize_lvol(id, new_size):
         logger.error(f"New size {new_size} must be higher than the original size {lvol.size}")
         return False
 
+    if lvol.max_size < new_size:
+        logger.error(f"New size {new_size} must be smaller than the max size {lvol.max_size}")
+        return False
+
     logger.info(f"Resizing LVol: {lvol.id}, new size: {lvol.size}")
 
-    # if lvol.pool_uuid:
-    #     pool = db_controller.get_pool_by_id(lvol.pool_uuid)
-    #     if pool:
-    #         print(pool)
-
-    snode = db_controller.get_storage_node_by_hostname(lvol.hostname)
+    snode = db_controller.get_storage_node_by_id(lvol.node_id)
 
     # creating RPCClient instance
     rpc_client = RPCClient(
@@ -1196,19 +1224,25 @@ def resize_lvol(id, new_size):
         snode.rpc_username,
         snode.rpc_password)
 
-    # ret = rpc_client.get_bdevs(lvol.lvol_name)
-    # bdev_data = ret[0]
-    # logger.debug(json.dumps(ret, indent=2))
-    # print("is claimed:", bdev_data['claimed'])
-    size_mb = int(new_size / (1024 * 1024))
-    ret = rpc_client.resize_lvol(lvol.lvol_bdev, size_mb)
-    if not ret:
-        return "Error"
+    num_blocks = int(new_size / lvol.distr_bs)
+    if lvol.snapshot_name:
+        ret = rpc_client.resize_lvol(lvol.top_bdev, num_blocks)
+        if not ret:
+            logger.error("Error resizing lvol")
+            return False
+    elif lvol.cloned_from_snap:
+        ret = rpc_client.resize_clone(lvol.top_bdev, num_blocks)
+        if not ret:
+            logger.error("Error resizing clone")
+            return False
+    else:
+        logger.error("Can not resize distr")
+        return False
 
     lvol.size = new_size
     lvol.write_to_db(db_controller.kv_store)
     logger.info("Done")
-    return ret
+    return True
 
 
 def set_read_only(id):

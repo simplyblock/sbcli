@@ -714,3 +714,43 @@ def list_tasks(cluster_id):
             "Date": time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(task.date)),
         })
     return utils.print_table(data)
+
+ 
+def cluster_grace_startup(cl_id):
+    db_controller = DBController()
+    cluster = db_controller.get_cluster_by_id(cl_id)
+    if not cluster:
+        logger.error(f"Cluster not found {cl_id}")
+        return False
+    logger.info(f"Unsuspending cluster: {cl_id}")
+    unsuspend_cluster(cl_id)
+
+    st = db_controller.get_storage_nodes()
+    for node in st:
+        logger.info(f"Restarting node: {node.get_id()}")
+        storage_node_ops.restart_storage_node(node.get_id())
+        time.sleep(5)
+        get_node = db_controller.get_storage_node_by_id(node.get_id())
+        if get_node.status != StorageNode.STATUS_ONLINE:
+            logger.error("failed to restart node")
+    
+    return True
+
+
+def cluster_grace_shutdown(cl_id):
+    db_controller = DBController()
+    cluster = db_controller.get_cluster_by_id(cl_id)
+    if not cluster:
+        logger.error(f"Cluster not found {cl_id}")
+        return False
+
+    st = db_controller.get_storage_nodes()
+    for node in st:
+        logger.info(f"Suspending node: {node.get_id()}")
+        storage_node_ops.suspend_storage_node(node.get_id())
+        logger.info(f"Shutting down node: {node.get_id()}")
+        storage_node_ops.shutdown_storage_node(node.get_id())
+       
+    logger.info(f"Suspending cluster: {cl_id}")
+    suspend_cluster(cl_id)
+    return True

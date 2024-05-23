@@ -118,7 +118,11 @@ class RPCClient:
         return self._request("nvmf_get_transports", params)
 
     def transport_create(self, trtype):
-        params = {"trtype": trtype}
+        params = {
+            "trtype": trtype,
+#            "max_io_qpairs_per_ctrlr": 65000,
+#            "max_queue_depth": 65000,
+        }
         return self._request("nvmf_create_transport", params)
 
     def listeners_list(self, nqn):
@@ -286,12 +290,19 @@ class RPCClient:
             params = {"name": name}
         return self._request("bdev_get_bdevs", params)
 
-    def resize_lvol(self, name, new_size_mb):
+    def resize_lvol(self, lvol_bdev, blockcnt):
         params = {
-            "name": name,
-            "size_in_mib": new_size_mb
+            "lvol_bdev": lvol_bdev,
+            "blockcnt": blockcnt
         }
-        return self._request("bdev_lvol_resize", params)
+        return self._request("ultra21_lvol_set", params)
+
+    def resize_clone(self, clone_bdev, blockcnt):
+        params = {
+            "clone_bdev": clone_bdev,
+            "blockcnt": blockcnt
+        }
+        return self._request("ultra21_lvol_set", params)
 
     def lvol_read_only(self, name):
         params = {"name": name}
@@ -627,12 +638,13 @@ class RPCClient:
         params = {"socket_id": 0}
         return self._request("ultra21_util_get_malloc_stats", params)
 
-    def ultra21_lvol_mount_clone(self, clone_name, snap_bdev, base_bdev):
+    def ultra21_lvol_mount_clone(self, clone_name, snap_bdev, base_bdev, blockcnt):
         params = {
             "modus": "CLONE",
-            "lvol_bdev": clone_name,
+            "clone_bdev": clone_name,
             "base_bdev": base_bdev,
-            "snapshot_bdev": snap_bdev
+            "lvol_bdev": snap_bdev,
+            "blockcnt": blockcnt,
         }
         return self._request("ultra21_lvol_mount", params)
 
@@ -646,3 +658,7 @@ class RPCClient:
 
     def framework_start_init(self):
         return self._request("framework_start_init")
+
+    def bdev_jm_unmap_vuid(self, name, vuid):
+        params = {"name": name, "vuid": vuid}
+        return self._request("bdev_jm_unmap_vuid", params)

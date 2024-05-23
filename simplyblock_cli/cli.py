@@ -436,10 +436,17 @@ class CLIWrapper:
         sub_command = self.add_sub_command(subparser, "update", 'Update cluster mgmt services')
         sub_command.add_argument("id", help='cluster UUID')
 
+        # graceful-shutdown storage nodes
+        sub_command = self.add_sub_command(subparser, "graceful-shutdown", 'Graceful shutdown of storage nodes')
+        sub_command.add_argument("id", help='cluster UUID')
+
+        # graceful-startup storage nodes
+        sub_command = self.add_sub_command(subparser, "graceful-startup", 'Graceful startup of storage nodes')
+        sub_command.add_argument("id", help='cluster UUID')
+        
         # get tasks list
         sub_command = self.add_sub_command(subparser, "list-tasks", 'List tasks by cluster ID')
         sub_command.add_argument("cluster_id", help='UUID of the cluster')
-
 
         # lvol ops
         subparser = self.add_command('lvol', 'LVol commands')
@@ -1050,6 +1057,12 @@ class CLIWrapper:
             elif sub_command == "list-tasks":
                 ret = cluster_ops.list_tasks(args.cluster_id)
 
+            elif sub_command == "graceful-shutdown":
+                ret = cluster_ops.cluster_grace_shutdown(args.id)
+                
+            elif sub_command == "graceful-startup":
+                ret = cluster_ops.cluster_grace_startup(args.id)
+                
             else:
                 self.parser.print_help()
 

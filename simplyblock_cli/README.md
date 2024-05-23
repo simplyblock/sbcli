@@ -1,10 +1,9 @@
-
 # Simply Block CLI
 
 ## Install
 ```bash
-pip install sbcli-dev
- ```
+pip install sbcli
+```
 
 ## Command Line Interface
 ```bash
@@ -31,14 +30,17 @@ optional arguments:
 ## Cluster commands
 ```bash
 $ sbcli cluster  -h
-usage: sbcli cluster [-h] {init,status,suspend,unsuspend,add-dev-model,rm-dev-model,add-host-auth,rm-host-auth,get-capacity,get-io-stats,set-log-level,get-event-log} ...
+usage: sbcli cluster [-h] {init,create,list,status,get,suspend,unsuspend,add-dev-model,rm-dev-model,add-host-auth,rm-host-auth,get-capacity,get-io-stats,set-log-level,get-event-log} ...
 
 Cluster commands
 
 positional arguments:
-  {init,status,suspend,unsuspend,add-dev-model,rm-dev-model,add-host-auth,rm-host-auth,get-capacity,get-io-stats,set-log-level,get-event-log}
+  {init,create,list,status,get,suspend,unsuspend,add-dev-model,rm-dev-model,add-host-auth,rm-host-auth,get-capacity,get-io-stats,set-log-level,get-event-log}
     init                Create an empty cluster
+    create              Create a new cluster with this node as management (local run)
+    list                Show clusters list
     status              Show cluster status
+    get                 Show cluster info
     suspend             Suspend cluster. The cluster will stop processing all IO. Attention! This will cause an "all paths down" event for nvmeof/iscsi volumes on all hosts connected to
                         the cluster.
     unsuspend           Unsuspend cluster. The cluster will start processing IO again.
@@ -91,30 +93,84 @@ optional arguments:
 
 ```
 
+### Create Cluster
+```bash
+$ sbcli cluster create -h
+usage: sbcli cluster create [-h] [--blk_size {512,4096}] [--page_size PAGE_SIZE] [--ha_type {single,ha}] [--tls {on,off}] [--auth-hosts-only {on,off}] [--model_ids MODEL_IDS [MODEL_IDS ...]] [--CLI_PASS CLI_PASS] [--cap-warn CAP_WARN] [--cap-crit CAP_CRIT] [--prov-cap-warn PROV_CAP_WARN] [--prov-cap-crit PROV_CAP_CRIT] [--ifname IFNAME] [--log-del-interval LOG_DEL_INTERVAL] [--metrics-retention-period METRICS_RETENTION_PERIOD]
+
+Create a new cluster with this node as management (local run)
+
+optional arguments:
+  --blk_size {512,4096}               The block size in bytes
+  --page_size PAGE_SIZE               The size of a data page in bytes
+  --ha_type {single,ha}               Can be "single" for single node clusters or "HA" for multi-node clusters
+  --tls {on,off}                      TCP/IP transport security can be turned on or off
+  --auth-hosts-only {on,off}          If turned on, hosts must be explicitly added to the cluster to connect to any NVMeoF subsystem
+  --model_ids MODEL_IDS [MODEL_IDS ...]
+                                      A list of supported NVMe device model-ids
+  --CLI_PASS CLI_PASS                 Password for CLI SSH connection
+  --cap-warn CAP_WARN                 Capacity warning level in percent
+  --cap-crit CAP_CRIT                 Capacity critical level in percent
+  --prov-cap-warn PROV_CAP_WARN       Provisioned capacity warning level in percent
+  --prov-cap-crit PROV_CAP_CRIT       Provisioned capacity critical level in percent
+  --ifname IFNAME                     Management interface name
+  --log-del-interval LOG_DEL_INTERVAL Graylog deletion interval
+  --metrics-retention-period METRICS_RETENTION_PERIOD
+                                      Retention period for Prometheus metrics
+  -h, --help                          show this help message and exit
+
+```
+
+### List Clusters
+```bash
+$ sbcli cluster list -h
+usage: sbcli cluster list [-h]
+
+Show clusters list
+
+optional arguments:
+  -h, --help  show this help message and exit
+
+```
 ### Show cluster status
 ```bash
 $ sbcli cluster status -h
-usage: sbcli cluster status [-h] cluster-id
+usage: sbcli cluster status [-h] cluster_id
 
 Show cluster status
 
 positional arguments:
-  cluster-id  the cluster UUID
+  cluster_id  the cluster UUID
 
 optional arguments:
   -h, --help  show this help message and exit
 ```
 
+### Show Cluster Info
+```bash
+$ sbcli cluster get -h
+usage: sbcli cluster get [-h] id
+
+Show cluster info
+
+positional arguments:
+  id          The cluster UUID
+
+optional arguments:
+  -h, --help  show this help message and exit
+
+```
+
 ### Suspend cluster 
 ```bash
 $ sbcli cluster suspend -h
-usage: sbcli cluster suspend [-h] cluster-id
+usage: sbcli cluster suspend [-h] cluster_id
 
 Suspend cluster. The cluster will stop processing all IO. 
 Attention! This will cause an "all paths down" event for nvmeof/iscsi volumes on all hosts connected to the cluster.
 
 positional arguments:
-  cluster-id  the cluster UUID
+  cluster_id  the cluster UUID
 
 optional arguments:
   -h, --help  show this help message and exit
@@ -124,12 +180,12 @@ optional arguments:
 ### Unsuspend cluster 
 ```bash
 $ sbcli cluster unsuspend -h
-usage: sbcli cluster unsuspend [-h] cluster-id
+usage: sbcli cluster unsuspend [-h] cluster_id
 
 Unsuspend cluster. The cluster will start processing IO again.
 
 positional arguments:
-  cluster-id  the cluster UUID
+  cluster_id  the cluster UUID
 
 optional arguments:
   -h, --help  show this help message and exit
@@ -139,14 +195,14 @@ optional arguments:
 ### Add device model to the NVMe devices whitelist
 ```bash
 $ sbcli cluster add-dev-model -h
-usage: sbcli cluster add-dev-model [-h] cluster-id model-ids [model-ids ...]
+usage: sbcli cluster add-dev-model [-h] cluster_id model-ids [model-ids ...]
 
 Add a device to the white list by the device model id. When adding nodes to the cluster later on, all devices of the specified model-ids, which are present on the node to be added to the
 cluster, are added to the storage node for the cluster. This does not apply for already added devices, but only affect devices on additional nodes, which will be added to the cluster. It
 is always possible to also add devices present on a server to a node manually.
 
 positional arguments:
-  cluster-id  the cluster UUID
+  cluster_id  the cluster UUID
   model-ids   a list of supported NVMe device model-ids
 
 optional arguments:
@@ -156,12 +212,12 @@ optional arguments:
 ### Remove device model from the NVMe devices whitelist
 ```bash
 $ sbcli cluster rm-dev-model -h
-usage: sbcli cluster rm-dev-model [-h] cluster-id model-ids [model-ids ...]
+usage: sbcli cluster rm-dev-model [-h] cluster_id model-ids [model-ids ...]
 
 Remove device from the white list by the device model id. This does not apply for already added devices, but only affect devices on additional nodes, which will be added to the cluster.
 
 positional arguments:
-  cluster-id  the cluster UUID
+  cluster_id  the cluster UUID
   model-ids   a list of NVMe device model-ids
 
 optional arguments:
@@ -171,12 +227,12 @@ optional arguments:
 ### Add host auth
 ```bash
 $ sbcli cluster add-host-auth -h
-usage: sbcli cluster add-host-auth [-h] cluster-id host-nqn
+usage: sbcli cluster add-host-auth [-h] cluster_id host-nqn
 
 If the "authorized hosts only" security feature is turned on, hosts must be explicitly added to the cluster via their nqn before they can discover the subsystem initiate a connection.
 
 positional arguments:
-  cluster-id  the cluster UUID
+  cluster_id  the cluster UUID
   host-nqn    NQN of the host to allow to discover and connect to teh cluster
 
 optional arguments:
@@ -186,13 +242,13 @@ optional arguments:
 ### Remove host auth
 ```bash
 $ sbcli cluster rm-host-auth -h
-usage: sbcli cluster rm-host-auth [-h] cluster-id host-nqn
+usage: sbcli cluster rm-host-auth [-h] cluster_id host-nqn
 
 If the "authorized hosts only" security feature is turned on, this function removes hosts, which have been added to the cluster via their nqn, from the list
 of authorized hosts. After a host has been removed, it cannot connect any longer to the subsystem and cluster.
 
 positional arguments:
-  cluster-id  the cluster UUID
+  cluster_id  the cluster UUID
   host-nqn    NQN of the host to remove from the allowed hosts list
 
 optional arguments:
@@ -203,12 +259,12 @@ optional arguments:
 ### Get total cluster capacity
 ```bash
 $ sbcli cluster get-capacity -h
-usage: sbcli cluster get-capacity [-h] [--history HISTORY] cluster-id
+usage: sbcli cluster get-capacity [-h] [--history HISTORY] cluster_id
 
 Returns the current total available capacity, utilized capacity (in percent and absolute) and provisioned capacity (in percent and absolute) in GB in the cluster.
 
 positional arguments:
-  cluster-id         the cluster UUID
+  cluster_id         the cluster UUID
 
 optional arguments:
   -h, --help         show this help message and exit
@@ -219,13 +275,13 @@ optional arguments:
 ### Return io statistics of a cluster
 ```bash
 $ sbcli cluster get-io-stats -h
-usage: sbcli cluster get-io-stats [-h] [--history HISTORY] cluster-id
+usage: sbcli cluster get-io-stats [-h] [--history HISTORY] cluster_id
 
 Returns the io statistics. If --history is not selected, this is a monitor, which updates current statistics records every two seconds (similar to ping):read-iops write-iops total-iops
 read-mbs write-mbs total-mbs
 
 positional arguments:
-  cluster-id         the cluster UUID
+  cluster_id         the cluster UUID
 
 optional arguments:
   -h, --help         show this help message and exit
@@ -235,12 +291,12 @@ optional arguments:
 ### Set log level
 ```bash
 $ sbcli cluster set-log-level -h
-usage: sbcli cluster set-log-level [-h] cluster-id {debug,test,prod}
+usage: sbcli cluster set-log-level [-h] cluster_id {debug,test,prod}
 
 Defines the detail of the log information collected and stored
 
 positional arguments:
-  cluster-id         the cluster UUID
+  cluster_id         the cluster UUID
   {debug,test,prod}  Log level
 
 optional arguments:
@@ -251,12 +307,12 @@ optional arguments:
 ### Get events log
 ```bash
 $ sbcli cluster get-event-log -h
-usage: sbcli cluster get-event-log [-h] [--from FROM] [--to TO] cluster-id
+usage: sbcli cluster get-event-log [-h] [--from FROM] [--to TO] cluster_id
 
 returns cluster event log in syslog format
 
 positional arguments:
-  cluster-id   the cluster UUID
+  cluster_id   the cluster UUID
 
 optional arguments:
   -h, --help   show this help message and exit
@@ -265,6 +321,66 @@ optional arguments:
 
 ```
 
+### Get Cluster Auto-generated Secret
+```bash
+$ sbcli cluster get-secret -h
+usage: sbcli cluster get-secret [-h] cluster_id
+
+Get auto-generated secret
+
+positional arguments:
+  cluster_id  The cluster UUID
+
+optional arguments:
+  -h, --help  show this help message and exit
+
+```
+
+### Set Cluster Secret
+```bash
+$ sbcli cluster set-secret -h
+usage: sbcli cluster set-secret [-h] cluster_id secret
+
+Update the secret (replaces the existing one with a new one) and returns the new one.
+
+positional arguments:
+  cluster_id  The cluster UUID
+  secret      New 20 characters password
+
+optional arguments:
+  -h, --help  show this help message and exit
+
+```
+
+### Health Check Cluster
+```bash
+$ sbcli cluster check -h
+usage: sbcli cluster check [-h] id
+
+Health check cluster
+
+positional arguments:
+  id          Cluster UUID
+
+optional arguments:
+  -h, --help  show this help message and exit
+
+```
+
+### Update Cluster Management Services
+```bash
+$ sbcli cluster update -h
+usage: sbcli cluster update [-h] id
+
+Update cluster management services
+
+positional arguments:
+  id          Cluster UUID
+
+optional arguments:
+  -h, --help  show this help message and exit
+
+```
 
 ## Storage node commands
 ```bash
@@ -321,12 +437,12 @@ optional arguments:
 - must be run on the storage node itself
 ```bash
 $ sbcli storage-node add -h
-usage: sbcli storage-node add [-h] [--data-nics DATA_NICS [DATA_NICS ...]] [--distr] cluster-id ifname
+usage: sbcli storage-node add [-h] [--data-nics DATA_NICS [DATA_NICS ...]] [--distr] cluster_id ifname
 
 Add storage node
 
 positional arguments:
-  cluster-id            UUID of the cluster to which the node will belong
+  cluster_id            UUID of the cluster to which the node will belong
   ifname                Management interface name
 
 optional arguments:
@@ -354,12 +470,12 @@ optional arguments:
 ### List storage nodes
 ```bash
 $ sbcli storage-node list -h
-usage: sbcli storage-node list [-h] [--json] cluster-id
+usage: sbcli storage-node list [-h] [--json] cluster_id
 
 List storage nodes
 
 positional arguments:
-  cluster-id  id of the cluster for which nodes are listed
+  cluster_id  id of the cluster for which nodes are listed
 
 optional arguments:
   -h, --help  show this help message and exit
@@ -371,12 +487,12 @@ optional arguments:
 - must be run on the storage node itself
 ```bash
 $ sbcli storage-node restart -h
-usage: sbcli storage-node restart [-h] [-t] cluster-id
+usage: sbcli storage-node restart [-h] [-t] node_id
 
 Restart a storage node. All functions and device drivers will be reset. During restart, the node does not accept IO. In a high-availability setup, this will not impact operations.
 
 positional arguments:
-  cluster-id  the cluster UUID to which the node belongs
+  node_id  UUID of storage node
 
 optional arguments:
   -h, --help  show this help message and exit
@@ -387,13 +503,13 @@ optional arguments:
 ### Shutdown a storage node
 ```bash
 $ sbcli storage-node shutdown -h
-usage: sbcli storage-node shutdown [-h] cluster-id
+usage: sbcli storage-node shutdown [-h] node_id
 
 Shutdown a storage node. Once the command is issued, the node will stop accepting IO,but IO, which was previously received, will still be processed. In a high-availability setup, this will
 not impact operations.
 
 positional arguments:
-  cluster-id  the cluster UUID to which the node belongs
+  node_id  UUID of storage node
 
 optional arguments:
   -h, --help  show this help message and exit
@@ -403,12 +519,12 @@ optional arguments:
 ### Suspend a storage node
 ```bash
 $ sbcli storage-node suspend -h
-usage: sbcli storage-node suspend [-h] cluster-id
+usage: sbcli storage-node suspend [-h] [--force] node_id
 
 Suspend a storage node. The node will stop accepting new IO, but will finish processing any IO, which has been received already.
 
 positional arguments:
-  cluster-id  the cluster UUID to which the node belongs
+  node_id  UUID of storage node
 
 optional arguments:
   -h, --help  show this help message and exit
@@ -418,12 +534,12 @@ optional arguments:
 ### Resume a storage node
 ```bash
 $ sbcli storage-node resume -h
-usage: sbcli storage-node resume [-h] cluster-id
+usage: sbcli storage-node resume [-h] node_id
 
 Resume a storage node
 
 positional arguments:
-  cluster-id  the cluster UUID to which the node belongs
+  node_id  UUID of storage node
 
 optional arguments:
   -h, --help  show this help message and exit
@@ -432,12 +548,12 @@ optional arguments:
 ### Returns the current io statistics of a node
 ```bash
 $ sbcli storage-node get-io-stats -h
-usage: sbcli storage-node get-io-stats [-h] cluster-id
+usage: sbcli storage-node get-io-stats [-h] node_id
 
 Returns the current io statistics of a node
 
 positional arguments:
-  cluster-id  the cluster UUID
+  node_id  UUID of storage node
 
 optional arguments:
   -h, --help  show this help message and exit
@@ -729,13 +845,13 @@ optional arguments:
 ### List LVols
 ```bash
 $ sbcli lvol list -h
-usage: sbcli lvol list [-h] [--cluster-id CLUSTER_ID] [--json]
+usage: sbcli lvol list [-h] [--cluster_id CLUSTER_ID] [--json]
 
 List all LVols
 
 optional arguments:
   -h, --help            show this help message and exit
-  --cluster-id CLUSTER_ID
+  --cluster_id CLUSTER_ID
                         List LVols in particular cluster
   --json                Print outputs in json format
 ```
@@ -920,13 +1036,13 @@ optional arguments:
 ### Moves a full copy of the logical volume between clusters
 ```bash
 $ sbcli lvol move -h
-usage: sbcli lvol move [-h] id cluster-id node-id
+usage: sbcli lvol move [-h] id cluster_id node-id
 
 Moves a full copy of the logical volume between clusters
 
 positional arguments:
   id          LVol id
-  cluster-id  Destination Cluster ID
+  cluster_id  Destination Cluster ID
   node-id     Destination Node ID
 
 optional arguments:
@@ -1096,7 +1212,7 @@ positional arguments:
     get                 get pool details
     delete              delete pool. It is only possible to delete a pool if it is empty (no provisioned logical volumes contained).
     enable              Set pool status to Active
-    disable             Set pool status to Inactive. Attention! This will suspend all new IO to the pool! IO in flight processing will be completed.
+    disable             Set pool status to Inactive. Attention! This will suspend all new IO to the pool! IO in flight processing will be completed.       
     get-secret          Returns auto generated, 20 characters secret.
     set-secret          Updates the secret (replaces the existing one with a new one) and returns the new one.
 
@@ -1165,14 +1281,14 @@ optional arguments:
 ### List pools
 ```bash
 $ sbcli pool list -h
-usage: sbcli pool list [-h] [--json] [--cluster-id]
+usage: sbcli pool list [-h] [--json] [--cluster_id]
 
 List pools
 
 optional arguments:
   -h, --help    show this help message and exit
   --json        Print outputs in json format
-  --cluster-id  ID of the cluster
+  --cluster_id  ID of the cluster
 
 ```
 
@@ -1343,6 +1459,156 @@ Create LVol from snapshot
 positional arguments:
   id          snapshot UUID
   lvol_name   LVol name
+
+optional arguments:
+  -h, --help  show this help message and exit
+
+```
+
+## Caching client node commands
+```bash
+$ sbcli caching-node -h
+usage: sbcli caching-node [-h] {deploy,add-node,list,list-lvols,remove,connect,disconnect,recreate} ...
+
+Caching client node commands
+
+positional arguments:
+  {deploy,add-node,list,list-lvols,remove,connect,disconnect,recreate}
+    deploy              Deploy caching node on this machine (local exec)
+    add-node            Add new Caching node to the cluster
+    list                List Caching nodes
+    list-lvols          List connected lvols
+    remove              Remove Caching node from the cluster
+    connect             Connect to LVol
+    disconnect          Disconnect LVol from Caching node
+    recreate            recreate Caching node bdevs
+
+optional arguments:
+  -h, --help            show this help message and exit
+
+
+```
+
+### Deploy Caching node
+```bash
+$ sbcli caching-node deploy -h
+usage: sbcli caching-node deploy [-h]
+
+Deploy Caching node
+
+optional arguments:
+  --ifname Management interface name, default: eth0
+  -h, --help  show this help message and exit
+
+```
+
+### Add Caching Node to the Cluster
+```bash
+$ sbcli caching-node add-node -h
+usage: sbcli caching-node add-node [-h] cluster_id node_ip ifname [--cpu-mask SPDK_CPU_MASK] [--memory SPDK_MEM] [--spdk-image SPDK_IMAGE] [--namespace NAMESPACE]
+
+Add new Caching node to the cluster
+
+positional arguments:
+  cluster_id            UUID of the cluster to which the node will belong
+  node_ip               IP of caching node to add
+  ifname                Management interface name
+
+optional arguments:
+  --cpu-mask SPDK_CPU_MASK
+                        SPDK app CPU mask, default is all cores found
+  --memory SPDK_MEM     SPDK huge memory allocation, default is Max hugepages available
+  --spdk-image SPDK_IMAGE
+                        SPDK image uri
+  --namespace NAMESPACE
+                        k8s namespace to deploy on
+  -h, --help            show this help message and exit
+
+```
+
+### List Caching Nodes
+```bash
+$ sbcli caching-node list -h
+usage: sbcli caching-node list [-h]
+
+List Caching nodes
+
+optional arguments:
+  -h, --help  show this help message and exit
+
+```
+
+### List Connected LVols
+```bash
+$ sbcli caching-node list-lvols -h
+usage: sbcli caching-node list-lvols [-h] id
+
+List connected lvols
+
+positional arguments:
+  id          Caching Node UUID
+
+optional arguments:
+  -h, --help  show this help message and exit
+
+```
+
+### Remove Caching Node from the Cluster
+```bash
+$ sbcli caching-node remove -h
+usage: sbcli caching-node remove [-h] id [--force]
+
+Remove Caching node from the cluster
+
+positional arguments:
+  id            Caching Node UUID
+
+optional arguments:
+  --force       Force remove
+  -h, --help    show this help message and exit
+
+```
+### Connect to LVol
+```bash
+$ sbcli caching-node connect -h
+usage: sbcli caching-node connect [-h] node_id lvol_id
+
+Connect to LVol
+
+positional arguments:
+  node_id     Caching node UUID
+  lvol_id     LVol UUID
+
+optional arguments:
+  -h, --help  show this help message and exit
+
+```
+
+### Disconnect LVol from Caching Node
+```bash
+$ sbcli caching-node disconnect -h
+usage: sbcli caching-node disconnect [-h] node_id lvol_id
+
+Disconnect LVol from Caching node
+
+positional arguments:
+  node_id     Caching node UUID
+  lvol_id     LVol UUID
+
+optional arguments:
+  -h, --help  show this help message and exit
+
+```
+
+### Recreate Caching Node BDevs
+```bash
+$ sbcli caching-node recreate -h
+usage: sbcli caching-node recreate [-h] node_id
+
+recreate Caching node bdevs
+
+positional arguments:
+  node_id     Caching node UUID
 
 optional arguments:
   -h, --help  show this help message and exit
