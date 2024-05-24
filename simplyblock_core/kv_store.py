@@ -139,7 +139,6 @@ class DBController:
             if node.hostname == hostname:
                 return node
 
-    # todo: change this function for multi cluster
     def get_storage_device_by_id(self, id):
         nodes = self.get_storage_nodes()
         for node in nodes:
