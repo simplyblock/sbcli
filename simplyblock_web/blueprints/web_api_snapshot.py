@@ -52,3 +52,16 @@ def list_snapshots():
             "created_at": str(snap.created_at),
         })
     return utils.get_response(data)
+
+@bp.route('/snapshot/clone_snapshot', methods=['POST'])
+def clone_snapshot():
+    cl_data = request.get_json()
+    if 'snapshot_id' not in cl_data:
+        return utils.get_response(None, "missing required param: snapshot_id", 400)
+    if 'clone_name' not in cl_data:
+        return utils.get_response(None, "missing required param: clone_name", 400)
+
+    lvolID = snapshot_controller.clone(
+        cl_data['snapshot_id'],
+        cl_data['clone_name'])
+    return utils.get_response(lvolID)
