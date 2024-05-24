@@ -88,10 +88,10 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spd
     snode_api = CNodeClient(node_ip)
 
     node_info, _ = snode_api.info()
-    logger.info(f"Node found: {node_info['hostname']}")
-
+    system_id = node_info['system_id']
     hostname = node_info['hostname']
-    snode = db_controller.get_storage_node_by_hostname(hostname)
+    logger.info(f"Node found: {node_info['hostname']}")
+    snode = db_controller.get_caching_node_by_system_id(system_id)
     if snode:
         logger.error("Node already exists, try remove it first.")
         return False
@@ -119,9 +119,8 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spd
     snode.uuid = str(uuid.uuid4())
     snode.status = CachingNode.STATUS_IN_CREATION
     # snode.baseboard_sn = node_info['system_id']
-    snode.system_uuid = node_info['system_id']
+    snode.system_uuid = system_id
     snode.hostname = hostname
-    # snode.host_nqn = subsystem_nqn
     snode.subsystem = subsystem_nqn
     snode.data_nics = data_nics
     snode.mgmt_ip = node_info['network_interface'][iface_name]['ip']
@@ -349,6 +348,10 @@ def connect(caching_node_id, lvol_id):
         if clvol.lvol_id == lvol_id:
             logger.info(f"Already connected, dev path: {clvol.device_path}")
             return False
+
+    if cnode.cluster_id != pool.cluster_id:
+        logger.error("Caching node and LVol are in different clusters")
+        return False
 
     logger.info("Connecting to remote LVOL")
     mini_id = lvol.get_id().split("-")[0]

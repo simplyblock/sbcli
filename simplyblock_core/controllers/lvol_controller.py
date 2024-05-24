@@ -219,7 +219,7 @@ def add_lvol(name, size, host_id_or_name, pool_id_or_name, use_comp, use_crypto,
         return False, "Storage node has no nvme devices"
 
     dev_count = 0
-    for node in db_controller.get_storage_nodes():
+    for node in db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id):
         if node.status == node.STATUS_ONLINE:
             for dev in node.nvme_devices:
                 if dev.status == dev.STATUS_ONLINE:
@@ -253,7 +253,7 @@ def add_lvol(name, size, host_id_or_name, pool_id_or_name, use_comp, use_crypto,
             distr_npcs = 1
         else:
             node_count = 0
-            for node in db_controller.get_storage_nodes():
+            for node in db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id):
                 if node.status == node.STATUS_ONLINE:
                     node_count += 1
             if node_count == 3:
@@ -504,6 +504,11 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
         logger.error(error)
         return False, error
 
+    cluster_size_prov = 0
+    cluster_size_total = 0
+    for lvol in db_controller.get_lvols():
+        cluster_size_prov += lvol.size
+
     dev_count = 0
     snodes = db_controller.get_storage_nodes_by_cluster_id(cl.get_id())
     online_nodes = []
@@ -513,6 +518,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
             for dev in node.nvme_devices:
                 if dev.status == dev.STATUS_ONLINE:
                     dev_count += 1
+                    cluster_size_total += dev.size
 
     if dev_count == 0:
         logger.error("No NVMe devices found in the cluster")
@@ -528,15 +534,6 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
     if len(online_nodes) == 0:
         logger.error("No online Storage nodes found")
         return False, "No online Storage nodes found"
-
-    cluster_size_prov = 0
-    cluster_size_total = 0
-    for lvol in db_controller.get_lvols():
-        cluster_size_prov += lvol.size
-
-    for dev in db_controller.get_storage_devices():
-        if dev.status == NVMeDevice.STATUS_ONLINE:
-            cluster_size_total += dev.size
 
     cluster_size_prov_util = int(((cluster_size_prov+size) / cluster_size_total) * 100)
 

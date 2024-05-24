@@ -13,7 +13,7 @@ logger = logging.getLogger()
 
 def device_set_state(device_id, state):
     db_controller = DBController()
-    dev = db_controller.get_storage_devices(device_id)
+    dev = db_controller.get_storage_device_by_id(device_id)
     if not dev:
         logger.error("device not found")
 
@@ -32,7 +32,7 @@ def device_set_state(device_id, state):
 
     old_status = dev.status
     device.status = state
-    distr_controller.send_dev_status_event(device.cluster_device_order, device.status)
+    distr_controller.send_dev_status_event(device, device.status)
     snode.write_to_db(db_controller.kv_store)
     device_events.device_status_change(device, device.status, old_status)
     return True
@@ -40,7 +40,7 @@ def device_set_state(device_id, state):
 
 def device_set_io_error(device_id, is_error):
     db_controller = DBController()
-    dev = db_controller.get_storage_devices(device_id)
+    dev = db_controller.get_storage_device_by_id(device_id)
     if not dev:
         logger.error("device not found")
 
@@ -84,7 +84,7 @@ def get_alceml_name(alceml_id):
 
 def restart_device(device_id, force=False):
     db_controller = DBController()
-    dev = db_controller.get_storage_devices(device_id)
+    dev = db_controller.get_storage_device_by_id(device_id)
     if not dev:
         logger.error("device not found")
 
@@ -176,7 +176,7 @@ def restart_device(device_id, force=False):
     snode.write_to_db(db_controller.kv_store)
 
     logger.info("Make other nodes connect to the device")
-    snodes = db_controller.get_storage_nodes()
+    snodes = db_controller.get_storage_nodes_by_cluster_id(dev.cluster_id)
     for node_index, node in enumerate(snodes):
         if node.get_id() == snode.get_id():
             continue
@@ -205,7 +205,7 @@ def restart_device(device_id, force=False):
         time.sleep(3)
 
     logger.info("Sending device event")
-    distr_controller.send_dev_status_event(device_obj.cluster_device_order, "online")
+    distr_controller.send_dev_status_event(device_obj, NVMeDevice.STATUS_ONLINE)
     device_events.device_restarted(device_obj)
 
     return "Done"
@@ -213,7 +213,7 @@ def restart_device(device_id, force=False):
 
 def set_device_testing_mode(device_id, mode):
     db_controller = DBController()
-    device = db_controller.get_storage_devices(device_id)
+    device = db_controller.get_storage_device_by_id(device_id)
     if not device:
         logger.error("device not found")
         return False
@@ -235,7 +235,7 @@ def set_device_testing_mode(device_id, mode):
 
 def device_remove(device_id, force=True):
     db_controller = DBController()
-    dev = db_controller.get_storage_devices(device_id)
+    dev = db_controller.get_storage_device_by_id(device_id)
     if not dev:
         logger.error("device not found")
         return False
@@ -258,7 +258,7 @@ def device_remove(device_id, force=True):
             return False
 
     logger.info("Sending device event")
-    distr_controller.send_dev_status_event(device.cluster_device_order, "removed")
+    distr_controller.send_dev_status_event(device, NVMeDevice.STATUS_REMOVED)
 
     logger.info("Disconnecting device from all nodes")
     distr_controller.disconnect_device(device)
@@ -311,7 +311,7 @@ def device_remove(device_id, force=True):
 
 def get_device(device_id):
     db_controller = DBController()
-    device = db_controller.get_storage_devices(device_id)
+    device = db_controller.get_storage_device_by_id(device_id)
     if not device:
         logger.error("device not found")
         return False
@@ -321,7 +321,7 @@ def get_device(device_id):
 
 def get_device_capacity(device_id, history, records_count=20, parse_sizes=True):
     db_controller = DBController()
-    device = db_controller.get_storage_devices(device_id)
+    device = db_controller.get_storage_device_by_id(device_id)
     if not device:
         logger.error("device not found")
 
@@ -353,7 +353,7 @@ def get_device_capacity(device_id, history, records_count=20, parse_sizes=True):
 
 def get_device_iostats(device_id, history, records_count=20, parse_sizes=True):
     db_controller = DBController()
-    device = db_controller.get_storage_devices(device_id)
+    device = db_controller.get_storage_device_by_id(device_id)
     if not device:
         logger.error(f"Device not found: {device_id}")
         return False
@@ -412,7 +412,7 @@ def reset_storage_device(dev_id):
     logger.info("Setting device to unavailable")
     old_status = device.status
     device.status = NVMeDevice.STATUS_UNAVAILABLE
-    distr_controller.send_dev_status_event(device.cluster_device_order, device.status)
+    distr_controller.send_dev_status_event(device, device.status)
     snode.write_to_db(db_controller.kv_store)
     device_events.device_status_change(device, device.status, old_status)
 
