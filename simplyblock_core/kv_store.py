@@ -3,13 +3,14 @@ import logging
 
 import fdb
 import time
-from typing import List
+
 from simplyblock_core import constants
 from simplyblock_core.models.caching_node import CachingNode
 from simplyblock_core.models.cluster import ClusterMap
 
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.compute_node import ComputeNode
+from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.port_stat import PortStat
 from simplyblock_core.models.events import EventObj
 from simplyblock_core.models.global_settings import GlobalSettings
@@ -123,7 +124,7 @@ class DBController:
             if node.hostname == hostname:
                 return node
 
-    def get_storage_devices(self, id="") -> List[str]:
+    def get_storage_devices(self, id=""):
         # workaround because nvme devices are stored inside the node object itself.
         nodes = self.get_storage_nodes()
         devices = []
@@ -180,6 +181,11 @@ class DBController:
         ret = LVol().read_from_db(self.kv_store, id)
         if ret:
             return ret[0]
+
+    def get_lvol_by_name(self, lvol_name):
+        for lvol in self.get_lvols():
+            if lvol.lvol_name == lvol_name:
+                return lvol
 
     def get_mgmt_node_by_id(self, id):
         ret = MgmtNode().read_from_db(self.kv_store, id)
@@ -243,3 +249,6 @@ class DBController:
 
     def get_events(self, event_id=""):
         return EventObj().read_from_db(self.kv_store, id=event_id)
+
+    def get_job_tasks(self, cluster_id):
+        return JobSchedule().read_from_db(self.kv_store, id=cluster_id, reverse=True)
