@@ -1,8 +1,8 @@
 ### simplyblock e2e tests
 import requests
 import time
-from e2e.utils import SbcliUtils
-from e2e.ssh_utils import SshUtils
+from utils import SbcliUtils
+from ssh_utils import SshUtils
 
 # selected the node that doesn't have lvol attached
 
