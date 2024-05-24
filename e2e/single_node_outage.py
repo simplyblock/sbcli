@@ -87,3 +87,9 @@ class TestSingleNodeOutage:
         for node, ssh in self.ssh_obj.ssh_connections.items():
             print(f"Closing node ssh connection for {node}")
             ssh.close()
+
+if __name__ == "__main__":
+    test = TestSingleNodeOutage()
+    test.setup()
+    test.run()
+    test.teardown()
