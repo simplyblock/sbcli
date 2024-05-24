@@ -17,7 +17,7 @@ db_controller = kv_store.DBController()
 bp = Blueprint("snapshot", __name__)
 
 
-@bp.route('/snapshot/create_snapshot', methods=['POST'])
+@bp.route('/snapshot', methods=['POST'])
 def create_snapshot():
     cl_data = request.get_json()
     if 'lvol_id' not in cl_data:
@@ -31,12 +31,12 @@ def create_snapshot():
     return utils.get_response(snapID)
 
 
-@bp.route('/snapshot/delete_snapshot/<string:uuid>', methods=['DELETE'])
+@bp.route('/snapshot/<string:uuid>', methods=['DELETE'])
 def delete_snapshot(uuid):
     ret = snapshot_controller.delete(uuid)
     return utils.get_response(ret)
 
-@bp.route('/snapshot/list_snapshots', methods=['GET'])
+@bp.route('/snapshot', methods=['GET'])
 def list_snapshots():
     snaps = db_controller.get_snapshots()
     data = []
@@ -53,7 +53,7 @@ def list_snapshots():
         })
     return utils.get_response(data)
 
-@bp.route('/snapshot/clone_snapshot', methods=['POST'])
+@bp.route('/snapshot/clone', methods=['POST'])
 def clone_snapshot():
     cl_data = request.get_json()
     if 'snapshot_id' not in cl_data:
