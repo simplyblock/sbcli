@@ -476,6 +476,7 @@ class RPCClient:
             "subnqn": nqn,
             "fabrics_connect_timeout_us": 100000,
             "fast_io_fail_timeout_sec": 0,
+            "num_io_queues": 16384,
         }
         return self._request("bdev_nvme_attach_controller", params)
 
