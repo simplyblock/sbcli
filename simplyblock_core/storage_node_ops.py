@@ -307,7 +307,7 @@ def _connect_to_remote_devs(this_node):
 
     remote_devices = []
     # connect to remote devs
-    snodes = db_controller.get_storage_nodes()
+    snodes = db_controller.get_storage_nodes_by_cluster_id(this_node.cluster_id)
     for node_index, node in enumerate(snodes):
         if node.get_id() == this_node.get_id() or node.status == node.STATUS_OFFLINE:
             continue
@@ -571,7 +571,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask,
 
     # make other nodes connect to the new devices
     logger.info("Make other nodes connect to the new devices")
-    snodes = db_controller.get_storage_nodes()
+    snodes = db_controller.get_storage_nodes_by_cluster_id(cluster_id)
     for node_index, node in enumerate(snodes):
         if node.get_id() == snode.get_id() or node.status != StorageNode.STATUS_ONLINE:
             continue
@@ -613,10 +613,10 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask,
     time.sleep(3)
 
     logger.info("Sending cluster event updates")
-    distr_controller.send_node_status_event(snode.get_id(), "online")
+    distr_controller.send_node_status_event(snode, StorageNode.STATUS_ONLINE)
 
     for dev in snode.nvme_devices:
-        distr_controller.send_dev_status_event(dev.cluster_device_order, "online")
+        distr_controller.send_dev_status_event(dev, NVMeDevice.STATUS_ONLINE)
 
     storage_events.snode_add(snode)
     logger.info("Done")
@@ -710,7 +710,7 @@ def add_storage_node(cluster_id, iface_name, data_nics):
 
     # make other nodes connect to the new devices
     logger.info("Make other nodes connect to the new devices")
-    snodes = db_controller.get_storage_nodes()
+    snodes = db_controller.get_storage_nodes_by_cluster_id(cluster_id)
     for node_index, node in enumerate(snodes):
         if node.get_id() == snode.get_id():
             continue
@@ -748,10 +748,10 @@ def add_storage_node(cluster_id, iface_name, data_nics):
     time.sleep(3)
 
     logger.info("Sending cluster event updates")
-    distr_controller.send_node_status_event(snode.get_id(), "online")
+    distr_controller.send_node_status_event(snode, StorageNode.STATUS_ONLINE)
 
     for dev in snode.nvme_devices:
-        distr_controller.send_dev_status_event(dev.cluster_device_order, "online")
+        distr_controller.send_dev_status_event(dev, NVMeDevice.STATUS_ONLINE)
 
     logger.info("Done")
     return "Success"
@@ -825,7 +825,7 @@ def remove_storage_node(node_id, force_remove=False, force_migrate=False):
                 distr_controller.disconnect_device(dev)
             old_status = dev.status
             dev.status = NVMeDevice.STATUS_FAILED
-            distr_controller.send_dev_status_event(dev.cluster_device_order, NVMeDevice.STATUS_FAILED)
+            distr_controller.send_dev_status_event(dev, NVMeDevice.STATUS_FAILED)
             device_events.device_status_change(dev, NVMeDevice.STATUS_FAILED, old_status)
 
     logger.info("Removing storage node")
@@ -849,7 +849,7 @@ def remove_storage_node(node_id, force_remove=False, force_migrate=False):
     snode.status = StorageNode.STATUS_REMOVED
     snode.write_to_db(db_controller.kv_store)
     logger.info("Sending node event update")
-    distr_controller.send_node_status_event(snode.get_id(), snode.status)
+    distr_controller.send_node_status_event(snode, snode.status)
     storage_events.snode_status_change(snode, StorageNode.STATUS_REMOVED, old_status)
     logger.info("done")
 
@@ -882,7 +882,7 @@ def restart_storage_node(
     snode.status = StorageNode.STATUS_RESTARTING
     snode.write_to_db(kv_store)
     logger.info("Sending node event update")
-    distr_controller.send_node_status_event(snode.get_id(), snode.status)
+    distr_controller.send_node_status_event(snode, snode.status)
     storage_events.snode_status_change(snode, snode.status, old_status)
 
     logger.info(f"Restarting Storage node: {snode.mgmt_ip}")
@@ -984,7 +984,7 @@ def restart_storage_node(
         else:
             logger.info(f"Device not found: {db_dev.get_id()}")
             db_dev.status = NVMeDevice.STATUS_REMOVED
-            distr_controller.send_dev_status_event(db_dev.cluster_device_order, "offline")
+            distr_controller.send_dev_status_event(db_dev, db_dev.status)
 
     for dev in nvme_devs:
         if dev.serial_number not in known_devices_sn:
@@ -1010,7 +1010,7 @@ def restart_storage_node(
 
     # make other nodes connect to the new devices
     logger.info("Make other nodes connect to the node devices")
-    snodes = db_controller.get_storage_nodes()
+    snodes = db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id)
     for node_index, node in enumerate(snodes):
         if node.get_id() == snode.get_id() or node.status != StorageNode.STATUS_ONLINE:
             continue
@@ -1048,14 +1048,14 @@ def restart_storage_node(
     storage_events.snode_status_change(snode, snode.status, old_status)
 
     logger.info("Sending node event update")
-    distr_controller.send_node_status_event(snode.get_id(), NVMeDevice.STATUS_ONLINE)
+    distr_controller.send_node_status_event(snode, StorageNode.STATUS_ONLINE)
 
     logger.info("Sending devices event updates")
     for dev in snode.nvme_devices:
         if dev.status != NVMeDevice.STATUS_ONLINE:
             logger.debug(f"Device is not online: {dev.get_id()}, status: {dev.status}")
             continue
-        distr_controller.send_dev_status_event(dev.cluster_device_order, NVMeDevice.STATUS_ONLINE)
+        distr_controller.send_dev_status_event(dev, NVMeDevice.STATUS_ONLINE)
 
     logger.info("Sending cluster map to current node")
     ret = distr_controller.send_cluster_map_to_node(snode)
@@ -1203,7 +1203,7 @@ def shutdown_storage_node(node_id, force=False):
     for dev in snode.nvme_devices:
         if dev.status in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_READONLY]:
             device_controller.device_set_unavailable(dev.get_id())
-    distr_controller.send_node_status_event(snode.get_id(), "in_shutdown")
+    distr_controller.send_node_status_event(snode, StorageNode.STATUS_IN_SHUTDOWN)
 
     # shutdown node
     # make other nodes disconnect from this node
@@ -1223,7 +1223,7 @@ def shutdown_storage_node(node_id, force=False):
     snode_api = SNodeClient(snode.api_endpoint)
     results, err = snode_api.spdk_process_kill()
 
-    distr_controller.send_node_status_event(snode.get_id(), StorageNode.STATUS_OFFLINE)
+    distr_controller.send_node_status_event(snode, StorageNode.STATUS_OFFLINE)
 
     logger.info("Setting node status to offline")
     snode = db_controller.get_storage_node_by_id(node_id)
@@ -1250,7 +1250,7 @@ def suspend_storage_node(node_id, force=False):
         return False
 
     cluster = db_controller.get_cluster_by_id(snode.cluster_id)
-    snodes = db_controller.get_storage_nodes()
+    snodes = db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id)
     online_nodes = 0
     for node in snodes:
         if node.status == node.STATUS_ONLINE:
@@ -1265,7 +1265,7 @@ def suspend_storage_node(node_id, force=False):
         return False
 
     logger.info("Suspending node")
-    distr_controller.send_node_status_event(snode.get_id(), "suspended")
+    distr_controller.send_node_status_event(snode, StorageNode.STATUS_SUSPENDED)
     for dev in snode.nvme_devices:
         if dev.status == NVMeDevice.STATUS_ONLINE:
             device_controller.device_set_unavailable(dev.get_id())
@@ -1309,7 +1309,7 @@ def resume_storage_node(node_id):
     logger.info("Resuming node")
 
     logger.info("Sending cluster event updates")
-    distr_controller.send_node_status_event(snode.get_id(), "online")
+    distr_controller.send_node_status_event(snode, StorageNode.STATUS_ONLINE)
 
     for dev in snode.nvme_devices:
         if dev.status == NVMeDevice.STATUS_UNAVAILABLE:
