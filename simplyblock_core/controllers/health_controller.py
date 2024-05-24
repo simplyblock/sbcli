@@ -171,7 +171,7 @@ def check_node(node_id, with_devices=True):
 
 def check_device(device_id):
     db_controller = DBController()
-    device = db_controller.get_storage_devices(device_id)
+    device = db_controller.get_storage_device_by_id(device_id)
     if not device:
         logger.error("device not found")
         return False
@@ -235,7 +235,7 @@ def check_device(device_id):
 
 def check_remote_device(device_id):
     db_controller = DBController()
-    device = db_controller.get_storage_devices(device_id)
+    device = db_controller.get_storage_device_by_id(device_id)
     if not device:
         logger.error("device not found")
         return False
