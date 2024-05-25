@@ -33,7 +33,7 @@ def add_cluster():
         return utils.get_response_error("missing required param: ha_type", 400)
     if 'tls' not in cl_data:
         return utils.get_response_error("missing required param: tls", 400)
-    if 'auth-hosts-only' not in cl_data:
+    if 'auth_hosts_only' not in cl_data:
         return utils.get_response_error("missing required param: auth-hosts-only", 400)
     if 'dhchap' not in cl_data:
         return utils.get_response_error("missing required param: dhchap", 400)
@@ -57,7 +57,7 @@ def add_cluster():
     c.model_ids = cl_data['model_ids']
     c.ha_type = cl_data['ha_type']
     c.tls = cl_data['tls']
-    c.auth_hosts_only = cl_data['auth-hosts-only']
+    c.auth_hosts_only = cl_data['auth_hosts_only']
     c.nqn = cl_data['nqn']
     c.iscsi = cl_data['iscsi'] or False
     c.dhchap = cl_data['dhchap']
