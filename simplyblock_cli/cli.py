@@ -152,7 +152,6 @@ class CLIWrapper:
         #                                       'attached to the storage node')
         # sub_command.add_argument("node_id", help='UUID of the node')
         # sub_command.add_argument("cluster_id", help='UUID of the cluster')
-
         sub_command = self.add_sub_command(
             subparser, 'remove-device', 'Remove a storage device. The device will become unavailable, independently '
                                         'if it was physically removed from the server. This function can be used if '
@@ -212,7 +211,6 @@ class CLIWrapper:
         #     subparser, 'get-ctrl-secret', 'Returns the auto-generated controller secret required for the nvmeof '
         #                                   'connection between host and cluster')
         # sub_command.add_argument("id", help='Storage node ID')
-
         # check storage node
         sub_command = self.add_sub_command(subparser, "check", 'Health check storage node')
         sub_command.add_argument("id", help='UUID of storage node')
@@ -376,12 +374,6 @@ class CLIWrapper:
                                  dest='crypto_key1', default=None)
         sub_command.add_argument("--crypto-key2", help='the hex value of key2 to be used for lvol encryption',
                                  dest='crypto_key2', default=None)
-        # sub_command.add_argument("--node-ha",
-        #                          help='The maximum amount of concurrent node failures accepted without interruption of operations',
-        #                          required=False, default=1, type=int, choices=[0, 1, 2])
-        # sub_command.add_argument("--dev-redundancy",
-        #                          help='{1,2} supported minimal concurrent device failures without data loss',
-        #                          required=False, action='store_true')
         sub_command.add_argument("--max-rw-iops", help='Maximum Read Write IO Per Second', type=int)
         sub_command.add_argument("--max-rw-mbytes", help='Maximum Read Write Mega Bytes Per Second', type=int)
         sub_command.add_argument("--max-r-mbytes", help='Maximum Read Mega Bytes Per Second', type=int)
