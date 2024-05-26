@@ -764,7 +764,7 @@ def delete_storage_node(node_id):
     logger.info("done")
 
 
-def remove_storage_node(node_id, force_remove=False, force_migrate=False):
+def remove_storage_node(node_id, force_remove=False):
     db_controller = DBController()
     snode = db_controller.get_storage_node_by_id(node_id)
     if not snode:
