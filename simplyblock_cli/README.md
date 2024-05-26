@@ -29,95 +29,106 @@ optional arguments:
 
 ## Cluster commands
 ```bash
-$ sbcli cluster  -h
-usage: sbcli cluster [-h] {init,create,list,status,get,suspend,unsuspend,add-dev-model,rm-dev-model,add-host-auth,rm-host-auth,get-capacity,get-io-stats,set-log-level,get-event-log} ...
+$ sbcli cluster -h
+usage: sbcli cluster [-h]
+                         {create,list,status,get,suspend,unsuspend,add-dev-model,rm-dev-model,add-host-auth,rm-host-auth,get-capacity,get-io-stats,set-log-level,get-cli-ssh-pass,get-logs,get-secret,set-secret,check,update,graceful-shutdown,graceful-startup}
+                         ...
 
 Cluster commands
 
 positional arguments:
-  {init,create,list,status,get,suspend,unsuspend,add-dev-model,rm-dev-model,add-host-auth,rm-host-auth,get-capacity,get-io-stats,set-log-level,get-event-log}
-    init                Create an empty cluster
-    create              Create a new cluster with this node as management (local run)
+  {create,list,status,get,suspend,unsuspend,add-dev-model,rm-dev-model,add-host-auth,rm-host-auth,get-capacity,get-io-stats,set-log-level,get-cli-ssh-pass,get-logs,get-secret,set-secret,check,update,graceful-shutdown,graceful-startup}
+
+    create              Create an new cluster with this node as mgmt (local run)
+
     list                Show clusters list
+
     status              Show cluster status
+
     get                 Show cluster info
-    suspend             Suspend cluster. The cluster will stop processing all IO. Attention! This will cause an "all paths down" event for nvmeof/iscsi volumes on all hosts connected to
-                        the cluster.
+
+    suspend             Suspend cluster. The cluster will stop processing all IO. Attention! This will cause an "all paths down" event for nvmeof/iscsi volumes on all hosts connected to the cluster.
+
     unsuspend           Unsuspend cluster. The cluster will start processing IO again.
-    add-dev-model       Add a device to the white list by the device model id. When adding nodes to the cluster later on, all devices of the specified model-ids, which are present on the
-                        node to be added to the cluster, are added to the storage node for the cluster. This does not apply for already added devices, but only affect devices on additional
-                        nodes, which will be added to the cluster. It is always possible to also add devices present on a server to a node manually.
-    rm-dev-model        Remove device from the white list by the device model id. This does not apply for already added devices, but only affect devices on additional nodes, which will be
-                        added to the cluster.
-    add-host-auth       If the "authorized hosts only" security feature is turned on, hosts must be explicitly added to the cluster via their nqn before they can discover the subsystem
-                        initiate a connection.
-    rm-host-auth        If the "authorized hosts only" security feature is turned on, this function removes hosts, which have been added to the cluster via their nqn, from the list of
-                        authorized hosts. After a host has been removed, it cannot connect any longer to the subsystem and cluster.
-    get-capacity        Returns the current total available capacity, utilized capacity (in percent and absolute) and provisioned capacity (in percent and absolute) in GB in the cluster.
-    get-io-stats        Returns the io statistics. If --history is not selected, this is a monitor, which updates current statistics records every two seconds (similar to ping):read-iops
-                        write-iops total-iops read-mbs write-mbs total-mbs
+
+    get-capacity        Returns the current total available capacity, utilized capacity (in percent and absolute) and provisioned capacity (in percent and absolute) in GB
+                        in the cluster.
+
+    get-io-stats        Returns the io statistics. If --history is not selected, this is a monitor, which updates current statistics records every two seconds (similar to
+                        ping):read-iops write-iops total-iops read-mbs write-mbs total-mbs
+
     set-log-level       Defines the detail of the log information collected and stored
-    get-event-log       returns cluster event log in syslog format
+
+    get-cli-ssh-pass    returns the ssh password for the CLI ssh connection
+
+    get-logs            Returns distr logs
+
+    get-secret          Returns auto generated, 20 characters secret.
+
+    set-secret          Updates the secret (replaces the existing one with a new one) and returns the new one.
+
+    check               Health check cluster
+
+    update              Update cluster mgmt services
+
+    graceful-shutdown   Graceful shutdown of storage nodes
+
+    graceful-startup    Graceful startup of storage nodes
 
 optional arguments:
   -h, --help            show this help message and exit
-
-```
-
-### Initializing new cluster
-```bash
-$ sbcli cluster init -h
-usage: sbcli cluster init [-h] --blk_size {512,4096} --page_size_in_blocks PAGE_SIZE_IN_BLOCKS --model_ids MODEL_IDS [MODEL_IDS ...] --ha_type {single,ha} --tls {on,off} --auth-hosts-only
-                          {on,off} --dhchap {off,one-way,bi-direct} [--NQN NQN] [--iSCSI]
-
-Create an empty cluster
-
-optional arguments:
-  -h, --help            show this help message and exit
-  --blk_size {512,4096}
-                        The block size in bytes
-  --page_size_in_blocks PAGE_SIZE_IN_BLOCKS
-                        The size of a data page in logical blocks
-  --model_ids MODEL_IDS [MODEL_IDS ...]
-                        a list of supported NVMe device model-ids
-  --ha_type {single,ha}
-                        Can be "single" for single node clusters or "HA", which requires at least 3 nodes
-  --tls {on,off}        TCP/IP transport security can be turned on and off. If turned on, both hosts and storage nodes must authenticate the connection via TLS certificates
-  --auth-hosts-only {on,off}
-                        if turned on, hosts must be explicitely added to the cluster to be able to connect to any NVMEoF subsystem in the cluster
-  --dhchap {off,one-way,bi-direct}
-                        if set to "one-way", hosts must present a secret whenever a connection is initiated between a host and a logical volume on a NVMEoF subsystem in the cluster. If set
-                        to "bi-directional", both host and subsystem must present a secret to authenticate each other
-  --NQN NQN             cluster NQN subsystem
-  --iSCSI               The cluster supports iscsi LUNs in addition to nvmeof volumes
-
 ```
 
 ### Create Cluster
 ```bash
 $ sbcli cluster create -h
-usage: sbcli cluster create [-h] [--blk_size {512,4096}] [--page_size PAGE_SIZE] [--ha_type {single,ha}] [--tls {on,off}] [--auth-hosts-only {on,off}] [--model_ids MODEL_IDS [MODEL_IDS ...]] [--CLI_PASS CLI_PASS] [--cap-warn CAP_WARN] [--cap-crit CAP_CRIT] [--prov-cap-warn PROV_CAP_WARN] [--prov-cap-crit PROV_CAP_CRIT] [--ifname IFNAME] [--log-del-interval LOG_DEL_INTERVAL] [--metrics-retention-period METRICS_RETENTION_PERIOD]
 
-Create a new cluster with this node as management (local run)
+usage: sbcli cluster create [-h] [--blk_size {512,4096}] [--page_size PAGE_SIZE] [--ha_type {single,ha}] [--tls {on,off}] [--auth-hosts-only {on,off}]
+                                [--model_ids MODEL_IDS [MODEL_IDS ...]] [--CLI_PASS CLI_PASS] [--cap-warn CAP_WARN] [--cap-crit CAP_CRIT] [--prov-cap-warn PROV_CAP_WARN]
+                                [--prov-cap-crit PROV_CAP_CRIT] [--ifname IFNAME] [--log-del-interval LOG_DEL_INTERVAL]
+                                [--metrics-retention-period METRICS_RETENTION_PERIOD]
+
+Create an new cluster with this node as mgmt (local run)
 
 optional arguments:
-  --blk_size {512,4096}               The block size in bytes
-  --page_size PAGE_SIZE               The size of a data page in bytes
-  --ha_type {single,ha}               Can be "single" for single node clusters or "HA" for multi-node clusters
-  --tls {on,off}                      TCP/IP transport security can be turned on or off
-  --auth-hosts-only {on,off}          If turned on, hosts must be explicitly added to the cluster to connect to any NVMeoF subsystem
+  -h, --help            show this help message and exit
+
+  --blk_size {512,4096}
+                        The block size in bytes
+
+  --page_size PAGE_SIZE
+                        The size of a data page in bytes
+
+  --ha_type {single,ha}
+                        Can be "single" for single node clusters or "HA", which requires at least 3 nodes
+
+  --tls {on,off}        TCP/IP transport security can be turned on and off. If turned on, both hosts and storage nodes must authenticate the connection via TLS certificates
+
+  --auth-hosts-only {on,off}
+                        if turned on, hosts must be explicitely added to the cluster to be able to connect to any NVMEoF subsystem in the cluster
+
   --model_ids MODEL_IDS [MODEL_IDS ...]
-                                      A list of supported NVMe device model-ids
-  --CLI_PASS CLI_PASS                 Password for CLI SSH connection
-  --cap-warn CAP_WARN                 Capacity warning level in percent
-  --cap-crit CAP_CRIT                 Capacity critical level in percent
-  --prov-cap-warn PROV_CAP_WARN       Provisioned capacity warning level in percent
-  --prov-cap-crit PROV_CAP_CRIT       Provisioned capacity critical level in percent
-  --ifname IFNAME                     Management interface name
-  --log-del-interval LOG_DEL_INTERVAL Graylog deletion interval
+                        a list of supported NVMe device model-ids
+
+  --CLI_PASS CLI_PASS   Password for CLI SSH connection
+
+  --cap-warn CAP_WARN   Capacity warning level in percent, default=80
+
+  --cap-crit CAP_CRIT   Capacity critical level in percent, default=90
+
+  --prov-cap-warn PROV_CAP_WARN
+                        Capacity warning level in percent, default=180
+
+  --prov-cap-crit PROV_CAP_CRIT
+                        Capacity critical level in percent, default=190
+
+  --ifname IFNAME       Management interface name, default: eth0
+
+  --log-del-interval LOG_DEL_INTERVAL
+                        graylog deletion interval, default: 7d
+
   --metrics-retention-period METRICS_RETENTION_PERIOD
-                                      Retention period for Prometheus metrics
-  -h, --help                          show this help message and exit
+                        retention period for prometheus metrics, default: 7d
 
 ```
 
@@ -154,19 +165,19 @@ usage: sbcli cluster get [-h] id
 Show cluster info
 
 positional arguments:
-  id          The cluster UUID
+  id          the cluster UUID
 
 optional arguments:
   -h, --help  show this help message and exit
 
 ```
 
-### Suspend cluster 
+### Suspend cluster
 ```bash
 $ sbcli cluster suspend -h
 usage: sbcli cluster suspend [-h] cluster_id
 
-Suspend cluster. The cluster will stop processing all IO. 
+Suspend cluster. The cluster will stop processing all IO.
 Attention! This will cause an "all paths down" event for nvmeof/iscsi volumes on all hosts connected to the cluster.
 
 positional arguments:
@@ -177,7 +188,7 @@ optional arguments:
 
 ```
 
-### Unsuspend cluster 
+### Unsuspend cluster
 ```bash
 $ sbcli cluster unsuspend -h
 usage: sbcli cluster unsuspend [-h] cluster_id
@@ -191,75 +202,10 @@ optional arguments:
   -h, --help  show this help message and exit
 ```
 
-
-### Add device model to the NVMe devices whitelist
-```bash
-$ sbcli cluster add-dev-model -h
-usage: sbcli cluster add-dev-model [-h] cluster_id model-ids [model-ids ...]
-
-Add a device to the white list by the device model id. When adding nodes to the cluster later on, all devices of the specified model-ids, which are present on the node to be added to the
-cluster, are added to the storage node for the cluster. This does not apply for already added devices, but only affect devices on additional nodes, which will be added to the cluster. It
-is always possible to also add devices present on a server to a node manually.
-
-positional arguments:
-  cluster_id  the cluster UUID
-  model-ids   a list of supported NVMe device model-ids
-
-optional arguments:
-  -h, --help  show this help message and exit
-```
-
-### Remove device model from the NVMe devices whitelist
-```bash
-$ sbcli cluster rm-dev-model -h
-usage: sbcli cluster rm-dev-model [-h] cluster_id model-ids [model-ids ...]
-
-Remove device from the white list by the device model id. This does not apply for already added devices, but only affect devices on additional nodes, which will be added to the cluster.
-
-positional arguments:
-  cluster_id  the cluster UUID
-  model-ids   a list of NVMe device model-ids
-
-optional arguments:
-  -h, --help  show this help message and exit
-```
-
-### Add host auth
-```bash
-$ sbcli cluster add-host-auth -h
-usage: sbcli cluster add-host-auth [-h] cluster_id host-nqn
-
-If the "authorized hosts only" security feature is turned on, hosts must be explicitly added to the cluster via their nqn before they can discover the subsystem initiate a connection.
-
-positional arguments:
-  cluster_id  the cluster UUID
-  host-nqn    NQN of the host to allow to discover and connect to teh cluster
-
-optional arguments:
-  -h, --help  show this help message and exit
-```
-
-### Remove host auth
-```bash
-$ sbcli cluster rm-host-auth -h
-usage: sbcli cluster rm-host-auth [-h] cluster_id host-nqn
-
-If the "authorized hosts only" security feature is turned on, this function removes hosts, which have been added to the cluster via their nqn, from the list
-of authorized hosts. After a host has been removed, it cannot connect any longer to the subsystem and cluster.
-
-positional arguments:
-  cluster_id  the cluster UUID
-  host-nqn    NQN of the host to remove from the allowed hosts list
-
-optional arguments:
-  -h, --help  show this help message and exit
-
-```
-
 ### Get total cluster capacity
 ```bash
 $ sbcli cluster get-capacity -h
-usage: sbcli cluster get-capacity [-h] [--history HISTORY] cluster_id
+usage: sbcli cluster get-capacity [-h] [--json] [--history HISTORY] cluster_id
 
 Returns the current total available capacity, utilized capacity (in percent and absolute) and provisioned capacity (in percent and absolute) in GB in the cluster.
 
@@ -268,57 +214,55 @@ positional arguments:
 
 optional arguments:
   -h, --help         show this help message and exit
+  --json             Print json output
   --history HISTORY  (XXdYYh), list history records (one for every 15 minutes) for XX days and YY hours (up to 10 days in total).
-
 ```
 
-### Return io statistics of a cluster
+### Return IO statistics of a cluster
 ```bash
 $ sbcli cluster get-io-stats -h
-usage: sbcli cluster get-io-stats [-h] [--history HISTORY] cluster_id
+usage: sbcli cluster get-io-stats [-h] [--records RECORDS] [--history HISTORY] [--random] cluster_id
 
-Returns the io statistics. If --history is not selected, this is a monitor, which updates current statistics records every two seconds (similar to ping):read-iops write-iops total-iops
-read-mbs write-mbs total-mbs
+Returns the io statistics. If --history is not selected, this is a monitor, which updates current statistics records every two seconds (similar to ping):read-iops write-
+iops total-iops read-mbs write-mbs total-mbs
 
 positional arguments:
   cluster_id         the cluster UUID
 
 optional arguments:
   -h, --help         show this help message and exit
+  --records RECORDS  Number of records, default: 20
   --history HISTORY  (XXdYYh), list history records (one for every 15 minutes) for XX days and YY hours (up to 10 days in total).
+  --random           Generate random data
 ```
 
-### Set log level
+### Get SSH Password for CLI SSH Connection
 ```bash
-$ sbcli cluster set-log-level -h
-usage: sbcli cluster set-log-level [-h] cluster_id {debug,test,prod}
+$ sbcli cluster get-cli-ssh-pass -h
+usage: sbcli cluster get-cli-ssh-pass [-h] cluster_id
 
-Defines the detail of the log information collected and stored
+returns the ssh password for the CLI ssh connection
 
 positional arguments:
-  cluster_id         the cluster UUID
-  {debug,test,prod}  Log level
+  cluster_id  the cluster UUID
 
 optional arguments:
-  -h, --help         show this help message and exit
+  -h, --help  show this help message and exit
 
 ```
 
-### Get events log
+### returns distr logs
 ```bash
-$ sbcli cluster get-event-log -h
-usage: sbcli cluster get-event-log [-h] [--from FROM] [--to TO] cluster_id
+$ sbcli cluster get-logs -h
+usage: sbcli cluster get-logs [-h] cluster_id
 
-returns cluster event log in syslog format
+Returns distr logs
 
 positional arguments:
-  cluster_id   the cluster UUID
+  cluster_id  cluster uuid
 
 optional arguments:
-  -h, --help   show this help message and exit
-  --from FROM  from time, format: dd-mm-yy hh:mm
-  --to TO      to time, format: dd-mm-yy hh:mm
-
+  -h, --help  show this help message and exit
 ```
 
 ### Get Cluster Auto-generated Secret
@@ -326,10 +270,10 @@ optional arguments:
 $ sbcli cluster get-secret -h
 usage: sbcli cluster get-secret [-h] cluster_id
 
-Get auto-generated secret
+Returns auto generated, 20 characters secret.
 
 positional arguments:
-  cluster_id  The cluster UUID
+  cluster_id  cluster uuid
 
 optional arguments:
   -h, --help  show this help message and exit
@@ -341,11 +285,11 @@ optional arguments:
 $ sbcli cluster set-secret -h
 usage: sbcli cluster set-secret [-h] cluster_id secret
 
-Update the secret (replaces the existing one with a new one) and returns the new one.
+Updates the secret (replaces the existing one with a new one) and returns the new one.
 
 positional arguments:
-  cluster_id  The cluster UUID
-  secret      New 20 characters password
+  cluster_id  cluster uuid
+  secret      new 20 characters password
 
 optional arguments:
   -h, --help  show this help message and exit
@@ -360,11 +304,10 @@ usage: sbcli cluster check [-h] id
 Health check cluster
 
 positional arguments:
-  id          Cluster UUID
+  id          cluster UUID
 
 optional arguments:
   -h, --help  show this help message and exit
-
 ```
 
 ### Update Cluster Management Services
@@ -372,147 +315,340 @@ optional arguments:
 $ sbcli cluster update -h
 usage: sbcli cluster update [-h] id
 
-Update cluster management services
+Update cluster mgmt services
 
 positional arguments:
-  id          Cluster UUID
+  id          cluster UUID
 
 optional arguments:
   -h, --help  show this help message and exit
 
+```
+
+### Cluster Graceful shutdown
+```bash
+sbcli cluster graceful-shutdown -h
+usage: sbcli cluster graceful-shutdown [-h] id
+
+Graceful shutdown of storage nodes
+
+positional arguments:
+  id          cluster UUID
+
+optional arguments:
+  -h, --help  show this help message and exit
+```
+
+### Cluster Graceful start
+```bash
+sbcli cluster graceful-startup -h
+usage: sbcli cluster graceful-startup [-h] id
+
+Graceful startup of storage nodes
+
+positional arguments:
+  id          cluster UUID
+
+optional arguments:
+  -h, --help  show this help message and exit
 ```
 
 ## Storage node commands
 ```bash
 $ sbcli storage-node -h
 usage: sbcli storage-node [-h]
-                          {add,remove,list,restart,shutdown,suspend,resume,get-io-stats,list-devices,reset-device,run-smart,add-device,replace,remove-device,set-ro-device,set-failed-device,set-online-device,get-capacity-device,get-io-stats-device,get-event-log,get-log-page-device}
-                          ...
+                              {deploy,deploy-cleaner,add-node,delete,remove,list,get,update,restart,shutdown,suspend,resume,get-io-stats,get-capacity,list-devices,device-testing-mode,get-device,reset-device,restart-device,run-smart,add-device,remove-device,set-ro-device,set-failed-device,set-online-device,get-capacity-device,get-io-stats-device,port-list,port-io-stats,get-host-secret,get-ctrl-secret,check,check-device,info,info-spdk}
+
 
 Storage node commands
 
 positional arguments:
-  {add,remove,list,restart,shutdown,suspend,resume,get-io-stats,list-devices,reset-device,run-smart,add-device,replace,remove-device,set-ro-device,set-failed-device,set-online-device,get-capacity-device,get-io-stats-device,get-event-log,get-log-page-device}
-    add                 Add storage node
+  {deploy,deploy-cleaner,add-node,delete,remove,list,get,update,restart,shutdown,suspend,resume,get-io-stats,get-capacity,list-devices,device-testing-mode,get-device,reset-device,restart-device,run-smart,add-device,remove-device,set-ro-device,set-failed-device,set-online-device,get-capacity-device,get-io-stats-device,port-list,port-io-stats,get-host-secret,get-ctrl-secret,check,check-device,info,info-spdk}
+
+    deploy              Deploy local services for remote ops (local run)
+
+    deploy-cleaner      clean local deploy (local run)
+
+    add-node            Add storage node by ip
+
+    delete              Delete storage node obj
+
     remove              Remove storage node
+
     list                List storage nodes
-    restart             Restart a storage node. All functions and device drivers will be reset. During restart, the node does not accept IO. In a high-availability setup, this will not
-                        impact operations.
-    shutdown            Shutdown a storage node. Once the command is issued, the node will stop accepting IO,but IO, which was previously received, will still be processed. In a high-
-                        availability setup, this will not impact operations.
+
+    get                 Get storage node info
+
+    update              Update storage node db info
+
+    restart             Restart a storage node. All functions and device drivers will be reset. During restart, the node does not accept IO. In a high-availability setup,
+                        this will not impact operations.
+
+    shutdown            Shutdown a storage node. Once the command is issued, the node will stop accepting IO,but IO, which was previously received, will still be processed.
+                        In a high-availability setup, this will not impact operations.
+
     suspend             Suspend a storage node. The node will stop accepting new IO, but will finish processing any IO, which has been received already.
+
     resume              Resume a storage node
+
     get-io-stats        Returns the current io statistics of a node
+
+    get-capacity        Returns the size, absolute and relative utilization of the node in bytes
+
     list-devices        List storage devices
+
+    device-testing-mode
+                        set pt testing bdev mode
+
+    get-device          Get storage device by id
+
     reset-device        Reset storage device
+
+    restart-device      Re add "removed" storage device
+
     run-smart           Run tests against storage device
+
     add-device          Add a new storage device
-    replace             Replace a storage node. This command is run on the new physical server, which is expected to replace the old server. Attention!!! All the nvme devices, which are
-                        part of the cluster to which the node belongs, must be inserted into the new server before this command is run. The old node will be de-commissioned and cannot be
-                        used any more.
-    remove-device       Remove a storage device. The device will become unavailable, independently if it was physically removed from the server. This function can be used if auto-detection
-                        of removal did not work or if the device must be maintained otherwise while remaining inserted into the server.
+
+    remove-device       Remove a storage device. The device will become unavailable, independently if it was physically removed from the server. This function can be used
+                        if auto-detection of removal did not work or if the device must be maintained otherwise while remaining inserted into the server.
+
     set-ro-device       Set storage device read only
-    set-failed-device   Set storage device to failed state. This command can be used, if an administrator believes that the device must be changed, but its status and health state do not
-                        lead to an automatic detection of the failure state. Attention!!! The failed state is final, all data on the device will be automatically recovered to other devices
-                        in the cluster.
+
+    set-failed-device   Set storage device to failed state. This command can be used, if an administrator believes that the device must be changed, but its status and
+                        health state do not lead to an automatic detection of the failure state. Attention!!! The failed state is final, all data on the device will be
+                        automatically recovered to other devices in the cluster.
+
     set-online-device   Set storage device to online state
+
     get-capacity-device
                         Returns the size, absolute and relative utilization of the device in bytes
+
     get-io-stats-device
-                        Returns the io statistics. If --history is not selected, this is a monitor, which updates current statistics records every two seconds (similar to ping):read-iops
-                        write-iops total-iops read-mbs write-mbs total-mbs
-    get-event-log       Returns storage node event log in syslog format. This includes events from the storage node itself, the network interfaces and all devices on the node, including
-                        health status information and updates.
-    get-log-page-device
-                        Get nvme log-page information from the device. Attention! The availability of particular log pages depends on the device model. For more information, see nvme
-                        specification.
+                        Returns the io statistics. If --history is not selected, this is a monitor, which updates current statistics records every two seconds (similar to
+                        ping):read-iops write-iops total-iops read-mbs write-mbs total-mbs
+
+    port-list           Get Data interfaces list for a node
+
+    port-io-stats       Get Data interfaces IO stats
+
+    get-host-secret     Returns the auto-generated host secret required for the nvmeof connection between host and cluster
+
+    get-ctrl-secret     Returns the auto-generated controller secret required for the nvmeof connection between host and cluster
+
+    check               Health check storage node
+
+    check-device        Health check device
+
+    info                Get node information
+
+    info-spdk           Get SPDK memory information
 
 optional arguments:
   -h, --help            show this help message and exit
 
+```
+
+### Storage node deploy
+- must be run on the storage node itself
+```bash
+$ sbcli storage-node deploy -h
+usage: sbcli storage-node deploy [-h] [--ifname IFNAME]
+
+Deploy local services for remote ops (local run)
+
+optional arguments:
+  -h, --help       show this help message and exit
+  --ifname IFNAME  Management interface name, default: eth0
+```
+
+### clean local deploy
+- must be run on the storage node itself
+```bash
+$ sbcli storage-node deploy-cleaner -h
+usage: sbcli storage-node deploy-cleaner [-h]
+
+clean local deploy (local run)
+
+optional arguments:
+  -h, --help  show this help message and exit
 ```
 
 ### Add new storage node
 - must be run on the storage node itself
 ```bash
-$ sbcli storage-node add -h
-usage: sbcli storage-node add [-h] [--data-nics DATA_NICS [DATA_NICS ...]] [--distr] cluster_id ifname
+$ sbcli storage-node add-node -h
+usage: sbcli storage-node add-node [-h] [--jm-pcie JM_PCIE] [--data-nics DATA_NICS [DATA_NICS ...]] [--cpu-mask SPDK_CPU_MASK] [--memory SPDK_MEM]
+                                       [--dev-split DEV_SPLIT] [--spdk-image SPDK_IMAGE] [--spdk-debug] [--iobuf_small_pool_count SMALL_POOL_COUNT]
+                                       [--iobuf_large_pool_count LARGE_POOL_COUNT] [--iobuf_small_bufsize SMALL_BUFSIZE] [--iobuf_large_bufsize LARGE_BUFSIZE]
+                                       cluster_id node_ip ifname
 
-Add storage node
+Add storage node by ip
 
 positional arguments:
   cluster_id            UUID of the cluster to which the node will belong
+  node_ip               IP of storage node to add
   ifname                Management interface name
 
 optional arguments:
   -h, --help            show this help message and exit
+  --jm-pcie JM_PCIE     JM device address
   --data-nics DATA_NICS [DATA_NICS ...]
                         Data interface names
-  --distr               Install Disturb spdk app instead of default: ultra21
+  --cpu-mask SPDK_CPU_MASK
+                        SPDK app CPU mask, default is all cores found
+  --memory SPDK_MEM     SPDK huge memory allocation, default is 4G
+  --dev-split DEV_SPLIT
+                        Split nvme devices by this factor, can be 2 or more
+  --spdk-image SPDK_IMAGE
+                        SPDK image uri
+  --spdk-debug          Enable spdk debug logs
+  --iobuf_small_pool_count SMALL_POOL_COUNT
+                        bdev_set_options param
+  --iobuf_large_pool_count LARGE_POOL_COUNT
+                        bdev_set_options param
+  --iobuf_small_bufsize SMALL_BUFSIZE
+                        bdev_set_options param
+  --iobuf_large_bufsize LARGE_BUFSIZE
+                        bdev_set_options param
+```
+
+### delete storage node
+```bash
+$ sbcli storage-node delete -h
+usage: sbcli storage-node delete [-h] node_id
+
+Delete storage node obj
+
+positional arguments:
+  node_id     UUID of storage node
+
+optional arguments:
+  -h, --help  show this help message and exit
 ```
 
 ### Remove storage node
 ```bash
 $ sbcli storage-node remove -h
-usage: sbcli storage-node remove [-h] node-id
+usage: sbcli storage-node remove [-h] [--force-remove] node_id
 
 Remove storage node
 
 positional arguments:
-  node-id     node-id of storage node
+  node_id          UUID of storage node
 
 optional arguments:
-  -h, --help  show this help message and exit
-
+  -h, --help       show this help message and exit
+  --force-remove   Force remove all LVols and snapshots
 ```
 
 ### List storage nodes
 ```bash
-$ sbcli storage-node list -h
-usage: sbcli storage-node list [-h] [--json] cluster_id
+$ sbcli storage-node remove -h
+usage: sbcli storage-node remove [-h] [--force-remove] node_id
+
+Remove storage node
+
+positional arguments:
+  node_id          UUID of storage node
+
+optional arguments:
+  -h, --help       show this help message and exit
+  --force-remove   Force remove all LVols and snapshots
+  --force-migrate  Force migrate All LVols to other nodes
+sbcli storage-node list -h
+usage: sbcli storage-node list [-h] [--cluster-id CLUSTER_ID] [--json]
 
 List storage nodes
 
+optional arguments:
+  -h, --help            show this help message and exit
+  --cluster-id CLUSTER_ID
+                        id of the cluster for which nodes are listed
+  --json                Print outputs in json format
+
+```
+
+### Get a storage node
+```bash
+$ sbcli storage-node get -h
+usage: sbcli storage-node get [-h] id
+
+Get storage node info
+
 positional arguments:
-  cluster_id  id of the cluster for which nodes are listed
+  id          UUID of storage node
 
 optional arguments:
   -h, --help  show this help message and exit
-  --json      Print outputs in json format
 
 ```
+
+### Update storage node db info
+```bash
+$ sbcli storage-node update -h
+usage: sbcli storage-node update [-h] id key value
+
+Update storage node db info
+
+positional arguments:
+  id          UUID of storage node
+  key         Key
+  value       Value
+
+optional arguments:
+  -h, --help  show this help message and exit
+
+```
+
 
 ### Restart storage node
 - must be run on the storage node itself
 ```bash
 $ sbcli storage-node restart -h
-usage: sbcli storage-node restart [-h] [-t] node_id
+usage: sbcli storage-node restart [-h] [--cpu-mask SPDK_CPU_MASK] [--memory SPDK_MEM] [--spdk-image SPDK_IMAGE] [--spdk-debug]
+                                      [--iobuf_small_pool_count SMALL_POOL_COUNT] [--iobuf_large_pool_count LARGE_POOL_COUNT] [--iobuf_small_bufsize SMALL_BUFSIZE]
+                                      [--iobuf_large_bufsize LARGE_BUFSIZE]
+                                      node_id
 
-Restart a storage node. All functions and device drivers will be reset. During restart, the node does not accept IO. In a high-availability setup, this will not impact operations.
+Restart a storage node. All functions and device drivers will be reset. During restart, the node does not accept IO. In a high-availability setup, this will not impact
+operations.
 
 positional arguments:
-  node_id  UUID of storage node
+  node_id               UUID of storage node
 
 optional arguments:
-  -h, --help  show this help message and exit
-  -t, --test  Run smart test on the NVMe devices
-
+  -h, --help            show this help message and exit
+  --cpu-mask SPDK_CPU_MASK
+                        SPDK app CPU mask, default is all cores found
+  --memory SPDK_MEM     SPDK huge memory allocation, default is 4G
+  --spdk-image SPDK_IMAGE
+                        SPDK image uri
+  --spdk-debug          Enable spdk debug logs
+  --iobuf_small_pool_count SMALL_POOL_COUNT
+                        bdev_set_options param
+  --iobuf_large_pool_count LARGE_POOL_COUNT
+                        bdev_set_options param
+  --iobuf_small_bufsize SMALL_BUFSIZE
+                        bdev_set_options param
+  --iobuf_large_bufsize LARGE_BUFSIZE
+                        bdev_set_options param
 ```
 
 ### Shutdown a storage node
 ```bash
 $ sbcli storage-node shutdown -h
-usage: sbcli storage-node shutdown [-h] node_id
+usage: sbcli storage-node shutdown [-h] [--force] node_id
 
-Shutdown a storage node. Once the command is issued, the node will stop accepting IO,but IO, which was previously received, will still be processed. In a high-availability setup, this will
-not impact operations.
+Shutdown a storage node. Once the command is issued, the node will stop accepting IO,but IO, which was previously received, will still be processed. In a high-availability
+setup, this will not impact operations.
 
 positional arguments:
-  node_id  UUID of storage node
+  node_id     UUID of storage node
 
 optional arguments:
   -h, --help  show this help message and exit
+  --force     Force node shutdown
 
 ```
 
@@ -524,10 +660,11 @@ usage: sbcli storage-node suspend [-h] [--force] node_id
 Suspend a storage node. The node will stop accepting new IO, but will finish processing any IO, which has been received already.
 
 positional arguments:
-  node_id  UUID of storage node
+  node_id     UUID of storage node
 
 optional arguments:
   -h, --help  show this help message and exit
+  --force     Force node suspend
 
 ```
 
@@ -539,7 +676,7 @@ usage: sbcli storage-node resume [-h] node_id
 Resume a storage node
 
 positional arguments:
-  node_id  UUID of storage node
+  node_id     UUID of storage node
 
 optional arguments:
   -h, --help  show this help message and exit
@@ -548,21 +685,22 @@ optional arguments:
 ### Returns the current io statistics of a node
 ```bash
 $ sbcli storage-node get-io-stats -h
-usage: sbcli storage-node get-io-stats [-h] node_id
+usage: sbcli storage-node get-io-stats [-h] [--history HISTORY] node_id
 
 Returns the current io statistics of a node
 
 positional arguments:
-  node_id  UUID of storage node
+  node_id            Node ID
 
 optional arguments:
-  -h, --help  show this help message and exit
+  -h, --help         show this help message and exit
+  --history HISTORY  list history records -one for every 15 minutes- for XX days and YY hours -up to 10 days in total-, format: XXdYYh
 ```
 
 ### List storage devices
 ```bash
 $ sbcli storage-node list-devices -h
-usage: sbcli storage-node list-devices [-h] node-id [-a] [-s {node-seq,dev-seq,serial}] [--json] 
+usage: sbcli storage-node list-devices [-h] node-id [-a] [-s {node-seq,dev-seq,serial}] [--json]
 
 List storage devices
 
@@ -577,16 +715,94 @@ optional arguments:
   --json                Print outputs in json format
 
 ```
+### Get storage node capacity
+```bash
+$ sbcli storage-node get-capacity -h
+usage: sbcli storage-node get-capacity [-h] [--history HISTORY] node_id
+
+Returns the size, absolute and relative utilization of the node in bytes
+
+positional arguments:
+  node_id            Node ID
+
+optional arguments:
+  -h, --help         show this help message and exit
+  --history HISTORY  list history records -one for every 15 minutes- for XX days and YY hours -up to 10 days in total-, format: X
+```
+
+### List storage devices
+```bash
+$ sbcli storage-node list-devices -h
+usage: sbcli storage-node list-devices [-h] [-s {node-seq,dev-seq,serial}] [--json] node_id
+
+List storage devices
+
+positional arguments:
+  node_id               the node's UUID
+
+optional arguments:
+  -h, --help            show this help message and exit
+  -s {node-seq,dev-seq,serial}, --sort {node-seq,dev-seq,serial}
+                        Sort the outputs
+  --json                Print outputs in json format
+```
+
+### set pt testing bdev mode
+```bash
+$ sbcli storage-node device-testing-mode -h
+usage: sbcli storage-node device-testing-mode [-h]
+                                                  device_id
+                                                  {full_pass_trhough,io_error_on_read,io_error_on_write,io_error_on_unmap,io_error_on_all,discard_io_all,hotplug_removal}
+
+set pt testing bdev mode
+
+positional arguments:
+  device_id             Device UUID
+  {full_pass_trhough,io_error_on_read,io_error_on_write,io_error_on_unmap,io_error_on_all,discard_io_all,hotplug_removal}
+                        Testing mode
+
+optional arguments:
+  -h, --help            show this help message and exit
+```
+
+
+### Get storage device by ID
+```bash
+$ sbcli storage-node get-device -h
+usage: sbcli storage-node get-device [-h] device_id
+
+Get storage device by id
+
+positional arguments:
+  device_id   the devices's UUID
+
+optional arguments:
+  -h, --help  show this help message and exit
+```
 
 ### Reset a storage device
 ```bash
 $ sbcli storage-node reset-device -h
-usage: sbcli storage-node reset-device [-h] device-id
+usage: sbcli storage-node reset-device [-h] device_id
 
 Reset storage device
 
 positional arguments:
-  device-id   the devices's UUID
+  device_id   the devices's UUID
+
+optional arguments:
+  -h, --help  show this help message and exit
+```
+
+### Restart a device
+```bash
+$ sbcli storage-node restart-device -h
+usage: sbcli storage-node restart-device [-h] id
+
+Re add "removed" storage device
+
+positional arguments:
+  id          the devices's UUID
 
 optional arguments:
   -h, --help  show this help message and exit
@@ -595,12 +811,12 @@ optional arguments:
 ### Run smart tests against a storage device
 ```bash
 $ sbcli storage-node run-smart -h
-usage: sbcli storage-node run-smart [-h] device-id
+usage: sbcli storage-node run-smart [-h] device_id
 
 Run tests against storage device
 
 positional arguments:
-  device-id   the devices's UUID
+  device_id   the devices's UUID
 
 optional arguments:
   -h, --help  show this help message and exit
@@ -609,12 +825,14 @@ optional arguments:
 ### Add a new storage device
 ```bash
 $ sbcli storage-node add-device -h
-usage: sbcli storage-node add-device [-h] name
+usage: sbcli storage-node add-device [-h] name node_id cluster_id
 
 Add a new storage device
 
 positional arguments:
-  name        Storage device name (as listed in the operating system). The device will be de-ttached from the operating system and attached to the storage node
+  name        Storage device name (as listed in the operating system). The device will be de-attached from the operating system and attached to the storage node
+  node_id     UUID of the node
+  cluster_id  UUID of the cluster
 
 optional arguments:
   -h, --help  show this help message and exit
@@ -623,7 +841,7 @@ optional arguments:
 ### Replace a storage node
 ```bash
 $ sbcli storage-node replace -h
-usage: sbcli storage-node replace [-h] node-id ifname [--data-nics DATA_NICS [DATA_NICS ...]] 
+usage: sbcli storage-node replace [-h] node-id ifname [--data-nics DATA_NICS [DATA_NICS ...]]
 
 Replace a storage node. This command is run on the new physical server, which is expected to replace the old server. Attention!!! All the nvme devices, which are part of the cluster to
 which the node belongs, must be inserted into the new server before this command is run. The old node will be de-commissioned and cannot be used any more.
@@ -641,28 +859,44 @@ optional arguments:
 ### Remove a storage device
 ```bash
 $ sbcli storage-node remove-device -h
-usage: sbcli storage-node remove-device [-h] device-id
+usage: sbcli storage-node remove-device [-h] [--force] device_id
 
-Remove a storage device. The device will become unavailable, independently if it was physically removed from the server. This function can be used if auto-detection of removal did not work
-or if the device must be maintained otherwise while remaining inserted into the server.
+Remove a storage device. The device will become unavailable, independently if it was physically removed from the server. This function can be used if auto-detection of
+removal did not work or if the device must be maintained otherwise while remaining inserted into the server.
 
 positional arguments:
-  device-id   Storage device ID
+  device_id   Storage device ID
+
+optional arguments:
+  -h, --help  show this help message and exit
+  --force     Force device remove
+```
+
+### Set storage device to read only
+```bash
+$ sbcli storage-node set-ro-device -h
+usage: sbcli storage-node set-ro-device [-h] device_id
+
+Set storage device read only
+
+positional arguments:
+  device_id   Storage device ID
 
 optional arguments:
   -h, --help  show this help message and exit
 ```
 
+
 ### Set storage device to failed state
 ```bash
 $ sbcli storage-node set-failed-device -h
-usage: sbcli storage-node set-failed-device [-h] device-id
+usage: sbcli storage-node set-failed-device [-h] device_id
 
-Set storage device to failed state. This command can be used, if an administrator believes that the device must be changed, but its status and health state do not lead to an automatic
-detection of the failure state. Attention!!! The failed state is final, all data on the device will be automatically recovered to other devices in the cluster.
+Set storage device to failed state. This command can be used, if an administrator believes that the device must be changed, but its status and health state do not lead to
+an automatic detection of the failure state. Attention!!! The failed state is final, all data on the device will be automatically recovered to other devices in the cluster.
 
 positional arguments:
-  device-id   Storage device ID
+  device_id   Storage device ID
 
 optional arguments:
   -h, --help  show this help message and exit
@@ -671,12 +905,12 @@ optional arguments:
 ### Set storage device to online state
 ```bash
 $ sbcli storage-node set-online-device -h
-usage: sbcli storage-node set-online-device [-h] device-id
+usage: sbcli storage-node set-online-device [-h] device_id
 
 Set storage device to online state
 
 positional arguments:
-  device-id   Storage device ID
+  device_id   Storage device ID
 
 optional arguments:
   -h, --help  show this help message and exit
@@ -686,29 +920,28 @@ optional arguments:
 ### Returns the size of a device
 ```bash
 $ sbcli storage-node get-capacity-device -h
-usage: sbcli storage-node get-capacity-device [-h] [--history HISTORY] device-id
+usage: sbcli storage-node get-capacity-device [-h] [--history HISTORY] device_id
 
 Returns the size, absolute and relative utilization of the device in bytes
 
 positional arguments:
-  device-id          Storage device ID
+  device_id          Storage device ID
 
 optional arguments:
   -h, --help         show this help message and exit
   --history HISTORY  list history records -one for every 15 minutes- for XX days and YY hours -up to 10 days in total-, format: XXdYYh
 ```
 
-
-### Returns the io statistics of a device
+### Returns the IO statistics of a device
 ```bash
 $ sbcli storage-node get-io-stats-device -h
-usage: sbcli storage-node get-io-stats-device [-h] [--history HISTORY] device-id
+usage: sbcli storage-node get-io-stats-device [-h] [--history HISTORY] device_id
 
-Returns the io statistics. If --history is not selected, this is a monitor, which updates current statistics records every two seconds (similar to ping):read-iops write-iops total-iops
-read-mbs write-mbs total-mbs
+Returns the io statistics. If --history is not selected, this is a monitor, which updates current statistics records every two seconds (similar to ping):read-iops write-
+iops total-iops read-mbs write-mbs total-mbs
 
 positional arguments:
-  device-id          Storage device ID
+  device_id          Storage device ID
 
 optional arguments:
   -h, --help         show this help message and exit
@@ -716,37 +949,118 @@ optional arguments:
 
 ```
 
-### Returns storage node event log in syslog format
+### Get data interface list for a node
 ```bash
-$ sbcli storage-node get-event-log -h
-usage: sbcli storage-node get-event-log [-h] [--from FROM] [--to TO] node-id
+$ sbcli storage-node port-list -h
+usage: sbcli storage-node port-list [-h] node_id
 
-Returns storage node event log in syslog format. This includes events from the storage node itself, the network interfaces and all devices on the node, including health status information
-and updates.
+Get Data interfaces list for a node
 
 positional arguments:
-  node-id      Storage node ID
+  node_id     Storage node ID
 
 optional arguments:
-  -h, --help   show this help message and exit
-  --from FROM  from time, format: dd-mm-yy hh:mm
-  --to TO      to time, format: dd-mm-yy hh:mm
+  -h, --help  show this help message and exit
 ```
 
-### Get nvme log-page information from the device
+### Get data interface IO Stats
 ```bash
-$ sbcli storage-node get-log-page-device -h
-usage: sbcli storage-node get-log-page-device [-h] device-id {error,smart,telemetry,dev-self-test,endurance,persistent-event}
+$ sbcli storage-node port-io-stats -h
+usage: sbcli storage-node port-io-stats [-h] [--history HISTORY] port_id
 
-Get nvme log-page information from the device. Attention! The availability of particular log pages depends on the device model. For more information, see nvme specification.
+Get Data interfaces IO stats
 
 positional arguments:
-  device-id             Storage device ID
-  {error,smart,telemetry,dev-self-test,endurance,persistent-event}
-                        Can be [error , smart , telemetry , dev-self-test , endurance , persistent-event]
+  port_id            Data port ID
 
 optional arguments:
-  -h, --help            show this help message and exit
+  -h, --help         show this help message and exit
+  --history HISTORY  list history records -one for every 15 minutes- for XX days and YY hours -up to 10 days in total, format: XXdYYh
+```
+
+### Host secret for nvme connection
+```bash
+sbcli storage-node get-host-secret -h
+usage: sbcli storage-node get-host-secret [-h] id
+
+Returns the auto-generated host secret required for the nvmeof connection between host and cluster
+
+positional arguments:
+  id          Storage node ID
+
+optional arguments:
+  -h, --help  show this help message and exit
+```
+
+### Controller secret for nvme connection
+```bash
+$ sbcli storage-node get-ctrl-secret -h
+usage: sbcli storage-node get-ctrl-secret [-h] id
+
+Returns the auto-generated controller secret required for the nvmeof connection between host and cluster
+
+positional arguments:
+  id          Storage node ID
+
+optional arguments:
+  -h, --help  show this help message and exit
+```
+
+### Health check storage node
+```bash
+$ sbcli storage-node check -h
+usage: sbcli storage-node check [-h] id
+
+Health check storage node
+
+positional arguments:
+  id          UUID of storage node
+
+optional arguments:
+  -h, --help  show this help message and exit
+```
+
+### Health check device
+```bash
+$ sbcli storage-node check-device -h
+usage: sbcli storage-node check-device [-h] id
+
+Health check device
+
+positional arguments:
+  id          device UUID
+
+optional arguments:
+  -h, --help  show this help message and exit
+```
+
+### Get node information
+```bash
+$ sbcli storage-node info -h
+usage: sbcli storage-node info [-h] id
+
+Get node information
+
+positional arguments:
+  id          Node UUID
+
+optional arguments:
+  -h, --help  show this help message and exit
+```
+
+
+### Get SPDK Memory Information
+```bash
+$ sbcli storage-node info-spdk -h
+usage: sbcli storage-node info-spdk [-h] id
+
+Get SPDK memory information
+
+positional arguments:
+  id          Node UUID
+
+optional arguments:
+  -h, --help  show this help message and exit
 ```
 
 
@@ -754,30 +1068,38 @@ optional arguments:
 ```bash
 $ sbcli lvol -h
 usage: sbcli lvol [-h]
-                  {add,qos-set,list,get,delete,connect,resize,set-read-only,create-snapshot,clone,get-host-secret,get-ctrl-secret,move ,replicate
-                  ,inflate,get-capacity,get-io-stats} ...
+                      {add,qos-set,list,list-mem,get,delete,connect,resize,set-read-only,set-read-write,suspend,unsuspend,create-snapshot,clone,move,replicate,inflate,get-capacity,get-io-stats,send-cluster-map,get-cluster-map,check}
+                      ...
 
 LVol commands
 
 positional arguments:
-  {add,qos-set,list,get,delete,connect,resize,set-read-only,create-snapshot,clone,get-host-secret,get-ctrl-secret,move ,replicate ,inflate,get-capacity,get-io-stats}
-    add                 Add LVol, if both --comp and --crypto are used, then the compress bdev will be at the top
+  {add,qos-set,list,list-mem,get,delete,connect,resize,set-read-only,set-read-write,suspend,unsuspend,create-snapshot,clone,move,replicate,inflate,get-capacity,get-io-stats,send-cluster-map,get-cluster-map,check}
+    add                 Add a new logical volume
     qos-set             Change qos settings for an active logical volume
     list                List all LVols
+    list-mem            List all LVols
     get                 Get LVol details
-    delete              Delete LVol
-    connect             show connection string to LVol host
-    resize              Resize LVol
-    set-read-only       Set LVol Read-only
+    delete              Delete LVol. This is only possible, if no more snapshots and non-inflated clones of the volume exist. The volume must be suspended before it can be
+                        deleted.
+    connect             show connection strings to cluster. Multiple connections to the cluster are always available for multi-pathing and high-availability.
+    resize              Resize LVol. The lvol cannot be exceed the maximum size for lvols. It cannot exceed total remaining provisioned space in pool. It cannot drop below
+                        the current utilization.
+    set-read-only       Set LVol Read-only. Current write IO in flight will still be processed, but for new IO, only read and unmap IO are possible.
+    set-read-write      Set LVol Read-Write.
+    suspend             Suspend LVol. IO in flight will still be processed, but new IO is not accepted. Make sure that the volume is detached from all hosts before
+                        suspending it to avoid IO errors.
+    unsuspend           Unsuspend LVol. IO may be resumed.
     create-snapshot     Create snapshot from LVol
     clone               create LVol based on a snapshot
-    get-host-secret     Returns the auto-generated host secret required for the nvmeof connection between host and cluster
-    get-ctrl-secret     Returns the auto-generated controller secret required for the nvmeof connection between host and cluster
-    move                Moves a full copy of the logical volume between clusters
+    move                Moves a full copy of the logical volume between nodes
     replicate           Create a replication path between two volumes in two clusters
     inflate             Inflate a clone to "full" logical volume and disconnect it from its parent snapshot.
-    get-capacity        Returns the current provisioned capacity
-    get-io-stats        Returns either the current io statistics
+    get-capacity        Returns the current (or historic) provisioned and utilized (in percent and absolute) capacity.
+    get-io-stats        Returns either the current or historic io statistics (read-IO, write-IO, total-IO, read mbs, write mbs, total mbs).
+    send-cluster-map    send distr cluster map
+    get-cluster-map     get distr cluster map
+    check               Health check LVol
 
 optional arguments:
   -h, --help            show this help message and exit
@@ -787,42 +1109,58 @@ optional arguments:
 ### Add LVol
 ```bash
 $ sbcli lvol add -h
-usage:sbcli lvol add [-h] [--compress] [--encrypt] [--thick] [--iscsi] [--node-ha {0,1,2}] [--dev-redundancy] [--max-w-iops MAX_W_IOPS] [--max-r-iops MAX_R_IOPS] [--max-r-mbytes MAX_R_MBYTES] [--max-w-mbytes MAX_W_MBYTES]
-                     [--distr] [--distr-ndcs DISTR_NDCS] [--distr-npcs DISTR_NPCS] [--distr-alloc_names DISTR_ALLOC_NAMES]
-                     name size pool hostname
+usage: sbcli lvol add [-h] [--snapshot] [--max-size MAX_SIZE] [--host-id HOST_ID] [--ha-type {single,ha,default}] [--compress] [--encrypt] [--crypto-key1 CRYPTO_KEY1]
+                          [--crypto-key2 CRYPTO_KEY2] [--node-ha {0,1,2}] [--dev-redundancy] [--max-rw-iops MAX_RW_IOPS] [--max-rw-mbytes MAX_RW_MBYTES]
+                          [--max-r-mbytes MAX_R_MBYTES] [--max-w-mbytes MAX_W_MBYTES] [--distr-vuid DISTR_VUID] [--distr-ndcs DISTR_NDCS] [--distr-npcs DISTR_NPCS]
+                          [--distr-bs DISTR_BS] [--distr-chunk-bs DISTR_CHUNK_BS]
+                          name size pool
 
-Add LVol, if both --comp and --crypto are used, then the compress bdev will be at the top
+Add a new logical volume
 
 positional arguments:
   name                  LVol name or id
   size                  LVol size: 10M, 10G, 10(bytes)
   pool                  Pool UUID or name
-  hostname              Storage node hostname
 
 optional arguments:
   -h, --help            show this help message and exit
+  --snapshot, -s        Make LVol with snapshot capability, default is False
+  --max-size MAX_SIZE   LVol max size
+  --host-id HOST_ID     Primary storage node UUID or Hostname
+  --ha-type {single,ha,default}
+                        LVol HA type (single, ha), default is cluster HA type
   --compress            Use inline data compression and de-compression on the logical volume
   --encrypt             Use inline data encryption and de-cryption on the logical volume
-  --thick               Deactivate thin provisioning
-  --iscsi               Use ISCSI fabric type instead of NVMEoF; in this case, it is required to specify the cluster hosts to which the volume will be attached
+  --crypto-key1 CRYPTO_KEY1
+                        the hex value of key1 to be used for lvol encryption
+  --crypto-key2 CRYPTO_KEY2
+                        the hex value of key2 to be used for lvol encryption
   --node-ha {0,1,2}     The maximum amount of concurrent node failures accepted without interruption of operations
   --dev-redundancy      {1,2} supported minimal concurrent device failures without data loss
-  --max-w-iops MAX_W_IOPS
-                        Maximum Write IO Per Second
-  --max-r-iops MAX_R_IOPS
-                        Maximum Read IO Per Second
+  --max-rw-iops MAX_RW_IOPS
+                        Maximum Read Write IO Per Second
+  --max-rw-mbytes MAX_RW_MBYTES
+                        Maximum Read Write Mega Bytes Per Second
   --max-r-mbytes MAX_R_MBYTES
                         Maximum Read Mega Bytes Per Second
   --max-w-mbytes MAX_W_MBYTES
                         Maximum Write Mega Bytes Per Second
-  --distr               Use Disturb bdev
+  --distr-vuid DISTR_VUID
+                        (Dev) set vuid manually, default: random (1-99999)
+  --distr-ndcs DISTR_NDCS
+                        (Dev) set ndcs manually, default: 4
+  --distr-npcs DISTR_NPCS
+                        (Dev) set npcs manually, default: 1
+  --distr-bs DISTR_BS   (Dev) distrb bdev block size, default: 4096
+  --distr-chunk-bs DISTR_CHUNK_BS
+                        (Dev) distrb bdev chunk block size, default: 4096
 
 ```
 
 ### Set QOS options for LVol
 ```bash
-$ sbcli lvol qos-set [-h]
-usage: sbcli lvol qos-set [-h] [--max-w-iops MAX_W_IOPS] [--max-r-iops MAX_R_IOPS] [--max-r-mbytes MAX_R_MBYTES] [--max-w-mbytes MAX_W_MBYTES] id
+$ sbcli lvol qos-set -h
+usage: sbcli lvol qos-set [-h] [--max-rw-iops MAX_RW_IOPS] [--max-rw-mbytes MAX_RW_MBYTES] [--max-r-mbytes MAX_R_MBYTES] [--max-w-mbytes MAX_W_MBYTES] id
 
 Change qos settings for an active logical volume
 
@@ -831,29 +1169,42 @@ positional arguments:
 
 optional arguments:
   -h, --help            show this help message and exit
-  --max-w-iops MAX_W_IOPS
-                        Maximum Write IO Per Second
-  --max-r-iops MAX_R_IOPS
-                        Maximum Read IO Per Second
+  --max-rw-iops MAX_RW_IOPS
+                        Maximum Read Write IO Per Second
+  --max-rw-mbytes MAX_RW_MBYTES
+                        Maximum Read Write Mega Bytes Per Second
   --max-r-mbytes MAX_R_MBYTES
                         Maximum Read Mega Bytes Per Second
   --max-w-mbytes MAX_W_MBYTES
                         Maximum Write Mega Bytes Per Second
-
 ```
 
 ### List LVols
 ```bash
 $ sbcli lvol list -h
-usage: sbcli lvol list [-h] [--cluster_id CLUSTER_ID] [--json]
+usage: sbcli lvol list [-h] [--cluster-id CLUSTER_ID] [--json]
 
 List all LVols
 
 optional arguments:
   -h, --help            show this help message and exit
-  --cluster_id CLUSTER_ID
+  --cluster-id CLUSTER_ID
                         List LVols in particular cluster
   --json                Print outputs in json format
+```
+
+### Get the size and max_size of the lvol
+```bash
+$ sbcli lvol list-mem -h
+usage: sbcli lvol list-mem [-h] [--json] [--csv]
+
+Get the size and max_size of the lvol
+
+optional arguments:
+  -h, --help  show this help message and exit
+  --json      Print outputs in json format
+  --csv       Print outputs in csv format
+
 ```
 
 ### Get LVol details
@@ -864,7 +1215,7 @@ usage: sbcli lvol get [-h] [--json] id
 Get LVol details
 
 positional arguments:
-  id          LVol id
+  id          LVol id or name
 
 optional arguments:
   -h, --help  show this help message and exit
@@ -874,12 +1225,12 @@ optional arguments:
 ### Delete LVol
 ```bash
 $ sbcli lvol delete -h
-usage: sbcli lvol delete [-h] [--force] id
+usage: sbcli lvol delete [-h] [--force] id [id ...]
 
 Delete LVol. This is only possible, if no more snapshots and non-inflated clones of the volume exist. The volume must be suspended before it can be deleted.
 
 positional arguments:
-  id          LVol id
+  id          LVol id or ids
 
 optional arguments:
   -h, --help  show this help message and exit
@@ -889,7 +1240,7 @@ optional arguments:
 ### Show nvme-cli connection commands
 ```bash
 $ sbcli lvol connect -h
-usage: sbcli lvol lvol connect [-h] id
+usage: sbcli lvol connect [-h] id
 
 show connection strings to cluster. Multiple connections to the cluster are always available for multi-pathing and high-availability.
 
@@ -948,7 +1299,8 @@ optional arguments:
 $ sbcli lvol suspend -h
 usage: sbcli lvol suspend [-h] id
 
-Suspend LVol. IO in flight will still be processed, but new IO is not accepted. Make sure that the volume is detached from all hosts before suspending it to avoid IO errors.
+Suspend LVol. IO in flight will still be processed, but new IO is not accepted. Make sure that the volume is detached from all hosts before suspending it to avoid IO
+errors.
 
 positional arguments:
   id          LVol id
@@ -993,65 +1345,33 @@ optional arguments:
 $ sbcli lvol clone -h
 usage: sbcli lvol clone [-h] snapshot_id clone_name
 
-Create LVol based on a snapshot
+create LVol based on a snapshot
 
 positional arguments:
-  snapshot_id          snapshot UUID
-  clone_name        clone name
+  snapshot_id  snapshot UUID
+  clone_name   clone name
 
 optional arguments:
-  -h, --help  show this help message and exit
+  -h, --help   show this help message and exit
 ```
 
-### Returns the host secret
-```bash
-$ sbcli lvol get-host-secret -h
-usage: sbcli lvol get-host-secret [-h] id
-
-Returns the auto-generated host secret required for the nvmeof connection between host and cluster
-
-positional arguments:
-  id          LVol id
-
-optional arguments:
-  -h, --help  show this help message and exit
-
-```
-
-### Returns the controller secret
-```bash
-$ sbcli lvol get-ctrl-secret -h
-usage: sbcli lvol get-ctrl-secret [-h] id
-
-Returns the auto-generated controller secret required for the nvmeof connection between host and cluster
-
-positional arguments:
-  id          LVol id
-
-optional arguments:
-  -h, --help  show this help message and exit
-
-```
-
-### Moves a full copy of the logical volume between clusters
+### Move: Moves a full copy of the logical volume between nodes
 ```bash
 $ sbcli lvol move -h
-usage: sbcli lvol move [-h] id cluster_id node-id
+usage: sbcli lvol move [-h] [--force] id node_id
 
-Moves a full copy of the logical volume between clusters
+Moves a full copy of the logical volume between nodes
 
 positional arguments:
-  id          LVol id
-  cluster_id  Destination Cluster ID
-  node-id     Destination Node ID
+  id          LVol UUID
+  node_id     Destination Node UUID
 
 optional arguments:
   -h, --help  show this help message and exit
-
-
+  --force     Force LVol delete from source node
 ```
 
-### Create a replication path between two volumes in two clusters
+### Replicate: Create a replication path between two volumes in two clusters
 ```bash
 $ sbcli lvol replicate -h
 usage: sbcli lvol replicate [-h] [--asynchronous] id cluster-a cluster-b
@@ -1066,10 +1386,9 @@ positional arguments:
 optional arguments:
   -h, --help      show this help message and exit
   --asynchronous  Replication may be performed synchronously(default) and asynchronously
-
 ```
 
-### Inflate a clone to "full" logical volume and disconnect it from its parent snapshot.
+### Inflate a clone to full logical volume
 ```bash
 $ sbcli lvol inflate -h
 usage: sbcli lvol inflate [-h] id
@@ -1083,7 +1402,7 @@ optional arguments:
   -h, --help  show this help message and exit
 ```
 
-### Returns the current LVol provisioned capacity
+### Get Capacity: Current provisioned and Utilised capacity
 ```bash
 $ sbcli lvol get-capacity -h
 usage: sbcli lvol get-capacity [-h] [--history HISTORY] id
@@ -1096,10 +1415,9 @@ positional arguments:
 optional arguments:
   -h, --help         show this help message and exit
   --history HISTORY  (XXdYYh), list history records (one for every 15 minutes) for XX days and YY hours (up to 10 days in total).
-
 ```
 
-### Returns either the current io statistics
+### Get IO Stats
 ```bash
 $ sbcli lvol get-io-stats -h
 usage: sbcli lvol get-io-stats [-h] [--history HISTORY] id
@@ -1114,6 +1432,47 @@ optional arguments:
   --history HISTORY  (XXdYYh), list history records (one for every 15 minutes) for XX days and YY hours (up to 10 days in total).
 ```
 
+### send distr cluster map
+```bash
+$ sbcli lvol send-cluster-map -h
+usage: sbcli lvol send-cluster-map [-h] id
+
+send distr cluster map
+
+positional arguments:
+  id          LVol id
+
+optional arguments:
+  -h, --help  show this help message and exit
+```
+
+### Get distr cluster map
+```bash
+$ sbcli lvol get-cluster-map -h
+usage: sbcli lvol get-cluster-map [-h] id
+
+get distr cluster map
+
+positional arguments:
+  id          LVol id
+
+optional arguments:
+  -h, --help  show this help message and exit
+```
+
+### Health check lvol
+```bash
+$ sbcli lvol check -h
+usage: sbcli lvol check [-h] id
+
+Health check LVol
+
+positional arguments:
+  id          UUID of LVol
+
+optional arguments:
+  -h, --help  show this help message and exit
+```
 
 ## Management node commands
 ```bash
@@ -1137,12 +1496,14 @@ optional arguments:
 ### Add management node
 ```bash
 $ sbcli mgmt add -h
-usage: sbcli mgmt add [-h] ip_port
+usage: sbcli mgmt add [-h] cluster_ip cluster_id ifname
 
 Add Management node to the cluster
 
 positional arguments:
-  ip_port     Docker server IP:PORT
+  cluster_ip  the cluster IP address
+  cluster_id  the cluster UUID
+  ifname      Management interface name
 
 optional arguments:
   -h, --help  show this help message and exit
@@ -1200,21 +1561,23 @@ optional arguments:
 ## Pool commands
 ```bash
 $ sbcli pool -h
-usage: sbcli pool [-h] {add,set,list,get,delete,enable,disable,get-secret,set-secret} ...
+usage: sbcli pool [-h] {add,set,list,get,delete,enable,disable,get-secret,upd-secret,get-capacity,get-io-stats} ...
 
 Pool commands
 
 positional arguments:
-  {add,set,list,get,delete,enable,disable,get-secret,set-secret}
+  {add,set,list,get,delete,enable,disable,get-secret,upd-secret,get-capacity,get-io-stats}
     add                 Add a new Pool
     set                 Set pool attributes
     list                List pools
     get                 get pool details
     delete              delete pool. It is only possible to delete a pool if it is empty (no provisioned logical volumes contained).
     enable              Set pool status to Active
-    disable             Set pool status to Inactive. Attention! This will suspend all new IO to the pool! IO in flight processing will be completed.       
+    disable             Set pool status to Inactive. Attention! This will suspend all new IO to the pool! IO in flight processing will be completed.
     get-secret          Returns auto generated, 20 characters secret.
-    set-secret          Updates the secret (replaces the existing one with a new one) and returns the new one.
+    upd-secret          Updates the secret (replaces the existing one with a new one) and returns the new one.
+    get-capacity        Return provisioned, utilized (absolute) and utilized (percent) storage on the Pool.
+    get-io-stats        Returns either the current or historic io statistics (read-IO, write-IO, total-IO, read mbs, write mbs, total mbs).
 
 optional arguments:
   -h, --help            show this help message and exit
@@ -1222,15 +1585,13 @@ optional arguments:
 ```
 
 ### Add pool
- - QOS parameters are optional but when used in a pool, new Lvol
-   creation will require the active qos parameter. 
- - User can use both QOS parameters (--max-rw-iops, --max-rw-mbytes) 
-   and will apply which limit comes first.
+ - QOS parameters are optional but when used in a pool, new Lvol creation will require the active qos parameter.
+ - User can use both QOS parameters (--max-rw-iops, --max-rw-mbytes) and will apply which limit comes first.
 ```bash
 $ sbcli pool add -h
-usage: sbcli pool add [-h] [--pool-max POOL_MAX] [--lvol-max LVOL_MAX] [--max-w-iops MAX_W_IOPS] [--max-r-iops MAX_R_IOPS] [--max-r-mbytes MAX_R_MBYTES] [--max-w-mbytes MAX_W_MBYTES]
-                      [--has-secret]
-                      name
+usage: sbcli pool add [-h] [--pool-max POOL_MAX] [--lvol-max LVOL_MAX] [--max-rw-iops MAX_RW_IOPS] [--max-rw-mbytes MAX_RW_MBYTES] [--max-r-mbytes MAX_R_MBYTES]
+                          [--max-w-mbytes MAX_W_MBYTES] [--has-secret]
+                          name
 
 Add a new Pool
 
@@ -1241,10 +1602,10 @@ optional arguments:
   -h, --help            show this help message and exit
   --pool-max POOL_MAX   Pool maximum size: 20M, 20G, 0(default)
   --lvol-max LVOL_MAX   LVol maximum size: 20M, 20G, 0(default)
-  --max-w-iops MAX_W_IOPS
-                        Maximum Write IO Per Second
-  --max-r-iops MAX_R_IOPS
-                        Maximum Read IO Per Second
+  --max-rw-iops MAX_RW_IOPS
+                        Maximum Read Write IO Per Second
+  --max-rw-mbytes MAX_RW_MBYTES
+                        Maximum Read Write Mega Bytes Per Second
   --max-r-mbytes MAX_R_MBYTES
                         Maximum Read Mega Bytes Per Second
   --max-w-mbytes MAX_W_MBYTES
@@ -1256,7 +1617,9 @@ optional arguments:
 ### Set pool attributes
 ```bash
 $ sbcli pool set -h
-usage: sbcli pool set [-h] [--pool-max POOL_MAX] [--lvol-max LVOL_MAX] [--max-w-iops MAX_W_IOPS] [--max-r-iops MAX_R_IOPS] [--max-r-mbytes MAX_R_MBYTES] [--max-w-mbytes MAX_W_MBYTES] id
+usage: sbcli pool set [-h] [--pool-max POOL_MAX] [--lvol-max LVOL_MAX] [--max-rw-iops MAX_RW_IOPS] [--max-rw-mbytes MAX_RW_MBYTES] [--max-r-mbytes MAX_R_MBYTES]
+                          [--max-w-mbytes MAX_W_MBYTES]
+                          id
 
 Set pool attributes
 
@@ -1267,10 +1630,10 @@ optional arguments:
   -h, --help            show this help message and exit
   --pool-max POOL_MAX   Pool maximum size: 20M, 20G
   --lvol-max LVOL_MAX   LVol maximum size: 20M, 20G
-  --max-w-iops MAX_W_IOPS
-                        Maximum Write IO Per Second
-  --max-r-iops MAX_R_IOPS
-                        Maximum Read IO Per Second
+  --max-rw-iops MAX_RW_IOPS
+                        Maximum Read Write IO Per Second
+  --max-rw-mbytes MAX_RW_MBYTES
+                        Maximum Read Write Mega Bytes Per Second
   --max-r-mbytes MAX_R_MBYTES
                         Maximum Read Mega Bytes Per Second
   --max-w-mbytes MAX_W_MBYTES
@@ -1281,14 +1644,14 @@ optional arguments:
 ### List pools
 ```bash
 $ sbcli pool list -h
-usage: sbcli pool list [-h] [--json] [--cluster_id]
+usage: sbcli pool list [-h] [--json] [--cluster-id]
 
 List pools
 
 optional arguments:
   -h, --help    show this help message and exit
   --json        Print outputs in json format
-  --cluster_id  ID of the cluster
+  --cluster-id  ID of the cluster
 
 ```
 
@@ -1371,16 +1734,47 @@ optional arguments:
 
 ### Update pool secret
 ```bash
-$ sbcli pool set-secret -h
-usage: sbcli pool set-secret [-h] pool_id
+$ sbcli pool upd-secret -h
+usage: sbcli pool upd-secret [-h] pool_id secret
 
 Updates the secret (replaces the existing one with a new one) and returns the new one.
+
+positional arguments:
+  pool_id     pool uuid
+  secret      new 20 characters password
+
+optional arguments:
+  -h, --help  show this help message and exit
+
+```
+
+### Get Pool capacity
+```bash
+$ sbcli pool get-capacity -h
+usage: sbcli pool get-capacity [-h] pool_id
+
+Return provisioned, utilized (absolute) and utilized (percent) storage on the Pool.
 
 positional arguments:
   pool_id     pool uuid
 
 optional arguments:
   -h, --help  show this help message and exit
+```
+
+### Get IO Stats
+```bash
+$ sbcli pool get-io-stats -h
+usage: sbcli pool get-io-stats [-h] [--history HISTORY] id
+
+Returns either the current or historic io statistics (read-IO, write-IO, total-IO, read mbs, write mbs, total mbs).
+
+positional arguments:
+  id                 Pool id
+
+optional arguments:
+  -h, --help         show this help message and exit
+  --history HISTORY  (XXdYYh), list history records (one for every 15 minutes) for XX days and YY hours (up to 10 days in total).
 
 ```
 
@@ -1401,7 +1795,6 @@ positional arguments:
 
 optional arguments:
   -h, --help            show this help message and exit
-
 
 ```
 
@@ -1492,20 +1885,20 @@ optional arguments:
 ### Deploy Caching node
 ```bash
 $ sbcli caching-node deploy -h
-usage: sbcli caching-node deploy [-h]
+usage: sbcli caching-node deploy [-h] [--ifname IFNAME]
 
-Deploy Caching node
+Deploy caching node on this machine (local exec)
 
 optional arguments:
-  --ifname Management interface name, default: eth0
-  -h, --help  show this help message and exit
+  -h, --help       show this help message and exit
+  --ifname IFNAME  Management interface name, default: eth0
 
 ```
 
 ### Add Caching Node to the Cluster
 ```bash
 $ sbcli caching-node add-node -h
-usage: sbcli caching-node add-node [-h] cluster_id node_ip ifname [--cpu-mask SPDK_CPU_MASK] [--memory SPDK_MEM] [--spdk-image SPDK_IMAGE] [--namespace NAMESPACE]
+usage: sbcli caching-node add-node [-h] [--cpu-mask SPDK_CPU_MASK] [--memory SPDK_MEM] [--spdk-image SPDK_IMAGE] [--namespace NAMESPACE] cluster_id node_ip ifname
 
 Add new Caching node to the cluster
 
@@ -1515,6 +1908,7 @@ positional arguments:
   ifname                Management interface name
 
 optional arguments:
+  -h, --help            show this help message and exit
   --cpu-mask SPDK_CPU_MASK
                         SPDK app CPU mask, default is all cores found
   --memory SPDK_MEM     SPDK huge memory allocation, default is Max hugepages available
@@ -1522,7 +1916,6 @@ optional arguments:
                         SPDK image uri
   --namespace NAMESPACE
                         k8s namespace to deploy on
-  -h, --help            show this help message and exit
 
 ```
 
@@ -1548,7 +1941,7 @@ List connected lvols
 positional arguments:
   id          Caching Node UUID
 
-optional arguments:
+optionathick                arguments:
   -h, --help  show this help message and exit
 
 ```
@@ -1556,16 +1949,16 @@ optional arguments:
 ### Remove Caching Node from the Cluster
 ```bash
 $ sbcli caching-node remove -h
-usage: sbcli caching-node remove [-h] id [--force]
+usage: sbcli caching-node remove [-h] [--force] id
 
 Remove Caching node from the cluster
 
 positional arguments:
-  id            Caching Node UUID
+  id          Caching Node UUID
 
 optional arguments:
-  --force       Force remove
-  -h, --help    show this help message and exit
+  -h, --help  show this help message and exit
+  --force     Force remove
 
 ```
 ### Connect to LVol
