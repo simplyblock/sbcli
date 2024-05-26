@@ -502,12 +502,6 @@ class CLIWrapper:
                                  help='Replication may be performed synchronously(default) and asynchronously',
                                  action='store_true')
 
-        # lvol inflate
-        sub_command = self.add_sub_command(
-            subparser, 'inflate', 'Inflate a clone to "full" logical volume and disconnect it '
-                                  'from its parent snapshot.')
-        sub_command.add_argument("id", help='LVol id')
-
         # lvol get-capacity
         sub_command = self.add_sub_command(
             subparser, 'get-capacity', 'Returns the current (or historic) provisioned and utilized '
@@ -1059,7 +1053,6 @@ class CLIWrapper:
                 if args.resize:
                     new_size = self.parse_size(args.resize)
                 ret = snapshot_controller.clone(args.snapshot_id, args.clone_name, new_size)
-
             elif sub_command == "get-io-stats":
                 id = args.id
                 history = args.history
