@@ -778,7 +778,7 @@ def delete_storage_node(node_id):
     logger.info("done")
 
 
-def remove_storage_node(node_id, force_remove=False, force_migrate=False):
+def remove_storage_node(node_id, force_remove=False):
     db_controller = DBController()
     snode = db_controller.get_storage_node_by_id(node_id)
     if not snode:
@@ -807,10 +807,7 @@ def remove_storage_node(node_id, force_remove=False, force_migrate=False):
             node_snaps.append(sn)
 
     if node_snaps:
-        if force_migrate:
-            logger.error("Not implemented!")
-            return False
-        elif force_remove:
+        if force_remove:
             for sn in node_snaps:
                 snapshot_controller.delete(sn.get_id())
         else:
@@ -1463,15 +1460,6 @@ def add_storage_device(dev_name, node_id, cluster_id):
     ret = rpc_client.bdev_nvme_controller_list()
     logger.debug(ret)
 
-    # # create nvme partitions
-    # device_to_partition, status_ns = create_partitions_arrays(global_settings, nvme_devs)
-    # out_data = {
-    #     'device_to_partition': device_to_partition,
-    #     'status_ns': status_ns,
-    #     'NS_LB_SIZE': global_settings.NS_LB_SIZE,
-    #     'NS_SIZE_IN_LBS': global_settings.NS_SIZE_IN_LBS}
-    # rpc_client.create_nvme_partitions(out_data)
-
     # allocate bdevs
     logger.info("Allocating bdevs")
     ret = rpc_client.allocate_bdev(nvme_device.device_name, nvme_device.sequential_number)
@@ -1498,11 +1486,6 @@ def add_storage_device(dev_name, node_id, cluster_id):
 
     logger.info("Done")
     return True
-
-
-def replace_node(kv_store, old_node_name, iface_name):
-    return "Not implemented!"
-
 
 
 def get_node_capacity(node_id, history, records_count=20, parse_sizes=True):

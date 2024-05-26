@@ -175,11 +175,6 @@ class RPCClient:
         }
         return self._request2("ultra21_alloc_ns_init", params)
 
-    def create_nvme_partitions(self, params):
-        # this is not implemented in the spdk side, will not issue a request.
-        # TODO: implement
-        return params
-
     def allocate_bdev(self, name, sn):
         # this is not implemented in the spdk side, will not issue a request.
         # TODO: implement
