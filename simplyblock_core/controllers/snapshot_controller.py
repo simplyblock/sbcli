@@ -204,7 +204,6 @@ def clone(snapshot_id, clone_name):
     lvol.lvol_name = clone_name
     lvol.size = snap.lvol.size
     lvol.distr_bs = snap.lvol.distr_bs
-    lvol.vuid = snap.lvol.vuid
     lvol.ndcs = snap.lvol.ndcs
     lvol.npcs = snap.lvol.npcs
     lvol.distr_chunk_bs = snap.lvol.distr_chunk_bs
@@ -275,6 +274,7 @@ def clone(snapshot_id, clone_name):
     logger.info(f"add lvol {clone_name} to subsystem")
     ret = rpc_client.nvmf_subsystem_add_ns(subsystem_nqn, top_bdev)
 
+    lvol.vuid = new_vuid
     lvol.bdev_stack = bdev_stack
     lvol.uuid = lvol_id
     lvol.lvol_bdev = lvol_name
@@ -286,6 +286,8 @@ def clone(snapshot_id, clone_name):
     lvol.cloned_from_snap = snapshot_id
     lvol.nqn = subsystem_nqn
     lvol.pool_uuid = pool.id
+    lvol.ha_type = snap.lvol.ha_type
+    lvol.status = LVol.STATUS_ONLINE
 
     spdk_mem_info_after = rpc_client.ultra21_util_get_malloc_stats()
     logger.debug("ultra21_util_get_malloc_stats:")
@@ -298,8 +300,6 @@ def clone(snapshot_id, clone_name):
     logger.info("spdk mem diff:")
     logger.info(json.dumps(diff, indent=2))
     lvol.mem_diff = diff
-
-
 
     pool.lvols.append(lvol_id)
     pool.write_to_db(db_controller.kv_store)
