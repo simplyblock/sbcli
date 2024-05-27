@@ -65,11 +65,56 @@ class SshUtils:
         stdin, stdout, stderr = target_ssh.exec_command('uname -a')
         print("Output: ", stdout.read().decode())
 
-        cluster_uuid = "35c2443e-c317-4492-a2bc-608a66ab7de2"
-
-        stdin, stdout, stderr = target_ssh.exec_command(f'sbcli-release storage-node list --cluster-id {cluster_uuid}')
-        print("Output: ", stdout.read().decode())
+        # stdin, stdout, stderr = target_ssh.exec_command('sudo lsblk')
+        # print("Output: ", stdout.read().decode())
         
         if self.ssh_connections.get(address, None):
             self.ssh_connections[address].close()
         self.ssh_connections[address] = target_ssh
+
+    def format_disk(self, node, device):
+        """Format disk on the given node
+
+        Args:
+            node (str): Node to perform ssh operation on
+            device (str): Device path
+        """
+        command = f"sudo mkfs.xfs {device}"
+        ssh_connection = self.ssh_connections[node]
+        stdin, stdout, stderr = ssh_connection.exec_command(command)
+        print("Output: ", stdout.read().decode())
+
+    def mount_path(self, node, device, mount_path):
+        """Mount device to given path on given node
+
+        Args:
+            node (str): Node to perform ssh operation on
+            device (str): Device path
+            mount_path (_type_): Mount path to perform mount on
+        """
+
+        ssh_connection = self.ssh_connections[node]
+        try:
+            stdin, stdout, stderr = ssh_connection.exec_command(f"sudo rm -rf {mount_path}")
+            print("Output: ", stdout.read().decode())
+            print("Error: ", stderr.read().decode())
+        except Exception as e:
+            print(e)
+        stdin, stdout, stderr = ssh_connection.exec_command(f"sudo rm -rf {mount_path}")
+        print("Output: ", stdout.read().decode())
+
+        command = f"sudo mount {device} {mount_path}"
+        # stdin, stdout, stderr = ssh_connection.exec_command(command)
+        # print("Output: ", stdout.read().decode())
+
+    def unmount_path(self, node, device):
+        """Unmount device to given path on given node
+
+        Args:
+            node (str): Node to perform ssh operation on
+            device (str): Device path
+        """
+        command = f"sudo umount {device}"
+        ssh_connection = self.ssh_connections[node]
+        stdin, stdout, stderr = ssh_connection.exec_command(command)
+        print("Output: ", stdout.read().decode())
