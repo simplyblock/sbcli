@@ -2,6 +2,7 @@
 # encoding: utf-8
 
 import logging
+import sys
 from flask import Flask
 
 import utils
@@ -10,7 +11,7 @@ from blueprints import web_api_cluster, web_api_mgmt_node, web_api_device, \
 from auth_middleware import token_required
 from simplyblock_core import constants
 
-logger_handler = logging.StreamHandler()
+logger_handler = logging.StreamHandler(sys.stdout)
 logger_handler.setFormatter(logging.Formatter('%(asctime)s: %(levelname)s: %(message)s'))
 logger = logging.getLogger()
 logger.addHandler(logger_handler)
