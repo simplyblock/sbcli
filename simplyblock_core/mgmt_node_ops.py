@@ -23,7 +23,7 @@ def add_mgmt_node(mgmt_ip, cluster_id=None):
         return False
 
     node = MgmtNode()
-    node.system_uuid = str(uuid.uuid4())
+    node.uuid = str(uuid.uuid4())
     node.hostname = hostname
     node.docker_ip_port = f"{mgmt_ip}:2375"
     node.cluster_id = cluster_id
@@ -46,8 +46,9 @@ def list_mgmt_nodes(is_json):
         logging.debug(node)
         logging.debug("*" * 20)
         data.append({
+            "UUID": node.get_id(),
             "Hostname": node.hostname,
-            "IP": node.docker_ip_port.split(":")[0],
+            "IP": node.mgmt_ip,
             "Status": node.status,
         })
 
@@ -63,14 +64,12 @@ def list_mgmt_nodes(is_json):
 
 def remove_mgmt_node(uuid):
     db_controller = DBController()
-    logging.info("removing mgmt node")
-    # todo(Hamdy): remove by uuid
-    hostname = None
-    snode = db_controller.get_mgmt_node_by_hostname(hostname)
+    snode = db_controller.get_mgmt_node_by_id(uuid)
     if not snode:
         logger.error("can not find node")
-        exit(1)
+        return False
 
+    logging.info("removing mgmt node")
     snode.remove(db_controller.kv_store)
 
     logger.info("Leaving swarm...")
