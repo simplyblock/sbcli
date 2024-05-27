@@ -23,10 +23,13 @@ def _get_device(task):
 
 
 def task_runner(task):
+    device = _get_device(task)
+
     if task.retry <= 0:
         task.function_result = "timeout"
         task.status = JobSchedule.STATUS_DONE
         task.write_to_db(db_controller.kv_store)
+        device_controller.device_set_unavailable(device.get_id())
         return
 
     node = db_controller.get_storage_node_by_id(task.node_id)
@@ -37,7 +40,6 @@ def task_runner(task):
         task.write_to_db(db_controller.kv_store)
         return
 
-    device = _get_device(task)
     if device.status == NVMeDevice.STATUS_ONLINE and device.io_error is False:
         logger.info(f"Device is online: {device.get_id()}, no restart needed")
         task.function_result = "skipped because dev is online"
