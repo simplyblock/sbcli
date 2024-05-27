@@ -61,9 +61,11 @@ def list_mgmt_nodes(is_json):
     return output
 
 
-def remove_mgmt_node(hostname):
+def remove_mgmt_node(uuid):
     db_controller = DBController()
     logging.info("removing mgmt node")
+    # todo(Hamdy): remove by uuid
+    hostname = None
     snode = db_controller.get_mgmt_node_by_hostname(hostname)
     if not snode:
         logger.error("can not find node")

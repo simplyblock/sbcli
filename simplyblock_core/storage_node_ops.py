@@ -327,7 +327,7 @@ def _connect_to_remote_devs(this_node):
 
 
 def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask,
-             spdk_mem, dev_split=1, spdk_image=None, spdk_debug=False,
+             spdk_mem, spdk_image=None, spdk_debug=False,
              small_pool_count=0, large_pool_count=0, small_bufsize=0, large_bufsize=0, jm_device_pcie=None):
     db_controller = DBController()
     kv_store = db_controller.kv_store
@@ -519,21 +519,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask,
         logger.error("No NVMe devices was found!")
         return False
 
-    if dev_split > 1:
-        # split devices
-        new_devices = []
-        for dev in nvme_devs:
-            ret = rpc_client.bdev_split(dev.nvme_bdev, dev_split)
-            for pt in ret:
-                dev_dict = dev.get_clean_dict()
-                dev_dict['uuid'] = str(uuid.uuid4())
-                dev_dict['device_name'] = pt
-                dev_dict['nvme_bdev'] = pt
-                dev_dict['size'] = int(dev.size / dev_split)
-                new_devices.append(NVMeDevice(dev_dict))
-        snode.nvme_devices = new_devices
-    else:
-        snode.nvme_devices = nvme_devs
+    snode.nvme_devices = nvme_devs
 
     jm_device = snode.nvme_devices[0]
     # Set device cluster order
@@ -778,7 +764,7 @@ def delete_storage_node(node_id):
     logger.info("done")
 
 
-def remove_storage_node(node_id, force_remove=False):
+def remove_storage_node(node_id, force_remove=False, force_migrate=False):
     db_controller = DBController()
     snode = db_controller.get_storage_node_by_id(node_id)
     if not snode:
@@ -1333,7 +1319,7 @@ def resume_storage_node(node_id):
     return True
 
 
-
+# not used in AWS, must run on bare-metal servers
 def run_test_storage_device(kv_store, dev_name):
     db_controller = DBController(kv_store)
     baseboard_sn = utils.get_baseboard_sn()
@@ -1815,6 +1801,7 @@ def get_spdk_info(node_id):
     return utils.print_table(data)
 
 
+# remove
 def update(node_id, key, value):
     db_controller = DBController()
 

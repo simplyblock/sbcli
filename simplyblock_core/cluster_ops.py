@@ -45,8 +45,8 @@ def _add_graylog_input(cluster_ip, password):
     logger.debug(response.text)
     return response.status_code == 201
 
-def create_cluster(blk_size, page_size_in_blocks, ha_type, tls,
-                   auth_hosts_only, cli_pass, model_ids,
+
+def create_cluster(blk_size, page_size_in_blocks, ha_type, cli_pass,
                    cap_warn, cap_crit, prov_cap_warn, prov_cap_crit, ifname, log_del_interval, metrics_retention_period):
     logger.info("Installing dependencies...")
     ret = scripts.install_deps()
@@ -89,10 +89,10 @@ def create_cluster(blk_size, page_size_in_blocks, ha_type, tls,
     c.uuid = str(uuid.uuid4())
     c.blk_size = blk_size
     c.page_size_in_blocks = page_size_in_blocks
-    c.model_ids = model_ids
+    # c.model_ids = model_ids
     c.ha_type = ha_type
-    c.tls = tls
-    c.auth_hosts_only = auth_hosts_only
+    # c.tls = tls
+    # c.auth_hosts_only = auth_hosts_only
     c.nqn = f"{constants.CLUSTER_NQN}:{c.uuid}"
     c.cli_pass = cli_pass
     c.secret = utils.generate_string(20)
