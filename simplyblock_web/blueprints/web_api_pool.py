@@ -42,7 +42,7 @@ def add_pool():
         | pool_max        | Pool maximum size: 10M, 10G, 10(bytes)
         | lvol_max        | LVol maximum size: 10M, 10G, 10(bytes)
         | no_secret       | pool is created with a secret
-        | max-rw_iops     | Maximum Read Write IO Per Second
+        | max_rw_iops     | Maximum Read Write IO Per Second
         | max_rw_mbytes   | Maximum Read Write Mega Bytes Per Second
         | max_r_mbytes    | Maximum Read Mega Bytes Per Second
         | max_w_mbytes    | Maximum Write Mega Bytes Per Second
