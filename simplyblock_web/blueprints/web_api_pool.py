@@ -36,6 +36,17 @@ def list_pools(uuid):
 
 @bp.route('/pool', methods=['POST'])
 def add_pool():
+    """
+        Params:
+        | name (required) | LVol name or id
+        | pool_max        | Pool maximum size: 10M, 10G, 10(bytes)
+        | lvol_max        | LVol maximum size: 10M, 10G, 10(bytes)
+        | no_secret       | pool is created with a secret
+        | max-rw_iops     | Maximum Read Write IO Per Second
+        | max_rw_mbytes   | Maximum Read Write Mega Bytes Per Second
+        | max_r_mbytes    | Maximum Read Mega Bytes Per Second
+        | max_w_mbytes    | Maximum Write Mega Bytes Per Second
+    """
     pool_data = request.get_json()
     if 'name' not in pool_data:
         return utils.get_response_error("missing required param: name", 400)
@@ -49,18 +60,24 @@ def add_pool():
     if 'no_secret' in pool_data:
         pool_secret = False
 
-    pool_max_size = utils.get_int_value_or_default(pool_data, "pool-max", 0)
-    lvol_max_size = utils.get_int_value_or_default(pool_data, "lvol-max", 0)
-    max_rw_iops = utils.get_int_value_or_default(pool_data, "max-rw-iops", 0)
-    max_rw_mbytes = utils.get_int_value_or_default(pool_data, "max-rw-mbytes", 0)
-    max_r_mbytes_per_sec = utils.get_int_value_or_default(pool_data, "max-r-mbytes", 0)
-    max_w_mbytes_per_sec = utils.get_int_value_or_default(pool_data, "max-w-mbytes", 0)
+    pool_max_size = 0
+    lvol_max_size = 0
+    if 'pool_max' in pool_data:
+        pool_max_size = utils.parse_size(pool_data['pool_max'])
+
+    if 'lvol_max' in pool_data:
+        lvol_max_size = utils.parse_size(pool_data['lvol_max'])
+
+    max_rw_iops = utils.get_int_value_or_default(pool_data, "max_rw_iops", 0)
+    max_rw_mbytes = utils.get_int_value_or_default(pool_data, "max_rw_mbytes", 0)
+    max_r_mbytes_per_sec = utils.get_int_value_or_default(pool_data, "max_r_mbytes", 0)
+    max_w_mbytes_per_sec = utils.get_int_value_or_default(pool_data, "max_w_mbytes", 0)
 
     ret = pool_controller.add_pool(
         name, pool_max_size, lvol_max_size, max_rw_iops, max_rw_mbytes,
         max_r_mbytes_per_sec, max_w_mbytes_per_sec, pool_secret)
 
-    return utils.get_response(ret, "Error")
+    return utils.get_response(ret)
 
 
 @bp.route('/pool/<string:uuid>', methods=['DELETE'])
