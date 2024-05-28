@@ -599,7 +599,7 @@ class CLIWrapper:
 
         # lvol get-io-stats
         sub_command = self.add_sub_command(
-            subparser, 'get-io-stats', 'Returns either the current or historic io statistics '
+            subparser, 'get-io-stats', help="Get Input Output stats of LVol", usage='Returns either the current or historic io statistics '
                                        '(read-IO, write-IO, total-IO, read mbs, write mbs, total mbs).')
         sub_command.add_argument("id", help='LVol id')
         sub_command.add_argument("--history", help='(XXdYYh), list history records (one for every 15 minutes) '
@@ -669,8 +669,8 @@ class CLIWrapper:
 
         # delete pool
         sub_command = self.add_sub_command(
-            subparser, 'delete', 'delete pool. It is only possible to delete a pool if it is empty '
-                                 '(no provisioned logical volumes contained).')
+            subparser, 'delete', 'Delete Pool', usage=
+            "It is only possible to delete a pool if it is empty (no provisioned logical volumes contained).")
         sub_command.add_argument("id", help='pool uuid')
 
         # enable
@@ -762,7 +762,7 @@ class CLIWrapper:
 
 
     def init_parser(self):
-        self.parser = argparse.ArgumentParser(description='Ultra management CLI')
+        self.parser = argparse.ArgumentParser(prog=constants.SIMPLY_BLOCK_CLI_NAME, description='SimplyBlock management CLI')
         self.parser.add_argument("-d", '--debug', help='Print debug messages', required=False, action='store_true')
         self.subparser = self.parser.add_subparsers(dest='command')
 
@@ -772,8 +772,8 @@ class CLIWrapper:
         storagenode_subparser = storagenode.add_subparsers(dest=command)
         return storagenode_subparser
 
-    def add_sub_command(self, parent_parser, command, help):
-        return parent_parser.add_parser(command, description=help, help=help)
+    def add_sub_command(self, parent_parser, command, help, usage=None):
+        return parent_parser.add_parser(command, description=help, help=help, usage=usage)
 
     def run(self):
         args = self.parser.parse_args()
