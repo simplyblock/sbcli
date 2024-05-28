@@ -564,6 +564,7 @@ class CLIWrapper:
         sub_command = self.add_sub_command(subparser, 'clone', 'create LVol based on a snapshot')
         sub_command.add_argument("snapshot_id", help='snapshot UUID')
         sub_command.add_argument("clone_name", help='clone name')
+        sub_command.add_argument("--resize", help='New LVol size: 10M, 10G, 10(bytes)')
 
         # lvol move
         sub_command = self.add_sub_command(
@@ -719,6 +720,7 @@ class CLIWrapper:
         sub_command = self.add_sub_command(subparser, 'clone', 'Create LVol from snapshot')
         sub_command.add_argument("id", help='snapshot UUID')
         sub_command.add_argument("lvol_name", help='LVol name')
+        sub_command.add_argument("--resize", help='New LVol size: 10M, 10G, 10(bytes)')
 
         # Caching node cli
         subparser = self.add_command('caching-node', 'Caching client node commands', aliases=['cn'])
@@ -1152,9 +1154,10 @@ class CLIWrapper:
                 name = args.name
                 ret = lvol_controller.create_snapshot(id, name)
             elif sub_command == "clone":
-                snapshot_id = args.snapshot_id
-                clone_name = args.clone_name
-                ret = lvol_controller.clone(snapshot_id, clone_name)
+                new_size = 0
+                if args.resize:
+                    new_size = self.parse_size(args.resize)
+                ret = snapshot_controller.clone(args.snapshot_id, args.clone_name, new_size)
 
             elif sub_command == "get-io-stats":
                 id = args.id
@@ -1268,7 +1271,10 @@ class CLIWrapper:
             if sub_command == "delete":
                 ret = snapshot_controller.delete(args.id)
             if sub_command == "clone":
-                ret = snapshot_controller.clone(args.id, args.lvol_name)
+                new_size = 0
+                if args.resize:
+                    new_size = self.parse_size(args.resize)
+                ret = snapshot_controller.clone(args.id, args.lvol_name, new_size)
 
         elif args.command in ['caching-node', 'cn']:
             sub_command = args_dict['caching-node']

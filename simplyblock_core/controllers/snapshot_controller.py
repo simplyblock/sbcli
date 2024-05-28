@@ -158,7 +158,7 @@ def delete(snapshot_uuid):
     return True
 
 
-def clone(snapshot_id, clone_name):
+def clone(snapshot_id, clone_name, new_size=0):
     snap = db_controller.get_snapshot_by_id(snapshot_id)
     if not snap:
         logger.error(f"Snapshot not found {snapshot_id}")
@@ -185,13 +185,6 @@ def clone(snapshot_id, clone_name):
         logger.error("Storage node in not Online")
         return False
 
-    # creating RPCClient instance
-    rpc_client = RPCClient(
-        snode.mgmt_ip,
-        snode.rpc_port,
-        snode.rpc_username,
-        snode.rpc_password)
-
     if not snode.nvme_devices:
         logger.error("Storage node has no nvme devices")
         return False
@@ -199,6 +192,7 @@ def clone(snapshot_id, clone_name):
     if snode.status != snode.STATUS_ONLINE:
         logger.error("Storage node in not Online")
         return False
+
 
     lvol = LVol()
     lvol.lvol_name = clone_name
@@ -209,10 +203,18 @@ def clone(snapshot_id, clone_name):
     lvol.distr_chunk_bs = snap.lvol.distr_chunk_bs
     lvol.distr_page_size = snap.lvol.distr_page_size
     lvol.distr_page_size = snap.lvol.distr_page_size
+    if new_size:
+        if snap.lvol.size >= new_size:
+            logger.error(f"New size {new_size} must be higher than the original size {snap.lvol.size}")
+            return False
+
+        if snap.lvol.max_size < new_size:
+            logger.error(f"New size {new_size} must be smaller than the max size {snap.lvol.max_size}")
+            return False
+        lvol.size = new_size
+
 
     bdev_stack = []
-
-    ##############################################################################
     jm_names = lvol_controller.get_jm_names(snode)
     rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
     spdk_mem_info_before = rpc_client.ultra21_util_get_malloc_stats()
@@ -238,7 +240,7 @@ def clone(snapshot_id, clone_name):
     logger.info("Creating clone bdev")
     block_len = lvol.distr_bs
     page_len = int(lvol.distr_page_size / lvol.distr_bs)
-    max_num_blocks = num_blocks * 10
+    max_num_blocks = snap.lvol.max_size
     ret = rpc_client.ultra21_lvol_bmap_init(name, num_blocks, block_len, page_len, max_num_blocks)
     if not ret:
         return False, "Failed to init distr bdev"

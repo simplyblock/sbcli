@@ -1284,10 +1284,6 @@ def create_snapshot(lvol_id, snapshot_name):
     return snapshot_controller.add(lvol_id, snapshot_name)
 
 
-def clone(snapshot_id, clone_name):
-    return snapshot_controller.clone(snapshot_id, clone_name)
-
-
 def get_capacity(id, history):
     lvol = db_controller.get_lvol_by_id(id)
     if not lvol:
