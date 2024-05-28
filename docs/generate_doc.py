@@ -53,6 +53,6 @@ for cmd in COMMANDS:
 
 print(readme_content)
 
-with open("README.md", "w") as f:
+with open("../simplyblock_cli/README.md", "w") as f:
     f.write(readme_content)
 

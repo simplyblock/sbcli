@@ -89,10 +89,7 @@ def create_cluster(blk_size, page_size_in_blocks, ha_type, cli_pass,
     c.uuid = str(uuid.uuid4())
     c.blk_size = blk_size
     c.page_size_in_blocks = page_size_in_blocks
-    # c.model_ids = model_ids
     c.ha_type = ha_type
-    # c.tls = tls
-    # c.auth_hosts_only = auth_hosts_only
     c.nqn = f"{constants.CLUSTER_NQN}:{c.uuid}"
     c.cli_pass = cli_pass
     c.secret = utils.generate_string(20)

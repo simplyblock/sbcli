@@ -793,7 +793,10 @@ def remove_storage_node(node_id, force_remove=False):
             node_snaps.append(sn)
 
     if node_snaps:
-        if force_remove:
+        if force_migrate:
+            logger.error("Not implemented!")
+            return False
+        elif force_remove:
             for sn in node_snaps:
                 snapshot_controller.delete(sn.get_id())
         else:
@@ -1799,24 +1802,6 @@ def get_spdk_info(node_id):
             "Parsed": utils.humanbytes(ret[key])
         })
     return utils.print_table(data)
-
-
-# remove
-def update(node_id, key, value):
-    db_controller = DBController()
-
-    snode = db_controller.get_storage_node_by_id(node_id)
-    if not snode:
-        logger.error(f"Can not find storage node: {node_id}")
-        return False
-
-    if key in snode._attribute_map:
-        setattr(snode, key, value)
-        snode.write_to_db(db_controller.kv_store)
-        return True
-    else:
-        logger.error("Key not found")
-        return False
 
 
 def get(node_id):
