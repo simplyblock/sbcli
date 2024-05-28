@@ -1,5 +1,4 @@
 # coding=utf-8
-import datetime
 import json
 import logging
 import uuid
@@ -69,7 +68,7 @@ def remove_mgmt_node(uuid):
         logger.error("can not find node")
         return False
 
-    logging.info("removing mgmt node")
+    logging.info("Removing mgmt node")
     snode.remove(db_controller.kv_store)
 
     logger.info("Leaving swarm...")
@@ -79,39 +78,3 @@ def remove_mgmt_node(uuid):
     mgmt_events.mgmt_remove(snode)
     logging.info("done")
 
-
-def show_cluster():
-    c = utils.get_docker_client()
-    nl = c.nodes.list(filters={'role': 'manager'})
-    nodes = []
-    for n in nl:
-        nodes.append({
-            "Hostname": n.attrs['Description']['Hostname'],
-            "IP": n.attrs['ManagerStatus']['Addr'].split(":")[0],
-            "Status": n.attrs['Status']['State'],
-            "UpdatedAt": datetime.datetime.strptime(n.attrs['UpdatedAt'][:26], "%Y-%m-%dT%H:%M:%S.%f").strftime(
-                "%H:%M:%S, %d/%m/%Y"),
-        })
-    return utils.print_table(nodes)
-
-
-def cluster_status():
-    c = utils.get_docker_client()
-    ns = c.nodes.list(filters={'role': 'manager'})
-    total_nodes = len(ns)
-    active_nodes = 0
-    lead_node = None
-    for n in ns:
-        if n.attrs['Status']['State'] == 'ready':
-            active_nodes += 1
-        if 'Leader' in n.attrs['ManagerStatus'] and n.attrs['ManagerStatus']['Leader']:
-            lead_node = n.attrs['Description']['Hostname']
-
-    status = {
-        "Status": "Online",
-        "Active Nodes": active_nodes,
-        "Total nodes": total_nodes,
-        "Leader": lead_node
-    }
-
-    return utils.print_table([status])

@@ -119,9 +119,7 @@ class RPCClient:
 
     def transport_create(self, trtype):
         params = {
-            "trtype": trtype,
-#            "max_io_qpairs_per_ctrlr": 65000,
-#            "max_queue_depth": 65000,
+            "trtype": trtype
         }
         return self._request("nvmf_create_transport", params)
 
@@ -175,11 +173,6 @@ class RPCClient:
         }
         return self._request2("ultra21_alloc_ns_init", params)
 
-    def allocate_bdev(self, name, sn):
-        # this is not implemented in the spdk side, will not issue a request.
-        # TODO: implement
-        return name, sn
-
     def nvmf_subsystem_add_ns(self, nqn, dev_name, uuid=None, nguid=None):
         params = {
             "nqn": nqn,
@@ -219,44 +212,9 @@ class RPCClient:
 
         return self._request("nvmf_subsystem_listener_set_ana_state", params)
 
-    def get_device_status(self, device_name):
-        # TODO: to be implemented
-        return {
-            "jsonrpc": "2.0",
-            "id": 1,
-            "result": {
-                'name': device_name,
-                'status': 'live'
-            }
-        }
-
     def get_device_stats(self, uuid):
         params = {"name": uuid}
         return self._request("bdev_get_iostat", params)
-
-    def shutdown_node(self, node_id):
-        # TODO: to be implemented
-        return {
-            "jsonrpc": "2.0",
-            "id": 1,
-            "result": True
-        }
-
-    def suspend_node(self, node_id):
-        # TODO: to be implemented
-        return {
-            "jsonrpc": "2.0",
-            "id": 1,
-            "result": True
-        }
-
-    def resume_node(self, node_id):
-        # TODO: to be implemented
-        return {
-            "jsonrpc": "2.0",
-            "id": 1,
-            "result": True
-        }
 
     def reset_device(self, device_name):
         params = {"name": device_name}
@@ -557,7 +515,6 @@ class RPCClient:
         else:
             return False
 
-
     def distr_status_events_get(self):
         return self._request("distr_status_events_get")
 
@@ -604,13 +561,11 @@ class RPCClient:
         }
         return self._request("ultra21_lvol_mount", params)
 
-    def ultra21_lvol_mount_lvol(self, lvol_name, base_bdev, label, desc):
+    def ultra21_lvol_mount_lvol(self, lvol_name, base_bdev):
         params = {
             "modus": "BASE",
             "lvol_bdev": lvol_name,
-            "base_bdev": base_bdev,
-            # "label": label,
-            # "desc": desc
+            "base_bdev": base_bdev
         }
         return self._request("ultra21_lvol_mount", params)
 
