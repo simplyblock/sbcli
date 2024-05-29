@@ -75,7 +75,7 @@ def process_lvol_event(event):
     if event.message in ["error_open", 'error_read', "error_write", "error_unmap"]:
         vuid = event.object_dict['vuid']
         lvol = None
-        for lv in db_controller.get_lvols():
+        for lv in db_controller.get_lvols():  # pass
             if lv.vuid == vuid:
                 lvol = lv
                 break

@@ -84,7 +84,6 @@ class DBController:
         cmap = ClusterMap().read_from_db(self.kv_store)
         return cmap[0] if cmap else None
 
-    # todo: change this function for multi cluster
     def get_storage_nodes(self):
         ret = StorageNode().read_from_db(self.kv_store)
         ret = sorted(ret, key=lambda x: x.create_dt)
@@ -171,9 +170,16 @@ class DBController:
             if pool.pool_name == name:
                 return pool
 
-    def get_lvols(self):
-        ret = LVol().read_from_db(self.kv_store)
-        return ret
+    def get_lvols(self, cluster_id=None):
+        lvols = []
+        if cluster_id:
+            for pool in self.get_pools():
+                if pool.cluster_id == cluster_id:
+                    for lv_id in pool.lvols:
+                        lvols.append(self.get_lvol_by_id(lv_id))
+        else:
+            lvols = LVol().read_from_db(self.kv_store)
+        return lvols
 
     def get_snapshots(self):
         ret = SnapShot().read_from_db(self.kv_store)

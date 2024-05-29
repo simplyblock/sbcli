@@ -303,7 +303,7 @@ def device_remove(device_id, force=True):
     snode.write_to_db(db_controller.kv_store)
     device_events.device_delete(device)
 
-    for lvol in db_controller.get_lvols():
+    for lvol in db_controller.get_lvols(snode.cluster_id):
         lvol_controller.send_cluster_map(lvol.get_id())
 
     return True

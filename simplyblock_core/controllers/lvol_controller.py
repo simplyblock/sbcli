@@ -125,7 +125,7 @@ def validate_add_lvol_func(name, size, host_id_or_name, pool_id_or_name,
             return False, f"Invalid LVol size: {utils.humanbytes(size)} " \
                           f"Pool max size has reached {utils.humanbytes(total)} of {utils.humanbytes(pool.pool_max_size)}"
 
-    for lvol in db_controller.get_lvols():
+    for lvol in db_controller.get_lvols(pool.cluster_id):
         if lvol.pool_uuid == pool.get_id():
             if lvol.lvol_name == name:
                 return False, f"LVol name must be unique: {name}"
@@ -506,7 +506,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
 
     cluster_size_prov = 0
     cluster_size_total = 0
-    for lvol in db_controller.get_lvols():
+    for lvol in db_controller.get_lvols(cl.get_id()):
         cluster_size_prov += lvol.size
 
     dev_count = 0
@@ -520,6 +520,10 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
                     dev_count += 1
                     cluster_size_total += dev.size
 
+    if len(online_nodes) == 0:
+        logger.error("No online Storage nodes found")
+        return False, "No online Storage nodes found"
+
     if dev_count == 0:
         logger.error("No NVMe devices found in the cluster")
         return False, "No NVMe devices found in the cluster"
@@ -530,10 +534,6 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
     if len(online_nodes) < 3 and ha_type == "ha":
         logger.error("Storage nodes are less than 3 in ha cluster")
         return False, "Storage nodes are less than 3 in ha cluster"
-
-    if len(online_nodes) == 0:
-        logger.error("No online Storage nodes found")
-        return False, "No online Storage nodes found"
 
     cluster_size_prov_util = int(((cluster_size_prov+size) / cluster_size_total) * 100)
 
@@ -1020,7 +1020,7 @@ def delete_lvol(id_or_name, force_delete=False):
         snap = db_controller.get_snapshot_by_id(lvol.cloned_from_snap)
         if snap.deleted is True:
             lvols_count = 0
-            for lvol in db_controller.get_lvols():
+            for lvol in db_controller.get_lvols():  # pass
                 if lvol.cloned_from_snap == snap.get_id():
                     lvols_count += 1
             if lvols_count == 0:
@@ -1081,8 +1081,20 @@ def set_lvol(uuid, max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes, name=
     return True
 
 
-def list_lvols(is_json):
-    lvols = db_controller.get_lvols()
+def list_lvols(is_json, cluster_id, pool_id_or_name):
+    lvols = []
+    if cluster_id:
+        lvols = db_controller.get_lvols(cluster_id)
+    elif pool_id_or_name:
+        pool = db_controller.get_pool_by_id(pool_id_or_name)
+        if not pool:
+            pool = db_controller.get_pool_by_name(pool_id_or_name)
+            if pool:
+                for lv_id in pool.lvols:
+                    lvols.append(db_controller.get_lvol_by_id(lv_id))
+    else:
+        lvols = db_controller.get_lvols()
+
     data = []
     for lvol in lvols:
         if lvol.deleted is True:
@@ -1133,7 +1145,7 @@ def list_lvols_mem(is_json, is_csv):
 
 def get_lvol(lvol_id_or_name, is_json):
     lvol = None
-    for lv in db_controller.get_lvols():
+    for lv in db_controller.get_lvols():  # pass
         if lv.get_id() == lvol_id_or_name or lv.lvol_name == lvol_id_or_name:
             lvol = lv
             break

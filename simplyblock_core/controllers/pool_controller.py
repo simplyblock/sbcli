@@ -34,14 +34,10 @@ def add_pool(name, pool_max, lvol_max, max_rw_iops, max_rw_mbytes, max_r_mbytes,
             logger.error(f"Pool found with the same name: {name}")
             return False
 
-    if cluster_id:
-        cluster = db_controller.get_cluster_by_id(cluster_id)
-        if not cluster:
-            logger.error(f"Cluster not found: {cluster_id}")
-            return False
-    else:
-        cluster = db_controller.get_clusters()[0]
-
+    cluster = db_controller.get_cluster_by_id(cluster_id)
+    if not cluster:
+        logger.error(f"Cluster not found: {cluster_id}")
+        return False
 
     pool_max = pool_max or 0
     lvol_max = lvol_max or 0
