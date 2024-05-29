@@ -235,6 +235,22 @@ class CLIWrapper:
         sub_command.add_argument("--metrics-retention-period", help='retention period for prometheus metrics, default: 7d',
                                  dest='metrics_retention_period', default='7d')
 
+        # add cluster
+        sub_command = self.add_sub_command(subparser, 'add', 'Add new cluster')
+        sub_command.add_argument("--blk_size", help='The block size in bytes', type=int, choices=[512, 4096], default=512)
+        sub_command.add_argument("--page_size", help='The size of a data page in bytes', type=int, default=2097152)
+        sub_command.add_argument("--ha_type",
+                                 help='Can be "single" for single node clusters or  "HA", which requires at least 3 nodes',
+                                 choices=["single", "ha"], default='single')
+        sub_command.add_argument("--cap-warn", help='Capacity warning level in percent, default=80',
+                                 type=int, required=False, dest="cap_warn")
+        sub_command.add_argument("--cap-crit", help='Capacity critical level in percent, default=90',
+                                 type=int, required=False, dest="cap_crit")
+        sub_command.add_argument("--prov-cap-warn", help='Capacity warning level in percent, default=180',
+                                 type=int, required=False, dest="prov_cap_warn")
+        sub_command.add_argument("--prov-cap-crit", help='Capacity critical level in percent, default=190',
+                                 type=int, required=False, dest="prov_cap_crit")
+
         # show cluster list
         self.add_sub_command(subparser, 'list', 'Show clusters list')
 
@@ -797,6 +813,8 @@ class CLIWrapper:
                 ret = self.cluster_create(args)
             elif sub_command == 'join':
                 ret = self.cluster_join(args)
+            elif sub_command == 'add':
+                ret = self.cluster_add(args)
             elif sub_command == 'status':
                 cluster_id = args.cluster_id
                 ret = cluster_ops.show_cluster(cluster_id)
@@ -1113,22 +1131,17 @@ class CLIWrapper:
         out = storage_ops.list_storage_devices(self.db_store, node_id, sort, is_json)
         return out
 
-    def cluster_init(self, args):
-        page_size_in_blocks = args.page_size_in_blocks
+    def cluster_add(self, args):
+        page_size_in_blocks = args.page_size
         blk_size = args.blk_size
-        model_ids = args.model_ids
         ha_type = args.ha_type
-        tls = args.tls == 'on'
-        auth_hosts_only = args.auth_hosts_only == 'on'
-        dhchap = args.dhchap
-        NQN = args.NQN
-        iSCSI = args.iSCSI
-        CLI_PASS = args.CLI_PASS
+        cap_warn = args.cap_warn
+        cap_crit = args.cap_crit
+        prov_cap_warn = args.prov_cap_warn
+        prov_cap_crit = args.prov_cap_crit
 
-        # TODO: Validate the inputs
         return cluster_ops.add_cluster(
-            blk_size, page_size_in_blocks, model_ids, ha_type, tls,
-            auth_hosts_only, dhchap, NQN, iSCSI, CLI_PASS)
+            blk_size, page_size_in_blocks, ha_type, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit)
 
     def cluster_create(self, args):
         page_size_in_blocks = args.page_size
@@ -1143,7 +1156,6 @@ class CLIWrapper:
         log_del_interval = args.log_del_interval
         metrics_retention_period = args.metrics_retention_period
 
-        # TODO: Validate the inputs
         return cluster_ops.create_cluster(
             blk_size, page_size_in_blocks, ha_type,
             CLI_PASS, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
