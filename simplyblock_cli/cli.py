@@ -479,7 +479,7 @@ class CLIWrapper:
         # add pool
         sub_command = self.add_sub_command(subparser, 'add', 'Add a new Pool')
         sub_command.add_argument("name", help='Pool name')
-        sub_command.add_argument("cluster_id", help='Cluster UUID', dest='cluster_id')
+        sub_command.add_argument("cluster_id", help='Cluster UUID')
         sub_command.add_argument("--pool-max", help='Pool maximum size: 20M, 20G, 0(default)', default="0")
         sub_command.add_argument("--lvol-max", help='LVol maximum size: 20M, 20G, 0(default)', default="0")
         sub_command.add_argument("--max-rw-iops", help='Maximum Read Write IO Per Second', type=int)
