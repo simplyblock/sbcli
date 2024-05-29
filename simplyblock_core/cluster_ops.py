@@ -19,6 +19,24 @@ from simplyblock_core.models.storage_node import StorageNode
 logger = logging.getLogger()
 
 
+def _add_grafana_dashboards(username, password, cluster_id):
+    url = f"http://${username}:${password}@0.0.0.0:3000/api/dashboards/import"
+    headers = {
+        'Content-Type': 'application/json',
+    }
+    dirpath, _, filenames = next(os.walk(os.path.join(constants.INSTALL_DIR, "scripts", "dashboards")))
+    for filename in filenames:
+        with open(os.path.join(dirpath, filename), 'r') as f:
+            st = f.read()
+            st = st.replace("$Cluster", cluster_id)
+        payload = json.dumps(st)
+        response = requests.post(url, headers=headers, data=payload)
+        logger.debug(response.status_code)
+        logger.debug(response.text)
+
+    return True
+
+
 def _add_graylog_input(cluster_ip, password):
     url = f"http://{cluster_ip}:9000/api/system/inputs"
     payload = json.dumps({
@@ -124,8 +142,8 @@ def create_cluster(blk_size, page_size_in_blocks, ha_type, cli_pass,
     mgmt_node_ops.add_mgmt_node(DEV_IP, c.uuid)
 
     logger.info("Applying dashboard...")
-    ret = scripts.apply_dashboard(c.secret)
-    logger.info("Applying dashboard > Done")
+    ret = _add_grafana_dashboards("admin", c.secret, c.uuid)
+    logger.info(f"Applying dashboard > {ret}")
 
     logger.info("New Cluster has been created")
     logger.info(c.uuid)
@@ -386,6 +404,12 @@ def add_cluster(blk_size, page_size_in_blocks, ha_type, cap_warn, cap_crit, prov
     cluster.updated_at = int(time.time())
     cluster.write_to_db(db_controller.kv_store)
     cluster_events.cluster_create(cluster)
+
+    # todo: do it multi thread
+    logger.info("Applying dashboard...")
+    ret = _add_grafana_dashboards("admin", cluster.secret, cluster.uuid)
+    logger.info(f"Applying dashboard > {ret}")
+
     return cluster.get_id()
 
 

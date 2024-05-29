@@ -9,9 +9,7 @@ RPC_HTTP_PROXY_PORT = 8080
 LOG_LEVEL = logging.INFO
 LOG_WEB_DEBUG = True
 
-FILE_DIR = os.path.dirname(os.path.realpath(__file__))
-INSTALL_DIR = os.path.dirname(FILE_DIR)
-TOP_DIR = os.path.dirname(INSTALL_DIR)
+INSTALL_DIR = os.path.dirname(os.path.realpath(__file__))
 
 NODE_MONITOR_INTERVAL_SEC = 3
 DEVICE_MONITOR_INTERVAL_SEC = 5

@@ -120,7 +120,7 @@
                             "uid": "PBFA97CFB590B2093"
                         },
                         "editorMode": "builder",
-                        "expr": "cluster_size_total",
+                        "expr": "cluster_size_total{cluster=\"$Cluster\"}",
                         "legendFormat": "__auto",
                         "range": true,
                         "refId": "A"
@@ -213,7 +213,7 @@
                             "uid": "PBFA97CFB590B2093"
                         },
                         "editorMode": "builder",
-                        "expr": "cluster_size_free",
+                        "expr": "cluster_size_free{cluster=\"$Cluster\"}",
                         "legendFormat": "__auto",
                         "range": true,
                         "refId": "A"
@@ -306,7 +306,7 @@
                             "uid": "PBFA97CFB590B2093"
                         },
                         "editorMode": "builder",
-                        "expr": "cluster_size_used",
+                        "expr": "cluster_size_used{cluster=\"$Cluster\"}",
                         "legendFormat": "__auto",
                         "range": true,
                         "refId": "A"
@@ -399,7 +399,7 @@
                             "uid": "PBFA97CFB590B2093"
                         },
                         "editorMode": "builder",
-                        "expr": "cluster_size_prov",
+                        "expr": "cluster_size_prov{cluster=\"$Cluster\"}",
                         "legendFormat": "__auto",
                         "range": true,
                         "refId": "A"
@@ -492,7 +492,7 @@
                             "uid": "PBFA97CFB590B2093"
                         },
                         "editorMode": "builder",
-                        "expr": "cluster_size_prov_util",
+                        "expr": "cluster_size_prov_util{cluster=\"$Cluster\"}",
                         "legendFormat": "__auto",
                         "range": true,
                         "refId": "A"
@@ -585,7 +585,7 @@
                             "uid": "PBFA97CFB590B2093"
                         },
                         "editorMode": "builder",
-                        "expr": "cluster_size_util",
+                        "expr": "cluster_size_util{cluster=\"$Cluster\"}",
                         "legendFormat": "__auto",
                         "range": true,
                         "refId": "A"
@@ -652,8 +652,7 @@
                             "mode": "absolute",
                             "steps": [
                                 {
-                                    "color": "green",
-                                    "value": null
+                                    "color": "green"
                                 },
                                 {
                                     "color": "red",
@@ -691,7 +690,7 @@
                             "uid": "PBFA97CFB590B2093"
                         },
                         "editorMode": "builder",
-                        "expr": "cluster_write_bytes",
+                        "expr": "cluster_write_bytes{cluster=\"$Cluster\"}",
                         "legendFormat": "__auto",
                         "range": true,
                         "refId": "A"
@@ -745,8 +744,7 @@
                             "mode": "absolute",
                             "steps": [
                                 {
-                                    "color": "green",
-                                    "value": null
+                                    "color": "green"
                                 },
                                 {
                                     "color": "red",
@@ -784,7 +782,7 @@
                             "uid": "PBFA97CFB590B2093"
                         },
                         "editorMode": "builder",
-                        "expr": "cluster_write_bytes_ps",
+                        "expr": "cluster_write_bytes_ps{cluster=\"$Cluster\"}",
                         "legendFormat": "__auto",
                         "range": true,
                         "refId": "A"
@@ -838,8 +836,7 @@
                             "mode": "absolute",
                             "steps": [
                                 {
-                                    "color": "green",
-                                    "value": null
+                                    "color": "green"
                                 },
                                 {
                                     "color": "red",
@@ -877,7 +874,7 @@
                             "uid": "PBFA97CFB590B2093"
                         },
                         "editorMode": "builder",
-                        "expr": "cluster_write_latency_ps / 1000",
+                        "expr": "cluster_write_latency_ps{cluster=\"$Cluster\"} / 1000",
                         "legendFormat": "__auto",
                         "range": true,
                         "refId": "A"
@@ -931,8 +928,7 @@
                             "mode": "absolute",
                             "steps": [
                                 {
-                                    "color": "green",
-                                    "value": null
+                                    "color": "green"
                                 },
                                 {
                                     "color": "red",
@@ -969,7 +965,7 @@
                             "uid": "PBFA97CFB590B2093"
                         },
                         "editorMode": "builder",
-                        "expr": "cluster_write_io",
+                        "expr": "cluster_write_io{cluster=\"$Cluster\"}",
                         "legendFormat": "__auto",
                         "range": true,
                         "refId": "A"
@@ -1023,8 +1019,7 @@
                             "mode": "absolute",
                             "steps": [
                                 {
-                                    "color": "green",
-                                    "value": null
+                                    "color": "green"
                                 },
                                 {
                                     "color": "red",
@@ -1061,7 +1056,7 @@
                             "uid": "PBFA97CFB590B2093"
                         },
                         "editorMode": "builder",
-                        "expr": "cluster_write_io_ps",
+                        "expr": "cluster_write_io_ps{cluster=\"$Cluster\"}",
                         "legendFormat": "__auto",
                         "range": true,
                         "refId": "A"
@@ -1115,8 +1110,7 @@
                             "mode": "absolute",
                             "steps": [
                                 {
-                                    "color": "green",
-                                    "value": null
+                                    "color": "green"
                                 },
                                 {
                                     "color": "red",
@@ -1153,7 +1147,7 @@
                             "uid": "PBFA97CFB590B2093"
                         },
                         "editorMode": "builder",
-                        "expr": "cluster_write_latency_ticks",
+                        "expr": "cluster_write_latency_ticks{cluster=\"$Cluster\"}",
                         "legendFormat": "__auto",
                         "range": true,
                         "refId": "A"
@@ -1220,8 +1214,7 @@
                             "mode": "absolute",
                             "steps": [
                                 {
-                                    "color": "green",
-                                    "value": null
+                                    "color": "green"
                                 },
                                 {
                                     "color": "red",
@@ -1259,7 +1252,7 @@
                             "uid": "PBFA97CFB590B2093"
                         },
                         "editorMode": "builder",
-                        "expr": "cluster_read_bytes",
+                        "expr": "cluster_read_bytes{cluster=\"$Cluster\"}",
                         "legendFormat": "__auto",
                         "range": true,
                         "refId": "A"
@@ -1313,8 +1306,7 @@
                             "mode": "absolute",
                             "steps": [
                                 {
-                                    "color": "green",
-                                    "value": null
+                                    "color": "green"
                                 },
                                 {
                                     "color": "red",
@@ -1352,7 +1344,7 @@
                             "uid": "PBFA97CFB590B2093"
                         },
                         "editorMode": "builder",
-                        "expr": "cluster_read_bytes_ps",
+                        "expr": "cluster_read_bytes_ps{cluster=\"$Cluster\"}",
                         "legendFormat": "__auto",
                         "range": true,
                         "refId": "A"
@@ -1406,8 +1398,7 @@
                             "mode": "absolute",
                             "steps": [
                                 {
-                                    "color": "green",
-                                    "value": null
+                                    "color": "green"
                                 },
                                 {
                                     "color": "red",
@@ -1445,7 +1436,7 @@
                             "uid": "PBFA97CFB590B2093"
                         },
                         "editorMode": "builder",
-                        "expr": "cluster_read_latency_ps",
+                        "expr": "cluster_read_latency_ps{cluster=\"$Cluster\"}",
                         "legendFormat": "__auto",
                         "range": true,
                         "refId": "A"
@@ -1499,8 +1490,7 @@
                             "mode": "absolute",
                             "steps": [
                                 {
-                                    "color": "green",
-                                    "value": null
+                                    "color": "green"
                                 },
                                 {
                                     "color": "red",
@@ -1537,7 +1527,7 @@
                             "uid": "PBFA97CFB590B2093"
                         },
                         "editorMode": "builder",
-                        "expr": "cluster_read_io",
+                        "expr": "cluster_read_io{cluster=\"$Cluster\"}",
                         "legendFormat": "__auto",
                         "range": true,
                         "refId": "A"
@@ -1591,8 +1581,7 @@
                             "mode": "absolute",
                             "steps": [
                                 {
-                                    "color": "green",
-                                    "value": null
+                                    "color": "green"
                                 },
                                 {
                                     "color": "red",
@@ -1629,7 +1618,7 @@
                             "uid": "PBFA97CFB590B2093"
                         },
                         "editorMode": "builder",
-                        "expr": "cluster_read_io_ps",
+                        "expr": "cluster_read_io_ps{cluster=\"$Cluster\"}",
                         "legendFormat": "__auto",
                         "range": true,
                         "refId": "A"
@@ -1683,8 +1672,7 @@
                             "mode": "absolute",
                             "steps": [
                                 {
-                                    "color": "green",
-                                    "value": null
+                                    "color": "green"
                                 },
                                 {
                                     "color": "red",
@@ -1721,7 +1709,7 @@
                             "uid": "PBFA97CFB590B2093"
                         },
                         "editorMode": "builder",
-                        "expr": "cluster_read_latency_ticks",
+                        "expr": "cluster_read_latency_ticks{cluster=\"$Cluster\"}",
                         "legendFormat": "__auto",
                         "range": true,
                         "refId": "A"
@@ -1788,8 +1776,7 @@
                             "mode": "absolute",
                             "steps": [
                                 {
-                                    "color": "green",
-                                    "value": null
+                                    "color": "green"
                                 },
                                 {
                                     "color": "red",
@@ -1826,7 +1813,7 @@
                             "uid": "PBFA97CFB590B2093"
                         },
                         "editorMode": "builder",
-                        "expr": "cluster_unmap_latency_ticks",
+                        "expr": "cluster_unmap_latency_ticks{cluster=\"$Cluster\"}",
                         "legendFormat": "__auto",
                         "range": true,
                         "refId": "A"
@@ -1880,8 +1867,7 @@
                             "mode": "absolute",
                             "steps": [
                                 {
-                                    "color": "green",
-                                    "value": null
+                                    "color": "green"
                                 },
                                 {
                                     "color": "red",
@@ -1919,7 +1905,7 @@
                             "uid": "PBFA97CFB590B2093"
                         },
                         "editorMode": "builder",
-                        "expr": "cluster_unmap_bytes_ps",
+                        "expr": "cluster_unmap_bytes_ps{cluster=\"$Cluster\"}",
                         "legendFormat": "__auto",
                         "range": true,
                         "refId": "A"
@@ -1974,8 +1960,7 @@
                             "mode": "absolute",
                             "steps": [
                                 {
-                                    "color": "green",
-                                    "value": null
+                                    "color": "green"
                                 },
                                 {
                                     "color": "red",
@@ -2013,7 +1998,7 @@
                             "uid": "PBFA97CFB590B2093"
                         },
                         "editorMode": "builder",
-                        "expr": "cluster_unmap_latency_ps",
+                        "expr": "cluster_unmap_latency_ps{cluster=\"$Cluster\"}",
                         "legendFormat": "__auto",
                         "range": true,
                         "refId": "A"
@@ -2067,8 +2052,7 @@
                             "mode": "absolute",
                             "steps": [
                                 {
-                                    "color": "green",
-                                    "value": null
+                                    "color": "green"
                                 },
                                 {
                                     "color": "red",
@@ -2130,7 +2114,7 @@
                             "uid": "PBFA97CFB590B2093"
                         },
                         "editorMode": "builder",
-                        "expr": "cluster_unmap_io_ps",
+                        "expr": "cluster_unmap_io_ps{cluster=\"$Cluster\"}",
                         "legendFormat": "__auto",
                         "range": true,
                         "refId": "A"
@@ -2184,8 +2168,7 @@
                             "mode": "absolute",
                             "steps": [
                                 {
-                                    "color": "green",
-                                    "value": null
+                                    "color": "green"
                                 },
                                 {
                                     "color": "red",
@@ -2222,7 +2205,7 @@
                             "uid": "PBFA97CFB590B2093"
                         },
                         "editorMode": "builder",
-                        "expr": "cluster_unmap_io",
+                        "expr": "cluster_unmap_io{cluster=\"$Cluster\"}",
                         "legendFormat": "__auto",
                         "range": true,
                         "refId": "A"
@@ -2276,8 +2259,7 @@
                             "mode": "absolute",
                             "steps": [
                                 {
-                                    "color": "green",
-                                    "value": null
+                                    "color": "green"
                                 },
                                 {
                                     "color": "red",
@@ -2315,7 +2297,7 @@
                             "uid": "PBFA97CFB590B2093"
                         },
                         "editorMode": "builder",
-                        "expr": "cluster_unmap_bytes",
+                        "expr": "cluster_unmap_bytes{cluster=\"$Cluster\"}",
                         "legendFormat": "__auto",
                         "range": true,
                         "refId": "A"
@@ -2330,7 +2312,36 @@
         "style": "dark",
         "tags": [],
         "templating": {
-            "list": []
+            "list": [
+                {
+                    "current": {
+                        "selected": false,
+                        "text": "76aa3622-8918-4539-adb2-7c4b1852be14",
+                        "value": "76aa3622-8918-4539-adb2-7c4b1852be14"
+                    },
+                    "datasource": {
+                        "type": "prometheus",
+                        "uid": "PBFA97CFB590B2093"
+                    },
+                    "definition": "query_result(cluster_read_io)",
+                    "description": "Cluster",
+                    "hide": 0,
+                    "includeAll": false,
+                    "label": "Cluster",
+                    "multi": true,
+                    "name": "Cluster",
+                    "options": [],
+                    "query": {
+                        "query": "query_result(cluster_read_io)",
+                        "refId": "PrometheusVariableQueryEditor-VariableQuery"
+                    },
+                    "refresh": 2,
+                    "regex": "/.*cluster=\"([^\"]*).*/",
+                    "skipUrlSync": false,
+                    "sort": 1,
+                    "type": "query"
+                }
+            ]
         },
         "time": {
             "from": "now-1h",
