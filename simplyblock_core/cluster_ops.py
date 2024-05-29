@@ -28,7 +28,7 @@ def _add_grafana_dashboards(username, password, cluster_id, cluster_ip):
     for filename in filenames:
         with open(os.path.join(dirpath, filename), 'r') as f:
             st = f.read()
-            st = st.replace("$Cluster", cluster_id)
+            # st = st.replace("$Cluster", cluster_id)
             st = json.loads(st)
         payload = json.dumps(st)
         response = requests.post(url, headers=headers, data=payload)
@@ -405,12 +405,6 @@ def add_cluster(blk_size, page_size_in_blocks, ha_type, cap_warn, cap_crit, prov
     cluster.updated_at = int(time.time())
     cluster.write_to_db(db_controller.kv_store)
     cluster_events.cluster_create(cluster)
-
-    cl_ip = db_controller.get_mgmt_nodes()[0].mgmt_ip
-    # todo: do it multi thread
-    logger.info("Applying dashboard...")
-    ret = _add_grafana_dashboards("admin", cluster.secret, cluster.uuid, cl_ip)
-    logger.info(f"Applying dashboard > {ret}")
 
     return cluster.get_id()
 
