@@ -355,27 +355,33 @@ def join_cluster(cluster_ip, cluster_id, role, ifname, data_nics,  spdk_cpu_mask
     logger.info("Node joined the cluster")
 
 
-def add_cluster(blk_size, page_size_in_blocks, model_ids, ha_type, tls,
-                auth_hosts_only, dhchap, nqn, iscsi, cli_pass):
+def add_cluster(blk_size, page_size_in_blocks, ha_type, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit):
     db_controller = DBController()
     logger.info("Adding new cluster")
-    c = Cluster()
-    c.uuid = str(uuid.uuid4())
-    c.blk_size = blk_size
-    c.page_size_in_blocks = page_size_in_blocks
-    c.model_ids = model_ids
-    c.ha_type = ha_type
-    c.tls = tls
-    c.auth_hosts_only = auth_hosts_only
-    c.nqn = nqn
-    c.iscsi = iscsi
-    c.dhchap = dhchap
-    c.cli_pass = cli_pass
-    c.status = Cluster.STATUS_ACTIVE
-    c.updated_at = int(time.time())
-    c.write_to_db(db_controller.kv_store)
-    logger.info("New Cluster has been created")
-    logger.info(c.uuid)
+    default_cluster = db_controller.get_clusters()[0]
+    cluster = Cluster()
+    cluster.uuid = str(uuid.uuid4())
+    cluster.blk_size = blk_size
+    cluster.page_size_in_blocks = page_size_in_blocks
+    cluster.ha_type = ha_type
+    cluster.nqn = f"{constants.CLUSTER_NQN}:{cluster.uuid}"
+    cluster.cli_pass = default_cluster.cli_pass
+    cluster.secret = utils.generate_string(20)
+    cluster.db_connection = default_cluster.db_connection
+    if cap_warn and cap_warn > 0:
+        cluster.cap_warn = cap_warn
+    if cap_crit and cap_crit > 0:
+        cluster.cap_crit = cap_crit
+    if prov_cap_warn and prov_cap_warn > 0:
+        cluster.prov_cap_warn = prov_cap_warn
+    if prov_cap_crit and prov_cap_crit > 0:
+        cluster.prov_cap_crit = prov_cap_crit
+
+    cluster.status = Cluster.STATUS_ACTIVE
+    cluster.updated_at = int(time.time())
+    cluster.write_to_db(db_controller.kv_store)
+    cluster_events.cluster_create(cluster)
+    return cluster.get_id()
 
 
 def show_cluster(cl_id, is_json=False):
