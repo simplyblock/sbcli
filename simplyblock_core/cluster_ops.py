@@ -19,8 +19,8 @@ from simplyblock_core.models.storage_node import StorageNode
 logger = logging.getLogger()
 
 
-def _add_grafana_dashboards(username, password, cluster_id):
-    url = f"http://${username}:${password}@0.0.0.0:3000/api/dashboards/import"
+def _add_grafana_dashboards(username, password, cluster_id, cluster_ip):
+    url = f"http://{username}:{password}@{cluster_ip}:3000/api/dashboards/import"
     headers = {
         'Content-Type': 'application/json',
     }
@@ -142,7 +142,7 @@ def create_cluster(blk_size, page_size_in_blocks, ha_type, cli_pass,
     mgmt_node_ops.add_mgmt_node(DEV_IP, c.uuid)
 
     logger.info("Applying dashboard...")
-    ret = _add_grafana_dashboards("admin", c.secret, c.uuid)
+    ret = _add_grafana_dashboards("admin", c.secret, c.uuid, DEV_IP)
     logger.info(f"Applying dashboard > {ret}")
 
     logger.info("New Cluster has been created")
@@ -389,7 +389,7 @@ def add_cluster(blk_size, page_size_in_blocks, ha_type, cap_warn, cap_crit, prov
     cluster.ha_type = ha_type
     cluster.nqn = f"{constants.CLUSTER_NQN}:{cluster.uuid}"
     cluster.cli_pass = default_cluster.cli_pass
-    cluster.secret = utils.generate_string(20)
+    cluster.secret = default_cluster.secret
     cluster.db_connection = default_cluster.db_connection
     if cap_warn and cap_warn > 0:
         cluster.cap_warn = cap_warn
@@ -405,9 +405,10 @@ def add_cluster(blk_size, page_size_in_blocks, ha_type, cap_warn, cap_crit, prov
     cluster.write_to_db(db_controller.kv_store)
     cluster_events.cluster_create(cluster)
 
+    cl_ip = db_controller.get_mgmt_nodes()[0].mgmt_ip
     # todo: do it multi thread
     logger.info("Applying dashboard...")
-    ret = _add_grafana_dashboards("admin", cluster.secret, cluster.uuid)
+    ret = _add_grafana_dashboards("admin", cluster.secret, cluster.uuid, cl_ip)
     logger.info(f"Applying dashboard > {ret}")
 
     return cluster.get_id()
