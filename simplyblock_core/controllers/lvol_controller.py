@@ -1020,7 +1020,7 @@ def delete_lvol(id_or_name, force_delete=False):
     # remove from pool
     pool.lvols.remove(lvol.get_id())
     pool.write_to_db(db_controller.kv_store)
-
+    lvol_events.lvol_delete(lvol)
     lvol.remove(db_controller.kv_store)
 
     # if lvol is clone and snapshot is deleted, then delete snapshot
@@ -1034,7 +1034,6 @@ def delete_lvol(id_or_name, force_delete=False):
             if lvols_count == 0:
                 snapshot_controller.delete(snap.get_id())
 
-    lvol_events.lvol_delete(lvol)
     logger.info("Done")
     return True
 
