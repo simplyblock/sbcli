@@ -84,6 +84,7 @@ class DBController:
         cmap = ClusterMap().read_from_db(self.kv_store)
         return cmap[0] if cmap else None
 
+    # todo: change this function for multi cluster
     def get_storage_nodes(self):
         ret = StorageNode().read_from_db(self.kv_store)
         ret = sorted(ret, key=lambda x: x.create_dt)
