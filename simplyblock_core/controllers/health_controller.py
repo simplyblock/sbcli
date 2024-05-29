@@ -39,16 +39,16 @@ def check_cluster(cluster_id):
                 "UUID": device.get_id(),
                 "Status": "ok" if ret else "failed"
             })
-    # todo: change this function for multi cluster
-    for lvol in db_controller.get_lvols():
-        ret = check_lvol(lvol.get_id())
-        result &= ret
-        print("*" * 100)
-        data.append({
-            "Kind": "LVol",
-            "UUID": lvol.get_id(),
-            "Status": "ok" if ret else "failed"
-        })
+
+        for lvol in db_controller.get_lvols(cluster_id):
+            ret = check_lvol(lvol.get_id())
+            result &= ret
+            print("*" * 100)
+            data.append({
+                "Kind": "LVol",
+                "UUID": lvol.get_id(),
+                "Status": "ok" if ret else "failed"
+            })
     print(utils.print_table(data))
     return result
 
