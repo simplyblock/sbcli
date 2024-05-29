@@ -197,6 +197,7 @@ def clone(snapshot_id, clone_name, new_size=0):
     lvol = LVol()
     lvol.lvol_name = clone_name
     lvol.size = snap.lvol.size
+    lvol.vuid = snap.lvol.vuid
     lvol.distr_bs = snap.lvol.distr_bs
     lvol.ndcs = snap.lvol.ndcs
     lvol.npcs = snap.lvol.npcs

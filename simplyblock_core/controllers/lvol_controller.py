@@ -891,16 +891,10 @@ def _remove_bdev_stack(bdev_stack, rpc_client):
         type = bdev['type']
         name = bdev['name']
         ret = None
-        # if type == "alceml":
-        #     ret = rpc_client.bdev_alceml_delete(name)
         if type == "bdev_distr":
             ret = rpc_client.bdev_distrib_delete(name)
-        # elif type == "lvs":
-        #     ret = rpc_client.bdev_lvol_delete_lvstore(name)
-        # elif type == "lvol":
-        #     ret = rpc_client.delete_lvol(name)
-        # elif type == "ultra_pt":
-        #     ret = rpc_client.ultra21_bdev_pass_delete(name)
+        elif type == "bmap_init":
+            pass
         elif type == "ultra_lvol":
             ret = rpc_client.ultra21_lvol_dismount(name)
         elif type == "comp":
