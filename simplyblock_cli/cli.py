@@ -377,8 +377,9 @@ class CLIWrapper:
         sub_command.add_argument("--max-w-mbytes", help='Maximum Write Mega Bytes Per Second', type=int)
 
         # list lvols
-        sub_command = self.add_sub_command(subparser, 'list', 'List all LVols')
-        sub_command.add_argument("--cluster-id", help='List LVols in particular cluster')
+        sub_command = self.add_sub_command(subparser, 'list', 'List LVols')
+        sub_command.add_argument("--cluster-id", help='List LVols in particular cluster', dest="cluster_id")
+        sub_command.add_argument("--pool", help='List LVols in particular Pool ID or name', dest="pool")
         sub_command.add_argument("--json", help='Print outputs in json format', required=False, action='store_true')
 
         # Get the size and max_size of the lvol
@@ -478,7 +479,7 @@ class CLIWrapper:
         # add pool
         sub_command = self.add_sub_command(subparser, 'add', 'Add a new Pool')
         sub_command.add_argument("name", help='Pool name')
-        sub_command.add_argument("--cluster-id", help='id of the cluster', dest='cluster_id')
+        sub_command.add_argument("cluster_id", help='Cluster UUID', dest='cluster_id')
         sub_command.add_argument("--pool-max", help='Pool maximum size: 20M, 20G, 0(default)', default="0")
         sub_command.add_argument("--lvol-max", help='LVol maximum size: 20M, 20G, 0(default)', default="0")
         sub_command.add_argument("--max-rw-iops", help='Maximum Read Write IO Per Second', type=int)
@@ -916,7 +917,7 @@ class CLIWrapper:
                     args.id, args.max_rw_iops, args.max_rw_mbytes,
                     args.max_r_mbytes, args.max_w_mbytes)
             elif sub_command == "list":
-                ret = lvol_controller.list_lvols(args.json)
+                ret = lvol_controller.list_lvols(args.json, args.cluster_id, args.pool)
             elif sub_command == "list-mem":
                 ret = lvol_controller.list_lvols_mem(args.json, args.csv)
             elif sub_command == "get":

@@ -49,7 +49,7 @@ db_controller = kv_store.DBController()
 
 logger.info("Starting LVol monitor...")
 while True:
-    lvols = db_controller.get_lvols()
+    lvols = db_controller.get_lvols()  # pass
     if not lvols:
         logger.error("LVols list is empty")
 

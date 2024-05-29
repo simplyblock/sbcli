@@ -115,7 +115,7 @@ logger.info("Starting stats collector...")
 while True:
 
     pools = db_controller.get_pools()
-    all_lvols = db_controller.get_lvols()
+    all_lvols = db_controller.get_lvols()  # pass
     for pool in pools:
         lvols = []
         for lvol in all_lvols:

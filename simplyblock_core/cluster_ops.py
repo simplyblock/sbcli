@@ -357,8 +357,13 @@ def join_cluster(cluster_ip, cluster_id, role, ifname, data_nics,  spdk_cpu_mask
 
 def add_cluster(blk_size, page_size_in_blocks, ha_type, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit):
     db_controller = DBController()
+    clusters = db_controller.get_clusters()
+    if not clusters:
+        logger.error("No previous clusters found!")
+        return False
+
+    default_cluster = clusters[0]
     logger.info("Adding new cluster")
-    default_cluster = db_controller.get_clusters()[0]
     cluster = Cluster()
     cluster.uuid = str(uuid.uuid4())
     cluster.blk_size = blk_size
