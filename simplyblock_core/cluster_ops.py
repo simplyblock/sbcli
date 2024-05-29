@@ -29,6 +29,7 @@ def _add_grafana_dashboards(username, password, cluster_id, cluster_ip):
         with open(os.path.join(dirpath, filename), 'r') as f:
             st = f.read()
             st = st.replace("$Cluster", cluster_id)
+            st = json.loads(st)
         payload = json.dumps(st)
         response = requests.post(url, headers=headers, data=payload)
         logger.debug(response.status_code)
