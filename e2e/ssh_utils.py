@@ -150,33 +150,6 @@ class SshUtils:
         return output.strip().split("\n")[1:]
     
     def run_fio_test(self, node, device=None, directory=None, log_file=None, **kwargs):
-
-        text = """[test]
-            directory=/home/ec2-user/test_location
-            ioengine=aiolib
-            direct=1
-            iodepth=1
-            time_based=1
-            runtime=3600
-            readwrite=randrw
-            bs=4K
-            size=10MiB
-            verify=md5
-            numjobs=1
-            verify_dump=1
-            verify_fatal=0
-            verify_state_save=1
-            verify_backlog=10
-        """
-
-        # home_dir = self.exec_command(node, command="pwd")
-        # home_dir = home_dir.strip()
-
-        # ssh = self.ssh_connections[node]
-
-        # ftp = ssh.open_sftp()
-        # ftp.putfo(BytesIO(text.encode()), f'{home_dir}/fio_test.fio')
-        # ftp.close()
         if device:
             location = f"--filename={device}"
         if directory:
