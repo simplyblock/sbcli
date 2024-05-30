@@ -10,16 +10,6 @@ mkdir "$spdk_deploy_dir"
 
 git clone https://github.com/simplyblock-io/simplyBlockDeploy.git "$spdk_deploy_dir"
 
-namespace="simplyblock-cluster-e2e"
-sbcli_pkg="sbcli-dev"
-spdk_image="simplyblock/spdk:faster-bdev-startup-latest"
-
-terraform init
-terraform workspace select -or-create "$namespace"
-
-terraform apply -var mgmt_nodes=1 -var storage_nodes=3 \
-    -var sbcli_pkg="$sbcli_pkg" -var extra_nodes=0 --auto-approve
-
 bootstrap_path="$spdk_deploy_path/bootstrap-cluster.sh"
 chmod +x "$bootstrap_path"
 

@@ -18,82 +18,89 @@ class SbcliUtils:
             "Authorization": f"{cluster_id} {cluster_secret}"
         }
 
+    def get_request(self, api_url, headers=None):
+        request_url = self.cluster_api_url + api_url
+        headers = headers if headers else self.headers
+        print(f"Calling GET for {api_url} with headers: {headers}")
+        resp = requests.get(request_url, headers=headers)
+        if resp.status_code == HTTPStatus.OK:
+            data = resp.json()
+        else:
+            print('request failed. status_code', resp.status_code)
+            print('request failed. text', resp.text)
+            resp.raise_for_status()
+        return data
+
+
+    def post_request(self, api_url, headers=None, body=None):
+        request_url = self.cluster_api_url + api_url
+        headers = headers if headers else self.headers
+        print(f"Calling POST for {api_url} with headers: {headers}, body: {body}")
+        resp = requests.post(request_url, headers=headers,
+                            json=body)
+        if resp.status_code == HTTPStatus.OK:
+            data = resp.json()
+        else:
+            print('request failed. status_code', resp.status_code)
+            print('request failed. text', resp.text)
+            resp.raise_for_status()
+        return data
+
+    def delete_request(self, api_url, headers=None):
+        request_url = self.cluster_api_url + api_url
+        headers = headers if headers else self.headers
+        print(f"Calling DELETE for {api_url} with headers: {headers}")
+        resp = requests.delete(request_url, headers=headers)
+        if resp.status_code == HTTPStatus.OK:
+            data = resp.json()
+        else:
+            print('request failed. status_code', resp.status_code)
+            print('request failed. text', resp.text)
+            resp.raise_for_status()
+        return data
+
     def get_node_without_lvols(self) -> str:
         """
         returns a single nodeID which doesn't have any lvol attached
         """
-
-        request_url = self.cluster_api_url + "/storagenode"
-
         # a node which doesn't have any lvols attached
         node_uuid = ""
-        resp = requests.get(request_url, headers=self.headers)
-        if resp.status_code == HTTPStatus.OK:
-            data = resp.json()
-            for result in data['results']:
-                if len(result['lvols']) == 0:
-                    node_uuid = result['uuid']
-                    break
-        else:
-            print('request failed. status_code', resp.status_code)
-            print('request failed. text', resp.text)
-
+        data = self.get_request(api_url="/storagenode")
+        for result in data['results']:
+            if len(result['lvols']) == 0:
+                node_uuid = result['uuid']
+                break
         return node_uuid
 
     def shutdown_node(self, node_uuid: str):
         """
         given a node_UUID, shutdowns the node
         """
-        request_url = self.cluster_api_url + "/storagenode/shutdown/" + node_uuid
-        resp = requests.get(request_url, headers=self.headers)
-        if resp.status_code == HTTPStatus.OK:
-            data = resp.json()
-            print(data)
-            # TODO: parse and display error accordingly: {'results': True, 'status': True}
-        else:
-            print('request failed. status_code', resp.status_code)
-            print('request failed. text', resp.text)
+        # TODO: parse and display error accordingly: {'results': True, 'status': True}
+        data = self.get_request(api_url=f"/storagenode/shutdown/{node_uuid}")
 
 
     def suspend_node(self, node_uuid: str):
         """
         given a node_UUID, suspends the node
         """
-        request_url = self.cluster_api_url + "/storagenode/suspend/" + node_uuid
-        resp = requests.get(request_url, headers=self.headers)
-        if resp.status_code == HTTPStatus.OK:
-            data = resp.json()
-            print(data)
-            # TODO: parse and display error accordingly: {'results': True, 'status': True}
-        else:
-            print('request failed. status_code', resp.status_code)
-            print('request failed. text', resp.text)
+        # TODO: parse and display error accordingly: {'results': True, 'status': True}
+        data = self.get_request(api_url=f"/storagenode/suspend/{node_uuid}")
+
 
     def resume_node(self, node_uuid: str):
         """
         given a node_UUID, resumes the node
         """
-        request_url = self.cluster_api_url + "/storagenode/resume/" + node_uuid
-        resp = requests.get(request_url, headers=self.headers)
-        if resp.status_code == HTTPStatus.OK:
-            data = resp.json()
-            print(data)
-        else:
-            print('request failed. status_code', resp.status_code)
-            print('request failed. text', resp.text)
+        # TODO: parse and display error accordingly: {'results': True, 'status': True}
+        data = self.get_request(api_url=f"/storagenode/resume/{node_uuid}")
 
     def restart_node(self, node_uuid: str):
         """
         given a node_UUID, restarts the node
         """
-        request_url = self.cluster_api_url + "/storagenode/restart/" + node_uuid
-        resp = requests.get(request_url, headers=self.headers)
-        if resp.status_code == HTTPStatus.OK:
-            data = resp.json()
-            print(data)
-        else:
-            print('request failed. status_code', resp.status_code)
-            print('request failed. text', resp.text)
+        # TODO: parse and display error accordingly: {'results': True, 'status': True}
+        data = self.get_request(api_url=f"/storagenode/restart/{node_uuid}")
 
     def get_all_nodes_ip(self):
         """Return all nodes part of cluster
@@ -114,51 +121,23 @@ class SbcliUtils:
         return management_nodes, storage_nodes
     
     def get_management_nodes(self):
-        request_url = self.cluster_api_url + "/mgmtnode/"
-        resp = requests.get(request_url, headers=self.headers)
-        if resp.status_code == HTTPStatus.OK:
-            data = resp.json()
-        else:
-            print('request failed. status_code', resp.status_code)
-            print('request failed. text', resp.text)
+        data = self.get_request(api_url="/mgmtnode/")
         return data
     
     def get_storage_nodes(self):
-        request_url = self.cluster_api_url + "/storagenode/"
-        resp = requests.get(request_url, headers=self.headers)
-        if resp.status_code == HTTPStatus.OK:
-            data = resp.json()
-        else:
-            print('request failed. status_code', resp.status_code)
-            print('request failed. text', resp.text)
+        data = self.get_request(api_url="/storagenode/")
         return data
     
     def list_storage_pools(self):
         pool_data = dict()
-        request_url = self.cluster_api_url + "/pool"
-        resp = requests.get(request_url, 
-                             headers=self.headers)
-        if resp.status_code == HTTPStatus.OK:
-            data = resp.json()
-        else:
-            print('request failed. status_code', resp.status_code)
-            print('request failed. text', resp.text)
+        data = self.get_request(api_url="/pool")
         for pool_info in data["results"]:
             pool_data[pool_info["pool_name"]] = pool_info["id"]
             
         return pool_data
     
     def get_pool_by_id(self, pool_id):
-        request_url = self.cluster_api_url + "/pool/" + pool_id
-
-        resp = requests.get(request_url, 
-                            headers=self.headers)
-        
-        if resp.status_code == HTTPStatus.OK:
-            data = resp.json()
-        else:
-            print('request failed. status_code', resp.status_code)
-            print('request failed. text', resp.text)
+        data = self.get_request(api_url=f"/pool/{pool_id}")
 
         return data
 
@@ -168,20 +147,12 @@ class SbcliUtils:
             if name == pool_name:
                 print(f"Pool {pool_name} already exists. Exiting")
                 return
-
-        request_url = self.cluster_api_url + "/pool"
+        
         body = {
             "name": pool_name
         }
-        resp = requests.post(request_url, 
-                             headers=self.headers,
-                             json=body)
-        if resp.status_code == HTTPStatus.OK:
-            data = resp.json()
-            print(data)
-        else:
-            print('request failed. status_code', resp.status_code)
-            print('request failed. text', resp.text)
+        data = self.post_request(api_url="/pool", body=body)
+        # TODO: Add assertions
 
     def delete_storage_pool(self, pool_name):
         pools = self.list_storage_pools()
@@ -196,19 +167,11 @@ class SbcliUtils:
         
         pool_data = self.get_pool_by_id(pool_id=pool_id)
 
-        request_url = self.cluster_api_url + "/pool/" + pool_id
         header = self.headers.copy()
-
         header["secret"] = pool_data["results"][0]["secret"]
 
-        resp = requests.delete(request_url, 
-                               headers=header)
-        if resp.status_code == HTTPStatus.OK:
-            data = resp.json()
-            print(data)
-        else:
-            print('request failed. status_code', resp.status_code)
-            print('request failed. text', resp.text)
+        data = self.delete_request(api_url=f"/pool/{pool_id}", 
+                                   headers=header)
     
     def delete_all_storage_pools(self):
         pools = self.list_storage_pools()
@@ -217,85 +180,72 @@ class SbcliUtils:
             self.delete_storage_pool(pool_name=name)
 
     def list_lvols(self):
-        pool_data = dict()
-        request_url = self.cluster_api_url + "/pool"
-        resp = requests.get(request_url, 
-                             headers=self.headers)
-        if resp.status_code == HTTPStatus.OK:
-            data = resp.json()
-        else:
-            print('request failed. status_code', resp.status_code)
-            print('request failed. text', resp.text)
-        for pool_info in data["results"]:
-            pool_data[pool_info["pool_name"]] = pool_info["id"]
-            
-        return pool_data
+        lvol_data = dict()
+        data = self.get_request(api_url="/lvol")
+        print(f"LVOL List: {data}")
+        for lvol_info in data["results"]:
+            lvol_data[lvol_info["lvol_name"]] = lvol_info["id"]
+            print(f"Lvol hostname: {lvol_info['hostname']}")
+        return lvol_data
     
-    def get_lvol_by_id(self, pool_id):
-        request_url = self.cluster_api_url + "/pool/" + pool_id
-
-        resp = requests.get(request_url, 
-                            headers=self.headers)
-        
-        if resp.status_code == HTTPStatus.OK:
-            data = resp.json()
-        else:
-            print('request failed. status_code', resp.status_code)
-            print('request failed. text', resp.text)
-
+    def get_lvol_by_id(self, lvol_id):
+        data = self.get_request(api_url=f"/lvol/{lvol_id}")
         return data
 
-    def add_lvol(self, pool_name):
-        pools = self.list_storage_pools()
-        for name in list(pools.keys()):
-            if name == pool_name:
-                print(f"Pool {pool_name} already exists. Exiting")
+    def add_lvol(self, lvol_name, pool_name, size="256M", distr_ndcs=1, distr_npcs=1):
+        lvols = self.list_lvols()
+        for name in list(lvols.keys()):
+            if name == lvol_name:
+                print(f"Pool {lvol_name} already exists. Exiting")
                 return
 
-        request_url = self.cluster_api_url + "/pool"
         body = {
-            "name": pool_name
+            "name": lvol_name,
+            "size": size,
+            "pool": pool_name,
+            "comp": False,
+            "crypto": False,
+            "max_rw_iops": "0",
+            "max_rw_mbytes": "0",
+            "max_r_mbytes": "0",
+            "max_w_mbytes": "0",
+            "distr-ndcs": str(distr_ndcs),
+            "distr-npcs": str(distr_npcs)
         }
-        resp = requests.post(request_url, 
-                             headers=self.headers,
-                             json=body)
-        if resp.status_code == HTTPStatus.OK:
-            data = resp.json()
-            print(data)
-        else:
-            print('request failed. status_code', resp.status_code)
-            print('request failed. text', resp.text)
+        data = self.post_request(api_url="/lvol", body=body)
+        print(data)
 
-    def delete_lvol(self, pool_name):
-        pools = self.list_storage_pools()
-        pool_id = None
-        for name in list(pools.keys()):
-            if name == pool_name:
-                pool_id = pools[name]
+    def delete_lvol(self, lvol_name):
+        lvols = self.list_lvols()
+        lvol_id = None
+        for name in list(lvols.keys()):
+            if name == lvol_name:
+                lvol_id = lvols[name]
         
-        if not pool_id:
-            print("Pool does not exist. Exiting")
+        if not lvol_id:
+            print("Lvol does not exist. Exiting")
             return
-        
-        pool_data = self.get_pool_by_id(pool_id=pool_id)
 
-        request_url = self.cluster_api_url + "/pool/" + pool_id
-        header = self.headers.copy()
-
-        header["secret"] = pool_data["results"][0]["secret"]
-
-        resp = requests.delete(request_url, 
-                               headers=header)
-        if resp.status_code == HTTPStatus.OK:
-            data = resp.json()
-            print(data)
-        else:
-            print('request failed. status_code', resp.status_code)
-            print('request failed. text', resp.text)
+        data = self.delete_request(api_url=f"/lvol/{lvol_id}")
+        print(f"Delete lvol resp: {data}")
     
     def delete_all_lvols(self):
-        pools = self.list_storage_pools()
-        for name in list(pools.keys()):
-            print(f"Deleting pool: {name}")
-            self.delete_storage_pool(pool_name=name)
+        lvols = self.list_lvols()
+        for name in list(lvols.keys()):
+            print(f"Deleting lvol: {name}")
+            self.delete_lvol(lvol_name=name)
 
+    def get_lvol_connect_str(self, lvol_name):
+        lvols = self.list_lvols()
+        lvol_id = None
+        for name in list(lvols.keys()):
+            if name == lvol_name:
+                lvol_id = lvols[name]
+        
+        if not lvol_id:
+            print("Lvol does not exist. Exiting")
+            return
+
+        data = self.get_request(api_url=f"/lvol/connect/{lvol_id}")
+        print(f"Connect lvol resp: {data}")
+        return data["result"][0]["connect"]

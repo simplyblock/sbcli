@@ -2,6 +2,7 @@
 # import requests
 # from http import HTTPStatus
 import time
+import traceback
 # from utils import get_node_without_lvols, suspend_node, shutdown_node
 from __init__ import get_all_tests
 
@@ -110,11 +111,21 @@ def main():
 
     # validate(node_uuid)
     tests = get_all_tests()
+    errors = {}
     for test in tests:
         test_obj = test()
         test_obj.setup()
-        test_obj.run()
-        test_obj.teardown()
+        try:
+            test_obj.run()
+        except Exception as exp:
+            errors[f"{test}"] = exp
+        finally:
+            test_obj.teardown()
+    
+    for test, exception in errors.items():
+        print(f"Raising exception for test: {test}")
+        traceback.print_tb(exception.__traceback__)
+        raise exception
     # resume_node(node_uuid)
     # restart_node(node_uuid)
     # after restart the node status switches back to online
