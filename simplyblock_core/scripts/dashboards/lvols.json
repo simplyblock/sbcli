@@ -119,8 +119,8 @@
                             "type": "prometheus",
                             "uid": "PBFA97CFB590B2093"
                         },
-                        "editorMode": "builder",
-                        "expr": "lvol_size_total",
+                        "editorMode": "code",
+                        "expr": "lvol_size_total{cluster=~\"$cluster\",pool=~\"$pool\",lvol=~\"$lvol\"}",
                         "legendFormat": "__auto",
                         "range": true,
                         "refId": "A"
@@ -212,8 +212,8 @@
                             "type": "prometheus",
                             "uid": "PBFA97CFB590B2093"
                         },
-                        "editorMode": "builder",
-                        "expr": "lvol_size_free",
+                        "editorMode": "code",
+                        "expr": "lvol_size_free{cluster=~\"$cluster\",pool=~\"$pool\",lvol=~\"$lvol\"}",
                         "legendFormat": "__auto",
                         "range": true,
                         "refId": "A"
@@ -305,8 +305,8 @@
                             "type": "prometheus",
                             "uid": "PBFA97CFB590B2093"
                         },
-                        "editorMode": "builder",
-                        "expr": "lvol_size_used",
+                        "editorMode": "code",
+                        "expr": "lvol_size_used{cluster=~\"$cluster\",pool=~\"$pool\",lvol=~\"$lvol\"}",
                         "legendFormat": "__auto",
                         "range": true,
                         "refId": "A"
@@ -398,8 +398,8 @@
                             "type": "prometheus",
                             "uid": "PBFA97CFB590B2093"
                         },
-                        "editorMode": "builder",
-                        "expr": "lvol_size_prov",
+                        "editorMode": "code",
+                        "expr": "lvol_size_prov{cluster=~\"$cluster\",pool=~\"$pool\",lvol=~\"$lvol\"}",
                         "legendFormat": "__auto",
                         "range": true,
                         "refId": "A"
@@ -491,8 +491,8 @@
                             "type": "prometheus",
                             "uid": "PBFA97CFB590B2093"
                         },
-                        "editorMode": "builder",
-                        "expr": "lvol_size_prov_util",
+                        "editorMode": "code",
+                        "expr": "lvol_size_prov_util{cluster=~\"$cluster\",pool=~\"$pool\",lvol=~\"$lvol\"}",
                         "legendFormat": "__auto",
                         "range": true,
                         "refId": "A"
@@ -584,8 +584,8 @@
                             "type": "prometheus",
                             "uid": "PBFA97CFB590B2093"
                         },
-                        "editorMode": "builder",
-                        "expr": "lvol_size_util",
+                        "editorMode": "code",
+                        "expr": "lvol_size_util{cluster=~\"$cluster\",pool=~\"$pool\",lvol=~\"$lvol\"}",
                         "legendFormat": "__auto",
                         "range": true,
                         "refId": "A"
@@ -690,8 +690,8 @@
                             "type": "prometheus",
                             "uid": "PBFA97CFB590B2093"
                         },
-                        "editorMode": "builder",
-                        "expr": "lvol_write_bytes",
+                        "editorMode": "code",
+                        "expr": "lvol_write_bytes{cluster=~\"$cluster\",pool=~\"$pool\",lvol=~\"$lvol\"}",
                         "legendFormat": "__auto",
                         "range": true,
                         "refId": "A"
@@ -782,8 +782,8 @@
                             "type": "prometheus",
                             "uid": "PBFA97CFB590B2093"
                         },
-                        "editorMode": "builder",
-                        "expr": "lvol_write_io_ps",
+                        "editorMode": "code",
+                        "expr": "lvol_write_io_ps{cluster=~\"$cluster\",pool=~\"$pool\",lvol=~\"$lvol\"}",
                         "legendFormat": "__auto",
                         "range": true,
                         "refId": "A"
@@ -874,8 +874,8 @@
                             "type": "prometheus",
                             "uid": "PBFA97CFB590B2093"
                         },
-                        "editorMode": "builder",
-                        "expr": "lvol_write_latency_ticks",
+                        "editorMode": "code",
+                        "expr": "lvol_write_latency_ticks{cluster=~\"$cluster\",pool=~\"$pool\",lvol=~\"$lvol\"}",
                         "legendFormat": "__auto",
                         "range": true,
                         "refId": "A"
@@ -966,8 +966,8 @@
                             "type": "prometheus",
                             "uid": "PBFA97CFB590B2093"
                         },
-                        "editorMode": "builder",
-                        "expr": "lvol_write_io",
+                        "editorMode": "code",
+                        "expr": "lvol_write_io{cluster=~\"$cluster\",pool=~\"$pool\",lvol=~\"$lvol\"}",
                         "legendFormat": "__auto",
                         "range": true,
                         "refId": "A"
@@ -1059,8 +1059,8 @@
                             "type": "prometheus",
                             "uid": "PBFA97CFB590B2093"
                         },
-                        "editorMode": "builder",
-                        "expr": "lvol_write_bytes_ps",
+                        "editorMode": "code",
+                        "expr": "lvol_write_bytes_ps{cluster=~\"$cluster\",pool=~\"$pool\",lvol=~\"$lvol\"}",
                         "legendFormat": "__auto",
                         "range": true,
                         "refId": "A"
@@ -1152,8 +1152,8 @@
                             "type": "prometheus",
                             "uid": "PBFA97CFB590B2093"
                         },
-                        "editorMode": "builder",
-                        "expr": "lvol_write_latency_ps / 1000",
+                        "editorMode": "code",
+                        "expr": "lvol_write_latency_ps{cluster=~\"$cluster\",pool=~\"$pool\",lvol=~\"$lvol\"} / 1000",
                         "legendFormat": "__auto",
                         "range": true,
                         "refId": "A"
@@ -1258,8 +1258,8 @@
                             "type": "prometheus",
                             "uid": "PBFA97CFB590B2093"
                         },
-                        "editorMode": "builder",
-                        "expr": "lvol_read_bytes",
+                        "editorMode": "code",
+                        "expr": "lvol_read_bytes{cluster=~\"$cluster\",pool=~\"$pool\",lvol=~\"$lvol\"}",
                         "legendFormat": "__auto",
                         "range": true,
                         "refId": "A"
@@ -1351,8 +1351,8 @@
                             "type": "prometheus",
                             "uid": "PBFA97CFB590B2093"
                         },
-                        "editorMode": "builder",
-                        "expr": "lvol_read_bytes_ps",
+                        "editorMode": "code",
+                        "expr": "lvol_read_bytes_ps{cluster=~\"$cluster\",pool=~\"$pool\",lvol=~\"$lvol\"}",
                         "legendFormat": "__auto",
                         "range": true,
                         "refId": "A"
@@ -1444,8 +1444,8 @@
                             "type": "prometheus",
                             "uid": "PBFA97CFB590B2093"
                         },
-                        "editorMode": "builder",
-                        "expr": "lvol_read_latency_ps",
+                        "editorMode": "code",
+                        "expr": "lvol_read_latency_ps{cluster=~\"$cluster\",pool=~\"$pool\",lvol=~\"$lvol\"}",
                         "legendFormat": "__auto",
                         "range": true,
                         "refId": "A"
@@ -1536,8 +1536,8 @@
                             "type": "prometheus",
                             "uid": "PBFA97CFB590B2093"
                         },
-                        "editorMode": "builder",
-                        "expr": "lvol_read_io",
+                        "editorMode": "code",
+                        "expr": "lvol_read_io{cluster=~\"$cluster\",pool=~\"$pool\",lvol=~\"$lvol\"}",
                         "legendFormat": "__auto",
                         "range": true,
                         "refId": "A"
@@ -1628,8 +1628,8 @@
                             "type": "prometheus",
                             "uid": "PBFA97CFB590B2093"
                         },
-                        "editorMode": "builder",
-                        "expr": "lvol_read_io_ps",
+                        "editorMode": "code",
+                        "expr": "lvol_read_io_ps{cluster=~\"$cluster\",pool=~\"$pool\",lvol=~\"$lvol\"}",
                         "legendFormat": "__auto",
                         "range": true,
                         "refId": "A"
@@ -1720,8 +1720,8 @@
                             "type": "prometheus",
                             "uid": "PBFA97CFB590B2093"
                         },
-                        "editorMode": "builder",
-                        "expr": "lvol_read_latency_ticks",
+                        "editorMode": "code",
+                        "expr": "lvol_read_latency_ticks{cluster=~\"$cluster\",pool=~\"$pool\",lvol=~\"$lvol\"}",
                         "legendFormat": "__auto",
                         "range": true,
                         "refId": "A"
@@ -1825,8 +1825,8 @@
                             "type": "prometheus",
                             "uid": "PBFA97CFB590B2093"
                         },
-                        "editorMode": "builder",
-                        "expr": "lvol_unmap_latency_ticks",
+                        "editorMode": "code",
+                        "expr": "lvol_unmap_latency_ticks{cluster=~\"$cluster\",pool=~\"$pool\",lvol=~\"$lvol\"}",
                         "legendFormat": "__auto",
                         "range": true,
                         "refId": "A"
@@ -1918,8 +1918,8 @@
                             "type": "prometheus",
                             "uid": "PBFA97CFB590B2093"
                         },
-                        "editorMode": "builder",
-                        "expr": "lvol_unmap_bytes_ps",
+                        "editorMode": "code",
+                        "expr": "lvol_unmap_bytes_ps{cluster=~\"$cluster\",pool=~\"$pool\",lvol=~\"$lvol\"}",
                         "legendFormat": "__auto",
                         "range": true,
                         "refId": "A"
@@ -2012,8 +2012,8 @@
                             "type": "prometheus",
                             "uid": "PBFA97CFB590B2093"
                         },
-                        "editorMode": "builder",
-                        "expr": "lvol_unmap_latency_ps",
+                        "editorMode": "code",
+                        "expr": "lvol_unmap_latency_ps{cluster=~\"$cluster\",pool=~\"$pool\",lvol=~\"$lvol\"}",
                         "legendFormat": "__auto",
                         "range": true,
                         "refId": "A"
@@ -2129,8 +2129,8 @@
                             "type": "prometheus",
                             "uid": "PBFA97CFB590B2093"
                         },
-                        "editorMode": "builder",
-                        "expr": "lvol_unmap_io_ps",
+                        "editorMode": "code",
+                        "expr": "lvol_unmap_io_ps{cluster=~\"$cluster\",pool=~\"$pool\",lvol=~\"$lvol\"}",
                         "legendFormat": "__auto",
                         "range": true,
                         "refId": "A"
@@ -2221,8 +2221,8 @@
                             "type": "prometheus",
                             "uid": "PBFA97CFB590B2093"
                         },
-                        "editorMode": "builder",
-                        "expr": "lvol_unmap_io",
+                        "editorMode": "code",
+                        "expr": "lvol_unmap_io{cluster=~\"$cluster\",pool=~\"$pool\",lvol=~\"$lvol\"}",
                         "legendFormat": "__auto",
                         "range": true,
                         "refId": "A"
@@ -2314,8 +2314,8 @@
                             "type": "prometheus",
                             "uid": "PBFA97CFB590B2093"
                         },
-                        "editorMode": "builder",
-                        "expr": "lvol_unmap_bytes",
+                        "editorMode": "code",
+                        "expr": "lvol_unmap_bytes{cluster=~\"$cluster\",pool=~\"$pool\",lvol=~\"$lvol\"}",
                         "legendFormat": "__auto",
                         "range": true,
                         "refId": "A"
@@ -2330,7 +2330,104 @@
         "style": "dark",
         "tags": [],
         "templating": {
-            "list": []
+            "list": [
+                {
+                    "allValue": ".*",
+                    "current": {
+                        "selected": true,
+                        "text": [
+                            "All"
+                        ],
+                        "value": [
+                            "$__all"
+                        ]
+                    },
+                    "datasource": {
+                        "type": "prometheus",
+                        "uid": "PBFA97CFB590B2093"
+                    },
+                    "definition": "label_values(cluster)",
+                    "hide": 0,
+                    "includeAll": true,
+                    "label": "cluster",
+                    "multi": true,
+                    "name": "cluster",
+                    "options": [],
+                    "query": {
+                        "query": "label_values(cluster)",
+                        "refId": "PrometheusVariableQueryEditor-VariableQuery"
+                    },
+                    "refresh": 1,
+                    "regex": "",
+                    "skipUrlSync": false,
+                    "sort": 0,
+                    "type": "query"
+                },
+                {
+                    "allValue": ".*",
+                    "current": {
+                        "selected": true,
+                        "text": [
+                            "All"
+                        ],
+                        "value": [
+                            "$__all"
+                        ]
+                    },
+                    "datasource": {
+                        "type": "prometheus",
+                        "uid": "PBFA97CFB590B2093"
+                    },
+                    "definition": "query_result(lvol_size_total{cluster=~\"$cluster\"})",
+                    "hide": 0,
+                    "includeAll": true,
+                    "label": "pool",
+                    "multi": true,
+                    "name": "pool",
+                    "options": [],
+                    "query": {
+                        "query": "query_result(lvol_size_total{cluster=~\"$cluster\"})",
+                        "refId": "PrometheusVariableQueryEditor-VariableQuery"
+                    },
+                    "refresh": 1,
+                    "regex": ".*pool=\"(.*?)\".*",
+                    "skipUrlSync": false,
+                    "sort": 0,
+                    "type": "query"
+                },
+                {
+                    "allValue": ".*",
+                    "current": {
+                        "selected": true,
+                        "text": [
+                            "All"
+                        ],
+                        "value": [
+                            "$__all"
+                        ]
+                    },
+                    "datasource": {
+                        "type": "prometheus",
+                        "uid": "PBFA97CFB590B2093"
+                    },
+                    "definition": "query_result(lvol_size_total{cluster=~\"$cluster\",pool=~\"$pool\"})",
+                    "hide": 0,
+                    "includeAll": true,
+                    "label": "lvol",
+                    "multi": true,
+                    "name": "lvol",
+                    "options": [],
+                    "query": {
+                        "query": "query_result(lvol_size_total{cluster=~\"$cluster\",pool=~\"$pool\"})",
+                        "refId": "PrometheusVariableQueryEditor-VariableQuery"
+                    },
+                    "refresh": 1,
+                    "regex": ".*lvol=\"(.*?)\".*",
+                    "skipUrlSync": false,
+                    "sort": 0,
+                    "type": "query"
+                }
+            ]
         },
         "time": {
             "from": "now-1h",
