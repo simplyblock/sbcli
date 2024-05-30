@@ -23,18 +23,16 @@ class CLIWrapper:
         self.db_store = kv_store.KVStore()
         self.init_parser()
 
-        # storage-node command
+        #
+        #----------------- storage-node -----------------
+        #
+
         subparser = self.add_command('storage-node', 'Storage node commands', aliases=['sn'])
         # Add storage node
         sub_command = self.add_sub_command(subparser, "deploy", 'Deploy local services for remote ops (local run)')
         sub_command.add_argument("--ifname", help='Management interface name, default: eth0')
 
-        sub_command = self.add_sub_command(subparser, "deploy-cleaner", 'clean local deploy (local run)')
-
-        # sub_command = self.add_sub_command(subparser, "add", 'Add storage node')
-        # sub_command.add_argument("cluster_id", help='UUID of the cluster to which the node will belong')
-        # sub_command.add_argument("ifname", help='Management interface name')
-        # sub_command.add_argument("--data-nics", help='Data interface names', nargs='+', dest='data_nics')
+        self.add_sub_command(subparser, "deploy-cleaner", 'clean local deploy (local run)')
 
         sub_command = self.add_sub_command(subparser, "add-node", 'Add storage node by ip')
         sub_command.add_argument("cluster_id", help='UUID of the cluster to which the node will belong')
@@ -45,8 +43,6 @@ class CLIWrapper:
         sub_command.add_argument("--cpu-mask", help='SPDK app CPU mask, default is all cores found',
                                  dest='spdk_cpu_mask')
         sub_command.add_argument("--memory", help='SPDK huge memory allocation, default is 4G', dest='spdk_mem')
-        sub_command.add_argument("--dev-split", help='Split nvme devices by this factor, can be 2 or more',
-                                 dest='dev_split', type=int, default=1)
         sub_command.add_argument("--spdk-image", help='SPDK image uri', dest='spdk_image')
         sub_command.add_argument("--spdk-debug", help='Enable spdk debug logs', dest='spdk_debug', required=False, action='store_true')
 
@@ -73,11 +69,6 @@ class CLIWrapper:
 
         sub_command = self.add_sub_command(subparser, "get", 'Get storage node info')
         sub_command.add_argument("id", help='UUID of storage node')
-
-        sub_command = self.add_sub_command(subparser, "update", 'Update storage node db info')
-        sub_command.add_argument("id", help='UUID of storage node')
-        sub_command.add_argument("key", help='Key')
-        sub_command.add_argument("value", help='Value')
 
         # Restart storage node
         sub_command = self.add_sub_command(
@@ -153,29 +144,8 @@ class CLIWrapper:
         sub_command = self.add_sub_command(subparser, "restart-device", 'Re add "removed" storage device')
         sub_command.add_argument("id", help='the devices\'s UUID')
 
-        # run tests against storage device
-        sub_command = self.add_sub_command(subparser, 'run-smart', 'Run tests against storage device')
-        sub_command.add_argument("device_id", help='the devices\'s UUID')
-
         # Add a new storage device
         sub_command = self.add_sub_command(subparser, 'add-device', 'Add a new storage device')
-        sub_command.add_argument("name", help='Storage device name (as listed in the operating system). '
-                                              'The device will be de-attached from the operating system and '
-                                              'attached to the storage node')
-        sub_command.add_argument("node_id", help='UUID of the node')
-        sub_command.add_argument("cluster_id", help='UUID of the cluster')
-
-        # Replace storage node
-        # sub_command = self.add_sub_command(
-        #     subparser, 'replace', 'Replace a storage node. This command is run on the new physical server, which is '
-        #                           'expected to replace the old server. Attention!!! All the nvme devices, '
-        #                           'which are part of the cluster to which the node belongs, must be inserted into '
-        #                           'the new server before this command is run. The old node will be de-commissioned '
-        #                           'and cannot be used any more.')
-        # sub_command.add_argument("node_id", help='UUID of the node to be replaced')
-        # sub_command.add_argument("ifname", help='Management interface name')
-        # sub_command.add_argument("--data-nics", help='Data interface names', nargs='+', dest='data_nics')
-
         sub_command = self.add_sub_command(
             subparser, 'remove-device', 'Remove a storage device. The device will become unavailable, independently '
                                         'if it was physically removed from the server. This function can be used if '
@@ -184,20 +154,13 @@ class CLIWrapper:
         sub_command.add_argument("device_id", help='Storage device ID')
         sub_command.add_argument("--force", help='Force device remove', required=False, action='store_true')
 
-        sub_command = self.add_sub_command(subparser, 'set-ro-device', 'Set storage device read only')
-        sub_command.add_argument("device_id", help='Storage device ID')
-
         sub_command = self.add_sub_command(
-            subparser, 'set-failed-device', 'Set storage device to failed state. This command can be used, '
+            subparser, 'set-failed-device', 'Set storage device to failed state. ', usage='This command can be used, '
                                             'if an administrator believes that the device must be changed, '
                                             'but its status and health state do not lead to an automatic detection '
                                             'of the failure state. Attention!!! The failed state is final, all data '
                                             'on the device will be automatically recovered to other devices '
                                             'in the cluster. ')
-        sub_command.add_argument("device_id", help='Storage device ID')
-
-        sub_command = self.add_sub_command(subparser, 'set-online-device', 'Set storage device to online state')
-        sub_command.add_argument("device_id", help='Storage device ID')
 
         sub_command = self.add_sub_command(
             subparser, 'get-capacity-device', 'Returns the size, absolute and relative utilization of '
@@ -215,23 +178,6 @@ class CLIWrapper:
         sub_command.add_argument("--history", help='list history records -one for every 15 minutes- '
                                                    'for XX days and YY hours -up to 10 days in total-, format: XXdYYh')
 
-        sub_command = self.add_sub_command(
-            subparser, 'get-event-log', 'Returns storage node event log in syslog format. This includes events from '
-                                        'the storage node itself, the network interfaces and all devices on the node, '
-                                        'including health status information and updates.')
-        sub_command.add_argument("node_id", help='Storage node ID')
-        sub_command.add_argument("--from", help='from time, format: dd-mm-yy hh:mm')
-        sub_command.add_argument("--to", help='to time, format: dd-mm-yy hh:mm')
-
-        sub_command = self.add_sub_command(
-            subparser, 'get-log-page-device', 'Get nvme log-page information from the device. Attention! The '
-                                              'availability of particular log pages depends on the device model. '
-                                              'For more information, see nvme specification. ')
-        sub_command.add_argument("device-id", help='Storage device ID')
-        sub_command.add_argument(
-            "log-page", help='Can be [error , smart , telemetry , dev-self-test , endurance , persistent-event]',
-            choices=["error", "smart", "telemetry", "dev-self-test", "endurance", "persistent-event"])
-
         sub_command = self.add_sub_command(subparser, 'port-list', 'Get Data interfaces list for a node')
         sub_command.add_argument("node_id", help='Storage node ID')
 
@@ -240,22 +186,6 @@ class CLIWrapper:
         sub_command.add_argument("--history", help='list history records -one for every 15 minutes- '
                                                    'for XX days and YY hours -up to 10 days in total, format: XXdYYh',
                                  type=int, default=20)
-
-        #  get-host-secret
-        sub_command = self.add_sub_command(
-            subparser, 'get-host-secret', 'Returns the auto-generated host secret required for the nvmeof '
-                                          'connection between host and cluster')
-        sub_command.add_argument("id", help='Storage node ID')
-
-        #  get-ctrl-secret
-        sub_command = self.add_sub_command(
-            subparser, 'get-ctrl-secret', 'Returns the auto-generated controller secret required for the nvmeof '
-                                          'connection between host and cluster')
-        sub_command.add_argument("id", help='Storage node ID')
-
-        # #  run health ckecks
-        # sub_command = self.add_sub_command(subparser, 'health-check', 'Run health checks')
-        # sub_command.add_argument("id", help='Storage node ID')
 
         # check storage node
         sub_command = self.add_sub_command(subparser, "check", 'Health check storage node')
@@ -273,7 +203,10 @@ class CLIWrapper:
         sub_command = self.add_sub_command(subparser, "info-spdk", 'Get SPDK memory information')
         sub_command.add_argument("id", help='Node UUID')
 
-        # Initialize cluster parser
+        #
+        # ----------------- cluster -----------------
+        #
+
         subparser = self.add_command('cluster', 'Cluster commands')
 
         sub_command = self.add_sub_command(subparser, 'create',
@@ -287,20 +220,7 @@ class CLIWrapper:
         sub_command.add_argument(
             "--ha_type", help='Can be "single" for single node clusters or  "HA", which requires at least 3 nodes',
             choices=["single", "ha"], default='single')
-        sub_command.add_argument(
-            "--tls", help='TCP/IP transport security can be turned on and off. '
-                          'If turned on, both hosts and storage nodes must '
-                          'authenticate the connection via TLS certificates',
-            choices=["on", "off"], default='off')
-        sub_command.add_argument(
-            "--auth-hosts-only", help='if turned on, hosts must be explicitely added to the '
-                                      'cluster to be able to connect to any NVMEoF subsystem in the cluster',
-            choices=["on", "off"], default='off')
-        sub_command.add_argument(
-            "--model_ids", help='a list of supported NVMe device model-ids', nargs='+',
-            default=['Amazon EC2 NVMe Instance Storage'])
         sub_command.add_argument("--CLI_PASS", help='Password for CLI SSH connection', required=False)
-        # cap-warn ( % ), cap-crit ( % ), prov-cap-warn ( % ), prov-cap-crit. ( % )
         sub_command.add_argument("--cap-warn", help='Capacity warning level in percent, default=80',
                                  type=int, required=False, dest="cap_warn")
         sub_command.add_argument("--cap-crit", help='Capacity critical level in percent, default=90',
@@ -316,17 +236,7 @@ class CLIWrapper:
                                  dest='metrics_retention_period', default='7d')
 
         # show cluster list
-        sub_command = self.add_sub_command(subparser, 'list', 'Show clusters list')
-
-        # # join cluster
-        # sub_command = self.add_sub_command(subparser, 'join', 'join cluster')
-        # sub_command.add_argument("cluster_ip", help='the cluster IP address')
-        # sub_command.add_argument("cluster_id", help='the cluster UUID')
-        # sub_command.add_argument("role", help='Choose the node role in the cluster', choices=["management", "storage", "storage-alloc"])
-        # sub_command.add_argument("ifname", help='Management interface name')
-        # sub_command.add_argument("--data-nics", help='Data interface names', nargs='+', dest='data_nics')
-        # sub_command.add_argument("--cpu-mask", help='SPDK app CPU mask, default is all cores found',  dest='spdk_cpu_mask')
-        # sub_command.add_argument("--memory", help='SPDK huge memory allocation, default is 4G',  dest='spdk_mem')
+        self.add_sub_command(subparser, 'list', 'Show clusters list')
 
         # show cluster info
         sub_command = self.add_sub_command(
@@ -338,47 +248,12 @@ class CLIWrapper:
         sub_command.add_argument("id", help='the cluster UUID')
 
         sub_command = self.add_sub_command(
-            subparser, 'suspend', 'Suspend cluster. The cluster will stop processing all IO. '
-                                  'Attention! This will cause an "all paths down" event for nvmeof/iscsi volumes '
-                                  'on all hosts connected to the cluster.')
+            subparser, 'suspend', 'Suspend cluster')
         sub_command.add_argument("cluster_id", help='the cluster UUID')
 
         sub_command = self.add_sub_command(
-            subparser, 'unsuspend', 'Unsuspend cluster. The cluster will start processing IO again.')
+            subparser, 'unsuspend', 'Unsuspend cluster')
         sub_command.add_argument("cluster_id", help='the cluster UUID')
-
-        sub_command = self.add_sub_command(
-            subparser, 'add-dev-model', 'Add a device to the white list by the device model id. '
-                                        'When adding nodes to the cluster later on, all devices of the specified '
-                                        'model-ids, which are present on the node to be added to the cluster, '
-                                        'are added to the storage node for the cluster. This does not apply for '
-                                        'already added devices, but only affect devices on additional nodes, '
-                                        'which will be added to the cluster. It is always possible to also add '
-                                        'devices present on a server to a node manually.')
-        sub_command.add_argument("cluster_id", help='the cluster UUID')
-        sub_command.add_argument("model_ids", help='a list of supported NVMe device model-ids', nargs='+')
-
-        sub_command = self.add_sub_command(
-            subparser, 'rm-dev-model', 'Remove device from the white list by the device model id. This does not apply '
-                                       'for already added devices, but only affect devices on additional nodes, '
-                                       'which will be added to the cluster. ')
-        sub_command.add_argument("cluster_id", help='the cluster UUID')
-        sub_command.add_argument("model-ids", help='a list of NVMe device model-ids', nargs='+')
-
-        sub_command = self.add_sub_command(
-            subparser, 'add-host-auth', 'If the "authorized hosts only" security feature is turned on, '
-                                        'hosts must be explicitly added to the cluster via their nqn before '
-                                        'they can discover the subsystem initiate a connection.')
-        sub_command.add_argument("cluster_id", help='the cluster UUID')
-        sub_command.add_argument("host-nqn", help='NQN of the host to allow to discover and connect to teh cluster')
-
-        sub_command = self.add_sub_command(
-            subparser, 'rm-host-auth', 'If the "authorized hosts only" security feature is turned on, '
-                                       'this function removes hosts, which have been added to the cluster '
-                                       'via their nqn, from the list of authorized hosts. After a host has '
-                                       'been removed, it cannot connect any longer to the subsystem and cluster.')
-        sub_command.add_argument("cluster_id", help='the cluster UUID')
-        sub_command.add_argument("host-nqn", help='NQN of the host to remove from the allowed hosts list')
 
         sub_command = self.add_sub_command(
             subparser, 'get-capacity', 'Returns the current total available capacity, utilized capacity '
@@ -397,18 +272,6 @@ class CLIWrapper:
         sub_command.add_argument("--records", help='Number of records, default: 20', type=int, default=20)
         sub_command.add_argument("--history", help='(XXdYYh), list history records (one for every 15 minutes) '
                                                    'for XX days and YY hours (up to 10 days in total).')
-        sub_command.add_argument("--random", help='Generate random data', action='store_true')
-
-        sub_command = self.add_sub_command(
-            subparser, 'set-log-level', 'Defines the detail of the log information collected and stored')
-        sub_command.add_argument("cluster_id", help='the cluster UUID')
-        sub_command.add_argument("level", help='Log level', choices=["debug", "test", "prod"])
-
-        # sub_command = self.add_sub_command(
-        #     subparser, 'get-event-log', 'returns cluster event log in syslog format')
-        # sub_command.add_argument("cluster-id", help='the cluster UUID')
-        # sub_command.add_argument("--from", help='from time, format: dd-mm-yy hh:mm')
-        # sub_command.add_argument("--to", help='to time, format: dd-mm-yy hh:mm')
 
         sub_command = self.add_sub_command(
             subparser, 'get-cli-ssh-pass', 'returns the ssh password for the CLI ssh connection')
@@ -423,7 +286,7 @@ class CLIWrapper:
         sub_command.add_argument("cluster_id", help='cluster uuid')
 
         # set-secret
-        sub_command = self.add_sub_command(subparser, 'set-secret', 'Updates the secret (replaces the existing '
+        sub_command = self.add_sub_command(subparser, 'upd-secret', 'Updates the secret (replaces the existing '
                                                                     'one with a new one) and returns the new one.')
         sub_command.add_argument("cluster_id", help='cluster uuid')
         sub_command.add_argument("secret", help='new 20 characters password')
@@ -443,12 +306,16 @@ class CLIWrapper:
         # graceful-startup storage nodes
         sub_command = self.add_sub_command(subparser, "graceful-startup", 'Graceful startup of storage nodes')
         sub_command.add_argument("id", help='cluster UUID')
-        
+
         # get tasks list
         sub_command = self.add_sub_command(subparser, "list-tasks", 'List tasks by cluster ID')
         sub_command.add_argument("cluster_id", help='UUID of the cluster')
 
-        # lvol ops
+
+        #
+        # ----------------- lvol -----------------
+        #
+
         subparser = self.add_command('lvol', 'LVol commands')
         # add lvol
         sub_command = self.add_sub_command(subparser, 'add', 'Add a new logical volume')
@@ -471,13 +338,6 @@ class CLIWrapper:
                                  dest='crypto_key1', default=None)
         sub_command.add_argument("--crypto-key2", help='the hex value of key2 to be used for lvol encryption',
                                  dest='crypto_key2', default=None)
-        sub_command.add_argument("--thick", help='Deactivate thin provisioning', required=False, action='store_true')
-        sub_command.add_argument("--node-ha",
-                                 help='The maximum amount of concurrent node failures accepted without interruption of operations',
-                                 required=False, default=1, type=int, choices=[0, 1, 2])
-        sub_command.add_argument("--dev-redundancy",
-                                 help='{1,2} supported minimal concurrent device failures without data loss',
-                                 required=False, action='store_true')
         sub_command.add_argument("--max-rw-iops", help='Maximum Read Write IO Per Second', type=int)
         sub_command.add_argument("--max-rw-mbytes", help='Maximum Read Write Mega Bytes Per Second', type=int)
         sub_command.add_argument("--max-r-mbytes", help='Maximum Read Mega Bytes Per Second', type=int)
@@ -504,14 +364,17 @@ class CLIWrapper:
         sub_command = self.add_sub_command(subparser, 'list', 'List all LVols')
         sub_command.add_argument("--cluster-id", help='List LVols in particular cluster')
         sub_command.add_argument("--json", help='Print outputs in json format', required=False, action='store_true')
-        # list lvols
-        sub_command = self.add_sub_command(subparser, 'list-mem', 'List all LVols')
+
+        # Get the size and max_size of the lvol
+        sub_command = self.add_sub_command(subparser, 'list-mem', 'Get the size and max_size of the lvol')
         sub_command.add_argument("--json", help='Print outputs in json format', required=False, action='store_true')
         sub_command.add_argument("--csv", help='Print outputs in csv format', required=False, action='store_true')
+
         # get lvol
         sub_command = self.add_sub_command(subparser, 'get', 'Get LVol details')
         sub_command.add_argument("id", help='LVol id or name')
         sub_command.add_argument("--json", help='Print outputs in json format', required=False, action='store_true')
+
         # delete lvol
         sub_command = self.add_sub_command(
             subparser, 'delete', 'Delete LVol. This is only possible, if no more snapshots and non-inflated clones '
@@ -534,27 +397,6 @@ class CLIWrapper:
         sub_command.add_argument("id", help='LVol id')
         sub_command.add_argument("size", help='New LVol size size: 10M, 10G, 10(bytes)')
 
-        # lvol set read-only
-        sub_command = self.add_sub_command(
-            subparser, 'set-read-only', 'Set LVol Read-only. Current write IO in flight will still be processed, '
-                                        'but for new IO, only read and unmap IO are possible.')
-        sub_command.add_argument("id", help='LVol id')
-
-        # lvol set read-write
-        sub_command = self.add_sub_command(subparser, 'set-read-write', 'Set LVol Read-Write.')
-        sub_command.add_argument("id", help='LVol id')
-
-        # lvol suspend
-        sub_command = self.add_sub_command(
-            subparser, 'suspend', 'Suspend LVol. IO in flight will still be processed, but new IO is not accepted. '
-                                  'Make sure that the volume is detached from all hosts before '
-                                  'suspending it to avoid IO errors.')
-        sub_command.add_argument("id", help='LVol id')
-
-        # lvol unsuspend
-        sub_command = self.add_sub_command(subparser, 'unsuspend', 'Unsuspend LVol. IO may be resumed.')
-        sub_command.add_argument("id", help='LVol id')
-
         # lvol create-snapshot
         sub_command = self.add_sub_command(subparser, 'create-snapshot', 'Create snapshot from LVol')
         sub_command.add_argument("id", help='LVol id')
@@ -564,6 +406,7 @@ class CLIWrapper:
         sub_command = self.add_sub_command(subparser, 'clone', 'create LVol based on a snapshot')
         sub_command.add_argument("snapshot_id", help='snapshot UUID')
         sub_command.add_argument("clone_name", help='clone name')
+        sub_command.add_argument("--resize", help='New LVol size: 10M, 10G, 10(bytes)')
 
         # lvol move
         sub_command = self.add_sub_command(
@@ -572,22 +415,6 @@ class CLIWrapper:
         # sub_command.add_argument("cluster-id", help='Destination Cluster ID')
         sub_command.add_argument("node_id", help='Destination Node UUID')
         sub_command.add_argument("--force", help='Force LVol delete from source node', required=False, action='store_true')
-
-        # lvol replicate
-        sub_command = self.add_sub_command(
-            subparser, 'replicate', 'Create a replication path between two volumes in two clusters')
-        sub_command.add_argument("id", help='LVol id')
-        sub_command.add_argument("cluster-a", help='A Cluster ID')
-        sub_command.add_argument("cluster-b", help='B Cluster ID')
-        sub_command.add_argument("--asynchronous",
-                                 help='Replication may be performed synchronously(default) and asynchronously',
-                                 action='store_true')
-
-        # lvol inflate
-        sub_command = self.add_sub_command(
-            subparser, 'inflate', 'Inflate a clone to "full" logical volume and disconnect it '
-                                  'from its parent snapshot.')
-        sub_command.add_argument("id", help='LVol id')
 
         # lvol get-capacity
         sub_command = self.add_sub_command(
@@ -599,7 +426,7 @@ class CLIWrapper:
 
         # lvol get-io-stats
         sub_command = self.add_sub_command(
-            subparser, 'get-io-stats', 'Returns either the current or historic io statistics '
+            subparser, 'get-io-stats', help="Get Input Output stats of LVol", usage='Returns either the current or historic io statistics '
                                        '(read-IO, write-IO, total-IO, read mbs, write mbs, total mbs).')
         sub_command.add_argument("id", help='LVol id')
         sub_command.add_argument("--history", help='(XXdYYh), list history records (one for every 15 minutes) '
@@ -628,10 +455,7 @@ class CLIWrapper:
         sub_command.add_argument("--json", help='Print outputs in json format', action='store_true')
 
         sub_command = self.add_sub_command(subparser, "remove", 'Remove Management node')
-        sub_command.add_argument("hostname", help='hostname')
-
-        sub_command = self.add_sub_command(subparser, 'show', 'List management nodes')
-        sub_command = self.add_sub_command(subparser, 'status', 'Show management cluster status')
+        sub_command.add_argument("id", help='Mgmt node uuid')
 
         # pool ops
         subparser = self.add_command('pool', 'Pool commands')
@@ -669,8 +493,8 @@ class CLIWrapper:
 
         # delete pool
         sub_command = self.add_sub_command(
-            subparser, 'delete', 'delete pool. It is only possible to delete a pool if it is empty '
-                                 '(no provisioned logical volumes contained).')
+            subparser, 'delete', 'Delete Pool', usage=
+            "It is only possible to delete a pool if it is empty (no provisioned logical volumes contained).")
         sub_command.add_argument("id", help='pool uuid')
 
         # enable
@@ -711,7 +535,7 @@ class CLIWrapper:
         sub_command.add_argument("id", help='LVol UUID')
         sub_command.add_argument("name", help='snapshot name')
 
-        sub_command = self.add_sub_command(subparser, 'list', 'List snapshots')
+        self.add_sub_command(subparser, 'list', 'List snapshots')
 
         sub_command = self.add_sub_command(subparser, 'delete', 'Delete a snapshot')
         sub_command.add_argument("id", help='snapshot UUID')
@@ -719,6 +543,7 @@ class CLIWrapper:
         sub_command = self.add_sub_command(subparser, 'clone', 'Create LVol from snapshot')
         sub_command.add_argument("id", help='snapshot UUID')
         sub_command.add_argument("lvol_name", help='LVol name')
+        sub_command.add_argument("--resize", help='New LVol size: 10M, 10G, 10(bytes)')
 
         # Caching node cli
         subparser = self.add_command('caching-node', 'Caching client node commands', aliases=['cn'])
@@ -736,7 +561,7 @@ class CLIWrapper:
         sub_command.add_argument("--spdk-image", help='SPDK image uri', dest='spdk_image')
         sub_command.add_argument("--namespace", help='k8s namespace to deploy on',)
 
-        sub_command = self.add_sub_command(subparser, 'list', 'List Caching nodes')
+        self.add_sub_command(subparser, 'list', 'List Caching nodes')
 
         sub_command = self.add_sub_command(subparser, 'list-lvols', 'List connected lvols')
         sub_command.add_argument("id", help='Caching Node UUID')
@@ -744,9 +569,6 @@ class CLIWrapper:
         sub_command = self.add_sub_command(subparser, 'remove', 'Remove Caching node from the cluster')
         sub_command.add_argument("id", help='Caching Node UUID')
         sub_command.add_argument("--force", help='Force remove', required=False, action='store_true')
-
-        # sub_command = self.add_sub_command(subparser, 'restart', 'Restart Caching node')
-        # sub_command.add_argument("id", help='Caching Node UUID')
 
         sub_command = self.add_sub_command(subparser, 'connect', 'Connect to LVol')
         sub_command.add_argument("node_id", help='Caching node UUID')
@@ -759,10 +581,8 @@ class CLIWrapper:
         sub_command = self.add_sub_command(subparser, 'recreate', 'recreate Caching node bdevs ')
         sub_command.add_argument("node_id", help='Caching node UUID')
 
-
-
     def init_parser(self):
-        self.parser = argparse.ArgumentParser(description='Ultra management CLI')
+        self.parser = argparse.ArgumentParser(prog=constants.SIMPLY_BLOCK_CLI_NAME, description='SimplyBlock management CLI')
         self.parser.add_argument("-d", '--debug', help='Print debug messages', required=False, action='store_true')
         self.subparser = self.parser.add_subparsers(dest='command')
 
@@ -772,8 +592,8 @@ class CLIWrapper:
         storagenode_subparser = storagenode.add_subparsers(dest=command)
         return storagenode_subparser
 
-    def add_sub_command(self, parent_parser, command, help):
-        return parent_parser.add_parser(command, description=help, help=help)
+    def add_sub_command(self, parent_parser, command, help, usage=None):
+        return parent_parser.add_parser(command, description=help, help=help, usage=usage)
 
     def run(self):
         args = self.parser.parse_args()
@@ -788,11 +608,7 @@ class CLIWrapper:
         if args.command in ['storage-node', 'sn']:
             sub_command = args_dict['storage-node']
 
-            if sub_command in ['get-log-page-device', 'get-event-log',
-                               "get-ctrl-secret", "get-host-secret"]:
-                ret = "Not Implemented!"
-
-            elif sub_command == "deploy":
+            if sub_command == "deploy":
                 ret = storage_ops.deploy(args.ifname)
 
             elif sub_command == "deploy-cleaner":
@@ -806,7 +622,6 @@ class CLIWrapper:
                 node_ip = args.node_ip
                 ifname = args.ifname
                 data_nics = args.data_nics
-                dev_split = args.dev_split
                 spdk_image = args.spdk_image
                 spdk_debug = args.spdk_debug
 
@@ -829,7 +644,7 @@ class CLIWrapper:
                         return f"SPDK memory:{args.spdk_mem} must be larger than 1G"
 
                 out = storage_ops.add_node(
-                    cluster_id, node_ip, ifname, data_nics, spdk_cpu_mask, spdk_mem, dev_split, spdk_image, spdk_debug,
+                    cluster_id, node_ip, ifname, data_nics, spdk_cpu_mask, spdk_mem, spdk_image, spdk_debug,
                     small_pool_count, large_pool_count, small_bufsize, large_bufsize, args.jm_pcie)
                 return out
 
@@ -837,7 +652,7 @@ class CLIWrapper:
                 ret = storage_ops.list_storage_nodes(self.db_store, args.json)
 
             elif sub_command == "remove":
-                ret = storage_ops.remove_storage_node(args.node_id, args.force_remove, args.force_migrate)
+                ret = storage_ops.remove_storage_node(args.node_id, args.force_remove)
 
             elif sub_command == "delete":
                 ret = storage_ops.delete_storage_node(args.node_id)
@@ -883,8 +698,6 @@ class CLIWrapper:
                 ret = device_controller.device_remove(args.device_id, args.force)
 
             elif sub_command == "shutdown":
-                # answer = self.query_yes_no("Are you sure?", default=None)
-                # if answer is True:
                 ret = storage_ops.shutdown_storage_node(args.node_id, args.force)
 
             elif sub_command == "suspend":
@@ -899,20 +712,11 @@ class CLIWrapper:
             elif sub_command == "restart-device":
                 ret = device_controller.restart_device(args.id)
 
-            elif sub_command == "run-smart":
-                dev_name = args.name
-                ret = storage_ops.run_test_storage_device(self.db_store, dev_name)
-
             elif sub_command == "add-device":
-                dev_name = args.name
-                node_id = args.node_id
-                cluster_id = args.cluster_id
-                ret = storage_ops.add_storage_device(dev_name, node_id, cluster_id)
+                ret = "Not implemented!"
 
-            elif sub_command == "replace":
-                old_node_name = args.name
-                ifname = args.ifname
-                ret = storage_ops.replace_node(self.db_store, old_node_name, ifname)
+            elif sub_command == "set-failed-device":
+                ret = "Not implemented!"
 
             elif sub_command == "get-capacity-device":
                 device_id = args.device_id
@@ -922,6 +726,7 @@ class CLIWrapper:
                     ret = utils.print_table(data)
                 else:
                     return False
+
             elif sub_command == "get-device":
                 device_id = args.device_id
                 ret = device_controller.get_device(device_id)
@@ -934,6 +739,7 @@ class CLIWrapper:
                     ret = utils.print_table(data)
                 else:
                     return False
+
             elif sub_command == "get-capacity":
                 node_id = args.node_id
                 history = args.history
@@ -962,14 +768,6 @@ class CLIWrapper:
                 history = args.history
                 ret = storage_ops.get_node_port_iostats(port_id, history)
 
-            elif sub_command == "get-host-secret":
-                node_id = args.id
-                ret = storage_ops.get_host_secret(node_id)
-
-            elif sub_command == "get-ctrl-secret":
-                node_id = args.id
-                ret = storage_ops.get_ctrl_secret(node_id)
-
             elif sub_command == "check":
                 node_id = args.id
                 ret = health_controller.check_node(node_id)
@@ -986,9 +784,6 @@ class CLIWrapper:
                 node_id = args.id
                 ret = storage_ops.get_spdk_info(node_id)
 
-            elif sub_command == "update":
-                ret = storage_ops.update(args.id, args.key, args.value)
-
             elif sub_command == "get":
                 ret = storage_ops.get(args.id)
 
@@ -997,12 +792,7 @@ class CLIWrapper:
 
         elif args.command == 'cluster':
             sub_command = args_dict[args.command]
-            if sub_command in ["add-dev-model", "rm-dev-model", "add-host-auth",
-                               "rm-host-auth", "set-log-level"]:
-                ret = "Not Implemented!"
-            elif sub_command == 'init':
-                ret = self.cluster_init(args)
-            elif sub_command == 'create':
+            if sub_command == 'create':
                 ret = self.cluster_create(args)
             elif sub_command == 'join':
                 ret = self.cluster_join(args)
@@ -1059,29 +849,10 @@ class CLIWrapper:
 
             elif sub_command == "graceful-shutdown":
                 ret = cluster_ops.cluster_grace_shutdown(args.id)
-                
+
             elif sub_command == "graceful-startup":
                 ret = cluster_ops.cluster_grace_startup(args.id)
-                
-            else:
-                self.parser.print_help()
 
-        elif args.command == 'compute-node':
-            sub_command = args_dict[args.command]
-            if sub_command == "add":
-                ret = compute_ops.add_compute_node(self.db_store)
-            elif sub_command == "reset":
-                ret = compute_ops.reset_compute_node(self.db_store)
-            elif sub_command == "remove":
-                ret = compute_ops.remove_compute_node(self.db_store)
-            elif sub_command == "suspend":
-                ret = compute_ops.suspend_compute_node(self.db_store)
-            elif sub_command == "resume":
-                ret = compute_ops.resume_compute_node(self.db_store)
-            elif sub_command == "shutdown":
-                ret = compute_ops.shutdown_compute_node(self.db_store)
-            elif sub_command == "list":
-                ret = compute_ops.list_compute_nodes(self.db_store, args.json)
             else:
                 self.parser.print_help()
 
@@ -1144,18 +915,15 @@ class CLIWrapper:
                 id = args.id
                 size = self.parse_size(args.size)
                 ret = lvol_controller.resize_lvol(id, size)
-            elif sub_command == "set-read-only":
-                id = args.id
-                ret = lvol_controller.set_read_only(id)
             elif sub_command == "create-snapshot":
                 id = args.id
                 name = args.name
                 ret = lvol_controller.create_snapshot(id, name)
             elif sub_command == "clone":
-                snapshot_id = args.snapshot_id
-                clone_name = args.clone_name
-                ret = lvol_controller.clone(snapshot_id, clone_name)
-
+                new_size = 0
+                if args.resize:
+                    new_size = self.parse_size(args.resize)
+                ret = snapshot_controller.clone(args.snapshot_id, args.clone_name, new_size)
             elif sub_command == "get-io-stats":
                 id = args.id
                 history = args.history
@@ -1192,11 +960,7 @@ class CLIWrapper:
             elif sub_command == "list":
                 ret = mgmt_ops.list_mgmt_nodes(args.json)
             elif sub_command == "remove":
-                ret = mgmt_ops.remove_mgmt_node(args.hostname)
-            elif sub_command == "show":
-                ret = mgmt_ops.show_cluster()
-            elif sub_command == "status":
-                ret = mgmt_ops.cluster_status()
+                ret = mgmt_ops.remove_mgmt_node(args.id)
             else:
                 self.parser.print_help()
 
@@ -1268,7 +1032,10 @@ class CLIWrapper:
             if sub_command == "delete":
                 ret = snapshot_controller.delete(args.id)
             if sub_command == "clone":
-                ret = snapshot_controller.clone(args.id, args.lvol_name)
+                new_size = 0
+                if args.resize:
+                    new_size = self.parse_size(args.resize)
+                ret = snapshot_controller.clone(args.id, args.lvol_name, new_size)
 
         elif args.command in ['caching-node', 'cn']:
             sub_command = args_dict['caching-node']
@@ -1364,10 +1131,7 @@ class CLIWrapper:
         page_size_in_blocks = args.page_size
         blk_size = args.blk_size
         ha_type = args.ha_type
-        tls = args.tls == 'on'
-        auth_hosts_only = args.auth_hosts_only == 'on'
         CLI_PASS = args.CLI_PASS
-        model_ids = args.model_ids
         cap_warn = args.cap_warn
         cap_crit = args.cap_crit
         prov_cap_warn = args.prov_cap_warn
@@ -1378,8 +1142,8 @@ class CLIWrapper:
 
         # TODO: Validate the inputs
         return cluster_ops.create_cluster(
-            blk_size, page_size_in_blocks, ha_type, tls,
-            auth_hosts_only, CLI_PASS, model_ids, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
+            blk_size, page_size_in_blocks, ha_type,
+            CLI_PASS, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
             ifname, log_del_interval, metrics_retention_period)
 
     def cluster_join(self, args):

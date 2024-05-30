@@ -641,9 +641,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
             "name": lvol.top_bdev,
             "params": {
                 "lvol_name": lvol.top_bdev,
-                "base_bdev": lvol.base_bdev,
-                "label": "label",
-                "desc": "desc"
+                "base_bdev": lvol.base_bdev
             }
         })
     else:
@@ -892,16 +890,10 @@ def _remove_bdev_stack(bdev_stack, rpc_client):
         type = bdev['type']
         name = bdev['name']
         ret = None
-        # if type == "alceml":
-        #     ret = rpc_client.bdev_alceml_delete(name)
         if type == "bdev_distr":
             ret = rpc_client.bdev_distrib_delete(name)
-        # elif type == "lvs":
-        #     ret = rpc_client.bdev_lvol_delete_lvstore(name)
-        # elif type == "lvol":
-        #     ret = rpc_client.delete_lvol(name)
-        # elif type == "ultra_pt":
-        #     ret = rpc_client.ultra21_bdev_pass_delete(name)
+        elif type == "bmap_init":
+            pass
         elif type == "ultra_lvol":
             ret = rpc_client.ultra21_lvol_dismount(name)
         elif type == "comp":
@@ -1021,7 +1013,7 @@ def delete_lvol(id_or_name, force_delete=False):
     # remove from pool
     pool.lvols.remove(lvol.get_id())
     pool.write_to_db(db_controller.kv_store)
-
+    lvol_events.lvol_delete(lvol)
     lvol.remove(db_controller.kv_store)
 
     # if lvol is clone and snapshot is deleted, then delete snapshot
@@ -1035,7 +1027,6 @@ def delete_lvol(id_or_name, force_delete=False):
             if lvols_count == 0:
                 snapshot_controller.delete(snap.get_id())
 
-    lvol_events.lvol_delete(lvol)
     logger.info("Done")
     return True
 
@@ -1281,10 +1272,6 @@ def set_read_only(id):
 
 def create_snapshot(lvol_id, snapshot_name):
     return snapshot_controller.add(lvol_id, snapshot_name)
-
-
-def clone(snapshot_id, clone_name):
-    return snapshot_controller.clone(snapshot_id, clone_name)
 
 
 def get_capacity(id, history):

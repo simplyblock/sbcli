@@ -103,4 +103,4 @@ while True:
                 if task.status != JobSchedule.STATUS_DONE:
                     res = task_runner(task)
 
-    time.sleep(5)
+    time.sleep(constants.TASK_EXEC_INTERVAL_SEC)

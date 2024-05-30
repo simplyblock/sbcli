@@ -125,16 +125,6 @@ def cluster_status(uuid):
     return utils.get_response(json.loads(data))
 
 
-@bp.route('/cluster/enable/<string:uuid>', methods=['PUT'])
-def cluster_enable(uuid):
-    return utils.get_response("Not Implemented!")
-
-
-@bp.route('/cluster/disable/<string:uuid>', methods=['PUT'])
-def cluster_disable(uuid):
-    return utils.get_response("Not Implemented!")
-
-
 @bp.route('/cluster/get-logs/<string:uuid>', methods=['GET'])
 def cluster_get_logs(uuid):
     cluster = db_controller.get_cluster_by_id(uuid)
