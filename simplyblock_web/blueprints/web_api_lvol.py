@@ -274,24 +274,3 @@ def create_snapshot():
         cl_data['lvol_id'],
         cl_data['snapshot_name'])
     return utils.get_response(snapID)
-
-@bp.route('/lvol/publish_volume/<string:uuid>', methods=['GET'])
-def publish_volume(uuid):
-    """
-    Args:
-        uuid:
-    Returns:
-        bool
-    """
-    return utils.get_csi_response(True)
-
-
-@bp.route('/lvol/unpublish_volume/<string:uuid>', methods=['GET'])
-def unpublish_volume(uuid):
-    """
-    Args:
-        uuid:
-    Returns:
-        bool
-    """
-    return utils.get_csi_response(True)

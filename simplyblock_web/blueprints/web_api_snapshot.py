@@ -36,6 +36,7 @@ def delete_snapshot(uuid):
     ret = snapshot_controller.delete(uuid)
     return utils.get_response(ret)
 
+
 @bp.route('/snapshot', methods=['GET'])
 def list_snapshots():
     snaps = db_controller.get_snapshots()
@@ -52,6 +53,7 @@ def list_snapshots():
             "created_at": str(snap.created_at),
         })
     return utils.get_response(data)
+
 
 @bp.route('/snapshot/clone', methods=['POST'])
 def clone_snapshot():
