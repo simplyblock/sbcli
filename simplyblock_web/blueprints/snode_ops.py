@@ -313,11 +313,13 @@ def leave_swarm():
 def make_gpt_partitions_for_nbd():
     nbd_device = '/dev/nbd0'
     jm_percent = '3'
+    num_partitions = 0
 
     try:
         data = request.get_json()
         nbd_device = data['nbd_device']
         jm_percent = data['jm_percent']
+        num_partitions = data['num_partitions']
     except:
         pass
 

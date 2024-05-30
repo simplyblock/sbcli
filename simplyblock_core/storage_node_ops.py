@@ -224,6 +224,160 @@ def get_next_cluster_device_order(db_controller):
     return 0
 
 
+def _prepare_cluster_devices_2(snode, devices, after_restart=False):
+    db_controller = DBController()
+
+    rpc_client = RPCClient(
+        snode.mgmt_ip, snode.rpc_port,
+        snode.rpc_username, snode.rpc_password)
+
+    jm_nvme_bdevs = []
+    for index, nvme in enumerate(devices):
+        if nvme.status not in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_UNAVAILABLE, NVMeDevice.STATUS_READONLY]:
+            logger.debug(f"Device is skipped: {nvme.get_id()}, status: {nvme.status}")
+            continue
+
+        if nvme.partition_main_bdev and nvme.partition_jm_bdev:
+            logger.info(f"Device partitions found, JM: {nvme.partition_jm_bdev}, main: {nvme.partition_main_bdev}")
+        else:
+            logger.info(f"Creating partitions for {nvme.nvme_bdev}")
+
+            nbd_device = rpc_client.nbd_start_disk(nvme.nvme_bdev)
+            time.sleep(3)
+            if not nbd_device:
+                logger.error(f"Failed to start nbd dev")
+                return False
+            snode_api = SNodeClient(snode.api_endpoint)
+            result, error = snode_api.make_gpt_partitions(nbd_device, "3")
+            if error:
+                logger.error(f"Failed to make partitions")
+                logger.error(error)
+                return False
+            time.sleep(3)
+            rpc_client.nbd_stop_disk(nbd_device)
+            time.sleep(1)
+            rpc_client.bdev_nvme_detach_controller(nvme.nvme_controller)
+            time.sleep(1)
+            rpc_client.bdev_nvme_controller_attach(nvme.nvme_controller, nvme.pcie_address)
+            time.sleep(1)
+            rpc_client.bdev_examine(nvme.nvme_bdev)
+            time.sleep(1)
+
+            # look for partitions
+            for bdev in rpc_client.get_bdevs():
+                if bdev['name'] == f"{nvme.nvme_bdev}p1":
+                    nvme.partition_jm_bdev = bdev['name']
+                    nvme.partition_jm_size = bdev['block_size'] * bdev['num_blocks']
+                elif bdev['name'] == f"{nvme.nvme_bdev}p2":
+                    nvme.partition_main_bdev = bdev['name']
+                    nvme.partition_main_size = bdev['block_size'] * bdev['num_blocks']
+                    nvme.size = bdev['block_size'] * bdev['num_blocks']
+
+            if nvme.partition_main_bdev and nvme.partition_jm_bdev:
+                logger.info(
+                    f"Device partitions created, JM: {nvme.partition_jm_bdev}, main: {nvme.partition_main_bdev}")
+            else:
+                logger.error("Failed to create partitions")
+                return False
+
+        jm_nvme_bdevs.append(nvme.partition_jm_bdev)
+        test_name = f"{nvme.nvme_bdev}_test"
+        ret = rpc_client.bdev_passtest_create(test_name, nvme.partition_main_bdev)
+        if not ret:
+            logger.error(f"Failed to create passtest bdev {test_name}")
+            return False
+        alceml_id = nvme.get_id()
+        alceml_name = device_controller.get_alceml_name(alceml_id)
+        logger.info(f"adding {alceml_name}")
+        pba_init_mode = 3
+        if after_restart:
+            pba_init_mode = 2
+        ret = rpc_client.bdev_alceml_create(alceml_name, test_name, alceml_id, pba_init_mode=pba_init_mode)
+        if not ret:
+            logger.error(f"Failed to create alceml bdev: {alceml_name}")
+            return False
+
+        # add pass through
+        pt_name = f"{alceml_name}_PT"
+        ret = rpc_client.bdev_PT_NoExcl_create(pt_name, alceml_name)
+        if not ret:
+            logger.error(f"Failed to create pt noexcl bdev: {pt_name}")
+            return False
+
+        subsystem_nqn = snode.subsystem + ":dev:" + alceml_id
+        logger.info("creating subsystem %s", subsystem_nqn)
+        ret = rpc_client.subsystem_create(subsystem_nqn, 'sbcli-cn', alceml_id)
+        IP = None
+        for iface in snode.data_nics:
+            if iface.ip4_address:
+                tr_type = iface.get_transport_type()
+                ret = rpc_client.transport_list()
+                found = False
+                if ret:
+                    for ty in ret:
+                        if ty['trtype'] == tr_type:
+                            found = True
+                if found is False:
+                    ret = rpc_client.transport_create(tr_type)
+                logger.info("adding listener for %s on IP %s" % (subsystem_nqn, iface.ip4_address))
+                ret = rpc_client.listeners_create(subsystem_nqn, tr_type, iface.ip4_address, "4420")
+                IP = iface.ip4_address
+                break
+        logger.info(f"add {pt_name} to subsystem")
+        ret = rpc_client.nvmf_subsystem_add_ns(subsystem_nqn, pt_name)
+        if not ret:
+            logger.error(f"Failed to add: {pt_name} to the subsystem: {subsystem_nqn}")
+            return False
+
+        nvme.testing_bdev = test_name
+        nvme.alceml_bdev = alceml_name
+        nvme.pt_bdev = pt_name
+        nvme.nvmf_nqn = subsystem_nqn
+        nvme.nvmf_ip = IP
+        nvme.nvmf_port = 4420
+        nvme.io_error = False
+        old_status = nvme.status
+        nvme.status = NVMeDevice.STATUS_ONLINE
+        device_events.device_status_change(nvme, nvme.status, old_status)
+        snode.write_to_db(db_controller.kv_store)
+
+    if jm_nvme_bdevs:
+        raid_bdev = f"raid_jm_{snode.get_id()}"
+        ret = rpc_client.bdev_raid_create(raid_bdev, jm_nvme_bdevs)
+        if not ret:
+            logger.error(f"Failed to create raid_jm_{snode.get_id()}")
+            return False
+        alceml_name = f"alceml_jm_{snode.get_id()}"
+        pba_init_mode = 3
+        if after_restart:
+            pba_init_mode = 2
+        ret = rpc_client.bdev_alceml_create(alceml_name, raid_bdev, str(uuid.uuid4()), pba_init_mode=pba_init_mode)
+        if not ret:
+            logger.error(f"Failed to create alceml bdev: {alceml_name}")
+            return False
+
+        jm_bdev = f"jm_{snode.get_id()}"
+        ret = rpc_client.bdev_jm_create(jm_bdev, alceml_name)
+        if not ret:
+            logger.error(f"Failed to create {jm_bdev}")
+            return False
+        ret = rpc_client.get_bdevs(raid_bdev)
+
+        snode.jm_device = JMDevice({
+            'uuid': str(uuid.uuid4()),
+            'device_name': jm_bdev,
+            'size': ret[0]["block_size"] * ret[0]["num_blocks"],
+            'status': JMDevice.STATUS_ONLINE,
+            'jm_nvme_bdev_list': jm_nvme_bdevs,
+            'raid_bdev': raid_bdev,
+            'alceml_bdev': alceml_name,
+            'jm_bdev': jm_bdev
+        })
+
+    snode.write_to_db(db_controller.kv_store)
+    return True
+
+
 def _prepare_cluster_devices(snode, after_restart=False):
     db_controller = DBController()
 
@@ -252,7 +406,6 @@ def _prepare_cluster_devices(snode, after_restart=False):
             if error:
                 logger.error(f"Failed to make partitions")
                 logger.error(error)
-                input("exit?")
                 return False
             time.sleep(3)
             rpc_client.nbd_stop_disk(nbd_device)
@@ -408,7 +561,8 @@ def _connect_to_remote_devs(this_node):
 
 def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask,
              spdk_mem, spdk_image=None, spdk_debug=False,
-             small_pool_count=0, large_pool_count=0, small_bufsize=0, large_bufsize=0):
+             small_pool_count=0, large_pool_count=0, small_bufsize=0, large_bufsize=0,
+             num_partitions_per_dev=0, jm_percent=3):
     db_controller = DBController()
     kv_store = db_controller.kv_store
 
@@ -562,6 +716,9 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask,
     snode.iobuf_small_bufsize = small_bufsize or 0
     snode.iobuf_large_bufsize = large_bufsize or 0
 
+    snode.num_partitions_per_dev = num_partitions_per_dev or 0
+    snode.jm_percent = jm_percent or 3
+
     snode.write_to_db(kv_store)
 
     # creating RPCClient instance
@@ -612,7 +769,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask,
     snode.write_to_db(db_controller.kv_store)
 
     # prepare devices
-    ret = _prepare_cluster_devices(snode)
+    ret = _prepare_cluster_devices(snode, )
     if not ret:
         logger.error("Failed to prepare cluster devices")
         return False
@@ -751,7 +908,7 @@ def add_storage_node(cluster_id, iface_name, data_nics):
     snode.write_to_db(db_controller.kv_store)
 
     # prepare devices
-    _prepare_cluster_devices(snode)
+    # _prepare_cluster_devices(snode)
 
     logger.info("Connecting to remote devices")
     remote_devices = _connect_to_remote_devs(snode)
