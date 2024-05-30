@@ -7,7 +7,7 @@ from flask import Flask
 
 import utils
 from blueprints import web_api_cluster, web_api_mgmt_node, web_api_device, \
-    web_api_lvol, web_api_storage_node, web_api_pool, web_api_caching_node, web_api_snapshot
+    web_api_lvol, web_api_storage_node, web_api_pool, web_api_caching_node
 from auth_middleware import token_required
 from simplyblock_core import constants
 
@@ -27,7 +27,6 @@ app.register_blueprint(web_api_cluster.bp)
 app.register_blueprint(web_api_mgmt_node.bp)
 app.register_blueprint(web_api_device.bp)
 app.register_blueprint(web_api_lvol.bp)
-app.register_blueprint(web_api_snapshot.bp)
 app.register_blueprint(web_api_storage_node.bp)
 app.register_blueprint(web_api_pool.bp)
 app.register_blueprint(web_api_caching_node.bp)

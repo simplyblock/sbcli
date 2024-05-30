@@ -53,6 +53,9 @@ GRAYLOG_CHECK_INTERVAL_SEC = 60
 
 FDB_CHECK_INTERVAL_SEC = 60
 
+SIMPLY_BLOCK_CLI_NAME = "sbcli-mig"
+TASK_EXEC_INTERVAL_SEC = 30
+
 SIMPLY_BLOCK_DOCKER_IMAGE = "simplyblock/simplyblock:add_with_snapshot_lvol_api"
 
 SIMPLY_BLOCK_SPDK_CORE_IMAGE = "simplyblock/spdk-core:latest"
