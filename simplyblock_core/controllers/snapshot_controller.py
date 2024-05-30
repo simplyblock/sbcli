@@ -158,7 +158,7 @@ def delete(snapshot_uuid):
     return True
 
 
-def clone(snapshot_id, clone_name):
+def clone(snapshot_id, clone_name, new_size=0):
     snap = db_controller.get_snapshot_by_id(snapshot_id)
     if not snap:
         logger.error(f"Snapshot not found {snapshot_id}")
@@ -185,13 +185,6 @@ def clone(snapshot_id, clone_name):
         logger.error("Storage node in not Online")
         return False
 
-    # creating RPCClient instance
-    rpc_client = RPCClient(
-        snode.mgmt_ip,
-        snode.rpc_port,
-        snode.rpc_username,
-        snode.rpc_password)
-
     if not snode.nvme_devices:
         logger.error("Storage node has no nvme devices")
         return False
@@ -200,20 +193,29 @@ def clone(snapshot_id, clone_name):
         logger.error("Storage node in not Online")
         return False
 
+
     lvol = LVol()
     lvol.lvol_name = clone_name
     lvol.size = snap.lvol.size
-    lvol.distr_bs = snap.lvol.distr_bs
     lvol.vuid = snap.lvol.vuid
+    lvol.distr_bs = snap.lvol.distr_bs
     lvol.ndcs = snap.lvol.ndcs
     lvol.npcs = snap.lvol.npcs
     lvol.distr_chunk_bs = snap.lvol.distr_chunk_bs
     lvol.distr_page_size = snap.lvol.distr_page_size
     lvol.distr_page_size = snap.lvol.distr_page_size
+    if new_size:
+        if snap.lvol.size >= new_size:
+            logger.error(f"New size {new_size} must be higher than the original size {snap.lvol.size}")
+            return False
+
+        if snap.lvol.max_size < new_size:
+            logger.error(f"New size {new_size} must be smaller than the max size {snap.lvol.max_size}")
+            return False
+        lvol.size = new_size
+
 
     bdev_stack = []
-
-    ##############################################################################
     jm_names = lvol_controller.get_jm_names(snode)
     rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
     spdk_mem_info_before = rpc_client.ultra21_util_get_malloc_stats()
@@ -239,7 +241,7 @@ def clone(snapshot_id, clone_name):
     logger.info("Creating clone bdev")
     block_len = lvol.distr_bs
     page_len = int(lvol.distr_page_size / lvol.distr_bs)
-    max_num_blocks = num_blocks * 10
+    max_num_blocks = snap.lvol.max_size
     ret = rpc_client.ultra21_lvol_bmap_init(name, num_blocks, block_len, page_len, max_num_blocks)
     if not ret:
         return False, "Failed to init distr bdev"
@@ -275,10 +277,12 @@ def clone(snapshot_id, clone_name):
     logger.info(f"add lvol {clone_name} to subsystem")
     ret = rpc_client.nvmf_subsystem_add_ns(subsystem_nqn, top_bdev)
 
+    lvol.vuid = new_vuid
     lvol.bdev_stack = bdev_stack
     lvol.uuid = lvol_id
     lvol.lvol_bdev = lvol_name
     lvol.top_bdev = top_bdev
+    lvol.base_bdev = name
     lvol.hostname = snode.hostname
     lvol.node_id = snode.get_id()
     lvol.mode = 'read-write'
@@ -286,6 +290,8 @@ def clone(snapshot_id, clone_name):
     lvol.cloned_from_snap = snapshot_id
     lvol.nqn = subsystem_nqn
     lvol.pool_uuid = pool.id
+    lvol.ha_type = snap.lvol.ha_type
+    lvol.status = LVol.STATUS_ONLINE
 
     spdk_mem_info_after = rpc_client.ultra21_util_get_malloc_stats()
     logger.debug("ultra21_util_get_malloc_stats:")
@@ -298,8 +304,6 @@ def clone(snapshot_id, clone_name):
     logger.info("spdk mem diff:")
     logger.info(json.dumps(diff, indent=2))
     lvol.mem_diff = diff
-
-
 
     pool.lvols.append(lvol_id)
     pool.write_to_db(db_controller.kv_store)

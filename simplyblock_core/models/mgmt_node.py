@@ -29,7 +29,7 @@ class MgmtNode(BaseModel):
     }
     attributes = {
         "baseboard_sn": {"type": str, 'default': ""},
-        "system_uuid": {"type": str, 'default': ""},
+        "uuid": {"type": str, 'default': ""},
         "hostname": {"type": str, 'default': ""},
         "status": {"type": str, 'default': ""},
         "docker_ip_port": {"type": str, 'default': ""},
@@ -45,7 +45,7 @@ class MgmtNode(BaseModel):
         self.object_type = "object"
 
     def get_id(self):
-        return self.system_uuid
+        return self.uuid
 
     def get_status_code(self):
         if self.status in self.STATUS_CODE_MAP:
