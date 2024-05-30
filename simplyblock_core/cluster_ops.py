@@ -705,7 +705,7 @@ def list_tasks(cluster_id):
             "UUID": task.uuid,
             "Device": task.device_id,
             "Function": task.function_name,
-            "Retry": task.retry,
+            "Retry": f"{task.retry}/{constants.TASK_EXEC_RETRY_COUNT}",
             "Status": task.status,
             "Result": task.function_result,
             "Date": time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(task.date)),
