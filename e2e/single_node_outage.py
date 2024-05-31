@@ -7,17 +7,17 @@ from ssh_utils import SshUtils
 
 # selected the node that doesn't have lvol attached
 
-cluster_secret = "hyUbGHsz5qmy0GUaphXj"
-cluster_id = "ed2c3fe4-bdc6-4a6f-bc6d-c30baf5f2faf"
-cluster_ip = "10.0.3.42"
+cluster_secret = "1mRBJANeT5E7AQiSSA5x"
+cluster_id = "d6f7d754-4146-4d80-9fc1-ba906dbf372d"
+cluster_ip = "10.0.3.218"
 
 url = f"http://{cluster_ip}"
-api_base_url = "https://1n8nquvs84.execute-api.us-east-2.amazonaws.com/"
+api_base_url = "https://w7eixh7x1b.execute-api.us-east-2.amazonaws.com/"
 headers = {
     "Content-Type": "application/json",
     "Authorization": f"{cluster_id} {cluster_secret}"
 }
-bastion_server = "18.191.234.254"
+bastion_server = "3.133.127.29"
 
 class TestSingleNodeOutage:
     """
@@ -120,7 +120,8 @@ class TestSingleNodeOutage:
         lvol = self.sbcli_utils.list_lvols()
         self.sbcli_utils.add_lvol(
             lvol_name=self.lvol_name,
-            pool_name=self.pool_name
+            pool_name=self.pool_name,
+            size="800M"
         )
         lvols = self.sbcli_utils.list_lvols()
         assert self.lvol_name in list(lvols.keys()), \
@@ -155,6 +156,14 @@ class TestSingleNodeOutage:
         
         no_lvol_node_uuid = self.sbcli_utils.get_node_without_lvols()
 
+        print("Getting lvol status before shutdown")
+        lvol_id = self.sbcli_utils.get_lvol_id(lvol_name=self.lvol_name)
+        lvol_details = self.sbcli_utils.get_lvol_details(lvol_id=lvol_id)
+        for lvol in lvol_details:
+            print(f"LVOL STATUS: {lvol['status']}")
+            assert lvol["status"] == "online", \
+                f"Lvol {lvol['id']} is not in online state. {lvol['status']}"
+
         self.sbcli_utils.suspend_node(node_uuid=no_lvol_node_uuid)
         self.sbcli_utils.shutdown_node(node_uuid=no_lvol_node_uuid)
 
@@ -178,11 +187,6 @@ class TestSingleNodeOutage:
                          health_check_status="true"
                          )
 
-
-        self.ssh_obj.kill_processes(
-            node=self.mgmt_nodes[0],
-            process_name="fio"
-        )
         print("Test case passed!!")
 
     def validations(self, node_uuid, cluster_status, node_status, device_status, lvol_status,
@@ -203,7 +207,7 @@ class TestSingleNodeOutage:
             assert lvol["status"] == lvol_status, \
                 f"Lvol {lvol['id']} is not in {lvol_status} state. {lvol['status']}"
         
-        storage_nodes = self.sbcli_utils.get_storage_nodes()
+        storage_nodes = self.sbcli_utils.get_storage_nodes()["results"]
         for node in storage_nodes:
             assert node["health_check"] == health_check_status, \
                 f"Node {node['id']} health-check is not {health_check_status}. {node['health_check']}"
@@ -218,6 +222,10 @@ class TestSingleNodeOutage:
         print("Inside teardown function")
         # self.sbcli_utils.delete_all_lvols()
         # self.sbcli_utils.delete_all_storage_pools()
+        self.ssh_obj.kill_processes(
+            node=self.mgmt_nodes[0],
+            process_name="fio"
+        )
         for node, ssh in self.ssh_obj.ssh_connections.items():
             print(f"Closing node ssh connection for {node}")
             ssh.close()

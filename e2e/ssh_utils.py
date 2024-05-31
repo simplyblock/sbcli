@@ -84,6 +84,7 @@ class SshUtils:
                 is_bastion_server=True if node==self.bastion_server else False
             )
             ssh_connection = self.ssh_connections[node]
+        print(f"Command: {command}")
         stdin, stdout, stderr = ssh_connection.exec_command(command)
         output = stdout.read().decode()
         print("Output: ", output)
@@ -164,8 +165,15 @@ class SshUtils:
                                      log_file=log_file)
     
     def kill_processes(self, node, pid=None, process_name=None):
+        kill_command = "sudo kill -9 %s"
         if pid:
-            command = f"sudo kill =9 {pid}"
+            command = kill_command % pid
             self.exec_command(node, command)
         if process_name:
-            pass
+            command = "ps -ef | grep -i %s | awk '{print $2}'" % process_name
+            output = self.exec_command(node=node,
+                                       command=command)
+            pids = output.strip().split("\n")
+            for pid in pids:
+                command = kill_command % pid.strip()
+                self.exec_command(node, command)

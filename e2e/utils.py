@@ -77,6 +77,7 @@ class SbcliUtils:
         given a node_UUID, shutdowns the node
         """
         # TODO: parse and display error accordingly: {'results': True, 'status': True}
+        print(f"Shutting down node with uuid: {node_uuid}")
         data = self.get_request(api_url=f"/storagenode/shutdown/{node_uuid}")
 
 
@@ -255,22 +256,22 @@ class SbcliUtils:
     def get_cluster_status(self, cluster_id=None):
         cluster_id = self.cluster_id if not cluster_id else cluster_id
         cluster_details = self.get_request(api_url=f"/cluster/status/{cluster_id}")
-        print(f"Cluster Status: {cluster_details}")
+        # print(f"Cluster Status: {cluster_details}")
         return cluster_details["results"]
 
     def get_storage_node_details(self, storage_node_id):
         node_details = self.get_request(api_url=f"/storagenode/{storage_node_id}")
-        print(f"Node Details: {node_details}")
+        # print(f"Node Details: {node_details}")
         return node_details["results"]
 
     def get_device_details(self, storage_node_id):
         device_details = self.get_request(api_url=f"/device/list/{storage_node_id}")            
-        print(f"Device Details: {device_details}")
+        # print(f"Device Details: {device_details}")
         return device_details["results"]
 
     def get_lvol_details(self, lvol_id):
         lvol_details = self.get_request(api_url=f"/lvol/{lvol_id}")
-        print(f"Lvol Details: {lvol_details}")
+        # print(f"Lvol Details: {lvol_details}")
         return lvol_details["results"]
     
     def get_cluster_logs(self, cluster_id=None):
