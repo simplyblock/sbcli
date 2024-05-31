@@ -162,4 +162,10 @@ class SshUtils:
         self.exec_command_background(node=node,
                                      command=command,
                                      log_file=log_file)
-        time.sleep(10)
+    
+    def kill_processes(self, node, pid=None, process_name=None):
+        if pid:
+            command = f"sudo kill =9 {pid}"
+            self.exec_command(node, command)
+        if process_name:
+            pass

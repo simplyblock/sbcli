@@ -154,13 +154,16 @@ class SbcliUtils:
         data = self.post_request(api_url="/pool", body=body)
         # TODO: Add assertions
 
-    def delete_storage_pool(self, pool_name):
+    def get_storage_pool_id(self, pool_name):
         pools = self.list_storage_pools()
         pool_id = None
         for name in list(pools.keys()):
             if name == pool_name:
                 pool_id = pools[name]
-        
+        return pool_id
+
+    def delete_storage_pool(self, pool_name):
+        pool_id = self.get_storage_pool_id(pool_name=pool_name)
         if not pool_id:
             print("Pool does not exist. Exiting")
             return
@@ -170,7 +173,7 @@ class SbcliUtils:
         header = self.headers.copy()
         header["secret"] = pool_data["results"][0]["secret"]
 
-        data = self.delete_request(api_url=f"/pool/{pool_id}", 
+        data = self.delete_request(api_url=f"/pool/{pool_id}",
                                    headers=header)
     
     def delete_all_storage_pools(self):
@@ -216,11 +219,7 @@ class SbcliUtils:
         print(data)
 
     def delete_lvol(self, lvol_name):
-        lvols = self.list_lvols()
-        lvol_id = None
-        for name in list(lvols.keys()):
-            if name == lvol_name:
-                lvol_id = lvols[name]
+        lvol_id = self.get_lvol_id(lvol_name=lvol_name)
         
         if not lvol_id:
             print("Lvol does not exist. Exiting")
@@ -235,13 +234,16 @@ class SbcliUtils:
             print(f"Deleting lvol: {name}")
             self.delete_lvol(lvol_name=name)
 
-    def get_lvol_connect_str(self, lvol_name):
+    def get_lvol_id(self, lvol_name):
         lvols = self.list_lvols()
         lvol_id = None
         for name in list(lvols.keys()):
             if name == lvol_name:
                 lvol_id = lvols[name]
-        
+        return lvol_id
+
+    def get_lvol_connect_str(self, lvol_name):
+        lvol_id = self.get_lvol_id(lvol_name=lvol_name)
         if not lvol_id:
             print("Lvol does not exist. Exiting")
             return
@@ -249,3 +251,30 @@ class SbcliUtils:
         data = self.get_request(api_url=f"/lvol/connect/{lvol_id}")
         print(f"Connect lvol resp: {data}")
         return data["result"][0]["connect"]
+    
+    def get_cluster_status(self, cluster_id=None):
+        cluster_id = self.cluster_id if not cluster_id else cluster_id
+        cluster_details = self.get_request(api_url=f"/cluster/status/{cluster_id}")
+        print(f"Cluster Status: {cluster_details}")
+        return cluster_details["results"]
+
+    def get_storage_node_details(self, storage_node_id):
+        node_details = self.get_request(api_url=f"/storagenode/{storage_node_id}")
+        print(f"Node Details: {node_details}")
+        return node_details["results"]
+
+    def get_device_details(self, storage_node_id):
+        device_details = self.get_request(api_url=f"/device/list/{storage_node_id}")            
+        print(f"Device Details: {device_details}")
+        return device_details["results"]
+
+    def get_lvol_details(self, lvol_id):
+        lvol_details = self.get_request(api_url=f"/lvol/{lvol_id}")
+        print(f"Lvol Details: {lvol_details}")
+        return lvol_details["results"]
+    
+    def get_cluster_logs(self, cluster_id=None):
+        cluster_id = self.cluster_id if not cluster_id else cluster_id
+        cluster_logs = self.get_request(api_url=f"/cluster/get-logs/{cluster_id}")
+        print(f"Cluster Logs: {cluster_logs}")
+        return cluster_logs["results"]

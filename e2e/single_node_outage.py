@@ -7,17 +7,17 @@ from ssh_utils import SshUtils
 
 # selected the node that doesn't have lvol attached
 
-cluster_secret = "ajNau5afZ6z6sSAioQlP"
-cluster_id = "f8b32ee7-2bd1-4c63-b287-9a4b42b880e3"
-cluster_ip = "10.0.3.151"
+cluster_secret = "hyUbGHsz5qmy0GUaphXj"
+cluster_id = "ed2c3fe4-bdc6-4a6f-bc6d-c30baf5f2faf"
+cluster_ip = "10.0.3.42"
 
 url = f"http://{cluster_ip}"
-api_base_url = "https://ur6wajztxe.execute-api.us-east-2.amazonaws.com/"
+api_base_url = "https://1n8nquvs84.execute-api.us-east-2.amazonaws.com/"
 headers = {
     "Content-Type": "application/json",
     "Authorization": f"{cluster_id} {cluster_secret}"
 }
-bastion_server = "18.218.46.26"
+bastion_server = "18.191.234.254"
 
 class TestSingleNodeOutage:
     """
@@ -125,16 +125,6 @@ class TestSingleNodeOutage:
         lvols = self.sbcli_utils.list_lvols()
         assert self.lvol_name in list(lvols.keys()), \
             f"Lvol {self.lvol_name} present in list of lvols post add: {lvols}"
-
-        lvol_details = self.sbcli_utils.get_lvol_by_id(lvol_id=lvols[self.lvol_name])
-        lvol_hostname = lvol_details["results"][0]["hostname"]
-        storage_nodes = self.sbcli_utils.get_storage_nodes()
-        storage_hostnames = []
-        for node in storage_nodes["results"]:
-            storage_hostnames.append(node["hostname"])
-
-        print(f"Storage hostname: {storage_hostnames}")
-        print(f"LVOL hostname: {lvol_hostname}")
         
         connect_str = self.sbcli_utils.get_lvol_connect_str(lvol_name=self.lvol_name)
 
@@ -162,7 +152,65 @@ class TestSingleNodeOutage:
         self.ssh_obj.run_fio_test(node=self.mgmt_nodes[0],
                                   directory=self.mount_path,
                                   log_file=self.log_path)
+        
+        no_lvol_node_uuid = self.sbcli_utils.get_node_without_lvols()
+
+        self.sbcli_utils.suspend_node(node_uuid=no_lvol_node_uuid)
+        self.sbcli_utils.shutdown_node(node_uuid=no_lvol_node_uuid)
+
+        self.validations(node_uuid=no_lvol_node_uuid,
+                         cluster_status=None,
+                         node_status="offline",
+                         device_status="unavailable",
+                         lvol_status="online",
+                         health_check_status="true"
+                         )
+
+        event_log = self.sbcli_utils.get_cluster_logs()
+                
+        self.sbcli_utils.restart_node(node_uuid=no_lvol_node_uuid)
+
+        self.validations(node_uuid=no_lvol_node_uuid,
+                         cluster_status=None,
+                         node_status="online",
+                         device_status="online",
+                         lvol_status="online",
+                         health_check_status="true"
+                         )
+
+
+        self.ssh_obj.kill_processes(
+            node=self.mgmt_nodes[0],
+            process_name="fio"
+        )
         print("Test case passed!!")
+
+    def validations(self, node_uuid, cluster_status, node_status, device_status, lvol_status,
+                    health_check_status):
+        cluster_details = self.sbcli_utils.get_cluster_status(cluster_id=cluster_id)
+        node_details = self.sbcli_utils.get_storage_node_details(storage_node_id=node_uuid)
+        device_details = self.sbcli_utils.get_device_details(storage_node_id=node_uuid)
+        lvol_id = self.sbcli_utils.get_lvol_id(lvol_name=self.lvol_name)
+        lvol_details = self.sbcli_utils.get_lvol_details(lvol_id=lvol_id)
+
+        assert node_details[0]["status"] == node_status, \
+            f"Node {node_uuid} is not in {node_status} state. {node_details[0]['status']}"
+        for device in device_details:
+            assert device["status"] == device_status, \
+                f"Device {device['id']} is not in {device_status} state. {device['status']}"
+        
+        for lvol in lvol_details:
+            assert lvol["status"] == lvol_status, \
+                f"Lvol {lvol['id']} is not in {lvol_status} state. {lvol['status']}"
+        
+        storage_nodes = self.sbcli_utils.get_storage_nodes()
+        for node in storage_nodes:
+            assert node["health_check"] == health_check_status, \
+                f"Node {node['id']} health-check is not {health_check_status}. {node['health_check']}"
+            device_details = self.sbcli_utils.get_device_details(storage_node_id=node["id"])
+            for device in device_details:
+                assert device["health_check"] == health_check_status, \
+                    f"Device {device['id']} health-check is not {health_check_status}. {device['health_check']}"
 
     def teardown(self):
         """Contains teradown required post test case execution
