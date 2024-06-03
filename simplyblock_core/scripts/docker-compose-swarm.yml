@@ -22,6 +22,8 @@ services:
   WebAppAPI:
     image: $SIMPLYBLOCK_DOCKER_IMAGE
     command: "python simplyblock_web/app.py"
+    networks:
+      - localnet
     deploy:
       endpoint_mode: dnsrr
       mode: global
@@ -32,18 +34,6 @@ services:
     environment:
       - FLASK_DEBUG=False
       - FLASK_ENV=production
-
-  CLI:
-    image: $SIMPLYBLOCK_DOCKER_IMAGE
-    command: "bash simplyblock_core/scripts/run_ssh.sh $CLI_SSH_PASS"
-    deploy:
-      mode: global
-      placement:
-        constraints: [node.role == manager]
-    ports:
-      - 2222:22
-    volumes:
-      - "/etc/foundationdb:/etc/foundationdb"
 
   StorageNodeMonitor:
     image: $SIMPLYBLOCK_DOCKER_IMAGE
@@ -113,16 +103,6 @@ services:
     volumes:
       - "/etc/foundationdb:/etc/foundationdb"
 
-  visualizer:
-    image: dockersamples/visualizer:latest
-    ports:
-      - 8081:8080
-    volumes:
-      - "/var/run/docker.sock:/var/run/docker.sock"
-    deploy:
-      placement:
-        constraints: [node.role == manager]
-
   HAProxy:
     image: haproxytech/haproxy-debian:latest
     deploy:
@@ -132,6 +112,8 @@ services:
     ports:
       - 80:80
       - 8404:8404
+    networks:
+      - localnet
     volumes:
       - "$DIR/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg"
 
@@ -221,3 +203,9 @@ networks:
   hostnet:
     external: true
     name: host
+
+  localnet:
+    driver: overlay
+    ipam:
+      config:
+        - subnet: 192.168.1.0/24
