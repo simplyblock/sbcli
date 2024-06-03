@@ -226,7 +226,7 @@ class SshUtils:
             file_name (str): File path
 
         Returns:
-            str: Output of file
+            str: Output of file name
         """
         cmd = f"cat {file_name}"
         output = self.exec_command(node=node, command=cmd)
