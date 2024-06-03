@@ -5,14 +5,15 @@ import time
 import traceback
 # from utils import get_node_without_lvols, suspend_node, shutdown_node
 from __init__ import get_all_tests
+from logger_config import setup_logger
 
 # selected the node that doesn't have lvol attached
 
-# cluster_secret = "AlSGu3Pi4F9jwn47j8Ww"
+#  cluster_secret = "AlSGu3Pi4F9jwn47j8Ww"
 # cluster_uuid = "6b602adf-8fe8-4a31-bd5b-4baffad95ca1"
 # cluster_ip = "44.222.172.138"
 
-# url = f"http://{cluster_ip}/"
+# url =f"http://{cluster_ip}/"
 # headers = {
 #     "Content-Type": "application/json",
 #     "Authorization": f"{cluster_uuid} {cluster_secret}"
@@ -113,19 +114,24 @@ def main():
     tests = get_all_tests()
     errors = {}
     for test in tests:
+        logger.info(f"Running Test {test}")
         test_obj = test()
-        test_obj.setup()
         try:
+            test_obj.setup()
             test_obj.run()
         except Exception as exp:
-            errors[f"{test}"] = exp
-        finally:
+            logger.error(traceback.format_exc())
+            errors[f"{test}"] = [exp]
+        try:
             test_obj.teardown()
+        except Exception as exp:
+            logger.error(traceback.format_exc())
+            errors[f"{test}"].append(exp)
     
     for test, exception in errors.items():
-        print(f"Raising exception for test: {test}")
-        traceback.print_tb(exception.__traceback__)
-        raise exception
+        logger.error(f"Raising exception for test: {test}")
+        for exc in exception:
+            raise exc
     # resume_node(node_uuid)
     # restart_node(node_uuid)
     # after restart the node status switches back to online
@@ -142,4 +148,5 @@ def generate_report():
     pass
 
 
+logger = setup_logger(__name__)
 main()

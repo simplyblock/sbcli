@@ -1,6 +1,7 @@
 import time
 import paramiko
 from io import BytesIO
+from logger_config import setup_logger
 
 
 SSH_KEY_LOCATION = '/mnt/c/Users/Raunak Jalan/.ssh/simplyblock-us-east-2.pem'
@@ -12,6 +13,7 @@ class SshUtils:
     def __init__(self, bastion_server):
         self.ssh_connections = dict()
         self.bastion_server = bastion_server
+        self.logger = setup_logger(__name__)
 
     def connect(self, address: str, port: int=22,
                 bastion_server_address: str=None,
@@ -41,7 +43,7 @@ class SshUtils:
                     port=port,
                     pkey=private_key,
                     timeout=3600)
-        print("Connected to bastion server.")
+        self.logger.info("Connected to bastion server.")
 
         if self.ssh_connections.get(bastion_server_address, None):
             self.ssh_connections[bastion_server_address].close()
@@ -66,7 +68,7 @@ class SshUtils:
                            sock=channel,
                            pkey=private_key,
                            timeout=3600)
-        print("Connected to target server through proxy.")
+        self.logger.info("Connected to target server through proxy.")
 
         # stdin, stdout, stderr = target_ssh.exec_command('sudo lsblk')
         # print("Output: ", stdout.read().decode())
@@ -76,25 +78,42 @@ class SshUtils:
         self.ssh_connections[address] = target_ssh
 
     def exec_command(self, node, command):
+        """Executes command on given machine
+
+        Args:
+            node (str): Machine to run command on
+            command (str): Command to run
+
+        Returns:
+            str: Output of command
+        """
         ssh_connection = self.ssh_connections[node]
         if not ssh_connection.get_transport().is_active():
-            print(f"Reconnecting SSH to node {node}")
+            self.logger.info(f"Reconnecting SSH to node {node}")
             self.connect(
                 address=node,
                 is_bastion_server=True if node==self.bastion_server else False
             )
             ssh_connection = self.ssh_connections[node]
-        print(f"Command: {command}")
+        self.logger.info(f"Command: {command}")
+        output = ""
         stdin, stdout, stderr = ssh_connection.exec_command(command)
         output = stdout.read().decode()
-        print("Output: ", output)
+        self.logger.debug(f"Output: {output}")
 
         return output
     
     def exec_command_background(self, node, command, log_file=None):
+        """Executes command on given machine in background
+
+        Args:
+            node (str): Machine to run command on
+            command (str): Command to run
+            log_file (str): Path to redirect output to
+        """
         ssh_connection = self.ssh_connections[node]
         if not ssh_connection.get_transport().is_active():
-            print(f"Reconnecting SSH to node {node}")
+            self.logger.info(f"Reconnecting SSH to node {node}")
             self.connect(
                 address=node,
                 is_bastion_server=True if node==self.bastion_server else False
@@ -102,6 +121,7 @@ class SshUtils:
             ssh_connection = self.ssh_connections[node]
         channel = ssh_connection.get_transport().open_session()
         # log_file = log_file if log_file else "/dev/null"
+        self.logger.info(f"Command: {command}")
         channel.exec_command(f'{command} >> {log_file} &')
     
     def format_disk(self, node, device):
@@ -111,7 +131,7 @@ class SshUtils:
             node (str): Node to perform ssh operation on
             device (str): Device path
         """
-        command = f"sudo mkfs.xfs {device}"
+        command = f"sudo mkfs.xfs -t ext4 {device}"
         stdout = self.exec_command(node, command)
 
     def mount_path(self, node, device, mount_path):
@@ -126,7 +146,7 @@ class SshUtils:
             command = f"sudo rm -rf {mount_path}"
             self.exec_command(node, command)
         except Exception as e:
-            print(e)
+            self.logger.info(e)
         
         command = f"sudo mkdir {mount_path}"
         self.exec_command(node, command)
@@ -145,12 +165,26 @@ class SshUtils:
         self.exec_command(node, command)
 
     def get_devices(self, node):
+        """Get devices on a machine
+
+        Args:
+            node (str): Node to perform ssh operation on
+        """
         command = "sudo lsblk | awk '{print $1}'"
         output = self.exec_command(node, command)
 
         return output.strip().split("\n")[1:]
     
     def run_fio_test(self, node, device=None, directory=None, log_file=None, **kwargs):
+        """Run FIO Tests with given params
+
+        Args:
+            node (str): Node to perform ssh operation on
+            device (str): Device path. Defaults to None.
+            directory (str, optional): Directory to run test on. Defaults to None.
+            log_file (str, optional): Log file to redirect output to. Defaults to None.
+        """
+        #TODO: Use Kwargs to get as many params as possible
         if device:
             location = f"--filename={device}"
         if directory:
@@ -159,12 +193,18 @@ class SshUtils:
                    "--direct=1 --iodepth=1 --time_based --runtime=3600 --rw=randrw --bs=4K --size=10MiB "
                    "--verify=md5 --numjobs=1 --verify_dump=1 --verify_fatal=0 --verify_state_save=1 --verify_backlog=10") 
         
-        print(f"COmmand: {command}")
         self.exec_command_background(node=node,
                                      command=command,
                                      log_file=log_file)
     
     def kill_processes(self, node, pid=None, process_name=None):
+        """Kill the given process
+
+        Args:
+            node (str): Node to kill process on
+            pid (int, optional): Kill the given pid. Defaults to None.
+            process_name (str, optional): Kill the process with name. Defaults to None.
+        """
         kill_command = "sudo kill -9 %s"
         if pid:
             command = kill_command % pid
@@ -177,3 +217,17 @@ class SshUtils:
             for pid in pids:
                 command = kill_command % pid.strip()
                 self.exec_command(node, command)
+
+    def read_file(self, node, file_name):
+        """Read the given file
+
+        Args:
+            node (str): Machine to read file from
+            file_name (str): File path
+
+        Returns:
+            str: Output of file
+        """
+        cmd = f"cat {file_name}"
+        output = self.exec_command(node=node, command=cmd)
+        return output

@@ -1,23 +1,24 @@
 ### simplyblock e2e tests
 import os
-import requests
 import time
-from utils import SbcliUtils
+from sbcli_utils import SbcliUtils
 from ssh_utils import SshUtils
+from utils import TestUtils
+from logger_config import setup_logger
 
 # selected the node that doesn't have lvol attached
 
-cluster_secret = "1mRBJANeT5E7AQiSSA5x"
-cluster_id = "d6f7d754-4146-4d80-9fc1-ba906dbf372d"
-cluster_ip = "10.0.3.218"
+cluster_secret = "jh3euwt3yBr4VlWLdxZ4"
+cluster_id = "f7591e7b-4460-4a11-8436-188d7f641f92"
+cluster_ip = "10.0.3.112"
 
 url = f"http://{cluster_ip}"
-api_base_url = "https://w7eixh7x1b.execute-api.us-east-2.amazonaws.com/"
+api_base_url = "https://mg52j6wpw7.execute-api.us-east-2.amazonaws.com/"
 headers = {
     "Content-Type": "application/json",
     "Authorization": f"{cluster_id} {cluster_secret}"
 }
-bastion_server = "3.133.127.29"
+bastion_server = "18.222.38.54"
 
 class TestSingleNodeOutage:
     """
@@ -57,6 +58,7 @@ class TestSingleNodeOutage:
 
     def __init__(self):
         self.ssh_obj = SshUtils(bastion_server=bastion_server)
+        self.logger = setup_logger(__name__)
         self.sbcli_utils = SbcliUtils(
             cluster_ip=cluster_ip,
             url=url,
@@ -64,26 +66,28 @@ class TestSingleNodeOutage:
             cluster_id=cluster_id,
             cluster_secret=cluster_secret
         )
+        self.test_utils = TestUtils(self.sbcli_utils, self.ssh_obj)
         self.mgmt_nodes = None
         self.storage_nodes = None
         self.pool_name = "test_pool"
         self.lvol_name = "test_lvol"
         self.mount_path = "/home/ec2-user/test_location"
         self.log_path = f"{os.path.dirname(self.mount_path)}/log_file.log"
+        self.base_cmd = None
 
     def setup(self):
         """Contains setup required to run the test case
         """
-        print("Inside setup function")
+        self.logger.info("Inside setup function")
         self.mgmt_nodes, self.storage_nodes = self.sbcli_utils.get_all_nodes_ip()
         for node in self.mgmt_nodes:
-            print(f"**Connecting to management nodes** - {node}")
+            self.logger.info(f"**Connecting to management nodes** - {node}")
             self.ssh_obj.connect(
                 address=node,
                 bastion_server_address=bastion_server,
             )
         for node in self.storage_nodes:
-            print(f"**Connecting to storage nodes** - {node}")
+            self.logger.info(f"**Connecting to storage nodes** - {node}")
             self.ssh_obj.connect(
                 address=node,
                 bastion_server_address=bastion_server,
@@ -92,11 +96,18 @@ class TestSingleNodeOutage:
                                   device=self.mount_path)
         self.sbcli_utils.delete_all_lvols()
         self.sbcli_utils.delete_all_storage_pools()
+        expected_base = ["sbcli", "sbcli-dev", "sbcli-release"]
+        for base in expected_base:
+            output = self.ssh_obj.exec_command(node=self.mgmt_nodes[0],
+                                               command=base)
+            if len(output.strip()):
+                self.base_cmd = base
+                self.logger.info(f"Using base command as {self.base_cmd}")
 
     def run(self):
         """ Performs each step of the testcase
         """
-        print("Inside run function")
+        self.logger.info("Inside run function")
         initial_devices = self.ssh_obj.get_devices(node=self.mgmt_nodes[0])
 
         self.sbcli_utils.add_storage_pool(
@@ -134,12 +145,12 @@ class TestSingleNodeOutage:
 
         final_devices = self.ssh_obj.get_devices(node=self.mgmt_nodes[0])
         disk_use = None
-        print("Initial vs final disk:")
-        print(f"Initial: {initial_devices}")
-        print(f"Final: {final_devices}")
+        self.logger.info("Initial vs final disk:")
+        self.logger.info(f"Initial: {initial_devices}")
+        self.logger.info(f"Final: {final_devices}")
         for device in final_devices:
             if device not in initial_devices:
-                print(f"Using disk: /dev/{device.strip()}")
+                self.logger.info(f"Using disk: /dev/{device.strip()}")
                 disk_use = f"/dev/{device.strip()}"
                 break
         self.ssh_obj.unmount_path(node=self.mgmt_nodes[0],
@@ -156,52 +167,98 @@ class TestSingleNodeOutage:
         
         no_lvol_node_uuid = self.sbcli_utils.get_node_without_lvols()
 
-        print("Getting lvol status before shutdown")
+        self.logger.info("Getting lvol status before shutdown")
         lvol_id = self.sbcli_utils.get_lvol_id(lvol_name=self.lvol_name)
         lvol_details = self.sbcli_utils.get_lvol_details(lvol_id=lvol_id)
         for lvol in lvol_details:
-            print(f"LVOL STATUS: {lvol['status']}")
+            self.logger.info(f"LVOL STATUS: {lvol['status']}")
             assert lvol["status"] == "online", \
                 f"Lvol {lvol['id']} is not in online state. {lvol['status']}"
+        
+        self.validations(node_uuid=no_lvol_node_uuid,
+                         node_status="online",
+                         device_status="online",
+                         lvol_status="online",
+                         health_check_status=True
+                         )
 
         self.sbcli_utils.suspend_node(node_uuid=no_lvol_node_uuid)
         self.sbcli_utils.shutdown_node(node_uuid=no_lvol_node_uuid)
 
+        self.logger.info("Sleeping for 10 seconds")
+        time.sleep(10)
+
         self.validations(node_uuid=no_lvol_node_uuid,
-                         cluster_status=None,
                          node_status="offline",
                          device_status="unavailable",
                          lvol_status="online",
-                         health_check_status="true"
+                         health_check_status=True
                          )
-
-        event_log = self.sbcli_utils.get_cluster_logs()
+        
+        # Write steps in order
+        steps = {
+            "Storage Node": ["suspended", "shutdown", "restart"],
+            "Device": {"restart"}
+        }
+        self.test_utils.validate_event_logs(cluster_id=cluster_id, 
+                                            operations=steps)
                 
         self.sbcli_utils.restart_node(node_uuid=no_lvol_node_uuid)
 
+        self.logger.info("Sleeping for 10 seconds")
+        time.sleep(10)
+
         self.validations(node_uuid=no_lvol_node_uuid,
-                         cluster_status=None,
                          node_status="online",
                          device_status="online",
                          lvol_status="online",
-                         health_check_status="true"
+                         health_check_status=True
                          )
+        
+        self.ssh_obj.kill_processes(
+            node=self.mgmt_nodes[0],
+            process_name="fio"
+        )
+        
+        self.test_utils.validate_fio_test(node=self.mgmt_nodes[0],
+                                          log_file=self.log_path)
 
-        print("Test case passed!!")
+        self.logger.info("TEST CASE PASSED !!!")
 
-    def validations(self, node_uuid, cluster_status, node_status, device_status, lvol_status,
+
+
+    def validations(self, node_uuid, node_status, device_status, lvol_status,
                     health_check_status):
-        cluster_details = self.sbcli_utils.get_cluster_status(cluster_id=cluster_id)
+        """Validates node, devices, lvol status with expected status
+
+        Args:
+            node_uuid (str): UUID of node to validate
+            node_status (str): Expected node status
+            device_status (str): Expected device status
+            lvol_status (str): Expected lvol status
+            health_check_status (bool): Expected health check status
+        """
         node_details = self.sbcli_utils.get_storage_node_details(storage_node_id=node_uuid)
         device_details = self.sbcli_utils.get_device_details(storage_node_id=node_uuid)
         lvol_id = self.sbcli_utils.get_lvol_id(lvol_name=self.lvol_name)
         lvol_details = self.sbcli_utils.get_lvol_details(lvol_id=lvol_id)
+        command = f"{self.base_cmd} lvol get-cluster-map {lvol_id}"
+        lvol_cluster_map_details = self.ssh_obj.exec_command(node=self.mgmt_nodes[0],
+                                                             command=command)
+        self.logger.info(f"LVOL Cluster map: {lvol_cluster_map_details}")
+        cluster_map_nodes, cluster_map_devices = self.test_utils.parse_lvol_cluster_map_output(lvol_cluster_map_details)
+        offline_device = None
 
         assert node_details[0]["status"] == node_status, \
             f"Node {node_uuid} is not in {node_status} state. {node_details[0]['status']}"
         for device in device_details:
-            assert device["status"] == device_status, \
-                f"Device {device['id']} is not in {device_status} state. {device['status']}"
+            if "jm" in device["jm_bdev"]:
+                assert device["status"] == "JM_DEV", \
+                    f"JM Device {device['id']} is not in JM_DEV state. {device['status']}"
+            else:
+                assert device["status"] == device_status, \
+                    f"Device {device['id']} is not in {device_status} state. {device['status']}"
+                offline_device = device['id']
         
         for lvol in lvol_details:
             assert lvol["status"] == lvol_status, \
@@ -215,17 +272,42 @@ class TestSingleNodeOutage:
             for device in device_details:
                 assert device["health_check"] == health_check_status, \
                     f"Device {device['id']} health-check is not {health_check_status}. {device['health_check']}"
+                
+        for node_id, node in cluster_map_nodes.items():
+            if node_id == node_uuid:
+                assert node["Reported Status"] == node_status, \
+                    f"Node {node_id} is not in {node_status} state. {node['Reported Status']}"
+                assert node["Actual Status"] == node_status, \
+                    f"Node {node_id} is not in {node_status} state. {node['Actual Status']}"
+            else:
+                assert node["Reported Status"] == "online", \
+                    f"Node {node_uuid} is not in online state. {node['Reported Status']}"
+                assert node["Actual Status"] == "online", \
+                    f"Node {node_uuid} is not in online state. {node['Actual Status']}"
+                
+        for device_id, device in cluster_map_devices.items():
+            if device_id == offline_device:
+                assert device["Reported Status"] == device_status, \
+                    f"Device {device_id} is not in {device_status} state. {device['Reported Status']}"
+                assert device["Actual Status"] == device_status, \
+                    f"Device {device_id} is not in {device_status} state. {device['Actual Status']}"
+            else:
+                assert device["Reported Status"] == "online", \
+                    f"Device {device_id} is not in online state. {device['Reported Status']}"
+                assert device["Actual Status"] == "online", \
+                    f"Device {device_id} is not in online state. {device['Actual Status']}"
 
     def teardown(self):
         """Contains teradown required post test case execution
         """
-        print("Inside teardown function")
-        # self.sbcli_utils.delete_all_lvols()
-        # self.sbcli_utils.delete_all_storage_pools()
-        self.ssh_obj.kill_processes(
-            node=self.mgmt_nodes[0],
-            process_name="fio"
-        )
+        self.logger.info("Inside teardown function")
+        lvol_id = self.sbcli_utils.get_lvol_id(lvol_name=self.lvol_name)
+        lvol_details = self.sbcli_utils.get_lvol_details(lvol_id=lvol_id)
+        nqn = lvol_details[0]["nqn"]
+        self.sbcli_utils.delete_all_lvols()
+        self.sbcli_utils.delete_all_storage_pools()
+        self.ssh_obj.exec_command(node=self.mgmt_nodes[0],
+                                  command=f"sudo nvme disconnect -n {nqn}")
         for node, ssh in self.ssh_obj.ssh_connections.items():
-            print(f"Closing node ssh connection for {node}")
+            self.logger.info(f"Closing node ssh connection for {node}")
             ssh.close()
