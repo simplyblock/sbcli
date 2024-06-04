@@ -1,3 +1,4 @@
 /.idea/
 *.pyc
 env_var
+e2e/*.log
