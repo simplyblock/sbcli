@@ -8,10 +8,6 @@ on:
     - cron: '0 5 * * *'  # Runs every day at 5 AM UTC
   workflow_dispatch:
     inputs:
-      sbcli_branch:
-        description: ''
-        required: true
-        default: 'main'
       simplyBlockDeploy_branch:
         description: ''
         required: true
