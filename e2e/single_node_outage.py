@@ -23,15 +23,19 @@ bastion_server = os.environ.get("BASTION_SERVER")
 class TestSingleNodeOutage:
     """
     Steps:
-    1. Start FIO tests
-    2. While FIO is running, validate this scenario:
+    1. Create Storage Pool and Delete Storage pool
+    2. Create storage pool
+    3. Create LVOL
+    4. Connect LVOL
+    5. Mount Device
+    6. Start FIO tests
+    7. While FIO is running, validate this scenario:
         a. In a cluster with three nodes, select one node, which does not 
            have any lvol attached.
         b. Suspend the Node via API or CLI while the fio test is running. 
         c. Shutdown the Node via API or CLI while the fio test is running. 
         d. Check status of objects during outage: 
             - the node is in status “offline”
-            - the cluster is in status “degraded”
             - the devices of the node are in status “unavailable”
             - lvols remain in “online” state 
             - the event log contains the records indicating the object status 
@@ -41,18 +45,15 @@ class TestSingleNodeOutage:
               and verify that the status changes of the node and devices are reflected in 
               the other cluster map. Other two nodes and 4 devices remain online.
             - health-check status of all nodes and devices is “true”
-
         e. check that fio remains running without interruption.
 
-    3. Restart the node again.
+    8. Restart the node again.
         a. check the status again: 
             - the status of all nodes is “online”
-            - the cluster is in status “active”
             - all devices in the cluster are in status “online”
             - the event log contains the records indicating the object status changes
             - select a cluster map from any of the two lvols (lvol get-cluster-map)
               and verify that all nodes and all devices appear online
-
         b. check that fio remains running without interruption.
     """
 
