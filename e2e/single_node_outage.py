@@ -6,19 +6,19 @@ from ssh_utils import SshUtils
 from utils import TestUtils
 from logger_config import setup_logger
 
-# selected the node that doesn't have lvol attached
 
-cluster_secret = "jh3euwt3yBr4VlWLdxZ4"
-cluster_id = "f7591e7b-4460-4a11-8436-188d7f641f92"
-cluster_ip = "10.0.3.112"
+cluster_secret = os.environ.get("CLUSTER_SECRET")
+cluster_id = os.environ.get("CLUSTER_ID")
+cluster_ip = os.environ.get("CLUSTER_IP")
 
 url = f"http://{cluster_ip}"
-api_base_url = "https://mg52j6wpw7.execute-api.us-east-2.amazonaws.com/"
+api_base_url = os.environ.get("API_BASE_URL")
 headers = {
     "Content-Type": "application/json",
     "Authorization": f"{cluster_id} {cluster_secret}"
 }
-bastion_server = "18.222.38.54"
+bastion_server = os.environ.get("BASTION_SERVER")
+
 
 class TestSingleNodeOutage:
     """
@@ -194,14 +194,6 @@ class TestSingleNodeOutage:
                          lvol_status="online",
                          health_check_status=True
                          )
-        
-        # Write steps in order
-        steps = {
-            "Storage Node": ["suspended", "shutdown", "restart"],
-            "Device": {"restart"}
-        }
-        self.test_utils.validate_event_logs(cluster_id=cluster_id, 
-                                            operations=steps)
                 
         self.sbcli_utils.restart_node(node_uuid=no_lvol_node_uuid)
 
@@ -214,6 +206,14 @@ class TestSingleNodeOutage:
                          lvol_status="online",
                          health_check_status=True
                          )
+        
+        # Write steps in order
+        steps = {
+            "Storage Node": ["suspended", "shutdown", "restart"],
+            "Device": {"restart"}
+        }
+        self.test_utils.validate_event_logs(cluster_id=cluster_id, 
+                                            operations=steps)
         
         self.ssh_obj.kill_processes(
             node=self.mgmt_nodes[0],
