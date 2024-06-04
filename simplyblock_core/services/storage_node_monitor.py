@@ -48,7 +48,7 @@ def get_cluster_target_status(cluster_id):
             for dev in node.nvme_devices:
                 if dev.status == NVMeDevice.STATUS_ONLINE:
                     node_online_devices += 1
-                else:
+                elif dev.status != NVMeDevice.STATUS_JM:
                     node_offline_devices += 1
 
             if node_offline_devices > 0 or node_online_devices == 0:
