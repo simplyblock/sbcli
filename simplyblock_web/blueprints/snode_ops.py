@@ -313,7 +313,7 @@ def leave_swarm():
 def make_gpt_partitions_for_nbd():
     nbd_device = '/dev/nbd0'
     jm_percent = '3'
-    num_partitions = 0
+    num_partitions = 1
 
     try:
         data = request.get_json()
@@ -325,13 +325,19 @@ def make_gpt_partitions_for_nbd():
 
     cmd_list = [
         f"parted -f {nbd_device} mklabel gpt",
-        f"parted -f {nbd_device} mkpart journal \"0%\" \"{jm_percent}%\"",
-        f"parted -f {nbd_device} mkpart main \"{jm_percent}%\" \"100%\"",
-        f"sgdisk -t 1:6527994e-2c5a-4eec-9613-8f5944074e8b {nbd_device}",
-        f"sgdisk -t 2:6527994e-2c5a-4eec-9613-8f5944074e8b {nbd_device}"
+        f"parted -f {nbd_device} mkpart journal \"0%\" \"{jm_percent}%\""
     ]
+    sg_cmd_list = [
+        f"sgdisk -t 1:6527994e-2c5a-4eec-9613-8f5944074e8b {nbd_device}",
+    ]
+    perc_per_partition = int((100 - jm_percent) / num_partitions)
+    for i in range(num_partitions):
+        st = jm_percent + (i * perc_per_partition)
+        en = st + perc_per_partition
+        cmd_list.append(f"parted -f {nbd_device} mkpart part{(i+1)} \"{st}%\" \"{en}%\"")
+        sg_cmd_list.append(f"sgdisk -t {(i+2)}:6527994e-2c5a-4eec-9613-8f5944074e8b {nbd_device}")
 
-    for cmd in cmd_list:
+    for cmd in cmd_list+sg_cmd_list:
         logger.debug(cmd)
         out, err, ret_code = shell_utils.run_command(cmd)
         logger.debug(out)
