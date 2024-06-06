@@ -786,3 +786,26 @@ def cluster_grace_shutdown(cl_id):
     logger.info(f"Suspending cluster: {cl_id}")
     suspend_cluster(cl_id)
     return True
+
+
+def delete_cluster(cl_id):
+    db_controller = DBController()
+    cluster = db_controller.get_cluster_by_id(cl_id)
+    if not cluster:
+        logger.error(f"Cluster not found {cl_id}")
+        return False
+
+    nodes = db_controller.get_storage_nodes_by_cluster_id(cl_id)
+    if nodes:
+        logger.error("Can only remove Empty cluster, Storage nodes found")
+        return False
+
+    pools = db_controller.get_pools(cl_id)
+    if pools:
+        logger.error("Can only remove Empty cluster, Pools found")
+        return False
+
+    logger.info(f"Deleting Cluster {cl_id}")
+    cluster_events.cluster_delete(cluster)
+    cluster.remove(db_controller.kv_store)
+    logger.info("Done")

@@ -327,6 +327,12 @@ class CLIWrapper:
         sub_command = self.add_sub_command(subparser, "list-tasks", 'List tasks by cluster ID')
         sub_command.add_argument("cluster_id", help='UUID of the cluster')
 
+        # delete cluster
+        sub_command = self.add_sub_command(
+            subparser, 'delete', 'Delete Cluster',
+            usage="This is only possible, if no storage nodes and pools are attached to the cluster")
+        sub_command.add_argument("id", help='cluster UUID')
+
 
         #
         # ----------------- lvol -----------------
@@ -873,6 +879,9 @@ class CLIWrapper:
 
             elif sub_command == "graceful-startup":
                 ret = cluster_ops.cluster_grace_startup(args.id)
+
+            elif sub_command == "delete":
+                ret = cluster_ops.delete_cluster(args.id)
 
             else:
                 self.parser.print_help()
