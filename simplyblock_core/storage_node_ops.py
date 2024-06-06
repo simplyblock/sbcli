@@ -113,7 +113,7 @@ def addNvmeDevices(cluster, rpc_client, devs, snode):
                 'uuid': str(uuid.uuid4()),
                 'device_name': nvme_dict['name'],
                 'size': total_size,
-                'partitions_count': (index+1),
+                'physical_label': get_next_physical_device_order(),
                 'pcie_address': nvme_driver_data['pci_address'],
                 'model_id': model_number,
                 'serial_number': nvme_driver_data['ctrlr_data']['serial_number'],
@@ -197,6 +197,19 @@ def get_next_cluster_device_order(db_controller):
         for dev in node.nvme_devices:
             found = True
             max_order = max(max_order, dev.cluster_device_order)
+    if found:
+        return max_order + 1
+    return 0
+
+
+def get_next_physical_device_order():
+    db_controller = DBController()
+    max_order = 0
+    found = False
+    for node in db_controller.get_storage_nodes():
+        for dev in node.nvme_devices:
+            found = True
+            max_order = max(max_order, dev.physical_label)
     if found:
         return max_order + 1
     return 0
