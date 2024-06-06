@@ -80,8 +80,10 @@ jobs:
         id: terraform_outputs
         run: |
           cd $GITHUB_WORKSPACE/simplyBlockDeploy
-          output_value=$(terraform output -raw bastion_public_ip)
-          echo "::set-output name=bastion_public_ip::$output_value"
+          output_bastion_public_ip=$(terraform output -raw bastion_public_ip)
+          echo "::set-output name=bastion_public_ip::$output_bastion_public_ip"
+          output_key_name=$(terraform output -raw key_name)
+          echo "::set-output name=key_name::$output_key_name"
       - name: Bootstrap Cluster
         run: |
           cd $GITHUB_WORKSPACE/simplyBlockDeploy
@@ -103,6 +105,7 @@ jobs:
           export CLUSTER_IP=${{ steps.bootstrap_cluster.outputs.cluster_ip }}
           export API_BASE_URL=${{ steps.bootstrap_cluster.outputs.cluster_api_gateway_endpoint }}
           export BASTION_SERVER=${{ steps.terraform_outputs.outputs.bastion_public_ip }}
+          export KEY_NAME=${{ steps.terraform_outputs.outputs.key_name }}
           python3 e2e.py
 
       - name: Upload docker logs to s3

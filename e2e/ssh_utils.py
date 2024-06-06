@@ -1,10 +1,12 @@
 import time
 import paramiko
+import os
 from io import BytesIO
 from logger_config import setup_logger
 
 
-SSH_KEY_LOCATION = '/mnt/c/Users/Raunak Jalan/.ssh/simplyblock-us-east-2.pem'
+SSH_KEY_LOCATION =  "~/.ssh/" + os.environ.get("KEY_NAME")
+
 
 class SshUtils:
     """Class to perform all ssh level operationa
