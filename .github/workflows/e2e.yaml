@@ -60,7 +60,7 @@ jobs:
           terraform plan \
             -var "mgmt_nodes=1" -var "storage_nodes=3" \
             -var "extra_nodes=1" -var "extra_nodes_instance_type=m6id.large" \
-            -var "region=us-east-2" -var "sbcli_pkg=${{ github.event.inputs.sbcli_cmd || 'sbcli-dev' }}" -out=tfplan
+            -var "region=us-east-2" -var "sbcli_cmd=${{ github.event.inputs.sbcli_cmd || 'sbcli-dev' }}" -out=tfplan
 
       - name: Apply Terraform Changes
         run: terraform apply tfplan
