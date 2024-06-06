@@ -5,7 +5,8 @@ from io import BytesIO
 from logger_config import setup_logger
 
 
-SSH_KEY_LOCATION =  "~/.ssh/" + os.environ.get("KEY_NAME")
+SSH_KEY_LOCATION = os.path.expanduser("~/.ssh/" + os.environ.get("KEY_NAME"))
+
 
 
 class SshUtils:
@@ -35,6 +36,8 @@ class SshUtils:
         ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
 
         # Load the private key
+        if not os.path.exists(SSH_KEY_LOCATION):
+            raise FileNotFoundError(f"SSH private key not found at {SSH_KEY_LOCATION}")
         private_key = paramiko.Ed25519Key(filename=SSH_KEY_LOCATION)
 
         # Connect to the proxy server first
