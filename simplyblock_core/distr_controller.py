@@ -95,7 +95,9 @@ def get_distr_cluster_map(snodes, target_node):
             dev_map[dev.cluster_device_order] = {
                 "UUID": dev.get_id(),
                 "bdev_name": name,
-                "status": dev.status}
+                "status": dev.status,
+                "physical_label": dev.partitions_count
+            }
             dev_w_map.append({
                 "weight": dev_w,
                 "id": dev.cluster_device_order})

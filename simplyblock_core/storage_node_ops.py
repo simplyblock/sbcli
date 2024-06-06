@@ -113,6 +113,7 @@ def addNvmeDevices(cluster, rpc_client, devs, snode):
                 'uuid': str(uuid.uuid4()),
                 'device_name': nvme_dict['name'],
                 'size': total_size,
+                'partitions_count': (index+1),
                 'pcie_address': nvme_driver_data['pci_address'],
                 'model_id': model_number,
                 'serial_number': nvme_driver_data['ctrlr_data']['serial_number'],
