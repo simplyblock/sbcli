@@ -79,6 +79,7 @@ jobs:
       - name: Get Terraform Outputs
         id: terraform_outputs
         run: |
+          cd $GITHUB_WORKSPACE/simplyBlockDeploy
           output_value=$(terraform output -raw bastion_public_ip)
           echo "::set-output name=bastion_public_ip::$output_value"
       - name: Bootstrap Cluster
@@ -119,16 +120,16 @@ jobs:
           S3_BUCKET_NAME: "simplyblock-e2e-test-logs"
           RUN_ID: ${{ github.run_id }}
 
-      - name: Send Slack Notification
-        if: always()
-        env:
-          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
-        run: |
-          if [[ ${{ job.status }} == 'success' ]]; then
-            curl -X POST -H 'Content-type: application/json' --data '{"text":"Python E2E tests successfully completed!"}' $SLACK_WEBHOOK_URL
-          else
-            curl -X POST -H 'Content-type: application/json' --data '{"text":"Python E2E tests failed!"}' $SLACK_WEBHOOK_URL
-          fi
+      # - name: Send Slack Notification
+      #   if: always()
+      #   env:
+      #     SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+      #   run: |
+      #     if [[ ${{ job.status }} == 'success' ]]; then
+      #       curl -X POST -H 'Content-type: application/json' --data '{"text":"Python E2E tests successfully completed!"}' $SLACK_WEBHOOK_URL
+      #     else
+      #       curl -X POST -H 'Content-type: application/json' --data '{"text":"Python E2E tests failed!"}' $SLACK_WEBHOOK_URL
+      #     fi
 
       - name: Destroy Cluster
         if: always()
