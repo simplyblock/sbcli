@@ -503,7 +503,8 @@ class CLIWrapper:
         # list pools
         sub_command = self.add_sub_command(subparser, 'list', 'List pools')
         sub_command.add_argument("--json", help='Print outputs in json format', required=False, action='store_true')
-        sub_command.add_argument("--cluster-id", help='ID of the cluster', required=False, action='store_true')
+        sub_command.add_argument("--cluster-id", help='ID of the cluster', dest="cluster_id")
+
         # get pool
         sub_command = self.add_sub_command(subparser, 'get', 'get pool details')
         sub_command.add_argument("id", help='pool uuid')
@@ -1019,7 +1020,7 @@ class CLIWrapper:
                 ret = pool_controller.get_pool(args.id, args.json)
 
             elif sub_command == "list":
-                ret = pool_controller.list_pools(args.json)
+                ret = pool_controller.list_pools(args.json, args.cluster_id)
 
             elif sub_command == "delete":
                 ret = pool_controller.delete_pool(args.id)

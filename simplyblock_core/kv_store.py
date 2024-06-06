@@ -155,9 +155,15 @@ class DBController:
         ret = ComputeNode().read_from_db(self.kv_store)
         return ret
 
-    def get_pools(self):
-        ret = Pool().read_from_db(self.kv_store)
-        return ret
+    def get_pools(self, cluster_id=None):
+        pools = []
+        if cluster_id:
+            for pool in Pool().read_from_db(self.kv_store):
+                if pool.cluster_id == cluster_id:
+                    pools.append(pool)
+        else:
+            pools = Pool().read_from_db(self.kv_store)
+        return pools
 
     def get_pool_by_id(self, id):
         ret = Pool().read_from_db(self.kv_store, id)
@@ -173,7 +179,7 @@ class DBController:
     def get_lvols(self, cluster_id=None):
         lvols = []
         if cluster_id:
-            for pool in self.get_pools():
+            for pool in self.get_pools(cluster_id):
                 if pool.cluster_id == cluster_id:
                     for lv_id in pool.lvols:
                         lvols.append(self.get_lvol_by_id(lv_id))

@@ -140,8 +140,8 @@ def delete_pool(uuid):
     return True
 
 
-def list_pools(is_json):
-    pools = db_controller.get_pools()
+def list_pools(is_json, cluster_id=None):
+    pools = db_controller.get_pools(cluster_id)
     data = []
     for pool in pools:
         data.append({
