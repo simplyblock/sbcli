@@ -252,7 +252,7 @@ def _create_jm_device_stack(rpc_client, jm_devices, snode, after_restart):
 
 def _create_storage_device_stack(rpc_client, nvme, snode, after_restart):
     test_name = f"{nvme.nvme_bdev}_test"
-    ret = rpc_client.bdev_passtest_create(test_name, nvme.partition_main_bdev)
+    ret = rpc_client.bdev_passtest_create(test_name, nvme.nvme_bdev)
     if not ret:
         logger.error(f"Failed to create passtest bdev {test_name}")
         return False
@@ -354,8 +354,9 @@ def _prepare_cluster_devices_2(snode, devices, after_restart=False):
 
         # look for partitions
         partitioned_devices = _search_for_partitions(rpc_client, nvme)
-
-        if len(partitioned_devices) == (1 + snode.partitions_count):
+        logger.debug("partitioned_devices")
+        logger.debug(partitioned_devices)
+        if len(partitioned_devices) == (1 + snode.num_partitions_per_dev):
             logger.info("Partitioned devices found")
         elif after_restart:
             logger.error("Partitions count mismatch")
@@ -364,7 +365,7 @@ def _prepare_cluster_devices_2(snode, devices, after_restart=False):
             logger.info(f"Creating partitions for {nvme.nvme_bdev}")
             _create_device_partitions(rpc_client, nvme, snode)
             partitioned_devices = _search_for_partitions(rpc_client, nvme)
-            if len(partitioned_devices) == (1 + snode.partitions_count):
+            if len(partitioned_devices) == (1 + snode.num_partitions_per_dev):
                 logger.info("Device partitions created")
             else:
                 logger.error("Failed to create partitions")
@@ -374,6 +375,9 @@ def _prepare_cluster_devices_2(snode, devices, after_restart=False):
 
         for dev in partitioned_devices:
             new_device = _create_storage_device_stack(rpc_client, dev, snode, after_restart)
+            if not new_device:
+                logger.error("failed to create dev stack")
+                return False
             new_device.cluster_device_order = dev_order
             dev_order += 1
             new_devices.append(new_device)
@@ -403,6 +407,9 @@ def _prepare_cluster_devices(snode, after_restart=False):
         if nvme.status not in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_UNAVAILABLE, NVMeDevice.STATUS_READONLY]:
             logger.debug(f"Device is skipped: {nvme.get_id()}, status: {nvme.status}")
             continue
+
+        ret = rpc_client.get_bdevs(nvme.nvme_bdev)
+        nvme_dict = ret[0]
 
         if nvme.partition_main_bdev and nvme.partition_jm_bdev:
             logger.info(f"Device partitions found, JM: {nvme.partition_jm_bdev}, main: {nvme.partition_main_bdev}")
@@ -575,7 +582,7 @@ def _connect_to_remote_devs(this_node):
 def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask,
              spdk_mem, spdk_image=None, spdk_debug=False,
              small_pool_count=0, large_pool_count=0, small_bufsize=0, large_bufsize=0,
-             num_partitions_per_dev=0, jm_percent=3):
+             num_partitions_per_dev=0, jm_percent=0):
     db_controller = DBController()
     kv_store = db_controller.kv_store
 
@@ -769,18 +776,6 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask,
     if not nvme_devs:
         logger.error("No NVMe devices was found!")
         return False
-
-    # snode.nvme_devices = nvme_devs
-
-    # # Set device cluster order
-    # dev_order = get_next_cluster_device_order(db_controller)
-    # for index, nvme in enumerate(snode.nvme_devices):
-    #     nvme.cluster_device_order = dev_order
-    #     dev_order += 1
-    #     device_events.device_create(nvme)
-    #
-    # # save object
-    # snode.write_to_db(db_controller.kv_store)
 
     # prepare devices
     ret = _prepare_cluster_devices_2(snode, nvme_devs, after_restart=False)
@@ -1213,7 +1208,7 @@ def restart_storage_node(
     for dev in nvme_devs:
         if dev.serial_number not in known_devices_sn:
             logger.info(f"New device found: {dev.get_id()}")
-            dev.status = 'new'
+            dev.status = NVMeDevice.STATUS_NEW
             new_devices.append(dev)
             snode.nvme_devices.append(dev)
 
@@ -1223,7 +1218,7 @@ def restart_storage_node(
         dev_order += 1
 
     # prepare devices
-    ret = _prepare_cluster_devices(snode, after_restart=True)
+    ret = _prepare_cluster_devices_2(snode, nvme_devs, after_restart=True)
     if not ret:
         logger.error("Failed to prepare cluster devices")
         return False

@@ -40,7 +40,7 @@ class CLIWrapper:
         sub_command.add_argument("cluster_id", help='UUID of the cluster to which the node will belong')
         sub_command.add_argument("node_ip", help='IP of storage node to add')
         sub_command.add_argument("ifname", help='Management interface name')
-        sub_command.add_argument("--partitions", help='Number of partitions to create per device', type=int, default=0)
+        sub_command.add_argument("--partitions", help='Number of partitions to create per device', type=int, default=1)
         sub_command.add_argument("--jm-percent", help='Number in percent to use for JM from each device',
                                  type=int, default=3, dest='jm_percent')
         sub_command.add_argument("--data-nics", help='Data interface names', nargs='+', dest='data_nics')
