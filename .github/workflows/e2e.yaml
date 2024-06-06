@@ -75,6 +75,7 @@ jobs:
         run: |
           cd $GITHUB_WORKSPACE/simplyBlockDeploy
           terraform apply tfplan
+        id: apply_terraform_changes
 
       - name: Bootstrap Cluster
         run: |
@@ -87,13 +88,15 @@ jobs:
       - name: Setup Tests
         run: |
           cd $GITHUB_WORKSPACE/e2e
-          python3 -m pip install -r requirements.txt
+          python3 -m venv myenv
+          source myenv/bin/activate
+          pip install -r requirements.txt
           echo "Running tests in namespace ${{ steps.get-namespace.outputs.namespace }}"
           export CLUSTER_ID=${{ steps.bootstrap_cluster.outputs.cluster_id }}
           export CLUSTER_SECRET=${{ steps.bootstrap_cluster.outputs.cluster_secret }}
           export CLUSTER_IP=${{ steps.bootstrap_cluster.outputs.cluster_ip }}
           export API_BASE_URL=${{ steps.bootstrap_cluster.outputs.cluster_api_gateway_endpoint }}
-          export BASTION_SERVER=${ terraform output -raw bastion_public_ip }
+          export BASTION_SERVER=${{ steps.apply_terraform_changes.outputs.bastion_public_ip }}
 
       - name: Run tests
         run: |
