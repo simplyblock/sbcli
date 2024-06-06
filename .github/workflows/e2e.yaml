@@ -75,8 +75,12 @@ jobs:
         run: |
           cd $GITHUB_WORKSPACE/simplyBlockDeploy
           terraform apply tfplan
-        id: apply_terraform_changes
 
+      - name: Get Terraform Outputs
+        id: terraform_outputs
+        run: |
+          output_value=$(terraform output -raw bastion_public_ip)
+          echo "::set-output name=bastion_public_ip::$output_value"
       - name: Bootstrap Cluster
         run: |
           cd $GITHUB_WORKSPACE/simplyBlockDeploy
@@ -88,19 +92,21 @@ jobs:
       - name: Setup Tests
         run: |
           cd $GITHUB_WORKSPACE/e2e
+          sudo apt-get install -y python3.12-venv
           python3 -m venv myenv
           source myenv/bin/activate
-          pip install -r requirements.txt
+          python3 -m pip install -r requirements.txt
           echo "Running tests in namespace ${{ steps.get-namespace.outputs.namespace }}"
           export CLUSTER_ID=${{ steps.bootstrap_cluster.outputs.cluster_id }}
           export CLUSTER_SECRET=${{ steps.bootstrap_cluster.outputs.cluster_secret }}
           export CLUSTER_IP=${{ steps.bootstrap_cluster.outputs.cluster_ip }}
           export API_BASE_URL=${{ steps.bootstrap_cluster.outputs.cluster_api_gateway_endpoint }}
-          export BASTION_SERVER=${{ steps.apply_terraform_changes.outputs.bastion_public_ip }}
+          export BASTION_SERVER=${{ steps.terraform_outputs.outputs.bastion_public_ip }}
 
       - name: Run tests
         run: |
           cd $GITHUB_WORKSPACE/e2e
+          source myenv/bin/activate
           python3 e2e.py
 
       - name: Upload docker logs to s3
