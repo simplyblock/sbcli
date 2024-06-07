@@ -132,6 +132,8 @@ services:
     ports:
       - 80:80
       - 8404:8404
+      - 9000:9000
+      - 3000:3000
     volumes:
       - "$DIR/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg"
 
