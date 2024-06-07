@@ -265,8 +265,8 @@ class SbcliUtils:
             "max_rw_mbytes": "0",
             "max_r_mbytes": "0",
             "max_w_mbytes": "0",
-            "distr-ndcs": str(distr_ndcs),
-            "distr-npcs": str(distr_npcs)
+            "distr_ndcs": str(distr_ndcs),
+            "distr_npcs": str(distr_npcs)
         }
         self.post_request(api_url="/lvol", body=body)
 
