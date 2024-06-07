@@ -34,6 +34,8 @@ def get_csi_response(data, error=None, http_code=None):
     if error:
         resp['error']['code'] = 1
         resp['error']['message'] = error
+        if http_code:
+            return jsonify(resp), http_code
         return jsonify(resp)
     if data is not None:
         resp['result'] = data

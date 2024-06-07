@@ -85,7 +85,7 @@ def list_caching_nodes(uuid):
 @bp.route('/cachingnode/systemid/<string:uuid>', methods=['GET'])
 def get_caching_node_by_system_id(uuid):
     if not uuid:
-        return utils.get_csi_response(None, "missing required url param: uuid", 400)
+        return utils.get_response(None, "missing required url param: uuid", 400)
 
     nodes = db_controller.get_caching_nodes()
     node_found = None
@@ -110,7 +110,7 @@ def caching_node_connect(uuid):
 
     cl_data = request.get_json()
     if 'lvol_id' not in cl_data:
-        return utils.get_csi_response(None, "missing required param: lvol_id", 400)
+        return utils.get_response(None, "missing required param: lvol_id", 400)
 
     lvol_id = cl_data['lvol_id']
     lvol = db_controller.get_lvol_by_id(lvol_id)
@@ -119,7 +119,7 @@ def caching_node_connect(uuid):
 
     ret = caching_node_controller.connect(cnode.get_id(), lvol.get_id())
 
-    return utils.get_csi_response(ret)
+    return utils.get_response(ret)
 
 
 @bp.route('/cachingnode/disconnect/<string:uuid>', methods=['PUT'])
@@ -130,7 +130,7 @@ def caching_node_disconnect(uuid):
 
     cl_data = request.get_json()
     if 'lvol_id' not in cl_data:
-        return utils.get_csi_response(None, "missing required param: lvol_id", 400)
+        return utils.get_response(None, "missing required param: lvol_id", 400)
 
     lvol_id = cl_data['lvol_id']
     lvol = db_controller.get_lvol_by_id(lvol_id)
@@ -139,7 +139,7 @@ def caching_node_disconnect(uuid):
 
     ret = caching_node_controller.disconnect(cnode.get_id(), lvol.get_id())
 
-    return utils.get_csi_response(ret)
+    return utils.get_response(ret)
 
 
 @bp.route('/cachingnode/lvols/<string:uuid>', methods=['GET'])
@@ -162,7 +162,7 @@ def caching_node_list_lvols(uuid):
             "Status": lvol.status,
         })
 
-    return utils.get_csi_response(data)
+    return utils.get_response(data)
 
 
 @bp.route('/cachingnode/recreate/<string:hostname>', methods=['GET'])
