@@ -6,8 +6,8 @@ from logger_config import setup_logger
 class SbcliUtils:
     """Contains all API calls
     """
-    
-    def __init__(self, cluster_ip, url, cluster_secret, 
+
+    def __init__(self, cluster_ip, url, cluster_secret,
                  cluster_api_url, cluster_id):
         self.cluster_ip = cluster_ip
         self.cluster_id = cluster_id
@@ -108,7 +108,7 @@ class SbcliUtils:
         """
         # TODO: parse and display error accordingly: {'results': True, 'status': True}
         self.logger.info(f"Shutting down node with uuid: {node_uuid}")
-        data = self.get_request(api_url=f"/storagenode/shutdown/{node_uuid}")
+        self.get_request(api_url=f"/storagenode/shutdown/{node_uuid}")
 
 
     def suspend_node(self, node_uuid: str):
@@ -116,7 +116,7 @@ class SbcliUtils:
         given a node_UUID, suspends the node
         """
         # TODO: parse and display error accordingly: {'results': True, 'status': True}
-        data = self.get_request(api_url=f"/storagenode/suspend/{node_uuid}")
+        self.get_request(api_url=f"/storagenode/suspend/{node_uuid}")
 
 
     def resume_node(self, node_uuid: str):
@@ -124,21 +124,21 @@ class SbcliUtils:
         given a node_UUID, resumes the node
         """
         # TODO: parse and display error accordingly: {'results': True, 'status': True}
-        data = self.get_request(api_url=f"/storagenode/resume/{node_uuid}")
+        self.get_request(api_url=f"/storagenode/resume/{node_uuid}")
 
     def restart_node(self, node_uuid: str):
         """
         given a node_UUID, restarts the node
         """
         # TODO: parse and display error accordingly: {'results': True, 'status': True}
-        data = self.get_request(api_url=f"/storagenode/restart/{node_uuid}")
+        self.get_request(api_url=f"/storagenode/restart/{node_uuid}")
 
     def get_all_nodes_ip(self):
         """Return all nodes part of cluster
         """
         management_nodes = []
         storage_nodes = []
-        
+
         data = self.get_management_nodes()
 
         for nodes in data["results"]:
@@ -150,19 +150,19 @@ class SbcliUtils:
             storage_nodes.append(nodes["mgmt_ip"])
 
         return management_nodes, storage_nodes
-    
+
     def get_management_nodes(self):
         """Return management nodes part of cluster
         """
         data = self.get_request(api_url="/mgmtnode/")
         return data
-    
+
     def get_storage_nodes(self):
         """Return storage nodes part of cluster
         """
         data = self.get_request(api_url="/storagenode/")
         return data
-    
+
     def list_storage_pools(self):
         """Return storage pools
         """
@@ -170,11 +170,11 @@ class SbcliUtils:
         data = self.get_request(api_url="/pool")
         for pool_info in data["results"]:
             pool_data[pool_info["pool_name"]] = pool_info["id"]
-            
+
         return pool_data
-    
+
     def get_pool_by_id(self, pool_id):
-        """Return storage pool with given id 
+        """Return storage pool with given id
         """
         data = self.get_request(api_url=f"/pool/{pool_id}")
 
@@ -188,7 +188,7 @@ class SbcliUtils:
             if name == pool_name:
                 print(f"Pool {pool_name} already exists. Exiting")
                 return
-        
+
         body = {
             "name": pool_name,
             "max_rw_iops": str(max_rw_iops),
@@ -196,7 +196,7 @@ class SbcliUtils:
             "max_r_mbytes": str(max_rw_iops),
             "max_w_mbytes": str(max_rw_iops),
         }
-        data = self.post_request(api_url="/pool", body=body)
+        self.post_request(api_url="/pool", body=body)
         # TODO: Add assertions
 
     def get_storage_pool_id(self, pool_name):
@@ -216,15 +216,15 @@ class SbcliUtils:
         if not pool_id:
             self.logger.info("Pool does not exist. Exiting")
             return
-        
+
         pool_data = self.get_pool_by_id(pool_id=pool_id)
 
         header = self.headers.copy()
         header["secret"] = pool_data["results"][0]["secret"]
 
-        data = self.delete_request(api_url=f"/pool/{pool_id}",
+        self.delete_request(api_url=f"/pool/{pool_id}",
                                    headers=header)
-    
+
     def delete_all_storage_pools(self):
         """Deletes all the storage pools
         """
@@ -243,7 +243,7 @@ class SbcliUtils:
             lvol_data[lvol_info["lvol_name"]] = lvol_info["id"]
             self.logger.info(f"Lvol hostname: {lvol_info['hostname']}")
         return lvol_data
-    
+
     def get_lvol_by_id(self, lvol_id):
         """Return all lvol with given id
         """
@@ -276,20 +276,20 @@ class SbcliUtils:
             "distr_bs": str(distr_bs),
             "distr_chunk_bs": str(distr_chunk_bs),
         }
-        data = self.post_request(api_url="/lvol", body=body)
+        self.post_request(api_url="/lvol", body=body)
 
     def delete_lvol(self, lvol_name):
         """Deletes lvol with given name
         """
         lvol_id = self.get_lvol_id(lvol_name=lvol_name)
-        
+
         if not lvol_id:
             self.logger.info("Lvol does not exist. Exiting")
             return
 
         data = self.delete_request(api_url=f"/lvol/{lvol_id}")
         self.logger.info(f"Delete lvol resp: {data}")
-    
+
     def delete_all_lvols(self):
         """Deletes all lvols
         """
@@ -319,7 +319,7 @@ class SbcliUtils:
         data = self.get_request(api_url=f"/lvol/connect/{lvol_id}")
         self.logger.info(f"Connect lvol resp: {data}")
         return data["result"][0]["connect"]
-    
+
     def get_cluster_status(self, cluster_id=None):
         """Return cluster status for given cluster id
         """
@@ -338,7 +338,7 @@ class SbcliUtils:
     def get_device_details(self, storage_node_id):
         """Get Device details for given node id
         """
-        device_details = self.get_request(api_url=f"/device/list/{storage_node_id}")            
+        device_details = self.get_request(api_url=f"/device/list/{storage_node_id}")
         # print(f"Device Details: {device_details}")
         return device_details["results"]
 
@@ -348,7 +348,7 @@ class SbcliUtils:
         lvol_details = self.get_request(api_url=f"/lvol/{lvol_id}")
         # print(f"Lvol Details: {lvol_details}")
         return lvol_details["results"]
-    
+
     def get_cluster_logs(self, cluster_id=None):
         """Get Cluster logs for given cluster id
         """

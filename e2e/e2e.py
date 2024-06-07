@@ -1,6 +1,5 @@
 ### simplyblock e2e tests
 import argparse
-import time
 import traceback
 from __init__ import get_all_tests
 from logger_config import setup_logger
@@ -45,7 +44,7 @@ def main():
         except Exception as exp:
             logger.error(traceback.format_exc())
             errors[f"{test}"].append(exp)
-    
+
     for test, exception in errors.items():
         logger.error(f"Raising exception for test: {test}")
         for exc in exception:

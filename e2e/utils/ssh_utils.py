@@ -1,10 +1,10 @@
-import time
 import paramiko
-from io import BytesIO
+import os
 from logger_config import setup_logger
+from pathlib import Path
 
+SSH_KEY_LOCATION = os.path.join(Path.home(), ".ssh", os.environ.get("KEY_NAME"))
 
-SSH_KEY_LOCATION = '/mnt/c/Users/Raunak Jalan/.ssh/simplyblock-us-east-2.pem'
 
 class SshUtils:
     """Class to perform all ssh level operationa
@@ -33,6 +33,8 @@ class SshUtils:
         ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
 
         # Load the private key
+        if not os.path.exists(SSH_KEY_LOCATION):
+            raise FileNotFoundError(f"SSH private key not found at {SSH_KEY_LOCATION}")
         private_key = paramiko.Ed25519Key(filename=SSH_KEY_LOCATION)
 
         # Connect to the proxy server first
@@ -70,9 +72,6 @@ class SshUtils:
                            timeout=3600)
         self.logger.info("Connected to target server through proxy.")
 
-        # stdin, stdout, stderr = target_ssh.exec_command('sudo lsblk')
-        # print("Output: ", stdout.read().decode())
-        
         if self.ssh_connections.get(address, None):
             self.ssh_connections[address].close()
         self.ssh_connections[address] = target_ssh
@@ -97,12 +96,12 @@ class SshUtils:
             ssh_connection = self.ssh_connections[node]
         self.logger.info(f"Command: {command}")
         output = ""
-        stdin, stdout, stderr = ssh_connection.exec_command(command)
+        _stdin, stdout, _stderr = ssh_connection.exec_command(command)
         output = stdout.read().decode()
         self.logger.debug(f"Output: {output}")
 
         return output
-    
+
     def exec_command_background(self, node, command, log_file=None):
         """Executes command on given machine in background
 
@@ -120,10 +119,9 @@ class SshUtils:
             )
             ssh_connection = self.ssh_connections[node]
         channel = ssh_connection.get_transport().open_session()
-        # log_file = log_file if log_file else "/dev/null"
         self.logger.info(f"Command: {command}")
         channel.exec_command(f'{command} >> {log_file} &')
-    
+
     def format_disk(self, node, device):
         """Format disk on the given node
 
@@ -132,7 +130,7 @@ class SshUtils:
             device (str): Device path
         """
         command = f"sudo mkfs.xfs -t ext4 {device}"
-        stdout = self.exec_command(node, command)
+        self.exec_command(node, command)
 
     def mount_path(self, node, device, mount_path):
         """Mount device to given path on given node
@@ -147,7 +145,7 @@ class SshUtils:
             self.exec_command(node, command)
         except Exception as e:
             self.logger.info(e)
-        
+
         command = f"sudo mkdir {mount_path}"
         self.exec_command(node, command)
 
@@ -174,7 +172,7 @@ class SshUtils:
         output = self.exec_command(node, command)
 
         return output.strip().split("\n")[1:]
-    
+
     def run_fio_test(self, node, device=None, directory=None, log_file=None, **kwargs):
         """Run FIO Tests with given params
 
@@ -191,12 +189,12 @@ class SshUtils:
             location = f"--directory={directory}"
         command = (f"sudo fio --name=test {location} --ioengine=libaio "
                    "--direct=1 --iodepth=1 --time_based --runtime=3600 --rw=randrw --bs=4K --size=10MiB "
-                   "--verify=md5 --numjobs=1 --verify_dump=1 --verify_fatal=0 --verify_state_save=1 --verify_backlog=10") 
-        
+                   "--verify=md5 --numjobs=1 --verify_dump=1 --verify_fatal=0 --verify_state_save=1 --verify_backlog=10")
+
         self.exec_command_background(node=node,
                                      command=command,
                                      log_file=log_file)
-        
+    
     def find_process_name(self, node, process_name, return_pid=False):
         if return_pid:
             command = "ps -ef | grep -i %s | awk '{print $2}'" % process_name

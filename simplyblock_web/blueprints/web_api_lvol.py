@@ -86,7 +86,7 @@ def add_lvol():
         | comp            | Create a new compress LVol
         | crypto          | Create a new crypto LVol
         | snapshot        | Create a Lvol with snapshot capability
-        | max-rw-iops     | Maximum Read Write IO Per Second
+        | max_rw_iops     | Maximum Read Write IO Per Second
         | max_rw_mbytes   | Maximum Read Write Mega Bytes Per Second
         | max_r_mbytes    | Maximum Read Mega Bytes Per Second
         | max_w_mbytes    | Maximum Write Mega Bytes Per Second
@@ -144,7 +144,7 @@ def add_lvol():
     distr_vuid = utils.get_int_value_or_default(cl_data, "distr_vuid", 0)
     distr_ndcs = utils.get_int_value_or_default(cl_data, "distr_ndcs", 0)
     distr_npcs = utils.get_int_value_or_default(cl_data, "distr_npcs", 0)
-    distr_bs = utils.get_int_value_or_default(cl_data, "distr_ps", 4096)
+    distr_bs = utils.get_int_value_or_default(cl_data, "distr_bs", 4096)
     distr_chunk_bs = utils.get_int_value_or_default(cl_data, "distr_chunk_bs", 4096)
     crypto_key1 = utils.get_value_or_default(cl_data, "crypto_key1", None)
     crypto_key2 = utils.get_value_or_default(cl_data, "crypto_key2", None)

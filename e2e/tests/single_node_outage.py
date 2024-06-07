@@ -42,25 +42,25 @@ class TestSingleNodeOutage:
     5. Mount Device
     6. Start FIO tests
     7. While FIO is running, validate this scenario:
-        a. In a cluster with three nodes, select one node, which does not 
+        a. In a cluster with three nodes, select one node, which does not
            have any lvol attached.
-        b. Suspend the Node via API or CLI while the fio test is running. 
-        c. Shutdown the Node via API or CLI while the fio test is running. 
-        d. Check status of objects during outage: 
+        b. Suspend the Node via API or CLI while the fio test is running.
+        c. Shutdown the Node via API or CLI while the fio test is running.
+        d. Check status of objects during outage:
             - the node is in status “offline”
             - the devices of the node are in status “unavailable”
-            - lvols remain in “online” state 
-            - the event log contains the records indicating the object status 
+            - lvols remain in “online” state
+            - the event log contains the records indicating the object status
               changes; the event log also contains records indicating read and
               write IO errors.
             - select a cluster map from any of the two lvols (lvol get-cluster-map)
-              and verify that the status changes of the node and devices are reflected in 
+              and verify that the status changes of the node and devices are reflected in
               the other cluster map. Other two nodes and 4 devices remain online.
             - health-check status of all nodes and devices is “true”
         e. check that fio remains running without interruption.
 
     8. Restart the node again.
-        a. check the status again: 
+        a. check the status again:
             - the status of all nodes is “online”
             - all devices in the cluster are in status “online”
             - the event log contains the records indicating the object status changes
@@ -129,19 +129,18 @@ class TestSingleNodeOutage:
         pools = self.sbcli_utils.list_storage_pools()
         assert self.pool_name in list(pools.keys()), \
             f"Pool {self.pool_name} not present in list of pools: {pools}"
-        
+
         self.sbcli_utils.delete_storage_pool(
             pool_name=self.pool_name
         )
         pools = self.sbcli_utils.list_storage_pools()
         assert self.pool_name not in list(pools.keys()), \
             f"Pool {self.pool_name} present in list of pools post delete: {pools}"
-        
+
         self.sbcli_utils.add_storage_pool(
             pool_name=self.pool_name
         )
-        
-        lvol = self.sbcli_utils.list_lvols()
+
         self.sbcli_utils.add_lvol(
             lvol_name=self.lvol_name,
             pool_name=self.pool_name,
@@ -150,10 +149,10 @@ class TestSingleNodeOutage:
         lvols = self.sbcli_utils.list_lvols()
         assert self.lvol_name in list(lvols.keys()), \
             f"Lvol {self.lvol_name} present in list of lvols post add: {lvols}"
-        
+
         connect_str = self.sbcli_utils.get_lvol_connect_str(lvol_name=self.lvol_name)
 
-        self.ssh_obj.exec_command(node=self.mgmt_nodes[0], 
+        self.ssh_obj.exec_command(node=self.mgmt_nodes[0],
                                   command=connect_str)
 
         final_devices = self.ssh_obj.get_devices(node=self.mgmt_nodes[0])
@@ -173,11 +172,11 @@ class TestSingleNodeOutage:
         self.ssh_obj.mount_path(node=self.mgmt_nodes[0],
                                 device=disk_use,
                                 mount_path=self.mount_path)
-        
+
         self.ssh_obj.run_fio_test(node=self.mgmt_nodes[0],
                                   directory=self.mount_path,
                                   log_file=self.log_path)
-        
+
         no_lvol_node_uuid = self.sbcli_utils.get_node_without_lvols()
 
         self.logger.info("Getting lvol status before shutdown")
@@ -187,7 +186,7 @@ class TestSingleNodeOutage:
             self.logger.info(f"LVOL STATUS: {lvol['status']}")
             assert lvol["status"] == "online", \
                 f"Lvol {lvol['id']} is not in online state. {lvol['status']}"
-        
+
         self.validations(node_uuid=no_lvol_node_uuid,
                          node_status="online",
                          device_status="online",
@@ -207,7 +206,7 @@ class TestSingleNodeOutage:
                          lvol_status="online",
                          health_check_status=True
                          )
-                
+
         self.sbcli_utils.restart_node(node_uuid=no_lvol_node_uuid)
 
         self.logger.info("Sleeping for 10 seconds")
@@ -219,20 +218,20 @@ class TestSingleNodeOutage:
                          lvol_status="online",
                          health_check_status=True
                          )
-        
+
         # Write steps in order
         steps = {
             "Storage Node": ["suspended", "shutdown", "restart"],
             "Device": {"restart"}
         }
-        self.test_utils.validate_event_logs(cluster_id=cluster_id, 
+        self.test_utils.validate_event_logs(cluster_id=cluster_id,
                                             operations=steps)
-        
+
         self.ssh_obj.kill_processes(
             node=self.mgmt_nodes[0],
             process_name="fio"
         )
-        
+
         self.test_utils.validate_fio_test(node=self.mgmt_nodes[0],
                                           log_file=self.log_path)
 
@@ -272,11 +271,11 @@ class TestSingleNodeOutage:
                 assert device["status"] == device_status, \
                     f"Device {device['id']} is not in {device_status} state. {device['status']}"
                 offline_device = device['id']
-        
+
         for lvol in lvol_details:
             assert lvol["status"] == lvol_status, \
                 f"Lvol {lvol['id']} is not in {lvol_status} state. {lvol['status']}"
-        
+
         storage_nodes = self.sbcli_utils.get_storage_nodes()["results"]
         for node in storage_nodes:
             assert node["health_check"] == health_check_status, \
@@ -285,7 +284,7 @@ class TestSingleNodeOutage:
             for device in device_details:
                 assert device["health_check"] == health_check_status, \
                     f"Device {device['id']} health-check is not {health_check_status}. {device['health_check']}"
-                
+
         for node_id, node in cluster_map_nodes.items():
             if node_id == node_uuid:
                 assert node["Reported Status"] == node_status, \
@@ -297,7 +296,7 @@ class TestSingleNodeOutage:
                     f"Node {node_uuid} is not in online state. {node['Reported Status']}"
                 assert node["Actual Status"] == "online", \
                     f"Node {node_uuid} is not in online state. {node['Actual Status']}"
-                
+
         for device_id, device in cluster_map_devices.items():
             if device_id == offline_device:
                 assert device["Reported Status"] == device_status, \
