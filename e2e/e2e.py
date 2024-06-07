@@ -1,16 +1,37 @@
 ### simplyblock e2e tests
+import argparse
 import time
 import traceback
 from __init__ import get_all_tests
 from logger_config import setup_logger
+from exceptions.custom_exception import TestNotFoundException
 
 
 def main():
     """Run complete test suite
     """
+    parser = argparse.ArgumentParser(description="Run simplyBlock's E2E Test Framework")
+    parser.add_argument('--testname', type=str, help="The name of the test to run", default=None)
+
+    args = parser.parse_args()
+
     tests = get_all_tests()
+    # Find the test class based on the provided test name
+    test_class_run = []
+    if args.testname is None:
+        test_class_run = tests
+    else:
+        for cls in tests:
+            if args.testname.lower() in cls.__name__.lower():
+                test_class_run.append(cls)
+
+    if not test_class_run:
+        available_tests = ', '.join(cls.__name__ for cls in tests)
+        print(f"Test '{args.testname}' not found. Available tests are: {available_tests}")
+        raise TestNotFoundException(args.testname, available_tests)
+    
     errors = {}
-    for test in tests:
+    for test in test_class_run:
         logger.info(f"Running Test {test}")
         test_obj = test()
         try:

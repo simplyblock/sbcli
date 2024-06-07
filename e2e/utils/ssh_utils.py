@@ -196,6 +196,18 @@ class SshUtils:
         self.exec_command_background(node=node,
                                      command=command,
                                      log_file=log_file)
+        
+    def find_process_name(self, node, process_name, return_pid=False):
+        if return_pid:
+            command = "ps -ef | grep -i %s | awk '{print $2}'" % process_name
+        else:
+            command = "ps -ef | grep -i %s" % process_name
+        output = self.exec_command(node=node,
+                                    command=command)
+                                    
+        data = output.strip().split("\n")
+
+        return data
     
     def kill_processes(self, node, pid=None, process_name=None):
         """Kill the given process
@@ -210,10 +222,9 @@ class SshUtils:
             command = kill_command % pid
             self.exec_command(node, command)
         if process_name:
-            command = "ps -ef | grep -i %s | awk '{print $2}'" % process_name
-            output = self.exec_command(node=node,
-                                       command=command)
-            pids = output.strip().split("\n")
+            pids = self.find_process_name(node=node,
+                                          process_name=process_name,
+                                          return_pid=True)
             for pid in pids:
                 command = kill_command % pid.strip()
                 self.exec_command(node, command)

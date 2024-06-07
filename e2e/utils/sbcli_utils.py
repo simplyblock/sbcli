@@ -180,7 +180,7 @@ class SbcliUtils:
 
         return data
 
-    def add_storage_pool(self, pool_name):
+    def add_storage_pool(self, pool_name, max_rw_iops=0, max_rw_mbytes=0, max_r_mbytes=0, max_w_mbytes=0):
         """Adds the storage with given name
         """
         pools = self.list_storage_pools()
@@ -190,7 +190,11 @@ class SbcliUtils:
                 return
         
         body = {
-            "name": pool_name
+            "name": pool_name,
+            "max_rw_iops": str(max_rw_iops),
+            "max_rw_mbytes": str(max_rw_iops),
+            "max_r_mbytes": str(max_rw_iops),
+            "max_w_mbytes": str(max_rw_iops),
         }
         data = self.post_request(api_url="/pool", body=body)
         # TODO: Add assertions
@@ -246,7 +250,9 @@ class SbcliUtils:
         data = self.get_request(api_url=f"/lvol/{lvol_id}")
         return data
 
-    def add_lvol(self, lvol_name, pool_name, size="256M", distr_ndcs=1, distr_npcs=1):
+    def add_lvol(self, lvol_name, pool_name, size="256M", distr_ndcs=1, distr_npcs=1,
+                 distr_bs=4096, distr_chunk_bs=4096, max_rw_iops=0, max_rw_mbytes=0,
+                 max_r_mbytes=0, max_w_mbytes=0):
         """Adds lvol with given params
         """
         lvols = self.list_lvols()
@@ -261,12 +267,14 @@ class SbcliUtils:
             "pool": pool_name,
             "comp": False,
             "crypto": False,
-            "max_rw_iops": "0",
-            "max_rw_mbytes": "0",
-            "max_r_mbytes": "0",
-            "max_w_mbytes": "0",
-            "distr-ndcs": str(distr_ndcs),
-            "distr-npcs": str(distr_npcs)
+            "max_rw_iops": str(max_rw_iops),
+            "max_rw_mbytes": str(max_rw_mbytes),
+            "max_r_mbytes": str(max_r_mbytes),
+            "max_w_mbytes": str(max_w_mbytes),
+            "distr_ndcs": str(distr_ndcs),
+            "distr_npcs": str(distr_npcs),
+            "distr_bs": str(distr_bs),
+            "distr_chunk_bs": str(distr_chunk_bs),
         }
         data = self.post_request(api_url="/lvol", body=body)
 

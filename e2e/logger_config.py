@@ -1,15 +1,18 @@
 import logging
+import os
 from datetime import datetime
 
 def setup_logger(name):
     # Create a custom logger
     logger = logging.getLogger(name)
     logger.setLevel(logging.DEBUG)
+    
+    os.makedirs("logs", exist_ok=True)
 
     # Create a file handler
     current_datetime = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     # Create a file handler with datetime-appended log file name
-    log_file = f"log_{current_datetime}.log"
+    log_file = os.path.join("logs" ,f"log_{current_datetime}.log")
     f_handler = logging.FileHandler(log_file)
     f_handler.setLevel(logging.DEBUG)
 
