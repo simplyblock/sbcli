@@ -46,7 +46,7 @@ def _add_graylog_input(cluster_ip, password):
     return response.status_code == 201
 
 
-def create_cluster(blk_size, page_size_in_blocks, ha_type, cli_pass,
+def create_cluster(blk_size, page_size_in_blocks, cli_pass,
                    cap_warn, cap_crit, prov_cap_warn, prov_cap_crit, ifname, log_del_interval, metrics_retention_period):
     logger.info("Installing dependencies...")
     ret = scripts.install_deps()
@@ -89,7 +89,6 @@ def create_cluster(blk_size, page_size_in_blocks, ha_type, cli_pass,
     c.uuid = str(uuid.uuid4())
     c.blk_size = blk_size
     c.page_size_in_blocks = page_size_in_blocks
-    c.ha_type = ha_type
     c.nqn = f"{constants.CLUSTER_NQN}:{c.uuid}"
     c.cli_pass = cli_pass
     c.secret = utils.generate_string(20)
@@ -114,8 +113,7 @@ def create_cluster(blk_size, page_size_in_blocks, ha_type, cli_pass,
     _add_graylog_input(DEV_IP, c.secret)
 
     c.status = Cluster.STATUS_ACTIVE
-    if ha_type == 'ha':
-        c.status = Cluster.STATUS_SUSPENDED
+
     c.updated_at = int(time.time())
     c.write_to_db(db_controller.kv_store)
 
@@ -355,7 +353,7 @@ def join_cluster(cluster_ip, cluster_id, role, ifname, data_nics,  spdk_cpu_mask
     logger.info("Node joined the cluster")
 
 
-def add_cluster(blk_size, page_size_in_blocks, model_ids, ha_type, tls,
+def add_cluster(blk_size, page_size_in_blocks, model_ids, tls,
                 auth_hosts_only, dhchap, nqn, iscsi, cli_pass):
     db_controller = DBController()
     logger.info("Adding new cluster")
@@ -364,7 +362,6 @@ def add_cluster(blk_size, page_size_in_blocks, model_ids, ha_type, tls,
     c.blk_size = blk_size
     c.page_size_in_blocks = page_size_in_blocks
     c.model_ids = model_ids
-    c.ha_type = ha_type
     c.tls = tls
     c.auth_hosts_only = auth_hosts_only
     c.nqn = nqn

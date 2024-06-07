@@ -137,15 +137,25 @@ class CLIWrapper:
         sub_command.add_argument("device_id", help='the devices\'s UUID')
 
         # Reset storage device
-        sub_command = self.add_sub_command(subparser, "reset-device", 'Reset storage device')
+        sub_command = self.add_sub_command(
+            subparser, "reset-device", 'Reset storage device',
+            usage="Hardware device reset. Resetting the device can return the device from an "
+                  "unavailable into online state, if successful")
         sub_command.add_argument("device_id", help='the devices\'s UUID')
 
         # Reset storage device
-        sub_command = self.add_sub_command(subparser, "restart-device", 'Re add "removed" storage device')
+        sub_command = self.add_sub_command(subparser, "restart-device", 'Re add "removed" storage device',
+                                           usage="a previously removed or unavailable device may be returned into "
+                                                 "online state. If the device is not physically present, accessible "
+                                                 "or healthy, it will flip back into unavailable state again.")
         sub_command.add_argument("id", help='the devices\'s UUID')
 
         # Add a new storage device
-        sub_command = self.add_sub_command(subparser, 'add-device', 'Add a new storage device')
+        sub_command = self.add_sub_command(subparser, 'add-device', 'Add a new storage device',
+                                           usage="Adding a device will include a previously detected device "
+                                                 "(currently in \"new\" state) into cluster and will launch and "
+                                                 "auto-rebalancing background process in which some cluster "
+                                                 "capacity is re-distributed to this newly added device.")
         sub_command = self.add_sub_command(
             subparser, 'remove-device', 'Remove a storage device.', usage='The device will become unavailable, independently '
                                         'if it was physically removed from the server. This function can be used if '
@@ -170,10 +180,7 @@ class CLIWrapper:
                                                    'for XX days and YY hours -up to 10 days in total-, format: XXdYYh')
 
         sub_command = self.add_sub_command(
-            subparser, 'get-io-stats-device', 'Returns the io statistics.', usage='If --history is not selected, this is '
-                                              'a monitor, which updates current statistics records every two seconds '
-                                              '(similar to ping):read-iops write-iops total-iops read-mbs '
-                                              'write-mbs total-mbs')
+            subparser, 'get-io-stats-device', 'Returns device IO statistics')
         sub_command.add_argument("device_id", help='Storage device ID')
         sub_command.add_argument("--history", help='list history records -one for every 15 minutes- '
                                                    'for XX days and YY hours -up to 10 days in total-, format: XXdYYh')
@@ -217,9 +224,6 @@ class CLIWrapper:
         sub_command.add_argument(
             "--page_size", help='The size of a data page in bytes', type=int, default=2097152)
 
-        sub_command.add_argument(
-            "--ha_type", help='Can be "single" for single node clusters or  "HA", which requires at least 3 nodes',
-            choices=["single", "ha"], default='single')
         sub_command.add_argument("--CLI_PASS", help='Password for CLI SSH connection', required=False)
         sub_command.add_argument("--cap-warn", help='Capacity warning level in percent, default=80',
                                  type=int, required=False, dest="cap_warn")
@@ -265,9 +269,7 @@ class CLIWrapper:
                                                    'for XX days and YY hours (up to 10 days in total).')
 
         sub_command = self.add_sub_command(
-            subparser, 'get-io-stats', 'Returns the io statistics.', usage='If --history is not selected, this is a monitor, '
-                                       'which updates current statistics records every two seconds '
-                                       '(similar to ping):read-iops write-iops total-iops read-mbs write-mbs total-mbs')
+            subparser, 'get-io-stats', 'Returns cluster IO statistics.')
         sub_command.add_argument("cluster_id", help='the cluster UUID')
         sub_command.add_argument("--records", help='Number of records, default: 20', type=int, default=20)
         sub_command.add_argument("--history", help='(XXdYYh), list history records (one for every 15 minutes) '
@@ -278,7 +280,7 @@ class CLIWrapper:
         sub_command.add_argument("cluster_id", help='the cluster UUID')
 
         # get-logs
-        sub_command = self.add_sub_command(subparser, 'get-logs', 'Returns distr logs')
+        sub_command = self.add_sub_command(subparser, 'get-logs', 'Returns cluster status logs')
         sub_command.add_argument("cluster_id", help='cluster uuid')
 
         # get-secret
@@ -328,10 +330,10 @@ class CLIWrapper:
         sub_command.add_argument("--host-id", help='Primary storage node UUID or Hostname', dest='host_id')
         sub_command.add_argument("--ha-type", help='LVol HA type (single, ha), default is cluster HA type',
                                  dest='ha_type', choices=["single", "ha", "default"], default='default')
-
-        sub_command.add_argument("--compress",
-                                 help='Use inline data compression and de-compression on the logical volume',
-                                 required=False, action='store_true')
+        #
+        # sub_command.add_argument("--compress",
+        #                          help='Use inline data compression and de-compression on the logical volume',
+        #                          required=False, action='store_true')
         sub_command.add_argument("--encrypt", help='Use inline data encryption and de-cryption on the logical volume',
                                  required=False, action='store_true')
         sub_command.add_argument("--crypto-key1", help='the hex value of key1 to be used for lvol encryption',
@@ -377,7 +379,7 @@ class CLIWrapper:
 
         # delete lvol
         sub_command = self.add_sub_command(
-            subparser, 'delete', 'Delete LVol. This is only possible, if no more snapshots and non-inflated clones '
+            subparser, 'delete', 'Delete LVol.', usage='This is only possible, if no more snapshots and non-inflated clones '
                                  'of the volume exist. The volume must be suspended before it can be deleted. ')
         sub_command.add_argument("id", help='LVol id or ids', nargs='+')
         sub_command.add_argument("--force", help='Force delete LVol from the cluster', required=False,
@@ -426,8 +428,7 @@ class CLIWrapper:
 
         # lvol get-io-stats
         sub_command = self.add_sub_command(
-            subparser, 'get-io-stats', help="Get Input Output stats of LVol", usage='Returns either the current or historic io statistics '
-                                       '(read-IO, write-IO, total-IO, read mbs, write mbs, total mbs).')
+            subparser, 'get-io-stats', help="Returns LVol IO statistics")
         sub_command.add_argument("id", help='LVol id')
         sub_command.add_argument("--history", help='(XXdYYh), list history records (one for every 15 minutes) '
                                                    'for XX days and YY hours (up to 10 days in total).')
@@ -502,8 +503,7 @@ class CLIWrapper:
         sub_command.add_argument("pool_id", help='pool uuid')
         # disable
         sub_command = self.add_sub_command(
-            subparser, 'disable', 'Set pool status to Inactive. Attention! This will suspend all new IO to '
-                                  'the pool! IO in flight processing will be completed.')
+            subparser, 'disable', 'Set pool status to Inactive.')
         sub_command.add_argument("pool_id", help='pool uuid')
 
         # get-secret
@@ -1110,27 +1110,9 @@ class CLIWrapper:
         out = storage_ops.list_storage_devices(self.db_store, node_id, sort, is_json)
         return out
 
-    def cluster_init(self, args):
-        page_size_in_blocks = args.page_size_in_blocks
-        blk_size = args.blk_size
-        model_ids = args.model_ids
-        ha_type = args.ha_type
-        tls = args.tls == 'on'
-        auth_hosts_only = args.auth_hosts_only == 'on'
-        dhchap = args.dhchap
-        NQN = args.NQN
-        iSCSI = args.iSCSI
-        CLI_PASS = args.CLI_PASS
-
-        # TODO: Validate the inputs
-        return cluster_ops.add_cluster(
-            blk_size, page_size_in_blocks, model_ids, ha_type, tls,
-            auth_hosts_only, dhchap, NQN, iSCSI, CLI_PASS)
-
     def cluster_create(self, args):
         page_size_in_blocks = args.page_size
         blk_size = args.blk_size
-        ha_type = args.ha_type
         CLI_PASS = args.CLI_PASS
         cap_warn = args.cap_warn
         cap_crit = args.cap_crit
@@ -1142,7 +1124,7 @@ class CLIWrapper:
 
         # TODO: Validate the inputs
         return cluster_ops.create_cluster(
-            blk_size, page_size_in_blocks, ha_type,
+            blk_size, page_size_in_blocks,
             CLI_PASS, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
             ifname, log_del_interval, metrics_retention_period)
 
