@@ -32,14 +32,15 @@ jobs:
       - run: go version
 
       - name: Configure AWS Credentials
-        uses: aws-actions/configure-aws-credentials@v2
+        uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION }}
 
       - name: Clone simplyBlockDeploy repo
-        run: git clone -b ${{ github.event.inputs.simplyBlockDeploy_branch || 'main'}} https://github.com/simplyblock-io/simplyBlockDeploy.git
+        run: |
+          git clone -b ${{ github.event.inputs.simplyBlockDeploy_branch || 'main'}} git@github.com:simplyblock-io/simplyBlockDeploy.git $GITHUB_WORKSPACE/simplyBlockDeploy
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v2
@@ -47,105 +48,93 @@ jobs:
           terraform_wrapper: false
 
       - name: Initialize Terraform
-        run: terraform init
+        run: |
+          cd $GITHUB_WORKSPACE/simplyBlockDeploy
+          terraform init
 
       - name: select or create workspace
-        run: terraform workspace select -or-create githubactions
+        run: |
+          cd $GITHUB_WORKSPACE/simplyBlockDeploy
+          terraform workspace select -or-create githubactions-sbclie2e
 
       - name: Validate Terraform Configuration
-        run: terraform validate
+        run: |
+          cd $GITHUB_WORKSPACE/simplyBlockDeploy
+          terraform validate
 
       - name: Plan Terraform Changes
         run: |
+          cd $GITHUB_WORKSPACE/simplyBlockDeploy
           terraform plan \
             -var "mgmt_nodes=1" -var "storage_nodes=3" \
             -var "extra_nodes=1" -var "extra_nodes_instance_type=m6id.large" \
             -var "region=us-east-2" -var "sbcli_cmd=${{ github.event.inputs.sbcli_cmd || 'sbcli-dev' }}" -out=tfplan
 
       - name: Apply Terraform Changes
-        run: terraform apply tfplan
+        run: |
+          cd $GITHUB_WORKSPACE/simplyBlockDeploy
+          terraform apply tfplan
 
+      - name: Get Terraform Outputs
+        id: terraform_outputs
+        run: |
+          cd $GITHUB_WORKSPACE/simplyBlockDeploy
+          output_bastion_public_ip=$(terraform output -raw bastion_public_ip)
+          echo "::set-output name=bastion_public_ip::$output_bastion_public_ip"
+          output_key_name=$(terraform output -raw key_name)
+          echo "::set-output name=key_name::$output_key_name"
       - name: Bootstrap Cluster
         run: |
-          cd simplyBlockDeploy
+          cd $GITHUB_WORKSPACE/simplyBlockDeploy
           ./bootstrap-cluster.sh --memory 8g --cpu-mask 0x3 --iobuf_small_pool_count 10000 --iobuf_large_pool_count 25000
         id: bootstrap_cluster
         env:
           SBCLI_CMD: ${{ github.event.inputs.sbcli_cmd || 'sbcli-dev' }}
 
-      # - name: Bootstrap Cluster
-      #   run: $GITHUB_WORKSPACE/bootstrap-k3s.sh
-      #   id: bootstrap_k3s
-
-      # - name: copying  Kubeconfig file
-      #   run: |
-      #     mkdir -p ${HOME}/.kube
-      #     scp -o StrictHostKeyChecking=no -i ${{ steps.bootstrap_k3s.outputs.KEY }} ec2-user@${{ steps.bootstrap_k3s.outputs.extra_node_ip }}:/etc/rancher/k3s/k3s.yaml ${HOME}/.kube/config
-
-      # - name: update .kube/config address
-      #   run: |
-      #     sed -i "s/127.0.0.1/${{ steps.bootstrap_k3s.outputs.extra_node_ip }}/g" ${HOME}/.kube/config
-
-      # - name: Label Node type=cache
-      #   run: |
-      #     nodes=$(kubectl get nodes -o jsonpath='{.items[*].metadata.name}')
-
-      #     for node in $nodes; do
-      #         kubectl label nodes $node type=cache
-      #     done
-
-      #     kubectl get nodes --show-labels
-
-      # - name: Install SPDK-CSI using Helm
-      #   run: |
-      #     cd spdk-csi/charts/latest/spdk-csi
-      #     helm install -n spdk-csi --create-namespace spdk-csi ./ \
-      #        --set csiConfig.simplybk.uuid=${{ steps.bootstrap_cluster.outputs.cluster_id }} \
-      #        --set csiConfig.simplybk.ip=${{ steps.bootstrap_cluster.outputs.cluster_api_gateway_endpoint }} \
-      #        --set csiSecret.simplybk.secret=${{ steps.bootstrap_cluster.outputs.cluster_secret }} \
-      #        --set logicalVolume.pool_name=testing1 \
-      #        --set image.simplyblock.tag=dev
-
-      - name: Setup Tests
+      - name: Setup Tests & Run Tests
         run: |
           cd $GITHUB_WORKSPACE/e2e
+          sudo apt-get install -y python3.12-venv
+          python3 -m venv myenv
+          source myenv/bin/activate
           python3 -m pip install -r requirements.txt
           echo "Running tests in namespace ${{ steps.get-namespace.outputs.namespace }}"
           export CLUSTER_ID=${{ steps.bootstrap_cluster.outputs.cluster_id }}
           export CLUSTER_SECRET=${{ steps.bootstrap_cluster.outputs.cluster_secret }}
           export CLUSTER_IP=${{ steps.bootstrap_cluster.outputs.cluster_ip }}
           export API_BASE_URL=${{ steps.bootstrap_cluster.outputs.cluster_api_gateway_endpoint }}
-          export BASTION_SERVER=${{ steps.apply_terraform_changes.outputs.bastion_public_ip }}
-
-      - name: Run tests
-        run: |
-          cd $GITHUB_WORKSPACE/e2e
+          export BASTION_SERVER=${{ steps.terraform_outputs.outputs.bastion_public_ip }}
+          export KEY_NAME=${{ steps.terraform_outputs.outputs.key_name }}
           python3 e2e.py
 
-      # - name: Upload docker logs to s3
-      #   run: $GITHUB_WORKSPACE/upload_docker_logs_to_s3.sh
-      #   if: always()
-      #   env:
-      #     AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-      #     AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-      #     AWS_REGION: ${{ secrets.AWS_REGION }}
-      #     S3_BUCKET_NAME: "simplyblock-e2e-test-logs"
-      #     RUN_ID: ${{ github.run_id }}
+      - name: Upload docker logs to s3
+        run: |
+          cd $GITHUB_WORKSPACE/simplyBlockDeploy
+          ./upload_docker_logs_to_s3.sh
+        if: always()
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_REGION: ${{ secrets.AWS_REGION }}
+          S3_BUCKET_NAME: "simplyblock-e2e-test-logs"
+          RUN_ID: ${{ github.run_id }}
 
-      # - name: Send Slack Notification
-      #   if: always()
-      #   env:
-      #     SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
-      #   run: |
-      #     if [[ ${{ job.status }} == 'success' ]]; then
-      #       curl -X POST -H 'Content-type: application/json' --data '{"text":"Python E2E tests successfully completed!"}' $SLACK_WEBHOOK_URL
-      #     else
-      #       curl -X POST -H 'Content-type: application/json' --data '{"text":"Python E2E tests failed!"}' $SLACK_WEBHOOK_URL
-      #     fi
+      - name: Send Slack Notification
+        if: always()
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: |
+          if [[ ${{ job.status }} == 'success' ]]; then
+            curl -X POST -H 'Content-type: application/json' --data '{"text":"Python E2E tests successfully completed!"}' $SLACK_WEBHOOK_URL
+          else
+            curl -X POST -H 'Content-type: application/json' --data '{"text":"Python E2E tests failed!"}' $SLACK_WEBHOOK_URL
+          fi
 
       - name: Destroy Cluster
         if: always()
-        run: terraform destroy --auto-approve
+        run: |
+          cd $GITHUB_WORKSPACE/simplyBlockDeploy
+          terraform destroy --auto-approve
 
       - name: 'Cleanup build folder'
         run: |
