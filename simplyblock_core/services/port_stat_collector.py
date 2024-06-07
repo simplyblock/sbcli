@@ -52,14 +52,14 @@ logger.setLevel(logging.DEBUG)
 # get DB controller
 db_controller = kv_store.DBController()
 
-system_id = utils.get_system_id()
+hostname = utils.get_hostname()
 logger.info("Starting port stats collector...")
 while True:
     time.sleep(constants.PROT_STAT_COLLECTOR_INTERVAL_SEC)
 
-    snode = db_controller.get_storage_node_by_system_id(system_id)
+    snode = db_controller.get_storage_node_by_hostname(hostname)
     if not snode:
-        logger.error("This node is not part of any cluster, system_id: %s" % system_id)
+        logger.error("This node is not part of the cluster, hostname: %s" % hostname)
         continue
 
     if not snode.data_nics:

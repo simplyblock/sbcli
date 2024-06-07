@@ -112,14 +112,14 @@ def process_event(event_id):
     event.write_to_db(db_controller.kv_store)
 
 
-system_id = utils.get_system_id()
+hostname = utils.get_hostname()
 logger.info("Starting Distr event collector...")
 while True:
     time.sleep(constants.DISTR_EVENT_COLLECTOR_INTERVAL_SEC)
 
-    snode = db_controller.get_storage_node_by_system_id(system_id)
+    snode = db_controller.get_storage_node_by_hostname(hostname)
     if not snode:
-        logger.error("This node is not part of any cluster, system_id: %s" % system_id)
+        logger.error("This node is not part of the cluster, hostname: %s" % hostname)
         continue
 
     client = rpc_client.RPCClient(
