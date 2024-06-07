@@ -1,12 +1,10 @@
-import time
 import paramiko
 import os
-from io import BytesIO
 from logger_config import setup_logger
+from pathlib import Path
 
-
-SSH_KEY_LOCATION = os.path.expanduser("~/.ssh/" + os.environ.get("KEY_NAME"))
-
+# Set the location of the SSH key
+SSH_KEY_LOCATION = os.path.join(Path.home(), ".ssh", os.environ.get("KEY_NAME"))
 
 
 class SshUtils:
