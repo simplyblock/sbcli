@@ -72,7 +72,7 @@ class CLIWrapper:
 
         # Restart storage node
         sub_command = self.add_sub_command(
-            subparser, "restart", 'Restart a storage node. All functions and device drivers will be reset. '
+            subparser, "restart", 'Restart a storage node.', usage='All functions and device drivers will be reset. '
                                   'During restart, the node does not accept IO. In a high-availability setup, '
                                   'this will not impact operations.')
         sub_command.add_argument("node_id", help='UUID of storage node')
@@ -90,7 +90,7 @@ class CLIWrapper:
 
         # Shutdown storage node
         sub_command = self.add_sub_command(
-            subparser, "shutdown", 'Shutdown a storage node. Once the command is issued, the node will stop accepting '
+            subparser, "shutdown", 'Shutdown a storage node.', usage='Once the command is issued, the node will stop accepting '
                                    'IO,but IO, which was previously received, will still be processed. '
                                    'In a high-availability setup, this will not impact operations.')
         sub_command.add_argument("node_id", help='UUID of storage node')
@@ -98,7 +98,7 @@ class CLIWrapper:
 
         # Suspend storage node
         sub_command = self.add_sub_command(
-            subparser, "suspend", 'Suspend a storage node. The node will stop accepting new IO, but will finish '
+            subparser, "suspend", 'Suspend a storage node.', usage='The node will stop accepting new IO, but will finish '
                                   'processing any IO, which has been received already.')
         sub_command.add_argument("node_id", help='UUID of storage node')
         sub_command.add_argument("--force", help='Force node suspend', required=False, action='store_true')
@@ -147,7 +147,7 @@ class CLIWrapper:
         # Add a new storage device
         sub_command = self.add_sub_command(subparser, 'add-device', 'Add a new storage device')
         sub_command = self.add_sub_command(
-            subparser, 'remove-device', 'Remove a storage device. The device will become unavailable, independently '
+            subparser, 'remove-device', 'Remove a storage device.', usage='The device will become unavailable, independently '
                                         'if it was physically removed from the server. This function can be used if '
                                         'auto-detection of removal did not work or if the device must be maintained '
                                         'otherwise while remaining inserted into the server. ')
@@ -170,7 +170,7 @@ class CLIWrapper:
                                                    'for XX days and YY hours -up to 10 days in total-, format: XXdYYh')
 
         sub_command = self.add_sub_command(
-            subparser, 'get-io-stats-device', 'Returns the io statistics. If --history is not selected, this is '
+            subparser, 'get-io-stats-device', 'Returns the io statistics.', usage='If --history is not selected, this is '
                                               'a monitor, which updates current statistics records every two seconds '
                                               '(similar to ping):read-iops write-iops total-iops read-mbs '
                                               'write-mbs total-mbs')
@@ -265,7 +265,7 @@ class CLIWrapper:
                                                    'for XX days and YY hours (up to 10 days in total).')
 
         sub_command = self.add_sub_command(
-            subparser, 'get-io-stats', 'Returns the io statistics. If --history is not selected, this is a monitor, '
+            subparser, 'get-io-stats', 'Returns the io statistics.', usage='If --history is not selected, this is a monitor, '
                                        'which updates current statistics records every two seconds '
                                        '(similar to ping):read-iops write-iops total-iops read-mbs write-mbs total-mbs')
         sub_command.add_argument("cluster_id", help='the cluster UUID')
@@ -385,13 +385,13 @@ class CLIWrapper:
 
         # show connection string
         sub_command = self.add_sub_command(
-            subparser, 'connect', 'show connection strings to cluster. Multiple connections to the cluster are '
+            subparser, 'connect', 'show connection strings to cluster.', usage='Multiple connections to the cluster are '
                                   'always available for multi-pathing and high-availability.')
         sub_command.add_argument("id", help='LVol id')
 
         # lvol resize
         sub_command = self.add_sub_command(
-            subparser, 'resize', 'Resize LVol. The lvol cannot be exceed the maximum size for lvols. It cannot '
+            subparser, 'resize', 'Resize LVol.', usage='The lvol cannot be exceed the maximum size for lvols. It cannot '
                                  'exceed total remaining provisioned space in pool. It cannot drop below the '
                                  'current utilization.')
         sub_command.add_argument("id", help='LVol id')
