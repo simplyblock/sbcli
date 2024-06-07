@@ -4,7 +4,6 @@ on:
   push:
     branches:
       - main
-      - e2e-fixes
   schedule:
     - cron: '0 5 * * *'  # Runs every day at 5 AM UTC
   workflow_dispatch:
