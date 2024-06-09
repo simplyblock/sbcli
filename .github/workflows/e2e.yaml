@@ -114,6 +114,7 @@ jobs:
       - name: Upload automation and docker logs to s3
         run: |
           cd $GITHUB_WORKSPACE/e2e/logs
+          sudo chmod 777 upload_logs.sh
           ./upload_logs.sh
           cd $GITHUB_WORKSPACE/simplyBlockDeploy
           ./upload_docker_logs_to_s3.sh
