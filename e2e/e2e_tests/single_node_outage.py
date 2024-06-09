@@ -7,29 +7,29 @@ from utils.common_utils import CommonUtils
 from logger_config import setup_logger
 
 
-# cluster_secret = os.environ.get("CLUSTER_SECRET")
-# cluster_id = os.environ.get("CLUSTER_ID")
-# cluster_ip = os.environ.get("CLUSTER_IP")
-
-# url = f"http://{cluster_ip}"
-# api_base_url = os.environ.get("API_BASE_URL")
-# headers = {
-#     "Content-Type": "application/json",
-#     "Authorization": f"{cluster_id} {cluster_secret}"
-# }
-# bastion_server = os.environ.get("BASTION_SERVER")
-
-cluster_secret = "gnxpANBkOglOf9W9bj09"
-cluster_id = "5852d5d4-47dc-47c3-9095-b8c01cf1701e"
-cluster_ip = "10.0.3.130"
+cluster_secret = os.environ.get("CLUSTER_SECRET")
+cluster_id = os.environ.get("CLUSTER_ID")
+cluster_ip = os.environ.get("CLUSTER_IP")
 
 url = f"http://{cluster_ip}"
-api_base_url = "https://w6o4vt5uo5.execute-api.us-east-2.amazonaws.com/"
+api_base_url = os.environ.get("API_BASE_URL")
 headers = {
     "Content-Type": "application/json",
     "Authorization": f"{cluster_id} {cluster_secret}"
 }
-bastion_server = "3.128.168.118"
+bastion_server = os.environ.get("BASTION_SERVER")
+
+# cluster_secret = "gnxpANBkOglOf9W9bj09"
+# cluster_id = "5852d5d4-47dc-47c3-9095-b8c01cf1701e"
+# cluster_ip = "10.0.3.130"
+
+# url = f"http://{cluster_ip}"
+# api_base_url = "https://w6o4vt5uo5.execute-api.us-east-2.amazonaws.com/"
+# headers = {
+#     "Content-Type": "application/json",
+#     "Authorization": f"{cluster_id} {cluster_secret}"
+# }
+# bastion_server = "3.128.168.118"
 
 
 class TestSingleNodeOutage:
