@@ -17,7 +17,7 @@ def main():
     tests = get_all_tests()
     # Find the test class based on the provided test name
     test_class_run = []
-    if args.testname is None:
+    if args.testname is None or len(args.testname.strip()) == 0:
         test_class_run = tests
     else:
         for cls in tests:
