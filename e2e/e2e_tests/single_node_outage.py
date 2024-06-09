@@ -87,6 +87,7 @@ class TestSingleNodeOutage:
         self.mount_path = "/home/ec2-user/test_location"
         self.log_path = f"{os.path.dirname(self.mount_path)}/log_file.log"
         self.base_cmd = None
+        print(f"Details: {api_base_url} {bastion_server} {cluster_id}")
 
     def setup(self):
         """Contains setup required to run the test case

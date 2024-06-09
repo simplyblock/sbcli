@@ -7,29 +7,29 @@ from utils.common_utils import CommonUtils
 from logger_config import setup_logger
 
 
-# cluster_secret = os.environ.get("CLUSTER_SECRET")
-# cluster_id = os.environ.get("CLUSTER_ID")
-# cluster_ip = os.environ.get("CLUSTER_IP")
-
-# url = f"http://{cluster_ip}"
-# api_base_url = os.environ.get("API_BASE_URL")
-# headers = {
-#     "Content-Type": "application/json",
-#     "Authorization": f"{cluster_id} {cluster_secret}"
-# }
-# bastion_server = os.environ.get("BASTION_SERVER")
-
-cluster_secret = "yNFIop83RAYy5i7jgimu"
-cluster_id = "5c56a38c-1edb-4787-94de-360d29027896"
-cluster_ip = "10.0.3.183"
+cluster_secret = os.environ.get("CLUSTER_SECRET")
+cluster_id = os.environ.get("CLUSTER_ID")
+cluster_ip = os.environ.get("CLUSTER_IP")
 
 url = f"http://{cluster_ip}"
-api_base_url = "https://kx32fdz013.execute-api.us-east-2.amazonaws.com/"
+api_base_url = os.environ.get("API_BASE_URL")
 headers = {
     "Content-Type": "application/json",
     "Authorization": f"{cluster_id} {cluster_secret}"
 }
-bastion_server = "3.141.7.124"
+bastion_server = os.environ.get("BASTION_SERVER")
+
+# cluster_secret = "yNFIop83RAYy5i7jgimu"
+# cluster_id = "5c56a38c-1edb-4787-94de-360d29027896"
+# cluster_ip = "10.0.3.183"
+
+# url = f"http://{cluster_ip}"
+# api_base_url = "https://kx32fdz013.execute-api.us-east-2.amazonaws.com/"
+# headers = {
+#     "Content-Type": "application/json",
+#     "Authorization": f"{cluster_id} {cluster_secret}"
+# }
+# bastion_server = "3.141.7.124"
 
 
 class TestSingleNodeMultipleFioPerfValidation:
