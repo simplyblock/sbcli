@@ -21,7 +21,7 @@ LOCAL_LOGS_DIR="$RUN_ID"
 for file in *.log; do
     if [ -f "$file" ]; then
         filename=$(basename "$file")
-        aws s3 cp "$file" "s3://$S3_BUCKET/$LOCAL_LOGS_DIR/$filename"
+        aws s3 cp "$file" "s3://$S3_BUCKET_NAME/$LOCAL_LOGS_DIR/$filename"
     fi
 done
 
