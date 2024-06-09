@@ -16,6 +16,10 @@ on:
         description: ''
         required: true
         default: 'sbcli-dev'
+      testname:
+        description: 'Name of test tor run. Empty to run all'
+        required: false
+        default: ''
 jobs:
   e2e:
     runs-on: self-hosted
@@ -105,10 +109,12 @@ jobs:
           export API_BASE_URL=${{ steps.bootstrap_cluster.outputs.cluster_api_gateway_endpoint }}
           export BASTION_SERVER=${{ steps.terraform_outputs.outputs.bastion_public_ip }}
           export KEY_NAME=${{ steps.terraform_outputs.outputs.key_name }}
-          python3 e2e.py
+          python3 e2e.py --testname ${{ github.event.inputs.testname || ''}}
 
-      - name: Upload docker logs to s3
+      - name: Upload automation and docker logs to s3
         run: |
+          cd $GITHUB_WORKSPACE/e2e/logs
+          ./upload_logs.sh
           cd $GITHUB_WORKSPACE/simplyBlockDeploy
           ./upload_docker_logs_to_s3.sh
         if: always()
@@ -119,16 +125,16 @@ jobs:
           S3_BUCKET_NAME: "simplyblock-e2e-test-logs"
           RUN_ID: ${{ github.run_id }}
 
-      - name: Send Slack Notification
-        if: always()
-        env:
-          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
-        run: |
-          if [[ ${{ job.status }} == 'success' ]]; then
-            curl -X POST -H 'Content-type: application/json' --data '{"text":"Python E2E tests successfully completed!"}' $SLACK_WEBHOOK_URL
-          else
-            curl -X POST -H 'Content-type: application/json' --data '{"text":"Python E2E tests failed!"}' $SLACK_WEBHOOK_URL
-          fi
+      # - name: Send Slack Notification
+      #   if: always()
+      #   env:
+      #     SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+      #   run: |
+      #     if [[ ${{ job.status }} == 'success' ]]; then
+      #       curl -X POST -H 'Content-type: application/json' --data '{"text":"Python E2E tests successfully completed!"}' $SLACK_WEBHOOK_URL
+      #     else
+      #       curl -X POST -H 'Content-type: application/json' --data '{"text":"Python E2E tests failed!"}' $SLACK_WEBHOOK_URL
+      #     fi
 
       - name: Destroy Cluster
         if: always()

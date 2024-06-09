@@ -1,6 +1,6 @@
 ### simplyblock e2e tests
 import os
-import time
+from utils.test_utils import sleep_n_sec
 from utils.sbcli_utils import SbcliUtils
 from utils.ssh_utils import SshUtils
 from utils.test_utils import TestUtils
@@ -198,7 +198,7 @@ class TestSingleNodeOutage:
         self.sbcli_utils.shutdown_node(node_uuid=no_lvol_node_uuid)
 
         self.logger.info("Sleeping for 10 seconds")
-        time.sleep(10)
+        sleep_n_sec(10)
 
         self.validations(node_uuid=no_lvol_node_uuid,
                          node_status="offline",
@@ -210,7 +210,7 @@ class TestSingleNodeOutage:
         self.sbcli_utils.restart_node(node_uuid=no_lvol_node_uuid)
 
         self.logger.info("Sleeping for 10 seconds")
-        time.sleep(10)
+        sleep_n_sec(10)
 
         self.validations(node_uuid=no_lvol_node_uuid,
                          node_status="online",

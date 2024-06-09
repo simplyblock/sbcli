@@ -58,7 +58,7 @@ class SbcliUtils:
         headers = headers if headers else self.headers
         self.logger.info(f"Calling POST for {api_url} with headers: {headers}, body: {body}")
         resp = requests.post(request_url, headers=headers,
-                            json=body)
+                             json=body, timeout=100)
         if resp.status_code == HTTPStatus.OK:
             data = resp.json()
         else:
@@ -192,9 +192,9 @@ class SbcliUtils:
         body = {
             "name": pool_name,
             "max_rw_iops": str(max_rw_iops),
-            "max_rw_mbytes": str(max_rw_iops),
-            "max_r_mbytes": str(max_rw_iops),
-            "max_w_mbytes": str(max_rw_iops),
+            "max_rw_mbytes": str(max_rw_mbytes),
+            "max_r_mbytes": str(max_r_mbytes),
+            "max_w_mbytes": str(max_w_mbytes),
         }
         self.post_request(api_url="/pool", body=body)
         # TODO: Add assertions
@@ -258,7 +258,7 @@ class SbcliUtils:
         lvols = self.list_lvols()
         for name in list(lvols.keys()):
             if name == lvol_name:
-                self.logger.info(f"Pool {lvol_name} already exists. Exiting")
+                self.logger.info(f"LVOL {lvol_name} already exists. Exiting")
                 return
 
         body = {

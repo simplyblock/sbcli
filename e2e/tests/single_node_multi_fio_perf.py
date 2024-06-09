@@ -1,6 +1,6 @@
 ### simplyblock e2e tests
 import os
-import time
+from utils.test_utils import sleep_n_sec
 from utils.sbcli_utils import SbcliUtils
 from utils.ssh_utils import SshUtils
 from utils.test_utils import TestUtils
@@ -19,17 +19,17 @@ from logger_config import setup_logger
 # }
 # bastion_server = os.environ.get("BASTION_SERVER")
 
-cluster_secret = "tiDRTutIifo7gc23E4PT"
-cluster_id = "a15e011f-77fd-43d0-b32a-73ee46d55f33"
-cluster_ip = "10.0.3.241"
+cluster_secret = "yNFIop83RAYy5i7jgimu"
+cluster_id = "5c56a38c-1edb-4787-94de-360d29027896"
+cluster_ip = "10.0.3.183"
 
 url = f"http://{cluster_ip}"
-api_base_url = "https://3frb79ldhe.execute-api.us-east-2.amazonaws.com/"
+api_base_url = "https://kx32fdz013.execute-api.us-east-2.amazonaws.com/"
 headers = {
     "Content-Type": "application/json",
     "Authorization": f"{cluster_id} {cluster_secret}"
 }
-bastion_server = "3.138.204.210"
+bastion_server = "3.141.7.124"
 
 
 class TestSingleNodeMultipleFioPerfValidation:
@@ -196,7 +196,7 @@ class TestSingleNodeMultipleFioPerfValidation:
                 self.logger.info(f"Using disk: /dev/{device.strip()}")
                 disk_use = f"/dev/{device.strip()}"
                 break
-        self.lvol_devices[self.lvol_name1] = disk_use
+        self.lvol_devices[self.lvol_name1]["Device"] = disk_use
 
         initial_devices = self.ssh_obj.get_devices(node=self.mgmt_nodes[0])
 
@@ -214,8 +214,10 @@ class TestSingleNodeMultipleFioPerfValidation:
                 self.logger.info(f"Using disk: /dev/{device.strip()}")
                 disk_use = f"/dev/{device.strip()}"
                 break
-        self.lvol_devices[self.lvol_name2] = disk_use
+        self.lvol_devices[self.lvol_name2]["Device"] = disk_use
+        
 
+        i = 1
         for lvol, data in self.lvol_devices.items():
             self.logger.info(f"Setting device and Running FIO for lvol: {lvol}, Data: {data}")
             self.ssh_obj.unmount_path(node=self.mgmt_nodes[0],
@@ -225,24 +227,60 @@ class TestSingleNodeMultipleFioPerfValidation:
             self.ssh_obj.mount_path(node=self.mgmt_nodes[0],
                                     device=data["Device"],
                                     mount_path=data["Path"])
-            time.sleep(3)
+            sleep_n_sec(3)
         
             self.ssh_obj.run_fio_test(node=self.mgmt_nodes[0],
                                       directory=data["Path"],
-                                      log_file=data["Log"])
+                                      log_file=data["Log"],
+                                      name=f"fio_run_{i}",
+                                      readwrite="randrw",
+                                      ioengine="libaio",
+                                      iodepth=64,
+                                      bs=4096,
+                                      rwmixread=55,
+                                      size="2G",
+                                      time_based=True,
+                                      runtime=300)
+            i += 1
         
-        self.logger.info(f"Process List: {process_list}")
-        time.sleep(60)
+        sleep_n_sec(3)
+        process_list_before = self.ssh_obj.find_process_name(node=self.mgmt_nodes[0],
+                                                             process_name="fio")
+        self.logger.info(f"Process List: {process_list_before}")
+        sleep_n_sec(60)
 
-        process_list = self.ssh_obj.find_process_name(node=self.mgmt_nodes[0],
-                                                      process_name="fio")
-        self.logger.info(f"Process List: {process_list}")
+        process_list_after = self.ssh_obj.find_process_name(node=self.mgmt_nodes[0],
+                                                            process_name="fio")
+        self.logger.info(f"Process List: {process_list_after}")
+
+        process_list_before = process_list_before[0:len(process_list_before)-2]
+        process_list_after = process_list_before[0:len(process_list_after)-2]
         
+        assert process_list_after == process_list_before, \
+            f"FIO process list changed - Before Sleep: {process_list_before}, After Sleep: {process_list_after}"
         
-        self.ssh_obj.kill_processes(
-            node=self.mgmt_nodes[0],
-            process_name="fio"
-        )
+        sleep_n_sec(500)
+
+        # process_list_after = self.ssh_obj.find_process_name(node=self.mgmt_nodes[0],
+        #                                                     process_name="fio")
+        # self.logger.info(f"Process List: {process_list_after}")
+        # if len(process_list_after) == 2:
+        #     process_list_after = 0
+        # else:
+        #     self.ssh_obj.kill_processes(
+        #         node=self.mgmt_nodes[0],
+        #         process_name="fio"
+        #     )
+        #     self.logger.error(f"FIO process did not get stopped after runtime. {process_list_after}")
+        #     raise RuntimeError(f"FIO process did not get stopped after runtime. {process_list_after}")
+        
+        out1 = self.ssh_obj.read_file(node=self.mgmt_nodes[0],
+                                      file_name=self.log_path1)
+        out2 = self.ssh_obj.read_file(node=self.mgmt_nodes[0],
+                                      file_name=self.log_path2)
+        
+        self.logger.info(f"Log file 1 {self.log_path1}: \n {out1}")
+        self.logger.info(f"Log file 2 {self.log_path2}: \n {out2}")
         
         # self.test_utils.validate_fio_test(node=self.mgmt_nodes[0],
         #                                   log_file=self.log_path)

@@ -3,7 +3,8 @@ import os
 from logger_config import setup_logger
 from pathlib import Path
 
-SSH_KEY_LOCATION = os.path.join(Path.home(), ".ssh", os.environ.get("KEY_NAME"))
+# SSH_KEY_LOCATION = os.path.join(Path.home(), ".ssh", os.environ.get("KEY_NAME"))
+SSH_KEY_LOCATION = '/mnt/c/Users/Raunak Jalan/.ssh/simplyblock-us-east-2.pem'
 
 
 class SshUtils:
@@ -187,9 +188,23 @@ class SshUtils:
             location = f"--filename={device}"
         if directory:
             location = f"--directory={directory}"
-        command = (f"sudo fio --name=test {location} --ioengine=libaio "
-                   "--direct=1 --iodepth=1 --time_based --runtime=3600 --rw=randrw --bs=4K --size=10MiB "
-                   "--verify=md5 --numjobs=1 --verify_dump=1 --verify_fatal=0 --verify_state_save=1 --verify_backlog=10")
+        runtime = kwargs.get("runtime", 3600)
+        rw = kwargs.get("rw", "randrw")
+        name = kwargs.get("name", "test")
+        ioengine = kwargs.get("ioengine", "libaio")
+        iodepth = kwargs.get("iodepth", 1)
+        bs = kwargs.get("bs", "4k")
+        rwmixread = kwargs.get("rwmixread", 70)
+        size = kwargs.get("size", "10MiB")
+        time_based = kwargs.get("time_based", True)
+        if time_based:
+            time_based = "--time_based"
+        else:
+            time_based = ""
+        
+        command = (f"sudo fio --name={name} {location} --ioengine={ioengine} --direct=1 --iodepth={iodepth} "
+                   f"{time_based} --runtime={runtime} --rw={rw} --bs={bs} --size={size} --rwmixread={rwmixread}"
+                   "--verify=md5 --numjobs=1 --verify_dump=1 --verify_fatal=1 --verify_state_save=1 --verify_backlog=10")
 
         self.exec_command_background(node=node,
                                      command=command,

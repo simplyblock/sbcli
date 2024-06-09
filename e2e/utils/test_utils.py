@@ -1,3 +1,4 @@
+import time
 from logger_config import setup_logger
 import re
 
@@ -114,3 +115,14 @@ class TestUtils:
             self.logger.info(device)
 
         return nodes, devices
+    
+
+def sleep_n_sec(seconds):
+    """Sleeps for given seconds
+
+    Args:
+        seconds (int): Seconds to sleep for
+    """
+    logger = setup_logger(__name__)
+    logger.info(f"Sleeping for {seconds} seconds.")
+    time.sleep(seconds)
