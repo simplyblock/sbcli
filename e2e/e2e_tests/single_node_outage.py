@@ -1,9 +1,9 @@
 ### simplyblock e2e tests
 import os
-from utils.test_utils import sleep_n_sec
+from utils.common_utils import sleep_n_sec
 from utils.sbcli_utils import SbcliUtils
 from utils.ssh_utils import SshUtils
-from utils.test_utils import TestUtils
+from utils.common_utils import CommonUtils
 from logger_config import setup_logger
 
 
@@ -79,7 +79,7 @@ class TestSingleNodeOutage:
             cluster_id=cluster_id,
             cluster_secret=cluster_secret
         )
-        self.test_utils = TestUtils(self.sbcli_utils, self.ssh_obj)
+        self.common_utils = CommonUtils(self.sbcli_utils, self.ssh_obj)
         self.mgmt_nodes = None
         self.storage_nodes = None
         self.pool_name = "test_pool"
@@ -224,7 +224,7 @@ class TestSingleNodeOutage:
             "Storage Node": ["suspended", "shutdown", "restart"],
             "Device": {"restart"}
         }
-        self.test_utils.validate_event_logs(cluster_id=cluster_id,
+        self.common_utils.validate_event_logs(cluster_id=cluster_id,
                                             operations=steps)
 
         self.ssh_obj.kill_processes(
@@ -232,7 +232,7 @@ class TestSingleNodeOutage:
             process_name="fio"
         )
 
-        self.test_utils.validate_fio_test(node=self.mgmt_nodes[0],
+        self.common_utils.validate_fio_test(node=self.mgmt_nodes[0],
                                           log_file=self.log_path)
 
         self.logger.info("TEST CASE PASSED !!!")
@@ -258,7 +258,7 @@ class TestSingleNodeOutage:
         lvol_cluster_map_details = self.ssh_obj.exec_command(node=self.mgmt_nodes[0],
                                                              command=command)
         self.logger.info(f"LVOL Cluster map: {lvol_cluster_map_details}")
-        cluster_map_nodes, cluster_map_devices = self.test_utils.parse_lvol_cluster_map_output(lvol_cluster_map_details)
+        cluster_map_nodes, cluster_map_devices = self.common_utils.parse_lvol_cluster_map_output(lvol_cluster_map_details)
         offline_device = None
 
         assert node_details[0]["status"] == node_status, \

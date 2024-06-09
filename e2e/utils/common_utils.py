@@ -3,7 +3,7 @@ from logger_config import setup_logger
 import re
 
 
-class TestUtils:
+class CommonUtils:
     """Contains common validations and parsers
     """
     def __init__(self, sbcli_utils, ssh_utils):

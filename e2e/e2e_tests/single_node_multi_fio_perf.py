@@ -1,9 +1,9 @@
 ### simplyblock e2e tests
 import os
-from utils.test_utils import sleep_n_sec
+from utils.common_utils import sleep_n_sec
 from utils.sbcli_utils import SbcliUtils
 from utils.ssh_utils import SshUtils
-from utils.test_utils import TestUtils
+from utils.common_utils import CommonUtils
 from logger_config import setup_logger
 
 
@@ -79,7 +79,7 @@ class TestSingleNodeMultipleFioPerfValidation:
             cluster_id=cluster_id,
             cluster_secret=cluster_secret
         )
-        self.test_utils = TestUtils(self.sbcli_utils, self.ssh_obj)
+        self.common_utils = CommonUtils(self.sbcli_utils, self.ssh_obj)
         self.mgmt_nodes = None
         self.storage_nodes = None
         self.pool_name = "test_pool"
@@ -282,7 +282,7 @@ class TestSingleNodeMultipleFioPerfValidation:
         self.logger.info(f"Log file 1 {self.log_path1}: \n {out1}")
         self.logger.info(f"Log file 2 {self.log_path2}: \n {out2}")
         
-        # self.test_utils.validate_fio_test(node=self.mgmt_nodes[0],
+        # self.common_utils.validate_fio_test(node=self.mgmt_nodes[0],
         #                                   log_file=self.log_path)
 
         self.logger.info("TEST CASE PASSED !!!")
