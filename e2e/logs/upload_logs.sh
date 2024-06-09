@@ -10,6 +10,12 @@ else
     echo "awscli already exists."
 fi
 
+
+AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID
+AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY
+AWS_DEFAULT_REGION=$AWS_REGION
+S3_BUCKET=$S3_BUCKET_NAME
+
 # Configure AWS CLI with provided environment variables
 aws configure set aws_access_key_id $AWS_ACCESS_KEY_ID
 aws configure set aws_secret_access_key $AWS_SECRET_ACCESS_KEY
@@ -21,7 +27,7 @@ LOCAL_LOGS_DIR="$RUN_ID"
 for file in *.log; do
     if [ -f "$file" ]; then
         filename=$(basename "$file")
-        aws s3 cp "$file" "s3://$S3_BUCKET_NAME/$LOCAL_LOGS_DIR/$filename"
+        aws s3 cp "$file" "s3://$S3_BUCKET/$LOCAL_LOGS_DIR/$filename"
     fi
 done
 
