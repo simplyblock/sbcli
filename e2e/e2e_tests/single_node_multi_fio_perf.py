@@ -20,17 +20,17 @@ from logger_config import setup_logger
 # }
 # bastion_server = os.environ.get("BASTION_SERVER")
 
-cluster_secret = "K6rEkcyN7JiCgKdzy5ui"
-cluster_id = "d9aa5591-9c1c-4aae-a1cb-8fe3a4f63949"
-cluster_ip = "10.0.3.79"
+cluster_secret = "j4RHLYdVMxUwwsVivmiY"
+cluster_id = "d1a63a2e-0ef3-4d6d-ba07-2db5981cedab"
+cluster_ip = "10.0.3.88"
 
 url = f"http://{cluster_ip}"
-api_base_url = "https://brucd45ho6.execute-api.us-east-2.amazonaws.com/"
+api_base_url = "https://v8itnqf5dd.execute-api.us-east-2.amazonaws.com/"
 headers = {
     "Content-Type": "application/json",
     "Authorization": f"{cluster_id} {cluster_secret}"
 }
-bastion_server = "18.117.71.1"
+bastion_server = "3.149.251.255"
 
 
 class TestSingleNodeMultipleFioPerfValidation:
@@ -153,7 +153,7 @@ class TestSingleNodeMultipleFioPerfValidation:
         self.sbcli_utils.add_lvol(
             lvol_name=self.lvol_name1,
             pool_name=self.pool_name,
-            size="2G",
+            size="10G",
             distr_ndcs=1,
             distr_npcs=1,
             distr_bs=4096,
@@ -166,7 +166,7 @@ class TestSingleNodeMultipleFioPerfValidation:
         self.sbcli_utils.add_lvol(
             lvol_name=self.lvol_name2,
             pool_name=self.pool_name,
-            size="2G",
+            size="10G",
             distr_ndcs=1,
             distr_npcs=1,
             distr_bs=4096,

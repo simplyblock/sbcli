@@ -10,7 +10,7 @@ def setup_logger(name):
     os.makedirs("logs", exist_ok=True)
 
     # Create a file handler
-    current_datetime = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    current_datetime = datetime.now().strftime("%Y-%m-%d")
     # Create a file handler with datetime-appended log file name
     log_file = os.path.join("logs" ,f"log_{current_datetime}.log")
     f_handler = logging.FileHandler(log_file)
