@@ -52,7 +52,6 @@ services:
       - "graylog_data:/usr/share/graylog/data/data"
       - "graylog_journal:/usr/share/graylog/data/journal"
     deploy:
-      endpoint_mode: dnsrr
       placement:
         constraints: [node.role == manager]
 
@@ -126,7 +125,6 @@ services:
         protocol: tcp
         mode: host
     deploy:
-      endpoint_mode: dnsrr
       placement:
         constraints: [node.role == manager]
 
