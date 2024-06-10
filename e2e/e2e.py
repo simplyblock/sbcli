@@ -3,7 +3,10 @@ import argparse
 import traceback
 from __init__ import get_all_tests
 from logger_config import setup_logger
-from exceptions.custom_exception import TestNotFoundException
+from exceptions.custom_exception import (
+    TestNotFoundException,
+    MultipleExceptions
+)
 
 
 def main():
@@ -38,17 +41,23 @@ def main():
             test_obj.run()
         except Exception as exp:
             logger.error(traceback.format_exc())
-            errors[f"{test}"] = [exp]
+            errors[f"{test.__name__}"] = [exp]
         try:
             test_obj.teardown()
         except Exception as exp:
             logger.error(traceback.format_exc())
-            errors[f"{test}"].append(exp)
+            errors[f"{test.__name__}"].append(exp)
 
-    for test, exception in errors.items():
-        logger.error(f"Raising exception for test: {test}")
-        for exc in exception:
-            raise exc
+    failed_cases = list(errors.keys())
+    logger.info("List - Status of cases")
+    for test in test_class_run:
+        if test.__name__ not in failed_cases:
+            logger.info(f"{test.__name__} PASSED CASE.")
+        else:
+            logger.info(f"{test.__name__} FAILED CASE.")
+
+    if errors:
+        raise MultipleExceptions(errors)
 
 
 def generate_report():

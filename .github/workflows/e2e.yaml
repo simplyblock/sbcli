@@ -125,16 +125,49 @@ jobs:
           S3_BUCKET_NAME: "simplyblock-e2e-test-logs"
           RUN_ID: ${{ github.run_id }}
 
-      # - name: Send Slack Notification
-      #   if: always()
-      #   env:
-      #     SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
-      #   run: |
-      #     if [[ ${{ job.status }} == 'success' ]]; then
-      #       curl -X POST -H 'Content-type: application/json' --data '{"text":"Python E2E tests successfully completed!"}' $SLACK_WEBHOOK_URL
-      #     else
-      #       curl -X POST -H 'Content-type: application/json' --data '{"text":"Python E2E tests failed!"}' $SLACK_WEBHOOK_URL
-      #     fi
+      - name: Parse test results
+        id: parse_results
+        run: |
+          cd $GITHUB_WORKSPACE/e2e/logs
+
+          LATEST_LOG=$(ls -t *.log | head -n 1)
+          while [ ! -s "$LATEST_LOG" ]; do
+            LATEST_LOG=$(ls -t *.log | tail -n +2 | head -n 1)
+          done
+
+          PASSED_TESTS=$(grep -i "PASSED CASE" "$LATEST_LOG" | wc -l)
+          FAILED_TESTS=$(grep -i "FAILED CASE" "$LATEST_LOG" | wc -l)
+          TOTAL_TESTS=$((PASSED_TESTS + FAILED_TESTS))
+
+          # Create a detailed test results summary
+          TEST_RESULTS=$(grep -iE "PASSED CASE|FAILED CASE" "$LATEST_LOG")
+
+          echo "PASSED_TESTS=${PASSED_TESTS}" >> $GITHUB_ENV
+          echo "FAILED_TESTS=${FAILED_TESTS}" >> $GITHUB_ENV
+          echo "TOTAL_TESTS=${TOTAL_TESTS}" >> $GITHUB_ENV
+          echo "TEST_RESULTS<<EOF" >> $GITHUB_ENV
+          echo "${TEST_RESULTS}" >> $GITHUB_ENV
+          echo "EOF" >> $GITHUB_ENV
+
+      - name: Send Slack Notification
+        if: always()
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          GITHUB_RUN_URL: ${{ github.run_url }}
+          S3_BUCKET_NAME: "simplyblock-e2e-test-logs"
+          RUN_ID: ${{ github.run_id }}
+          PASSED_TESTS: ${{ env.PASSED_TESTS }}
+          FAILED_TESTS: ${{ env.FAILED_TESTS }}
+          TOTAL_TESTS: ${{ env.TOTAL_TESTS }}
+          TEST_RESULTS: ${{ env.TEST_RESULTS }}
+        run: |
+          AWS_LOGS_URL="s3://${S3_BUCKET_NAME}/${RUN_ID}"
+          
+          if [[ ${{ job.status }} == 'success' ]]; then
+            curl -X POST -H 'Content-type: application/json' --data '{"text":":white_check_mark: Python E2E tests successfully completed!\nGitHub Run: '${GITHUB_RUN_URL}'\nAWS Logs: '${AWS_LOGS_URL}'\n\nPassed Tests: '${PASSED_TESTS}'\nFailed Tests: '${FAILED_TESTS}'\nTotal Tests: '${TOTAL_TESTS}'\n\nTest Results:\n'${TEST_RESULTS}'"}' $SLACK_WEBHOOK_URL
+          else
+            curl -X POST -H 'Content-type: application/json' --data '{"text":":x: Python E2E tests failed!\nGitHub Run: '${GITHUB_RUN_URL}'\nAWS Logs: '${AWS_LOGS_URL}'\n\nPassed Tests: '${PASSED_TESTS}'\nFailed Tests: '${FAILED_TESTS}'\nTotal Tests: '${TOTAL_TESTS}'\n\nTest Results:\n'${TEST_RESULTS}'"}' $SLACK_WEBHOOK_URL
+          fi
 
       - name: Destroy Cluster
         if: always()

@@ -1,5 +1,6 @@
 ### simplyblock e2e tests
 import os
+import re
 from utils.common_utils import sleep_n_sec
 from utils.sbcli_utils import SbcliUtils
 from utils.ssh_utils import SshUtils
@@ -7,29 +8,29 @@ from utils.common_utils import CommonUtils
 from logger_config import setup_logger
 
 
-cluster_secret = os.environ.get("CLUSTER_SECRET")
-cluster_id = os.environ.get("CLUSTER_ID")
-cluster_ip = os.environ.get("CLUSTER_IP")
-
-url = f"http://{cluster_ip}"
-api_base_url = os.environ.get("API_BASE_URL")
-headers = {
-    "Content-Type": "application/json",
-    "Authorization": f"{cluster_id} {cluster_secret}"
-}
-bastion_server = os.environ.get("BASTION_SERVER")
-
-# cluster_secret = "yNFIop83RAYy5i7jgimu"
-# cluster_id = "5c56a38c-1edb-4787-94de-360d29027896"
-# cluster_ip = "10.0.3.183"
+# cluster_secret = os.environ.get("CLUSTER_SECRET")
+# cluster_id = os.environ.get("CLUSTER_ID")
+# cluster_ip = os.environ.get("CLUSTER_IP")
 
 # url = f"http://{cluster_ip}"
-# api_base_url = "https://kx32fdz013.execute-api.us-east-2.amazonaws.com/"
+# api_base_url = os.environ.get("API_BASE_URL")
 # headers = {
 #     "Content-Type": "application/json",
 #     "Authorization": f"{cluster_id} {cluster_secret}"
 # }
-# bastion_server = "3.141.7.124"
+# bastion_server = os.environ.get("BASTION_SERVER")
+
+cluster_secret = "K6rEkcyN7JiCgKdzy5ui"
+cluster_id = "d9aa5591-9c1c-4aae-a1cb-8fe3a4f63949"
+cluster_ip = "10.0.3.79"
+
+url = f"http://{cluster_ip}"
+api_base_url = "https://brucd45ho6.execute-api.us-east-2.amazonaws.com/"
+headers = {
+    "Content-Type": "application/json",
+    "Authorization": f"{cluster_id} {cluster_secret}"
+}
+bastion_server = "18.117.71.1"
 
 
 class TestSingleNodeMultipleFioPerfValidation:
@@ -87,8 +88,8 @@ class TestSingleNodeMultipleFioPerfValidation:
         self.lvol_name2 = "test_lvol2"
         self.mount_path1 = "/home/ec2-user/test_location1"
         self.mount_path2 = "/home/ec2-user/test_location2"
-        self.log_path1 = f"{os.path.dirname(self.mount_path1)}/log_file.log"
-        self.log_path2 = f"{os.path.dirname(self.mount_path2)}/log_file.log"
+        self.log_path1 = f"{os.path.dirname(self.mount_path1)}/log_file1.log"
+        self.log_path2 = f"{os.path.dirname(self.mount_path2)}/log_file2.log"
         self.base_cmd = None
         self.lvol_devices = {self.lvol_name1: {"Device": None, 
                                                "Path": self.mount_path1, 
@@ -261,9 +262,9 @@ class TestSingleNodeMultipleFioPerfValidation:
         
         sleep_n_sec(500)
 
-        # process_list_after = self.ssh_obj.find_process_name(node=self.mgmt_nodes[0],
-        #                                                     process_name="fio")
-        # self.logger.info(f"Process List: {process_list_after}")
+        process_list_after = self.ssh_obj.find_process_name(node=self.mgmt_nodes[0],
+                                                            process_name="fio")
+        self.logger.info(f"Process List: {process_list_after}")
         # if len(process_list_after) == 2:
         #     process_list_after = 0
         # else:
@@ -286,6 +287,31 @@ class TestSingleNodeMultipleFioPerfValidation:
         #                                   log_file=self.log_path)
 
         self.logger.info("TEST CASE PASSED !!!")
+
+    def validate_fio_output(self, output):
+        iops_pattern = re.compile(r'total:.*iops=([0-9]+)')
+        read_bw_pattern = re.compile(r'read: IOPS=.*, BW=([0-9.]+)MiB/s')
+        write_bw_pattern = re.compile(r'write: IOPS=.*, BW=([0-9.]+)MiB/s')
+
+        iops_match = iops_pattern.search(output)
+        read_bw_match = read_bw_pattern.search(output)
+        write_bw_match = write_bw_pattern.search(output)
+
+        if not iops_match or not read_bw_match or not write_bw_match:
+            return False, "Failed to parse fio output"
+
+        total_iops = int(iops_match.group(1))
+        read_bw = float(read_bw_match.group(1))
+        write_bw = float(write_bw_match.group(1))
+
+        if not (550 < total_iops < 650):
+            return False, f"Total IOPS {total_iops} out of range (550-650)"
+        if not (4.5 < read_bw < 5.5):
+            return False, f"Read BW {read_bw} out of range (4.5-5.5 MiB/s)"
+        if not (4.5 < write_bw < 5.5):
+            return False, f"Write BW {write_bw} out of range (4.5-5.5 MiB/s)"
+
+        return True, "Fio output validation passed"
 
     def teardown(self):
         """Contains teradown required post test case execution
