@@ -1566,7 +1566,7 @@ def get_node_ports(node_id):
     return utils.print_table(out)
 
 
-def get_node_port_iostats(port_id, history=None):
+def get_node_port_iostats(port_id, history=None, records_count=20):
     db_controller = DBController()
     nodes = db_controller.get_storage_nodes()
     nd = None
@@ -1582,19 +1582,25 @@ def get_node_port_iostats(port_id, history=None):
         logger.error("Port not found")
         return False
 
-    limit = 20
-    if history and history > 1:
-        limit = history
-    data = db_controller.get_port_stats(nd.get_id(), port.get_id(), limit=limit)
-    out = []
+    if history:
+        records_number = utils.parse_history_param(history)
+        if not records_number:
+            logger.error(f"Error parsing history string: {history}")
+            return False
+    else:
+        records_number = 20
 
-    for record in data:
+    records = db_controller.get_port_stats(nd.get_id(), port.get_id(), limit=records_number)
+    new_records = utils.process_records(records, records_count)
+
+    out = []
+    for record in new_records:
         out.append({
-            "Date": time.strftime("%H:%M:%S, %d/%m/%Y", time.gmtime(record.date)),
-            "out_speed": utils.humanbytes(record.out_speed),
-            "in_speed": utils.humanbytes(record.in_speed),
-            "bytes_sent": utils.humanbytes(record.bytes_sent),
-            "bytes_received": utils.humanbytes(record.bytes_received),
+            "Date": time.strftime("%H:%M:%S, %d/%m/%Y", time.gmtime(record['date'])),
+            "out_speed": utils.humanbytes(record['out_speed']),
+            "in_speed": utils.humanbytes(record['in_speed']),
+            "bytes_sent": utils.humanbytes(record['bytes_sent']),
+            "bytes_received": utils.humanbytes(record['bytes_received']),
         })
     return utils.print_table(out)
 

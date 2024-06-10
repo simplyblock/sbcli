@@ -30,3 +30,6 @@ class PortStat(BaseModel):
 
     def get_id(self):
         return "%s/%s/%s" % (self.node_id, self.uuid, self.date)
+
+    def keys(self):
+        return self.attributes
