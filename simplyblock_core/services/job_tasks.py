@@ -30,6 +30,7 @@ def task_runner(task):
         task.status = JobSchedule.STATUS_DONE
         task.write_to_db(db_controller.kv_store)
         device_controller.device_set_unavailable(device.get_id())
+        device_controller.device_set_retries_exhausted(device.get_id(), True)
         return True
 
     node = db_controller.get_storage_node_by_id(task.node_id)
@@ -105,4 +106,4 @@ while True:
                     res = task_runner(task)
                     if res is False:
                         time.sleep(delay_seconds)
-                        delay_seconds += 2
+                        delay_seconds *= 2

@@ -45,6 +45,7 @@ class NVMeDevice(BaseModel):
         "bdev_stack": {"type": List, 'default': []},
 
         "io_error": {"type": bool, 'default': False},
+        "retries_exhausted": {"type": bool, 'default': False},
 
     }
 
