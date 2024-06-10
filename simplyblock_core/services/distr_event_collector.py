@@ -14,6 +14,7 @@ from simplyblock_core.models.lvol_model import LVol
 from graypy import GELFUDPHandler
 
 from simplyblock_core.models.nvme_device import NVMeDevice
+from simplyblock_core.rpc_client import RPCClient
 
 # configure logging
 logger_handler = logging.StreamHandler(stream=sys.stdout)
@@ -33,9 +34,9 @@ def process_device_event(event):
         node_id = event.node_id
         storage_id = event.storage_id
 
-        nodes = db_controller.get_storage_nodes()
-        device_id = None
-        for node in nodes:
+        device = None
+        device_node = None
+        for node in db_controller.get_storage_nodes():
             for dev in node.nvme_devices:
                 if dev.cluster_device_order == storage_id:
                     if dev.status not in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_READONLY]:
@@ -43,22 +44,34 @@ def process_device_event(event):
                         event.status = 'skipped'
                         return
 
-                    # if node.get_id() != node_id:
-                    #     logger.info(f"The storage device is remote, skipping")
-                    #     event.status = 'skipped-remote'
-                    #     return
-
-                    device_id = dev.get_id()
+                    device = dev
+                    device_node = node
                     break
 
-        if not device_id:
+        if not device:
             logger.info(f"Device not found!, storage id: {storage_id} from node: {node_id}")
             event.status = 'device_not_found'
             return
 
+        device_id = device.get_id()
         if event.message == 'SPDK_BDEV_EVENT_REMOVE':
-            logger.info(f"Removing storage id: {storage_id} from node: {node_id}")
-            device_controller.device_remove(device_id)
+            if device.node_id == node_id:
+                logger.info(f"Removing storage id: {storage_id} from node: {node_id}")
+                device_controller.device_remove(device_id)
+            else:
+                logger.info(f"Removing remote storage id: {storage_id} from node: {node_id}")
+                new_remote_devices = []
+                rpc_client = RPCClient(device_node.mgmt_ip, device_node.rpc_port,
+                                       device_node.rpc_username, device_node.rpc_password)
+                for rem_dev in device_node.remote_devices:
+                    if rem_dev.get_id() == device.get_id():
+                        ctrl_name = rem_dev.remote_bdev[:-2]
+                        rpc_client.bdev_nvme_detach_controller(ctrl_name)
+                    else:
+                        new_remote_devices.append(rem_dev)
+                device_node.remote_devices = new_remote_devices
+                device_node.write_to_db(db_controller.kv_store)
+
         elif event.message in ['error_write', 'error_unmap']:
             logger.info(f"Setting device to read-only")
             device_controller.device_set_io_error(device_id, True)
