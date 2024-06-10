@@ -109,7 +109,11 @@ jobs:
           export API_BASE_URL=${{ steps.bootstrap_cluster.outputs.cluster_api_gateway_endpoint }}
           export BASTION_SERVER=${{ steps.terraform_outputs.outputs.bastion_public_ip }}
           export KEY_NAME=${{ steps.terraform_outputs.outputs.key_name }}
-          python3 e2e.py --testname ${{ github.event.inputs.testname || ''}}
+          TESTNAME=""
+          if [ -n "${{ github.event.inputs.testname }}" ]; then
+            TESTNAME="--testname ${{ github.event.inputs.testname }}"
+          fi
+          python3 e2e.py $TESTNAME
 
       - name: Upload automation and docker logs to s3
         run: |
@@ -130,21 +134,37 @@ jobs:
         run: |
           cd $GITHUB_WORKSPACE/e2e/logs
 
+          # Find the latest non-empty log file
           LATEST_LOG=$(ls -t *.log | head -n 1)
           while [ ! -s "$LATEST_LOG" ]; do
             LATEST_LOG=$(ls -t *.log | tail -n +2 | head -n 1)
           done
 
-          PASSED_TESTS=$(grep -i "PASSED CASE" "$LATEST_LOG" | wc -l)
-          FAILED_TESTS=$(grep -i "FAILED CASE" "$LATEST_LOG" | wc -l)
-          TOTAL_TESTS=$((PASSED_TESTS + FAILED_TESTS))
+          # Parse the identified log file
+          TOTAL_TESTS=$(grep -i "Number of Total Cases" "$LATEST_LOG" | awk '{print $NF}')
+          PASSED_TESTS=$(grep -i "Number of Passed Cases" "$LATEST_LOG" | awk '{print $NF}')
+          FAILED_TESTS=$(grep -i "Number of Failed Cases" "$LATEST_LOG" | awk '{print $NF}')
+          PASSED_CASES=$(grep -i "PASSED CASE" "$LATEST_LOG" | awk '{print $1}' | xargs)
+          FAILED_CASES=$(grep -i "FAILED CASE" "$LATEST_LOG" | awk '{print $1}' | xargs)
 
           # Create a detailed test results summary
           TEST_RESULTS=$(grep -iE "PASSED CASE|FAILED CASE" "$LATEST_LOG")
 
+          # Format passed and failed cases as bullet points
+          PASSED_CASES_BULLETS=$(grep -i "PASSED CASE" "$LATEST_LOG" | awk '{print "• " $1}' | xargs printf "%s\\n")
+          FAILED_CASES_BULLETS=$(grep -i "FAILED CASE" "$LATEST_LOG" | awk '{print "• " $1}' | xargs printf "%s\\n")
+
           echo "PASSED_TESTS=${PASSED_TESTS}" >> $GITHUB_ENV
           echo "FAILED_TESTS=${FAILED_TESTS}" >> $GITHUB_ENV
           echo "TOTAL_TESTS=${TOTAL_TESTS}" >> $GITHUB_ENV
+          echo "PASSED_CASES=${PASSED_CASES}" >> $GITHUB_ENV
+          echo "FAILED_CASES=${FAILED_CASES}" >> $GITHUB_ENV
+          echo "PASSED_CASES_BULLETS<<EOF" >> $GITHUB_ENV
+          echo "${PASSED_CASES_BULLETS}" >> $GITHUB_ENV
+          echo "EOF" >> $GITHUB_ENV
+          echo "FAILED_CASES_BULLETS<<EOF" >> $GITHUB_ENV
+          echo "${FAILED_CASES_BULLETS}" >> $GITHUB_ENV
+          echo "EOF" >> $GITHUB_ENV
           echo "TEST_RESULTS<<EOF" >> $GITHUB_ENV
           echo "${TEST_RESULTS}" >> $GITHUB_ENV
           echo "EOF" >> $GITHUB_ENV
@@ -159,14 +179,22 @@ jobs:
           PASSED_TESTS: ${{ env.PASSED_TESTS }}
           FAILED_TESTS: ${{ env.FAILED_TESTS }}
           TOTAL_TESTS: ${{ env.TOTAL_TESTS }}
+          PASSED_CASES: ${{ env.PASSED_CASES }}
+          FAILED_CASES: ${{ env.FAILED_CASES }}
+          PASSED_CASES_BULLETS: ${{ env.PASSED_CASES_BULLETS }}
+          FAILED_CASES_BULLETS: ${{ env.FAILED_CASES_BULLETS }}
           TEST_RESULTS: ${{ env.TEST_RESULTS }}
+          TRIGGER_EVENT: ${{ github.event_name }}
+          TRIGGER_DETAILS: ${{ github.event.head_commit.message }}
+          TRIGGER_ACTOR: ${{ github.actor }}
         run: |
           AWS_LOGS_URL="s3://${S3_BUCKET_NAME}/${RUN_ID}"
+          MESSAGE="Python E2E tests run triggered by ${TRIGGER_ACTOR} via ${TRIGGER_EVENT}. Commit message: ${TRIGGER_DETAILS}\nGitHub Run: ${GITHUB_RUN_URL}\nAWS Logs: ${AWS_LOGS_URL}\n\nTotal Tests: ${TOTAL_TESTS}\n\n- Test Cases Passed :white_check_mark:\n${PASSED_CASES_BULLETS}\n- Test Cases Failed :x:\n${FAILED_CASES_BULLETS}\n\nTest Results:\n${TEST_RESULTS}"
           
           if [[ ${{ job.status }} == 'success' ]]; then
-            curl -X POST -H 'Content-type: application/json' --data '{"text":":white_check_mark: Python E2E tests successfully completed!\nGitHub Run: '${GITHUB_RUN_URL}'\nAWS Logs: '${AWS_LOGS_URL}'\n\nPassed Tests: '${PASSED_TESTS}'\nFailed Tests: '${FAILED_TESTS}'\nTotal Tests: '${TOTAL_TESTS}'\n\nTest Results:\n'${TEST_RESULTS}'"}' $SLACK_WEBHOOK_URL
+            curl -X POST -H 'Content-type: application/json' --data '{"text":":white_check_mark: '${MESSAGE}'"}' $SLACK_WEBHOOK_URL
           else
-            curl -X POST -H 'Content-type: application/json' --data '{"text":":x: Python E2E tests failed!\nGitHub Run: '${GITHUB_RUN_URL}'\nAWS Logs: '${AWS_LOGS_URL}'\n\nPassed Tests: '${PASSED_TESTS}'\nFailed Tests: '${FAILED_TESTS}'\nTotal Tests: '${TOTAL_TESTS}'\n\nTest Results:\n'${TEST_RESULTS}'"}' $SLACK_WEBHOOK_URL
+            curl -X POST -H 'Content-type: application/json' --data '{"text":":x: '${MESSAGE}'"}' $SLACK_WEBHOOK_URL
           fi
 
       - name: Destroy Cluster

@@ -49,12 +49,17 @@ def main():
             errors[f"{test.__name__}"].append(exp)
 
     failed_cases = list(errors.keys())
-    logger.info("List - Status of cases")
+    logger.info(f"Number of Total Cases: {len(test_class_run)}")
+    logger.info(f"Number of Passed Cases: {len(test_class_run) - len(failed_cases)}")
+    logger.info(f"Number of Failed Cases: {len(failed_cases)}")
+    
+    logger.info("Test Wise run status:")
     for test in test_class_run:
         if test.__name__ not in failed_cases:
             logger.info(f"{test.__name__} PASSED CASE.")
         else:
             logger.info(f"{test.__name__} FAILED CASE.")
+
 
     if errors:
         raise MultipleExceptions(errors)
