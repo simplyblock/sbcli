@@ -158,15 +158,13 @@ jobs:
           TOTAL_TESTS=$(grep -i "Number of Total Cases" "$LATEST_LOG" | awk '{print $NF}')
           PASSED_TESTS=$(grep -i "Number of Passed Cases" "$LATEST_LOG" | awk '{print $NF}')
           FAILED_TESTS=$(grep -i "Number of Failed Cases" "$LATEST_LOG" | awk '{print $NF}')
-          PASSED_CASES=$(grep -i "PASSED CASE" "$LATEST_LOG" | awk '{print $1}' | xargs)
-          FAILED_CASES=$(grep -i "FAILED CASE" "$LATEST_LOG" | awk '{print $1}' | xargs)
-
-          # Create a detailed test results summary
-          TEST_RESULTS=$(grep -iE "PASSED CASE|FAILED CASE" "$LATEST_LOG")
+          PASSED_CASES=$(grep -i "PASSED CASE" "$LATEST_LOG" | grep -oP '(?<=INFO - ).*(?= PASSED CASE)')
+          FAILED_CASES=$(grep -i "FAILED CASE" "$LATEST_LOG" | grep -oP '(?<=INFO - ).*(?= FAILED CASE)')
 
           # Format passed and failed cases as bullet points
-          PASSED_CASES_BULLETS=$(grep -i "PASSED CASE" "$LATEST_LOG" | awk '{print "• " $1}' | xargs printf "%s\\n")
-          FAILED_CASES_BULLETS=$(grep -i "FAILED CASE" "$LATEST_LOG" | awk '{print "• " $1}' | xargs printf "%s\\n")
+          PASSED_CASES_BULLETS=$(echo "$PASSED_CASES" | awk '{print "• " $0}' | xargs printf "%s\\n")
+          FAILED_CASES_BULLETS=$(echo "$FAILED_CASES" | awk '{print "• " $0}' | xargs printf "%s\\n")
+
 
           echo "PASSED_TESTS=${PASSED_TESTS}" >> $GITHUB_ENV
           echo "FAILED_TESTS=${FAILED_TESTS}" >> $GITHUB_ENV
@@ -178,9 +176,6 @@ jobs:
           echo "EOF" >> $GITHUB_ENV
           echo "FAILED_CASES_BULLETS<<EOF" >> $GITHUB_ENV
           echo "${FAILED_CASES_BULLETS}" >> $GITHUB_ENV
-          echo "EOF" >> $GITHUB_ENV
-          echo "TEST_RESULTS<<EOF" >> $GITHUB_ENV
-          echo "${TEST_RESULTS}" >> $GITHUB_ENV
           echo "EOF" >> $GITHUB_ENV
 
       - name: Send Slack Notification
@@ -198,19 +193,19 @@ jobs:
           FAILED_CASES: ${{ env.FAILED_CASES }}
           PASSED_CASES_BULLETS: ${{ env.PASSED_CASES_BULLETS }}
           FAILED_CASES_BULLETS: ${{ env.FAILED_CASES_BULLETS }}
-          TEST_RESULTS: ${{ env.TEST_RESULTS }}
           TRIGGER_EVENT: ${{ github.event_name }}
           TRIGGER_ACTOR: ${{ github.actor }}
         run: |
           GITHUB_RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}"
           AWS_LOGS_URL="https://us-east-2.console.aws.amazon.com/s3/buckets/${S3_BUCKET_NAME}/${RUN_ID}?region=us-east-2"
-          MESSAGE="Python E2E tests run triggered by ${{ env.TRIGGER_ACTOR }} via ${{ env.TRIGGER_EVENT }}. \nGitHub Run: ${{ env.GITHUB_RUN_URL }}\nAWS Logs: ${AWS_LOGS_URL}\n\nTotal Tests: ${{ env.TOTAL_TESTS }}\n\n- Test Cases Passed :white_check_mark:\n${{ env.PASSED_CASES_BULLETS }}\n- Test Cases Failed :x:\n${{ env.FAILED_CASES_BULLETS }}\n\nTest Results:\n${{ env.TEST_RESULTS }}"
-          
           if [[ ${{ job.status }} == 'success' ]]; then
-            curl -X POST -H 'Content-type: application/json' --data "{\"text\":\"${MESSAGE}\"}" $SLACK_WEBHOOK_URL
+            OVERALL_STATUS=":white_check_mark: Overall Status: SUCCESS"
           else
-            curl -X POST -H 'Content-type: application/json' --data "{\"text\":\"${MESSAGE}\"}" $SLACK_WEBHOOK_URL
+            OVERALL_STATUS=":x: Overall Status: FAILURE"
           fi
+          MESSAGE="Python E2E tests run triggered by ${{ env.TRIGGER_ACTOR }} via ${{ env.TRIGGER_EVENT }}. \n${OVERALL_STATUS}\nGitHub Run: ${GITHUB_RUN_URL}\nAWS Logs: ${AWS_LOGS_URL}\n\nTotal Tests: ${{ env.TOTAL_TESTS }}\n\n- Test Cases Passed :white_check_mark:\n${{ env.PASSED_CASES_BULLETS }}\n- Test Cases Failed :x:\n${{ env.FAILED_CASES_BULLETS }}"
+          
+          curl -X POST -H 'Content-type: application/json' --data "{\"text\":\"${MESSAGE}\"}" $SLACK_WEBHOOK_URL
 
       - name: Destroy Cluster
         if: always()
