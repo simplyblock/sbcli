@@ -136,10 +136,23 @@ jobs:
           cd $GITHUB_WORKSPACE/e2e/logs
 
           # Find the latest non-empty log file
-          LATEST_LOG=$(ls -t *.log | head -n 1)
-          while [ ! -s "$LATEST_LOG" ]; do
-            LATEST_LOG=$(ls -t *.log | tail -n +2 | head -n 1)
+          COUNTER=0
+          MAX_ATTEMPTS=10
+
+          # Find the latest non-empty log file
+          while [ $COUNTER -lt $MAX_ATTEMPTS ]; do
+            LATEST_LOG=$(ls -t *.log | head -n 1)
+            if [ -s "$LATEST_LOG" ]; then
+              break
+            fi
+            COUNTER=$((COUNTER + 1))
+            sleep 1  # Add a small delay to avoid rapid looping
           done
+
+          if [ ! -s "$LATEST_LOG" ]; then
+            echo "No non-empty log file found after $MAX_ATTEMPTS attempts"
+            exit 1
+          fi
 
           # Parse the identified log file
           TOTAL_TESTS=$(grep -i "Number of Total Cases" "$LATEST_LOG" | awk '{print $NF}')
