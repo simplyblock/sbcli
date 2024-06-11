@@ -30,6 +30,9 @@ def device_set_state(device_id, state):
     if device.status == state:
         return True
 
+    if state == NVMeDevice.STATUS_ONLINE:
+        device.retries_exhausted = False
+
     old_status = dev.status
     device.status = state
     distr_controller.send_dev_status_event(device, device.status)
@@ -82,32 +85,7 @@ def get_alceml_name(alceml_id):
     return f"alceml_{alceml_id}"
 
 
-def restart_device(device_id, force=False):
-    db_controller = DBController()
-    dev = db_controller.get_storage_device_by_id(device_id)
-    if not dev:
-        logger.error("device not found")
-
-    if dev.status != NVMeDevice.STATUS_REMOVED:
-        logger.error("Device must be in removed status")
-        if not force:
-            return False
-
-    snode = db_controller.get_storage_node_by_id(dev.node_id)
-    if not snode:
-        logger.error("node not found")
-        return False
-
-    device_obj = None
-    for dev in snode.nvme_devices:
-        if dev.get_id() == device_id:
-            device_obj = dev
-            break
-
-    device_obj.status = 'restarting'
-    snode.write_to_db(db_controller.kv_store)
-
-    logger.info(f"Restarting device {device_id}")
+def _def_create_device_stack(device_obj, snode):
 
     rpc_client = RPCClient(
         snode.mgmt_ip, snode.rpc_port,
@@ -171,7 +149,46 @@ def restart_device(device_id, force=False):
     device_obj.nvmf_nqn = subsystem_nqn
     device_obj.nvmf_ip = IP
     device_obj.nvmf_port = 4420
+    return True
+
+
+def restart_device(device_id, force=False):
+    db_controller = DBController()
+    dev = db_controller.get_storage_devices(device_id)
+    if not dev:
+        logger.error("device not found")
+
+    if dev.status != NVMeDevice.STATUS_REMOVED:
+        logger.error("Device must be in removed status")
+        if not force:
+            return False
+
+    snode = db_controller.get_storage_node_by_id(dev.node_id)
+    if not snode:
+        logger.error("node not found")
+        return False
+
+    device_obj = None
+    for dev in snode.nvme_devices:
+        if dev.get_id() == device_id:
+            device_obj = dev
+            break
+
+    device_obj.status = 'restarting'
+    snode.write_to_db(db_controller.kv_store)
+
+    logger.info(f"Restarting device {device_id}")
+
+    ret = _def_create_device_stack(device_obj, snode)
+
+    if not ret:
+        logger.error("Failed to create device stack")
+        device_obj.status = NVMeDevice.STATUS_UNAVAILABLE
+        snode.write_to_db(db_controller.kv_store)
+        return False
+
     device_obj.io_error = False
+    device_obj.retries_exhausted = False
     device_obj.status = NVMeDevice.STATUS_ONLINE
     snode.write_to_db(db_controller.kv_store)
 
@@ -428,8 +445,37 @@ def reset_storage_device(dev_id):
         return False
 
     device.io_error = False
+    device.retries_exhausted = False
     snode.write_to_db(db_controller.kv_store)
 
     device_events.device_reset(device)
     device_set_online(dev_id)
+    return True
+
+
+def device_set_retries_exhausted(device_id, retries_exhausted):
+    db_controller = DBController()
+    dev = db_controller.get_storage_devices(device_id)
+    if not dev:
+        logger.error("device not found")
+
+    snode = db_controller.get_storage_node_by_id(dev.node_id)
+    if not snode:
+        logger.error("node not found")
+        return False
+
+    device = None
+    for dev in snode.nvme_devices:
+        if dev.get_id() == device_id:
+            device = dev
+            break
+
+    if not device:
+        logger.error("device not found")
+
+    if device.retries_exhausted == retries_exhausted:
+        return True
+
+    device.retries_exhausted = retries_exhausted
+    snode.write_to_db(db_controller.kv_store)
     return True

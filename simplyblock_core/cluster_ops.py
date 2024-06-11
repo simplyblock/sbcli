@@ -69,7 +69,7 @@ def _add_graylog_input(cluster_ip, password):
     return response.status_code == 201
 
 
-def create_cluster(blk_size, page_size_in_blocks, ha_type, cli_pass,
+def create_cluster(blk_size, page_size_in_blocks, cli_pass,
                    cap_warn, cap_crit, prov_cap_warn, prov_cap_crit, ifname, log_del_interval, metrics_retention_period):
     logger.info("Installing dependencies...")
     ret = scripts.install_deps()
@@ -112,7 +112,6 @@ def create_cluster(blk_size, page_size_in_blocks, ha_type, cli_pass,
     c.uuid = str(uuid.uuid4())
     c.blk_size = blk_size
     c.page_size_in_blocks = page_size_in_blocks
-    c.ha_type = ha_type
     c.nqn = f"{constants.CLUSTER_NQN}:{c.uuid}"
     c.cli_pass = cli_pass
     c.secret = utils.generate_string(20)
@@ -137,8 +136,7 @@ def create_cluster(blk_size, page_size_in_blocks, ha_type, cli_pass,
     _add_graylog_input(DEV_IP, c.secret)
 
     c.status = Cluster.STATUS_ACTIVE
-    if ha_type == 'ha':
-        c.status = Cluster.STATUS_SUSPENDED
+
     c.updated_at = int(time.time())
     c.write_to_db(db_controller.kv_store)
 
@@ -740,7 +738,7 @@ def list_tasks(cluster_id):
             "UUID": task.uuid,
             "Device": task.device_id,
             "Function": task.function_name,
-            "Retry": task.retry,
+            "Retry": f"{task.retry}/{constants.TASK_EXEC_RETRY_COUNT}",
             "Status": task.status,
             "Result": task.function_result,
             "Date": time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(task.date)),

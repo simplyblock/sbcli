@@ -58,6 +58,10 @@ while True:
             logger.debug(f"Skipping LVol health check because of io_error {lvol.get_id()}")
             continue
         ret = health_controller.check_lvol(lvol.get_id())
+        if not ret:
+            time.sleep(5)
+            ret = health_controller.check_lvol(lvol.get_id())
+
         logger.info(f"LVol: {lvol.get_id()}, is healthy: {ret}")
         set_lvol_health_check(lvol, ret)
         if ret:

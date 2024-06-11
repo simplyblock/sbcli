@@ -19,7 +19,7 @@ class JobSchedule(BaseModel):
         "function_params": {"type": dict, 'default': {}},
         "function_result": {"type": str, 'default': ""},
 
-        "retry": {"type": int, 'default': 5},
+        "retry": {"type": int, 'default': 0},
         "status": {"type": str, 'default': ""},
 
     }

@@ -92,7 +92,32 @@
                         },
                         "unit": "bytes"
                     },
-                    "overrides": []
+                    "overrides": [
+                        {
+                            "__systemRef": "hideSeriesFrom",
+                            "matcher": {
+                                "id": "byNames",
+                                "options": {
+                                    "mode": "exclude",
+                                    "names": [
+                                        "{__name__=\"snode_size_total\", cluster=\"9baa11f4-0b47-47e1-9dec-20dacdda59d0\", exported_job=\"collector\", instance=\"pushgateway:9091\", job=\"metricsgateway\", snode=\"90499750-6b1e-4452-8ff5-125166f33865\"}"
+                                    ],
+                                    "prefix": "All except:",
+                                    "readOnly": true
+                                }
+                            },
+                            "properties": [
+                                {
+                                    "id": "custom.hideFrom",
+                                    "value": {
+                                        "legend": false,
+                                        "tooltip": false,
+                                        "viz": true
+                                    }
+                                }
+                            ]
+                        }
+                    ]
                 },
                 "gridPos": {
                     "h": 7,
@@ -119,8 +144,8 @@
                             "type": "prometheus",
                             "uid": "PBFA97CFB590B2093"
                         },
-                        "editorMode": "builder",
-                        "expr": "snode_size_total",
+                        "editorMode": "code",
+                        "expr": "snode_size_total{cluster=~\"$cluster\",snode=~\"$node\"}",
                         "legendFormat": "__auto",
                         "range": true,
                         "refId": "A"
@@ -212,8 +237,8 @@
                             "type": "prometheus",
                             "uid": "PBFA97CFB590B2093"
                         },
-                        "editorMode": "builder",
-                        "expr": "snode_size_free",
+                        "editorMode": "code",
+                        "expr": "snode_size_free{cluster=~\"$cluster\",snode=~\"$node\"}",
                         "legendFormat": "__auto",
                         "range": true,
                         "refId": "A"
@@ -305,8 +330,8 @@
                             "type": "prometheus",
                             "uid": "PBFA97CFB590B2093"
                         },
-                        "editorMode": "builder",
-                        "expr": "snode_size_used",
+                        "editorMode": "code",
+                        "expr": "snode_size_used{cluster=~\"$cluster\",snode=~\"$node\"}",
                         "legendFormat": "__auto",
                         "range": true,
                         "refId": "A"
@@ -398,8 +423,8 @@
                             "type": "prometheus",
                             "uid": "PBFA97CFB590B2093"
                         },
-                        "editorMode": "builder",
-                        "expr": "snode_size_prov",
+                        "editorMode": "code",
+                        "expr": "snode_size_prov{cluster=~\"$cluster\",snode=~\"$node\"}",
                         "legendFormat": "__auto",
                         "range": true,
                         "refId": "A"
@@ -491,8 +516,8 @@
                             "type": "prometheus",
                             "uid": "PBFA97CFB590B2093"
                         },
-                        "editorMode": "builder",
-                        "expr": "snode_size_prov_util",
+                        "editorMode": "code",
+                        "expr": "snode_size_prov_util{cluster=~\"$cluster\",snode=~\"$node\"}",
                         "legendFormat": "__auto",
                         "range": true,
                         "refId": "A"
@@ -584,8 +609,8 @@
                             "type": "prometheus",
                             "uid": "PBFA97CFB590B2093"
                         },
-                        "editorMode": "builder",
-                        "expr": "snode_size_util",
+                        "editorMode": "code",
+                        "expr": "snode_size_util{cluster=~\"$cluster\",snode=~\"$node\"}",
                         "legendFormat": "__auto",
                         "range": true,
                         "refId": "A"
@@ -690,8 +715,8 @@
                             "type": "prometheus",
                             "uid": "PBFA97CFB590B2093"
                         },
-                        "editorMode": "builder",
-                        "expr": "snode_write_bytes",
+                        "editorMode": "code",
+                        "expr": "snode_write_bytes{cluster=~\"$cluster\",snode=~\"$node\"}",
                         "legendFormat": "__auto",
                         "range": true,
                         "refId": "A"
@@ -783,8 +808,8 @@
                             "type": "prometheus",
                             "uid": "PBFA97CFB590B2093"
                         },
-                        "editorMode": "builder",
-                        "expr": "snode_write_bytes_ps",
+                        "editorMode": "code",
+                        "expr": "snode_write_bytes_ps{cluster=~\"$cluster\",snode=~\"$node\"}",
                         "legendFormat": "__auto",
                         "range": true,
                         "refId": "A"
@@ -875,8 +900,8 @@
                             "type": "prometheus",
                             "uid": "PBFA97CFB590B2093"
                         },
-                        "editorMode": "builder",
-                        "expr": "snode_write_latency_ticks",
+                        "editorMode": "code",
+                        "expr": "snode_write_latency_ticks{cluster=~\"$cluster\",snode=~\"$node\"}",
                         "legendFormat": "__auto",
                         "range": true,
                         "refId": "A"
@@ -967,8 +992,8 @@
                             "type": "prometheus",
                             "uid": "PBFA97CFB590B2093"
                         },
-                        "editorMode": "builder",
-                        "expr": "snode_write_io",
+                        "editorMode": "code",
+                        "expr": "snode_write_io{cluster=~\"$cluster\",snode=~\"$node\"}",
                         "legendFormat": "__auto",
                         "range": true,
                         "refId": "A"
@@ -1059,8 +1084,8 @@
                             "type": "prometheus",
                             "uid": "PBFA97CFB590B2093"
                         },
-                        "editorMode": "builder",
-                        "expr": "snode_write_io_ps",
+                        "editorMode": "code",
+                        "expr": "snode_write_io_ps{cluster=~\"$cluster\",snode=~\"$node\"}",
                         "legendFormat": "__auto",
                         "range": true,
                         "refId": "A"
@@ -1152,8 +1177,8 @@
                             "type": "prometheus",
                             "uid": "PBFA97CFB590B2093"
                         },
-                        "editorMode": "builder",
-                        "expr": "snode_write_latency_ps / 1000",
+                        "editorMode": "code",
+                        "expr": "snode_write_latency_ps{cluster=~\"$cluster\",snode=~\"$node\"} / 1000",
                         "legendFormat": "__auto",
                         "range": true,
                         "refId": "A"
@@ -1258,8 +1283,8 @@
                             "type": "prometheus",
                             "uid": "PBFA97CFB590B2093"
                         },
-                        "editorMode": "builder",
-                        "expr": "snode_read_bytes",
+                        "editorMode": "code",
+                        "expr": "snode_read_bytes{cluster=~\"$cluster\",snode=~\"$node\"}",
                         "legendFormat": "__auto",
                         "range": true,
                         "refId": "A"
@@ -1351,8 +1376,8 @@
                             "type": "prometheus",
                             "uid": "PBFA97CFB590B2093"
                         },
-                        "editorMode": "builder",
-                        "expr": "snode_read_bytes_ps",
+                        "editorMode": "code",
+                        "expr": "snode_read_bytes_ps{cluster=~\"$cluster\",snode=~\"$node\"}",
                         "legendFormat": "__auto",
                         "range": true,
                         "refId": "A"
@@ -1444,8 +1469,8 @@
                             "type": "prometheus",
                             "uid": "PBFA97CFB590B2093"
                         },
-                        "editorMode": "builder",
-                        "expr": "snode_read_latency_ps",
+                        "editorMode": "code",
+                        "expr": "snode_read_latency_ps{cluster=~\"$cluster\",snode=~\"$node\"}",
                         "legendFormat": "__auto",
                         "range": true,
                         "refId": "A"
@@ -1536,8 +1561,8 @@
                             "type": "prometheus",
                             "uid": "PBFA97CFB590B2093"
                         },
-                        "editorMode": "builder",
-                        "expr": "snode_read_io",
+                        "editorMode": "code",
+                        "expr": "snode_read_io{cluster=~\"$cluster\",snode=~\"$node\"}",
                         "legendFormat": "__auto",
                         "range": true,
                         "refId": "A"
@@ -1628,8 +1653,8 @@
                             "type": "prometheus",
                             "uid": "PBFA97CFB590B2093"
                         },
-                        "editorMode": "builder",
-                        "expr": "snode_read_io_ps",
+                        "editorMode": "code",
+                        "expr": "snode_read_io_ps{cluster=~\"$cluster\",snode=~\"$node\"}",
                         "legendFormat": "__auto",
                         "range": true,
                         "refId": "A"
@@ -1720,8 +1745,8 @@
                             "type": "prometheus",
                             "uid": "PBFA97CFB590B2093"
                         },
-                        "editorMode": "builder",
-                        "expr": "snode_read_latency_ticks",
+                        "editorMode": "code",
+                        "expr": "snode_read_latency_ticks{cluster=~\"$cluster\",snode=~\"$node\"}",
                         "legendFormat": "__auto",
                         "range": true,
                         "refId": "A"
@@ -1825,8 +1850,8 @@
                             "type": "prometheus",
                             "uid": "PBFA97CFB590B2093"
                         },
-                        "editorMode": "builder",
-                        "expr": "snode_unmap_latency_ticks",
+                        "editorMode": "code",
+                        "expr": "snode_unmap_latency_ticks{cluster=~\"$cluster\",snode=~\"$node\"}",
                         "legendFormat": "__auto",
                         "range": true,
                         "refId": "A"
@@ -1918,8 +1943,8 @@
                             "type": "prometheus",
                             "uid": "PBFA97CFB590B2093"
                         },
-                        "editorMode": "builder",
-                        "expr": "snode_unmap_bytes_ps",
+                        "editorMode": "code",
+                        "expr": "snode_unmap_bytes_ps{cluster=~\"$cluster\",snode=~\"$node\"}",
                         "legendFormat": "__auto",
                         "range": true,
                         "refId": "A"
@@ -2012,8 +2037,8 @@
                             "type": "prometheus",
                             "uid": "PBFA97CFB590B2093"
                         },
-                        "editorMode": "builder",
-                        "expr": "snode_unmap_latency_ps",
+                        "editorMode": "code",
+                        "expr": "snode_unmap_latency_ps{cluster=~\"$cluster\",snode=~\"$node\"}",
                         "legendFormat": "__auto",
                         "range": true,
                         "refId": "A"
@@ -2129,8 +2154,8 @@
                             "type": "prometheus",
                             "uid": "PBFA97CFB590B2093"
                         },
-                        "editorMode": "builder",
-                        "expr": "snode_unmap_io_ps",
+                        "editorMode": "code",
+                        "expr": "snode_unmap_io_ps{cluster=~\"$cluster\",snode=~\"$node\"}",
                         "legendFormat": "__auto",
                         "range": true,
                         "refId": "A"
@@ -2221,8 +2246,8 @@
                             "type": "prometheus",
                             "uid": "PBFA97CFB590B2093"
                         },
-                        "editorMode": "builder",
-                        "expr": "snode_unmap_io",
+                        "editorMode": "code",
+                        "expr": "snode_unmap_io{cluster=~\"$cluster\",snode=~\"$node\"}",
                         "legendFormat": "__auto",
                         "range": true,
                         "refId": "A"
@@ -2314,8 +2339,8 @@
                             "type": "prometheus",
                             "uid": "PBFA97CFB590B2093"
                         },
-                        "editorMode": "builder",
-                        "expr": "snode_unmap_bytes",
+                        "editorMode": "code",
+                        "expr": "snode_unmap_bytes{cluster=~\"$cluster\",snode=~\"$node\"}",
                         "legendFormat": "__auto",
                         "range": true,
                         "refId": "A"
@@ -2325,12 +2350,77 @@
                 "type": "timeseries"
             }
         ],
-        "refresh": "",
+        "refresh": "5s",
         "schemaVersion": 38,
         "style": "dark",
         "tags": [],
         "templating": {
-            "list": []
+            "list": [
+                {
+                    "allValue": ".*",
+                    "current": {
+                        "selected": true,
+                        "text": [
+                            "All"
+                        ],
+                        "value": [
+                            "$__all"
+                        ]
+                    },
+                    "datasource": {
+                        "type": "prometheus",
+                        "uid": "PBFA97CFB590B2093"
+                    },
+                    "definition": "label_values(cluster)",
+                    "hide": 0,
+                    "includeAll": true,
+                    "label": "cluster",
+                    "multi": true,
+                    "name": "cluster",
+                    "options": [],
+                    "query": {
+                        "query": "label_values(cluster)",
+                        "refId": "PrometheusVariableQueryEditor-VariableQuery"
+                    },
+                    "refresh": 1,
+                    "regex": "",
+                    "skipUrlSync": false,
+                    "sort": 0,
+                    "type": "query"
+                },
+                {
+                    "allValue": ".*",
+                    "current": {
+                        "selected": true,
+                        "text": [
+                            "All"
+                        ],
+                        "value": [
+                            "$__all"
+                        ]
+                    },
+                    "datasource": {
+                        "type": "prometheus",
+                        "uid": "PBFA97CFB590B2093"
+                    },
+                    "definition": "query_result(device_size_total{cluster=~\"$cluster\"})",
+                    "hide": 0,
+                    "includeAll": true,
+                    "label": "node",
+                    "multi": true,
+                    "name": "node",
+                    "options": [],
+                    "query": {
+                        "query": "query_result(device_size_total{cluster=~\"$cluster\"})",
+                        "refId": "PrometheusVariableQueryEditor-VariableQuery"
+                    },
+                    "refresh": 2,
+                    "regex": ".*snode=\"(.*?)\".*",
+                    "skipUrlSync": false,
+                    "sort": 1,
+                    "type": "query"
+                }
+            ]
         },
         "time": {
             "from": "now-1h",

@@ -7,7 +7,7 @@ import logging
 from flask import Blueprint
 from flask import request
 
-from simplyblock_core.controllers import lvol_controller
+from simplyblock_core.controllers import lvol_controller, snapshot_controller
 
 from simplyblock_web import utils
 
@@ -88,10 +88,12 @@ def add_lvol():
         | pool (required) | Pool UUID or name
         | comp            | Create a new compress LVol
         | crypto          | Create a new crypto LVol
-        | max-rw-iops     | Maximum Read Write IO Per Second
+        | snapshot        | Create a Lvol with snapshot capability
+        | max_rw_iops     | Maximum Read Write IO Per Second
         | max_rw_mbytes   | Maximum Read Write Mega Bytes Per Second
         | max_r_mbytes    | Maximum Read Mega Bytes Per Second
         | max_w_mbytes    | Maximum Write Mega Bytes Per Second
+        | max_size        | Maximum LVol size: 10M, 10G, 10(bytes)
         | ha_type         | LVol HA type, can be (single,ha,default=cluster's ha type), Default=default
         | distr_vuid      | Distr bdev virtual unique ID, Default=0 means random
         | distr_ndcs      | Distr bdev number of data chunks per stripe, Default=0 means auto set
@@ -133,16 +135,19 @@ def add_lvol():
     rw_mbytes = utils.get_int_value_or_default(cl_data, "max_rw_mbytes", 0)
     r_mbytes = utils.get_int_value_or_default(cl_data, "max_r_mbytes", 0)
     w_mbytes = utils.get_int_value_or_default(cl_data, "max_w_mbytes", 0)
+    max_size = utils.get_int_value_or_default(cl_data, "max_size", 0)
 
     compression = utils.get_value_or_default(cl_data, "comp", False)
     encryption = utils.get_value_or_default(cl_data, "crypto", False)
+    snapshot = utils.get_value_or_default(cl_data, "snapshot", False)
+
 
     ha_type = utils.get_value_or_default(cl_data, "ha_type", "default")
 
     distr_vuid = utils.get_int_value_or_default(cl_data, "distr_vuid", 0)
     distr_ndcs = utils.get_int_value_or_default(cl_data, "distr_ndcs", 0)
     distr_npcs = utils.get_int_value_or_default(cl_data, "distr_npcs", 0)
-    distr_bs = utils.get_int_value_or_default(cl_data, "distr_ps", 4096)
+    distr_bs = utils.get_int_value_or_default(cl_data, "distr_bs", 4096)
     distr_chunk_bs = utils.get_int_value_or_default(cl_data, "distr_chunk_bs", 4096)
     crypto_key1 = utils.get_value_or_default(cl_data, "crypto_key1", None)
     crypto_key2 = utils.get_value_or_default(cl_data, "crypto_key2", None)
@@ -155,7 +160,9 @@ def add_lvol():
 
         use_comp=compression,
         use_crypto=encryption,
+        with_snapshot=snapshot,
 
+        max_size=max_size,
         max_rw_iops=rw_iops,
         max_rw_mbytes=rw_mbytes,
         max_r_mbytes=r_mbytes,
@@ -256,3 +263,17 @@ def connect_lvol(uuid):
 
     ret = lvol_controller.connect_lvol(uuid)
     return utils.get_csi_response(ret)
+
+
+@bp.route('/lvol/create_snapshot', methods=['POST'])
+def create_snapshot():
+    cl_data = request.get_json()
+    if 'lvol_id' not in cl_data:
+        return utils.get_csi_response(None, "missing required param: lvol_id", 400)
+    if 'snapshot_name' not in cl_data:
+        return utils.get_csi_response(None, "missing required param: snapshot_name", 400)
+
+    snapID = snapshot_controller.add(
+        cl_data['lvol_id'],
+        cl_data['snapshot_name'])
+    return utils.get_response(snapID)
