@@ -3,8 +3,8 @@ import os
 from logger_config import setup_logger
 from pathlib import Path
 
-# SSH_KEY_LOCATION = os.path.join(Path.home(), ".ssh", os.environ.get("KEY_NAME"))
-SSH_KEY_LOCATION = '/mnt/c/Users/Raunak Jalan/.ssh/simplyblock-us-east-2.pem'
+SSH_KEY_LOCATION = os.path.join(Path.home(), ".ssh", os.environ.get("KEY_NAME"))
+# SSH_KEY_LOCATION = '/mnt/c/Users/Raunak Jalan/.ssh/simplyblock-us-east-2.pem'
 
 
 class SshUtils:
@@ -203,13 +203,13 @@ class SshUtils:
             time_based = ""
         
         command = (f"sudo fio --name={name} {location} --ioengine={ioengine} --direct=1 --iodepth={iodepth} "
-                   f"{time_based} --runtime={runtime} --rw={rw} --bs={bs} --size={size} --rwmixread={rwmixread}"
+                   f"{time_based} --runtime={runtime} --rw={rw} --bs={bs} --size={size} --rwmixread={rwmixread} "
                    "--verify=md5 --numjobs=1 --verify_dump=1 --verify_fatal=1 --verify_state_save=1 --verify_backlog=10")
 
         self.logger.info(f"{command} >> {log_file} &")
-        # self.exec_command_background(node=node,
-        #                              command=command,
-        #                              log_file=log_file)
+        self.exec_command_background(node=node,
+                                     command=command,
+                                     log_file=log_file)
     
     def find_process_name(self, node, process_name, return_pid=False):
         if return_pid:

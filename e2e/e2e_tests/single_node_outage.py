@@ -19,17 +19,17 @@ headers = {
 }
 bastion_server = os.environ.get("BASTION_SERVER")
 
-# cluster_secret = "gnxpANBkOglOf9W9bj09"
-# cluster_id = "5852d5d4-47dc-47c3-9095-b8c01cf1701e"
-# cluster_ip = "10.0.3.130"
+# cluster_secret = "bsmEXb6W3XtEFr4LIRnx"
+# cluster_id = "79d5e453-ca37-4124-af57-c4d99b12402d"
+# cluster_ip = "10.0.3.136"
 
 # url = f"http://{cluster_ip}"
-# api_base_url = "https://w6o4vt5uo5.execute-api.us-east-2.amazonaws.com/"
+# api_base_url = "https://zybd1owv43.execute-api.us-east-2.amazonaws.com/"
 # headers = {
 #     "Content-Type": "application/json",
 #     "Authorization": f"{cluster_id} {cluster_secret}"
 # }
-# bastion_server = "3.128.168.118"
+# bastion_server = "18.116.14.160"
 
 
 class TestSingleNodeOutage:

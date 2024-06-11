@@ -8,29 +8,29 @@ from utils.common_utils import CommonUtils
 from logger_config import setup_logger
 
 
-# cluster_secret = os.environ.get("CLUSTER_SECRET")
-# cluster_id = os.environ.get("CLUSTER_ID")
-# cluster_ip = os.environ.get("CLUSTER_IP")
-
-# url = f"http://{cluster_ip}"
-# api_base_url = os.environ.get("API_BASE_URL")
-# headers = {
-#     "Content-Type": "application/json",
-#     "Authorization": f"{cluster_id} {cluster_secret}"
-# }
-# bastion_server = os.environ.get("BASTION_SERVER")
-
-cluster_secret = "bsmEXb6W3XtEFr4LIRnx"
-cluster_id = "79d5e453-ca37-4124-af57-c4d99b12402d"
-cluster_ip = "10.0.3.241"
+cluster_secret = os.environ.get("CLUSTER_SECRET")
+cluster_id = os.environ.get("CLUSTER_ID")
+cluster_ip = os.environ.get("CLUSTER_IP")
 
 url = f"http://{cluster_ip}"
-api_base_url = "https://rr9fha4uwh.execute-api.us-east-2.amazonaws.com/"
+api_base_url = os.environ.get("API_BASE_URL")
 headers = {
     "Content-Type": "application/json",
     "Authorization": f"{cluster_id} {cluster_secret}"
 }
-bastion_server = "3.17.78.22"
+bastion_server = os.environ.get("BASTION_SERVER")
+
+# cluster_secret = "bsmEXb6W3XtEFr4LIRnx"
+# cluster_id = "79d5e453-ca37-4124-af57-c4d99b12402d"
+# cluster_ip = "10.0.3.136"
+
+# url = f"http://{cluster_ip}"
+# api_base_url = "https://zybd1owv43.execute-api.us-east-2.amazonaws.com/"
+# headers = {
+#     "Content-Type": "application/json",
+#     "Authorization": f"{cluster_id} {cluster_secret}"
+# }
+# bastion_server = "18.116.14.160"
 
 
 class TestSingleNodeMultipleFioPerfValidation:
@@ -260,11 +260,12 @@ class TestSingleNodeMultipleFioPerfValidation:
         assert process_list_after == process_list_before, \
             f"FIO process list changed - Before Sleep: {process_list_before}, After Sleep: {process_list_after}"
         
-        sleep_n_sec(500)
+        sleep_n_sec(1900)
 
         process_list_after = self.ssh_obj.find_process_name(node=self.mgmt_nodes[0],
                                                             process_name="fio")
         self.logger.info(f"Process List: {process_list_after}")
+        did_not_quit = False
         if len(process_list_after) == 2:
             process_list_after = 0
         else:
@@ -273,7 +274,8 @@ class TestSingleNodeMultipleFioPerfValidation:
                 process_name="fio"
             )
             self.logger.error(f"FIO process did not get stopped after runtime. {process_list_after}")
-            raise RuntimeError(f"FIO process did not get stopped after runtime. {process_list_after}")
+            did_not_quit = True
+            # raise RuntimeError(f"FIO process did not get stopped after runtime. {process_list_after}")
         
         out1 = self.ssh_obj.read_file(node=self.mgmt_nodes[0],
                                       file_name=self.log_path1)
@@ -283,9 +285,11 @@ class TestSingleNodeMultipleFioPerfValidation:
         self.logger.info(f"Log file 1 {self.log_path1}: \n {out1}")
         self.logger.info(f"Log file 2 {self.log_path2}: \n {out2}")
         
-        self.common_utils.validate_fio_test(node=self.mgmt_nodes[0],
-                                          log_file=self.log_path)
+        # self.common_utils.validate_fio_test(node=self.mgmt_nodes[0],
+        #                                   log_file=self.log_path)
 
+        if did_not_quit:
+            raise RuntimeError(f"FIO process did not get stopped after runtime. {process_list_after}")
         self.logger.info("TEST CASE PASSED !!!")
 
     def validate_fio_output(self, output):

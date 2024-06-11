@@ -17,7 +17,7 @@ on:
         required: true
         default: 'sbcli-dev'
       testname:
-        description: 'Name of test tor run. Empty to run all'
+        description: 'Name of test to run. Empty to run all'
         required: false
         default: ''
 jobs:
@@ -154,6 +154,21 @@ jobs:
           PASSED_CASES_BULLETS=$(grep -i "PASSED CASE" "$LATEST_LOG" | awk '{print "• " $1}' | xargs printf "%s\\n")
           FAILED_CASES_BULLETS=$(grep -i "FAILED CASE" "$LATEST_LOG" | awk '{print "• " $1}' | xargs printf "%s\\n")
 
+          echo "PASSED_TESTS=${PASSED_TESTS}"
+          echo "FAILED_TESTS=${FAILED_TESTS}"
+          echo "TOTAL_TESTS=${TOTAL_TESTS}"
+          echo "PASSED_CASES=${PASSED_CASES}"
+          echo "FAILED_CASES=${FAILED_CASES}"
+          echo "PASSED_CASES_BULLETS<<EOF"
+          echo "${PASSED_CASES_BULLETS}"
+          echo "EOF"
+          echo "FAILED_CASES_BULLETS<<EOF"
+          echo "${FAILED_CASES_BULLETS}"
+          echo "EOF"
+          echo "TEST_RESULTS<<EOF"
+          echo "${TEST_RESULTS}"
+          echo "EOF"
+          
           echo "PASSED_TESTS=${PASSED_TESTS}" >> $GITHUB_ENV
           echo "FAILED_TESTS=${FAILED_TESTS}" >> $GITHUB_ENV
           echo "TOTAL_TESTS=${TOTAL_TESTS}" >> $GITHUB_ENV
