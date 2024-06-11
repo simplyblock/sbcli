@@ -519,6 +519,13 @@ class RPCClient:
     def distr_status_events_get(self):
         return self._request("distr_status_events_get")
 
+    def distr_status_events_discard_then_get(self, nev_discard, nev_read):
+        params = {
+            "nev_discard": nev_discard,
+            "nev_read": nev_read,
+        }
+        return self._request("distr_status_events_discard_then_get", params)
+
     def alceml_get_capacity(self, name):
         params = {"name": name}
         return self._request("alceml_get_pages_usage", params)
