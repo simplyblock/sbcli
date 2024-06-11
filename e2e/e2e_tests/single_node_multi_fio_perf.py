@@ -20,17 +20,17 @@ from logger_config import setup_logger
 # }
 # bastion_server = os.environ.get("BASTION_SERVER")
 
-cluster_secret = "j4RHLYdVMxUwwsVivmiY"
-cluster_id = "d1a63a2e-0ef3-4d6d-ba07-2db5981cedab"
-cluster_ip = "10.0.3.88"
+cluster_secret = "bsmEXb6W3XtEFr4LIRnx"
+cluster_id = "79d5e453-ca37-4124-af57-c4d99b12402d"
+cluster_ip = "10.0.3.241"
 
 url = f"http://{cluster_ip}"
-api_base_url = "https://v8itnqf5dd.execute-api.us-east-2.amazonaws.com/"
+api_base_url = "https://rr9fha4uwh.execute-api.us-east-2.amazonaws.com/"
 headers = {
     "Content-Type": "application/json",
     "Authorization": f"{cluster_id} {cluster_secret}"
 }
-bastion_server = "3.149.251.255"
+bastion_server = "3.17.78.22"
 
 
 class TestSingleNodeMultipleFioPerfValidation:
@@ -265,15 +265,15 @@ class TestSingleNodeMultipleFioPerfValidation:
         process_list_after = self.ssh_obj.find_process_name(node=self.mgmt_nodes[0],
                                                             process_name="fio")
         self.logger.info(f"Process List: {process_list_after}")
-        # if len(process_list_after) == 2:
-        #     process_list_after = 0
-        # else:
-        #     self.ssh_obj.kill_processes(
-        #         node=self.mgmt_nodes[0],
-        #         process_name="fio"
-        #     )
-        #     self.logger.error(f"FIO process did not get stopped after runtime. {process_list_after}")
-        #     raise RuntimeError(f"FIO process did not get stopped after runtime. {process_list_after}")
+        if len(process_list_after) == 2:
+            process_list_after = 0
+        else:
+            self.ssh_obj.kill_processes(
+                node=self.mgmt_nodes[0],
+                process_name="fio"
+            )
+            self.logger.error(f"FIO process did not get stopped after runtime. {process_list_after}")
+            raise RuntimeError(f"FIO process did not get stopped after runtime. {process_list_after}")
         
         out1 = self.ssh_obj.read_file(node=self.mgmt_nodes[0],
                                       file_name=self.log_path1)
@@ -283,8 +283,8 @@ class TestSingleNodeMultipleFioPerfValidation:
         self.logger.info(f"Log file 1 {self.log_path1}: \n {out1}")
         self.logger.info(f"Log file 2 {self.log_path2}: \n {out2}")
         
-        # self.common_utils.validate_fio_test(node=self.mgmt_nodes[0],
-        #                                   log_file=self.log_path)
+        self.common_utils.validate_fio_test(node=self.mgmt_nodes[0],
+                                          log_file=self.log_path)
 
         self.logger.info("TEST CASE PASSED !!!")
 
@@ -316,17 +316,17 @@ class TestSingleNodeMultipleFioPerfValidation:
     def teardown(self):
         """Contains teradown required post test case execution
         """
-        nqn_devices = []
-        self.logger.info("Inside teardown function")
-        for lvol in list(self.lvol_devices.keys()):
-            lvol_id = self.sbcli_utils.get_lvol_id(lvol_name=lvol)
-            lvol_details = self.sbcli_utils.get_lvol_details(lvol_id=lvol_id)
-            nqn_devices.append(lvol_details[0]["nqn"])
-        self.sbcli_utils.delete_all_lvols()
-        self.sbcli_utils.delete_all_storage_pools()
-        for nqn in nqn_devices:
-            self.ssh_obj.exec_command(node=self.mgmt_nodes[0],
-                                      command=f"sudo nvme disconnect -n {nqn}")
+        # nqn_devices = []
+        # self.logger.info("Inside teardown function")
+        # for lvol in list(self.lvol_devices.keys()):
+        #     lvol_id = self.sbcli_utils.get_lvol_id(lvol_name=lvol)
+        #     lvol_details = self.sbcli_utils.get_lvol_details(lvol_id=lvol_id)
+        #     nqn_devices.append(lvol_details[0]["nqn"])
+        # self.sbcli_utils.delete_all_lvols()
+        # self.sbcli_utils.delete_all_storage_pools()
+        # for nqn in nqn_devices:
+        #     self.ssh_obj.exec_command(node=self.mgmt_nodes[0],
+        #                               command=f"sudo nvme disconnect -n {nqn}")
         for node, ssh in self.ssh_obj.ssh_connections.items():
             self.logger.info(f"Closing node ssh connection for {node}")
             ssh.close()

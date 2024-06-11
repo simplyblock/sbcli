@@ -130,7 +130,7 @@ class SshUtils:
             node (str): Node to perform ssh operation on
             device (str): Device path
         """
-        command = f"sudo mkfs.xfs -t ext4 {device}"
+        command = f"sudo mkfs.ext4 {device}"
         self.exec_command(node, command)
 
     def mount_path(self, node, device, mount_path):
@@ -206,9 +206,10 @@ class SshUtils:
                    f"{time_based} --runtime={runtime} --rw={rw} --bs={bs} --size={size} --rwmixread={rwmixread}"
                    "--verify=md5 --numjobs=1 --verify_dump=1 --verify_fatal=1 --verify_state_save=1 --verify_backlog=10")
 
-        self.exec_command_background(node=node,
-                                     command=command,
-                                     log_file=log_file)
+        self.logger.info(f"{command} >> {log_file} &")
+        # self.exec_command_background(node=node,
+        #                              command=command,
+        #                              log_file=log_file)
     
     def find_process_name(self, node, process_name, return_pid=False):
         if return_pid:
