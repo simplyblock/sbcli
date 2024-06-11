@@ -25,15 +25,15 @@ def add_deployer():
     dpl_data = request.get_json()
     if 'snodes' not in dpl_data:
         return utils.get_response_error("missing required param: snodes", 400)
-    if 'azs' not in dpl_data:
-        return utils.get_response_error("missing required param: azs", 400)
+    if 'az' not in dpl_data:
+        return utils.get_response_error("missing required param: az", 400)
     if 'cluster_id' not in dpl_data:
         return utils.get_response_error("missing required param: cluster_id", 400)
 
     d = Deployer()
     d.jobid = str(uuid.uuid4())
     d.snodes = dpl_data['snodes']
-    d.azs = dpl_data['azs']
+    d.az = dpl_data['az']
     d.cluster_id = dpl_data['cluster_id']
     d.write_to_db(db_controller.kv_store)
 

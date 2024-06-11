@@ -24,7 +24,7 @@ class Deployer(BaseModel):
     attributes = {
         "jobid": {"type": str, 'default': ""},
         "snodes": {"type": str, 'default': ""},
-        "azs": {"type": str, 'default': ""},
+        "az": {"type": str, 'default': ""},
         "cluster_id": {"type": str, "default": ""},
     }
 
