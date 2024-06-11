@@ -318,7 +318,7 @@ class SbcliUtils:
 
         data = self.get_request(api_url=f"/lvol/connect/{lvol_id}")
         self.logger.info(f"Connect lvol resp: {data}")
-        return data["result"][0]["connect"]
+        return data["results"][0]["connect"]
 
     def get_cluster_status(self, cluster_id=None):
         """Return cluster status for given cluster id

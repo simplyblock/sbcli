@@ -168,7 +168,7 @@ jobs:
           echo "TEST_RESULTS<<EOF"
           echo "${TEST_RESULTS}"
           echo "EOF"
-          
+
           echo "PASSED_TESTS=${PASSED_TESTS}" >> $GITHUB_ENV
           echo "FAILED_TESTS=${FAILED_TESTS}" >> $GITHUB_ENV
           echo "TOTAL_TESTS=${TOTAL_TESTS}" >> $GITHUB_ENV
@@ -204,12 +204,12 @@ jobs:
           TRIGGER_ACTOR: ${{ github.actor }}
         run: |
           AWS_LOGS_URL="s3://${S3_BUCKET_NAME}/${RUN_ID}"
-          MESSAGE="Python E2E tests run triggered by ${TRIGGER_ACTOR} via ${TRIGGER_EVENT}. Commit message: ${TRIGGER_DETAILS}\nGitHub Run: ${GITHUB_RUN_URL}\nAWS Logs: ${AWS_LOGS_URL}\n\nTotal Tests: ${TOTAL_TESTS}\n\n- Test Cases Passed :white_check_mark:\n${PASSED_CASES_BULLETS}\n- Test Cases Failed :x:\n${FAILED_CASES_BULLETS}\n\nTest Results:\n${TEST_RESULTS}"
+          MESSAGE="Python E2E tests run triggered by ${{ env.TRIGGER_ACTOR }} via ${{ env.TRIGGER_EVENT }}. Commit message: ${{ env.TRIGGER_DETAILS }}\nGitHub Run: ${{ env.GITHUB_RUN_URL }}\nAWS Logs: ${AWS_LOGS_URL}\n\nTotal Tests: ${{ env.TOTAL_TESTS }}\n\n- Test Cases Passed :white_check_mark:\n${{ env.PASSED_CASES_BULLETS }}\n- Test Cases Failed :x:\n${{ env.FAILED_CASES_BULLETS }}\n\nTest Results:\n${{ env.TEST_RESULTS }}"
           
           if [[ ${{ job.status }} == 'success' ]]; then
-            curl -X POST -H 'Content-type: application/json' --data '{"text":":white_check_mark: '${MESSAGE}'"}' $SLACK_WEBHOOK_URL
+            curl -X POST -H 'Content-type: application/json' --data "{\"text\":\"${MESSAGE}\"}" $SLACK_WEBHOOK_URL
           else
-            curl -X POST -H 'Content-type: application/json' --data '{"text":":x: '${MESSAGE}'"}' $SLACK_WEBHOOK_URL
+            curl -X POST -H 'Content-type: application/json' --data "{\"text\":\"${MESSAGE}\"}" $SLACK_WEBHOOK_URL
           fi
 
       - name: Destroy Cluster
