@@ -63,7 +63,8 @@ def clone_snapshot():
     if 'clone_name' not in cl_data:
         return utils.get_response(None, "missing required param: clone_name", 400)
 
-    lvolID = snapshot_controller.clone(
-        cl_data['snapshot_id'],
-        cl_data['clone_name'])
-    return utils.get_response(lvolID)
+    res, msg = snapshot_controller.clone(
+        cl_data['snapshot_id'], cl_data['clone_name'])
+    if res:
+        return utils.get_response(msg)
+    return utils.get_response(None, msg)
