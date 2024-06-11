@@ -88,8 +88,8 @@ class TestSingleNodeMultipleFioPerfValidation:
         self.lvol_name2 = "test_lvol2"
         self.mount_path1 = "/home/ec2-user/test_location1"
         self.mount_path2 = "/home/ec2-user/test_location2"
-        self.log_path1 = f"{os.path.dirname(self.mount_path1)}/log_file1.log"
-        self.log_path2 = f"{os.path.dirname(self.mount_path2)}/log_file2.log"
+        self.log_path1 = f"{os.path.dirname(self.mount_path1)}/log_file1.json"
+        self.log_path2 = f"{os.path.dirname(self.mount_path2)}/log_file2.json"
         self.base_cmd = None
         self.lvol_devices = {self.lvol_name1: {"Device": None, 
                                                "Path": self.mount_path1, 
@@ -232,7 +232,6 @@ class TestSingleNodeMultipleFioPerfValidation:
         
             self.ssh_obj.run_fio_test(node=self.mgmt_nodes[0],
                                       directory=data["Path"],
-                                      log_file=data["Log"],
                                       name=f"fio_run_{i}",
                                       readwrite="randrw",
                                       ioengine="libaio",
@@ -241,7 +240,9 @@ class TestSingleNodeMultipleFioPerfValidation:
                                       rwmixread=55,
                                       size="2G",
                                       time_based=True,
-                                      runtime=300)
+                                      runtime=300,
+                                      output_format="json",
+                                      output_file=data["Log"])
             i += 1
         
         sleep_n_sec(3)

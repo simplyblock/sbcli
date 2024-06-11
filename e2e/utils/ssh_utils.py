@@ -121,7 +121,10 @@ class SshUtils:
             ssh_connection = self.ssh_connections[node]
         channel = ssh_connection.get_transport().open_session()
         self.logger.info(f"Command: {command}")
-        channel.exec_command(f'{command} >> {log_file} &')
+        if log_file:
+            channel.exec_command(f'{command} >> {log_file} &')
+        else:
+            channel.exec_command(f'{command} &')
 
     def format_disk(self, node, device):
         """Format disk on the given node
@@ -202,9 +205,19 @@ class SshUtils:
         else:
             time_based = ""
         
+        output_format = kwargs.get("output_format", '')
+        if len(output_format):
+                output_format = f' --output-format={output_format} '
+
+        output_file = kwargs.get("output_file", '')
+        if output_file:
+            output_file = f" --output={output_file} "
+                
+        
         command = (f"sudo fio --name={name} {location} --ioengine={ioengine} --direct=1 --iodepth={iodepth} "
                    f"{time_based} --runtime={runtime} --rw={rw} --bs={bs} --size={size} --rwmixread={rwmixread} "
-                   "--verify=md5 --numjobs=1 --verify_dump=1 --verify_fatal=1 --verify_state_save=1 --verify_backlog=10")
+                   "--verify=md5 --numjobs=1 --verify_dump=1 --verify_fatal=1 --verify_state_save=1 --verify_backlog=10 "
+                   f"--group_reporting{output_format}{output_file}")
 
         self.logger.info(f"{command} >> {log_file} &")
         self.exec_command_background(node=node,
