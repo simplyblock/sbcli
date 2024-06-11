@@ -6,6 +6,21 @@ from simplyblock_core.models.base_model import BaseModel
 
 class Deployer(BaseModel):
 
+    STATUS_ACTIVE = "active"
+    STATUS_READONLY = 'read_only'
+    STATUS_INACTIVE = "inactive"
+    STATUS_SUSPENDED = "suspended"
+    STATUS_DEGRADED = "degraded"
+    
+    STATUS_CODE_MAP = {
+        STATUS_ACTIVE: 0,
+        STATUS_INACTIVE: 1,
+
+        STATUS_SUSPENDED: 10,
+        STATUS_DEGRADED: 11,
+
+    }
+
     attributes = {
         "jobid": {"type": str, 'default': ""},
         "snodes": {"type": str, 'default': ""},
