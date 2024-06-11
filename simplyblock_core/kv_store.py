@@ -9,6 +9,7 @@ from simplyblock_core.models.caching_node import CachingNode
 from simplyblock_core.models.cluster import ClusterMap
 
 from simplyblock_core.models.cluster import Cluster
+from simplyblock_core.models.deployer import Deployer
 from simplyblock_core.models.compute_node import ComputeNode
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.port_stat import PortStat
@@ -240,6 +241,14 @@ class DBController:
 
     def get_cluster_by_id(self, cluster_id):
         ret = Cluster().read_from_db(self.kv_store, id=cluster_id)
+        if ret:
+            return ret[0]
+
+    def get_deployers(self):
+        return Deployer().read_from_db(self.kv_store)
+
+    def get_deployer_by_id(self, job_id):
+        ret = Deployer().read_from_db(self.kv_store, id=job_id)
         if ret:
             return ret[0]
 
