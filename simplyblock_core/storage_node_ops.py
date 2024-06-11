@@ -1820,3 +1820,21 @@ def get(node_id):
 
     data = snode.get_clean_dict()
     return json.dumps(data, indent=2)
+
+
+def set_node_status(node_id, status):
+    db_controller = DBController()
+    snode = db_controller.get_storage_node_by_id(node_id)
+    if snode.status != status:
+        old_status = snode.status
+        snode.status = status
+        snode.updated_at = str(datetime.datetime.now())
+        snode.write_to_db(db_controller.kv_store)
+        storage_events.snode_status_change(snode, snode.status, old_status, caused_by="monitor")
+        distr_controller.send_node_status_event(snode.get_id(), status)
+
+    if snode.status == StorageNode.STATUS_ONLINE:
+        logger.info("Connecting to remote devices")
+        _connect_to_remote_devs(snode)
+
+    return True

@@ -4,7 +4,7 @@ import time
 import sys
 
 
-from simplyblock_core import constants, kv_store
+from simplyblock_core import constants, kv_store, storage_node_ops
 from simplyblock_core.controllers import device_controller
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.nvme_device import NVMeDevice
@@ -15,6 +15,15 @@ from graypy import GELFUDPHandler
 from simplyblock_core.models.storage_node import StorageNode
 
 
+def _get_node_unavailable_devices_count(node_id):
+    node = db_controller.get_storage_node_by_id(node_id)
+    devices = []
+    for dev in node.nvme_devices:
+        if dev.status == NVMeDevice.STATUS_UNAVAILABLE:
+            devices.append(dev)
+    return len(devices)
+
+
 def _get_device(task):
     node = db_controller.get_storage_node_by_id(task.node_id)
     for dev in node.nvme_devices:
@@ -23,6 +32,13 @@ def _get_device(task):
 
 
 def task_runner(task):
+    if task.function_name == "device_restart":
+        return task_runner_device(task)
+    if task.function_name == "node_restart":
+        return task_runner_node(task)
+
+
+def task_runner_device(task):
     device = _get_device(task)
 
     if task.retry >= constants.TASK_EXEC_RETRY_COUNT:
@@ -69,6 +85,50 @@ def task_runner(task):
     device = _get_device(task)
     if device.status == NVMeDevice.STATUS_ONLINE and device.io_error is False:
         logger.info(f"Device is online: {device.get_id()}")
+        task.function_result = "done"
+        task.status = JobSchedule.STATUS_DONE
+        task.write_to_db(db_controller.kv_store)
+        return True
+
+    task.retry += 1
+    task.write_to_db(db_controller.kv_store)
+    return False
+
+
+def task_runner_node(task):
+    node = db_controller.get_storage_node_by_id(task.node_id)
+    if task.retry >= constants.TASK_EXEC_RETRY_COUNT:
+        task.function_result = "max retry reached"
+        task.status = JobSchedule.STATUS_DONE
+        task.write_to_db(db_controller.kv_store)
+        storage_node_ops.set_node_status(task.node_id, StorageNode.STATUS_UNREACHABLE)
+        return True
+
+    if _get_node_unavailable_devices_count(node.get_id()) == 0:
+        logger.info(f"Node is online: {node.get_id()}, no restart needed")
+        task.function_result = "skipped because node is online"
+        task.status = JobSchedule.STATUS_DONE
+        task.write_to_db(db_controller.kv_store)
+        return True
+
+    task.status = JobSchedule.STATUS_RUNNING
+    task.write_to_db(db_controller.kv_store)
+
+    # shutting down node
+    logger.info(f"Shutdown node {node.get_id()}")
+    ret = storage_node_ops.shutdown_storage_node(node.get_id(), force=True)
+    if ret:
+        logger.info(f"Node shutdown succeeded")
+    time.sleep(5)
+
+    # resetting node
+    logger.info(f"Restart node {node.get_id()}")
+    ret = storage_node_ops.restart_storage_node(node.get_id())
+    if ret:
+        logger.info(f"Node restart succeeded")
+
+    if _get_node_unavailable_devices_count(node.get_id()) == 0:
+        logger.info(f"Node is online: {node.get_id()}, no restart needed")
         task.function_result = "done"
         task.status = JobSchedule.STATUS_DONE
         task.write_to_db(db_controller.kv_store)
