@@ -161,38 +161,38 @@ def delete(snapshot_uuid):
 def clone(snapshot_id, clone_name, new_size=0):
     snap = db_controller.get_snapshot_by_id(snapshot_id)
     if not snap:
-        logger.error(f"Snapshot not found {snapshot_id}")
-        return False
+        msg=f"Snapshot not found {snapshot_id}"
+        logger.error(msg)
+        return False, msg
 
     pool = db_controller.get_pool_by_id(snap.lvol.pool_uuid)
     if not pool:
-        logger.error(f"Pool not found: {snap.lvol.pool_uuid}")
-        return False
+        msg=f"Pool not found: {snap.lvol.pool_uuid}"
+        logger.error(msg)
+        return False, msg
+
     if pool.status == Pool.STATUS_INACTIVE:
-        logger.error(f"Pool is disabled")
-        return False
+        msg="Pool is disabled"
+        logger.error(msg)
+        return False, msg
 
     snode = db_controller.get_storage_node_by_id(snap.lvol.node_id)
-    if not pool:
-        logger.error(f"Storage node not found: {snap.lvol.node_id}")
-        return False
-
-    if not snode.nvme_devices:
-        logger.error("Storage node has no nvme devices")
-        return False
+    if not snode:
+        msg=f"Storage node not found: {snap.lvol.node_id}"
+        logger.error(msg)
+        return False, msg
 
     if snode.status != snode.STATUS_ONLINE:
-        logger.error("Storage node in not Online")
-        return False
+        msg="Storage node in not Online"
+        logger.error(msg)
+        return False, msg
 
-    if not snode.nvme_devices:
-        logger.error("Storage node has no nvme devices")
-        return False
-
-    if snode.status != snode.STATUS_ONLINE:
-        logger.error("Storage node in not Online")
-        return False
-
+    for lvol in db_controller.get_lvols():
+        if lvol.pool_uuid == pool.get_id():
+            if lvol.lvol_name == clone_name:
+                msg=f"LVol name must be unique: {clone_name}"
+                logger.error(msg)
+                return False, msg
 
     lvol = LVol()
     lvol.lvol_name = clone_name
@@ -206,12 +206,14 @@ def clone(snapshot_id, clone_name, new_size=0):
     lvol.distr_page_size = snap.lvol.distr_page_size
     if new_size:
         if snap.lvol.size >= new_size:
-            logger.error(f"New size {new_size} must be higher than the original size {snap.lvol.size}")
-            return False
+            msg=f"New size {new_size} must be higher than the original size {snap.lvol.size}"
+            logger.error(msg)
+            return False, msg
 
         if snap.lvol.max_size < new_size:
-            logger.error(f"New size {new_size} must be smaller than the max size {snap.lvol.max_size}")
-            return False
+            msg=f"New size {new_size} must be smaller than the max size {snap.lvol.max_size}"
+            logger.error(msg)
+            return False, msg
         lvol.size = new_size
 
 
@@ -227,8 +229,9 @@ def clone(snapshot_id, clone_name, new_size=0):
         name, new_vuid, lvol.ndcs, lvol.npcs, num_blocks,
         lvol.distr_bs, jm_names, lvol.distr_chunk_bs, None, None, lvol.distr_page_size)
     if not ret:
-        logger.error("Failed to create Distr bdev")
-        return False, "Failed to create Distr bdev"
+        msg="Failed to create Distr bdev"
+        logger.error(msg)
+        return False, msg
     if ret == "?":
         logger.error(f"Failed to create Distr bdev, ret={ret}")
         # return False
@@ -236,7 +239,9 @@ def clone(snapshot_id, clone_name, new_size=0):
     logger.info("Sending cluster map to the lvol")
     ret = distr_controller.send_cluster_map_to_node(snode)
     if not ret:
-        return False, "Failed to send cluster map"
+        msg = "Failed to send cluster map"
+        logger.error(msg)
+        return False, msg
 
     logger.info("Creating clone bdev")
     block_len = lvol.distr_bs
@@ -313,4 +318,4 @@ def clone(snapshot_id, clone_name, new_size=0):
     logger.info("Done")
     snapshot_events.snapshot_clone(snap, lvol)
 
-    return lvol_id
+    return True, lvol_id
