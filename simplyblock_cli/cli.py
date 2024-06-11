@@ -894,7 +894,7 @@ class CLIWrapper:
                 host_id = args.host_id
                 ha_type = args.ha_type
                 pool = args.pool
-                comp = args.compress
+                comp = None
                 crypto = args.encrypt
                 distr_vuid = args.distr_vuid
                 distr_ndcs = args.distr_ndcs
