@@ -1,5 +1,5 @@
 DOCKER_USER=hamdysimplyblock
 
-SIMPLY_BLOCK_VERSION=1.1.5
+SIMPLY_BLOCK_VERSION=1.1.6
 SIMPLY_BLOCK_COMMAND_NAME=sbcli-release
 SIMPLY_BLOCK_DOCKER_IMAGE=simplyblock/simplyblock:release_v1

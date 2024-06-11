@@ -103,3 +103,7 @@ class SNodeClient:
             "num_partitions": num_partitions,
         }
         return self._request("POST", "make_gpt_partitions", params)
+
+    def delete_dev_gpt_partitions(self, device_pci):
+        params = {"device_pci": device_pci}
+        return self._request("POST", "delete_dev_gpt_partitions", params)

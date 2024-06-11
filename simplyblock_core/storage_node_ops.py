@@ -959,8 +959,14 @@ def remove_storage_node(node_id, force_remove=False, force_migrate=False):
         snode_api = SNodeClient(snode.api_endpoint, timeout=20)
         snode_api.spdk_process_kill()
         snode_api.leave_swarm()
+        pci_address = []
+        for dev in snode.nvme_devices:
+            if dev.pcie_address not in pci_address:
+                ret = snode_api.delete_dev_gpt_partitions(dev.pcie_address)
+                logger.debug(ret)
+                pci_address.append(dev.pcie_address)
     except Exception as e:
-        logger.warning(f"Failed to remove SPDK process: {e}")
+        logger.exception(e)
 
     old_status = snode.status
     snode.status = StorageNode.STATUS_REMOVED
