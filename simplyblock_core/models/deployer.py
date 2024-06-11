@@ -3,8 +3,6 @@
 from typing import Mapping, List
 
 from simplyblock_core.models.base_model import BaseModel
-from simplyblock_core.models.storage_node import StorageNode
-
 
 class Deployer(BaseModel):
 
