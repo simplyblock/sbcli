@@ -8,29 +8,29 @@ from utils.common_utils import CommonUtils
 from logger_config import setup_logger
 
 
-# cluster_secret = os.environ.get("CLUSTER_SECRET")
-# cluster_id = os.environ.get("CLUSTER_ID")
-# cluster_ip = os.environ.get("CLUSTER_IP")
-
-# url = f"http://{cluster_ip}"
-# api_base_url = os.environ.get("API_BASE_URL")
-# headers = {
-#     "Content-Type": "application/json",
-#     "Authorization": f"{cluster_id} {cluster_secret}"
-# }
-# bastion_server = os.environ.get("BASTION_SERVER")
-
-cluster_secret = "qNf9okpUw1dBGnlASACP"
-cluster_id = "0fbe47d3-9c61-4733-843d-da4a5fd67fac"
-cluster_ip = "10.0.3.136"
+cluster_secret = os.environ.get("CLUSTER_SECRET")
+cluster_id = os.environ.get("CLUSTER_ID")
+cluster_ip = os.environ.get("CLUSTER_IP")
 
 url = f"http://{cluster_ip}"
-api_base_url = "https://zybd1owv43.execute-api.us-east-2.amazonaws.com/"
+api_base_url = os.environ.get("API_BASE_URL")
 headers = {
     "Content-Type": "application/json",
     "Authorization": f"{cluster_id} {cluster_secret}"
 }
-bastion_server = "18.116.14.160"
+bastion_server = os.environ.get("BASTION_SERVER")
+
+# cluster_secret = "qNf9okpUw1dBGnlASACP"
+# cluster_id = "0fbe47d3-9c61-4733-843d-da4a5fd67fac"
+# cluster_ip = "10.0.3.136"
+
+# url = f"http://{cluster_ip}"
+# api_base_url = "https://zybd1owv43.execute-api.us-east-2.amazonaws.com/"
+# headers = {
+#     "Content-Type": "application/json",
+#     "Authorization": f"{cluster_id} {cluster_secret}"
+# }
+# bastion_server = "18.116.14.160"
 
 
 class TestSingleNodeMultipleFioPerfValidation:
@@ -260,7 +260,7 @@ class TestSingleNodeMultipleFioPerfValidation:
         assert process_list_after == process_list_before, \
             f"FIO process list changed - Before Sleep: {process_list_before}, After Sleep: {process_list_after}"
         
-        sleep_n_sec(1900)
+        sleep_n_sec(600)
 
         process_list_after = self.ssh_obj.find_process_name(node=self.mgmt_nodes[0],
                                                             process_name="fio")
@@ -320,17 +320,17 @@ class TestSingleNodeMultipleFioPerfValidation:
     def teardown(self):
         """Contains teradown required post test case execution
         """
-        # nqn_devices = []
-        # self.logger.info("Inside teardown function")
-        # for lvol in list(self.lvol_devices.keys()):
-        #     lvol_id = self.sbcli_utils.get_lvol_id(lvol_name=lvol)
-        #     lvol_details = self.sbcli_utils.get_lvol_details(lvol_id=lvol_id)
-        #     nqn_devices.append(lvol_details[0]["nqn"])
-        # self.sbcli_utils.delete_all_lvols()
-        # self.sbcli_utils.delete_all_storage_pools()
-        # for nqn in nqn_devices:
-        #     self.ssh_obj.exec_command(node=self.mgmt_nodes[0],
-        #                               command=f"sudo nvme disconnect -n {nqn}")
+        nqn_devices = []
+        self.logger.info("Inside teardown function")
+        for lvol in list(self.lvol_devices.keys()):
+            lvol_id = self.sbcli_utils.get_lvol_id(lvol_name=lvol)
+            lvol_details = self.sbcli_utils.get_lvol_details(lvol_id=lvol_id)
+            nqn_devices.append(lvol_details[0]["nqn"])
+        self.sbcli_utils.delete_all_lvols()
+        self.sbcli_utils.delete_all_storage_pools()
+        for nqn in nqn_devices:
+            self.ssh_obj.exec_command(node=self.mgmt_nodes[0],
+                                      command=f"sudo nvme disconnect -n {nqn}")
         for node, ssh in self.ssh_obj.ssh_connections.items():
             self.logger.info(f"Closing node ssh connection for {node}")
             ssh.close()

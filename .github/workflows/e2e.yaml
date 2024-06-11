@@ -130,6 +130,7 @@ jobs:
           RUN_ID: ${{ github.run_id }}
 
       - name: Parse test results
+        if: always()
         id: parse_results
         run: |
           cd $GITHUB_WORKSPACE/e2e/logs
@@ -154,21 +155,6 @@ jobs:
           PASSED_CASES_BULLETS=$(grep -i "PASSED CASE" "$LATEST_LOG" | awk '{print "• " $1}' | xargs printf "%s\\n")
           FAILED_CASES_BULLETS=$(grep -i "FAILED CASE" "$LATEST_LOG" | awk '{print "• " $1}' | xargs printf "%s\\n")
 
-          echo "PASSED_TESTS=${PASSED_TESTS}"
-          echo "FAILED_TESTS=${FAILED_TESTS}"
-          echo "TOTAL_TESTS=${TOTAL_TESTS}"
-          echo "PASSED_CASES=${PASSED_CASES}"
-          echo "FAILED_CASES=${FAILED_CASES}"
-          echo "PASSED_CASES_BULLETS<<EOF"
-          echo "${PASSED_CASES_BULLETS}"
-          echo "EOF"
-          echo "FAILED_CASES_BULLETS<<EOF"
-          echo "${FAILED_CASES_BULLETS}"
-          echo "EOF"
-          echo "TEST_RESULTS<<EOF"
-          echo "${TEST_RESULTS}"
-          echo "EOF"
-
           echo "PASSED_TESTS=${PASSED_TESTS}" >> $GITHUB_ENV
           echo "FAILED_TESTS=${FAILED_TESTS}" >> $GITHUB_ENV
           echo "TOTAL_TESTS=${TOTAL_TESTS}" >> $GITHUB_ENV
@@ -188,7 +174,8 @@ jobs:
         if: always()
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
-          GITHUB_RUN_URL: ${{ github.run_url }}
+          GITHUB_SERVER_URL: ${{ github.server_url }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
           S3_BUCKET_NAME: "simplyblock-e2e-test-logs"
           RUN_ID: ${{ github.run_id }}
           PASSED_TESTS: ${{ env.PASSED_TESTS }}
@@ -200,11 +187,11 @@ jobs:
           FAILED_CASES_BULLETS: ${{ env.FAILED_CASES_BULLETS }}
           TEST_RESULTS: ${{ env.TEST_RESULTS }}
           TRIGGER_EVENT: ${{ github.event_name }}
-          TRIGGER_DETAILS: ${{ github.event.head_commit.message }}
           TRIGGER_ACTOR: ${{ github.actor }}
         run: |
-          AWS_LOGS_URL="s3://${S3_BUCKET_NAME}/${RUN_ID}"
-          MESSAGE="Python E2E tests run triggered by ${{ env.TRIGGER_ACTOR }} via ${{ env.TRIGGER_EVENT }}. Commit message: ${{ env.TRIGGER_DETAILS }}\nGitHub Run: ${{ env.GITHUB_RUN_URL }}\nAWS Logs: ${AWS_LOGS_URL}\n\nTotal Tests: ${{ env.TOTAL_TESTS }}\n\n- Test Cases Passed :white_check_mark:\n${{ env.PASSED_CASES_BULLETS }}\n- Test Cases Failed :x:\n${{ env.FAILED_CASES_BULLETS }}\n\nTest Results:\n${{ env.TEST_RESULTS }}"
+          GITHUB_RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}"
+          AWS_LOGS_URL="https://us-east-2.console.aws.amazon.com/s3/buckets/${S3_BUCKET_NAME}/${RUN_ID}?region=us-east-2"
+          MESSAGE="Python E2E tests run triggered by ${{ env.TRIGGER_ACTOR }} via ${{ env.TRIGGER_EVENT }}. \nGitHub Run: ${{ env.GITHUB_RUN_URL }}\nAWS Logs: ${AWS_LOGS_URL}\n\nTotal Tests: ${{ env.TOTAL_TESTS }}\n\n- Test Cases Passed :white_check_mark:\n${{ env.PASSED_CASES_BULLETS }}\n- Test Cases Failed :x:\n${{ env.FAILED_CASES_BULLETS }}\n\nTest Results:\n${{ env.TEST_RESULTS }}"
           
           if [[ ${{ job.status }} == 'success' ]]; then
             curl -X POST -H 'Content-type: application/json' --data "{\"text\":\"${MESSAGE}\"}" $SLACK_WEBHOOK_URL

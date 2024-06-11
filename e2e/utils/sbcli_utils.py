@@ -303,10 +303,7 @@ class SbcliUtils:
         """
         lvols = self.list_lvols()
         lvol_id = None
-        for name in list(lvols.keys()):
-            if name == lvol_name:
-                lvol_id = lvols[name]
-        return lvol_id
+        return lvols.get(lvol_name, None)
 
     def get_lvol_connect_str(self, lvol_name):
         """Return connect string for the lvol
