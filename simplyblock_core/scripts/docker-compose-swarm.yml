@@ -112,8 +112,11 @@ services:
     ports:
       - 80:80
       - 8404:8404
+      - 3000:3000
+      - 9000:9000
     networks:
       - localnet
+      - monitoring-net
     volumes:
       - "$DIR/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg"
 
@@ -200,6 +203,9 @@ volumes:
   os_data:
 
 networks:
+  monitoring-net:
+    external: true
+
   hostnet:
     external: true
     name: host
