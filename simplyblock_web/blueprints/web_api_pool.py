@@ -51,7 +51,11 @@ def add_pool():
     if 'name' not in pool_data:
         return utils.get_response_error("missing required param: name", 400)
 
+    if 'cluster_id' not in pool_data:
+        return utils.get_response_error("missing required param: cluster_id", 400)
+
     name = pool_data['name']
+    cluster_id = pool_data['cluster_id']
     for p in db_controller.get_pools():
         if p.pool_name == name:
             return utils.get_response_error(f"Pool found with the same name: {name}", 400)
@@ -75,7 +79,7 @@ def add_pool():
 
     ret = pool_controller.add_pool(
         name, pool_max_size, lvol_max_size, max_rw_iops, max_rw_mbytes,
-        max_r_mbytes_per_sec, max_w_mbytes_per_sec, pool_secret)
+        max_r_mbytes_per_sec, max_w_mbytes_per_sec, pool_secret, cluster_id)
 
     return utils.get_response(ret)
 
