@@ -174,6 +174,17 @@ class SshUtils:
         """
         command = f"sudo umount {device}"
         self.exec_command(node, command)
+    
+    def wipefs_disk(self, node, device):
+        """Wipe disk signature on the given node
+
+        Args:
+            node (str): Node to perform ssh operation on
+            device (str): Device path
+        """
+        command=f"sudo wipefs -a {device}"
+        self.exec_command(node=node, command=command)
+
 
     def get_devices(self, node):
         """Get devices on a machine

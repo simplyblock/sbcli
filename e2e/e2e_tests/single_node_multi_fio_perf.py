@@ -21,18 +21,6 @@ headers = {
 }
 bastion_server = os.environ.get("BASTION_SERVER")
 
-# cluster_secret = "SjGc8iEWWb3QbpBJGxgF"
-# cluster_id = "9501fb5e-2cb7-4ecf-b2fd-9cd0bddb0a54"
-# cluster_ip = "10.0.3.125"
-
-# url = f"http://{cluster_ip}"
-# api_base_url = "https://mckvdxlxeb.execute-api.us-east-2.amazonaws.com/"
-# headers = {
-#     "Content-Type": "application/json",
-#     "Authorization": f"{cluster_id} {cluster_secret}"
-# }
-# bastion_server = "3.147.46.32"
-
 
 class TestSingleNodeMultipleFioPerfValidation:
     """
@@ -223,14 +211,19 @@ class TestSingleNodeMultipleFioPerfValidation:
 
         for lvol, data in self.lvol_devices.items():
             self.logger.info(f"Setting device and Running FIO for lvol: {lvol}, Data: {data}")
-            self.ssh_obj.unmount_path(node=self.mgmt_nodes[0],
-                                      device=data["Device"])
+            # self.ssh_obj.unmount_path(node=self.mgmt_nodes[0],
+            #                           device=data["Device"])
+            # sleep_n_sec(2)
+            self.ssh_obj.wipefs_disk(node=self.mgmt_nodes[0],
+                                     device=data["Device"])
+            sleep_n_sec(2)
             self.ssh_obj.format_disk(node=self.mgmt_nodes[0],
                                      device=data["Device"])
+            sleep_n_sec(2)
             self.ssh_obj.mount_path(node=self.mgmt_nodes[0],
                                     device=data["Device"],
                                     mount_path=data["Path"])
-            sleep_n_sec(3)
+            sleep_n_sec(2)
         
         fio_thread1 = threading.Thread(target=self.ssh_obj.run_fio_test, args=(self.mgmt_nodes[0], None, self.lvol_devices[self.lvol_name1]["Path"], None,),
                                    kwargs={"name": "fio_run_1",
@@ -264,7 +257,7 @@ class TestSingleNodeMultipleFioPerfValidation:
         fio_thread1.start()
         fio_thread2.start()
         
-        sleep_n_sec(3)
+        sleep_n_sec(5)
         process_list_before = self.ssh_obj.find_process_name(node=self.mgmt_nodes[0],
                                                              process_name="fio")
         self.logger.info(f"Process List: {process_list_before}")

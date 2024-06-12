@@ -162,8 +162,8 @@ jobs:
           FAILED_CASES=$(grep -i "FAILED CASE" "$LATEST_LOG" | grep -oP '(?<=INFO - ).*(?= FAILED CASE)')
 
           # Format passed and failed cases as bullet points
-          PASSED_CASES_BULLETS=$(echo "$PASSED_CASES" | awk '{print "• " $0}' | paste -sd "\n")
-          FAILED_CASES_BULLETS=$(echo "$FAILED_CASES" | awk '{print "• " $0}' | paste -sd "\n")
+          PASSED_CASES_BULLETS=$(echo "$PASSED_CASES" | awk '{print "• " $0}')
+          FAILED_CASES_BULLETS=$(echo "$FAILED_CASES" | awk '{print "• " $0}')
 
 
           echo "PASSED_TESTS=${PASSED_TESTS}" >> $GITHUB_ENV
@@ -197,7 +197,7 @@ jobs:
           TRIGGER_ACTOR: ${{ github.actor }}
         run: |
           GITHUB_RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}"
-          AWS_LOGS_URL="https://us-east-2.console.aws.amazon.com/s3/buckets/${S3_BUCKET_NAME}/${RUN_ID}?region=us-east-2"
+          AWS_LOGS_URL="https://s3.console.aws.amazon.com/s3/buckets/${S3_BUCKET_NAME}?prefix=${RUN_ID}/&region=us-east-2"
           if [[ ${{ job.status }} == 'success' ]]; then
             OVERALL_STATUS=":white_check_mark: Overall Status: SUCCESS"
           else
