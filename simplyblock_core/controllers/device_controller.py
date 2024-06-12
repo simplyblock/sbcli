@@ -1,7 +1,7 @@
 import time
 import logging
 
-from simplyblock_core import distr_controller, utils
+from simplyblock_core import distr_controller, utils, storage_node_ops
 from simplyblock_core.controllers import device_events, lvol_controller
 from simplyblock_core.kv_store import DBController
 from simplyblock_core.models.nvme_device import NVMeDevice
@@ -103,69 +103,21 @@ def restart_device(device_id):
             device_obj = dev
             break
 
-    device_obj.status = 'restarting'
-    snode.write_to_db(db_controller.kv_store)
+    logger.info("Setting device unavailable")
+    device_set_state(device_id, NVMeDevice.STATUS_UNAVAILABLE)
 
     logger.info(f"Restarting device {device_id}")
-
     rpc_client = RPCClient(
         snode.mgmt_ip, snode.rpc_port,
         snode.rpc_username, snode.rpc_password,
         timeout=600
     )
-
-    test_name = f"{device_obj.nvme_bdev}_test"
-    # create testing bdev
-    ret = rpc_client.bdev_passtest_create(test_name, device_obj.nvme_bdev)
+    ret = storage_node_ops._create_storage_device_stack(rpc_client, device_obj, snode, after_restart=True)
     if not ret:
-        logger.error(f"Failed to create bdev: {test_name}")
+        logger.error("Failed to create device stack")
+        # device_set_unavailable(device_obj.get_id())
         return False
 
-    alceml_id = device_obj.get_id()
-    alceml_name = get_alceml_name(alceml_id)
-    logger.info(f"adding {alceml_name}")
-    ret = rpc_client.bdev_alceml_create(alceml_name, test_name, alceml_id, pba_init_mode=2)
-    if not ret:
-        logger.error(f"Failed to create alceml bdev: {alceml_name}")
-        return False
-
-    # add pass through
-    pt_name = f"{alceml_name}_PT"
-    ret = rpc_client.bdev_PT_NoExcl_create(pt_name, alceml_name)
-    if not ret:
-        logger.error(f"Failed to create pt noexcl bdev: {pt_name}")
-        return False
-
-    subsystem_nqn = snode.subsystem + ":dev:" + alceml_id
-    logger.info("Creating subsystem %s", subsystem_nqn)
-    ret = rpc_client.subsystem_create(subsystem_nqn, 'sbcli-cn', alceml_id)
-    IP = None
-    for iface in snode.data_nics:
-        if iface.ip4_address:
-            tr_type = iface.get_transport_type()
-            ret = rpc_client.transport_list()
-            found = False
-            if ret:
-                for ty in ret:
-                    if ty['trtype'] == tr_type:
-                        found = True
-            if found is False:
-                ret = rpc_client.transport_create(tr_type)
-            # logger.info("adding listener for %s on IP %s" % (subsystem_nqn, iface.ip4_address))
-            ret = rpc_client.listeners_create(subsystem_nqn, tr_type, iface.ip4_address, "4420")
-            IP = iface.ip4_address
-            break
-    logger.info(f"Adding {pt_name} to the subsystem")
-    ret = rpc_client.nvmf_subsystem_add_ns(subsystem_nqn, pt_name)
-
-    device_obj.testing_bdev = test_name
-    device_obj.alceml_bdev = alceml_name
-    device_obj.pt_bdev = pt_name
-    device_obj.nvmf_nqn = subsystem_nqn
-    device_obj.nvmf_ip = IP
-    device_obj.nvmf_port = 4420
-    device_obj.io_error = False
-    device_obj.status = NVMeDevice.STATUS_ONLINE
     snode.write_to_db(db_controller.kv_store)
 
     logger.info("Make other nodes connect to the device")
@@ -197,8 +149,7 @@ def restart_device(device_id):
         node.write_to_db(db_controller.kv_store)
         time.sleep(3)
 
-    logger.info("Sending device event")
-    distr_controller.send_dev_status_event(device_obj.cluster_device_order, "online")
+    device_set_online(device_obj.get_id())
     device_events.device_restarted(device_obj)
 
     return "Done"
@@ -367,19 +318,12 @@ def get_device_iostats(device_id, history, records_count=20, parse_sizes=True):
 
 def reset_storage_device(dev_id):
     db_controller = DBController()
-    device = None
-    snode = None
-    for node in db_controller.get_storage_nodes():
-        for dev in node.nvme_devices:
-            if dev.get_id() == dev_id:
-                device = dev
-                snode = node
-                break
-
+    device = db_controller.get_storage_devices(dev_id)
     if not device:
         logger.error(f"Device not found: {dev_id}")
         return False
 
+    snode = db_controller.get_storage_node_by_id(device.node_id)
     if not snode:
         logger.error(f"Node not found {device.node_id}")
         return False
@@ -388,12 +332,15 @@ def reset_storage_device(dev_id):
         logger.error(f"Device status: {device.status} is removed")
         return False
 
-    logger.info("Setting device to unavailable")
-    old_status = device.status
-    device.status = NVMeDevice.STATUS_UNAVAILABLE
-    distr_controller.send_dev_status_event(device.cluster_device_order, device.status)
-    snode.write_to_db(db_controller.kv_store)
-    device_events.device_status_change(device, device.status, old_status)
+    logger.info("Setting devices to unavailable")
+    device_set_unavailable(dev_id)
+    devs = []
+    for dev in snode.nvme_devices:
+        if dev.get_id() == device.get_id():
+            continue
+        if dev.status == NVMeDevice.STATUS_ONLINE and dev.physical_label == device.physical_label:
+            devs.append(dev)
+            device_set_unavailable(dev.get_id())
 
     logger.info("Resetting device")
     rpc_client = RPCClient(
@@ -405,10 +352,15 @@ def reset_storage_device(dev_id):
     if not response:
         logger.error(f"Failed to reset NVMe BDev {controller_name}")
         return False
+    time.sleep(3)
 
-    device.io_error = False
-    snode.write_to_db(db_controller.kv_store)
+    logger.info("Setting devices online")
+    for dev in devs:
+        device_set_online(dev.get_id())
 
-    device_events.device_reset(device)
+    # set io_error flag False
+    device_set_io_error(dev_id, False)
+    # set device to online
     device_set_online(dev_id)
+    device_events.device_reset(device)
     return True
