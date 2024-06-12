@@ -87,8 +87,6 @@ def get_nics_data():
         logger.error(err)
         return []
     data = json.loads(out)
-    logger.debug("ifaces")
-    logger.debug(data)
 
     def _get_ip4_address(list_of_addr):
         if list_of_addr:

@@ -90,6 +90,7 @@ def addNvmeDevices(cluster, rpc_client, devs, snode):
     except:
         pass
 
+    next_physical_label = get_next_physical_device_order()
     for index, pcie in enumerate(devs):
 
         if pcie in ctr_map:
@@ -113,7 +114,7 @@ def addNvmeDevices(cluster, rpc_client, devs, snode):
                 'uuid': str(uuid.uuid4()),
                 'device_name': nvme_dict['name'],
                 'size': total_size,
-                'physical_label': get_next_physical_device_order(),
+                'physical_label': next_physical_label,
                 'pcie_address': nvme_driver_data['pci_address'],
                 'model_id': model_number,
                 'serial_number': nvme_driver_data['ctrlr_data']['serial_number'],
@@ -123,6 +124,7 @@ def addNvmeDevices(cluster, rpc_client, devs, snode):
                 'cluster_id': snode.cluster_id,
                 'status': NVMeDevice.STATUS_ONLINE
         }))
+        next_physical_label += 1
     return devices
 
 
