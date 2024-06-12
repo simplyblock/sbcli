@@ -112,8 +112,6 @@ services:
     ports:
       - 80:80
       - 8404:8404
-      - 3000:3000
-      - 9000:9000
     networks:
       - localnet
       - monitoring-net
