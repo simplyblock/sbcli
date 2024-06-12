@@ -1,6 +1,7 @@
 ### simplyblock e2e tests
 import os
 import re
+import threading
 from utils.common_utils import sleep_n_sec
 from utils.sbcli_utils import SbcliUtils
 from utils.ssh_utils import SshUtils
@@ -20,17 +21,17 @@ headers = {
 }
 bastion_server = os.environ.get("BASTION_SERVER")
 
-# cluster_secret = "qNf9okpUw1dBGnlASACP"
-# cluster_id = "0fbe47d3-9c61-4733-843d-da4a5fd67fac"
-# cluster_ip = "10.0.3.136"
+# cluster_secret = "SjGc8iEWWb3QbpBJGxgF"
+# cluster_id = "9501fb5e-2cb7-4ecf-b2fd-9cd0bddb0a54"
+# cluster_ip = "10.0.3.125"
 
 # url = f"http://{cluster_ip}"
-# api_base_url = "https://zybd1owv43.execute-api.us-east-2.amazonaws.com/"
+# api_base_url = "https://mckvdxlxeb.execute-api.us-east-2.amazonaws.com/"
 # headers = {
 #     "Content-Type": "application/json",
 #     "Authorization": f"{cluster_id} {cluster_secret}"
 # }
-# bastion_server = "18.116.14.160"
+# bastion_server = "3.147.46.32"
 
 
 class TestSingleNodeMultipleFioPerfValidation:
@@ -123,8 +124,8 @@ class TestSingleNodeMultipleFioPerfValidation:
         self.sbcli_utils.delete_all_storage_pools()
         expected_base = ["sbcli", "sbcli-dev", "sbcli-release"]
         for base in expected_base:
-            output = self.ssh_obj.exec_command(node=self.mgmt_nodes[0],
-                                               command=base)
+            output, error = self.ssh_obj.exec_command(node=self.mgmt_nodes[0],
+                                                      command=base)
             if len(output.strip()):
                 self.base_cmd = base
                 self.logger.info(f"Using base command as {self.base_cmd}")
@@ -218,7 +219,6 @@ class TestSingleNodeMultipleFioPerfValidation:
         self.lvol_devices[self.lvol_name2]["Device"] = disk_use
         
 
-        i = 1
         for lvol, data in self.lvol_devices.items():
             self.logger.info(f"Setting device and Running FIO for lvol: {lvol}, Data: {data}")
             self.ssh_obj.unmount_path(node=self.mgmt_nodes[0],
@@ -230,20 +230,35 @@ class TestSingleNodeMultipleFioPerfValidation:
                                     mount_path=data["Path"])
             sleep_n_sec(3)
         
-            self.ssh_obj.run_fio_test(node=self.mgmt_nodes[0],
-                                      directory=data["Path"],
-                                      name=f"fio_run_{i}",
-                                      readwrite="randrw",
-                                      ioengine="libaio",
-                                      iodepth=64,
-                                      bs=4096,
-                                      rwmixread=55,
-                                      size="2G",
-                                      time_based=True,
-                                      runtime=300,
-                                      output_format="json",
-                                      output_file=data["Log"])
-            i += 1
+        fio_thread1 = threading.Thread(target=self.ssh_obj.run_fio_test, args=(self.mgmt_nodes[0], None, self.lvol_devices[self.lvol_name1]["Path"], None,),
+                                   kwargs={"name": "fio_run_1",
+                                           "readwrite": "randrw",
+                                           "ioengine": "libaio",
+                                           "iodepth": 64,
+                                           "bs": 4096,
+                                           "rwmixread": 55,
+                                           "size": "2G",
+                                           "time_based": True,
+                                           "runtime": 300,
+                                           "output_format": "json",
+                                           "output_file": self.lvol_devices[self.lvol_name1]["Log"]})
+
+        fio_thread2 = threading.Thread(target=self.ssh_obj.run_fio_test, args=(self.mgmt_nodes[0], None, self.lvol_devices[self.lvol_name2]["Path"], None,),
+                                    kwargs={"name": "fio_run_2",
+                                            "readwrite": "randrw",
+                                            "ioengine": "libaio",
+                                            "iodepth": 64,
+                                            "bs": 4096,
+                                            "rwmixread": 55,
+                                            "size": "2G",
+                                            "time_based": True,
+                                            "runtime": 300,
+                                            "output_format": "json",
+                                            "output_file": self.lvol_devices[self.lvol_name2]["Log"]})
+            
+                                      
+        fio_thread1.start()
+        fio_thread2.start()
         
         sleep_n_sec(3)
         process_list_before = self.ssh_obj.find_process_name(node=self.mgmt_nodes[0],
@@ -261,7 +276,8 @@ class TestSingleNodeMultipleFioPerfValidation:
         assert process_list_after == process_list_before, \
             f"FIO process list changed - Before Sleep: {process_list_before}, After Sleep: {process_list_after}"
         
-        sleep_n_sec(600)
+        fio_thread1.join()
+        fio_thread2.join()
 
         process_list_after = self.ssh_obj.find_process_name(node=self.mgmt_nodes[0],
                                                             process_name="fio")
