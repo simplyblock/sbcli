@@ -171,7 +171,7 @@ class SshUtils:
         Args:
             node (str): Node to perform ssh operation on
         """
-        command = "sudo lsblk | awk '{print $1}'"
+        command = "sudo lsblk -dn -o NAME"
         output, error = self.exec_command(node, command)
 
         return output.strip().split("\n")
