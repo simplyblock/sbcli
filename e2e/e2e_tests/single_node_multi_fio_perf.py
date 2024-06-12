@@ -113,7 +113,7 @@ class TestSingleNodeMultipleFioPerfValidation:
         self.sbcli_utils.delete_all_storage_pools()
         expected_base = ["sbcli", "sbcli-dev", "sbcli-release"]
         for base in expected_base:
-            output, error = self.ssh_obj.exec_command(node=self.mgmt_nodes[0],
+            output, _ = self.ssh_obj.exec_command(node=self.mgmt_nodes[0],
                                                       command=base)
             if len(output.strip()):
                 self.base_cmd = base
@@ -208,7 +208,6 @@ class TestSingleNodeMultipleFioPerfValidation:
         self.lvol_devices[self.lvol_name2]["Device"] = disk_use
 
         sleep_n_sec(5)
-
         for lvol, data in self.lvol_devices.items():
             self.logger.info(f"Setting device and Running FIO for lvol: {lvol}, Data: {data}")
             # self.ssh_obj.unmount_path(node=self.mgmt_nodes[0],
