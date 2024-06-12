@@ -71,7 +71,7 @@ class TestSingleNodeMultipleFioPerfValidation:
         b. check that fio remains running without interruption.
     """
 
-    def __init__(self):
+    def __init__(self, **kwargs):
         self.ssh_obj = SshUtils(bastion_server=bastion_server)
         self.logger = setup_logger(__name__)
         self.sbcli_utils = SbcliUtils(
@@ -98,6 +98,7 @@ class TestSingleNodeMultipleFioPerfValidation:
                              self.lvol_name2: {"Device": None, 
                                                "Path": self.mount_path2, 
                                                "Log": self.log_path2}}
+        self.fio_debug = kwargs.get("fio_debug", False)
 
     def setup(self):
         """Contains setup required to run the test case
@@ -217,14 +218,15 @@ class TestSingleNodeMultipleFioPerfValidation:
                 disk_use = f"/dev/{device.strip()}"
                 break
         self.lvol_devices[self.lvol_name2]["Device"] = disk_use
-        
+
+        sleep_n_sec(5)
 
         for lvol, data in self.lvol_devices.items():
             self.logger.info(f"Setting device and Running FIO for lvol: {lvol}, Data: {data}")
             self.ssh_obj.unmount_path(node=self.mgmt_nodes[0],
-                                    device=data["Device"])
+                                      device=data["Device"])
             self.ssh_obj.format_disk(node=self.mgmt_nodes[0],
-                                    device=data["Device"])
+                                     device=data["Device"])
             self.ssh_obj.mount_path(node=self.mgmt_nodes[0],
                                     device=data["Device"],
                                     mount_path=data["Path"])
@@ -241,7 +243,8 @@ class TestSingleNodeMultipleFioPerfValidation:
                                            "time_based": True,
                                            "runtime": 300,
                                            "output_format": "json",
-                                           "output_file": self.lvol_devices[self.lvol_name1]["Log"]})
+                                           "output_file": self.lvol_devices[self.lvol_name1]["Log"],
+                                           "debug": self.fio_debug})
 
         fio_thread2 = threading.Thread(target=self.ssh_obj.run_fio_test, args=(self.mgmt_nodes[0], None, self.lvol_devices[self.lvol_name2]["Path"], None,),
                                     kwargs={"name": "fio_run_2",
@@ -254,7 +257,8 @@ class TestSingleNodeMultipleFioPerfValidation:
                                             "time_based": True,
                                             "runtime": 300,
                                             "output_format": "json",
-                                            "output_file": self.lvol_devices[self.lvol_name2]["Log"]})
+                                            "output_file": self.lvol_devices[self.lvol_name2]["Log"],
+                                            "debug": self.fio_debug})
             
                                       
         fio_thread1.start()
@@ -276,6 +280,8 @@ class TestSingleNodeMultipleFioPerfValidation:
         assert process_list_after == process_list_before, \
             f"FIO process list changed - Before Sleep: {process_list_before}, After Sleep: {process_list_after}"
         
+        self.logger.info("Waiting for FIO processes to complete!")
+
         fio_thread1.join()
         fio_thread2.join()
 
@@ -343,6 +349,8 @@ class TestSingleNodeMultipleFioPerfValidation:
             lvol_id = self.sbcli_utils.get_lvol_id(lvol_name=lvol)
             lvol_details = self.sbcli_utils.get_lvol_details(lvol_id=lvol_id)
             nqn_devices.append(lvol_details[0]["nqn"])
+            self.ssh_obj.unmount_path(node=self.mgmt_nodes[0],
+                                      device=self.lvol_devices[lvol]["Device"])
         self.sbcli_utils.delete_all_lvols()
         self.sbcli_utils.delete_all_storage_pools()
         for nqn in nqn_devices:

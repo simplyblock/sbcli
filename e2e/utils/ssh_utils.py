@@ -102,21 +102,31 @@ class SshUtils:
 
         try:
             stdin, stdout, stderr = ssh_connection.exec_command(command, timeout=timeout)
+            
             output = []
             error = []
+            if "fio" in command:
+                # Read stdout and stderr in a non-blocking way
+                while not stdout.channel.exit_status_ready():
+                    if stdout.channel.recv_ready():
+                        output.append(stdout.channel.recv(1024).decode())
+                    if stderr.channel.recv_stderr_ready():
+                        error.append(stderr.channel.recv_stderr(1024).decode())
+                    time.sleep(0.1)
+                output = " ".join(output)
+                error = " ".join(error)
 
-            # Read stdout and stderr in a non-blocking way
-            while not stdout.channel.exit_status_ready():
-                if stdout.channel.recv_ready():
-                    output.append(stdout.channel.recv(1024).decode())
-                if stderr.channel.recv_stderr_ready():
-                    error.append(stderr.channel.recv_stderr(1024).decode())
-                time.sleep(0.1)
+            else:
+                stdin, stdout, stderr = ssh_connection.exec_command(command, timeout=timeout)
+                output = stdout.read().decode()
+                error = stderr.read().decode()
 
-            output = ''.join(output)
-            error = ''.join(error)
-            self.logger.debug(f"Output: {output}")
-            self.logger.debug(f"Error: {error}")
+            self.logger.debug(f"Command output: {output}")
+            self.logger.debug(f"Command error: {error}")
+
+            if not output and not error:
+                self.logger.warning(f"Command '{command}' executed but returned no output or error.")
+
             return output, error
         except paramiko.SSHException as e:
             self.logger.error(f"SSH command failed: {e}")
@@ -171,10 +181,10 @@ class SshUtils:
         Args:
             node (str): Node to perform ssh operation on
         """
-        command = "sudo lsblk -dn -o NAME"
+        command = "lsblk -dn -o NAME"
         output, error = self.exec_command(node, command)
 
-        return output.strip().split("\n")
+        return output.strip().split()
     
     def run_fio_test(self, node, device=None, directory=None, log_file=None, **kwargs):
         """Run FIO Tests with given params
@@ -185,7 +195,6 @@ class SshUtils:
             directory (str, optional): Directory to run test on. Defaults to None.
             log_file (str, optional): Log file to redirect output to. Defaults to None.
         """
-        # TODO: Use Kwargs to get as many params as possible
         location = ""
         if device:
             location = f"--filename={device}"
@@ -213,6 +222,9 @@ class SshUtils:
                    f"{time_based} --runtime={runtime} --rw={rw} --bs={bs} --size={size} --rwmixread={rwmixread} "
                    "--verify=md5 --numjobs=1 --verify_dump=1 --verify_fatal=1 --verify_state_save=1 --verify_backlog=10 "
                    f"--group_reporting{output_format}{output_file}")
+        
+        if kwargs.get("debug", None):
+            command = f"{command} --debug=all"
         if log_file:
             command = f"{command} >> {log_file}"
 
@@ -224,12 +236,6 @@ class SshUtils:
 
         total_time = end_time - start_time
         self.logger.info(f"Total time taken to run the command: {total_time:.2f} seconds")
-
-        if log_file:
-            with open(log_file, "a") as f:
-                f.write(output)
-                if error:
-                    f.write(error)
     
     def find_process_name(self, node, process_name, return_pid=False):
         if return_pid:

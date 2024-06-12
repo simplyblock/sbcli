@@ -62,7 +62,7 @@ class CommonUtils:
             RuntimeError: If there are interruptions
         """
         file_data = self.ssh_utils.read_file(node, log_file)
-        fail_words = ["error", "fail", "latency", "throughput"]
+        fail_words = ["error", "fail", "throughput", "interrupt", "terminate"]
         for word in fail_words:
             if word in file_data:
                 raise RuntimeError("FIO Test has interuupts")

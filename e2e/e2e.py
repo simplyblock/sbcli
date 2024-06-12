@@ -14,6 +14,7 @@ def main():
     """
     parser = argparse.ArgumentParser(description="Run simplyBlock's E2E Test Framework")
     parser.add_argument('--testname', type=str, help="The name of the test to run", default=None)
+    parser.add_argument('--fio_debug', type=bool, help="Add debug flag to fio", default=False)
 
     args = parser.parse_args()
 
@@ -35,7 +36,7 @@ def main():
     errors = {}
     for test in test_class_run:
         logger.info(f"Running Test {test}")
-        test_obj = test()
+        test_obj = test(fio_debug=args.fio_debug)
         try:
             test_obj.setup()
             test_obj.run()

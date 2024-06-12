@@ -20,17 +20,17 @@ headers = {
 }
 bastion_server = os.environ.get("BASTION_SERVER")
 
-# cluster_secret = "qNf9okpUw1dBGnlASACP"
-# cluster_id = "0fbe47d3-9c61-4733-843d-da4a5fd67fac"
-# cluster_ip = "10.0.3.136"
+# cluster_secret = "SjGc8iEWWb3QbpBJGxgF"
+# cluster_id = "9501fb5e-2cb7-4ecf-b2fd-9cd0bddb0a54"
+# cluster_ip = "10.0.3.125"
 
 # url = f"http://{cluster_ip}"
-# api_base_url = "https://zybd1owv43.execute-api.us-east-2.amazonaws.com/"
+# api_base_url = "https://mckvdxlxeb.execute-api.us-east-2.amazonaws.com/"
 # headers = {
 #     "Content-Type": "application/json",
 #     "Authorization": f"{cluster_id} {cluster_secret}"
 # }
-# bastion_server = "18.116.14.160"
+# bastion_server = "3.147.46.32"
 
 
 class TestSingleNodeOutage:
@@ -70,7 +70,7 @@ class TestSingleNodeOutage:
         b. check that fio remains running without interruption.
     """
 
-    def __init__(self):
+    def __init__(self, **kwargs):
         self.ssh_obj = SshUtils(bastion_server=bastion_server)
         self.logger = setup_logger(__name__)
         self.sbcli_utils = SbcliUtils(
@@ -87,9 +87,8 @@ class TestSingleNodeOutage:
         self.lvol_name = "test_lvol"
         self.mount_path = "/home/ec2-user/test_location"
         self.log_path = f"{os.path.dirname(self.mount_path)}/log_file.log"
-        self.json_log_path = f"{os.path.dirname(self.mount_path)}/log_file.json"
         self.base_cmd = None
-        print(f"Details: {api_base_url} {bastion_server} {cluster_id}")
+        self.fio_debug = kwargs.get("fio_debug", False)
 
     def setup(self):
         """Contains setup required to run the test case
@@ -176,14 +175,10 @@ class TestSingleNodeOutage:
                                 device=disk_use,
                                 mount_path=self.mount_path)
 
-        self.ssh_obj.run_fio_test(node=self.mgmt_nodes[0],
-                                  directory=self.mount_path,
-                                  log_file=self.log_path)
         fio_thread1 = threading.Thread(target=self.ssh_obj.run_fio_test, args=(self.mgmt_nodes[0], None, self.mount_path, self.log_path,),
-                                   kwargs={"name": "fio_run_1",
-                                           "runtime": 300,
-                                           "output_format": "json",
-                                           "output_file": self.json_log_path})
+                                       kwargs={"name": "fio_run_1",
+                                               "runtime": 150,
+                                               "debug": self.fio_debug})
         fio_thread1.start()
 
         no_lvol_node_uuid = self.sbcli_utils.get_node_without_lvols()
@@ -235,6 +230,8 @@ class TestSingleNodeOutage:
         }
         self.common_utils.validate_event_logs(cluster_id=cluster_id,
                                               operations=steps)
+        
+        self.logger.info("Waiting for FIO process to complete!")
         
         fio_thread1.join()
 
@@ -327,6 +324,8 @@ class TestSingleNodeOutage:
         lvol_id = self.sbcli_utils.get_lvol_id(lvol_name=self.lvol_name)
         lvol_details = self.sbcli_utils.get_lvol_details(lvol_id=lvol_id)
         nqn = lvol_details[0]["nqn"]
+        self.ssh_obj.unmount_path(node=self.mgmt_nodes[0],
+                                  device=self.mount_path)
         self.sbcli_utils.delete_all_lvols()
         self.sbcli_utils.delete_all_storage_pools()
         self.ssh_obj.exec_command(node=self.mgmt_nodes[0],
