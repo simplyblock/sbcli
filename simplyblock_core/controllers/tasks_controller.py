@@ -4,6 +4,7 @@ import time
 import uuid
 
 from simplyblock_core import kv_store
+from simplyblock_core.controllers import tasks_events
 from simplyblock_core.models.job_schedule import JobSchedule
 
 logger = logging.getLogger()
@@ -36,6 +37,7 @@ def _add_task(function_name, cluster_id, node_id, device_id):
     task_obj.function_name = JobSchedule.FN_DEV_MIG
     task_obj.status = JobSchedule.STATUS_NEW
     task_obj.write_to_db(db_controller.kv_store)
+    tasks_events.task_create(task_obj)
     return task_obj.uuid
 
 

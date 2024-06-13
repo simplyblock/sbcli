@@ -5,7 +5,7 @@ import sys
 
 
 from simplyblock_core import constants, kv_store, storage_node_ops
-from simplyblock_core.controllers import device_controller
+from simplyblock_core.controllers import device_controller, tasks_events
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.nvme_device import NVMeDevice
 
@@ -64,8 +64,10 @@ def task_runner_device(task):
         task.write_to_db(db_controller.kv_store)
         return True
 
-    task.status = JobSchedule.STATUS_RUNNING
-    task.write_to_db(db_controller.kv_store)
+    if task.status != JobSchedule.STATUS_RUNNING:
+        task.status = JobSchedule.STATUS_RUNNING
+        task.write_to_db(db_controller.kv_store)
+        tasks_events.task_updated(task)
 
     # resetting device
     logger.info(f"Resetting device {device.get_id()}")
@@ -111,8 +113,10 @@ def task_runner_node(task):
         task.write_to_db(db_controller.kv_store)
         return True
 
-    task.status = JobSchedule.STATUS_RUNNING
-    task.write_to_db(db_controller.kv_store)
+    if task.status != JobSchedule.STATUS_RUNNING:
+        task.status = JobSchedule.STATUS_RUNNING
+        task.write_to_db(db_controller.kv_store)
+        tasks_events.task_updated(task)
 
     # shutting down node
     logger.info(f"Shutdown node {node.get_id()}")
@@ -168,3 +172,4 @@ while True:
                         if res is False:
                             time.sleep(delay_seconds)
                             delay_seconds *= 2
+                    tasks_events.task_updated(task)

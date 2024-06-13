@@ -5,6 +5,7 @@ import sys
 
 
 from simplyblock_core import constants, kv_store
+from simplyblock_core.controllers import tasks_events
 from simplyblock_core.models.job_schedule import JobSchedule
 
 
@@ -15,12 +16,15 @@ from graypy import GELFUDPHandler
 def task_runner(task):
     task.status = JobSchedule.STATUS_RUNNING
     task.write_to_db(db_controller.kv_store)
+    tasks_events.task_updated(task)
 
-    time.sleep(10)
+    time.sleep(30)
 
-    task.function_result = "sleep 10"
+    task.function_result = "sleep 30"
     task.status = JobSchedule.STATUS_DONE
     task.write_to_db(db_controller.kv_store)
+    tasks_events.task_updated(task)
+
     return True
 
 
