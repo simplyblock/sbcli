@@ -31,15 +31,12 @@ def update_deployer(uuid):
         return utils.get_response_error("missing required param: snodes", 400)
     if 'az' not in dpl_data:
         return utils.get_response_error("missing required param: az", 400)
-    if 'cluster_id' not in dpl_data:
-        return utils.get_response_error("missing required param: cluster_id", 400)
-
  
     dpl.snodes = dpl_data['snodes']
     dpl.az = dpl_data['az']
-    dpl.cluster_id = dpl_data['cluster_id']
     dpl.write_to_db(db_controller.kv_store)
 
+    #TODO: call prepare terraform parameter function
     return utils.get_response(dpl.to_dict()), 201
 
 
@@ -88,13 +85,12 @@ def add_deployer():
         return utils.get_response_error("missing required param: bucket_name", 400)
 
     d = Deployer()
-    d.uuid        = str(uuid.uuid4())
+    d.uuid        = dpl_data['cluster_id']
     d.snodes      = dpl_data['snodes']
     d.snodes_type = dpl_data['snodes_type']
     d.mnodes      = dpl_data['mnodes']
     d.mnodes_type = dpl_data['mnodes_type']
     d.az          = dpl_data['az']
-    d.cluster_id  = dpl_data['cluster_id']
     d.region      = dpl_data['region']
     d.workspace   = dpl_data['workspace']
     d.bucket_name = dpl_data['bucket_name']

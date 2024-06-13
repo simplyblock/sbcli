@@ -28,7 +28,6 @@ class Deployer(BaseModel):
         "mnodes": {"type": int, 'default': 0},
         "mnodes_type": {"type": str, 'default': ""},
         "az": {"type": str, 'default': ""},
-        "cluster_id": {"type": str, "default": ""},
         "region": {"type": str, 'default': ""},
         "workspace": {"type": str, 'default': ""},
         "bucket_name": {"type": str, 'default': ""},
