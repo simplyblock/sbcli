@@ -40,7 +40,7 @@ def log_distr_event(cluster_id, node_id, event_dict):
     ds.uuid = str(uuid.uuid4())
     ds.cluster_uuid = cluster_id
     ds.node_id = node_id
-    ds.date = int(time.time())
+    ds.date = round(time.time()*1000)
     ds.domain = DOMAIN_DISTR
     ds.event_level = EventObj.LEVEL_ERROR
     ds.caused_by = CAUSED_BY_MONITOR
@@ -83,7 +83,7 @@ def log_event_cluster(cluster_id, domain, event, db_object, caused_by, message,
     ds = EventObj()
     ds.uuid = str(uuid.uuid4())
     ds.cluster_uuid = cluster_id
-    ds.date = int(time.time())
+    ds.date = round(time.time()*1000)
     ds.node_id = node_id
     ds.event_level = event_level
 
@@ -98,6 +98,7 @@ def log_event_cluster(cluster_id, domain, event, db_object, caused_by, message,
 
     db_controller = DBController()
     ds.write_to_db(db_controller.kv_store)
+
 
 def log_event_based_on_level(cluster_id, event, db_object, message, caused_by, event_level):
     json_str = json.dumps({

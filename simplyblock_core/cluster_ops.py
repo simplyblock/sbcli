@@ -623,7 +623,7 @@ def get_logs(cluster_id, is_json=False):
             vuid = record.object_dict['vuid']
 
         out.append({
-            "Date": time.strftime("%H:%M:%S, %d/%m/%Y", time.gmtime(record.date)),
+            "Date": record.get_date_string(),
             "NodeId": record.node_id,
             "Event": record.event,
             "Level": record.event_level,
