@@ -7,11 +7,8 @@ class SbcliUtils:
     """Contains all API calls
     """
 
-    def __init__(self, cluster_ip, url, cluster_secret,
-                 cluster_api_url, cluster_id):
-        self.cluster_ip = cluster_ip
+    def __init__(self, cluster_secret, cluster_api_url, cluster_id):
         self.cluster_id = cluster_id
-        self.url = url
         self.cluster_secret = cluster_secret
         self.cluster_api_url = cluster_api_url
         self.headers = {

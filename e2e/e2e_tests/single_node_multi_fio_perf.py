@@ -13,9 +13,7 @@ from logger_config import setup_logger
 
 cluster_secret = os.environ.get("CLUSTER_SECRET")
 cluster_id = os.environ.get("CLUSTER_ID")
-cluster_ip = os.environ.get("CLUSTER_IP")
 
-url = f"http://{cluster_ip}"
 api_base_url = os.environ.get("API_BASE_URL")
 headers = {
     "Content-Type": "application/json",
@@ -65,8 +63,6 @@ class TestSingleNodeMultipleFioPerfValidation:
         self.ssh_obj = SshUtils(bastion_server=bastion_server)
         self.logger = setup_logger(__name__)
         self.sbcli_utils = SbcliUtils(
-            cluster_ip=cluster_ip,
-            url=url,
             cluster_api_url=api_base_url,
             cluster_id=cluster_id,
             cluster_secret=cluster_secret
