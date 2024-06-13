@@ -1183,11 +1183,11 @@ def restart_storage_node(
             continue
         distr_controller.send_dev_status_event(dev.cluster_device_order, NVMeDevice.STATUS_ONLINE)
 
-    logger.info("Sending cluster map to current node")
-    ret = distr_controller.send_cluster_map_to_node(snode)
-    if not ret:
-        return False, "Failed to send cluster map"
-    time.sleep(3)
+    # logger.info("Sending cluster map to current node")
+    # ret = distr_controller.send_cluster_map_to_node(snode)
+    # if not ret:
+    #     return False, "Failed to send cluster map"
+    # time.sleep(3)
 
     for lvol_id in snode.lvols:
         lvol = lvol_controller.recreate_lvol(lvol_id, snode)
