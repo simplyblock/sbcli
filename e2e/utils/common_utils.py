@@ -66,8 +66,73 @@ class CommonUtils:
         for word in fail_words:
             if word in file_data:
                 raise RuntimeError("FIO Test has interuupts")
-            
     
+    def validate_fio_json_output(self, output):
+        """Validates JSON fio output
+
+        Args:
+            output (str): JSON output to validate
+        """
+        job = output['jobs'][0]
+        job_name = job['job options']['name']
+        file_name = job['job options']['directory']
+        read_iops = job['read']['iops']
+        write_iops = job['write']['iops']
+        total_iops = read_iops + write_iops
+        disk_name = output['disk_util'][0]['name']
+
+        read_bw_kb = job['read']['bw']
+        write_bw_kb = job['write']['bw']
+        read_bw_mib = read_bw_kb / 1024
+        write_bw_mib = write_bw_kb / 1024
+
+        self.logger.info(f"Performign validation for FIO job: {job_name} on device: "
+                         f"{disk_name} mounted on: {file_name}")
+        assert 550 < total_iops < 650, f"Total IOPS {total_iops} out of range (550-650)"
+        assert 4.5 < read_bw_mib < 5.5, f"Read BW {read_bw_mib} out of range (4.5-5.5 MiB/s)"
+        assert 4.5 < write_bw_mib < 5.5, f"Write BW {write_bw_mib} out of range (4.5-5.5 MiB/s)"
+
+    def manage_fio_threads(self, node, threads):
+        process_list_before = self.ssh_utils.find_process_name(node=node,
+                                                               process_name="fio")
+        self.logger.info(f"Process List: {process_list_before}")
+        sleep_n_sec(60)
+
+        process_list_after = self.ssh_utils.find_process_name(node=node,
+                                                              process_name="fio")
+        self.logger.info(f"Process List: {process_list_after}")
+
+        process_list_before = process_list_before[0:len(process_list_before)-2]
+        process_list_after = process_list_before[0:len(process_list_after)-2]
+        
+        assert process_list_after == process_list_before, \
+            f"FIO process list changed - Before Sleep: {process_list_before}, After Sleep: {process_list_after}"
+        
+        self.logger.info("Waiting for FIO processes to complete!")
+        start_time = time.time()
+        while True:
+            process = self.ssh_utils.find_process_name(node=node,
+                                                       process_name="fio")
+            process_fio = [element for element in process if "grep" not in element]
+            
+            if len(process_fio) == 0:
+                break
+            end_time = time.time()
+            if end_time - start_time > 800:
+                raise RuntimeError("Fio Process not completing post its time")
+            sleep_n_sec(60)
+
+        for thread in threads:
+            thread.join(timeout=30)
+
+        process_list_after = self.ssh_utils.find_process_name(node=node,
+                                                              process_name="fio")
+        self.logger.info(f"Process List: {process_list_after}")
+
+        process_fio = [element for element in process_list_after if "grep" not in element]
+
+        assert len(process_fio) == 0, f"FIO process list not empty: {process_list_after}"
+            
     def parse_lvol_cluster_map_output(self, output):
         """Parses LVOL cluster map output
 

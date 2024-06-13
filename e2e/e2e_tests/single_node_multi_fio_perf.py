@@ -1,7 +1,9 @@
 ### simplyblock e2e tests
+import json
 import os
 import re
 import threading
+import time
 from utils.common_utils import sleep_n_sec
 from utils.sbcli_utils import SbcliUtils
 from utils.ssh_utils import SshUtils
@@ -210,11 +212,8 @@ class TestSingleNodeMultipleFioPerfValidation:
         sleep_n_sec(5)
         for lvol, data in self.lvol_devices.items():
             self.logger.info(f"Setting device and Running FIO for lvol: {lvol}, Data: {data}")
-            # self.ssh_obj.unmount_path(node=self.mgmt_nodes[0],
-            #                           device=data["Device"])
-            # sleep_n_sec(2)
-            self.ssh_obj.wipefs_disk(node=self.mgmt_nodes[0],
-                                     device=data["Device"])
+            self.ssh_obj.unmount_path(node=self.mgmt_nodes[0],
+                                      device=data["Device"])
             sleep_n_sec(2)
             self.ssh_obj.format_disk(node=self.mgmt_nodes[0],
                                      device=data["Device"])
@@ -257,80 +256,74 @@ class TestSingleNodeMultipleFioPerfValidation:
         fio_thread2.start()
         
         sleep_n_sec(5)
-        process_list_before = self.ssh_obj.find_process_name(node=self.mgmt_nodes[0],
-                                                             process_name="fio")
-        self.logger.info(f"Process List: {process_list_before}")
-        sleep_n_sec(60)
-
-        process_list_after = self.ssh_obj.find_process_name(node=self.mgmt_nodes[0],
-                                                            process_name="fio")
-        self.logger.info(f"Process List: {process_list_after}")
-
-        process_list_before = process_list_before[0:len(process_list_before)-2]
-        process_list_after = process_list_before[0:len(process_list_after)-2]
         
-        assert process_list_after == process_list_before, \
-            f"FIO process list changed - Before Sleep: {process_list_before}, After Sleep: {process_list_after}"
-        
-        self.logger.info("Waiting for FIO processes to complete!")
+        self.common_utils.manage_fio_threads(node=self.mgmt_nodes[0],
+                                             threads=[fio_thread1, fio_thread2])
 
-        fio_thread1.join()
-        fio_thread2.join()
-
-        process_list_after = self.ssh_obj.find_process_name(node=self.mgmt_nodes[0],
-                                                            process_name="fio")
-        self.logger.info(f"Process List: {process_list_after}")
-        did_not_quit = False
-        if len(process_list_after) == 2:
-            process_list_after = 0
-        else:
-            self.ssh_obj.kill_processes(
-                node=self.mgmt_nodes[0],
-                process_name="fio"
-            )
-            self.logger.error(f"FIO process did not get stopped after runtime. {process_list_after}")
-            did_not_quit = True
-            # raise RuntimeError(f"FIO process did not get stopped after runtime. {process_list_after}")
-        
         out1 = self.ssh_obj.read_file(node=self.mgmt_nodes[0],
                                       file_name=self.log_path1)
         out2 = self.ssh_obj.read_file(node=self.mgmt_nodes[0],
                                       file_name=self.log_path2)
+        out1 = json.loads(out1)
+        out2 = json.loads(out2)
         
         self.logger.info(f"Log file 1 {self.log_path1}: \n {out1}")
         self.logger.info(f"Log file 2 {self.log_path2}: \n {out2}")
         
-        # self.common_utils.validate_fio_test(node=self.mgmt_nodes[0],
-        #                                   log_file=self.log_path)
+        self.common_utils.validate_fio_json_output(out1)
+        self.common_utils.validate_fio_json_output(out2)
 
-        if did_not_quit:
-            raise RuntimeError(f"FIO process did not get stopped after runtime. {process_list_after}")
+        # fio_thread1 = threading.Thread(target=self.ssh_obj.run_fio_test, args=(self.mgmt_nodes[0], None, self.lvol_devices[self.lvol_name1]["Path"], None,),
+        #                            kwargs={"name": "fio_run_1",
+        #                                    "readwrite": "writetrim",
+        #                                    "ioengine": "libaio",
+        #                                    "iodepth": 64,
+        #                                    "bs": 4096,
+        #                                    "rwmixread": 55,
+        #                                    "size": "2G",
+        #                                    "time_based": True,
+        #                                    "runtime": 300,
+        #                                    "output_format": "json",
+        #                                    "output_file": self.lvol_devices[self.lvol_name1]["Log"],
+        #                                    "debug": self.fio_debug})
+
+        # fio_thread2 = threading.Thread(target=self.ssh_obj.run_fio_test, args=(self.mgmt_nodes[0], None, self.lvol_devices[self.lvol_name2]["Path"], None,),
+        #                             kwargs={"name": "fio_run_2",
+        #                                     "readwrite": "writetrim",
+        #                                     "ioengine": "libaio",
+        #                                     "iodepth": 64,
+        #                                     "bs": 4096,
+        #                                     "rwmixread": 55,
+        #                                     "size": "2G",
+        #                                     "time_based": True,
+        #                                     "runtime": 300,
+        #                                     "output_format": "json",
+        #                                     "output_file": self.lvol_devices[self.lvol_name2]["Log"],
+        #                                     "debug": self.fio_debug})
+            
+                                      
+        # fio_thread1.start()
+        # fio_thread2.start()
+        
+        # sleep_n_sec(5)
+        
+        # self.common_utils.manage_fio_threads(node=self.mgmt_nodes[0],
+        #                                      threads=[fio_thread1, fio_thread2])
+
+        # out1 = self.ssh_obj.read_file(node=self.mgmt_nodes[0],
+        #                               file_name=self.log_path1)
+        # out2 = self.ssh_obj.read_file(node=self.mgmt_nodes[0],
+        #                               file_name=self.log_path2)
+        # out1 = json.loads(out1)
+        # out2 = json.loads(out2)
+        
+        # self.logger.info(f"Log file 1 {self.log_path1}: \n {out1}")
+        # self.logger.info(f"Log file 2 {self.log_path2}: \n {out2}")
+        
+        # self.common_utils.validate_fio_json_output(out1)
+        # self.common_utils.validate_fio_json_output(out2)
+
         self.logger.info("TEST CASE PASSED !!!")
-
-    def validate_fio_output(self, output):
-        iops_pattern = re.compile(r'total:.*iops=([0-9]+)')
-        read_bw_pattern = re.compile(r'read: IOPS=.*, BW=([0-9.]+)MiB/s')
-        write_bw_pattern = re.compile(r'write: IOPS=.*, BW=([0-9.]+)MiB/s')
-
-        iops_match = iops_pattern.search(output)
-        read_bw_match = read_bw_pattern.search(output)
-        write_bw_match = write_bw_pattern.search(output)
-
-        if not iops_match or not read_bw_match or not write_bw_match:
-            return False, "Failed to parse fio output"
-
-        total_iops = int(iops_match.group(1))
-        read_bw = float(read_bw_match.group(1))
-        write_bw = float(write_bw_match.group(1))
-
-        if not (550 < total_iops < 650):
-            return False, f"Total IOPS {total_iops} out of range (550-650)"
-        if not (4.5 < read_bw < 5.5):
-            return False, f"Read BW {read_bw} out of range (4.5-5.5 MiB/s)"
-        if not (4.5 < write_bw < 5.5):
-            return False, f"Write BW {write_bw} out of range (4.5-5.5 MiB/s)"
-
-        return True, "Fio output validation passed"
 
     def teardown(self):
         """Contains teradown required post test case execution

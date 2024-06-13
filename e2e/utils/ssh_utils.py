@@ -99,13 +99,13 @@ class SshUtils:
             ssh_connection = self.ssh_connections[node]
 
         self.logger.info(f"Command: {command}")
-
         try:
             stdin, stdout, stderr = ssh_connection.exec_command(command, timeout=timeout)
             
             output = []
             error = []
-            if "fio" in command:
+            if "sudo fio" in command:
+                self.logger.info("Inside while loop")
                 # Read stdout and stderr in a non-blocking way
                 while not stdout.channel.exit_status_ready():
                     if stdout.channel.recv_ready():
@@ -117,7 +117,6 @@ class SshUtils:
                 error = " ".join(error)
 
             else:
-                stdin, stdout, stderr = ssh_connection.exec_command(command, timeout=timeout)
                 output = stdout.read().decode()
                 error = stderr.read().decode()
 
@@ -175,17 +174,6 @@ class SshUtils:
         command = f"sudo umount {device}"
         self.exec_command(node, command)
     
-    def wipefs_disk(self, node, device):
-        """Wipe disk signature on the given node
-
-        Args:
-            node (str): Node to perform ssh operation on
-            device (str): Device path
-        """
-        command=f"sudo wipefs -a {device}"
-        self.exec_command(node=node, command=command)
-
-
     def get_devices(self, node):
         """Get devices on a machine
 
@@ -193,7 +181,7 @@ class SshUtils:
             node (str): Node to perform ssh operation on
         """
         command = "lsblk -dn -o NAME"
-        output, error = self.exec_command(node, command)
+        output, _ = self.exec_command(node, command)
 
         return output.strip().split()
     

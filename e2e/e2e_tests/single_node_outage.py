@@ -1,5 +1,6 @@
 ### simplyblock e2e tests
 import os
+import time
 import threading
 from utils.common_utils import sleep_n_sec
 from utils.sbcli_utils import SbcliUtils
@@ -219,17 +220,24 @@ class TestSingleNodeOutage:
         self.common_utils.validate_event_logs(cluster_id=cluster_id,
                                               operations=steps)
         
-        self.logger.info("Waiting for FIO process to complete!")
+        self.logger.info("Waiting for FIO processes to complete!")
+        start_time = time.time()
+        while True:
+            process = self.ssh_obj.find_process_name(node=self.mgmt_nodes[0],
+                                                       process_name="fio")
+            process_fio = [element for element in process if "grep" not in element]
+            
+            if len(process_fio) == 0:
+                break
+            end_time = time.time()
+            if end_time - start_time > 800:
+                raise RuntimeError("Fio Process not completing post its time")
+            sleep_n_sec(60)
         
-        fio_thread1.join()
-
-        # self.ssh_obj.kill_processes(
-        #     node=self.mgmt_nodes[0],
-        #     process_name="fio"
-        # )
+        fio_thread1.join(timeout=30)
 
         self.common_utils.validate_fio_test(node=self.mgmt_nodes[0],
-                                          log_file=self.log_path)
+                                            log_file=self.log_path)
 
         self.logger.info("TEST CASE PASSED !!!")
 
