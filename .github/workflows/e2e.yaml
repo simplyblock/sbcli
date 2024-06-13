@@ -162,8 +162,8 @@ jobs:
           FAILED_CASES=$(grep -i "FAILED CASE" "$LATEST_LOG" | grep -oP '(?<=INFO - ).*(?= FAILED CASE)')
 
           # Format passed and failed cases as bullet points
-          PASSED_CASES_BULLETS=$(echo "$PASSED_CASES" | awk '{print "    • " $0}')
-          FAILED_CASES_BULLETS=$(echo "$FAILED_CASES" | awk '{print "    • " $0}')
+          PASSED_CASES_BULLETS=$(echo "$PASSED_CASES" | awk '{printf "    • %s\n", $0}')
+          FAILED_CASES_BULLETS=$(echo "$FAILED_CASES" | awk '{printf "    • %s\n", $0}')
 
 
           echo "PASSED_TESTS=${PASSED_TESTS}" >> $GITHUB_ENV
