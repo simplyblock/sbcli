@@ -247,8 +247,8 @@ class DBController:
     def get_deployers(self):
         return Deployer().read_from_db(self.kv_store)
 
-    def get_deployer_by_id(self, job_id):
-        ret = Deployer().read_from_db(self.kv_store, id=job_id)
+    def get_deployer_by_id(self, deployer_id):
+        ret = Deployer().read_from_db(self.kv_store, id=deployer_id)
         if ret:
             return ret[0]
 

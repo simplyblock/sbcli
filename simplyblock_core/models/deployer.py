@@ -22,10 +22,16 @@ class Deployer(BaseModel):
     }
 
     attributes = {
-        "jobid": {"type": str, 'default': ""},
-        "snodes": {"type": str, 'default': ""},
+        "uuid": {"type": str, 'default': ""},
+        "snodes": {"type": int, 'default': 0},
+        "snodes_type": {"type": str, 'default': ""},
+        "mnodes": {"type": int, 'default': 0},
+        "mnodes_type": {"type": str, 'default': ""},
         "az": {"type": str, 'default': ""},
         "cluster_id": {"type": str, "default": ""},
+        "region": {"type": str, 'default': ""},
+        "workspace": {"type": str, 'default': ""},
+        "bucket_name": {"type": str, 'default': ""},
     }
 
     def __init__(self, data=None):
