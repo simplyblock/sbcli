@@ -3,7 +3,8 @@ import json
 import logging
 import math
 import os
-import stat
+import tempfile
+import shutil
 import time
 import uuid
 
@@ -105,24 +106,25 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
         c.prov_cap_crit = prov_cap_crit
 
     alerts_template_folder = os.path.join(TOP_DIR, "simplyblock_core/scripts/alerting/")
+    alert_resources_file = "alert_resources.yaml"
 
     env = Environment(loader=FileSystemLoader(alerts_template_folder), trim_blocks=True, lstrip_blocks=True)
-    alert_resources_file = "alert_resources.yaml"
     template = env.get_template(f'{alert_resources_file}.j2')
+
     values = {
         'CONTACT_POINT': contact_point,
     }
-    if not os.access(alerts_template_folder, os.W_OK):
-        try:
-            os.chmod(alerts_template_folder, stat.S_IWUSR | stat.S_IRUSR | stat.S_IXUSR)
-        except PermissionError as e:
-            print(f"PermissionError: {e}")
-            print("Please run this script with elevated permissions or change the directory permissions manually.")
-            exit(1)
-    output_file_path = os.path.join(alerts_template_folder, alert_resources_file)
 
-    with open(output_file_path, 'w') as file:
+    temp_dir = tempfile.mkdtemp()
+
+    temp_file_path = os.path.join(temp_dir, alert_resources_file)
+    with open(temp_file_path, 'w') as file:
         file.write(template.render(values))
+
+    destination_file_path = os.path.join(alerts_template_folder, alert_resources_file)
+    shutil.move(temp_file_path, destination_file_path)
+    print(f"File moved to {destination_file_path} successfully.")
+    shutil.rmtree(temp_dir)
 
     logger.info("Deploying swarm stack ...")
     ret = scripts.deploy_stack(cli_pass, DEV_IP, constants.SIMPLY_BLOCK_DOCKER_IMAGE, c.secret, c.uuid, log_del_interval, metrics_retention_period)
