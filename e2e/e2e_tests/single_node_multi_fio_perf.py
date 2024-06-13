@@ -256,9 +256,25 @@ class TestSingleNodeMultipleFioPerfValidation:
         fio_thread2.start()
         
         sleep_n_sec(5)
+
+        process_list_before = self.ssh_obj.find_process_name(node=self.mgmt_nodes[0],
+                                                             process_name="fio")
+        self.logger.info(f"Process List: {process_list_before}")
+        sleep_n_sec(60)
+
+        process_list_after = self.ssh_obj.find_process_name(node=self.mgmt_nodes[0],
+                                                            process_name="fio")
+        self.logger.info(f"Process List: {process_list_after}")
+
+        process_list_before = process_list_before[0:len(process_list_before)-2]
+        process_list_after = process_list_before[0:len(process_list_after)-2]
+        
+        assert process_list_after == process_list_before, \
+            f"FIO process list changed - Before Sleep: {process_list_before}, After Sleep: {process_list_after}"
         
         self.common_utils.manage_fio_threads(node=self.mgmt_nodes[0],
-                                             threads=[fio_thread1, fio_thread2])
+                                             threads=[fio_thread1, fio_thread2],
+                                             timeout=900)
 
         out1 = self.ssh_obj.read_file(node=self.mgmt_nodes[0],
                                       file_name=self.log_path1)
@@ -272,56 +288,6 @@ class TestSingleNodeMultipleFioPerfValidation:
         
         self.common_utils.validate_fio_json_output(out1)
         self.common_utils.validate_fio_json_output(out2)
-
-        # fio_thread1 = threading.Thread(target=self.ssh_obj.run_fio_test, args=(self.mgmt_nodes[0], None, self.lvol_devices[self.lvol_name1]["Path"], None,),
-        #                            kwargs={"name": "fio_run_1",
-        #                                    "readwrite": "writetrim",
-        #                                    "ioengine": "libaio",
-        #                                    "iodepth": 64,
-        #                                    "bs": 4096,
-        #                                    "rwmixread": 55,
-        #                                    "size": "2G",
-        #                                    "time_based": True,
-        #                                    "runtime": 300,
-        #                                    "output_format": "json",
-        #                                    "output_file": self.lvol_devices[self.lvol_name1]["Log"],
-        #                                    "debug": self.fio_debug})
-
-        # fio_thread2 = threading.Thread(target=self.ssh_obj.run_fio_test, args=(self.mgmt_nodes[0], None, self.lvol_devices[self.lvol_name2]["Path"], None,),
-        #                             kwargs={"name": "fio_run_2",
-        #                                     "readwrite": "writetrim",
-        #                                     "ioengine": "libaio",
-        #                                     "iodepth": 64,
-        #                                     "bs": 4096,
-        #                                     "rwmixread": 55,
-        #                                     "size": "2G",
-        #                                     "time_based": True,
-        #                                     "runtime": 300,
-        #                                     "output_format": "json",
-        #                                     "output_file": self.lvol_devices[self.lvol_name2]["Log"],
-        #                                     "debug": self.fio_debug})
-            
-                                      
-        # fio_thread1.start()
-        # fio_thread2.start()
-        
-        # sleep_n_sec(5)
-        
-        # self.common_utils.manage_fio_threads(node=self.mgmt_nodes[0],
-        #                                      threads=[fio_thread1, fio_thread2])
-
-        # out1 = self.ssh_obj.read_file(node=self.mgmt_nodes[0],
-        #                               file_name=self.log_path1)
-        # out2 = self.ssh_obj.read_file(node=self.mgmt_nodes[0],
-        #                               file_name=self.log_path2)
-        # out1 = json.loads(out1)
-        # out2 = json.loads(out2)
-        
-        # self.logger.info(f"Log file 1 {self.log_path1}: \n {out1}")
-        # self.logger.info(f"Log file 2 {self.log_path2}: \n {out2}")
-        
-        # self.common_utils.validate_fio_json_output(out1)
-        # self.common_utils.validate_fio_json_output(out2)
 
         self.logger.info("TEST CASE PASSED !!!")
 

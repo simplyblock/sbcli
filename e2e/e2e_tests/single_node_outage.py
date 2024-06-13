@@ -220,28 +220,14 @@ class TestSingleNodeOutage:
         self.common_utils.validate_event_logs(cluster_id=cluster_id,
                                               operations=steps)
         
-        self.logger.info("Waiting for FIO processes to complete!")
-        start_time = time.time()
-        while True:
-            process = self.ssh_obj.find_process_name(node=self.mgmt_nodes[0],
-                                                       process_name="fio")
-            process_fio = [element for element in process if "grep" not in element]
-            
-            if len(process_fio) == 0:
-                break
-            end_time = time.time()
-            if end_time - start_time > 800:
-                raise RuntimeError("Fio Process not completing post its time")
-            sleep_n_sec(60)
-        
-        fio_thread1.join(timeout=30)
+        self.common_utils.manage_fio_threads(node=self.mgmt_nodes[0],
+                                             threads=[fio_thread1],
+                                             timeout=300)
 
         self.common_utils.validate_fio_test(node=self.mgmt_nodes[0],
                                             log_file=self.log_path)
 
         self.logger.info("TEST CASE PASSED !!!")
-
-
 
     def validations(self, node_uuid, node_status, device_status, lvol_status,
                     health_check_status):

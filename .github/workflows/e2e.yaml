@@ -162,8 +162,8 @@ jobs:
           FAILED_CASES=$(grep -i "FAILED CASE" "$LATEST_LOG" | grep -oP '(?<=INFO - ).*(?= FAILED CASE)')
 
           # Format passed and failed cases as bullet points
-          PASSED_CASES_BULLETS=$(echo "$PASSED_CASES" | awk '{print "• " $0}')
-          FAILED_CASES_BULLETS=$(echo "$FAILED_CASES" | awk '{print "• " $0}')
+          PASSED_CASES_BULLETS=$(echo "$PASSED_CASES" | awk '{print "    • " $0}')
+          FAILED_CASES_BULLETS=$(echo "$FAILED_CASES" | awk '{print "    • " $0}')
 
 
           echo "PASSED_TESTS=${PASSED_TESTS}" >> $GITHUB_ENV
@@ -203,7 +203,7 @@ jobs:
           else
             OVERALL_STATUS=":x: Overall Status: FAILURE"
           fi
-          MESSAGE="Python E2E tests run triggered by ${{ env.TRIGGER_ACTOR }} via ${{ env.TRIGGER_EVENT }}. \n${OVERALL_STATUS}\nGitHub Run: ${GITHUB_RUN_URL}\nAWS Logs: ${AWS_LOGS_URL}\n\nTotal Tests: ${{ env.TOTAL_TESTS }}\n\n- Test Cases Passed :white_check_mark:\n${{ env.PASSED_CASES_BULLETS }}\n- Test Cases Failed :x:\n${{ env.FAILED_CASES_BULLETS }}"
+          MESSAGE="Python E2E tests run triggered by ${{ env.TRIGGER_ACTOR }} via ${{ env.TRIGGER_EVENT }}. \n${OVERALL_STATUS}\nGitHub Run: ${GITHUB_RUN_URL}\nAWS Logs: ${AWS_LOGS_URL}\n\nTotal Tests: ${{ env.TOTAL_TESTS }}\nPassed Tests: ${{ env.PASSED_TESTS }}\nFailed Tests: ${{ env.FAILED_TESTS }}\n\n-- Test Cases Passed :white_check_mark:\n${{ env.PASSED_CASES_BULLETS }}\n\n-- Test Cases Failed :x:\n${{ env.FAILED_CASES_BULLETS }}"
           
           curl -X POST -H 'Content-type: application/json' --data "{\"text\":\"${MESSAGE}\"}" $SLACK_WEBHOOK_URL
 

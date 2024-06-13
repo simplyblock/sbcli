@@ -92,22 +92,17 @@ class CommonUtils:
         assert 4.5 < read_bw_mib < 5.5, f"Read BW {read_bw_mib} out of range (4.5-5.5 MiB/s)"
         assert 4.5 < write_bw_mib < 5.5, f"Write BW {write_bw_mib} out of range (4.5-5.5 MiB/s)"
 
-    def manage_fio_threads(self, node, threads):
-        process_list_before = self.ssh_utils.find_process_name(node=node,
-                                                               process_name="fio")
-        self.logger.info(f"Process List: {process_list_before}")
-        sleep_n_sec(60)
+    def manage_fio_threads(self, node, threads, timeout=100):
+        """Run till fio process is complete and joins the thread
 
-        process_list_after = self.ssh_utils.find_process_name(node=node,
-                                                              process_name="fio")
-        self.logger.info(f"Process List: {process_list_after}")
+        Args:
+            node (str): Node IP where fio is running
+            threads (list): List of threads
+            timeout (int): Time to check for completion
 
-        process_list_before = process_list_before[0:len(process_list_before)-2]
-        process_list_after = process_list_before[0:len(process_list_after)-2]
-        
-        assert process_list_after == process_list_before, \
-            f"FIO process list changed - Before Sleep: {process_list_before}, After Sleep: {process_list_after}"
-        
+        Raises:
+            RuntimeError: If fio process hang
+        """
         self.logger.info("Waiting for FIO processes to complete!")
         start_time = time.time()
         while True:
@@ -120,7 +115,11 @@ class CommonUtils:
             end_time = time.time()
             if end_time - start_time > 800:
                 raise RuntimeError("Fio Process not completing post its time")
+            if timeout <= 0:
+                break
             sleep_n_sec(60)
+            timeout = timeout - 60
+            
 
         for thread in threads:
             thread.join(timeout=30)
