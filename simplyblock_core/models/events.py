@@ -1,4 +1,6 @@
 # coding=utf-8
+from datetime import datetime
+
 from simplyblock_core.models.base_model import BaseModel
 
 
@@ -25,7 +27,7 @@ class EventObj(BaseModel):
         "uuid": {"type": str, 'default': ""},
         "cluster_uuid": {"type": str, 'default': ""},
         "node_id": {"type": str, 'default': ""},
-        "date": {"type": int, 'default': 0},
+        "date": {"type": int, 'default': 0},  # in milliseconds
 
         "event_level": {"type": str, 'default': LEVEL_INFO},
 
@@ -49,3 +51,9 @@ class EventObj(BaseModel):
 
     def get_id(self):
         return "%s/%s/%s" % (self.cluster_uuid, self.date, self.uuid)
+
+    def get_date_string(self):
+        if self.date > 1e10:
+            return str(datetime.fromtimestamp(self.date/1000))
+        else:
+            return str(datetime.fromtimestamp(self.date))
