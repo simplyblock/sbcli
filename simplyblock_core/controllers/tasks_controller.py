@@ -36,10 +36,11 @@ def _add_task(function_name, cluster_id, node_id, device_id):
     task_obj.function_name = JobSchedule.FN_DEV_MIG
     task_obj.status = JobSchedule.STATUS_NEW
     task_obj.write_to_db(db_controller.kv_store)
-    return task_obj.get_id()
+    return task_obj.uuid
 
 
-def add_device_mig_task(device):
+def add_device_mig_task(device_id):
+    device = db_controller.get_storage_devices(device_id)
     return _add_task(JobSchedule.FN_DEV_MIG, device.cluster_id, device.node_id, device.get_id())
 
 

@@ -1044,7 +1044,7 @@ def restart_storage_node(
             continue
 
         distr_controller.send_dev_status_event(dev.cluster_device_order, NVMeDevice.STATUS_ONLINE)
-        tasks_controller.add_device_mig_task(dev)
+        tasks_controller.add_device_mig_task(dev.get_id())
 
     logger.info("Sending cluster map to current node")
     ret = distr_controller.send_cluster_map_to_node(snode)

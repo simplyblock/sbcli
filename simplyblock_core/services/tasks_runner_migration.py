@@ -13,7 +13,11 @@ from graypy import GELFUDPHandler
 
 
 def task_runner(task):
+    task.status = JobSchedule.STATUS_RUNNING
+    task.write_to_db(db_controller.kv_store)
+
     time.sleep(10)
+
     task.function_result = "sleep 10"
     task.status = JobSchedule.STATUS_DONE
     task.write_to_db(db_controller.kv_store)

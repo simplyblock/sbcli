@@ -699,8 +699,8 @@ def list_tasks(cluster_id):
     tasks = db_controller.get_job_tasks(cluster_id)
     for task in tasks:
         data.append({
-            "UUID": task.uuid,
-            "Device": task.device_id,
+            "Task ID": task.uuid,
+            "Target ID": task.device_id or task.node_id,
             "Function": task.function_name,
             "Retry": f"{task.retry}/{constants.TASK_EXEC_RETRY_COUNT}",
             "Status": task.status,
