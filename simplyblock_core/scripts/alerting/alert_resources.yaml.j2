@@ -42,7 +42,7 @@ templates:
       {{ end -}}
       *Log message*: {{ index .Labels "message" }}
       {% endraw %}
-      *Explore logs:* {{ GRAFANA_ENDPOINT }}
+      *Explore logs:* 
       {% raw %}
       {{ if .DashboardURL -}}
       *Go to dashboard:* {{ .DashboardURL }}
