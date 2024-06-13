@@ -41,9 +41,3 @@ class Deployer(BaseModel):
 
     def get_id(self):
         return self.uuid
-
-    def get_status_code(self):
-        if self.status in self.STATUS_CODE_MAP:
-            return self.STATUS_CODE_MAP[self.status]
-        else:
-            return -1
