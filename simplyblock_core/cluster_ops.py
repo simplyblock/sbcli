@@ -3,6 +3,7 @@ import json
 import logging
 import math
 import os
+import stat
 import time
 import uuid
 
@@ -111,8 +112,16 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     values = {
         'CONTACT_POINT': contact_point,
     }
+    if not os.access(alerts_template_folder, os.W_OK):
+        try:
+            os.chmod(alerts_template_folder, stat.S_IWUSR | stat.S_IRUSR | stat.S_IXUSR)
+        except PermissionError as e:
+            print(f"PermissionError: {e}")
+            print("Please run this script with elevated permissions or change the directory permissions manually.")
+            exit(1)
+    output_file_path = os.path.join(alerts_template_folder, alert_resources_file)
 
-    with open(os.path.join(alerts_template_folder, alert_resources_file), 'w') as file:
+    with open(output_file_path, 'w') as file:
         file.write(template.render(values))
 
     logger.info("Deploying swarm stack ...")
