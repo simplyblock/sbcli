@@ -41,18 +41,9 @@ positional arguments:
     remove              Remove storage node
     list                List storage nodes
     get                 Get storage node info
-    restart             Restart a storage node. All functions and device
-                        drivers will be reset. During restart, the node does
-                        not accept IO. In a high-availability setup, this will
-                        not impact operations.
-    shutdown            Shutdown a storage node. Once the command is issued,
-                        the node will stop accepting IO,but IO, which was
-                        previously received, will still be processed. In a
-                        high-availability setup, this will not impact
-                        operations.
-    suspend             Suspend a storage node. The node will stop accepting
-                        new IO, but will finish processing any IO, which has
-                        been received already.
+    restart             Restart a storage node.
+    shutdown            Shutdown a storage node.
+    suspend             Suspend a storage node.
     resume              Resume a storage node
     get-io-stats        Returns the current io statistics of a node
     get-capacity        Returns the size, absolute and relative utilization of
@@ -64,22 +55,13 @@ positional arguments:
     reset-device        Reset storage device
     restart-device      Re add "removed" storage device
     add-device          Add a new storage device
-    remove-device       Remove a storage device. The device will become
-                        unavailable, independently if it was physically
-                        removed from the server. This function can be used if
-                        auto-detection of removal did not work or if the
-                        device must be maintained otherwise while remaining
-                        inserted into the server.
+    remove-device       Remove a storage device.
     set-failed-device   Set storage device to failed state.
     get-capacity-device
                         Returns the size, absolute and relative utilization of
                         the device in bytes
     get-io-stats-device
-                        Returns the io statistics. If --history is not
-                        selected, this is a monitor, which updates current
-                        statistics records every two seconds (similar to
-                        ping):read-iops write-iops total-iops read-mbs write-
-                        mbs total-mbs
+                        Returns device IO statistics
     port-list           Get Data interfaces list for a node
     port-io-stats       Get Data interfaces IO stats
     check               Health check storage node
@@ -225,18 +207,11 @@ optional arguments:
 ```
 
     
-### Restart a storage node. all functions and device drivers will be reset. during restart, the node does not accept io. in a high-availability setup, this will not impact operations.
-
+### Restart a storage node.
+All functions and device drivers will be reset. During restart, the node does not accept IO. In a high-availability setup, this will not impact operations.
 
 ```bash
-usage: sbcli-dev storage-node restart [-h] [--cpu-mask SPDK_CPU_MASK]
-                                      [--memory SPDK_MEM]
-                                      [--spdk-image SPDK_IMAGE] [--spdk-debug]
-                                      [--iobuf_small_pool_count SMALL_POOL_COUNT]
-                                      [--iobuf_large_pool_count LARGE_POOL_COUNT]
-                                      [--iobuf_small_bufsize SMALL_BUFSIZE]
-                                      [--iobuf_large_bufsize LARGE_BUFSIZE]
-                                      node_id
+usage: All functions and device drivers will be reset. During restart, the node does not accept IO. In a high-availability setup, this will not impact operations.
 
 positional arguments:
   node_id               UUID of storage node
@@ -261,11 +236,11 @@ optional arguments:
 ```
 
     
-### Shutdown a storage node. once the command is issued, the node will stop accepting io,but io, which was previously received, will still be processed. in a high-availability setup, this will not impact operations.
-
+### Shutdown a storage node.
+Once the command is issued, the node will stop accepting IO,but IO, which was previously received, will still be processed. In a high-availability setup, this will not impact operations.
 
 ```bash
-usage: sbcli-dev storage-node shutdown [-h] [--force] node_id
+usage: Once the command is issued, the node will stop accepting IO,but IO, which was previously received, will still be processed. In a high-availability setup, this will not impact operations.
 
 positional arguments:
   node_id     UUID of storage node
@@ -277,11 +252,11 @@ optional arguments:
 ```
 
     
-### Suspend a storage node. the node will stop accepting new io, but will finish processing any io, which has been received already.
-
+### Suspend a storage node.
+The node will stop accepting new IO, but will finish processing any IO, which has been received already.
 
 ```bash
-usage: sbcli-dev storage-node suspend [-h] [--force] node_id
+usage: The node will stop accepting new IO, but will finish processing any IO, which has been received already.
 
 positional arguments:
   node_id     UUID of storage node
@@ -370,11 +345,11 @@ optional arguments:
 ```bash
 usage: sbcli-dev storage-node device-testing-mode [-h]
                                                   device_id
-                                                  {full_pass_trhough,io_error_on_read,io_error_on_write,io_error_on_unmap,io_error_on_all,discard_io_all,hotplug_removal}
+                                                  {full_pass_through,io_error_on_read,io_error_on_write,io_error_on_unmap,io_error_on_all,discard_io_all,hotplug_removal}
 
 positional arguments:
   device_id             Device UUID
-  {full_pass_trhough,io_error_on_read,io_error_on_write,io_error_on_unmap,io_error_on_all,discard_io_all,hotplug_removal}
+  {full_pass_through,io_error_on_read,io_error_on_write,io_error_on_unmap,io_error_on_all,discard_io_all,hotplug_removal}
                         Testing mode
 
 optional arguments:
@@ -399,10 +374,10 @@ optional arguments:
 
     
 ### Reset storage device
-
+Hardware device reset. Resetting the device can return the device from an unavailable into online state, if successful
 
 ```bash
-usage: sbcli-dev storage-node reset-device [-h] device_id
+usage: Hardware device reset. Resetting the device can return the device from an unavailable into online state, if successful
 
 positional arguments:
   device_id   the devices's UUID
@@ -414,10 +389,10 @@ optional arguments:
 
     
 ### Re add "removed" storage device
-
+a previously removed or unavailable device may be returned into online state. If the device is not physically present, accessible or healthy, it will flip back into unavailable state again.
 
 ```bash
-usage: sbcli-dev storage-node restart-device [-h] id
+usage: a previously removed or unavailable device may be returned into online state. If the device is not physically present, accessible or healthy, it will flip back into unavailable state again.
 
 positional arguments:
   id          the devices's UUID
@@ -429,10 +404,10 @@ optional arguments:
 
     
 ### Add a new storage device
-
+Adding a device will include a previously detected device (currently in "new" state) into cluster and will launch and auto-rebalancing background process in which some cluster capacity is re-distributed to this newly added device.
 
 ```bash
-usage: sbcli-dev storage-node add-device [-h]
+usage: Adding a device will include a previously detected device (currently in "new" state) into cluster and will launch and auto-rebalancing background process in which some cluster capacity is re-distributed to this newly added device.
 
 optional arguments:
   -h, --help  show this help message and exit
@@ -440,11 +415,11 @@ optional arguments:
 ```
 
     
-### Remove a storage device. the device will become unavailable, independently if it was physically removed from the server. this function can be used if auto-detection of removal did not work or if the device must be maintained otherwise while remaining inserted into the server. 
-
+### Remove a storage device.
+The device will become unavailable, independently if it was physically removed from the server. This function can be used if auto-detection of removal did not work or if the device must be maintained otherwise while remaining inserted into the server. 
 
 ```bash
-usage: sbcli-dev storage-node remove-device [-h] [--force] device_id
+usage: The device will become unavailable, independently if it was physically removed from the server. This function can be used if auto-detection of removal did not work or if the device must be maintained otherwise while remaining inserted into the server. 
 
 positional arguments:
   device_id   Storage device ID
@@ -487,7 +462,7 @@ optional arguments:
 ```
 
     
-### Returns the io statistics. if --history is not selected, this is a monitor, which updates current statistics records every two seconds (similar to ping):read-iops write-iops total-iops read-mbs write-mbs total-mbs
+### Returns device io statistics
 
 
 ```bash
@@ -619,13 +594,9 @@ positional arguments:
                         capacity (in percent and absolute) and provisioned
                         capacity (in percent and absolute) in GB in the
                         cluster.
-    get-io-stats        Returns the io statistics. If --history is not
-                        selected, this is a monitor, which updates current
-                        statistics records every two seconds (similar to
-                        ping):read-iops write-iops total-iops read-mbs write-
-                        mbs total-mbs
+    get-io-stats        Returns cluster IO statistics.
     get-cli-ssh-pass    returns the ssh password for the CLI ssh connection
-    get-logs            Returns distr logs
+    get-logs            Returns cluster status logs
     get-secret          Returns auto generated, 20 characters secret.
     upd-secret          Updates the secret (replaces the existing one with a
                         new one) and returns the new one.
@@ -646,8 +617,7 @@ optional arguments:
 
 ```bash
 usage: sbcli-dev cluster create [-h] [--blk_size {512,4096}]
-                                [--page_size PAGE_SIZE]
-                                [--ha_type {single,ha}] [--CLI_PASS CLI_PASS]
+                                [--page_size PAGE_SIZE] [--CLI_PASS CLI_PASS]
                                 [--cap-warn CAP_WARN] [--cap-crit CAP_CRIT]
                                 [--prov-cap-warn PROV_CAP_WARN]
                                 [--prov-cap-crit PROV_CAP_CRIT]
@@ -661,9 +631,6 @@ optional arguments:
                         The block size in bytes
   --page_size PAGE_SIZE
                         The size of a data page in bytes
-  --ha_type {single,ha}
-                        Can be "single" for single node clusters or "HA",
-                        which requires at least 3 nodes
   --CLI_PASS CLI_PASS   Password for CLI SSH connection
   --cap-warn CAP_WARN   Capacity warning level in percent, default=80
   --cap-crit CAP_CRIT   Capacity critical level in percent, default=90
@@ -771,7 +738,7 @@ optional arguments:
 ```
 
     
-### Returns the io statistics. if --history is not selected, this is a monitor, which updates current statistics records every two seconds (similar to ping):read-iops write-iops total-iops read-mbs write-mbs total-mbs
+### Returns cluster io statistics.
 
 
 ```bash
@@ -806,7 +773,7 @@ optional arguments:
 ```
 
     
-### Returns distr logs
+### Returns cluster status logs
 
 
 ```bash
@@ -942,22 +909,15 @@ positional arguments:
     list                List all LVols
     list-mem            Get the size and max_size of the lvol
     get                 Get LVol details
-    delete              Delete LVol. This is only possible, if no more
-                        snapshots and non-inflated clones of the volume exist.
-                        The volume must be suspended before it can be deleted.
-    connect             show connection strings to cluster. Multiple
-                        connections to the cluster are always available for
-                        multi-pathing and high-availability.
-    resize              Resize LVol. The lvol cannot be exceed the maximum
-                        size for lvols. It cannot exceed total remaining
-                        provisioned space in pool. It cannot drop below the
-                        current utilization.
+    delete              Delete LVol.
+    connect             show connection strings to cluster.
+    resize              Resize LVol.
     create-snapshot     Create snapshot from LVol
     clone               create LVol based on a snapshot
     move                Moves a full copy of the logical volume between nodes
     get-capacity        Returns the current (or historic) provisioned and
                         utilized (in percent and absolute) capacity.
-    get-io-stats        Get Input Output stats of LVol
+    get-io-stats        Returns LVol IO statistics
     send-cluster-map    send distr cluster map
     get-cluster-map     get distr cluster map
     check               Health check LVol
@@ -974,7 +934,7 @@ optional arguments:
 ```bash
 usage: sbcli-dev lvol add [-h] [--snapshot] [--max-size MAX_SIZE]
                           [--host-id HOST_ID] [--ha-type {single,ha,default}]
-                          [--compress] [--encrypt] [--crypto-key1 CRYPTO_KEY1]
+                          [--encrypt] [--crypto-key1 CRYPTO_KEY1]
                           [--crypto-key2 CRYPTO_KEY2]
                           [--max-rw-iops MAX_RW_IOPS]
                           [--max-rw-mbytes MAX_RW_MBYTES]
@@ -997,8 +957,6 @@ optional arguments:
   --host-id HOST_ID     Primary storage node UUID or Hostname
   --ha-type {single,ha,default}
                         LVol HA type (single, ha), default is cluster HA type
-  --compress            Use inline data compression and de-compression on the
-                        logical volume
   --encrypt             Use inline data encryption and de-cryption on the
                         logical volume
   --crypto-key1 CRYPTO_KEY1
@@ -1098,11 +1056,11 @@ optional arguments:
 ```
 
     
-### Delete lvol. this is only possible, if no more snapshots and non-inflated clones of the volume exist. the volume must be suspended before it can be deleted. 
-
+### Delete lvol.
+This is only possible, if no more snapshots and non-inflated clones of the volume exist. The volume must be suspended before it can be deleted. 
 
 ```bash
-usage: sbcli-dev lvol delete [-h] [--force] id [id ...]
+usage: This is only possible, if no more snapshots and non-inflated clones of the volume exist. The volume must be suspended before it can be deleted. 
 
 positional arguments:
   id          LVol id or ids
@@ -1114,11 +1072,11 @@ optional arguments:
 ```
 
     
-### Show connection strings to cluster. multiple connections to the cluster are always available for multi-pathing and high-availability.
-
+### Show connection strings to cluster.
+Multiple connections to the cluster are always available for multi-pathing and high-availability.
 
 ```bash
-usage: sbcli-dev lvol connect [-h] id
+usage: Multiple connections to the cluster are always available for multi-pathing and high-availability.
 
 positional arguments:
   id          LVol id
@@ -1129,11 +1087,11 @@ optional arguments:
 ```
 
     
-### Resize lvol. the lvol cannot be exceed the maximum size for lvols. it cannot exceed total remaining provisioned space in pool. it cannot drop below the current utilization.
-
+### Resize lvol.
+The lvol cannot be exceed the maximum size for lvols. It cannot exceed total remaining provisioned space in pool. It cannot drop below the current utilization.
 
 ```bash
-usage: sbcli-dev lvol resize [-h] id size
+usage: The lvol cannot be exceed the maximum size for lvols. It cannot exceed total remaining provisioned space in pool. It cannot drop below the current utilization.
 
 positional arguments:
   id          LVol id
@@ -1212,11 +1170,11 @@ optional arguments:
 ```
 
     
-### Get input output stats of lvol
-Returns either the current or historic io statistics (read-IO, write-IO, total-IO, read mbs, write mbs, total mbs).
+### Returns lvol io statistics
+
 
 ```bash
-usage: Returns either the current or historic io statistics (read-IO, write-IO, total-IO, read mbs, write mbs, total mbs).
+usage: sbcli-dev lvol get-io-stats [-h] [--history HISTORY] id
 
 positional arguments:
   id                 LVol id
@@ -1353,9 +1311,7 @@ positional arguments:
     get                 get pool details
     delete              Delete Pool
     enable              Set pool status to Active
-    disable             Set pool status to Inactive. Attention! This will
-                        suspend all new IO to the pool! IO in flight
-                        processing will be completed.
+    disable             Set pool status to Inactive.
     get-secret          Returns auto generated, 20 characters secret.
     upd-secret          Updates the secret (replaces the existing one with a
                         new one) and returns the new one.
@@ -1494,7 +1450,7 @@ optional arguments:
 ```
 
     
-### Set pool status to inactive. attention! this will suspend all new io to the pool! io in flight processing will be completed.
+### Set pool status to inactive.
 
 
 ```bash

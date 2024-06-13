@@ -191,8 +191,7 @@ class CLIWrapper:
         sub_command = self.add_sub_command(subparser, 'port-io-stats', 'Get Data interfaces IO stats')
         sub_command.add_argument("port_id", help='Data port ID')
         sub_command.add_argument("--history", help='list history records -one for every 15 minutes- '
-                                                   'for XX days and YY hours -up to 10 days in total, format: XXdYYh',
-                                 type=int, default=20)
+                                                   'for XX days and YY hours -up to 10 days in total, format: XXdYYh')
 
         # check storage node
         sub_command = self.add_sub_command(subparser, "check", 'Health check storage node')
@@ -865,7 +864,7 @@ class CLIWrapper:
                 host_id = args.host_id
                 ha_type = args.ha_type
                 pool = args.pool
-                comp = args.compress
+                comp = None
                 crypto = args.encrypt
                 distr_vuid = args.distr_vuid
                 distr_ndcs = args.distr_ndcs

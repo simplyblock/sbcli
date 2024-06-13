@@ -14,7 +14,7 @@ import docker
 from simplyblock_core import constants, scripts, distr_controller
 from simplyblock_core import utils
 from simplyblock_core.controllers import lvol_controller, storage_events, snapshot_controller, device_events, \
-    device_controller
+    device_controller, tasks_controller
 from simplyblock_core.kv_store import DBController
 from simplyblock_core import shell_utils
 from simplyblock_core.models.iface import IFace
@@ -1037,11 +1037,14 @@ def restart_storage_node(
     distr_controller.send_node_status_event(snode.get_id(), NVMeDevice.STATUS_ONLINE)
 
     logger.info("Sending devices event updates")
+    logger.info("Starting migration tasks")
     for dev in snode.nvme_devices:
         if dev.status != NVMeDevice.STATUS_ONLINE:
-            logger.debug(f"Device is not online: {dev.get_id()}, status: {dev.status}")
+            logger.info(f"Device is not online: {dev.get_id()}, status: {dev.status}")
             continue
+
         distr_controller.send_dev_status_event(dev.cluster_device_order, NVMeDevice.STATUS_ONLINE)
+        tasks_controller.add_device_mig_task(dev.get_id())
 
     logger.info("Sending cluster map to current node")
     ret = distr_controller.send_cluster_map_to_node(snode)
@@ -1238,14 +1241,16 @@ def suspend_storage_node(node_id, force=False):
     for node in snodes:
         if node.status == node.STATUS_ONLINE:
             online_nodes += 1
-    if cluster.ha_type == "ha" and online_nodes <= 3 and cluster.status == cluster.STATUS_ACTIVE:
-        logger.warning(f"Cluster mode is HA but online storage nodes are less than 3")
-        if force is False:
-            return False
 
-    if cluster.ha_type == "ha" and cluster.status == cluster.STATUS_DEGRADED and force is False:
-        logger.warning(f"Cluster status is degraded, use --force but this will suspend the cluster")
-        return False
+    if cluster.ha_type == "ha":
+        if online_nodes <= 3 and cluster.status == cluster.STATUS_ACTIVE:
+            logger.warning(f"Cluster mode is HA but online storage nodes are less than 3")
+            if force is False:
+                return False
+
+        if cluster.status == cluster.STATUS_DEGRADED and force is False:
+            logger.warning(f"Cluster status is degraded, use --force but this will suspend the cluster")
+            return False
 
     logger.info("Suspending node")
     distr_controller.send_node_status_event(snode.get_id(), "suspended")
@@ -1566,7 +1571,7 @@ def get_node_ports(node_id):
     return utils.print_table(out)
 
 
-def get_node_port_iostats(port_id, history=None):
+def get_node_port_iostats(port_id, history=None, records_count=20):
     db_controller = DBController()
     nodes = db_controller.get_storage_nodes()
     nd = None
@@ -1582,19 +1587,25 @@ def get_node_port_iostats(port_id, history=None):
         logger.error("Port not found")
         return False
 
-    limit = 20
-    if history and history > 1:
-        limit = history
-    data = db_controller.get_port_stats(nd.get_id(), port.get_id(), limit=limit)
-    out = []
+    if history:
+        records_number = utils.parse_history_param(history)
+        if not records_number:
+            logger.error(f"Error parsing history string: {history}")
+            return False
+    else:
+        records_number = 20
 
-    for record in data:
+    records = db_controller.get_port_stats(nd.get_id(), port.get_id(), limit=records_number)
+    new_records = utils.process_records(records, records_count)
+
+    out = []
+    for record in new_records:
         out.append({
-            "Date": time.strftime("%H:%M:%S, %d/%m/%Y", time.gmtime(record.date)),
-            "out_speed": utils.humanbytes(record.out_speed),
-            "in_speed": utils.humanbytes(record.in_speed),
-            "bytes_sent": utils.humanbytes(record.bytes_sent),
-            "bytes_received": utils.humanbytes(record.bytes_received),
+            "Date": time.strftime("%H:%M:%S, %d/%m/%Y", time.gmtime(record['date'])),
+            "out_speed": utils.humanbytes(record['out_speed']),
+            "in_speed": utils.humanbytes(record['in_speed']),
+            "bytes_sent": utils.humanbytes(record['bytes_sent']),
+            "bytes_received": utils.humanbytes(record['bytes_received']),
         })
     return utils.print_table(out)
 
@@ -1814,3 +1825,21 @@ def get(node_id):
 
     data = snode.get_clean_dict()
     return json.dumps(data, indent=2)
+
+
+def set_node_status(node_id, status):
+    db_controller = DBController()
+    snode = db_controller.get_storage_node_by_id(node_id)
+    if snode.status != status:
+        old_status = snode.status
+        snode.status = status
+        snode.updated_at = str(datetime.datetime.now())
+        snode.write_to_db(db_controller.kv_store)
+        storage_events.snode_status_change(snode, snode.status, old_status, caused_by="monitor")
+        distr_controller.send_node_status_event(snode.get_id(), status)
+
+    if snode.status == StorageNode.STATUS_ONLINE:
+        logger.info("Connecting to remote devices")
+        _connect_to_remote_devs(snode)
+
+    return True

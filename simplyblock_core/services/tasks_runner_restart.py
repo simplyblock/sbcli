@@ -4,8 +4,8 @@ import time
 import sys
 
 
-from simplyblock_core import constants, kv_store
-from simplyblock_core.controllers import device_controller
+from simplyblock_core import constants, kv_store, storage_node_ops
+from simplyblock_core.controllers import device_controller, tasks_events
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.nvme_device import NVMeDevice
 
@@ -13,6 +13,15 @@ from simplyblock_core.models.nvme_device import NVMeDevice
 from graypy import GELFUDPHandler
 
 from simplyblock_core.models.storage_node import StorageNode
+
+
+def _get_node_unavailable_devices_count(node_id):
+    node = db_controller.get_storage_node_by_id(node_id)
+    devices = []
+    for dev in node.nvme_devices:
+        if dev.status == NVMeDevice.STATUS_UNAVAILABLE:
+            devices.append(dev)
+    return len(devices)
 
 
 def _get_device(task):
@@ -23,6 +32,13 @@ def _get_device(task):
 
 
 def task_runner(task):
+    if task.function_name == JobSchedule.FN_DEV_RESTART:
+        return task_runner_device(task)
+    if task.function_name == JobSchedule.FN_NODE_RESTART:
+        return task_runner_node(task)
+
+
+def task_runner_device(task):
     device = _get_device(task)
 
     if task.retry >= constants.TASK_EXEC_RETRY_COUNT:
@@ -30,6 +46,7 @@ def task_runner(task):
         task.status = JobSchedule.STATUS_DONE
         task.write_to_db(db_controller.kv_store)
         device_controller.device_set_unavailable(device.get_id())
+        device_controller.device_set_retries_exhausted(device.get_id(), True)
         return True
 
     node = db_controller.get_storage_node_by_id(task.node_id)
@@ -47,8 +64,10 @@ def task_runner(task):
         task.write_to_db(db_controller.kv_store)
         return True
 
-    task.status = JobSchedule.STATUS_RUNNING
-    task.write_to_db(db_controller.kv_store)
+    if task.status != JobSchedule.STATUS_RUNNING:
+        task.status = JobSchedule.STATUS_RUNNING
+        task.write_to_db(db_controller.kv_store)
+        tasks_events.task_updated(task)
 
     # resetting device
     logger.info(f"Resetting device {device.get_id()}")
@@ -78,6 +97,52 @@ def task_runner(task):
     return False
 
 
+def task_runner_node(task):
+    node = db_controller.get_storage_node_by_id(task.node_id)
+    if task.retry >= constants.TASK_EXEC_RETRY_COUNT:
+        task.function_result = "max retry reached"
+        task.status = JobSchedule.STATUS_DONE
+        task.write_to_db(db_controller.kv_store)
+        storage_node_ops.set_node_status(task.node_id, StorageNode.STATUS_UNREACHABLE)
+        return True
+
+    if _get_node_unavailable_devices_count(node.get_id()) == 0:
+        logger.info(f"Node is online: {node.get_id()}, no restart needed")
+        task.function_result = "skipped because node is online"
+        task.status = JobSchedule.STATUS_DONE
+        task.write_to_db(db_controller.kv_store)
+        return True
+
+    if task.status != JobSchedule.STATUS_RUNNING:
+        task.status = JobSchedule.STATUS_RUNNING
+        task.write_to_db(db_controller.kv_store)
+        tasks_events.task_updated(task)
+
+    # shutting down node
+    logger.info(f"Shutdown node {node.get_id()}")
+    ret = storage_node_ops.shutdown_storage_node(node.get_id(), force=True)
+    if ret:
+        logger.info(f"Node shutdown succeeded")
+    time.sleep(5)
+
+    # resetting node
+    logger.info(f"Restart node {node.get_id()}")
+    ret = storage_node_ops.restart_storage_node(node.get_id())
+    if ret:
+        logger.info(f"Node restart succeeded")
+
+    if _get_node_unavailable_devices_count(node.get_id()) == 0:
+        logger.info(f"Node is online: {node.get_id()}, no restart needed")
+        task.function_result = "done"
+        task.status = JobSchedule.STATUS_DONE
+        task.write_to_db(db_controller.kv_store)
+        return True
+
+    task.retry += 1
+    task.write_to_db(db_controller.kv_store)
+    return False
+
+
 # configure logging
 logger_handler = logging.StreamHandler(stream=sys.stdout)
 logger_handler.setFormatter(logging.Formatter('%(asctime)s: %(levelname)s: %(message)s'))
@@ -90,7 +155,7 @@ logger.setLevel(logging.DEBUG)
 # get DB controller
 db_controller = kv_store.DBController()
 
-logger.info("Starting Jobs runner...")
+logger.info("Starting Tasks runner...")
 while True:
     time.sleep(3)
     clusters = db_controller.get_clusters()
@@ -101,8 +166,10 @@ while True:
             tasks = db_controller.get_job_tasks(cl.get_id())
             for task in tasks:
                 delay_seconds = constants.TASK_EXEC_INTERVAL_SEC
-                while task.status != JobSchedule.STATUS_DONE:
-                    res = task_runner(task)
-                    if res is False:
-                        time.sleep(delay_seconds)
-                        delay_seconds += 2
+                if task.function_name in [JobSchedule.FN_DEV_RESTART, JobSchedule.FN_NODE_RESTART]:
+                    while task.status != JobSchedule.STATUS_DONE:
+                        res = task_runner(task)
+                        if res is False:
+                            time.sleep(delay_seconds)
+                            delay_seconds *= 2
+                    tasks_events.task_updated(task)
