@@ -5,6 +5,7 @@ import math
 import os
 import tempfile
 import shutil
+import subprocess
 import time
 import uuid
 
@@ -122,8 +123,11 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
         file.write(template.render(values))
 
     destination_file_path = os.path.join(alerts_template_folder, alert_resources_file)
-    shutil.move(temp_file_path, destination_file_path)
-    print(f"File moved to {destination_file_path} successfully.")
+    try:
+        subprocess.run(['sudo', 'mv', temp_file_path, destination_file_path], check=True)
+        print(f"File moved to {destination_file_path} successfully.")
+    except subprocess.CalledProcessError as e:
+        print(f"An error occurred: {e}")
     shutil.rmtree(temp_dir)
 
     logger.info("Deploying swarm stack ...")
