@@ -8,6 +8,7 @@ import uuid
 
 import docker
 import requests
+from jinja2 import Environment, FileSystemLoader
 
 from simplyblock_core import utils, scripts, constants, mgmt_node_ops, storage_node_ops, shell_utils
 from simplyblock_core.controllers import cluster_events, device_controller
@@ -17,7 +18,7 @@ from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
 
 logger = logging.getLogger()
-
+TOP_DIR = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 
 def _add_graylog_input(cluster_ip, password):
     url = f"http://{cluster_ip}:9000/api/system/inputs"
@@ -47,7 +48,7 @@ def _add_graylog_input(cluster_ip, password):
 
 
 def create_cluster(blk_size, page_size_in_blocks, cli_pass,
-                   cap_warn, cap_crit, prov_cap_warn, prov_cap_crit, ifname, log_del_interval, metrics_retention_period):
+                   cap_warn, cap_crit, prov_cap_warn, prov_cap_crit, ifname, log_del_interval, metrics_retention_period, contact_point):
     logger.info("Installing dependencies...")
     ret = scripts.install_deps()
     logger.info("Installing dependencies > Done")
@@ -101,6 +102,18 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
         c.prov_cap_warn = prov_cap_warn
     if prov_cap_crit and prov_cap_crit > 0:
         c.prov_cap_crit = prov_cap_crit
+
+    alerts_template_folder = os.path.join(TOP_DIR, "simplyblock_core/scripts/alerting/")
+
+    env = Environment(loader=FileSystemLoader(alerts_template_folder), trim_blocks=True, lstrip_blocks=True)
+    alert_resources_file = "alert_resources.yaml"
+    template = env.get_template(f'{alert_resources_file}.j2')
+    values = {
+        'CONTACT_POINT': contact_point,
+    }
+
+    with open(os.path.join(alerts_template_folder, alert_resources_file), 'w') as file:
+        file.write(template.render(values))
 
     logger.info("Deploying swarm stack ...")
     ret = scripts.deploy_stack(cli_pass, DEV_IP, constants.SIMPLY_BLOCK_DOCKER_IMAGE, c.secret, c.uuid, log_del_interval, metrics_retention_period)
