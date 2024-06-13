@@ -14,7 +14,7 @@ import docker
 from simplyblock_core import constants, scripts, distr_controller
 from simplyblock_core import utils
 from simplyblock_core.controllers import lvol_controller, storage_events, snapshot_controller, device_events, \
-    device_controller
+    device_controller, tasks_controller
 from simplyblock_core.kv_store import DBController
 from simplyblock_core import shell_utils
 from simplyblock_core.models.iface import IFace
@@ -1037,11 +1037,14 @@ def restart_storage_node(
     distr_controller.send_node_status_event(snode.get_id(), NVMeDevice.STATUS_ONLINE)
 
     logger.info("Sending devices event updates")
+    logger.info("Starting migration tasks")
     for dev in snode.nvme_devices:
         if dev.status != NVMeDevice.STATUS_ONLINE:
-            logger.debug(f"Device is not online: {dev.get_id()}, status: {dev.status}")
+            logger.info(f"Device is not online: {dev.get_id()}, status: {dev.status}")
             continue
+
         distr_controller.send_dev_status_event(dev.cluster_device_order, NVMeDevice.STATUS_ONLINE)
+        tasks_controller.add_device_mig_task(dev)
 
     logger.info("Sending cluster map to current node")
     ret = distr_controller.send_cluster_map_to_node(snode)
@@ -1238,14 +1241,16 @@ def suspend_storage_node(node_id, force=False):
     for node in snodes:
         if node.status == node.STATUS_ONLINE:
             online_nodes += 1
-    if cluster.ha_type == "ha" and online_nodes <= 3 and cluster.status == cluster.STATUS_ACTIVE:
-        logger.warning(f"Cluster mode is HA but online storage nodes are less than 3")
-        if force is False:
-            return False
 
-    if cluster.ha_type == "ha" and cluster.status == cluster.STATUS_DEGRADED and force is False:
-        logger.warning(f"Cluster status is degraded, use --force but this will suspend the cluster")
-        return False
+    if cluster.ha_type == "ha":
+        if online_nodes <= 3 and cluster.status == cluster.STATUS_ACTIVE:
+            logger.warning(f"Cluster mode is HA but online storage nodes are less than 3")
+            if force is False:
+                return False
+
+        if cluster.status == cluster.STATUS_DEGRADED and force is False:
+            logger.warning(f"Cluster status is degraded, use --force but this will suspend the cluster")
+            return False
 
     logger.info("Suspending node")
     distr_controller.send_node_status_event(snode.get_id(), "suspended")

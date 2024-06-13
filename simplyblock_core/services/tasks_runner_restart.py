@@ -32,9 +32,9 @@ def _get_device(task):
 
 
 def task_runner(task):
-    if task.function_name == "device_restart":
+    if task.function_name == JobSchedule.FN_DEV_RESTART:
         return task_runner_device(task)
-    if task.function_name == "node_restart":
+    if task.function_name == JobSchedule.FN_NODE_RESTART:
         return task_runner_node(task)
 
 
@@ -151,7 +151,7 @@ logger.setLevel(logging.DEBUG)
 # get DB controller
 db_controller = kv_store.DBController()
 
-logger.info("Starting Jobs runner...")
+logger.info("Starting Tasks runner...")
 while True:
     time.sleep(3)
     clusters = db_controller.get_clusters()
@@ -162,8 +162,9 @@ while True:
             tasks = db_controller.get_job_tasks(cl.get_id())
             for task in tasks:
                 delay_seconds = constants.TASK_EXEC_INTERVAL_SEC
-                while task.status != JobSchedule.STATUS_DONE:
-                    res = task_runner(task)
-                    if res is False:
-                        time.sleep(delay_seconds)
-                        delay_seconds *= 2
+                if task.function_name in [JobSchedule.FN_DEV_RESTART, JobSchedule.FN_NODE_RESTART]:
+                    while task.status != JobSchedule.STATUS_DONE:
+                        res = task_runner(task)
+                        if res is False:
+                            time.sleep(delay_seconds)
+                            delay_seconds *= 2
