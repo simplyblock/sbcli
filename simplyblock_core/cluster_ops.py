@@ -113,8 +113,13 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     env = Environment(loader=FileSystemLoader(alerts_template_folder), trim_blocks=True, lstrip_blocks=True)
     template = env.get_template(f'{alert_resources_file}.j2')
 
-    ALERT_TYPE = "slack" if "slack" in contact_point else "email"
-
+    if "slack" in contact_point:
+        ALERT_TYPE = "slack"
+    elif "@" in contact_point:
+        ALERT_TYPE = "email"
+    else:
+        ALERT_TYPE = "slack"
+        
     values = {
         'CONTACT_POINT': contact_point,
         'GRAFANA_ENDPOINT': grafana_endpoint,
