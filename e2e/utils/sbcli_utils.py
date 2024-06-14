@@ -7,11 +7,8 @@ class SbcliUtils:
     """Contains all API calls
     """
 
-    def __init__(self, cluster_ip, url, cluster_secret,
-                 cluster_api_url, cluster_id):
-        self.cluster_ip = cluster_ip
+    def __init__(self, cluster_secret, cluster_api_url, cluster_id):
         self.cluster_id = cluster_id
-        self.url = url
         self.cluster_secret = cluster_secret
         self.cluster_api_url = cluster_api_url
         self.headers = {
@@ -58,7 +55,7 @@ class SbcliUtils:
         headers = headers if headers else self.headers
         self.logger.info(f"Calling POST for {api_url} with headers: {headers}, body: {body}")
         resp = requests.post(request_url, headers=headers,
-                            json=body)
+                             json=body, timeout=100)
         if resp.status_code == HTTPStatus.OK:
             data = resp.json()
         else:
@@ -180,7 +177,7 @@ class SbcliUtils:
 
         return data
 
-    def add_storage_pool(self, pool_name):
+    def add_storage_pool(self, pool_name, max_rw_iops=0, max_rw_mbytes=0, max_r_mbytes=0, max_w_mbytes=0):
         """Adds the storage with given name
         """
         pools = self.list_storage_pools()
@@ -190,7 +187,11 @@ class SbcliUtils:
                 return
 
         body = {
-            "name": pool_name
+            "name": pool_name,
+            "max_rw_iops": str(max_rw_iops),
+            "max_rw_mbytes": str(max_rw_mbytes),
+            "max_r_mbytes": str(max_r_mbytes),
+            "max_w_mbytes": str(max_w_mbytes),
         }
         self.post_request(api_url="/pool", body=body)
         # TODO: Add assertions
@@ -246,13 +247,15 @@ class SbcliUtils:
         data = self.get_request(api_url=f"/lvol/{lvol_id}")
         return data
 
-    def add_lvol(self, lvol_name, pool_name, size="256M", distr_ndcs=1, distr_npcs=1):
+    def add_lvol(self, lvol_name, pool_name, size="256M", distr_ndcs=1, distr_npcs=1,
+                 distr_bs=4096, distr_chunk_bs=4096, max_rw_iops=0, max_rw_mbytes=0,
+                 max_r_mbytes=0, max_w_mbytes=0):
         """Adds lvol with given params
         """
         lvols = self.list_lvols()
         for name in list(lvols.keys()):
             if name == lvol_name:
-                self.logger.info(f"Pool {lvol_name} already exists. Exiting")
+                self.logger.info(f"LVOL {lvol_name} already exists. Exiting")
                 return
 
         body = {
@@ -261,12 +264,14 @@ class SbcliUtils:
             "pool": pool_name,
             "comp": False,
             "crypto": False,
-            "max_rw_iops": "0",
-            "max_rw_mbytes": "0",
-            "max_r_mbytes": "0",
-            "max_w_mbytes": "0",
+            "max_rw_iops": str(max_rw_iops),
+            "max_rw_mbytes": str(max_rw_mbytes),
+            "max_r_mbytes": str(max_r_mbytes),
+            "max_w_mbytes": str(max_w_mbytes),
             "distr_ndcs": str(distr_ndcs),
-            "distr_npcs": str(distr_npcs)
+            "distr_npcs": str(distr_npcs),
+            "distr_bs": str(distr_bs),
+            "distr_chunk_bs": str(distr_chunk_bs),
         }
         self.post_request(api_url="/lvol", body=body)
 
@@ -295,10 +300,7 @@ class SbcliUtils:
         """
         lvols = self.list_lvols()
         lvol_id = None
-        for name in list(lvols.keys()):
-            if name == lvol_name:
-                lvol_id = lvols[name]
-        return lvol_id
+        return lvols.get(lvol_name, None)
 
     def get_lvol_connect_str(self, lvol_name):
         """Return connect string for the lvol
@@ -310,7 +312,7 @@ class SbcliUtils:
 
         data = self.get_request(api_url=f"/lvol/connect/{lvol_id}")
         self.logger.info(f"Connect lvol resp: {data}")
-        return data["result"][0]["connect"]
+        return data["results"][0]["connect"]
 
     def get_cluster_status(self, cluster_id=None):
         """Return cluster status for given cluster id

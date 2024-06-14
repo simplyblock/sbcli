@@ -5,7 +5,7 @@ import sys
 
 
 from simplyblock_core import constants, kv_store, storage_node_ops
-from simplyblock_core.controllers import device_controller
+from simplyblock_core.controllers import device_controller, tasks_events
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.nvme_device import NVMeDevice
 
@@ -32,9 +32,9 @@ def _get_device(task):
 
 
 def task_runner(task):
-    if task.function_name == "device_restart":
+    if task.function_name == JobSchedule.FN_DEV_RESTART:
         return task_runner_device(task)
-    if task.function_name == "node_restart":
+    if task.function_name == JobSchedule.FN_NODE_RESTART:
         return task_runner_node(task)
 
 
@@ -64,8 +64,17 @@ def task_runner_device(task):
         task.write_to_db(db_controller.kv_store)
         return True
 
-    task.status = JobSchedule.STATUS_RUNNING
-    task.write_to_db(db_controller.kv_store)
+    if device.status in [NVMeDevice.STATUS_REMOVED, NVMeDevice.STATUS_FAILED]:
+        logger.info(f"Device is not unavailable: {device.get_id()}, {device.status} , stopping task")
+        task.function_result = f"stopped because dev is {device.status}"
+        task.status = JobSchedule.STATUS_DONE
+        task.write_to_db(db_controller.kv_store)
+        return True
+
+    if task.status != JobSchedule.STATUS_RUNNING:
+        task.status = JobSchedule.STATUS_RUNNING
+        task.write_to_db(db_controller.kv_store)
+        tasks_events.task_updated(task)
 
     # resetting device
     logger.info(f"Resetting device {device.get_id()}")
@@ -111,8 +120,10 @@ def task_runner_node(task):
         task.write_to_db(db_controller.kv_store)
         return True
 
-    task.status = JobSchedule.STATUS_RUNNING
-    task.write_to_db(db_controller.kv_store)
+    if task.status != JobSchedule.STATUS_RUNNING:
+        task.status = JobSchedule.STATUS_RUNNING
+        task.write_to_db(db_controller.kv_store)
+        tasks_events.task_updated(task)
 
     # shutting down node
     logger.info(f"Shutdown node {node.get_id()}")
@@ -151,7 +162,7 @@ logger.setLevel(logging.DEBUG)
 # get DB controller
 db_controller = kv_store.DBController()
 
-logger.info("Starting Jobs runner...")
+logger.info("Starting Tasks runner...")
 while True:
     time.sleep(3)
     clusters = db_controller.get_clusters()
@@ -159,11 +170,13 @@ while True:
         logger.error("No clusters found!")
     else:
         for cl in clusters:
-            tasks = db_controller.get_job_tasks(cl.get_id())
+            tasks = db_controller.get_job_tasks(cl.get_id(), reverse=False)
             for task in tasks:
                 delay_seconds = constants.TASK_EXEC_INTERVAL_SEC
-                while task.status != JobSchedule.STATUS_DONE:
-                    res = task_runner(task)
-                    if res is False:
-                        time.sleep(delay_seconds)
-                        delay_seconds *= 2
+                if task.function_name in [JobSchedule.FN_DEV_RESTART, JobSchedule.FN_NODE_RESTART]:
+                    while task.status != JobSchedule.STATUS_DONE:
+                        res = task_runner(task)
+                        if res is False:
+                            time.sleep(delay_seconds)
+                            delay_seconds *= 2
+                    tasks_events.task_updated(task)

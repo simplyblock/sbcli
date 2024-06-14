@@ -23,23 +23,6 @@ def get_response(data, error=None, http_code=None):
     return jsonify(resp)
 
 
-def get_csi_response(data, error=None, http_code=None):
-    resp = {
-        "result": "",
-        "error": {
-            "code": 0,
-            "message": ""
-        }
-    }
-    if error:
-        resp['error']['code'] = 1
-        resp['error']['message'] = error
-        return jsonify(resp)
-    if data is not None:
-        resp['result'] = data
-    return jsonify(resp)
-
-
 def get_response_error(error=None, http_code=None):
     return get_response(data=None, error=error, http_code=http_code)
 

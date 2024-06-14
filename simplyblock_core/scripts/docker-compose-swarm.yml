@@ -186,9 +186,20 @@ services:
     networks:
       - hostnet
 
-  TasksRunner:
+  TasksRunnerRestart:
     image: $SIMPLYBLOCK_DOCKER_IMAGE
-    command: "python simplyblock_core/services/job_tasks.py"
+    command: "python simplyblock_core/services/tasks_runner_restart.py"
+    deploy:
+      placement:
+        constraints: [node.role == manager]
+    volumes:
+      - "/etc/foundationdb:/etc/foundationdb"
+    networks:
+      - hostnet
+
+  TasksRunnerMigration:
+    image: $SIMPLYBLOCK_DOCKER_IMAGE
+    command: "python simplyblock_core/services/tasks_runner_migration.py"
     deploy:
       placement:
         constraints: [node.role == manager]

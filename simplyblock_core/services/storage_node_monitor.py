@@ -8,7 +8,7 @@ from datetime import datetime
 
 
 from simplyblock_core import constants, kv_store, cluster_ops, storage_node_ops, distr_controller
-from simplyblock_core.controllers import storage_events, health_controller
+from simplyblock_core.controllers import health_controller, device_controller, tasks_controller
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
@@ -104,42 +104,18 @@ def update_cluster_status(cluster_id):
 
 
 def set_node_online(node):
-    if node.status == StorageNode.STATUS_UNREACHABLE:
-        snode = db_controller.get_storage_node_by_id(node.get_id())
-        # for dev in snode.nvme_devices:
-        #     if dev.status == 'unavailable':
-        #         dev.status = 'online'
-        #         distr_controller.send_dev_status_event(dev.cluster_device_order, "online")
-
-        old_status = snode.status
-        snode.status = StorageNode.STATUS_ONLINE
-        snode.updated_at = str(datetime.now())
-        snode.write_to_db(db_store)
-        storage_events.snode_status_change(snode, snode.status, old_status, caused_by="monitor")
-        distr_controller.send_node_status_event(snode, StorageNode.STATUS_ONLINE)
-
-        logger.info("Connecting to remote devices")
-        storage_node_ops._connect_to_remote_devs(snode)
+    if node.status != StorageNode.STATUS_ONLINE:
+        storage_node_ops.set_node_status(snode, StorageNode.STATUS_ONLINE)
 
 
 def set_node_offline(node):
-    if node.status == StorageNode.STATUS_ONLINE:
-        snode = db_controller.get_storage_node_by_id(node.get_id())
-        # for dev in snode.nvme_devices:
-        #     if dev.status == 'online':
-        #         dev.status = 'unavailable'
-        #         distr_controller.send_dev_status_event(dev.cluster_device_order, "unavailable")
-
-        old_status = snode.status
-        snode.status = StorageNode.STATUS_UNREACHABLE
-        snode.updated_at = str(datetime.now())
-        snode.write_to_db(db_store)
-        storage_events.snode_status_change(snode, snode.status, old_status, caused_by="monitor")
-        distr_controller.send_node_status_event(snode, StorageNode.STATUS_UNREACHABLE)
+    if node.status != StorageNode.STATUS_UNREACHABLE:
+        storage_node_ops.set_node_status(snode.get_id(), StorageNode.STATUS_UNREACHABLE)
+        # add node to auto restart
+        tasks_controller.add_node_to_auto_restart(node)
 
 
 logger.info("Starting node monitor")
-
 while True:
     clusters = db_controller.get_clusters()
     for cluster in clusters:
@@ -176,7 +152,12 @@ while True:
             else:
                 set_node_offline(snode)
 
-            update_cluster_status(cluster_id)
+            if not ping_check and not node_rpc_check:
+                # node is dead, set devices offline
+                for dev in snode.nvme_devices:
+                    device_controller.device_set_unavailable(dev.get_id())
+
+        update_cluster_status(cluster_id)
 
     logger.info(f"Sleeping for {constants.NODE_MONITOR_INTERVAL_SEC} seconds")
     time.sleep(constants.NODE_MONITOR_INTERVAL_SEC)

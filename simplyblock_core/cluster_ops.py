@@ -659,7 +659,7 @@ def get_logs(cluster_id, is_json=False):
             vuid = record.object_dict['vuid']
 
         out.append({
-            "Date": time.strftime("%H:%M:%S, %d/%m/%Y", time.gmtime(record.date)),
+            "Date": record.get_date_string(),
             "NodeId": record.node_id,
             "Event": record.event,
             "Level": record.event_level,
@@ -735,8 +735,8 @@ def list_tasks(cluster_id):
     tasks = db_controller.get_job_tasks(cluster_id)
     for task in tasks:
         data.append({
-            "UUID": task.uuid,
-            "Device": task.device_id,
+            "Task ID": task.uuid,
+            "Target ID": task.device_id or task.node_id,
             "Function": task.function_name,
             "Retry": f"{task.retry}/{constants.TASK_EXEC_RETRY_COUNT}",
             "Status": task.status,

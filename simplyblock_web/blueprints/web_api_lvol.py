@@ -108,11 +108,11 @@ def add_lvol():
     cl_data = request.get_json()
     logger.debug(cl_data)
     if 'size' not in cl_data:
-        return utils.get_csi_response(None, "missing required param: size", 400)
+        return utils.get_response(None, "missing required param: size", 400)
     if 'name' not in cl_data:
-        return utils.get_csi_response(None, "missing required param: name", 400)
+        return utils.get_response(None, "missing required param: name", 400)
     if 'pool' not in cl_data:
-        return utils.get_csi_response(None, "missing required param: pool", 400)
+        return utils.get_response(None, "missing required param: pool", 400)
 
     name = cl_data['name']
     pool_id_or_name = cl_data['pool']
@@ -124,12 +124,12 @@ def add_lvol():
             pool = p
             break
     if not pool:
-        return utils.get_csi_response(None, f"Pool not found: {pool_id_or_name}", 400)
+        return utils.get_response(None, f"Pool not found: {pool_id_or_name}", 400)
 
     for lvol in db_controller.get_lvols():  # pass
         if lvol.pool_uuid == pool.get_id():
             if lvol.lvol_name == name:
-                return utils.get_csi_response(lvol.get_id())
+                return utils.get_response(lvol.get_id())
 
     rw_iops = utils.get_int_value_or_default(cl_data, "max_rw_iops", 0)
     rw_mbytes = utils.get_int_value_or_default(cl_data, "max_rw_mbytes", 0)
@@ -179,7 +179,7 @@ def add_lvol():
         crypto_key2=crypto_key2,
     )
 
-    return utils.get_csi_response(ret, error)
+    return utils.get_response(ret, error, http_code=400)
 
 
 @bp.route('/lvol/<string:uuid>', methods=['PUT'])
@@ -247,12 +247,12 @@ def resize_lvol(uuid):
 
     cl_data = request.get_json()
     if 'size' not in cl_data:
-        return utils.get_csi_response(None, "missing required param: new_size", 400)
+        return utils.get_response(None, "missing required param: new_size", 400)
 
     new_size = utils.parse_size(cl_data['size'])
 
     ret = lvol_controller.resize_lvol(uuid, new_size)
-    return utils.get_csi_response(ret)
+    return utils.get_response(ret)
 
 
 @bp.route('/lvol/connect/<string:uuid>', methods=['GET'])
@@ -262,16 +262,16 @@ def connect_lvol(uuid):
         return utils.get_response_error(f"LVol not found: {uuid}", 404)
 
     ret = lvol_controller.connect_lvol(uuid)
-    return utils.get_csi_response(ret)
+    return utils.get_response(ret)
 
 
 @bp.route('/lvol/create_snapshot', methods=['POST'])
 def create_snapshot():
     cl_data = request.get_json()
     if 'lvol_id' not in cl_data:
-        return utils.get_csi_response(None, "missing required param: lvol_id", 400)
+        return utils.get_response(None, "missing required param: lvol_id", 400)
     if 'snapshot_name' not in cl_data:
-        return utils.get_csi_response(None, "missing required param: snapshot_name", 400)
+        return utils.get_response(None, "missing required param: snapshot_name", 400)
 
     snapID = snapshot_controller.add(
         cl_data['lvol_id'],
