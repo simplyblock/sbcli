@@ -111,7 +111,8 @@ class TestSingleNodeOutage:
         initial_devices = self.ssh_obj.get_devices(node=self.mgmt_nodes[0])
 
         self.sbcli_utils.add_storage_pool(
-            pool_name=self.pool_name
+            pool_name=self.pool_name,
+            cluster_id=cluster_id
         )
         pools = self.sbcli_utils.list_storage_pools()
         assert self.pool_name in list(pools.keys()), \
@@ -125,7 +126,8 @@ class TestSingleNodeOutage:
             f"Pool {self.pool_name} present in list of pools post delete: {pools}"
 
         self.sbcli_utils.add_storage_pool(
-            pool_name=self.pool_name
+            pool_name=self.pool_name,
+            cluster_id=cluster_id
         )
 
         self.sbcli_utils.add_lvol(

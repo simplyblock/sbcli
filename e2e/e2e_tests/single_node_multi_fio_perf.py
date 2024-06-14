@@ -129,6 +129,7 @@ class TestSingleNodeMultipleFioPerfValidation:
         
         self.sbcli_utils.add_storage_pool(
             pool_name=self.pool_name,
+            cluster_id=cluster_id,
             max_rw_iops=30000,
             max_r_mbytes=100,
             max_w_mbytes=100
