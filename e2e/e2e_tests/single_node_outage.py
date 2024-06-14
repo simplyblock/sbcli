@@ -1,17 +1,17 @@
 ### simplyblock e2e tests
 import os
 import time
-from sbcli_utils import SbcliUtils
-from ssh_utils import SshUtils
-from utils import TestUtils
+import threading
+from utils.common_utils import sleep_n_sec
+from utils.sbcli_utils import SbcliUtils
+from utils.ssh_utils import SshUtils
+from utils.common_utils import CommonUtils
 from logger_config import setup_logger
 
 
 cluster_secret = os.environ.get("CLUSTER_SECRET")
 cluster_id = os.environ.get("CLUSTER_ID")
-cluster_ip = os.environ.get("CLUSTER_IP")
 
-url = f"http://{cluster_ip}"
 api_base_url = os.environ.get("API_BASE_URL")
 headers = {
     "Content-Type": "application/json",
@@ -57,17 +57,15 @@ class TestSingleNodeOutage:
         b. check that fio remains running without interruption.
     """
 
-    def __init__(self):
+    def __init__(self, **kwargs):
         self.ssh_obj = SshUtils(bastion_server=bastion_server)
         self.logger = setup_logger(__name__)
         self.sbcli_utils = SbcliUtils(
-            cluster_ip=cluster_ip,
-            url=url,
             cluster_api_url=api_base_url,
             cluster_id=cluster_id,
             cluster_secret=cluster_secret
         )
-        self.test_utils = TestUtils(self.sbcli_utils, self.ssh_obj)
+        self.common_utils = CommonUtils(self.sbcli_utils, self.ssh_obj)
         self.mgmt_nodes = None
         self.storage_nodes = None
         self.pool_name = "test_pool"
@@ -75,6 +73,7 @@ class TestSingleNodeOutage:
         self.mount_path = "/home/ec2-user/test_location"
         self.log_path = f"{os.path.dirname(self.mount_path)}/log_file.log"
         self.base_cmd = None
+        self.fio_debug = kwargs.get("fio_debug", False)
 
     def setup(self):
         """Contains setup required to run the test case
@@ -99,8 +98,8 @@ class TestSingleNodeOutage:
         self.sbcli_utils.delete_all_storage_pools()
         expected_base = ["sbcli", "sbcli-dev", "sbcli-release"]
         for base in expected_base:
-            output = self.ssh_obj.exec_command(node=self.mgmt_nodes[0],
-                                               command=base)
+            output, error = self.ssh_obj.exec_command(node=self.mgmt_nodes[0],
+                                                      command=base)
             if len(output.strip()):
                 self.base_cmd = base
                 self.logger.info(f"Using base command as {self.base_cmd}")
@@ -161,9 +160,11 @@ class TestSingleNodeOutage:
                                 device=disk_use,
                                 mount_path=self.mount_path)
 
-        self.ssh_obj.run_fio_test(node=self.mgmt_nodes[0],
-                                  directory=self.mount_path,
-                                  log_file=self.log_path)
+        fio_thread1 = threading.Thread(target=self.ssh_obj.run_fio_test, args=(self.mgmt_nodes[0], None, self.mount_path, self.log_path,),
+                                       kwargs={"name": "fio_run_1",
+                                               "runtime": 150,
+                                               "debug": self.fio_debug})
+        fio_thread1.start()
 
         no_lvol_node_uuid = self.sbcli_utils.get_node_without_lvols()
 
@@ -186,7 +187,7 @@ class TestSingleNodeOutage:
         self.sbcli_utils.shutdown_node(node_uuid=no_lvol_node_uuid)
 
         self.logger.info("Sleeping for 10 seconds")
-        time.sleep(10)
+        sleep_n_sec(10)
 
         self.validations(node_uuid=no_lvol_node_uuid,
                          node_status="offline",
@@ -198,7 +199,7 @@ class TestSingleNodeOutage:
         self.sbcli_utils.restart_node(node_uuid=no_lvol_node_uuid)
 
         self.logger.info("Sleeping for 10 seconds")
-        time.sleep(10)
+        sleep_n_sec(10)
 
         self.validations(node_uuid=no_lvol_node_uuid,
                          node_status="online",
@@ -212,20 +213,17 @@ class TestSingleNodeOutage:
             "Storage Node": ["suspended", "shutdown", "restart"],
             "Device": {"restart"}
         }
-        self.test_utils.validate_event_logs(cluster_id=cluster_id,
-                                            operations=steps)
+        self.common_utils.validate_event_logs(cluster_id=cluster_id,
+                                              operations=steps)
+        
+        self.common_utils.manage_fio_threads(node=self.mgmt_nodes[0],
+                                             threads=[fio_thread1],
+                                             timeout=300)
 
-        self.ssh_obj.kill_processes(
-            node=self.mgmt_nodes[0],
-            process_name="fio"
-        )
-
-        self.test_utils.validate_fio_test(node=self.mgmt_nodes[0],
-                                          log_file=self.log_path)
+        self.common_utils.validate_fio_test(node=self.mgmt_nodes[0],
+                                            log_file=self.log_path)
 
         self.logger.info("TEST CASE PASSED !!!")
-
-
 
     def validations(self, node_uuid, node_status, device_status, lvol_status,
                     health_check_status):
@@ -243,10 +241,10 @@ class TestSingleNodeOutage:
         lvol_id = self.sbcli_utils.get_lvol_id(lvol_name=self.lvol_name)
         lvol_details = self.sbcli_utils.get_lvol_details(lvol_id=lvol_id)
         command = f"{self.base_cmd} lvol get-cluster-map {lvol_id}"
-        lvol_cluster_map_details = self.ssh_obj.exec_command(node=self.mgmt_nodes[0],
-                                                             command=command)
+        lvol_cluster_map_details, _ = self.ssh_obj.exec_command(node=self.mgmt_nodes[0],
+                                                                    command=command)
         self.logger.info(f"LVOL Cluster map: {lvol_cluster_map_details}")
-        cluster_map_nodes, cluster_map_devices = self.test_utils.parse_lvol_cluster_map_output(lvol_cluster_map_details)
+        cluster_map_nodes, cluster_map_devices = self.common_utils.parse_lvol_cluster_map_output(lvol_cluster_map_details)
         offline_device = None
 
         assert node_details[0]["status"] == node_status, \
@@ -304,6 +302,8 @@ class TestSingleNodeOutage:
         lvol_id = self.sbcli_utils.get_lvol_id(lvol_name=self.lvol_name)
         lvol_details = self.sbcli_utils.get_lvol_details(lvol_id=lvol_id)
         nqn = lvol_details[0]["nqn"]
+        self.ssh_obj.unmount_path(node=self.mgmt_nodes[0],
+                                  device=self.mount_path)
         self.sbcli_utils.delete_all_lvols()
         self.sbcli_utils.delete_all_storage_pools()
         self.ssh_obj.exec_command(node=self.mgmt_nodes[0],
