@@ -684,7 +684,7 @@ class CLIWrapper:
                 ret = storage_ops.list_storage_nodes(args.json, args.cluster_id)
 
             elif sub_command == "remove":
-                ret = storage_ops.remove_storage_node(args.node_id, args.force_remove)
+                ret = storage_ops.remove_storage_node(args.node_id, args.force_remove, args.force_migrate)
 
             elif sub_command == "delete":
                 ret = storage_ops.delete_storage_node(args.node_id)

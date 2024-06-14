@@ -361,7 +361,7 @@ def _prepare_cluster_devices_2(snode, devices, after_restart=False):
 
     new_devices = []
     jm_devices = []
-    dev_order = get_next_cluster_device_order(db_controller)
+    dev_order = get_next_cluster_device_order(db_controller, snode.cluster_id)
     for index, nvme in enumerate(devices):
         if nvme.status not in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_UNAVAILABLE, NVMeDevice.STATUS_READONLY]:
             logger.debug(f"Device is skipped: {nvme.get_id()}, status: {nvme.status}")
@@ -900,7 +900,7 @@ def delete_storage_node(node_id):
     logger.info("done")
 
 
-def remove_storage_node(node_id, force_remove=False):
+def remove_storage_node(node_id, force_remove=False, force_migrate=False):
     db_controller = DBController()
     snode = db_controller.get_storage_node_by_id(node_id)
     if not snode:
