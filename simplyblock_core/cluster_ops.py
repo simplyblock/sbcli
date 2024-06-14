@@ -116,13 +116,14 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
 
     slack_pattern = re.compile(r"https://hooks\.slack\.com/services/\S+")
     email_pattern = re.compile(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$")
-    
+
     if slack_pattern.match(contact_point):
         ALERT_TYPE = "slack"
     elif email_pattern.match(contact_point):
         ALERT_TYPE = "email"
     else:
         ALERT_TYPE = "slack" 
+
     values = {
         'CONTACT_POINT': contact_point,
         'GRAFANA_ENDPOINT': grafana_endpoint,
