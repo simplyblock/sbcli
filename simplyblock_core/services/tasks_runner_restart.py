@@ -64,6 +64,13 @@ def task_runner_device(task):
         task.write_to_db(db_controller.kv_store)
         return True
 
+    if device.status in [NVMeDevice.STATUS_REMOVED, NVMeDevice.STATUS_FAILED]:
+        logger.info(f"Device is not unavailable: {device.get_id()}, {device.status} , stopping task")
+        task.function_result = f"stopped because dev is {device.status}"
+        task.status = JobSchedule.STATUS_DONE
+        task.write_to_db(db_controller.kv_store)
+        return True
+
     if task.status != JobSchedule.STATUS_RUNNING:
         task.status = JobSchedule.STATUS_RUNNING
         task.write_to_db(db_controller.kv_store)
