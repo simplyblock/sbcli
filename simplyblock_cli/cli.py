@@ -38,7 +38,9 @@ class CLIWrapper:
         sub_command.add_argument("cluster_id", help='UUID of the cluster to which the node will belong')
         sub_command.add_argument("node_ip", help='IP of storage node to add')
         sub_command.add_argument("ifname", help='Management interface name')
-        sub_command.add_argument("--jm-pcie", help='JM device address', dest='jm_pcie')
+        sub_command.add_argument("--partitions", help='Number of partitions to create per device', type=int, default=1)
+        sub_command.add_argument("--jm-percent", help='Number in percent to use for JM from each device',
+                                 type=int, default=3, dest='jm_percent')
         sub_command.add_argument("--data-nics", help='Data interface names', nargs='+', dest='data_nics')
         sub_command.add_argument("--cpu-mask", help='SPDK app CPU mask, default is all cores found',
                                  dest='spdk_cpu_mask')
@@ -53,6 +55,10 @@ class CLIWrapper:
 
         # delete storage node
         sub_command = self.add_sub_command(subparser, "delete", 'Delete storage node obj')
+        sub_command.add_argument("node_id", help='UUID of storage node')
+
+        # remove storage node
+        sub_command = self.add_sub_command(subparser, "delete", 'Delete storage node')
         sub_command.add_argument("node_id", help='UUID of storage node')
 
         # remove storage node
@@ -653,6 +659,8 @@ class CLIWrapper:
                 large_pool_count = args.large_pool_count
                 small_bufsize = args.small_bufsize
                 large_bufsize = args.large_bufsize
+                num_partitions_per_dev = args.partitions
+                jm_percent = args.jm_percent
 
                 spdk_cpu_mask = None
                 if args.spdk_cpu_mask:
@@ -669,7 +677,7 @@ class CLIWrapper:
 
                 out = storage_ops.add_node(
                     cluster_id, node_ip, ifname, data_nics, spdk_cpu_mask, spdk_mem, spdk_image, spdk_debug,
-                    small_pool_count, large_pool_count, small_bufsize, large_bufsize, args.jm_pcie)
+                    small_pool_count, large_pool_count, small_bufsize, large_bufsize, num_partitions_per_dev, jm_percent)
                 return out
 
             elif sub_command == "list":

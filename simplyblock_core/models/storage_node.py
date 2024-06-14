@@ -5,7 +5,7 @@ from typing import List
 
 from simplyblock_core.models.base_model import BaseModel
 from simplyblock_core.models.iface import IFace
-from simplyblock_core.models.nvme_device import NVMeDevice
+from simplyblock_core.models.nvme_device import NVMeDevice, JMDevice
 
 
 class StorageNode(BaseModel):
@@ -83,6 +83,10 @@ class StorageNode(BaseModel):
         "iobuf_large_pool_count": {"type": int, "default": 0},
         "iobuf_small_bufsize": {"type": int, "default": 0},
         "iobuf_large_bufsize": {"type": int, "default": 0},
+
+        "num_partitions_per_dev": {"type": int, "default": 1},
+        "jm_percent": {"type": int, "default": 3},
+        "jm_device": {"type": JMDevice, "default": None},
 
     }
 

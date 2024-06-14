@@ -167,7 +167,7 @@ def validate_add_lvol_func(name, size, host_id_or_name, pool_id_or_name,
 
 
 def get_jm_names(snode):
-    return [f"jm_{snode.get_id()}"]
+    return [snode.jm_device.jm_bdev] if snode.jm_device else []
 
 
 # Deprecated
@@ -696,7 +696,6 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
         lvol.top_bdev = lvol.comp_bdev
 
     nodes = _get_next_3_nodes(cl.get_id())
-
     if host_node:
         nodes.insert(0, host_node)
     else:
