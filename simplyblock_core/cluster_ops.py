@@ -114,7 +114,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     env = Environment(loader=FileSystemLoader(alerts_template_folder), trim_blocks=True, lstrip_blocks=True)
     template = env.get_template(f'{alert_resources_file}.j2')
 
-    slack_pattern = re.compile(r"https://hooks\.slack\.com/services/.+")
+    slack_pattern = re.compile(r"https://hooks\.slack\.com/services/\S+")
     email_pattern = re.compile(r".+@.+\..+")
     
     if slack_pattern.match(contact_point):
