@@ -118,7 +118,7 @@ def restart_device(device_id):
         # device_set_unavailable(device_obj.get_id())
         return False
 
-    snode.write_to_db(db_controller.kv_store)
+    device_set_online(device_obj.get_id())
 
     logger.info("Make other nodes connect to the device")
     snodes = db_controller.get_storage_nodes()
@@ -149,9 +149,7 @@ def restart_device(device_id):
         node.write_to_db(db_controller.kv_store)
         time.sleep(3)
 
-    device_set_online(device_obj.get_id())
     device_events.device_restarted(device_obj)
-
     return "Done"
 
 
