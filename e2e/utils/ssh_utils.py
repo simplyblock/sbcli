@@ -1,3 +1,4 @@
+import time
 import paramiko
 import os
 from logger_config import setup_logger
@@ -76,12 +77,13 @@ class SshUtils:
             self.ssh_connections[address].close()
         self.ssh_connections[address] = target_ssh
 
-    def exec_command(self, node, command):
-        """Executes command on given machine
+    def exec_command(self, node, command, timeout=3600):
+        """Executes command on given machine with a timeout.
 
         Args:
             node (str): Machine to run command on
             command (str): Command to run
+            timeout (int): Timeout in seconds
 
         Returns:
             str: Output of command
@@ -91,36 +93,45 @@ class SshUtils:
             self.logger.info(f"Reconnecting SSH to node {node}")
             self.connect(
                 address=node,
-                is_bastion_server=True if node==self.bastion_server else False
+                is_bastion_server=True if node == self.bastion_server else False
             )
             ssh_connection = self.ssh_connections[node]
+
         self.logger.info(f"Command: {command}")
-        output = ""
-        _stdin, stdout, _stderr = ssh_connection.exec_command(command)
-        output = stdout.read().decode()
-        self.logger.debug(f"Output: {output}")
+        try:
+            stdin, stdout, stderr = ssh_connection.exec_command(command, timeout=timeout)
+            
+            output = []
+            error = []
+            if "sudo fio" in command:
+                self.logger.info("Inside while loop")
+                # Read stdout and stderr in a non-blocking way
+                while not stdout.channel.exit_status_ready():
+                    if stdout.channel.recv_ready():
+                        output.append(stdout.channel.recv(1024).decode())
+                    if stderr.channel.recv_stderr_ready():
+                        error.append(stderr.channel.recv_stderr(1024).decode())
+                    time.sleep(0.1)
+                output = " ".join(output)
+                error = " ".join(error)
 
-        return output
+            else:
+                output = stdout.read().decode()
+                error = stderr.read().decode()
 
-    def exec_command_background(self, node, command, log_file=None):
-        """Executes command on given machine in background
+            self.logger.debug(f"Command output: {output}")
+            self.logger.debug(f"Command error: {error}")
 
-        Args:
-            node (str): Machine to run command on
-            command (str): Command to run
-            log_file (str): Path to redirect output to
-        """
-        ssh_connection = self.ssh_connections[node]
-        if not ssh_connection.get_transport().is_active():
-            self.logger.info(f"Reconnecting SSH to node {node}")
-            self.connect(
-                address=node,
-                is_bastion_server=True if node==self.bastion_server else False
-            )
-            ssh_connection = self.ssh_connections[node]
-        channel = ssh_connection.get_transport().open_session()
-        self.logger.info(f"Command: {command}")
-        channel.exec_command(f'{command} >> {log_file} &')
+            if not output and not error:
+                self.logger.warning(f"Command '{command}' executed but returned no output or error.")
+
+            return output, error
+        except paramiko.SSHException as e:
+            self.logger.error(f"SSH command failed: {e}")
+            return "", str(e)
+        except paramiko.ssh_exception.SSHException as e:
+            self.logger.error(f"SSH connection failed: {e}")
+            return "", str(e)
 
     def format_disk(self, node, device):
         """Format disk on the given node
@@ -129,7 +140,7 @@ class SshUtils:
             node (str): Node to perform ssh operation on
             device (str): Device path
         """
-        command = f"sudo mkfs.xfs -t ext4 {device}"
+        command = f"sudo mkfs.ext4 {device}"
         self.exec_command(node, command)
 
     def mount_path(self, node, device, mount_path):
@@ -161,18 +172,18 @@ class SshUtils:
         """
         command = f"sudo umount {device}"
         self.exec_command(node, command)
-
+    
     def get_devices(self, node):
         """Get devices on a machine
 
         Args:
             node (str): Node to perform ssh operation on
         """
-        command = "sudo lsblk | awk '{print $1}'"
-        output = self.exec_command(node, command)
+        command = "lsblk -dn -o NAME"
+        output, _ = self.exec_command(node, command)
 
-        return output.strip().split("\n")[1:]
-
+        return output.strip().split()
+    
     def run_fio_test(self, node, device=None, directory=None, log_file=None, **kwargs):
         """Run FIO Tests with given params
 
@@ -182,19 +193,60 @@ class SshUtils:
             directory (str, optional): Directory to run test on. Defaults to None.
             log_file (str, optional): Log file to redirect output to. Defaults to None.
         """
-        #TODO: Use Kwargs to get as many params as possible
+        location = ""
         if device:
             location = f"--filename={device}"
         if directory:
             location = f"--directory={directory}"
-        command = (f"sudo fio --name=test {location} --ioengine=libaio "
-                   "--direct=1 --iodepth=1 --time_based --runtime=3600 --rw=randrw --bs=4K --size=10MiB "
-                   "--verify=md5 --numjobs=1 --verify_dump=1 --verify_fatal=0 --verify_state_save=1 --verify_backlog=10")
+        
+        runtime = kwargs.get("runtime", 3600)
+        rw = kwargs.get("rw", "randrw")
+        name = kwargs.get("name", "test")
+        ioengine = kwargs.get("ioengine", "libaio")
+        iodepth = kwargs.get("iodepth", 1)
+        bs = kwargs.get("bs", "4k")
+        rwmixread = kwargs.get("rwmixread", 70)
+        size = kwargs.get("size", "10MiB")
+        time_based = kwargs.get("time_based", True)
+        time_based = "--time_based" if time_based else ""
+        
+        output_format = kwargs.get("output_format", '')
+        output_format = f' --output-format={output_format} ' if output_format else ''
 
-        self.exec_command_background(node=node,
-                                     command=command,
-                                     log_file=log_file)
+        output_file = kwargs.get("output_file", '')
+        output_file = f" --output={output_file} " if output_file else ''
 
+        command = (f"sudo fio --name={name} {location} --ioengine={ioengine} --direct=1 --iodepth={iodepth} "
+                   f"{time_based} --runtime={runtime} --rw={rw} --bs={bs} --size={size} --rwmixread={rwmixread} "
+                   "--verify=md5 --numjobs=1 --verify_dump=1 --verify_fatal=1 --verify_state_save=1 --verify_backlog=10 "
+                   f"--group_reporting{output_format}{output_file}")
+        
+        if kwargs.get("debug", None):
+            command = f"{command} --debug=all"
+        if log_file:
+            command = f"{command} >> {log_file}"
+
+        self.logger.info(f"{command}")
+
+        start_time = time.time()
+        output, error = self.exec_command(node=node, command=command, timeout=runtime + 300)
+        end_time = time.time()
+
+        total_time = end_time - start_time
+        self.logger.info(f"Total time taken to run the command: {total_time:.2f} seconds")
+    
+    def find_process_name(self, node, process_name, return_pid=False):
+        if return_pid:
+            command = "ps -ef | grep -i %s | awk '{print $2}'" % process_name
+        else:
+            command = "ps -ef | grep -i %s" % process_name
+        output, error = self.exec_command(node=node,
+                                          command=command)
+                                    
+        data = output.strip().split("\n")
+
+        return data
+    
     def kill_processes(self, node, pid=None, process_name=None):
         """Kill the given process
 
@@ -208,10 +260,9 @@ class SshUtils:
             command = kill_command % pid
             self.exec_command(node, command)
         if process_name:
-            command = "ps -ef | grep -i %s | awk '{print $2}'" % process_name
-            output = self.exec_command(node=node,
-                                       command=command)
-            pids = output.strip().split("\n")
+            pids = self.find_process_name(node=node,
+                                          process_name=process_name,
+                                          return_pid=True)
             for pid in pids:
                 command = kill_command % pid.strip()
                 self.exec_command(node, command)
@@ -227,5 +278,5 @@ class SshUtils:
             str: Output of file name
         """
         cmd = f"cat {file_name}"
-        output = self.exec_command(node=node, command=cmd)
+        output, _ = self.exec_command(node=node, command=cmd)
         return output
