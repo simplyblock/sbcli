@@ -17,15 +17,18 @@ bp = Blueprint("pool", __name__)
 db_controller = kv_store.DBController()
 
 
-@bp.route('/pool', defaults={'uuid': None}, methods=['GET'])
-@bp.route('/pool/<string:uuid>', methods=['GET'])
-def list_pools(uuid):
+@bp.route('/pool', defaults={'uuid': None, "cluster_id": None}, methods=['GET'])
+@bp.route('/pool/<string:uuid>', defaults={"cluster_id": None}, methods=['GET'])
+@bp.route('/pool/cluster_id/<string:cluster_id>', defaults={'uuid': None,}, methods=['GET'])
+def list_pools(uuid, cluster_id):
     if uuid:
         pool = db_controller.get_pool_by_id(uuid)
         if pool:
             pools = [pool]
         else:
             return utils.get_response_error(f"Pool not found: {uuid}", 404)
+    elif cluster_id:
+        pools = db_controller.get_pools(cluster_id)
     else:
         pools = db_controller.get_pools()
     data = []
