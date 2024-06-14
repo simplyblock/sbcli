@@ -160,10 +160,15 @@ jobs:
           echo "Parsing the identified log file: $LATEST_LOG"
 
           # Parse the identified log file
+          echo "Total tests"
           TOTAL_TESTS=$(grep -i "Number of Total Cases" "$LATEST_LOG" | awk '{print $NF}')
+          echo "number Passed tests"
           PASSED_TESTS=$(grep -i "Number of Passed Cases" "$LATEST_LOG" | awk '{print $NF}')
+          echo "number Failed tests"
           FAILED_TESTS=$(grep -i "Number of Failed Cases" "$LATEST_LOG" | awk '{print $NF}')
+          echo "List Passed tests"
           PASSED_CASES=$(grep -i "PASSED CASE" "$LATEST_LOG" | grep -oP '(?<=INFO - ).*(?= PASSED CASE)')
+          echo "List Failed tests"
           FAILED_CASES=$(grep -i "FAILED CASE" "$LATEST_LOG" | grep -oP '(?<=INFO - ).*(?= FAILED CASE)')
 
           # Format passed and failed cases as bullet points
