@@ -58,6 +58,6 @@ TASK_EXEC_INTERVAL_SEC = 30
 TASK_EXEC_RETRY_COUNT = 8
 
 SIMPLY_BLOCK_SPDK_CORE_IMAGE = "simplyblock/spdk-core:latest"
-SIMPLY_BLOCK_SPDK_ULTRA_IMAGE = "simplyblock/spdk:release_v1-latest"
+SIMPLY_BLOCK_SPDK_ULTRA_IMAGE = "simplyblock/spdk:faster-bdev-startup-latest"
 
 GELF_PORT = 12201
