@@ -250,5 +250,5 @@ class DBController:
     def get_events(self, event_id=""):
         return EventObj().read_from_db(self.kv_store, id=event_id)
 
-    def get_job_tasks(self, cluster_id):
-        return JobSchedule().read_from_db(self.kv_store, id=cluster_id, reverse=True)
+    def get_job_tasks(self, cluster_id, reverse=True):
+        return JobSchedule().read_from_db(self.kv_store, id=cluster_id, reverse=reverse)
