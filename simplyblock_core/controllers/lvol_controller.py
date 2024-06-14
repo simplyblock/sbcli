@@ -938,11 +938,7 @@ def delete_lvol_from_node(lvol_id, node_id, clear_data=True):
         lvol.write_to_db(db_controller.kv_store)
 
         # 4- clear JM
-        jm_device = None
-        for dev in snode.nvme_devices:
-            if dev.status == NVMeDevice.STATUS_JM:
-                jm_device = dev
-                break
+        jm_device = snode.jm_device
         ret = rpc_client.alceml_unmap_vuid(jm_device.alceml_bdev, lvol.vuid)
         if not ret:
             logger.error(f"Failed to unmap jm alceml {jm_device.alceml_bdev} with vuid {lvol.vuid}")

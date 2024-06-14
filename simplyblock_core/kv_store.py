@@ -145,6 +145,9 @@ class DBController:
                 if dev.get_id() == id:
                     return dev
 
+    def get_storage_devices(self, id):
+        return self.get_storage_device_by_id(id)
+
     # Compute node functions
     def get_compute_node_by_id(self, id):
         ret = ComputeNode().read_from_db(self.kv_store, id)
