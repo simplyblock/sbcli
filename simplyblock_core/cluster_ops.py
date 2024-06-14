@@ -112,7 +112,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
 
     env = Environment(loader=FileSystemLoader(alerts_template_folder), trim_blocks=True, lstrip_blocks=True)
     template = env.get_template(f'{alert_resources_file}.j2')
-    
+
     ALERT_TYPE = "slack" if "slack" in contact_point else "email"
 
     values = {
@@ -129,6 +129,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
 
     destination_file_path = os.path.join(alerts_template_folder, alert_resources_file)
     try:
+        subprocess.run(['sudo', '-v'], check=True) # sudo -v checks if the current user has sudo permissions
         subprocess.run(['sudo', 'mv', temp_file_path, destination_file_path], check=True)
         print(f"File moved to {destination_file_path} successfully.")
     except subprocess.CalledProcessError as e:
