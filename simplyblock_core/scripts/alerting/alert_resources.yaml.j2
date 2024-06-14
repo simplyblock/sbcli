@@ -7,6 +7,7 @@ policies:
         object_matchers:
           - ['app', '=', 'simplyblock']
 
+{% if ALERT_TYPE == "slack" %}
 contactPoints:
   - orgId: 1
     name: grafana-alerts
@@ -22,8 +23,6 @@ contactPoints:
           text: |
             {{ template "slack.message" . }}
             {% endraw %}
-
-{% raw %}
 templates:
   - orgId: 1
     name: slack.title
@@ -42,7 +41,7 @@ templates:
       {{ end -}}
       *Log message*: {{ index .Labels "message" }}
       {% endraw %}
-      *Explore logs:* 
+      *Explore logs:* {{ GRAFANA_ENDPOINT }}
       {% raw %}
       {{ if .DashboardURL -}}
       *Go to dashboard:* {{ .DashboardURL }}
@@ -71,3 +70,67 @@ templates:
 
       {{- end }}
       {% endraw %}
+      
+{% else %}
+contactPoints:
+  - orgId: 1
+    name: grafana-alerts
+    receivers:
+      - uid: grafana
+        type: email
+        settings:
+          addresses: '{{ CONTACT_POINT }}'
+          title: |
+            {% raw %}
+            {{ template "email.title" . }}
+          text: |
+            {{ template "email.message" . }}
+            {% endraw %}
+templates:
+  - orgId: 1
+    name: email.title
+    template: |-
+      {{ define "email.title" -}}
+      [{{ .Status | toUpper }}{{ if eq .Status "firing" }}:{{ .Alerts.Firing | len }}{{ end }}] Grafana Alerting Notification
+      {{- end -}}
+  - orgId: 1
+    name: email.message
+    template: |-
+      {{ define "email.print_alert" -}}
+      Alert: {{ .Labels.alertname }}
+      {{ if .Annotations -}}
+      Summary: {{ .Annotations.summary}}
+      Description: {{ .Annotations.description }}
+      {{ end -}}
+      Log message: {{ index .Labels "message" }}
+      {% endraw %}
+      Explore logs: {{ GRAFANA_ENDPOINT }}
+      {% raw %}
+      {{ if .DashboardURL -}}
+      Go to dashboard: {{ .DashboardURL }}
+      {{- end }}
+      {{ if .PanelURL -}}
+      Go to panel: {{ .PanelURL }}
+      {{- end }}
+
+      Details:
+      {{ range .Labels.SortedPairs -}}
+      - {{ .Name }}: `{{ .Value }}`
+      {{ end -}}
+
+      {{ if .SilenceURL -}}
+      Silence this alert: {{ .SilenceURL }}
+      {{- end }}
+      {{- end }}
+
+      {{ define "email.message" -}}
+      {{ if .Alerts.Firing -}}
+      {{ len .Alerts.Firing }} firing alert(s):
+      {{ range .Alerts.Firing }}
+      {{ template "email.print_alert" . }}
+      {{ end -}}
+      {{ end }}
+
+      {{- end }}
+      {% endraw %}
+{% endif %}

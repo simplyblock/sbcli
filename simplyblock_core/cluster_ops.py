@@ -51,7 +51,8 @@ def _add_graylog_input(cluster_ip, password):
 
 
 def create_cluster(blk_size, page_size_in_blocks, cli_pass,
-                   cap_warn, cap_crit, prov_cap_warn, prov_cap_crit, ifname, log_del_interval, metrics_retention_period, contact_point):
+                   cap_warn, cap_crit, prov_cap_warn, prov_cap_crit, ifname, log_del_interval, metrics_retention_period,
+                    contact_point, grafana_endpoint):
     logger.info("Installing dependencies...")
     ret = scripts.install_deps()
     logger.info("Installing dependencies > Done")
@@ -111,9 +112,13 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
 
     env = Environment(loader=FileSystemLoader(alerts_template_folder), trim_blocks=True, lstrip_blocks=True)
     template = env.get_template(f'{alert_resources_file}.j2')
+    
+    ALERT_TYPE = "slack" if "slack" in contact_point else "email"
 
     values = {
         'CONTACT_POINT': contact_point,
+        'GRAFANA_ENDPOINT': grafana_endpoint,
+        'ALERT_TYPE': ALERT_TYPE,
     }
 
     temp_dir = tempfile.mkdtemp()
