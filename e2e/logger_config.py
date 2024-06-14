@@ -20,8 +20,15 @@ def setup_logger(name):
     f_format = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
     f_handler.setFormatter(f_format)
 
+    c_handler = logging.StreamHandler()
+    c_handler.setLevel(logging.DEBUG)
+
+    # Create formatter and add it to the handler
+    c_handler.setFormatter(f_format)
+
     # Add handler to the logger
     if not logger.handlers:  # To prevent adding multiple handlers to the same logger
         logger.addHandler(f_handler)
+        logger.addHandler(c_handler)
 
     return logger

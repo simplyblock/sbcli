@@ -167,8 +167,14 @@ jobs:
           FAILED_CASES=$(grep -i "FAILED CASE" "$LATEST_LOG" | grep -oP '(?<=INFO - ).*(?= FAILED CASE)')
 
           # Format passed and failed cases as bullet points
+          echo "Adding PASSED cases with bullets: $PASSED_CASES"
+          echo "Adding FAILED cases with bullets: $PASSED_CASES"
+
           PASSED_CASES_BULLETS=$(echo "$PASSED_CASES" | awk '{printf "    • %s\n", $0}')
           FAILED_CASES_BULLETS=$(echo "$FAILED_CASES" | awk '{printf "    • %s\n", $0}')
+
+          echo "PASSED cases with bullets: $PASSED_CASES_BULLETS"
+          echo "FAILED cases with bullets: $FAILED_CASES_BULLETS"
 
           echo "TOTAL_TESTS=${TOTAL_TESTS}"
           echo "PASSED_TESTS=${PASSED_TESTS}"
