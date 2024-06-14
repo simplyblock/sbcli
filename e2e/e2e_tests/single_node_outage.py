@@ -96,7 +96,7 @@ class TestSingleNodeOutage:
                                   device=self.mount_path)
         self.sbcli_utils.delete_all_lvols()
         self.sbcli_utils.delete_all_storage_pools()
-        expected_base = ["sbcli", "sbcli-dev", "sbcli-release"]
+        expected_base = ["sbcli", "sbcli-dev", "sbcli-release", "sbcli-pre"]
         for base in expected_base:
             output, error = self.ssh_obj.exec_command(node=self.mgmt_nodes[0],
                                                       command=base)
