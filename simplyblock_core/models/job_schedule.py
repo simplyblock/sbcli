@@ -8,6 +8,10 @@ class JobSchedule(BaseModel):
     STATUS_RUNNING = 'running'
     STATUS_DONE = 'done'
 
+    FN_DEV_RESTART = "device_restart"
+    FN_NODE_RESTART = "node_restart"
+    FN_DEV_MIG = "device_migration"
+
     attributes = {
         "uuid": {"type": str, 'default': ""},
         "cluster_id": {"type": str, 'default': ""},

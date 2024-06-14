@@ -2,7 +2,7 @@ import time
 import logging
 
 from simplyblock_core import distr_controller, utils
-from simplyblock_core.controllers import device_events, lvol_controller
+from simplyblock_core.controllers import device_events, lvol_controller, tasks_controller
 from simplyblock_core.kv_store import DBController
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.rpc_client import RPCClient
@@ -16,6 +16,7 @@ def device_set_state(device_id, state):
     dev = db_controller.get_storage_devices(device_id)
     if not dev:
         logger.error("device not found")
+        return False
 
     snode = db_controller.get_storage_node_by_id(dev.node_id)
     if not snode:
@@ -78,7 +79,13 @@ def device_set_read_only(device_id):
 
 
 def device_set_online(device_id):
-    return device_set_state(device_id, NVMeDevice.STATUS_ONLINE)
+    ret = device_set_state(device_id, NVMeDevice.STATUS_ONLINE)
+    if ret:
+        logger.info("Adding task to device data migration")
+        task_id = tasks_controller.add_device_mig_task(device_id)
+        if task_id:
+            logger.info(f"Task id: {task_id}")
+    return ret
 
 
 def get_alceml_name(alceml_id):
@@ -140,7 +147,7 @@ def _def_create_device_stack(device_obj, snode):
     if device_obj.jm_bdev:
         ret = rpc_client.bdev_jm_create(device_obj.jm_bdev, device_obj.alceml_bdev)
         if not ret:
-            logger.error(f"Failed to create bdev: {device_obj.jm_bdev}")
+            logger.error(f"Failed to create jm bdev: {device_obj.jm_bdev}")
             return False
 
     device_obj.testing_bdev = test_name
@@ -174,23 +181,19 @@ def restart_device(device_id, force=False):
             device_obj = dev
             break
 
-    device_obj.status = 'restarting'
-    snode.write_to_db(db_controller.kv_store)
-
     logger.info(f"Restarting device {device_id}")
+    device_set_unavailable(device_id)
 
     ret = _def_create_device_stack(device_obj, snode)
 
     if not ret:
         logger.error("Failed to create device stack")
-        device_obj.status = NVMeDevice.STATUS_UNAVAILABLE
-        snode.write_to_db(db_controller.kv_store)
         return False
 
-    device_obj.io_error = False
-    device_obj.retries_exhausted = False
-    device_obj.status = NVMeDevice.STATUS_ONLINE
-    snode.write_to_db(db_controller.kv_store)
+    logger.info("Setting device io_error to False")
+    device_set_io_error(device_id, False)
+    logger.info("Setting device online")
+    device_set_online(device_id)
 
     logger.info("Make other nodes connect to the device")
     snodes = db_controller.get_storage_nodes()
@@ -221,8 +224,6 @@ def restart_device(device_id, force=False):
         node.write_to_db(db_controller.kv_store)
         time.sleep(3)
 
-    logger.info("Sending device event")
-    distr_controller.send_dev_status_event(device_obj.cluster_device_order, "online")
     device_events.device_restarted(device_obj)
 
     return "Done"

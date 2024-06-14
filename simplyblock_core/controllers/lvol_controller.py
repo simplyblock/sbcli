@@ -1348,7 +1348,7 @@ def get_cluster_map(lvol_id):
     if not ret:
         logger.error(f"Failed to get LVol cluster map: {lvol_id}")
         return False
-    logger.info(ret)
+    logger.debug(ret)
     print("*"*100)
     results, is_passed = distr_controller.parse_distr_cluster_map(ret)
     return utils.print_table(results)
