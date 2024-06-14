@@ -135,16 +135,19 @@ jobs:
         run: |
           cd $GITHUB_WORKSPACE/e2e/logs
 
+          echo "Looking for the latest non-empty log file..."
+
           # Find the latest non-empty log file
           COUNTER=0
           MAX_ATTEMPTS=10
 
-          # Find the latest non-empty log file
           while [ $COUNTER -lt $MAX_ATTEMPTS ]; do
             LATEST_LOG=$(ls -t *.log | head -n 1)
             if [ -s "$LATEST_LOG" ]; then
+              echo "Found non-empty log file: $LATEST_LOG"
               break
             fi
+            echo "Attempt $((COUNTER + 1)): No non-empty log file found. Retrying..."
             COUNTER=$((COUNTER + 1))
             sleep 1  # Add a small delay to avoid rapid looping
           done
@@ -153,6 +156,8 @@ jobs:
             echo "No non-empty log file found after $MAX_ATTEMPTS attempts"
             exit 1
           fi
+
+          echo "Parsing the identified log file: $LATEST_LOG"
 
           # Parse the identified log file
           TOTAL_TESTS=$(grep -i "Number of Total Cases" "$LATEST_LOG" | awk '{print $NF}')
@@ -165,6 +170,11 @@ jobs:
           PASSED_CASES_BULLETS=$(echo "$PASSED_CASES" | awk '{printf "    • %s\n", $0}')
           FAILED_CASES_BULLETS=$(echo "$FAILED_CASES" | awk '{printf "    • %s\n", $0}')
 
+          echo "TOTAL_TESTS=${TOTAL_TESTS}"
+          echo "PASSED_TESTS=${PASSED_TESTS}"
+          echo "FAILED_TESTS=${FAILED_TESTS}"
+          echo "PASSED_CASES=${PASSED_CASES}"
+          echo "FAILED_CASES=${FAILED_CASES}"
 
           echo "PASSED_TESTS=${PASSED_TESTS}" >> $GITHUB_ENV
           echo "FAILED_TESTS=${FAILED_TESTS}" >> $GITHUB_ENV
@@ -178,34 +188,35 @@ jobs:
           echo "${FAILED_CASES_BULLETS}" >> $GITHUB_ENV
           echo "EOF" >> $GITHUB_ENV
 
-      - name: Send Slack Notification
-        if: always()
-        env:
-          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
-          GITHUB_SERVER_URL: ${{ github.server_url }}
-          GITHUB_REPOSITORY: ${{ github.repository }}
-          S3_BUCKET_NAME: "simplyblock-e2e-test-logs"
-          RUN_ID: ${{ github.run_id }}
-          PASSED_TESTS: ${{ env.PASSED_TESTS }}
-          FAILED_TESTS: ${{ env.FAILED_TESTS }}
-          TOTAL_TESTS: ${{ env.TOTAL_TESTS }}
-          PASSED_CASES: ${{ env.PASSED_CASES }}
-          FAILED_CASES: ${{ env.FAILED_CASES }}
-          PASSED_CASES_BULLETS: ${{ env.PASSED_CASES_BULLETS }}
-          FAILED_CASES_BULLETS: ${{ env.FAILED_CASES_BULLETS }}
-          TRIGGER_EVENT: ${{ github.event_name }}
-          TRIGGER_ACTOR: ${{ github.actor }}
-        run: |
-          GITHUB_RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}"
-          AWS_LOGS_URL="https://s3.console.aws.amazon.com/s3/buckets/${S3_BUCKET_NAME}?prefix=${RUN_ID}/&region=us-east-2"
-          if [[ ${{ job.status }} == 'success' ]]; then
-            OVERALL_STATUS=":white_check_mark: Overall Status: SUCCESS"
-          else
-            OVERALL_STATUS=":x: Overall Status: FAILURE"
-          fi
-          MESSAGE="Python E2E tests run triggered by ${{ env.TRIGGER_ACTOR }} via ${{ env.TRIGGER_EVENT }}. \n${OVERALL_STATUS}\nGitHub Run: ${GITHUB_RUN_URL}\nAWS Logs: ${AWS_LOGS_URL}\n\nTotal Tests: ${{ env.TOTAL_TESTS }}\nPassed Tests: ${{ env.PASSED_TESTS }}\nFailed Tests: ${{ env.FAILED_TESTS }}\n\n-- Test Cases Passed :white_check_mark:\n${{ env.PASSED_CASES_BULLETS }}\n\n-- Test Cases Failed :x:\n${{ env.FAILED_CASES_BULLETS }}"
+
+      # - name: Send Slack Notification
+      #   if: always()
+      #   env:
+      #     SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+      #     GITHUB_SERVER_URL: ${{ github.server_url }}
+      #     GITHUB_REPOSITORY: ${{ github.repository }}
+      #     S3_BUCKET_NAME: "simplyblock-e2e-test-logs"
+      #     RUN_ID: ${{ github.run_id }}
+      #     PASSED_TESTS: ${{ env.PASSED_TESTS }}
+      #     FAILED_TESTS: ${{ env.FAILED_TESTS }}
+      #     TOTAL_TESTS: ${{ env.TOTAL_TESTS }}
+      #     PASSED_CASES: ${{ env.PASSED_CASES }}
+      #     FAILED_CASES: ${{ env.FAILED_CASES }}
+      #     PASSED_CASES_BULLETS: ${{ env.PASSED_CASES_BULLETS }}
+      #     FAILED_CASES_BULLETS: ${{ env.FAILED_CASES_BULLETS }}
+      #     TRIGGER_EVENT: ${{ github.event_name }}
+      #     TRIGGER_ACTOR: ${{ github.actor }}
+      #   run: |
+      #     GITHUB_RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}"
+      #     AWS_LOGS_URL="https://s3.console.aws.amazon.com/s3/buckets/${S3_BUCKET_NAME}?prefix=${RUN_ID}/&region=us-east-2"
+      #     if [[ ${{ job.status }} == 'success' ]]; then
+      #       OVERALL_STATUS=":white_check_mark: Overall Status: SUCCESS"
+      #     else
+      #       OVERALL_STATUS=":x: Overall Status: FAILURE"
+      #     fi
+      #     MESSAGE="Python E2E tests run triggered by ${{ env.TRIGGER_ACTOR }} via ${{ env.TRIGGER_EVENT }}. \n${OVERALL_STATUS}\nGitHub Run: ${GITHUB_RUN_URL}\nAWS Logs: ${AWS_LOGS_URL}\n\nTotal Tests: ${{ env.TOTAL_TESTS }}\nPassed Tests: ${{ env.PASSED_TESTS }}\nFailed Tests: ${{ env.FAILED_TESTS }}\n\n-- Test Cases Passed :white_check_mark:\n${{ env.PASSED_CASES_BULLETS }}\n\n-- Test Cases Failed :x:\n${{ env.FAILED_CASES_BULLETS }}"
           
-          curl -X POST -H 'Content-type: application/json' --data "{\"text\":\"${MESSAGE}\"}" $SLACK_WEBHOOK_URL
+      #     curl -X POST -H 'Content-type: application/json' --data "{\"text\":\"${MESSAGE}\"}" $SLACK_WEBHOOK_URL
 
       - name: Destroy Cluster
         if: always()
