@@ -190,8 +190,12 @@ jobs:
           echo "PASSED_TESTS=${PASSED_TESTS}" >> $GITHUB_ENV
           echo "FAILED_TESTS=${FAILED_TESTS}" >> $GITHUB_ENV
           echo "TOTAL_TESTS=${TOTAL_TESTS}" >> $GITHUB_ENV
-          echo "PASSED_CASES=${PASSED_CASES}" >> $GITHUB_ENV
-          echo "FAILED_CASES=${FAILED_CASES}" >> $GITHUB_ENV
+          echo "PASSED_CASES<<EOF" >> $GITHUB_ENV
+          echo "${PASSED_CASES}" >> $GITHUB_ENV
+          echo "EOF" >> $GITHUB_ENV
+          echo "FAILED_CASES<<EOF" >> $GITHUB_ENV
+          echo "${FAILED_CASES}" >> $GITHUB_ENV
+          echo "EOF" >> $GITHUB_ENV
           echo "PASSED_CASES_BULLETS<<EOF" >> $GITHUB_ENV
           echo "${PASSED_CASES_BULLETS}" >> $GITHUB_ENV
           echo "EOF" >> $GITHUB_ENV
