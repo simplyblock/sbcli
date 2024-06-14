@@ -167,9 +167,9 @@ jobs:
           echo "number Failed tests"
           FAILED_TESTS=$(grep -i "Number of Failed Cases" "$LATEST_LOG" | awk '{print $NF}')
           echo "List Passed tests"
-          PASSED_CASES=$(grep -i "PASSED CASE" "$LATEST_LOG" | grep -oP '(?<=INFO - ).*(?= PASSED CASE)')
+          PASSED_CASES=$(grep "PASSED CASE" "$LATEST_LOG" | awk -F 'INFO - | FAILED CASE' '{print $2}')
           echo "List Failed tests"
-          FAILED_CASES=$(grep -i "FAILED CASE" "$LATEST_LOG" | grep -oP '(?<=INFO - ).*(?= FAILED CASE)')
+          FAILED_CASES=$(grep "FAILED CASE" "$LATEST_LOG" | awk -F 'INFO - | FAILED CASE' '{print $2}')
 
           # Format passed and failed cases as bullet points
           echo "Adding PASSED cases with bullets: $PASSED_CASES"
