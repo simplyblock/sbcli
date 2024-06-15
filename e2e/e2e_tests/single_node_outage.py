@@ -250,7 +250,7 @@ class TestSingleNodeOutage:
         assert node_details[0]["status"] == node_status, \
             f"Node {node_uuid} is not in {node_status} state. {node_details[0]['status']}"
         for device in device_details:
-            if "jm" in device["jm_bdev"]:
+            if "jm_bdev" in device and "jm" in device["jm_bdev"]:
                 assert device["status"] == "JM_DEV", \
                     f"JM Device {device['id']} is not in JM_DEV state. {device['status']}"
             else:
