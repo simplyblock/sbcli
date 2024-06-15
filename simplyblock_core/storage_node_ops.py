@@ -1112,7 +1112,7 @@ def restart_storage_node(
         else:
             logger.info(f"Device not found: {db_dev.get_id()}")
             db_dev.status = NVMeDevice.STATUS_REMOVED
-            distr_controller.send_dev_status_event(db_dev.cluster_device_order, db_dev.status)
+            distr_controller.send_dev_status_event(db_dev, db_dev.status)
 
     # todo: handle new devices
     # for dev in nvme_devs:

@@ -45,16 +45,20 @@ def deploy_mgmt_node(cluster_ip, cluster_id, ifname):
     ret = scripts.configure_docker(DEV_IP)
 
     db_connection = cluster_data['db_connection']
-    ret = scripts.set_db_config(db_connection)
-
-
-    logger.info("Joining docker swarm...")
+    scripts.set_db_config(db_connection)
+    time.sleep(1)
+    hostname = utils.get_hostname()
     db_controller = DBController()
     nodes = db_controller.get_mgmt_nodes(cluster_id=cluster_id)
     if not nodes:
         logger.error("No mgmt nodes was found in the cluster!")
-        exit(1)
+        return False
+    for node in nodes:
+        if node.hostname == hostname:
+            logger.error("Node already exists in the cluster")
+            return False
 
+    logger.info("Joining docker swarm...")
     try:
         cluster_docker = utils.get_docker_client(cluster_id)
         docker_ip = cluster_docker.info()["Swarm"]["NodeAddr"]
@@ -85,7 +89,7 @@ def deploy_mgmt_node(cluster_ip, cluster_id, ifname):
         raise e
 
     logger.info("Adding management node object")
-    add_mgmt_node(DEV_IP, cluster_id)
+    node_id = add_mgmt_node(DEV_IP, cluster_id)
 
     # check if ha setting is required
     nodes = db_controller.get_mgmt_nodes(cluster_id=cluster_id)
@@ -131,7 +135,7 @@ def deploy_mgmt_node(cluster_ip, cluster_id, ifname):
             cl.write_to_db(db_controller.kv_store)
 
     logger.info("Node joined the cluster")
-    return True
+    return node_id
 
 
 def add_mgmt_node(mgmt_ip, cluster_id=None):
@@ -153,7 +157,7 @@ def add_mgmt_node(mgmt_ip, cluster_id=None):
 
     mgmt_events.mgmt_add(node)
     logger.info("Done")
-    return True
+    return node.uuid
 
 
 def list_mgmt_nodes(is_json):

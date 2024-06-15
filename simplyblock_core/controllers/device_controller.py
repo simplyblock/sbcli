@@ -36,7 +36,7 @@ def device_set_state(device_id, state):
 
     old_status = dev.status
     device.status = state
-    distr_controller.send_dev_status_event(device.cluster_device_order, device.status)
+    distr_controller.send_dev_status_event(device, device.status)
     snode.write_to_db(db_controller.kv_store)
     device_events.device_status_change(device, device.status, old_status)
     return True
@@ -268,7 +268,7 @@ def device_remove(device_id, force=True):
             break
 
     logger.info("Sending device event")
-    distr_controller.send_dev_status_event(device.cluster_device_order, "removed")
+    distr_controller.send_dev_status_event(device, NVMeDevice.STATUS_REMOVED)
 
     logger.info("Disconnecting device from all nodes")
     distr_controller.disconnect_device(device)
