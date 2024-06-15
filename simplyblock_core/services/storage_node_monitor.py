@@ -8,7 +8,7 @@ from datetime import datetime
 
 
 from simplyblock_core import constants, kv_store, cluster_ops, storage_node_ops, distr_controller
-from simplyblock_core.controllers import storage_events, health_controller, device_controller
+from simplyblock_core.controllers import health_controller, device_controller, tasks_controller
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
@@ -111,6 +111,8 @@ def set_node_online(node):
 def set_node_offline(node):
     if node.status != StorageNode.STATUS_UNREACHABLE:
         storage_node_ops.set_node_status(snode.get_id(), StorageNode.STATUS_UNREACHABLE)
+        # add node to auto restart
+        tasks_controller.add_node_to_auto_restart(node)
 
 
 logger.info("Starting node monitor")
