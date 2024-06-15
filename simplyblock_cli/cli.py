@@ -472,7 +472,7 @@ class CLIWrapper:
         # mgmt-node ops
         subparser = self.add_command('mgmt', 'Management node commands')
 
-        sub_command = self.add_sub_command(subparser, 'add', 'Add Management node to the cluster')
+        sub_command = self.add_sub_command(subparser, 'add', 'Add Management node to the cluster (local run)')
         sub_command.add_argument("cluster_ip", help='the cluster IP address')
         sub_command.add_argument("cluster_id", help='the cluster UUID')
         sub_command.add_argument("ifname", help='Management interface name')
@@ -823,8 +823,6 @@ class CLIWrapper:
             sub_command = args_dict[args.command]
             if sub_command == 'create':
                 ret = self.cluster_create(args)
-            elif sub_command == 'join':
-                ret = self.cluster_join(args)
             elif sub_command == 'add':
                 ret = self.cluster_add(args)
             elif sub_command == 'status':
@@ -990,7 +988,7 @@ class CLIWrapper:
                 cluster_id = args.cluster_id
                 cluster_ip = args.cluster_ip
                 ifname = args.ifname
-                ret = cluster_ops.join_cluster(cluster_ip, cluster_id, "management", ifname, [], None, None)
+                ret = mgmt_ops.deploy_mgmt_node(cluster_ip, cluster_id, ifname)
             elif sub_command == "list":
                 ret = mgmt_ops.list_mgmt_nodes(args.json)
             elif sub_command == "remove":
@@ -1173,27 +1171,6 @@ class CLIWrapper:
             blk_size, page_size_in_blocks,
             CLI_PASS, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
             ifname, log_del_interval, metrics_retention_period)
-
-    def cluster_join(self, args):
-        cluster_id = args.cluster_id
-        cluster_ip = args.cluster_ip
-        role = args.role
-        ifname = args.ifname
-        data_nics = args.data_nics
-        spdk_cpu_mask = None
-        if args.spdk_cpu_mask:
-            if self.validate_cpu_mask(args.spdk_cpu_mask):
-                spdk_cpu_mask = args.spdk_cpu_mask
-            else:
-                return f"Invalid cpu mask value: {args.spdk_cpu_mask}"
-
-        spdk_mem = None
-        if args.spdk_mem:
-            spdk_mem = self.parse_size(args.spdk_mem)
-            if spdk_mem < 1 * 1024 * 1024:
-                return f"SPDK memory:{args.spdk_mem} must be larger than 1G"
-
-        return cluster_ops.join_cluster(cluster_ip, cluster_id, role, ifname, data_nics, spdk_cpu_mask, spdk_mem)
 
     def query_yes_no(self, question, default="yes"):
         """Ask a yes/no question via raw_input() and return their answer.
