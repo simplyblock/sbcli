@@ -30,7 +30,8 @@ def list_pools(uuid, cluster_id):
     elif cluster_id:
         pools = db_controller.get_pools(cluster_id)
     else:
-        pools = db_controller.get_pools()
+        cluster_id = utils.get_cluster_id(request)
+        pools = db_controller.get_pools(cluster_id)
     data = []
     for pool in pools:
         data.append(pool.get_clean_dict())
@@ -42,6 +43,7 @@ def add_pool():
     """
         Params:
         | name (required) | LVol name or id
+        | cluster_id (required) | Cluster uuid
         | pool_max        | Pool maximum size: 10M, 10G, 10(bytes)
         | lvol_max        | LVol maximum size: 10M, 10G, 10(bytes)
         | no_secret       | pool is created with a secret

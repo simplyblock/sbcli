@@ -32,7 +32,8 @@ def list_lvols(uuid, cluster_id):
     elif cluster_id:
         lvols = db_controller.get_lvols(cluster_id)
     else:
-        lvols = db_controller.get_lvols()  # pass
+        cluster_id = utils.get_cluster_id(request)
+        lvols = db_controller.get_lvols(cluster_id)
     data = []
     for lvol in lvols:
         data.append(lvol.get_clean_dict())
