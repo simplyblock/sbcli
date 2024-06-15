@@ -376,7 +376,7 @@ def join_cluster(cluster_ip, cluster_id, role, ifname, data_nics,  spdk_cpu_mask
     logger.info("Node joined the cluster")
 
 
-def add_cluster(blk_size, page_size_in_blocks, ha_type, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit):
+def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit):
     db_controller = DBController()
     clusters = db_controller.get_clusters()
     if not clusters:
@@ -389,7 +389,7 @@ def add_cluster(blk_size, page_size_in_blocks, ha_type, cap_warn, cap_crit, prov
     cluster.uuid = str(uuid.uuid4())
     cluster.blk_size = blk_size
     cluster.page_size_in_blocks = page_size_in_blocks
-    cluster.ha_type = ha_type
+    cluster.ha_type = default_cluster.ha_type
     cluster.nqn = f"{constants.CLUSTER_NQN}:{cluster.uuid}"
     cluster.cli_pass = default_cluster.cli_pass
     cluster.secret = default_cluster.secret

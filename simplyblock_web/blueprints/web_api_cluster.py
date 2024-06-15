@@ -25,7 +25,6 @@ def add_cluster():
 
     blk_size = 512
     page_size_in_blocks = 2097152
-    ha_type = "single"
     cap_warn = 0
     cap_crit = 0
     prov_cap_warn = 0
@@ -41,13 +40,7 @@ def add_cluster():
     if 'page_size_in_blocks' in cl_data:
         page_size_in_blocks = cl_data['page_size_in_blocks']
 
-    if 'ha_type' in cl_data:
-        if cl_data['ha_type'] not in ["single", "ha"]:
-            return utils.get_response_error("ha_type can be single or ha", 400)
-        ha_type = cl_data['ha_type']
-
-    ret = cluster_ops.add_cluster(blk_size, page_size_in_blocks, ha_type,
-                                  cap_warn, cap_crit, prov_cap_warn, prov_cap_crit)
+    ret = cluster_ops.add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit)
 
     return utils.get_response(ret)
 

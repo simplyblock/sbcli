@@ -144,8 +144,8 @@ while True:
     )
     num_of_events = constants.DISTR_EVENT_COLLECTOR_NUM_OF_EVENTS
     try:
-        # events = client.distr_status_events_get()
-        events = client.distr_status_events_discard_then_get(0, num_of_events)
+        events = client.distr_status_events_get()
+        # events = client.distr_status_events_discard_then_get(0, num_of_events)
         if not events:
             logger.error("Distr events empty")
             continue
@@ -161,8 +161,8 @@ while True:
             logger.info(f"Processing event: {eid}")
             process_event(eid)
 
-        logger.info(f"Discarding events: {num_of_events}")
-        events = client.distr_status_events_discard_then_get(num_of_events, 0)
+        # logger.info(f"Discarding events: {num_of_events}")
+        # events = client.distr_status_events_discard_then_get(num_of_events, 0)
 
     except Exception as e:
         logger.error("Failed to process distr events")

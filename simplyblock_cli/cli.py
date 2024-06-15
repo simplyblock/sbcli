@@ -248,9 +248,6 @@ class CLIWrapper:
         sub_command = self.add_sub_command(subparser, 'add', 'Add new cluster')
         sub_command.add_argument("--blk_size", help='The block size in bytes', type=int, choices=[512, 4096], default=512)
         sub_command.add_argument("--page_size", help='The size of a data page in bytes', type=int, default=2097152)
-        sub_command.add_argument("--ha_type",
-                                 help='Can be "single" for single node clusters or  "HA", which requires at least 3 nodes',
-                                 choices=["single", "ha"], default='single')
         sub_command.add_argument("--cap-warn", help='Capacity warning level in percent, default=80',
                                  type=int, required=False, dest="cap_warn")
         sub_command.add_argument("--cap-crit", help='Capacity critical level in percent, default=90',
@@ -1152,14 +1149,13 @@ class CLIWrapper:
     def cluster_add(self, args):
         page_size_in_blocks = args.page_size
         blk_size = args.blk_size
-        ha_type = args.ha_type
         cap_warn = args.cap_warn
         cap_crit = args.cap_crit
         prov_cap_warn = args.prov_cap_warn
         prov_cap_crit = args.prov_cap_crit
 
         return cluster_ops.add_cluster(
-            blk_size, page_size_in_blocks, ha_type, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit)
+            blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit)
 
     def cluster_create(self, args):
         page_size_in_blocks = args.page_size
