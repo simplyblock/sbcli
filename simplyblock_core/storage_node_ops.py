@@ -234,14 +234,16 @@ def _prepare_cluster_devices(snode, after_restart=False):
         pba_init_mode = 3
         if after_restart:
             pba_init_mode = 2
-        ret = rpc_client.bdev_alceml_create(alceml_name, test_name, alceml_id, pba_init_mode=pba_init_mode)
+        ret = rpc_client.bdev_alceml_create(alceml_name, test_name, alceml_id, pba_init_mode=pba_init_mode,
+                                            dev_cpu_mask=snode.dev_cpu_mask)
         if not ret:
             logger.error(f"Failed to create alceml bdev: {alceml_name}")
             return False
 
         # create jm
         if nvme.jm_bdev:
-            ret = rpc_client.bdev_jm_create(nvme.jm_bdev, alceml_name)
+            ret = rpc_client.bdev_jm_create(nvme.jm_bdev, alceml_name,
+                                            dev_cpu_mask=snode.dev_cpu_mask)
             if not ret:
                 logger.error(f"Failed to create JM bdev: {nvme.jm_bdev}")
                 return False
@@ -326,7 +328,7 @@ def _connect_to_remote_devs(this_node):
     return remote_devices
 
 
-def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask,
+def add_node(cluster_id, node_ip, iface_name, data_nics_list,
              spdk_mem, spdk_image=None, spdk_debug=False,
              small_pool_count=0, large_pool_count=0, small_bufsize=0, large_bufsize=0, jm_device_pcie=None):
     db_controller = DBController()
@@ -398,6 +400,27 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask,
         if not spdk_mem:
             spdk_mem = huge_free
             logger.info(f"Using the free hugepages for spdk memory: {utils.humanbytes(huge_free)}")
+
+    # Tune cpu maks parameters
+    cpu_count = node_info["cpu_count"]
+    pollers_mask = ""
+    app_thread_mask = ""
+    dev_cpu_mask = ""
+    if cpu_count < 8:
+        mask = (1 << (cpu_count - 1)) - 1
+        mask <<= 1
+        spdk_cpu_mask = f'0x{mask:X}'
+        os_cores = [0]
+    else:
+        os_cores, nvme_pollers_cores, app_thread_core, dev_cpu_cores = \
+            utils.calculate_core_allocation(cpu_count)
+        spdk_cores = nvme_pollers_cores + app_thread_core + dev_cpu_cores
+
+        pollers_mask = utils.generate_mask(nvme_pollers_cores)
+        app_thread_mask = utils.generate_mask(app_thread_core)
+        spdk_cpu_mask = utils.generate_mask(spdk_cores)
+        dev_cpu_mask = utils.generate_mask(dev_cpu_cores)
+
 
     logger.info("Joining docker swarm...")
     cluster_docker = utils.get_docker_client(cluster_id)
@@ -476,6 +499,10 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask,
     snode.spdk_image = spdk_image or ""
     snode.spdk_debug = spdk_debug or 0
     snode.write_to_db(kv_store)
+    snode.app_thread_mask = app_thread_mask or ""
+    snode.pollers_mask = pollers_mask or ""
+    snode.dev_cpu_mask = dev_cpu_mask or ""
+    snode.os_cores = os_cores or []
 
     snode.iobuf_small_pool_count = small_pool_count or 0
     snode.iobuf_large_pool_count = large_pool_count or 0
@@ -499,13 +526,41 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask,
             logger.error("Failed to set iobuf options")
             return False
 
-    # 2- start spdk framework
+    # 2- set socket implementation options
+    ret = rpc_client.sock_impl_set_options()
+    if not ret:
+        logger.error("Failed socket implement set options")
+        return False
+
+    # 3- set nvme config
+    if snode.pollers_mask:
+        ret = rpc_client.nvmf_set_config(snode.pollers_mask)
+        if not ret:
+            logger.error("Failed to set pollers mask")
+            return False
+
+    # 4- start spdk framework
     ret = rpc_client.framework_start_init()
     if not ret:
         logger.error("Failed to start framework")
         return False
 
-    # 3- set nvme bdev options
+    # 5- set app_thread cpu mask
+    if snode.app_thread_mask:
+        ret = rpc_client.thread_get_stats()
+        app_thread_process_id = 0
+        if ret.get("threads"):
+            for entry in ret["threads"]:
+                if entry['name'] == 'app_thread':
+                    app_thread_process_id = entry['id']
+                    break
+
+        ret = rpc_client.thread_set_cpumask(app_thread_process_id, snode.app_thread_mask)
+        if not ret:
+            logger.error("Failed to set app thread mask")
+            return False
+
+    # 6- set nvme bdev options
     ret = rpc_client.bdev_nvme_set_options()
     if not ret:
         logger.error("Failed to set nvme options")
@@ -878,10 +933,6 @@ def restart_storage_node(
     logger.info(f"Node info: {node_info}")
 
     logger.info("Restarting SPDK")
-    cpu = snode.spdk_cpu_mask
-    if spdk_cpu_mask:
-        cpu = spdk_cpu_mask
-        snode.spdk_cpu_mask = cpu
     mem = snode.spdk_mem
     if spdk_mem:
         mem = spdk_mem
@@ -897,7 +948,7 @@ def restart_storage_node(
 
     cluster_docker = utils.get_docker_client(snode.cluster_id)
     cluster_ip = cluster_docker.info()["Swarm"]["NodeAddr"]
-    results, err = snode_api.spdk_process_start(cpu, mem, img, spdk_debug, cluster_ip)
+    results, err = snode_api.spdk_process_start(snode.spdk_cpu_mask, mem, img, spdk_debug, cluster_ip)
 
     if not results:
         logger.error(f"Failed to start spdk: {err}")
@@ -931,13 +982,41 @@ def restart_storage_node(
             logger.error("Failed to set iobuf options")
             return False
 
-    # 2- start spdk framework
+    # 2- set socket implementation options
+    ret = rpc_client.sock_impl_set_options()
+    if not ret:
+        logger.error("Failed socket implement set options")
+        return False
+
+    # 3- set nvme config
+    if snode.pollers_mask:
+        ret = rpc_client.nvmf_set_config(snode.pollers_mask)
+        if not ret:
+            logger.error("Failed to set pollers mask")
+            return False
+
+    # 4- start spdk framework
     ret = rpc_client.framework_start_init()
     if not ret:
         logger.error("Failed to start framework")
         return False
 
-    # 3- set nvme bdev options
+    # 5- set app_thread cpu mask
+    if snode.app_thread_mask:
+        ret = rpc_client.thread_get_stats()
+        app_thread_process_id = 0
+        if ret.get("threads"):
+            for entry in ret["threads"]:
+                if entry['name'] == 'app_thread':
+                    app_thread_process_id = entry['id']
+                    break
+
+        ret = rpc_client.thread_set_cpumask(app_thread_process_id, snode.app_thread_mask)
+        if not ret:
+            logger.error("Failed to set app thread mask")
+            return False
+
+    # 6- set nvme bdev options
     ret = rpc_client.bdev_nvme_set_options()
     if not ret:
         logger.error("Failed to set nvme options")

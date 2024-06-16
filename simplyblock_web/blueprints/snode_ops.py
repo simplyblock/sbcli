@@ -67,23 +67,10 @@ def spdk_process_start():
     spdk_cpu_mask = None
     if 'spdk_cpu_mask' in data:
         spdk_cpu_mask = data['spdk_cpu_mask']
+
     spdk_mem = None
     if 'spdk_mem' in data:
         spdk_mem = data['spdk_mem']
-    node_cpu_count = os.cpu_count()
-
-    if spdk_cpu_mask:
-        try:
-            requested_cpu_count = len(format(int(spdk_cpu_mask, 16), 'b'))
-            if requested_cpu_count > node_cpu_count:
-                return utils.get_response(
-                    False,
-                    f"The requested cpu count: {requested_cpu_count} "
-                    f"is larger than the node's cpu count: {node_cpu_count}")
-        except:
-            spdk_cpu_mask = hex(int(math.pow(2, node_cpu_count)) - 1)
-    else:
-        spdk_cpu_mask = hex(int(math.pow(2, node_cpu_count)) - 1)
 
     if spdk_mem:
         spdk_mem = int(utils.parse_size(spdk_mem) / (1000 * 1000))

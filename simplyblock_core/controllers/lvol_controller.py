@@ -265,7 +265,7 @@ def add_lvol(name, size, host_id_or_name, pool_id_or_name, use_comp, use_crypto,
 
     # name, vuid, ndcs, npcs, num_blocks, block_size, alloc_names
     ret = rpc_client.bdev_distrib_create(f"distr_{name}", vuid, distr_ndcs, distr_npcs, num_blocks, distr_bs, jm_names,
-                                         distr_chunk_bs)
+                                         distr_chunk_bs, dev_cpu_mask=snode.dev_cpu_mask)
     bdev_stack.append({"type": "distr", "name": f"distr_{name}"})
     if not ret:
         logger.error("failed to create Distr bdev")
@@ -761,6 +761,7 @@ def _create_bdev_stack(lvol, snode, ha_comm_addrs, ha_inode_self):
             params['jm_names'] = get_jm_names(snode)
             params['ha_comm_addrs'] = ha_comm_addrs
             params['ha_inode_self'] = ha_inode_self
+            params['dev_cpu_mask'] = snode.dev_cpu_mask
             ret = rpc_client.bdev_distrib_create(**params)
             if ret:
                 ret = distr_controller.send_cluster_map_to_node(snode)
