@@ -115,6 +115,11 @@ def set_node_offline(node):
         tasks_controller.add_node_to_auto_restart(node)
 
 
+def set_node_devices_unavailable(node):
+    for dev in node.nvme_devices:
+        device_controller.device_set_unavailable(dev.get_id())
+
+
 logger.info("Starting node monitor")
 while True:
     clusters = db_controller.get_clusters()
@@ -124,6 +129,9 @@ while True:
         nodes = db_controller.get_storage_nodes_by_cluster_id(cluster_id)
         for snode in nodes:
             if snode.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_UNREACHABLE]:
+                if snode.status in [StorageNode.STATUS_OFFLINE, StorageNode.STATUS_SUSPENDED,
+                                    StorageNode.STATUS_REMOVED]:
+                    set_node_devices_unavailable(snode)
                 logger.info(f"Node status is: {snode.status}, skipping")
                 continue
 
@@ -154,8 +162,7 @@ while True:
 
             if not ping_check and not node_rpc_check:
                 # node is dead, set devices offline
-                for dev in snode.nvme_devices:
-                    device_controller.device_set_unavailable(dev.get_id())
+                set_node_devices_unavailable(snode)
 
         update_cluster_status(cluster_id)
 
