@@ -12,15 +12,26 @@ contactPoints:
     name: grafana-alerts
     receivers:
       - uid: grafana
-        type: slack
+        type: {{ ALERT_TYPE }}
+        {% if ALERT_TYPE == 'slack' %}
         settings:
           username: grafana_bot
-          url: 'https://hooks.slack.com/services/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'
+          url: '{{ CONTACT_POINT }}'
           title: |
-            {{ template "slack.title" . }}
+            {{ '{{' }} template "slack.title" . {{ '}}' }}
           text: |
-            {{ template "slack.message" . }}
+            {{ '{{' }} template "slack.message" . {{ '}}' }}
+        {% else %}
+        settings:
+          addresses: '{{ CONTACT_POINT }}'
+          subject: |
+            {{ '{{' }} template "email.subject" . {{ '}}' }}
+          body: |
+            {{ '{{' }} template "email.body" . {{ '}}' }}
+        {% endif %}
 
+{% if ALERT_TYPE == 'slack' %}
+{% raw %}
 templates:
   - orgId: 1
     name: slack.title
@@ -38,7 +49,9 @@ templates:
       *Description*: {{ .Annotations.description }}
       {{ end -}}
       *Log message*: {{ index .Labels "message" }}
-      *Explore logs:* https://grafanaURL.com/explore?orgId=1
+      {% endraw %}
+      *Explore logs:* {{ GRAFANA_ENDPOINT }}
+      {% raw %}
       {{ if .DashboardURL -}}
       *Go to dashboard:* {{ .DashboardURL }}
       {{- end }}
@@ -65,3 +78,39 @@ templates:
       {{ end }}
 
       {{- end }}
+{% endraw %}
+{% else %}
+{% raw %}
+  - orgId: 1
+    name: email.subject
+    template: |-
+      {{ define "email.subject" -}}
+      [{{ .Status | toUpper }}] Grafana Alert
+      {{- end -}}
+  - orgId: 1
+    name: email.body
+    template: |-
+      {{ define "email.body" -}}
+      Alert: {{ .Labels.alertname }}
+      {{ if .Annotations -}}
+      Summary: {{ .Annotations.summary}}
+      Description: {{ .Annotations.description }}
+      {{ end -}}
+      Log message: {{ index .Labels "message" }}
+      Explore logs: {{ GRAFANA_ENDPOINT }}
+      {{ if .DashboardURL -}}
+      Go to dashboard: {{ .DashboardURL }}
+      {{- end }}
+      {{ if .PanelURL -}}
+      Go to panel: {{ .PanelURL }}
+      {{- end }}
+      Details:
+      {{ range .Labels.SortedPairs -}}
+      - {{ .Name }}: `{{ .Value }}`
+      {{ end -}}
+      {{ if .SilenceURL -}}
+      Silence this alert: {{ .SilenceURL }}
+      {{- end }}
+      {{- end }}
+{% endraw %}
+{% endif %}

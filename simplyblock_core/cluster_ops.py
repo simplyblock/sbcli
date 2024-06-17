@@ -3,11 +3,16 @@ import json
 import logging
 import math
 import os
+import re
+import tempfile
+import shutil
+import subprocess
 import time
 import uuid
 
 import docker
 import requests
+from jinja2 import Environment, FileSystemLoader
 
 from simplyblock_core import utils, scripts, constants, mgmt_node_ops, storage_node_ops, shell_utils
 from simplyblock_core.controllers import cluster_events, device_controller
@@ -17,7 +22,7 @@ from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
 
 logger = logging.getLogger()
-
+TOP_DIR = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 
 def _add_graylog_input(cluster_ip, password):
     url = f"http://{cluster_ip}:9000/api/system/inputs"
@@ -47,7 +52,8 @@ def _add_graylog_input(cluster_ip, password):
 
 
 def create_cluster(blk_size, page_size_in_blocks, cli_pass,
-                   cap_warn, cap_crit, prov_cap_warn, prov_cap_crit, ifname, log_del_interval, metrics_retention_period):
+                   cap_warn, cap_crit, prov_cap_warn, prov_cap_crit, ifname, log_del_interval, metrics_retention_period,
+                    contact_point, grafana_endpoint):
     logger.info("Installing dependencies...")
     ret = scripts.install_deps()
     logger.info("Installing dependencies > Done")
@@ -101,6 +107,43 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
         c.prov_cap_warn = prov_cap_warn
     if prov_cap_crit and prov_cap_crit > 0:
         c.prov_cap_crit = prov_cap_crit
+
+    alerts_template_folder = os.path.join(TOP_DIR, "simplyblock_core/scripts/alerting/")
+    alert_resources_file = "alert_resources.yaml"
+
+    env = Environment(loader=FileSystemLoader(alerts_template_folder), trim_blocks=True, lstrip_blocks=True)
+    template = env.get_template(f'{alert_resources_file}.j2')
+
+    slack_pattern = re.compile(r"https://hooks\.slack\.com/services/\S+")
+    email_pattern = re.compile(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$")
+
+    if slack_pattern.match(contact_point):
+        ALERT_TYPE = "slack"
+    elif email_pattern.match(contact_point):
+        ALERT_TYPE = "email"
+    else:
+        ALERT_TYPE = "slack" 
+
+    values = {
+        'CONTACT_POINT': contact_point,
+        'GRAFANA_ENDPOINT': grafana_endpoint,
+        'ALERT_TYPE': ALERT_TYPE,
+    }
+
+    temp_dir = tempfile.mkdtemp()
+
+    temp_file_path = os.path.join(temp_dir, alert_resources_file)
+    with open(temp_file_path, 'w') as file:
+        file.write(template.render(values))
+
+    destination_file_path = os.path.join(alerts_template_folder, alert_resources_file)
+    try:
+        subprocess.run(['sudo', '-v'], check=True) # sudo -v checks if the current user has sudo permissions
+        subprocess.run(['sudo', 'mv', temp_file_path, destination_file_path], check=True)
+        print(f"File moved to {destination_file_path} successfully.")
+    except subprocess.CalledProcessError as e:
+        print(f"An error occurred: {e}")
+    shutil.rmtree(temp_dir)
 
     logger.info("Deploying swarm stack ...")
     ret = scripts.deploy_stack(cli_pass, DEV_IP, constants.SIMPLY_BLOCK_DOCKER_IMAGE, c.secret, c.uuid, log_del_interval, metrics_retention_period)
