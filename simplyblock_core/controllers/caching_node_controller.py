@@ -124,7 +124,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spd
     # snode.host_nqn = subsystem_nqn
     snode.subsystem = subsystem_nqn
     snode.data_nics = data_nics
-    snode.mgmt_ip = node_info['network_interface'][iface_name]['ip']
+    snode.node_ip = node_info['network_interface'][iface_name]['ip']
     snode.rpc_port = constants.RPC_HTTP_PROXY_PORT
     snode.rpc_username = rpc_user
     snode.rpc_password = rpc_pass
@@ -155,7 +155,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spd
     logger.info(f"Trying to set hugepages for: {utils.humanbytes(spdk_mem)}")
     logger.info("Deploying SPDK")
     results, err = snode_api.spdk_process_start(
-        spdk_cpu_mask, spdk_mem, spdk_image, snode.mgmt_ip,
+        spdk_cpu_mask, spdk_mem, spdk_image, snode.node_ip,
         snode.rpc_port, snode.rpc_username, snode.rpc_password, namespace)
     if not results:
         logger.error(f"Failed to start spdk: {err}")
@@ -178,7 +178,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spd
 
     # creating RPCClient instance
     rpc_client = RPCClient(
-        snode.mgmt_ip, snode.rpc_port,
+        snode.node_ip, snode.rpc_port,
         snode.rpc_username, snode.rpc_password,
         timeout=60*5, retry=5)
 
@@ -262,11 +262,11 @@ def recreate(node_id):
         return False
 
     logger.info(f"Recreating caching node: {node_id}, status: {snode.status}")
-    snode_api = CNodeClient(f"{snode.mgmt_ip}:5000")
+    snode_api = CNodeClient(f"{snode.node_ip}:5000")
 
     # creating RPCClient instance
     rpc_client = RPCClient(
-        snode.mgmt_ip, snode.rpc_port,
+        snode.node_ip, snode.rpc_port,
         snode.rpc_username, snode.rpc_password,
         timeout=60*5, retry=5)
 
@@ -354,7 +354,7 @@ def connect(caching_node_id, lvol_id):
     mini_id = lvol.get_id().split("-")[0]
     rem_name = f"rem_{mini_id}"
     rpc_client = RPCClient(
-        cnode.mgmt_ip, cnode.rpc_port, cnode.rpc_username, cnode.rpc_password,
+        cnode.node_ip, cnode.rpc_port, cnode.rpc_username, cnode.rpc_password,
         timeout=60*5, retry=5)
     # create nvmef connection
     if lvol.ha_type == 'single':
@@ -500,7 +500,7 @@ def disconnect(caching_node_id, lvol_id):
 
     # remove subsystem
     rpc_client = RPCClient(
-        cnode.mgmt_ip, cnode.rpc_port, cnode.rpc_username, cnode.rpc_password, timeout=120)
+        cnode.node_ip, cnode.rpc_port, cnode.rpc_username, cnode.rpc_password, timeout=120)
 
     ret = rpc_client.subsystem_delete(subsystem_nqn)
 
@@ -601,7 +601,7 @@ def list_nodes(is_json=False):
         data.append({
             "UUID": node.uuid,
             "Hostname": node.hostname,
-            "Management IP": node.mgmt_ip,
+            "Management IP": node.node_ip,
             "LVOLs": f"{len(node.lvols)}",
             "Cache": utils.humanbytes(node.cache_size),
             "Ram": utils.humanbytes(node.memory),

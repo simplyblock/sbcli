@@ -208,7 +208,7 @@ def add_lvol(name, size, host_id_or_name, pool_id_or_name, use_comp, use_crypto,
 
     # creating RPCClient instance
     rpc_client = RPCClient(
-        snode.mgmt_ip,
+        snode.node_ip,
         snode.rpc_port,
         snode.rpc_username,
         snode.rpc_password)
@@ -719,7 +719,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
         for node in three_nodes:
             nodes_ids.append(node.get_id())
             port = 10000 + int(random.random() * 60000)
-            nodes_ips.append(f"{node.mgmt_ip}:{port}")
+            nodes_ips.append(f"{node.node_ip}:{port}")
 
         ha_address = ",".join(nodes_ips)
         for index, node in enumerate(three_nodes):
@@ -745,7 +745,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
 
 
 def _create_bdev_stack(lvol, snode, ha_comm_addrs, ha_inode_self):
-    rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
+    rpc_client = RPCClient(snode.node_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
 
     created_bdevs = []
     for bdev in lvol.bdev_stack:
@@ -796,7 +796,7 @@ def _create_bdev_stack(lvol, snode, ha_comm_addrs, ha_inode_self):
 
 
 def add_lvol_on_node(lvol, snode, ha_comm_addrs=None, ha_inode_self=None):
-    rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
+    rpc_client = RPCClient(snode.node_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
     spdk_mem_info_before = rpc_client.ultra21_util_get_malloc_stats()
 
     ret, msg = _create_bdev_stack(lvol, snode, ha_comm_addrs, ha_inode_self)
@@ -870,7 +870,7 @@ def recreate_lvol(lvol_id, snode):
         for node_id in lvol.nodes:
             sn = db_controller.get_storage_node_by_id(node_id)
             port = 10000 + int(random.random() * 60000)
-            nodes_ips.append(f"{sn.mgmt_ip}:{port}")
+            nodes_ips.append(f"{sn.node_ip}:{port}")
 
         ha_address = ",".join(nodes_ips)
         for index, node_id in enumerate(lvol.nodes):
@@ -915,7 +915,7 @@ def delete_lvol_from_node(lvol_id, node_id, clear_data=True):
     lvol = db_controller.get_lvol_by_id(lvol_id)
     snode = db_controller.get_storage_node_by_id(node_id)
     logger.info(f"Deleting LVol:{lvol.get_id()} from node:{snode.get_id()}")
-    rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
+    rpc_client = RPCClient(snode.node_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
 
     # 1- remove subsystem
     logger.info(f"Removing subsystem")
@@ -932,7 +932,7 @@ def delete_lvol_from_node(lvol_id, node_id, clear_data=True):
         logger.info(f"Clearing Alceml devices")
         for node in db_controller.get_storage_nodes():
             if node.status == StorageNode.STATUS_ONLINE:
-                rpc_node = RPCClient(node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password)
+                rpc_node = RPCClient(node.node_ip, node.rpc_port, node.rpc_username, node.rpc_password)
                 for dev in node.nvme_devices:
                     if dev.status != NVMeDevice.STATUS_JM:
                         ret = rpc_node.alceml_unmap_vuid(dev.alceml_bdev, lvol.vuid)
@@ -976,7 +976,7 @@ def delete_lvol(id_or_name, force_delete=False):
     snode = db_controller.get_storage_node_by_id(lvol.node_id)
     # creating RPCClient instance
     rpc_client = RPCClient(
-        snode.mgmt_ip,
+        snode.node_ip,
         snode.rpc_port,
         snode.rpc_username,
         snode.rpc_password)
@@ -1047,7 +1047,7 @@ def set_lvol(uuid, max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes, name=
     snode = db_controller.get_storage_node_by_hostname(lvol.hostname)
     # creating RPCClient instance
     rpc_client = RPCClient(
-        snode.mgmt_ip,
+        snode.node_ip,
         snode.rpc_port,
         snode.rpc_username,
         snode.rpc_password)
@@ -1209,7 +1209,7 @@ def resize_lvol(id, new_size):
 
     # creating RPCClient instance
     rpc_client = RPCClient(
-        snode.mgmt_ip,
+        snode.node_ip,
         snode.rpc_port,
         snode.rpc_username,
         snode.rpc_password)
@@ -1252,7 +1252,7 @@ def set_read_only(id):
 
     # creating RPCClient instance
     rpc_client = RPCClient(
-        snode.mgmt_ip,
+        snode.node_ip,
         snode.rpc_port,
         snode.rpc_username,
         snode.rpc_password)
@@ -1343,7 +1343,7 @@ def get_cluster_map(lvol_id):
         return False
 
     snode = db_controller.get_storage_node_by_id(lvol.node_id)
-    rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
+    rpc_client = RPCClient(snode.node_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
     ret = rpc_client.distr_get_cluster_map(lvol.base_bdev)
     if not ret:
         logger.error(f"Failed to get LVol cluster map: {lvol_id}")
@@ -1383,7 +1383,7 @@ def migrate(lvol_id, node_id):
         for node in three_nodes:
             nodes_ids.append(node.get_id())
             port = 10000 + int(random.random() * 60000)
-            nodes_ips.append(f"{node.mgmt_ip}:{port}")
+            nodes_ips.append(f"{node.node_ip}:{port}")
 
         ha_address = ",".join(nodes_ips)
         for index, node in enumerate(three_nodes):

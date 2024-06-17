@@ -13,7 +13,7 @@ from simplyblock_core.models.mgmt_node import MgmtNode
 logger = logging.getLogger()
 
 
-def add_mgmt_node(mgmt_ip, cluster_id=None):
+def add_mgmt_node(node_ip, cluster_id=None):
     db_controller = DBController()
     hostname = utils.get_hostname()
     node = db_controller.get_mgmt_node_by_hostname(hostname)
@@ -24,9 +24,9 @@ def add_mgmt_node(mgmt_ip, cluster_id=None):
     node = MgmtNode()
     node.uuid = str(uuid.uuid4())
     node.hostname = hostname
-    node.docker_ip_port = f"{mgmt_ip}:2375"
+    node.docker_ip_port = f"{node_ip}:2375"
     node.cluster_id = cluster_id
-    node.mgmt_ip = mgmt_ip
+    node.node_ip = node_ip
     node.status = MgmtNode.STATUS_ONLINE
     node.write_to_db(db_controller.kv_store)
 
@@ -47,7 +47,7 @@ def list_mgmt_nodes(is_json):
         data.append({
             "UUID": node.get_id(),
             "Hostname": node.hostname,
-            "IP": node.mgmt_ip,
+            "IP": node.node_ip,
             "Status": node.status,
         })
 

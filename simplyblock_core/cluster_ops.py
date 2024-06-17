@@ -676,7 +676,7 @@ def update_cluster(cl_id):
         print(e)
 
     for node in db_controller.get_storage_nodes():
-        node_docker = docker.DockerClient(base_url=f"tcp://{node.mgmt_ip}:2375", version="auto")
+        node_docker = docker.DockerClient(base_url=f"tcp://{node.node_ip}:2375", version="auto")
         logger.info(f"Pulling image {constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE}")
         node_docker.images.pull(constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE)
         if node.status == StorageNode.STATUS_ONLINE:

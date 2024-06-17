@@ -40,7 +40,7 @@ def add(lvol_id, snapshot_name):
         if sn.lvol.get_id() == lvol_id:
             snap_count += 1
 
-    rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
+    rpc_client = RPCClient(snode.node_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
     spdk_mem_info_before = rpc_client.ultra21_util_get_malloc_stats()
 
     num_blocks = int(lvol.size / lvol.distr_bs)
@@ -132,7 +132,7 @@ def delete(snapshot_uuid):
 
     # creating RPCClient instance
     rpc_client = RPCClient(
-        snode.mgmt_ip,
+        snode.node_ip,
         snode.rpc_port,
         snode.rpc_username,
         snode.rpc_password)
@@ -219,7 +219,7 @@ def clone(snapshot_id, clone_name, new_size=0):
 
     bdev_stack = []
     jm_names = lvol_controller.get_jm_names(snode)
-    rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
+    rpc_client = RPCClient(snode.node_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
     spdk_mem_info_before = rpc_client.ultra21_util_get_malloc_stats()
 
     num_blocks = int(lvol.size / lvol.distr_bs)

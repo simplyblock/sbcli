@@ -213,7 +213,7 @@ def _prepare_cluster_devices(snode, after_restart=False):
     db_controller = DBController()
 
     rpc_client = RPCClient(
-        snode.mgmt_ip, snode.rpc_port,
+        snode.node_ip, snode.rpc_port,
         snode.rpc_username, snode.rpc_password)
 
     for index, nvme in enumerate(snode.nvme_devices):
@@ -302,7 +302,7 @@ def _connect_to_remote_devs(this_node):
     db_controller = DBController()
 
     rpc_client = RPCClient(
-        this_node.mgmt_ip, this_node.rpc_port,
+        this_node.node_ip, this_node.rpc_port,
         this_node.rpc_username, this_node.rpc_password)
 
     remote_devices = []
@@ -453,7 +453,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask,
     snode.host_nqn = subsystem_nqn
     snode.subsystem = subsystem_nqn
     snode.data_nics = data_nics
-    snode.mgmt_ip = node_info['network_interface'][iface_name]['ip']
+    snode.node_ip = node_info['network_interface'][iface_name]['ip']
     snode.rpc_port = constants.RPC_HTTP_PROXY_PORT
     snode.rpc_username = rpc_user
     snode.rpc_password = rpc_pass
@@ -486,7 +486,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask,
 
     # creating RPCClient instance
     rpc_client = RPCClient(
-        snode.mgmt_ip, snode.rpc_port,
+        snode.node_ip, snode.rpc_port,
         snode.rpc_username, snode.rpc_password)
 
     # 1- set iobuf options
@@ -562,7 +562,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask,
         if node.get_id() == snode.get_id() or node.status != StorageNode.STATUS_ONLINE:
             continue
         logger.info(f"Connecting to node: {node.get_id()}")
-        rpc_client = RPCClient(node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password)
+        rpc_client = RPCClient(node.node_ip, node.rpc_port, node.rpc_username, node.rpc_password)
         count = 0
         for dev in snode.nvme_devices:
             if dev.status != NVMeDevice.STATUS_ONLINE:
@@ -630,7 +630,7 @@ def add_storage_node(cluster_id, iface_name, data_nics):
         snode = StorageNode()
         snode.uuid = str(uuid.uuid4())
 
-    mgmt_ip = _get_if_ip_address(iface_name)
+    node_ip = _get_if_ip_address(iface_name)
     system_id = utils.get_system_id()
 
     BASE_NQN = cluster.nqn.split(":")[0]
@@ -651,7 +651,7 @@ def add_storage_node(cluster_id, iface_name, data_nics):
     snode.host_nqn = subsystem_nqn
     snode.subsystem = subsystem_nqn
     snode.data_nics = data_nics
-    snode.mgmt_ip = mgmt_ip
+    snode.node_ip = node_ip
     snode.rpc_port = constants.RPC_HTTP_PROXY_PORT
     snode.rpc_username = rpc_user
     snode.rpc_password = rpc_pass
@@ -660,7 +660,7 @@ def add_storage_node(cluster_id, iface_name, data_nics):
 
     # creating RPCClient instance
     rpc_client = RPCClient(
-        snode.mgmt_ip,
+        snode.node_ip,
         snode.rpc_port,
         snode.rpc_username,
         snode.rpc_password)
@@ -701,7 +701,7 @@ def add_storage_node(cluster_id, iface_name, data_nics):
         if node.get_id() == snode.get_id():
             continue
         logger.info(f"Connecting to node: {node.get_id()}")
-        rpc_client = RPCClient(node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password)
+        rpc_client = RPCClient(node.node_ip, node.rpc_port, node.rpc_username, node.rpc_password)
         count = 0
         for dev in snode.nvme_devices:
             name = f"remote_{dev.alceml_bdev}"
@@ -818,7 +818,7 @@ def remove_storage_node(node_id, force_remove=False):
 
     logger.debug("Leaving swarm...")
     try:
-        node_docker = docker.DockerClient(base_url=f"tcp://{snode.mgmt_ip}:2375", version="auto")
+        node_docker = docker.DockerClient(base_url=f"tcp://{snode.node_ip}:2375", version="auto")
         cluster_docker = utils.get_docker_client(snode.cluster_id)
         cluster_docker.nodes.get(node_docker.info()["Swarm"]["NodeID"]).remove(force=True)
     except:
@@ -871,7 +871,7 @@ def restart_storage_node(
     distr_controller.send_node_status_event(snode.get_id(), snode.status)
     storage_events.snode_status_change(snode, snode.status, old_status)
 
-    logger.info(f"Restarting Storage node: {snode.mgmt_ip}")
+    logger.info(f"Restarting Storage node: {snode.node_ip}")
 
     snode_api = SNodeClient(snode.api_endpoint)
     node_info, _ = snode_api.info()
@@ -917,7 +917,7 @@ def restart_storage_node(
 
     # creating RPCClient instance
     rpc_client = RPCClient(
-        snode.mgmt_ip, snode.rpc_port,
+        snode.node_ip, snode.rpc_port,
         snode.rpc_username, snode.rpc_password,
         timeout=10 * 60, retry=5)
 
@@ -1001,7 +1001,7 @@ def restart_storage_node(
         if node.get_id() == snode.get_id() or node.status != StorageNode.STATUS_ONLINE:
             continue
         logger.info(f"Connecting to node: {node.get_id()}")
-        rpc_client = RPCClient(node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password)
+        rpc_client = RPCClient(node.node_ip, node.rpc_port, node.rpc_username, node.rpc_password)
         count = 0
         for dev in snode.nvme_devices:
             if dev.status != 'online':
@@ -1082,7 +1082,7 @@ def list_storage_nodes(kv_store, is_json):
         data.append({
             "UUID": node.uuid,
             "Hostname": node.hostname,
-            "Management IP": node.mgmt_ip,
+            "Management IP": node.node_ip,
             "Devices": f"{total_devices}/{online_devices}",
             "LVols": f"{len(node.lvols)}",
             # "Data NICs": "\n".join([d.if_name for d in node.data_nics]),
@@ -1198,7 +1198,7 @@ def shutdown_storage_node(node_id, force=False):
         distr_controller.disconnect_device(dev)
 
     rpc_client = RPCClient(
-        snode.mgmt_ip, snode.rpc_port,
+        snode.node_ip, snode.rpc_port,
         snode.rpc_username, snode.rpc_password)
 
     # delete jm
@@ -1259,7 +1259,7 @@ def suspend_storage_node(node_id, force=False):
             device_controller.device_set_unavailable(dev.get_id())
 
     rpc_client = RPCClient(
-        snode.mgmt_ip, snode.rpc_port,
+        snode.node_ip, snode.rpc_port,
         snode.rpc_username, snode.rpc_password)
 
     logger.debug("Setting LVols to offline")
@@ -1304,7 +1304,7 @@ def resume_storage_node(node_id):
             device_controller.device_set_online(dev.get_id())
 
     rpc_client = RPCClient(
-        snode.mgmt_ip, snode.rpc_port,
+        snode.node_ip, snode.rpc_port,
         snode.rpc_username, snode.rpc_password)
 
     logger.debug("Setting LVols to online")
@@ -1439,7 +1439,7 @@ def add_storage_device(dev_name, node_id, cluster_id):
     logger.info("init device in spdk")
     # creating RPCClient instance
     rpc_client = RPCClient(
-        snode.mgmt_ip,
+        snode.node_ip,
         snode.rpc_port,
         snode.rpc_username,
         snode.rpc_password)
@@ -1703,13 +1703,13 @@ def health_check(node_id):
 
     try:
 
-        res = utils.ping_host(snode.mgmt_ip)
+        res = utils.ping_host(snode.node_ip)
         if res:
-            logger.info(f"Ping host: {snode.mgmt_ip}... OK")
+            logger.info(f"Ping host: {snode.node_ip}... OK")
         else:
-            logger.error(f"Ping host: {snode.mgmt_ip}... Failed")
+            logger.error(f"Ping host: {snode.node_ip}... Failed")
 
-        node_docker = docker.DockerClient(base_url=f"tcp://{snode.mgmt_ip}:2375", version="auto")
+        node_docker = docker.DockerClient(base_url=f"tcp://{snode.node_ip}:2375", version="auto")
         containers_list = node_docker.containers.list(all=True)
         for cont in containers_list:
             name = cont.attrs['Name']
@@ -1732,7 +1732,7 @@ def health_check(node_id):
     try:
         logger.info("Connecting to node's SPDK")
         rpc_client = RPCClient(
-            snode.mgmt_ip, snode.rpc_port,
+            snode.node_ip, snode.rpc_port,
             snode.rpc_username, snode.rpc_password,
             timeout=3, retry=1)
 
@@ -1771,7 +1771,7 @@ def health_check(node_id):
 
     try:
         logger.info("Connecting to node's API")
-        snode_api = SNodeClient(f"{snode.mgmt_ip}:5000")
+        snode_api = SNodeClient(f"{snode.node_ip}:5000")
         node_info, _ = snode_api.info()
         logger.info(f"Node info: {node_info['hostname']}")
 
@@ -1787,7 +1787,7 @@ def get_info(node_id):
         logger.error(f"Can not find storage node: {node_id}")
         return False
 
-    snode_api = SNodeClient(f"{snode.mgmt_ip}:5000")
+    snode_api = SNodeClient(f"{snode.node_ip}:5000")
     node_info, _ = snode_api.info()
     return json.dumps(node_info, indent=2)
 
@@ -1800,7 +1800,7 @@ def get_spdk_info(node_id):
         logger.error(f"Can not find storage node: {node_id}")
         return False
 
-    rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
+    rpc_client = RPCClient(snode.node_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
     ret = rpc_client.ultra21_util_get_malloc_stats()
     if not ret:
         logger.error(f"Failed to get SPDK info for node {node_id}")

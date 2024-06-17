@@ -139,12 +139,12 @@ class SbcliUtils:
         data = self.get_management_nodes()
 
         for nodes in data["results"]:
-            management_nodes.append(nodes["mgmt_ip"])
+            management_nodes.append(nodes["node_ip"])
 
         data = self.get_storage_nodes()
 
         for nodes in data["results"]:
-            storage_nodes.append(nodes["mgmt_ip"])
+            storage_nodes.append(nodes["node_ip"])
 
         return management_nodes, storage_nodes
 

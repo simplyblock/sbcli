@@ -127,21 +127,21 @@ while True:
         logger.info(f"Checking node {snode.hostname}")
 
         # 1- check node ping
-        ping_check = health_controller._check_node_ping(snode.mgmt_ip)
-        logger.info(f"Check: ping mgmt ip {snode.mgmt_ip} ... {ping_check}")
+        ping_check = health_controller._check_node_ping(snode.node_ip)
+        logger.info(f"Check: ping mgmt ip {snode.node_ip} ... {ping_check}")
 
         # 2- check node API
-        node_api_check = health_controller._check_node_api(snode.mgmt_ip)
-        logger.info(f"Check: node API {snode.mgmt_ip}:5000 ... {node_api_check}")
+        node_api_check = health_controller._check_node_api(snode.node_ip)
+        logger.info(f"Check: node API {snode.node_ip}:5000 ... {node_api_check}")
 
         # 3- check node RPC
         node_rpc_check = health_controller._check_node_rpc(
-            snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
-        logger.info(f"Check: node RPC {snode.mgmt_ip}:{snode.rpc_port} ... {node_rpc_check}")
+            snode.node_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
+        logger.info(f"Check: node RPC {snode.node_ip}:{snode.rpc_port} ... {node_rpc_check}")
 
         # 4- docker API
-        node_docker_check = health_controller._check_node_docker_api(snode.mgmt_ip)
-        logger.info(f"Check: node docker API {snode.mgmt_ip}:2375 ... {node_docker_check}")
+        node_docker_check = health_controller._check_node_docker_api(snode.node_ip)
+        logger.info(f"Check: node docker API {snode.node_ip}:2375 ... {node_docker_check}")
 
         is_node_online = ping_check and node_api_check and node_rpc_check and node_docker_check
         if is_node_online:

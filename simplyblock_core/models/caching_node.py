@@ -69,7 +69,7 @@ class CachingNode(BaseModel):
         "updated_at": {"type": str, 'default': str(datetime.now())},
         "create_dt": {"type": str, 'default': str(datetime.now())},
         "remove_dt": {"type": str, 'default': str(datetime.now())},
-        "mgmt_ip": {"type": str, 'default': ""},
+        "node_ip": {"type": str, 'default': ""},
         "rpc_port": {"type": int, 'default': -1},
         "rpc_username": {"type": str, 'default': ""},
         "rpc_password": {"type": str, 'default': ""},

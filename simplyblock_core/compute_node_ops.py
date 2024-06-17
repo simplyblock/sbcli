@@ -159,7 +159,7 @@ def list_compute_nodes(kv_store, is_json):
             "create_dt": node.create_dt,
             "host_nqn": node.host_nqn,
             "hostname": node.hostname,
-            "mgmt_ip": node.mgmt_ip,
+            "node_ip": node.node_ip,
             "status": node.status,
             "subsystem": node.subsystem,
             "system_uuid": node.system_uuid})

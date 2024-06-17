@@ -61,7 +61,7 @@ def process_device_event(event):
             else:
                 logger.info(f"Removing remote storage id: {storage_id} from node: {node_id}")
                 new_remote_devices = []
-                rpc_client = RPCClient(device_node.mgmt_ip, device_node.rpc_port,
+                rpc_client = RPCClient(device_node.node_ip, device_node.rpc_port,
                                        device_node.rpc_username, device_node.rpc_password)
                 for rem_dev in device_node.remote_devices:
                     if rem_dev.get_id() == device.get_id():
@@ -137,7 +137,7 @@ while True:
         continue
 
     client = rpc_client.RPCClient(
-        snode.mgmt_ip,
+        snode.node_ip,
         snode.rpc_port,
         snode.rpc_username,
         snode.rpc_password,

@@ -34,7 +34,7 @@ class MgmtNode(BaseModel):
         "status": {"type": str, 'default': ""},
         "docker_ip_port": {"type": str, 'default': ""},
         "cluster_id": {"type": str, 'default': ""},
-        "mgmt_ip": {"type": str, 'default': ""},
+        "node_ip": {"type": str, 'default': ""},
         "updated_at": {"type": str, 'default': str(datetime.now())},
 
     }

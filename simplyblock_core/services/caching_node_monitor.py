@@ -71,12 +71,12 @@ while True:
             continue
 
         logger.info(f"Checking node {node.hostname}")
-        if not ping_host(node.mgmt_ip):
+        if not ping_host(node.node_ip):
             logger.info(f"Node {node.hostname} is offline")
             set_node_offline(node)
             continue
         rpc_client = RPCClient(
-            node.mgmt_ip,
+            node.node_ip,
             node.rpc_port,
             node.rpc_username,
             node.rpc_password,

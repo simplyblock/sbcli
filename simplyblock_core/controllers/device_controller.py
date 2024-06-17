@@ -95,7 +95,7 @@ def get_alceml_name(alceml_id):
 def _def_create_device_stack(device_obj, snode):
 
     rpc_client = RPCClient(
-        snode.mgmt_ip, snode.rpc_port,
+        snode.node_ip, snode.rpc_port,
         snode.rpc_username, snode.rpc_password,
         timeout=600
     )
@@ -203,7 +203,7 @@ def restart_device(device_id, force=False):
         if node.status != snode.STATUS_ONLINE:
             continue
 
-        rpc_client = RPCClient(node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password)
+        rpc_client = RPCClient(node.node_ip, node.rpc_port, node.rpc_username, node.rpc_password)
         name = f"remote_{device_obj.alceml_bdev}"
         ret = rpc_client.bdev_nvme_attach_controller_tcp(name, device_obj.nvmf_nqn, device_obj.nvmf_ip,
                                                          device_obj.nvmf_port)
@@ -244,7 +244,7 @@ def set_device_testing_mode(device_id, mode):
     logger.info(f"Set device:{device_id} Test mode:{mode}")
     # creating RPCClient instance
     rpc_client = RPCClient(
-        snode.mgmt_ip, snode.rpc_port,
+        snode.node_ip, snode.rpc_port,
         snode.rpc_username, snode.rpc_password)
 
     ret = rpc_client.bdev_passtest_mode(device.testing_bdev, mode)
@@ -283,7 +283,7 @@ def device_remove(device_id, force=True):
 
     logger.info("Removing device fabric")
     rpc_client = RPCClient(
-        snode.mgmt_ip, snode.rpc_port,
+        snode.node_ip, snode.rpc_port,
         snode.rpc_username, snode.rpc_password)
 
     ret = rpc_client.subsystem_delete(device.nvmf_nqn)
@@ -436,7 +436,7 @@ def reset_storage_device(dev_id):
 
     logger.info("Resetting device")
     rpc_client = RPCClient(
-        snode.mgmt_ip, snode.rpc_port,
+        snode.node_ip, snode.rpc_port,
         snode.rpc_username, snode.rpc_password)
 
     controller_name = device.nvme_bdev[:-2]

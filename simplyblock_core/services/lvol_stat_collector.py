@@ -132,7 +132,7 @@ while True:
             #     continue
             snode = db_controller.get_storage_node_by_hostname(lvol.hostname)
             rpc_client = RPCClient(
-                snode.mgmt_ip, snode.rpc_port,
+                snode.node_ip, snode.rpc_port,
                 snode.rpc_username, snode.rpc_password,
                 timeout=3, retry=2)
 

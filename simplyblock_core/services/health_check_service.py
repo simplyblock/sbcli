@@ -72,12 +72,12 @@ while True:
             continue
 
         # 1- check node ping
-        ping_check = health_controller._check_node_ping(snode.mgmt_ip)
-        logger.info(f"Check: ping mgmt ip {snode.mgmt_ip} ... {ping_check}")
+        ping_check = health_controller._check_node_ping(snode.node_ip)
+        logger.info(f"Check: ping mgmt ip {snode.node_ip} ... {ping_check}")
 
         # 2- check node API
-        node_api_check = health_controller._check_node_api(snode.mgmt_ip)
-        logger.info(f"Check: node API {snode.mgmt_ip}:5000 ... {node_api_check}")
+        node_api_check = health_controller._check_node_api(snode.node_ip)
+        logger.info(f"Check: node API {snode.node_ip}:5000 ... {node_api_check}")
 
         if snode.status == StorageNode.STATUS_OFFLINE:
             set_node_health_check(snode, ping_check & node_api_check)
@@ -85,12 +85,12 @@ while True:
 
         # 3- check node RPC
         node_rpc_check = health_controller._check_node_rpc(
-            snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
-        logger.info(f"Check: node RPC {snode.mgmt_ip}:{snode.rpc_port} ... {node_rpc_check}")
+            snode.node_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
+        logger.info(f"Check: node RPC {snode.node_ip}:{snode.rpc_port} ... {node_rpc_check}")
 
         # 4- docker API
-        node_docker_check = health_controller._check_node_docker_api(snode.mgmt_ip)
-        logger.info(f"Check: node docker API {snode.mgmt_ip}:2375 ... {node_docker_check}")
+        node_docker_check = health_controller._check_node_docker_api(snode.node_ip)
+        logger.info(f"Check: node docker API {snode.node_ip}:2375 ... {node_docker_check}")
 
         is_node_online = ping_check and node_api_check and node_rpc_check and node_docker_check
 
@@ -118,7 +118,7 @@ while True:
 
             logger.info(f"Node remote device: {len(snode.remote_devices)}")
             rpc_client = RPCClient(
-                snode.mgmt_ip, snode.rpc_port,
+                snode.node_ip, snode.rpc_port,
                 snode.rpc_username, snode.rpc_password,
                 timeout=5, retry=3)
             for remote_device in snode.remote_devices:

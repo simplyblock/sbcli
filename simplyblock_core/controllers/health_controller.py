@@ -114,21 +114,21 @@ def check_node(node_id, with_devices=True):
     # passed = True
 
     # 1- check node ping
-    ping_check = _check_node_ping(snode.mgmt_ip)
-    logger.info(f"Check: ping mgmt ip {snode.mgmt_ip} ... {ping_check}")
+    ping_check = _check_node_ping(snode.node_ip)
+    logger.info(f"Check: ping mgmt ip {snode.node_ip} ... {ping_check}")
 
     # 2- check node API
-    node_api_check = _check_node_api(snode.mgmt_ip)
-    logger.info(f"Check: node API {snode.mgmt_ip}:5000 ... {node_api_check}")
+    node_api_check = _check_node_api(snode.node_ip)
+    logger.info(f"Check: node API {snode.node_ip}:5000 ... {node_api_check}")
 
     # 3- check node RPC
     node_rpc_check = _check_node_rpc(
-        snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
-    logger.info(f"Check: node RPC {snode.mgmt_ip}:{snode.rpc_port} ... {node_rpc_check}")
+        snode.node_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
+    logger.info(f"Check: node RPC {snode.node_ip}:{snode.rpc_port} ... {node_rpc_check}")
 
     # 4- docker API
-    node_docker_check = _check_node_docker_api(snode.mgmt_ip)
-    logger.info(f"Check: node docker API {snode.mgmt_ip}:2375 ... {node_docker_check}")
+    node_docker_check = _check_node_docker_api(snode.node_ip)
+    logger.info(f"Check: node docker API {snode.node_ip}:2375 ... {node_docker_check}")
 
     is_node_online = ping_check and node_api_check and node_rpc_check and node_docker_check
 
@@ -151,7 +151,7 @@ def check_node(node_id, with_devices=True):
         logger.info(f"Node remote device: {len(snode.remote_devices)}")
 
         rpc_client = RPCClient(
-            snode.mgmt_ip, snode.rpc_port,
+            snode.node_ip, snode.rpc_port,
             snode.rpc_username, snode.rpc_password,
             timeout=3, retry=1)
         for remote_device in snode.remote_devices:
@@ -188,7 +188,7 @@ def check_device(device_id):
     passed = True
     try:
         rpc_client = RPCClient(
-            snode.mgmt_ip, snode.rpc_port,
+            snode.node_ip, snode.rpc_port,
             snode.rpc_username, snode.rpc_password)
 
         bdevs_stack = [device.nvme_bdev, device.testing_bdev, device.alceml_bdev, device.pt_bdev]
@@ -246,7 +246,7 @@ def check_remote_device(device_id):
             if node.get_id() == snode.get_id():
                 continue
             logger.info(f"Connecting to node: {node.get_id()}")
-            rpc_client = RPCClient(node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password)
+            rpc_client = RPCClient(node.node_ip, node.rpc_port, node.rpc_username, node.rpc_password)
             name = f"remote_{device.alceml_bdev}n1"
             ret = rpc_client.get_bdevs(name)
             if ret:
@@ -268,7 +268,7 @@ def check_lvol_on_node(lvol_id, node_id):
 
     snode = db_controller.get_storage_node_by_id(node_id)
     rpc_client = RPCClient(
-        snode.mgmt_ip, snode.rpc_port,
+        snode.node_ip, snode.rpc_port,
         snode.rpc_username, snode.rpc_password, timeout=5, retry=1)
 
     passed = True

@@ -182,7 +182,7 @@ while True:
                 continue
 
             rpc_client = RPCClient(
-                node.mgmt_ip, node.rpc_port,
+                node.node_ip, node.rpc_port,
                 node.rpc_username, node.rpc_password,
                 timeout=3, retry=2)
 
