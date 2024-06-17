@@ -144,7 +144,7 @@ def _def_create_device_stack(device_obj, snode):
     logger.info(f"Adding {pt_name} to the subsystem")
     ret = rpc_client.nvmf_subsystem_add_ns(subsystem_nqn, pt_name)
 
-    if device_obj.jm_bdev:
+    if hasattr(device_obj, 'jm_bdev') and device_obj.jm_bdev:
         ret = rpc_client.bdev_jm_create(device_obj.jm_bdev, device_obj.alceml_bdev)
         if not ret:
             logger.error(f"Failed to create jm bdev: {device_obj.jm_bdev}")
