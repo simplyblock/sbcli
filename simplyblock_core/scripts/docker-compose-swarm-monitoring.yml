@@ -138,11 +138,17 @@ services:
 
 volumes:
   mongodb_data:
+    driver: rexray/efs
   os_data:
+    driver: rexray/efs
   graylog_data:
+    driver: rexray/efs
   graylog_journal:
+    driver: rexray/efs
   grafana_data:
+    driver: rexray/efs
   prometheus_data:
+    driver: rexray/efs
   alertmanager_data:
 
 networks:
