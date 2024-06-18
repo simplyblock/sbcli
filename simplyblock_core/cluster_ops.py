@@ -16,9 +16,6 @@ from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
 
-import sys
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-from setup import get_env_var
 
 logger = logging.getLogger()
 
@@ -106,8 +103,8 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     if prov_cap_crit and prov_cap_crit > 0:
         c.prov_cap_crit = prov_cap_crit
 
-    simplyblock_docker_image = get_env_var("SIMPLY_BLOCK_DOCKER_IMAGE", 
-                                           constants.SIMPLY_BLOCK_DOCKER_IMAGE)
+    simplyblock_docker_image = os.environ.get("SIMPLY_BLOCK_DOCKER_IMAGE", 
+                                              constants.SIMPLY_BLOCK_DOCKER_IMAGE)
 
     logger.info("Deploying swarm stack ...")
     ret = scripts.deploy_stack(cli_pass, DEV_IP, simplyblock_docker_image, 
