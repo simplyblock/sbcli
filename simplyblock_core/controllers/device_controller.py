@@ -190,11 +190,6 @@ def restart_device(device_id, force=False):
         logger.error("Failed to create device stack")
         return False
 
-    logger.info("Setting device io_error to False")
-    device_set_io_error(device_id, False)
-    logger.info("Setting device online")
-    device_set_online(device_id)
-
     logger.info("Make other nodes connect to the device")
     snodes = db_controller.get_storage_nodes()
     for node_index, node in enumerate(snodes):
@@ -224,6 +219,10 @@ def restart_device(device_id, force=False):
         node.write_to_db(db_controller.kv_store)
         time.sleep(3)
 
+    logger.info("Setting device io_error to False")
+    device_set_io_error(device_id, False)
+    logger.info("Setting device online")
+    device_set_online(device_id)
     device_events.device_restarted(device_obj)
     return "Done"
 
