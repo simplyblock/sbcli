@@ -123,7 +123,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
         ALERT_TYPE = "email"
     else:
         ALERT_TYPE = "slack" 
-
+        contact_point = 'https://hooks.slack.com/services/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'
     values = {
         'CONTACT_POINT': contact_point,
         'GRAFANA_ENDPOINT': grafana_endpoint,
