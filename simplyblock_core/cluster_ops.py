@@ -140,9 +140,9 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     try:
         subprocess.run(['sudo', '-v'], check=True) # sudo -v checks if the current user has sudo permissions
         subprocess.run(['sudo', 'mv', temp_file_path, destination_file_path], check=True)
-        print(f"File moved to {destination_file_path} successfully.")
+        logger.info(f"File moved to {destination_file_path} successfully.")
     except subprocess.CalledProcessError as e:
-        print(f"An error occurred: {e}")
+        logger.error(f"An error occurred: {e}")
     shutil.rmtree(temp_dir)
 
     logger.info("Deploying swarm stack ...")
