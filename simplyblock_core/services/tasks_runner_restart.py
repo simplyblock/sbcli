@@ -113,7 +113,8 @@ def task_runner_node(task):
         storage_node_ops.set_node_status(task.node_id, StorageNode.STATUS_UNREACHABLE)
         return True
 
-    if _get_node_unavailable_devices_count(node.get_id()) == 0:
+    # if _get_node_unavailable_devices_count(node.get_id()) == 0:
+    if node.status == StorageNode.STATUS_ONLINE:
         logger.info(f"Node is online: {node.get_id()}, no restart needed")
         task.function_result = "skipped because node is online"
         task.status = JobSchedule.STATUS_DONE
@@ -138,7 +139,8 @@ def task_runner_node(task):
     if ret:
         logger.info(f"Node restart succeeded")
 
-    if _get_node_unavailable_devices_count(node.get_id()) == 0:
+    # if _get_node_unavailable_devices_count(node.get_id()) == 0:
+    if node.status == StorageNode.STATUS_ONLINE:
         logger.info(f"Node is online: {node.get_id()}, no restart needed")
         task.function_result = "done"
         task.status = JobSchedule.STATUS_DONE
