@@ -2005,7 +2005,7 @@ def set_node_status(node_id, status):
         snode.updated_at = str(datetime.datetime.now())
         snode.write_to_db(db_controller.kv_store)
         storage_events.snode_status_change(snode, snode.status, old_status, caused_by="monitor")
-        distr_controller.send_node_status_event(snode.get_id(), status)
+        distr_controller.send_node_status_event(snode, status)
 
     if snode.status == StorageNode.STATUS_ONLINE:
         logger.info("Connecting to remote devices")

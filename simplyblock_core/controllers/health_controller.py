@@ -55,7 +55,7 @@ def check_cluster(cluster_id):
 
 def _check_node_docker_api(ip):
     try:
-        node_docker = docker.DockerClient(base_url=f"tcp://{ip}:2375", version="auto")
+        node_docker = docker.DockerClient(base_url=f"tcp://{ip}:2375", version="auto", timeout=3)
         ret = node_docker.info()
         if ret:
             logger.debug(ret)
@@ -69,7 +69,7 @@ def _check_node_rpc(rpc_ip, rpc_port, rpc_username, rpc_password):
     try:
         rpc_client = RPCClient(
             rpc_ip, rpc_port, rpc_username, rpc_password,
-            timeout=5, retry=3)
+            timeout=3, retry=1)
         ret = rpc_client.get_version()
         if ret:
             logger.debug(f"SPDK version: {ret['version']}")
