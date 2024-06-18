@@ -34,7 +34,7 @@ def _add_task(function_name, cluster_id, node_id, device_id):
     task_obj.node_id = node_id
     task_obj.device_id = device_id
     task_obj.date = int(time.time())
-    task_obj.function_name = JobSchedule.FN_DEV_MIG
+    task_obj.function_name = function_name
     task_obj.status = JobSchedule.STATUS_NEW
     task_obj.write_to_db(db_controller.kv_store)
     tasks_events.task_create(task_obj)
