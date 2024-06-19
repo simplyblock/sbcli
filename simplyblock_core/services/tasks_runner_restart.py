@@ -143,6 +143,13 @@ def task_runner_node(task):
         storage_node_ops.set_node_status(task.node_id, StorageNode.STATUS_UNREACHABLE)
         return True
 
+    if node.status == StorageNode.STATUS_REMOVED:
+        logger.info(f"Node is removed: {task.node_id}, stopping task")
+        task.function_result = f"Node is removed"
+        task.status = JobSchedule.STATUS_DONE
+        task.write_to_db(db_controller.kv_store)
+        return True
+
     # if _get_node_unavailable_devices_count(node.get_id()) == 0:
     if node.status == StorageNode.STATUS_ONLINE:
         logger.info(f"Node is online: {node.get_id()}, no restart needed")
