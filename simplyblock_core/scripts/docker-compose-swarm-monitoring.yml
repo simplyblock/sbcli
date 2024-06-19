@@ -156,17 +156,17 @@ services:
 
 volumes:
   mongodb_data:
-    driver: rexray/efs
+    driver: ${USE_EFS:-local}
   os_data:
-    driver: rexray/efs
+    driver: ${USE_EFS:-local}
   graylog_data:
-    driver: rexray/efs
+    driver: ${USE_EFS:-local}
   graylog_journal:
-    driver: rexray/efs
+    driver: ${USE_EFS:-local}
   grafana_data:
-    driver: rexray/efs
+    driver: ${USE_EFS:-local}
   prometheus_data:
-    driver: rexray/efs
+    driver: ${USE_EFS:-local}
   alertmanager_data:
 
 networks:

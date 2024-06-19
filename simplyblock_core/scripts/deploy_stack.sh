@@ -21,6 +21,12 @@ fi
 
 docker network create monitoring-net -d overlay --attachable
 
+INSTANCE_ID=$(curl -s http://169.254.169.254/latest/meta-data/instance-id)
+
+if [ -n "$INSTANCE_ID" ]; then
+  echo "This is an AWS EC2 instance. Instance ID: $INSTANCE_ID"
+  export USE_EFS="rexray/efs"
+
 docker stack deploy --compose-file="$DIR"/docker-compose-swarm-monitoring.yml monitoring
 
 # wait for the services to become online
