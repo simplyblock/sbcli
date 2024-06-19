@@ -170,9 +170,6 @@ volumes:
   alertmanager_data:
 
 networks:
-  hostnet:
-    external: true
-    name: host
   localnet:
     driver: overlay
     ipam:
