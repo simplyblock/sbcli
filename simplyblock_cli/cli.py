@@ -58,10 +58,6 @@ class CLIWrapper:
         sub_command.add_argument("node_id", help='UUID of storage node')
 
         # remove storage node
-        sub_command = self.add_sub_command(subparser, "delete", 'Delete storage node')
-        sub_command.add_argument("node_id", help='UUID of storage node')
-
-        # remove storage node
         sub_command = self.add_sub_command(subparser, "remove", 'Remove storage node')
         sub_command.add_argument("node_id", help='UUID of storage node')
         sub_command.add_argument("--force-remove", help='Force remove all LVols and snapshots',
@@ -78,9 +74,9 @@ class CLIWrapper:
 
         # Restart storage node
         sub_command = self.add_sub_command(
-            subparser, "restart", 'Restart a storage node.', usage='All functions and device drivers will be reset. '
+            subparser, "restart", 'Restart a storage node', usage='All functions and device drivers will be reset. '
                                   'During restart, the node does not accept IO. In a high-availability setup, '
-                                  'this will not impact operations.')
+                                  'this will not impact operations')
         sub_command.add_argument("node_id", help='UUID of storage node')
         sub_command.add_argument("--cpu-mask", help='SPDK app CPU mask, default is all cores found', dest='spdk_cpu_mask')
         sub_command.add_argument("--memory", help='SPDK huge memory allocation, default is 4G', dest='spdk_mem')
@@ -96,7 +92,7 @@ class CLIWrapper:
 
         # Shutdown storage node
         sub_command = self.add_sub_command(
-            subparser, "shutdown", 'Shutdown a storage node.', usage='Once the command is issued, the node will stop accepting '
+            subparser, "shutdown", 'Shutdown a storage node', usage='Once the command is issued, the node will stop accepting '
                                    'IO,but IO, which was previously received, will still be processed. '
                                    'In a high-availability setup, this will not impact operations.')
         sub_command.add_argument("node_id", help='UUID of storage node')
@@ -104,7 +100,7 @@ class CLIWrapper:
 
         # Suspend storage node
         sub_command = self.add_sub_command(
-            subparser, "suspend", 'Suspend a storage node.', usage='The node will stop accepting new IO, but will finish '
+            subparser, "suspend", 'Suspend a storage node', usage='The node will stop accepting new IO, but will finish '
                                   'processing any IO, which has been received already.')
         sub_command.add_argument("node_id", help='UUID of storage node')
         sub_command.add_argument("--force", help='Force node suspend', required=False, action='store_true')
@@ -113,13 +109,13 @@ class CLIWrapper:
         sub_command = self.add_sub_command(subparser, "resume", 'Resume a storage node')
         sub_command.add_argument("node_id", help='UUID of storage node')
 
-        sub_command = self.add_sub_command(subparser, "get-io-stats", 'Returns the current io statistics of a node')
+        sub_command = self.add_sub_command(subparser, "get-io-stats", 'Get node IO statistics')
         sub_command.add_argument("node_id", help='Node ID')
         sub_command.add_argument("--history", help='list history records -one for every 15 minutes- '
                                                    'for XX days and YY hours -up to 10 days in total-, format: XXdYYh')
 
         sub_command = self.add_sub_command(
-            subparser, 'get-capacity', 'Returns the size, absolute and relative utilization of the node in bytes')
+            subparser, 'get-capacity', 'Get node capacity statistics')
         sub_command.add_argument("node_id", help='Node ID')
         sub_command.add_argument("--history", help='list history records -one for every 15 minutes- '
                                                    'for XX days and YY hours -up to 10 days in total-, format: XXdYYh')
@@ -132,7 +128,7 @@ class CLIWrapper:
         sub_command.add_argument(
             "--json", help='Print outputs in json format', required=False, action='store_true')
 
-        sub_command = self.add_sub_command(subparser, "device-testing-mode", 'set pt testing bdev mode')
+        sub_command = self.add_sub_command(subparser, "device-testing-mode", 'Set device testing mode')
         sub_command.add_argument("device_id", help='Device UUID')
         sub_command.add_argument("mode", help='Testing mode', choices=[
             'full_pass_through', 'io_error_on_read', 'io_error_on_write',
@@ -150,7 +146,7 @@ class CLIWrapper:
         sub_command.add_argument("device_id", help='the devices\'s UUID')
 
         # Reset storage device
-        sub_command = self.add_sub_command(subparser, "restart-device", 'Re add "removed" storage device',
+        sub_command = self.add_sub_command(subparser, "restart-device", 'Restart storage device',
                                            usage="a previously removed or unavailable device may be returned into "
                                                  "online state. If the device is not physically present, accessible "
                                                  "or healthy, it will flip back into unavailable state again.")
@@ -163,30 +159,29 @@ class CLIWrapper:
                                                  "auto-rebalancing background process in which some cluster "
                                                  "capacity is re-distributed to this newly added device.")
         sub_command = self.add_sub_command(
-            subparser, 'remove-device', 'Remove a storage device.', usage='The device will become unavailable, independently '
+            subparser, 'remove-device', 'Remove a storage device', usage='The device will become unavailable, independently '
                                         'if it was physically removed from the server. This function can be used if '
                                         'auto-detection of removal did not work or if the device must be maintained '
                                         'otherwise while remaining inserted into the server. ')
         sub_command.add_argument("device_id", help='Storage device ID')
         sub_command.add_argument("--force", help='Force device remove', required=False, action='store_true')
 
-        sub_command = self.add_sub_command(
-            subparser, 'set-failed-device', 'Set storage device to failed state. ', usage='This command can be used, '
-                                            'if an administrator believes that the device must be changed, '
-                                            'but its status and health state do not lead to an automatic detection '
-                                            'of the failure state. Attention!!! The failed state is final, all data '
-                                            'on the device will be automatically recovered to other devices '
-                                            'in the cluster. ')
+        # sub_command = self.add_sub_command(
+        #     subparser, 'set-failed-device', 'Set storage device to failed state. ', usage='This command can be used, '
+        #                                     'if an administrator believes that the device must be changed, '
+        #                                     'but its status and health state do not lead to an automatic detection '
+        #                                     'of the failure state. Attention!!! The failed state is final, all data '
+        #                                     'on the device will be automatically recovered to other devices '
+        #                                     'in the cluster. ')
 
         sub_command = self.add_sub_command(
-            subparser, 'get-capacity-device', 'Returns the size, absolute and relative utilization of '
-                                              'the device in bytes')
+            subparser, 'get-capacity-device', 'Get device capacity')
         sub_command.add_argument("device_id", help='Storage device ID')
         sub_command.add_argument("--history", help='list history records -one for every 15 minutes- '
                                                    'for XX days and YY hours -up to 10 days in total-, format: XXdYYh')
 
         sub_command = self.add_sub_command(
-            subparser, 'get-io-stats-device', 'Returns device IO statistics')
+            subparser, 'get-io-stats-device', 'Get device IO statistics')
         sub_command.add_argument("device_id", help='Storage device ID')
         sub_command.add_argument("--history", help='list history records -one for every 15 minutes- '
                                                    'for XX days and YY hours -up to 10 days in total-, format: XXdYYh')
@@ -278,36 +273,33 @@ class CLIWrapper:
         sub_command.add_argument("cluster_id", help='the cluster UUID')
 
         sub_command = self.add_sub_command(
-            subparser, 'get-capacity', 'Returns the current total available capacity, utilized capacity '
-                                       '(in percent and absolute) and provisioned capacity (in percent and absolute) '
-                                       'in GB in the cluster.')
+            subparser, 'get-capacity', 'Get cluster capacity')
         sub_command.add_argument("cluster_id", help='the cluster UUID')
         sub_command.add_argument("--json", help='Print json output', required=False, action='store_true')
         sub_command.add_argument("--history", help='(XXdYYh), list history records (one for every 15 minutes) '
                                                    'for XX days and YY hours (up to 10 days in total).')
 
         sub_command = self.add_sub_command(
-            subparser, 'get-io-stats', 'Returns cluster IO statistics.')
+            subparser, 'get-io-stats', 'Get cluster IO statistics')
         sub_command.add_argument("cluster_id", help='the cluster UUID')
         sub_command.add_argument("--records", help='Number of records, default: 20', type=int, default=20)
         sub_command.add_argument("--history", help='(XXdYYh), list history records (one for every 15 minutes) '
                                                    'for XX days and YY hours (up to 10 days in total).')
 
-        sub_command = self.add_sub_command(
-            subparser, 'get-cli-ssh-pass', 'returns the ssh password for the CLI ssh connection')
-        sub_command.add_argument("cluster_id", help='the cluster UUID')
+        # sub_command = self.add_sub_command(
+        #     subparser, 'get-cli-ssh-pass', 'returns the ssh password for the CLI ssh connection')
+        # sub_command.add_argument("cluster_id", help='the cluster UUID')
 
         # get-logs
         sub_command = self.add_sub_command(subparser, 'get-logs', 'Returns cluster status logs')
         sub_command.add_argument("cluster_id", help='cluster uuid')
 
         # get-secret
-        sub_command = self.add_sub_command(subparser, 'get-secret', 'Returns auto generated, 20 characters secret.')
+        sub_command = self.add_sub_command(subparser, 'get-secret', 'Get cluster secret')
         sub_command.add_argument("cluster_id", help='cluster uuid')
 
         # set-secret
-        sub_command = self.add_sub_command(subparser, 'upd-secret', 'Updates the secret (replaces the existing '
-                                                                    'one with a new one) and returns the new one.')
+        sub_command = self.add_sub_command(subparser, 'upd-secret', 'Updates the cluster secret')
         sub_command.add_argument("cluster_id", help='cluster uuid')
         sub_command.add_argument("secret", help='new 20 characters password')
 
@@ -404,7 +396,7 @@ class CLIWrapper:
 
         # delete lvol
         sub_command = self.add_sub_command(
-            subparser, 'delete', 'Delete LVol.', usage='This is only possible, if no more snapshots and non-inflated clones '
+            subparser, 'delete', 'Delete LVol', usage='This is only possible, if no more snapshots and non-inflated clones '
                                  'of the volume exist. The volume must be suspended before it can be deleted. ')
         sub_command.add_argument("id", help='LVol id or ids', nargs='+')
         sub_command.add_argument("--force", help='Force delete LVol from the cluster', required=False,
@@ -412,13 +404,13 @@ class CLIWrapper:
 
         # show connection string
         sub_command = self.add_sub_command(
-            subparser, 'connect', 'show connection strings to cluster.', usage='Multiple connections to the cluster are '
+            subparser, 'connect', 'Get lvol connection strings', usage='Multiple connections to the cluster are '
                                   'always available for multi-pathing and high-availability.')
         sub_command.add_argument("id", help='LVol id')
 
         # lvol resize
         sub_command = self.add_sub_command(
-            subparser, 'resize', 'Resize LVol.', usage='The lvol cannot be exceed the maximum size for lvols. It cannot '
+            subparser, 'resize', 'Resize LVol', usage='The lvol cannot be exceed the maximum size for lvols. It cannot '
                                  'exceed total remaining provisioned space in pool. It cannot drop below the '
                                  'current utilization.')
         sub_command.add_argument("id", help='LVol id')
@@ -445,23 +437,22 @@ class CLIWrapper:
 
         # lvol get-capacity
         sub_command = self.add_sub_command(
-            subparser, 'get-capacity', 'Returns the current (or historic) provisioned and utilized '
-                                       '(in percent and absolute) capacity.')
+            subparser, 'get-capacity',"Get LVol capacity")
         sub_command.add_argument("id", help='LVol id')
         sub_command.add_argument("--history", help='(XXdYYh), list history records (one for every 15 minutes) '
                                                    'for XX days and YY hours (up to 10 days in total).')
 
         # lvol get-io-stats
         sub_command = self.add_sub_command(
-            subparser, 'get-io-stats', help="Returns LVol IO statistics")
+            subparser, 'get-io-stats', help="Get LVol IO statistics")
         sub_command.add_argument("id", help='LVol id')
         sub_command.add_argument("--history", help='(XXdYYh), list history records (one for every 15 minutes) '
                                                    'for XX days and YY hours (up to 10 days in total).')
 
-        sub_command = self.add_sub_command(subparser, 'send-cluster-map', 'send distr cluster map')
+        sub_command = self.add_sub_command(subparser, 'send-cluster-map', 'send cluster map')
         sub_command.add_argument("id", help='LVol id')
 
-        sub_command = self.add_sub_command(subparser, 'get-cluster-map', 'get distr cluster map')
+        sub_command = self.add_sub_command(subparser, 'get-cluster-map', 'get cluster map')
         sub_command.add_argument("id", help='LVol id')
 
         # check lvol
@@ -534,24 +525,21 @@ class CLIWrapper:
         sub_command.add_argument("pool_id", help='pool uuid')
 
         # get-secret
-        sub_command = self.add_sub_command(subparser, 'get-secret', 'Returns auto generated, 20 characters secret.')
+        sub_command = self.add_sub_command(subparser, 'get-secret', 'Get pool secret')
         sub_command.add_argument("pool_id", help='pool uuid')
 
         # get-secret
-        sub_command = self.add_sub_command(subparser, 'upd-secret', 'Updates the secret (replaces the existing '
-                                                                    'one with a new one) and returns the new one.')
+        sub_command = self.add_sub_command(subparser, 'upd-secret', 'Updates pool secret')
         sub_command.add_argument("pool_id", help='pool uuid')
         sub_command.add_argument("secret", help='new 20 characters password')
 
         # get-capacity
-        sub_command = self.add_sub_command(subparser, 'get-capacity', 'Return provisioned, utilized (absolute) '
-                                                                      'and utilized (percent) storage on the Pool.')
+        sub_command = self.add_sub_command(subparser, 'get-capacity', 'Get pool capacity')
         sub_command.add_argument("pool_id", help='pool uuid')
 
         # get-io-stats
         sub_command = self.add_sub_command(
-            subparser, 'get-io-stats', 'Returns either the current or historic io statistics '
-                                       '(read-IO, write-IO, total-IO, read mbs, write mbs, total mbs).')
+            subparser, 'get-io-stats', 'Get pool IO statistics')
         sub_command.add_argument("id", help='Pool id')
         sub_command.add_argument("--history", help='(XXdYYh), list history records (one for every 15 minutes) '
                                                    'for XX days and YY hours (up to 10 days in total).')
@@ -605,7 +593,7 @@ class CLIWrapper:
         sub_command.add_argument("node_id", help='Caching node UUID')
         sub_command.add_argument("lvol_id", help='LVol UUID')
 
-        sub_command = self.add_sub_command(subparser, 'recreate', 'recreate Caching node bdevs ')
+        sub_command = self.add_sub_command(subparser, 'recreate', 'recreate Caching node bdevs')
         sub_command.add_argument("node_id", help='Caching node UUID')
 
     def init_parser(self):
