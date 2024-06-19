@@ -46,6 +46,21 @@ def _add_graylog_input(cluster_ip, password):
     logger.debug(response.text)
     return response.status_code == 201
 
+def get_env_var(name, default=None):
+    if not name:
+        return False
+    with open("/usr/local/env_var", "r", encoding="utf-8") as fh:
+        lines = fh.readlines()
+    data = {}
+    for line in lines:
+        if not line or line.startswith("#"):
+            continue
+        try:
+            k, v = line.split("=")
+            data[k.strip()] = v.strip()
+        except:
+            pass
+    return data.get(name, default)
 
 def create_cluster(blk_size, page_size_in_blocks, cli_pass,
                    cap_warn, cap_crit, prov_cap_warn, prov_cap_crit, ifname, log_del_interval, metrics_retention_period):
@@ -103,8 +118,8 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     if prov_cap_crit and prov_cap_crit > 0:
         c.prov_cap_crit = prov_cap_crit
 
-    simplyblock_docker_image = os.environ.get("SIMPLY_BLOCK_DOCKER_IMAGE", 
-                                              constants.SIMPLY_BLOCK_DOCKER_IMAGE)
+    simplyblock_docker_image = get_env_var("SIMPLY_BLOCK_DOCKER_IMAGE", 
+                                           constants.SIMPLY_BLOCK_DOCKER_IMAGE)
     logger.info(f"Using docker image: {simplyblock_docker_image}")
 
     logger.info("Deploying swarm stack ...")
