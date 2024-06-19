@@ -15,6 +15,19 @@ from graypy import GELFUDPHandler
 from simplyblock_core.models.storage_node import StorageNode
 
 
+# configure logging
+logger_handler = logging.StreamHandler(stream=sys.stdout)
+logger_handler.setFormatter(logging.Formatter('%(asctime)s: %(levelname)s: %(message)s'))
+gelf_handler = GELFUDPHandler('0.0.0.0', constants.GELF_PORT)
+logger = logging.getLogger()
+logger.addHandler(gelf_handler)
+logger.addHandler(logger_handler)
+logger.setLevel(logging.DEBUG)
+
+# get DB controller
+db_controller = kv_store.DBController()
+
+
 def _get_node_unavailable_devices_count(node_id):
     node = db_controller.get_storage_node_by_id(node_id)
     devices = []
@@ -29,6 +42,16 @@ def _get_device(task):
     for dev in node.nvme_devices:
         if dev.get_id() == task.device_id:
             return dev
+
+
+def _validate_no_task_node_restart(cluster_id, node_id):
+    tasks = db_controller.get_job_tasks(cluster_id)
+    for task in tasks:
+        if task.function_name == JobSchedule.FN_NODE_RESTART and task.node_id == node_id:
+            if task.status != JobSchedule.STATUS_DONE:
+                logger.info(f"Task found, skip adding new task: {task.get_id()}")
+                return False
+    return True
 
 
 def task_runner(task):
@@ -47,6 +70,13 @@ def task_runner_device(task):
         task.write_to_db(db_controller.kv_store)
         device_controller.device_set_unavailable(device.get_id())
         device_controller.device_set_retries_exhausted(device.get_id(), True)
+        return True
+
+    if not _validate_no_task_node_restart(task.cluster_id, task.node_id):
+        task.function_result = "canceled: node restart found"
+        task.status = JobSchedule.STATUS_DONE
+        task.write_to_db(db_controller.kv_store)
+        device_controller.device_set_unavailable(device.get_id())
         return True
 
     node = db_controller.get_storage_node_by_id(task.node_id)
@@ -151,18 +181,6 @@ def task_runner_node(task):
     task.write_to_db(db_controller.kv_store)
     return False
 
-
-# configure logging
-logger_handler = logging.StreamHandler(stream=sys.stdout)
-logger_handler.setFormatter(logging.Formatter('%(asctime)s: %(levelname)s: %(message)s'))
-gelf_handler = GELFUDPHandler('0.0.0.0', constants.GELF_PORT)
-logger = logging.getLogger()
-logger.addHandler(gelf_handler)
-logger.addHandler(logger_handler)
-logger.setLevel(logging.DEBUG)
-
-# get DB controller
-db_controller = kv_store.DBController()
 
 logger.info("Starting Tasks runner...")
 while True:
