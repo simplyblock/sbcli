@@ -214,3 +214,9 @@ networks:
   hostnet:
     external: true
     name: host
+
+  localnet:
+    driver: overlay
+    ipam:
+      config:
+        - subnet: 192.168.1.0/24
