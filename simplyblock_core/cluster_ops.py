@@ -105,6 +105,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
 
     simplyblock_docker_image = os.environ.get("SIMPLY_BLOCK_DOCKER_IMAGE", 
                                               constants.SIMPLY_BLOCK_DOCKER_IMAGE)
+    logger.info(f"Using docker image: {simplyblock_docker_image}")
 
     logger.info("Deploying swarm stack ...")
     ret = scripts.deploy_stack(cli_pass, DEV_IP, simplyblock_docker_image, 
