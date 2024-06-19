@@ -280,3 +280,14 @@ class SshUtils:
         cmd = f"cat {file_name}"
         output, _ = self.exec_command(node=node, command=cmd)
         return output
+    
+    def list_files(self, node, location):
+        """List the entities in given location on a node
+
+        Args:
+            node (str): Node IP
+            location (str): Location to perform ls
+        """
+        cmd = f"sudo ls -l {location}"
+        output, error = self.exec_command(node=node, command=cmd)
+        return output

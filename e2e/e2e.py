@@ -1,12 +1,21 @@
 ### simplyblock e2e tests
 import argparse
 import traceback
+import os
 from __init__ import get_all_tests
 from logger_config import setup_logger
 from exceptions.custom_exception import (
     TestNotFoundException,
     MultipleExceptions
 )
+from utils.sbcli_utils import SbcliUtils
+from utils.ssh_utils import SshUtils
+
+
+cluster_secret = os.environ.get("CLUSTER_SECRET")
+cluster_id = os.environ.get("CLUSTER_ID")
+api_base_url = os.environ.get("API_BASE_URL")
+bastion_server = os.environ.get("BASTION_SERVER")
 
 
 def main():
@@ -48,6 +57,12 @@ def main():
         except Exception as exp:
             logger.error(traceback.format_exc())
             errors[f"{test.__name__}"].append(exp)
+        finally:
+            if check_for_dumps():
+                logger.info("Found a core dump during test execution. "
+                            "Cannot execute more tests as cluster is not stable. Exiting")
+                break
+            
 
     failed_cases = list(errors.keys())
     logger.info(f"Number of Total Cases: {len(test_class_run)}")
@@ -60,7 +75,6 @@ def main():
             logger.info(f"{test.__name__} PASSED CASE.")
         else:
             logger.info(f"{test.__name__} FAILED CASE.")
-
 
     if errors:
         raise MultipleExceptions(errors)
@@ -76,6 +90,34 @@ def generate_report():
     sbcli lvol get, sbcli lvol get-cluster-map, spdk log)
     """
     pass
+
+
+def check_for_dumps():
+    """Validates whether core dumps present on machines
+    
+    Returns:
+        bool: If there are core dumps or not
+    """
+    logger.info("Checking for core dumps!!")
+    ssh_obj = SshUtils(bastion_server=bastion_server)
+    sbcli_utils = SbcliUtils(
+        cluster_api_url=api_base_url,
+        cluster_id=cluster_id,
+        cluster_secret=cluster_secret
+    )
+    _, storage_nodes = sbcli_utils.get_all_nodes_ip()
+    for node in storage_nodes:
+        logger.info(f"**Connecting to storage nodes** - {node}")
+        ssh_obj.connect(
+            address=node,
+            bastion_server_address=bastion_server,
+        )
+    for node in storage_nodes:
+        files = ssh_obj.list_files(node, "/etc/simplyblock/")
+        logger.info(f"Files in /etc/simplyblock: {files}")
+        if "dump" in files:
+            return True
+    return False
 
 
 logger = setup_logger(__name__)
