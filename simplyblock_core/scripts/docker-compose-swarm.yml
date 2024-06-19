@@ -114,6 +114,7 @@ services:
       - 8404:8404
     networks:
       - localnet
+      - monitoring-net
     volumes:
       - "$DIR/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg"
 
@@ -211,6 +212,9 @@ volumes:
   os_data:
 
 networks:
+  monitoring-net:
+    external: true
+    
   hostnet:
     external: true
     name: host

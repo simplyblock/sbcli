@@ -7,7 +7,7 @@ services:
     volumes:
       - "mongodb_data:/data/db"
     networks:
-      - localnet
+      - monitoring-net
     deploy:
       placement:
         constraints: [node.role == manager]
@@ -24,7 +24,7 @@ services:
     volumes:
       - "os_data:/usr/share/opensearch/data"
     networks:
-      - localnet
+      - monitoring-net
     deploy:
       placement:
         constraints: [node.role == manager]
@@ -56,7 +56,7 @@ services:
       - "graylog_data:/usr/share/graylog/data/data"
       - "graylog_journal:/usr/share/graylog/data/journal"
     networks:
-      - localnet
+      - monitoring-net
     deploy:
       placement:
         constraints: [node.role == manager]
@@ -68,7 +68,7 @@ services:
       ClusterIP: "HAProxy"
       ClusterSecret: "${CLUSTER_SECRET}"
     networks:
-      - localnet
+      - monitoring-net
     deploy:
       placement:
         constraints: [node.role == manager]
@@ -76,7 +76,7 @@ services:
   pushgateway:
     image: prom/pushgateway
     networks:
-      - localnet
+      - monitoring-net
     deploy:
       placement:
         constraints: [node.role == manager]
@@ -92,7 +92,7 @@ services:
       - "--storage.tsdb.path=/prometheus"
       - "--storage.tsdb.retention.time=${RETENTION_PERIOD}"
     networks:
-      - localnet
+      - monitoring-net
     deploy:
       placement:
         constraints: [node.role == manager]
@@ -112,7 +112,7 @@ services:
       - '--collector.filesystem.ignored-fs-types="^(sys|proc|auto|cgroup|devpts|ns|au|fuse\.lxc|mqueue)(fs|)$$"'
       - '--no-collector.ipvs'
     networks:
-      - localnet
+      - monitoring-net
     deploy:
       mode: global
       placement:
@@ -136,7 +136,7 @@ services:
         protocol: tcp
         mode: host
     networks:
-      - localnet
+      - monitoring-net
     deploy:
       placement:
         constraints: [node.role == manager]
@@ -147,7 +147,7 @@ services:
       LOG_DELETION_INTERVAL: "${LOG_DELETION_INTERVAL}"
     command: "python simplyblock_core/workers/cleanup_graylog.py"
     networks:
-      - localnet
+      - monitoring-net
     deploy:
       placement:
         constraints: [node.role == manager]
@@ -170,13 +170,5 @@ volumes:
   alertmanager_data:
 
 networks:
-  hostnet:
+  monitoring-net:
     external: true
-    name: host
-
-  localnet:
-    driver: overlay
-    ipam:
-      config:
-        - subnet: 192.168.1.0/24
-        
