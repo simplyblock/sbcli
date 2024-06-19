@@ -151,9 +151,7 @@ while True:
                 set_node_online(snode)
             else:
                 set_node_offline(snode)
-
-            if not ping_check and not node_rpc_check:
-                # node is dead, set devices offline
+                # node offline, set devices offline
                 for dev in snode.nvme_devices:
                     device_controller.device_set_unavailable(dev.get_id())
 
