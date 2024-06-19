@@ -59,7 +59,7 @@ services:
     image: simplyblock/promagent
     environment:
       ClusterID: "${CLUSTER_ID}"
-      ClusterIP: "${CLUSTER_IP}"
+      ClusterIP: "HAProxy"
       ClusterSecret: "${CLUSTER_SECRET}"
     deploy:
       placement:
