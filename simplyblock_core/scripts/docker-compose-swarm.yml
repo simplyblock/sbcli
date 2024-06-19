@@ -114,7 +114,6 @@ services:
       - 8404:8404
     networks:
       - localnet
-      - monitoring_default
     volumes:
       - "$DIR/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg"
 

@@ -6,6 +6,8 @@ services:
     image: "mongo:5.0"
     volumes:
       - "mongodb_data:/data/db"
+    networks:
+      - localnet
     deploy:
       placement:
         constraints: [node.role == manager]
@@ -21,6 +23,8 @@ services:
       - "plugins.security.disabled=true"
     volumes:
       - "os_data:/usr/share/opensearch/data"
+    networks:
+      - localnet
     deploy:
       placement:
         constraints: [node.role == manager]
@@ -51,6 +55,8 @@ services:
     volumes:
       - "graylog_data:/usr/share/graylog/data/data"
       - "graylog_journal:/usr/share/graylog/data/journal"
+    networks:
+      - localnet
     deploy:
       placement:
         constraints: [node.role == manager]
@@ -61,12 +67,16 @@ services:
       ClusterID: "${CLUSTER_ID}"
       ClusterIP: "HAProxy"
       ClusterSecret: "${CLUSTER_SECRET}"
+    networks:
+      - localnet
     deploy:
       placement:
         constraints: [node.role == manager]
 
   pushgateway:
     image: prom/pushgateway
+    networks:
+      - localnet
     deploy:
       placement:
         constraints: [node.role == manager]
@@ -81,6 +91,8 @@ services:
       - "--config.file=/etc/prometheus/prometheus.yml"
       - "--storage.tsdb.path=/prometheus"
       - "--storage.tsdb.retention.time=${RETENTION_PERIOD}"
+    networks:
+      - localnet
     deploy:
       placement:
         constraints: [node.role == manager]
@@ -99,6 +111,8 @@ services:
       - '--collector.filesystem.ignored-mount-points="^(/rootfs|/host|)/(sys|proc|dev|host|etc)($$|/)"'
       - '--collector.filesystem.ignored-fs-types="^(sys|proc|auto|cgroup|devpts|ns|au|fuse\.lxc|mqueue)(fs|)$$"'
       - '--no-collector.ipvs'
+    networks:
+      - localnet
     deploy:
       mode: global
       placement:
@@ -121,6 +135,8 @@ services:
         published: 3000
         protocol: tcp
         mode: host
+    networks:
+      - localnet
     deploy:
       placement:
         constraints: [node.role == manager]
@@ -130,6 +146,8 @@ services:
     environment:
       LOG_DELETION_INTERVAL: "${LOG_DELETION_INTERVAL}"
     command: "python simplyblock_core/workers/cleanup_graylog.py"
+    networks:
+      - localnet
     deploy:
       placement:
         constraints: [node.role == manager]
