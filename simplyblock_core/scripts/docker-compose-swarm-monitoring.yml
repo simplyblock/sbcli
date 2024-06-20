@@ -153,16 +153,6 @@ services:
         constraints: [node.role == manager]
 
   ### monitoring ###
-  data-writer:
-    image: geoffrey13/data-writer
-    volumes:
-      - "graylog_journal:/app/data:rw"
-    command: ["/app/data", "5"]
-    networks:
-      - monitoring-net
-    deploy:
-      placement:
-        constraints: [node.role == manager]
 
 volumes:
   mongodb_data:
@@ -172,7 +162,7 @@ volumes:
   graylog_data:
     driver: ${USE_EFS:-local}
   graylog_journal:
-    driver: local
+    driver: ${USE_EBS:-local}
   grafana_data:
     driver: ${USE_EFS:-local}
   prometheus_data:
