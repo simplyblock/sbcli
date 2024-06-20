@@ -70,8 +70,7 @@ jobs:
         run: |
           cd $GITHUB_WORKSPACE/simplyBlockDeploy
           terraform plan \
-            -var "mgmt_nodes=1" -var "storage_nodes=3" -var "storage_nodes_instance_type=i3en.xlarge" \
-            -var "volumes_per_storage_nodes=0" \
+            -var "mgmt_nodes=1" -var "storage_nodes=3" \
             -var "extra_nodes=1" -var "extra_nodes_instance_type=m6id.large" \
             -var "region=us-east-2" -var "sbcli_cmd=${{ github.event.inputs.sbcli_cmd || 'sbcli-dev' }}" -out=tfplan
 
@@ -91,8 +90,7 @@ jobs:
       - name: Bootstrap Cluster
         run: |
           cd $GITHUB_WORKSPACE/simplyBlockDeploy
-          ./bootstrap-cluster.sh --memory 4g --cpu-mask 0x3 --iobuf_small_pool_count 25000  \
-          --iobuf_large_pool_count 10000 --partitions 4
+          ./bootstrap-cluster.sh --memory 4g --cpu-mask 0x3 --iobuf_small_pool_count 25000 --iobuf_large_pool_count 10000
         id: bootstrap_cluster
         env:
           SBCLI_CMD: ${{ github.event.inputs.sbcli_cmd || 'sbcli-dev' }}
