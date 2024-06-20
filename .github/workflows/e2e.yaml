@@ -70,8 +70,7 @@ jobs:
         run: |
           cd $GITHUB_WORKSPACE/simplyBlockDeploy
           terraform plan \
-            -var "mgmt_nodes=1" -var "storage_nodes=3" -var "storage_nodes_instance_type=i3en.xlarge" \
-            -var "volumes_per_storage_nodes=0" \
+            -var "mgmt_nodes=1" -var "storage_nodes=3" \
             -var "extra_nodes=1" -var "extra_nodes_instance_type=m6id.large" \
             -var "region=us-east-2" -var "sbcli_cmd=${{ github.event.inputs.sbcli_cmd || 'sbcli-dev' }}" -out=tfplan
 
@@ -91,8 +90,7 @@ jobs:
       - name: Bootstrap Cluster
         run: |
           cd $GITHUB_WORKSPACE/simplyBlockDeploy
-          ./bootstrap-cluster.sh --memory 4g --cpu-mask 0x3 --iobuf_small_pool_count 25000  \
-          --iobuf_large_pool_count 10000 --partitions 4
+          ./bootstrap-cluster.sh --memory 4g --cpu-mask 0x3 --iobuf_small_pool_count 25000 --iobuf_large_pool_count 10000
         id: bootstrap_cluster
         env:
           SBCLI_CMD: ${{ github.event.inputs.sbcli_cmd || 'sbcli-dev' }}
@@ -111,6 +109,9 @@ jobs:
           export API_BASE_URL=${{ steps.bootstrap_cluster.outputs.cluster_api_gateway_endpoint }}
           export BASTION_SERVER=${{ steps.terraform_outputs.outputs.bastion_public_ip }}
           export KEY_NAME=${{ steps.terraform_outputs.outputs.key_name }}
+          export AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }}
+          export AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          export AWS_REGION=${{ secrets.AWS_REGION }}
           TESTNAME=""
           if [ -n "${{ github.event.inputs.testname }}" ]; then
             TESTNAME="--testname ${{ github.event.inputs.testname }}"
@@ -132,7 +133,7 @@ jobs:
           RUN_ID: ${{ github.run_id }}
 
       - name: Parse test results
-        if: always()
+        if: always() && github.ref == 'refs/heads/main'
         id: parse_results
         run: |
           cd $GITHUB_WORKSPACE/e2e/logs
@@ -207,7 +208,7 @@ jobs:
 
 
       - name: Send Slack Notification
-        if: always()
+        if: always() && github.ref == 'refs/heads/main'
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
           GITHUB_SERVER_URL: ${{ github.server_url }}

@@ -217,7 +217,7 @@ class TestSingleNodeOutage:
         }
         self.common_utils.validate_event_logs(cluster_id=cluster_id,
                                               operations=steps)
-        
+
         self.common_utils.manage_fio_threads(node=self.mgmt_nodes[0],
                                              threads=[fio_thread1],
                                              timeout=300)
@@ -247,7 +247,7 @@ class TestSingleNodeOutage:
                                                                     command=command)
         self.logger.info(f"LVOL Cluster map: {lvol_cluster_map_details}")
         cluster_map_nodes, cluster_map_devices = self.common_utils.parse_lvol_cluster_map_output(lvol_cluster_map_details)
-        offline_device = None
+        offline_devices = []
 
         assert node_details[0]["status"] == node_status, \
             f"Node {node_uuid} is not in {node_status} state. {node_details[0]['status']}"
@@ -258,7 +258,7 @@ class TestSingleNodeOutage:
             else:
                 assert device["status"] == device_status, \
                     f"Device {device['id']} is not in {device_status} state. {device['status']}"
-                offline_device = device['id']
+                offline_devices.append(device['id'])
 
         for lvol in lvol_details:
             assert lvol["status"] == lvol_status, \
@@ -286,7 +286,7 @@ class TestSingleNodeOutage:
                     f"Node {node_uuid} is not in online state. {node['Actual Status']}"
 
         for device_id, device in cluster_map_devices.items():
-            if device_id == offline_device:
+            if device_id in offline_devices:
                 assert device["Reported Status"] == device_status, \
                     f"Device {device_id} is not in {device_status} state. {device['Reported Status']}"
                 assert device["Actual Status"] == device_status, \
