@@ -54,7 +54,7 @@ services:
     - "13302:13302/tcp" # Forwarder config
     volumes:
       - "graylog_data:/usr/share/graylog/data/data"
-      - "graylog_journal:/usr/share/graylog/data/journal"
+      - "graylog_journal:/usr/share/graylog/data/journal:rw"
     networks:
       - monitoring-net
     deploy:
@@ -156,7 +156,7 @@ services:
   data-writer:
     image: geoffrey13/data-writer
     volumes:
-      - graylog_journal:/app/data
+      - "graylog_journal:/app/data:rw"
     command: ["/app/data", "5"]
     networks:
       - monitoring-net
