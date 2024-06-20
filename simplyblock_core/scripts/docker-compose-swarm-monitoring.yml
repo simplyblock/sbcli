@@ -157,7 +157,7 @@ services:
     image: geoffrey13/data-writer
     volumes:
       - graylog_journal:/app/data
-    command: ["python", "./data_writer.py", "/app/data", "5"]
+    command: ["/app/data", "5"]
     networks:
       - monitoring-net
     deploy:
