@@ -172,7 +172,7 @@ volumes:
   graylog_data:
     driver: ${USE_EFS:-local}
   graylog_journal:
-    driver: ${USE_EFS:-local}
+    driver: local
   grafana_data:
     driver: ${USE_EFS:-local}
   prometheus_data:
