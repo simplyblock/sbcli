@@ -49,7 +49,7 @@ def add(lvol_id, snapshot_name):
     ret = rpc_client.bdev_distrib_create(
         base_name, new_vuid, lvol.ndcs, lvol.npcs, num_blocks,
         lvol.distr_bs, lvol_controller.get_jm_names(snode), lvol.distr_chunk_bs,
-        None, None, lvol.distr_page_size)
+        None, None, lvol.distr_page_size, dev_cpu_mask=snode.dev_cpu_mask)
     if not ret:
         logger.error("Failed to create Distr bdev")
         return False, "Failed to create Distr bdev"
@@ -232,7 +232,8 @@ def clone(snapshot_id, clone_name, new_size=0):
     name = f"distr_{new_vuid}_1"
     ret = rpc_client.bdev_distrib_create(
         name, new_vuid, lvol.ndcs, lvol.npcs, num_blocks,
-        lvol.distr_bs, jm_names, lvol.distr_chunk_bs, None, None, lvol.distr_page_size)
+        lvol.distr_bs, jm_names, lvol.distr_chunk_bs, None, None, lvol.distr_page_size,
+        dev_cpu_mask=snode.dev_cpu_mask)
     if not ret:
         msg="Failed to create Distr bdev"
         logger.error(msg)

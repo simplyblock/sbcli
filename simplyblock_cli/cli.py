@@ -42,8 +42,6 @@ class CLIWrapper:
         sub_command.add_argument("--jm-percent", help='Number in percent to use for JM from each device',
                                  type=int, default=3, dest='jm_percent')
         sub_command.add_argument("--data-nics", help='Data interface names', nargs='+', dest='data_nics')
-        sub_command.add_argument("--cpu-mask", help='SPDK app CPU mask, default is all cores found',
-                                 dest='spdk_cpu_mask')
         sub_command.add_argument("--memory", help='SPDK huge memory allocation, default is 4G', dest='spdk_mem')
         sub_command.add_argument("--spdk-image", help='SPDK image uri', dest='spdk_image')
         sub_command.add_argument("--spdk-debug", help='Enable spdk debug logs', dest='spdk_debug', required=False, action='store_true')
@@ -78,7 +76,6 @@ class CLIWrapper:
                                   'During restart, the node does not accept IO. In a high-availability setup, '
                                   'this will not impact operations')
         sub_command.add_argument("node_id", help='UUID of storage node')
-        sub_command.add_argument("--cpu-mask", help='SPDK app CPU mask, default is all cores found', dest='spdk_cpu_mask')
         sub_command.add_argument("--memory", help='SPDK huge memory allocation, default is 4G', dest='spdk_mem')
         sub_command.add_argument("--spdk-image", help='SPDK image uri', dest='spdk_image')
         sub_command.add_argument("--spdk-debug", help='Enable spdk debug logs', dest='spdk_debug', required=False, action='store_true')
@@ -647,13 +644,6 @@ class CLIWrapper:
                 num_partitions_per_dev = args.partitions
                 jm_percent = args.jm_percent
 
-                spdk_cpu_mask = None
-                if args.spdk_cpu_mask:
-                    if self.validate_cpu_mask(args.spdk_cpu_mask):
-                        spdk_cpu_mask = args.spdk_cpu_mask
-                    else:
-                        return f"Invalid cpu mask value: {args.spdk_cpu_mask}"
-
                 spdk_mem = None
                 if args.spdk_mem:
                     spdk_mem = self.parse_size(args.spdk_mem)
@@ -661,7 +651,7 @@ class CLIWrapper:
                         return f"SPDK memory:{args.spdk_mem} must be larger than 1G"
 
                 out = storage_ops.add_node(
-                    cluster_id, node_ip, ifname, data_nics, spdk_cpu_mask, spdk_mem, spdk_image, spdk_debug,
+                    cluster_id, node_ip, ifname, data_nics, spdk_mem, spdk_image, spdk_debug,
                     small_pool_count, large_pool_count, small_bufsize, large_bufsize, num_partitions_per_dev, jm_percent)
                 return out
 
@@ -680,13 +670,6 @@ class CLIWrapper:
                 spdk_image = args.spdk_image
                 spdk_debug = args.spdk_debug
 
-                cpu_mask = None
-                if args.spdk_cpu_mask:
-                    if self.validate_cpu_mask(args.spdk_cpu_mask):
-                        cpu_mask = args.spdk_cpu_mask
-                    else:
-                        return f"Invalid cpu mask value: {args.spdk_cpu_mask}"
-
                 spdk_mem = None
                 if args.spdk_mem:
                     spdk_mem = self.parse_size(args.spdk_mem)
@@ -700,7 +683,7 @@ class CLIWrapper:
                 large_bufsize = args.large_bufsize
 
                 ret = storage_ops.restart_storage_node(
-                    node_id, cpu_mask, spdk_mem,
+                    node_id, spdk_mem,
                     spdk_image, spdk_debug,
                     small_pool_count, large_pool_count,
                     small_bufsize, large_bufsize)

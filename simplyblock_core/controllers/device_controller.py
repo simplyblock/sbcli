@@ -110,7 +110,8 @@ def _def_create_device_stack(device_obj, snode):
     alceml_id = device_obj.get_id()
     alceml_name = get_alceml_name(alceml_id)
     logger.info(f"adding {alceml_name}")
-    ret = rpc_client.bdev_alceml_create(alceml_name, test_name, alceml_id, pba_init_mode=2)
+    ret = rpc_client.bdev_alceml_create(alceml_name, test_name, alceml_id, pba_init_mode=2,
+                                        dev_cpu_mask=snode.dev_cpu_mask)
     if not ret:
         logger.error(f"Failed to create alceml bdev: {alceml_name}")
         return False
@@ -145,7 +146,8 @@ def _def_create_device_stack(device_obj, snode):
     ret = rpc_client.nvmf_subsystem_add_ns(subsystem_nqn, pt_name)
 
     if hasattr(device_obj, 'jm_bdev') and device_obj.jm_bdev:
-        ret = rpc_client.bdev_jm_create(device_obj.jm_bdev, device_obj.alceml_bdev)
+        ret = rpc_client.bdev_jm_create(device_obj.jm_bdev, device_obj.alceml_bdev,
+                                        dev_cpu_mask=snode.dev_cpu_mask)
         if not ret:
             logger.error(f"Failed to create jm bdev: {device_obj.jm_bdev}")
             return False
