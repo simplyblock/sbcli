@@ -140,16 +140,10 @@ while True:
         snode.rpc_port,
         snode.rpc_username,
         snode.rpc_password,
-        timeout=3, retry=2
-    )
-    num_of_events = constants.DISTR_EVENT_COLLECTOR_NUM_OF_EVENTS
-    try:
-        # events = client.distr_status_events_get()
-        events = client.distr_status_events_discard_then_get(0, num_of_events)
-        if not events:
-            logger.error("Distr events empty")
-            continue
+        timeout=3, retry=2)
 
+    try:
+        events = client.distr_status_events_discard_then_get(0, constants.DISTR_EVENT_COLLECTOR_NUM_OF_EVENTS)
         logger.info(f"Found events: {len(events)}")
         event_ids = []
         for ev in events:
@@ -161,8 +155,9 @@ while True:
             logger.info(f"Processing event: {eid}")
             process_event(eid)
 
-        logger.info(f"Discarding events: {num_of_events}")
-        events = client.distr_status_events_discard_then_get(num_of_events, 0)
+        if events:
+            logger.info(f"Discarding events: {len(events)}")
+            client.distr_status_events_discard_then_get(len(events), 0)
 
     except Exception as e:
         logger.error("Failed to process distr events")
