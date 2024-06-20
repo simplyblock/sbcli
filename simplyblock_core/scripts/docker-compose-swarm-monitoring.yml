@@ -41,6 +41,7 @@ services:
       GRAYLOG_HTTP_EXTERNAL_URI: "http://localhost:9000/"
       GRAYLOG_ELASTICSEARCH_HOSTS: "http://opensearch:9200"
       GRAYLOG_MONGODB_URI: "mongodb://mongodb:27017/graylog"
+      GRAYLOG_MESSAGE_JOURNAL_MAX_SIZE: "100mb"
     ports:
     - "5044:5044/tcp"   # Beats
     - "5140:5140/udp"   # Syslog
@@ -167,7 +168,6 @@ volumes:
     driver: ${USE_EFS:-local}
   prometheus_data:
     driver: ${USE_EFS:-local}
-  alertmanager_data:
 
 networks:
   monitoring-net:
