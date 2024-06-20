@@ -1,7 +1,7 @@
-SIMPLY_BLOCK_COMMAND_NAME=sbcli-mc
-SIMPLY_BLOCK_VERSION=1.2.7
+SIMPLY_BLOCK_COMMAND_NAME=sbcli-dev
+SIMPLY_BLOCK_VERSION=3.0.4
 
 
-SIMPLY_BLOCK_DOCKER_IMAGE=simplyblock/simplyblock:change-api-return-key-segfault-dump-upload
+SIMPLY_BLOCK_DOCKER_IMAGE=simplyblock/simplyblock:dev
 
 DOCKER_USER=hamdysimplyblock

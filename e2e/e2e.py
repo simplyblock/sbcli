@@ -115,7 +115,7 @@ def check_for_dumps():
     for node in storage_nodes:
         files = ssh_obj.list_files(node, "/etc/simplyblock/")
         logger.info(f"Files in /etc/simplyblock: {files}")
-        if "dump" in files:
+        if "core" in files:
             return True
     return False
 
