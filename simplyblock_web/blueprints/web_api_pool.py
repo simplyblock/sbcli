@@ -17,17 +17,21 @@ bp = Blueprint("pool", __name__)
 db_controller = kv_store.DBController()
 
 
-@bp.route('/pool', defaults={'uuid': None}, methods=['GET'])
-@bp.route('/pool/<string:uuid>', methods=['GET'])
-def list_pools(uuid):
+@bp.route('/pool', defaults={'uuid': None, "cluster_id": None}, methods=['GET'])
+@bp.route('/pool/<string:uuid>', defaults={"cluster_id": None}, methods=['GET'])
+@bp.route('/pool/cluster_id/<string:cluster_id>', defaults={'uuid': None,}, methods=['GET'])
+def list_pools(uuid, cluster_id):
     if uuid:
         pool = db_controller.get_pool_by_id(uuid)
         if pool:
             pools = [pool]
         else:
             return utils.get_response_error(f"Pool not found: {uuid}", 404)
+    elif cluster_id:
+        pools = db_controller.get_pools(cluster_id)
     else:
-        pools = db_controller.get_pools()
+        cluster_id = utils.get_cluster_id(request)
+        pools = db_controller.get_pools(cluster_id)
     data = []
     for pool in pools:
         data.append(pool.get_clean_dict())
@@ -39,6 +43,7 @@ def add_pool():
     """
         Params:
         | name (required) | LVol name or id
+        | cluster_id (required) | Cluster uuid
         | pool_max        | Pool maximum size: 10M, 10G, 10(bytes)
         | lvol_max        | LVol maximum size: 10M, 10G, 10(bytes)
         | no_secret       | pool is created with a secret
@@ -51,7 +56,11 @@ def add_pool():
     if 'name' not in pool_data:
         return utils.get_response_error("missing required param: name", 400)
 
+    if 'cluster_id' not in pool_data:
+        return utils.get_response_error("missing required param: cluster_id", 400)
+
     name = pool_data['name']
+    cluster_id = pool_data['cluster_id']
     for p in db_controller.get_pools():
         if p.pool_name == name:
             return utils.get_response_error(f"Pool found with the same name: {name}", 400)
@@ -75,7 +84,7 @@ def add_pool():
 
     ret = pool_controller.add_pool(
         name, pool_max_size, lvol_max_size, max_rw_iops, max_rw_mbytes,
-        max_r_mbytes_per_sec, max_w_mbytes_per_sec, pool_secret)
+        max_r_mbytes_per_sec, max_w_mbytes_per_sec, pool_secret, cluster_id)
 
     return utils.get_response(ret)
 

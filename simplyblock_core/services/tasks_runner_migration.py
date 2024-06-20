@@ -48,7 +48,7 @@ while True:
         logger.error("No clusters found!")
     else:
         for cl in clusters:
-            tasks = db_controller.get_job_tasks(cl.get_id())
+            tasks = db_controller.get_job_tasks(cl.get_id(), reverse=False)
             for task in tasks:
                 delay_seconds = constants.TASK_EXEC_INTERVAL_SEC
                 if task.function_name == JobSchedule.FN_DEV_MIG:

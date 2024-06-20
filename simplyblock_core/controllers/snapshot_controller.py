@@ -119,7 +119,12 @@ def delete(snapshot_uuid):
         logger.error(f"Snapshot not found {snapshot_uuid}")
         return False
 
-    for lvol in db_controller.get_lvols():
+    snode = db_controller.get_storage_node_by_id(snap.lvol.node_id)
+    if not snode:
+        logger.error(f"Storage node not found {snap.lvol.node_id}")
+        return False
+
+    for lvol in db_controller.get_lvols(snode.cluster_id):
         if lvol.cloned_from_snap and lvol.cloned_from_snap == snapshot_uuid:
             logger.warning(f"Soft delete snapshot with clones, lvol ID: {lvol.get_id()}")
             snap.deleted = True

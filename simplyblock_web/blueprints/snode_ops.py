@@ -14,7 +14,8 @@ from flask import request
 
 from simplyblock_web import utils, node_utils
 
-from simplyblock_core import scripts, constants
+from simplyblock_core import scripts, constants, shell_utils
+from ec2_metadata import ec2_metadata
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
@@ -22,11 +23,24 @@ bp = Blueprint("snode", __name__, url_prefix="/snode")
 
 cluster_id_file = "/etc/foundationdb/sbcli_cluster_id"
 
-cpu_info = cpuinfo.get_cpu_info()
-hostname, _, _ = node_utils.run_command("hostname -s")
-system_id = ""
+CPU_INFO = cpuinfo.get_cpu_info()
+HOSTNAME, _, _ = node_utils.run_command("hostname -s")
+SYSTEM_ID = ""
+EC2_PUBLIC_IP = ""
+EC2_MD = ""
+
 try:
-    system_id, _, _ = node_utils.run_command("dmidecode -s system-uuid")
+    SYSTEM_ID = ec2_metadata.instance_id
+except:
+    SYSTEM_ID, _, _ = node_utils.run_command("dmidecode -s system-uuid")
+
+try:
+    EC2_PUBLIC_IP = ec2_metadata.public_ipv4
+except:
+    pass
+
+try:
+    EC2_MD = ec2_metadata.instance_identity_document
 except:
     pass
 
@@ -216,11 +230,11 @@ def get_info():
     out = {
         "cluster_id": get_cluster_id(),
 
-        "hostname": hostname,
-        "system_id": system_id,
+        "hostname": HOSTNAME,
+        "system_id": SYSTEM_ID,
 
-        "cpu_count": cpu_info['count'],
-        "cpu_hz": cpu_info['hz_advertised'][0],
+        "cpu_count": CPU_INFO['count'],
+        "cpu_hz": CPU_INFO['hz_advertised'][0],
 
         "memory": node_utils.get_memory(),
         "hugepages": node_utils.get_huge_memory(),
@@ -234,9 +248,9 @@ def get_info():
 
         "network_interface": node_utils.get_nics_data(),
 
-        "ec2_metadata": get_ec2_meta(),
+        "ec2_metadata": EC2_MD,
 
-        "ec2_public_ip": get_ec2_public_ip(),
+        "ec2_public_ip": EC2_PUBLIC_IP,
     }
     return utils.get_response(out)
 
@@ -289,4 +303,81 @@ def leave_swarm():
         node_docker.swarm.leave(force=True)
     except:
         pass
+    return utils.get_response(True)
+
+
+@bp.route('/make_gpt_partitions', methods=['POST'])
+def make_gpt_partitions_for_nbd():
+    nbd_device = '/dev/nbd0'
+    jm_percent = '3'
+    num_partitions = 1
+
+    try:
+        data = request.get_json()
+        nbd_device = data['nbd_device']
+        jm_percent = data['jm_percent']
+        num_partitions = data['num_partitions']
+    except:
+        pass
+
+    cmd_list = [
+        f"parted -fs {nbd_device} mklabel gpt",
+        f"parted -f {nbd_device} mkpart journal \"0%\" \"{jm_percent}%\""
+    ]
+    sg_cmd_list = [
+        f"sgdisk -t 1:6527994e-2c5a-4eec-9613-8f5944074e8b {nbd_device}",
+    ]
+    perc_per_partition = int((100 - jm_percent) / num_partitions)
+    for i in range(num_partitions):
+        st = jm_percent + (i * perc_per_partition)
+        en = st + perc_per_partition
+        cmd_list.append(f"parted -f {nbd_device} mkpart part{(i+1)} \"{st}%\" \"{en}%\"")
+        sg_cmd_list.append(f"sgdisk -t {(i+2)}:6527994e-2c5a-4eec-9613-8f5944074e8b {nbd_device}")
+
+    for cmd in cmd_list+sg_cmd_list:
+        logger.debug(cmd)
+        out, err, ret_code = shell_utils.run_command(cmd)
+        logger.debug(out)
+        logger.debug(ret_code)
+        if ret_code != 0:
+            logger.error(err)
+            return utils.get_response(False, f"Error running cmd: {cmd}, returncode: {ret_code}, output: {out}, err: {err}")
+        time.sleep(1)
+
+    return utils.get_response(True)
+
+
+@bp.route('/delete_dev_gpt_partitions', methods=['POST'])
+def delete_gpt_partitions_for_dev():
+
+    data = request.get_json()
+
+    if "device_pci" not in data:
+        return utils.get_response(False, "Required parameter is missing: device_pci")
+
+    device_pci = data['device_pci']
+
+    cmd_list = [
+        f"echo -n \"{device_pci}\" > /sys/bus/pci/drivers/uio_pci_generic/unbind",
+        f"echo -n \"{device_pci}\" > /sys/bus/pci/drivers/nvme/bind",
+    ]
+
+    for cmd in cmd_list:
+        logger.debug(cmd)
+        ret = os.popen(cmd).read().strip()
+        logger.debug(ret)
+        time.sleep(1)
+
+    device_name = os.popen(f"ls /sys/devices/pci0000:00/{device_pci}/nvme/nvme*/ | grep nvme").read().strip()
+    cmd_list = [
+        f"parted -fs /dev/{device_name} mklabel gpt",
+        f"echo -n \"{device_pci}\" > /sys/bus/pci/drivers/nvme/unbind",
+    ]
+
+    for cmd in cmd_list:
+        logger.debug(cmd)
+        ret = os.popen(cmd).read().strip()
+        logger.debug(ret)
+        time.sleep(1)
+
     return utils.get_response(True)

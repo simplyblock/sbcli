@@ -74,4 +74,3 @@ while True:
             update_port_stats(snode, nic, stats)
         else:
             logger.error("Error getting port stats: %s", nic.get_id())
-

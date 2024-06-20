@@ -9,9 +9,7 @@ RPC_HTTP_PROXY_PORT = 8080
 LOG_LEVEL = logging.INFO
 LOG_WEB_DEBUG = True
 
-FILE_DIR = os.path.dirname(os.path.realpath(__file__))
-INSTALL_DIR = os.path.dirname(FILE_DIR)
-TOP_DIR = os.path.dirname(INSTALL_DIR)
+INSTALL_DIR = os.path.dirname(os.path.realpath(__file__))
 
 NODE_MONITOR_INTERVAL_SEC = 3
 DEVICE_MONITOR_INTERVAL_SEC = 5
@@ -54,12 +52,12 @@ GRAYLOG_CHECK_INTERVAL_SEC = 60
 
 FDB_CHECK_INTERVAL_SEC = 60
 
-SIMPLY_BLOCK_CLI_NAME = "sbcli-dev"
+SIMPLY_BLOCK_DOCKER_IMAGE = "simplyblock/simplyblock:pre-release"
+SIMPLY_BLOCK_CLI_NAME = "sbcli"
 TASK_EXEC_INTERVAL_SEC = 30
 TASK_EXEC_RETRY_COUNT = 8
 
-SIMPLY_BLOCK_DOCKER_IMAGE = "simplyblock/simplyblock:dev"
 SIMPLY_BLOCK_SPDK_CORE_IMAGE = "simplyblock/spdk-core:latest"
-SIMPLY_BLOCK_SPDK_ULTRA_IMAGE = "simplyblock/spdk:main-latest"
+SIMPLY_BLOCK_SPDK_ULTRA_IMAGE = "simplyblock/spdk:prerelease-latest"
 
 GELF_PORT = 12201

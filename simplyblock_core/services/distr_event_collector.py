@@ -88,7 +88,7 @@ def process_lvol_event(event):
     if event.message in ["error_open", 'error_read', "error_write", "error_unmap"]:
         vuid = event.object_dict['vuid']
         lvol = None
-        for lv in db_controller.get_lvols():
+        for lv in db_controller.get_lvols():  # pass
             if lv.vuid == vuid:
                 lvol = lv
                 break
@@ -127,7 +127,6 @@ def process_event(event_id):
 
 hostname = utils.get_hostname()
 logger.info("Starting Distr event collector...")
-logger.info(f"Node:{hostname}")
 while True:
     time.sleep(constants.DISTR_EVENT_COLLECTOR_INTERVAL_SEC)
 

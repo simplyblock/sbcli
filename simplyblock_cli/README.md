@@ -3,9 +3,9 @@
 
 
 ```bash
-usage: sbcli-dev [-h] [-d]
-                 {storage-node,sn,cluster,lvol,mgmt,pool,snapshot,caching-node,cn}
-                 ...
+usage: sbcli [-h] [-d]
+             {storage-node,sn,cluster,lvol,mgmt,pool,snapshot,caching-node,cn}
+             ...
 
 positional arguments:
   {storage-node,sn,cluster,lvol,mgmt,pool,snapshot,caching-node,cn}
@@ -28,12 +28,12 @@ optional arguments:
 
 
 ```bash
-usage: sbcli-dev storage-node [-h]
-                              {deploy,deploy-cleaner,add-node,delete,remove,list,get,restart,shutdown,suspend,resume,get-io-stats,get-capacity,list-devices,device-testing-mode,get-device,reset-device,restart-device,add-device,remove-device,set-failed-device,get-capacity-device,get-io-stats-device,port-list,port-io-stats,check,check-device,info,info-spdk}
-                              ...
+usage: sbcli storage-node [-h]
+                          {deploy,deploy-cleaner,add-node,delete,remove,list,get,restart,shutdown,suspend,resume,get-io-stats,get-capacity,list-devices,device-testing-mode,get-device,reset-device,restart-device,add-device,remove-device,get-capacity-device,get-io-stats-device,port-list,port-io-stats,check,check-device,info,info-spdk}
+                          ...
 
 positional arguments:
-  {deploy,deploy-cleaner,add-node,delete,remove,list,get,restart,shutdown,suspend,resume,get-io-stats,get-capacity,list-devices,device-testing-mode,get-device,reset-device,restart-device,add-device,remove-device,set-failed-device,get-capacity-device,get-io-stats-device,port-list,port-io-stats,check,check-device,info,info-spdk}
+  {deploy,deploy-cleaner,add-node,delete,remove,list,get,restart,shutdown,suspend,resume,get-io-stats,get-capacity,list-devices,device-testing-mode,get-device,reset-device,restart-device,add-device,remove-device,get-capacity-device,get-io-stats-device,port-list,port-io-stats,check,check-device,info,info-spdk}
     deploy              Deploy local services for remote ops (local run)
     deploy-cleaner      clean local deploy (local run)
     add-node            Add storage node by ip
@@ -41,27 +41,24 @@ positional arguments:
     remove              Remove storage node
     list                List storage nodes
     get                 Get storage node info
-    restart             Restart a storage node.
-    shutdown            Shutdown a storage node.
-    suspend             Suspend a storage node.
+    restart             Restart a storage node
+    shutdown            Shutdown a storage node
+    suspend             Suspend a storage node
     resume              Resume a storage node
-    get-io-stats        Returns the current io statistics of a node
-    get-capacity        Returns the size, absolute and relative utilization of
-                        the node in bytes
+    get-io-stats        Get node IO statistics
+    get-capacity        Get node capacity statistics
     list-devices        List storage devices
     device-testing-mode
-                        set pt testing bdev mode
+                        Set device testing mode
     get-device          Get storage device by id
     reset-device        Reset storage device
-    restart-device      Re add "removed" storage device
+    restart-device      Restart storage device
     add-device          Add a new storage device
-    remove-device       Remove a storage device.
-    set-failed-device   Set storage device to failed state.
+    remove-device       Remove a storage device
     get-capacity-device
-                        Returns the size, absolute and relative utilization of
-                        the device in bytes
+                        Get device capacity
     get-io-stats-device
-                        Returns device IO statistics
+                        Get device IO statistics
     port-list           Get Data interfaces list for a node
     port-io-stats       Get Data interfaces IO stats
     check               Health check storage node
@@ -79,7 +76,7 @@ optional arguments:
 
 
 ```bash
-usage: sbcli-dev storage-node deploy [-h] [--ifname IFNAME]
+usage: sbcli storage-node deploy [-h] [--ifname IFNAME]
 
 optional arguments:
   -h, --help       show this help message and exit
@@ -92,7 +89,7 @@ optional arguments:
 
 
 ```bash
-usage: sbcli-dev storage-node deploy-cleaner [-h]
+usage: sbcli storage-node deploy-cleaner [-h]
 
 optional arguments:
   -h, --help  show this help message and exit
@@ -104,17 +101,17 @@ optional arguments:
 
 
 ```bash
-usage: sbcli-dev storage-node add-node [-h] [--jm-pcie JM_PCIE]
-                                       [--data-nics DATA_NICS [DATA_NICS ...]]
-                                       [--cpu-mask SPDK_CPU_MASK]
-                                       [--memory SPDK_MEM]
-                                       [--spdk-image SPDK_IMAGE]
-                                       [--spdk-debug]
-                                       [--iobuf_small_pool_count SMALL_POOL_COUNT]
-                                       [--iobuf_large_pool_count LARGE_POOL_COUNT]
-                                       [--iobuf_small_bufsize SMALL_BUFSIZE]
-                                       [--iobuf_large_bufsize LARGE_BUFSIZE]
-                                       cluster_id node_ip ifname
+usage: sbcli storage-node add-node [-h] [--partitions PARTITIONS]
+                                   [--jm-percent JM_PERCENT]
+                                   [--data-nics DATA_NICS [DATA_NICS ...]]
+                                   [--cpu-mask SPDK_CPU_MASK]
+                                   [--memory SPDK_MEM]
+                                   [--spdk-image SPDK_IMAGE] [--spdk-debug]
+                                   [--iobuf_small_pool_count SMALL_POOL_COUNT]
+                                   [--iobuf_large_pool_count LARGE_POOL_COUNT]
+                                   [--iobuf_small_bufsize SMALL_BUFSIZE]
+                                   [--iobuf_large_bufsize LARGE_BUFSIZE]
+                                   cluster_id node_ip ifname
 
 positional arguments:
   cluster_id            UUID of the cluster to which the node will belong
@@ -123,7 +120,10 @@ positional arguments:
 
 optional arguments:
   -h, --help            show this help message and exit
-  --jm-pcie JM_PCIE     JM device address
+  --partitions PARTITIONS
+                        Number of partitions to create per device
+  --jm-percent JM_PERCENT
+                        Number in percent to use for JM from each device
   --data-nics DATA_NICS [DATA_NICS ...]
                         Data interface names
   --cpu-mask SPDK_CPU_MASK
@@ -148,7 +148,7 @@ optional arguments:
 
 
 ```bash
-usage: sbcli-dev storage-node delete [-h] node_id
+usage: sbcli storage-node delete [-h] node_id
 
 positional arguments:
   node_id     UUID of storage node
@@ -163,8 +163,8 @@ optional arguments:
 
 
 ```bash
-usage: sbcli-dev storage-node remove [-h] [--force-remove] [--force-migrate]
-                                     node_id
+usage: sbcli storage-node remove [-h] [--force-remove] [--force-migrate]
+                                 node_id
 
 positional arguments:
   node_id          UUID of storage node
@@ -181,7 +181,7 @@ optional arguments:
 
 
 ```bash
-usage: sbcli-dev storage-node list [-h] [--cluster-id CLUSTER_ID] [--json]
+usage: sbcli storage-node list [-h] [--cluster-id CLUSTER_ID] [--json]
 
 optional arguments:
   -h, --help            show this help message and exit
@@ -196,7 +196,7 @@ optional arguments:
 
 
 ```bash
-usage: sbcli-dev storage-node get [-h] id
+usage: sbcli storage-node get [-h] id
 
 positional arguments:
   id          UUID of storage node
@@ -207,11 +207,18 @@ optional arguments:
 ```
 
     
-### Restart a storage node.
-All functions and device drivers will be reset. During restart, the node does not accept IO. In a high-availability setup, this will not impact operations.
+### Restart a storage node
+All functions and device drivers will be reset. During restart, the node does not accept IO. In a high-availability setup, this will not impact operations
 
 ```bash
-usage: All functions and device drivers will be reset. During restart, the node does not accept IO. In a high-availability setup, this will not impact operations.
+usage: sbcli storage-node restart [-h] [--cpu-mask SPDK_CPU_MASK]
+                                  [--memory SPDK_MEM]
+                                  [--spdk-image SPDK_IMAGE] [--spdk-debug]
+                                  [--iobuf_small_pool_count SMALL_POOL_COUNT]
+                                  [--iobuf_large_pool_count LARGE_POOL_COUNT]
+                                  [--iobuf_small_bufsize SMALL_BUFSIZE]
+                                  [--iobuf_large_bufsize LARGE_BUFSIZE]
+                                  node_id
 
 positional arguments:
   node_id               UUID of storage node
@@ -236,11 +243,11 @@ optional arguments:
 ```
 
     
-### Shutdown a storage node.
+### Shutdown a storage node
 Once the command is issued, the node will stop accepting IO,but IO, which was previously received, will still be processed. In a high-availability setup, this will not impact operations.
 
 ```bash
-usage: Once the command is issued, the node will stop accepting IO,but IO, which was previously received, will still be processed. In a high-availability setup, this will not impact operations.
+usage: sbcli storage-node shutdown [-h] [--force] node_id
 
 positional arguments:
   node_id     UUID of storage node
@@ -252,11 +259,11 @@ optional arguments:
 ```
 
     
-### Suspend a storage node.
+### Suspend a storage node
 The node will stop accepting new IO, but will finish processing any IO, which has been received already.
 
 ```bash
-usage: The node will stop accepting new IO, but will finish processing any IO, which has been received already.
+usage: sbcli storage-node suspend [-h] [--force] node_id
 
 positional arguments:
   node_id     UUID of storage node
@@ -272,7 +279,7 @@ optional arguments:
 
 
 ```bash
-usage: sbcli-dev storage-node resume [-h] node_id
+usage: sbcli storage-node resume [-h] node_id
 
 positional arguments:
   node_id     UUID of storage node
@@ -283,11 +290,11 @@ optional arguments:
 ```
 
     
-### Returns the current io statistics of a node
+### Get node io statistics
 
 
 ```bash
-usage: sbcli-dev storage-node get-io-stats [-h] [--history HISTORY] node_id
+usage: sbcli storage-node get-io-stats [-h] [--history HISTORY] node_id
 
 positional arguments:
   node_id            Node ID
@@ -301,11 +308,11 @@ optional arguments:
 ```
 
     
-### Returns the size, absolute and relative utilization of the node in bytes
+### Get node capacity statistics
 
 
 ```bash
-usage: sbcli-dev storage-node get-capacity [-h] [--history HISTORY] node_id
+usage: sbcli storage-node get-capacity [-h] [--history HISTORY] node_id
 
 positional arguments:
   node_id            Node ID
@@ -323,9 +330,9 @@ optional arguments:
 
 
 ```bash
-usage: sbcli-dev storage-node list-devices [-h] [-s {node-seq,dev-seq,serial}]
-                                           [--json]
-                                           node_id
+usage: sbcli storage-node list-devices [-h] [-s {node-seq,dev-seq,serial}]
+                                       [--json]
+                                       node_id
 
 positional arguments:
   node_id               the node's UUID
@@ -339,13 +346,13 @@ optional arguments:
 ```
 
     
-### Set pt testing bdev mode
+### Set device testing mode
 
 
 ```bash
-usage: sbcli-dev storage-node device-testing-mode [-h]
-                                                  device_id
-                                                  {full_pass_through,io_error_on_read,io_error_on_write,io_error_on_unmap,io_error_on_all,discard_io_all,hotplug_removal}
+usage: sbcli storage-node device-testing-mode [-h]
+                                              device_id
+                                              {full_pass_through,io_error_on_read,io_error_on_write,io_error_on_unmap,io_error_on_all,discard_io_all,hotplug_removal}
 
 positional arguments:
   device_id             Device UUID
@@ -362,7 +369,7 @@ optional arguments:
 
 
 ```bash
-usage: sbcli-dev storage-node get-device [-h] device_id
+usage: sbcli storage-node get-device [-h] device_id
 
 positional arguments:
   device_id   the devices's UUID
@@ -377,7 +384,7 @@ optional arguments:
 Hardware device reset. Resetting the device can return the device from an unavailable into online state, if successful
 
 ```bash
-usage: Hardware device reset. Resetting the device can return the device from an unavailable into online state, if successful
+usage: sbcli storage-node reset-device [-h] device_id
 
 positional arguments:
   device_id   the devices's UUID
@@ -388,11 +395,11 @@ optional arguments:
 ```
 
     
-### Re add "removed" storage device
+### Restart storage device
 a previously removed or unavailable device may be returned into online state. If the device is not physically present, accessible or healthy, it will flip back into unavailable state again.
 
 ```bash
-usage: a previously removed or unavailable device may be returned into online state. If the device is not physically present, accessible or healthy, it will flip back into unavailable state again.
+usage: sbcli storage-node restart-device [-h] id
 
 positional arguments:
   id          the devices's UUID
@@ -407,7 +414,7 @@ optional arguments:
 Adding a device will include a previously detected device (currently in "new" state) into cluster and will launch and auto-rebalancing background process in which some cluster capacity is re-distributed to this newly added device.
 
 ```bash
-usage: Adding a device will include a previously detected device (currently in "new" state) into cluster and will launch and auto-rebalancing background process in which some cluster capacity is re-distributed to this newly added device.
+usage: sbcli storage-node add-device [-h]
 
 optional arguments:
   -h, --help  show this help message and exit
@@ -415,11 +422,11 @@ optional arguments:
 ```
 
     
-### Remove a storage device.
+### Remove a storage device
 The device will become unavailable, independently if it was physically removed from the server. This function can be used if auto-detection of removal did not work or if the device must be maintained otherwise while remaining inserted into the server. 
 
 ```bash
-usage: The device will become unavailable, independently if it was physically removed from the server. This function can be used if auto-detection of removal did not work or if the device must be maintained otherwise while remaining inserted into the server. 
+usage: sbcli storage-node remove-device [-h] [--force] device_id
 
 positional arguments:
   device_id   Storage device ID
@@ -431,24 +438,12 @@ optional arguments:
 ```
 
     
-### Set storage device to failed state. 
-This command can be used, if an administrator believes that the device must be changed, but its status and health state do not lead to an automatic detection of the failure state. Attention!!! The failed state is final, all data on the device will be automatically recovered to other devices in the cluster. 
-
-```bash
-usage: This command can be used, if an administrator believes that the device must be changed, but its status and health state do not lead to an automatic detection of the failure state. Attention!!! The failed state is final, all data on the device will be automatically recovered to other devices in the cluster. 
-
-optional arguments:
-  -h, --help  show this help message and exit
-
-```
-
-    
-### Returns the size, absolute and relative utilization of the device in bytes
+### Get device capacity
 
 
 ```bash
-usage: sbcli-dev storage-node get-capacity-device [-h] [--history HISTORY]
-                                                  device_id
+usage: sbcli storage-node get-capacity-device [-h] [--history HISTORY]
+                                              device_id
 
 positional arguments:
   device_id          Storage device ID
@@ -462,12 +457,12 @@ optional arguments:
 ```
 
     
-### Returns device io statistics
+### Get device io statistics
 
 
 ```bash
-usage: sbcli-dev storage-node get-io-stats-device [-h] [--history HISTORY]
-                                                  device_id
+usage: sbcli storage-node get-io-stats-device [-h] [--history HISTORY]
+                                              device_id
 
 positional arguments:
   device_id          Storage device ID
@@ -485,7 +480,7 @@ optional arguments:
 
 
 ```bash
-usage: sbcli-dev storage-node port-list [-h] node_id
+usage: sbcli storage-node port-list [-h] node_id
 
 positional arguments:
   node_id     Storage node ID
@@ -500,7 +495,7 @@ optional arguments:
 
 
 ```bash
-usage: sbcli-dev storage-node port-io-stats [-h] [--history HISTORY] port_id
+usage: sbcli storage-node port-io-stats [-h] [--history HISTORY] port_id
 
 positional arguments:
   port_id            Data port ID
@@ -517,7 +512,7 @@ optional arguments:
 
 
 ```bash
-usage: sbcli-dev storage-node check [-h] id
+usage: sbcli storage-node check [-h] id
 
 positional arguments:
   id          UUID of storage node
@@ -532,7 +527,7 @@ optional arguments:
 
 
 ```bash
-usage: sbcli-dev storage-node check-device [-h] id
+usage: sbcli storage-node check-device [-h] id
 
 positional arguments:
   id          device UUID
@@ -547,7 +542,7 @@ optional arguments:
 
 
 ```bash
-usage: sbcli-dev storage-node info [-h] id
+usage: sbcli storage-node info [-h] id
 
 positional arguments:
   id          Node UUID
@@ -562,7 +557,7 @@ optional arguments:
 
 
 ```bash
-usage: sbcli-dev storage-node info-spdk [-h] id
+usage: sbcli storage-node info-spdk [-h] id
 
 positional arguments:
   id          Node UUID
@@ -577,34 +572,31 @@ optional arguments:
 
 
 ```bash
-usage: sbcli-dev cluster [-h]
-                         {create,list,status,get,suspend,unsuspend,get-capacity,get-io-stats,get-cli-ssh-pass,get-logs,get-secret,upd-secret,check,update,graceful-shutdown,graceful-startup,list-tasks}
-                         ...
+usage: sbcli cluster [-h]
+                     {create,add,list,status,get,suspend,unsuspend,get-capacity,get-io-stats,get-logs,get-secret,upd-secret,check,update,graceful-shutdown,graceful-startup,list-tasks,delete}
+                     ...
 
 positional arguments:
-  {create,list,status,get,suspend,unsuspend,get-capacity,get-io-stats,get-cli-ssh-pass,get-logs,get-secret,upd-secret,check,update,graceful-shutdown,graceful-startup,list-tasks}
+  {create,add,list,status,get,suspend,unsuspend,get-capacity,get-io-stats,get-logs,get-secret,upd-secret,check,update,graceful-shutdown,graceful-startup,list-tasks,delete}
     create              Create an new cluster with this node as mgmt (local
                         run)
+    add                 Add new cluster
     list                Show clusters list
     status              Show cluster status
     get                 Show cluster info
     suspend             Suspend cluster
     unsuspend           Unsuspend cluster
-    get-capacity        Returns the current total available capacity, utilized
-                        capacity (in percent and absolute) and provisioned
-                        capacity (in percent and absolute) in GB in the
-                        cluster.
-    get-io-stats        Returns cluster IO statistics.
-    get-cli-ssh-pass    returns the ssh password for the CLI ssh connection
+    get-capacity        Get cluster capacity
+    get-io-stats        Get cluster IO statistics
     get-logs            Returns cluster status logs
-    get-secret          Returns auto generated, 20 characters secret.
-    upd-secret          Updates the secret (replaces the existing one with a
-                        new one) and returns the new one.
+    get-secret          Get cluster secret
+    upd-secret          Updates the cluster secret
     check               Health check cluster
     update              Update cluster mgmt services
     graceful-shutdown   Graceful shutdown of storage nodes
     graceful-startup    Graceful startup of storage nodes
     list-tasks          List tasks by cluster ID
+    delete              Delete Cluster
 
 optional arguments:
   -h, --help            show this help message and exit
@@ -616,14 +608,13 @@ optional arguments:
 
 
 ```bash
-usage: sbcli-dev cluster create [-h] [--blk_size {512,4096}]
-                                [--page_size PAGE_SIZE] [--CLI_PASS CLI_PASS]
-                                [--cap-warn CAP_WARN] [--cap-crit CAP_CRIT]
-                                [--prov-cap-warn PROV_CAP_WARN]
-                                [--prov-cap-crit PROV_CAP_CRIT]
-                                [--ifname IFNAME]
-                                [--log-del-interval LOG_DEL_INTERVAL]
-                                [--metrics-retention-period METRICS_RETENTION_PERIOD]
+usage: sbcli cluster create [-h] [--blk_size {512,4096}]
+                            [--page_size PAGE_SIZE] [--CLI_PASS CLI_PASS]
+                            [--cap-warn CAP_WARN] [--cap-crit CAP_CRIT]
+                            [--prov-cap-warn PROV_CAP_WARN]
+                            [--prov-cap-crit PROV_CAP_CRIT] [--ifname IFNAME]
+                            [--log-del-interval LOG_DEL_INTERVAL]
+                            [--metrics-retention-period METRICS_RETENTION_PERIOD]
 
 optional arguments:
   -h, --help            show this help message and exit
@@ -647,11 +638,36 @@ optional arguments:
 ```
 
     
+### Add new cluster
+
+
+```bash
+usage: sbcli cluster add [-h] [--blk_size {512,4096}] [--page_size PAGE_SIZE]
+                         [--cap-warn CAP_WARN] [--cap-crit CAP_CRIT]
+                         [--prov-cap-warn PROV_CAP_WARN]
+                         [--prov-cap-crit PROV_CAP_CRIT]
+
+optional arguments:
+  -h, --help            show this help message and exit
+  --blk_size {512,4096}
+                        The block size in bytes
+  --page_size PAGE_SIZE
+                        The size of a data page in bytes
+  --cap-warn CAP_WARN   Capacity warning level in percent, default=80
+  --cap-crit CAP_CRIT   Capacity critical level in percent, default=90
+  --prov-cap-warn PROV_CAP_WARN
+                        Capacity warning level in percent, default=180
+  --prov-cap-crit PROV_CAP_CRIT
+                        Capacity critical level in percent, default=190
+
+```
+
+    
 ### Show clusters list
 
 
 ```bash
-usage: sbcli-dev cluster list [-h]
+usage: sbcli cluster list [-h]
 
 optional arguments:
   -h, --help  show this help message and exit
@@ -663,7 +679,7 @@ optional arguments:
 
 
 ```bash
-usage: sbcli-dev cluster status [-h] cluster_id
+usage: sbcli cluster status [-h] cluster_id
 
 positional arguments:
   cluster_id  the cluster UUID
@@ -678,7 +694,7 @@ optional arguments:
 
 
 ```bash
-usage: sbcli-dev cluster get [-h] id
+usage: sbcli cluster get [-h] id
 
 positional arguments:
   id          the cluster UUID
@@ -693,7 +709,7 @@ optional arguments:
 
 
 ```bash
-usage: sbcli-dev cluster suspend [-h] cluster_id
+usage: sbcli cluster suspend [-h] cluster_id
 
 positional arguments:
   cluster_id  the cluster UUID
@@ -708,7 +724,7 @@ optional arguments:
 
 
 ```bash
-usage: sbcli-dev cluster unsuspend [-h] cluster_id
+usage: sbcli cluster unsuspend [-h] cluster_id
 
 positional arguments:
   cluster_id  the cluster UUID
@@ -719,12 +735,11 @@ optional arguments:
 ```
 
     
-### Returns the current total available capacity, utilized capacity (in percent and absolute) and provisioned capacity (in percent and absolute) in gb in the cluster.
+### Get cluster capacity
 
 
 ```bash
-usage: sbcli-dev cluster get-capacity [-h] [--json] [--history HISTORY]
-                                      cluster_id
+usage: sbcli cluster get-capacity [-h] [--json] [--history HISTORY] cluster_id
 
 positional arguments:
   cluster_id         the cluster UUID
@@ -738,13 +753,12 @@ optional arguments:
 ```
 
     
-### Returns cluster io statistics.
+### Get cluster io statistics
 
 
 ```bash
-usage: sbcli-dev cluster get-io-stats [-h] [--records RECORDS]
-                                      [--history HISTORY]
-                                      cluster_id
+usage: sbcli cluster get-io-stats [-h] [--records RECORDS] [--history HISTORY]
+                                  cluster_id
 
 positional arguments:
   cluster_id         the cluster UUID
@@ -758,26 +772,11 @@ optional arguments:
 ```
 
     
-### Returns the ssh password for the cli ssh connection
-
-
-```bash
-usage: sbcli-dev cluster get-cli-ssh-pass [-h] cluster_id
-
-positional arguments:
-  cluster_id  the cluster UUID
-
-optional arguments:
-  -h, --help  show this help message and exit
-
-```
-
-    
 ### Returns cluster status logs
 
 
 ```bash
-usage: sbcli-dev cluster get-logs [-h] cluster_id
+usage: sbcli cluster get-logs [-h] cluster_id
 
 positional arguments:
   cluster_id  cluster uuid
@@ -788,11 +787,11 @@ optional arguments:
 ```
 
     
-### Returns auto generated, 20 characters secret.
+### Get cluster secret
 
 
 ```bash
-usage: sbcli-dev cluster get-secret [-h] cluster_id
+usage: sbcli cluster get-secret [-h] cluster_id
 
 positional arguments:
   cluster_id  cluster uuid
@@ -803,11 +802,11 @@ optional arguments:
 ```
 
     
-### Updates the secret (replaces the existing one with a new one) and returns the new one.
+### Updates the cluster secret
 
 
 ```bash
-usage: sbcli-dev cluster upd-secret [-h] cluster_id secret
+usage: sbcli cluster upd-secret [-h] cluster_id secret
 
 positional arguments:
   cluster_id  cluster uuid
@@ -823,7 +822,7 @@ optional arguments:
 
 
 ```bash
-usage: sbcli-dev cluster check [-h] id
+usage: sbcli cluster check [-h] id
 
 positional arguments:
   id          cluster UUID
@@ -838,7 +837,7 @@ optional arguments:
 
 
 ```bash
-usage: sbcli-dev cluster update [-h] id
+usage: sbcli cluster update [-h] id
 
 positional arguments:
   id          cluster UUID
@@ -853,7 +852,7 @@ optional arguments:
 
 
 ```bash
-usage: sbcli-dev cluster graceful-shutdown [-h] id
+usage: sbcli cluster graceful-shutdown [-h] id
 
 positional arguments:
   id          cluster UUID
@@ -868,7 +867,7 @@ optional arguments:
 
 
 ```bash
-usage: sbcli-dev cluster graceful-startup [-h] id
+usage: sbcli cluster graceful-startup [-h] id
 
 positional arguments:
   id          cluster UUID
@@ -883,10 +882,25 @@ optional arguments:
 
 
 ```bash
-usage: sbcli-dev cluster list-tasks [-h] cluster_id
+usage: sbcli cluster list-tasks [-h] cluster_id
 
 positional arguments:
   cluster_id  UUID of the cluster
+
+optional arguments:
+  -h, --help  show this help message and exit
+
+```
+
+    
+### Delete cluster
+This is only possible, if no storage nodes and pools are attached to the cluster
+
+```bash
+usage: sbcli cluster delete [-h] id
+
+positional arguments:
+  id          cluster UUID
 
 optional arguments:
   -h, --help  show this help message and exit
@@ -898,28 +912,27 @@ optional arguments:
 
 
 ```bash
-usage: sbcli-dev lvol [-h]
-                      {add,qos-set,list,list-mem,get,delete,connect,resize,create-snapshot,clone,move,get-capacity,get-io-stats,send-cluster-map,get-cluster-map,check}
-                      ...
+usage: sbcli lvol [-h]
+                  {add,qos-set,list,list-mem,get,delete,connect,resize,create-snapshot,clone,move,get-capacity,get-io-stats,send-cluster-map,get-cluster-map,check}
+                  ...
 
 positional arguments:
   {add,qos-set,list,list-mem,get,delete,connect,resize,create-snapshot,clone,move,get-capacity,get-io-stats,send-cluster-map,get-cluster-map,check}
     add                 Add a new logical volume
     qos-set             Change qos settings for an active logical volume
-    list                List all LVols
+    list                List LVols
     list-mem            Get the size and max_size of the lvol
     get                 Get LVol details
-    delete              Delete LVol.
-    connect             show connection strings to cluster.
-    resize              Resize LVol.
+    delete              Delete LVol
+    connect             Get lvol connection strings
+    resize              Resize LVol
     create-snapshot     Create snapshot from LVol
     clone               create LVol based on a snapshot
     move                Moves a full copy of the logical volume between nodes
-    get-capacity        Returns the current (or historic) provisioned and
-                        utilized (in percent and absolute) capacity.
-    get-io-stats        Returns LVol IO statistics
-    send-cluster-map    send distr cluster map
-    get-cluster-map     get distr cluster map
+    get-capacity        Get LVol capacity
+    get-io-stats        Get LVol IO statistics
+    send-cluster-map    send cluster map
+    get-cluster-map     get cluster map
     check               Health check LVol
 
 optional arguments:
@@ -932,18 +945,16 @@ optional arguments:
 
 
 ```bash
-usage: sbcli-dev lvol add [-h] [--snapshot] [--max-size MAX_SIZE]
-                          [--host-id HOST_ID] [--ha-type {single,ha,default}]
-                          [--encrypt] [--crypto-key1 CRYPTO_KEY1]
-                          [--crypto-key2 CRYPTO_KEY2]
-                          [--max-rw-iops MAX_RW_IOPS]
-                          [--max-rw-mbytes MAX_RW_MBYTES]
-                          [--max-r-mbytes MAX_R_MBYTES]
-                          [--max-w-mbytes MAX_W_MBYTES]
-                          [--distr-vuid DISTR_VUID] [--distr-ndcs DISTR_NDCS]
-                          [--distr-npcs DISTR_NPCS] [--distr-bs DISTR_BS]
-                          [--distr-chunk-bs DISTR_CHUNK_BS]
-                          name size pool
+usage: sbcli lvol add [-h] [--snapshot] [--max-size MAX_SIZE]
+                      [--host-id HOST_ID] [--ha-type {single,ha,default}]
+                      [--encrypt] [--crypto-key1 CRYPTO_KEY1]
+                      [--crypto-key2 CRYPTO_KEY2] [--max-rw-iops MAX_RW_IOPS]
+                      [--max-rw-mbytes MAX_RW_MBYTES]
+                      [--max-r-mbytes MAX_R_MBYTES]
+                      [--max-w-mbytes MAX_W_MBYTES] [--distr-vuid DISTR_VUID]
+                      [--distr-ndcs DISTR_NDCS] [--distr-npcs DISTR_NPCS]
+                      [--distr-bs DISTR_BS] [--distr-chunk-bs DISTR_CHUNK_BS]
+                      name size pool
 
 positional arguments:
   name                  LVol name or id
@@ -988,11 +999,11 @@ optional arguments:
 
 
 ```bash
-usage: sbcli-dev lvol qos-set [-h] [--max-rw-iops MAX_RW_IOPS]
-                              [--max-rw-mbytes MAX_RW_MBYTES]
-                              [--max-r-mbytes MAX_R_MBYTES]
-                              [--max-w-mbytes MAX_W_MBYTES]
-                              id
+usage: sbcli lvol qos-set [-h] [--max-rw-iops MAX_RW_IOPS]
+                          [--max-rw-mbytes MAX_RW_MBYTES]
+                          [--max-r-mbytes MAX_R_MBYTES]
+                          [--max-w-mbytes MAX_W_MBYTES]
+                          id
 
 positional arguments:
   id                    LVol id
@@ -1011,16 +1022,17 @@ optional arguments:
 ```
 
     
-### List all lvols
+### List lvols
 
 
 ```bash
-usage: sbcli-dev lvol list [-h] [--cluster-id CLUSTER_ID] [--json]
+usage: sbcli lvol list [-h] [--cluster-id CLUSTER_ID] [--pool POOL] [--json]
 
 optional arguments:
   -h, --help            show this help message and exit
   --cluster-id CLUSTER_ID
                         List LVols in particular cluster
+  --pool POOL           List LVols in particular Pool ID or name
   --json                Print outputs in json format
 
 ```
@@ -1030,7 +1042,7 @@ optional arguments:
 
 
 ```bash
-usage: sbcli-dev lvol list-mem [-h] [--json] [--csv]
+usage: sbcli lvol list-mem [-h] [--json] [--csv]
 
 optional arguments:
   -h, --help  show this help message and exit
@@ -1044,7 +1056,7 @@ optional arguments:
 
 
 ```bash
-usage: sbcli-dev lvol get [-h] [--json] id
+usage: sbcli lvol get [-h] [--json] id
 
 positional arguments:
   id          LVol id or name
@@ -1056,11 +1068,11 @@ optional arguments:
 ```
 
     
-### Delete lvol.
+### Delete lvol
 This is only possible, if no more snapshots and non-inflated clones of the volume exist. The volume must be suspended before it can be deleted. 
 
 ```bash
-usage: This is only possible, if no more snapshots and non-inflated clones of the volume exist. The volume must be suspended before it can be deleted. 
+usage: sbcli lvol delete [-h] [--force] id [id ...]
 
 positional arguments:
   id          LVol id or ids
@@ -1072,11 +1084,11 @@ optional arguments:
 ```
 
     
-### Show connection strings to cluster.
+### Get lvol connection strings
 Multiple connections to the cluster are always available for multi-pathing and high-availability.
 
 ```bash
-usage: Multiple connections to the cluster are always available for multi-pathing and high-availability.
+usage: sbcli lvol connect [-h] id
 
 positional arguments:
   id          LVol id
@@ -1087,11 +1099,11 @@ optional arguments:
 ```
 
     
-### Resize lvol.
+### Resize lvol
 The lvol cannot be exceed the maximum size for lvols. It cannot exceed total remaining provisioned space in pool. It cannot drop below the current utilization.
 
 ```bash
-usage: The lvol cannot be exceed the maximum size for lvols. It cannot exceed total remaining provisioned space in pool. It cannot drop below the current utilization.
+usage: sbcli lvol resize [-h] id size
 
 positional arguments:
   id          LVol id
@@ -1107,7 +1119,7 @@ optional arguments:
 
 
 ```bash
-usage: sbcli-dev lvol create-snapshot [-h] id name
+usage: sbcli lvol create-snapshot [-h] id name
 
 positional arguments:
   id          LVol id
@@ -1123,7 +1135,7 @@ optional arguments:
 
 
 ```bash
-usage: sbcli-dev lvol clone [-h] [--resize RESIZE] snapshot_id clone_name
+usage: sbcli lvol clone [-h] [--resize RESIZE] snapshot_id clone_name
 
 positional arguments:
   snapshot_id      snapshot UUID
@@ -1140,7 +1152,7 @@ optional arguments:
 
 
 ```bash
-usage: sbcli-dev lvol move [-h] [--force] id node_id
+usage: sbcli lvol move [-h] [--force] id node_id
 
 positional arguments:
   id          LVol UUID
@@ -1153,11 +1165,11 @@ optional arguments:
 ```
 
     
-### Returns the current (or historic) provisioned and utilized (in percent and absolute) capacity.
+### Get lvol capacity
 
 
 ```bash
-usage: sbcli-dev lvol get-capacity [-h] [--history HISTORY] id
+usage: sbcli lvol get-capacity [-h] [--history HISTORY] id
 
 positional arguments:
   id                 LVol id
@@ -1170,11 +1182,11 @@ optional arguments:
 ```
 
     
-### Returns lvol io statistics
+### Get lvol io statistics
 
 
 ```bash
-usage: sbcli-dev lvol get-io-stats [-h] [--history HISTORY] id
+usage: sbcli lvol get-io-stats [-h] [--history HISTORY] id
 
 positional arguments:
   id                 LVol id
@@ -1187,11 +1199,11 @@ optional arguments:
 ```
 
     
-### Send distr cluster map
+### Send cluster map
 
 
 ```bash
-usage: sbcli-dev lvol send-cluster-map [-h] id
+usage: sbcli lvol send-cluster-map [-h] id
 
 positional arguments:
   id          LVol id
@@ -1202,11 +1214,11 @@ optional arguments:
 ```
 
     
-### Get distr cluster map
+### Get cluster map
 
 
 ```bash
-usage: sbcli-dev lvol get-cluster-map [-h] id
+usage: sbcli lvol get-cluster-map [-h] id
 
 positional arguments:
   id          LVol id
@@ -1221,7 +1233,7 @@ optional arguments:
 
 
 ```bash
-usage: sbcli-dev lvol check [-h] id
+usage: sbcli lvol check [-h] id
 
 positional arguments:
   id          UUID of LVol
@@ -1236,11 +1248,11 @@ optional arguments:
 
 
 ```bash
-usage: sbcli-dev mgmt [-h] {add,list,remove} ...
+usage: sbcli mgmt [-h] {add,list,remove} ...
 
 positional arguments:
   {add,list,remove}
-    add              Add Management node to the cluster
+    add              Add Management node to the cluster (local run)
     list             List Management nodes
     remove           Remove Management node
 
@@ -1250,11 +1262,11 @@ optional arguments:
 ```
 
     
-### Add management node to the cluster
+### Add management node to the cluster (local run)
 
 
 ```bash
-usage: sbcli-dev mgmt add [-h] cluster_ip cluster_id ifname
+usage: sbcli mgmt add [-h] cluster_ip cluster_id ifname
 
 positional arguments:
   cluster_ip  the cluster IP address
@@ -1271,7 +1283,7 @@ optional arguments:
 
 
 ```bash
-usage: sbcli-dev mgmt list [-h] [--json]
+usage: sbcli mgmt list [-h] [--json]
 
 optional arguments:
   -h, --help  show this help message and exit
@@ -1284,7 +1296,7 @@ optional arguments:
 
 
 ```bash
-usage: sbcli-dev mgmt remove [-h] id
+usage: sbcli mgmt remove [-h] id
 
 positional arguments:
   id          Mgmt node uuid
@@ -1299,9 +1311,9 @@ optional arguments:
 
 
 ```bash
-usage: sbcli-dev pool [-h]
-                      {add,set,list,get,delete,enable,disable,get-secret,upd-secret,get-capacity,get-io-stats}
-                      ...
+usage: sbcli pool [-h]
+                  {add,set,list,get,delete,enable,disable,get-secret,upd-secret,get-capacity,get-io-stats}
+                  ...
 
 positional arguments:
   {add,set,list,get,delete,enable,disable,get-secret,upd-secret,get-capacity,get-io-stats}
@@ -1312,14 +1324,10 @@ positional arguments:
     delete              Delete Pool
     enable              Set pool status to Active
     disable             Set pool status to Inactive.
-    get-secret          Returns auto generated, 20 characters secret.
-    upd-secret          Updates the secret (replaces the existing one with a
-                        new one) and returns the new one.
-    get-capacity        Return provisioned, utilized (absolute) and utilized
-                        (percent) storage on the Pool.
-    get-io-stats        Returns either the current or historic io statistics
-                        (read-IO, write-IO, total-IO, read mbs, write mbs,
-                        total mbs).
+    get-secret          Get pool secret
+    upd-secret          Updates pool secret
+    get-capacity        Get pool capacity
+    get-io-stats        Get pool IO statistics
 
 optional arguments:
   -h, --help            show this help message and exit
@@ -1331,15 +1339,16 @@ optional arguments:
 
 
 ```bash
-usage: sbcli-dev pool add [-h] [--pool-max POOL_MAX] [--lvol-max LVOL_MAX]
-                          [--max-rw-iops MAX_RW_IOPS]
-                          [--max-rw-mbytes MAX_RW_MBYTES]
-                          [--max-r-mbytes MAX_R_MBYTES]
-                          [--max-w-mbytes MAX_W_MBYTES] [--has-secret]
-                          name
+usage: sbcli pool add [-h] [--pool-max POOL_MAX] [--lvol-max LVOL_MAX]
+                      [--max-rw-iops MAX_RW_IOPS]
+                      [--max-rw-mbytes MAX_RW_MBYTES]
+                      [--max-r-mbytes MAX_R_MBYTES]
+                      [--max-w-mbytes MAX_W_MBYTES] [--has-secret]
+                      name cluster_id
 
 positional arguments:
   name                  Pool name
+  cluster_id            Cluster UUID
 
 optional arguments:
   -h, --help            show this help message and exit
@@ -1364,12 +1373,12 @@ optional arguments:
 
 
 ```bash
-usage: sbcli-dev pool set [-h] [--pool-max POOL_MAX] [--lvol-max LVOL_MAX]
-                          [--max-rw-iops MAX_RW_IOPS]
-                          [--max-rw-mbytes MAX_RW_MBYTES]
-                          [--max-r-mbytes MAX_R_MBYTES]
-                          [--max-w-mbytes MAX_W_MBYTES]
-                          id
+usage: sbcli pool set [-h] [--pool-max POOL_MAX] [--lvol-max LVOL_MAX]
+                      [--max-rw-iops MAX_RW_IOPS]
+                      [--max-rw-mbytes MAX_RW_MBYTES]
+                      [--max-r-mbytes MAX_R_MBYTES]
+                      [--max-w-mbytes MAX_W_MBYTES]
+                      id
 
 positional arguments:
   id                    Pool UUID
@@ -1394,12 +1403,13 @@ optional arguments:
 
 
 ```bash
-usage: sbcli-dev pool list [-h] [--json] [--cluster-id]
+usage: sbcli pool list [-h] [--json] [--cluster-id CLUSTER_ID]
 
 optional arguments:
-  -h, --help    show this help message and exit
-  --json        Print outputs in json format
-  --cluster-id  ID of the cluster
+  -h, --help            show this help message and exit
+  --json                Print outputs in json format
+  --cluster-id CLUSTER_ID
+                        ID of the cluster
 
 ```
 
@@ -1408,7 +1418,7 @@ optional arguments:
 
 
 ```bash
-usage: sbcli-dev pool get [-h] [--json] id
+usage: sbcli pool get [-h] [--json] id
 
 positional arguments:
   id          pool uuid
@@ -1424,7 +1434,7 @@ optional arguments:
 It is only possible to delete a pool if it is empty (no provisioned logical volumes contained).
 
 ```bash
-usage: It is only possible to delete a pool if it is empty (no provisioned logical volumes contained).
+usage: sbcli pool delete [-h] id
 
 positional arguments:
   id          pool uuid
@@ -1439,7 +1449,7 @@ optional arguments:
 
 
 ```bash
-usage: sbcli-dev pool enable [-h] pool_id
+usage: sbcli pool enable [-h] pool_id
 
 positional arguments:
   pool_id     pool uuid
@@ -1454,7 +1464,7 @@ optional arguments:
 
 
 ```bash
-usage: sbcli-dev pool disable [-h] pool_id
+usage: sbcli pool disable [-h] pool_id
 
 positional arguments:
   pool_id     pool uuid
@@ -1465,11 +1475,11 @@ optional arguments:
 ```
 
     
-### Returns auto generated, 20 characters secret.
+### Get pool secret
 
 
 ```bash
-usage: sbcli-dev pool get-secret [-h] pool_id
+usage: sbcli pool get-secret [-h] pool_id
 
 positional arguments:
   pool_id     pool uuid
@@ -1480,11 +1490,11 @@ optional arguments:
 ```
 
     
-### Updates the secret (replaces the existing one with a new one) and returns the new one.
+### Updates pool secret
 
 
 ```bash
-usage: sbcli-dev pool upd-secret [-h] pool_id secret
+usage: sbcli pool upd-secret [-h] pool_id secret
 
 positional arguments:
   pool_id     pool uuid
@@ -1496,11 +1506,11 @@ optional arguments:
 ```
 
     
-### Return provisioned, utilized (absolute) and utilized (percent) storage on the pool.
+### Get pool capacity
 
 
 ```bash
-usage: sbcli-dev pool get-capacity [-h] pool_id
+usage: sbcli pool get-capacity [-h] pool_id
 
 positional arguments:
   pool_id     pool uuid
@@ -1511,11 +1521,11 @@ optional arguments:
 ```
 
     
-### Returns either the current or historic io statistics (read-io, write-io, total-io, read mbs, write mbs, total mbs).
+### Get pool io statistics
 
 
 ```bash
-usage: sbcli-dev pool get-io-stats [-h] [--history HISTORY] id
+usage: sbcli pool get-io-stats [-h] [--history HISTORY] id
 
 positional arguments:
   id                 Pool id
@@ -1532,7 +1542,7 @@ optional arguments:
 
 
 ```bash
-usage: sbcli-dev snapshot [-h] {add,list,delete,clone} ...
+usage: sbcli snapshot [-h] {add,list,delete,clone} ...
 
 positional arguments:
   {add,list,delete,clone}
@@ -1551,7 +1561,7 @@ optional arguments:
 
 
 ```bash
-usage: sbcli-dev snapshot add [-h] id name
+usage: sbcli snapshot add [-h] id name
 
 positional arguments:
   id          LVol UUID
@@ -1567,7 +1577,7 @@ optional arguments:
 
 
 ```bash
-usage: sbcli-dev snapshot list [-h]
+usage: sbcli snapshot list [-h]
 
 optional arguments:
   -h, --help  show this help message and exit
@@ -1579,7 +1589,7 @@ optional arguments:
 
 
 ```bash
-usage: sbcli-dev snapshot delete [-h] id
+usage: sbcli snapshot delete [-h] id
 
 positional arguments:
   id          snapshot UUID
@@ -1594,7 +1604,7 @@ optional arguments:
 
 
 ```bash
-usage: sbcli-dev snapshot clone [-h] [--resize RESIZE] id lvol_name
+usage: sbcli snapshot clone [-h] [--resize RESIZE] id lvol_name
 
 positional arguments:
   id               snapshot UUID
@@ -1611,9 +1621,9 @@ optional arguments:
 
 
 ```bash
-usage: sbcli-dev caching-node [-h]
-                              {deploy,add-node,list,list-lvols,remove,connect,disconnect,recreate}
-                              ...
+usage: sbcli caching-node [-h]
+                          {deploy,add-node,list,list-lvols,remove,connect,disconnect,recreate}
+                          ...
 
 positional arguments:
   {deploy,add-node,list,list-lvols,remove,connect,disconnect,recreate}
@@ -1636,7 +1646,7 @@ optional arguments:
 
 
 ```bash
-usage: sbcli-dev caching-node deploy [-h] [--ifname IFNAME]
+usage: sbcli caching-node deploy [-h] [--ifname IFNAME]
 
 optional arguments:
   -h, --help       show this help message and exit
@@ -1649,11 +1659,11 @@ optional arguments:
 
 
 ```bash
-usage: sbcli-dev caching-node add-node [-h] [--cpu-mask SPDK_CPU_MASK]
-                                       [--memory SPDK_MEM]
-                                       [--spdk-image SPDK_IMAGE]
-                                       [--namespace NAMESPACE]
-                                       cluster_id node_ip ifname
+usage: sbcli caching-node add-node [-h] [--cpu-mask SPDK_CPU_MASK]
+                                   [--memory SPDK_MEM]
+                                   [--spdk-image SPDK_IMAGE]
+                                   [--namespace NAMESPACE]
+                                   cluster_id node_ip ifname
 
 positional arguments:
   cluster_id            UUID of the cluster to which the node will belong
@@ -1678,7 +1688,7 @@ optional arguments:
 
 
 ```bash
-usage: sbcli-dev caching-node list [-h]
+usage: sbcli caching-node list [-h]
 
 optional arguments:
   -h, --help  show this help message and exit
@@ -1690,7 +1700,7 @@ optional arguments:
 
 
 ```bash
-usage: sbcli-dev caching-node list-lvols [-h] id
+usage: sbcli caching-node list-lvols [-h] id
 
 positional arguments:
   id          Caching Node UUID
@@ -1705,7 +1715,7 @@ optional arguments:
 
 
 ```bash
-usage: sbcli-dev caching-node remove [-h] [--force] id
+usage: sbcli caching-node remove [-h] [--force] id
 
 positional arguments:
   id          Caching Node UUID
@@ -1721,7 +1731,7 @@ optional arguments:
 
 
 ```bash
-usage: sbcli-dev caching-node connect [-h] node_id lvol_id
+usage: sbcli caching-node connect [-h] node_id lvol_id
 
 positional arguments:
   node_id     Caching node UUID
@@ -1737,7 +1747,7 @@ optional arguments:
 
 
 ```bash
-usage: sbcli-dev caching-node disconnect [-h] node_id lvol_id
+usage: sbcli caching-node disconnect [-h] node_id lvol_id
 
 positional arguments:
   node_id     Caching node UUID
@@ -1749,11 +1759,11 @@ optional arguments:
 ```
 
     
-### Recreate caching node bdevs 
+### Recreate caching node bdevs
 
 
 ```bash
-usage: sbcli-dev caching-node recreate [-h] node_id
+usage: sbcli caching-node recreate [-h] node_id
 
 positional arguments:
   node_id     Caching node UUID
