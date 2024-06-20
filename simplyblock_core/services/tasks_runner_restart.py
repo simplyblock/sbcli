@@ -150,9 +150,8 @@ def task_runner_node(task):
         task.write_to_db(db_controller.kv_store)
         return True
 
-    # if _get_node_unavailable_devices_count(node.get_id()) == 0:
-    if node.status == StorageNode.STATUS_ONLINE:
-        logger.info(f"Node is online: {node.get_id()}, no restart needed")
+    if _get_node_unavailable_devices_count(node.get_id()) == 0 and node.status == StorageNode.STATUS_ONLINE:
+        logger.info(f"Node is online: {node.get_id()}")
         task.function_result = "Node is online"
         task.status = JobSchedule.STATUS_DONE
         task.write_to_db(db_controller.kv_store)
@@ -168,7 +167,7 @@ def task_runner_node(task):
     ret = storage_node_ops.shutdown_storage_node(node.get_id(), force=True)
     if ret:
         logger.info(f"Node shutdown succeeded")
-    time.sleep(5)
+    time.sleep(3)
 
     # resetting node
     logger.info(f"Restart node {node.get_id()}")
@@ -176,9 +175,8 @@ def task_runner_node(task):
     if ret:
         logger.info(f"Node restart succeeded")
 
-    # if _get_node_unavailable_devices_count(node.get_id()) == 0:
-    if node.status == StorageNode.STATUS_ONLINE:
-        logger.info(f"Node is online: {node.get_id()}, no restart needed")
+    if _get_node_unavailable_devices_count(node.get_id()) == 0 and node.status == StorageNode.STATUS_ONLINE:
+        logger.info(f"Node is online: {node.get_id()}")
         task.function_result = "done"
         task.status = JobSchedule.STATUS_DONE
         task.write_to_db(db_controller.kv_store)
