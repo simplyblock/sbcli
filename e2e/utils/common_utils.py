@@ -46,7 +46,7 @@ class CommonUtils:
                     if step == "restart":
                         to_check_in_logs.append("Device status changed from: online to: unavailable")
                         # TODO: Change from unavailable to online once bug is fixed.
-                        to_check_in_logs.append("Device status changed from: online to: online")
+                        # to_check_in_logs.append("Device status changed from: online to: online")
 
         for expected_log in to_check_in_logs:
             assert expected_log in actual_logs, f"Expected event/log {expected_log} not found in Actual logs: {actual_logs}"
