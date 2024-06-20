@@ -81,15 +81,15 @@ def task_runner_device(task):
 
     node = db_controller.get_storage_node_by_id(task.node_id)
     if node.status != StorageNode.STATUS_ONLINE:
-        logger.error(f"Node is not online: {node.get_id()} , skipping task: {task.get_id()}")
+        logger.error(f"Node is not online: {node.get_id()}, retry")
         task.function_result = "Node is offline"
         task.retry += 1
         task.write_to_db(db_controller.kv_store)
         return False
 
     if device.status == NVMeDevice.STATUS_ONLINE and device.io_error is False:
-        logger.info(f"Device is online: {device.get_id()}, no restart needed")
-        task.function_result = "skipped because dev is online"
+        logger.info(f"Device is online: {device.get_id()}")
+        task.function_result = "Device is online"
         task.status = JobSchedule.STATUS_DONE
         task.write_to_db(db_controller.kv_store)
         return True
@@ -106,17 +106,17 @@ def task_runner_device(task):
         task.write_to_db(db_controller.kv_store)
         tasks_events.task_updated(task)
 
-    # resetting device
-    logger.info(f"Resetting device {device.get_id()}")
-    device_controller.reset_storage_device(device.get_id())
-    time.sleep(5)
-    device = _get_device(task)
-    if device.status == NVMeDevice.STATUS_ONLINE and device.io_error is False:
-        logger.info(f"Device is online: {device.get_id()}")
-        task.function_result = "done"
-        task.status = JobSchedule.STATUS_DONE
-        task.write_to_db(db_controller.kv_store)
-        return True
+    # # resetting device
+    # logger.info(f"Resetting device {device.get_id()}")
+    # device_controller.reset_storage_device(device.get_id())
+    # time.sleep(5)
+    # device = _get_device(task)
+    # if device.status == NVMeDevice.STATUS_ONLINE and device.io_error is False:
+    #     logger.info(f"Device is online: {device.get_id()}")
+    #     task.function_result = "done"
+    #     task.status = JobSchedule.STATUS_DONE
+    #     task.write_to_db(db_controller.kv_store)
+    #     return True
 
     logger.info(f"Restarting device {device.get_id()}")
     device_controller.restart_device(device.get_id(), force=True)
@@ -153,7 +153,7 @@ def task_runner_node(task):
     # if _get_node_unavailable_devices_count(node.get_id()) == 0:
     if node.status == StorageNode.STATUS_ONLINE:
         logger.info(f"Node is online: {node.get_id()}, no restart needed")
-        task.function_result = "skipped because node is online"
+        task.function_result = "Node is online"
         task.status = JobSchedule.STATUS_DONE
         task.write_to_db(db_controller.kv_store)
         return True
@@ -203,7 +203,8 @@ while True:
                 if task.function_name in [JobSchedule.FN_DEV_RESTART, JobSchedule.FN_NODE_RESTART]:
                     while task.status != JobSchedule.STATUS_DONE:
                         res = task_runner(task)
-                        if res is False:
+                        if res:
+                            tasks_events.task_updated(task)
+                        else:
                             time.sleep(delay_seconds)
                             delay_seconds *= 2
-                    tasks_events.task_updated(task)

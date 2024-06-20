@@ -54,6 +54,8 @@ while True:
                 if task.function_name == JobSchedule.FN_DEV_MIG:
                     while task.status != JobSchedule.STATUS_DONE:
                         res = task_runner(task)
-                        if res is False:
+                        if res:
+                            tasks_events.task_updated(task)
+                        else:
                             time.sleep(delay_seconds)
                             delay_seconds *= 2
