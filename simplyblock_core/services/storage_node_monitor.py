@@ -66,8 +66,8 @@ def get_cluster_target_status(cluster_id):
     logger.debug(f"online_devices: {online_devices}")
     logger.debug(f"offline_devices: {offline_devices}")
 
-    # if more than two affected modes then cluster is suspended
-    if affected_nodes > 2:
+    # if more than two affected nodes then cluster is suspended
+    if affected_nodes > 2 or offline_nodes > 2:
         return Cluster.STATUS_SUSPENDED
 
     # if any device goes offline then cluster is degraded
