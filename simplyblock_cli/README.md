@@ -104,7 +104,6 @@ optional arguments:
 usage: sbcli storage-node add-node [-h] [--partitions PARTITIONS]
                                    [--jm-percent JM_PERCENT]
                                    [--data-nics DATA_NICS [DATA_NICS ...]]
-                                   [--cpu-mask SPDK_CPU_MASK]
                                    [--memory SPDK_MEM]
                                    [--spdk-image SPDK_IMAGE] [--spdk-debug]
                                    [--iobuf_small_pool_count SMALL_POOL_COUNT]
@@ -126,8 +125,6 @@ optional arguments:
                         Number in percent to use for JM from each device
   --data-nics DATA_NICS [DATA_NICS ...]
                         Data interface names
-  --cpu-mask SPDK_CPU_MASK
-                        SPDK app CPU mask, default is all cores found
   --memory SPDK_MEM     SPDK huge memory allocation, default is 4G
   --spdk-image SPDK_IMAGE
                         SPDK image uri
@@ -211,8 +208,7 @@ optional arguments:
 All functions and device drivers will be reset. During restart, the node does not accept IO. In a high-availability setup, this will not impact operations
 
 ```bash
-usage: sbcli storage-node restart [-h] [--cpu-mask SPDK_CPU_MASK]
-                                  [--memory SPDK_MEM]
+usage: sbcli storage-node restart [-h] [--memory SPDK_MEM]
                                   [--spdk-image SPDK_IMAGE] [--spdk-debug]
                                   [--iobuf_small_pool_count SMALL_POOL_COUNT]
                                   [--iobuf_large_pool_count LARGE_POOL_COUNT]
@@ -225,8 +221,6 @@ positional arguments:
 
 optional arguments:
   -h, --help            show this help message and exit
-  --cpu-mask SPDK_CPU_MASK
-                        SPDK app CPU mask, default is all cores found
   --memory SPDK_MEM     SPDK huge memory allocation, default is 4G
   --spdk-image SPDK_IMAGE
                         SPDK image uri
@@ -615,6 +609,8 @@ usage: sbcli cluster create [-h] [--blk_size {512,4096}]
                             [--prov-cap-crit PROV_CAP_CRIT] [--ifname IFNAME]
                             [--log-del-interval LOG_DEL_INTERVAL]
                             [--metrics-retention-period METRICS_RETENTION_PERIOD]
+                            [--contact-point CONTACT_POINT]
+                            [--grafana-endpoint GRAFANA_ENDPOINT]
 
 optional arguments:
   -h, --help            show this help message and exit
@@ -634,6 +630,10 @@ optional arguments:
                         graylog deletion interval, default: 7d
   --metrics-retention-period METRICS_RETENTION_PERIOD
                         retention period for prometheus metrics, default: 7d
+  --contact-point CONTACT_POINT
+                        the email or slack webhook url to be used for alerting
+  --grafana-endpoint GRAFANA_ENDPOINT
+                        the endpoint url for grafana
 
 ```
 

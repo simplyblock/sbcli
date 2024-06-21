@@ -630,9 +630,6 @@ class CLIWrapper:
             elif sub_command == "deploy-cleaner":
                 ret = storage_ops.deploy_cleaner()
 
-            elif sub_command == "add":
-                ret = self.storage_node_add(args)
-
             elif sub_command == "add-node":
                 cluster_id = args.cluster_id
                 node_ip = args.node_ip
@@ -1100,14 +1097,6 @@ class CLIWrapper:
 
     def storage_node_list(self, args):
         out = storage_ops.list_storage_nodes(self.db_store, args.json)
-        return out
-
-    def storage_node_add(self, args):
-        cluster_id = args.cluster_id
-        ifname = args.ifname
-        data_nics = args.data_nics
-        # TODO: Validate the inputs
-        out = storage_ops.add_storage_node(cluster_id, ifname, data_nics)
         return out
 
     def storage_node_list_devices(self, args):
