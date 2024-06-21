@@ -16,7 +16,6 @@ sudo systemctl enable docker
 sudo systemctl start docker
 
 sudo docker plugin install --grant-all-permissions rexray/efs REXRAY_PREEMPT=true
-sudo docker plugin install --grant-all-permissions rexray/ebs REXRAY_PREEMPT=true
 
 wget https://github.com/apple/foundationdb/releases/download/7.3.3/foundationdb-clients-7.3.3-1.el7.x86_64.rpm -q
 sudo rpm -U foundationdb-clients-7.3.3-1.el7.x86_64.rpm --quiet --reinstall
