@@ -140,10 +140,15 @@ while True:
         snode.rpc_port,
         snode.rpc_username,
         snode.rpc_password,
-        timeout=3, retry=2)
+        timeout=10, retry=2)
 
     try:
         events = client.distr_status_events_discard_then_get(0, constants.DISTR_EVENT_COLLECTOR_NUM_OF_EVENTS)
+
+        if not events:
+            logger.debug("no events found")
+            continue
+
         logger.info(f"Found events: {len(events)}")
         event_ids = []
         for ev in events:
@@ -155,7 +160,6 @@ while True:
             logger.info(f"Processing event: {eid}")
             process_event(eid)
 
-        if events:
             logger.info(f"Discarding events: {len(events)}")
             client.distr_status_events_discard_then_get(len(events), 0)
 

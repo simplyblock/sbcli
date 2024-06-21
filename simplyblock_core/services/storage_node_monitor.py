@@ -105,7 +105,7 @@ def update_cluster_status(cluster_id):
 
 def set_node_online(node):
     if node.status != StorageNode.STATUS_ONLINE:
-        storage_node_ops.set_node_status(snode, StorageNode.STATUS_ONLINE)
+        storage_node_ops.set_node_status(snode.get_id(), StorageNode.STATUS_ONLINE)
 
 
 def set_node_offline(node):
