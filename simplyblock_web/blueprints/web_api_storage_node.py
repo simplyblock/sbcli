@@ -179,14 +179,6 @@ def storage_node_add():
         data_nics = req_data['data_nics']
         data_nics = data_nics.split(",")
 
-    spdk_cpu_mask = None
-    if 'spdk_cpu_mask' in req_data:
-        msk = req_data['spdk_cpu_mask']
-        if utils.validate_cpu_mask(msk):
-            spdk_cpu_mask = msk
-        else:
-            return utils.get_response_error(f"Invalid cpu mask value: {msk}", 400)
-
     spdk_mem = None
     if 'spdk_mem' in req_data:
         mem = req_data['spdk_mem']
@@ -195,7 +187,7 @@ def storage_node_add():
             return utils.get_response_error(f"SPDK memory:{mem} must be larger than 1G", 400)
 
     out = storage_node_ops.add_node(
-        cluster_id, node_ip, ifname, data_nics, spdk_cpu_mask, spdk_mem,
+        cluster_id, node_ip, ifname, data_nics, spdk_mem,
         spdk_image=spdk_image, spdk_debug=spdk_debug)
 
     return utils.get_response(out)

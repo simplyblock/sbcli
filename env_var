@@ -1,7 +1,6 @@
 SIMPLY_BLOCK_COMMAND_NAME=sbcli-mig
 SIMPLY_BLOCK_VERSION=1.0.154
 
-
 SIMPLY_BLOCK_DOCKER_IMAGE=simplyblock/simplyblock:configure_monitoring_svc_with_efs
 
 DOCKER_USER=hamdysimplyblock
