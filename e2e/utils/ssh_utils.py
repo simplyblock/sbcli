@@ -41,6 +41,7 @@ class SshUtils:
         # Connect to the proxy server first
         if not bastion_server_address:
             bastion_server_address = self.bastion_server
+        self.logger.info(f"Connecting to bastion server: {bastion_server_address}")
         ssh.connect(hostname=bastion_server_address,
                     username=username,
                     port=port,
