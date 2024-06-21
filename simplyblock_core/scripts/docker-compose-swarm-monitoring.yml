@@ -32,7 +32,7 @@ services:
   graylog:
     hostname: "server"
     image: "graylog/graylog:5.0"
-    entrypoint: "/usr/bin/tini -- "
+    entrypoint: "/usr/bin/tini -- wait-for-it opensearch:9200 --  /docker-entrypoint.sh"
     environment:
       GRAYLOG_NODE_ID_FILE: "/usr/share/graylog/data/config/node-id"
       GRAYLOG_PASSWORD_SECRET: "${GRAYLOG_PASSWORD_SECRET}"
@@ -61,14 +61,7 @@ services:
     deploy:
       placement:
         constraints: [node.role == manager]
-    command: >
-      /bin/sh -c "
-      if [ ! -z ${USE_EFS} ] && [ ! -f /usr/share/graylog/data/journal/5GB_test_file ]; then
-        dd if=/dev/zero of=/usr/share/graylog/data/journal/5GB_test_file bs=1M count=5120;
-      fi;
-      wait-for-it opensearch:9200 -- /docker-entrypoint.sh
-      "
-      
+
   promagent:
     image: simplyblock/promagent
     environment:
@@ -164,19 +157,19 @@ services:
 
 volumes:
   mongodb_data:
-    driver: ${USE_EFS:-local}
+    driver: ${USE_EBS:-local}
   os_data:
-    driver: ${USE_EFS:-local}
+    driver: ${USE_EBS:-local}
   graylog_data:
-    driver: ${USE_EFS:-local}
+    driver: ${USE_EBS:-local}
   graylog_journal:
-    driver: ${USE_EFS:-local}
+    driver: ${USE_EBS:-local}
   grafana_data:
-    driver: ${USE_EFS:-local}
+    driver: ${USE_EBS:-local}
   graylog_config:
-    driver: ${USE_EFS:-local}  
+    driver: ${USE_EBS:-local}  
   prometheus_data:
-    driver: ${USE_EFS:-local}
+    driver: ${USE_EBS:-local}
 
 networks:
   monitoring-net:
