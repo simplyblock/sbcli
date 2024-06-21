@@ -175,6 +175,7 @@ def task_runner_node(task):
     if ret:
         logger.info(f"Node restart succeeded")
 
+    time.sleep(5)
     if _get_node_unavailable_devices_count(node.get_id()) == 0 and node.status == StorageNode.STATUS_ONLINE:
         logger.info(f"Node is online: {node.get_id()}")
         task.function_result = "done"
