@@ -235,6 +235,10 @@ class CLIWrapper:
                                  dest='log_del_interval', default='7d')
         sub_command.add_argument("--metrics-retention-period", help='retention period for prometheus metrics, default: 7d',
                                  dest='metrics_retention_period', default='7d')
+        sub_command.add_argument("--contact-point", help='the email or slack webhook url to be used for alerting',
+                                 dest='contact_point', default='')
+        sub_command.add_argument("--grafana-endpoint", help='the endpoint url for grafana',
+                                 dest='grafana_endpoint', default='')
 
         # add cluster
         sub_command = self.add_sub_command(subparser, 'add', 'Add new cluster')
@@ -1137,11 +1141,13 @@ class CLIWrapper:
         ifname = args.ifname
         log_del_interval = args.log_del_interval
         metrics_retention_period = args.metrics_retention_period
+        contact_point = args.contact_point
+        grafana_endpoint = args.grafana_endpoint
 
         return cluster_ops.create_cluster(
             blk_size, page_size_in_blocks,
             CLI_PASS, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
-            ifname, log_del_interval, metrics_retention_period)
+            ifname, log_del_interval, metrics_retention_period, contact_point, grafana_endpoint)
 
     def query_yes_no(self, question, default="yes"):
         """Ask a yes/no question via raw_input() and return their answer.
