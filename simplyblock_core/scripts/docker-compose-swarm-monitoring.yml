@@ -55,6 +55,7 @@ services:
     volumes:
       - "graylog_data:/usr/share/graylog/data/data"
       - "graylog_journal:/usr/share/graylog/data/journal"
+      - "graylog_config:/usr/share/graylog/data/config" 
     networks:
       - monitoring-net
     deploy:
@@ -165,6 +166,8 @@ volumes:
     driver: local
   grafana_data:
     driver: ${USE_EFS:-local}
+  graylog_config:
+    driver: ${USE_EFS:-local}  
   prometheus_data:
     driver: ${USE_EFS:-local}
 
