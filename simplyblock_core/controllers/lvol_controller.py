@@ -125,7 +125,7 @@ def validate_add_lvol_func(name, size, host_id_or_name, pool_id_or_name,
             return False, f"Invalid LVol size: {utils.humanbytes(size)} " \
                           f"Pool max size has reached {utils.humanbytes(total)} of {utils.humanbytes(pool.pool_max_size)}"
 
-    for lvol in db_controller.get_lvols():
+    for lvol in db_controller.get_lvols(pool.cluster_id):
         if lvol.pool_uuid == pool.get_id():
             if lvol.lvol_name == name:
                 return False, f"LVol name must be unique: {name}"
@@ -167,7 +167,7 @@ def validate_add_lvol_func(name, size, host_id_or_name, pool_id_or_name,
 
 
 def get_jm_names(snode):
-    return [f"jm_{snode.get_id()}"]
+    return [snode.jm_device.jm_bdev] if snode.jm_device else []
 
 
 # Deprecated
@@ -218,7 +218,7 @@ def add_lvol(name, size, host_id_or_name, pool_id_or_name, use_comp, use_crypto,
         return False, "Storage node has no nvme devices"
 
     dev_count = 0
-    for node in db_controller.get_storage_nodes():
+    for node in db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id):
         if node.status == node.STATUS_ONLINE:
             for dev in node.nvme_devices:
                 if dev.status == dev.STATUS_ONLINE:
@@ -252,7 +252,7 @@ def add_lvol(name, size, host_id_or_name, pool_id_or_name, use_comp, use_crypto,
             distr_npcs = 1
         else:
             node_count = 0
-            for node in db_controller.get_storage_nodes():
+            for node in db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id):
                 if node.status == node.STATUS_ONLINE:
                     node_count += 1
             if node_count == 3:
@@ -265,7 +265,7 @@ def add_lvol(name, size, host_id_or_name, pool_id_or_name, use_comp, use_crypto,
 
     # name, vuid, ndcs, npcs, num_blocks, block_size, alloc_names
     ret = rpc_client.bdev_distrib_create(f"distr_{name}", vuid, distr_ndcs, distr_npcs, num_blocks, distr_bs, jm_names,
-                                         distr_chunk_bs)
+                                         distr_chunk_bs, dev_cpu_mask=snode.dev_cpu_mask)
     bdev_stack.append({"type": "distr", "name": f"distr_{name}"})
     if not ret:
         logger.error("failed to create Distr bdev")
@@ -364,8 +364,8 @@ def add_lvol(name, size, host_id_or_name, pool_id_or_name, use_comp, use_crypto,
     return lvol_id, None
 
 
-def _get_next_3_nodes():
-    snodes = db_controller.get_storage_nodes()
+def _get_next_3_nodes(cluster_id):
+    snodes = db_controller.get_storage_nodes_by_cluster_id(cluster_id)
     online_nodes = []
     node_stats = {}
     for node in snodes:
@@ -461,6 +461,7 @@ def validate_aes_xts_keys(key1: str, key2: str) -> Tuple[bool, str]:
 
     return True, ""
 
+
 def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp, use_crypto,
                 distr_vuid, distr_ndcs, distr_npcs,
                 max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes,
@@ -483,12 +484,12 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
     if not pool:
         return False, f"Pool not found: {pool_id_or_name}"
 
-    cl = db_controller.get_clusters()[0]
+    cl = db_controller.get_cluster_by_id(pool.cluster_id)
     if cl.status not in [cl.STATUS_ACTIVE, cl.STATUS_DEGRADED]:
         return False, f"Cluster is not active, status: {cl.status}"
 
     if ha_type == "default":
-        ha_type = cl.ha_type
+        ha_type = "single"
 
     max_rw_iops = max_rw_iops or 0
     max_rw_mbytes = max_rw_mbytes or 0
@@ -502,8 +503,13 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
         logger.error(error)
         return False, error
 
+    cluster_size_prov = 0
+    cluster_size_total = 0
+    for lvol in db_controller.get_lvols(cl.get_id()):
+        cluster_size_prov += lvol.size
+
     dev_count = 0
-    snodes = db_controller.get_storage_nodes()
+    snodes = db_controller.get_storage_nodes_by_cluster_id(cl.get_id())
     online_nodes = []
     for node in snodes:
         if node.status == node.STATUS_ONLINE:
@@ -511,6 +517,11 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
             for dev in node.nvme_devices:
                 if dev.status == dev.STATUS_ONLINE:
                     dev_count += 1
+                    cluster_size_total += dev.size
+
+    if len(online_nodes) == 0:
+        logger.error("No online Storage nodes found")
+        return False, "No online Storage nodes found"
 
     if dev_count == 0:
         logger.error("No NVMe devices found in the cluster")
@@ -522,19 +533,6 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
     if len(online_nodes) < 3 and ha_type == "ha":
         logger.error("Storage nodes are less than 3 in ha cluster")
         return False, "Storage nodes are less than 3 in ha cluster"
-
-    if len(online_nodes) == 0:
-        logger.error("No online Storage nodes found")
-        return False, "No online Storage nodes found"
-
-    cluster_size_prov = 0
-    cluster_size_total = 0
-    for lvol in db_controller.get_lvols():
-        cluster_size_prov += lvol.size
-
-    for dev in db_controller.get_storage_devices():
-        if dev.status == NVMeDevice.STATUS_ONLINE:
-            cluster_size_total += dev.size
 
     cluster_size_prov_util = int(((cluster_size_prov+size) / cluster_size_total) * 100)
 
@@ -697,8 +695,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
         lvol.lvol_type += ',compress'
         lvol.top_bdev = lvol.comp_bdev
 
-    nodes = _get_next_3_nodes()
-
+    nodes = _get_next_3_nodes(cl.get_id())
     if host_node:
         nodes.insert(0, host_node)
     else:
@@ -761,6 +758,7 @@ def _create_bdev_stack(lvol, snode, ha_comm_addrs, ha_inode_self):
             params['jm_names'] = get_jm_names(snode)
             params['ha_comm_addrs'] = ha_comm_addrs
             params['ha_inode_self'] = ha_inode_self
+            params['dev_cpu_mask'] = snode.dev_cpu_mask
             ret = rpc_client.bdev_distrib_create(**params)
             if ret:
                 ret = distr_controller.send_cluster_map_to_node(snode)
@@ -930,7 +928,7 @@ def delete_lvol_from_node(lvol_id, node_id, clear_data=True):
     # 3- clear alceml devices
     if clear_data:
         logger.info(f"Clearing Alceml devices")
-        for node in db_controller.get_storage_nodes():
+        for node in db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id):
             if node.status == StorageNode.STATUS_ONLINE:
                 rpc_node = RPCClient(node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password)
                 for dev in node.nvme_devices:
@@ -941,11 +939,7 @@ def delete_lvol_from_node(lvol_id, node_id, clear_data=True):
         lvol.write_to_db(db_controller.kv_store)
 
         # 4- clear JM
-        jm_device = None
-        for dev in snode.nvme_devices:
-            if dev.status == NVMeDevice.STATUS_JM:
-                jm_device = dev
-                break
+        jm_device = snode.jm_device
         ret = rpc_client.alceml_unmap_vuid(jm_device.alceml_bdev, lvol.vuid)
         if not ret:
             logger.error(f"Failed to unmap jm alceml {jm_device.alceml_bdev} with vuid {lvol.vuid}")
@@ -1021,7 +1015,7 @@ def delete_lvol(id_or_name, force_delete=False):
         snap = db_controller.get_snapshot_by_id(lvol.cloned_from_snap)
         if snap.deleted is True:
             lvols_count = 0
-            for lvol in db_controller.get_lvols():
+            for lvol in db_controller.get_lvols():  # pass
                 if lvol.cloned_from_snap == snap.get_id():
                     lvols_count += 1
             if lvols_count == 0:
@@ -1082,8 +1076,20 @@ def set_lvol(uuid, max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes, name=
     return True
 
 
-def list_lvols(is_json):
-    lvols = db_controller.get_lvols()
+def list_lvols(is_json, cluster_id, pool_id_or_name):
+    lvols = []
+    if cluster_id:
+        lvols = db_controller.get_lvols(cluster_id)
+    elif pool_id_or_name:
+        pool = db_controller.get_pool_by_id(pool_id_or_name)
+        if not pool:
+            pool = db_controller.get_pool_by_name(pool_id_or_name)
+            if pool:
+                for lv_id in pool.lvols:
+                    lvols.append(db_controller.get_lvol_by_id(lv_id))
+    else:
+        lvols = db_controller.get_lvols()
+
     data = []
     for lvol in lvols:
         if lvol.deleted is True:
@@ -1134,7 +1140,7 @@ def list_lvols_mem(is_json, is_csv):
 
 def get_lvol(lvol_id_or_name, is_json):
     lvol = None
-    for lv in db_controller.get_lvols():
+    for lv in db_controller.get_lvols():  # pass
         if lv.get_id() == lvol_id_or_name or lv.lvol_name == lvol_id_or_name:
             lvol = lv
             break
@@ -1348,7 +1354,7 @@ def get_cluster_map(lvol_id):
     if not ret:
         logger.error(f"Failed to get LVol cluster map: {lvol_id}")
         return False
-    logger.info(ret)
+    logger.debug(ret)
     print("*"*100)
     results, is_passed = distr_controller.parse_distr_cluster_map(ret)
     return utils.print_table(results)

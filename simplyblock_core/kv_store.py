@@ -97,11 +97,19 @@ class DBController:
                 nodes.append(n)
         return sorted(nodes, key=lambda x: x.create_dt)
 
+    def get_storage_node_by_system_id(self, system_id):
+        nodes = StorageNode().read_from_db(self.kv_store)
+        for node in nodes:
+            if node.system_uuid == system_id:
+                return node
+        return None
+
     def get_storage_node_by_id(self, id):
         ret = StorageNode().read_from_db(self.kv_store, id)
         if ret:
             return ret[0]
 
+    # todo: change this function for multi cluster
     def get_caching_nodes(self):
         ret = CachingNode().read_from_db(self.kv_store)
         ret = sorted(ret, key=lambda x: x.create_dt)
@@ -111,6 +119,12 @@ class DBController:
         ret = CachingNode().read_from_db(self.kv_store, id)
         if ret:
             return ret[0]
+
+    def get_caching_node_by_system_id(self, system_id):
+        nodes = CachingNode().read_from_db(self.kv_store)
+        for node in nodes:
+            if node.system_uuid == system_id:
+                return node
 
     def get_caching_node_by_hostname(self, hostname):
         nodes = self.get_caching_nodes()
@@ -124,20 +138,15 @@ class DBController:
             if node.hostname == hostname:
                 return node
 
-    def get_storage_devices(self, id=""):
-        # workaround because nvme devices are stored inside the node object itself.
+    def get_storage_device_by_id(self, id):
         nodes = self.get_storage_nodes()
-        devices = []
-        device = None
         for node in nodes:
-            if node.nvme_devices:
-                devices.extend(node.nvme_devices)
-                for dev in node.nvme_devices:
-                    if dev.get_id() == id:
-                        device = dev
-        if id:
-            return device
-        return devices
+            for dev in node.nvme_devices:
+                if dev.get_id() == id:
+                    return dev
+
+    def get_storage_devices(self, id):
+        return self.get_storage_device_by_id(id)
 
     # Compute node functions
     def get_compute_node_by_id(self, id):
@@ -149,9 +158,15 @@ class DBController:
         ret = ComputeNode().read_from_db(self.kv_store)
         return ret
 
-    def get_pools(self):
-        ret = Pool().read_from_db(self.kv_store)
-        return ret
+    def get_pools(self, cluster_id=None):
+        pools = []
+        if cluster_id:
+            for pool in Pool().read_from_db(self.kv_store):
+                if pool.cluster_id == cluster_id:
+                    pools.append(pool)
+        else:
+            pools = Pool().read_from_db(self.kv_store)
+        return pools
 
     def get_pool_by_id(self, id):
         ret = Pool().read_from_db(self.kv_store, id)
@@ -164,9 +179,16 @@ class DBController:
             if pool.pool_name == name:
                 return pool
 
-    def get_lvols(self):
-        ret = LVol().read_from_db(self.kv_store)
-        return ret
+    def get_lvols(self, cluster_id=None):
+        lvols = []
+        if cluster_id:
+            for pool in self.get_pools(cluster_id):
+                if pool.cluster_id == cluster_id:
+                    for lv_id in pool.lvols:
+                        lvols.append(self.get_lvol_by_id(lv_id))
+        else:
+            lvols = LVol().read_from_db(self.kv_store)
+        return lvols
 
     def get_snapshots(self):
         ret = SnapShot().read_from_db(self.kv_store)
@@ -250,5 +272,5 @@ class DBController:
     def get_events(self, event_id=""):
         return EventObj().read_from_db(self.kv_store, id=event_id)
 
-    def get_job_tasks(self, cluster_id):
-        return JobSchedule().read_from_db(self.kv_store, id=cluster_id, reverse=True)
+    def get_job_tasks(self, cluster_id, reverse=True):
+        return JobSchedule().read_from_db(self.kv_store, id=cluster_id, reverse=reverse)
