@@ -118,7 +118,7 @@ while True:
                 rpc_client = RPCClient(
                     snode.mgmt_ip, snode.rpc_port,
                     snode.rpc_username, snode.rpc_password,
-                    timeout=5, retry=3)
+                    timeout=10, retry=1)
                 for remote_device in snode.remote_devices:
                     ret = rpc_client.get_bdevs(remote_device.remote_bdev)
                     if ret:
