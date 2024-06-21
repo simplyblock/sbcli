@@ -74,6 +74,7 @@ class TestSingleNodeOutage:
         self.log_path = f"{os.path.dirname(self.mount_path)}/log_file.log"
         self.base_cmd = None
         self.fio_debug = kwargs.get("fio_debug", False)
+        self.base_cmd = os.environ.get("SBCLI_CMD", "sbcli-dev")
 
     def setup(self):
         """Contains setup required to run the test case
@@ -96,13 +97,6 @@ class TestSingleNodeOutage:
                                   device=self.mount_path)
         self.sbcli_utils.delete_all_lvols()
         self.sbcli_utils.delete_all_storage_pools()
-        expected_base = ["sbcli", "sbcli-dev", "sbcli-release", "sbcli-pre"]
-        for base in expected_base:
-            output, error = self.ssh_obj.exec_command(node=self.mgmt_nodes[0],
-                                                      command=base)
-            if len(output.strip()):
-                self.base_cmd = base
-                self.logger.info(f"Using base command as {self.base_cmd}")
 
     def run(self):
         """ Performs each step of the testcase
