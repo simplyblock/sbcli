@@ -69,7 +69,7 @@ def _check_node_rpc(rpc_ip, rpc_port, rpc_username, rpc_password):
     try:
         rpc_client = RPCClient(
             rpc_ip, rpc_port, rpc_username, rpc_password,
-            timeout=3, retry=1)
+            timeout=10, retry=1)
         ret = rpc_client.get_version()
         if ret:
             logger.debug(f"SPDK version: {ret['version']}")
