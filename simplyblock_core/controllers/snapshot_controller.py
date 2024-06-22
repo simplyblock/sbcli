@@ -13,6 +13,8 @@ from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.rpc_client import RPCClient
+from simplyblock_core.snode_client import SNodeClient
+
 
 logger = lg.getLogger()
 
@@ -33,6 +35,21 @@ def add(lvol_id, snapshot_name):
     logger.info(f"Creating snapshot: {snapshot_name} from LVol: {lvol.id}")
     snode = db_controller.get_storage_node_by_id(lvol.node_id)
 
+##############################################################################
+    # Validate adding snap on storage node
+    snode_api = SNodeClient(snode.api_endpoint)
+    result, _ = snode_api.info()
+    memory_free = result["memory_details"]["free"]
+    huge_free = result["memory_details"]["huge_free"]
+    total_node_capacity = db_controller.get_snode_size(snode.get_id())
+
+    error = utils.validate_add_lvol_or_snap_on_node(memory_free, huge_free, snode.max_snap, lvol.size, total_node_capacity,
+                                                    len(db_controller.get_snapshots_by_node_id(snode.get_id())))
+
+    if error:
+        logger.error(f"Failed to add snap on node {snode.get_id()}")
+        logger.error(error)
+        return False
 
 ##############################################################################
     snap_count = 0
@@ -199,6 +216,16 @@ def clone(snapshot_id, clone_name, new_size=0):
                 logger.error(msg)
                 return False, msg
 
+    # Validate cloning snap on storage node
+    snode_api = SNodeClient(snode.api_endpoint)
+    result, _ = snode_api.info()
+    memory_free = result["memory_details"]["free"]
+    huge_free = result["memory_details"]["huge_free"]
+    total_node_capacity = db_controller.get_snode_size(snode.get_id())
+    error = utils.validate_add_lvol_or_snap_on_node(memory_free, huge_free, snode.max_lvol, snap.lvol.size,  total_node_capacity, len(snode.lvols))
+    if error:
+        logger.error(error)
+        return False, f"Failed to add lvol on node {snode.get_id()}"
     lvol = LVol()
     lvol.lvol_name = clone_name
     lvol.size = snap.lvol.size
