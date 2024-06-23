@@ -17,9 +17,9 @@ sudo systemctl start docker
 
 #sudo docker plugin install --grant-all-permissions rexray/ebs REXRAY_PREEMPT=true
 
-sudo docker plugin install --grant-all-permissions public.ecr.aws/semsee/rexray-ebs:stable --alias rexray/ebs REXRAY_PREEMPT=true
+#sudo docker plugin install --grant-all-permissions public.ecr.aws/semsee/rexray-ebs:stable --alias rexray/ebs REXRAY_PREEMPT=true
 
-#sudo docker plugin install umsp/rexray-ebs:nvme-fix --alias rexray/ebs REXRAY_PREEMPT=true --grant-all-permissions
+sudo docker plugin install umsp/rexray-ebs:nvme-fix --alias rexray/ebs REXRAY_PREEMPT=true --grant-all-permissions
 
 wget https://github.com/apple/foundationdb/releases/download/7.3.3/foundationdb-clients-7.3.3-1.el7.x86_64.rpm -q
 sudo rpm -U foundationdb-clients-7.3.3-1.el7.x86_64.rpm --quiet --reinstall
