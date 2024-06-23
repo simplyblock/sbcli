@@ -60,11 +60,16 @@ def get_instance_tf_engine_instance_id():
 
 def check_command_status(ssm_client, command_id, instance_id):
     # time.sleep(1) # wait for a second to avoid: An error occurred (InvocationDoesNotExist)
-    response = ssm_client.get_command_invocation(
-        CommandId=command_id,
-        InstanceId=instance_id
-    )
-    return response['Status']
+    try:
+        response = ssm_client.get_command_invocation(
+            CommandId=command_id,
+            InstanceId=instance_id
+        )
+        return response['Status']
+    except Exception as e:
+        print(f"Exeception {e}")
+        return "Exeception"
+
 
 def wait_for_s3_object(s3_client, bucket, key, timeout=300, interval=5):
     elapsed_time = 0
