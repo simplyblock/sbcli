@@ -278,7 +278,7 @@ def add_deployer():
 
     TFSTATE_BUCKET=d.tf_state_bucket_name
     TFSTATE_KEY='csi'
-    TFSTATE_REGION=d.az
+    TFSTATE_REGION='us-east-2'
     TF_WORKSPACE=d.tf_workspace
 
     # tf mgmt node parameters
