@@ -132,30 +132,30 @@ def update_cluster(TFSTATE_BUCKET, TFSTATE_KEY, TFSTATE_REGION, TF_WORKSPACE, st
     if len(instance_ids) == 0:
         # wait for a min and try again before returning error on the API
         print('no instance IDs')
-        return
+        return False, "", "no instance IDs"
+
+    ECR_REGION="us-east-1"
+    ECR_ACCOUNT_ID="565979732541"
+    ECR_REPOSITORY_NAME="simplyblockdeploy"
+    ECR_IMAGE_TAG="latest"
 
     commands = [
         f"""
-        ECR_REGION="us-east-1"
-        ECR_ACCOUNT_ID="565979732541"
-        ECR_REPOSITORY_NAME="simplyblockdeploy"
-        ECR_IMAGE_TAG="latest"
-
-        docker pull $ECR_ACCOUNT_ID.dkr.ecr.$ECR_REGION.amazonaws.com/$ECR_REPOSITORY_NAME:$ECR_IMAGE_TAG
+        docker pull $ECR_ACCOUNT_ID.dkr.ecr.{ECR_REGION}.amazonaws.com/{ECR_REPOSITORY_NAME}:{ECR_IMAGE_TAG}
         docker volume create terraform
-        docker run --rm -v terraform:/app -w /app $ECR_ACCOUNT_ID.dkr.ecr.$ECR_REGION.amazonaws.com/$ECR_REPOSITORY_NAME:$ECR_IMAGE_TAG \
+        docker run --rm -v terraform:/app -w /app {ECR_ACCOUNT_ID}.dkr.ecr.{ECR_REGION}.amazonaws.com/{ECR_REPOSITORY_NAME}:{ECR_IMAGE_TAG} \
             init -reconfigure -input=false \
                     -backend-config='bucket={TFSTATE_BUCKET}' \
                     -backend-config='key={TFSTATE_KEY}' \
                     -backend-config='region={TFSTATE_REGION}'
 
-        docker run --rm -v terraform:/app -e TF_LOG=DEBUG -w /app $ECR_ACCOUNT_ID.dkr.ecr.$ECR_REGION.amazonaws.com/$ECR_REPOSITORY_NAME:$ECR_IMAGE_TAG \
+        docker run --rm -v terraform:/app -e TF_LOG=DEBUG -w /app {ECR_ACCOUNT_ID}.dkr.ecr.{ECR_REGION}.amazonaws.com/{ECR_REPOSITORY_NAME}:{ECR_IMAGE_TAG} \
             workspace select {TF_WORKSPACE}
 
-        docker run --rm -v terraform:/app -w /app $ECR_ACCOUNT_ID.dkr.ecr.$ECR_REGION.amazonaws.com/$ECR_REPOSITORY_NAME:$ECR_IMAGE_TAG \
+        docker run --rm -v terraform:/app -w /app {ECR_ACCOUNT_ID}.dkr.ecr.{ECR_REGION}.amazonaws.com/{ECR_REPOSITORY_NAME}:{ECR_IMAGE_TAG} \
             plan -var mgmt_nodes={mgmt_nodes} -var storage_nodes={storage_nodes} -var az={availability_zone} -var region={aws_region}
 
-        docker run --rm -v terraform:/app -w /app $ECR_ACCOUNT_ID.dkr.ecr.$ECR_REGION.amazonaws.com/$ECR_REPOSITORY_NAME:$ECR_IMAGE_TAG \
+        docker run --rm -v terraform:/app -w /app {ECR_ACCOUNT_ID}.dkr.ecr.{ECR_REGION}.amazonaws.com/{ECR_REPOSITORY_NAME}:{ECR_IMAGE_TAG} \
          apply -var mgmt_nodes={mgmt_nodes} -var storage_nodes={storage_nodes} -var az={availability_zone} -var region={aws_region} --auto-approve
         """
     ]
@@ -313,4 +313,4 @@ def add_deployer():
         "stderr": stderr
     }
 
-    return utils.get_response(output, 201)
+    return utils.get_response(output, http_code=201)
