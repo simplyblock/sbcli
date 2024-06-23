@@ -90,6 +90,8 @@ def display_logs(command_id, instance_id, status):
     output_s3_key = f'{output_key_prefix}/{command_id}/{instance_id}/awsrunShellScript/0.awsrunShellScript/stdout'
     error_s3_key = f'{output_key_prefix}/{command_id}/{instance_id}/awsrunShellScript/0.awsrunShellScript/stderr'
 
+    stdout_content = ''
+    stderr_content = ''
     # if success get STDOUT. else get STDERR
     if status == 'Success':
         wait_for_s3_object(s3, bucket_name, output_s3_key)
@@ -111,6 +113,8 @@ def display_logs(command_id, instance_id, status):
         except ClientError as ex:
             if ex.response['Error']['Code'] == 'NoSuchKey':
                 print('No object found - returning empty')
+
+    return stdout_content, stderr_content
 
 def wait_for_status(command_id, instance_id):
     status = 'Pending'
@@ -172,7 +176,8 @@ def update_cluster(TFSTATE_BUCKET, TFSTATE_KEY, TFSTATE_REGION, TF_WORKSPACE, st
     status = wait_for_status(command_id, instance_ids[0])
 
     # Get Logs
-    display_logs(command_id, instance_ids[0], status)
+    stdout, stderr = display_logs(command_id, instance_ids[0], status)
+    return True, stdout, stderr
 
 
 @bp.route('/deployer', methods=['GET'], defaults={'uuid': None})
