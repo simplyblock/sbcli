@@ -1,7 +1,4 @@
 # coding=utf-8
-
-from typing import Mapping, List
-
 from simplyblock_core.models.base_model import BaseModel
 
 class Deployer(BaseModel):
@@ -30,18 +27,19 @@ class Deployer(BaseModel):
         "az": {"type": str, 'default': ""},
         "sbcli_cmd": {"type": str, 'default': ""},
         "sbcli_pkg_version": {"type": str, 'default': ""},
-        "whitelist_ips": {"type": str, 'default': ""},
+        "whitelist_ips": {"type": str, 'default': ""}, # todo: make this a list
         "mgmt_nodes": {"type": int, 'default': 0},
         "storage_nodes": {"type": int, 'default': 0},
-        "extra_nodes": {"type": str, 'default': ""},
+        "extra_nodes": {"type": int, 'default': ""},
         "mgmt_nodes_instance_type": {"type": str, 'default': ""},
         "storage_nodes_instance_type": {"type": str, 'default': ""},
         "extra_nodes_instance_type": {"type": str, 'default': ""},
-        "storage_nodes_ebs_size1": {"type": str, 'default': ""},
-        "storage_nodes_ebs_size2": {"type": str, 'default': ""},
-        "volumes_per_storage_nodes": {"type": str, 'default': ""},
-        "nr_hugepages": {"type": str, 'default': ""},
+        "storage_nodes_ebs_size1": {"type": int, 'default': ""}, # size in GB
+        "storage_nodes_ebs_size2": {"type": int, 'default': ""}, # size in GB
+        "volumes_per_storage_nodes": {"type": int, 'default': ""},
+        "nr_hugepages": {"type": int, 'default': ""},
         "tf_state_bucket_name": {"type": str, 'default': ""},
+        "tf_workspace": {"type": str, 'default': ""},
     }
 
     def __init__(self, data=None):

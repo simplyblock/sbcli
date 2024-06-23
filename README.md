@@ -43,3 +43,7 @@ wget https://github.com/apple/foundationdb/releases/download/7.3.3/FoundationDB-
 
 setup the code on a management node and the webApp code can be developed by building the `docker-compose-dev.yml` file.
 
+
+```
+sudo docker compose -f docker-compose-dev.yml up --build -d
+```

@@ -170,54 +170,6 @@ def update_cluster(TFSTATE_BUCKET, TFSTATE_KEY, TFSTATE_REGION, TF_WORKSPACE, st
     display_logs(command_id, instance_ids[0], status)
 
 
-@bp.route('/deployer/<string:uuid>', methods=['PUT'])
-def update_deployer(uuid):
-    dpl = db_controller.get_deployer_by_id(uuid)
-    if not dpl:
-        return utils.get_response_error(f"Deployer not found: {uuid}", 404)
-
-    dpl_data = request.get_json()
-    if 'snodes' not in dpl_data:
-        return utils.get_response_error("missing required param: snodes", 400)
-    if 'az' not in dpl_data:
-        return utils.get_response_error("missing required param: az", 400)
-
-    dpl.snodes = dpl_data['snodes']
-    dpl.az = dpl_data['az']
-    dpl.write_to_db(db_controller.kv_store)
-
-    # tf state parameter
-    # todo: take these params from DB
-    TFSTATE_BUCKET='simplyblock-terraform-state-bucket'
-    TFSTATE_KEY='csi'
-    TFSTATE_REGION=dpl.az
-    TF_WORKSPACE='manohar'
-
-    # tf mgmt node parameters
-    storage_nodes = 4
-    mgmt_nodes = 1
-    availability_zone = "us-east-1a"
-    aws_region = "us-east-1"
-    status, stdout, stderr = update_cluster(
-        TFSTATE_BUCKET,
-        TFSTATE_KEY,
-        TFSTATE_REGION,
-        TF_WORKSPACE,
-        storage_nodes,
-        mgmt_nodes,
-        availability_zone,
-        aws_region
-    )
-
-    output = {
-        "status": status,
-        "stdout": stdout,
-        "stderr": stderr
-    }
-
-    return utils.get_response(output, 201)
-
-
 @bp.route('/deployer', methods=['GET'], defaults={'uuid': None})
 @bp.route('/deployer/<string:uuid>', methods=['GET'])
 def list_deployer(uuid):
@@ -240,6 +192,45 @@ def list_deployer(uuid):
         data.append(d)
     return utils.get_response(data)
 
+
+def validate_tf_vars(dpl_data):
+    if 'cluster_id' not in dpl_data:
+        return utils.get_response_error("missing required param: cluster_id", 400)
+    if 'region' not in dpl_data:
+        return utils.get_response_error("missing required param: region", 400)
+    if 'az' not in dpl_data:
+        return utils.get_response_error("missing required param: az", 400)
+    if 'sbcli_cmd' not in dpl_data:
+        return utils.get_response_error("missing required param: sbcli_cmd", 400)
+    if 'sbcli_pkg_version' not in dpl_data:
+        return utils.get_response_error("missing required param: sbcli_pkg_version", 400)
+    if 'mgmt_nodes' not in dpl_data:
+        return utils.get_response_error("missing required param: mgmt_nodes", 400)
+    if 'storage_nodes' not in dpl_data:
+        return utils.get_response_error("missing required param: storage_nodes", 400)
+    if 'extra_nodes' not in dpl_data:
+        return utils.get_response_error("missing required param: extra_nodes", 400)
+    if 'mgmt_nodes_instance_type' not in dpl_data:
+        return utils.get_response_error("missing required param: mgmt_nodes_instance_type", 400)
+    if 'storage_nodes_instance_type' not in dpl_data:
+        return utils.get_response_error("missing required param: storage_nodes_instance_type", 400)
+    if 'extra_nodes_instance_type' not in dpl_data:
+        return utils.get_response_error("missing required param: extra_nodes_instance_type", 400)
+    if 'storage_nodes_ebs_size1' not in dpl_data:
+        return utils.get_response_error("missing required param: storage_nodes_ebs_size1", 400)
+    if 'storage_nodes_ebs_size2' not in dpl_data:
+        return utils.get_response_error("missing required param: storage_nodes_ebs_size2", 400)
+    if 'volumes_per_storage_nodes' not in dpl_data:
+        return utils.get_response_error("missing required param: volumes_per_storage_nodes", 400)
+    if 'nr_hugepages' not in dpl_data:
+        return utils.get_response_error("missing required param: nr_hugepages", 400)
+    if 'tf_state_bucket_name' not in dpl_data:
+        return utils.get_response_error("missing required param: tf_state_bucket_name", 400)
+    if 'tf_workspace' not in dpl_data:
+        return utils.get_response_error("missing required param: tf_workspace", 400)
+
+    return utils.get_response({})
+
 @bp.route('/deployer/tfvars', methods=['POST'])
 def set_tf_vars():
     """
@@ -249,78 +240,67 @@ def set_tf_vars():
     storage node add in a different availability zone can be done using the /deployer API
     """
     dpl_data = request.get_json()
-    if 'snodes_type' not in dpl_data:
-        return utils.get_response_error("missing required param: snodes_type", 400)
-    if 'mnodes' not in dpl_data:
-        return utils.get_response_error("missing required param: mnodes", 400)
-    if 'mnodes_type' not in dpl_data:
-        return utils.get_response_error("missing required param: mnodes_type", 400)
-    if 'az' not in dpl_data:
-        return utils.get_response_error("missing required param: az", 400)
-    if 'cluster_id' not in dpl_data:
-        return utils.get_response_error("missing required param: cluster_id", 400)
-    if 'region' not in dpl_data:
-        return utils.get_response_error("missing required param: region", 400)
-    if 'workspace' not in dpl_data:
-        return utils.get_response_error("missing required param: workspace", 400)
-    if 'bucket_name' not in dpl_data:
-        return utils.get_response_error("missing required param: bucket_name", 400)
+    resp = validate_tf_vars(dpl_data)
+    if not resp['status']:
+        return resp
 
     d = Deployer()
-    d.uuid        = dpl_data['cluster_id']
-    d.snodes      = dpl_data['snodes']
-    d.snodes_type = dpl_data['snodes_type']
-    d.mnodes      = dpl_data['mnodes']
-    d.mnodes_type = dpl_data['mnodes_type']
-    d.az          = dpl_data['az']
-    d.region      = dpl_data['region']
-    d.workspace   = dpl_data['workspace']
-    d.bucket_name = dpl_data['bucket_name']
-    d.write_to_db(db_controller.kv_store)
+    d.uuid = dpl_data['cluster_id']
+    d.region = dpl_data['region']
+    d.az = dpl_data['az']
+    d.sbcli_cmd = dpl_data['sbcli_cmd']
+    d.sbcli_pkg_version = dpl_data['sbcli_pkg_version']
+    d.mgmt_nodes = dpl_data['mgmt_nodes']
+    d.storage_nodes = dpl_data['storage_nodes']
+    d.extra_nodes = dpl_data['extra_nodes']
+    d.mgmt_nodes_instance_type = dpl_data['mgmt_nodes_instance_type']
+    d.storage_nodes_instance_type = dpl_data['storage_nodes_instance_type']
+    d.extra_nodes_instance_type = dpl_data['extra_nodes_instance_type']
+    d.storage_nodes_ebs_size1 = dpl_data['storage_nodes_ebs_size1']
+    d.storage_nodes_ebs_size2 = dpl_data['storage_nodes_ebs_size2']
+    d.volumes_per_storage_nodes = dpl_data['volumes_per_storage_nodes']
+    d.nr_hugepages = dpl_data['nr_hugepages']
+    d.tf_state_bucket_name = dpl_data['tf_state_bucket_name']
+    d.tf_workspace = dpl_data['tf_workspace']
 
+    d.write_to_db(db_controller.kv_store)
     return utils.get_response(d.to_dict()), 201
 
 @bp.route('/deployer', methods=['POST'])
 def add_deployer():
     dpl_data = request.get_json()
-    if 'snodes' not in dpl_data:
-        return utils.get_response_error("missing required param: snodes", 400)
-    if 'snodes_type' not in dpl_data:
-        return utils.get_response_error("missing required param: snodes_type", 400)
-    if 'mnodes' not in dpl_data:
-        return utils.get_response_error("missing required param: mnodes", 400)
-    if 'mnodes_type' not in dpl_data:
-        return utils.get_response_error("missing required param: mnodes_type", 400)
-    if 'az' not in dpl_data:
-        return utils.get_response_error("missing required param: az", 400)
-    if 'cluster_id' not in dpl_data:
-        return utils.get_response_error("missing required param: cluster_id", 400)
-    if 'region' not in dpl_data:
-        return utils.get_response_error("missing required param: region", 400)
-    if 'workspace' not in dpl_data:
-        return utils.get_response_error("missing required param: workspace", 400)
-    if 'bucket_name' not in dpl_data:
-        return utils.get_response_error("missing required param: bucket_name", 400)
+    resp = validate_tf_vars(dpl_data)
+    if not resp['status']:
+        return resp
 
-    d = Deployer()
-    d.uuid        = dpl_data['cluster_id']
-    d.snodes      = dpl_data['snodes']
-    d.snodes_type = dpl_data['snodes_type']
-    d.mnodes      = dpl_data['mnodes']
-    d.mnodes_type = dpl_data['mnodes_type']
-    d.az          = dpl_data['az']
-    d.region      = dpl_data['region']
-    d.workspace   = dpl_data['workspace']
-    d.bucket_name = dpl_data['bucket_name']
-    d.write_to_db(db_controller.kv_store)
+    uuid = dpl_data['cluster_id']
+    d = db_controller.get_deployer_by_id(uuid)
 
-    return utils.get_response(d.to_dict()), 201
+    TFSTATE_BUCKET=d.tf_state_bucket_name
+    TFSTATE_KEY='csi'
+    TFSTATE_REGION=d.az
+    TF_WORKSPACE=d.tf_workspace
 
-## Todo check if there is already an instance running. Maybe use Step function
-## Todo: How to share the ECR Image with the customer?
-## Todo: aws ecr get-login-password --region us-east-1 --> automate ECR Login
-## Todo: Alert when the instance is inactive or the command is undeliverable
-# if the command status is a failure, the code gets stuck
-# SSM Ping status: Connection lost: --> Push a metric to CW. And configure ASG Rule based on the Ping Status
-# if the command is successful, increment the numbers.
+    # tf mgmt node parameters
+    storage_nodes = d.storage_nodes
+    mgmt_nodes = d.mgmt_nodes
+    availability_zone = d.az
+    aws_region = d.region
+    status, stdout, stderr = update_cluster(
+        TFSTATE_BUCKET,
+        TFSTATE_KEY,
+        TFSTATE_REGION,
+        TF_WORKSPACE,
+        storage_nodes,
+        mgmt_nodes,
+        availability_zone,
+        aws_region
+    )
 
+    output = {
+        "status": status,
+        "stdout": stdout,
+        "stderr": stderr
+    }
+
+    return utils.get_response(output, 201)
