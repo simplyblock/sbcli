@@ -195,41 +195,41 @@ def list_deployer(uuid):
 
 def validate_tf_vars(dpl_data):
     if 'cluster_id' not in dpl_data:
-        return utils.get_response_error("missing required param: cluster_id", 400)
+        return "missing required param: cluster_id"
     if 'region' not in dpl_data:
-        return utils.get_response_error("missing required param: region", 400)
+        return "missing required param: region"
     if 'az' not in dpl_data:
-        return utils.get_response_error("missing required param: az", 400)
+        return "missing required param: az"
     if 'sbcli_cmd' not in dpl_data:
-        return utils.get_response_error("missing required param: sbcli_cmd", 400)
+        return "missing required param: sbcli_cmd"
     if 'sbcli_pkg_version' not in dpl_data:
-        return utils.get_response_error("missing required param: sbcli_pkg_version", 400)
+        return "missing required param: sbcli_pkg_version"
     if 'mgmt_nodes' not in dpl_data:
-        return utils.get_response_error("missing required param: mgmt_nodes", 400)
+        return "missing required param: mgmt_nodes"
     if 'storage_nodes' not in dpl_data:
-        return utils.get_response_error("missing required param: storage_nodes", 400)
+        return "missing required param: storage_nodes"
     if 'extra_nodes' not in dpl_data:
-        return utils.get_response_error("missing required param: extra_nodes", 400)
+        return "missing required param: extra_nodes"
     if 'mgmt_nodes_instance_type' not in dpl_data:
-        return utils.get_response_error("missing required param: mgmt_nodes_instance_type", 400)
+        return "missing required param: mgmt_nodes_instance_type"
     if 'storage_nodes_instance_type' not in dpl_data:
-        return utils.get_response_error("missing required param: storage_nodes_instance_type", 400)
+        return "missing required param: storage_nodes_instance_type"
     if 'extra_nodes_instance_type' not in dpl_data:
-        return utils.get_response_error("missing required param: extra_nodes_instance_type", 400)
+        return "missing required param: extra_nodes_instance_type"
     if 'storage_nodes_ebs_size1' not in dpl_data:
-        return utils.get_response_error("missing required param: storage_nodes_ebs_size1", 400)
+        return "missing required param: storage_nodes_ebs_size1"
     if 'storage_nodes_ebs_size2' not in dpl_data:
-        return utils.get_response_error("missing required param: storage_nodes_ebs_size2", 400)
+        return "missing required param: storage_nodes_ebs_size2"
     if 'volumes_per_storage_nodes' not in dpl_data:
-        return utils.get_response_error("missing required param: volumes_per_storage_nodes", 400)
+        return "missing required param: volumes_per_storage_nodes"
     if 'nr_hugepages' not in dpl_data:
-        return utils.get_response_error("missing required param: nr_hugepages", 400)
+        return "missing required param: nr_hugepages"
     if 'tf_state_bucket_name' not in dpl_data:
-        return utils.get_response_error("missing required param: tf_state_bucket_name", 400)
+        return "missing required param: tf_state_bucket_name"
     if 'tf_workspace' not in dpl_data:
-        return utils.get_response_error("missing required param: tf_workspace", 400)
+        return "missing required param: tf_workspace"
 
-    return utils.get_response({})
+    return ""
 
 @bp.route('/deployer/tfvars', methods=['POST'])
 def set_tf_vars():
@@ -240,9 +240,9 @@ def set_tf_vars():
     storage node add in a different availability zone can be done using the /deployer API
     """
     dpl_data = request.get_json()
-    resp = validate_tf_vars(dpl_data)
-    if not resp['status']:
-        return resp
+    validation_err = validate_tf_vars(dpl_data)
+    if validation_err != "":
+        return utils.get_response_error(validation_err, 400)
 
     d = Deployer()
     d.uuid = dpl_data['cluster_id']
@@ -269,9 +269,9 @@ def set_tf_vars():
 @bp.route('/deployer', methods=['POST'])
 def add_deployer():
     dpl_data = request.get_json()
-    resp = validate_tf_vars(dpl_data)
-    if not resp['status']:
-        return resp
+    validation_err = validate_tf_vars(dpl_data)
+    if validation_err != "":
+        return utils.get_response_error(validation_err, 400)
 
     uuid = dpl_data['cluster_id']
     d = db_controller.get_deployer_by_id(uuid)
