@@ -118,7 +118,7 @@ def wait_for_status(command_id, instance_id):
 
     return status
 
-def main(TFSTATE_BUCKET, TFSTATE_KEY, TFSTATE_REGION, TF_WORKSPACE, storage_nodes, mgmt_nodes, availability_zone, aws_region):
+def update_cluster(TFSTATE_BUCKET, TFSTATE_KEY, TFSTATE_REGION, TF_WORKSPACE, storage_nodes, mgmt_nodes, availability_zone, aws_region):
     instance_ids = get_instance_tf_engine_instance_id()
     if len(instance_ids) == 0:
         # wait for a min and try again before returning error on the API
@@ -198,7 +198,7 @@ def update_deployer(uuid):
     mgmt_nodes = 1
     availability_zone = "us-east-1a"
     aws_region = "us-east-1"
-    status, stdout, stderr = main(
+    status, stdout, stderr = update_cluster(
         TFSTATE_BUCKET,
         TFSTATE_KEY,
         TFSTATE_REGION,
@@ -239,6 +239,46 @@ def list_deployer(uuid):
         d['status_code'] = deployer.get_status_code()
         data.append(d)
     return utils.get_response(data)
+
+@bp.route('/deployer/tfvars', methods=['POST'])
+def set_tf_vars():
+    """
+    Take the terraform variables and replace the existing values
+    Used to set the TF vars that are used currently
+    Ideally this should be called immediately the first cluster is created. So that for all the subsequent
+    storage node add in a different availability zone can be done using the /deployer API
+    """
+    dpl_data = request.get_json()
+    if 'snodes_type' not in dpl_data:
+        return utils.get_response_error("missing required param: snodes_type", 400)
+    if 'mnodes' not in dpl_data:
+        return utils.get_response_error("missing required param: mnodes", 400)
+    if 'mnodes_type' not in dpl_data:
+        return utils.get_response_error("missing required param: mnodes_type", 400)
+    if 'az' not in dpl_data:
+        return utils.get_response_error("missing required param: az", 400)
+    if 'cluster_id' not in dpl_data:
+        return utils.get_response_error("missing required param: cluster_id", 400)
+    if 'region' not in dpl_data:
+        return utils.get_response_error("missing required param: region", 400)
+    if 'workspace' not in dpl_data:
+        return utils.get_response_error("missing required param: workspace", 400)
+    if 'bucket_name' not in dpl_data:
+        return utils.get_response_error("missing required param: bucket_name", 400)
+
+    d = Deployer()
+    d.uuid        = dpl_data['cluster_id']
+    d.snodes      = dpl_data['snodes']
+    d.snodes_type = dpl_data['snodes_type']
+    d.mnodes      = dpl_data['mnodes']
+    d.mnodes_type = dpl_data['mnodes_type']
+    d.az          = dpl_data['az']
+    d.region      = dpl_data['region']
+    d.workspace   = dpl_data['workspace']
+    d.bucket_name = dpl_data['bucket_name']
+    d.write_to_db(db_controller.kv_store)
+
+    return utils.get_response(d.to_dict()), 201
 
 @bp.route('/deployer', methods=['POST'])
 def add_deployer():
@@ -283,3 +323,4 @@ def add_deployer():
 # if the command status is a failure, the code gets stuck
 # SSM Ping status: Connection lost: --> Push a metric to CW. And configure ASG Rule based on the Ping Status
 # if the command is successful, increment the numbers.
+
