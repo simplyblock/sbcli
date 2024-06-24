@@ -15,6 +15,7 @@ sudo yum install hostname pkg-config git wget python3-pip yum-utils docker-ce do
 sudo systemctl enable docker
 sudo systemctl start docker
 
+sudo docker plugin install --grant-all-permissions rexray/efs REXRAY_PREEMPT=true
 sudo docker plugin install --grant-all-permissions rexray/ebs REXRAY_PREEMPT=true
 
 #sudo docker plugin install --grant-all-permissions public.ecr.aws/semsee/rexray-ebs:stable --alias rexray/ebs REXRAY_PREEMPT=true
