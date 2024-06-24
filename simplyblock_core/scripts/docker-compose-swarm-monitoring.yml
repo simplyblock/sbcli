@@ -56,7 +56,6 @@ services:
     volumes:
       - "graylog_data:/usr/share/graylog/data/data"
       - "graylog_journal:/usr/share/graylog/data/journal"
-     # - "graylog_config:/usr/share/graylog/data/config" 
     networks:
       - monitoring-net
     deploy:

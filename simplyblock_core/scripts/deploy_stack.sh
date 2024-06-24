@@ -26,7 +26,6 @@ INSTANCE_ID=$(curl -s http://169.254.169.254/latest/meta-data/instance-id)
 if [ -n "$INSTANCE_ID" ] 
 then
   export USE_EFS="rexray/efs"
-  export USE_EBS="rexray/ebs"
 fi
 
 docker stack deploy --compose-file="$DIR"/docker-compose-swarm-monitoring.yml monitoring
