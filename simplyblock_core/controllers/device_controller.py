@@ -92,7 +92,7 @@ def get_alceml_name(alceml_id):
     return f"alceml_{alceml_id}"
 
 
-def _def_create_device_stack(device_obj, snode):
+def _def_create_device_stack(device_obj, snode, force=False):
 
     rpc_client = RPCClient(
         snode.mgmt_ip, snode.rpc_port,
@@ -105,7 +105,8 @@ def _def_create_device_stack(device_obj, snode):
     ret = rpc_client.bdev_passtest_create(test_name, device_obj.nvme_bdev)
     if not ret:
         logger.error(f"Failed to create bdev: {test_name}")
-        return False
+        if not force:
+            return False
 
     alceml_id = device_obj.get_id()
     alceml_name = get_alceml_name(alceml_id)
@@ -114,14 +115,16 @@ def _def_create_device_stack(device_obj, snode):
                                         dev_cpu_mask=snode.dev_cpu_mask)
     if not ret:
         logger.error(f"Failed to create alceml bdev: {alceml_name}")
-        return False
+        if not force:
+            return False
 
     # add pass through
     pt_name = f"{alceml_name}_PT"
     ret = rpc_client.bdev_PT_NoExcl_create(pt_name, alceml_name)
     if not ret:
         logger.error(f"Failed to create pt noexcl bdev: {pt_name}")
-        return False
+        if not force:
+            return False
 
     subsystem_nqn = snode.subsystem + ":dev:" + alceml_id
     logger.info("Creating subsystem %s", subsystem_nqn)
@@ -150,7 +153,8 @@ def _def_create_device_stack(device_obj, snode):
                                         dev_cpu_mask=snode.dev_cpu_mask)
         if not ret:
             logger.error(f"Failed to create jm bdev: {device_obj.jm_bdev}")
-            return False
+            if not force:
+                return False
 
     device_obj.testing_bdev = test_name
     device_obj.alceml_bdev = alceml_name
@@ -186,11 +190,12 @@ def restart_device(device_id, force=False):
     logger.info(f"Restarting device {device_id}")
     device_set_unavailable(device_id)
 
-    ret = _def_create_device_stack(device_obj, snode)
+    ret = _def_create_device_stack(device_obj, snode, force=force)
 
     if not ret:
         logger.error("Failed to create device stack")
-        return False
+        if not force:
+            return False
 
     logger.info("Make other nodes connect to the device")
     snodes = db_controller.get_storage_nodes()
