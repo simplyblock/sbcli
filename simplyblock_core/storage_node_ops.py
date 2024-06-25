@@ -720,8 +720,8 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
     snode.iobuf_small_bufsize = small_bufsize or 0
     snode.iobuf_large_bufsize = large_bufsize or 0
 
-    snode.num_partitions_per_dev = num_partitions_per_dev or 1
-    snode.jm_percent = jm_percent or 3
+    snode.num_partitions_per_dev = num_partitions_per_dev
+    snode.jm_percent = jm_percent
 
     snode.write_to_db(kv_store)
 
