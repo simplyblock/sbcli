@@ -274,3 +274,8 @@ class DBController:
 
     def get_job_tasks(self, cluster_id, reverse=True):
         return JobSchedule().read_from_db(self.kv_store, id=cluster_id, reverse=reverse)
+
+    def get_task_by_id(self, task_id):
+        for task in self.get_job_tasks(""):
+            if task.uuid == task_id:
+                return task
