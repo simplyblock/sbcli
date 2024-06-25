@@ -1,9 +1,10 @@
+
 name: E2E Tests
 
 on:
-  # push:
-  #   branches:
-  #     - main
+  push:
+    branches:
+      - main
   schedule:
     - cron: '0 5 * * *'  # Runs every day at 5 AM UTC
   workflow_dispatch:
@@ -172,7 +173,7 @@ jobs:
           echo "number Failed tests"
           FAILED_TESTS=$(grep -i "Number of Failed Cases" "$LATEST_LOG" | awk '{print $NF}')
           echo "List Passed tests"
-          PASSED_CASES=$(grep "PASSED CASE" "$LATEST_LOG" | awk -F 'INFO - | PASSED CASE' '{print $2}')
+          PASSED_CASES=$(grep "PASSED CASE" "$LATEST_LOG" | awk -F 'INFO - | FAILED CASE' '{print $2}')
           echo "List Failed tests"
           FAILED_CASES=$(grep "FAILED CASE" "$LATEST_LOG" | awk -F 'INFO - | FAILED CASE' '{print $2}')
 
