@@ -288,7 +288,7 @@ def _create_jm_stack_on_device(rpc_client, nvme, snode, after_restart):
     return JMDevice({
         'uuid': str(uuid.uuid4()),
         'device_name': jm_bdev,
-        'nvme_device': nvme,
+        'device_id': nvme.get_id(),
         'size': nvme.size,
         'status': JMDevice.STATUS_ONLINE,
         'alceml_bdev': alceml_name,
@@ -481,6 +481,7 @@ def _prepare_cluster_devices_jm_on_dev(snode, devices):
 
 
 def _prepare_cluster_devices_on_restart(snode):
+    db_controller = DBController()
 
     rpc_client = RPCClient(
         snode.mgmt_ip, snode.rpc_port,
@@ -502,7 +503,8 @@ def _prepare_cluster_devices_on_restart(snode):
     if jm_device.jm_nvme_bdev_list:
         ret = _create_jm_stack_on_raid(rpc_client, jm_device.jm_nvme_bdev_list, snode, after_restart=False)
     else:
-        ret = _create_jm_stack_on_device(rpc_client, jm_device.nvme_device, snode, after_restart=True)
+        dev = db_controller.get_storage_device_by_id(jm_device.device_id)
+        ret = _create_jm_stack_on_device(rpc_client, dev, snode, after_restart=True)
     if not ret:
         logger.error(f"Failed to create JM device")
         return False
