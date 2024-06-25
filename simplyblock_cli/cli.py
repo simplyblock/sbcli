@@ -10,7 +10,8 @@ from simplyblock_core import compute_node_ops as compute_ops
 from simplyblock_core import storage_node_ops as storage_ops
 from simplyblock_core import mgmt_node_ops as mgmt_ops
 from simplyblock_core import constants
-from simplyblock_core.controllers import pool_controller, lvol_controller, snapshot_controller, device_controller
+from simplyblock_core.controllers import pool_controller, lvol_controller, snapshot_controller, device_controller, \
+    tasks_controller
 from simplyblock_core.controllers import caching_node_controller, health_controller
 from simplyblock_core.models.pool import Pool
 
@@ -323,6 +324,10 @@ class CLIWrapper:
         # get tasks list
         sub_command = self.add_sub_command(subparser, "list-tasks", 'List tasks by cluster ID')
         sub_command.add_argument("cluster_id", help='UUID of the cluster')
+
+        # cancel task
+        sub_command = self.add_sub_command(subparser, "cancel-task", 'Cancel task by ID')
+        sub_command.add_argument("id", help='UUID of the Task')
 
         # delete cluster
         sub_command = self.add_sub_command(
@@ -846,7 +851,10 @@ class CLIWrapper:
                 ret = cluster_ops.update_cluster(args.id)
 
             elif sub_command == "list-tasks":
-                ret = cluster_ops.list_tasks(args.cluster_id)
+                ret = tasks_controller.list_tasks(args.cluster_id)
+
+            elif sub_command == "cancel-task":
+                ret = tasks_controller.cancel_task(args.id)
 
             elif sub_command == "graceful-shutdown":
                 ret = cluster_ops.cluster_grace_shutdown(args.id)

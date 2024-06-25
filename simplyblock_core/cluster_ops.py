@@ -588,28 +588,6 @@ def update_cluster(cl_id):
     logger.info("Done")
     return True
 
-
-def list_tasks(cluster_id):
-    db_controller = DBController()
-    cluster = db_controller.get_cluster_by_id(cluster_id)
-    if not cluster:
-        logger.error("Cluster not found: %s", cluster_id)
-        return False
-
-    data = []
-    tasks = db_controller.get_job_tasks(cluster_id)
-    for task in tasks:
-        data.append({
-            "Task ID": task.uuid,
-            "Target ID": task.device_id or task.node_id,
-            "Function": task.function_name,
-            "Retry": f"{task.retry}/{constants.TASK_EXEC_RETRY_COUNT}",
-            "Status": task.status,
-            "Result": task.function_result,
-            "Date": time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(task.date)),
-        })
-    return utils.print_table(data)
-
  
 def cluster_grace_startup(cl_id):
     db_controller = DBController()

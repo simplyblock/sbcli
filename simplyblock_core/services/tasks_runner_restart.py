@@ -79,6 +79,12 @@ def task_runner_device(task):
         device_controller.device_set_unavailable(device.get_id())
         return True
 
+    if task.canceled:
+        task.function_result = "canceled"
+        task.status = JobSchedule.STATUS_DONE
+        task.write_to_db(db_controller.kv_store)
+        return True
+
     node = db_controller.get_storage_node_by_id(task.node_id)
     if node.status != StorageNode.STATUS_ONLINE:
         logger.error(f"Node is not online: {node.get_id()}, retry")
@@ -148,6 +154,12 @@ def task_runner_node(task):
     if _get_node_unavailable_devices_count(node.get_id()) == 0 and node.status == StorageNode.STATUS_ONLINE:
         logger.info(f"Node is online: {node.get_id()}")
         task.function_result = "Node is online"
+        task.status = JobSchedule.STATUS_DONE
+        task.write_to_db(db_controller.kv_store)
+        return True
+
+    if task.canceled:
+        task.function_result = "canceled"
         task.status = JobSchedule.STATUS_DONE
         task.write_to_db(db_controller.kv_store)
         return True
