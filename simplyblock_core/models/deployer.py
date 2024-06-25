@@ -39,6 +39,7 @@ class Deployer(BaseModel):
         "volumes_per_storage_nodes": {"type": int, 'default': ""},
         "nr_hugepages": {"type": int, 'default': ""},
         "tf_state_bucket_name": {"type": str, 'default': ""},
+        "tf_state_bucket_region": {"type": str, 'default': ""},
         "tf_workspace": {"type": str, 'default': ""},
         "status": {"type": str, 'default': ""},
         "tf_logs_bucket_name": {"type": str, 'default': ""},

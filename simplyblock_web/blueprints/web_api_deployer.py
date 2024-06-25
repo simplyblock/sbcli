@@ -131,7 +131,7 @@ def update_cluster(d, kv_store):
     print('started update_cluster')
     TFSTATE_BUCKET=d.tf_state_bucket_name
     TFSTATE_KEY='csi'
-    TFSTATE_REGION='us-east-2'
+    TFSTATE_REGION=d.tf_state_bucket_region
     TF_WORKSPACE=d.tf_workspace
 
     storage_nodes = d.storage_nodes
@@ -199,6 +199,7 @@ def update_cluster(d, kv_store):
     status = wait_for_status(command_id, instance_ids[0])
 
     # Get Logs
+    # TODO: manage multiple deployments with IDs so that IDs can be specific
     d.status = ""
     d.write_to_db(kv_store)
 
@@ -260,6 +261,8 @@ def validate_tf_vars(dpl_data):
         return "missing required param: nr_hugepages"
     if 'tf_state_bucket_name' not in dpl_data:
         return "missing required param: tf_state_bucket_name"
+    if 'tf_state_bucket_region' not in dpl_data:
+        return "missing required param: tf_state_bucket_region"
     if 'tf_workspace' not in dpl_data:
         return "missing required param: tf_workspace"
     if 'tf_logs_bucket_name' not in dpl_data:
