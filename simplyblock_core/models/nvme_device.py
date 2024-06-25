@@ -82,7 +82,7 @@ class JMDevice(BaseModel):
         "raid_bdev": {"type": str, 'default': ""},
         "alceml_bdev": {"type": str, 'default': ""},
         "jm_bdev": {"type": str, 'default': ""},
-        "nvme_device": {"type": NVMeDevice, 'default': None},
+        "device_id": {"type": str, 'default': ""},
 
         "health_check": {"type": bool, "default": True},
         "io_error": {"type": bool, 'default': False},
