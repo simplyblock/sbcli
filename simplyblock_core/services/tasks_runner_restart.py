@@ -106,20 +106,15 @@ def task_runner_device(task):
         task.write_to_db(db_controller.kv_store)
         tasks_events.task_updated(task)
 
-    # # resetting device
-    # logger.info(f"Resetting device {device.get_id()}")
-    # device_controller.reset_storage_device(device.get_id())
-    # time.sleep(5)
-    # device = _get_device(task)
-    # if device.status == NVMeDevice.STATUS_ONLINE and device.io_error is False:
-    #     logger.info(f"Device is online: {device.get_id()}")
-    #     task.function_result = "done"
-    #     task.status = JobSchedule.STATUS_DONE
-    #     task.write_to_db(db_controller.kv_store)
-    #     return True
+    # set device online for the first 3 retries
+    if task.retry < 3:
+        logger.info(f"Set device online {device.get_id()}")
+        device_controller.device_set_online(device.get_id())
+    else:
+        logger.info(f"Restarting device {device.get_id()}")
+        device_controller.restart_device(device.get_id(), force=True)
 
-    logger.info(f"Restarting device {device.get_id()}")
-    device_controller.restart_device(device.get_id(), force=True)
+    # check device status
     time.sleep(5)
     device = _get_device(task)
     if device.status == NVMeDevice.STATUS_ONLINE and device.io_error is False:
