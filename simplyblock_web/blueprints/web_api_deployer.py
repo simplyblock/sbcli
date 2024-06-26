@@ -228,6 +228,7 @@ def update_cluster(d, kv_store):
 
         stdout, _ = display_logs(command_id, instance_ids[0], d.status, tf_logs_bucket_name)
         d.tf_output = stdout
+        d.write_to_db(kv_store)
 
 
 @bp.route('/deployer', methods=['GET'], defaults={'uuid': None})
