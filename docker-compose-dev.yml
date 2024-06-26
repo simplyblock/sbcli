@@ -1,0 +1,15 @@
+version: '3.8'
+
+services:
+  webappapi:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    command: "python simplyblock_web/app.py"
+    volumes:
+      - "/etc/foundationdb:/etc/foundationdb"
+    environment:
+      - FLASK_DEBUG=False
+      - FLASK_ENV=production
+    ports:
+      - 7200:5000
