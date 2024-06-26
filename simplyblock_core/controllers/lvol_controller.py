@@ -696,6 +696,9 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
         lvol.top_bdev = lvol.comp_bdev
 
     nodes = _get_next_3_nodes(cl.get_id())
+    if not nodes:
+        return False, f"No nodes found with enough resources to create the LVol"
+
     if host_node:
         nodes.insert(0, host_node)
     else:
@@ -1367,8 +1370,12 @@ def migrate(lvol_id, node_id):
         logger.error(f"lvol not found: {lvol_id}")
         return False
 
-    old_node = lvol.node_id
-    nodes = _get_next_3_nodes()
+    old_node_id = lvol.node_id
+    old_node = db_controller.get_storage_node_by_id(old_node_id)
+    nodes = _get_next_3_nodes(old_node.cluster_id)
+    if not nodes:
+        logger.error(f"No nodes found with enough resources to create the LVol")
+        return False
 
     if node_id:
         nodes[0] = db_controller.get_storage_node_by_id(node_id)
@@ -1402,7 +1409,7 @@ def migrate(lvol_id, node_id):
     host_node.write_to_db(db_controller.kv_store)
     lvol.write_to_db(db_controller.kv_store)
 
-    lvol_events.lvol_migrate(lvol, old_node, lvol.node_id)
+    lvol_events.lvol_migrate(lvol, old_node_id, lvol.node_id)
 
     return True
 
