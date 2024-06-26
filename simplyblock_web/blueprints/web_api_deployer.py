@@ -226,7 +226,7 @@ def update_cluster(d, kv_store, storage_nodes, availability_zone):
 
         stdout, _ = display_logs(command_id, instance_ids[0], d.status, tf_logs_bucket_name)
         d.tf_output = stdout
-        d.storage_nodes += storage_nodes
+        d.storage_nodes = storage_nodes
         d.availability_zone = availability_zone
         d.write_to_db(kv_store)
 
