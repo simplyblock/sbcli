@@ -173,11 +173,11 @@ def update_cluster(d, kv_store):
         """,
         f"""
         docker run --rm -v terraform:/app -w /app {ECR_ACCOUNT_ID}.dkr.ecr.{ECR_REGION}.amazonaws.com/{ECR_REPOSITORY_NAME}:{ECR_IMAGE_TAG} \
-            plan -var mgmt_nodes={mgmt_nodes} -var storage_nodes={storage_nodes} -var availability_zone={availability_zone} -var region={aws_region}
+            plan -var mgmt_nodes={mgmt_nodes} -var storage_nodes={storage_nodes} -var az={availability_zone} -var region={aws_region}
         """,
         f"""
         docker run --rm -v terraform:/app -w /app {ECR_ACCOUNT_ID}.dkr.ecr.{ECR_REGION}.amazonaws.com/{ECR_REPOSITORY_NAME}:{ECR_IMAGE_TAG} \
-         apply -var mgmt_nodes={mgmt_nodes} -var storage_nodes={storage_nodes} -var availability_zone={availability_zone} -var region={aws_region} --auto-approve
+         apply -var mgmt_nodes={mgmt_nodes} -var storage_nodes={storage_nodes} -var az={availability_zone} -var region={aws_region} --auto-approve
         """
     ]
 
