@@ -286,5 +286,5 @@ class DBController:
 
     def get_task_by_id(self, task_id):
         for task in self.get_job_tasks(""):
-            if task.uuid == task_id:
+            if task_id.split('/')[-1] == task.uuid:
                 return task
