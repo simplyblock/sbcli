@@ -28,7 +28,7 @@ class NVMeDevice(BaseModel):
         "serial_number": {"type": str, 'default': ""},
         "overload_percentage": {"type": int, 'default': 0},
         "nvme_bdev": {"type": str, 'default': ""},
-        "alloc_bdev": {"type": str, 'default': ""},
+        "nvme_controller": {"type": str, 'default': ""},
         "alceml_bdev": {"type": str, 'default': ""},
         "node_id": {"type": str, 'default': ""},
         "pt_bdev": {"type": str, 'default': ""},
@@ -37,7 +37,6 @@ class NVMeDevice(BaseModel):
         "nvmf_port": {"type": int, 'default': 0},
         "remote_bdev": {"type": str, 'default': ""},
         "testing_bdev": {"type": str, 'default': ""},
-        "jm_bdev": {"type": str, 'default': ""},
         "cluster_device_order": {"type": int, 'default': 0},
         "health_check": {"type": bool, "default": True},
         "cluster_id": {"type": str, 'default': ""},
@@ -46,6 +45,13 @@ class NVMeDevice(BaseModel):
 
         "io_error": {"type": bool, 'default': False},
         "retries_exhausted": {"type": bool, 'default': False},
+
+        "partition_main_bdev": {"type": str, 'default': ""},
+        "partition_main_size": {"type": int, 'default': 0},
+        "partition_jm_bdev": {"type": str, 'default': ""},
+        "partition_jm_size": {"type": int, 'default': 0},
+
+        "physical_label": {"type": int, 'default': 0},
 
     }
 
@@ -57,5 +63,37 @@ class NVMeDevice(BaseModel):
     def get_id(self):
         return self.uuid
 
-    def get_capacity_percentage(self):
-        return ((self.size - self.capacity) / self.size) * 100
+
+class JMDevice(BaseModel):
+
+    STATUS_ONLINE = 'online'
+    STATUS_UNAVAILABLE = 'unavailable'
+    STATUS_REMOVED = 'removed'
+    STATUS_FAILED = 'failed'
+    STATUS_READONLY = 'read_only'
+
+    attributes = {
+        "uuid": {"type": str, 'default': ""},
+        "device_name": {"type": str, 'default': ""},
+        "status": {"type": str, 'default': ""},
+        "size": {"type": int, 'default': -1},
+
+        "jm_nvme_bdev_list": {"type": List[str], 'default': []},
+        "raid_bdev": {"type": str, 'default': ""},
+        "nvme_bdev": {"type": str, 'default': ""},
+        "alceml_bdev": {"type": str, 'default': ""},
+        "jm_bdev": {"type": str, 'default': ""},
+
+
+        "health_check": {"type": bool, "default": True},
+        "io_error": {"type": bool, 'default': False},
+    }
+
+    def __init__(self, data=None):
+        super(JMDevice, self).__init__()
+        self.set_attrs(self.attributes, data)
+        self.object_type = "object"
+
+    def get_id(self):
+        return self.uuid
+

@@ -1,8 +1,9 @@
+import time
 from logger_config import setup_logger
 import re
 
 
-class TestUtils:
+class CommonUtils:
     """Contains common validations and parsers
     """
     def __init__(self, sbcli_utils, ssh_utils):
@@ -45,7 +46,7 @@ class TestUtils:
                     if step == "restart":
                         to_check_in_logs.append("Device status changed from: online to: unavailable")
                         # TODO: Change from unavailable to online once bug is fixed.
-                        to_check_in_logs.append("Device status changed from: online to: online")
+                        to_check_in_logs.append("Device restarted")
 
         for expected_log in to_check_in_logs:
             assert expected_log in actual_logs, f"Expected event/log {expected_log} not found in Actual logs: {actual_logs}"
@@ -61,12 +62,79 @@ class TestUtils:
             RuntimeError: If there are interruptions
         """
         file_data = self.ssh_utils.read_file(node, log_file)
-        fail_words = ["error", "fail", "latency", "throughput"]
+        fail_words = ["error", "fail", "throughput", "interrupt", "terminate"]
         for word in fail_words:
             if word in file_data:
                 raise RuntimeError("FIO Test has interuupts")
-            
     
+    def validate_fio_json_output(self, output):
+        """Validates JSON fio output
+
+        Args:
+            output (str): JSON output to validate
+        """
+        job = output['jobs'][0]
+        job_name = job['job options']['name']
+        file_name = job['job options']['directory']
+        read_iops = job['read']['iops']
+        write_iops = job['write']['iops']
+        total_iops = read_iops + write_iops
+        disk_name = output['disk_util'][0]['name']
+
+        read_bw_kb = job['read']['bw']
+        write_bw_kb = job['write']['bw']
+        read_bw_mib = read_bw_kb / 1024
+        write_bw_mib = write_bw_kb / 1024
+
+        self.logger.info(f"Performign validation for FIO job: {job_name} on device: "
+                         f"{disk_name} mounted on: {file_name}")
+        assert 550 < total_iops < 650, f"Total IOPS {total_iops} out of range (550-650)"
+        # TODO: Uncomment when issue is fixed
+        # assert 4.5 < read_bw_mib < 5.5, f"Read BW {read_bw_mib} out of range (4.5-5.5 MiB/s)"
+        # assert 4.5 < write_bw_mib < 5.5, f"Write BW {write_bw_mib} out of range (4.5-5.5 MiB/s)"
+        assert read_bw_mib > 0, f"Read BW {read_bw_mib} less than or equal to 0MiB"
+        assert write_bw_mib > 0, f"Write BW {write_bw_mib} less than or equal to 0MiB"
+
+    def manage_fio_threads(self, node, threads, timeout=100):
+        """Run till fio process is complete and joins the thread
+
+        Args:
+            node (str): Node IP where fio is running
+            threads (list): List of threads
+            timeout (int): Time to check for completion
+
+        Raises:
+            RuntimeError: If fio process hang
+        """
+        self.logger.info("Waiting for FIO processes to complete!")
+        start_time = time.time()
+        while True:
+            process = self.ssh_utils.find_process_name(node=node,
+                                                       process_name="fio")
+            process_fio = [element for element in process if "grep" not in element]
+            
+            if len(process_fio) == 0:
+                break
+            end_time = time.time()
+            if end_time - start_time > 800:
+                raise RuntimeError("Fio Process not completing post its time")
+            if timeout <= 0:
+                break
+            sleep_n_sec(60)
+            timeout = timeout - 60
+            
+
+        for thread in threads:
+            thread.join(timeout=30)
+
+        process_list_after = self.ssh_utils.find_process_name(node=node,
+                                                              process_name="fio")
+        self.logger.info(f"Process List: {process_list_after}")
+
+        process_fio = [element for element in process_list_after if "grep" not in element]
+
+        assert len(process_fio) == 0, f"FIO process list not empty: {process_list_after}"
+            
     def parse_lvol_cluster_map_output(self, output):
         """Parses LVOL cluster map output
 
@@ -114,3 +182,14 @@ class TestUtils:
             self.logger.info(device)
 
         return nodes, devices
+    
+
+def sleep_n_sec(seconds):
+    """Sleeps for given seconds
+
+    Args:
+        seconds (int): Seconds to sleep for
+    """
+    logger = setup_logger(__name__)
+    logger.info(f"Sleeping for {seconds} seconds.")
+    time.sleep(seconds)

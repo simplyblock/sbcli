@@ -111,7 +111,7 @@ def convert_to_seconds(time_string):
 while True:
     try:
         clusters = db_controller.get_clusters()
-        lvols = db_controller.get_lvols()
+        lvols = db_controller.get_lvols()  # pass
         logger.info("Clusters and logical volumes successfully retrieved for cleanup.")
         
         st_date = "" # seconds

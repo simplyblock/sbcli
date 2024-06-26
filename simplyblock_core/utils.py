@@ -257,7 +257,7 @@ def process_records(records, records_count):
 
 def ping_host(ip):
     logger.debug(f"Pinging ip ... {ip}")
-    response = os.system(f"ping -c 1 {ip} > /dev/null")
+    response = os.system(f"ping -c 1 -W 3 {ip} > /dev/null")
     if response == 0:
         logger.debug(f"{ip} is UP")
         return True
@@ -280,3 +280,48 @@ def sum_records(records):
 
 def get_random_vuid():
     return 1 + int(random.random() * 10000)
+
+
+def calculate_core_allocation(cpu_count):
+    '''
+    If number of cpu cores >= 8, tune cpu core mask
+        1. Never use core 0 for spdk.
+        2. For every 8 cores, leave one core to the operating system
+        3. Do not use more than 15% of remaining available cores for nvme pollers
+        4. Use one dedicated core for app_thread
+        5. distribute distrib bdevs and alceml bdevs to all other cores
+    JIRA ticket link/s
+    https://simplyblock.atlassian.net/browse/SFAM-885
+    '''
+
+    all_cores = list(range(0, cpu_count))
+    # Calculate the number of cores to exclude for the OS
+    if cpu_count == 8:
+        os_cores_count = 1
+    else:
+        os_cores_count = 1 + (cpu_count // 8)
+
+    # Calculate os cores
+    os_cores = all_cores[0:os_cores_count]
+
+    # Calculate available cores
+    available_cores_count = cpu_count - os_cores_count
+
+    # Calculate NVMe pollers
+    nvme_pollers_count = int(available_cores_count * 0.15)
+    nvme_pollers_cores = all_cores[os_cores_count:os_cores_count + nvme_pollers_count]
+
+    # Allocate core for app_thread
+    app_thread_core = all_cores[os_cores_count + nvme_pollers_count:os_cores_count + nvme_pollers_count + 1]
+
+    # Calculate bdb_lcpu cores
+    bdb_lcpu_cores = all_cores[os_cores_count + nvme_pollers_count + 1:]
+
+    return os_cores, nvme_pollers_cores, app_thread_core, bdb_lcpu_cores
+
+
+def generate_mask(cores):
+    mask = 0
+    for core in cores:
+        mask |= (1 << core)
+    return f'0x{mask:X}'

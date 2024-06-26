@@ -16,11 +16,13 @@ logger = log.getLogger()
 
 def check_cluster(cluster_id):
     db_controller = DBController()
-    st = db_controller.get_storage_nodes()
+    st = db_controller.get_storage_nodes_by_cluster_id(cluster_id)
     data = []
+    result = True
     for node in st:
         # check if node is online, unavailable, restarting
         ret = check_node(node.get_id(), with_devices=False)
+        result &= ret
         print("*"*100)
         data.append({
             "Kind": "Node",
@@ -28,30 +30,32 @@ def check_cluster(cluster_id):
             "Status": "ok" if ret else "failed"
         })
 
-    for device in db_controller.get_storage_devices():
-        ret = check_device(device.get_id())
-        print("*" * 100)
-        data.append({
-            "Kind": "Device",
-            "UUID": device.get_id(),
-            "Status": "ok" if ret else "failed"
-        })
+        for device in node.nvme_devices:
+            ret = check_device(device.get_id())
+            result &= ret
+            print("*" * 100)
+            data.append({
+                "Kind": "Device",
+                "UUID": device.get_id(),
+                "Status": "ok" if ret else "failed"
+            })
 
-    for lvol in db_controller.get_lvols():
-        ret = check_lvol(lvol.get_id())
-        print("*" * 100)
-        data.append({
-            "Kind": "LVol",
-            "UUID": lvol.get_id(),
-            "Status": "ok" if ret else "failed"
-        })
+        for lvol in db_controller.get_lvols(cluster_id):
+            ret = check_lvol(lvol.get_id())
+            result &= ret
+            print("*" * 100)
+            data.append({
+                "Kind": "LVol",
+                "UUID": lvol.get_id(),
+                "Status": "ok" if ret else "failed"
+            })
     print(utils.print_table(data))
-    return True
+    return result
 
 
 def _check_node_docker_api(ip):
     try:
-        node_docker = docker.DockerClient(base_url=f"tcp://{ip}:2375", version="auto")
+        node_docker = docker.DockerClient(base_url=f"tcp://{ip}:2375", version="auto", timeout=3)
         ret = node_docker.info()
         if ret:
             logger.debug(ret)
@@ -65,7 +69,7 @@ def _check_node_rpc(rpc_ip, rpc_port, rpc_username, rpc_password):
     try:
         rpc_client = RPCClient(
             rpc_ip, rpc_port, rpc_username, rpc_password,
-            timeout=5, retry=3)
+            timeout=10, retry=1)
         ret = rpc_client.get_version()
         if ret:
             logger.debug(f"SPDK version: {ret['version']}")
@@ -167,7 +171,7 @@ def check_node(node_id, with_devices=True):
 
 def check_device(device_id):
     db_controller = DBController()
-    device = db_controller.get_storage_devices(device_id)
+    device = db_controller.get_storage_device_by_id(device_id)
     if not device:
         logger.error("device not found")
         return False
@@ -192,8 +196,8 @@ def check_device(device_id):
             snode.rpc_username, snode.rpc_password)
 
         bdevs_stack = [device.nvme_bdev, device.testing_bdev, device.alceml_bdev, device.pt_bdev]
-        if device.jm_bdev:
-            bdevs_stack.append(device.jm_bdev)
+        # if device.jm_bdev:
+        #     bdevs_stack.append(device.jm_bdev)
         logger.info(f"Checking Device: {device_id}, status:{device.status}")
         problems = 0
         for bdev in bdevs_stack:
@@ -231,7 +235,7 @@ def check_device(device_id):
 
 def check_remote_device(device_id):
     db_controller = DBController()
-    device = db_controller.get_storage_devices(device_id)
+    device = db_controller.get_storage_device_by_id(device_id)
     if not device:
         logger.error("device not found")
         return False
@@ -241,7 +245,7 @@ def check_remote_device(device_id):
         return False
 
     result = True
-    for node in db_controller.get_storage_nodes():
+    for node in db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id):
         if node.status == StorageNode.STATUS_ONLINE:
             if node.get_id() == snode.get_id():
                 continue
@@ -305,20 +309,6 @@ def check_lvol_on_node(lvol_id, node_id):
     except Exception as e:
         logger.exception(e)
         return False
-
-    # check ndcs+npcs <= online devices
-    # then change its status to offline if fails this check
-    online_devices = 0
-    for node in db_controller.get_storage_nodes():
-        for dev in node.nvme_devices:
-            if dev.status == dev.STATUS_ONLINE:
-                online_devices += 1
-
-    # if lvol.ndcs + lvol.npcs < online_devices:
-    #     logger.info(f"Checking Distr ndcs+npcs: {lvol.ndcs}+{lvol.npcs}, online devices: {online_devices} ... ok")
-    # else:
-    #     logger.info(f"Checking Distr ndcs+npcs: {lvol.ndcs}+{lvol.npcs}, online devices: {online_devices} ... failed")
-        # passed = False
 
     return passed
 

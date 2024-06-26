@@ -60,3 +60,12 @@ def cluster_prov_cap_crit(cluster, util):
     msg = f"Cluster provisioned capacity reached: {util}%"
     _cluster_cap_event(cluster, msg, event_level=EventObj.LEVEL_CRITICAL)
 
+
+def cluster_delete(cluster):
+    ec.log_event_cluster(
+        cluster_id=cluster.get_id(),
+        domain=ec.DOMAIN_CLUSTER,
+        event=ec.EVENT_OBJ_DELETED,
+        db_object=cluster,
+        caused_by=ec.CAUSED_BY_CLI,
+        message=f"Cluster deleted {cluster.get_id()}")

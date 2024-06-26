@@ -19,17 +19,21 @@ bp = Blueprint("lvol", __name__)
 db_controller = kv_store.DBController()
 
 
-@bp.route('/lvol', defaults={'uuid': None}, methods=['GET'])
-@bp.route('/lvol/<string:uuid>', methods=['GET'])
-def list_lvols(uuid):
+@bp.route('/lvol', defaults={'uuid': None, "cluster_id": None}, methods=['GET'])
+@bp.route('/lvol/<string:uuid>', defaults={"cluster_id": None}, methods=['GET'])
+@bp.route('/lvol/cluster_id/<string:cluster_id>', defaults={'uuid': None,}, methods=['GET'])
+def list_lvols(uuid, cluster_id):
     if uuid:
         lvol = db_controller.get_lvol_by_id(uuid)
         if lvol:
             lvols = [lvol]
         else:
             return utils.get_response_error(f"LVol not found: {uuid}", 404)
+    elif cluster_id:
+        lvols = db_controller.get_lvols(cluster_id)
     else:
-        lvols = db_controller.get_lvols()
+        cluster_id = utils.get_cluster_id(request)
+        lvols = db_controller.get_lvols(cluster_id)
     data = []
     for lvol in lvols:
         data.append(lvol.get_clean_dict())
@@ -123,7 +127,7 @@ def add_lvol():
     if not pool:
         return utils.get_response(None, f"Pool not found: {pool_id_or_name}", 400)
 
-    for lvol in db_controller.get_lvols():
+    for lvol in db_controller.get_lvols():  # pass
         if lvol.pool_uuid == pool.get_id():
             if lvol.lvol_name == name:
                 return utils.get_response(lvol.get_id())

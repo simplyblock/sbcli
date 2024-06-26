@@ -29,6 +29,7 @@ sudo sed -i 's/#X11UseLocalhost yes/X11UseLocalhost no/g' /etc/ssh/sshd_config
 
 sudo service sshd restart
 sudo modprobe nvme-tcp
+sudo modprobe nbd
 
 sudo sysctl -w net.ipv6.conf.all.disable_ipv6=1
 

@@ -16,7 +16,7 @@ COMMANDS = [
 
 def get_parser_help_content(parser):
     formatter = parser._get_formatter()
-    formatter.add_usage(parser.usage, parser._actions, parser._mutually_exclusive_groups)
+    formatter.add_usage(None, parser._actions, parser._mutually_exclusive_groups)
     for action_group in parser._action_groups:
         formatter.start_section(action_group.title)
         formatter.add_text(action_group.description)

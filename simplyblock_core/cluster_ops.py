@@ -1,15 +1,19 @@
 # coding=utf-8
 import json
 import logging
-import math
 import os
+import re
+import tempfile
+import shutil
+import subprocess
 import time
 import uuid
 
 import docker
 import requests
+from jinja2 import Environment, FileSystemLoader
 
-from simplyblock_core import utils, scripts, constants, mgmt_node_ops, storage_node_ops, shell_utils
+from simplyblock_core import utils, scripts, constants, mgmt_node_ops, storage_node_ops
 from simplyblock_core.controllers import cluster_events, device_controller
 from simplyblock_core.kv_store import DBController
 from simplyblock_core.models.cluster import Cluster
@@ -17,10 +21,33 @@ from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
 
 logger = logging.getLogger()
+TOP_DIR = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+
+def _add_grafana_dashboards(username, password, cluster_ip):
+    url = f"http://{username}:{password}@{cluster_ip}/grafana/api/dashboards/import"
+    headers = {'Content-Type': 'application/json'}
+    dirpath, _, filenames = next(os.walk(os.path.join(constants.INSTALL_DIR, "scripts", "dashboards")))
+    ret = True
+    for filename in filenames:
+        with open(os.path.join(dirpath, filename), 'r') as f:
+            st = f.read()
+            # st = st.replace("$Cluster", cluster_id)
+            st = json.loads(st)
+        payload = json.dumps(st)
+        response = requests.post(url, headers=headers, data=payload)
+        logger.debug(response.status_code)
+        logger.debug(response.text)
+        if response.status_code == 200:
+            resp = response.json()
+            logger.info(f"Dashboard: {resp['title']}, imported: {resp['imported']}")
+        else:
+            logger.error(f"Error importing dashboard, status code:{response.status_code} text:{response.text}")
+            ret = False
+    return ret
 
 
 def _add_graylog_input(cluster_ip, password):
-    url = f"http://{cluster_ip}:9000/api/system/inputs"
+    url = f"http://{cluster_ip}/graylog/api/system/inputs"
     payload = json.dumps({
         "title": "spdk log input",
         "type": "org.graylog2.inputs.gelf.udp.GELFUDPInput",
@@ -47,7 +74,8 @@ def _add_graylog_input(cluster_ip, password):
 
 
 def create_cluster(blk_size, page_size_in_blocks, cli_pass,
-                   cap_warn, cap_crit, prov_cap_warn, prov_cap_crit, ifname, log_del_interval, metrics_retention_period):
+                   cap_warn, cap_crit, prov_cap_warn, prov_cap_crit, ifname, log_del_interval, metrics_retention_period,
+                    contact_point, grafana_endpoint):
     logger.info("Installing dependencies...")
     ret = scripts.install_deps()
     logger.info("Installing dependencies > Done")
@@ -102,6 +130,44 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     if prov_cap_crit and prov_cap_crit > 0:
         c.prov_cap_crit = prov_cap_crit
 
+    alerts_template_folder = os.path.join(TOP_DIR, "simplyblock_core/scripts/alerting/")
+    alert_resources_file = "alert_resources.yaml"
+
+    env = Environment(loader=FileSystemLoader(alerts_template_folder), trim_blocks=True, lstrip_blocks=True)
+    template = env.get_template(f'{alert_resources_file}.j2')
+
+    slack_pattern = re.compile(r"https://hooks\.slack\.com/services/\S+")
+    email_pattern = re.compile(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$")
+
+    if slack_pattern.match(contact_point):
+        ALERT_TYPE = "slack"
+    elif email_pattern.match(contact_point):
+        ALERT_TYPE = "email"
+    else:
+        ALERT_TYPE = "slack"
+        contact_point = 'https://hooks.slack.com/services/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'
+
+    values = {
+        'CONTACT_POINT': contact_point,
+        'GRAFANA_ENDPOINT': grafana_endpoint,
+        'ALERT_TYPE': ALERT_TYPE,
+    }
+
+    temp_dir = tempfile.mkdtemp()
+
+    temp_file_path = os.path.join(temp_dir, alert_resources_file)
+    with open(temp_file_path, 'w') as file:
+        file.write(template.render(values))
+
+    destination_file_path = os.path.join(alerts_template_folder, alert_resources_file)
+    try:
+        subprocess.run(['sudo', '-v'], check=True) # sudo -v checks if the current user has sudo permissions
+        subprocess.run(['sudo', 'mv', temp_file_path, destination_file_path], check=True)
+        print(f"File moved to {destination_file_path} successfully.")
+    except subprocess.CalledProcessError as e:
+        print(f"An error occurred: {e}")
+    shutil.rmtree(temp_dir)
+
     logger.info("Deploying swarm stack ...")
     ret = scripts.deploy_stack(cli_pass, DEV_IP, constants.SIMPLY_BLOCK_DOCKER_IMAGE, c.secret, c.uuid, log_del_interval, metrics_retention_period)
     logger.info("Deploying swarm stack > Done")
@@ -122,8 +188,8 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     mgmt_node_ops.add_mgmt_node(DEV_IP, c.uuid)
 
     logger.info("Applying dashboard...")
-    ret = scripts.apply_dashboard(c.secret)
-    logger.info("Applying dashboard > Done")
+    ret = _add_grafana_dashboards("admin", c.secret, DEV_IP)
+    logger.info(f"Applying dashboard > {ret}")
 
     logger.info("New Cluster has been created")
     logger.info(c.uuid)
@@ -176,203 +242,39 @@ def deploy_spdk(node_docker, spdk_cpu_mask, spdk_mem):
             break
 
 
-def join_cluster(cluster_ip, cluster_id, role, ifname, data_nics,  spdk_cpu_mask, spdk_mem):  # role: ["management", "storage"]
-
-    if role not in ["management", "storage", "storage-alloc"]:
-        logger.error(f"Unknown role: {role}")
+def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit):
+    db_controller = DBController()
+    clusters = db_controller.get_clusters()
+    if not clusters:
+        logger.error("No previous clusters found!")
         return False
 
-    try:
-        resp = requests.get(f"http://{cluster_ip}/cluster/{cluster_id}")
-        resp_json = resp.json()
-        cluster_data = resp_json['results'][0]
-        logger.info(f"Cluster found! NQN:{cluster_data['nqn']}")
-        logger.debug(cluster_data)
-    except Exception as e:
-        logger.error("Error getting cluster data!")
-        logger.error(e)
-        return ""
-
-    logger.info("Installing dependencies...")
-    ret = scripts.install_deps()
-    logger.info("Installing dependencies > Done")
-
-    if not ifname:
-        ifname = "eth0"
-
-    DEV_IP = utils.get_iface_ip(ifname)
-    if not DEV_IP:
-        logger.error(f"Error getting interface ip: {ifname}")
-        return False
-
-    logger.info(f"Node IP: {DEV_IP}")
-    ret = scripts.configure_docker(DEV_IP)
-
-    db_connection = cluster_data['db_connection']
-    ret = scripts.set_db_config(db_connection)
-
-    if role == "storage":
-        logger.info("Deploying SPDK")
-        node_cpu_count = os.cpu_count()
-        if spdk_cpu_mask:
-            requested_cpu_count = len(format(int(spdk_cpu_mask, 16), 'b'))
-            if requested_cpu_count > node_cpu_count:
-                logger.error(f"The requested cpu count: {requested_cpu_count} "
-                             f"is larger than the node's cpu count: {node_cpu_count}")
-                return False
-        else:
-            spdk_cpu_mask = hex(int(math.pow(2, node_cpu_count))-1)
-        if spdk_mem:
-            spdk_mem = int(spdk_mem/(1024*1024))
-        else:
-            spdk_mem = 4096
-        node_docker = docker.DockerClient(base_url=f"tcp://{DEV_IP}:2375", version="auto", timeout=60*5)
-        deploy_spdk(node_docker, spdk_cpu_mask, spdk_mem)
-        time.sleep(5)
-
-    logger.info("Joining docker swarm...")
-    db_controller = DBController()
-    nodes = db_controller.get_mgmt_nodes(cluster_id=cluster_id)
-    if not nodes:
-        logger.error("No mgmt nodes was found in the cluster!")
-        exit(1)
-
-    try:
-        cluster_docker = utils.get_docker_client(cluster_id)
-        docker_ip = cluster_docker.info()["Swarm"]["NodeAddr"]
-
-        if role == 'management':
-            join_token = cluster_docker.swarm.attrs['JoinTokens']['Manager']
-        else:
-            join_token = cluster_docker.swarm.attrs['JoinTokens']['Worker']
-
-        node_docker = docker.DockerClient(base_url=f"tcp://{DEV_IP}:2375", version="auto")
-        if node_docker.info()["Swarm"]["LocalNodeState"] == "active":
-            logger.info("Node is part of another swarm, leaving swarm")
-            try:
-                cluster_docker.nodes.get(node_docker.info()["Swarm"]["NodeID"]).remove(force=True)
-            except:
-                pass
-            node_docker.swarm.leave(force=True)
-            time.sleep(5)
-        node_docker.swarm.join([f"{docker_ip}:2377"], join_token)
-
-        retries = 10
-        while retries > 0:
-            if node_docker.info()["Swarm"]["LocalNodeState"] == "active":
-                break
-            logger.info("Waiting for node to be active...")
-            retries -= 1
-            time.sleep(2)
-        logger.info("Joining docker swarm > Done")
-        time.sleep(5)
-
-    except Exception as e:
-        raise e
-
-    if role == 'management':
-        mgmt_node_ops.add_mgmt_node(DEV_IP, cluster_id)
-        cluster_obj = db_controller.get_cluster_by_id(cluster_id)
-        nodes = db_controller.get_mgmt_nodes(cluster_id=cluster_id)
-        if len(nodes) >= 3:
-            logger.info("Waiting for FDB container to be active...")
-            fdb_cont = None
-            retries = 30
-            while retries > 0 and fdb_cont is None:
-                logger.info("Looking for FDB container...")
-                for cont in node_docker.containers.list(all=True):
-                    logger.debug(cont.attrs['Name'])
-                    if cont.attrs['Name'].startswith("/app_fdb"):
-                        fdb_cont = cont
-                        break
-                if fdb_cont:
-                    logger.info("FDB container found")
-                    break
-                else:
-                    retries -= 1
-                    time.sleep(5)
-
-            if not fdb_cont:
-                logger.warning("FDB container was not found")
-            else:
-                retries = 10
-                while retries > 0:
-                    info = node_docker.containers.get(fdb_cont.attrs['Id'])
-                    status = info.attrs['State']["Status"]
-                    is_running = info.attrs['State']["Running"]
-                    if not is_running:
-                        logger.info("Container is not running, waiting...")
-                        time.sleep(3)
-                        retries -= 1
-                    else:
-                        logger.info(f"Container status: {status}, Is Running: {is_running}")
-                    break
-
-            logger.info("Configuring Double DB...")
-            time.sleep(3)
-            out = scripts.set_db_config_double()
-            cluster_obj.ha_type = "ha"
-            cluster_obj.write_to_db(db_controller.kv_store)
-            logger.info("Configuring DB > Done")
-
-    elif role == "storage":
-        # add storage node
-        fdb_cont = None
-        retries = 30
-        while retries > 0 and fdb_cont is None:
-            logger.info("Looking for SpdkAppProxy container...")
-            for cont in node_docker.containers.list(all=True):
-                logger.debug(cont.attrs['Name'])
-                if cont.attrs['Name'].startswith("/app_SpdkAppProxy"):
-                    fdb_cont = cont
-                    break
-            if fdb_cont:
-                logger.info("SpdkAppProxy container found")
-                break
-            else:
-                retries -= 1
-                time.sleep(5)
-
-        if not fdb_cont:
-            logger.warning("SpdkAppProxy container was not found")
-        else:
-            retries = 10
-            while retries > 0:
-                info = node_docker.containers.get(fdb_cont.attrs['Id'])
-                status = info.attrs['State']["Status"]
-                is_running = info.attrs['State']["Running"]
-                if not is_running:
-                    logger.info("Container is not running, waiting...")
-                    time.sleep(3)
-                    retries -= 1
-                else:
-                    logger.info(f"Container status: {status}, Is Running: {is_running}")
-                break
-        storage_node_ops.add_storage_node(cluster_id, ifname, data_nics)
-
-    logger.info("Node joined the cluster")
-
-
-def add_cluster(blk_size, page_size_in_blocks, model_ids, tls,
-                auth_hosts_only, dhchap, nqn, iscsi, cli_pass):
-    db_controller = DBController()
+    default_cluster = clusters[0]
     logger.info("Adding new cluster")
-    c = Cluster()
-    c.uuid = str(uuid.uuid4())
-    c.blk_size = blk_size
-    c.page_size_in_blocks = page_size_in_blocks
-    c.model_ids = model_ids
-    c.tls = tls
-    c.auth_hosts_only = auth_hosts_only
-    c.nqn = nqn
-    c.iscsi = iscsi
-    c.dhchap = dhchap
-    c.cli_pass = cli_pass
-    c.status = Cluster.STATUS_ACTIVE
-    c.updated_at = int(time.time())
-    c.write_to_db(db_controller.kv_store)
-    logger.info("New Cluster has been created")
-    logger.info(c.uuid)
+    cluster = Cluster()
+    cluster.uuid = str(uuid.uuid4())
+    cluster.blk_size = blk_size
+    cluster.page_size_in_blocks = page_size_in_blocks
+    cluster.ha_type = default_cluster.ha_type
+    cluster.nqn = f"{constants.CLUSTER_NQN}:{cluster.uuid}"
+    cluster.cli_pass = default_cluster.cli_pass
+    cluster.secret = default_cluster.secret
+    cluster.db_connection = default_cluster.db_connection
+    if cap_warn and cap_warn > 0:
+        cluster.cap_warn = cap_warn
+    if cap_crit and cap_crit > 0:
+        cluster.cap_crit = cap_crit
+    if prov_cap_warn and prov_cap_warn > 0:
+        cluster.prov_cap_warn = prov_cap_warn
+    if prov_cap_crit and prov_cap_crit > 0:
+        cluster.prov_cap_crit = prov_cap_crit
+
+    cluster.status = Cluster.STATUS_ACTIVE
+    cluster.updated_at = int(time.time())
+    cluster.write_to_db(db_controller.kv_store)
+    cluster_events.cluster_create(cluster)
+
+    return cluster.get_id()
 
 
 def show_cluster(cl_id, is_json=False):
@@ -382,7 +284,7 @@ def show_cluster(cl_id, is_json=False):
         logger.error(f"Cluster not found {cl_id}")
         return False
 
-    st = db_controller.get_storage_nodes()
+    st = db_controller.get_storage_nodes_by_cluster_id(cl_id)
     data = []
     for node in st:
         for dev in node.nvme_devices:
@@ -443,7 +345,7 @@ def cluster_set_read_only(cl_id):
 
     ret = set_cluster_status(cl_id, Cluster.STATUS_READONLY)
     if ret:
-        st = db_controller.get_storage_nodes()
+        st = db_controller.get_storage_nodes_by_cluster_id(cl_id)
         for node in st:
             for dev in node.nvme_devices:
                 if dev.status == NVMeDevice.STATUS_ONLINE:
@@ -463,7 +365,7 @@ def cluster_set_active(cl_id):
 
     ret = set_cluster_status(cl_id, Cluster.STATUS_ACTIVE)
     if ret:
-        st = db_controller.get_storage_nodes()
+        st = db_controller.get_storage_nodes_by_cluster_id(cl_id)
         for node in st:
             for dev in node.nvme_devices:
                 if dev.status == NVMeDevice.STATUS_READONLY:
@@ -474,11 +376,11 @@ def cluster_set_active(cl_id):
 def list():
     db_controller = DBController()
     cls = db_controller.get_clusters()
-    st = db_controller.get_storage_nodes()
     mt = db_controller.get_mgmt_nodes()
 
     data = []
     for cl in cls:
+        st = db_controller.get_storage_nodes_by_cluster_id(cl.get_id())
         data.append({
             "UUID": cl.id,
             "NQN": cl.nqn,
@@ -623,7 +525,7 @@ def get_logs(cluster_id, is_json=False):
             vuid = record.object_dict['vuid']
 
         out.append({
-            "Date": time.strftime("%H:%M:%S, %d/%m/%Y", time.gmtime(record.date)),
+            "Date": record.get_date_string(),
             "NodeId": record.node_id,
             "Event": record.event,
             "Level": record.event_level,
@@ -655,12 +557,12 @@ def update_cluster(cl_id):
         logger.error(f"Cluster not found {cl_id}")
         return False
 
-    try:
-        out, _, ret_code = shell_utils.run_command("pip install sbcli-dev --upgrade")
-        if ret_code == 0:
-            logger.info("sbcli-dev is upgraded")
-    except Exception as e:
-        logger.error(e)
+    # try:
+    #     out, _, ret_code = shell_utils.run_command("pip install sbcli-dev --upgrade")
+    #     if ret_code == 0:
+    #         logger.info("sbcli-dev is upgraded")
+    # except Exception as e:
+    #     logger.error(e)
 
     try:
         logger.info("Updating mgmt cluster")
@@ -675,7 +577,7 @@ def update_cluster(cl_id):
     except Exception as e:
         print(e)
 
-    for node in db_controller.get_storage_nodes():
+    for node in db_controller.get_storage_nodes_by_cluster_id(cl_id):
         node_docker = docker.DockerClient(base_url=f"tcp://{node.mgmt_ip}:2375", version="auto")
         logger.info(f"Pulling image {constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE}")
         node_docker.images.pull(constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE)
@@ -688,28 +590,6 @@ def update_cluster(cl_id):
     return True
 
 
-def list_tasks(cluster_id):
-    db_controller = DBController()
-    cluster = db_controller.get_cluster_by_id(cluster_id)
-    if not cluster:
-        logger.error("Cluster not found: %s", cluster_id)
-        return False
-
-    data = []
-    tasks = db_controller.get_job_tasks(cluster_id)
-    for task in tasks:
-        data.append({
-            "UUID": task.uuid,
-            "Device": task.device_id,
-            "Function": task.function_name,
-            "Retry": f"{task.retry}/{constants.TASK_EXEC_RETRY_COUNT}",
-            "Status": task.status,
-            "Result": task.function_result,
-            "Date": time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(task.date)),
-        })
-    return utils.print_table(data)
-
-
 def cluster_grace_startup(cl_id):
     db_controller = DBController()
     cluster = db_controller.get_cluster_by_id(cl_id)
@@ -719,7 +599,7 @@ def cluster_grace_startup(cl_id):
     logger.info(f"Unsuspending cluster: {cl_id}")
     unsuspend_cluster(cl_id)
 
-    st = db_controller.get_storage_nodes()
+    st = db_controller.get_storage_nodes_by_cluster_id(cl_id)
     for node in st:
         logger.info(f"Restarting node: {node.get_id()}")
         storage_node_ops.restart_storage_node(node.get_id())
@@ -738,7 +618,7 @@ def cluster_grace_shutdown(cl_id):
         logger.error(f"Cluster not found {cl_id}")
         return False
 
-    st = db_controller.get_storage_nodes()
+    st = db_controller.get_storage_nodes_by_cluster_id(cl_id)
     for node in st:
         logger.info(f"Suspending node: {node.get_id()}")
         storage_node_ops.suspend_storage_node(node.get_id())
@@ -748,3 +628,26 @@ def cluster_grace_shutdown(cl_id):
     logger.info(f"Suspending cluster: {cl_id}")
     suspend_cluster(cl_id)
     return True
+
+
+def delete_cluster(cl_id):
+    db_controller = DBController()
+    cluster = db_controller.get_cluster_by_id(cl_id)
+    if not cluster:
+        logger.error(f"Cluster not found {cl_id}")
+        return False
+
+    nodes = db_controller.get_storage_nodes_by_cluster_id(cl_id)
+    if nodes:
+        logger.error("Can only remove Empty cluster, Storage nodes found")
+        return False
+
+    pools = db_controller.get_pools(cl_id)
+    if pools:
+        logger.error("Can only remove Empty cluster, Pools found")
+        return False
+
+    logger.info(f"Deleting Cluster {cl_id}")
+    cluster_events.cluster_delete(cluster)
+    cluster.remove(db_controller.kv_store)
+    logger.info("Done")
