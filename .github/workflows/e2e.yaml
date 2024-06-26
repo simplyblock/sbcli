@@ -1,9 +1,9 @@
 name: E2E Tests
 
 on:
-  # push:
-  #   branches:
-  #     - main
+  push:
+    branches:
+      - main
   schedule:
     - cron: '0 5 * * *'  # Runs every day at 5 AM UTC
   workflow_dispatch:
@@ -45,7 +45,6 @@ jobs:
       - name: Clone simplyBlockDeploy repo
         run: |
           git clone -b ${{ github.event.inputs.simplyBlockDeploy_branch || 'main'}} git@github.com:simplyblock-io/simplyBlockDeploy.git $GITHUB_WORKSPACE/simplyBlockDeploy
-
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v2
         with:
@@ -55,17 +54,14 @@ jobs:
         run: |
           cd $GITHUB_WORKSPACE/simplyBlockDeploy
           terraform init
-
       - name: select or create workspace
         run: |
           cd $GITHUB_WORKSPACE/simplyBlockDeploy
           terraform workspace select -or-create ghiaction-sbclie2e
-
       - name: Validate Terraform Configuration
         run: |
           cd $GITHUB_WORKSPACE/simplyBlockDeploy
           terraform validate
-
       - name: Plan Terraform Changes
         run: |
           cd $GITHUB_WORKSPACE/simplyBlockDeploy
@@ -74,12 +70,10 @@ jobs:
             -var "volumes_per_storage_nodes=0" \
             -var "extra_nodes=1" -var "extra_nodes_instance_type=m6id.large" \
             -var "region=us-east-2" -var "sbcli_cmd=${{ github.event.inputs.sbcli_cmd || 'sbcli-dev' }}" -out=tfplan
-
       - name: Apply Terraform Changes
         run: |
           cd $GITHUB_WORKSPACE/simplyBlockDeploy
           terraform apply tfplan
-
       - name: Get Terraform Outputs
         id: terraform_outputs
         run: |
@@ -119,7 +113,6 @@ jobs:
             TESTNAME="--testname ${{ github.event.inputs.testname }}"
           fi
           python3 e2e.py $TESTNAME
-
       - name: Upload automation and docker logs to s3
         run: |
           cd $GITHUB_WORKSPACE/e2e/logs
@@ -139,13 +132,10 @@ jobs:
         id: parse_results
         run: |
           cd $GITHUB_WORKSPACE/e2e/logs
-
           echo "Looking for the latest non-empty log file..."
-
           # Find the latest non-empty log file
           COUNTER=0
           MAX_ATTEMPTS=10
-
           while [ $COUNTER -lt $MAX_ATTEMPTS ]; do
             LATEST_LOG=$(ls -t *.log | head -n 1)
             if [ -s "$LATEST_LOG" ]; then
@@ -156,14 +146,11 @@ jobs:
             COUNTER=$((COUNTER + 1))
             sleep 1  # Add a small delay to avoid rapid looping
           done
-
           if [ ! -s "$LATEST_LOG" ]; then
             echo "No non-empty log file found after $MAX_ATTEMPTS attempts"
             exit 1
           fi
-
           echo "Parsing the identified log file: $LATEST_LOG"
-
           # Parse the identified log file
           echo "Total tests"
           TOTAL_TESTS=$(grep -i "Number of Total Cases" "$LATEST_LOG" | awk '{print $NF}')
@@ -172,26 +159,21 @@ jobs:
           echo "number Failed tests"
           FAILED_TESTS=$(grep -i "Number of Failed Cases" "$LATEST_LOG" | awk '{print $NF}')
           echo "List Passed tests"
-          PASSED_CASES=$(grep "PASSED CASE" "$LATEST_LOG" | awk -F 'INFO - | PASSED CASE' '{print $2}')
+          PASSED_CASES=$(grep "PASSED CASE" "$LATEST_LOG" | awk -F 'INFO - | FAILED CASE' '{print $2}')
           echo "List Failed tests"
           FAILED_CASES=$(grep "FAILED CASE" "$LATEST_LOG" | awk -F 'INFO - | FAILED CASE' '{print $2}')
-
           # Format passed and failed cases as bullet points
           echo "Adding PASSED cases with bullets: $PASSED_CASES"
           echo "Adding FAILED cases with bullets: $PASSED_CASES"
-
           PASSED_CASES_BULLETS=$(echo "$PASSED_CASES" | awk '{printf "    • %s\n", $0}')
           FAILED_CASES_BULLETS=$(echo "$FAILED_CASES" | awk '{printf "    • %s\n", $0}')
-
           echo "PASSED cases with bullets: $PASSED_CASES_BULLETS"
           echo "FAILED cases with bullets: $FAILED_CASES_BULLETS"
-
           echo "TOTAL_TESTS=${TOTAL_TESTS}"
           echo "PASSED_TESTS=${PASSED_TESTS}"
           echo "FAILED_TESTS=${FAILED_TESTS}"
           echo "PASSED_CASES=${PASSED_CASES}"
           echo "FAILED_CASES=${FAILED_CASES}"
-
           echo "PASSED_TESTS=${PASSED_TESTS}" >> $GITHUB_ENV
           echo "FAILED_TESTS=${FAILED_TESTS}" >> $GITHUB_ENV
           echo "TOTAL_TESTS=${TOTAL_TESTS}" >> $GITHUB_ENV
@@ -207,8 +189,6 @@ jobs:
           echo "FAILED_CASES_BULLETS<<EOF" >> $GITHUB_ENV
           echo "${FAILED_CASES_BULLETS}" >> $GITHUB_ENV
           echo "EOF" >> $GITHUB_ENV
-
-
       - name: Send Slack Notification
         if: always() && github.ref == 'refs/heads/main'
         env:
@@ -237,13 +217,11 @@ jobs:
           MESSAGE="Python E2E tests run triggered by ${{ env.TRIGGER_ACTOR }} via ${{ env.TRIGGER_EVENT }}. \n${OVERALL_STATUS}\nGitHub Run: ${GITHUB_RUN_URL}\nAWS Logs: ${AWS_LOGS_URL}\n\nTotal Tests: ${{ env.TOTAL_TESTS }}\nPassed Tests: ${{ env.PASSED_TESTS }}\nFailed Tests: ${{ env.FAILED_TESTS }}\n\n-- Test Cases Passed :white_check_mark:\n${{ env.PASSED_CASES_BULLETS }}\n\n-- Test Cases Failed :x:\n${{ env.FAILED_CASES_BULLETS }}"
           
           curl -X POST -H 'Content-type: application/json' --data "{\"text\":\"${MESSAGE}\"}" $SLACK_WEBHOOK_URL
-
       - name: Destroy Cluster
         if: always()
         run: |
           cd $GITHUB_WORKSPACE/simplyBlockDeploy
           terraform destroy --auto-approve
-
       - name: 'Cleanup build folder'
         run: |
           ls -la ./
