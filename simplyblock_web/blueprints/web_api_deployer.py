@@ -126,7 +126,7 @@ def wait_for_status(command_id, instance_id):
 
     return status
 
-def update_cluster(d, kv_store):
+def update_cluster(d, kv_store, storage_nodes, availability_zone):
 
     print('started update_cluster')
     TFSTATE_BUCKET=d.tf_state_bucket_name
@@ -134,9 +134,7 @@ def update_cluster(d, kv_store):
     TFSTATE_REGION=d.tf_state_bucket_region
     TF_WORKSPACE=d.tf_workspace
 
-    storage_nodes = d.storage_nodes
     mgmt_nodes = d.mgmt_nodes
-    availability_zone = d.availability_zone
     aws_region = d.region
     ECR_REGION = d.ecr_region
     ECR_REPOSITORY_NAME = d.ecr_repository_name
@@ -228,6 +226,8 @@ def update_cluster(d, kv_store):
 
         stdout, _ = display_logs(command_id, instance_ids[0], d.status, tf_logs_bucket_name)
         d.tf_output = stdout
+        d.storage_nodes += storage_nodes
+        d.availability_zone = availability_zone
         d.write_to_db(kv_store)
 
 
@@ -368,9 +368,13 @@ def add_deployer():
     d.status = "started"
     d.write_to_db(db_controller.kv_store)
 
+    storage_nodes = int(dpl_data['storage_nodes'])
+    availability_zone = dpl_data['availability_zone']
+    d.write_to_db(db_controller.kv_store)
+
     t = threading.Thread(
         target=update_cluster,
-        args=(d, db_controller.kv_store))
+        args=(d, db_controller.kv_store, d.storage_nodes+storage_nodes, availability_zone))
 
     t.start()
 
