@@ -6,8 +6,6 @@ services:
     image: "mongo:5.0"
     volumes:
       - "mongodb_data:/data/db"
-    networks:
-      - monitoring-net
     deploy:
       placement:
         constraints: [node.role == manager]
@@ -25,8 +23,6 @@ services:
       - "plugins.security.disabled=true"
     volumes:
       - "os_data:/usr/share/opensearch/data"
-    networks:
-      - monitoring-net
     deploy:
       placement:
         constraints: [node.role == manager]
@@ -59,8 +55,6 @@ services:
     volumes:
       - "graylog_data:/usr/share/graylog/data/data"
       - "graylog_journal:/usr/share/graylog/data/journal"
-    networks:
-      - monitoring-net
     deploy:
       placement:
         constraints: [node.role == manager]
@@ -73,8 +67,6 @@ services:
       ClusterID: "${CLUSTER_ID}"
       ClusterIP: "HAProxy"
       ClusterSecret: "${CLUSTER_SECRET}"
-    networks:
-      - monitoring-net
     deploy:
       placement:
         constraints: [node.role == manager]
@@ -83,8 +75,6 @@ services:
 
   pushgateway:
     image: prom/pushgateway
-    networks:
-      - monitoring-net
     deploy:
       placement:
         constraints: [node.role == manager]
@@ -154,8 +144,6 @@ services:
     environment:
       LOG_DELETION_INTERVAL: "${LOG_DELETION_INTERVAL}"
     command: "python simplyblock_core/workers/cleanup_graylog.py"
-    networks:
-      - monitoring-net
     deploy:
       placement:
         constraints: [node.role == manager]
