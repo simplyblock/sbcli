@@ -5,7 +5,7 @@ import boto3
 import time
 from botocore.exceptions import ClientError
 import threading
-
+import uuid
 
 from flask import Blueprint
 from flask import request
@@ -136,7 +136,7 @@ def update_cluster(d, kv_store):
 
     storage_nodes = d.storage_nodes
     mgmt_nodes = d.mgmt_nodes
-    availability_zone = d.az
+    availability_zone = d.availability_zone
     aws_region = d.region
     ECR_REGION = d.ecr_region
     ECR_REPOSITORY_NAME = d.ecr_repository_name
@@ -158,13 +158,13 @@ def update_cluster(d, kv_store):
     commands = [
         f"""
         docker pull $ECR_ACCOUNT_ID.dkr.ecr.{ECR_REGION}.amazonaws.com/{ECR_REPOSITORY_NAME}:{ECR_IMAGE_TAG}
+        docker volume create terraform
         """,
         f"""
         docker run --rm -v terraform:/app -e TF_LOG=DEBUG -w /app {ECR_ACCOUNT_ID}.dkr.ecr.{ECR_REGION}.amazonaws.com/{ECR_REPOSITORY_NAME}:{ECR_IMAGE_TAG} \
             workspace select -or-create {TF_WORKSPACE}
         """,
         f"""
-        docker volume create terraform
         docker run --rm -v terraform:/app -w /app {ECR_ACCOUNT_ID}.dkr.ecr.{ECR_REGION}.amazonaws.com/{ECR_REPOSITORY_NAME}:{ECR_IMAGE_TAG} \
             init -reconfigure -input=false \
                     -backend-config='bucket={TFSTATE_BUCKET}' \
@@ -173,11 +173,11 @@ def update_cluster(d, kv_store):
         """,
         f"""
         docker run --rm -v terraform:/app -w /app {ECR_ACCOUNT_ID}.dkr.ecr.{ECR_REGION}.amazonaws.com/{ECR_REPOSITORY_NAME}:{ECR_IMAGE_TAG} \
-            plan -var mgmt_nodes={mgmt_nodes} -var storage_nodes={storage_nodes} -var az={availability_zone} -var region={aws_region}
+            plan -var mgmt_nodes={mgmt_nodes} -var storage_nodes={storage_nodes} -var availability_zone={availability_zone} -var region={aws_region}
         """,
         f"""
         docker run --rm -v terraform:/app -w /app {ECR_ACCOUNT_ID}.dkr.ecr.{ECR_REGION}.amazonaws.com/{ECR_REPOSITORY_NAME}:{ECR_IMAGE_TAG} \
-         apply -var mgmt_nodes={mgmt_nodes} -var storage_nodes={storage_nodes} -var az={availability_zone} -var region={aws_region} --auto-approve
+         apply -var mgmt_nodes={mgmt_nodes} -var storage_nodes={storage_nodes} -var availability_zone={availability_zone} -var region={aws_region} --auto-approve
         """
     ]
 
@@ -194,17 +194,41 @@ def update_cluster(d, kv_store):
 
     command_id = response['Command']['CommandId']
     print(f'Command ID: {command_id}')
-    d.status = "waiting for status"
-    d.write_to_db(kv_store)
-    status = wait_for_status(command_id, instance_ids[0])
-
-    # Get Logs
-    # TODO: manage multiple deployments with IDs so that IDs can be specific
-    d.status = ""
+    d.status = f"waiting for status. commandID: {command_id}"
     d.write_to_db(kv_store)
 
-    stdout, stderr = display_logs(command_id, instance_ids[0], status, tf_logs_bucket_name)
-    return True, stdout, stderr
+    d.status = wait_for_status(command_id, instance_ids[0])
+    d.write_to_db(kv_store)
+
+    if d.status == "Success":
+        # get terraform outputs
+        commands = [
+        f"""
+        docker run --rm -v terraform:/app -w /app {ECR_ACCOUNT_ID}.dkr.ecr.{ECR_REGION}.amazonaws.com/{ECR_REPOSITORY_NAME}:{ECR_IMAGE_TAG} \
+         output --json
+        """
+        ]
+        response = ssm.send_command(
+            InstanceIds=instance_ids,
+            DocumentName=document_name,
+            Parameters={
+                'commands': commands
+            },
+            OutputS3BucketName=tf_logs_bucket_name,
+            OutputS3KeyPrefix=output_key_prefix
+        )
+
+        command_id = response['Command']['CommandId']
+        print(f'Command ID: {command_id}')
+        d.status = "fetching tfouputs"
+        d.write_to_db(kv_store)
+
+        d.status = wait_for_status(command_id, instance_ids[0])
+        d.write_to_db(kv_store)
+
+        stdout, _ = display_logs(command_id, instance_ids[0], d.status, tf_logs_bucket_name)
+        d.tf_output = stdout
+
 
 @bp.route('/deployer', methods=['GET'], defaults={'uuid': None})
 @bp.route('/deployer/<string:uuid>', methods=['GET'])
@@ -227,38 +251,9 @@ def list_deployer(uuid):
         data.append(d)
     return utils.get_response(data)
 
-
-def validate_tf_vars(dpl_data):
-    if 'cluster_id' not in dpl_data:
-        return "missing required param: cluster_id"
-    if 'region' not in dpl_data:
-        return "missing required param: region"
-    if 'az' not in dpl_data:
-        return "missing required param: az"
-    if 'sbcli_cmd' not in dpl_data:
-        return "missing required param: sbcli_cmd"
-    if 'sbcli_pkg_version' not in dpl_data:
-        return "missing required param: sbcli_pkg_version"
-    if 'mgmt_nodes' not in dpl_data:
-        return "missing required param: mgmt_nodes"
-    if 'storage_nodes' not in dpl_data:
-        return "missing required param: storage_nodes"
-    if 'extra_nodes' not in dpl_data:
-        return "missing required param: extra_nodes"
-    if 'mgmt_nodes_instance_type' not in dpl_data:
-        return "missing required param: mgmt_nodes_instance_type"
-    if 'storage_nodes_instance_type' not in dpl_data:
-        return "missing required param: storage_nodes_instance_type"
-    if 'extra_nodes_instance_type' not in dpl_data:
-        return "missing required param: extra_nodes_instance_type"
-    if 'storage_nodes_ebs_size1' not in dpl_data:
-        return "missing required param: storage_nodes_ebs_size1"
-    if 'storage_nodes_ebs_size2' not in dpl_data:
-        return "missing required param: storage_nodes_ebs_size2"
-    if 'volumes_per_storage_nodes' not in dpl_data:
-        return "missing required param: volumes_per_storage_nodes"
-    if 'nr_hugepages' not in dpl_data:
-        return "missing required param: nr_hugepages"
+def validate_tf_settings(dpl_data):
+    """
+    """
     if 'tf_state_bucket_name' not in dpl_data:
         return "missing required param: tf_state_bucket_name"
     if 'tf_state_bucket_region' not in dpl_data:
@@ -278,6 +273,28 @@ def validate_tf_vars(dpl_data):
 
     return ""
 
+def validate_tf_vars(dpl_data):
+    """
+    """
+    if 'region' not in dpl_data:
+        return "missing required param: region"
+    if 'availability_zone' not in dpl_data:
+        return "missing required param: availability_zone"
+    if 'sbcli_cmd' not in dpl_data:
+        return "missing required param: sbcli_cmd"
+    if 'sbcli_pkg_version' not in dpl_data:
+        return "missing required param: sbcli_pkg_version"
+    if 'mgmt_nodes' not in dpl_data:
+        return "missing required param: mgmt_nodes"
+    if 'storage_nodes' not in dpl_data:
+        return "missing required param: storage_nodes"
+    if 'mgmt_nodes_instance_type' not in dpl_data:
+        return "missing required param: mgmt_nodes_instance_type"
+    if 'storage_nodes_instance_type' not in dpl_data:
+        return "missing required param: storage_nodes_instance_type"
+
+    return ""
+
 @bp.route('/deployer/tfvars', methods=['POST'])
 def set_tf_vars():
     """
@@ -291,41 +308,65 @@ def set_tf_vars():
     if validation_err != "":
         return utils.get_response_error(validation_err, 400)
 
-    d = Deployer()
-    d.uuid = dpl_data['cluster_id']
+    validation_err = validate_tf_settings(dpl_data)
+    if validation_err != "":
+        return utils.get_response_error(validation_err, 400)
+
+    # if there are no deployments, create a new one.
+    # else update the existing one
+    d = get_deployer()
+    if d is None:
+        d = Deployer()
+        d.uuid = str(uuid.uuid4())
+
+    # set TF variables
     d.region = dpl_data['region']
-    d.az = dpl_data['az']
+    d.availability_zone = dpl_data['availability_zone']
     d.sbcli_cmd = dpl_data['sbcli_cmd']
     d.sbcli_pkg_version = dpl_data['sbcli_pkg_version']
     d.mgmt_nodes = dpl_data['mgmt_nodes']
     d.storage_nodes = dpl_data['storage_nodes']
-    d.extra_nodes = dpl_data['extra_nodes']
     d.mgmt_nodes_instance_type = dpl_data['mgmt_nodes_instance_type']
     d.storage_nodes_instance_type = dpl_data['storage_nodes_instance_type']
-    d.extra_nodes_instance_type = dpl_data['extra_nodes_instance_type']
-    d.storage_nodes_ebs_size1 = dpl_data['storage_nodes_ebs_size1']
-    d.storage_nodes_ebs_size2 = dpl_data['storage_nodes_ebs_size2']
-    d.volumes_per_storage_nodes = dpl_data['volumes_per_storage_nodes']
-    d.nr_hugepages = dpl_data['nr_hugepages']
+
+    # set TF settings
     d.tf_state_bucket_name = dpl_data['tf_state_bucket_name']
+    d.tf_state_bucket_region = dpl_data['tf_state_bucket_region']
     d.tf_workspace = dpl_data['tf_workspace']
+    d.tf_logs_bucket_name = dpl_data['tf_logs_bucket_name']
+    d.ecr_account_id = dpl_data['ecr_account_id']
+    d.ecr_region = dpl_data['ecr_region']
+    d.ecr_repository_name = dpl_data['ecr_repository_name']
+    d.ecr_image_tag = dpl_data['ecr_image_tag']
 
     d.write_to_db(db_controller.kv_store)
     return utils.get_response(d.to_dict()), 201
 
 @bp.route('/deployer', methods=['POST'])
 def add_deployer():
-    dpl_data = request.get_json()
-    validation_err = validate_tf_vars(dpl_data)
-    if validation_err != "":
-        return utils.get_response_error(validation_err, 400)
+    """
+    This API creates the Infrastructure in a different AZ and on the same existing AWS Account
+    """
 
-    uuid = dpl_data['cluster_id']
+    # validations
+    dpl_data = request.get_json()
+
+    if "uuid" not in dpl_data:
+        return utils.get_response_error("missing required param: uuid", 400)
+
+    uuid = dpl_data['uuid']
     d = db_controller.get_deployer_by_id(uuid)
 
-    if d.status != "":
-        return utils.get_response({}, error=f"a command already in progres. Current status: {d.status}", http_code=400)
+    if "storage_nodes" not in dpl_data:
+        return utils.get_response_error("missing required param: storage_nodes", 400)
 
+    if "availability_zone" not in dpl_data:
+        return utils.get_response_error("missing required param: availability_zone", 400)
+
+    if d.storage_nodes < int(dpl_data['storage_nodes']):
+        return utils.get_response_error("missing required param: availability_zone", 400)
+
+    # start the deployment
     d.status = "started"
     d.write_to_db(db_controller.kv_store)
 
@@ -340,3 +381,12 @@ def add_deployer():
     }
 
     return utils.get_response(output, http_code=201)
+
+def get_deployer():
+    """
+    get the deployer if it exists. Else returns an None
+    """
+    dpls = db_controller.get_deployers()
+    if len(dpls) > 0:
+        return dpls[0]
+    return None

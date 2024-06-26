@@ -24,7 +24,7 @@ class Deployer(BaseModel):
     attributes = {
         "uuid": {"type": str, 'default': ""},
         "region": {"type": str, 'default': ""},
-        "az": {"type": str, 'default': ""},
+        "availability_zone": {"type": str, 'default': ""},
         "sbcli_cmd": {"type": str, 'default': ""},
         "sbcli_pkg_version": {"type": str, 'default': ""},
         "whitelist_ips": {"type": str, 'default': ""}, # todo: make this a list
@@ -47,6 +47,7 @@ class Deployer(BaseModel):
         "ecr_region": {"type": str, 'default': ""},
         "ecr_repository_name": {"type": str, 'default': ""},
         "ecr_image_tag": {"type": str, 'default': ""},
+        "tf_output": {"type": str, 'default': ""},
     }
 
     def __init__(self, data=None):
