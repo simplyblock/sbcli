@@ -27,17 +27,17 @@ class Deployer(BaseModel):
         "availability_zone": {"type": str, 'default': ""},
         "sbcli_cmd": {"type": str, 'default': ""},
         "sbcli_pkg_version": {"type": str, 'default': ""},
-        "whitelist_ips": {"type": str, 'default': ""}, # todo: make this a list
+        "whitelist_ips": {"type": str, 'default': ""},  # todo: make this a list
         "mgmt_nodes": {"type": int, 'default': 0},
         "storage_nodes": {"type": int, 'default': 0},
-        "extra_nodes": {"type": int, 'default': ""},
+        "extra_nodes": {"type": int, 'default': 0},
         "mgmt_nodes_instance_type": {"type": str, 'default': ""},
         "storage_nodes_instance_type": {"type": str, 'default': ""},
         "extra_nodes_instance_type": {"type": str, 'default': ""},
-        "storage_nodes_ebs_size1": {"type": int, 'default': ""}, # size in GB
-        "storage_nodes_ebs_size2": {"type": int, 'default': ""}, # size in GB
-        "volumes_per_storage_nodes": {"type": int, 'default': ""},
-        "nr_hugepages": {"type": int, 'default': ""},
+        "storage_nodes_ebs_size1": {"type": int, 'default': 0},  # size in GB
+        "storage_nodes_ebs_size2": {"type": int, 'default': 0},  # size in GB
+        "volumes_per_storage_nodes": {"type": int, 'default': 0},
+        "nr_hugepages": {"type": int, 'default': 0},
         "tf_state_bucket_name": {"type": str, 'default': ""},
         "tf_state_bucket_region": {"type": str, 'default': ""},
         "tf_workspace": {"type": str, 'default': ""},
