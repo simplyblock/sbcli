@@ -214,7 +214,7 @@ volumes:
 networks:
   monitoring-net:
     external: true
-    
+
   hostnet:
     external: true
     name: host

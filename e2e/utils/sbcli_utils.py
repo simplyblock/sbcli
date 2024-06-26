@@ -177,7 +177,7 @@ class SbcliUtils:
 
         return data
 
-    def add_storage_pool(self, pool_name, max_rw_iops=0, max_rw_mbytes=0, max_r_mbytes=0, max_w_mbytes=0):
+    def add_storage_pool(self, pool_name, cluster_id=None, max_rw_iops=0, max_rw_mbytes=0, max_r_mbytes=0, max_w_mbytes=0):
         """Adds the storage with given name
         """
         pools = self.list_storage_pools()
@@ -193,6 +193,8 @@ class SbcliUtils:
             "max_r_mbytes": str(max_r_mbytes),
             "max_w_mbytes": str(max_w_mbytes),
         }
+        if cluster_id:
+            body["cluster_id"] = cluster_id
         self.post_request(api_url="/pool", body=body)
         # TODO: Add assertions
 

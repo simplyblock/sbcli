@@ -30,7 +30,8 @@ def list_storage_nodes(uuid):
         else:
             return utils.get_response_error(f"node not found: {uuid}", 404)
     else:
-        nodes = db_controller.get_storage_nodes()
+        cluster_id = utils.get_cluster_id(request)
+        nodes = db_controller.get_storage_nodes_by_cluster_id(cluster_id)
     data = []
     for node in nodes:
         d = node.get_clean_dict()

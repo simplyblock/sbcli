@@ -85,6 +85,7 @@ class TestSingleNodeMultipleFioPerfValidation:
                                                "Path": self.mount_path2, 
                                                "Log": self.log_path2}}
         self.fio_debug = kwargs.get("fio_debug", False)
+        self.base_cmd = os.environ.get("SBCLI_CMD", "sbcli-dev")
 
     def setup(self):
         """Contains setup required to run the test case
@@ -109,14 +110,7 @@ class TestSingleNodeMultipleFioPerfValidation:
                                   device=self.mount_path2)
         self.sbcli_utils.delete_all_lvols()
         self.sbcli_utils.delete_all_storage_pools()
-        expected_base = ["sbcli", "sbcli-dev", "sbcli-release"]
-        for base in expected_base:
-            output, _ = self.ssh_obj.exec_command(node=self.mgmt_nodes[0],
-                                                      command=base)
-            if len(output.strip()):
-                self.base_cmd = base
-                self.logger.info(f"Using base command as {self.base_cmd}")
-
+        
     def run(self):
         """ Performs each step of the testcase
         """
@@ -129,6 +123,7 @@ class TestSingleNodeMultipleFioPerfValidation:
         
         self.sbcli_utils.add_storage_pool(
             pool_name=self.pool_name,
+            cluster_id=cluster_id,
             max_rw_iops=30000,
             max_r_mbytes=100,
             max_w_mbytes=100
