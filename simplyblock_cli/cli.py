@@ -647,7 +647,6 @@ class CLIWrapper:
                 large_pool_count = args.large_pool_count
                 small_bufsize = args.small_bufsize
                 large_bufsize = args.large_bufsize
-
                 num_partitions_per_dev = args.partitions
                 jm_percent = args.jm_percent
 
