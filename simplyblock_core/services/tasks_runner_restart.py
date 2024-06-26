@@ -208,6 +208,8 @@ while True:
                 delay_seconds = constants.TASK_EXEC_INTERVAL_SEC
                 if task.function_name in [JobSchedule.FN_DEV_RESTART, JobSchedule.FN_NODE_RESTART]:
                     while task.status != JobSchedule.STATUS_DONE:
+                        # get new task object because it could be changed from cancel task
+                        task = db_controller.get_task_by_id(task.get_id())
                         res = task_runner(task)
                         if res:
                             tasks_events.task_updated(task)
