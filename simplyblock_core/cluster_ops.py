@@ -589,7 +589,7 @@ def update_cluster(cl_id):
     logger.info("Done")
     return True
 
- 
+
 def cluster_grace_startup(cl_id):
     db_controller = DBController()
     cluster = db_controller.get_cluster_by_id(cl_id)
@@ -607,7 +607,7 @@ def cluster_grace_startup(cl_id):
         get_node = db_controller.get_storage_node_by_id(node.get_id())
         if get_node.status != StorageNode.STATUS_ONLINE:
             logger.error("failed to restart node")
-    
+
     return True
 
 
@@ -624,7 +624,7 @@ def cluster_grace_shutdown(cl_id):
         storage_node_ops.suspend_storage_node(node.get_id())
         logger.info(f"Shutting down node: {node.get_id()}")
         storage_node_ops.shutdown_storage_node(node.get_id())
-       
+
     logger.info(f"Suspending cluster: {cl_id}")
     suspend_cluster(cl_id)
     return True
