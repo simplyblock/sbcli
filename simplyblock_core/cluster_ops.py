@@ -45,6 +45,7 @@ def _add_grafana_dashboards(username, password, cluster_ip):
             ret = False
     return ret
 
+
 def _add_graylog_input(cluster_ip, password):
     url = f"http://{cluster_ip}/graylog/api/system/inputs"
     payload = json.dumps({
