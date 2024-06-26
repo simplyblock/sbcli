@@ -364,9 +364,6 @@ def add_deployer():
     if "availability_zone" not in dpl_data:
         return utils.get_response_error("missing required param: availability_zone", 400)
 
-    if d.storage_nodes < int(dpl_data['storage_nodes']):
-        return utils.get_response_error("missing required param: availability_zone", 400)
-
     # start the deployment
     d.status = "started"
     d.write_to_db(db_controller.kv_store)
