@@ -90,28 +90,35 @@ services:
     command:
       - "--config.file=/etc/prometheus/prometheus.yml"
       - "--storage.tsdb.path=/prometheus"
-      - "--storage.tsdb.retention.time=${RETENTION_PERIOD}"
+     # - "--storage.tsdb.retention.time=${RETENTION_PERIOD}"
+      - "--storage.tsdb.min-block-duration=${RETENTION_PERIOD}"
+      - "--storage.tsdb.max-block-duration=${RETENTION_PERIOD}"
     restart: "always"
     deploy:
-      replicas: 2
+      mode: global
       placement:
         constraints: [node.role == manager]
     networks:
       - monitoring-net
+    depends_on:
+      - thanos-sidecar
 
   minio:
-    image: minio/minio:RELEASE.2020-09-10T22-02-45Z
+    image: minio/minio:RELEASE.2020-05-01T22-19-14Z
     volumes:
       - minio_data:/data
     environment:
       MINIO_PROMETHEUS_AUTH_TYPE: public
       MINIO_ACCESS_KEY: myaccesskey
       MINIO_SECRET_KEY: mysecretkey
-    command: server /data
+    entrypoint: sh
+    command: -c 'mkdir -p /data/thanos-data-bucket && /usr/bin/minio server /data'
     restart: "always"
     deploy:
       placement:
         constraints: [node.role == manager]
+    ports:
+      - "9001:9000"
     networks:
       - monitoring-net
 
@@ -126,7 +133,7 @@ services:
       - prometheus_data:/prometheus
       - ./objstore.yml:/etc/thanos/objstore.yml
     deploy:
-      replicas: 2
+      mode: global
       placement:
         constraints: [node.role == manager]
     networks:
