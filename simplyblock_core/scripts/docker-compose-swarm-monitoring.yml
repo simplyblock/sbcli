@@ -254,6 +254,7 @@ volumes:
     driver: ${USE_EFS:-local}
   minio_data:
     driver: ${USE_EFS:-local}
+
 networks:
   monitoring-net:
     external: true
