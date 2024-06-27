@@ -90,7 +90,7 @@ jobs:
       - name: Bootstrap Cluster
         run: |
           cd $GITHUB_WORKSPACE/simplyBlockDeploy
-          ./bootstrap-cluster.sh --max-lvol 100 --max-snap 100 --max-prov 150g --number-of-devices 1
+          ./bootstrap-cluster.sh --max-lvol 10 --max-snap 10 --max-prov 150g --number-of-devices 1
         id: bootstrap_cluster
         env:
           SBCLI_CMD: ${{ github.event.inputs.sbcli_cmd || 'sbcli-dev' }}
