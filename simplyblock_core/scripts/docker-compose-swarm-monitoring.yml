@@ -171,9 +171,9 @@ services:
       - compact
       - --data-dir=/data
       - --objstore.config-file=/etc/thanos/objstore.yml
-      - --retention.resolution-raw=${RETENTION_PERIOD}
-      - --retention.resolution-5m=${RETENTION_PERIOD}
-      - --retention.resolution-1h=${RETENTION_PERIOD}
+      - --retention.resolution-raw=30d
+      - --retention.resolution-5m=60d
+      - --retention.resolution-1h=90d
     volumes:
       - ./objstore.yml:/etc/thanos/objstore.yml
       - thanos_compactor_data:/data
