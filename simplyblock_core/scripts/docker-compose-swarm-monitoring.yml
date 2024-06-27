@@ -93,6 +93,86 @@ services:
       - "--storage.tsdb.retention.time=${RETENTION_PERIOD}"
     restart: "always"
     deploy:
+      replicas: 2
+      placement:
+        constraints: [node.role == manager]
+    networks:
+      - monitoring-net
+
+  minio:
+    image: minio/minio:RELEASE.2020-09-10T22-02-45Z
+    volumes:
+      - minio_data:/data
+    environment:
+      MINIO_PROMETHEUS_AUTH_TYPE: public
+      MINIO_ACCESS_KEY: myaccesskey
+      MINIO_SECRET_KEY: mysecretkey
+    command: server /data
+    restart: "always"
+    deploy:
+      placement:
+        constraints: [node.role == manager]
+    networks:
+      - monitoring-net
+
+  thanos-sidecar:
+    image: thanosio/thanos:v0.31.0
+    command:
+      - sidecar
+      - --tsdb.path=/prometheus
+      - --prometheus.url=http://prometheus:9090
+      - --objstore.config-file=/etc/thanos/objstore.yml
+    volumes:
+      - prometheus_data:/prometheus
+      - ./objstore.yml:/etc/thanos/objstore.yml
+    deploy:
+      replicas: 2
+      placement:
+        constraints: [node.role == manager]
+    networks:
+      - monitoring-net
+
+  thanos-store:
+    image: thanosio/thanos:v0.31.0
+    command:
+      - store
+      - --objstore.config-file=/etc/thanos/objstore.yml
+      - --index-cache-size=500MB
+      - --chunk-pool-size=500MB
+    volumes:
+      - ./objstore.yml:/etc/thanos/objstore.yml
+    deploy:
+      placement:
+        constraints: [node.role == manager]
+    networks:
+      - monitoring-net
+
+  thanos-query:
+    image: thanosio/thanos:v0.31.0
+    command:
+      - query
+      - --http-address=0.0.0.0:9091
+      - --store=thanos-store:10901
+      - --store=thanos-sidecar:10901
+    deploy:
+      placement:
+        constraints: [node.role == manager]
+    networks:
+      - monitoring-net
+
+  thanos-compactor:
+    image: thanosio/thanos:v0.31.0
+    command:
+      - compact
+      - --data-dir=/data
+      - --objstore.config-file=/etc/thanos/objstore.yml
+      - --retention.resolution-raw=${RETENTION_PERIOD}
+      - --retention.resolution-5m=${RETENTION_PERIOD}
+      - --retention.resolution-1h=${RETENTION_PERIOD}
+    volumes:
+      - ./thanos/objstore.yml:/etc/thanos/objstore.yml
+      - thanos_compactor_data:/data
+    deploy:
       placement:
         constraints: [node.role == manager]
     networks:
@@ -133,6 +213,11 @@ services:
       - ./datasource.yml:/etc/grafana/provisioning/datasources/datasource.yaml
       - grafana_data:/var/lib/grafana
       - ./alerting:/etc/grafana/provisioning/alerting
+    ports:
+      - target: 3000
+        published: 3000
+        protocol: tcp
+        mode: host
     deploy:
       placement:
         constraints: [node.role == manager]
@@ -165,7 +250,10 @@ volumes:
     driver: ${USE_EFS:-local}  
   prometheus_data:
     driver: ${USE_EFS:-local}
-
+  thanos_compactor_data:
+    driver: ${USE_EFS:-local}
+  minio_data:
+    driver: ${USE_EFS:-local}
 networks:
   monitoring-net:
     external: true
