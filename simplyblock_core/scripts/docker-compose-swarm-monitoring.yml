@@ -153,18 +153,32 @@ services:
 volumes:
   mongodb_data:
     driver: ${USE_EFS:-local}
+    driver_opts:
+      tags: "InstanceID=${INSTANCE_ID)"
   os_data:
     driver: ${USE_EFS:-local}
+    driver_opts:
+      tags: "InstanceID=${INSTANCE_ID)"
   graylog_data:
     driver: ${USE_EFS:-local}
+    driver_opts:
+      tags: "InstanceID=${INSTANCE_ID)"
   graylog_journal:
     driver: ${USE_EFS:-local}
+    driver_opts:
+      tags: "InstanceID=${INSTANCE_ID)"
   grafana_data:
     driver: ${USE_EFS:-local}
+    driver_opts:
+      tags: "InstanceID=${INSTANCE_ID)"
   graylog_config:
-    driver: ${USE_EFS:-local}  
+    driver: ${USE_EFS:-local} 
+    driver_opts:
+      tags: "InstanceID=${INSTANCE_ID)" 
   prometheus_data:
     driver: ${USE_EFS:-local}
+    driver_opts:
+      tags: "InstanceID=${INSTANCE_ID)"
 
 networks:
   monitoring-net:
