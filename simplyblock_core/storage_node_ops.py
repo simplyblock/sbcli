@@ -550,9 +550,9 @@ def _connect_to_remote_devs(this_node):
 
 
 def add_node(cluster_id, node_ip, iface_name, data_nics_list,
-             spdk_mem, spdk_image=None, spdk_debug=False,
-             small_pool_count=0, large_pool_count=0, small_bufsize=0, large_bufsize=0,
-             num_partitions_per_dev=0, jm_percent=0):
+             max_lvol, max_snap, max_prov, spdk_image=None, spdk_debug=False,
+             small_bufsize=0, large_bufsize=0,
+             num_partitions_per_dev=0, jm_percent=0, number_of_devices=0):
     db_controller = DBController()
     kv_store = db_controller.kv_store
 
@@ -608,26 +608,12 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
                 logger.error(f"Node already exists, try remove it first: {ec2_metadata['instanceId']}")
                 return False
 
-    # check for memory
-    if "memory_details" in node_info and node_info['memory_details']:
-        memory_details = node_info['memory_details']
-        logger.info("Node Memory info")
-        logger.info(f"Total: {utils.humanbytes(memory_details['total'])}")
-        logger.info(f"Free: {utils.humanbytes(memory_details['free'])}")
-        logger.info(f"Hugepages Total: {utils.humanbytes(memory_details['huge_total'])}")
-        huge_free = memory_details['huge_free']
-        logger.info(f"Hugepages Free: {utils.humanbytes(huge_free)}")
-        if huge_free < 1 * 1024 * 1024:
-            logger.warning(f"Free hugepages are less than 1G: {utils.humanbytes(huge_free)}")
-        if not spdk_mem:
-            spdk_mem = huge_free
-            logger.info(f"Using the free hugepages for spdk memory: {utils.humanbytes(huge_free)}")
-
     # Tune cpu maks parameters
     cpu_count = node_info["cpu_count"]
     pollers_mask = ""
     app_thread_mask = ""
     dev_cpu_mask = ""
+    nvme_pollers_cores = []
     if cpu_count < 8:
         mask = (1 << (cpu_count - 1)) - 1
         mask <<= 1
@@ -643,6 +629,50 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
         spdk_cpu_mask = utils.generate_mask(spdk_cores)
         dev_cpu_mask = utils.generate_mask(dev_cpu_cores)
 
+    # Calculate pool count
+    if ec2_metadata and ec2_metadata.get('instanceType'):
+        supported_type, storage_devices, device_size = utils.get_total_size_per_instance_type(ec2_metadata["instanceType"])
+        if not supported_type:
+            logger.warning(f"Unsupported ec2 instance-type {ec2_metadata['instanceType']} for deployment")
+            if not number_of_devices:
+                logger.error(f"Unsupported ec2 instance-type {ec2_metadata['instanceType']} "
+                             "for deployment, please specify --number-of-devices")
+                return False
+        number_of_devices = storage_devices
+    else:
+        logger.warning("Can not get ec2 instance type for this instance.")
+        if not number_of_devices:
+            logger.error("Unsupported instance type please specify --number-of-devices.")
+            return False
+
+    number_of_split = num_partitions_per_dev if num_partitions_per_dev else num_partitions_per_dev + 1
+    number_of_alceml_devices = number_of_devices * number_of_split
+    small_pool_count, large_pool_count = utils.calculate_pool_count(
+        number_of_alceml_devices, max_lvol, max_snap, cpu_count, len(nvme_pollers_cores) or cpu_count)
+
+    # Calculate minimum huge page memory
+    minimum_hp_memory = utils.calculate_minimum_hp_memory(small_pool_count, large_pool_count, max_lvol, max_snap, cpu_count)
+
+    # Calculate minimum sys memory
+    minimum_sys_memory = utils.calculate_minimum_sys_memory(max_prov)
+
+    # check for memory
+    if "memory_details" in node_info and node_info['memory_details']:
+        memory_details = node_info['memory_details']
+        logger.info("Node Memory info")
+        logger.info(f"Total: {utils.humanbytes(memory_details['total'])}")
+        logger.info(f"Free: {utils.humanbytes(memory_details['free'])}")
+    else:
+        logger.error(f"Cannot get memory info from the ec2 instance.. Exiting")
+        return False
+
+    satisfied, spdk_mem = utils.calculate_spdk_memory(minimum_hp_memory,
+                                                      minimum_sys_memory,
+                                                      int(memory_details['free']),
+                                                      int(memory_details['huge_total']))
+    if not satisfied:
+        logger.error(f"Not enough memory for the provided max_lvo: {max_lvol}, max_snap: {max_snap}, max_prov: {max_prov}.. Exiting")
+        return False
 
     logger.info("Joining docker swarm...")
     cluster_docker = utils.get_docker_client(cluster_id)
@@ -717,12 +747,17 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
         snode.hugepages = node_info['hugepages']
 
     snode.spdk_cpu_mask = spdk_cpu_mask or ""
-    snode.spdk_mem = spdk_mem or 0
+    snode.spdk_mem = spdk_mem
+    snode.max_lvol = max_lvol
+    snode.max_snap = max_snap
+    snode.max_prov = max_prov
+    snode.number_of_devices = number_of_devices
     snode.spdk_image = spdk_image or ""
     snode.spdk_debug = spdk_debug or 0
     snode.write_to_db(kv_store)
     snode.app_thread_mask = app_thread_mask or ""
     snode.pollers_mask = pollers_mask or ""
+    snode.nvme_pollers_cores = nvme_pollers_cores or []
     snode.dev_cpu_mask = dev_cpu_mask or ""
     snode.os_cores = os_cores or []
 
@@ -975,12 +1010,10 @@ def remove_storage_node(node_id, force_remove=False, force_migrate=False):
 
 
 def restart_storage_node(
-        node_id,
-        spdk_mem=None,
+        node_id, max_lvol=0, max_snap=0, max_prov="",
         spdk_image=None,
         set_spdk_debug=None,
-        small_pool_count=0, large_pool_count=0,
-        small_bufsize=0, large_bufsize=0):
+        small_bufsize=0, large_bufsize=0, number_of_devices=0):
 
     db_controller = DBController()
     kv_store = db_controller.kv_store
@@ -1011,14 +1044,67 @@ def restart_storage_node(
     logger.info(f"Node info: {node_info}")
 
     logger.info("Restarting SPDK")
-    mem = snode.spdk_mem
-    if spdk_mem:
-        mem = spdk_mem
-        snode.spdk_mem = mem
+
     img = snode.spdk_image
+    if max_lvol:
+        snode.max_lvol = max_lvol
+    if max_snap:
+        snode.max_snap = max_snap
+    if max_prov:
+        snode.max_prov = max_prov
     if spdk_image:
         img = spdk_image
         snode.spdk_image = img
+
+    # Calculate pool count
+    if snode.ec2_metadata and snode.ec2_metadata.get('instanceType'):
+        supported_type, storage_devices, device_size = utils.get_total_size_per_instance_type(snode.ec2_metadata["instanceType"])
+        if not supported_type:
+            logger.warning(f"Unsupported ec2 instance-type {snode.ec2_metadata['instanceType']} for deployment")
+            if not number_of_devices:
+                logger.error(f"Unsupported ec2 instance-type {snode.ec2_metadata['instanceType']} "
+                             "for deployment, please specify --number-of-devices")
+                return False
+        number_of_devices = storage_devices
+    else:
+        logger.warning("Can not get ec2 instance type for this instance..")
+        if not number_of_devices:
+            if snode.number_of_devices:
+                number_of_devices = snode.number_of_devices
+            else:
+                logger.error("Unsupported instance type please specify --number-of-devices")
+                return False
+
+    snode.number_of_devices = number_of_devices
+
+    number_of_split = snode.num_partitions_per_dev if snode.num_partitions_per_dev else snode.num_partitions_per_dev + 1
+    number_of_alceml_devices = number_of_devices * number_of_split
+    small_pool_count, large_pool_count = utils.calculate_pool_count(
+        number_of_alceml_devices, snode.max_lvol, snode.max_snap, snode.cpu, len(snode.nvme_pollers_cores) or snode.cpu)
+
+    # Calculate minimum huge page memory
+    minimum_hp_memory = utils.calculate_minimum_hp_memory(small_pool_count, large_pool_count, snode.max_lvol, snode.max_snap, snode.cpu)
+
+    # Calculate minimum sys memory
+    minimum_sys_memory = utils.calculate_minimum_sys_memory(snode.max_prov)
+
+    # check for memory
+    if "memory_details" in node_info and node_info['memory_details']:
+        memory_details = node_info['memory_details']
+        logger.info("Node Memory info")
+        logger.info(f"Total: {utils.humanbytes(memory_details['total'])}")
+        logger.info(f"Free: {utils.humanbytes(memory_details['free'])}")
+    else:
+        logger.error(f"Cannot get memory info from the ec2 instance.. Exiting")
+
+    satisfied, spdk_mem = utils.calculate_spdk_memory(minimum_hp_memory,
+                                                      minimum_sys_memory,
+                                                      int(memory_details['free']),
+                                                      int(memory_details['huge_total']))
+    if not satisfied:
+        logger.error(f"Not enough memory for the provided max_lvo: {snode.max_lvol}, max_snap: {snode.max_snap}, max_prov: {utils.humanbytes(snode.max_prov)}.. Exiting")
+
+
     spdk_debug = snode.spdk_debug
     if set_spdk_debug:
         spdk_debug = spdk_debug
@@ -1026,17 +1112,14 @@ def restart_storage_node(
 
     cluster_docker = utils.get_docker_client(snode.cluster_id)
     cluster_ip = cluster_docker.info()["Swarm"]["NodeAddr"]
-    results, err = snode_api.spdk_process_start(snode.spdk_cpu_mask, mem, img, spdk_debug, cluster_ip)
+    results, err = snode_api.spdk_process_start(snode.spdk_cpu_mask, spdk_mem, img, spdk_debug, cluster_ip)
 
     if not results:
         logger.error(f"Failed to start spdk: {err}")
         return False
     time.sleep(3)
 
-    if small_pool_count:
-        snode.iobuf_small_pool_count = small_pool_count
-    if large_pool_count:
-        snode.iobuf_large_pool_count = large_pool_count
+
     if small_bufsize:
         snode.iobuf_small_bufsize = small_bufsize
     if large_bufsize:

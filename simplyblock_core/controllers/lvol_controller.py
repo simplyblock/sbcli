@@ -17,7 +17,7 @@ from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.rpc_client import RPCClient
-
+from simplyblock_core.snode_client import SNodeClient
 
 logger = lg.getLogger()
 db_controller = DBController()
@@ -364,12 +364,23 @@ def add_lvol(name, size, host_id_or_name, pool_id_or_name, use_comp, use_crypto,
     return lvol_id, None
 
 
-def _get_next_3_nodes(cluster_id):
+def _get_next_3_nodes(cluster_id, lvol_size=0):
     snodes = db_controller.get_storage_nodes_by_cluster_id(cluster_id)
     online_nodes = []
     node_stats = {}
     for node in snodes:
         if node.status == node.STATUS_ONLINE:
+            # Validate Eligible nodes for adding lvol
+            snode_api = SNodeClient(node.api_endpoint)
+            result, _ = snode_api.info()
+            memory_free = result["memory_details"]["free"]
+            huge_free = result["memory_details"]["huge_free"]
+            total_node_capacity = db_controller.get_snode_size(node.get_id())
+            error = utils.validate_add_lvol_or_snap_on_node(memory_free, huge_free, node.max_lvol, lvol_size,  total_node_capacity, len(node.lvols))
+            if error:
+                logger.warning(error)
+                continue
+
             online_nodes.append(node)
             node_stat_list = db_controller.get_node_stats(node, limit=1000)
             combined_record = utils.sum_records(node_stat_list)
@@ -695,7 +706,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
         lvol.lvol_type += ',compress'
         lvol.top_bdev = lvol.comp_bdev
 
-    nodes = _get_next_3_nodes(cl.get_id())
+    nodes = _get_next_3_nodes(cl.get_id(), lvol.size)
     if not nodes:
         return False, f"No nodes found with enough resources to create the LVol"
 
@@ -799,6 +810,18 @@ def _create_bdev_stack(lvol, snode, ha_comm_addrs, ha_inode_self):
 def add_lvol_on_node(lvol, snode, ha_comm_addrs=None, ha_inode_self=None):
     rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
     spdk_mem_info_before = rpc_client.ultra21_util_get_malloc_stats()
+
+    # Validate adding lvol on storage node
+    snode_api = SNodeClient(snode.api_endpoint)
+    result, _ = snode_api.info()
+    memory_free = result["memory_details"]["free"]
+    huge_free = result["memory_details"]["huge_free"]
+
+    total_node_capacity = db_controller.get_snode_size(snode.get_id())
+    error = utils.validate_add_lvol_or_snap_on_node(memory_free, huge_free, snode.max_lvol, lvol.size,  total_node_capacity, len(snode.lvols))
+    if error:
+        logger.error(error)
+        return False, f"Failed to add lvol on node {snode.get_id()}"
 
     ret, msg = _create_bdev_stack(lvol, snode, ha_comm_addrs, ha_inode_self)
     if not ret:
