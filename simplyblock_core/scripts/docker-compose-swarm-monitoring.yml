@@ -90,9 +90,9 @@ services:
     command:
       - "--config.file=/etc/prometheus/prometheus.yml"
       - "--storage.tsdb.path=/prometheus"
-     # - "--storage.tsdb.retention.time=${RETENTION_PERIOD}"
-      - "--storage.tsdb.min-block-duration=${RETENTION_PERIOD}"
-      - "--storage.tsdb.max-block-duration=${RETENTION_PERIOD}"
+      - "--storage.tsdb.retention.time=${RETENTION_PERIOD}"
+      - "--storage.tsdb.min-block-duration=2h"
+      - "--storage.tsdb.max-block-duration=2h"
     restart: "always"
     deploy:
       mode: global
@@ -117,8 +117,6 @@ services:
     deploy:
       placement:
         constraints: [node.role == manager]
-    ports:
-      - "9001:9000"
     networks:
       - monitoring-net
 
