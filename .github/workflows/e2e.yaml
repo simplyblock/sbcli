@@ -91,8 +91,7 @@ jobs:
       - name: Bootstrap Cluster
         run: |
           cd $GITHUB_WORKSPACE/simplyBlockDeploy
-          ./bootstrap-cluster.sh --memory 4g --iobuf_small_pool_count 25000  \
-          --iobuf_large_pool_count 10000 --partitions 4
+          ./bootstrap-cluster.sh --max-lvol 100 --max-snap 100 --max-prov 150g
         id: bootstrap_cluster
         env:
           SBCLI_CMD: ${{ github.event.inputs.sbcli_cmd || 'sbcli-dev' }}
