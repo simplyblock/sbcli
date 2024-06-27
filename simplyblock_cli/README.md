@@ -104,10 +104,10 @@ optional arguments:
 usage: sbcli storage-node add-node [-h] [--partitions PARTITIONS]
                                    [--jm-percent JM_PERCENT]
                                    [--data-nics DATA_NICS [DATA_NICS ...]]
-                                   [--memory SPDK_MEM]
+                                   [--max-lvol MAX_LVOL] [--max-snap MAX_SNAP]
+                                   [--max-prov MAX_PROV]
+                                   [--number-of-devices NUMBER_OF_DEVICES]
                                    [--spdk-image SPDK_IMAGE] [--spdk-debug]
-                                   [--iobuf_small_pool_count SMALL_POOL_COUNT]
-                                   [--iobuf_large_pool_count LARGE_POOL_COUNT]
                                    [--iobuf_small_bufsize SMALL_BUFSIZE]
                                    [--iobuf_large_bufsize LARGE_BUFSIZE]
                                    cluster_id node_ip ifname
@@ -125,14 +125,15 @@ optional arguments:
                         Number in percent to use for JM from each device
   --data-nics DATA_NICS [DATA_NICS ...]
                         Data interface names
-  --memory SPDK_MEM     SPDK huge memory allocation, default is 4G
+  --max-lvol MAX_LVOL   Max lvol per storage node
+  --max-snap MAX_SNAP   Max snapshot per storage node
+  --max-prov MAX_PROV   Max provisioning size of all storage nodes
+  --number-of-devices NUMBER_OF_DEVICES
+                        Number of devices per storage node if it's not
+                        supported EC2 instance
   --spdk-image SPDK_IMAGE
                         SPDK image uri
   --spdk-debug          Enable spdk debug logs
-  --iobuf_small_pool_count SMALL_POOL_COUNT
-                        bdev_set_options param
-  --iobuf_large_pool_count LARGE_POOL_COUNT
-                        bdev_set_options param
   --iobuf_small_bufsize SMALL_BUFSIZE
                         bdev_set_options param
   --iobuf_large_bufsize LARGE_BUFSIZE
@@ -208,10 +209,10 @@ optional arguments:
 All functions and device drivers will be reset. During restart, the node does not accept IO. In a high-availability setup, this will not impact operations
 
 ```bash
-usage: sbcli storage-node restart [-h] [--memory SPDK_MEM]
+usage: sbcli storage-node restart [-h] [--max-lvol MAX_LVOL]
+                                  [--max-snap MAX_SNAP] [--max-prov MAX_PROV]
+                                  [--number-of-devices NUMBER_OF_DEVICES]
                                   [--spdk-image SPDK_IMAGE] [--spdk-debug]
-                                  [--iobuf_small_pool_count SMALL_POOL_COUNT]
-                                  [--iobuf_large_pool_count LARGE_POOL_COUNT]
                                   [--iobuf_small_bufsize SMALL_BUFSIZE]
                                   [--iobuf_large_bufsize LARGE_BUFSIZE]
                                   node_id
@@ -221,14 +222,15 @@ positional arguments:
 
 optional arguments:
   -h, --help            show this help message and exit
-  --memory SPDK_MEM     SPDK huge memory allocation, default is 4G
+  --max-lvol MAX_LVOL   Max lvol per storage node
+  --max-snap MAX_SNAP   Max snapshot per storage node
+  --max-prov MAX_PROV   Max provisioning size of all storage nodes
+  --number-of-devices NUMBER_OF_DEVICES
+                        Number of devices per storage node if it's not
+                        supported EC2 instance
   --spdk-image SPDK_IMAGE
                         SPDK image uri
   --spdk-debug          Enable spdk debug logs
-  --iobuf_small_pool_count SMALL_POOL_COUNT
-                        bdev_set_options param
-  --iobuf_large_pool_count LARGE_POOL_COUNT
-                        bdev_set_options param
   --iobuf_small_bufsize SMALL_BUFSIZE
                         bdev_set_options param
   --iobuf_large_bufsize LARGE_BUFSIZE
@@ -567,11 +569,11 @@ optional arguments:
 
 ```bash
 usage: sbcli cluster [-h]
-                     {create,add,list,status,get,suspend,unsuspend,get-capacity,get-io-stats,get-logs,get-secret,upd-secret,check,update,graceful-shutdown,graceful-startup,list-tasks,delete}
+                     {create,add,list,status,get,suspend,unsuspend,get-capacity,get-io-stats,get-logs,get-secret,upd-secret,check,update,graceful-shutdown,graceful-startup,list-tasks,cancel-task,delete}
                      ...
 
 positional arguments:
-  {create,add,list,status,get,suspend,unsuspend,get-capacity,get-io-stats,get-logs,get-secret,upd-secret,check,update,graceful-shutdown,graceful-startup,list-tasks,delete}
+  {create,add,list,status,get,suspend,unsuspend,get-capacity,get-io-stats,get-logs,get-secret,upd-secret,check,update,graceful-shutdown,graceful-startup,list-tasks,cancel-task,delete}
     create              Create an new cluster with this node as mgmt (local
                         run)
     add                 Add new cluster
@@ -590,6 +592,7 @@ positional arguments:
     graceful-shutdown   Graceful shutdown of storage nodes
     graceful-startup    Graceful startup of storage nodes
     list-tasks          List tasks by cluster ID
+    cancel-task         Cancel task by ID
     delete              Delete Cluster
 
 optional arguments:
@@ -886,6 +889,21 @@ usage: sbcli cluster list-tasks [-h] cluster_id
 
 positional arguments:
   cluster_id  UUID of the cluster
+
+optional arguments:
+  -h, --help  show this help message and exit
+
+```
+
+    
+### Cancel task by id
+
+
+```bash
+usage: sbcli cluster cancel-task [-h] id
+
+positional arguments:
+  id          UUID of the Task
 
 optional arguments:
   -h, --help  show this help message and exit
