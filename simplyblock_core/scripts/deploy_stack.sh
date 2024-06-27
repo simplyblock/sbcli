@@ -28,7 +28,7 @@ then
   export USE_EFS="rexray/efs"
   #export INSTANCE_ID=$INSTANCE_ID
   echo "$INSTANCE_ID"
-  docker plugin install rexray/efs --grant-all-permissions EFS_TAG=$INSTANCE_ID REXRAY_PREEMPT=true
+  #docker plugin install rexray/efs --grant-all-permissions EFS_TAG=$INSTANCE_ID REXRAY_PREEMPT=true
 fi
 
 docker stack deploy --compose-file="$DIR"/docker-compose-swarm-monitoring.yml monitoring
