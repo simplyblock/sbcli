@@ -63,7 +63,7 @@ class StorageNode(BaseModel):
         "ctrl_secret": {"type": str, "default": ""},
         "max_lvol": {"type": int, "default": 0},
         "max_snap": {"type": int, "default": 0},
-        "max_prov": {"type": str, "default": ""},
+        "max_prov": {"type": int, "default": 0},
         "cpu": {"type": int, "default": 0},
         "cpu_hz": {"type": int, "default": 0},
         "memory": {"type": int, "default": 0},

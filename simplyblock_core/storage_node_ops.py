@@ -1010,7 +1010,7 @@ def remove_storage_node(node_id, force_remove=False, force_migrate=False):
 
 
 def restart_storage_node(
-        node_id, max_lvol=0, max_snap=0, max_prov="",
+        node_id, max_lvol=0, max_snap=0, max_prov=0,
         spdk_image=None,
         set_spdk_debug=None,
         small_bufsize=0, large_bufsize=0, number_of_devices=0):
