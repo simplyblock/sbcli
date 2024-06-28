@@ -54,7 +54,17 @@ jobs:
       - name: Initialize Terraform
         run: |
           cd $GITHUB_WORKSPACE/simplyBlockDeploy
-          terraform init
+          export TFSTATE_BUCKET=simplyblock-terraform-state-bucket
+          export TFSTATE_KEY=csi
+          export TFSTATE_REGION=us-east-2
+          export TFSTATE_DYNAMODB_TABLE=terraform-up-and-running-locks
+
+          terraform init -reconfigure \
+              -backend-config="bucket=${TFSTATE_BUCKET}" \
+              -backend-config="key=${TFSTATE_KEY}" \
+              -backend-config="region=${TFSTATE_REGION}" \
+              -backend-config="dynamodb_table=${TFSTATE_DYNAMODB_TABLE}" \
+              -backend-config="encrypt=true"
 
       - name: select or create workspace
         run: |
@@ -229,7 +239,7 @@ jobs:
             OVERALL_STATUS=":x: Overall Status: FAILURE"
           fi
           MESSAGE="Python E2E tests run triggered on branch **${BRANCH_NAME}**. \n${OVERALL_STATUS}\nGitHub Run: ${GITHUB_RUN_URL}\nAWS Logs: ${AWS_LOGS_URL}\n\nTotal Tests: ${{ env.TOTAL_TESTS }}\nPassed Tests: ${{ env.PASSED_TESTS }}\nFailed Tests: ${{ env.FAILED_TESTS }}\n\n-- Test Cases Passed :white_check_mark:\n${{ env.PASSED_CASES_BULLETS }}\n\n-- Test Cases Failed :x:\n${{ env.FAILED_CASES_BULLETS }}"
-          
+
           curl -X POST -H 'Content-type: application/json' --data "{\"text\":\"${MESSAGE}\"}" $SLACK_WEBHOOK_URL
 
       - name: Destroy Cluster
