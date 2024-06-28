@@ -1,6 +1,7 @@
-SIMPLY_BLOCK_COMMAND_NAME=sbcli-pre
-SIMPLY_BLOCK_VERSION=1.2.9
+SIMPLY_BLOCK_COMMAND_NAME=sbcli-dev
+SIMPLY_BLOCK_VERSION=3.0.8
 
-SIMPLY_BLOCK_DOCKER_IMAGE=simplyblock/simplyblock:pre-release
+
+SIMPLY_BLOCK_DOCKER_IMAGE=simplyblock/simplyblock:dev
 
 DOCKER_USER=hamdysimplyblock
