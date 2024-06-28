@@ -257,7 +257,7 @@ def process_records(records, records_count):
 
 def ping_host(ip):
     logger.debug(f"Pinging ip ... {ip}")
-    response = os.system(f"ping -c 1 {ip} > /dev/null")
+    response = os.system(f"ping -c 1 -W 3 {ip} > /dev/null")
     if response == 0:
         logger.debug(f"{ip} is UP")
         return True
@@ -325,3 +325,83 @@ def generate_mask(cores):
     for core in cores:
         mask |= (1 << core)
     return f'0x{mask:X}'
+
+def calculate_pool_count(alceml_count, lvol_count, snap_count, cpu_count, poller_count):
+    '''
+    				        Small pool count				            Large pool count
+    Create JM			    256						                    32					                    For each JM
+
+    Create Alceml 			256						                    32					                    For each Alceml
+
+    Create Distrib 			256						                    32					                    For each distrib
+
+    First Send cluster map	256						                    32					                    Calculated or one time
+
+    NVMF transport TCP 		127 * poll_groups_mask||CPUCount + 384		15 * poll_groups_mask||CPUCount + 384 	Calculated or one time
+
+    Subsystem add NS		128 * poll_groups_mask||CPUCount		    16 * poll_groups_mask||CPUCount		    Calculated or one time
+
+    Create snapshot			512						                    64					                    For each snapshot
+
+    Clone lvol			    256						                    32					                    For each clone
+    '''
+    poller_number = poller_count if poller_count else cpu_count
+    small_pool_count = (3 + alceml_count + lvol_count + 2 * snap_count + 1) * 256 + poller_number * 127 + 384 + 128 * poller_number + constants.EXTRA_SMALL_POOL_COUNT
+    large_pool_count = (3 + alceml_count + lvol_count + 2 * snap_count + 1) * 32 + poller_number * 15 + 384 + 16 * poller_number + constants.EXTRA_LARGE_POOL_COUNT
+    return small_pool_count, large_pool_count
+
+
+def calculate_minimum_hp_memory(small_pool_count, large_pool_count, lvol_count, snap_count, cpu_count):
+    '''
+    1092 (initial consumption) + 4 * CPU + 1.0277 * POOL_COUNT(Sum in MB) + (7 + 6) * lvol_count + 12 * snap_count
+    then you can amend the expected memory need for the creation of lvols (6MB),
+    connection number over lvols (7MB per connection), creation of snaps (12MB),
+    extra buffer 2GB
+    return: minimum_hp_memory in bytes
+    '''
+    pool_consumption = (small_pool_count * 8 + large_pool_count * 128) / 1024 + 1092
+    memory_consumption = (4 * cpu_count + 1.0277 * pool_consumption + (6 + 7) * lvol_count + 12 * snap_count) * (1024 * 1024) + constants.EXTRA_HUGE_PAGE_MEMORY
+    return memory_consumption
+
+
+def calculate_minimum_sys_memory(max_prov):
+    max_prov_tb = max_prov / (1024 * 1024 * 1024 * 1024)
+    minimum_sys_memory = (250 * 1024 * 1024) * 1.1 * max_prov_tb + constants.EXTRA_SYS_MEMORY
+    logger.debug(f"Minimum system memory is {humanbytes(minimum_sys_memory)}")
+    return minimum_sys_memory
+
+
+def calculate_spdk_memory(minimum_hp_memory, minimum_sys_memory, free_sys_memory, huge_total_memory):
+    total_free_memory = free_sys_memory + huge_total_memory
+    if total_free_memory < (minimum_hp_memory + minimum_sys_memory):
+        logger.warning(f"Total free memory:{humanbytes(total_free_memory)}, "
+                       f"Minimum huge pages memory: {humanbytes(minimum_hp_memory)}, "
+                       f"Minimum system memory: {humanbytes(minimum_sys_memory)}")
+        return False, 0
+    spdk_mem = minimum_hp_memory + (total_free_memory - minimum_hp_memory - minimum_sys_memory) * 0.2
+    logger.debug(f"SPDK memory is {humanbytes(spdk_mem)}")
+    return True, spdk_mem
+
+
+def get_total_size_per_instance_type(instance_type):
+    instance_storage_data = constants.INSTANCE_STORAGE_DATA
+    if instance_type in instance_storage_data:
+        number_of_devices = instance_storage_data[instance_type]["number_of_devices"]
+        device_size = instance_storage_data[instance_type]["size_per_device_gb"]
+        return True, number_of_devices, device_size
+
+    return False, 0, 0
+
+
+def validate_add_lvol_or_snap_on_node(memory_free, huge_free, max_lvol_or_snap,
+                                      lvol_or_snap_size, node_capacity, node_lvol_or_snap_count):
+    min_sys_memory = 2 / 4096 * lvol_or_snap_size +  1 / 4096 * node_capacity + constants.MIN_SYS_MEMORY_FOR_LVOL
+    if huge_free < constants.MIN_HUGE_PAGE_MEMORY_FOR_LVOL:
+        return f"No enough huge pages memory on the node, Free memory: {humanbytes(huge_free)}, " \
+               f"Min Huge memory required: {humanbytes(constants.MIN_HUGE_PAGE_MEMORY_FOR_LVOL)}"
+    if memory_free < min_sys_memory:
+        return f"No enough system memory on the node, Free Memory: {humanbytes(memory_free)}, " \
+               f"Min Sys memory required: {humanbytes(min_sys_memory)}"
+    if node_lvol_or_snap_count >= max_lvol_or_snap:
+        return f"You have exceeded the max number of lvol/snap {max_lvol_or_snap}"
+    return ""

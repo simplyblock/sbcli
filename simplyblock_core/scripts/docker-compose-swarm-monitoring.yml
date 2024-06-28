@@ -9,6 +9,8 @@ services:
     deploy:
       placement:
         constraints: [node.role == manager]
+    networks:
+      - monitoring-net
 
   opensearch:
     image: "opensearchproject/opensearch:2.4.0"
@@ -24,6 +26,8 @@ services:
     deploy:
       placement:
         constraints: [node.role == manager]
+    networks:
+      - monitoring-net
 
   graylog:
     hostname: "server"
@@ -34,16 +38,16 @@ services:
       GRAYLOG_PASSWORD_SECRET: "${GRAYLOG_PASSWORD_SECRET}"
       GRAYLOG_ROOT_PASSWORD_SHA2: "${GRAYLOG_ROOT_PASSWORD_SHA2}"
       GRAYLOG_HTTP_BIND_ADDRESS: "0.0.0.0:9000"
-      GRAYLOG_HTTP_EXTERNAL_URI: "http://localhost:9000/"
+      GRAYLOG_HTTP_EXTERNAL_URI: "http://localhost/graylog/"
       GRAYLOG_ELASTICSEARCH_HOSTS: "http://opensearch:9200"
       GRAYLOG_MONGODB_URI: "mongodb://mongodb:27017/graylog"
+      GRAYLOG_SKIP_PREFLIGHT_CHECKS: "true"
     ports:
     - "5044:5044/tcp"   # Beats
     - "5140:5140/udp"   # Syslog
     - "5140:5140/tcp"   # Syslog
     - "5555:5555/tcp"   # RAW TCP
     - "5555:5555/udp"   # RAW TCP
-    - "9000:9000/tcp"   # Server API
     - "12201:12201/tcp" # GELF TCP
     - "12201:12201/udp" # GELF UDP
     - "13301:13301/tcp" # Forwarder data
@@ -54,22 +58,28 @@ services:
     deploy:
       placement:
         constraints: [node.role == manager]
+    networks:
+      - monitoring-net
 
   promagent:
     image: simplyblock/promagent
     environment:
       ClusterID: "${CLUSTER_ID}"
-      ClusterIP: "${CLUSTER_IP}"
+      ClusterIP: "HAProxy"
       ClusterSecret: "${CLUSTER_SECRET}"
     deploy:
       placement:
         constraints: [node.role == manager]
+    networks:
+      - monitoring-net
 
   pushgateway:
     image: prom/pushgateway
     deploy:
       placement:
         constraints: [node.role == manager]
+    networks:
+      - monitoring-net
 
   prometheus:
     image: prom/prometheus:v2.44.0
@@ -81,9 +91,12 @@ services:
       - "--config.file=/etc/prometheus/prometheus.yml"
       - "--storage.tsdb.path=/prometheus"
       - "--storage.tsdb.retention.time=${RETENTION_PERIOD}"
+    restart: "always"
     deploy:
       placement:
         constraints: [node.role == manager]
+    networks:
+      - monitoring-net
 
   node-exporter:
     image: prom/node-exporter:v1.7.0
@@ -99,11 +112,14 @@ services:
       - '--collector.filesystem.ignored-mount-points="^(/rootfs|/host|)/(sys|proc|dev|host|etc)($$|/)"'
       - '--collector.filesystem.ignored-fs-types="^(sys|proc|auto|cgroup|devpts|ns|au|fuse\.lxc|mqueue)(fs|)$$"'
       - '--no-collector.ipvs'
+    restart: "always"
     deploy:
       mode: global
       placement:
         constraints: [node.role == worker]
-        
+    networks:
+      - monitoring-net
+
   grafana:
     image: grafana/grafana:10.0.12
     environment:
@@ -112,18 +128,16 @@ services:
       GF_ALERTING_ENABLED: "true"
       GF_PATHS_PROVISIONING: "/etc/grafana/provisioning"
       GF_INSTALL_PLUGINS: "grafana-opensearch-datasource"
+      GF_SERVER_ROOT_URL: "http://localhost/grafana/"
     volumes:
       - ./datasource.yml:/etc/grafana/provisioning/datasources/datasource.yaml
       - grafana_data:/var/lib/grafana
       - ./alerting:/etc/grafana/provisioning/alerting
-    ports:
-      - target: 3000
-        published: 3000
-        protocol: tcp
-        mode: host
     deploy:
       placement:
         constraints: [node.role == manager]
+    networks:
+      - monitoring-net
 
   CleanupGraylog:
     image: $SIMPLYBLOCK_DOCKER_IMAGE
@@ -133,19 +147,25 @@ services:
     deploy:
       placement:
         constraints: [node.role == manager]
-
-  ### monitoring ###
+    networks:
+      - monitoring-net
 
 volumes:
   mongodb_data:
+    driver: ${USE_EFS:-local}
   os_data:
+    driver: ${USE_EFS:-local}
   graylog_data:
+    driver: ${USE_EFS:-local}
   graylog_journal:
+    driver: ${USE_EFS:-local}
   grafana_data:
+    driver: ${USE_EFS:-local}
+  graylog_config:
+    driver: ${USE_EFS:-local}  
   prometheus_data:
-  alertmanager_data:
+    driver: ${USE_EFS:-local}
 
 networks:
-  hostnet:
+  monitoring-net:
     external: true
-    name: host

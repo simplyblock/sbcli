@@ -306,9 +306,9 @@ class RPCClient:
         params = {"name": name}
         return self._request("bdev_compress_delete", params)
 
-    def ultra21_bdev_pass_create(self, alloc_bdev, vuid, pt_name):
+    def ultra21_bdev_pass_create(self, base_bdev, vuid, pt_name):
         params = {
-            "base_bdev": alloc_bdev,
+            "base_bdev": base_bdev,
             "vuid": vuid,
             "pt_bdev": pt_name
         }
@@ -392,7 +392,7 @@ class RPCClient:
         params = {
             "name": name,
             "raid_level": "0",
-            "strip_size_kb": 4 * len(bdevs_list),
+            "strip_size_kb": 4,
             "base_bdevs": bdevs_list
         }
         return self._request("bdev_raid_create", params)
@@ -434,8 +434,9 @@ class RPCClient:
             "trsvcid": str(port),
             "subnqn": nqn,
             "fabrics_connect_timeout_us": 100000,
-            "fast_io_fail_timeout_sec": 0,
+            "fast_io_fail_timeout_sec": 1,
             "num_io_queues": 16384,
+            "ctrlr_loss_timeout_sec": 2,
         }
         return self._request("bdev_nvme_attach_controller", params)
 
@@ -483,9 +484,9 @@ class RPCClient:
         params = {
             "bdev_retry_count": 0,
             "transport_retry_count": 0,
-            "ctrlr_loss_timeout_sec": -1,
-            "fast_io_fail_timeout_sec": 5,
-            "reconnect_delay_sec": 5,
+            "ctrlr_loss_timeout_sec": 2,
+            "fast_io_fail_timeout_sec": 1,
+            "reconnect_delay_sec": 1,
             "keep_alive_timeout_ms": 200,
             "transport_ack_timeout": 7,
             "timeout_us": 100000
@@ -627,6 +628,24 @@ class RPCClient:
 
     def framework_start_init(self):
         return self._request("framework_start_init")
+
+    def bdev_examine(self, name):
+        params = {"name": name}
+        return self._request("bdev_examine", params)
+
+    def nbd_start_disk(self, bdev_name, nbd_device="/dev/nbd0"):
+        params = {
+            "bdev_name": bdev_name,
+            "nbd_device": nbd_device,
+        }
+        return self._request("nbd_start_disk", params)
+
+    def nbd_stop_disk(self, nbd_device):
+        params = {
+            "nbd_device": nbd_device
+        }
+        return self._request("nbd_stop_disk", params)
+
 
     def bdev_jm_unmap_vuid(self, name, vuid):
         params = {"name": name, "vuid": vuid}

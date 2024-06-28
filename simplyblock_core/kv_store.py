@@ -9,6 +9,7 @@ from simplyblock_core.models.caching_node import CachingNode
 from simplyblock_core.models.cluster import ClusterMap
 
 from simplyblock_core.models.cluster import Cluster
+from simplyblock_core.models.deployer import Deployer
 from simplyblock_core.models.compute_node import ComputeNode
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.port_stat import PortStat
@@ -97,11 +98,19 @@ class DBController:
                 nodes.append(n)
         return sorted(nodes, key=lambda x: x.create_dt)
 
+    def get_storage_node_by_system_id(self, system_id):
+        nodes = StorageNode().read_from_db(self.kv_store)
+        for node in nodes:
+            if node.system_uuid == system_id:
+                return node
+        return None
+
     def get_storage_node_by_id(self, id):
         ret = StorageNode().read_from_db(self.kv_store, id)
         if ret:
             return ret[0]
 
+    # todo: change this function for multi cluster
     def get_caching_nodes(self):
         ret = CachingNode().read_from_db(self.kv_store)
         ret = sorted(ret, key=lambda x: x.create_dt)
@@ -111,6 +120,12 @@ class DBController:
         ret = CachingNode().read_from_db(self.kv_store, id)
         if ret:
             return ret[0]
+
+    def get_caching_node_by_system_id(self, system_id):
+        nodes = CachingNode().read_from_db(self.kv_store)
+        for node in nodes:
+            if node.system_uuid == system_id:
+                return node
 
     def get_caching_node_by_hostname(self, hostname):
         nodes = self.get_caching_nodes()
@@ -124,20 +139,15 @@ class DBController:
             if node.hostname == hostname:
                 return node
 
-    def get_storage_devices(self, id=""):
-        # workaround because nvme devices are stored inside the node object itself.
+    def get_storage_device_by_id(self, id):
         nodes = self.get_storage_nodes()
-        devices = []
-        device = None
         for node in nodes:
-            if node.nvme_devices:
-                devices.extend(node.nvme_devices)
-                for dev in node.nvme_devices:
-                    if dev.get_id() == id:
-                        device = dev
-        if id:
-            return device
-        return devices
+            for dev in node.nvme_devices:
+                if dev.get_id() == id:
+                    return dev
+
+    def get_storage_devices(self, id):
+        return self.get_storage_device_by_id(id)
 
     # Compute node functions
     def get_compute_node_by_id(self, id):
@@ -149,9 +159,15 @@ class DBController:
         ret = ComputeNode().read_from_db(self.kv_store)
         return ret
 
-    def get_pools(self):
-        ret = Pool().read_from_db(self.kv_store)
-        return ret
+    def get_pools(self, cluster_id=None):
+        pools = []
+        if cluster_id:
+            for pool in Pool().read_from_db(self.kv_store):
+                if pool.cluster_id == cluster_id:
+                    pools.append(pool)
+        else:
+            pools = Pool().read_from_db(self.kv_store)
+        return pools
 
     def get_pool_by_id(self, id):
         ret = Pool().read_from_db(self.kv_store, id)
@@ -164,9 +180,16 @@ class DBController:
             if pool.pool_name == name:
                 return pool
 
-    def get_lvols(self):
-        ret = LVol().read_from_db(self.kv_store)
-        return ret
+    def get_lvols(self, cluster_id=None):
+        lvols = []
+        if cluster_id:
+            for pool in self.get_pools(cluster_id):
+                if pool.cluster_id == cluster_id:
+                    for lv_id in pool.lvols:
+                        lvols.append(self.get_lvol_by_id(lv_id))
+        else:
+            lvols = LVol().read_from_db(self.kv_store)
+        return lvols
 
     def get_snapshots(self):
         ret = SnapShot().read_from_db(self.kv_store)
@@ -243,6 +266,14 @@ class DBController:
         if ret:
             return ret[0]
 
+    def get_deployers(self):
+        return Deployer().read_from_db(self.kv_store)
+
+    def get_deployer_by_id(self, deployer_id):
+        ret = Deployer().read_from_db(self.kv_store, id=deployer_id)
+        if ret:
+            return ret[0]
+
     def get_port_stats(self, node_id, port_id, limit=20):
         stats = PortStat().read_from_db(self.kv_store, id="%s/%s" % (node_id, port_id), limit=limit, reverse=True)
         return stats
@@ -252,3 +283,23 @@ class DBController:
 
     def get_job_tasks(self, cluster_id, reverse=True):
         return JobSchedule().read_from_db(self.kv_store, id=cluster_id, reverse=reverse)
+
+    def get_task_by_id(self, task_id):
+        for task in self.get_job_tasks(""):
+            if task.uuid == task_id:
+                return task
+
+    def get_snapshots_by_node_id(self, node_id):
+        ret = []
+        snaps = SnapShot().read_from_db(self.kv_store)
+        for snap in snaps:
+            if snap.lvol.host_id == node_id:
+                ret.append(snap)
+        return ret
+
+    def get_snode_size(self, node_id):
+        snode = self.get_storage_node_by_id(node_id)
+        total_node_capacity = 0
+        for dev in snode.nvme_devices:
+            total_node_capacity += dev.size
+        return total_node_capacity

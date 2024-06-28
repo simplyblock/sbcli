@@ -1,9 +1,9 @@
 name: E2E Tests
 
 on:
-  # push:
-  #   branches:
-  #     - main
+  push:
+    branches:
+      - main
   schedule:
     - cron: '0 5 * * *'  # Runs every day at 5 AM UTC
   workflow_dispatch:
@@ -100,7 +100,7 @@ jobs:
       - name: Bootstrap Cluster
         run: |
           cd $GITHUB_WORKSPACE/simplyBlockDeploy
-          ./bootstrap-cluster.sh --memory 4g --iobuf_small_pool_count 25000 --iobuf_large_pool_count 10000
+          ./bootstrap-cluster.sh --max-lvol 100 --max-snap 100 --max-prov 150g --number-of-devices 1
         id: bootstrap_cluster
         env:
           SBCLI_CMD: ${{ github.event.inputs.sbcli_cmd || 'sbcli-dev' }}
@@ -119,6 +119,9 @@ jobs:
           export API_BASE_URL=${{ steps.bootstrap_cluster.outputs.cluster_api_gateway_endpoint }}
           export BASTION_SERVER=${{ steps.terraform_outputs.outputs.bastion_public_ip }}
           export KEY_NAME=${{ steps.terraform_outputs.outputs.key_name }}
+          export AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }}
+          export AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          export AWS_REGION=${{ secrets.AWS_REGION }}
           TESTNAME=""
           if [ -n "${{ github.event.inputs.testname }}" ]; then
             TESTNAME="--testname ${{ github.event.inputs.testname }}"
@@ -177,7 +180,7 @@ jobs:
           echo "number Failed tests"
           FAILED_TESTS=$(grep -i "Number of Failed Cases" "$LATEST_LOG" | awk '{print $NF}')
           echo "List Passed tests"
-          PASSED_CASES=$(grep "PASSED CASE" "$LATEST_LOG" | awk -F 'INFO - | PASSED CASE' '{print $2}')
+          PASSED_CASES=$(grep "PASSED CASE" "$LATEST_LOG" | awk -F 'INFO - | FAILED CASE' '{print $2}')
           echo "List Failed tests"
           FAILED_CASES=$(grep "FAILED CASE" "$LATEST_LOG" | awk -F 'INFO - | FAILED CASE' '{print $2}')
 
@@ -212,7 +215,6 @@ jobs:
           echo "FAILED_CASES_BULLETS<<EOF" >> $GITHUB_ENV
           echo "${FAILED_CASES_BULLETS}" >> $GITHUB_ENV
           echo "EOF" >> $GITHUB_ENV
-
 
       - name: Send Slack Notification
         if: always() && github.ref == 'refs/heads/main' || github.ref == 'refs/heads/pre-release'

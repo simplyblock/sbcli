@@ -88,7 +88,7 @@ def process_lvol_event(event):
     if event.message in ["error_open", 'error_read', "error_write", "error_unmap"]:
         vuid = event.object_dict['vuid']
         lvol = None
-        for lv in db_controller.get_lvols():
+        for lv in db_controller.get_lvols():  # pass
             if lv.vuid == vuid:
                 lvol = lv
                 break
@@ -127,7 +127,6 @@ def process_event(event_id):
 
 hostname = utils.get_hostname()
 logger.info("Starting Distr event collector...")
-logger.info(f"Node:{hostname}")
 while True:
     time.sleep(constants.DISTR_EVENT_COLLECTOR_INTERVAL_SEC)
 
@@ -141,14 +140,13 @@ while True:
         snode.rpc_port,
         snode.rpc_username,
         snode.rpc_password,
-        timeout=3, retry=2
-    )
-    num_of_events = constants.DISTR_EVENT_COLLECTOR_NUM_OF_EVENTS
+        timeout=10, retry=2)
+
     try:
-        # events = client.distr_status_events_get()
-        events = client.distr_status_events_discard_then_get(0, num_of_events)
+        events = client.distr_status_events_discard_then_get(0, constants.DISTR_EVENT_COLLECTOR_NUM_OF_EVENTS)
+
         if not events:
-            logger.error("Distr events empty")
+            logger.debug("no events found")
             continue
 
         logger.info(f"Found events: {len(events)}")
@@ -162,8 +160,8 @@ while True:
             logger.info(f"Processing event: {eid}")
             process_event(eid)
 
-        logger.info(f"Discarding events: {num_of_events}")
-        events = client.distr_status_events_discard_then_get(num_of_events, 0)
+            logger.info(f"Discarding events: {len(events)}")
+            client.distr_status_events_discard_then_get(len(events), 0)
 
     except Exception as e:
         logger.error("Failed to process distr events")

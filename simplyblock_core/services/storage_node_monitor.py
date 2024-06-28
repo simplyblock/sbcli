@@ -31,8 +31,8 @@ db_store = kv_store.KVStore()
 db_controller = kv_store.DBController(kv_store=db_store)
 
 
-def get_cluster_target_status(cluster):
-    snodes = db_controller.get_storage_nodes()
+def get_cluster_target_status(cluster_id):
+    snodes = db_controller.get_storage_nodes_by_cluster_id(cluster_id)
 
     online_nodes = 0
     offline_nodes = 0
@@ -66,8 +66,8 @@ def get_cluster_target_status(cluster):
     logger.debug(f"online_devices: {online_devices}")
     logger.debug(f"offline_devices: {offline_devices}")
 
-    # if more than two affected modes then cluster is suspended
-    if affected_nodes > 2:
+    # if more than two affected nodes then cluster is suspended
+    if affected_nodes > 2 or offline_nodes > 2:
         return Cluster.STATUS_SUSPENDED
 
     # if any device goes offline then cluster is degraded
@@ -85,7 +85,7 @@ def update_cluster_status(cluster_id):
     cluster = db_controller.get_cluster_by_id(cluster_id)
 
     if cluster.ha_type == "ha":
-        cluster_target_status = get_cluster_target_status(cluster)
+        cluster_target_status = get_cluster_target_status(cluster_id)
         logger.info(f"Target cluster status {cluster_target_status}, current status: {cluster.status}")
         if cluster.status == cluster_target_status:
             return
@@ -117,44 +117,47 @@ def set_node_offline(node):
 
 logger.info("Starting node monitor")
 while True:
-    # get storage nodes
-    nodes = db_controller.get_storage_nodes()
-    for snode in nodes:
-        if snode.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_UNREACHABLE]:
-            logger.info(f"Node status is: {snode.status}, skipping")
-            continue
+    clusters = db_controller.get_clusters()
+    for cluster in clusters:
+        cluster_id = cluster.get_id()
+        # get storage nodes
+        nodes = db_controller.get_storage_nodes_by_cluster_id(cluster_id)
+        for snode in nodes:
+            if snode.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_UNREACHABLE]:
+                logger.info(f"Node status is: {snode.status}, skipping")
+                continue
 
-        logger.info(f"Checking node {snode.hostname}")
+            logger.info(f"Checking node {snode.hostname}")
 
-        # 1- check node ping
-        ping_check = health_controller._check_node_ping(snode.mgmt_ip)
-        logger.info(f"Check: ping mgmt ip {snode.mgmt_ip} ... {ping_check}")
+            # 1- check node ping
+            ping_check = health_controller._check_node_ping(snode.mgmt_ip)
+            logger.info(f"Check: ping mgmt ip {snode.mgmt_ip} ... {ping_check}")
 
-        # 2- check node API
-        node_api_check = health_controller._check_node_api(snode.mgmt_ip)
-        logger.info(f"Check: node API {snode.mgmt_ip}:5000 ... {node_api_check}")
+            # 2- check node API
+            node_api_check = health_controller._check_node_api(snode.mgmt_ip)
+            logger.info(f"Check: node API {snode.mgmt_ip}:5000 ... {node_api_check}")
 
-        # 3- check node RPC
-        node_rpc_check = health_controller._check_node_rpc(
-            snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
-        logger.info(f"Check: node RPC {snode.mgmt_ip}:{snode.rpc_port} ... {node_rpc_check}")
+            # 3- check node RPC
+            node_rpc_check = health_controller._check_node_rpc(
+                snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
+            logger.info(f"Check: node RPC {snode.mgmt_ip}:{snode.rpc_port} ... {node_rpc_check}")
 
-        # 4- docker API
-        node_docker_check = health_controller._check_node_docker_api(snode.mgmt_ip)
-        logger.info(f"Check: node docker API {snode.mgmt_ip}:2375 ... {node_docker_check}")
+            # 4- docker API
+            node_docker_check = health_controller._check_node_docker_api(snode.mgmt_ip)
+            logger.info(f"Check: node docker API {snode.mgmt_ip}:2375 ... {node_docker_check}")
 
-        is_node_online = ping_check and node_api_check and node_rpc_check and node_docker_check
-        if is_node_online:
-            set_node_online(snode)
-        else:
-            set_node_offline(snode)
+            is_node_online = ping_check and node_api_check and node_rpc_check and node_docker_check
+            if is_node_online:
+                set_node_online(snode)
+            else:
+                set_node_offline(snode)
 
-        if not ping_check and not node_rpc_check:
-            # node is dead, set devices offline
-            for dev in snode.nvme_devices:
-                device_controller.device_set_unavailable(dev.get_id())
+            if not ping_check and not node_rpc_check:
+                # node is dead, set devices offline
+                for dev in snode.nvme_devices:
+                    device_controller.device_set_unavailable(dev.get_id())
 
-        update_cluster_status(snode.cluster_id)
+        update_cluster_status(cluster_id)
 
     logger.info(f"Sleeping for {constants.NODE_MONITOR_INTERVAL_SEC} seconds")
     time.sleep(constants.NODE_MONITOR_INTERVAL_SEC)

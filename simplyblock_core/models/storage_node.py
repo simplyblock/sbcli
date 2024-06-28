@@ -5,7 +5,7 @@ from typing import List
 
 from simplyblock_core.models.base_model import BaseModel
 from simplyblock_core.models.iface import IFace
-from simplyblock_core.models.nvme_device import NVMeDevice
+from simplyblock_core.models.nvme_device import NVMeDevice, JMDevice
 
 
 class StorageNode(BaseModel):
@@ -61,7 +61,9 @@ class StorageNode(BaseModel):
         "remote_devices": {"type": List[NVMeDevice], 'default': []},
         "host_secret": {"type": str, "default": ""},
         "ctrl_secret": {"type": str, "default": ""},
-
+        "max_lvol": {"type": int, "default": 0},
+        "max_snap": {"type": int, "default": 0},
+        "max_prov": {"type": str, "default": ""},
         "cpu": {"type": int, "default": 0},
         "cpu_hz": {"type": int, "default": 0},
         "memory": {"type": int, "default": 0},
@@ -73,10 +75,12 @@ class StorageNode(BaseModel):
         "app_thread_mask": {"type": str, "default": ""},
         "pollers_mask": {"type": str, "default": ""},
         "os_cores": {"type": str, "default": []},
+        "nvme_pollers_cores": {"type": str, "default": ""},
         "dev_cpu_mask": {"type": str, "default": ""},
         "spdk_mem": {"type": int, "default": 0},
         "spdk_image": {"type": str, "default": ""},
         "spdk_debug": {"type": bool, "default": False},
+
 
         "ec2_metadata": {"type": dict, "default": {}},
         "ec2_instance_id": {"type": str, "default": ""},
@@ -87,6 +91,10 @@ class StorageNode(BaseModel):
         "iobuf_large_pool_count": {"type": int, "default": 0},
         "iobuf_small_bufsize": {"type": int, "default": 0},
         "iobuf_large_bufsize": {"type": int, "default": 0},
+
+        "num_partitions_per_dev": {"type": int, "default": 1},
+        "jm_percent": {"type": int, "default": 3},
+        "jm_device": {"type": JMDevice, "default": None},
 
     }
 

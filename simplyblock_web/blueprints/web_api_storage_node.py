@@ -30,7 +30,8 @@ def list_storage_nodes(uuid):
         else:
             return utils.get_response_error(f"node not found: {uuid}", 404)
     else:
-        nodes = db_controller.get_storage_nodes()
+        cluster_id = utils.get_cluster_id(request)
+        nodes = db_controller.get_storage_nodes_by_cluster_id(cluster_id)
     data = []
     for node in nodes:
         d = node.get_clean_dict()
@@ -162,9 +163,21 @@ def storage_node_add():
     if 'ifname' not in req_data:
         return utils.get_response_error("missing required param: ifname", 400)
 
+    if 'max_lvol' not in req_data:
+        return utils.get_response_error("missing required param: max_lvol", 400)
+
+    if 'max_snap' not in req_data:
+        return utils.get_response_error("missing required param: max_snap", 400)
+
+    if 'max_prov' not in req_data:
+        return utils.get_response_error("missing required param: max_prov", 400)
+
     cluster_id = req_data['cluster_id']
     node_ip = req_data['node_ip']
     ifname = req_data['ifname']
+    max_lvol = req_data['max_lvol']
+    max_snap = req_data['max_snap']
+    max_prov = req_data['max_prov']
 
     spdk_image = None
     if 'spdk_image' in req_data:
@@ -179,15 +192,10 @@ def storage_node_add():
         data_nics = req_data['data_nics']
         data_nics = data_nics.split(",")
 
-    spdk_mem = None
-    if 'spdk_mem' in req_data:
-        mem = req_data['spdk_mem']
-        spdk_mem = utils.parse_size(mem)
-        if spdk_mem < 1 * 1024 * 1024:
-            return utils.get_response_error(f"SPDK memory:{mem} must be larger than 1G", 400)
+
 
     out = storage_node_ops.add_node(
-        cluster_id, node_ip, ifname, data_nics, spdk_mem,
+        cluster_id, node_ip, ifname, data_nics, max_lvol, max_snap, max_prov,
         spdk_image=spdk_image, spdk_debug=spdk_debug)
 
     return utils.get_response(out)

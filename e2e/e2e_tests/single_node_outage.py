@@ -74,6 +74,7 @@ class TestSingleNodeOutage:
         self.log_path = f"{os.path.dirname(self.mount_path)}/log_file.log"
         self.base_cmd = None
         self.fio_debug = kwargs.get("fio_debug", False)
+        self.base_cmd = os.environ.get("SBCLI_CMD", "sbcli-dev")
 
     def setup(self):
         """Contains setup required to run the test case
@@ -96,13 +97,6 @@ class TestSingleNodeOutage:
                                   device=self.mount_path)
         self.sbcli_utils.delete_all_lvols()
         self.sbcli_utils.delete_all_storage_pools()
-        expected_base = ["sbcli", "sbcli-dev", "sbcli-release"]
-        for base in expected_base:
-            output, error = self.ssh_obj.exec_command(node=self.mgmt_nodes[0],
-                                                      command=base)
-            if len(output.strip()):
-                self.base_cmd = base
-                self.logger.info(f"Using base command as {self.base_cmd}")
 
     def run(self):
         """ Performs each step of the testcase
@@ -111,7 +105,8 @@ class TestSingleNodeOutage:
         initial_devices = self.ssh_obj.get_devices(node=self.mgmt_nodes[0])
 
         self.sbcli_utils.add_storage_pool(
-            pool_name=self.pool_name
+            pool_name=self.pool_name,
+            cluster_id=cluster_id
         )
         pools = self.sbcli_utils.list_storage_pools()
         assert self.pool_name in list(pools.keys()), \
@@ -125,7 +120,8 @@ class TestSingleNodeOutage:
             f"Pool {self.pool_name} present in list of pools post delete: {pools}"
 
         self.sbcli_utils.add_storage_pool(
-            pool_name=self.pool_name
+            pool_name=self.pool_name,
+            cluster_id=cluster_id
         )
 
         self.sbcli_utils.add_lvol(
@@ -215,7 +211,7 @@ class TestSingleNodeOutage:
         }
         self.common_utils.validate_event_logs(cluster_id=cluster_id,
                                               operations=steps)
-        
+
         self.common_utils.manage_fio_threads(node=self.mgmt_nodes[0],
                                              threads=[fio_thread1],
                                              timeout=300)
@@ -245,7 +241,7 @@ class TestSingleNodeOutage:
                                                                     command=command)
         self.logger.info(f"LVOL Cluster map: {lvol_cluster_map_details}")
         cluster_map_nodes, cluster_map_devices = self.common_utils.parse_lvol_cluster_map_output(lvol_cluster_map_details)
-        offline_device = None
+        offline_devices = []
 
         assert node_details[0]["status"] == node_status, \
             f"Node {node_uuid} is not in {node_status} state. {node_details[0]['status']}"
@@ -256,7 +252,7 @@ class TestSingleNodeOutage:
             else:
                 assert device["status"] == device_status, \
                     f"Device {device['id']} is not in {device_status} state. {device['status']}"
-                offline_device = device['id']
+                offline_devices.append(device['id'])
 
         for lvol in lvol_details:
             assert lvol["status"] == lvol_status, \
@@ -284,7 +280,7 @@ class TestSingleNodeOutage:
                     f"Node {node_uuid} is not in online state. {node['Actual Status']}"
 
         for device_id, device in cluster_map_devices.items():
-            if device_id == offline_device:
+            if device_id in offline_devices:
                 assert device["Reported Status"] == device_status, \
                     f"Device {device_id} is not in {device_status} state. {device['Reported Status']}"
                 assert device["Actual Status"] == device_status, \
