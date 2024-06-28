@@ -133,7 +133,7 @@ jobs:
           RUN_ID: ${{ github.run_id }}
 
       - name: Parse test results
-        if: always() && github.ref == 'refs/heads/main'
+        if: always() && github.ref == 'refs/heads/main' || github.ref == 'refs/heads/pre-release'
         id: parse_results
         run: |
           cd $GITHUB_WORKSPACE/e2e/logs
@@ -206,9 +206,8 @@ jobs:
           echo "${FAILED_CASES_BULLETS}" >> $GITHUB_ENV
           echo "EOF" >> $GITHUB_ENV
 
-
       - name: Send Slack Notification
-        if: always() && github.ref == 'refs/heads/main'
+        if: always() && github.ref == 'refs/heads/main' || github.ref == 'refs/heads/pre-release'
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
           GITHUB_SERVER_URL: ${{ github.server_url }}
@@ -222,8 +221,7 @@ jobs:
           FAILED_CASES: ${{ env.FAILED_CASES }}
           PASSED_CASES_BULLETS: ${{ env.PASSED_CASES_BULLETS }}
           FAILED_CASES_BULLETS: ${{ env.FAILED_CASES_BULLETS }}
-          TRIGGER_EVENT: ${{ github.event_name }}
-          TRIGGER_ACTOR: ${{ github.actor }}
+          BRANCH_NAME: ${{ github.ref_name }}
         run: |
           GITHUB_RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}"
           AWS_LOGS_URL="https://s3.console.aws.amazon.com/s3/buckets/${S3_BUCKET_NAME}?prefix=${RUN_ID}/&region=us-east-2"
@@ -232,7 +230,7 @@ jobs:
           else
             OVERALL_STATUS=":x: Overall Status: FAILURE"
           fi
-          MESSAGE="Python E2E tests run triggered by ${{ env.TRIGGER_ACTOR }} via ${{ env.TRIGGER_EVENT }}. \n${OVERALL_STATUS}\nGitHub Run: ${GITHUB_RUN_URL}\nAWS Logs: ${AWS_LOGS_URL}\n\nTotal Tests: ${{ env.TOTAL_TESTS }}\nPassed Tests: ${{ env.PASSED_TESTS }}\nFailed Tests: ${{ env.FAILED_TESTS }}\n\n-- Test Cases Passed :white_check_mark:\n${{ env.PASSED_CASES_BULLETS }}\n\n-- Test Cases Failed :x:\n${{ env.FAILED_CASES_BULLETS }}"
+          MESSAGE="Python E2E tests run triggered on branch **${BRANCH_NAME}**. \n${OVERALL_STATUS}\nGitHub Run: ${GITHUB_RUN_URL}\nAWS Logs: ${AWS_LOGS_URL}\n\nTotal Tests: ${{ env.TOTAL_TESTS }}\nPassed Tests: ${{ env.PASSED_TESTS }}\nFailed Tests: ${{ env.FAILED_TESTS }}\n\n-- Test Cases Passed :white_check_mark:\n${{ env.PASSED_CASES_BULLETS }}\n\n-- Test Cases Failed :x:\n${{ env.FAILED_CASES_BULLETS }}"
           
           curl -X POST -H 'Content-type: application/json' --data "{\"text\":\"${MESSAGE}\"}" $SLACK_WEBHOOK_URL
 
