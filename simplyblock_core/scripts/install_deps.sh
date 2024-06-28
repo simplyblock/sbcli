@@ -15,6 +15,8 @@ sudo yum install hostname pkg-config git wget python3-pip yum-utils docker-ce do
 sudo systemctl enable docker
 sudo systemctl start docker
 
+sudo docker plugin install rexray/efs --grant-all-permissions EFS_TAG=$INSTANCE_ID REXRAY_PREEMPT=true
+
 wget https://github.com/apple/foundationdb/releases/download/7.3.3/foundationdb-clients-7.3.3-1.el7.x86_64.rpm -q
 sudo rpm -U foundationdb-clients-7.3.3-1.el7.x86_64.rpm --quiet --reinstall
 rm -f foundationdb-clients-7.3.3-1.el7.x86_64.rpm
