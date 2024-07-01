@@ -299,7 +299,6 @@ class SbcliUtils:
         """Return lvol by lvol name
         """
         lvols = self.list_lvols()
-        lvol_id = None
         return lvols.get(lvol_name, None)
 
     def get_lvol_connect_str(self, lvol_name):
@@ -319,28 +318,28 @@ class SbcliUtils:
         """
         cluster_id = self.cluster_id if not cluster_id else cluster_id
         cluster_details = self.get_request(api_url=f"/cluster/status/{cluster_id}")
-        # print(f"Cluster Status: {cluster_details}")
+        self.logger.info(f"Cluster Status: {cluster_details}")
         return cluster_details["results"]
 
     def get_storage_node_details(self, storage_node_id):
         """Get Storage Node details for given node id
         """
         node_details = self.get_request(api_url=f"/storagenode/{storage_node_id}")
-        # print(f"Node Details: {node_details}")
+        self.logger.info(f"Node Details: {node_details}")
         return node_details["results"]
 
     def get_device_details(self, storage_node_id):
         """Get Device details for given node id
         """
         device_details = self.get_request(api_url=f"/device/list/{storage_node_id}")
-        # print(f"Device Details: {device_details}")
+        self.logger.info(f"Device Details: {device_details}")
         return device_details["results"]
 
     def get_lvol_details(self, lvol_id):
         """Get lvol details for given lvol id
         """
         lvol_details = self.get_request(api_url=f"/lvol/{lvol_id}")
-        # print(f"Lvol Details: {lvol_details}")
+        self.logger.info(f"Lvol Details: {lvol_details}")
         return lvol_details["results"]
 
     def get_cluster_logs(self, cluster_id=None):

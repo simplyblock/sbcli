@@ -45,6 +45,7 @@ def main():
             errors[f"{test.__name__}"] = [exp]
         try:
             test_obj.teardown()
+            pass
         except Exception as exp:
             logger.error(traceback.format_exc())
             errors[f"{test.__name__}"].append(exp)

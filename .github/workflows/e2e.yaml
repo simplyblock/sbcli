@@ -109,6 +109,10 @@ jobs:
           export API_BASE_URL=${{ steps.bootstrap_cluster.outputs.cluster_api_gateway_endpoint }}
           export BASTION_SERVER=${{ steps.terraform_outputs.outputs.bastion_public_ip }}
           export KEY_NAME=${{ steps.terraform_outputs.outputs.key_name }}
+          export AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }}
+          export AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          export AWS_REGION=${{ secrets.AWS_REGION }}
+          export SBCLI_CMD=${{ github.event.inputs.sbcli_cmd || 'sbcli-dev' }}
           TESTNAME=""
           if [ -n "${{ github.event.inputs.testname }}" ]; then
             TESTNAME="--testname ${{ github.event.inputs.testname }}"
@@ -204,34 +208,34 @@ jobs:
           echo "EOF" >> $GITHUB_ENV
 
 
-      # - name: Send Slack Notification
-      #   if: always()
-      #   env:
-      #     SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
-      #     GITHUB_SERVER_URL: ${{ github.server_url }}
-      #     GITHUB_REPOSITORY: ${{ github.repository }}
-      #     S3_BUCKET_NAME: "simplyblock-e2e-test-logs"
-      #     RUN_ID: ${{ github.run_id }}
-      #     PASSED_TESTS: ${{ env.PASSED_TESTS }}
-      #     FAILED_TESTS: ${{ env.FAILED_TESTS }}
-      #     TOTAL_TESTS: ${{ env.TOTAL_TESTS }}
-      #     PASSED_CASES: ${{ env.PASSED_CASES }}
-      #     FAILED_CASES: ${{ env.FAILED_CASES }}
-      #     PASSED_CASES_BULLETS: ${{ env.PASSED_CASES_BULLETS }}
-      #     FAILED_CASES_BULLETS: ${{ env.FAILED_CASES_BULLETS }}
-      #     TRIGGER_EVENT: ${{ github.event_name }}
-      #     TRIGGER_ACTOR: ${{ github.actor }}
-      #   run: |
-      #     GITHUB_RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}"
-      #     AWS_LOGS_URL="https://s3.console.aws.amazon.com/s3/buckets/${S3_BUCKET_NAME}?prefix=${RUN_ID}/&region=us-east-2"
-      #     if [[ ${{ job.status }} == 'success' ]]; then
-      #       OVERALL_STATUS=":white_check_mark: Overall Status: SUCCESS"
-      #     else
-      #       OVERALL_STATUS=":x: Overall Status: FAILURE"
-      #     fi
-      #     MESSAGE="Python E2E tests run triggered by ${{ env.TRIGGER_ACTOR }} via ${{ env.TRIGGER_EVENT }}. \n${OVERALL_STATUS}\nGitHub Run: ${GITHUB_RUN_URL}\nAWS Logs: ${AWS_LOGS_URL}\n\nTotal Tests: ${{ env.TOTAL_TESTS }}\nPassed Tests: ${{ env.PASSED_TESTS }}\nFailed Tests: ${{ env.FAILED_TESTS }}\n\n-- Test Cases Passed :white_check_mark:\n${{ env.PASSED_CASES_BULLETS }}\n\n-- Test Cases Failed :x:\n${{ env.FAILED_CASES_BULLETS }}"
+      - name: Send Slack Notification
+        if: always()
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          GITHUB_SERVER_URL: ${{ github.server_url }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          S3_BUCKET_NAME: "simplyblock-e2e-test-logs"
+          RUN_ID: ${{ github.run_id }}
+          PASSED_TESTS: ${{ env.PASSED_TESTS }}
+          FAILED_TESTS: ${{ env.FAILED_TESTS }}
+          TOTAL_TESTS: ${{ env.TOTAL_TESTS }}
+          PASSED_CASES: ${{ env.PASSED_CASES }}
+          FAILED_CASES: ${{ env.FAILED_CASES }}
+          PASSED_CASES_BULLETS: ${{ env.PASSED_CASES_BULLETS }}
+          FAILED_CASES_BULLETS: ${{ env.FAILED_CASES_BULLETS }}
+          TRIGGER_EVENT: ${{ github.event_name }}
+          TRIGGER_ACTOR: ${{ github.actor }}
+        run: |
+          GITHUB_RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}"
+          AWS_LOGS_URL="https://s3.console.aws.amazon.com/s3/buckets/${S3_BUCKET_NAME}?prefix=${RUN_ID}/&region=us-east-2"
+          if [[ ${{ job.status }} == 'success' ]]; then
+            OVERALL_STATUS=":white_check_mark: Overall Status: SUCCESS"
+          else
+            OVERALL_STATUS=":x: Overall Status: FAILURE"
+          fi
+          MESSAGE="Python E2E tests run triggered by ${{ env.TRIGGER_ACTOR }} via ${{ env.TRIGGER_EVENT }}. \n${OVERALL_STATUS}\nGitHub Run: ${GITHUB_RUN_URL}\nAWS Logs: ${AWS_LOGS_URL}\n\nTotal Tests: ${{ env.TOTAL_TESTS }}\nPassed Tests: ${{ env.PASSED_TESTS }}\nFailed Tests: ${{ env.FAILED_TESTS }}\n\n-- Test Cases Passed :white_check_mark:\n${{ env.PASSED_CASES_BULLETS }}\n\n-- Test Cases Failed :x:\n${{ env.FAILED_CASES_BULLETS }}"
           
-      #     curl -X POST -H 'Content-type: application/json' --data "{\"text\":\"${MESSAGE}\"}" $SLACK_WEBHOOK_URL
+          curl -X POST -H 'Content-type: application/json' --data "{\"text\":\"${MESSAGE}\"}" $SLACK_WEBHOOK_URL
 
       - name: Destroy Cluster
         if: always()
