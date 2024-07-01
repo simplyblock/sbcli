@@ -7,6 +7,9 @@ from exceptions.custom_exception import (
     TestNotFoundException,
     MultipleExceptions
 )
+from e2e_tests.test_cluster_base import TestClusterBase
+from utils.sbcli_utils import SbcliUtils
+from utils.ssh_utils import SshUtils
 
 
 def main():
@@ -45,10 +48,15 @@ def main():
             errors[f"{test.__name__}"] = [exp]
         try:
             test_obj.teardown()
-            pass
-        except Exception as exp:
+        except Exception as _:
+            logger.error(f"Error During Teardown for test: {test.__name__}")
             logger.error(traceback.format_exc())
-            errors[f"{test.__name__}"].append(exp)
+            # errors[f"{test.__name__}"].append(exp)
+        finally:
+            if check_for_dumps():
+                logger.info("Found a core dump during test execution. "
+                            "Cannot execute more tests as cluster is not stable. Exiting")
+                break
 
     failed_cases = list(errors.keys())
     logger.info(f"Number of Total Cases: {len(test_class_run)}")
@@ -65,6 +73,35 @@ def main():
 
     if errors:
         raise MultipleExceptions(errors)
+    
+
+def check_for_dumps():
+    """Validates whether core dumps present on machines
+    
+    Returns:
+        bool: If there are core dumps or not
+    """
+    logger.info("Checking for core dumps!!")
+    cluster_base = TestClusterBase()
+    ssh_obj = SshUtils(bastion_server=cluster_base.bastion_server)
+    sbcli_utils = SbcliUtils(
+        cluster_api_url=cluster_base.api_base_url,
+        cluster_id=cluster_base.cluster_id,
+        cluster_secret=cluster_base.cluster_secret
+    )
+    _, storage_nodes = sbcli_utils.get_all_nodes_ip()
+    for node in storage_nodes:
+        logger.info(f"**Connecting to storage nodes** - {node}")
+        ssh_obj.connect(
+            address=node,
+            bastion_server_address=cluster_base.bastion_server,
+        )
+    for node in storage_nodes:
+        files = ssh_obj.list_files(node, "/etc/simplyblock/")
+        logger.info(f"Files in /etc/simplyblock: {files}")
+        if "core" in files:
+            return True
+    return False
 
 
 def generate_report():

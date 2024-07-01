@@ -188,7 +188,7 @@ class TestSingleNodeOutage(TestClusterBase):
                                                                 command=command)
         self.logger.info(f"LVOL Cluster map: {lvol_cluster_map_details}")
         cluster_map_nodes, cluster_map_devices = self.common_utils.parse_lvol_cluster_map_output(lvol_cluster_map_details)
-        offline_device = None
+        offline_device = []
 
         assert node_details[0]["status"] == node_status, \
             f"Node {node_uuid} is not in {node_status} state. {node_details[0]['status']}"
