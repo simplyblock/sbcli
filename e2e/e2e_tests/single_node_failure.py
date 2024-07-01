@@ -99,7 +99,7 @@ class TestSingleNodeFailure(TestClusterBase):
                                                "runtime": 350,
                                                "debug": self.fio_debug})
         fio_thread1.start()
-        breakpoint()
+        # breakpoint()
 
         no_lvol_node_uuid = self.sbcli_utils.get_node_without_lvols()
         no_lvol_node = self.sbcli_utils.get_storage_node_details(storage_node_id=no_lvol_node_uuid)

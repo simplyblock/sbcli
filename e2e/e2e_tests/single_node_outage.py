@@ -141,8 +141,8 @@ class TestSingleNodeOutage(TestClusterBase):
 
         self.sbcli_utils.restart_node(node_uuid=no_lvol_node_uuid)
 
-        self.logger.info("Sleeping for 10 seconds")
-        sleep_n_sec(10)
+        self.logger.info(f"Waiting for node to become online, {no_lvol_node_uuid}")
+        self.sbcli_utils.wait_for_storage_node_status(no_lvol_node_uuid, "online", timeout=120)
 
         self.validations(node_uuid=no_lvol_node_uuid,
                          node_status="online",
@@ -193,13 +193,13 @@ class TestSingleNodeOutage(TestClusterBase):
         assert node_details[0]["status"] == node_status, \
             f"Node {node_uuid} is not in {node_status} state. {node_details[0]['status']}"
         for device in device_details:
-            if "jm" in device["jm_bdev"]:
-                assert device["status"] == "JM_DEV", \
-                    f"JM Device {device['id']} is not in JM_DEV state. {device['status']}"
-            else:
-                assert device["status"] == device_status, \
-                    f"Device {device['id']} is not in {device_status} state. {device['status']}"
-                offline_device = device['id']
+            # if "jm" in device["jm_bdev"]:
+            #     assert device["status"] == "JM_DEV", \
+            #         f"JM Device {device['id']} is not in JM_DEV state. {device['status']}"
+            # else:
+            assert device["status"] == device_status, \
+                f"Device {device['id']} is not in {device_status} state. {device['status']}"
+            offline_device.append(device['id'])
 
         for lvol in lvol_details:
             assert lvol["status"] == lvol_status, \
@@ -227,7 +227,7 @@ class TestSingleNodeOutage(TestClusterBase):
                     f"Node {node_uuid} is not in online state. {node['Actual Status']}"
 
         for device_id, device in cluster_map_devices.items():
-            if device_id == offline_device:
+            if device_id in offline_device:
                 assert device["Reported Status"] == device_status, \
                     f"Device {device_id} is not in {device_status} state. {device['Reported Status']}"
                 assert device["Actual Status"] == device_status, \

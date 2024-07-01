@@ -2,6 +2,7 @@
 import requests
 from http import HTTPStatus
 from logger_config import setup_logger
+from common_utils import sleep_n_sec
 
 
 class SbcliUtils:
@@ -178,7 +179,7 @@ class SbcliUtils:
 
         return data
 
-    def add_storage_pool(self, pool_name, max_rw_iops=0, max_rw_mbytes=0, max_r_mbytes=0, max_w_mbytes=0):
+    def add_storage_pool(self, pool_name, cluster_id=None, max_rw_iops=0, max_rw_mbytes=0, max_r_mbytes=0, max_w_mbytes=0):
         """Adds the storage with given name
         """
         pools = self.list_storage_pools()
@@ -193,7 +194,11 @@ class SbcliUtils:
             "max_rw_mbytes": str(max_rw_mbytes),
             "max_r_mbytes": str(max_r_mbytes),
             "max_w_mbytes": str(max_w_mbytes),
+            "cluster_id": self.cluster_id
         }
+        if cluster_id:
+            body["cluster_id"] = cluster_id
+
         self.post_request(api_url="/pool", body=body)
         # TODO: Add assertions
 
@@ -350,3 +355,13 @@ class SbcliUtils:
         cluster_logs = self.get_request(api_url=f"/cluster/get-logs/{cluster_id}")
         self.logger.info(f"Cluster Logs: {cluster_logs}")
         return cluster_logs["results"]
+    
+    def wait_for_storage_node_status(self, node_id, status, timeout=60):
+        while timeout > 0:
+            node_details = self.get_storage_node_details(storage_node_id=node_id)
+            if node_details[0]["status"] == status:
+                return True
+            else:
+                sleep_n_sec(5)
+                timeout -= 5
+        raise TimeoutError(f"Timed out waiting for node status, {node_id}, status: {status}")
