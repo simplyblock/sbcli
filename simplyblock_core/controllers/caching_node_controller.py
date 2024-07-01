@@ -422,6 +422,7 @@ def connect(caching_node_id, lvol_id):
         ret, _ = cnode_client.connect_nvme(ip, "4420", subsystem_nqn)
         break
 
+    time.sleep(5)
     cnode_info, _ = cnode_client.info()
     nvme_devs = cnode_info['nvme_devices']
     dev_path = None
@@ -587,7 +588,6 @@ def deploy(ifname):
     )
     logger.info("Pulling SPDK images")
     node_docker.images.pull(constants.SIMPLY_BLOCK_SPDK_CORE_IMAGE)
-    node_docker.images.pull(constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE)
     return f"{dev_ip}:5000"
 
 
