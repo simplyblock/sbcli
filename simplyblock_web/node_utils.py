@@ -87,8 +87,6 @@ def get_nics_data():
         logger.error(err)
         return []
     data = json.loads(out)
-    logger.debug("ifaces")
-    logger.debug(data)
 
     def _get_ip4_address(list_of_addr):
         if list_of_addr:
@@ -151,7 +149,7 @@ def get_memory_details():
         mem_kb = mem_info['MemTotal']
         data['total'] = utils.parse_size(mem_kb.replace(" ", ""))
 
-        mem_kb = mem_info['MemFree']
+        mem_kb = mem_info['MemAvailable']
         data['free'] = utils.parse_size(mem_kb.replace(" ", ""))
 
         mem_kb = mem_info['Hugetlb']

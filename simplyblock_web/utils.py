@@ -85,3 +85,11 @@ def get_int_value_or_default(data, key, default):
         return int(get_value_or_default(data, key, default))
     except Exception:
         return default
+
+
+def get_cluster_id(request):
+    au = request.headers["Authorization"]
+    if len(au.split()) == 2:
+        cluster_id = au.split()[0]
+        cluster_secret = au.split()[1]
+        return cluster_id

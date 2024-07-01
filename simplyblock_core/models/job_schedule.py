@@ -19,6 +19,8 @@ class JobSchedule(BaseModel):
         "device_id": {"type": str, 'default': ""},
         "date": {"type": int, 'default': 0},
 
+        "canceled": {"type": bool, 'default': False},
+
         "function_name": {"type": str, 'default': ""},
         "function_params": {"type": dict, 'default': {}},
         "function_result": {"type": str, 'default': ""},

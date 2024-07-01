@@ -10,8 +10,9 @@ from simplyblock_core.kv_store import DBController
 logger = logging.getLogger()
 
 
-def send_node_status_event(node_id, node_status):
+def send_node_status_event(node, node_status):
     db_controller = DBController()
+    node_id = node.get_id()
     logging.info(f"Sending event updates, node: {node_id}, status: {node_status}")
     node_status_event = {
         "timestamp": datetime.datetime.now().isoformat("T", "seconds") + 'Z',
@@ -20,7 +21,7 @@ def send_node_status_event(node_id, node_status):
         "status": node_status}
     events = {"events": [node_status_event]}
     logger.debug(node_status_event)
-    snodes = db_controller.get_storage_nodes()
+    snodes = db_controller.get_storage_nodes_by_cluster_id(node.cluster_id)
     for node in snodes:
         if node.status != node.STATUS_ONLINE:
             continue
@@ -29,8 +30,9 @@ def send_node_status_event(node_id, node_status):
         ret = rpc_client.distr_status_events_update(events)
 
 
-def send_dev_status_event(storage_ID, dev_status):
+def send_dev_status_event(device, dev_status):
     db_controller = DBController()
+    storage_ID = device.cluster_device_order
     logging.info(f"Sending event updates, device: {storage_ID}, status: {dev_status}")
     node_status_event = {
         "timestamp": datetime.datetime.now().isoformat("T", "seconds") + 'Z',
@@ -39,7 +41,7 @@ def send_dev_status_event(storage_ID, dev_status):
         "status": dev_status}
     events = {"events": [node_status_event]}
     logger.debug(node_status_event)
-    snodes = db_controller.get_storage_nodes()
+    snodes = db_controller.get_storage_nodes_by_cluster_id(device.cluster_id)
     for node in snodes:
         if node.status != node.STATUS_ONLINE:
             continue
@@ -52,7 +54,7 @@ def send_dev_status_event(storage_ID, dev_status):
 
 def disconnect_device(device):
     db_controller = DBController()
-    snodes = db_controller.get_storage_nodes()
+    snodes = db_controller.get_storage_nodes_by_cluster_id(device.cluster_id)
     for node in snodes:
         if node.status != node.STATUS_ONLINE:
             continue
@@ -95,7 +97,9 @@ def get_distr_cluster_map(snodes, target_node):
             dev_map[dev.cluster_device_order] = {
                 "UUID": dev.get_id(),
                 "bdev_name": name,
-                "status": dev.status}
+                "status": dev.status,
+                "physical_label": dev.physical_label
+            }
             dev_w_map.append({
                 "weight": dev_w,
                 "id": dev.cluster_device_order})
@@ -158,7 +162,7 @@ def parse_distr_cluster_map(map_string):
                 "Actual Status": "",
                 "Results": "",
             }
-            sd = db_controller.get_storage_devices(device_id)
+            sd = db_controller.get_storage_device_by_id(device_id)
             if sd:
                 data["Actual Status"] = sd.status
                 if sd.status == status:
@@ -175,7 +179,7 @@ def parse_distr_cluster_map(map_string):
 
 def send_cluster_map_to_node(node):
     db_controller = DBController()
-    snodes = db_controller.get_storage_nodes()
+    snodes = db_controller.get_storage_nodes_by_cluster_id(node.cluster_id)
     rpc_client = RPCClient(node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password)
     cluster_map_data = get_distr_cluster_map(snodes, node)
     cluster_map_data['UUID_node_target'] = node.get_id()
@@ -189,7 +193,7 @@ def send_cluster_map_to_node(node):
 
 def send_cluster_map_add_node(snode):
     db_controller = DBController()
-    snodes = db_controller.get_storage_nodes()
+    snodes = db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id)
     for node in snodes:
         if node.status != node.STATUS_ONLINE:
             continue

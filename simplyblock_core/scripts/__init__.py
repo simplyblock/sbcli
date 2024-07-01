@@ -35,10 +35,6 @@ def deploy_stack(cli_pass, dev_ip, image_name, graylog_password, cluster_id, log
     return __run_script(
         ['sudo', 'bash', '-x', os.path.join(DIR_PATH, 'deploy_stack.sh'), cli_pass, dev_ip, image_name, pass_hash, graylog_password, cluster_id, log_del_interval, metrics_retention_period])
 
-def apply_dashboard(grafanaPassword):
-    return __run_script(
-        ['sudo', 'bash', '-x', os.path.join(DIR_PATH, 'apply_dashboard.sh'), grafanaPassword])
-
 
 def deploy_cleaner():
     return __run_script(['sudo', 'bash', '-x', os.path.join(DIR_PATH, 'clean_local_storage_deploy.sh')])

@@ -10,7 +10,8 @@ from simplyblock_core import compute_node_ops as compute_ops
 from simplyblock_core import storage_node_ops as storage_ops
 from simplyblock_core import mgmt_node_ops as mgmt_ops
 from simplyblock_core import constants
-from simplyblock_core.controllers import pool_controller, lvol_controller, snapshot_controller, device_controller
+from simplyblock_core.controllers import pool_controller, lvol_controller, snapshot_controller, device_controller, \
+    tasks_controller
 from simplyblock_core.controllers import caching_node_controller, health_controller
 from simplyblock_core.models.pool import Pool
 
@@ -38,16 +39,18 @@ class CLIWrapper:
         sub_command.add_argument("cluster_id", help='UUID of the cluster to which the node will belong')
         sub_command.add_argument("node_ip", help='IP of storage node to add')
         sub_command.add_argument("ifname", help='Management interface name')
-        sub_command.add_argument("--jm-pcie", help='JM device address', dest='jm_pcie')
+        sub_command.add_argument("--partitions", help='Number of partitions to create per device', type=int, default=0)
+        sub_command.add_argument("--jm-percent", help='Number in percent to use for JM from each device',
+                                 type=int, default=3, dest='jm_percent')
         sub_command.add_argument("--data-nics", help='Data interface names', nargs='+', dest='data_nics')
-        sub_command.add_argument("--cpu-mask", help='SPDK app CPU mask, default is all cores found',
-                                 dest='spdk_cpu_mask')
-        sub_command.add_argument("--memory", help='SPDK huge memory allocation, default is 4G', dest='spdk_mem')
+        sub_command.add_argument("--max-lvol", help='Max lvol per storage node', dest='max_lvol', type=int)
+        sub_command.add_argument("--max-snap", help='Max snapshot per storage node', dest='max_snap', type=int)
+        sub_command.add_argument("--max-prov", help='Max provisioning size of all storage nodes', dest='max_prov')
+        sub_command.add_argument("--number-of-devices", help='Number of devices per storage node if it\'s not supported EC2 instance', dest='number_of_devices', type=int)
+
         sub_command.add_argument("--spdk-image", help='SPDK image uri', dest='spdk_image')
         sub_command.add_argument("--spdk-debug", help='Enable spdk debug logs', dest='spdk_debug', required=False, action='store_true')
 
-        sub_command.add_argument("--iobuf_small_pool_count", help='bdev_set_options param', dest='small_pool_count',  type=int, default=0)
-        sub_command.add_argument("--iobuf_large_pool_count", help='bdev_set_options param', dest='large_pool_count',  type=int, default=0)
         sub_command.add_argument("--iobuf_small_bufsize", help='bdev_set_options param', dest='small_bufsize',  type=int, default=0)
         sub_command.add_argument("--iobuf_large_bufsize", help='bdev_set_options param', dest='large_bufsize',  type=int, default=0)
 
@@ -64,7 +67,7 @@ class CLIWrapper:
                                  dest='force_migrate', required=False, action='store_true')
         # List all storage nodes
         sub_command = self.add_sub_command(subparser, "list", 'List storage nodes')
-        sub_command.add_argument("--cluster-id", help='id of the cluster for which nodes are listed')
+        sub_command.add_argument("--cluster-id", help='id of the cluster for which nodes are listed', dest='cluster_id')
         sub_command.add_argument("--json", help='Print outputs in json format', action='store_true')
 
         sub_command = self.add_sub_command(subparser, "get", 'Get storage node info')
@@ -72,17 +75,18 @@ class CLIWrapper:
 
         # Restart storage node
         sub_command = self.add_sub_command(
-            subparser, "restart", 'Restart a storage node.', usage='All functions and device drivers will be reset. '
+            subparser, "restart", 'Restart a storage node', usage='All functions and device drivers will be reset. '
                                   'During restart, the node does not accept IO. In a high-availability setup, '
-                                  'this will not impact operations.')
+                                  'this will not impact operations')
         sub_command.add_argument("node_id", help='UUID of storage node')
-        sub_command.add_argument("--cpu-mask", help='SPDK app CPU mask, default is all cores found', dest='spdk_cpu_mask')
-        sub_command.add_argument("--memory", help='SPDK huge memory allocation, default is 4G', dest='spdk_mem')
+        sub_command.add_argument("--max-lvol", help='Max lvol per storage node', dest='max_lvol', type=int, default=0)
+        sub_command.add_argument("--max-snap", help='Max snapshot per storage node', dest='max_snap', type=int, default=0)
+        sub_command.add_argument("--max-prov", help='Max provisioning size of all storage nodes', dest='max_prov', default="")
+        sub_command.add_argument("--number-of-devices", help='Number of devices per storage node if it\'s not supported EC2 instance', dest='number_of_devices', type=int, default=0)
+
         sub_command.add_argument("--spdk-image", help='SPDK image uri', dest='spdk_image')
         sub_command.add_argument("--spdk-debug", help='Enable spdk debug logs', dest='spdk_debug', required=False, action='store_true')
 
-        sub_command.add_argument("--iobuf_small_pool_count", help='bdev_set_options param', dest='small_pool_count',  type=int, default=0)
-        sub_command.add_argument("--iobuf_large_pool_count", help='bdev_set_options param', dest='large_pool_count',  type=int, default=0)
         sub_command.add_argument("--iobuf_small_bufsize", help='bdev_set_options param', dest='small_bufsize',  type=int, default=0)
         sub_command.add_argument("--iobuf_large_bufsize", help='bdev_set_options param', dest='large_bufsize',  type=int, default=0)
 
@@ -90,7 +94,7 @@ class CLIWrapper:
 
         # Shutdown storage node
         sub_command = self.add_sub_command(
-            subparser, "shutdown", 'Shutdown a storage node.', usage='Once the command is issued, the node will stop accepting '
+            subparser, "shutdown", 'Shutdown a storage node', usage='Once the command is issued, the node will stop accepting '
                                    'IO,but IO, which was previously received, will still be processed. '
                                    'In a high-availability setup, this will not impact operations.')
         sub_command.add_argument("node_id", help='UUID of storage node')
@@ -98,7 +102,7 @@ class CLIWrapper:
 
         # Suspend storage node
         sub_command = self.add_sub_command(
-            subparser, "suspend", 'Suspend a storage node.', usage='The node will stop accepting new IO, but will finish '
+            subparser, "suspend", 'Suspend a storage node', usage='The node will stop accepting new IO, but will finish '
                                   'processing any IO, which has been received already.')
         sub_command.add_argument("node_id", help='UUID of storage node')
         sub_command.add_argument("--force", help='Force node suspend', required=False, action='store_true')
@@ -107,13 +111,13 @@ class CLIWrapper:
         sub_command = self.add_sub_command(subparser, "resume", 'Resume a storage node')
         sub_command.add_argument("node_id", help='UUID of storage node')
 
-        sub_command = self.add_sub_command(subparser, "get-io-stats", 'Returns the current io statistics of a node')
+        sub_command = self.add_sub_command(subparser, "get-io-stats", 'Get node IO statistics')
         sub_command.add_argument("node_id", help='Node ID')
         sub_command.add_argument("--history", help='list history records -one for every 15 minutes- '
                                                    'for XX days and YY hours -up to 10 days in total-, format: XXdYYh')
 
         sub_command = self.add_sub_command(
-            subparser, 'get-capacity', 'Returns the size, absolute and relative utilization of the node in bytes')
+            subparser, 'get-capacity', 'Get node capacity statistics')
         sub_command.add_argument("node_id", help='Node ID')
         sub_command.add_argument("--history", help='list history records -one for every 15 minutes- '
                                                    'for XX days and YY hours -up to 10 days in total-, format: XXdYYh')
@@ -126,7 +130,7 @@ class CLIWrapper:
         sub_command.add_argument(
             "--json", help='Print outputs in json format', required=False, action='store_true')
 
-        sub_command = self.add_sub_command(subparser, "device-testing-mode", 'set pt testing bdev mode')
+        sub_command = self.add_sub_command(subparser, "device-testing-mode", 'Set device testing mode')
         sub_command.add_argument("device_id", help='Device UUID')
         sub_command.add_argument("mode", help='Testing mode', choices=[
             'full_pass_through', 'io_error_on_read', 'io_error_on_write',
@@ -144,7 +148,7 @@ class CLIWrapper:
         sub_command.add_argument("device_id", help='the devices\'s UUID')
 
         # Reset storage device
-        sub_command = self.add_sub_command(subparser, "restart-device", 'Re add "removed" storage device',
+        sub_command = self.add_sub_command(subparser, "restart-device", 'Restart storage device',
                                            usage="a previously removed or unavailable device may be returned into "
                                                  "online state. If the device is not physically present, accessible "
                                                  "or healthy, it will flip back into unavailable state again.")
@@ -157,30 +161,29 @@ class CLIWrapper:
                                                  "auto-rebalancing background process in which some cluster "
                                                  "capacity is re-distributed to this newly added device.")
         sub_command = self.add_sub_command(
-            subparser, 'remove-device', 'Remove a storage device.', usage='The device will become unavailable, independently '
+            subparser, 'remove-device', 'Remove a storage device', usage='The device will become unavailable, independently '
                                         'if it was physically removed from the server. This function can be used if '
                                         'auto-detection of removal did not work or if the device must be maintained '
                                         'otherwise while remaining inserted into the server. ')
         sub_command.add_argument("device_id", help='Storage device ID')
         sub_command.add_argument("--force", help='Force device remove', required=False, action='store_true')
 
-        sub_command = self.add_sub_command(
-            subparser, 'set-failed-device', 'Set storage device to failed state. ', usage='This command can be used, '
-                                            'if an administrator believes that the device must be changed, '
-                                            'but its status and health state do not lead to an automatic detection '
-                                            'of the failure state. Attention!!! The failed state is final, all data '
-                                            'on the device will be automatically recovered to other devices '
-                                            'in the cluster. ')
+        # sub_command = self.add_sub_command(
+        #     subparser, 'set-failed-device', 'Set storage device to failed state. ', usage='This command can be used, '
+        #                                     'if an administrator believes that the device must be changed, '
+        #                                     'but its status and health state do not lead to an automatic detection '
+        #                                     'of the failure state. Attention!!! The failed state is final, all data '
+        #                                     'on the device will be automatically recovered to other devices '
+        #                                     'in the cluster. ')
 
         sub_command = self.add_sub_command(
-            subparser, 'get-capacity-device', 'Returns the size, absolute and relative utilization of '
-                                              'the device in bytes')
+            subparser, 'get-capacity-device', 'Get device capacity')
         sub_command.add_argument("device_id", help='Storage device ID')
         sub_command.add_argument("--history", help='list history records -one for every 15 minutes- '
                                                    'for XX days and YY hours -up to 10 days in total-, format: XXdYYh')
 
         sub_command = self.add_sub_command(
-            subparser, 'get-io-stats-device', 'Returns device IO statistics')
+            subparser, 'get-io-stats-device', 'Get device IO statistics')
         sub_command.add_argument("device_id", help='Storage device ID')
         sub_command.add_argument("--history", help='list history records -one for every 15 minutes- '
                                                    'for XX days and YY hours -up to 10 days in total-, format: XXdYYh')
@@ -237,6 +240,23 @@ class CLIWrapper:
                                  dest='log_del_interval', default='7d')
         sub_command.add_argument("--metrics-retention-period", help='retention period for prometheus metrics, default: 7d',
                                  dest='metrics_retention_period', default='7d')
+        sub_command.add_argument("--contact-point", help='the email or slack webhook url to be used for alerting',
+                                 dest='contact_point', default='')
+        sub_command.add_argument("--grafana-endpoint", help='the endpoint url for grafana',
+                                 dest='grafana_endpoint', default='')
+
+        # add cluster
+        sub_command = self.add_sub_command(subparser, 'add', 'Add new cluster')
+        sub_command.add_argument("--blk_size", help='The block size in bytes', type=int, choices=[512, 4096], default=512)
+        sub_command.add_argument("--page_size", help='The size of a data page in bytes', type=int, default=2097152)
+        sub_command.add_argument("--cap-warn", help='Capacity warning level in percent, default=80',
+                                 type=int, required=False, dest="cap_warn")
+        sub_command.add_argument("--cap-crit", help='Capacity critical level in percent, default=90',
+                                 type=int, required=False, dest="cap_crit")
+        sub_command.add_argument("--prov-cap-warn", help='Capacity warning level in percent, default=180',
+                                 type=int, required=False, dest="prov_cap_warn")
+        sub_command.add_argument("--prov-cap-crit", help='Capacity critical level in percent, default=190',
+                                 type=int, required=False, dest="prov_cap_crit")
 
         # show cluster list
         self.add_sub_command(subparser, 'list', 'Show clusters list')
@@ -259,36 +279,33 @@ class CLIWrapper:
         sub_command.add_argument("cluster_id", help='the cluster UUID')
 
         sub_command = self.add_sub_command(
-            subparser, 'get-capacity', 'Returns the current total available capacity, utilized capacity '
-                                       '(in percent and absolute) and provisioned capacity (in percent and absolute) '
-                                       'in GB in the cluster.')
+            subparser, 'get-capacity', 'Get cluster capacity')
         sub_command.add_argument("cluster_id", help='the cluster UUID')
         sub_command.add_argument("--json", help='Print json output', required=False, action='store_true')
         sub_command.add_argument("--history", help='(XXdYYh), list history records (one for every 15 minutes) '
                                                    'for XX days and YY hours (up to 10 days in total).')
 
         sub_command = self.add_sub_command(
-            subparser, 'get-io-stats', 'Returns cluster IO statistics.')
+            subparser, 'get-io-stats', 'Get cluster IO statistics')
         sub_command.add_argument("cluster_id", help='the cluster UUID')
         sub_command.add_argument("--records", help='Number of records, default: 20', type=int, default=20)
         sub_command.add_argument("--history", help='(XXdYYh), list history records (one for every 15 minutes) '
                                                    'for XX days and YY hours (up to 10 days in total).')
 
-        sub_command = self.add_sub_command(
-            subparser, 'get-cli-ssh-pass', 'returns the ssh password for the CLI ssh connection')
-        sub_command.add_argument("cluster_id", help='the cluster UUID')
+        # sub_command = self.add_sub_command(
+        #     subparser, 'get-cli-ssh-pass', 'returns the ssh password for the CLI ssh connection')
+        # sub_command.add_argument("cluster_id", help='the cluster UUID')
 
         # get-logs
         sub_command = self.add_sub_command(subparser, 'get-logs', 'Returns cluster status logs')
         sub_command.add_argument("cluster_id", help='cluster uuid')
 
         # get-secret
-        sub_command = self.add_sub_command(subparser, 'get-secret', 'Returns auto generated, 20 characters secret.')
+        sub_command = self.add_sub_command(subparser, 'get-secret', 'Get cluster secret')
         sub_command.add_argument("cluster_id", help='cluster uuid')
 
         # set-secret
-        sub_command = self.add_sub_command(subparser, 'upd-secret', 'Updates the secret (replaces the existing '
-                                                                    'one with a new one) and returns the new one.')
+        sub_command = self.add_sub_command(subparser, 'upd-secret', 'Updates the cluster secret')
         sub_command.add_argument("cluster_id", help='cluster uuid')
         sub_command.add_argument("secret", help='new 20 characters password')
 
@@ -311,6 +328,16 @@ class CLIWrapper:
         # get tasks list
         sub_command = self.add_sub_command(subparser, "list-tasks", 'List tasks by cluster ID')
         sub_command.add_argument("cluster_id", help='UUID of the cluster')
+
+        # cancel task
+        sub_command = self.add_sub_command(subparser, "cancel-task", 'Cancel task by ID')
+        sub_command.add_argument("id", help='UUID of the Task')
+
+        # delete cluster
+        sub_command = self.add_sub_command(
+            subparser, 'delete', 'Delete Cluster',
+            usage="This is only possible, if no storage nodes and pools are attached to the cluster")
+        sub_command.add_argument("id", help='cluster UUID')
 
 
         #
@@ -362,8 +389,9 @@ class CLIWrapper:
         sub_command.add_argument("--max-w-mbytes", help='Maximum Write Mega Bytes Per Second', type=int)
 
         # list lvols
-        sub_command = self.add_sub_command(subparser, 'list', 'List all LVols')
-        sub_command.add_argument("--cluster-id", help='List LVols in particular cluster')
+        sub_command = self.add_sub_command(subparser, 'list', 'List LVols')
+        sub_command.add_argument("--cluster-id", help='List LVols in particular cluster', dest="cluster_id")
+        sub_command.add_argument("--pool", help='List LVols in particular Pool ID or name', dest="pool")
         sub_command.add_argument("--json", help='Print outputs in json format', required=False, action='store_true')
 
         # Get the size and max_size of the lvol
@@ -378,7 +406,7 @@ class CLIWrapper:
 
         # delete lvol
         sub_command = self.add_sub_command(
-            subparser, 'delete', 'Delete LVol.', usage='This is only possible, if no more snapshots and non-inflated clones '
+            subparser, 'delete', 'Delete LVol', usage='This is only possible, if no more snapshots and non-inflated clones '
                                  'of the volume exist. The volume must be suspended before it can be deleted. ')
         sub_command.add_argument("id", help='LVol id or ids', nargs='+')
         sub_command.add_argument("--force", help='Force delete LVol from the cluster', required=False,
@@ -386,13 +414,13 @@ class CLIWrapper:
 
         # show connection string
         sub_command = self.add_sub_command(
-            subparser, 'connect', 'show connection strings to cluster.', usage='Multiple connections to the cluster are '
+            subparser, 'connect', 'Get lvol connection strings', usage='Multiple connections to the cluster are '
                                   'always available for multi-pathing and high-availability.')
         sub_command.add_argument("id", help='LVol id')
 
         # lvol resize
         sub_command = self.add_sub_command(
-            subparser, 'resize', 'Resize LVol.', usage='The lvol cannot be exceed the maximum size for lvols. It cannot '
+            subparser, 'resize', 'Resize LVol', usage='The lvol cannot be exceed the maximum size for lvols. It cannot '
                                  'exceed total remaining provisioned space in pool. It cannot drop below the '
                                  'current utilization.')
         sub_command.add_argument("id", help='LVol id')
@@ -419,23 +447,22 @@ class CLIWrapper:
 
         # lvol get-capacity
         sub_command = self.add_sub_command(
-            subparser, 'get-capacity', 'Returns the current (or historic) provisioned and utilized '
-                                       '(in percent and absolute) capacity.')
+            subparser, 'get-capacity',"Get LVol capacity")
         sub_command.add_argument("id", help='LVol id')
         sub_command.add_argument("--history", help='(XXdYYh), list history records (one for every 15 minutes) '
                                                    'for XX days and YY hours (up to 10 days in total).')
 
         # lvol get-io-stats
         sub_command = self.add_sub_command(
-            subparser, 'get-io-stats', help="Returns LVol IO statistics")
+            subparser, 'get-io-stats', help="Get LVol IO statistics")
         sub_command.add_argument("id", help='LVol id')
         sub_command.add_argument("--history", help='(XXdYYh), list history records (one for every 15 minutes) '
                                                    'for XX days and YY hours (up to 10 days in total).')
 
-        sub_command = self.add_sub_command(subparser, 'send-cluster-map', 'send distr cluster map')
+        sub_command = self.add_sub_command(subparser, 'send-cluster-map', 'send cluster map')
         sub_command.add_argument("id", help='LVol id')
 
-        sub_command = self.add_sub_command(subparser, 'get-cluster-map', 'get distr cluster map')
+        sub_command = self.add_sub_command(subparser, 'get-cluster-map', 'get cluster map')
         sub_command.add_argument("id", help='LVol id')
 
         # check lvol
@@ -446,7 +473,7 @@ class CLIWrapper:
         # mgmt-node ops
         subparser = self.add_command('mgmt', 'Management node commands')
 
-        sub_command = self.add_sub_command(subparser, 'add', 'Add Management node to the cluster')
+        sub_command = self.add_sub_command(subparser, 'add', 'Add Management node to the cluster (local run)')
         sub_command.add_argument("cluster_ip", help='the cluster IP address')
         sub_command.add_argument("cluster_id", help='the cluster UUID')
         sub_command.add_argument("ifname", help='Management interface name')
@@ -462,6 +489,7 @@ class CLIWrapper:
         # add pool
         sub_command = self.add_sub_command(subparser, 'add', 'Add a new Pool')
         sub_command.add_argument("name", help='Pool name')
+        sub_command.add_argument("cluster_id", help='Cluster UUID')
         sub_command.add_argument("--pool-max", help='Pool maximum size: 20M, 20G, 0(default)', default="0")
         sub_command.add_argument("--lvol-max", help='LVol maximum size: 20M, 20G, 0(default)', default="0")
         sub_command.add_argument("--max-rw-iops", help='Maximum Read Write IO Per Second', type=int)
@@ -485,7 +513,8 @@ class CLIWrapper:
         # list pools
         sub_command = self.add_sub_command(subparser, 'list', 'List pools')
         sub_command.add_argument("--json", help='Print outputs in json format', required=False, action='store_true')
-        sub_command.add_argument("--cluster-id", help='ID of the cluster', required=False, action='store_true')
+        sub_command.add_argument("--cluster-id", help='ID of the cluster', dest="cluster_id")
+
         # get pool
         sub_command = self.add_sub_command(subparser, 'get', 'get pool details')
         sub_command.add_argument("id", help='pool uuid')
@@ -506,24 +535,21 @@ class CLIWrapper:
         sub_command.add_argument("pool_id", help='pool uuid')
 
         # get-secret
-        sub_command = self.add_sub_command(subparser, 'get-secret', 'Returns auto generated, 20 characters secret.')
+        sub_command = self.add_sub_command(subparser, 'get-secret', 'Get pool secret')
         sub_command.add_argument("pool_id", help='pool uuid')
 
         # get-secret
-        sub_command = self.add_sub_command(subparser, 'upd-secret', 'Updates the secret (replaces the existing '
-                                                                    'one with a new one) and returns the new one.')
+        sub_command = self.add_sub_command(subparser, 'upd-secret', 'Updates pool secret')
         sub_command.add_argument("pool_id", help='pool uuid')
         sub_command.add_argument("secret", help='new 20 characters password')
 
         # get-capacity
-        sub_command = self.add_sub_command(subparser, 'get-capacity', 'Return provisioned, utilized (absolute) '
-                                                                      'and utilized (percent) storage on the Pool.')
+        sub_command = self.add_sub_command(subparser, 'get-capacity', 'Get pool capacity')
         sub_command.add_argument("pool_id", help='pool uuid')
 
         # get-io-stats
         sub_command = self.add_sub_command(
-            subparser, 'get-io-stats', 'Returns either the current or historic io statistics '
-                                       '(read-IO, write-IO, total-IO, read mbs, write mbs, total mbs).')
+            subparser, 'get-io-stats', 'Get pool IO statistics')
         sub_command.add_argument("id", help='Pool id')
         sub_command.add_argument("--history", help='(XXdYYh), list history records (one for every 15 minutes) '
                                                    'for XX days and YY hours (up to 10 days in total).')
@@ -577,7 +603,7 @@ class CLIWrapper:
         sub_command.add_argument("node_id", help='Caching node UUID')
         sub_command.add_argument("lvol_id", help='LVol UUID')
 
-        sub_command = self.add_sub_command(subparser, 'recreate', 'recreate Caching node bdevs ')
+        sub_command = self.add_sub_command(subparser, 'recreate', 'recreate Caching node bdevs')
         sub_command.add_argument("node_id", help='Caching node UUID')
 
     def init_parser(self):
@@ -613,10 +639,13 @@ class CLIWrapper:
             elif sub_command == "deploy-cleaner":
                 ret = storage_ops.deploy_cleaner()
 
-            elif sub_command == "add":
-                ret = self.storage_node_add(args)
-
             elif sub_command == "add-node":
+                if not args.max_lvol:
+                    self.parser.error(f"Mandatory argument '--max-lvol' not provided for {sub_command}")
+                if not args.max_snap:
+                    self.parser.error(f"Mandatory argument '--max-snap' not provided for {sub_command}")
+                if not args.max_prov:
+                    self.parser.error(f"Mandatory argument '--max-prov' not provided for {sub_command}")
                 cluster_id = args.cluster_id
                 node_ip = args.node_ip
                 ifname = args.ifname
@@ -624,34 +653,28 @@ class CLIWrapper:
                 spdk_image = args.spdk_image
                 spdk_debug = args.spdk_debug
 
-                small_pool_count = args.small_pool_count
-                large_pool_count = args.large_pool_count
                 small_bufsize = args.small_bufsize
                 large_bufsize = args.large_bufsize
+                num_partitions_per_dev = args.partitions
+                jm_percent = args.jm_percent
 
-                spdk_cpu_mask = None
-                if args.spdk_cpu_mask:
-                    if self.validate_cpu_mask(args.spdk_cpu_mask):
-                        spdk_cpu_mask = args.spdk_cpu_mask
-                    else:
-                        return f"Invalid cpu mask value: {args.spdk_cpu_mask}"
-
-                spdk_mem = None
-                if args.spdk_mem:
-                    spdk_mem = self.parse_size(args.spdk_mem)
-                    if spdk_mem < 1 * 1024 * 1024:
-                        return f"SPDK memory:{args.spdk_mem} must be larger than 1G"
+                max_lvol = args.max_lvol
+                max_snap = args.max_snap
+                max_prov = self.parse_size(args.max_prov)
+                number_of_devices = args.number_of_devices
+                if max_prov < 1 * 1024 * 1024 * 1024:
+                    return f"Max provisioning memory:{args.max_prov} must be larger than 1G"
 
                 out = storage_ops.add_node(
-                    cluster_id, node_ip, ifname, data_nics, spdk_cpu_mask, spdk_mem, spdk_image, spdk_debug,
-                    small_pool_count, large_pool_count, small_bufsize, large_bufsize, args.jm_pcie)
+                    cluster_id, node_ip, ifname, data_nics, max_lvol, max_snap, max_prov, spdk_image, spdk_debug,
+                    small_bufsize, large_bufsize, num_partitions_per_dev, jm_percent, number_of_devices)
                 return out
 
             elif sub_command == "list":
-                ret = storage_ops.list_storage_nodes(self.db_store, args.json)
+                ret = storage_ops.list_storage_nodes(args.json, args.cluster_id)
 
             elif sub_command == "remove":
-                ret = storage_ops.remove_storage_node(args.node_id, args.force_remove)
+                ret = storage_ops.remove_storage_node(args.node_id, args.force_remove, args.force_migrate)
 
             elif sub_command == "delete":
                 ret = storage_ops.delete_storage_node(args.node_id)
@@ -662,30 +685,18 @@ class CLIWrapper:
                 spdk_image = args.spdk_image
                 spdk_debug = args.spdk_debug
 
-                cpu_mask = None
-                if args.spdk_cpu_mask:
-                    if self.validate_cpu_mask(args.spdk_cpu_mask):
-                        cpu_mask = args.spdk_cpu_mask
-                    else:
-                        return f"Invalid cpu mask value: {args.spdk_cpu_mask}"
+                max_lvol = args.max_lvol
+                max_snap = args.max_snap
+                max_prov = self.parse_size(args.max_prov) if args.max_prov else 0
+                number_of_devices = args.number_of_devices
 
-                spdk_mem = None
-                if args.spdk_mem:
-                    spdk_mem = self.parse_size(args.spdk_mem)
-                    if spdk_mem < 1 * 1024 * 1024:
-                        return f"SPDK memory:{args.spdk_mem} must be larger than 1G"
-
-
-                small_pool_count = args.small_pool_count
-                large_pool_count = args.large_pool_count
                 small_bufsize = args.small_bufsize
                 large_bufsize = args.large_bufsize
 
                 ret = storage_ops.restart_storage_node(
-                    node_id, cpu_mask, spdk_mem,
+                    node_id, max_lvol, max_snap, max_prov,
                     spdk_image, spdk_debug,
-                    small_pool_count, large_pool_count,
-                    small_bufsize, large_bufsize)
+                    small_bufsize, large_bufsize, number_of_devices)
 
             elif sub_command == "list-devices":
                 ret = self.storage_node_list_devices(args)
@@ -793,8 +804,8 @@ class CLIWrapper:
             sub_command = args_dict[args.command]
             if sub_command == 'create':
                 ret = self.cluster_create(args)
-            elif sub_command == 'join':
-                ret = self.cluster_join(args)
+            elif sub_command == 'add':
+                ret = self.cluster_add(args)
             elif sub_command == 'status':
                 cluster_id = args.cluster_id
                 ret = cluster_ops.show_cluster(cluster_id)
@@ -844,13 +855,19 @@ class CLIWrapper:
                 ret = cluster_ops.update_cluster(args.id)
 
             elif sub_command == "list-tasks":
-                ret = cluster_ops.list_tasks(args.cluster_id)
+                ret = tasks_controller.list_tasks(args.cluster_id)
+
+            elif sub_command == "cancel-task":
+                ret = tasks_controller.cancel_task(args.id)
 
             elif sub_command == "graceful-shutdown":
                 ret = cluster_ops.cluster_grace_shutdown(args.id)
 
             elif sub_command == "graceful-startup":
                 ret = cluster_ops.cluster_grace_startup(args.id)
+
+            elif sub_command == "delete":
+                ret = cluster_ops.delete_cluster(args.id)
 
             else:
                 self.parser.print_help()
@@ -896,7 +913,7 @@ class CLIWrapper:
                     args.id, args.max_rw_iops, args.max_rw_mbytes,
                     args.max_r_mbytes, args.max_w_mbytes)
             elif sub_command == "list":
-                ret = lvol_controller.list_lvols(args.json)
+                ret = lvol_controller.list_lvols(args.json, args.cluster_id, args.pool)
             elif sub_command == "list-mem":
                 ret = lvol_controller.list_lvols_mem(args.json, args.csv)
             elif sub_command == "get":
@@ -955,7 +972,7 @@ class CLIWrapper:
                 cluster_id = args.cluster_id
                 cluster_ip = args.cluster_ip
                 ifname = args.ifname
-                ret = cluster_ops.join_cluster(cluster_ip, cluster_id, "management", ifname, [], None, None)
+                ret = mgmt_ops.deploy_mgmt_node(cluster_ip, cluster_id, ifname)
             elif sub_command == "list":
                 ret = mgmt_ops.list_mgmt_nodes(args.json)
             elif sub_command == "remove":
@@ -974,7 +991,9 @@ class CLIWrapper:
                     args.max_rw_mbytes,
                     args.max_r_mbytes,
                     args.max_w_mbytes,
-                    args.has_secret)
+                    args.has_secret,
+                    args.cluster_id
+                )
 
             elif sub_command == "set":
                 pool_max = None
@@ -996,7 +1015,7 @@ class CLIWrapper:
                 ret = pool_controller.get_pool(args.id, args.json)
 
             elif sub_command == "list":
-                ret = pool_controller.list_pools(args.json)
+                ret = pool_controller.list_pools(args.json, args.cluster_id)
 
             elif sub_command == "delete":
                 ret = pool_controller.delete_pool(args.id)
@@ -1092,14 +1111,6 @@ class CLIWrapper:
         out = storage_ops.list_storage_nodes(self.db_store, args.json)
         return out
 
-    def storage_node_add(self, args):
-        cluster_id = args.cluster_id
-        ifname = args.ifname
-        data_nics = args.data_nics
-        # TODO: Validate the inputs
-        out = storage_ops.add_storage_node(cluster_id, ifname, data_nics)
-        return out
-
     def storage_node_list_devices(self, args):
         node_id = args.node_id
         sort = args.sort
@@ -1108,6 +1119,17 @@ class CLIWrapper:
         is_json = args.json
         out = storage_ops.list_storage_devices(self.db_store, node_id, sort, is_json)
         return out
+
+    def cluster_add(self, args):
+        page_size_in_blocks = args.page_size
+        blk_size = args.blk_size
+        cap_warn = args.cap_warn
+        cap_crit = args.cap_crit
+        prov_cap_warn = args.prov_cap_warn
+        prov_cap_crit = args.prov_cap_crit
+
+        return cluster_ops.add_cluster(
+            blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit)
 
     def cluster_create(self, args):
         page_size_in_blocks = args.page_size
@@ -1120,33 +1142,13 @@ class CLIWrapper:
         ifname = args.ifname
         log_del_interval = args.log_del_interval
         metrics_retention_period = args.metrics_retention_period
+        contact_point = args.contact_point
+        grafana_endpoint = args.grafana_endpoint
 
-        # TODO: Validate the inputs
         return cluster_ops.create_cluster(
             blk_size, page_size_in_blocks,
             CLI_PASS, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
-            ifname, log_del_interval, metrics_retention_period)
-
-    def cluster_join(self, args):
-        cluster_id = args.cluster_id
-        cluster_ip = args.cluster_ip
-        role = args.role
-        ifname = args.ifname
-        data_nics = args.data_nics
-        spdk_cpu_mask = None
-        if args.spdk_cpu_mask:
-            if self.validate_cpu_mask(args.spdk_cpu_mask):
-                spdk_cpu_mask = args.spdk_cpu_mask
-            else:
-                return f"Invalid cpu mask value: {args.spdk_cpu_mask}"
-
-        spdk_mem = None
-        if args.spdk_mem:
-            spdk_mem = self.parse_size(args.spdk_mem)
-            if spdk_mem < 1 * 1024 * 1024:
-                return f"SPDK memory:{args.spdk_mem} must be larger than 1G"
-
-        return cluster_ops.join_cluster(cluster_ip, cluster_id, role, ifname, data_nics, spdk_cpu_mask, spdk_mem)
+            ifname, log_del_interval, metrics_retention_period, contact_point, grafana_endpoint)
 
     def query_yes_no(self, question, default="yes"):
         """Ask a yes/no question via raw_input() and return their answer.
