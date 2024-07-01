@@ -2,7 +2,7 @@
 # encoding: utf-8
 
 import logging
-import time
+import threading
 
 from flask import Blueprint, request
 
@@ -146,8 +146,12 @@ def storage_node_restart(uuid):
     if not node:
         return utils.get_response_error(f"node not found: {uuid}", 404)
 
-    out = storage_node_ops.restart_storage_node(uuid)
-    return utils.get_response(out)
+    threading.Thread(
+        target=storage_node_ops.restart_storage_node,
+        args=(uuid,)
+    ).start()
+
+    return utils.get_response(True)
 
 
 @bp.route('/storagenode/add', methods=['POST'])
