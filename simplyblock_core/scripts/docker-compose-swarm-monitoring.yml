@@ -68,6 +68,7 @@ services:
       ClusterIP: "HAProxy"
       ClusterSecret: "${CLUSTER_SECRET}"
     deploy:
+      mode: global
       placement:
         constraints: [node.role == manager]
     networks:
@@ -76,6 +77,7 @@ services:
   pushgateway:
     image: prom/pushgateway
     deploy:
+      mode: global
       placement:
         constraints: [node.role == manager]
     networks:
@@ -114,6 +116,7 @@ services:
     command: -c 'mkdir -p /data/thanos-data-bucket && /usr/bin/minio server /data'
     restart: "always"
     deploy:
+      mode: global
       placement:
         constraints: [node.role == manager]
     networks:
@@ -147,6 +150,7 @@ services:
     volumes:
       - ./objstore.yml:/etc/thanos/objstore.yml
     deploy:
+      mode: global
       placement:
         constraints: [node.role == manager]
     networks:
@@ -160,6 +164,7 @@ services:
       - --store=thanos-store:10901
       - --store=thanos-sidecar:10901
     deploy:
+      mode: global
       placement:
         constraints: [node.role == manager]
     networks:
@@ -178,6 +183,7 @@ services:
       - ./objstore.yml:/etc/thanos/objstore.yml
       - thanos_compactor_data:/data
     deploy:
+      mode: global
       placement:
         constraints: [node.role == manager]
     networks:
