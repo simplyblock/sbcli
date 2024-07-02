@@ -405,3 +405,8 @@ def validate_add_lvol_or_snap_on_node(memory_free, huge_free, max_lvol_or_snap,
     if node_lvol_or_snap_count >= max_lvol_or_snap:
         return f"You have exceeded the max number of lvol/snap {max_lvol_or_snap}"
     return ""
+
+
+def get_host_arch():
+    out, _, _ = shell_utils.run_command("uname -m")
+    return out
