@@ -218,33 +218,33 @@ jobs:
           echo "${FAILED_CASES_BULLETS}" >> $GITHUB_ENV
           echo "EOF" >> $GITHUB_ENV
 
-      - name: Send Slack Notification
-        if: always() && github.ref == 'refs/heads/main' || github.ref == 'refs/heads/pre-release'
-        env:
-          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
-          GITHUB_SERVER_URL: ${{ github.server_url }}
-          GITHUB_REPOSITORY: ${{ github.repository }}
-          S3_BUCKET_NAME: "simplyblock-e2e-test-logs"
-          RUN_ID: ${{ github.run_id }}
-          PASSED_TESTS: ${{ env.PASSED_TESTS }}
-          FAILED_TESTS: ${{ env.FAILED_TESTS }}
-          TOTAL_TESTS: ${{ env.TOTAL_TESTS }}
-          PASSED_CASES: ${{ env.PASSED_CASES }}
-          FAILED_CASES: ${{ env.FAILED_CASES }}
-          PASSED_CASES_BULLETS: ${{ env.PASSED_CASES_BULLETS }}
-          FAILED_CASES_BULLETS: ${{ env.FAILED_CASES_BULLETS }}
-          BRANCH_NAME: ${{ github.ref_name }}
-        run: |
-          GITHUB_RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}"
-          AWS_LOGS_URL="https://s3.console.aws.amazon.com/s3/buckets/${S3_BUCKET_NAME}?prefix=${RUN_ID}/&region=us-east-2"
-          if [[ ${{ job.status }} == 'success' ]]; then
-            OVERALL_STATUS=":white_check_mark: Overall Status: SUCCESS"
-          else
-            OVERALL_STATUS=":x: Overall Status: FAILURE"
-          fi
-          MESSAGE="Python E2E tests run triggered on branch **${BRANCH_NAME}**. \n${OVERALL_STATUS}\nGitHub Run: ${GITHUB_RUN_URL}\nAWS Logs: ${AWS_LOGS_URL}\n\nTotal Tests: ${{ env.TOTAL_TESTS }}\nPassed Tests: ${{ env.PASSED_TESTS }}\nFailed Tests: ${{ env.FAILED_TESTS }}\n\n-- Test Cases Passed :white_check_mark:\n${{ env.PASSED_CASES_BULLETS }}\n\n-- Test Cases Failed :x:\n${{ env.FAILED_CASES_BULLETS }}"
+      # - name: Send Slack Notification
+      #   if: always() && github.ref == 'refs/heads/main' || github.ref == 'refs/heads/pre-release'
+      #   env:
+      #     SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+      #     GITHUB_SERVER_URL: ${{ github.server_url }}
+      #     GITHUB_REPOSITORY: ${{ github.repository }}
+      #     S3_BUCKET_NAME: "simplyblock-e2e-test-logs"
+      #     RUN_ID: ${{ github.run_id }}
+      #     PASSED_TESTS: ${{ env.PASSED_TESTS }}
+      #     FAILED_TESTS: ${{ env.FAILED_TESTS }}
+      #     TOTAL_TESTS: ${{ env.TOTAL_TESTS }}
+      #     PASSED_CASES: ${{ env.PASSED_CASES }}
+      #     FAILED_CASES: ${{ env.FAILED_CASES }}
+      #     PASSED_CASES_BULLETS: ${{ env.PASSED_CASES_BULLETS }}
+      #     FAILED_CASES_BULLETS: ${{ env.FAILED_CASES_BULLETS }}
+      #     BRANCH_NAME: ${{ github.ref_name }}
+      #   run: |
+      #     GITHUB_RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}"
+      #     AWS_LOGS_URL="https://s3.console.aws.amazon.com/s3/buckets/${S3_BUCKET_NAME}?prefix=${RUN_ID}/&region=us-east-2"
+      #     if [[ ${{ job.status }} == 'success' ]]; then
+      #       OVERALL_STATUS=":white_check_mark: Overall Status: SUCCESS"
+      #     else
+      #       OVERALL_STATUS=":x: Overall Status: FAILURE"
+      #     fi
+      #     MESSAGE="Python E2E tests run triggered on branch **${BRANCH_NAME}**. \n${OVERALL_STATUS}\nGitHub Run: ${GITHUB_RUN_URL}\nAWS Logs: ${AWS_LOGS_URL}\n\nTotal Tests: ${{ env.TOTAL_TESTS }}\nPassed Tests: ${{ env.PASSED_TESTS }}\nFailed Tests: ${{ env.FAILED_TESTS }}\n\n-- Test Cases Passed :white_check_mark:\n${{ env.PASSED_CASES_BULLETS }}\n\n-- Test Cases Failed :x:\n${{ env.FAILED_CASES_BULLETS }}"
 
-          curl -X POST -H 'Content-type: application/json' --data "{\"text\":\"${MESSAGE}\"}" $SLACK_WEBHOOK_URL
+      #     curl -X POST -H 'Content-type: application/json' --data "{\"text\":\"${MESSAGE}\"}" $SLACK_WEBHOOK_URL
 
       - name: Destroy Cluster
         if: always()
