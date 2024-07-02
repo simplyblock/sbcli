@@ -7,7 +7,6 @@ from logger_config import setup_logger
 
 class TestClusterBase:
     def __init__(self, **kwargs):
-        
         self.cluster_secret = os.environ.get("CLUSTER_SECRET")
         self.cluster_id = os.environ.get("CLUSTER_ID")
 

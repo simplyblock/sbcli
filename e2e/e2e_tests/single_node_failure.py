@@ -2,7 +2,7 @@
 import os
 import time
 import threading
-from e2e_tests.test_cluster_base import TestClusterBase
+from e2e.e2e_tests.cluster_test_base import TestClusterBase
 from utils.common_utils import sleep_n_sec
 from utils.sbcli_utils import SbcliUtils
 from utils.ssh_utils import SshUtils

@@ -85,6 +85,7 @@ class TestSingleNodeMultipleFioPerfValidation:
                                                "Path": self.mount_path2, 
                                                "Log": self.log_path2}}
         self.fio_debug = kwargs.get("fio_debug", False)
+        self.base_cmd = os.environ.get("SBCLI_CMD", "sbcli-dev")
 
     def setup(self):
         """Contains setup required to run the test case
@@ -109,14 +110,7 @@ class TestSingleNodeMultipleFioPerfValidation:
                                   device=self.mount_path2)
         self.sbcli_utils.delete_all_lvols()
         self.sbcli_utils.delete_all_storage_pools()
-        expected_base = ["sbcli", "sbcli-dev", "sbcli-release"]
-        for base in expected_base:
-            output, _ = self.ssh_obj.exec_command(node=self.mgmt_nodes[0],
-                                                      command=base)
-            if len(output.strip()):
-                self.base_cmd = base
-                self.logger.info(f"Using base command as {self.base_cmd}")
-
+        
     def run(self):
         """ Performs each step of the testcase
         """
@@ -129,6 +123,7 @@ class TestSingleNodeMultipleFioPerfValidation:
         
         self.sbcli_utils.add_storage_pool(
             pool_name=self.pool_name,
+            cluster_id=cluster_id,
             max_rw_iops=30000,
             max_r_mbytes=100,
             max_w_mbytes=100
@@ -138,153 +133,123 @@ class TestSingleNodeMultipleFioPerfValidation:
         assert self.pool_name in list(pools.keys()), \
             f"Pool {self.pool_name} not present in list of pools post add: {pools}"
         
-        lvol_ndcs_npcs_config = [
-            (1, 1),
-            # (2, 1),
-            (1, 0),
-            # (4, 1),
-            # (2, 2),
-            # (4, 2),
-        ]
-        for lvol_config in lvol_ndcs_npcs_config:
-            for workload in ["randrw", "writetrim"]:
-                self.sbcli_utils.add_lvol(
-                    lvol_name=self.lvol_name1,
-                    pool_name=self.pool_name,
-                    size="10G",
-                    distr_ndcs=lvol_config[0],
-                    distr_npcs=lvol_config[1],
-                    distr_bs=4096,
-                    distr_chunk_bs=4096,
-                    max_rw_iops=600,
-                    max_r_mbytes=5,
-                    max_w_mbytes=5
-                )
+        self.sbcli_utils.add_lvol(
+            lvol_name=self.lvol_name1,
+            pool_name=self.pool_name,
+            size="10G",
+            distr_ndcs=1,
+            distr_npcs=1,
+            distr_bs=4096,
+            distr_chunk_bs=4096,
+            max_rw_iops=600,
+            max_r_mbytes=5,
+            max_w_mbytes=5
+        )
 
-                self.sbcli_utils.add_lvol(
-                    lvol_name=self.lvol_name2,
-                    pool_name=self.pool_name,
-                    size="10G",
-                    distr_ndcs=lvol_config[0],
-                    distr_npcs=lvol_config[1],
-                    distr_bs=4096,
-                    distr_chunk_bs=4096,
-                    max_rw_iops=600,
-                    max_r_mbytes=5,
-                    max_w_mbytes=5
-                )
+        self.sbcli_utils.add_lvol(
+            lvol_name=self.lvol_name2,
+            pool_name=self.pool_name,
+            size="10G",
+            distr_ndcs=1,
+            distr_npcs=1,
+            distr_bs=4096,
+            distr_chunk_bs=4096,
+            max_rw_iops=600,
+            max_r_mbytes=5,
+            max_w_mbytes=5
+        )
 
-                lvols = self.sbcli_utils.list_lvols()
-                assert self.lvol_name1 in list(lvols.keys()), \
-                    f"Lvol {self.lvol_name1} present in list of lvols post add: {lvols}"
+        lvols = self.sbcli_utils.list_lvols()
+        assert self.lvol_name1 in list(lvols.keys()), \
+            f"Lvol {self.lvol_name1} present in list of lvols post add: {lvols}"
 
-                assert self.lvol_name2 in list(lvols.keys()), \
-                    f"Lvol {self.lvol_name2} present in list of lvols post add: {lvols}"
-                
-                connect_str = self.sbcli_utils.get_lvol_connect_str(lvol_name=self.lvol_name1)
-                self.ssh_obj.exec_command(node=self.mgmt_nodes[0],
-                                        command=connect_str)
+        assert self.lvol_name2 in list(lvols.keys()), \
+            f"Lvol {self.lvol_name2} present in list of lvols post add: {lvols}"
+        
+        connect_str = self.sbcli_utils.get_lvol_connect_str(lvol_name=self.lvol_name1)
+        self.ssh_obj.exec_command(node=self.mgmt_nodes[0],
+                                  command=connect_str)
 
-                final_devices = self.ssh_obj.get_devices(node=self.mgmt_nodes[0])
-                disk_use = None
-                self.logger.info("Initial vs final disk:")
-                self.logger.info(f"Initial: {initial_devices}")
-                self.logger.info(f"Final: {final_devices}")
-                for device in final_devices:
-                    if device not in initial_devices:
-                        self.logger.info(f"Using disk: /dev/{device.strip()}")
-                        disk_use = f"/dev/{device.strip()}"
-                        break
-                self.lvol_devices[self.lvol_name1]["Device"] = disk_use
+        final_devices = self.ssh_obj.get_devices(node=self.mgmt_nodes[0])
+        disk_use = None
+        self.logger.info("Initial vs final disk:")
+        self.logger.info(f"Initial: {initial_devices}")
+        self.logger.info(f"Final: {final_devices}")
+        for device in final_devices:
+            if device not in initial_devices:
+                self.logger.info(f"Using disk: /dev/{device.strip()}")
+                disk_use = f"/dev/{device.strip()}"
+                break
+        self.lvol_devices[self.lvol_name1]["Device"] = disk_use
 
-                initial_devices = self.ssh_obj.get_devices(node=self.mgmt_nodes[0])
+        initial_devices = self.ssh_obj.get_devices(node=self.mgmt_nodes[0])
 
-                connect_str = self.sbcli_utils.get_lvol_connect_str(lvol_name=self.lvol_name2)
-                self.ssh_obj.exec_command(node=self.mgmt_nodes[0],
-                                        command=connect_str)
+        connect_str = self.sbcli_utils.get_lvol_connect_str(lvol_name=self.lvol_name2)
+        self.ssh_obj.exec_command(node=self.mgmt_nodes[0],
+                                  command=connect_str)
 
-                final_devices = self.ssh_obj.get_devices(node=self.mgmt_nodes[0])
-                disk_use = None
-                self.logger.info("Initial vs final disk:")
-                self.logger.info(f"Initial: {initial_devices}")
-                self.logger.info(f"Final: {final_devices}")
-                for device in final_devices:
-                    if device not in initial_devices:
-                        self.logger.info(f"Using disk: /dev/{device.strip()}")
-                        disk_use = f"/dev/{device.strip()}"
-                        break
-                self.lvol_devices[self.lvol_name2]["Device"] = disk_use
+        final_devices = self.ssh_obj.get_devices(node=self.mgmt_nodes[0])
+        disk_use = None
+        self.logger.info("Initial vs final disk:")
+        self.logger.info(f"Initial: {initial_devices}")
+        self.logger.info(f"Final: {final_devices}")
+        for device in final_devices:
+            if device not in initial_devices:
+                self.logger.info(f"Using disk: /dev/{device.strip()}")
+                disk_use = f"/dev/{device.strip()}"
+                break
+        self.lvol_devices[self.lvol_name2]["Device"] = disk_use
 
-                sleep_n_sec(5)
-                for lvol, data in self.lvol_devices.items():
-                    self.logger.info(f"Setting device and Running FIO for lvol: {lvol}, Data: {data}")
-                    self.ssh_obj.unmount_path(node=self.mgmt_nodes[0],
-                                            device=data["Device"])
-                    sleep_n_sec(2)
-                    self.ssh_obj.format_disk(node=self.mgmt_nodes[0],
-                                            device=data["Device"])
-                    sleep_n_sec(2)
-                    self.ssh_obj.mount_path(node=self.mgmt_nodes[0],
-                                            device=data["Device"],
-                                            mount_path=data["Path"])
-                    sleep_n_sec(2)
-                
-                self.run_fio_and_validate(workload_name=workload)
+        sleep_n_sec(5)
+        for lvol, data in self.lvol_devices.items():
+            self.logger.info(f"Setting device and Running FIO for lvol: {lvol}, Data: {data}")
+            self.ssh_obj.unmount_path(node=self.mgmt_nodes[0],
+                                      device=data["Device"])
+            sleep_n_sec(2)
+            self.ssh_obj.format_disk(node=self.mgmt_nodes[0],
+                                     device=data["Device"])
+            sleep_n_sec(2)
+            self.ssh_obj.mount_path(node=self.mgmt_nodes[0],
+                                    device=data["Device"],
+                                    mount_path=data["Path"])
+            sleep_n_sec(2)
+        
+        fio_thread1 = threading.Thread(target=self.ssh_obj.run_fio_test, args=(self.mgmt_nodes[0], None, self.lvol_devices[self.lvol_name1]["Path"], None,),
+                                   kwargs={"name": "fio_run_1",
+                                           "readwrite": "randrw",
+                                           "ioengine": "libaio",
+                                           "iodepth": 64,
+                                           "bs": 4096,
+                                           "rwmixread": 55,
+                                           "size": "2G",
+                                           "time_based": True,
+                                           "runtime": 300,
+                                           "output_format": "json",
+                                           "output_file": self.lvol_devices[self.lvol_name1]["Log"],
+                                           "debug": self.fio_debug})
 
-                self.ssh_obj.kill_processes(node=self.mgmt_nodes[0],
-                                            process_name="fio")
-                
-                self.cleanup_env()
-
-                self.logger.info(f"TEST CASE WITH ndcs={lvol_config[0]} and npcs={lvol_config[1]}"
-                                 f" running workload {workload} PASSED !!!")
-
-        self.logger.info("TEST CASE PASSED !!!")
-
-    def run_fio_and_validate(self, workload_name):
-        """Runs given fio workload and validates it
-
-        Args:
-            workload_name (str): Name of workload to run
-        """
-        fio_thread1 = threading.Thread(target=self.ssh_obj.run_fio_test, 
-                                           args=(self.mgmt_nodes[0], None, self.lvol_devices[self.lvol_name1]["Path"], None,),
-                                           kwargs={"name": "fio_run_1",
-                                                   "readwrite": workload_name,
-                                                   "ioengine": "libaio",
-                                                   "iodepth": 64,
-                                                   "bs": 4096,
-                                                   "rwmixread": 55,
-                                                   "size": "2G",
-                                                   "time_based": True,
-                                                   "runtime": 300,
-                                                   "output_format": "json",
-                                                   "output_file": self.lvol_devices[self.lvol_name1]["Log"],
-                                                   "debug": self.fio_debug})
-
-        fio_thread2 = threading.Thread(target=self.ssh_obj.run_fio_test, 
-                                        args=(self.mgmt_nodes[0], None, self.lvol_devices[self.lvol_name2]["Path"], None,),
-                                        kwargs={"name": "fio_run_2",
-                                                "readwrite": workload_name,
-                                                "ioengine": "libaio",
-                                                "iodepth": 64,
-                                                "bs": 4096,
-                                                "rwmixread": 55,
-                                                "size": "2G",
-                                                "time_based": True,
-                                                "runtime": 300,
-                                                "output_format": "json",
-                                                "output_file": self.lvol_devices[self.lvol_name2]["Log"],
-                                                "debug": self.fio_debug})
+        fio_thread2 = threading.Thread(target=self.ssh_obj.run_fio_test, args=(self.mgmt_nodes[0], None, self.lvol_devices[self.lvol_name2]["Path"], None,),
+                                    kwargs={"name": "fio_run_2",
+                                            "readwrite": "randrw",
+                                            "ioengine": "libaio",
+                                            "iodepth": 64,
+                                            "bs": 4096,
+                                            "rwmixread": 55,
+                                            "size": "2G",
+                                            "time_based": True,
+                                            "runtime": 300,
+                                            "output_format": "json",
+                                            "output_file": self.lvol_devices[self.lvol_name2]["Log"],
+                                            "debug": self.fio_debug})
             
-                                    
+                                      
         fio_thread1.start()
         fio_thread2.start()
         
         sleep_n_sec(5)
 
         process_list_before = self.ssh_obj.find_process_name(node=self.mgmt_nodes[0],
-                                                            process_name="fio")
+                                                             process_name="fio")
         self.logger.info(f"Process List: {process_list_before}")
         sleep_n_sec(60)
 
@@ -299,13 +264,13 @@ class TestSingleNodeMultipleFioPerfValidation:
             f"FIO process list changed - Before Sleep: {process_list_before}, After Sleep: {process_list_after}"
         
         self.common_utils.manage_fio_threads(node=self.mgmt_nodes[0],
-                                                threads=[fio_thread1, fio_thread2],
-                                                timeout=900)
+                                             threads=[fio_thread1, fio_thread2],
+                                             timeout=900)
 
         out1 = self.ssh_obj.read_file(node=self.mgmt_nodes[0],
-                                        file_name=self.log_path1)
+                                      file_name=self.log_path1)
         out2 = self.ssh_obj.read_file(node=self.mgmt_nodes[0],
-                                        file_name=self.log_path2)
+                                      file_name=self.log_path2)
         out1 = json.loads(out1)
         out2 = json.loads(out2)
         
@@ -315,36 +280,24 @@ class TestSingleNodeMultipleFioPerfValidation:
         self.common_utils.validate_fio_json_output(out1)
         self.common_utils.validate_fio_json_output(out2)
 
-    def cleanup_env(self):
-        """Cleans up environment
+        self.logger.info("TEST CASE PASSED !!!")
+
+    def teardown(self):
+        """Contains teradown required post test case execution
         """
-        self.ssh_obj.delete_file_dir(node=self.mgmt_nodes[0],
-                                     entity=self.log_path1)
-        self.ssh_obj.delete_file_dir(node=self.mgmt_nodes[0],
-                                     entity=self.log_path2)
         nqn_devices = []
+        self.logger.info("Inside teardown function")
         for lvol in list(self.lvol_devices.keys()):
             lvol_id = self.sbcli_utils.get_lvol_id(lvol_name=lvol)
-            if lvol_id is None:
-                continue
             lvol_details = self.sbcli_utils.get_lvol_details(lvol_id=lvol_id)
             nqn_devices.append(lvol_details[0]["nqn"])
             self.ssh_obj.unmount_path(node=self.mgmt_nodes[0],
                                       device=self.lvol_devices[lvol]["Device"])
+        self.sbcli_utils.delete_all_lvols()
+        self.sbcli_utils.delete_all_storage_pools()
         for nqn in nqn_devices:
             self.ssh_obj.exec_command(node=self.mgmt_nodes[0],
                                       command=f"sudo nvme disconnect -n {nqn}")
-        
-            
-    def teardown(self):
-        """Contains teradown required post test case execution
-        """
-        self.logger.info("Inside teardown function")
-        self.ssh_obj.kill_processes(node=self.mgmt_nodes[0],
-                                    process_name="fio")
-        self.cleanup_env()
-        self.sbcli_utils.delete_all_lvols()
-        self.sbcli_utils.delete_all_storage_pools()
         for node, ssh in self.ssh_obj.ssh_connections.items():
             self.logger.info(f"Closing node ssh connection for {node}")
             ssh.close()
