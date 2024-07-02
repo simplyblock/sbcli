@@ -35,7 +35,7 @@ jobs:
       run: |
         SHORT_SHA=$(echo ${{ env.SHA }} | head -c 8)
 
-        apt-get install -y qemu qemu-user-static
+        sudo apt-get install -y qemu qemu-user-static
         docker buildx ls
         export DOCKER_DEFAULT_PLATFORM=linux/arm64
         docker buildx build --platform linux/arm64 --no-cache -t simplyblock/simplyblock -f docker/Dockerfile .
