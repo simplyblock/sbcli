@@ -104,24 +104,6 @@ services:
     networks:
       - monitoring-net
 
-  minio:
-    image: minio/minio:RELEASE.2020-05-01T22-19-14Z
-    volumes:
-      - minio_data:/data
-    environment:
-      MINIO_PROMETHEUS_AUTH_TYPE: public
-      MINIO_ACCESS_KEY: myaccesskey
-      MINIO_SECRET_KEY: mysecretkey
-    entrypoint: sh
-    command: -c 'mkdir -p /data/thanos-data-bucket && /usr/bin/minio server /data'
-    restart: "always"
-    deploy:
-      mode: global
-      placement:
-        constraints: [node.role == manager]
-    networks:
-      - monitoring-net
-
   thanos-sidecar:
     image: thanosio/thanos:v0.31.0
     user: root
@@ -226,11 +208,6 @@ services:
       - ./alerting:/etc/grafana/provisioning/alerting
       - ./dashboard.yml:/etc/grafana/provisioning/dashboards/main.yaml
       - ./dashboards:/var/lib/grafana/dashboards
-    ports:
-      - target: 3000
-        published: 3000
-        protocol: tcp
-        mode: host
     deploy:
       placement:
         constraints: [node.role == manager]
@@ -264,8 +241,6 @@ volumes:
   prometheus_data:
     driver: ${USE_EFS:-local}
   thanos_compactor_data:
-    driver: ${USE_EFS:-local}
-  minio_data:
     driver: ${USE_EFS:-local}
 
 networks:
