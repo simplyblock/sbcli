@@ -52,8 +52,8 @@ GRAYLOG_CHECK_INTERVAL_SEC = 60
 
 FDB_CHECK_INTERVAL_SEC = 60
 
-SIMPLY_BLOCK_DOCKER_IMAGE = "simplyblock/simplyblock:pre-release"
-SIMPLY_BLOCK_CLI_NAME = "sbcli"
+SIMPLY_BLOCK_DOCKER_IMAGE = "simplyblock/simplyblock:dev"
+SIMPLY_BLOCK_CLI_NAME = "sbcli-dev"
 TASK_EXEC_INTERVAL_SEC = 30
 TASK_EXEC_RETRY_COUNT = 8
 
@@ -62,3 +62,31 @@ SIMPLY_BLOCK_SPDK_CORE_IMAGE = "simplyblock/spdk-core:latest"
 SIMPLY_BLOCK_SPDK_ULTRA_IMAGE = "simplyblock/spdk:prerelease-latest"
 
 GELF_PORT = 12201
+
+MIN_HUGE_PAGE_MEMORY_FOR_LVOL = 209715200
+MIN_SYS_MEMORY_FOR_LVOL = 524288000
+EXTRA_SMALL_POOL_COUNT = 1024
+EXTRA_LARGE_POOL_COUNT = 128
+EXTRA_HUGE_PAGE_MEMORY = 2147483648
+EXTRA_SYS_MEMORY = 2147483648
+
+INSTANCE_STORAGE_DATA = {
+        'i4i.large': {'number_of_devices': 1, 'size_per_device_gb': 468},
+        'i4i.xlarge': {'number_of_devices': 1, 'size_per_device_gb': 937},
+        'i4i.2xlarge': {'number_of_devices': 1, 'size_per_device_gb': 1875},
+        'i4i.4xlarge': {'number_of_devices': 1, 'size_per_device_gb': 3750},
+        'i4i.8xlarge': {'number_of_devices': 2, 'size_per_device_gb': 3750},
+        'i4i.12xlarge': {'number_of_devices': 3, 'size_per_device_gb': 3750},
+        'i4i.16xlarge': {'number_of_devices': 4, 'size_per_device_gb': 3750},
+        'i4i.24xlarge': {'number_of_devices': 6, 'size_per_device_gb': 3750},
+        'i4i.32xlarge': {'number_of_devices': 8, 'size_per_device_gb': 3750},
+        'i4i.metal': {'number_of_devices': 8, 'size_per_device_gb': 3750},
+        'i3en.large': {'number_of_devices': 1, 'size_per_device_gb': 1250},
+        'i3en.xlarge': {'number_of_devices': 1, 'size_per_device_gb': 2500},
+        'i3en.2xlarge': {'number_of_devices': 2, 'size_per_device_gb': 2500},
+        'i3en.3xlarge': {'number_of_devices': 1, 'size_per_device_gb': 7500},
+        'i3en.6xlarge': {'number_of_devices': 2, 'size_per_device_gb': 7500},
+        'i3en.12xlarge': {'number_of_devices': 4, 'size_per_device_gb': 7500},
+        'i3en.24xlarge': {'number_of_devices': 8, 'size_per_device_gb': 7500},
+        'i3en.metal': {'number_of_devices': 8, 'size_per_device_gb': 7500},
+    }

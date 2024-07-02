@@ -186,7 +186,9 @@ class DBController:
             for pool in self.get_pools(cluster_id):
                 if pool.cluster_id == cluster_id:
                     for lv_id in pool.lvols:
-                        lvols.append(self.get_lvol_by_id(lv_id))
+                        lv = self.get_lvol_by_id(lv_id)
+                        if lv:
+                            lvols.append(lv)
         else:
             lvols = LVol().read_from_db(self.kv_store)
         return lvols
@@ -288,3 +290,18 @@ class DBController:
         for task in self.get_job_tasks(""):
             if task.uuid == task_id:
                 return task
+
+    def get_snapshots_by_node_id(self, node_id):
+        ret = []
+        snaps = SnapShot().read_from_db(self.kv_store)
+        for snap in snaps:
+            if snap.lvol.host_id == node_id:
+                ret.append(snap)
+        return ret
+
+    def get_snode_size(self, node_id):
+        snode = self.get_storage_node_by_id(node_id)
+        total_node_capacity = 0
+        for dev in snode.nvme_devices:
+            total_node_capacity += dev.size
+        return total_node_capacity

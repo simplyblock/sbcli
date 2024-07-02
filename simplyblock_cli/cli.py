@@ -43,12 +43,14 @@ class CLIWrapper:
         sub_command.add_argument("--jm-percent", help='Number in percent to use for JM from each device',
                                  type=int, default=3, dest='jm_percent')
         sub_command.add_argument("--data-nics", help='Data interface names', nargs='+', dest='data_nics')
-        sub_command.add_argument("--memory", help='SPDK huge memory allocation, default is 4G', dest='spdk_mem')
+        sub_command.add_argument("--max-lvol", help='Max lvol per storage node', dest='max_lvol', type=int)
+        sub_command.add_argument("--max-snap", help='Max snapshot per storage node', dest='max_snap', type=int)
+        sub_command.add_argument("--max-prov", help='Max provisioning size of all storage nodes', dest='max_prov')
+        sub_command.add_argument("--number-of-devices", help='Number of devices per storage node if it\'s not supported EC2 instance', dest='number_of_devices', type=int)
+
         sub_command.add_argument("--spdk-image", help='SPDK image uri', dest='spdk_image')
         sub_command.add_argument("--spdk-debug", help='Enable spdk debug logs', dest='spdk_debug', required=False, action='store_true')
 
-        sub_command.add_argument("--iobuf_small_pool_count", help='bdev_set_options param', dest='small_pool_count',  type=int, default=0)
-        sub_command.add_argument("--iobuf_large_pool_count", help='bdev_set_options param', dest='large_pool_count',  type=int, default=0)
         sub_command.add_argument("--iobuf_small_bufsize", help='bdev_set_options param', dest='small_bufsize',  type=int, default=0)
         sub_command.add_argument("--iobuf_large_bufsize", help='bdev_set_options param', dest='large_bufsize',  type=int, default=0)
 
@@ -77,12 +79,14 @@ class CLIWrapper:
                                   'During restart, the node does not accept IO. In a high-availability setup, '
                                   'this will not impact operations')
         sub_command.add_argument("node_id", help='UUID of storage node')
-        sub_command.add_argument("--memory", help='SPDK huge memory allocation, default is 4G', dest='spdk_mem')
+        sub_command.add_argument("--max-lvol", help='Max lvol per storage node', dest='max_lvol', type=int, default=0)
+        sub_command.add_argument("--max-snap", help='Max snapshot per storage node', dest='max_snap', type=int, default=0)
+        sub_command.add_argument("--max-prov", help='Max provisioning size of all storage nodes', dest='max_prov', default="")
+        sub_command.add_argument("--number-of-devices", help='Number of devices per storage node if it\'s not supported EC2 instance', dest='number_of_devices', type=int, default=0)
+
         sub_command.add_argument("--spdk-image", help='SPDK image uri', dest='spdk_image')
         sub_command.add_argument("--spdk-debug", help='Enable spdk debug logs', dest='spdk_debug', required=False, action='store_true')
 
-        sub_command.add_argument("--iobuf_small_pool_count", help='bdev_set_options param', dest='small_pool_count',  type=int, default=0)
-        sub_command.add_argument("--iobuf_large_pool_count", help='bdev_set_options param', dest='large_pool_count',  type=int, default=0)
         sub_command.add_argument("--iobuf_small_bufsize", help='bdev_set_options param', dest='small_bufsize',  type=int, default=0)
         sub_command.add_argument("--iobuf_large_bufsize", help='bdev_set_options param', dest='large_bufsize',  type=int, default=0)
 
@@ -636,6 +640,12 @@ class CLIWrapper:
                 ret = storage_ops.deploy_cleaner()
 
             elif sub_command == "add-node":
+                if not args.max_lvol:
+                    self.parser.error(f"Mandatory argument '--max-lvol' not provided for {sub_command}")
+                if not args.max_snap:
+                    self.parser.error(f"Mandatory argument '--max-snap' not provided for {sub_command}")
+                if not args.max_prov:
+                    self.parser.error(f"Mandatory argument '--max-prov' not provided for {sub_command}")
                 cluster_id = args.cluster_id
                 node_ip = args.node_ip
                 ifname = args.ifname
@@ -643,22 +653,21 @@ class CLIWrapper:
                 spdk_image = args.spdk_image
                 spdk_debug = args.spdk_debug
 
-                small_pool_count = args.small_pool_count
-                large_pool_count = args.large_pool_count
                 small_bufsize = args.small_bufsize
                 large_bufsize = args.large_bufsize
                 num_partitions_per_dev = args.partitions
                 jm_percent = args.jm_percent
 
-                spdk_mem = None
-                if args.spdk_mem:
-                    spdk_mem = self.parse_size(args.spdk_mem)
-                    if spdk_mem < 1 * 1024 * 1024:
-                        return f"SPDK memory:{args.spdk_mem} must be larger than 1G"
+                max_lvol = args.max_lvol
+                max_snap = args.max_snap
+                max_prov = self.parse_size(args.max_prov)
+                number_of_devices = args.number_of_devices
+                if max_prov < 1 * 1024 * 1024 * 1024:
+                    return f"Max provisioning memory:{args.max_prov} must be larger than 1G"
 
                 out = storage_ops.add_node(
-                    cluster_id, node_ip, ifname, data_nics, spdk_mem, spdk_image, spdk_debug,
-                    small_pool_count, large_pool_count, small_bufsize, large_bufsize, num_partitions_per_dev, jm_percent)
+                    cluster_id, node_ip, ifname, data_nics, max_lvol, max_snap, max_prov, spdk_image, spdk_debug,
+                    small_bufsize, large_bufsize, num_partitions_per_dev, jm_percent, number_of_devices)
                 return out
 
             elif sub_command == "list":
@@ -676,23 +685,18 @@ class CLIWrapper:
                 spdk_image = args.spdk_image
                 spdk_debug = args.spdk_debug
 
-                spdk_mem = None
-                if args.spdk_mem:
-                    spdk_mem = self.parse_size(args.spdk_mem)
-                    if spdk_mem < 1 * 1024 * 1024:
-                        return f"SPDK memory:{args.spdk_mem} must be larger than 1G"
+                max_lvol = args.max_lvol
+                max_snap = args.max_snap
+                max_prov = self.parse_size(args.max_prov) if args.max_prov else 0
+                number_of_devices = args.number_of_devices
 
-
-                small_pool_count = args.small_pool_count
-                large_pool_count = args.large_pool_count
                 small_bufsize = args.small_bufsize
                 large_bufsize = args.large_bufsize
 
                 ret = storage_ops.restart_storage_node(
-                    node_id, spdk_mem,
+                    node_id, max_lvol, max_snap, max_prov,
                     spdk_image, spdk_debug,
-                    small_pool_count, large_pool_count,
-                    small_bufsize, large_bufsize)
+                    small_bufsize, large_bufsize, number_of_devices)
 
             elif sub_command == "list-devices":
                 ret = self.storage_node_list_devices(args)

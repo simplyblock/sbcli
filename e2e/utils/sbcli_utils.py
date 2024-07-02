@@ -1,3 +1,4 @@
+import time
 import requests
 from http import HTTPStatus
 from logger_config import setup_logger
@@ -352,3 +353,13 @@ class SbcliUtils:
         cluster_logs = self.get_request(api_url=f"/cluster/get-logs/{cluster_id}")
         self.logger.info(f"Cluster Logs: {cluster_logs}")
         return cluster_logs["results"]
+
+    def wait_for_storage_node_status(self, node_id, status, timeout=60):
+        while timeout > 0:
+            node_details = self.get_storage_node_details(storage_node_id=node_id)
+            if node_details[0]["status"] == status:
+                return True
+            else:
+                time.sleep(5)
+                timeout -= 5
+        raise TimeoutError(f"Timed out waiting for node status, {node_id}, status: {status}")
