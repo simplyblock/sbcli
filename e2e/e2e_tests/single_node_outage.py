@@ -194,7 +194,8 @@ class TestSingleNodeOutage:
 
         self.sbcli_utils.restart_node(node_uuid=no_lvol_node_uuid)
 
-        self.logger.info("Sleeping for 10 seconds")
+        self.logger.info(f"Waiting for node to become online, {no_lvol_node_uuid}")
+        self.sbcli_utils.wait_for_storage_node_status(no_lvol_node_uuid, "online", timeout=120)
         sleep_n_sec(10)
 
         self.validations(node_uuid=no_lvol_node_uuid,

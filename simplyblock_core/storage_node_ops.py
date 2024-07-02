@@ -638,7 +638,8 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
                 logger.error(f"Unsupported ec2 instance-type {ec2_metadata['instanceType']} "
                              "for deployment, please specify --number-of-devices")
                 return False
-        number_of_devices = storage_devices
+        else:
+            number_of_devices = storage_devices
     else:
         logger.warning("Can not get ec2 instance type for this instance.")
         if not number_of_devices:
@@ -1010,7 +1011,7 @@ def remove_storage_node(node_id, force_remove=False, force_migrate=False):
 
 
 def restart_storage_node(
-        node_id, max_lvol=0, max_snap=0, max_prov="",
+        node_id, max_lvol=0, max_snap=0, max_prov=0,
         spdk_image=None,
         set_spdk_debug=None,
         small_bufsize=0, large_bufsize=0, number_of_devices=0):
@@ -1062,10 +1063,13 @@ def restart_storage_node(
         if not supported_type:
             logger.warning(f"Unsupported ec2 instance-type {snode.ec2_metadata['instanceType']} for deployment")
             if not number_of_devices:
-                logger.error(f"Unsupported ec2 instance-type {snode.ec2_metadata['instanceType']} "
-                             "for deployment, please specify --number-of-devices")
-                return False
-        number_of_devices = storage_devices
+                if not snode.number_of_devices:
+                    logger.error(f"Unsupported ec2 instance-type {snode.ec2_metadata['instanceType']} "
+                                 "for deployment, please specify --number-of-devices")
+                    return False
+                number_of_devices = snode.number_of_devices
+        else:
+            number_of_devices = storage_devices
     else:
         logger.warning("Can not get ec2 instance type for this instance..")
         if not number_of_devices:
@@ -1074,7 +1078,6 @@ def restart_storage_node(
             else:
                 logger.error("Unsupported instance type please specify --number-of-devices")
                 return False
-
     snode.number_of_devices = number_of_devices
 
     number_of_split = snode.num_partitions_per_dev if snode.num_partitions_per_dev else snode.num_partitions_per_dev + 1

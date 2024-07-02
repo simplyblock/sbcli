@@ -1027,12 +1027,15 @@ def delete_lvol(id_or_name, force_delete=False):
                 return False
 
     # remove from storage node
-    snode.lvols.remove(lvol.get_id())
-    snode.write_to_db(db_controller.kv_store)
+    if lvol.get_id() in snode.lvols:
+        snode.lvols.remove(lvol.get_id())
+        snode.write_to_db(db_controller.kv_store)
 
     # remove from pool
-    pool.lvols.remove(lvol.get_id())
-    pool.write_to_db(db_controller.kv_store)
+    if lvol.get_id() in pool.lvols:
+        pool.lvols.remove(lvol.get_id())
+        pool.write_to_db(db_controller.kv_store)
+
     lvol_events.lvol_delete(lvol)
     lvol.remove(db_controller.kv_store)
 
