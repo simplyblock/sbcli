@@ -163,3 +163,7 @@ def get_memory_details():
         pass
     return data
 
+
+def get_host_arch():
+    out, err, rc = run_command("uname -m")
+    return out
