@@ -301,7 +301,7 @@ def get_info():
         "system_id": system_id,
 
         "cpu_count": cpuinfo.get_cpu_info()['count'],
-        "cpu_hz": cpuinfo.get_cpu_info()['hz_advertised'][0],
+        "cpu_hz": cpuinfo.get_cpu_info()['hz_advertised'][0] if 'hz_advertised' in cpuinfo.get_cpu_info() else 1,
 
         "memory": get_memory(),
         "hugepages": get_huge_memory(),
