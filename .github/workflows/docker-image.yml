@@ -36,7 +36,9 @@ jobs:
       run: |
         SHORT_SHA=$(echo ${{ env.SHA }} | head -c 8)
 
-        docker build --no-cache -t simplyblock/simplyblock -f docker/Dockerfile .
+        sudo apt-get install -y qemu qemu-user-static
+        docker buildx ls
+        docker buildx build --platform linux/amd64,linux/arm64  --no-cache -t simplyblock/simplyblock -f docker/Dockerfile .
 
         docker tag simplyblock/simplyblock:latest simplyblock/simplyblock:$TAG
         docker tag simplyblock/simplyblock:latest simplyblock/simplyblock:$TAG-$SHORT_SHA
