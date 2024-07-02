@@ -187,9 +187,9 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
 
     mgmt_node_ops.add_mgmt_node(DEV_IP, c.uuid)
 
-    logger.info("Applying dashboard...")
-    ret = _add_grafana_dashboards("admin", c.secret, DEV_IP)
-    logger.info(f"Applying dashboard > {ret}")
+    #logger.info("Applying dashboard...")
+    #ret = _add_grafana_dashboards("admin", c.secret, DEV_IP)
+    #logger.info(f"Applying dashboard > {ret}")
 
     logger.info("New Cluster has been created")
     logger.info(c.uuid)

@@ -224,6 +224,8 @@ services:
       - ./datasource.yml:/etc/grafana/provisioning/datasources/datasource.yaml
       - grafana_data:/var/lib/grafana
       - ./alerting:/etc/grafana/provisioning/alerting
+      - ./dashboard.yml:/etc/grafana/provisioning/dashboards/main.yaml
+      - ./dashboards:/etc/grafana/provisioning/dashboards
     ports:
       - target: 3000
         published: 3000
