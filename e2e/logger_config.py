@@ -17,7 +17,7 @@ def setup_logger(name):
     f_handler.setLevel(logging.DEBUG)
 
     # Create formatter and add it to the handler
-    f_format = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    f_format = logging.Formatter('%(asctime)s - %(name)s:%(lineno)d - %(levelname)s - %(message)s')
     f_handler.setFormatter(f_format)
 
     c_handler = logging.StreamHandler()

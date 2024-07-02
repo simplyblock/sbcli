@@ -2,7 +2,7 @@
 import requests
 from http import HTTPStatus
 from logger_config import setup_logger
-from common_utils import sleep_n_sec
+from utils.common_utils import sleep_n_sec
 
 
 class SbcliUtils:
@@ -357,11 +357,15 @@ class SbcliUtils:
         return cluster_logs["results"]
     
     def wait_for_storage_node_status(self, node_id, status, timeout=60):
+        actual_status = None
         while timeout > 0:
             node_details = self.get_storage_node_details(storage_node_id=node_id)
-            if node_details[0]["status"] == status:
+            actual_status = node_details[0]["status"]
+            if actual_status == status:
                 return True
             else:
                 sleep_n_sec(5)
                 timeout -= 5
-        raise TimeoutError(f"Timed out waiting for node status, {node_id}, status: {status}")
+        raise TimeoutError(f"Timed out waiting for node status, {node_id},"
+                           f"Expected status: {status}, Actual status: {actual_status}")
+
