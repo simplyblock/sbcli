@@ -362,7 +362,7 @@ def connect(caching_node_id, lvol_id):
     if lvol.ha_type == 'single':
         snode = db_controller.get_storage_node_by_id(lvol.node_id)
         for nic in snode.data_nics:
-            ret = rpc_client.bdev_nvme_attach_controller_tcp(rem_name, lvol.nqn, nic.ip4_address, "4420")
+            ret = rpc_client.bdev_nvme_attach_controller_tcp_caching(rem_name, lvol.nqn, nic.ip4_address, "4420")
             logger.debug(ret)
             if not ret:
                 logger.error("Failed to connect to LVol")
@@ -372,7 +372,7 @@ def connect(caching_node_id, lvol_id):
         for nodes_id in lvol.nodes:
             snode = db_controller.get_storage_node_by_id(nodes_id)
             for nic in snode.data_nics:
-                ret = rpc_client.bdev_nvme_attach_controller_tcp(rem_name, lvol.nqn, nic.ip4_address, "4420")
+                ret = rpc_client.bdev_nvme_attach_controller_tcp_caching(rem_name, lvol.nqn, nic.ip4_address, "4420")
                 logger.debug(ret)
                 # if not ret:
                 #     logger.error("Failed to connect to LVol")
@@ -422,6 +422,7 @@ def connect(caching_node_id, lvol_id):
         ret, _ = cnode_client.connect_nvme(ip, "4420", subsystem_nqn)
         break
 
+    time.sleep(5)
     cnode_info, _ = cnode_client.info()
     nvme_devs = cnode_info['nvme_devices']
     dev_path = None
@@ -566,8 +567,11 @@ def deploy(ifname):
             time.sleep(2)
 
     logger.info("Creating CachingNodeAPI container")
+    cont_image = constants.SIMPLY_BLOCK_DOCKER_IMAGE
+    if utils.get_host_arch() == "aarch64":
+        cont_image = constants.SIMPLY_BLOCK_DOCKER_IMAGE_ARM64
     container = node_docker.containers.run(
-        constants.SIMPLY_BLOCK_DOCKER_IMAGE,
+        cont_image,
         "python simplyblock_web/caching_node_app.py",
         detach=True,
         privileged=True,
@@ -586,8 +590,10 @@ def deploy(ifname):
         ]
     )
     logger.info("Pulling SPDK images")
-    node_docker.images.pull(constants.SIMPLY_BLOCK_SPDK_CORE_IMAGE)
-    node_docker.images.pull(constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE)
+    spdk_core = constants.SIMPLY_BLOCK_SPDK_CORE_IMAGE
+    if utils.get_host_arch() == "aarch64":
+        spdk_core = constants.SIMPLY_BLOCK_SPDK_CORE_IMAGE_ARM64
+    node_docker.images.pull(spdk_core)
     return f"{dev_ip}:5000"
 
 

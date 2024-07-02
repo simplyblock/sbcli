@@ -440,6 +440,17 @@ class RPCClient:
         }
         return self._request("bdev_nvme_attach_controller", params)
 
+    def bdev_nvme_attach_controller_tcp_caching(self, name, nqn, ip, port):
+        params = {
+            "name": name,
+            "trtype": "tcp",
+            "traddr": ip,
+            "adrfam": "ipv4",
+            "trsvcid": str(port),
+            "subnqn": nqn
+        }
+        return self._request("bdev_nvme_attach_controller", params)
+
     def bdev_split(self, base_bdev, split_count):
         params = {
             "base_bdev": base_bdev,
