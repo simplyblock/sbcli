@@ -82,7 +82,7 @@ class CLIWrapper:
         sub_command.add_argument("--max-lvol", help='Max lvol per storage node', dest='max_lvol', type=int, default=0)
         sub_command.add_argument("--max-snap", help='Max snapshot per storage node', dest='max_snap', type=int, default=0)
         sub_command.add_argument("--max-prov", help='Max provisioning size of all storage nodes', dest='max_prov', default="")
-        sub_command.add_argument("--number-of-devices", help='Number of devices per storage node if it\'s not supported EC2 instance', dest='number_of_devices', type=int)
+        sub_command.add_argument("--number-of-devices", help='Number of devices per storage node if it\'s not supported EC2 instance', dest='number_of_devices', type=int, default=0)
 
         sub_command.add_argument("--spdk-image", help='SPDK image uri', dest='spdk_image')
         sub_command.add_argument("--spdk-debug", help='Enable spdk debug logs', dest='spdk_debug', required=False, action='store_true')
@@ -662,7 +662,7 @@ class CLIWrapper:
                 max_snap = args.max_snap
                 max_prov = self.parse_size(args.max_prov)
                 number_of_devices = args.number_of_devices
-                if max_prov < 1 * 1024 * 1024:
+                if max_prov < 1 * 1024 * 1024 * 1024:
                     return f"Max provisioning memory:{args.max_prov} must be larger than 1G"
 
                 out = storage_ops.add_node(
@@ -685,10 +685,10 @@ class CLIWrapper:
                 spdk_image = args.spdk_image
                 spdk_debug = args.spdk_debug
 
-
                 max_lvol = args.max_lvol
                 max_snap = args.max_snap
-                max_prov = self.parse_size(args.max_prov)
+                max_prov = self.parse_size(args.max_prov) if args.max_prov else 0
+                number_of_devices = args.number_of_devices
 
                 small_bufsize = args.small_bufsize
                 large_bufsize = args.large_bufsize
@@ -696,7 +696,7 @@ class CLIWrapper:
                 ret = storage_ops.restart_storage_node(
                     node_id, max_lvol, max_snap, max_prov,
                     spdk_image, spdk_debug,
-                    small_bufsize, large_bufsize)
+                    small_bufsize, large_bufsize, number_of_devices)
 
             elif sub_command == "list-devices":
                 ret = self.storage_node_list_devices(args)
