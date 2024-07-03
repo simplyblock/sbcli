@@ -766,9 +766,6 @@ def _create_bdev_stack(lvol, snode, ha_comm_addrs, ha_inode_self):
 
     created_bdevs = []
     for bdev in lvol.bdev_stack:
-        # if 'status' in bdev and bdev['status'] == 'created':
-        #     continue
-
         type = bdev['type']
         name = bdev['name']
         params = bdev['params']
@@ -936,6 +933,8 @@ def _remove_bdev_stack(bdev_stack, rpc_client):
             ret = rpc_client.bdev_lvol_delete_lvstore(name)
         elif type == "bdev_lvol":
             name = bdev['params']["lvs_name"]+"/"+bdev['params']["name"]
+            ret = rpc_client.delete_lvol(name)
+        elif type == "bdev_lvol_clone":
             ret = rpc_client.delete_lvol(name)
         else:
             logger.debug(f"Unknown BDev type: {type}")
