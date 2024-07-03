@@ -597,8 +597,8 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
     lvol.uuid = str(uuid.uuid4())
     lvol.guid = _generate_hex_string(16)
     lvol.vuid = vuid
-    lvol.lvol_bdev = f"LVS_{vuid}/{name}"
-    lvol.lvs_name = f"LVS_{lvol.vuid}"
+    lvol.lvol_bdev = f"LVOL_{vuid}"
+    lvol.lvs_name = f"LVS_{vuid}"
 
     lvol.crypto_bdev = ''
     lvol.comp_bdev = ''
@@ -614,60 +614,81 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
     lvol.distr_page_size = cl.page_size_in_blocks
 
     lvol.base_bdev = f"distr_{lvol.vuid}_{name}"
-    lvol.top_bdev = lvol.base_bdev
+    lvol.top_bdev = lvol.lvol_bdev
 
-    if with_snapshot:
-        lvol.bdev_stack.append({
-            "type": "bdev_distr",
-            "name": lvol.base_bdev,
-            "params": {
+    # if with_snapshot:
+    #     lvol.bdev_stack.append({
+    #         "type": "bdev_distr",
+    #         "name": lvol.base_bdev,
+    #         "params": {
+    #             "name": lvol.base_bdev,
+    #             "vuid": lvol.vuid,
+    #             "ndcs": lvol.ndcs,
+    #             "npcs": lvol.npcs,
+    #             "num_blocks": int(lvol.max_size / lvol.distr_bs),
+    #             "block_size": lvol.distr_bs,
+    #             "chunk_size": lvol.distr_chunk_bs,
+    #             "pba_page_size": lvol.distr_page_size,
+    #         }
+    #     })
+    #
+    #     lvol.bdev_stack.append({
+    #         "type": "bmap_init",
+    #         "name": lvol.base_bdev,
+    #         "params": {
+    #             "bdev_name": lvol.base_bdev,
+    #             "num_blocks": int(lvol.size / lvol.distr_bs),
+    #             "block_len": lvol.distr_bs,
+    #             "page_len": int(lvol.distr_page_size / lvol.distr_bs),
+    #             "max_num_blocks": int(lvol.max_size / lvol.distr_bs)
+    #         }
+    #     })
+    #     lvol.snapshot_name = f"snapshot_{lvol.vuid}_{name}"
+    #     lvol.top_bdev = f"lvol_{lvol.vuid}_{lvol.lvol_name}"
+    #     lvol.bdev_stack.append({
+    #         "type": "ultra_lvol",
+    #         "name": lvol.top_bdev,
+    #         "params": {
+    #             "lvol_name": lvol.top_bdev,
+    #             "base_bdev": lvol.base_bdev
+    #         }
+    #     })
+    # else:
+    lvol.bdev_stack.extend(
+        [
+            {
+                "type": "bdev_distr",
                 "name": lvol.base_bdev,
-                "vuid": lvol.vuid,
-                "ndcs": lvol.ndcs,
-                "npcs": lvol.npcs,
-                "num_blocks": int(lvol.max_size / lvol.distr_bs),
-                "block_size": lvol.distr_bs,
-                "chunk_size": lvol.distr_chunk_bs,
-                "pba_page_size": lvol.distr_page_size,
+                "params": {
+                    "name": lvol.base_bdev,
+                    "vuid": lvol.vuid,
+                    "ndcs": lvol.ndcs,
+                    "npcs": lvol.npcs,
+                    "num_blocks": int(lvol.size / lvol.distr_bs),
+                    "block_size": lvol.distr_bs,
+                    "chunk_size": lvol.distr_chunk_bs,
+                    "pba_page_size": lvol.distr_page_size,
+                }
+            },
+            {
+                "type": "bdev_lvstore",
+                "name": lvol.lvs_name,
+                "params": {
+                    "name": lvol.lvs_name,
+                    "bdev_name": lvol.base_bdev
+                }
+            },
+            {
+                "type": "bdev_lvol",
+                "name": lvol.lvol_bdev,
+                "params": {
+                    "name": lvol.lvol_bdev,
+                    "size": lvol.size,
+                    "lvs_name": lvol.lvs_name
+                }
             }
-        })
-
-        lvol.bdev_stack.append({
-            "type": "bmap_init",
-            "name": lvol.base_bdev,
-            "params": {
-                "bdev_name": lvol.base_bdev,
-                "num_blocks": int(lvol.size / lvol.distr_bs),
-                "block_len": lvol.distr_bs,
-                "page_len": int(lvol.distr_page_size / lvol.distr_bs),
-                "max_num_blocks": int(lvol.max_size / lvol.distr_bs)
-            }
-        })
-        lvol.snapshot_name = f"snapshot_{lvol.vuid}_{name}"
-        lvol.top_bdev = f"lvol_{lvol.vuid}_{lvol.lvol_name}"
-        lvol.bdev_stack.append({
-            "type": "ultra_lvol",
-            "name": lvol.top_bdev,
-            "params": {
-                "lvol_name": lvol.top_bdev,
-                "base_bdev": lvol.base_bdev
-            }
-        })
-    else:
-        lvol.bdev_stack.append({
-            "type": "bdev_distr",
-            "name": lvol.base_bdev,
-            "params": {
-                "name": lvol.base_bdev,
-                "vuid": lvol.vuid,
-                "ndcs": lvol.ndcs,
-                "npcs": lvol.npcs,
-                "num_blocks": int(lvol.size / lvol.distr_bs),
-                "block_size": lvol.distr_bs,
-                "chunk_size": lvol.distr_chunk_bs,
-                "pba_page_size": lvol.distr_page_size,
-            }
-        })
+        ]
+    )
 
     if use_crypto:
         if crypto_key1 == None or crypto_key2 == None:
@@ -683,28 +704,13 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
             "name": lvol.crypto_bdev,
             "params": {
                 "name": lvol.crypto_bdev,
-                "base_name": lvol.base_bdev,
+                "base_name": lvol.lvol_bdev,
                 "key1": crypto_key1,
                 "key2": crypto_key2,
             }
         })
         lvol.lvol_type += ',crypto'
         lvol.top_bdev = lvol.crypto_bdev
-
-    if use_comp is True:
-        base_bdev = lvol.lvol_bdev
-        if lvol.crypto_bdev:
-            base_bdev = lvol.crypto_bdev
-        lvol.comp_bdev = f"comp_{lvol.lvol_name}"
-        lvol.bdev_stack.append({
-            "type": "comp",
-            "name": lvol.comp_bdev,
-            "params": {
-                "base_bdev_name": base_bdev
-            }
-        })
-        lvol.lvol_type += ',compress'
-        lvol.top_bdev = lvol.comp_bdev
 
     nodes = _get_next_3_nodes(cl.get_id(), lvol.size)
     if not nodes:
@@ -788,8 +794,11 @@ def _create_bdev_stack(lvol, snode, ha_comm_addrs, ha_inode_self):
         elif type == "crypto":
             ret = _create_crypto_lvol(rpc_client, **params)
 
-        elif type == "comp":
-            ret = _create_compress_lvol(rpc_client, **params)
+        elif type == "bdev_lvstore":
+            ret = rpc_client.create_lvstore(**params)
+
+        elif type == "bdev_lvol":
+            ret = rpc_client.create_lvol(**params)
 
         else:
             logger.debug(f"Unknown BDev type: {type}")
@@ -920,10 +929,12 @@ def _remove_bdev_stack(bdev_stack, rpc_client):
             pass
         elif type == "ultra_lvol":
             ret = rpc_client.ultra21_lvol_dismount(name)
-        elif type == "comp":
-            ret = rpc_client.lvol_compress_delete(name)
         elif type == "crypto":
             ret = rpc_client.lvol_crypto_delete(name)
+        elif type == "bdev_lvstore":
+            ret = rpc_client.bdev_lvol_delete_lvstore(name)
+        elif type == "bdev_lvol":
+            ret = rpc_client.delete_lvol(name)
         else:
             logger.debug(f"Unknown BDev type: {type}")
             continue
