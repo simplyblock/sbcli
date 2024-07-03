@@ -59,7 +59,10 @@ def _add_task(function_name, cluster_id, node_id, device_id):
 
 def add_device_mig_task(device_id):
     device = db_controller.get_storage_devices(device_id)
-    return _add_task(JobSchedule.FN_DEV_MIG, device.cluster_id, device.node_id, device.get_id())
+    for node in db_controller.get_storage_nodes_by_cluster_id(device.cluster_id):
+        if node.lvols:
+            _add_task(JobSchedule.FN_DEV_MIG, device.cluster_id, node.get_id(), device.get_id())
+    return True
 
 
 def add_device_to_auto_restart(device):

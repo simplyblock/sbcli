@@ -20,6 +20,18 @@ def task_runner(task):
     snode = db_controller.get_storage_node_by_id(task.node_id)
     rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
 
+    if task.retry >= constants.TASK_EXEC_RETRY_COUNT:
+        task.function_result = "max retry reached"
+        task.status = JobSchedule.STATUS_DONE
+        task.write_to_db(db_controller.kv_store)
+        return True
+
+    if task.canceled:
+        task.function_result = "canceled"
+        task.status = JobSchedule.STATUS_DONE
+        task.write_to_db(db_controller.kv_store)
+        return True
+
     if task.status == JobSchedule.STATUS_NEW:
         device = None
         for dev in snode.nvme_devices:
@@ -39,9 +51,9 @@ def task_runner(task):
         task.function_params = {"migration_ids": rsp}
         task.write_to_db(db_controller.kv_store)
         tasks_events.task_updated(task)
-        return False
+        time.sleep(3)
 
-    elif task.status == JobSchedule.STATUS_RUNNING:
+    if "migration_ids" in task.function_params:
         is_done = True
         for mig_id in task.function_params["migration_ids"]:
             res = rpc_client.distr_migration_status(mig_id)
@@ -54,6 +66,8 @@ def task_runner(task):
             task.function_result = "Done"
             task.write_to_db(db_controller.kv_store)
             return True
+    else:
+        logger.warning("No migration ids!")
 
     task.retry += 1
     task.write_to_db(db_controller.kv_store)
@@ -71,7 +85,7 @@ logger.setLevel(logging.DEBUG)
 
 # get DB controller
 db_controller = kv_store.DBController()
-
+active_task_node_ids = []
 logger.info("Starting Tasks runner...")
 while True:
     time.sleep(3)
@@ -84,9 +98,15 @@ while True:
             for task in tasks:
                 delay_seconds = 5
                 if task.function_name == JobSchedule.FN_DEV_MIG:
-                    if task.status != JobSchedule.STATUS_DONE:
+                    if task.status != JobSchedule.STATUS_DONE and task.node_id not in active_task_node_ids:
+                        active_task_node_ids.append(task.node_id)
+
+                        # get new task object because it could be changed from cancel task
+                        task = db_controller.get_task_by_id(task.uuid)
                         res = task_runner(task)
                         if res:
                             tasks_events.task_updated(task)
+                            if task.node_id in active_task_node_ids:
+                                active_task_node_ids.remove(task.node_id)
                         else:
                             time.sleep(delay_seconds)
