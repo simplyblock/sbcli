@@ -17,7 +17,7 @@ services:
     environment:
       - "OPENSEARCH_JAVA_OPTS=-Xms1g -Xmx1g"
       - "bootstrap.memory_lock=false"
-      #- "discovery.type=single-node"
+      - "discovery.type=single-node"
       - "discovery.seed_hosts=opensearch"
       - "cluster.name=graylog-cluster"
       - "network.host=0.0.0.0"
