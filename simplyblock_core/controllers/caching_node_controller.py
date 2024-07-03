@@ -568,8 +568,6 @@ def deploy(ifname):
 
     logger.info("Creating CachingNodeAPI container")
     cont_image = constants.SIMPLY_BLOCK_DOCKER_IMAGE
-    if utils.get_host_arch() == "aarch64":
-        cont_image = constants.SIMPLY_BLOCK_DOCKER_IMAGE_ARM64
     container = node_docker.containers.run(
         cont_image,
         "python simplyblock_web/caching_node_app.py",
