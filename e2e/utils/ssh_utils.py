@@ -283,6 +283,16 @@ class SshUtils:
         return output
     
     def delete_file_dir(self, node, entity, recursive=False):
+        """Deletes file or directory
+
+        Args:
+            node (str): Node to delete entity on
+            entity (str): Path to file or directory
+            recursive (bool, optional): Delete with all its content. Defaults to False.
+
+        Returns:
+            _type_: _description_
+        """
         rec = "r" if recursive else ""
         cmd = f'sudo rm -{rec}f {entity}'
         output, _ = self.exec_command(node=node, command=cmd)
