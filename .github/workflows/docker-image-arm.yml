@@ -37,11 +37,8 @@ jobs:
 
         sudo apt-get install -y qemu qemu-user-static
         docker buildx ls
-        export DOCKER_DEFAULT_PLATFORM=linux/arm64
-        docker buildx build --platform linux/arm64 --no-cache -t simplyblock/simplyblock -f docker/Dockerfile .
-        docker tag simplyblock/simplyblock:latest simplyblock/simplyblock:$TAG-arm64
-        docker push simplyblock/simplyblock:$TAG-arm64
-
+        docker buildx build --platform linux/amd64,linux/arm64 -t simplyblock/simplyblock:$TAG -f docker/Dockerfile . --push
+        docker buildx build --platform linux/amd64,linux/arm64 -t simplyblock/simplyblock:$TAG-$SHORT_SHA -f docker/Dockerfile . --push
 
     - name: Configure AWS Credentials
       uses: aws-actions/configure-aws-credentials@v1
@@ -54,10 +51,6 @@ jobs:
       id: login-ecr
       uses: aws-actions/amazon-ecr-login@v2
 
-    - name: Tag docker image
-      run: |
-        docker tag simplyblock/simplyblock:latest 565979732541.dkr.ecr.us-east-1.amazonaws.com/simplyblock:$TAG-arm
-
     - name: Push the docker image
       run: |
-        docker image push 565979732541.dkr.ecr.us-east-1.amazonaws.com/simplyblock:$TAG-arm
+        docker buildx build --platform linux/amd64,linux/arm64 -t 565979732541.dkr.ecr.us-east-1.amazonaws.com/simplyblock:$TAG -f docker/Dockerfile . --push
