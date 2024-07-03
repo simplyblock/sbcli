@@ -692,3 +692,7 @@ class RPCClient:
     def thread_set_cpumask(self, app_thread_process_id, app_thread_mask):
         params = {"id": app_thread_process_id, "cpumask": app_thread_mask}
         return self._request("thread_set_cpumask", params)
+
+    def bdev_lvol_get_lvstores(self, name):
+        params = {"lvs_name": name}
+        return self._request2("bdev_lvol_get_lvstores", params)

@@ -279,13 +279,16 @@ def check_lvol_on_node(lvol_id, node_id):
     try:
         for bdev_info in lvol.bdev_stack:
             bdev_name = bdev_info['name']
-            if bdev_info['type'] == "bdev_lvol":
-                bdev_name = bdev_info['params']["lvs_name"] + "/" + bdev_info['params']["name"]
-            ret = rpc_client.get_bdevs(bdev_name)
+            if bdev_info['type'] == "bdev_lvstore":
+                ret = rpc_client.bdev_lvol_get_lvstores(bdev_name)
+            else:
+                if bdev_info['type'] == "bdev_lvol":
+                    bdev_name = bdev_info['params']["lvs_name"] + "/" + bdev_info['params']["name"]
+                ret = rpc_client.get_bdevs(bdev_name)
             if ret:
                 logger.info(f"Checking bdev: {bdev_name} ... ok")
             else:
-                logger.error(f"Checking LVol: {bdev_name} ... failed")
+                logger.error(f"Checking bdev: {bdev_name} ... failed")
                 passed = False
 
         ret = rpc_client.subsystem_list(lvol.nqn)
