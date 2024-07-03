@@ -7,7 +7,7 @@ from exceptions.custom_exception import (
     TestNotFoundException,
     MultipleExceptions
 )
-from e2e.e2e_tests.cluster_test_base import TestClusterBase
+from e2e_tests.cluster_test_base import TestClusterBase
 from utils.sbcli_utils import SbcliUtils
 from utils.ssh_utils import SshUtils
 
