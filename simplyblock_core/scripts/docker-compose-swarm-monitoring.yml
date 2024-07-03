@@ -16,19 +16,15 @@ services:
     image: "opensearchproject/opensearch:2.4.0"
     environment:
       - "OPENSEARCH_JAVA_OPTS=-Xms1g -Xmx1g"
-      - "bootstrap.memory_lock=false"
+      - "bootstrap.memory_lock=true"
       - "discovery.type=single-node"
       - "discovery.seed_hosts=opensearch"
-      - "cluster.name=graylog-cluster"
-      - "network.host=0.0.0.0"
-      ####################################
       - "action.auto_create_index=false"
       - "plugins.security.ssl.http.enabled=false"
       - "plugins.security.disabled=true"
     volumes:
       - "os_data:/usr/share/opensearch/data"
     deploy:
-      mode: global
       placement:
         constraints: [node.role == manager]
     networks:
