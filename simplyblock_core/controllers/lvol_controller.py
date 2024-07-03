@@ -614,7 +614,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
     lvol.distr_page_size = cl.page_size_in_blocks
 
     lvol.base_bdev = f"distr_{lvol.vuid}_{name}"
-    lvol.top_bdev = lvol.lvol_bdev
+    lvol.top_bdev = f"{lvol.lvs_name}/{lvol.lvol_bdev}"
 
     # if with_snapshot:
     #     lvol.bdev_stack.append({
@@ -704,7 +704,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
             "name": lvol.crypto_bdev,
             "params": {
                 "name": lvol.crypto_bdev,
-                "base_name": lvol.lvol_bdev,
+                "base_name": lvol.top_bdev,
                 "key1": crypto_key1,
                 "key2": crypto_key2,
             }
@@ -784,6 +784,7 @@ def _create_bdev_stack(lvol, snode, ha_comm_addrs, ha_inode_self):
                 ret = distr_controller.send_cluster_map_to_node(snode)
                 if not ret:
                     return False, "Failed to send cluster map"
+                time.sleep(5)
 
         elif type == "bmap_init":
             ret = rpc_client.ultra21_lvol_bmap_init(**params)
