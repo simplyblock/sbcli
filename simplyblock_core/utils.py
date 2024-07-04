@@ -286,38 +286,32 @@ def calculate_core_allocation(cpu_count):
     '''
     If number of cpu cores >= 8, tune cpu core mask
         1. Never use core 0 for spdk.
-        2. For every 8 cores, leave one core to the operating system
-        3. Do not use more than 15% of remaining available cores for nvme pollers
-        4. Use one dedicated core for app_thread
-        5. distribute distrib bdevs and alceml bdevs to all other cores
+        2. Core 1 is for app_thread
+        3. Core 2 for Journal manager
+        4. Poller cpu cores are 30% of Available cores
+        5. Alceml cpu cores are 30% of Available cores
+        6. Distribs cpu cores are 40% of Available cores
     JIRA ticket link/s
     https://simplyblock.atlassian.net/browse/SFAM-885
     '''
 
     all_cores = list(range(0, cpu_count))
-    # Calculate the number of cores to exclude for the OS
-    if cpu_count == 8:
-        os_cores_count = 1
-    else:
-        os_cores_count = 1 + (cpu_count // 8)
-
-    # Calculate os cores
-    os_cores = all_cores[0:os_cores_count]
+    app_thread_core = all_cores[1:2]
+    jm_cpu_core = all_cores[2:3]
 
     # Calculate available cores
-    available_cores_count = cpu_count - os_cores_count
+    available_cores_count = cpu_count - 3
 
-    # Calculate NVMe pollers
-    nvme_pollers_count = int(available_cores_count * 0.15)
-    nvme_pollers_cores = all_cores[os_cores_count:os_cores_count + nvme_pollers_count]
+    # Calculate cpus counts
+    poller_cpus_count = int(available_cores_count * 0.3)
+    alceml_cpus_cout = int(available_cores_count * 0.3)
 
-    # Allocate core for app_thread
-    app_thread_core = all_cores[os_cores_count + nvme_pollers_count:os_cores_count + nvme_pollers_count + 1]
+    # Calculate cpus cores
+    poller_cpu_cores = all_cores[3:poller_cpus_count+3]
+    alceml_cpu_cores = all_cores[3+poller_cpus_count:poller_cpus_count+alceml_cpus_cout+3]
+    distrib_cpu_cores = all_cores[3+poller_cpus_count+alceml_cpus_cout:]
 
-    # Calculate bdb_lcpu cores
-    bdb_lcpu_cores = all_cores[os_cores_count + nvme_pollers_count + 1:]
-
-    return os_cores, nvme_pollers_cores, app_thread_core, bdb_lcpu_cores
+    return app_thread_core, jm_cpu_core, poller_cpu_cores, alceml_cpu_cores, distrib_cpu_cores
 
 
 def generate_mask(cores):
@@ -410,3 +404,8 @@ def validate_add_lvol_or_snap_on_node(memory_free, huge_free, max_lvol_or_snap,
 def get_host_arch():
     out, _, _ = shell_utils.run_command("uname -m")
     return out
+
+def decimal_to_hex_power_of_2(decimal_number):
+    power_result = 2 ** decimal_number
+    hex_result = hex(power_result)
+    return hex_result
