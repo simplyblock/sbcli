@@ -35,7 +35,7 @@ def _validate_new_task_dev_restart(cluster_id, node_id, device_id):
     return True
 
 
-def _add_task(function_name, cluster_id, node_id, device_id):
+def _add_task(function_name, cluster_id, node_id, device_id, max_retry=constants.TASK_EXEC_RETRY_COUNT):
 
     if function_name in [JobSchedule.FN_DEV_RESTART, JobSchedule.FN_DEV_MIG]:
         if not _validate_new_task_dev_restart(cluster_id, node_id, device_id):
@@ -51,6 +51,7 @@ def _add_task(function_name, cluster_id, node_id, device_id):
     task_obj.device_id = device_id
     task_obj.date = int(time.time())
     task_obj.function_name = function_name
+    task_obj.max_retry = max_retry
     task_obj.status = JobSchedule.STATUS_NEW
     task_obj.write_to_db(db_controller.kv_store)
     tasks_events.task_create(task_obj)
@@ -61,7 +62,8 @@ def add_device_mig_task(device_id):
     device = db_controller.get_storage_devices(device_id)
     for node in db_controller.get_storage_nodes_by_cluster_id(device.cluster_id):
         if node.lvols:
-            _add_task(JobSchedule.FN_DEV_MIG, device.cluster_id, node.get_id(), device.get_id())
+            _add_task(JobSchedule.FN_DEV_MIG, device.cluster_id, node.get_id(), device.get_id(),
+                      max_retry=constants.MIG_TASK_EXEC_RETRY_COUNT)
     return True
 
 
@@ -84,9 +86,10 @@ def list_tasks(cluster_id):
     for task in tasks:
         data.append({
             "Task ID": task.uuid,
-            "Target ID": task.device_id or task.node_id,
+            "Node ID": task.node_id,
+            "Device ID": task.device_id,
             "Function": task.function_name,
-            "Retry": f"{task.retry}/{constants.TASK_EXEC_RETRY_COUNT}",
+            "Retry": f"{task.retry}/{task.max_retry}",
             "Status": task.status,
             "Result": task.function_result,
             "Date": time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(task.date)),

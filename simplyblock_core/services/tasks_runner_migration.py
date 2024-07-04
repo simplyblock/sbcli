@@ -20,7 +20,7 @@ from simplyblock_core.rpc_client import RPCClient
 def task_runner(task):
 
     snode = db_controller.get_storage_node_by_id(task.node_id)
-    rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password, timeout=10, retry=2)
+    rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password, timeout=5, retry=2)
 
     if task.canceled:
         task.function_result = "canceled"

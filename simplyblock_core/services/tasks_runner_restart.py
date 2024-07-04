@@ -137,7 +137,7 @@ def task_runner_device(task):
 
 def task_runner_node(task):
     node = db_controller.get_storage_node_by_id(task.node_id)
-    if task.retry >= constants.TASK_EXEC_RETRY_COUNT:
+    if task.retry >= task.max_retry:
         task.function_result = "max retry reached"
         task.status = JobSchedule.STATUS_DONE
         task.write_to_db(db_controller.kv_store)

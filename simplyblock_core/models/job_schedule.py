@@ -26,6 +26,7 @@ class JobSchedule(BaseModel):
         "function_result": {"type": str, 'default': ""},
 
         "retry": {"type": int, 'default': 0},
+        "max_retry": {"type": int, 'default': 0},
         "status": {"type": str, 'default': ""},
 
     }
