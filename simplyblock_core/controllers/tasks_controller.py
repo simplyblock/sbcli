@@ -62,8 +62,7 @@ def add_device_mig_task(device_id):
     device = db_controller.get_storage_devices(device_id)
     for node in db_controller.get_storage_nodes_by_cluster_id(device.cluster_id):
         if node.lvols:
-            _add_task(JobSchedule.FN_DEV_MIG, device.cluster_id, node.get_id(), device.get_id(),
-                      max_retry=constants.MIG_TASK_EXEC_RETRY_COUNT)
+            _add_task(JobSchedule.FN_DEV_MIG, device.cluster_id, node.get_id(), device.get_id(), max_retry=0)
     return True
 
 

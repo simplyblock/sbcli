@@ -57,7 +57,6 @@ SIMPLY_BLOCK_DOCKER_IMAGE_ARM64 = "simplyblock/simplyblock:main-arm64"
 SIMPLY_BLOCK_CLI_NAME = "sbcli"
 TASK_EXEC_INTERVAL_SEC = 30
 TASK_EXEC_RETRY_COUNT = 8
-MIG_TASK_EXEC_RETRY_COUNT = 9999
 
 SIMPLY_BLOCK_SPDK_CORE_IMAGE = "simplyblock/spdk-core:latest"
 SIMPLY_BLOCK_SPDK_CORE_IMAGE_ARM64 = "simplyblock/spdk-core:latest-arm64"
