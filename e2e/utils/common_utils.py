@@ -35,7 +35,8 @@ class CommonUtils:
                             to_check_in_logs.append("Storage node status changed from: suspended to: in_shutdown")
                             to_check_in_logs.append("Storage node status changed from: in_shutdown to: offline")
                         else:
-                            to_check_in_logs.append("Storage node status changed from: online to: in_shutdown")
+                            to_check_in_logs.append("Storage node status changed from: online to: offline")
+                            to_check_in_logs.append("Storage node status changed from: offline to: in_shutdown")
                             to_check_in_logs.append("Storage node status changed from: in_shutdown to: offline")
                         prev_step = "shutdown"
                     if step == "restart":
