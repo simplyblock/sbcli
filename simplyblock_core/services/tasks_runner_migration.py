@@ -43,6 +43,7 @@ def task_runner(task):
             task.write_to_db(db_controller.kv_store)
             return False
 
+        active_task_node_ids.append(task.node_id)
         task.status = JobSchedule.STATUS_RUNNING
         task.function_params = {"migration_ids": rsp}
         task.write_to_db(db_controller.kv_store)
@@ -94,9 +95,9 @@ while True:
             for task in tasks:
                 delay_seconds = 5
                 if task.function_name == JobSchedule.FN_DEV_MIG:
-                    if task.status != JobSchedule.STATUS_DONE and task.node_id not in active_task_node_ids:
-                        active_task_node_ids.append(task.node_id)
-
+                    if task.status == JobSchedule.STATUS_NEW and task.node_id in active_task_node_ids:
+                        continue
+                    if task.status != JobSchedule.STATUS_DONE:
                         # get new task object because it could be changed from cancel task
                         task = db_controller.get_task_by_id(task.uuid)
                         res = task_runner(task)
