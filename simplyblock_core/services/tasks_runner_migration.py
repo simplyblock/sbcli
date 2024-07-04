@@ -13,19 +13,14 @@ from simplyblock_core.models.job_schedule import JobSchedule
 from graypy import GELFUDPHandler
 
 from simplyblock_core.models.nvme_device import NVMeDevice
+from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.rpc_client import RPCClient
 
 
 def task_runner(task):
 
     snode = db_controller.get_storage_node_by_id(task.node_id)
-    rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
-
-    # if task.retry >= constants.TASK_EXEC_RETRY_COUNT:
-    #     task.function_result = "max retry reached"
-    #     task.status = JobSchedule.STATUS_DONE
-    #     task.write_to_db(db_controller.kv_store)
-    #     return True
+    rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password, timeout=10, retry=2)
 
     if task.canceled:
         task.function_result = "canceled"
@@ -38,6 +33,12 @@ def task_runner(task):
         task.status = JobSchedule.STATUS_RUNNING
         task.write_to_db(db_controller.kv_store)
         tasks_events.task_updated(task)
+
+    if snode.status != StorageNode.STATUS_ONLINE:
+        task.function_result = "node is not online, retrying"
+        task.retry += 1
+        task.write_to_db(db_controller.kv_store)
+        return False
 
     if "migration_ids" not in task.function_params:
         if task.retry >= 2:
