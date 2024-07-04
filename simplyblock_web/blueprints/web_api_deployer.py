@@ -26,15 +26,15 @@ document_name = 'AWS-RunShellScript'
 output_key_prefix = 'ssm-output'
 
 # intialise clients
-ssm = boto3.client('ssm', region_name='us-east-1')
-s3 = boto3.client('s3', region_name='us-east-1')
+ssm = boto3.client('ssm')
+s3 = boto3.client('s3')
 
 
 def get_instance_tf_engine_instance_id():
     tag_value = 'tfengine'
     tag_key = 'Name'
 
-    ec2 = boto3.client('ec2', region_name='us-east-1')
+    ec2 = boto3.client('ec2')
     response = ec2.describe_instances(
         Filters=[
             {
