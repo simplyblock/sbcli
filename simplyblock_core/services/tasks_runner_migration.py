@@ -12,6 +12,7 @@ from simplyblock_core.models.job_schedule import JobSchedule
 # Import the GELF logger
 from graypy import GELFUDPHandler
 
+from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.rpc_client import RPCClient
 
 
@@ -20,11 +21,11 @@ def task_runner(task):
     snode = db_controller.get_storage_node_by_id(task.node_id)
     rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
 
-    if task.retry >= constants.TASK_EXEC_RETRY_COUNT:
-        task.function_result = "max retry reached"
-        task.status = JobSchedule.STATUS_DONE
-        task.write_to_db(db_controller.kv_store)
-        return True
+    # if task.retry >= constants.TASK_EXEC_RETRY_COUNT:
+    #     task.function_result = "max retry reached"
+    #     task.status = JobSchedule.STATUS_DONE
+    #     task.write_to_db(db_controller.kv_store)
+    #     return True
 
     if task.canceled:
         task.function_result = "canceled"
@@ -33,8 +34,27 @@ def task_runner(task):
         return True
 
     if task.status == JobSchedule.STATUS_NEW:
-        device = db_controller.get_storage_devices(task.device_id)
+        active_task_node_ids.append(task.node_id)
+        task.status = JobSchedule.STATUS_RUNNING
+        task.write_to_db(db_controller.kv_store)
+        tasks_events.task_updated(task)
 
+    if "migration_ids" not in task.function_params:
+        if task.retry >= 2:
+            all_devs_online = True
+            for node in db_controller.get_storage_nodes_by_cluster_id(task.cluster_id):
+                for dev in node.nvme_devices:
+                    if dev.status != NVMeDevice.STATUS_ONLINE:
+                        all_devs_online = False
+                        break
+
+            if not all_devs_online:
+                task.function_result = "Some devs are offline, retrying"
+                task.retry += 1
+                task.write_to_db(db_controller.kv_store)
+                return False
+
+        device = db_controller.get_storage_devices(task.device_id)
         rsp = rpc_client.distr_migration_to_primary_start(device.cluster_device_order)
         if not rsp:
             logger.error(f"Failed to start device migration task, storage_ID: {device.cluster_device_order}")
@@ -42,29 +62,31 @@ def task_runner(task):
             task.retry += 1
             task.write_to_db(db_controller.kv_store)
             return False
-
-        active_task_node_ids.append(task.node_id)
-        task.status = JobSchedule.STATUS_RUNNING
         task.function_params = {"migration_ids": rsp}
         task.write_to_db(db_controller.kv_store)
-        tasks_events.task_updated(task)
         time.sleep(3)
 
     if "migration_ids" in task.function_params:
         is_done = True
+        is_error = False
         for mig_id in task.function_params["migration_ids"]:
             res = rpc_client.distr_migration_status(mig_id)
             for st in res:
                 if st["migration_id"] == mig_id:
                     if st['status'] != "completed":
                         is_done = False
+                    if st['error'] == 1:
+                        is_error = True
         if is_done:
-            task.status = JobSchedule.STATUS_DONE
-            task.function_result = "Done"
-            task.write_to_db(db_controller.kv_store)
-            return True
-    else:
-        logger.warning("No migration ids!")
+            if is_error:
+                task.function_params = {}
+                task.function_result = "mig ids completed with errors, retrying"
+                task.write_to_db(db_controller.kv_store)
+            else:
+                task.status = JobSchedule.STATUS_DONE
+                task.function_result = "Done"
+                task.write_to_db(db_controller.kv_store)
+                return True
 
     task.retry += 1
     task.write_to_db(db_controller.kv_store)
