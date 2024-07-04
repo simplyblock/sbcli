@@ -33,11 +33,7 @@ def task_runner(task):
         return True
 
     if task.status == JobSchedule.STATUS_NEW:
-        device = None
-        for dev in snode.nvme_devices:
-            if dev.get_id() == task.device_id:
-                device = dev
-                break
+        device = db_controller.get_storage_devices(task.device_id)
 
         rsp = rpc_client.distr_migration_to_primary_start(device.cluster_device_order)
         if not rsp:
