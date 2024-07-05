@@ -21,7 +21,7 @@ services:
       - "cluster.name=graylog"
       - "node.name=opensearch"
       - "discovery.seed_hosts=opensearch"
-      - "cluster.initial_master_nodes=opensearch"
+      #- "cluster.initial_master_nodes=opensearch"
       - "action.auto_create_index=false"
       - "plugins.security.ssl.http.enabled=false"
       - "plugins.security.disabled=true"
