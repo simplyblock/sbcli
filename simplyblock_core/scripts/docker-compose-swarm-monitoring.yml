@@ -7,6 +7,7 @@ services:
     volumes:
       - "mongodb_data:/data/db"
     deploy:
+      mode: global
       placement:
         constraints: [node.role == manager]
     networks:
@@ -46,9 +47,9 @@ services:
       GRAYLOG_HTTP_EXTERNAL_URI: "http://localhost/graylog/"
       GRAYLOG_ELASTICSEARCH_HOSTS: "http://opensearch:9200"
       GRAYLOG_MONGODB_URI: "mongodb://mongodb:27017/graylog"
-      #GRAYLOG_IS_MASTER: "true"
+      GRAYLOG_IS_MASTER: "true"
       #GRAYLOG_ELASTICSEARCH_SHARDS: "4"
-      GRAYLOG_ELASTICSEARCH_REPLICAS: "1"
+      #GRAYLOG_ELASTICSEARCH_REPLICAS: "1"
       GRAYLOG_SKIP_PREFLIGHT_CHECKS: "true"
     ports:
     - "5044:5044/tcp"   # Beats
@@ -64,6 +65,7 @@ services:
       - "graylog_data:/usr/share/graylog/data/data"
       - "graylog_journal:/usr/share/graylog/data/journal"
     deploy:
+      mode: global
       placement:
         constraints: [node.role == manager]
     networks:
