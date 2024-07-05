@@ -107,6 +107,7 @@ jobs:
           SBCLI_CMD: ${{ github.event.inputs.sbcli_cmd || 'sbcli-dev' }}
 
       - name: Setup Tests & Run Tests
+        timeout-minutes: 60
         run: |
           cd $GITHUB_WORKSPACE/e2e
           sudo apt-get install -y python3.12-venv
