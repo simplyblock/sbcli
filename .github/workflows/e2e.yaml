@@ -1,9 +1,10 @@
 name: E2E Tests
 
 on:
-#  push:
-#    branches:
-#      - main
+  push:
+    branches:
+      - pre-release
+      - sbcli
   schedule:
     - cron: '0 5 * * *'  # Runs every day at 5 AM UTC
   workflow_dispatch:
@@ -100,12 +101,13 @@ jobs:
       - name: Bootstrap Cluster
         run: |
           cd $GITHUB_WORKSPACE/simplyBlockDeploy
-          ./bootstrap-cluster.sh --max-lvol 10 --max-snap 10 --max-prov 450g --number-of-devices 3
+          ./bootstrap-cluster.sh --max-lvol 10 --max-snap 10 --max-prov 450g --number-of-devices 3 --spdk-debug
         id: bootstrap_cluster
         env:
           SBCLI_CMD: ${{ github.event.inputs.sbcli_cmd || 'sbcli-dev' }}
 
       - name: Setup Tests & Run Tests
+        timeout-minutes: 60
         run: |
           cd $GITHUB_WORKSPACE/e2e
           sudo apt-get install -y python3.12-venv
@@ -122,6 +124,7 @@ jobs:
           export AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }}
           export AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }}
           export AWS_REGION=${{ secrets.AWS_REGION }}
+          export SBCLI_CMD=${{ github.event.inputs.sbcli_cmd || 'sbcli-dev' }}
           TESTNAME=""
           if [ -n "${{ github.event.inputs.testname }}" ]; then
             TESTNAME="--testname ${{ github.event.inputs.testname }}"

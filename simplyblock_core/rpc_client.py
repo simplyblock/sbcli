@@ -118,8 +118,21 @@ class RPCClient:
         return self._request("nvmf_get_transports", params)
 
     def transport_create(self, trtype):
+        """
+            [{'trtype': 'TCP', 'max_queue_depth': 128,
+               'max_io_qpairs_per_ctrlr': 127, 'in_capsule_data_size': 4096,
+               'max_io_size': 131072, 'io_unit_size': 131072, 'max_aq_depth': 128,
+               'num_shared_buffers': 511, 'buf_cache_size': 4294967295,
+               'dif_insert_or_strip': False, 'zcopy': False, 'c2h_success': True,
+               'sock_priority': 0, 'abort_timeout_sec': 1}]
+            The output above is the default values of nvmf_get_transports
+            Failing of creating more than 127 lvols is because of max_io_qpairs_per_ctrlr
+            Currently, we set it to 256 and the max now is 246 lvols, because of bdev_io_pool_size
+            TODO, investigate what is the best configuration for the parameters above and bdev_io_pool_size
+        """
         params = {
-            "trtype": trtype
+            "trtype": trtype,
+            "max_io_qpairs_per_ctrlr": 256
         }
         return self._request("nvmf_create_transport", params)
 
