@@ -28,6 +28,7 @@ services:
     volumes:
       - "os_data:/usr/share/opensearch/data"
     deploy:
+      mode: global
       placement:
         constraints: [node.role == manager]
     networks:
