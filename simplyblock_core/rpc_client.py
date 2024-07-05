@@ -332,7 +332,7 @@ class RPCClient:
         return self._request2("ultra21_bdev_pass_delete", params)
 
     def bdev_alceml_create(self, alceml_name, nvme_name, uuid, pba_init_mode=3,
-                           dev_cpu_mask=""):
+                           alceml_cpu_mask=""):
         params = {
             "name": alceml_name,
             "cntr_path": nvme_name,
@@ -348,13 +348,13 @@ class RPCClient:
             "use_optimized": True,
             "pba_nbalign": 4096
         }
-        if dev_cpu_mask:
-            params["bdb_lcpu_mask"] = int(dev_cpu_mask,16)
+        if alceml_cpu_mask:
+            params["bdb_lcpu_mask"] = int(alceml_cpu_mask, 16)
         return self._request("bdev_alceml_create", params)
 
     def bdev_distrib_create(self, name, vuid, ndcs, npcs, num_blocks, block_size, jm_names,
                             chunk_size, ha_comm_addrs=None, ha_inode_self=None, pba_page_size=2097152,
-                            dev_cpu_mask=""):
+                            distrib_cpu_mask=""):
         """"
             // Optional (not specified = no HA)
             // Comma-separated communication addresses, for each node, e.g. "192.168.10.1:45001,192.168.10.1:32768".
@@ -380,8 +380,8 @@ class RPCClient:
         if ha_comm_addrs:
             params['ha_comm_addrs'] = ha_comm_addrs
             params['ha_inode_self'] = ha_inode_self
-        if dev_cpu_mask:
-            params["bdb_lcpu_mask"] = int(dev_cpu_mask, 16)
+        if distrib_cpu_mask:
+            params["bdb_lcpu_mask"] = int(distrib_cpu_mask, 16)
 
         return self._request("bdev_distrib_create", params)
 
@@ -614,14 +614,14 @@ class RPCClient:
         }
         return self._request("ultra21_lvol_dismount", params)
 
-    def bdev_jm_create(self, name, name_storage1, block_size=4096, dev_cpu_mask=""):
+    def bdev_jm_create(self, name, name_storage1, block_size=4096, jm_cpu_mask=""):
         params = {
             "name": name,
             "name_storage1": name_storage1,
             "block_size": block_size
         }
-        if dev_cpu_mask:
-            params["bdb_lcpu_mask"] = int(dev_cpu_mask, 16)
+        if jm_cpu_mask:
+            params["bdb_lcpu_mask"] = int(jm_cpu_mask, 16)
         return self._request("bdev_jm_create", params)
 
     def bdev_jm_delete(self, name):
