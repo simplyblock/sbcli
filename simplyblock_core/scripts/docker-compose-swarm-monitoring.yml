@@ -17,8 +17,11 @@ services:
     environment:
       - "OPENSEARCH_JAVA_OPTS=-Xms1g -Xmx1g"
       - "bootstrap.memory_lock=true"
-      - "discovery.type=single-node"
+      #- "discovery.type=single-node"
+      - "cluster.name=graylog"
+      - "node.name=opensearch"
       - "discovery.seed_hosts=opensearch"
+      - "cluster.initial_master_nodes=opensearch"
       - "action.auto_create_index=false"
       - "plugins.security.ssl.http.enabled=false"
       - "plugins.security.disabled=true"
@@ -42,6 +45,7 @@ services:
       GRAYLOG_HTTP_EXTERNAL_URI: "http://localhost/graylog/"
       GRAYLOG_ELASTICSEARCH_HOSTS: "http://opensearch:9200"
       GRAYLOG_MONGODB_URI: "mongodb://mongodb:27017/graylog"
+      GRAYLOG_IS_MASTER: "true"
       GRAYLOG_SKIP_PREFLIGHT_CHECKS: "true"
     ports:
     - "5044:5044/tcp"   # Beats
