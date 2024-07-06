@@ -103,6 +103,7 @@ def list():
             "BDev": snap.snap_bdev,
             "LVol ID": snap.lvol.get_id(),
             "Created At": time.strftime("%H:%M:%S, %d/%m/%Y", time.gmtime(snap.created_at)),
+            "Health": snap.health_check,
         })
     return utils.print_table(data)
 

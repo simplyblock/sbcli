@@ -33,6 +33,15 @@ def set_lvol_health_check(lvol, health_check_status):
     lvol_events.lvol_health_check_change(lvol, lvol.health_check, old_status, caused_by="monitor")
 
 
+def set_snapshot_health_check(snap, health_check_status):
+    snap = db_controller.get_snapshot_by_id(snap.get_id())
+    if snap.health_check == health_check_status:
+        return
+    snap.health_check = health_check_status
+    snap.updated_at = str(datetime.now())
+    snap.write_to_db(db_store)
+
+
 # configure logging
 logger_handler = logging.StreamHandler(stream=sys.stdout)
 logger_handler.setFormatter(logging.Formatter('%(asctime)s: %(levelname)s: %(message)s'))
@@ -68,5 +77,10 @@ while True:
             set_lvol_status(lvol, LVol.STATUS_ONLINE)
         else:
             set_lvol_status(lvol, LVol.STATUS_OFFLINE)
+
+    for snap in db_controller.get_snapshots():
+        logger.debug("Checking Snapshot: %s", snap.get_id())
+        ret = health_controller.check_snap(snap.get_id())
+        set_snapshot_health_check(snap, ret)
 
     time.sleep(constants.LVOL_MONITOR_INTERVAL_SEC)

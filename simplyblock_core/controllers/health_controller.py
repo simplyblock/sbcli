@@ -337,3 +337,19 @@ def check_lvol(lvol_id):
             if not ret:
                 passed = False
         return passed
+
+
+def check_snap(snap_id):
+    db_controller = DBController()
+    snap = db_controller.get_snapshot_by_id(snap_id)
+    if not snap:
+        logger.error(f"snap not found: {snap_id}")
+        return False
+
+    snode = db_controller.get_storage_node_by_id(snap.lvol.node_id)
+    rpc_client = RPCClient(
+        snode.mgmt_ip, snode.rpc_port,
+        snode.rpc_username, snode.rpc_password, timeout=5, retry=1)
+
+    ret = rpc_client.get_bdevs(snap.snap_bdev)
+    return ret
