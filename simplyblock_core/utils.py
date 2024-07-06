@@ -295,6 +295,9 @@ def calculate_core_allocation(cpu_count):
     https://simplyblock.atlassian.net/browse/SFAM-885
     '''
 
+    if cpu_count > 64:
+        cpu_count = 64
+
     all_cores = list(range(0, cpu_count))
     app_thread_core = all_cores[1:2]
     jm_cpu_core = all_cores[2:3]
