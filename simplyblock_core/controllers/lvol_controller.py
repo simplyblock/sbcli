@@ -664,7 +664,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
                     "vuid": lvol.vuid,
                     "ndcs": lvol.ndcs,
                     "npcs": lvol.npcs,
-                    "num_blocks": int(lvol.size / lvol.distr_bs),
+                    "num_blocks": int(lvol.max_size / lvol.distr_bs),
                     "block_size": lvol.distr_bs,
                     "chunk_size": lvol.distr_chunk_bs,
                     "pba_page_size": lvol.distr_page_size,
@@ -956,6 +956,11 @@ def delete_lvol_from_node(lvol_id, node_id, clear_data=True):
     # 1- remove subsystem
     logger.info(f"Removing subsystem")
     ret = rpc_client.subsystem_delete(lvol.nqn)
+
+    ## don't remove bdev stack until the last vuid
+    for lv in db_controller.get_lvols(snode.cluster_id):
+        if lv.vuid == lvol.vuid:
+            return True
 
     # 2- remove bdevs
     logger.info(f"Removing bdev stack")
