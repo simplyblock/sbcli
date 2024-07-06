@@ -960,6 +960,7 @@ def delete_lvol_from_node(lvol_id, node_id, clear_data=True):
     ## don't remove bdev stack until the last vuid
     for lv in db_controller.get_lvols(snode.cluster_id):
         if lv.vuid == lvol.vuid:
+            logger.debug("Other bdevs found using the same vuid, skipping bdev remove")
             return True
 
     # 2- remove bdevs

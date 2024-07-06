@@ -203,6 +203,7 @@ def clone(snapshot_id, clone_name, new_size=0):
     lvol.uuid = str(uuid.uuid4())
     lvol.lvol_name = clone_name
     lvol.size = snap.lvol.size
+    lvol.max_size = snap.lvol.max_size
     lvol.base_bdev = snap.lvol.base_bdev
     lvol.lvol_bdev = f"CLN_{clone_name}"
     lvol.lvs_name = snap.lvol.lvs_name
@@ -214,13 +215,22 @@ def clone(snapshot_id, clone_name, new_size=0):
     lvol.nqn = snode.subsystem + ":lvol:" + lvol.uuid
     lvol.pool_uuid = pool.id
     lvol.ha_type = snap.lvol.ha_type
+
+    lvol.ndcs = snap.lvol.ndcs
+    lvol.npcs = snap.lvol.npcs
+    lvol.distr_bs = snap.lvol.distr_bs
+    lvol.distr_chunk_bs = snap.lvol.distr_chunk_bs
+    lvol.distr_page_size = snap.lvol.distr_page_size
+    lvol.guid = snap.lvol.guid
+
     lvol.status = LVol.STATUS_ONLINE
-    lvol.bdev_stack = [
+    lvol.bdev_stack = snap.lvol.bdev_stack
+    lvol.bdev_stack.append(
         {
             "type": "bdev_lvol_clone",
             "name": lvol.top_bdev
         }
-    ]
+    )
 
     # if new_size:
     #     if snap.lvol.size >= new_size:
