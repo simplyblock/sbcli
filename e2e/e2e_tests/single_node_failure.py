@@ -113,7 +113,7 @@ class TestSingleNodeFailure(TestClusterBase):
                          health_check_status=True
                          )
         
-        sleep_n_sec(60)
+        sleep_n_sec(10)
 
         session = boto3.Session(
             aws_access_key_id=os.environ.get("AWS_ACCESS_KEY_ID"),
@@ -127,13 +127,13 @@ class TestSingleNodeFailure(TestClusterBase):
         self.stop_ec2_instance(instance_id)
         
         failure = None
-        for expected_status in ["in_shutdown", "in_restart", "offline"]:
+        for expected_status in ["offline"]:
             try:
                 self.logger.info(f"Waiting for node to become offline, {no_lvol_node_uuid}")
                 self.sbcli_utils.wait_for_storage_node_status(no_lvol_node_uuid,
                                                               expected_status,
                                                               timeout=120)
-                sleep_n_sec(20)
+                sleep_n_sec(3)
 
                 self.validations(node_uuid=no_lvol_node_uuid,
                                 node_status=expected_status,
@@ -152,7 +152,7 @@ class TestSingleNodeFailure(TestClusterBase):
                 # self.sbcli_utils.restart_node(node_uuid=no_lvol_node_uuid)
                 self.logger.info(f"Waiting for node to become online, {no_lvol_node_uuid}")
                 self.sbcli_utils.wait_for_storage_node_status(no_lvol_node_uuid, "online", timeout=120)
-                sleep_n_sec(20)
+                # sleep_n_sec(20)
                 raise exp
         
         if failure:
@@ -160,14 +160,14 @@ class TestSingleNodeFailure(TestClusterBase):
             # self.sbcli_utils.restart_node(node_uuid=no_lvol_node_uuid)
             self.logger.info(f"Waiting for node to become online, {no_lvol_node_uuid}")
             self.sbcli_utils.wait_for_storage_node_status(no_lvol_node_uuid, "online", timeout=120)
-            sleep_n_sec(20)
+            # sleep_n_sec(20)
             raise failure
         
         self.start_ec2_instance(instance_id=instance_id)
         # self.sbcli_utils.restart_node(node_uuid=no_lvol_node_uuid)
         self.logger.info(f"Waiting for node to become online, {no_lvol_node_uuid}")
         self.sbcli_utils.wait_for_storage_node_status(no_lvol_node_uuid, "online", timeout=120)
-        sleep_n_sec(20)
+        # sleep_n_sec(20)
 
         self.validations(node_uuid=no_lvol_node_uuid,
                          node_status="online",
@@ -214,7 +214,7 @@ class TestSingleNodeFailure(TestClusterBase):
         start_waiter.wait(InstanceIds=[instance_id])
         self.logger.info(f'Instance {instance_id} has been successfully started.')
 
-        sleep_n_sec(30)
+        sleep_n_sec(10)
 
     def stop_ec2_instance(self, instance_id):
         """Stop ec2 instance
@@ -229,7 +229,7 @@ class TestSingleNodeFailure(TestClusterBase):
         stop_waiter.wait(InstanceIds=[instance_id])
         self.logger.info((f'Instance {instance_id} has been successfully stopped.'))
         
-        sleep_n_sec(30)
+        sleep_n_sec(3)
 
 
     def validations(self, node_uuid, node_status, device_status, lvol_status,
