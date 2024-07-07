@@ -56,7 +56,9 @@ jobs:
 
       - name: Initialize Terraform
         run: |
+          ls -al
           cd $GITHUB_WORKSPACE/simplyBlockDeploy
+          ls -al
           export TFSTATE_BUCKET=simplyblock-terraform-state-bucket
           export TFSTATE_KEY=csi
           export TFSTATE_REGION=us-east-2
