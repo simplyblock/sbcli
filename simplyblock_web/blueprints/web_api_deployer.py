@@ -34,7 +34,7 @@ def get_instance_tf_engine_instance_id():
     tag_value = 'tfengine'
     tag_key = 'Name'
 
-    ec2 = boto3.client('ec2', region_name='us-east-1')
+    ec2 = boto3.client('ec2', region_name=region)
     response = ec2.describe_instances(
         Filters=[
             {
@@ -180,15 +180,21 @@ def update_cluster(d, kv_store, storage_nodes, availability_zone):
     ]
 
     # Send command with S3 output parameters
-    response = ssm.send_command(
-        InstanceIds=instance_ids,
-        DocumentName=document_name,
-        Parameters={
-            'commands': commands
-        },
-        OutputS3BucketName=tf_logs_bucket_name,
-        OutputS3KeyPrefix=output_key_prefix
-    )
+    try:
+        response = ssm.send_command(
+            InstanceIds=instance_ids,
+            DocumentName=document_name,
+            Parameters={
+                'commands': commands
+            },
+            OutputS3BucketName=tf_logs_bucket_name,
+            OutputS3KeyPrefix=output_key_prefix
+        )
+    except Exception as e:
+        print(f"Exception: {e}")
+        d.status = "failed"
+        d.write_to_db(kv_store)
+        return False, "", "Exception"
 
     command_id = response['Command']['CommandId']
     print(f'Command ID: {command_id}')
