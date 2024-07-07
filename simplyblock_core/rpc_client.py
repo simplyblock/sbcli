@@ -696,3 +696,10 @@ class RPCClient:
     def bdev_lvol_get_lvstores(self, name):
         params = {"lvs_name": name}
         return self._request2("bdev_lvol_get_lvstores", params)
+
+    def bdev_lvol_resize(self, name, size_in_mib):
+        params = {
+            "name": name,
+            "size_in_mib": size_in_mib
+        }
+        return self._request("bdev_lvol_resize", params)

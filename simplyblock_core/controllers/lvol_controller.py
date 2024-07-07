@@ -589,8 +589,8 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
     logger.info(f"Max size: {utils.humanbytes(max_size)}")
     lvol = LVol()
     lvol.lvol_name = name
-    lvol.size = size
-    lvol.max_size = max_size
+    lvol.size = int(size)
+    lvol.max_size = int(max_size)
     lvol.status = LVol.STATUS_ONLINE
     lvol.ha_type = ha_type
     lvol.bdev_stack = []
@@ -683,7 +683,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
                 "name": lvol.lvol_bdev,
                 "params": {
                     "name": lvol.lvol_bdev,
-                    "size": lvol.size,
+                    "size_in_mib": int(lvol.size/(1000*1000)),
                     "lvs_name": lvol.lvs_name
                 }
             }
@@ -1256,7 +1256,7 @@ def resize_lvol(id, new_size):
         logger.error(f"New size {new_size} must be smaller than the max size {lvol.max_size}")
         return False
 
-    logger.info(f"Resizing LVol: {lvol.id}, new size: {lvol.size}")
+    logger.info(f"Resizing LVol: {lvol.id}, new size: {new_size}")
 
     snode = db_controller.get_storage_node_by_id(lvol.node_id)
 
@@ -1267,19 +1267,10 @@ def resize_lvol(id, new_size):
         snode.rpc_username,
         snode.rpc_password)
 
-    num_blocks = int(new_size / lvol.distr_bs)
-    if lvol.snapshot_name:
-        ret = rpc_client.resize_lvol(lvol.top_bdev, num_blocks)
-        if not ret:
-            logger.error("Error resizing lvol")
-            return False
-    elif lvol.cloned_from_snap:
-        ret = rpc_client.resize_clone(lvol.top_bdev, num_blocks)
-        if not ret:
-            logger.error("Error resizing clone")
-            return False
-    else:
-        logger.error("Can not resize distr")
+    size_in_mib = int(new_size / (1000*1000))
+    ret = rpc_client.bdev_lvol_resize(lvol.top_bdev, size_in_mib)
+    if not ret:
+        logger.error("Error resizing lvol")
         return False
 
     lvol.size = new_size
