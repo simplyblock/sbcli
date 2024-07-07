@@ -44,6 +44,7 @@ jobs:
           aws-region: ${{ secrets.AWS_REGION }}
 
       - uses: actions/checkout@v4
+        name: Checkout code simplyBlockDeploy
         with:
           name: simplyblock-io/simplyBlockDeploy
           ref: refs/heads/${{ github.event.inputs.simplyBlockDeploy_branch || 'main'}}
