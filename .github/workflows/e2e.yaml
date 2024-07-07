@@ -43,7 +43,7 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION }}
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@master
         name: Checkout code simplyBlockDeploy
         with:
           name: simplyblock-io/simplyBlockDeploy
