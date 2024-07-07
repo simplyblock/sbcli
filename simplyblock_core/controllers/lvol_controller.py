@@ -865,10 +865,10 @@ def add_lvol_on_node(lvol, snode, ha_comm_addrs=None, ha_inode_self=None):
     if not ret:
         return False, "Failed to add bdev to subsystem"
 
-    logger.info("Sending cluster map to LVol")
-    ret = distr_controller.send_cluster_map_to_node(snode)
-    if not ret:
-        return False, "Failed to send cluster map"
+    # logger.info("Sending cluster map to LVol")
+    # ret = distr_controller.send_cluster_map_to_node(snode)
+    # if not ret:
+    #     return False, "Failed to send cluster map"
 
     spdk_mem_info_after = rpc_client.ultra21_util_get_malloc_stats()
     logger.debug("ultra21_util_get_malloc_stats:")
