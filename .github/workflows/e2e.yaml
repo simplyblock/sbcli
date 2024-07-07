@@ -49,6 +49,8 @@ jobs:
           repository: simplyblock-io/simplyBlockDeploy
           ref: refs/heads/${{ github.event.inputs.simplyBlockDeploy_branch || 'main'}}
           path: 'simplyBlockDeploy'
+          token: ${{ secrets.GH_ACCESS_KEY_ID_HAMDI }}
+
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v2
