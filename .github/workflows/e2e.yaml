@@ -29,7 +29,7 @@ jobs:
       cancel-in-progress: false
     steps:
       - name: Checkout code
-        uses: actions/checkout@v2
+        uses: actions/checkout@v4
 
       - uses: actions/setup-go@v5
         with:
@@ -43,9 +43,14 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION }}
 
-      - name: Clone simplyBlockDeploy repo
-        run: |
-          git clone -b ${{ github.event.inputs.simplyBlockDeploy_branch || 'main'}} git@github.com:simplyblock-io/simplyBlockDeploy.git $GITHUB_WORKSPACE/simplyBlockDeploy
+      - uses: actions/checkout@master
+        name: Checkout code simplyBlockDeploy
+        with:
+          repository: simplyblock-io/simplyBlockDeploy
+          ref: refs/heads/${{ github.event.inputs.simplyBlockDeploy_branch || 'main'}}
+          path: 'simplyBlockDeploy'
+          token: ${{ secrets.GH_ACCESS_KEY_ID_HAMDI }}
+
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v2
