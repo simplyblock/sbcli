@@ -47,6 +47,7 @@ jobs:
         with:
           name: simplyblock-io/simplyBlockDeploy
           ref: refs/heads/${{ github.event.inputs.simplyBlockDeploy_branch || 'main'}}
+          path: 'simplyBlockDeploy'
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v2
