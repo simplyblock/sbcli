@@ -561,7 +561,7 @@ class CLIWrapper:
         sub_command.add_argument("id", help='LVol UUID')
         sub_command.add_argument("name", help='snapshot name')
 
-        self.add_sub_command(subparser, 'list', 'List snapshots')
+        sub_command = self.add_sub_command(subparser, 'list', 'List snapshots')
         sub_command.add_argument("--all", help='List soft deleted snapshots', required=False, action='store_true')
 
         sub_command = self.add_sub_command(subparser, 'delete', 'Delete a snapshot')

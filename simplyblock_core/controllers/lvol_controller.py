@@ -1024,7 +1024,7 @@ def delete_lvol(id_or_name, force_delete=False):
     # soft delete LVol if it has snapshots
     snaps = db_controller.get_snapshots()
     for snap in snaps:
-        if snap.lvol.get_id() == lvol.get_id():
+        if snap.deleted is False and snap.lvol.get_id() == lvol.get_id():
             logger.warning(f"Soft delete LVol that has snapshots. Snapshot:{snap.get_id()}")
             ret = rpc_client.subsystem_delete(lvol.nqn)
             logger.debug(ret)
