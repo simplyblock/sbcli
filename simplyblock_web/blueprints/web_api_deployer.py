@@ -25,12 +25,7 @@ db_controller = kv_store.DBController()
 document_name = 'AWS-RunShellScript'
 output_key_prefix = 'ssm-output'
 
-# intialise clients
-session = boto3.Session()
-ec2_metadata = session.client('ec2-metadata', region_name='us-east-1')
-identity_document = ec2_metadata.describe_instances_identity_document()
-region = identity_document['region']
-
+region = utils.get_aws_region()
 ssm = boto3.client('ssm', region_name=region)
 s3 = boto3.client('s3', region_name=region)
 
