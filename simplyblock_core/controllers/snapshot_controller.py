@@ -89,13 +89,13 @@ def add(lvol_id, snapshot_name):
     return snap.uuid
 
 
-def list():
+def list(all=False):
     snaps = db_controller.get_snapshots()
     data = []
     for snap in snaps:
-        if snap.deleted is True:
-            continue
         logger.debug(snap)
+        if snap.deleted is True and all is False:
+            continue
         data.append({
             "UUID": snap.uuid,
             "Name": snap.snap_name,
@@ -108,7 +108,7 @@ def list():
     return utils.print_table(data)
 
 
-def delete(snapshot_uuid):
+def delete(snapshot_uuid, force=False):
     snap = db_controller.get_snapshot_by_id(snapshot_uuid)
     if not snap:
         logger.error(f"Snapshot not found {snapshot_uuid}")
@@ -140,7 +140,8 @@ def delete(snapshot_uuid):
     ret = rpc_client.delete_lvol(snap.snap_bdev)
     if not ret:
         logger.error(f"Failed to delete BDev {snap.snap_bdev}")
-        return False
+        if not force:
+            return False
 
     base_lvol = db_controller.get_lvol_by_id(snap.lvol.get_id())
     if base_lvol.deleted is True:

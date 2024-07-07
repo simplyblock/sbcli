@@ -237,10 +237,10 @@ class RPCClient:
         params = {"bdev_name": bdev_name, "lvs_name": name}
         return self._request("bdev_lvol_create_lvstore", params)
 
-    def create_lvol(self, name, size, lvs_name):
+    def create_lvol(self, name, size_in_mib, lvs_name):
         params = {
             "lvol_name": name,
-            "size": size,
+            "size_in_mib": size_in_mib,
             "lvs_name": lvs_name,
             "thin_provision": True,
         }

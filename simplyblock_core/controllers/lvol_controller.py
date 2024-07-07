@@ -959,6 +959,8 @@ def delete_lvol_from_node(lvol_id, node_id, clear_data=True):
 
     ## don't remove bdev stack until the last vuid
     for lv in db_controller.get_lvols(snode.cluster_id):
+        if lv.get_id() == lvol_id:
+            continue
         if lv.vuid == lvol.vuid:
             logger.debug("Other bdevs found using the same vuid, skipping bdev remove")
             return True
@@ -1123,7 +1125,7 @@ def set_lvol(uuid, max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes, name=
     return True
 
 
-def list_lvols(is_json, cluster_id, pool_id_or_name):
+def list_lvols(is_json, cluster_id, pool_id_or_name, all=False):
     lvols = []
     if cluster_id:
         lvols = db_controller.get_lvols(cluster_id)
@@ -1139,9 +1141,9 @@ def list_lvols(is_json, cluster_id, pool_id_or_name):
 
     data = []
     for lvol in lvols:
-        if lvol.deleted is True:
-            continue
         logger.debug(lvol)
+        if lvol.deleted is True and all is False:
+            continue
         data.append({
             "Id": lvol.uuid,
             "Name": lvol.lvol_name,

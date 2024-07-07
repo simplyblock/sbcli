@@ -393,6 +393,7 @@ class CLIWrapper:
         sub_command.add_argument("--cluster-id", help='List LVols in particular cluster', dest="cluster_id")
         sub_command.add_argument("--pool", help='List LVols in particular Pool ID or name', dest="pool")
         sub_command.add_argument("--json", help='Print outputs in json format', required=False, action='store_true')
+        sub_command.add_argument("--all", help='List soft deleted LVols', required=False, action='store_true')
 
         # Get the size and max_size of the lvol
         sub_command = self.add_sub_command(subparser, 'list-mem', 'Get the size and max_size of the lvol')
@@ -561,9 +562,11 @@ class CLIWrapper:
         sub_command.add_argument("name", help='snapshot name')
 
         self.add_sub_command(subparser, 'list', 'List snapshots')
+        sub_command.add_argument("--all", help='List soft deleted snapshots', required=False, action='store_true')
 
         sub_command = self.add_sub_command(subparser, 'delete', 'Delete a snapshot')
         sub_command.add_argument("id", help='snapshot UUID')
+        sub_command.add_argument("--force", help='Force remove', required=False, action='store_true')
 
         sub_command = self.add_sub_command(subparser, 'clone', 'Create LVol from snapshot')
         sub_command.add_argument("id", help='snapshot UUID')
@@ -913,7 +916,7 @@ class CLIWrapper:
                     args.id, args.max_rw_iops, args.max_rw_mbytes,
                     args.max_r_mbytes, args.max_w_mbytes)
             elif sub_command == "list":
-                ret = lvol_controller.list_lvols(args.json, args.cluster_id, args.pool)
+                ret = lvol_controller.list_lvols(args.json, args.cluster_id, args.pool, args.all)
             elif sub_command == "list-mem":
                 ret = lvol_controller.list_lvols_mem(args.json, args.csv)
             elif sub_command == "get":
@@ -1046,9 +1049,9 @@ class CLIWrapper:
             if sub_command == "add":
                 ret = snapshot_controller.add(args.id, args.name)
             if sub_command == "list":
-                ret = snapshot_controller.list()
+                ret = snapshot_controller.list(args.all)
             if sub_command == "delete":
-                ret = snapshot_controller.delete(args.id)
+                ret = snapshot_controller.delete(args.id, args.force)
             if sub_command == "clone":
                 new_size = 0
                 if args.resize:
