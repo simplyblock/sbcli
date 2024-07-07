@@ -46,7 +46,7 @@ jobs:
       - uses: actions/checkout@master
         name: Checkout code simplyBlockDeploy
         with:
-          name: simplyblock-io/simplyBlockDeploy
+          repository: simplyblock-io/simplyBlockDeploy
           ref: refs/heads/${{ github.event.inputs.simplyBlockDeploy_branch || 'main'}}
           path: 'simplyBlockDeploy'
 
