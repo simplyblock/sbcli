@@ -168,6 +168,9 @@ services:
       - --retention.resolution-raw=30d
       - --retention.resolution-5m=60d
       - --retention.resolution-1h=90d
+      - --block-sync-concurrency=20
+      - --compact.concurrency=1
+      - --wait
     volumes:
       - ./objstore.yml:/etc/thanos/objstore.yml
       - thanos_compactor_data:/data
