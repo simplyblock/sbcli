@@ -127,7 +127,7 @@ class TestSingleNodeFailure(TestClusterBase):
         self.stop_ec2_instance(instance_id)
         
         failure = None
-        for expected_status in ["in_shutdown", "in_restart", "offline"]:
+        for expected_status in ["offline"]:
             try:
                 self.logger.info(f"Waiting for node to become offline, {no_lvol_node_uuid}")
                 self.sbcli_utils.wait_for_storage_node_status(no_lvol_node_uuid,
@@ -146,8 +146,10 @@ class TestSingleNodeFailure(TestClusterBase):
             except (AssertionError, TimeoutError) as exp:
                 self.logger.info(f"Check for expected status {expected_status} failed, "
                                  "moving to other status")
+                self.logger.debug(exp)
                 failure = exp
             except Exception as exp:
+                self.logger.debug(exp)
                 self.start_ec2_instance(instance_id=instance_id)
                 # self.sbcli_utils.restart_node(node_uuid=no_lvol_node_uuid)
                 self.logger.info(f"Waiting for node to become online, {no_lvol_node_uuid}")
