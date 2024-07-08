@@ -223,7 +223,7 @@ class TestSingleNodeMultipleFioPerfValidation:
                                            "rwmixread": 55,
                                            "size": "2G",
                                            "time_based": True,
-                                           "runtime": 300,
+                                           "runtime": 180,
                                            "output_format": "json",
                                            "output_file": self.lvol_devices[self.lvol_name1]["Log"],
                                            "debug": self.fio_debug})
@@ -237,7 +237,7 @@ class TestSingleNodeMultipleFioPerfValidation:
                                             "rwmixread": 55,
                                             "size": "2G",
                                             "time_based": True,
-                                            "runtime": 300,
+                                            "runtime": 180,
                                             "output_format": "json",
                                             "output_file": self.lvol_devices[self.lvol_name2]["Log"],
                                             "debug": self.fio_debug})
