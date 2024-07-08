@@ -120,8 +120,10 @@ class SshUtils:
                 output = stdout.read().decode()
                 error = stderr.read().decode()
 
-            self.logger.debug(f"Command output: {output}")
-            self.logger.debug(f"Command error: {error}")
+            if output:
+                self.logger.debug(f"Command output: {output}")
+            if error:
+                self.logger.debug(f"Command error: {error}")
 
             if not output and not error:
                 self.logger.warning(f"Command '{command}' executed but returned no output or error.")
