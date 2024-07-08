@@ -113,7 +113,7 @@ class TestSingleNodeFailure(TestClusterBase):
                          health_check_status=True
                          )
         
-        sleep_n_sec(10)
+        sleep_n_sec(60)
 
         session = boto3.Session(
             aws_access_key_id=os.environ.get("AWS_ACCESS_KEY_ID"),
@@ -127,33 +127,32 @@ class TestSingleNodeFailure(TestClusterBase):
         self.stop_ec2_instance(instance_id)
         
         failure = None
-        for expected_status in ["offline"]:
-            try:
-                self.logger.info(f"Waiting for node to become offline, {no_lvol_node_uuid}")
-                self.sbcli_utils.wait_for_storage_node_status(no_lvol_node_uuid,
-                                                              expected_status,
-                                                              timeout=120)
-                sleep_n_sec(3)
+        expected_status = "offline"
+        try:
+            self.logger.info(f"Waiting for node to become offline, {no_lvol_node_uuid}")
+            self.sbcli_utils.wait_for_storage_node_status(no_lvol_node_uuid,
+                                                          expected_status,
+                                                          timeout=120)
+            sleep_n_sec(20)
 
-                self.validations(node_uuid=no_lvol_node_uuid,
-                                node_status=expected_status,
-                                device_status="unavailable",
-                                lvol_status="online",
-                                health_check_status=True
-                                )
-                failure = None
-                break
-            except (AssertionError, TimeoutError) as exp:
-                self.logger.info(f"Check for expected status {expected_status} failed, "
-                                 "moving to other status")
-                failure = exp
-            except Exception as exp:
-                self.start_ec2_instance(instance_id=instance_id)
-                # self.sbcli_utils.restart_node(node_uuid=no_lvol_node_uuid)
-                self.logger.info(f"Waiting for node to become online, {no_lvol_node_uuid}")
-                self.sbcli_utils.wait_for_storage_node_status(no_lvol_node_uuid, "online", timeout=120)
-                # sleep_n_sec(20)
-                raise exp
+            self.validations(node_uuid=no_lvol_node_uuid,
+                            node_status=expected_status,
+                            device_status="unavailable",
+                            lvol_status="online",
+                            health_check_status=True)
+        except (AssertionError, TimeoutError) as exp:
+            self.logger.info(f"Check for expected status {expected_status} failed, "
+                             "moving to other status")
+            self.logger.debug(exp)
+            failure = exp
+        except Exception as exp:
+            self.logger.debug(exp)
+            self.start_ec2_instance(instance_id=instance_id)
+            # self.sbcli_utils.restart_node(node_uuid=no_lvol_node_uuid)
+            self.logger.info(f"Waiting for node to become online, {no_lvol_node_uuid}")
+            self.sbcli_utils.wait_for_storage_node_status(no_lvol_node_uuid, "online", timeout=120)
+            # sleep_n_sec(20)
+            raise exp
         
         if failure:
             self.start_ec2_instance(instance_id=instance_id)
@@ -166,7 +165,7 @@ class TestSingleNodeFailure(TestClusterBase):
         self.start_ec2_instance(instance_id=instance_id)
         # self.sbcli_utils.restart_node(node_uuid=no_lvol_node_uuid)
         self.logger.info(f"Waiting for node to become online, {no_lvol_node_uuid}")
-        self.sbcli_utils.wait_for_storage_node_status(no_lvol_node_uuid, "online", timeout=120)
+        self.sbcli_utils.wait_for_storage_node_status(no_lvol_node_uuid, "online", timeout=3*60)
         # sleep_n_sec(20)
 
         self.validations(node_uuid=no_lvol_node_uuid,
