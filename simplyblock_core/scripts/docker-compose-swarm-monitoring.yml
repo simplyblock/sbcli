@@ -7,7 +7,6 @@ services:
     volumes:
       - "mongodb_data:/data/db"
     deploy:
-      mode: global
       placement:
         constraints: [node.role == manager]
     networks:
@@ -29,7 +28,6 @@ services:
     volumes:
       - "os_data:/usr/share/opensearch/data"
     deploy:
-      mode: global
       placement:
         constraints: [node.role == manager]
     networks:
@@ -65,7 +63,6 @@ services:
       - "graylog_data:/usr/share/graylog/data/data"
       - "graylog_journal:/usr/share/graylog/data/journal"
     deploy:
-      mode: global
       placement:
         constraints: [node.role == manager]
     networks:
