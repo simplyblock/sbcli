@@ -60,7 +60,7 @@ TASK_EXEC_RETRY_COUNT = 8
 SIMPLY_BLOCK_DOCKER_IMAGE = "simplyblock/simplyblock:configure_monitoring_svc_with_efs"
 SIMPLY_BLOCK_SPDK_CORE_IMAGE = "simplyblock/spdk-core:latest"
 SIMPLY_BLOCK_SPDK_CORE_IMAGE_ARM64 = "simplyblock/spdk-core:latest-arm64"
-SIMPLY_BLOCK_SPDK_ULTRA_IMAGE = "simplyblock/spdk:prerelease-latest"
+SIMPLY_BLOCK_SPDK_ULTRA_IMAGE = "simplyblock/spdk:main-latest"
 
 GELF_PORT = 12201
 

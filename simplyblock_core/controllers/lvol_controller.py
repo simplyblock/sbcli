@@ -969,9 +969,9 @@ def delete_lvol_from_node(lvol_id, node_id, clear_data=True):
         ret = rpc_client.alceml_unmap_vuid(jm_device.alceml_bdev, lvol.vuid)
         if not ret:
             logger.error(f"Failed to unmap jm alceml {jm_device.alceml_bdev} with vuid {lvol.vuid}")
-        ret = rpc_client.bdev_jm_unmap_vuid(jm_device.jm_bdev, lvol.vuid)
-        if not ret:
-            logger.error(f"Failed to unmap jm {jm_device.jm_bdev} with vuid {lvol.vuid}")
+        # ret = rpc_client.bdev_jm_unmap_vuid(jm_device.jm_bdev, lvol.vuid)
+        # if not ret:
+        #     logger.error(f"Failed to unmap jm {jm_device.jm_bdev} with vuid {lvol.vuid}")
 
         lvol.deletion_status = 'jm_unmapped'
         lvol.write_to_db(db_controller.kv_store)
