@@ -30,8 +30,8 @@ ssm = boto3.client('ssm', region_name=region)
 s3 = boto3.client('s3', region_name=region)
 
 
-def get_instance_tf_engine_instance_id():
-    tag_value = 'tfengine'
+def get_instance_tf_engine_instance_id(workspace: str):
+    tag_value = f'{workspace}-tfengine'
     tag_key = 'Name'
 
     ec2 = boto3.client('ec2', region_name=region)
@@ -145,7 +145,7 @@ def update_cluster(d, kv_store, storage_nodes, availability_zone):
     d.status = "in_progress"
     d.write_to_db(kv_store)
 
-    instance_ids = get_instance_tf_engine_instance_id()
+    instance_ids = get_instance_tf_engine_instance_id(d.tf_workspace)
     if len(instance_ids) == 0:
         # wait for a min and try again before returning error on the API
         print('no instance IDs')
