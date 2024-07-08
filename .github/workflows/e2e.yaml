@@ -1,9 +1,10 @@
 name: E2E Tests
 
 on:
-  # push:
-  #   branches:
-  #     - main
+  push:
+    branches:
+      - pre-release
+      - sbcli
   schedule:
     - cron: '0 5 * * *'  # Runs every day at 5 AM UTC
   workflow_dispatch:
@@ -28,7 +29,7 @@ jobs:
       cancel-in-progress: false
     steps:
       - name: Checkout code
-        uses: actions/checkout@v2
+        uses: actions/checkout@v4
 
       - uses: actions/setup-go@v5
         with:
@@ -42,9 +43,14 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION }}
 
-      - name: Clone simplyBlockDeploy repo
-        run: |
-          git clone -b ${{ github.event.inputs.simplyBlockDeploy_branch || 'main'}} git@github.com:simplyblock-io/simplyBlockDeploy.git $GITHUB_WORKSPACE/simplyBlockDeploy
+      - uses: actions/checkout@master
+        name: Checkout code simplyBlockDeploy
+        with:
+          repository: simplyblock-io/simplyBlockDeploy
+          ref: refs/heads/${{ github.event.inputs.simplyBlockDeploy_branch || 'main'}}
+          path: 'simplyBlockDeploy'
+          token: ${{ secrets.GH_ACCESS_KEY_ID_HAMDI }}
+
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v2
@@ -53,7 +59,9 @@ jobs:
 
       - name: Initialize Terraform
         run: |
+          ls -al
           cd $GITHUB_WORKSPACE/simplyBlockDeploy
+          ls -al
           export TFSTATE_BUCKET=simplyblock-terraform-state-bucket
           export TFSTATE_KEY=csi
           export TFSTATE_REGION=us-east-2
@@ -100,12 +108,13 @@ jobs:
       - name: Bootstrap Cluster
         run: |
           cd $GITHUB_WORKSPACE/simplyBlockDeploy
-          ./bootstrap-cluster.sh --max-lvol 10 --max-snap 10 --max-prov 450g --number-of-devices 3
+          ./bootstrap-cluster.sh --max-lvol 10 --max-snap 10 --max-prov 450g --number-of-devices 3 --spdk-debug
         id: bootstrap_cluster
         env:
           SBCLI_CMD: ${{ github.event.inputs.sbcli_cmd || 'sbcli-dev' }}
 
       - name: Setup Tests & Run Tests
+        timeout-minutes: 60
         run: |
           cd $GITHUB_WORKSPACE/e2e
           sudo apt-get install -y python3.12-venv
@@ -122,6 +131,7 @@ jobs:
           export AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }}
           export AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }}
           export AWS_REGION=${{ secrets.AWS_REGION }}
+          export SBCLI_CMD=${{ github.event.inputs.sbcli_cmd || 'sbcli-dev' }}
           TESTNAME=""
           if [ -n "${{ github.event.inputs.testname }}" ]; then
             TESTNAME="--testname ${{ github.event.inputs.testname }}"

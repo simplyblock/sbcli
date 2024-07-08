@@ -1,7 +1,8 @@
-import time
+
 import requests
 from http import HTTPStatus
 from logger_config import setup_logger
+from utils.common_utils import sleep_n_sec
 
 
 class SbcliUtils:
@@ -193,9 +194,11 @@ class SbcliUtils:
             "max_rw_mbytes": str(max_rw_mbytes),
             "max_r_mbytes": str(max_r_mbytes),
             "max_w_mbytes": str(max_w_mbytes),
+            "cluster_id": self.cluster_id
         }
         if cluster_id:
             body["cluster_id"] = cluster_id
+
         self.post_request(api_url="/pool", body=body)
         # TODO: Add assertions
 
@@ -302,7 +305,6 @@ class SbcliUtils:
         """Return lvol by lvol name
         """
         lvols = self.list_lvols()
-        lvol_id = None
         return lvols.get(lvol_name, None)
 
     def get_lvol_connect_str(self, lvol_name):
@@ -322,28 +324,28 @@ class SbcliUtils:
         """
         cluster_id = self.cluster_id if not cluster_id else cluster_id
         cluster_details = self.get_request(api_url=f"/cluster/status/{cluster_id}")
-        # print(f"Cluster Status: {cluster_details}")
+        self.logger.info(f"Cluster Status: {cluster_details}")
         return cluster_details["results"]
 
     def get_storage_node_details(self, storage_node_id):
         """Get Storage Node details for given node id
         """
         node_details = self.get_request(api_url=f"/storagenode/{storage_node_id}")
-        # print(f"Node Details: {node_details}")
+        self.logger.info(f"Node Details: {node_details}")
         return node_details["results"]
 
     def get_device_details(self, storage_node_id):
         """Get Device details for given node id
         """
         device_details = self.get_request(api_url=f"/device/list/{storage_node_id}")
-        # print(f"Device Details: {device_details}")
+        self.logger.info(f"Device Details: {device_details}")
         return device_details["results"]
 
     def get_lvol_details(self, lvol_id):
         """Get lvol details for given lvol id
         """
         lvol_details = self.get_request(api_url=f"/lvol/{lvol_id}")
-        # print(f"Lvol Details: {lvol_details}")
+        self.logger.info(f"Lvol Details: {lvol_details}")
         return lvol_details["results"]
 
     def get_cluster_logs(self, cluster_id=None):
@@ -353,13 +355,17 @@ class SbcliUtils:
         cluster_logs = self.get_request(api_url=f"/cluster/get-logs/{cluster_id}")
         self.logger.info(f"Cluster Logs: {cluster_logs}")
         return cluster_logs["results"]
-
+    
     def wait_for_storage_node_status(self, node_id, status, timeout=60):
+        actual_status = None
         while timeout > 0:
             node_details = self.get_storage_node_details(storage_node_id=node_id)
-            if node_details[0]["status"] == status:
+            actual_status = node_details[0]["status"]
+            if actual_status == status:
                 return True
             else:
-                time.sleep(5)
+                sleep_n_sec(5)
                 timeout -= 5
-        raise TimeoutError(f"Timed out waiting for node status, {node_id}, status: {status}")
+        raise TimeoutError(f"Timed out waiting for node status, {node_id},"
+                           f"Expected status: {status}, Actual status: {actual_status}")
+

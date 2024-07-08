@@ -111,8 +111,15 @@ def _def_create_device_stack(device_obj, snode, force=False):
     alceml_id = device_obj.get_id()
     alceml_name = get_alceml_name(alceml_id)
     logger.info(f"adding {alceml_name}")
-    ret = rpc_client.bdev_alceml_create(alceml_name, test_name, alceml_id, pba_init_mode=2,
-                                        dev_cpu_mask=snode.dev_cpu_mask)
+
+    if snode.alceml_cpu_cores:
+        alceml_cpu_mask = utils.decimal_to_hex_power_of_2(snode.alceml_cpu_cores[snode.alceml_cpu_index])
+        ret = rpc_client.bdev_alceml_create(alceml_name, test_name, alceml_id, pba_init_mode=2,
+                                            alceml_cpu_mask=alceml_cpu_mask)
+        snode.alceml_cpu_index = (snode.alceml_cpu_index + 1) % len(snode.alceml_cpu_cores)
+    else:
+        ret = rpc_client.bdev_alceml_create(alceml_name, test_name, alceml_id, pba_init_mode=2)
+
     if not ret:
         logger.error(f"Failed to create alceml bdev: {alceml_name}")
         if not force:
@@ -150,7 +157,7 @@ def _def_create_device_stack(device_obj, snode, force=False):
 
     if hasattr(device_obj, 'jm_bdev') and device_obj.jm_bdev:
         ret = rpc_client.bdev_jm_create(device_obj.jm_bdev, device_obj.alceml_bdev,
-                                        dev_cpu_mask=snode.dev_cpu_mask)
+                                        jm_cpu_mask=snode.jm_cpu_mask)
         if not ret:
             logger.error(f"Failed to create jm bdev: {device_obj.jm_bdev}")
             if not force:
