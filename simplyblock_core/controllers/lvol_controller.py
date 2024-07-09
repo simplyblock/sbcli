@@ -1492,3 +1492,36 @@ def move(lvol_id, node_id, force=False):
     else:
         logger.error("Failed to migrate lvol")
         return False
+
+def inflate_lvol(lvol_id):
+
+    lvol = db_controller.get_lvol_by_id(lvol_id)
+    if not lvol:
+        logger.error(f"LVol not found: {lvol_id}")
+        return False
+    if not lvol.cloned_from_snap:
+        logger.error(f"LVol: {lvol_id} must be cloned LVol not regular one")
+        return False
+    pool = db_controller.get_pool_by_id(lvol.pool_uuid)
+    if pool.status == Pool.STATUS_INACTIVE:
+        logger.error(f"Pool is disabled")
+        return False
+
+    logger.info(f"Inflating LVol: {lvol.id}")
+    snode = db_controller.get_storage_node_by_id(lvol.node_id)
+
+    # creating RPCClient instance
+    rpc_client = RPCClient(
+        snode.mgmt_ip,
+        snode.rpc_port,
+        snode.rpc_username,
+        snode.rpc_password)
+    ret = rpc_client.bdev_lvol_inflate(lvol.top_bdev)
+    if ret:
+        lvol.cloned_from_snap = ""
+        lvol.write_to_db(db_controller.kv_store)
+        logger.info("Done")
+    else:
+        logger.error(f"Failed to inflate LVol: {lvol_id}")
+    return ret
+
