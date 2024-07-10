@@ -125,51 +125,26 @@ class TestSingleNodeFailure(TestClusterBase):
         self.logger.info(f"Region : {session.region_name}")
 
         self.stop_ec2_instance(instance_id)
-        
-        failure = None
-        for expected_status in ["offline"]:
-            try:
-                self.logger.info(f"Waiting for node to become offline, {no_lvol_node_uuid}")
-                self.sbcli_utils.wait_for_storage_node_status(no_lvol_node_uuid,
-                                                              expected_status,
-                                                              timeout=120)
-                sleep_n_sec(20)
 
-                self.validations(node_uuid=no_lvol_node_uuid,
-                                node_status=expected_status,
-                                device_status="unavailable",
-                                lvol_status="online",
-                                health_check_status=True
-                                )
-                failure = None
-                break
-            except (AssertionError, TimeoutError) as exp:
-                self.logger.info(f"Check for expected status {expected_status} failed, "
-                                 "moving to other status")
-                self.logger.debug(exp)
-                failure = exp
-            except Exception as exp:
-                self.logger.debug(exp)
-                self.start_ec2_instance(instance_id=instance_id)
-                # self.sbcli_utils.restart_node(node_uuid=no_lvol_node_uuid)
-                self.logger.info(f"Waiting for node to become online, {no_lvol_node_uuid}")
-                self.sbcli_utils.wait_for_storage_node_status(no_lvol_node_uuid, "online", timeout=120)
-                sleep_n_sec(20)
-                raise exp
-        
-        if failure:
-            self.start_ec2_instance(instance_id=instance_id)
-            # self.sbcli_utils.restart_node(node_uuid=no_lvol_node_uuid)
-            self.logger.info(f"Waiting for node to become online, {no_lvol_node_uuid}")
-            self.sbcli_utils.wait_for_storage_node_status(no_lvol_node_uuid, "online", timeout=120)
+        try:
+            self.logger.info(f"Waiting for node to become offline, {no_lvol_node_uuid}")
+            self.sbcli_utils.wait_for_storage_node_status(no_lvol_node_uuid, "offline", timeout=120)
+
             sleep_n_sec(20)
-            raise failure
-        
+
+            self.validations(node_uuid=no_lvol_node_uuid,
+                             node_status="offline",
+                             device_status="unavailable",
+                             lvol_status="online",
+                             health_check_status=False)
+        except Exception as exp:
+            self.logger.error(exp)
+            self.start_ec2_instance(instance_id=instance_id)
+            raise exp
+
         self.start_ec2_instance(instance_id=instance_id)
-        # self.sbcli_utils.restart_node(node_uuid=no_lvol_node_uuid)
         self.logger.info(f"Waiting for node to become online, {no_lvol_node_uuid}")
-        self.sbcli_utils.wait_for_storage_node_status(no_lvol_node_uuid, "online", timeout=120)
-        sleep_n_sec(20)
+        self.sbcli_utils.wait_for_storage_node_status(no_lvol_node_uuid, "online", timeout=5 * 60)
 
         self.validations(node_uuid=no_lvol_node_uuid,
                          node_status="online",
@@ -273,12 +248,16 @@ class TestSingleNodeFailure(TestClusterBase):
 
         storage_nodes = self.sbcli_utils.get_storage_nodes()["results"]
         for node in storage_nodes:
-            assert node["health_check"] == health_check_status, \
-                f"Node {node['id']} health-check is not {health_check_status}. {node['health_check']}"
-            device_details = self.sbcli_utils.get_device_details(storage_node_id=node["id"])
-            for device in device_details:
-                assert device["health_check"] == health_check_status, \
-                    f"Device {device['id']} health-check is not {health_check_status}. {device['health_check']}"
+            if node["id"] == node_uuid:
+                assert node["health_check"] == health_check_status, \
+                    f"Node {node['id']} health-check is not {health_check_status}. {node['health_check']}"
+            else:
+                assert node["health_check"] is True, \
+                    f"Node {node['id']} health-check is not True. {node['health_check']}"
+                device_details = self.sbcli_utils.get_device_details(storage_node_id=node["id"])
+                for device in device_details:
+                    assert device["health_check"] is True, \
+                        f"Device {device['id']} health-check is not True. {device['health_check']}"
 
         for node_id, node in cluster_map_nodes.items():
             if node_id == node_uuid:

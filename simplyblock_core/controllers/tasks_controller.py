@@ -10,17 +10,6 @@ from simplyblock_core.models.job_schedule import JobSchedule
 logger = logging.getLogger()
 db_controller = kv_store.DBController()
 
-
-def _validate_new_task_node_restart(cluster_id, node_id):
-    tasks = db_controller.get_job_tasks(cluster_id)
-    for task in tasks:
-        if task.function_name == JobSchedule.FN_NODE_RESTART and task.node_id == node_id:
-            if task.status != JobSchedule.STATUS_DONE:
-                logger.info(f"Task found, skip adding new task: {task.get_id()}")
-                return False
-    return True
-
-
 def _validate_new_task_dev_restart(cluster_id, node_id, device_id):
     tasks = db_controller.get_job_tasks(cluster_id)
     for task in tasks:
@@ -41,7 +30,9 @@ def _add_task(function_name, cluster_id, node_id, device_id):
         if not _validate_new_task_dev_restart(cluster_id, node_id, device_id):
             return False
     elif function_name == JobSchedule.FN_NODE_RESTART:
-        if not _validate_new_task_node_restart(cluster_id, node_id):
+        task_id = get_active_node_restart_task(cluster_id, node_id)
+        if task_id:
+            logger.info(f"Task found, skip adding new task: {task_id}")
             return False
 
     task_obj = JobSchedule()
@@ -101,3 +92,21 @@ def cancel_task(task_id):
     task.write_to_db(db_controller.kv_store)
     tasks_events.task_canceled(task)
     return True
+
+
+def get_active_node_restart_task(cluster_id, node_id):
+    tasks = db_controller.get_job_tasks(cluster_id)
+    for task in tasks:
+        if task.function_name == JobSchedule.FN_NODE_RESTART and task.node_id == node_id:
+            if task.status != JobSchedule.STATUS_DONE and task.canceled is False:
+                return task.uuid
+    return False
+
+
+def get_active_dev_restart_task(cluster_id, device_id):
+    tasks = db_controller.get_job_tasks(cluster_id)
+    for task in tasks:
+        if task.function_name == JobSchedule.FN_DEV_RESTART and task.device_id == device_id:
+            if task.status != JobSchedule.STATUS_DONE and task.canceled is False:
+                return task.uuid
+    return False
