@@ -70,6 +70,7 @@ def task_runner(task):
     if "migration_ids" in task.function_params:
         completed_count = 0
         error_count = 0
+        progress = 0
         count = len(task.function_params["migration_ids"])
         for mig_id in task.function_params["migration_ids"]:
             res = rpc_client.distr_migration_status(mig_id)
@@ -79,6 +80,7 @@ def task_runner(task):
                         completed_count += 1
                     if st['error'] == 1:
                         error_count += 1
+                    progress += st['progress']
         if count == completed_count:
             if error_count >= 1:
                 task.function_params = {}
@@ -90,7 +92,8 @@ def task_runner(task):
                 task.write_to_db(db_controller.kv_store)
                 return True
         else:
-            task.function_result = f"completed: {completed_count}/{count}, errors: {error_count}"
+            progress = int(progress / count)
+            task.function_result = f"progress: {progress}%, errors: {error_count}"
             task.write_to_db(db_controller.kv_store)
 
     task.retry += 1

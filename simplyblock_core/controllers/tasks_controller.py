@@ -85,8 +85,7 @@ def list_tasks(cluster_id):
     for task in tasks:
         data.append({
             "Task ID": task.uuid,
-            "Node ID": task.node_id,
-            "Device ID": task.device_id,
+            "Node ID / Device ID": f"{task.node_id}\n{task.device_id}",
             "Function": task.function_name,
             "Retry": f"{task.retry}/{task.max_retry}",
             "Status": task.status,
