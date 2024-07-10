@@ -15,7 +15,7 @@ from jinja2 import Environment, FileSystemLoader
 
 from simplyblock_core import utils, scripts, constants, mgmt_node_ops, storage_node_ops
 from simplyblock_core.controllers import cluster_events, device_controller
-from simplyblock_core.kv_store import DBController
+from simplyblock_core.kv_store import DBController, KVStore
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
@@ -107,7 +107,6 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     except Exception as e:
         print(e)
 
-    db_controller = DBController()
     if not cli_pass:
         cli_pass = utils.generate_string(10)
 
@@ -181,6 +180,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     c.status = Cluster.STATUS_ACTIVE
 
     c.updated_at = int(time.time())
+    db_controller = DBController(KVStore())
     c.write_to_db(db_controller.kv_store)
 
     cluster_events.cluster_create(c)
@@ -589,7 +589,7 @@ def update_cluster(cl_id):
     logger.info("Done")
     return True
 
- 
+
 def cluster_grace_startup(cl_id):
     db_controller = DBController()
     cluster = db_controller.get_cluster_by_id(cl_id)
@@ -607,7 +607,7 @@ def cluster_grace_startup(cl_id):
         get_node = db_controller.get_storage_node_by_id(node.get_id())
         if get_node.status != StorageNode.STATUS_ONLINE:
             logger.error("failed to restart node")
-    
+
     return True
 
 
@@ -624,7 +624,7 @@ def cluster_grace_shutdown(cl_id):
         storage_node_ops.suspend_storage_node(node.get_id())
         logger.info(f"Shutting down node: {node.get_id()}")
         storage_node_ops.shutdown_storage_node(node.get_id())
-       
+
     logger.info(f"Suspending cluster: {cl_id}")
     suspend_cluster(cl_id)
     return True

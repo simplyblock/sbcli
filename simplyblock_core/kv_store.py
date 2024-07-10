@@ -9,6 +9,7 @@ from simplyblock_core.models.caching_node import CachingNode
 from simplyblock_core.models.cluster import ClusterMap
 
 from simplyblock_core.models.cluster import Cluster
+from simplyblock_core.models.deployer import Deployer
 from simplyblock_core.models.compute_node import ComputeNode
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.port_stat import PortStat
@@ -185,7 +186,9 @@ class DBController:
             for pool in self.get_pools(cluster_id):
                 if pool.cluster_id == cluster_id:
                     for lv_id in pool.lvols:
-                        lvols.append(self.get_lvol_by_id(lv_id))
+                        lv = self.get_lvol_by_id(lv_id)
+                        if lv:
+                            lvols.append(lv)
         else:
             lvols = LVol().read_from_db(self.kv_store)
         return lvols
@@ -265,6 +268,14 @@ class DBController:
         if ret:
             return ret[0]
 
+    def get_deployers(self):
+        return Deployer().read_from_db(self.kv_store)
+
+    def get_deployer_by_id(self, deployer_id):
+        ret = Deployer().read_from_db(self.kv_store, id=deployer_id)
+        if ret:
+            return ret[0]
+
     def get_port_stats(self, node_id, port_id, limit=20):
         stats = PortStat().read_from_db(self.kv_store, id="%s/%s" % (node_id, port_id), limit=limit, reverse=True)
         return stats
@@ -279,3 +290,18 @@ class DBController:
         for task in self.get_job_tasks(""):
             if task.uuid == task_id:
                 return task
+
+    def get_snapshots_by_node_id(self, node_id):
+        ret = []
+        snaps = SnapShot().read_from_db(self.kv_store)
+        for snap in snaps:
+            if snap.lvol.host_id == node_id:
+                ret.append(snap)
+        return ret
+
+    def get_snode_size(self, node_id):
+        snode = self.get_storage_node_by_id(node_id)
+        total_node_capacity = 0
+        for dev in snode.nvme_devices:
+            total_node_capacity += dev.size
+        return total_node_capacity

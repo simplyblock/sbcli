@@ -149,7 +149,7 @@ def get_memory_details():
         mem_kb = mem_info['MemTotal']
         data['total'] = utils.parse_size(mem_kb.replace(" ", ""))
 
-        mem_kb = mem_info['MemFree']
+        mem_kb = mem_info['MemAvailable']
         data['free'] = utils.parse_size(mem_kb.replace(" ", ""))
 
         mem_kb = mem_info['Hugetlb']
@@ -163,3 +163,7 @@ def get_memory_details():
         pass
     return data
 
+
+def get_host_arch():
+    out, err, rc = run_command("uname -m")
+    return out

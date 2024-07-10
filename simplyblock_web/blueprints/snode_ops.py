@@ -100,9 +100,9 @@ def spdk_process_start():
             node.remove(force=True)
             time.sleep(2)
 
-    spdk_debug = 0
+    spdk_debug = ""
     if set_debug:
-        spdk_debug = 1
+        spdk_debug = "1"
 
     spdk_image = constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE
     if 'spdk_image' in data and data['spdk_image']:

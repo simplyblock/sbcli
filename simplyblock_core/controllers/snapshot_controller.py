@@ -13,6 +13,8 @@ from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.rpc_client import RPCClient
+from simplyblock_core.snode_client import SNodeClient
+
 
 logger = lg.getLogger()
 
@@ -33,6 +35,21 @@ def add(lvol_id, snapshot_name):
     logger.info(f"Creating snapshot: {snapshot_name} from LVol: {lvol.id}")
     snode = db_controller.get_storage_node_by_id(lvol.node_id)
 
+##############################################################################
+    # Validate adding snap on storage node
+    snode_api = SNodeClient(snode.api_endpoint)
+    result, _ = snode_api.info()
+    memory_free = result["memory_details"]["free"]
+    huge_free = result["memory_details"]["huge_free"]
+    total_node_capacity = db_controller.get_snode_size(snode.get_id())
+
+    error = utils.validate_add_lvol_or_snap_on_node(memory_free, huge_free, snode.max_snap, lvol.size, total_node_capacity,
+                                                    len(db_controller.get_snapshots_by_node_id(snode.get_id())))
+
+    if error:
+        logger.error(f"Failed to add snap on node {snode.get_id()}")
+        logger.error(error)
+        return False
 
 ##############################################################################
     snap_count = 0
@@ -49,7 +66,7 @@ def add(lvol_id, snapshot_name):
     ret = rpc_client.bdev_distrib_create(
         base_name, new_vuid, lvol.ndcs, lvol.npcs, num_blocks,
         lvol.distr_bs, lvol_controller.get_jm_names(snode), lvol.distr_chunk_bs,
-        None, None, lvol.distr_page_size, dev_cpu_mask=snode.dev_cpu_mask)
+        None, None, lvol.distr_page_size, distrib_cpu_mask=snode.distrib_cpu_mask)
     if not ret:
         logger.error("Failed to create Distr bdev")
         return False, "Failed to create Distr bdev"
@@ -199,6 +216,16 @@ def clone(snapshot_id, clone_name, new_size=0):
                 logger.error(msg)
                 return False, msg
 
+    # Validate cloning snap on storage node
+    snode_api = SNodeClient(snode.api_endpoint)
+    result, _ = snode_api.info()
+    memory_free = result["memory_details"]["free"]
+    huge_free = result["memory_details"]["huge_free"]
+    total_node_capacity = db_controller.get_snode_size(snode.get_id())
+    error = utils.validate_add_lvol_or_snap_on_node(memory_free, huge_free, snode.max_lvol, snap.lvol.size,  total_node_capacity, len(snode.lvols))
+    if error:
+        logger.error(error)
+        return False, f"Failed to add lvol on node {snode.get_id()}"
     lvol = LVol()
     lvol.lvol_name = clone_name
     lvol.size = snap.lvol.size
@@ -233,7 +260,7 @@ def clone(snapshot_id, clone_name, new_size=0):
     ret = rpc_client.bdev_distrib_create(
         name, new_vuid, lvol.ndcs, lvol.npcs, num_blocks,
         lvol.distr_bs, jm_names, lvol.distr_chunk_bs, None, None, lvol.distr_page_size,
-        dev_cpu_mask=snode.dev_cpu_mask)
+        distrib_cpu_mask=snode.distrib_cpu_mask)
     if not ret:
         msg="Failed to create Distr bdev"
         logger.error(msg)

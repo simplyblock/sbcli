@@ -61,7 +61,10 @@ class StorageNode(BaseModel):
         "remote_devices": {"type": List[NVMeDevice], 'default': []},
         "host_secret": {"type": str, "default": ""},
         "ctrl_secret": {"type": str, "default": ""},
-
+        "max_lvol": {"type": int, "default": 0},
+        "max_snap": {"type": int, "default": 0},
+        "max_prov": {"type": int, "default": 0},
+        "number_of_devices": {"type": int, "default": 0},
         "cpu": {"type": int, "default": 0},
         "cpu_hz": {"type": int, "default": 0},
         "memory": {"type": int, "default": 0},
@@ -72,11 +75,16 @@ class StorageNode(BaseModel):
         "spdk_cpu_mask": {"type": str, "default": ""},
         "app_thread_mask": {"type": str, "default": ""},
         "pollers_mask": {"type": str, "default": ""},
-        "os_cores": {"type": str, "default": []},
-        "dev_cpu_mask": {"type": str, "default": ""},
+        "poller_cpu_cores": {"type": str, "default": ""},
+        "jm_cpu_mask": {"type": str, "default": ""},
+        "alceml_cpu_cores": {"type": List[int], "default": []},
+        "alceml_cpu_index": {"type": int, "default": 0},
+        "distrib_cpu_mask": {"type": str, "default": ""},
+
         "spdk_mem": {"type": int, "default": 0},
         "spdk_image": {"type": str, "default": ""},
         "spdk_debug": {"type": bool, "default": False},
+
 
         "ec2_metadata": {"type": dict, "default": {}},
         "ec2_instance_id": {"type": str, "default": ""},

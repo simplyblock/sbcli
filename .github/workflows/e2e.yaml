@@ -3,7 +3,8 @@ name: E2E Tests
 on:
   push:
     branches:
-      - main
+      - pre-release
+      - sbcli
   schedule:
     - cron: '0 5 * * *'  # Runs every day at 5 AM UTC
   workflow_dispatch:
@@ -28,7 +29,7 @@ jobs:
       cancel-in-progress: false
     steps:
       - name: Checkout code
-        uses: actions/checkout@v2
+        uses: actions/checkout@v4
 
       - uses: actions/setup-go@v5
         with:
@@ -42,9 +43,14 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION }}
 
-      - name: Clone simplyBlockDeploy repo
-        run: |
-          git clone -b ${{ github.event.inputs.simplyBlockDeploy_branch || 'main'}} git@github.com:simplyblock-io/simplyBlockDeploy.git $GITHUB_WORKSPACE/simplyBlockDeploy
+      - uses: actions/checkout@master
+        name: Checkout code simplyBlockDeploy
+        with:
+          repository: simplyblock-io/simplyBlockDeploy
+          ref: refs/heads/${{ github.event.inputs.simplyBlockDeploy_branch || 'main'}}
+          path: 'simplyBlockDeploy'
+          token: ${{ secrets.GH_ACCESS_KEY_ID_HAMDI }}
+
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v2
@@ -54,7 +60,17 @@ jobs:
       - name: Initialize Terraform
         run: |
           cd $GITHUB_WORKSPACE/simplyBlockDeploy
-          terraform init
+          export TFSTATE_BUCKET=simplyblock-terraform-state-bucket
+          export TFSTATE_KEY=csi
+          export TFSTATE_REGION=us-east-2
+          export TFSTATE_DYNAMODB_TABLE=terraform-up-and-running-locks
+
+          terraform init -reconfigure \
+              -backend-config="bucket=${TFSTATE_BUCKET}" \
+              -backend-config="key=${TFSTATE_KEY}" \
+              -backend-config="region=${TFSTATE_REGION}" \
+              -backend-config="dynamodb_table=${TFSTATE_DYNAMODB_TABLE}" \
+              -backend-config="encrypt=true"
 
       - name: select or create workspace
         run: |
@@ -70,9 +86,8 @@ jobs:
         run: |
           cd $GITHUB_WORKSPACE/simplyBlockDeploy
           terraform plan \
-            -var "mgmt_nodes=1" -var "storage_nodes=3" -var "storage_nodes_instance_type=i3en.xlarge" \
-            -var "volumes_per_storage_nodes=0" \
-            -var "extra_nodes=1" -var "extra_nodes_instance_type=m6id.large" \
+            -var "mgmt_nodes=1" -var "storage_nodes=3" -var "volumes_per_storage_nodes=3" \
+            -var "extra_nodes=1" -var "extra_nodes_instance_type=m6id.large" -var "storage_nodes_instance_type=m6id.2xlarge"\
             -var "region=us-east-2" -var "sbcli_cmd=${{ github.event.inputs.sbcli_cmd || 'sbcli-dev' }}" -out=tfplan
 
       - name: Apply Terraform Changes
@@ -91,13 +106,13 @@ jobs:
       - name: Bootstrap Cluster
         run: |
           cd $GITHUB_WORKSPACE/simplyBlockDeploy
-          ./bootstrap-cluster.sh --memory 4g --iobuf_small_pool_count 25000  \
-          --iobuf_large_pool_count 10000 --partitions 4
+          ./bootstrap-cluster.sh --max-lvol 10 --max-snap 10 --max-prov 450g --number-of-devices 3 --spdk-debug
         id: bootstrap_cluster
         env:
           SBCLI_CMD: ${{ github.event.inputs.sbcli_cmd || 'sbcli-dev' }}
 
       - name: Setup Tests & Run Tests
+        timeout-minutes: 60
         run: |
           cd $GITHUB_WORKSPACE/e2e
           sudo apt-get install -y python3.12-venv
@@ -114,6 +129,7 @@ jobs:
           export AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }}
           export AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }}
           export AWS_REGION=${{ secrets.AWS_REGION }}
+          export SBCLI_CMD=${{ github.event.inputs.sbcli_cmd || 'sbcli-dev' }}
           TESTNAME=""
           if [ -n "${{ github.event.inputs.testname }}" ]; then
             TESTNAME="--testname ${{ github.event.inputs.testname }}"
@@ -135,7 +151,7 @@ jobs:
           RUN_ID: ${{ github.run_id }}
 
       - name: Parse test results
-        if: always() && github.ref == 'refs/heads/main'
+        if: always() && github.ref == 'refs/heads/main' || github.ref == 'refs/heads/pre-release'
         id: parse_results
         run: |
           cd $GITHUB_WORKSPACE/e2e/logs
@@ -208,9 +224,8 @@ jobs:
           echo "${FAILED_CASES_BULLETS}" >> $GITHUB_ENV
           echo "EOF" >> $GITHUB_ENV
 
-
       - name: Send Slack Notification
-        if: always() && github.ref == 'refs/heads/main'
+        if: always() && github.ref == 'refs/heads/main' || github.ref == 'refs/heads/pre-release'
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
           GITHUB_SERVER_URL: ${{ github.server_url }}
@@ -224,8 +239,7 @@ jobs:
           FAILED_CASES: ${{ env.FAILED_CASES }}
           PASSED_CASES_BULLETS: ${{ env.PASSED_CASES_BULLETS }}
           FAILED_CASES_BULLETS: ${{ env.FAILED_CASES_BULLETS }}
-          TRIGGER_EVENT: ${{ github.event_name }}
-          TRIGGER_ACTOR: ${{ github.actor }}
+          BRANCH_NAME: ${{ github.ref_name }}
         run: |
           GITHUB_RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}"
           AWS_LOGS_URL="https://s3.console.aws.amazon.com/s3/buckets/${S3_BUCKET_NAME}?prefix=${RUN_ID}/&region=us-east-2"
@@ -234,8 +248,8 @@ jobs:
           else
             OVERALL_STATUS=":x: Overall Status: FAILURE"
           fi
-          MESSAGE="Python E2E tests run triggered by ${{ env.TRIGGER_ACTOR }} via ${{ env.TRIGGER_EVENT }}. \n${OVERALL_STATUS}\nGitHub Run: ${GITHUB_RUN_URL}\nAWS Logs: ${AWS_LOGS_URL}\n\nTotal Tests: ${{ env.TOTAL_TESTS }}\nPassed Tests: ${{ env.PASSED_TESTS }}\nFailed Tests: ${{ env.FAILED_TESTS }}\n\n-- Test Cases Passed :white_check_mark:\n${{ env.PASSED_CASES_BULLETS }}\n\n-- Test Cases Failed :x:\n${{ env.FAILED_CASES_BULLETS }}"
-          
+          MESSAGE="Python E2E tests run triggered on branch **${BRANCH_NAME}**. \n${OVERALL_STATUS}\nGitHub Run: ${GITHUB_RUN_URL}\nAWS Logs: ${AWS_LOGS_URL}\n\nTotal Tests: ${{ env.TOTAL_TESTS }}\nPassed Tests: ${{ env.PASSED_TESTS }}\nFailed Tests: ${{ env.FAILED_TESTS }}\n\n-- Test Cases Passed :white_check_mark:\n${{ env.PASSED_CASES_BULLETS }}\n\n-- Test Cases Failed :x:\n${{ env.FAILED_CASES_BULLETS }}"
+
           curl -X POST -H 'Content-type: application/json' --data "{\"text\":\"${MESSAGE}\"}" $SLACK_WEBHOOK_URL
 
       - name: Destroy Cluster
