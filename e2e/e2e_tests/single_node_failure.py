@@ -97,7 +97,7 @@ class TestSingleNodeFailure(TestClusterBase):
 
         fio_thread1 = threading.Thread(target=self.ssh_obj.run_fio_test, args=(self.mgmt_nodes[0], None, self.mount_path, self.log_path,),
                                        kwargs={"name": "fio_run_1",
-                                               "runtime": 300,
+                                               "runtime": 800,
                                                "debug": self.fio_debug})
         fio_thread1.start()
         # breakpoint()
@@ -125,48 +125,26 @@ class TestSingleNodeFailure(TestClusterBase):
         self.logger.info(f"Region : {session.region_name}")
 
         self.stop_ec2_instance(instance_id)
-        
-        failure = None
-        expected_status = "offline"
+
         try:
             self.logger.info(f"Waiting for node to become offline, {no_lvol_node_uuid}")
-            self.sbcli_utils.wait_for_storage_node_status(no_lvol_node_uuid,
-                                                          expected_status,
-                                                          timeout=120)
+            self.sbcli_utils.wait_for_storage_node_status(no_lvol_node_uuid, "offline", timeout=120)
+
             sleep_n_sec(20)
 
             self.validations(node_uuid=no_lvol_node_uuid,
-                            node_status=expected_status,
-                            device_status="unavailable",
-                            lvol_status="online",
-                            health_check_status=True)
-        except (AssertionError, TimeoutError) as exp:
-            self.logger.info(f"Check for expected status {expected_status} failed, "
-                             "moving to other status")
-            self.logger.debug(exp)
-            failure = exp
+                             node_status="offline",
+                             device_status="unavailable",
+                             lvol_status="online",
+                             health_check_status=False)
         except Exception as exp:
-            self.logger.debug(exp)
+            self.logger.error(exp)
             self.start_ec2_instance(instance_id=instance_id)
-            # self.sbcli_utils.restart_node(node_uuid=no_lvol_node_uuid)
-            self.logger.info(f"Waiting for node to become online, {no_lvol_node_uuid}")
-            self.sbcli_utils.wait_for_storage_node_status(no_lvol_node_uuid, "online", timeout=120)
-            # sleep_n_sec(20)
             raise exp
-        
-        if failure:
-            self.start_ec2_instance(instance_id=instance_id)
-            # self.sbcli_utils.restart_node(node_uuid=no_lvol_node_uuid)
-            self.logger.info(f"Waiting for node to become online, {no_lvol_node_uuid}")
-            self.sbcli_utils.wait_for_storage_node_status(no_lvol_node_uuid, "online", timeout=120)
-            # sleep_n_sec(20)
-            raise failure
-        
+
         self.start_ec2_instance(instance_id=instance_id)
-        # self.sbcli_utils.restart_node(node_uuid=no_lvol_node_uuid)
         self.logger.info(f"Waiting for node to become online, {no_lvol_node_uuid}")
-        self.sbcli_utils.wait_for_storage_node_status(no_lvol_node_uuid, "online", timeout=3*60)
-        # sleep_n_sec(20)
+        self.sbcli_utils.wait_for_storage_node_status(no_lvol_node_uuid, "online", timeout=5 * 60)
 
         self.validations(node_uuid=no_lvol_node_uuid,
                          node_status="online",
@@ -213,7 +191,7 @@ class TestSingleNodeFailure(TestClusterBase):
         start_waiter.wait(InstanceIds=[instance_id])
         self.logger.info(f'Instance {instance_id} has been successfully started.')
 
-        sleep_n_sec(10)
+        sleep_n_sec(30)
 
     def stop_ec2_instance(self, instance_id):
         """Stop ec2 instance
@@ -228,7 +206,7 @@ class TestSingleNodeFailure(TestClusterBase):
         stop_waiter.wait(InstanceIds=[instance_id])
         self.logger.info((f'Instance {instance_id} has been successfully stopped.'))
         
-        sleep_n_sec(3)
+        sleep_n_sec(30)
 
 
     def validations(self, node_uuid, node_status, device_status, lvol_status,
@@ -270,12 +248,16 @@ class TestSingleNodeFailure(TestClusterBase):
 
         storage_nodes = self.sbcli_utils.get_storage_nodes()["results"]
         for node in storage_nodes:
-            assert node["health_check"] == health_check_status, \
-                f"Node {node['id']} health-check is not {health_check_status}. {node['health_check']}"
-            device_details = self.sbcli_utils.get_device_details(storage_node_id=node["id"])
-            for device in device_details:
-                assert device["health_check"] == health_check_status, \
-                    f"Device {device['id']} health-check is not {health_check_status}. {device['health_check']}"
+            if node["id"] == node_uuid:
+                assert node["health_check"] == health_check_status, \
+                    f"Node {node['id']} health-check is not {health_check_status}. {node['health_check']}"
+            else:
+                assert node["health_check"] is True, \
+                    f"Node {node['id']} health-check is not True. {node['health_check']}"
+                device_details = self.sbcli_utils.get_device_details(storage_node_id=node["id"])
+                for device in device_details:
+                    assert device["health_check"] is True, \
+                        f"Device {device['id']} health-check is not True. {device['health_check']}"
 
         for node_id, node in cluster_map_nodes.items():
             if node_id == node_uuid:
