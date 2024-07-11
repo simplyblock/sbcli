@@ -63,8 +63,7 @@ def clone_snapshot():
     if 'clone_name' not in cl_data:
         return utils.get_response(None, "missing required param: clone_name", 400)
 
-    new_size = utils.get_int_value_or_default(cl_data, "new_size", 0)
-    
+    new_size = utils.parse_size(cl_data['new_size'])
     res, msg = snapshot_controller.clone(
         cl_data['snapshot_id'], cl_data['clone_name'], new_size)
     if res:
