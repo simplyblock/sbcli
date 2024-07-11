@@ -703,3 +703,7 @@ class RPCClient:
             "size_in_mib": size_in_mib
         }
         return self._request("bdev_lvol_resize", params)
+
+    def bdev_lvol_inflate(self, name):
+        params = {"name": name}
+        return self._request("bdev_lvol_inflate", params)

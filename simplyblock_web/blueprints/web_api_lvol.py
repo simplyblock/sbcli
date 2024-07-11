@@ -278,3 +278,15 @@ def create_snapshot():
         cl_data['lvol_id'],
         cl_data['snapshot_name'])
     return utils.get_response(snapID)
+
+
+@bp.route('/lvol/inflate_lvol/<string:uuid>', methods=['PUT'])
+def inflate_lvol(uuid):
+    lvol = db_controller.get_lvol_by_id(uuid)
+    if not lvol:
+        return utils.get_response_error(f"LVol not found: {uuid}", 404)
+    if not lvol.cloned_from_snap:
+        return utils.get_response_error(f"LVol: {uuid} must be cloned LVol not regular one", 404)
+
+    ret = lvol_controller.inflate_lvol(uuid)
+    return utils.get_response(ret)

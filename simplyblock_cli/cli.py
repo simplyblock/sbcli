@@ -470,6 +470,11 @@ class CLIWrapper:
         sub_command = self.add_sub_command(subparser, "check", 'Health check LVol')
         sub_command.add_argument("id", help='UUID of LVol')
 
+        # lvol inflate
+        sub_command = self.add_sub_command(subparser, 'inflate', 'Inflate a logical volume',
+                                           usage='All unallocated clusters are allocated and copied from the parent or zero filled if not allocated in the parent. '
+                                                 'Then all dependencies on the parent are removed.')
+        sub_command.add_argument("lvol_id", help='cloned lvol id')
 
         # mgmt-node ops
         subparser = self.add_command('mgmt', 'Management node commands')
@@ -966,6 +971,8 @@ class CLIWrapper:
                 ret = health_controller.check_lvol(id)
             elif sub_command == 'move':
                 ret = lvol_controller.move(args.id, args.node_id, args.force)
+            elif sub_command == "inflate":
+                ret = lvol_controller.inflate_lvol(args.lvol_id)
             else:
                 self.parser.print_help()
 
