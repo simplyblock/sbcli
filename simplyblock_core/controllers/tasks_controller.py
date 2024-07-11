@@ -114,3 +114,12 @@ def get_active_dev_restart_task(cluster_id, device_id):
             if task.status != JobSchedule.STATUS_DONE and task.canceled is False:
                 return task.uuid
     return False
+
+
+def get_active_node_mig_task(cluster_id, node_id):
+    tasks = db_controller.get_job_tasks(cluster_id)
+    for task in tasks:
+        if task.function_name in [JobSchedule.FN_DEV_MIG, JobSchedule.FN_FAILED_DEV_MIG] and task.node_id == node_id:
+            if task.status != JobSchedule.STATUS_DONE and task.canceled is False:
+                return task.uuid
+    return False
