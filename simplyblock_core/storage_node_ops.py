@@ -241,13 +241,19 @@ def _create_jm_stack_on_raid(rpc_client, jm_nvme_bdevs, snode, after_restart):
     pba_init_mode = 3
     if after_restart:
         pba_init_mode = 2
-    ret = rpc_client.bdev_alceml_create(alceml_name, raid_bdev, str(uuid.uuid4()), pba_init_mode=pba_init_mode)
+    if snode.alceml_cpu_cores:
+        alceml_cpu_mask = utils.decimal_to_hex_power_of_2(snode.alceml_cpu_cores[snode.alceml_cpu_index])
+        ret = rpc_client.bdev_alceml_create(alceml_name, raid_bdev, str(uuid.uuid4()), pba_init_mode=pba_init_mode,
+                                            alceml_cpu_mask=alceml_cpu_mask)
+        snode.alceml_cpu_index = (snode.alceml_cpu_index + 1) % len(snode.alceml_cpu_cores)
+    else:
+        ret = rpc_client.bdev_alceml_create(alceml_name, raid_bdev, str(uuid.uuid4()), pba_init_mode=pba_init_mode)
     if not ret:
         logger.error(f"Failed to create alceml bdev: {alceml_name}")
         return False
 
     jm_bdev = f"jm_{snode.get_id()}"
-    ret = rpc_client.bdev_jm_create(jm_bdev, alceml_name)
+    ret = rpc_client.bdev_jm_create(jm_bdev, alceml_name, jm_cpu_mask=snode.jm_cpu_mask)
     if not ret:
         logger.error(f"Failed to create {jm_bdev}")
         return False
@@ -274,13 +280,20 @@ def _create_jm_stack_on_device(rpc_client, nvme, snode, after_restart):
     pba_init_mode = 3
     if after_restart:
         pba_init_mode = 2
-    ret = rpc_client.bdev_alceml_create(alceml_name, nvme.nvme_bdev, alceml_id, pba_init_mode=pba_init_mode)
+    if snode.alceml_cpu_cores:
+        alceml_cpu_mask = utils.decimal_to_hex_power_of_2(snode.alceml_cpu_cores[snode.alceml_cpu_index])
+        ret = rpc_client.bdev_alceml_create(alceml_name, nvme.nvme_bdev, alceml_id, pba_init_mode=pba_init_mode,
+                                            alceml_cpu_mask=alceml_cpu_mask)
+        snode.alceml_cpu_index = (snode.alceml_cpu_index + 1) % len(snode.alceml_cpu_cores)
+    else:
+        ret = rpc_client.bdev_alceml_create(alceml_name, nvme.nvme_bdev, alceml_id, pba_init_mode=pba_init_mode)
+
     if not ret:
         logger.error(f"Failed to create alceml bdev: {alceml_name}")
         return False
 
     jm_bdev = f"jm_{snode.get_id()}"
-    ret = rpc_client.bdev_jm_create(jm_bdev, alceml_name)
+    ret = rpc_client.bdev_jm_create(jm_bdev, alceml_name, jm_cpu_mask=snode.jm_cpu_mask)
     if not ret:
         logger.error(f"Failed to create {jm_bdev}")
         return False
@@ -308,8 +321,16 @@ def _create_storage_device_stack(rpc_client, nvme, snode, after_restart):
     pba_init_mode = 3
     if after_restart:
         pba_init_mode = 2
-    ret = rpc_client.bdev_alceml_create(alceml_name, test_name, alceml_id, pba_init_mode=pba_init_mode,
-                                            dev_cpu_mask=snode.dev_cpu_mask)
+
+    if snode.alceml_cpu_cores:
+        alceml_cpu_mask = utils.decimal_to_hex_power_of_2(snode.alceml_cpu_cores[snode.alceml_cpu_index])
+        ret = rpc_client.bdev_alceml_create(alceml_name, test_name, alceml_id, pba_init_mode=pba_init_mode,
+                                            alceml_cpu_mask=alceml_cpu_mask)
+        snode.alceml_cpu_index = (snode.alceml_cpu_index + 1) % len(snode.alceml_cpu_cores)
+    else:
+        ret = rpc_client.bdev_alceml_create(alceml_name, test_name, alceml_id, pba_init_mode=pba_init_mode)
+
+
     if not ret:
         logger.error(f"Failed to create alceml bdev: {alceml_name}")
         return False
@@ -507,13 +528,20 @@ def _prepare_cluster_devices_on_restart(snode):
             return False
     else:
 
-        ret = rpc_client.bdev_alceml_create(jm_device.alceml_bdev, jm_device.nvme_bdev, jm_device.get_id(), pba_init_mode=2)
+        if snode.alceml_cpu_cores:
+            alceml_cpu_mask = utils.decimal_to_hex_power_of_2(snode.alceml_cpu_cores[snode.alceml_cpu_index])
+            ret = rpc_client.bdev_alceml_create(jm_device.alceml_bdev, jm_device.nvme_bdev, jm_device.get_id(),
+                                            pba_init_mode=2, alceml_cpu_mask=alceml_cpu_mask)
+            snode.alceml_cpu_index = (snode.alceml_cpu_index + 1) % len(snode.alceml_cpu_cores)
+        else:
+            ret = rpc_client.bdev_alceml_create(jm_device.alceml_bdev, jm_device.nvme_bdev, jm_device.get_id(),
+                                            pba_init_mode=2)
         if not ret:
             logger.error(f"Failed to create alceml bdev: {jm_device.alceml_bdev}")
             return False
 
         jm_bdev = f"jm_{snode.get_id()}"
-        ret = rpc_client.bdev_jm_create(jm_bdev, jm_device.alceml_bdev)
+        ret = rpc_client.bdev_jm_create(jm_bdev, jm_device.alceml_bdev, jm_cpu_mask=snode.jm_cpu_mask)
         if not ret:
             logger.error(f"Failed to create {jm_bdev}")
             return False
@@ -612,22 +640,26 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
     cpu_count = node_info["cpu_count"]
     pollers_mask = ""
     app_thread_mask = ""
-    dev_cpu_mask = ""
-    nvme_pollers_cores = []
+    jm_cpu_mask = ""
+    alceml_cpu_cores = []
+    alceml_cpu_index = 0
+    distrib_cpu_mask = ""
+
+    poller_cpu_cores = []
     if cpu_count < 8:
         mask = (1 << (cpu_count - 1)) - 1
         mask <<= 1
         spdk_cpu_mask = f'0x{mask:X}'
-        os_cores = [0]
     else:
-        os_cores, nvme_pollers_cores, app_thread_core, dev_cpu_cores = \
+        app_thread_core, jm_cpu_core, poller_cpu_cores, alceml_cpu_cores, distrib_cpu_cores = \
             utils.calculate_core_allocation(cpu_count)
-        spdk_cores = nvme_pollers_cores + app_thread_core + dev_cpu_cores
+        spdk_cores = app_thread_core + jm_cpu_core + poller_cpu_cores + alceml_cpu_cores + distrib_cpu_cores
 
-        pollers_mask = utils.generate_mask(nvme_pollers_cores)
+        pollers_mask = utils.generate_mask(poller_cpu_cores)
         app_thread_mask = utils.generate_mask(app_thread_core)
         spdk_cpu_mask = utils.generate_mask(spdk_cores)
-        dev_cpu_mask = utils.generate_mask(dev_cpu_cores)
+        jm_cpu_mask = utils.generate_mask(jm_cpu_core)
+        distrib_cpu_mask = utils.generate_mask(distrib_cpu_cores)
 
     # Calculate pool count
     if ec2_metadata and ec2_metadata.get('instanceType'):
@@ -649,7 +681,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
     number_of_split = num_partitions_per_dev if num_partitions_per_dev else num_partitions_per_dev + 1
     number_of_alceml_devices = number_of_devices * number_of_split
     small_pool_count, large_pool_count = utils.calculate_pool_count(
-        number_of_alceml_devices, max_lvol, max_snap, cpu_count, len(nvme_pollers_cores) or cpu_count)
+        number_of_alceml_devices, max_lvol, max_snap, cpu_count, len(poller_cpu_cores) or cpu_count)
 
     # Calculate minimum huge page memory
     minimum_hp_memory = utils.calculate_minimum_hp_memory(small_pool_count, large_pool_count, max_lvol, max_snap, cpu_count)
@@ -758,9 +790,11 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
     snode.write_to_db(kv_store)
     snode.app_thread_mask = app_thread_mask or ""
     snode.pollers_mask = pollers_mask or ""
-    snode.nvme_pollers_cores = nvme_pollers_cores or []
-    snode.dev_cpu_mask = dev_cpu_mask or ""
-    snode.os_cores = os_cores or []
+    snode.jm_cpu_mask = jm_cpu_mask
+    snode.alceml_cpu_index = alceml_cpu_index
+    snode.alceml_cpu_cores = alceml_cpu_cores
+    snode.distrib_cpu_mask = distrib_cpu_mask
+    snode.poller_cpu_cores = poller_cpu_cores or []
 
     snode.iobuf_small_pool_count = small_pool_count or 0
     snode.iobuf_large_pool_count = large_pool_count or 0
@@ -939,6 +973,12 @@ def remove_storage_node(node_id, force_remove=False, force_migrate=False):
         logger.error(f"Can not remove online node: {node_id}")
         return False
 
+    task_id = tasks_controller.get_active_node_restart_task(snode.cluster_id, snode.get_id())
+    if task_id:
+        logger.error(f"Restart task found: {task_id}, can not remove storage node")
+        if force_remove is False:
+            return False
+
     if snode.lvols:
         if force_migrate:
             for lvol_id in snode.lvols:
@@ -1014,7 +1054,7 @@ def restart_storage_node(
         node_id, max_lvol=0, max_snap=0, max_prov=0,
         spdk_image=None,
         set_spdk_debug=None,
-        small_bufsize=0, large_bufsize=0, number_of_devices=0):
+        small_bufsize=0, large_bufsize=0, number_of_devices=0, force=False):
 
     db_controller = DBController()
     kv_store = db_controller.kv_store
@@ -1029,6 +1069,12 @@ def restart_storage_node(
     if snode.status == StorageNode.STATUS_ONLINE:
         logger.error(f"Can not restart online node: {node_id}")
         return False
+
+    task_id = tasks_controller.get_active_node_restart_task(snode.cluster_id, snode.get_id())
+    if task_id:
+        logger.error(f"Restart task found: {task_id}, can not restart storage node")
+        if force is False:
+            return False
 
     logger.info("Setting node state to restarting")
     old_status = snode.status
@@ -1083,7 +1129,7 @@ def restart_storage_node(
     number_of_split = snode.num_partitions_per_dev if snode.num_partitions_per_dev else snode.num_partitions_per_dev + 1
     number_of_alceml_devices = number_of_devices * number_of_split
     small_pool_count, large_pool_count = utils.calculate_pool_count(
-        number_of_alceml_devices, snode.max_lvol, snode.max_snap, snode.cpu, len(snode.nvme_pollers_cores) or snode.cpu)
+        number_of_alceml_devices, snode.max_lvol, snode.max_snap, snode.cpu, len(snode.poller_cpu_cores) or snode.cpu)
 
     # Calculate minimum huge page memory
     minimum_hp_memory = utils.calculate_minimum_hp_memory(small_pool_count, large_pool_count, snode.max_lvol, snode.max_snap, snode.cpu)
@@ -1435,16 +1481,11 @@ def shutdown_storage_node(node_id, force=False):
         if force is False:
             return False
 
-    # cls = db_controller.get_clusters(id=snode.cluster_id)
-    # snodes = db_controller.get_storage_nodes()
-    # online_nodes = 0
-    # for node in snodes:
-    #     if node.status == node.STATUS_ONLINE:
-    #         online_nodes += 1
-    # if cls[0].ha_type == "ha" and online_nodes <= 3:
-    #     logger.warning(f"Cluster mode is HA but online storage nodes are less than 3")
-    #     if force is False:
-    #         return False
+    task_id = tasks_controller.get_active_node_restart_task(snode.cluster_id, snode.get_id())
+    if task_id:
+        logger.error(f"Restart task found: {task_id}, can not shutdown storage node")
+        if force is False:
+            return False
 
     logger.info("Shutting down node")
     old_status = snode.status
@@ -1504,7 +1545,14 @@ def suspend_storage_node(node_id, force=False):
     logger.info("Node found: %s in state: %s", snode.hostname, snode.status)
     if snode.status != StorageNode.STATUS_ONLINE:
         logger.error("Node is not in online state")
-        return False
+        if force is False:
+            return False
+
+    task_id = tasks_controller.get_active_node_restart_task(snode.cluster_id, snode.get_id())
+    if task_id:
+        logger.error(f"Restart task found: {task_id}, can not suspend storage node")
+        if force is False:
+            return False
 
     cluster = db_controller.get_cluster_by_id(snode.cluster_id)
     snodes = db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id)
@@ -1563,6 +1611,11 @@ def resume_storage_node(node_id):
     logger.info("Node found: %s in state: %s", snode.hostname, snode.status)
     if snode.status != StorageNode.STATUS_SUSPENDED:
         logger.error("Node is not in suspended state")
+        return False
+
+    task_id = tasks_controller.get_active_node_restart_task(snode.cluster_id, snode.get_id())
+    if task_id:
+        logger.error(f"Restart task found: {task_id}, can not resume storage node")
         return False
 
     logger.info("Resuming node")

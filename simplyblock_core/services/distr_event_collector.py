@@ -160,8 +160,8 @@ while True:
             logger.info(f"Processing event: {eid}")
             process_event(eid)
 
-            logger.info(f"Discarding events: {len(events)}")
-            client.distr_status_events_discard_then_get(len(events), 0)
+        logger.info(f"Discarding events: {len(events)}")
+        client.distr_status_events_discard_then_get(len(events), 0)
 
     except Exception as e:
         logger.error("Failed to process distr events")

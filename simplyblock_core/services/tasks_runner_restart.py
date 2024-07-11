@@ -5,7 +5,7 @@ import sys
 
 
 from simplyblock_core import constants, kv_store, storage_node_ops
-from simplyblock_core.controllers import device_controller, tasks_events
+from simplyblock_core.controllers import device_controller, tasks_events, health_controller
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.nvme_device import NVMeDevice
 
@@ -169,6 +169,19 @@ def task_runner_node(task):
         task.write_to_db(db_controller.kv_store)
         tasks_events.task_updated(task)
 
+    # is node reachable?
+    ping_check = health_controller._check_node_ping(node.mgmt_ip)
+    logger.info(f"Check: ping mgmt ip {node.mgmt_ip} ... {ping_check}")
+    node_api_check = health_controller._check_node_api(node.mgmt_ip)
+    logger.info(f"Check: node API {node.mgmt_ip}:5000 ... {node_api_check}")
+    if not ping_check or not node_api_check:
+        # node is unreachable, retry
+        logger.info(f"Node is not reachable: {task.node_id}, retry")
+        task.function_result = f"Node is unreachable, retry"
+        task.retry += 1
+        task.write_to_db(db_controller.kv_store)
+        return False
+
     # shutting down node
     logger.info(f"Shutdown node {node.get_id()}")
     ret = storage_node_ops.shutdown_storage_node(node.get_id(), force=True)
@@ -178,7 +191,7 @@ def task_runner_node(task):
 
     # resetting node
     logger.info(f"Restart node {node.get_id()}")
-    ret = storage_node_ops.restart_storage_node(node.get_id())
+    ret = storage_node_ops.restart_storage_node(node.get_id(), force=True)
     if ret:
         logger.info(f"Node restart succeeded")
 

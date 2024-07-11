@@ -111,8 +111,15 @@ def _def_create_device_stack(device_obj, snode, force=False):
     alceml_id = device_obj.get_id()
     alceml_name = get_alceml_name(alceml_id)
     logger.info(f"adding {alceml_name}")
-    ret = rpc_client.bdev_alceml_create(alceml_name, test_name, alceml_id, pba_init_mode=2,
-                                        dev_cpu_mask=snode.dev_cpu_mask)
+
+    if snode.alceml_cpu_cores:
+        alceml_cpu_mask = utils.decimal_to_hex_power_of_2(snode.alceml_cpu_cores[snode.alceml_cpu_index])
+        ret = rpc_client.bdev_alceml_create(alceml_name, test_name, alceml_id, pba_init_mode=2,
+                                            alceml_cpu_mask=alceml_cpu_mask)
+        snode.alceml_cpu_index = (snode.alceml_cpu_index + 1) % len(snode.alceml_cpu_cores)
+    else:
+        ret = rpc_client.bdev_alceml_create(alceml_name, test_name, alceml_id, pba_init_mode=2)
+
     if not ret:
         logger.error(f"Failed to create alceml bdev: {alceml_name}")
         if not force:
@@ -150,7 +157,7 @@ def _def_create_device_stack(device_obj, snode, force=False):
 
     if hasattr(device_obj, 'jm_bdev') and device_obj.jm_bdev:
         ret = rpc_client.bdev_jm_create(device_obj.jm_bdev, device_obj.alceml_bdev,
-                                        dev_cpu_mask=snode.dev_cpu_mask)
+                                        jm_cpu_mask=snode.jm_cpu_mask)
         if not ret:
             logger.error(f"Failed to create jm bdev: {device_obj.jm_bdev}")
             if not force:
@@ -186,6 +193,12 @@ def restart_device(device_id, force=False):
         if dev.get_id() == device_id:
             device_obj = dev
             break
+
+    task_id = tasks_controller.get_active_dev_restart_task(snode.cluster_id, device_id)
+    if task_id:
+        logger.error(f"Restart task found: {task_id}, can not restart device")
+        if force is False:
+            return False
 
     logger.info(f"Restarting device {device_id}")
     device_set_unavailable(device_id)
@@ -272,6 +285,12 @@ def device_remove(device_id, force=True):
         if dev.get_id() == device_id:
             device = dev
             break
+
+    task_id = tasks_controller.get_active_dev_restart_task(snode.cluster_id, device_id)
+    if task_id:
+        logger.error(f"Restart task found: {task_id}, can not remove device")
+        if force is False:
+            return False
 
     logger.info("Sending device event")
     distr_controller.send_dev_status_event(device, NVMeDevice.STATUS_REMOVED)
@@ -409,6 +428,11 @@ def reset_storage_device(dev_id):
 
     if device.status == NVMeDevice.STATUS_REMOVED:
         logger.error(f"Device status: {device.status} is removed")
+        return False
+
+    task_id = tasks_controller.get_active_dev_restart_task(snode.cluster_id, dev_id)
+    if task_id:
+        logger.error(f"Restart task found: {task_id}, can not reset device")
         return False
 
     logger.info("Setting devices to unavailable")

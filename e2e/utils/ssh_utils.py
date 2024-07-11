@@ -4,6 +4,7 @@ import os
 from logger_config import setup_logger
 from pathlib import Path
 
+
 SSH_KEY_LOCATION = os.path.join(Path.home(), ".ssh", os.environ.get("KEY_NAME"))
 
 
@@ -279,4 +280,30 @@ class SshUtils:
         """
         cmd = f"cat {file_name}"
         output, _ = self.exec_command(node=node, command=cmd)
+        return output
+    
+    def delete_file_dir(self, node, entity, recursive=False):
+        """Deletes file or directory
+
+        Args:
+            node (str): Node to delete entity on
+            entity (str): Path to file or directory
+            recursive (bool, optional): Delete with all its content. Defaults to False.
+
+        Returns:
+            _type_: _description_
+        """
+        rec = "r" if recursive else ""
+        cmd = f'sudo rm -{rec}f {entity}'
+        output, _ = self.exec_command(node=node, command=cmd)
+        return output
+    
+    def list_files(self, node, location):
+        """List the entities in given location on a node
+        Args:
+            node (str): Node IP
+            location (str): Location to perform ls
+        """
+        cmd = f"sudo ls -l {location}"
+        output, error = self.exec_command(node=node, command=cmd)
         return output

@@ -25,16 +25,16 @@ db_controller = kv_store.DBController()
 document_name = 'AWS-RunShellScript'
 output_key_prefix = 'ssm-output'
 
-# intialise clients
-ssm = boto3.client('ssm', region_name='us-east-1')
-s3 = boto3.client('s3', region_name='us-east-1')
+region = utils.get_aws_region()
+ssm = boto3.client('ssm', region_name=region)
+s3 = boto3.client('s3', region_name=region)
 
 
-def get_instance_tf_engine_instance_id():
-    tag_value = 'tfengine'
+def get_instance_tf_engine_instance_id(workspace: str):
+    tag_value = f'{workspace}-tfengine'
     tag_key = 'Name'
 
-    ec2 = boto3.client('ec2', region_name='us-east-1')
+    ec2 = boto3.client('ec2', region_name=region)
     response = ec2.describe_instances(
         Filters=[
             {
@@ -145,7 +145,7 @@ def update_cluster(d, kv_store, storage_nodes, availability_zone):
     d.status = "in_progress"
     d.write_to_db(kv_store)
 
-    instance_ids = get_instance_tf_engine_instance_id()
+    instance_ids = get_instance_tf_engine_instance_id(d.tf_workspace)
     if len(instance_ids) == 0:
         # wait for a min and try again before returning error on the API
         print('no instance IDs')
@@ -180,15 +180,21 @@ def update_cluster(d, kv_store, storage_nodes, availability_zone):
     ]
 
     # Send command with S3 output parameters
-    response = ssm.send_command(
-        InstanceIds=instance_ids,
-        DocumentName=document_name,
-        Parameters={
-            'commands': commands
-        },
-        OutputS3BucketName=tf_logs_bucket_name,
-        OutputS3KeyPrefix=output_key_prefix
-    )
+    try:
+        response = ssm.send_command(
+            InstanceIds=instance_ids,
+            DocumentName=document_name,
+            Parameters={
+                'commands': commands
+            },
+            OutputS3BucketName=tf_logs_bucket_name,
+            OutputS3KeyPrefix=output_key_prefix
+        )
+    except Exception as e:
+        print(f"Exception: {e}")
+        d.status = "failed"
+        d.write_to_db(kv_store)
+        return False, "", "Exception"
 
     command_id = response['Command']['CommandId']
     print(f'Command ID: {command_id}')

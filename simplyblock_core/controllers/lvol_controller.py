@@ -265,7 +265,7 @@ def add_lvol(name, size, host_id_or_name, pool_id_or_name, use_comp, use_crypto,
 
     # name, vuid, ndcs, npcs, num_blocks, block_size, alloc_names
     ret = rpc_client.bdev_distrib_create(f"distr_{name}", vuid, distr_ndcs, distr_npcs, num_blocks, distr_bs, jm_names,
-                                         distr_chunk_bs, dev_cpu_mask=snode.dev_cpu_mask)
+                                         distr_chunk_bs, distrib_cpu_mask=snode.distrib_cpu_mask)
     bdev_stack.append({"type": "distr", "name": f"distr_{name}"})
     if not ret:
         logger.error("failed to create Distr bdev")
@@ -772,7 +772,7 @@ def _create_bdev_stack(lvol, snode, ha_comm_addrs, ha_inode_self):
             params['jm_names'] = get_jm_names(snode)
             params['ha_comm_addrs'] = ha_comm_addrs
             params['ha_inode_self'] = ha_inode_self
-            params['dev_cpu_mask'] = snode.dev_cpu_mask
+            params['distrib_cpu_mask'] = snode.distrib_cpu_mask
             ret = rpc_client.bdev_distrib_create(**params)
             if ret:
                 ret = distr_controller.send_cluster_map_to_node(snode)
@@ -969,9 +969,9 @@ def delete_lvol_from_node(lvol_id, node_id, clear_data=True):
         ret = rpc_client.alceml_unmap_vuid(jm_device.alceml_bdev, lvol.vuid)
         if not ret:
             logger.error(f"Failed to unmap jm alceml {jm_device.alceml_bdev} with vuid {lvol.vuid}")
-        ret = rpc_client.bdev_jm_unmap_vuid(jm_device.jm_bdev, lvol.vuid)
-        if not ret:
-            logger.error(f"Failed to unmap jm {jm_device.jm_bdev} with vuid {lvol.vuid}")
+        # ret = rpc_client.bdev_jm_unmap_vuid(jm_device.jm_bdev, lvol.vuid)
+        # if not ret:
+        #     logger.error(f"Failed to unmap jm {jm_device.jm_bdev} with vuid {lvol.vuid}")
 
         lvol.deletion_status = 'jm_unmapped'
         lvol.write_to_db(db_controller.kv_store)

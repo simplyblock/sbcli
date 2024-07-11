@@ -41,12 +41,12 @@ def get_cluster_target_status(cluster_id):
     offline_devices = 0
 
     for node in snodes:
-        if node.status == node.STATUS_ONLINE:
+        if node.status == StorageNode.STATUS_ONLINE:
             online_nodes += 1
             node_online_devices = 0
             node_offline_devices = 0
             for dev in node.nvme_devices:
-                if dev.status in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_JM]:
+                if dev.status in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_JM, NVMeDevice.STATUS_READONLY]:
                     node_online_devices += 1
                 else:
                     node_offline_devices += 1
@@ -85,6 +85,10 @@ def update_cluster_status(cluster_id):
     cluster = db_controller.get_cluster_by_id(cluster_id)
 
     if cluster.ha_type == "ha":
+
+        if cluster.status == Cluster.STATUS_READONLY:
+            return
+
         cluster_target_status = get_cluster_target_status(cluster_id)
         logger.info(f"Target cluster status {cluster_target_status}, current status: {cluster.status}")
         if cluster.status == cluster_target_status:
@@ -120,7 +124,7 @@ while True:
     clusters = db_controller.get_clusters()
     for cluster in clusters:
         cluster_id = cluster.get_id()
-        # get storage nodes
+
         nodes = db_controller.get_storage_nodes_by_cluster_id(cluster_id)
         for snode in nodes:
             if snode.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_UNREACHABLE]:
