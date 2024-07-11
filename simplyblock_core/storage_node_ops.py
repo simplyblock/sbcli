@@ -973,6 +973,12 @@ def remove_storage_node(node_id, force_remove=False, force_migrate=False):
         logger.error(f"Can not remove online node: {node_id}")
         return False
 
+    task_id = tasks_controller.get_active_node_restart_task(snode.cluster_id, snode.get_id())
+    if task_id:
+        logger.error(f"Restart task found: {task_id}, can not remove storage node")
+        if force_remove is False:
+            return False
+
     if snode.lvols:
         if force_migrate:
             for lvol_id in snode.lvols:
@@ -1062,6 +1068,11 @@ def restart_storage_node(
 
     if snode.status == StorageNode.STATUS_ONLINE:
         logger.error(f"Can not restart online node: {node_id}")
+        return False
+
+    task_id = tasks_controller.get_active_node_restart_task(snode.cluster_id, snode.get_id())
+    if task_id:
+        logger.error(f"Restart task found: {task_id}, can not restart storage node")
         return False
 
     logger.info("Setting node state to restarting")
@@ -1469,16 +1480,11 @@ def shutdown_storage_node(node_id, force=False):
         if force is False:
             return False
 
-    # cls = db_controller.get_clusters(id=snode.cluster_id)
-    # snodes = db_controller.get_storage_nodes()
-    # online_nodes = 0
-    # for node in snodes:
-    #     if node.status == node.STATUS_ONLINE:
-    #         online_nodes += 1
-    # if cls[0].ha_type == "ha" and online_nodes <= 3:
-    #     logger.warning(f"Cluster mode is HA but online storage nodes are less than 3")
-    #     if force is False:
-    #         return False
+    task_id = tasks_controller.get_active_node_restart_task(snode.cluster_id, snode.get_id())
+    if task_id:
+        logger.error(f"Restart task found: {task_id}, can not shutdown storage node")
+        if force is False:
+            return False
 
     logger.info("Shutting down node")
     old_status = snode.status
@@ -1538,7 +1544,14 @@ def suspend_storage_node(node_id, force=False):
     logger.info("Node found: %s in state: %s", snode.hostname, snode.status)
     if snode.status != StorageNode.STATUS_ONLINE:
         logger.error("Node is not in online state")
-        return False
+        if force is False:
+            return False
+
+    task_id = tasks_controller.get_active_node_restart_task(snode.cluster_id, snode.get_id())
+    if task_id:
+        logger.error(f"Restart task found: {task_id}, can not suspend storage node")
+        if force is False:
+            return False
 
     cluster = db_controller.get_cluster_by_id(snode.cluster_id)
     snodes = db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id)
@@ -1597,6 +1610,11 @@ def resume_storage_node(node_id):
     logger.info("Node found: %s in state: %s", snode.hostname, snode.status)
     if snode.status != StorageNode.STATUS_SUSPENDED:
         logger.error("Node is not in suspended state")
+        return False
+
+    task_id = tasks_controller.get_active_node_restart_task(snode.cluster_id, snode.get_id())
+    if task_id:
+        logger.error(f"Restart task found: {task_id}, can not resume storage node")
         return False
 
     logger.info("Resuming node")
