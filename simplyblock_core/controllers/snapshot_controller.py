@@ -288,4 +288,6 @@ def clone(snapshot_id, clone_name, new_size=0):
     snode.write_to_db(db_controller.kv_store)
     logger.info("Done")
     snapshot_events.snapshot_clone(snap, lvol)
+    if new_size:
+        lvol_controller.resize_lvol(lvol.get_id(), new_size)
     return True, lvol.uuid

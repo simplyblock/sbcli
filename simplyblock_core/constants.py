@@ -52,7 +52,7 @@ GRAYLOG_CHECK_INTERVAL_SEC = 60
 
 FDB_CHECK_INTERVAL_SEC = 60
 
-SIMPLY_BLOCK_DOCKER_IMAGE = "simplyblock/simplyblock:lvol"
+SIMPLY_BLOCK_DOCKER_IMAGE = "simplyblock/simplyblock:add_snapshot_newsize_param"
 SIMPLY_BLOCK_CLI_NAME = "sbcli-lvol"
 TASK_EXEC_INTERVAL_SEC = 30
 TASK_EXEC_RETRY_COUNT = 8

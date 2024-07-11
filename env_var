@@ -1,7 +1,7 @@
 SIMPLY_BLOCK_COMMAND_NAME=sbcli-lvol
-SIMPLY_BLOCK_VERSION=1.1.1
+SIMPLY_BLOCK_VERSION=1.1.4
 
 
-SIMPLY_BLOCK_DOCKER_IMAGE=simplyblock/simplyblock:lvol
+SIMPLY_BLOCK_DOCKER_IMAGE=simplyblock/simplyblock:add_snapshot_newsize_param
 
 DOCKER_USER=hamdysimplyblock
