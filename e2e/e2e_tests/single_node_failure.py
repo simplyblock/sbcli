@@ -1,12 +1,7 @@
 ### simplyblock e2e tests
-import os
-import time
 import threading
 from e2e_tests.cluster_test_base import TestClusterBase
 from utils.common_utils import sleep_n_sec
-from utils.sbcli_utils import SbcliUtils
-from utils.ssh_utils import SshUtils
-from utils.common_utils import CommonUtils
 from logger_config import setup_logger
 
 
@@ -63,7 +58,9 @@ class TestSingleNodeFailure(TestClusterBase):
         self.sbcli_utils.add_lvol(
             lvol_name=self.lvol_name,
             pool_name=self.pool_name,
-            size="800M"
+            size="800M",
+            distr_ndcs=2,
+            distr_npcs=1
         )
         lvols = self.sbcli_utils.list_lvols()
         assert self.lvol_name in list(lvols.keys()), \
@@ -97,7 +94,6 @@ class TestSingleNodeFailure(TestClusterBase):
                                                "runtime": 800,
                                                "debug": self.fio_debug})
         fio_thread1.start()
-        # breakpoint()
 
         no_lvol_node_uuid = self.sbcli_utils.get_node_without_lvols()
         no_lvol_node = self.sbcli_utils.get_storage_node_details(storage_node_id=no_lvol_node_uuid)
@@ -119,6 +115,8 @@ class TestSingleNodeFailure(TestClusterBase):
             self.sbcli_utils.wait_for_storage_node_status(no_lvol_node_uuid,
                                                           "offline",
                                                           timeout=300)
+            
+            sleep_n_sec(10)
 
             self.validations(node_uuid=no_lvol_node_uuid,
                             node_status=["offline", "in_shutdown", "in_restart"],
@@ -175,75 +173,3 @@ class TestSingleNodeFailure(TestClusterBase):
                                             log_file=self.log_path)
 
         self.logger.info("TEST CASE PASSED !!!")
-
-
-    def validations(self, node_uuid, node_status, device_status, lvol_status,
-                    health_check_status):
-        """Validates node, devices, lvol status with expected status
-
-        Args:
-            node_uuid (str): UUID of node to validate
-            node_status (str): Expected node status
-            device_status (str): Expected device status
-            lvol_status (str): Expected lvol status
-            health_check_status (bool): Expected health check status
-        """
-        node_details = self.sbcli_utils.get_storage_node_details(storage_node_id=node_uuid)
-        device_details = self.sbcli_utils.get_device_details(storage_node_id=node_uuid)
-        lvol_id = self.sbcli_utils.get_lvol_id(lvol_name=self.lvol_name)
-        lvol_details = self.sbcli_utils.get_lvol_details(lvol_id=lvol_id)
-        command = f"{self.base_cmd} lvol get-cluster-map {lvol_id}"
-        lvol_cluster_map_details, _ = self.ssh_obj.exec_command(node=self.mgmt_nodes[0],
-                                                                command=command)
-        self.logger.info(f"LVOL Cluster map: {lvol_cluster_map_details}")
-        cluster_map_nodes, cluster_map_devices = self.common_utils.parse_lvol_cluster_map_output(lvol_cluster_map_details)
-        offline_device = []
-
-        assert node_details[0]["status"] in node_status, \
-            f"Node {node_uuid} is not in {node_status} state. {node_details[0]['status']}"
-        for device in device_details:
-            # if "jm" in device["jm_bdev"]:
-            #     assert device["status"] == "JM_DEV", \
-            #         f"JM Device {device['id']} is not in JM_DEV state. {device['status']}"
-            # else:
-            assert device["status"] == device_status, \
-                f"Device {device['id']} is not in {device_status} state. {device['status']}"
-            offline_device.append(device['id'])
-
-        for lvol in lvol_details:
-            assert lvol["status"] == lvol_status, \
-                f"Lvol {lvol['id']} is not in {lvol_status} state. {lvol['status']}"
-
-        storage_nodes = self.sbcli_utils.get_storage_nodes()["results"]
-        for node in storage_nodes:
-            assert node["health_check"] == health_check_status, \
-                f"Node {node['id']} health-check is not {health_check_status}. {node['health_check']}"
-            device_details = self.sbcli_utils.get_device_details(storage_node_id=node["id"])
-            for device in device_details:
-                assert device["health_check"] == health_check_status, \
-                    f"Device {device['id']} health-check is not {health_check_status}. {device['health_check']}"
-
-        for node_id, node in cluster_map_nodes.items():
-            if node_id == node_uuid:
-                assert node["Reported Status"] in node_status, \
-                    f"Node {node_id} is not in {node_status} reported state. {node['Reported Status']}"
-                assert node["Actual Status"] in node_status, \
-                    f"Node {node_id} is not in {node_status} state. {node['Actual Status']}"
-            else:
-                assert node["Reported Status"] == "online", \
-                    f"Node {node_uuid} is not in online state. {node['Reported Status']}"
-                assert node["Actual Status"] == "online", \
-                    f"Node {node_uuid} is not in online state. {node['Actual Status']}"
-
-        if device_status is not None:
-            for device_id, device in cluster_map_devices.items():
-                if device_id in offline_device:
-                    assert device["Reported Status"] == device_status, \
-                        f"Device {device_id} is not in {device_status} state. {device['Reported Status']}"
-                    assert device["Actual Status"] == device_status, \
-                        f"Device {device_id} is not in {device_status} state. {device['Actual Status']}"
-                else:
-                    assert device["Reported Status"] == "online", \
-                        f"Device {device_id} is not in online state. {device['Reported Status']}"
-                    assert device["Actual Status"] == "online", \
-                        f"Device {device_id} is not in online state. {device['Actual Status']}"
