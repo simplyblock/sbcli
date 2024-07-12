@@ -8,7 +8,6 @@ from utils.sbcli_utils import SbcliUtils
 from utils.ssh_utils import SshUtils
 from utils.common_utils import CommonUtils
 from logger_config import setup_logger
-import boto3
 
 
 class TestSingleNodeFailure(TestClusterBase):
@@ -23,9 +22,8 @@ class TestSingleNodeFailure(TestClusterBase):
     7. While FIO is running, validate this scenario:
         a. In a cluster with three nodes, select one node, which does not
            have any lvol attached.
-        b. Suspend the Node via API or CLI while the fio test is running.
-        c. Shutdown the Node via API or CLI while the fio test is running.
-        d. Check status of objects during outage:
+        b. Stop the spdk docker container of that node
+        c. Check status of objects during outage:
             - the node is in status “offline”
             - the devices of the node are in status “unavailable”
             - lvols remain in “online” state
@@ -36,9 +34,9 @@ class TestSingleNodeFailure(TestClusterBase):
               and verify that the status changes of the node and devices are reflected in
               the other cluster map. Other two nodes and 4 devices remain online.
             - health-check status of all nodes and devices is “true”
-        e. check that fio remains running without interruption.
+        d. check that fio remains running without interruption.
 
-    8. Restart the node again.
+    8. Wait for node spdk to automatically restart.
         a. check the status again:
             - the status of all nodes is “online”
             - all devices in the cluster are in status “online”
@@ -51,12 +49,11 @@ class TestSingleNodeFailure(TestClusterBase):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.logger = setup_logger(__name__)
-        self.ec2_client = None
 
     def run(self):
         """ Performs each step of the testcase
         """
-        self.logger.info("Inside run function")
+        self.logger.info(f"Inside run function. Base command: {self.base_cmd}")
         initial_devices = self.ssh_obj.get_devices(node=self.mgmt_nodes[0])
 
         self.sbcli_utils.add_storage_pool(
@@ -104,7 +101,7 @@ class TestSingleNodeFailure(TestClusterBase):
 
         no_lvol_node_uuid = self.sbcli_utils.get_node_without_lvols()
         no_lvol_node = self.sbcli_utils.get_storage_node_details(storage_node_id=no_lvol_node_uuid)
-        instance_id = no_lvol_node[0]["ec2_instance_id"]
+        node_ip = no_lvol_node[0]["mgmt_ip"]
 
         self.validations(node_uuid=no_lvol_node_uuid,
                          node_status="online",
@@ -114,37 +111,39 @@ class TestSingleNodeFailure(TestClusterBase):
                          )
         
         sleep_n_sec(60)
-
-        session = boto3.Session(
-            aws_access_key_id=os.environ.get("AWS_ACCESS_KEY_ID"),
-            aws_secret_access_key=os.environ.get("AWS_SECRET_ACCESS_KEY"),
-            region_name=os.environ.get("AWS_REGION")
-        )
-        self.ec2_client = session.client('ec2')
-        self.logger.info(f"Instances ID:{instance_id}")
-        self.logger.info(f"Region : {session.region_name}")
-
-        self.stop_ec2_instance(instance_id)
-
+        
+        self.ssh_obj.stop_docker_containers(node=node_ip, container_name="spdk")
+        
         try:
             self.logger.info(f"Waiting for node to become offline, {no_lvol_node_uuid}")
-            self.sbcli_utils.wait_for_storage_node_status(no_lvol_node_uuid, "offline", timeout=120)
-
-            sleep_n_sec(20)
+            self.sbcli_utils.wait_for_storage_node_status(no_lvol_node_uuid,
+                                                          "offline",
+                                                          timeout=300)
 
             self.validations(node_uuid=no_lvol_node_uuid,
-                             node_status="offline",
-                             device_status="unavailable",
-                             lvol_status="online",
-                             health_check_status=False)
+                            node_status=["offline", "in_shutdown", "in_restart"],
+                            # The status changes between them very quickly hence 
+                            # needed multiple checks
+                            device_status="unavailable",
+                            lvol_status="online",
+                            health_check_status=True
+                            )
         except Exception as exp:
-            self.logger.error(exp)
-            self.start_ec2_instance(instance_id=instance_id)
+            self.logger.debug(exp)
+            # self.start_ec2_instance(instance_id=instance_id)
+            # self.sbcli_utils.restart_node(node_uuid=no_lvol_node_uuid)
+            self.sbcli_utils.wait_for_storage_node_status(no_lvol_node_uuid,
+                                                          "online",
+                                                          timeout=300)
+            self.logger.info(f"Waiting for node to become online, {no_lvol_node_uuid}")
+            self.sbcli_utils.wait_for_storage_node_status(no_lvol_node_uuid, "online", timeout=120)
+            sleep_n_sec(20)
             raise exp
-
-        self.start_ec2_instance(instance_id=instance_id)
+        
+        # self.sbcli_utils.restart_node(node_uuid=no_lvol_node_uuid)
         self.logger.info(f"Waiting for node to become online, {no_lvol_node_uuid}")
-        self.sbcli_utils.wait_for_storage_node_status(no_lvol_node_uuid, "online", timeout=5 * 60)
+        self.sbcli_utils.wait_for_storage_node_status(no_lvol_node_uuid, "online", timeout=300)
+        sleep_n_sec(20)
 
         self.validations(node_uuid=no_lvol_node_uuid,
                          node_status="online",
@@ -177,37 +176,6 @@ class TestSingleNodeFailure(TestClusterBase):
 
         self.logger.info("TEST CASE PASSED !!!")
 
-    def start_ec2_instance(self, instance_id):
-        """Start ec2 instance
-
-        Args:
-            instance_id (str): Instance id to start
-        """
-        response = self.ec2_client.start_instances(InstanceIds=[instance_id])
-        print(f'Successfully started instance {instance_id}: {response}')
-
-        start_waiter = self.ec2_client.get_waiter('instance_running')
-        self.logger.info(f"Waiting for instance {instance_id} to start...")
-        start_waiter.wait(InstanceIds=[instance_id])
-        self.logger.info(f'Instance {instance_id} has been successfully started.')
-
-        sleep_n_sec(30)
-
-    def stop_ec2_instance(self, instance_id):
-        """Stop ec2 instance
-
-        Args:
-            instance_id (str): Instance id to stop
-        """
-        response = self.ec2_client.stop_instances(InstanceIds=[instance_id])
-        self.logger.info(f'Successfully stopped instance {instance_id}: {response}')
-        stop_waiter = self.ec2_client.get_waiter('instance_stopped')
-        self.logger.info(f"Waiting for instance {instance_id} to stop...")
-        stop_waiter.wait(InstanceIds=[instance_id])
-        self.logger.info((f'Instance {instance_id} has been successfully stopped.'))
-        
-        sleep_n_sec(30)
-
 
     def validations(self, node_uuid, node_status, device_status, lvol_status,
                     health_check_status):
@@ -231,7 +199,7 @@ class TestSingleNodeFailure(TestClusterBase):
         cluster_map_nodes, cluster_map_devices = self.common_utils.parse_lvol_cluster_map_output(lvol_cluster_map_details)
         offline_device = []
 
-        assert node_details[0]["status"] == node_status, \
+        assert node_details[0]["status"] in node_status, \
             f"Node {node_uuid} is not in {node_status} state. {node_details[0]['status']}"
         for device in device_details:
             # if "jm" in device["jm_bdev"]:
@@ -248,22 +216,18 @@ class TestSingleNodeFailure(TestClusterBase):
 
         storage_nodes = self.sbcli_utils.get_storage_nodes()["results"]
         for node in storage_nodes:
-            if node["id"] == node_uuid:
-                assert node["health_check"] == health_check_status, \
-                    f"Node {node['id']} health-check is not {health_check_status}. {node['health_check']}"
-            else:
-                assert node["health_check"] is True, \
-                    f"Node {node['id']} health-check is not True. {node['health_check']}"
-                device_details = self.sbcli_utils.get_device_details(storage_node_id=node["id"])
-                for device in device_details:
-                    assert device["health_check"] is True, \
-                        f"Device {device['id']} health-check is not True. {device['health_check']}"
+            assert node["health_check"] == health_check_status, \
+                f"Node {node['id']} health-check is not {health_check_status}. {node['health_check']}"
+            device_details = self.sbcli_utils.get_device_details(storage_node_id=node["id"])
+            for device in device_details:
+                assert device["health_check"] == health_check_status, \
+                    f"Device {device['id']} health-check is not {health_check_status}. {device['health_check']}"
 
         for node_id, node in cluster_map_nodes.items():
             if node_id == node_uuid:
-                assert node["Reported Status"] == node_status, \
-                    f"Node {node_id} is not in {node_status} state. {node['Reported Status']}"
-                assert node["Actual Status"] == node_status, \
+                assert node["Reported Status"] in node_status, \
+                    f"Node {node_id} is not in {node_status} reported state. {node['Reported Status']}"
+                assert node["Actual Status"] in node_status, \
                     f"Node {node_id} is not in {node_status} state. {node['Actual Status']}"
             else:
                 assert node["Reported Status"] == "online", \

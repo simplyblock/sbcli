@@ -1,4 +1,5 @@
 import os
+import boto3
 from utils.sbcli_utils import SbcliUtils
 from utils.ssh_utils import SshUtils
 from utils.common_utils import CommonUtils
@@ -33,6 +34,7 @@ class TestClusterBase:
         self.log_path = f"{os.path.dirname(self.mount_path)}/log_file.log"
         self.base_cmd = os.environ.get("SBCLI_CMD", "sbcli-dev")
         self.fio_debug = kwargs.get("fio_debug", False)
+        self.ec2_client = None
 
     def setup(self):
         """Contains setup required to run the test case
@@ -55,6 +57,12 @@ class TestClusterBase:
                                   device=self.mount_path)
         self.sbcli_utils.delete_all_lvols()
         self.sbcli_utils.delete_all_storage_pools()
+        session = boto3.Session(
+            aws_access_key_id=os.environ.get("AWS_ACCESS_KEY_ID"),
+            aws_secret_access_key=os.environ.get("AWS_SECRET_ACCESS_KEY"),
+            region_name=os.environ.get("AWS_REGION")
+        )
+        self.ec2_client = session.client('ec2')
 
     def teardown(self):
         """Contains teradown required post test case execution

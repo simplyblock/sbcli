@@ -9,6 +9,6 @@ def get_all_tests():
     tests = [
         TestSingleNodeOutage,
         TestSingleNodeMultipleFioPerfValidation,
-        # TestSingleNodeFailure
+        TestSingleNodeFailure
     ]
     return tests

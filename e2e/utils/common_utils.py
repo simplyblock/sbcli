@@ -184,6 +184,39 @@ class CommonUtils:
 
         return nodes, devices
     
+    def start_ec2_instance(self, ec2_client, instance_id):
+        """Start ec2 instance
+
+        Args:
+            ec2_client (EC2): EC2 class object from boto3
+            instance_id (str): Instance id to start
+        """
+        response = ec2_client.start_instances(InstanceIds=[instance_id])
+        print(f'Successfully started instance {instance_id}: {response}')
+
+        start_waiter = ec2_client.get_waiter('instance_running')
+        self.logger.info(f"Waiting for instance {instance_id} to start...")
+        start_waiter.wait(InstanceIds=[instance_id])
+        self.logger.info(f'Instance {instance_id} has been successfully started.')
+
+        sleep_n_sec(30)
+
+    def stop_ec2_instance(self, ec2_client, instance_id):
+        """Stop ec2 instance
+
+        Args:
+            ec2_client (EC2): EC2 class object from boto3
+            instance_id (str): Instance id to stop
+        """
+        response = ec2_client.stop_instances(InstanceIds=[instance_id])
+        self.logger.info(f'Successfully stopped instance {instance_id}: {response}')
+        stop_waiter = ec2_client.get_waiter('instance_stopped')
+        self.logger.info(f"Waiting for instance {instance_id} to stop...")
+        stop_waiter.wait(InstanceIds=[instance_id])
+        self.logger.info((f'Instance {instance_id} has been successfully stopped.'))
+        
+        sleep_n_sec(30)
+    
 
 def sleep_n_sec(seconds):
     """Sleeps for given seconds
