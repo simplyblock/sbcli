@@ -40,19 +40,19 @@ def task_runner(task):
         return False
 
     if "migration" not in task.function_params:
-        if task.retry >= 2:
-            all_devs_online = True
-            for node in db_controller.get_storage_nodes_by_cluster_id(task.cluster_id):
-                for dev in node.nvme_devices:
-                    if dev.status != NVMeDevice.STATUS_ONLINE:
-                        all_devs_online = False
-                        break
-
-            if not all_devs_online:
-                task.function_result = "Some devs are offline, retrying"
-                task.retry += 1
-                task.write_to_db(db_controller.kv_store)
-                return False
+        # if task.retry >= 2:
+        #     all_devs_online = True
+        #     for node in db_controller.get_storage_nodes_by_cluster_id(task.cluster_id):
+        #         for dev in node.nvme_devices:
+        #             if dev.status != NVMeDevice.STATUS_ONLINE:
+        #                 all_devs_online = False
+        #                 break
+        #
+        #     if not all_devs_online:
+        #         task.function_result = "Some devs are offline, retrying"
+        #         task.retry += 1
+        #         task.write_to_db(db_controller.kv_store)
+        #         return False
 
         device = db_controller.get_storage_devices(task.device_id)
         lvol = db_controller.get_lvol_by_id(task.function_params["lvol_id"])
