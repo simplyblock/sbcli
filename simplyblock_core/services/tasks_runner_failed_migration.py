@@ -125,8 +125,8 @@ while True:
                 delay_seconds = 5
                 if task.function_name == JobSchedule.FN_FAILED_DEV_MIG:
                     if task.status == JobSchedule.STATUS_NEW:
-                        task = tasks_controller.get_active_node_mig_task(task.cluster_id, task.node_id)
-                        if task:
+                        active_task = tasks_controller.get_active_node_mig_task(task.cluster_id, task.node_id)
+                        if active_task:
                             logger.info("task found on same node, retry")
                             continue
                     if task.status != JobSchedule.STATUS_DONE:
