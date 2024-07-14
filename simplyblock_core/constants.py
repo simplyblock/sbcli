@@ -52,15 +52,14 @@ GRAYLOG_CHECK_INTERVAL_SEC = 60
 
 FDB_CHECK_INTERVAL_SEC = 60
 
-SIMPLY_BLOCK_DOCKER_IMAGE = "simplyblock/simplyblock:pre-release-dm"
-SIMPLY_BLOCK_DOCKER_IMAGE_ARM64 = "simplyblock/simplyblock:main-arm64"
-SIMPLY_BLOCK_CLI_NAME = "sbcli"
+SIMPLY_BLOCK_DOCKER_IMAGE = "simplyblock/simplyblock:pre-release-fdm"
+SIMPLY_BLOCK_CLI_NAME = "sbcli-fdm"
 TASK_EXEC_INTERVAL_SEC = 30
 TASK_EXEC_RETRY_COUNT = 8
 
 SIMPLY_BLOCK_SPDK_CORE_IMAGE = "simplyblock/spdk-core:latest"
 SIMPLY_BLOCK_SPDK_CORE_IMAGE_ARM64 = "simplyblock/spdk-core:latest-arm64"
-SIMPLY_BLOCK_SPDK_ULTRA_IMAGE = "simplyblock/spdk:348-temp-migration-2-latest"
+SIMPLY_BLOCK_SPDK_ULTRA_IMAGE = "simplyblock/spdk:prerelease-latest"
 
 GELF_PORT = 12201
 

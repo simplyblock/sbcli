@@ -702,3 +702,17 @@ class RPCClient:
         if migration_id is not None:
             params["migration_id"] = migration_id
         return self._request("distr_migration_status", params)
+
+    def bdev_distrib_permanent_failure_migration(self, name, storage_ID):
+        params = {
+            "name": name,
+            "storage_ID": storage_ID
+        }
+        return self._request("bdev_distrib_permanent_failure_migration", params)
+
+    def bdev_distrib_migration_status(self, name, storage_ID):
+        params = {
+            "name": name,
+            "storage_ID": storage_ID
+        }
+        return self._request("bdev_distrib_migration_status", params)

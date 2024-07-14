@@ -24,9 +24,10 @@ def _validate_new_task_dev_restart(cluster_id, node_id, device_id):
     return True
 
 
-def _add_task(function_name, cluster_id, node_id, device_id, max_retry=constants.TASK_EXEC_RETRY_COUNT):
+def _add_task(function_name, cluster_id, node_id, device_id,
+              max_retry=constants.TASK_EXEC_RETRY_COUNT, function_params=None):
 
-    if function_name in [JobSchedule.FN_DEV_RESTART, JobSchedule.FN_DEV_MIG]:
+    if function_name in [JobSchedule.FN_DEV_RESTART, JobSchedule.FN_DEV_MIG, JobSchedule.FN_FAILED_DEV_MIG]:
         if not _validate_new_task_dev_restart(cluster_id, node_id, device_id):
             return False
     elif function_name == JobSchedule.FN_NODE_RESTART:
@@ -42,6 +43,8 @@ def _add_task(function_name, cluster_id, node_id, device_id, max_retry=constants
     task_obj.device_id = device_id
     task_obj.date = int(time.time())
     task_obj.function_name = function_name
+    if function_params and type(function_params) is dict:
+        task_obj.function_params = function_params
     task_obj.max_retry = max_retry
     task_obj.status = JobSchedule.STATUS_NEW
     task_obj.write_to_db(db_controller.kv_store)
@@ -123,3 +126,13 @@ def get_active_node_mig_task(cluster_id, node_id):
             if task.status != JobSchedule.STATUS_DONE and task.canceled is False:
                 return task.uuid
     return False
+
+
+def add_device_failed_mig_task(device_id):
+    device = db_controller.get_storage_devices(device_id)
+    for node in db_controller.get_storage_nodes_by_cluster_id(device.cluster_id):
+        for lvol_id in node.lvols:
+            _add_task(JobSchedule.FN_FAILED_DEV_MIG, device.cluster_id, node.get_id(), device.get_id(),
+                      max_retry=0, function_params={'lvol_id': lvol_id})
+    return True
+

@@ -496,3 +496,17 @@ def device_set_retries_exhausted(device_id, retries_exhausted):
     device.retries_exhausted = retries_exhausted
     snode.write_to_db(db_controller.kv_store)
     return True
+
+
+def device_set_failed(device_id):
+    db_controller = DBController()
+    dev = db_controller.get_storage_devices(device_id)
+    if not dev:
+        logger.error("device not found")
+
+    if dev.status == NVMeDevice.STATUS_FAILED:
+        return True
+
+    ret = device_set_state(device_id, NVMeDevice.STATUS_FAILED)
+    if ret:
+        tasks_controller.add_device_failed_mig_task(device_id)
