@@ -56,7 +56,7 @@ def task_runner(task):
 
         device = db_controller.get_storage_devices(task.device_id)
         lvol = db_controller.get_lvol_by_id(task.function_params["lvol_id"])
-        rsp = rpc_client.bdev_distrib_permanent_failure_migration(lvol.base_ndev, device.cluster_device_order)
+        rsp = rpc_client.bdev_distrib_permanent_failure_migration(lvol.base_bdev, device.cluster_device_order)
         if not rsp:
             logger.error(f"Failed to start device migration task, storage_ID: {device.cluster_device_order}")
             task.function_result = "Failed to start device migration task"
@@ -66,7 +66,7 @@ def task_runner(task):
 
         task.function_params = {
             "migration": {
-                "name": lvol.base_ndev,
+                "name": lvol.base_bdev,
                 "storage_ID":  device.cluster_device_order}
         }
         task.write_to_db(db_controller.kv_store)
