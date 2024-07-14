@@ -18,6 +18,7 @@ from simplyblock_core.controllers import lvol_controller, storage_events, snapsh
 from simplyblock_core.kv_store import DBController
 from simplyblock_core import shell_utils
 from simplyblock_core.models.iface import IFace
+from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.nvme_device import NVMeDevice, JMDevice
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.pci_utils import get_nvme_devices, bind_spdk_driver
@@ -1528,6 +1529,12 @@ def shutdown_storage_node(node_id, force=False):
     old_status = snode.status
     snode.status = StorageNode.STATUS_OFFLINE
     snode.write_to_db(db_controller.kv_store)
+
+    tasks = db_controller.get_job_tasks(snode.cluster_id)
+    for task in tasks:
+        if task.status in [JobSchedule.STATUS_RUNNING, JobSchedule.STATUS_NEW] and task.node_id == node_id:
+            task.canceled = True
+            task.write_to_db(db_controller.kv_store)
 
     # send event log
     storage_events.snode_status_change(snode, snode.status, old_status)
