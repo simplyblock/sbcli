@@ -105,7 +105,7 @@ def get_active_node_restart_task(cluster_id, node_id):
     tasks = db_controller.get_job_tasks(cluster_id)
     for task in tasks:
         if task.function_name == JobSchedule.FN_NODE_RESTART and task.node_id == node_id:
-            if task.status != JobSchedule.STATUS_DONE and task.canceled is False:
+            if task.status == JobSchedule.STATUS_RUNNING and task.canceled is False:
                 return task.uuid
     return False
 
@@ -114,7 +114,7 @@ def get_active_dev_restart_task(cluster_id, device_id):
     tasks = db_controller.get_job_tasks(cluster_id)
     for task in tasks:
         if task.function_name == JobSchedule.FN_DEV_RESTART and task.device_id == device_id:
-            if task.status != JobSchedule.STATUS_DONE and task.canceled is False:
+            if task.status == JobSchedule.STATUS_RUNNING and task.canceled is False:
                 return task.uuid
     return False
 
@@ -123,7 +123,7 @@ def get_active_node_mig_task(cluster_id, node_id):
     tasks = db_controller.get_job_tasks(cluster_id)
     for task in tasks:
         if task.function_name in [JobSchedule.FN_DEV_MIG, JobSchedule.FN_FAILED_DEV_MIG] and task.node_id == node_id:
-            if task.status != JobSchedule.STATUS_DONE and task.canceled is False:
+            if task.status == JobSchedule.STATUS_RUNNING and task.canceled is False:
                 return task.uuid
     return False
 
@@ -135,4 +135,3 @@ def add_device_failed_mig_task(device_id):
             _add_task(JobSchedule.FN_FAILED_DEV_MIG, device.cluster_id, node.get_id(), device.get_id(),
                       max_retry=0, function_params={'lvol_id': lvol_id})
     return True
-
