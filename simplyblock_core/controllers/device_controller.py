@@ -334,6 +334,7 @@ def device_remove(device_id, force=True):
     for lvol in db_controller.get_lvols():
         lvol_controller.send_cluster_map(lvol.get_id())
 
+    tasks_controller.add_device_failed_mig_task(device_id)
     return True
 
 
