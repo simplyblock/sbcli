@@ -24,6 +24,16 @@ def _validate_new_task_dev_restart(cluster_id, node_id, device_id):
     return True
 
 
+def _validate_new_task_dev_mig(cluster_id, node_id, device_id):
+    tasks = db_controller.get_job_tasks(cluster_id)
+    for task in tasks:
+        if task.function_name in [JobSchedule.FN_DEV_MIG] and task.device_id == device_id and task.node_id == node_id:
+            if task.status != JobSchedule.STATUS_DONE:
+                logger.info(f"Task found, skip adding new task: {task.get_id()}")
+                return False
+    return True
+
+
 def _add_task(function_name, cluster_id, node_id, device_id, max_retry=constants.TASK_EXEC_RETRY_COUNT):
 
     if function_name in [JobSchedule.FN_DEV_RESTART, JobSchedule.FN_DEV_MIG]:
@@ -33,6 +43,9 @@ def _add_task(function_name, cluster_id, node_id, device_id, max_retry=constants
         task_id = get_active_node_restart_task(cluster_id, node_id)
         if task_id:
             logger.info(f"Task found, skip adding new task: {task_id}")
+            return False
+    elif function_name == JobSchedule.FN_DEV_MIG:
+        if not _validate_new_task_dev_mig(cluster_id, node_id, device_id):
             return False
 
     task_obj = JobSchedule()
