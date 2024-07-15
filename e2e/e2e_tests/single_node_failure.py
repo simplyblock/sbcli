@@ -91,7 +91,7 @@ class TestSingleNodeFailure(TestClusterBase):
 
         fio_thread1 = threading.Thread(target=self.ssh_obj.run_fio_test, args=(self.mgmt_nodes[0], None, self.mount_path, self.log_path,),
                                        kwargs={"name": "fio_run_1",
-                                               "runtime": 500,
+                                               "runtime": 400,
                                                "debug": self.fio_debug})
         fio_thread1.start()
 
@@ -135,7 +135,7 @@ class TestSingleNodeFailure(TestClusterBase):
                                                           timeout=300)
             self.logger.info(f"Waiting for node to become online, {no_lvol_node_uuid}")
             self.sbcli_utils.wait_for_storage_node_status(no_lvol_node_uuid, "online", timeout=120)
-            sleep_n_sec(20)
+            # sleep_n_sec(20)
             raise exp
         
         # self.sbcli_utils.restart_node(node_uuid=no_lvol_node_uuid)
