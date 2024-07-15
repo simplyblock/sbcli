@@ -141,7 +141,7 @@ class TestSingleNodeFailure(TestClusterBase):
         # self.sbcli_utils.restart_node(node_uuid=no_lvol_node_uuid)
         self.logger.info(f"Waiting for node to become online, {no_lvol_node_uuid}")
         self.sbcli_utils.wait_for_storage_node_status(no_lvol_node_uuid, "online", timeout=300)
-        sleep_n_sec(20)
+        sleep_n_sec(60)
 
         self.validations(node_uuid=no_lvol_node_uuid,
                          node_status="online",
