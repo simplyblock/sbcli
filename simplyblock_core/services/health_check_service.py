@@ -125,7 +125,7 @@ while True:
                         logger.info(f"Checking bdev: {remote_device.remote_bdev} ... ok")
                     else:
                         logger.info(f"Checking bdev: {remote_device.remote_bdev} ... not found")
-                    # node_remote_devices_check &= bool(ret)
+                    node_remote_devices_check &= bool(ret)
 
                 health_check_status = is_node_online and node_devices_check and node_remote_devices_check
             set_node_health_check(snode, health_check_status)
