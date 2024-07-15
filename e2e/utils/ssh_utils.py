@@ -120,8 +120,10 @@ class SshUtils:
                 output = stdout.read().decode()
                 error = stderr.read().decode()
 
-            self.logger.debug(f"Command output: {output}")
-            self.logger.debug(f"Command error: {error}")
+            if output:
+                self.logger.debug(f"Command output: {output}")
+            if error:
+                self.logger.debug(f"Command error: {error}")
 
             if not output and not error:
                 self.logger.warning(f"Command '{command}' executed but returned no output or error.")
@@ -230,7 +232,7 @@ class SshUtils:
         self.logger.info(f"{command}")
 
         start_time = time.time()
-        output, error = self.exec_command(node=node, command=command, timeout=runtime + 300)
+        output, error = self.exec_command(node=node, command=command, timeout=runtime)
         end_time = time.time()
 
         total_time = end_time - start_time

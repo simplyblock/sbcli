@@ -121,8 +121,8 @@ class CommonUtils:
                 raise RuntimeError("Fio Process not completing post its time")
             if timeout <= 0:
                 break
-            sleep_n_sec(60)
-            timeout = timeout - 60
+            sleep_n_sec(10)
+            timeout = timeout - 10
             
 
         for thread in threads:

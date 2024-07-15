@@ -91,7 +91,7 @@ class TestSingleNodeFailure(TestClusterBase):
 
         fio_thread1 = threading.Thread(target=self.ssh_obj.run_fio_test, args=(self.mgmt_nodes[0], None, self.mount_path, self.log_path,),
                                        kwargs={"name": "fio_run_1",
-                                               "runtime": 400,
+                                               "runtime": 500,
                                                "debug": self.fio_debug})
         fio_thread1.start()
 
