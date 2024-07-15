@@ -59,7 +59,7 @@ TASK_EXEC_RETRY_COUNT = 8
 
 SIMPLY_BLOCK_SPDK_CORE_IMAGE = "simplyblock/spdk-core:latest"
 SIMPLY_BLOCK_SPDK_CORE_IMAGE_ARM64 = "simplyblock/spdk-core:latest-arm64"
-SIMPLY_BLOCK_SPDK_ULTRA_IMAGE = "simplyblock/spdk:prerelease-latest"
+SIMPLY_BLOCK_SPDK_ULTRA_IMAGE = "simplyblock/spdk:faster-bdev-startup-latest"
 
 GELF_PORT = 12201
 

@@ -80,13 +80,13 @@ def task_runner(task):
             migration_status = res["migration_status"]  # "Pending", "Succeeded", or "Failed"
             if migration_status == "Succeeded":
                 task.status = JobSchedule.STATUS_DONE
-                task.function_result = "Done"
+                task.function_result = migration_status
                 task.write_to_db(db_controller.kv_store)
                 return True
 
             elif migration_status == "Failed":
                 task.status = JobSchedule.STATUS_DONE
-                task.function_result = "Failed"
+                task.function_result = migration_status
                 task.write_to_db(db_controller.kv_store)
                 return True
 
