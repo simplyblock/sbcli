@@ -1262,18 +1262,12 @@ def restart_storage_node(
             db_dev.status = NVMeDevice.STATUS_REMOVED
             distr_controller.send_dev_status_event(db_dev, db_dev.status)
 
-    # todo: handle new devices
-    # for dev in nvme_devs:
-    #     if dev.serial_number not in known_devices_sn:
-    #         logger.info(f"New device found: {dev.get_id()}")
-    #         dev.status = NVMeDevice.STATUS_NEW
-    #         new_devices.append(dev)
-    #         snode.nvme_devices.append(dev)
-
-    # dev_order = get_next_cluster_device_order(db_controller, snode.cluster_id)
-    # for index, nvme in enumerate(new_devices):
-    #     nvme.cluster_device_order = dev_order
-    #     dev_order += 1
+    for dev in nvme_devs:
+        if dev.serial_number not in known_devices_sn:
+            logger.info(f"New device found: {dev.get_id()}")
+            dev.status = NVMeDevice.STATUS_NEW
+            new_devices.append(dev)
+            snode.nvme_devices.append(dev)
 
     # prepare devices
     ret = _prepare_cluster_devices_on_restart(snode)

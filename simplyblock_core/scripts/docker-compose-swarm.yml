@@ -219,6 +219,17 @@ services:
     networks:
       - hostnet
 
+  TasksRunnerNewDeviceMigration:
+    image: $SIMPLYBLOCK_DOCKER_IMAGE
+    command: "python simplyblock_core/services/tasks_runner_new_dev_migration.py"
+    deploy:
+      placement:
+        constraints: [node.role == manager]
+    volumes:
+      - "/etc/foundationdb:/etc/foundationdb"
+    networks:
+      - hostnet
+
 volumes:
   os_data:
 

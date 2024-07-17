@@ -511,3 +511,74 @@ def device_set_failed(device_id):
     ret = device_set_state(device_id, NVMeDevice.STATUS_FAILED)
     if ret:
         tasks_controller.add_device_failed_mig_task(device_id)
+
+
+def add_device(device_id):
+    db_controller = DBController()
+    dev = db_controller.get_storage_devices(device_id)
+    if not dev:
+        logger.error("device not found")
+
+    if dev.status != NVMeDevice.STATUS_NEW:
+        logger.error("Device must be in new state")
+        return False
+
+    snode = db_controller.get_storage_node_by_id(dev.node_id)
+    if not snode:
+        logger.error("node not found")
+        return False
+
+    device_obj = None
+    for dev in snode.nvme_devices:
+        if dev.get_id() == device_id:
+            device_obj = dev
+            break
+
+    logger.info(f"Adding device {device_id}")
+
+    ret = _def_create_device_stack(device_obj, snode)
+    if not ret:
+        logger.error("Failed to create device stack")
+        return False
+
+    dev_order = storage_node_ops.get_next_cluster_device_order(db_controller, snode.cluster_id)
+    device_obj.cluster_device_order = dev_order
+
+    logger.info("Setting device online")
+    device_obj.status = NVMeDevice.STATUS_ONLINE
+    snode.write_to_db(db_controller.kv_store)
+
+    logger.info("Make other nodes connect to the new device")
+    snodes = db_controller.get_storage_nodes()
+    for node_index, node in enumerate(snodes):
+        if node.get_id() == snode.get_id():
+            continue
+        if node.status != snode.STATUS_ONLINE:
+            continue
+
+        rpc_client = RPCClient(node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password)
+        name = f"remote_{device_obj.alceml_bdev}"
+        ret = rpc_client.bdev_nvme_attach_controller_tcp(name, device_obj.nvmf_nqn, device_obj.nvmf_ip,
+                                                         device_obj.nvmf_port)
+        if not ret:
+            logger.error(f"Failed to connect to device: {name}")
+            continue
+
+        device_obj.remote_bdev = f"{name}n1"
+        idx = -1
+        for i, d in enumerate(node.remote_devices):
+            if d.get_id() == device_obj.get_id():
+                idx = i
+                break
+        if idx >= 0:
+            node.remote_devices[idx] = device_obj
+        else:
+            node.remote_devices.append(device_obj)
+        node.write_to_db(db_controller.kv_store)
+        distr_controller.send_cluster_map_to_node(node)
+        time.sleep(1)
+
+    device_events.device_create(device_obj)
+
+    tasks_controller.add_new_device_mig_task(device_id)
+    return "Done"

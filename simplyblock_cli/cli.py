@@ -160,6 +160,8 @@ class CLIWrapper:
                                                  "(currently in \"new\" state) into cluster and will launch and "
                                                  "auto-rebalancing background process in which some cluster "
                                                  "capacity is re-distributed to this newly added device.")
+        sub_command.add_argument("id", help='the devices\'s UUID')
+
         sub_command = self.add_sub_command(
             subparser, 'remove-device', 'Remove a storage device', usage='The device will become unavailable, independently '
                                         'if it was physically removed from the server. This function can be used if '
@@ -724,7 +726,7 @@ class CLIWrapper:
                 ret = device_controller.restart_device(args.id)
 
             elif sub_command == "add-device":
-                ret = "Not implemented!"
+                ret = device_controller.add_device(args.id)
 
             elif sub_command == "set-failed-device":
                 ret = device_controller.device_set_failed(args.id)

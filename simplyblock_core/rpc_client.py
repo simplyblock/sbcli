@@ -716,3 +716,9 @@ class RPCClient:
             "storage_ID": storage_ID
         }
         return self._request("bdev_distrib_migration_status", params)
+
+    def bdev_distrib_expansion_migration(self, name, storage_ID):
+        params = {
+            "name": name,
+            "storage_ID": storage_ID}
+        return self._request("bdev_distrib_expansion_migration", params)
