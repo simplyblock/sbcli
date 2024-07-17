@@ -305,7 +305,8 @@ def _create_jm_stack_on_device(rpc_client, nvme, snode, after_restart):
         'size': nvme.size,
         'status': JMDevice.STATUS_ONLINE,
         'alceml_bdev': alceml_name,
-        'nvme_device': nvme,
+        'nvme_bdev': nvme.nvme_bdev,
+        "serial_number": nvme.serial_number,
         'jm_bdev': jm_bdev
     })
 
@@ -531,11 +532,11 @@ def _prepare_cluster_devices_on_restart(snode):
 
         if snode.alceml_cpu_cores:
             alceml_cpu_mask = utils.decimal_to_hex_power_of_2(snode.alceml_cpu_cores[snode.alceml_cpu_index])
-            ret = rpc_client.bdev_alceml_create(jm_device.alceml_bdev, jm_device.nvme_device.nvme_bdev, jm_device.get_id(),
+            ret = rpc_client.bdev_alceml_create(jm_device.alceml_bdev, jm_device.nvme_bdev, jm_device.get_id(),
                                             pba_init_mode=2, alceml_cpu_mask=alceml_cpu_mask)
             snode.alceml_cpu_index = (snode.alceml_cpu_index + 1) % len(snode.alceml_cpu_cores)
         else:
-            ret = rpc_client.bdev_alceml_create(jm_device.alceml_bdev, jm_device.nvme_device.nvme_bdev, jm_device.get_id(),
+            ret = rpc_client.bdev_alceml_create(jm_device.alceml_bdev, jm_device.nvme_bdev, jm_device.get_id(),
                                             pba_init_mode=2)
         if not ret:
             logger.error(f"Failed to create alceml bdev: {jm_device.alceml_bdev}")
@@ -810,7 +811,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
     # creating RPCClient instance
     rpc_client = RPCClient(
         snode.mgmt_ip, snode.rpc_port,
-        snode.rpc_username, snode.rpc_password)
+        snode.rpc_username, snode.rpc_password, timeout=60, retry=10)
 
     # 1- set iobuf options
     if (snode.iobuf_small_pool_count or snode.iobuf_large_pool_count or
@@ -1263,7 +1264,7 @@ def restart_storage_node(
             db_dev.status = NVMeDevice.STATUS_REMOVED
             distr_controller.send_dev_status_event(db_dev, db_dev.status)
 
-    if snode.jm_device and snode.jm_device.nvme_device:
+    if snode.jm_device and snode.jm_device.serial_number:
         known_devices_sn.append(snode.jm_device.nvme_device.serial_number)
 
     for dev in nvme_devs:

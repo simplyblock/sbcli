@@ -80,7 +80,8 @@ class JMDevice(BaseModel):
 
         "jm_nvme_bdev_list": {"type": List[str], 'default': []},
         "raid_bdev": {"type": str, 'default': ""},
-        "nvme_device": {"type": NVMeDevice, 'default': None},
+        "nvme_bdev": {"type": str, 'default': ""},
+        "serial_number": {"type": str, 'default': ""},
         "alceml_bdev": {"type": str, 'default': ""},
         "jm_bdev": {"type": str, 'default': ""},
 
