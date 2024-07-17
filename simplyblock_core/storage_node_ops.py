@@ -1265,7 +1265,7 @@ def restart_storage_node(
             distr_controller.send_dev_status_event(db_dev, db_dev.status)
 
     if snode.jm_device and snode.jm_device.serial_number:
-        known_devices_sn.append(snode.jm_device.nvme_device.serial_number)
+        known_devices_sn.append(snode.jm_device.serial_number)
 
     for dev in nvme_devs:
         if dev.serial_number not in known_devices_sn:
