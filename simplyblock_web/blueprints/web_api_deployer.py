@@ -141,6 +141,10 @@ def update_cluster(d, kv_store, storage_nodes, availability_zone):
     ECR_IMAGE_TAG = d.ecr_image_tag
     ECR_ACCOUNT_ID = d.ecr_account_id
     tf_logs_bucket_name = d.tf_logs_bucket_name
+    sbcli_cmd = d.sbcli_cmd
+    mgmt_nodes_instance_type = d.mgmt_nodes_instance_type
+    storage_nodes_instance_type = d.storage_nodes_instance_type
+    volumes_per_storage_nodes = d.volumes_per_storage_nodes
 
     d.status = "in_progress"
     d.write_to_db(kv_store)
@@ -171,11 +175,16 @@ def update_cluster(d, kv_store, storage_nodes, availability_zone):
         """,
         f"""
         docker run --rm -v terraform:/app -w /app {ECR_ACCOUNT_ID}.dkr.ecr.{ECR_REGION}.amazonaws.com/{ECR_REPOSITORY_NAME}:{ECR_IMAGE_TAG} \
-            plan -var mgmt_nodes={mgmt_nodes} -var storage_nodes={storage_nodes} -var az={availability_zone} -var region={aws_region}
+          plan -var mgmt_nodes={mgmt_nodes} -var storage_nodes={storage_nodes} -var az={availability_zone} -var region={aws_region} \
+               -var mgmt_nodes_instance_type={mgmt_nodes_instance_type} -var storage_nodes_instance_type={storage_nodes_instance_type} \
+               -var volumes_per_storage_nodes={volumes_per_storage_nodes} -var sbcli_cmd={sbcli_cmd}
         """,
         f"""
         docker run --rm -v terraform:/app -w /app {ECR_ACCOUNT_ID}.dkr.ecr.{ECR_REGION}.amazonaws.com/{ECR_REPOSITORY_NAME}:{ECR_IMAGE_TAG} \
-         apply -var mgmt_nodes={mgmt_nodes} -var storage_nodes={storage_nodes} -var az={availability_zone} -var region={aws_region} --auto-approve
+         apply -var mgmt_nodes={mgmt_nodes} -var storage_nodes={storage_nodes} -var az={availability_zone} -var region={aws_region} \
+               -var mgmt_nodes_instance_type={mgmt_nodes_instance_type} -var storage_nodes_instance_type={storage_nodes_instance_type} \
+               -var volumes_per_storage_nodes={volumes_per_storage_nodes} -var sbcli_cmd={sbcli_cmd}
+            --auto-approve
         """
     ]
 
@@ -299,6 +308,8 @@ def validate_tf_vars(dpl_data):
         return "missing required param: mgmt_nodes_instance_type"
     if 'storage_nodes_instance_type' not in dpl_data:
         return "missing required param: storage_nodes_instance_type"
+    if 'volumes_per_storage_nodes' not in dpl_data:
+        return "missing required param: volumes_per_storage_nodes"
 
     return ""
 
