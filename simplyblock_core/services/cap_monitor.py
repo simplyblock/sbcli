@@ -2,8 +2,6 @@
 import logging
 
 import time
-import sys
-
 
 
 from simplyblock_core import kv_store, constants, cluster_ops
@@ -14,12 +12,9 @@ from simplyblock_core.models.cluster import Cluster
 from graypy import GELFUDPHandler
 
 # configure logging
-logger_handler = logging.StreamHandler(stream=sys.stdout)
-logger_handler.setFormatter(logging.Formatter('%(asctime)s: %(levelname)s: %(message)s'))
 gelf_handler = GELFUDPHandler('0.0.0.0', constants.GELF_PORT)
 logger = logging.getLogger()
 logger.addHandler(gelf_handler)
-logger.addHandler(logger_handler)
 logger.setLevel(logging.DEBUG)
 
 ### script to test connection once connection is ascertain
