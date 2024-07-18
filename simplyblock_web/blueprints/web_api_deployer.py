@@ -163,15 +163,15 @@ def update_cluster(d, kv_store, storage_nodes, availability_zone):
         docker volume create terraform
         """,
         f"""
-        docker run --rm -v terraform:/app -e TF_LOG=DEBUG -w /app {ECR_ACCOUNT_ID}.dkr.ecr.{ECR_REGION}.amazonaws.com/{ECR_REPOSITORY_NAME}:{ECR_IMAGE_TAG} \
-            workspace select -or-create {TF_WORKSPACE}
-        """,
-        f"""
         docker run --rm -v terraform:/app -w /app {ECR_ACCOUNT_ID}.dkr.ecr.{ECR_REGION}.amazonaws.com/{ECR_REPOSITORY_NAME}:{ECR_IMAGE_TAG} \
             init -reconfigure -input=false \
                     -backend-config='bucket={TFSTATE_BUCKET}' \
                     -backend-config='key={TFSTATE_KEY}' \
                     -backend-config='region={TFSTATE_REGION}'
+        """,
+        f"""
+        docker run --rm -v terraform:/app -e TF_LOG=DEBUG -w /app {ECR_ACCOUNT_ID}.dkr.ecr.{ECR_REGION}.amazonaws.com/{ECR_REPOSITORY_NAME}:{ECR_IMAGE_TAG} \
+            workspace select -or-create {TF_WORKSPACE}
         """,
         f"""
         docker run --rm -v terraform:/app -w /app {ECR_ACCOUNT_ID}.dkr.ecr.{ECR_REGION}.amazonaws.com/{ECR_REPOSITORY_NAME}:{ECR_IMAGE_TAG} \
