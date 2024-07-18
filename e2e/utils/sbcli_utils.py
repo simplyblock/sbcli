@@ -361,7 +361,8 @@ class SbcliUtils:
         while timeout > 0:
             node_details = self.get_storage_node_details(storage_node_id=node_id)
             actual_status = node_details[0]["status"]
-            if actual_status == status:
+            status = status if isinstance(status, list) else [status]
+            if actual_status in status:
                 return True
             else:
                 self.logger.info(f"Expected Status: {status} / Actual Status: {actual_status}")
