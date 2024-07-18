@@ -386,6 +386,9 @@ def add_deployer():
     d.write_to_db(db_controller.kv_store)
 
     storage_nodes = int(dpl_data['storage_nodes'])
+    if d.storage_nodes+storage_nodes < 0:
+        return utils.get_response_error("total storage_nodes cannot be less than 0", 400)
+
     availability_zone = dpl_data['availability_zone']
     d.write_to_db(db_controller.kv_store)
 
