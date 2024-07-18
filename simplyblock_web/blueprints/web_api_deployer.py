@@ -183,7 +183,7 @@ def update_cluster(d, kv_store, storage_nodes, availability_zone):
         docker run --rm -v terraform:/app -w /app {ECR_ACCOUNT_ID}.dkr.ecr.{ECR_REGION}.amazonaws.com/{ECR_REPOSITORY_NAME}:{ECR_IMAGE_TAG} \
          apply -var mgmt_nodes={mgmt_nodes} -var storage_nodes={storage_nodes} -var az={availability_zone} -var region={aws_region} \
                -var mgmt_nodes_instance_type={mgmt_nodes_instance_type} -var storage_nodes_instance_type={storage_nodes_instance_type} \
-               -var volumes_per_storage_nodes={volumes_per_storage_nodes} -var sbcli_cmd={sbcli_cmd}
+               -var volumes_per_storage_nodes={volumes_per_storage_nodes} -var sbcli_cmd={sbcli_cmd} \
             --auto-approve
         """
     ]
