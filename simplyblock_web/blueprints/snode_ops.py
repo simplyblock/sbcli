@@ -224,6 +224,16 @@ def get_ec2_public_ip():
     return out
 
 
+def get_node_lsblk():
+    out, err, rc = node_utils.run_command("lsblk -J")
+    if rc != 0:
+        logger.error(err)
+        return []
+    data = json.loads(out)
+    return data
+
+
+
 @bp.route('/info', methods=['GET'])
 def get_info():
 
@@ -251,6 +261,8 @@ def get_info():
         "ec2_metadata": EC2_MD,
 
         "ec2_public_ip": EC2_PUBLIC_IP,
+
+        "lsblk": get_node_lsblk(),
     }
     return utils.get_response(out)
 
