@@ -40,14 +40,19 @@ while True:
         node_info, _ = snode_api.info()
 
         known_pcie = [dev.pcie_address for dev in node.nvme_devices]
+        if node.jm_device and 'pcie_address' in node.jm_device.device_data_dict:
+            known_pcie.append(node.jm_device.device_data_dict['pcie_address'])
+
         node_pcie = node_info['spdk_pcie_list']
 
         for pc in node_pcie:
             if pc not in known_pcie:
                 logger.info(f"New ssd found: {pc}")
-                new_dev = storage_node_ops.addNvmeDevices(node, node_info['spdk_pcie_list'])
-                new_dev.status = NVMeDevice.STATUS_NEW
-                node.nvme_devices.append(new_dev)
-                node.write_to_db(db_controller.kv_store)
+                devs = storage_node_ops.addNvmeDevices(node, [pc])
+                if devs:
+                    new_dev = devs[0]
+                    new_dev.status = NVMeDevice.STATUS_NEW
+                    node.nvme_devices.append(new_dev)
+                    node.write_to_db(db_controller.kv_store)
 
     time.sleep(constants.DEV_DISCOVERY_INTERVAL_SEC)

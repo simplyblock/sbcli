@@ -87,27 +87,18 @@ def addNvmeDevices(snode, devs):
         snode.rpc_username, snode.rpc_password, timeout=60, retry=10)
 
     devices = []
-    ret = rpc_client.bdev_nvme_controller_list()
-    ctr_map = {}
-    try:
-        if ret:
-            ctr_map = {i["ctrlrs"][0]['trid']['traddr']: i["name"] for i in ret}
-    except:
-        pass
-
     next_physical_label = get_next_physical_device_order()
-    for index, pcie in enumerate(devs):
+    for pcie in devs:
 
-        if pcie in ctr_map:
-            nvme_controller = ctr_map[pcie]
-        else:
-            nvme_controller = "nvme_%s" % index
-            ret, err = rpc_client.bdev_nvme_controller_attach(nvme_controller, pcie)
+        pci_st = str(pcie).replace("0", "").replace(":","").replace(".","")
+        nvme_controller = "nvme_%s" % pci_st
+        ret = rpc_client.bdev_nvme_controller_list(nvme_controller)
+        if not ret:
+            rpc_client.bdev_nvme_controller_attach(nvme_controller, pcie)
             time.sleep(2)
 
         nvme_bdev = f"{nvme_controller}n1"
         rpc_client.bdev_examine(nvme_bdev)
-        time.sleep(5)
         ret = rpc_client.get_bdevs(nvme_bdev)
         nvme_dict = ret[0]
         nvme_driver_data = nvme_dict['driver_specific']['nvme'][0]
@@ -311,6 +302,7 @@ def _create_jm_stack_on_device(rpc_client, nvme, snode, after_restart):
         'alceml_bdev': alceml_name,
         'nvme_bdev': nvme.nvme_bdev,
         "serial_number": nvme.serial_number,
+        "device_data_dict": nvme.to_dict(),
         'jm_bdev': jm_bdev
     })
 
@@ -1268,8 +1260,8 @@ def restart_storage_node(
             db_dev.status = NVMeDevice.STATUS_REMOVED
             distr_controller.send_dev_status_event(db_dev, db_dev.status)
 
-    if snode.jm_device and snode.jm_device.serial_number:
-        known_devices_sn.append(snode.jm_device.serial_number)
+    if snode.jm_device and "serial_number" in snode.jm_device.device_data_dict:
+        known_devices_sn.append(snode.jm_device.device_data_dict['serial_number'])
 
     for dev in nvme_devs:
         if dev.serial_number not in known_devices_sn:
