@@ -697,8 +697,8 @@ class RPCClient:
         params = {"storage_ID": storage_ID}
         return self._request("distr_migration_to_primary_start", params)
 
-    def distr_migration_status(self, migration_id=None):
+    def distr_migration_status(self, vuid=None):
         params = {}
-        if migration_id is not None:
-            params["migration_id"] = migration_id
+        if vuid is not None:
+            params["vuid"] = vuid
         return self._request("distr_migration_status", params)

@@ -72,10 +72,10 @@ def task_runner(task):
         error_count = 0
         progress = 0
         count = len(task.function_params["migration_ids"])
-        for mig_id in task.function_params["migration_ids"]:
-            res = rpc_client.distr_migration_status(mig_id)
+        for vuid in task.function_params["migration_ids"]:
+            res = rpc_client.distr_migration_status(vuid)
             for st in res:
-                if st["migration_id"] == mig_id:
+                if st["vuid"] == vuid:
                     if st['status'] == "completed":
                         completed_count += 1
                     if st['error'] == 1:
@@ -84,7 +84,7 @@ def task_runner(task):
         if count == completed_count:
             if error_count >= 1:
                 task.function_params = {}
-                task.function_result = "mig ids completed with errors, retrying"
+                task.function_result = "mig completed with errors, retrying"
                 task.write_to_db(db_controller.kv_store)
             else:
                 task.status = JobSchedule.STATUS_DONE
