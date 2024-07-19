@@ -130,18 +130,18 @@ class TestClusterBase:
         health_check_status = health_check_status if isinstance(health_check_status, list)\
               else [health_check_status]
         for node in storage_nodes:
-            if node["id"] == node_uuid and node['status'] == "offline":
+            if node["id"] == node_uuid and (node['status'] == "offline" or node['status'] == "in_restart"):
                 assert node["health_check"] in health_check_status, \
                     f"Node {node['id']} health-check is not {health_check_status}. Actual: {node['health_check']}. Node Status: {node_details[0]['status']}"
-            elif node["id"] == node_uuid and node['status'] == "in_restart":
-                assert node["health_check"] in [True, False], \
-                    f"Node {node['id']} health-check is not True or False. Actual: {node['health_check']}. Node Status: {node_details[0]['status']}"
+            # elif node["id"] == node_uuid and node['status'] == "in_restart":
+            #     assert node["health_check"] in [True, False], \
+            #         f"Node {node['id']} health-check is not True or False. Actual: {node['health_check']}. Node Status: {node_details[0]['status']}"
             else:
                 assert node["health_check"] is True, \
                     f"Node {node['id']} health-check is not True. Actual:  {node['health_check']}.  Node Status: {node_details[0]['status']}"
             device_details = self.sbcli_utils.get_device_details(storage_node_id=node["id"])
             for device in device_details:
-                if device['id'] in offline_device and node_details[0]['status'] == "offline":
+                if device['id'] in offline_device and (node_details[0]['status'] == "offline" or node_details[0]['status'] == "in_restart"):
                     assert device["health_check"] in health_check_status, \
                         f"Device {device['id']} health-check is not {health_check_status}. Actual:  {device['health_check']}"
                 else:
