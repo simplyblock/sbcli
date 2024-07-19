@@ -227,12 +227,12 @@ def clone(snapshot_id, clone_name, new_size=0):
 
     lvol.status = LVol.STATUS_ONLINE
     lvol.bdev_stack = snap.lvol.bdev_stack
-    lvol.bdev_stack.append(
+    lvol.bdev_stack = [
         {
             "type": "bdev_lvol_clone",
             "name": lvol.top_bdev
         }
-    )
+    ]
 
     # if new_size:
     #     if snap.lvol.size >= new_size:
