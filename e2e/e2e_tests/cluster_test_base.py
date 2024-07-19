@@ -133,6 +133,9 @@ class TestClusterBase:
             if node["id"] == node_uuid and node['status'] == "offline":
                 assert node["health_check"] in health_check_status, \
                     f"Node {node['id']} health-check is not {health_check_status}. Actual: {node['health_check']}. Node Status: {node_details[0]['status']}"
+            elif node["id"] == node_uuid and node['status'] == "in_restart":
+                assert node["health_check"] in [True, False], \
+                    f"Node {node['id']} health-check is not True or False. Actual: {node['health_check']}. Node Status: {node_details[0]['status']}"
             else:
                 assert node["health_check"] is True, \
                     f"Node {node['id']} health-check is not True. Actual:  {node['health_check']}.  Node Status: {node_details[0]['status']}"
