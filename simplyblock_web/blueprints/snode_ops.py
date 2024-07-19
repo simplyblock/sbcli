@@ -393,3 +393,25 @@ def delete_gpt_partitions_for_dev():
         time.sleep(1)
 
     return utils.get_response(True)
+
+
+@bp.route('/bind_device_to_spdk', methods=['POST'])
+def bind_device_to_spdk():
+    data = request.get_json()
+    if "device_pci" not in data:
+        return utils.get_response(False, "Required parameter is missing: device_pci")
+
+    device_pci = data['device_pci']
+
+    cmd_list = [
+        f"echo -n \"{device_pci}\" > /sys/bus/pci/drivers/nvme/unbind",
+        f"echo -n \"{device_pci}\" > /sys/bus/pci/drivers/uio_pci_generic/bind",
+    ]
+
+    for cmd in cmd_list:
+        logger.debug(cmd)
+        ret = os.popen(cmd).read().strip()
+        logger.debug(ret)
+        time.sleep(1)
+
+    return utils.get_response(True)
