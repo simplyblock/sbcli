@@ -81,7 +81,11 @@ def _get_if_ip_address(ifname):
     exit(1)
 
 
-def addNvmeDevices(cluster, rpc_client, devs, snode):
+def addNvmeDevices(snode, devs):
+    rpc_client = RPCClient(
+        snode.mgmt_ip, snode.rpc_port,
+        snode.rpc_username, snode.rpc_password, timeout=60, retry=10)
+
     devices = []
     ret = rpc_client.bdev_nvme_controller_list()
     ctr_map = {}
@@ -867,7 +871,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
     node_info, _ = snode_api.info()
 
     # discover devices
-    nvme_devs = addNvmeDevices(cluster, rpc_client, node_info['spdk_pcie_list'], snode)
+    nvme_devs = addNvmeDevices(snode, node_info['spdk_pcie_list'])
     if not nvme_devs:
         logger.error("No NVMe devices was found!")
         return False
@@ -1237,7 +1241,7 @@ def restart_storage_node(
 
     cluster = db_controller.get_cluster_by_id(snode.cluster_id)
     node_info, _ = snode_api.info()
-    nvme_devs = addNvmeDevices(cluster, rpc_client, node_info['spdk_pcie_list'], snode)
+    nvme_devs = addNvmeDevices(snode, node_info['spdk_pcie_list'])
     if not nvme_devs:
         logger.error("No NVMe devices was found!")
         return False
