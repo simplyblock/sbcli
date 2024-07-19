@@ -3,6 +3,7 @@ import threading
 from e2e_tests.cluster_test_base import TestClusterBase
 from utils.common_utils import sleep_n_sec
 from logger_config import setup_logger
+from datetime import datetime
 
 
 class TestSingleNodeFailure(TestClusterBase):
@@ -153,10 +154,6 @@ class TestSingleNodeFailure(TestClusterBase):
         event_logs = self.sbcli_utils.get_cluster_logs(self.cluster_id)
         self.logger.info(f"Event logs: {event_logs}")
 
-        storage_nodes = self.sbcli_utils.get_storage_nodes()["results"]
-        for node in storage_nodes:
-            print(f"Node {node['id']} Health: {node['health_check']}")
-
         # Write steps in order
         steps = {
             "Storage Node": ["shutdown", "restart"],
@@ -165,11 +162,17 @@ class TestSingleNodeFailure(TestClusterBase):
         self.common_utils.validate_event_logs(cluster_id=self.cluster_id,
                                               operations=steps)
         
-        self.common_utils.manage_fio_threads(node=self.mgmt_nodes[0],
-                                             threads=[fio_thread1],
-                                             timeout=1000)
+        end_time = self.common_utils.manage_fio_threads(node=self.mgmt_nodes[0],
+                                                        threads=[fio_thread1],
+                                                        timeout=1000)
 
         self.common_utils.validate_fio_test(node=self.mgmt_nodes[0],
                                             log_file=self.log_path)
+        
+        total_fio_runtime = end_time - self.ssh_obj.fio_runtime["fio_run_1"]
+        self.logger.info(f"FIO Run Time: {total_fio_runtime}")
+        
+        assert  total_fio_runtime >= 500, \
+            f'FIO Run Time Interrupted before given runtime. Actual: {self.ssh_obj.fio_runtime["fio_run_1"]}'
 
         self.logger.info("TEST CASE PASSED !!!")

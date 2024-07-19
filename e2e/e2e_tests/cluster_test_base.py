@@ -135,7 +135,7 @@ class TestClusterBase:
                     f"Node {node['id']} health-check is not {health_check_status}. Actual: {node['health_check']}. Node Status: {node_details[0]['status']}"
             else:
                 assert node["health_check"] is True, \
-                    f"Node {node['id']} health-check is not True. Actual:  {node['health_check']}"
+                    f"Node {node['id']} health-check is not True. Actual:  {node['health_check']}.  Node Status: {node_details[0]['status']}"
             device_details = self.sbcli_utils.get_device_details(storage_node_id=node["id"])
             for device in device_details:
                 if device['id'] in offline_device and node_details[0]['status'] == "offline":
