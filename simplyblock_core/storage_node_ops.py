@@ -1297,6 +1297,11 @@ def restart_storage_node(
             if dev.status != 'online':
                 continue
             name = f"remote_{dev.alceml_bdev}"
+            ret = rpc_client.bdev_nvme_controller_list(name)
+            if ret:
+                logger.debug(f"controller found, removing")
+                rpc_client.bdev_nvme_detach_controller(name)
+                time.sleep(1)
             ret = rpc_client.bdev_nvme_attach_controller_tcp(name, dev.nvmf_nqn, dev.nvmf_ip, dev.nvmf_port)
             if not ret:
                 logger.warning(f"Failed to connect to device: {name}")
