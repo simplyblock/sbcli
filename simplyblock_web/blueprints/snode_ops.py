@@ -405,7 +405,10 @@ def bind_device_to_spdk():
 
     cmd_list = [
         f"echo -n \"{device_pci}\" > /sys/bus/pci/drivers/nvme/unbind",
+        f"echo \"\" > /sys/bus/pci/devices/{device_pci}/driver_override",
         f"echo -n \"{device_pci}\" > /sys/bus/pci/drivers/uio_pci_generic/bind",
+        f"echo \"uio_pci_generic\" > /sys/bus/pci/devices/{device_pci}/driver_override",
+        f"echo -n \"{device_pci}\" > /sys/bus/pci/drivers_probe",
     ]
 
     for cmd in cmd_list:
