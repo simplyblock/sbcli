@@ -375,6 +375,7 @@ class SbcliUtils:
         actual_status = None
         device_ids = {}
         device_details = self.get_device_details(storage_node_id=node_id)
+        total_devices = len(device_details)
         while timeout > 0:
             device_details = self.get_device_details(storage_node_id=node_id)
             for device in device_details:
@@ -382,7 +383,8 @@ class SbcliUtils:
                 actual_status = device["status"]
                 status = status if isinstance(status, list) else [status]
                 if actual_status in status:
-                    return device_details
+                    if len(device_ids) == total_devices and all(list(device_ids.values())):
+                        return device_details
                 self.logger.info(f"Expected Status: {status} / Actual Status: {actual_status}")
             sleep_n_sec(1)
             timeout -= 1
