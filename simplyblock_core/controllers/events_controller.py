@@ -58,7 +58,7 @@ def log_distr_event(cluster_id, node_id, event_dict):
     ds.object_dict = event_dict
 
     log_event_based_on_level(cluster_id, event_dict['event_type'], DOMAIN_DISTR,
-                         event_dict['status'], CAUSED_BY_MONITOR, EventObj.LEVEL_ERROR,'new')
+                         event_dict['status'], CAUSED_BY_MONITOR, EventObj.LEVEL_ERROR)
 
     db_controller = DBController()
     ds.write_to_db(db_controller.kv_store)
@@ -95,20 +95,19 @@ def log_event_cluster(cluster_id, domain, event, db_object, caused_by, message,
     ds.message = message
     ds.status = status
 
-    log_event_based_on_level(cluster_id, event, db_object.name, message, caused_by, event_level,status)
+    log_event_based_on_level(cluster_id, event, db_object.name, message, caused_by, event_level)
 
     db_controller = DBController()
     ds.write_to_db(db_controller.kv_store)
 
 
-def log_event_based_on_level(cluster_id, event, db_object, message, caused_by, event_level, status):
+def log_event_based_on_level(cluster_id, event, db_object, message, caused_by, event_level):
     json_str = json.dumps({
         "cluster_id": cluster_id,
         "event": event,
         "object_name": db_object,
         "message": message,
-        "caused_by": caused_by,
-        "status": status
+        "caused_by": caused_by
     })
 
     if event_level == EventObj.LEVEL_CRITICAL:
