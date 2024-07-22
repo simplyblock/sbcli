@@ -107,7 +107,7 @@ class TestSingleNodeFailure(TestClusterBase):
                          health_check_status=True
                          )
         
-        sleep_n_sec(60)
+        sleep_n_sec(30)
         
         self.ssh_obj.stop_docker_containers(node=node_ip, container_name="spdk")
         
@@ -117,8 +117,6 @@ class TestSingleNodeFailure(TestClusterBase):
                                                           ["offline", "in_shutdown", "in_restart"],
                                                           timeout=300)
             
-            sleep_n_sec(10)
-
             self.validations(node_uuid=no_lvol_node_uuid,
                             node_status=["offline", "in_shutdown", "in_restart"],
                             # The status changes between them very quickly hence
@@ -136,13 +134,11 @@ class TestSingleNodeFailure(TestClusterBase):
                                                           timeout=300)
             self.logger.info(f"Waiting for node to become online, {no_lvol_node_uuid}")
             self.sbcli_utils.wait_for_storage_node_status(no_lvol_node_uuid, "online", timeout=120)
-            # sleep_n_sec(20)
             raise exp
         
         # self.sbcli_utils.restart_node(node_uuid=no_lvol_node_uuid)
         self.logger.info(f"Waiting for node to become online, {no_lvol_node_uuid}")
         self.sbcli_utils.wait_for_storage_node_status(no_lvol_node_uuid, "online", timeout=300)
-        sleep_n_sec(60)
 
         self.validations(node_uuid=no_lvol_node_uuid,
                          node_status="online",
