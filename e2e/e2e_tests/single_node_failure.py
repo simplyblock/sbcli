@@ -117,7 +117,7 @@ class TestSingleNodeFailure(TestClusterBase):
                                                           ["offline", "in_shutdown", "in_restart"],
                                                           timeout=300)
             
-            sleep_n_sec(15)
+            sleep_n_sec(10)
 
             self.validations(node_uuid=no_lvol_node_uuid,
                             node_status=["offline", "in_shutdown", "in_restart"],
@@ -150,9 +150,6 @@ class TestSingleNodeFailure(TestClusterBase):
                          lvol_status="online",
                          health_check_status=True
                          )
-        
-        event_logs = self.sbcli_utils.get_cluster_logs(self.cluster_id)
-        self.logger.info(f"Event logs: {event_logs}")
 
         # Write steps in order
         steps = {

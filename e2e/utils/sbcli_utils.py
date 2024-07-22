@@ -353,7 +353,7 @@ class SbcliUtils:
         """
         cluster_id = self.cluster_id if not cluster_id else cluster_id
         cluster_logs = self.get_request(api_url=f"/cluster/get-logs/{cluster_id}")
-        self.logger.info(f"Cluster Logs: {cluster_logs}")
+        self.logger.debug(f"Cluster Logs: {cluster_logs}")
         return cluster_logs["results"]
     
     def wait_for_storage_node_status(self, node_id, status, timeout=60):
@@ -370,4 +370,21 @@ class SbcliUtils:
                 timeout -= 1
         raise TimeoutError(f"Timed out waiting for node status, {node_id},"
                            f"Expected status: {status}, Actual status: {actual_status}")
+    
+    def wait_for_device_status(self, node_id, status, timeout=60):
+        actual_status = None
+        device_timeout = timeout
+        device_details = self.get_device_details(storage_node_id=node_id)
+        for device in device_details:
+            timeout = device_timeout
+            while timeout > 0:
+                actual_status = device["status"]
+                status = status if isinstance(status, list) else [status]
+                if actual_status in status:
+                    return True
+                self.logger.info(f"Expected Status: {status} / Actual Status: {actual_status}")
+                sleep_n_sec(1)
+                timeout -= 1
+            raise TimeoutError(f"Timed out waiting for device status, Node id: {node_id}, Device id: {device['id']}"
+                               f"Expected status: {status}, Actual status: {actual_status}")
 
