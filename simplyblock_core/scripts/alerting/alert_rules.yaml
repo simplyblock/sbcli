@@ -81,8 +81,8 @@ groups:
                 maxDataPoints: 43200
                 refId: C
                 type: threshold
-          noDataState: OK
-          execErrState: OK
+          noDataState: NoData
+          execErrState: Error
           for: 10s
           annotations:
             description: This is prometheus alert description
@@ -132,31 +132,30 @@ groups:
               relativeTimeRange:
                 from: 600
                 to: 0
-              datasourceUid: __expr__
+              datasourceUid: graylog_uid
               model:
-                conditions:
-                    - evaluator:
-                        params: []
-                        type: gt
-                      operator:
-                        type: and
-                      query:
-                        params:
-                            - B
-                      reducer:
-                        params: []
-                        type: last
-                      type: query
+                alias: ""
+                bucketAggs:
+                    - field: function
+                      id: "2"
+                      settings:
+                        min_doc_count: "1"
+                        order: desc
+                        orderBy: _term
+                        size: "10"
+                      type: terms
                 datasource:
-                    type: __expr__
-                    uid: __expr__
-                expression: A
+                    type: elasticsearch
+                    uid: graylog_uid
                 hide: false
                 intervalMs: 1000
                 maxDataPoints: 43200
-                reducer: count
+                metrics:
+                    - id: "1"
+                      type: count
+                query: '"event: STATUS_CHANGE" AND "object_name: NVMeDevice" AND "message: Device status changed from: unavailable to: online"'
                 refId: B
-                type: reduce
+                timeField: timestamp
             - refId: C
               relativeTimeRange:
                 from: 600
@@ -167,27 +166,42 @@ groups:
                     - evaluator:
                         params:
                             - 0
+                            - 0
                         type: gt
                       operator:
                         type: and
                       query:
                         params:
-                            - C
+                            - A
                       reducer:
                         params: []
-                        type: last
+                        type: count
+                      type: query
+                    - evaluator:
+                        params:
+                            - 0
+                            - 0
+                        type: no_value
+                      operator:
+                        type: and
+                      query:
+                        params:
+                            - B
+                      reducer:
+                        params: []
+                        type: count
                       type: query
                 datasource:
+                    name: Expression
                     type: __expr__
                     uid: __expr__
-                expression: B
-                hide: false
+                expression: ""
                 intervalMs: 1000
                 maxDataPoints: 43200
                 refId: C
-                type: threshold
-          noDataState: OK
-          execErrState: OK
+                type: classic_conditions
+          noDataState: NoData
+          execErrState: Error
           for: 2m
           annotations:
             description: Device status changed
@@ -231,31 +245,30 @@ groups:
               relativeTimeRange:
                 from: 600
                 to: 0
-              datasourceUid: __expr__
+              datasourceUid: graylog_uid
               model:
-                conditions:
-                    - evaluator:
-                        params: []
-                        type: gt
-                      operator:
-                        type: and
-                      query:
-                        params:
-                            - B
-                      reducer:
-                        params: []
-                        type: last
-                      type: query
+                alias: ""
+                bucketAggs:
+                    - field: function
+                      id: "2"
+                      settings:
+                        min_doc_count: "1"
+                        order: desc
+                        orderBy: _term
+                        size: "10"
+                      type: terms
                 datasource:
-                    type: __expr__
-                    uid: __expr__
-                expression: A
+                    type: elasticsearch
+                    uid: graylog_uid
                 hide: false
                 intervalMs: 1000
                 maxDataPoints: 43200
-                reducer: count
+                metrics:
+                    - id: "1"
+                      type: count
+                query: '"event: STATUS_CHANGE" AND "object_name: NVMeDevice" AND "message: Device status changed from: read_only to: online"'
                 refId: B
-                type: reduce
+                timeField: timestamp
             - refId: C
               relativeTimeRange:
                 from: 600
@@ -266,27 +279,42 @@ groups:
                     - evaluator:
                         params:
                             - 0
+                            - 0
                         type: gt
                       operator:
                         type: and
                       query:
                         params:
-                            - C
+                            - A
                       reducer:
                         params: []
-                        type: last
+                        type: count
+                      type: query
+                    - evaluator:
+                        params:
+                            - 0
+                            - 0
+                        type: no_value
+                      operator:
+                        type: and
+                      query:
+                        params:
+                            - B
+                      reducer:
+                        params: []
+                        type: count
                       type: query
                 datasource:
+                    name: Expression
                     type: __expr__
                     uid: __expr__
-                expression: B
-                hide: false
+                expression: ""
                 intervalMs: 1000
                 maxDataPoints: 43200
                 refId: C
-                type: threshold
-          noDataState: OK
-          execErrState: OK
+                type: classic_conditions
+          noDataState: NoData
+          execErrState: Error
           for: 2m
           annotations:
             description: Device status changed
@@ -330,31 +358,30 @@ groups:
               relativeTimeRange:
                 from: 600
                 to: 0
-              datasourceUid: __expr__
+              datasourceUid: graylog_uid
               model:
-                conditions:
-                    - evaluator:
-                        params: []
-                        type: gt
-                      operator:
-                        type: and
-                      query:
-                        params:
-                            - B
-                      reducer:
-                        params: []
-                        type: last
-                      type: query
+                alias: ""
+                bucketAggs:
+                    - field: function
+                      id: "2"
+                      settings:
+                        min_doc_count: "1"
+                        order: desc
+                        orderBy: _term
+                        size: "10"
+                      type: terms
                 datasource:
-                    type: __expr__
-                    uid: __expr__
-                expression: A
+                    type: elasticsearch
+                    uid: graylog_uid
                 hide: false
                 intervalMs: 1000
                 maxDataPoints: 43200
-                reducer: count
+                metrics:
+                    - id: "1"
+                      type: count
+                query: '"event: STATUS_CHANGE" AND "object_name: Cluster" AND "message: Cluster status changed from: degraded to: online"'
                 refId: B
-                type: reduce
+                timeField: timestamp
             - refId: C
               relativeTimeRange:
                 from: 600
@@ -365,27 +392,42 @@ groups:
                     - evaluator:
                         params:
                             - 0
+                            - 0
                         type: gt
                       operator:
                         type: and
                       query:
                         params:
-                            - C
+                            - A
                       reducer:
                         params: []
-                        type: last
+                        type: count
+                      type: query
+                    - evaluator:
+                        params:
+                            - 0
+                            - 0
+                        type: no_value
+                      operator:
+                        type: and
+                      query:
+                        params:
+                            - B
+                      reducer:
+                        params: []
+                        type: count
                       type: query
                 datasource:
+                    name: Expression
                     type: __expr__
                     uid: __expr__
-                expression: B
-                hide: false
+                expression: ""
                 intervalMs: 1000
                 maxDataPoints: 43200
                 refId: C
-                type: threshold
-          noDataState: OK
-          execErrState: OK
+                type: classic_conditions
+          noDataState: NoData
+          execErrState: Error
           for: 2m
           annotations:
             description: Cluster status changed
@@ -429,31 +471,30 @@ groups:
               relativeTimeRange:
                 from: 600
                 to: 0
-              datasourceUid: __expr__
+              datasourceUid: graylog_uid
               model:
-                conditions:
-                    - evaluator:
-                        params: []
-                        type: gt
-                      operator:
-                        type: and
-                      query:
-                        params:
-                            - B
-                      reducer:
-                        params: []
-                        type: last
-                      type: query
+                alias: ""
+                bucketAggs:
+                    - field: function
+                      id: "2"
+                      settings:
+                        min_doc_count: "1"
+                        order: desc
+                        orderBy: _term
+                        size: "10"
+                      type: terms
                 datasource:
-                    type: __expr__
-                    uid: __expr__
-                expression: A
+                    type: elasticsearch
+                    uid: graylog_uid
                 hide: false
                 intervalMs: 1000
                 maxDataPoints: 43200
-                reducer: count
+                metrics:
+                    - id: "1"
+                      type: count
+                query: '"event: STATUS_CHANGE" AND "object_name: Cluster" AND "message: Cluster status changed from: suspended to: online"'
                 refId: B
-                type: reduce
+                timeField: timestamp
             - refId: C
               relativeTimeRange:
                 from: 600
@@ -464,27 +505,42 @@ groups:
                     - evaluator:
                         params:
                             - 0
+                            - 0
                         type: gt
                       operator:
                         type: and
                       query:
                         params:
-                            - C
+                            - A
                       reducer:
                         params: []
-                        type: last
+                        type: count
+                      type: query
+                    - evaluator:
+                        params:
+                            - 0
+                            - 0
+                        type: no_value
+                      operator:
+                        type: and
+                      query:
+                        params:
+                            - B
+                      reducer:
+                        params: []
+                        type: count
                       type: query
                 datasource:
+                    name: Expression
                     type: __expr__
                     uid: __expr__
-                expression: B
-                hide: false
+                expression: ""
                 intervalMs: 1000
                 maxDataPoints: 43200
                 refId: C
-                type: threshold
-          noDataState: OK
-          execErrState: OK
+                type: classic_conditions
+          noDataState: NoData
+          execErrState: Error
           for: 2m
           annotations:
             description: Cluster status changed
@@ -528,31 +584,30 @@ groups:
               relativeTimeRange:
                 from: 600
                 to: 0
-              datasourceUid: __expr__
+              datasourceUid: graylog_uid
               model:
-                conditions:
-                    - evaluator:
-                        params: []
-                        type: gt
-                      operator:
-                        type: and
-                      query:
-                        params:
-                            - B
-                      reducer:
-                        params: []
-                        type: last
-                      type: query
+                alias: ""
+                bucketAggs:
+                    - field: function
+                      id: "2"
+                      settings:
+                        min_doc_count: "1"
+                        order: desc
+                        orderBy: _term
+                        size: "10"
+                      type: terms
                 datasource:
-                    type: __expr__
-                    uid: __expr__
-                expression: A
+                    type: elasticsearch
+                    uid: graylog_uid
                 hide: false
                 intervalMs: 1000
                 maxDataPoints: 43200
-                reducer: count
+                metrics:
+                    - id: "1"
+                      type: count
+                query: '"event: STATUS_CHANGE" AND "object_name: StorageNode" AND "message: Storage node status changed from: offline to: online"'
                 refId: B
-                type: reduce
+                timeField: timestamp
             - refId: C
               relativeTimeRange:
                 from: 600
@@ -563,27 +618,42 @@ groups:
                     - evaluator:
                         params:
                             - 0
+                            - 0
                         type: gt
                       operator:
                         type: and
                       query:
                         params:
-                            - C
+                            - A
                       reducer:
                         params: []
-                        type: last
+                        type: count
+                      type: query
+                    - evaluator:
+                        params:
+                            - 0
+                            - 0
+                        type: no_value
+                      operator:
+                        type: and
+                      query:
+                        params:
+                            - B
+                      reducer:
+                        params: []
+                        type: count
                       type: query
                 datasource:
+                    name: Expression
                     type: __expr__
                     uid: __expr__
-                expression: B
-                hide: false
+                expression: ""
                 intervalMs: 1000
                 maxDataPoints: 43200
                 refId: C
-                type: threshold
-          noDataState: OK
-          execErrState: OK
+                type: classic_conditions
+          noDataState: NoData
+          execErrState: Error
           for: 2m
           annotations:
             description: Storage node status changed
@@ -627,31 +697,30 @@ groups:
               relativeTimeRange:
                 from: 600
                 to: 0
-              datasourceUid: __expr__
+              datasourceUid: graylog_uid
               model:
-                conditions:
-                    - evaluator:
-                        params: []
-                        type: gt
-                      operator:
-                        type: and
-                      query:
-                        params:
-                            - B
-                      reducer:
-                        params: []
-                        type: last
-                      type: query
+                alias: ""
+                bucketAggs:
+                    - field: function
+                      id: "2"
+                      settings:
+                        min_doc_count: "1"
+                        order: desc
+                        orderBy: _term
+                        size: "10"
+                      type: terms
                 datasource:
-                    type: __expr__
-                    uid: __expr__
-                expression: A
+                    type: elasticsearch
+                    uid: graylog_uid
                 hide: false
                 intervalMs: 1000
                 maxDataPoints: 43200
-                reducer: count
+                metrics:
+                    - id: "1"
+                      type: count
+                query: '"event: CAPACITY" AND "object_name: Cluster" AND "message: Cluster provisioned capacity reached"'
                 refId: B
-                type: reduce
+                timeField: timestamp
             - refId: C
               relativeTimeRange:
                 from: 600
@@ -662,27 +731,42 @@ groups:
                     - evaluator:
                         params:
                             - 0
+                            - 0
                         type: gt
                       operator:
                         type: and
                       query:
                         params:
-                            - C
+                            - A
                       reducer:
                         params: []
-                        type: last
+                        type: count
+                      type: query
+                    - evaluator:
+                        params:
+                            - 0
+                            - 0
+                        type: no_value
+                      operator:
+                        type: and
+                      query:
+                        params:
+                            - B
+                      reducer:
+                        params: []
+                        type: count
                       type: query
                 datasource:
+                    name: Expression
                     type: __expr__
                     uid: __expr__
-                expression: B
-                hide: false
+                expression: ""
                 intervalMs: 1000
                 maxDataPoints: 43200
                 refId: C
-                type: threshold
-          noDataState: OK
-          execErrState: OK
+                type: classic_conditions
+          noDataState: NoData
+          execErrState: Error
           for: 2m
           annotations:
             description: Cluster provisioned capacity reached
@@ -726,31 +810,30 @@ groups:
               relativeTimeRange:
                 from: 600
                 to: 0
-              datasourceUid: __expr__
+              datasourceUid: graylog_uid
               model:
-                conditions:
-                    - evaluator:
-                        params: []
-                        type: gt
-                      operator:
-                        type: and
-                      query:
-                        params:
-                            - B
-                      reducer:
-                        params: []
-                        type: last
-                      type: query
+                alias: ""
+                bucketAggs:
+                    - field: function
+                      id: "2"
+                      settings:
+                        min_doc_count: "1"
+                        order: desc
+                        orderBy: _term
+                        size: "10"
+                      type: terms
                 datasource:
-                    type: __expr__
-                    uid: __expr__
-                expression: A
+                    type: elasticsearch
+                    uid: graylog_uid
                 hide: false
                 intervalMs: 1000
                 maxDataPoints: 43200
-                reducer: count
+                metrics:
+                    - id: "1"
+                      type: count
+                query: '"event: CAPACITY" AND "object_name: Cluster" AND "message: Cluster absolute capacity reached"'
                 refId: B
-                type: reduce
+                timeField: timestamp
             - refId: C
               relativeTimeRange:
                 from: 600
@@ -761,27 +844,42 @@ groups:
                     - evaluator:
                         params:
                             - 0
+                            - 0
                         type: gt
                       operator:
                         type: and
                       query:
                         params:
-                            - C
+                            - A
                       reducer:
                         params: []
-                        type: last
+                        type: count
+                      type: query
+                    - evaluator:
+                        params:
+                            - 0
+                            - 0
+                        type: no_value
+                      operator:
+                        type: and
+                      query:
+                        params:
+                            - B
+                      reducer:
+                        params: []
+                        type: count
                       type: query
                 datasource:
+                    name: Expression
                     type: __expr__
                     uid: __expr__
-                expression: B
-                hide: false
+                expression: ""
                 intervalMs: 1000
                 maxDataPoints: 43200
                 refId: C
-                type: threshold
-          noDataState: OK
-          execErrState: OK
+                type: classic_conditions
+          noDataState: NoData
+          execErrState: Error
           for: 2m
           annotations:
             description: Cluster absolute capacity reached
