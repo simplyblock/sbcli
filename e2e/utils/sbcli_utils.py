@@ -316,7 +316,7 @@ class SbcliUtils:
             return
 
         data = self.get_request(api_url=f"/lvol/connect/{lvol_id}")
-        self.logger.info(f"Connect lvol resp: {data}")
+        self.logger.debug(f"Connect lvol resp: {data}")
         return data["results"][0]["connect"]
 
     def get_cluster_status(self, cluster_id=None):
@@ -324,7 +324,7 @@ class SbcliUtils:
         """
         cluster_id = self.cluster_id if not cluster_id else cluster_id
         cluster_details = self.get_request(api_url=f"/cluster/status/{cluster_id}")
-        self.logger.info(f"Cluster Status: {cluster_details}")
+        self.logger.debug(f"Cluster Status: {cluster_details}")
         return cluster_details["results"]
 
     def get_storage_node_details(self, storage_node_id):
@@ -338,14 +338,14 @@ class SbcliUtils:
         """Get Device details for given node id
         """
         device_details = self.get_request(api_url=f"/device/list/{storage_node_id}")
-        self.logger.info(f"Device Details: {device_details}")
+        self.logger.debug(f"Device Details: {device_details}")
         return device_details["results"]
 
     def get_lvol_details(self, lvol_id):
         """Get lvol details for given lvol id
         """
         lvol_details = self.get_request(api_url=f"/lvol/{lvol_id}")
-        self.logger.info(f"Lvol Details: {lvol_details}")
+        self.logger.debug(f"Lvol Details: {lvol_details}")
         return lvol_details["results"]
 
     def get_cluster_logs(self, cluster_id=None):
@@ -363,7 +363,7 @@ class SbcliUtils:
             actual_status = node_details[0]["status"]
             status = status if isinstance(status, list) else [status]
             if actual_status in status:
-                return True
+                return node_details[0]
             else:
                 self.logger.info(f"Expected Status: {status} / Actual Status: {actual_status}")
                 sleep_n_sec(1)
@@ -373,18 +373,53 @@ class SbcliUtils:
     
     def wait_for_device_status(self, node_id, status, timeout=60):
         actual_status = None
-        device_timeout = timeout
+        device_ids = {}
         device_details = self.get_device_details(storage_node_id=node_id)
-        for device in device_details:
-            timeout = device_timeout
-            while timeout > 0:
+        while timeout > 0:
+            device_details = self.get_device_details(storage_node_id=node_id)
+            for device in device_details:
+                device_ids[device['id']] = device['status']
                 actual_status = device["status"]
                 status = status if isinstance(status, list) else [status]
                 if actual_status in status:
-                    return True
+                    return device_details
                 self.logger.info(f"Expected Status: {status} / Actual Status: {actual_status}")
+            sleep_n_sec(1)
+            timeout -= 1
+        raise TimeoutError(f"Timed out waiting for device status, Node id: {node_id}, Device id: {list(device_ids.keys())}"
+                            f"Expected status: {status}, Actual status: {list(device_ids.values())}")
+    
+    def wait_for_health_status(self, node_id, status, timeout=60, device_id=None):
+        actual_status = None
+        if not device_id:
+            node_details = self.get_storage_node_details(storage_node_id=node_id)
+            while timeout > 0:
+                    node_details = self.get_storage_node_details(storage_node_id=node_id)
+                    actual_status = node_details[0]["health_check"]
+                    status = status if isinstance(status, list) else [status]
+                    if actual_status in status:
+                        return node_details[0]
+                    else:
+                        self.logger.info(f"Expected Status: {status} / Actual Status: {actual_status}")
+                        sleep_n_sec(1)
+                        timeout -= 1
+            raise TimeoutError(f"Timed out waiting for node health status, {node_id},"
+                               f"Expected status: {status}, Actual status: {actual_status}")
+        else:
+            device_details = self.get_device_details(storage_node_id=node_id)
+            while timeout > 0:
+                device_details = self.get_device_details(storage_node_id=node_id)
+                for device in device_details:
+                    if device_id == device['id']:
+                        actual_status = device["health_check"]
+                        status = status if isinstance(status, list) else [status]
+                        if actual_status in status:
+                            return device
+                        self.logger.info(f"Expected Status: {status} / Actual Status: {actual_status}")
+                    else:
+                        continue
                 sleep_n_sec(1)
                 timeout -= 1
-            raise TimeoutError(f"Timed out waiting for device status, Node id: {node_id}, Device id: {device['id']}"
-                               f"Expected status: {status}, Actual status: {actual_status}")
+            raise TimeoutError(f"Timed out waiting for device status, Node id: {node_id}, Device id: {device_id}"
+                                f"Expected status: {status}, Actual status: {actual_status}")
 
