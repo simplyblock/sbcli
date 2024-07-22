@@ -153,7 +153,7 @@ groups:
                 metrics:
                     - id: "1"
                       type: count
-                query: '"event: STATUS_CHANGE" AND "object_name: NVMeDevice" AND "message: Device status changed from: unavailable to: online"'
+                query: '"event: STATUS_CHANGE" AND "object_name: NVMeDevice" AND "to: online"'
                 refId: B
                 timeField: timestamp
             - refId: C
@@ -266,7 +266,7 @@ groups:
                 metrics:
                     - id: "1"
                       type: count
-                query: '"event: STATUS_CHANGE" AND "object_name: NVMeDevice" AND "message: Device status changed from: read_only to: online"'
+                query: '"event: STATUS_CHANGE" AND "object_name: NVMeDevice" AND "to: online"'
                 refId: B
                 timeField: timestamp
             - refId: C
@@ -379,7 +379,7 @@ groups:
                 metrics:
                     - id: "1"
                       type: count
-                query: '"event: STATUS_CHANGE" AND "object_name: Cluster" AND "message: Cluster status changed from: degraded to: online"'
+                query: '"event: STATUS_CHANGE" AND "object_name: Cluster" AND "to: online"'
                 refId: B
                 timeField: timestamp
             - refId: C
@@ -492,7 +492,7 @@ groups:
                 metrics:
                     - id: "1"
                       type: count
-                query: '"event: STATUS_CHANGE" AND "object_name: Cluster" AND "message: Cluster status changed from: suspended to: online"'
+                query: '"event: STATUS_CHANGE" AND "object_name: Cluster" AND "to: online"'
                 refId: B
                 timeField: timestamp
             - refId: C
@@ -605,7 +605,7 @@ groups:
                 metrics:
                     - id: "1"
                       type: count
-                query: '"event: STATUS_CHANGE" AND "object_name: StorageNode" AND "message: Storage node status changed from: offline to: online"'
+                query: '"event: STATUS_CHANGE" AND "object_name: StorageNode" AND "to: online"'
                 refId: B
                 timeField: timestamp
             - refId: C
