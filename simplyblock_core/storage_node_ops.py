@@ -1018,6 +1018,7 @@ def remove_storage_node(node_id, force_remove=False, force_migrate=False):
             dev.status = NVMeDevice.STATUS_FAILED
             distr_controller.send_dev_status_event(dev, NVMeDevice.STATUS_FAILED)
             device_events.device_status_change(dev, NVMeDevice.STATUS_FAILED, old_status)
+            tasks_controller.add_device_failed_mig_task(dev.get_id())
 
     logger.info("Removing storage node")
 
