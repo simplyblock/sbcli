@@ -334,6 +334,21 @@ def device_remove(device_id, force=True):
     for lvol in db_controller.get_lvols():
         lvol_controller.send_cluster_map(lvol.get_id())
 
+    # remove device from jm raid
+    if snode.jm_device.raid_bdev:
+        nvme_controller = device.nvme_controller
+        dev_to_remove = None
+        for part in snode.jm_device.jm_nvme_bdev_list:
+            if part.startswith(nvme_controller):
+                dev_to_remove = part
+                break
+
+        if dev_to_remove:
+            ret = rpc_client.bdev_raid_remove_base_bdev(snode.jm_device.raid_bdev, dev_to_remove)
+            if ret:
+                snode.jm_device.jm_nvme_bdev_list.remove(dev_to_remove)
+                snode.write_to_db(db_controller.kv_store)
+
     tasks_controller.add_device_failed_mig_task(device_id)
     return True
 
@@ -536,6 +551,39 @@ def add_device(device_id):
 
     logger.info(f"Adding device {device_id}")
 
+
+
+    #######################################
+
+    rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
+
+    # look for partitions
+    partitioned_devices = storage_node_ops._search_for_partitions(rpc_client, device_obj)
+    logger.debug("partitioned_devices")
+    logger.debug(partitioned_devices)
+
+    if len(partitioned_devices) == 2:
+        logger.info("Partitioned devices found")
+    else:
+        logger.info(f"Creating partitions for {device_obj.nvme_bdev}")
+        storage_node_ops._create_device_partitions(rpc_client, device_obj, snode)
+        partitioned_devices = storage_node_ops._search_for_partitions(rpc_client, device_obj)
+
+        if len(partitioned_devices) == 2:
+            logger.info("Device partitions created")
+        else:
+            logger.error("Failed to create partitions")
+            return False
+
+    jm_part = partitioned_devices[0]
+    device_part = partitioned_devices[1]
+
+    device_obj.device_name = device_part.device_name
+    device_obj.nvme_bdev = device_part.nvme_bdev
+    device_obj.size = device_part.size
+
+    #######################################
+
     ret = _def_create_device_stack(device_obj, snode)
     if not ret:
         logger.error("Failed to create device stack")
@@ -578,7 +626,20 @@ def add_device(device_id):
         distr_controller.send_cluster_map_to_node(node)
         time.sleep(1)
 
+    # send cluster map to current node:
+    distr_controller.send_cluster_map_to_node(snode)
+
     device_events.device_create(device_obj)
 
     tasks_controller.add_new_device_mig_task(device_id)
+
+    # add device to jm raid
+    if snode.jm_device.raid_bdev:
+        nvme_bdev = jm_part.nvme_bdev
+        if nvme_bdev not in snode.jm_device.jm_nvme_bdev_list:
+            ret = rpc_client.bdev_raid_add_base_bdev(snode.jm_device.raid_bdev, nvme_bdev)
+            if ret:
+                snode.jm_device.jm_nvme_bdev_list.append(nvme_bdev)
+                snode.write_to_db(db_controller.kv_store)
+
     return "Done"
