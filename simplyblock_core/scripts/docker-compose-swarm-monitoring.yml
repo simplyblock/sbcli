@@ -191,7 +191,7 @@ services:
     deploy:
       mode: global
     networks:
-      - monitoring-net
+      - hostnet
 
   grafana:
     image: grafana/grafana:10.0.12
@@ -238,3 +238,7 @@ volumes:
 networks:
   monitoring-net:
     external: true
+
+  hostnet:
+    external: true
+    name: host
