@@ -40,3 +40,29 @@ sudo mkdir -p /etc/simplyblock
 sudo chmod 777 /etc/simplyblock
 
 sudo sh -c 'echo 1 >  /proc/sys/vm/drop_caches'
+
+docker plugin install grafana/loki-docker-driver:2.9.2 --alias loki --grant-all-permissions
+
+loki_config='{
+  "log-driver": "loki",
+  "log-opts": {
+    "loki-url": "http://loki:3100/loki/api/v1/push",
+    "loki-batch-size": "400",
+    "loki-retries": "5",
+    "loki-retry-interval": "500ms"
+  }
+}'
+
+# Path to the daemon.json file
+daemon_json_path="/etc/docker/daemon.json"
+
+# Check if daemon.json exists, create if not
+if [ ! -f "$daemon_json_path" ]; then
+  echo "{}" | sudo tee "$daemon_json_path" > /dev/null
+fi
+
+# Update the daemon.json file with the Loki configuration
+sudo jq ". + $loki_config" "$daemon_json_path" | sudo tee "$daemon_json_path" > /dev/null
+
+# Restart the Docker daemon to apply changes
+sudo systemctl restart docker

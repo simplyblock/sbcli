@@ -18,3 +18,12 @@ datasources:
     index: '*'
     interval: Hourly
     timeField: 'timestamp'
+- name: Loki
+  type: loki
+  url: http://loki:3100
+  access: proxy
+  isDefault: false
+  editable: true
+  version: 1
+  jsonData:
+    maxLines: 1000
