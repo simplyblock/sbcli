@@ -190,10 +190,8 @@ services:
     restart: "always"
     deploy:
       mode: global
-      placement:
-        constraints: [node.role == worker]
     networks:
-      - monitoring-net
+      - hostnet
 
   grafana:
     image: grafana/grafana:10.0.12
@@ -233,10 +231,14 @@ volumes:
   graylog_data:
   graylog_journal:
   grafana_data:
-  graylog_config:  
+  graylog_config:
   prometheus_data:
   thanos_compactor_data:
 
 networks:
   monitoring-net:
     external: true
+
+  hostnet:
+    external: true
+    name: host
