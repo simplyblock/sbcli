@@ -190,8 +190,6 @@ services:
     restart: "always"
     deploy:
       mode: global
-      placement:
-        constraints: [node.role == worker]
     networks:
       - monitoring-net
 
@@ -233,7 +231,7 @@ volumes:
   graylog_data:
   graylog_journal:
   grafana_data:
-  graylog_config:  
+  graylog_config:
   prometheus_data:
   thanos_compactor_data:
 
