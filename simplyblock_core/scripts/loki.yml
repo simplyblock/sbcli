@@ -24,12 +24,12 @@ schema_config:
         period: 24h
 storage_config:
   boltdb_shipper:
-    active_index_directory: /tmp/loki/index
-    cache_location: /tmp/loki/boltdb-cache
+    active_index_directory: /loki/index
+    cache_location: /loki/boltdb-cache
     cache_ttl: 24h
     shared_store: filesystem
   filesystem:
-    directory: /tmp/loki/chunks
+    directory: /loki/chunks
 limits_config:
   enforce_metric_name: false
   reject_old_samples: true
@@ -39,3 +39,6 @@ chunk_store_config:
 table_manager:
   retention_deletes_enabled: true
   retention_period: 24h
+compactor:
+  working_directory: /loki/boltdb-cache
+  shared_store: filesystem
