@@ -634,7 +634,7 @@ def add_device(device_id):
     tasks_controller.add_new_device_mig_task(device_id)
 
     # add device to jm raid
-    if snode.jm_device.raid_bdev:
+    if snode.jm_device.raid_bdev and snode.jm_device.jm_nvme_bdev_list < 2:
         nvme_bdev = jm_part.nvme_bdev
         if nvme_bdev not in snode.jm_device.jm_nvme_bdev_list:
             ret = rpc_client.bdev_raid_add_base_bdev(snode.jm_device.raid_bdev, nvme_bdev)
