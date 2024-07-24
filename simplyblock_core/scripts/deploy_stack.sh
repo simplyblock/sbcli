@@ -19,9 +19,9 @@ then
    export FDB_CLUSTER_FILE_CONTENTS=$FDB_CLUSTER_FILE_CONTENTS
 fi
 
-if [[ "$RETENTION_PERIOD" == *d ]]; then
-   export MAX_NUMBER_OF_INDICES=${RETENTION_PERIOD%d}
-elif [[ "$RETENTION_PERIOD" == *h || "$RETENTION_PERIOD" == *m ]]; then
+if [[ "$LOG_DELETION_INTERVAL" == *d ]]; then
+   export MAX_NUMBER_OF_INDICES=${LOG_DELETION_INTERVAL%d}
+elif [[ "$LOG_DELETION_INTERVAL" == *h || "$LOG_DELETION_INTERVAL" == *m ]]; then
    export MAX_NUMBER_OF_INDICES=1
 else
     echo "Invalid RETENTION_PERIOD format. Please use a value ending in 'd', 'h', or 'm'."
