@@ -143,6 +143,9 @@ services:
   HealthCheck:
     image: $SIMPLYBLOCK_DOCKER_IMAGE
     command: "python simplyblock_core/services/health_check_service.py"
+    labels:
+      logging: "promtail"
+      logging_jobname: "containerlogs"
     deploy:
       placement:
         constraints: [node.role == manager]

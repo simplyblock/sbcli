@@ -3,8 +3,14 @@ auth_enabled: false
 server:
   http_listen_port: 3100
 
+frontend:
+  address: 127.0.0.1
+
 ingester:
+  wal:
+    dir: "/loki/wal"
   lifecycler:
+    address: 127.0.0.1
     ring:
       kvstore:
         store: inmemory
