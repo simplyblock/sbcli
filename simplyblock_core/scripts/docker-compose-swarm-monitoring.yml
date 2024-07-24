@@ -236,7 +236,6 @@ services:
         constraints: [node.role == manager]
     networks:
       - monitoring-net
-      - hostnet
 
   promtail:
     image: grafana/promtail:2.7.1
@@ -251,7 +250,6 @@ services:
         constraints: [node.role == manager]
     networks:
       - monitoring-net
-      - hostnet
 
 volumes:
   loki_data:
