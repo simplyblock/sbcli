@@ -53,12 +53,14 @@ run_fio_workload() {
 
 create_snapshot_and_clone() {
     local base_name=$1
+    local lvol_id=$2
     local snapshot_name="${base_name}_snapshot_$(date +%s)"
-    log "Creating snapshot: $snapshot_name"
-    sbcli-lvol snapshot add $base_name $snapshot_name
+    log "Creating snapshot: $snapshot_name $lvol_id"
+    sbcli-lvol snapshot add $lvol_id $snapshot_name
 
+    snapshot_id=($(sbcli-lvol snapshot list | grep "$snapshot_name" | awk '{print $2}'))
     log "Creating clone from snapshot: $snapshot_name"
-    sbcli-lvol snapshot clone $snapshot_name "${snapshot_name}_clone"
+    sbcli-lvol snapshot clone $snapshot_id "${snapshot_name}_clone"
     echo "${snapshot_name}_clone"
 }
 
@@ -80,9 +82,6 @@ mount_and_run_fio() {
     sudo mount /dev/$clone_device $mount_point
 
     run_fio_workload $mount_point
-    sudo umount $mount_point
-
-    disconnect_lvol $clone_id
 }
 
 disconnect_lvol() {
@@ -104,6 +103,12 @@ delete_snapshots() {
         log "Deleting snapshot: $snapshot"
         sbcli-lvol snapshot delete $snapshot --force
     done
+}
+
+delete_lvol() {
+    local lvol_id=$1
+    log "Deleting LVOL/Clone with id $lvol_id"
+    sbcli-lvol lvol delete $lvol_id
 }
 
 delete_lvols() {
@@ -173,18 +178,23 @@ for ((i=1; i<=NUM_ITERATIONS; i++)); do
         format_fs $device $FS_TYPE
         sudo mount /dev/$device $mount_point
         run_fio_workload $mount_point
-        sudo umount $mount_point
-        disconnect_lvol $lvol_id
         current_base=$LVOL_NAME
     fi
     
-    clone_name=$(create_snapshot_and_clone $current_base)
+    lvol_id=$(sbcli-lvol lvol list | grep $current_base | awk '{print $2}')
+
+    clone_name=$(create_snapshot_and_clone $current_base $lvol_id)
     mount_and_run_fio $clone_name
     current_base=$clone_name
 done
 
 log "Script execution completed"
 
+unmount_all
+remove_mount_dirs
+disconnect_lvols
+delete_snapshots
+delete_lvols
 delete_pool
 
 log "CLEANUP COMPLETE"
