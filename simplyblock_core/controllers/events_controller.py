@@ -8,16 +8,16 @@ from simplyblock_core.kv_store import DBController
 from simplyblock_core import constants
 
 from graypy import GELFUDPHandler
-from logging_loki import LokiHandler
+#from logging_loki import LokiHandler
 
 # configure logging
 logging.captureWarnings(True)
 gelf_handler = GELFUDPHandler('0.0.0.0', constants.GELF_PORT)
-loki_handler = LokiHandler(url="http://0.0.0.0:3100/loki/api/v1/push", tags={"application": "simplyblk"},version="1")
+#loki_handler = LokiHandler(url="http://0.0.0.0:3100/loki/api/v1/push", tags={"application": "simplyblk"},version="1")
 logger = logging.getLogger()
 logger.setLevel(logging.DEBUG)
 logger.addHandler(gelf_handler)
-logger.addHandler(loki_handler)
+#logger.addHandler(loki_handler)
 
 
 py_warnings_logger = logging.getLogger("py.warnings")
