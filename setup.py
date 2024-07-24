@@ -84,6 +84,7 @@ setup(
         "graypy",
         "boto3",
         "jinja2",
+        "python-logging-loki",
     ],
     entry_points={
         'console_scripts': [

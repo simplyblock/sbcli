@@ -13,6 +13,7 @@ from simplyblock_core import constants, kv_store
 
 # Import the GELF logger
 from graypy import GELFUDPHandler
+from logging_loki import LokiHandler
 
 def set_node_health_check(snode, health_check_status):
     snode = db_controller.get_storage_node_by_id(snode.get_id())
@@ -44,9 +45,11 @@ def set_device_health_check(cluster_id, device, health_check_status):
 logger_handler = logging.StreamHandler(stream=sys.stdout)
 logger_handler.setFormatter(logging.Formatter('%(asctime)s: %(levelname)s: %(message)s'))
 gelf_handler = GELFUDPHandler('0.0.0.0', constants.GELF_PORT)
+loki_handler = LokiHandler(url="http://loki:3100/loki/api/v1/push", tags={"application": "simplyblk"},version="1")
 logger = logging.getLogger()
 logger.addHandler(gelf_handler)
 logger.addHandler(logger_handler)
+logger.addHandler(loki_handler)
 logger.setLevel(logging.DEBUG)
 
 # get DB controller

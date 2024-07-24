@@ -226,7 +226,7 @@ services:
       - monitoring-net
 
   loki:
-    image: grafana/loki:3.0.0
+    image: grafana/loki:2.7.1
     volumes:
       - ./loki.yml:/etc/loki/config.yaml
       - loki_data:/loki
@@ -238,7 +238,7 @@ services:
       - monitoring-net
 
   promtail:
-    image: grafana/promtail:3.0.0
+    image: grafana/promtail:2.7.1
     volumes:
       - ./promtail.yml:/etc/promtail/config.yaml
       - /var/lib/docker/containers:/var/lib/docker/containers:ro
