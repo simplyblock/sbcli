@@ -23,7 +23,6 @@ logger = logging.getLogger()
 logger.addHandler(gelf_handler)
 logger.addHandler(logger_handler)
 logger.addHandler(loki_handler)
-logger.setLevel(logging.DEBUG)
 
 ### script to test connection once connection is ascertain
 # get DB controller

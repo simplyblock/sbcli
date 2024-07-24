@@ -19,7 +19,6 @@ logger = logging.getLogger()
 logger.addHandler(gelf_handler)
 logger.addHandler(logger_handler)
 logger.addHandler(loki_handler)
-logger.setLevel(logging.DEBUG)
 
 logger.info("Starting FDB cleanup script...")
 

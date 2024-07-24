@@ -20,7 +20,6 @@ logger = logging.getLogger()
 logger.addHandler(gelf_handler)
 logger.addHandler(logger_handler)
 logger.addHandler(loki_handler)
-logger.setLevel(logging.DEBUG)
 
 deletion_interval = os.getenv('LOG_DELETION_INTERVAL', '24h')
 

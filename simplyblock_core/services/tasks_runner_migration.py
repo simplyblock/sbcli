@@ -38,7 +38,6 @@ logger = logging.getLogger()
 logger.addHandler(gelf_handler)
 logger.addHandler(logger_handler)
 logger.addHandler(loki_handler)
-logger.setLevel(logging.DEBUG)
 
 # get DB controller
 db_controller = kv_store.DBController()

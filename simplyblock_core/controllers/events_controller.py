@@ -15,10 +15,9 @@ logging.captureWarnings(True)
 gelf_handler = GELFUDPHandler('0.0.0.0', constants.GELF_PORT)
 #loki_handler = LokiHandler(url="http://loki:3100/loki/api/v1/push", tags={"application": "simplyblk"},version="1")
 logger = logging.getLogger()
-logger.setLevel(logging.DEBUG)
 logger.addHandler(gelf_handler)
 #logger.addHandler(loki_handler)
-
+logger.setLevel(logging.DEBUG)
 
 py_warnings_logger = logging.getLogger("py.warnings")
 py_warnings_logger.addHandler(gelf_handler)
