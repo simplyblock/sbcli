@@ -24,7 +24,7 @@ if [[ "$LOG_DELETION_INTERVAL" == *d ]]; then
 elif [[ "$LOG_DELETION_INTERVAL" == *h || "$LOG_DELETION_INTERVAL" == *m ]]; then
    export MAX_NUMBER_OF_INDICES=1
 else
-    echo "Invalid RETENTION_PERIOD format. Please use a value ending in 'd', 'h', or 'm'."
+    echo "Invalid LOG_DELETION_INTERVAL format. Please use a value ending in 'd', 'h', or 'm'."
     exit 1
 fi
 
