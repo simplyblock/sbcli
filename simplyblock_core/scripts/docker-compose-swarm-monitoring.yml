@@ -191,7 +191,7 @@ services:
     deploy:
       mode: global
     networks:
-      - hostnet
+      - monitoring-net
 
   grafana:
     image: grafana/grafana:10.0.12
