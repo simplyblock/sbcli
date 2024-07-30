@@ -185,6 +185,8 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spd
     mem = node_info['memory_details']['huge_free']
     logger.info(f"Free Hugepages detected: {utils.humanbytes(mem)}")
 
+    time.sleep(60)
+    
     # adding devices
     nvme_devs = addNvmeDevices(cluster, rpc_client, node_info['spdk_pcie_list'], snode)
     if not nvme_devs:
