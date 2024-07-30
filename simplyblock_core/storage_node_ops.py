@@ -1089,13 +1089,13 @@ def restart_storage_node(
         snode.spdk_image = img
 
     # Calculate pool count
-    if snode.node.cloud_instance_type:
-        supported_type, storage_devices, device_size = utils.get_total_size_per_instance_type(snode.node.cloud_instance_type)
+    if snode.cloud_instance_type:
+        supported_type, storage_devices, device_size = utils.get_total_size_per_instance_type(snode.cloud_instance_type)
         if not supported_type:
-            logger.warning(f"Unsupported instance-type {snode.node.cloud_instance_type} for deployment")
+            logger.warning(f"Unsupported instance-type {snode.cloud_instance_type} for deployment")
             if not number_of_devices:
                 if not snode.number_of_devices:
-                    logger.error(f"Unsupported instance-type {snode.node.cloud_instance_type} "
+                    logger.error(f"Unsupported instance-type {snode.cloud_instance_type} "
                                  "for deployment, please specify --number-of-devices")
                     return False
                 number_of_devices = snode.number_of_devices
@@ -1372,7 +1372,7 @@ def list_storage_nodes(is_json, cluster_id=None):
             "Health": node.health_check,
 
             "Cloud ID": node.cloud_instance_id,
-            "Cloud Type": node.snode.node.cloud_instance_type,
+            "Cloud Type": node.cloud_instance_type,
             "Ext IP": node.cloud_instance_public_ip,
 
         })
