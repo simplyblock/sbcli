@@ -37,6 +37,11 @@ spec:
         - name: script-config
           configMap:
             name: caching-node-restart-script-cm
+      tolerations:
+      - effect: NoSchedule
+        key: dedicated
+        operator: Equal
+        value: simplyblock-cache 
       initContainers:
         - name: copy-script
           image: busybox
