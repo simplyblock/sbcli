@@ -86,10 +86,10 @@ spec:
           mountPath: /script
         resources:
           limits:
-            hugepages-2Mi: 2Gi
-            memory: 1024Mi
+            hugepages-2Mi: 8Gi
+            memory: 4096Mi
           requests:
-            memory: 1024Mi
+            memory: 4096Mi
 
       - name: spdk-proxy-container
         image: {{ SPDK_IMAGE }}
