@@ -111,6 +111,8 @@ def spdk_process_start():
     else:
         spdk_mem = 64096
 
+    spdk_mem_gega = int(spdk_mem / 1024)
+
     spdk_image = constants.SIMPLY_BLOCK_SPDK_CORE_IMAGE
     if node_utils.get_host_arch() == "aarch64":
         spdk_image = constants.SIMPLY_BLOCK_SPDK_CORE_IMAGE_ARM64
@@ -132,6 +134,7 @@ def spdk_process_start():
             'SPDK_IMAGE': spdk_image,
             'SPDK_CPU_MASK': spdk_cpu_mask,
             'SPDK_MEM': spdk_mem,
+            'MEM_GEGA': spdk_mem_gega,
             'SERVER_IP': data['server_ip'],
             'RPC_PORT': data['rpc_port'],
             'RPC_USERNAME': data['rpc_username'],
