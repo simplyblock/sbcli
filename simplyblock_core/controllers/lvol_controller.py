@@ -678,6 +678,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
                     "bdev_name": lvol.base_bdev,
                     "cluster_sz": lvol.distr_page_size,
                     "clear_method": "none",
+                    "num_md_pages_per_cluster_ratio": 1,
                 }
             },
             {
@@ -887,6 +888,61 @@ def add_lvol_on_node(lvol, snode, ha_comm_addrs=None, ha_inode_self=None):
     return True, None
 
 
+def recreate_lvol_on_node(lvol, snode, ha_comm_addrs=None, ha_inode_self=None):
+    rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
+
+    for bdev in lvol.bdev_stack:
+        name = bdev['name']
+        type = bdev['type']
+        params = bdev['params']
+        if type == "bdev_distr":
+            params['jm_names'] = get_jm_names(snode)
+            params['ha_comm_addrs'] = ha_comm_addrs
+            params['ha_inode_self'] = ha_inode_self
+            params['distrib_cpu_mask'] = snode.distrib_cpu_mask
+            ret = rpc_client.bdev_distrib_create(**params)
+            if ret:
+                ret = distr_controller.send_cluster_map_to_node(snode)
+                if not ret:
+                    return False, "Failed to send cluster map"
+                time.sleep(3)
+                ret = rpc_client.bdev_examine(name)
+                time.sleep(5)
+
+    logger.info("creating subsystem %s", lvol.nqn)
+    ret = rpc_client.subsystem_create(lvol.nqn, 'sbcli-cn', lvol.uuid)
+    logger.debug(ret)
+
+    # add listeners
+    logger.info("adding listeners")
+    for iface in snode.data_nics:
+        if iface.ip4_address:
+            tr_type = iface.get_transport_type()
+            ret = rpc_client.transport_list()
+            found = False
+            if ret:
+                for ty in ret:
+                    if ty['trtype'] == tr_type:
+                        found = True
+            if found is False:
+                ret = rpc_client.transport_create(tr_type)
+            logger.info("adding listener for %s on IP %s" % (lvol.nqn, iface.ip4_address))
+            ret = rpc_client.listeners_create(lvol.nqn, tr_type, iface.ip4_address, "4420")
+            is_optimized = False
+            # if lvol.node_id == snode.get_id():
+            #     is_optimized = True
+            logger.info(f"Setting ANA state: {is_optimized}")
+            ret = rpc_client.nvmf_subsystem_listener_set_ana_state(
+                lvol.nqn, iface.ip4_address, "4420", is_optimized)
+
+    logger.info("Add BDev to subsystem")
+    ret = rpc_client.nvmf_subsystem_add_ns(lvol.nqn, lvol.top_bdev, lvol.uuid, lvol.guid)
+    if not ret:
+        return False, "Failed to add bdev to subsystem"
+
+    return True, None
+
+
 def recreate_lvol(lvol_id, snode):
     lvol = db_controller.get_lvol_by_id(lvol_id)
     if not lvol:
@@ -894,7 +950,7 @@ def recreate_lvol(lvol_id, snode):
         return False
 
     if lvol.ha_type == 'single':
-        is_created, error = add_lvol_on_node(lvol, snode)
+        is_created, error = recreate_lvol_on_node(lvol, snode)
         if error:
             return False
 
@@ -908,7 +964,7 @@ def recreate_lvol(lvol_id, snode):
         ha_address = ",".join(nodes_ips)
         for index, node_id in enumerate(lvol.nodes):
             sn = db_controller.get_storage_node_by_id(node_id)
-            is_created, error = add_lvol_on_node(lvol, sn, ha_address, index)
+            is_created, error = recreate_lvol_on_node(lvol, sn, ha_address, index)
             if error:
                 return False
 

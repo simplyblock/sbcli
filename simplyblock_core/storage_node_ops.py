@@ -1486,10 +1486,15 @@ def shutdown_storage_node(node_id, force=False):
     snode.write_to_db(db_controller.kv_store)
     storage_events.snode_status_change(snode, snode.status, old_status)
 
+    rpc_client = RPCClient(
+        snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
+
     logger.debug("Removing LVols")
     for lvol_id in snode.lvols:
         logger.debug(lvol_id)
-        lvol_controller.delete_lvol_from_node(lvol_id, snode.get_id(), clear_data=False)
+        lvol = db_controller.get_lvol_by_id(lvol_id)
+        lvol_controller._remove_bdev_stack([lvol.bdev_stack[0]], rpc_client)
+        time.sleep(1)
 
     for dev in snode.nvme_devices:
         if dev.status in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_READONLY]:
@@ -1502,9 +1507,6 @@ def shutdown_storage_node(node_id, force=False):
     for dev in snode.nvme_devices:
         distr_controller.disconnect_device(dev)
 
-    rpc_client = RPCClient(
-        snode.mgmt_ip, snode.rpc_port,
-        snode.rpc_username, snode.rpc_password)
 
     # delete jm
     logger.info("Removing JM")
