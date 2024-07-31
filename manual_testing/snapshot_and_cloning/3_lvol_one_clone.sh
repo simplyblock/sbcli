@@ -62,15 +62,19 @@ run_fio_workload() {
     sudo fio --directory=$mount_point --readwrite=write --bs=4K-128K --size=1G --name=test1 --name=test2 --name=test3 --name=test4 --name=test5
 }
 
-create_snapshot_and_clone() {
+create_snapshot() {
     local snapshot_name=$1
     local lvol_id=$2
     log $LINENO "Creating snapshot: $snapshot_name for LVOL ID: $lvol_id"
     sbcli-lvol snapshot add $lvol_id $snapshot_name
+}
 
+create_clone() {
+    local snapshot_name=$1
+    local clone_name=$2
     snapshot_id=($(sbcli-lvol snapshot list | grep "$snapshot_name" | awk '{print $2}'))
-    log $LINENO "Creating clone from snapshot: $snapshot_name with ID: $snapshot_id"
-    sbcli-lvol snapshot clone $snapshot_id "${snapshot_name}_clone"
+    log $LINENO "Creating clone from snapshot: $snapshot_name with ID: $snapshot_id with clone name $clone_name"
+    sbcli-lvol snapshot clone $snapshot_id $clone_name
 }
 
 mount_and_run_fio() {
@@ -173,42 +177,37 @@ delete_lvols
 get_cluster_id
 create_pool $cluster_id
 
+
+create_lvol
+lvol_id=$(sbcli-lvol lvol list | grep $LVOL_NAME | awk '{print $2}')
+before_lsblk=$(sudo lsblk -o name)
+connect_lvol $lvol_id
+after_lsblk=$(sudo lsblk -o name)
+device=$(diff <(echo "$before_lsblk") <(echo "$after_lsblk") | grep "^>" | awk '{print $2}')
+mount_point="$MOUNT_DIR/$LVOL_NAME"
+sudo mkdir -p $mount_point
+format_fs $device $FS_TYPE
+sudo mount /dev/$device $mount_point
+run_fio_workload $mount_point
+snapshot_name="${LVOL_NAME}_snapshot"
+create_snapshot $snapshot_name $lvol_id
+
 for ((i=1; i<=NUM_ITERATIONS; i++)); do
     log $LINENO "Iteration $i of $NUM_ITERATIONS"
-    if [ $i -eq 1 ]; then
-        create_lvol
-        lvol_id=$(sbcli-lvol lvol list | grep $LVOL_NAME | awk '{print $2}')
-        before_lsblk=$(sudo lsblk -o name)
-        connect_lvol $lvol_id
-        after_lsblk=$(sudo lsblk -o name)
-        device=$(diff <(echo "$before_lsblk") <(echo "$after_lsblk") | grep "^>" | awk '{print $2}')
-        mount_point="$MOUNT_DIR/$LVOL_NAME"
-        sudo mkdir -p $mount_point
-        format_fs $device $FS_TYPE
-        sudo mount /dev/$device $mount_point
-        run_fio_workload $mount_point
-        current_base=$LVOL_NAME
-    fi
-
-    log $LINENO "Performing operation with base: $current_base"
-    
-    lvol_id=$(sbcli-lvol lvol list | grep $current_base | awk '{print $2}')
-    short_timestamp=$(date +%y%m%d%H%M%S)
-    snapshot_name="${LVOL_NAME}_ss_${i}_${short_timestamp}"
-    create_snapshot_and_clone $snapshot_name $lvol_id
-    clone_name="${snapshot_name}_clone"
+    clone_name="${LVOL_NAME}_${i}_clone"
+    log $LINENO "Performing operation with clone: $clone_name"
+    create_clone $snapshot_name $clone_name
     mount_and_run_fio $clone_name
-    current_base=$clone_name
 done
 
 log $LINENO "Script execution completed"
 
-# unmount_all
-# remove_mount_dirs
-# disconnect_lvols
-# delete_snapshots
-# delete_lvols
-# delete_pool
+unmount_all
+remove_mount_dirs
+disconnect_lvols
+delete_snapshots
+delete_lvols
+delete_pool
 
 log $LINENO "CLEANUP COMPLETE"
 

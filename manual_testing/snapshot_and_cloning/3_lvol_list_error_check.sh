@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Variables
-POOL_NAME="snap_test_pool"
+POOL_NAME="lvol_test_pool"
 LVOL_NAME="lvol_2_1"
 LVOL_SIZE="250G"
 FS_TYPE="ext4" # Can be changed to xfs or mixed as needed
@@ -9,7 +9,9 @@ MOUNT_DIR="/mnt"
 NUM_ITERATIONS=40
 
 # List to store timings
-timings=()
+format_timings=()
+connect_timings=()
+fio_run_timings=()
 
 # Helper function to log with timestamp, line number, and command
 log() {
@@ -31,8 +33,9 @@ create_pool() {
 }
 
 create_lvol() {
-    log $LINENO "Creating logical volume: $LVOL_NAME with configuration 2+1 and snapshot capability"
-    sbcli-lvol lvol add --distr-ndcs 2 --distr-npcs 1 --max-size $LVOL_SIZE --snapshot $LVOL_NAME $LVOL_SIZE $POOL_NAME
+    lvol_name=$1
+    log $LINENO "Creating logical volume: $lvol_name with configuration 2+1"
+    sbcli-lvol lvol add --distr-ndcs 2 --distr-npcs 1 --max-size $LVOL_SIZE $lvol_name $LVOL_SIZE $POOL_NAME
 }
 
 connect_lvol() {
@@ -53,7 +56,7 @@ format_fs() {
     end_time=$(date +%s)
     
     time_taken=$((end_time - start_time))
-    timings+=("/dev/$device - $time_taken seconds")
+    format_timings+=("/dev/$device - $time_taken seconds")
 }
 
 run_fio_workload() {
@@ -62,35 +65,35 @@ run_fio_workload() {
     sudo fio --directory=$mount_point --readwrite=write --bs=4K-128K --size=1G --name=test1 --name=test2 --name=test3 --name=test4 --name=test5
 }
 
-create_snapshot_and_clone() {
-    local snapshot_name=$1
-    local lvol_id=$2
-    log $LINENO "Creating snapshot: $snapshot_name for LVOL ID: $lvol_id"
-    sbcli-lvol snapshot add $lvol_id $snapshot_name
-
-    snapshot_id=($(sbcli-lvol snapshot list | grep "$snapshot_name" | awk '{print $2}'))
-    log $LINENO "Creating clone from snapshot: $snapshot_name with ID: $snapshot_id"
-    sbcli-lvol snapshot clone $snapshot_id "${snapshot_name}_clone"
-}
-
 mount_and_run_fio() {
-    local clone_name=$1
-    log $LINENO "Mounting and running FIO workload on clone: $clone_name"
+    local lvol_name=$1
+    log $LINENO "Mounting and running FIO workload on lvol: $lvol_name"
 
-    clone_id=$(sbcli-lvol lvol list | grep -i $clone_name | awk '{print $2}')
+    lvol_id=$(sbcli-lvol lvol list | grep -i $lvol_name | awk '{print $2}')
     
     before_lsblk=$(sudo lsblk -o name)
-    connect_lvol $clone_id
+    start_time=$(date +%s)
+    connect_lvol $lvol_id
+    end_time=$(date +%s)
+    
+    time_taken=$((end_time - start_time))
+    connect_timings+=("$lvol_name - $time_taken seconds")
+    
     after_lsblk=$(sudo lsblk -o name)
-    clone_device=$(diff <(echo "$before_lsblk") <(echo "$after_lsblk") | grep "^>" | awk '{print $2}')
+    lvol_device=$(diff <(echo "$before_lsblk") <(echo "$after_lsblk") | grep "^>" | awk '{print $2}')
 
-    format_fs $clone_device $FS_TYPE
+    format_fs $lvol_device $FS_TYPE
 
-    local mount_point="$MOUNT_DIR/$clone_name"
+    local mount_point="$MOUNT_DIR/$lvol_name"
     sudo mkdir -p $mount_point
-    sudo mount /dev/$clone_device $mount_point
+    sudo mount /dev/$lvol_device $mount_point
 
+    start_time=$(date +%s)
     run_fio_workload $mount_point
+    end_time=$(date +%s)
+    
+    time_taken=$((end_time - start_time))
+    fio_run_timings+=("$lvol_name - $mount_point - $time_taken seconds")
 }
 
 disconnect_lvol() {
@@ -105,23 +108,8 @@ disconnect_lvol() {
     fi
 }
 
-delete_snapshots() {
-    log $LINENO "Deleting all snapshots"
-    snapshots=$(sbcli-lvol snapshot list | grep -v "ID" | awk '{print $2}')
-    for snapshot in $snapshots; do
-        log $LINENO "Deleting snapshot: $snapshot"
-        sbcli-lvol snapshot delete $snapshot --force
-    done
-}
-
-delete_lvol() {
-    local lvol_id=$1
-    log $LINENO "Deleting LVOL/Clone with id $lvol_id"
-    sbcli-lvol lvol delete $lvol_id
-}
-
 delete_lvols() {
-    log $LINENO "Deleting all existing LVOLs and clones"
+    log $LINENO "Deleting all existing LVOLs"
     lvols=$(sbcli-lvol lvol list | grep -v "ID" | awk '{print $2}')
     for lvol in $lvols; do
         log $LINENO "Deleting logical volume: $lvol"
@@ -166,7 +154,6 @@ disconnect_lvols() {
 unmount_all
 remove_mount_dirs
 disconnect_lvols
-delete_snapshots
 delete_lvols
 
 # Main script execution
@@ -175,45 +162,34 @@ create_pool $cluster_id
 
 for ((i=1; i<=NUM_ITERATIONS; i++)); do
     log $LINENO "Iteration $i of $NUM_ITERATIONS"
-    if [ $i -eq 1 ]; then
-        create_lvol
-        lvol_id=$(sbcli-lvol lvol list | grep $LVOL_NAME | awk '{print $2}')
-        before_lsblk=$(sudo lsblk -o name)
-        connect_lvol $lvol_id
-        after_lsblk=$(sudo lsblk -o name)
-        device=$(diff <(echo "$before_lsblk") <(echo "$after_lsblk") | grep "^>" | awk '{print $2}')
-        mount_point="$MOUNT_DIR/$LVOL_NAME"
-        sudo mkdir -p $mount_point
-        format_fs $device $FS_TYPE
-        sudo mount /dev/$device $mount_point
-        run_fio_workload $mount_point
-        current_base=$LVOL_NAME
-    fi
-
-    log $LINENO "Performing operation with base: $current_base"
-    
-    lvol_id=$(sbcli-lvol lvol list | grep $current_base | awk '{print $2}')
-    short_timestamp=$(date +%y%m%d%H%M%S)
-    snapshot_name="${LVOL_NAME}_ss_${i}_${short_timestamp}"
-    create_snapshot_and_clone $snapshot_name $lvol_id
-    clone_name="${snapshot_name}_clone"
-    mount_and_run_fio $clone_name
-    current_base=$clone_name
+    lvol_name="${LVOL_NAME}_${i}_ll"
+    create_lvol $lvol_name
+    mount_and_run_fio $lvol_name
 done
 
 log $LINENO "Script execution completed"
 
-# unmount_all
-# remove_mount_dirs
-# disconnect_lvols
-# delete_snapshots
-# delete_lvols
-# delete_pool
+unmount_all
+remove_mount_dirs
+disconnect_lvols
+delete_lvols
+delete_pool
 
 log $LINENO "CLEANUP COMPLETE"
 
 # Print timings
+log $LINENO "Printing timings for connect operations"
+for timing in "${connect_timings[@]}"; do
+    log $LINENO "$timing"
+done
+
+
 log $LINENO "Printing timings for mkfs operations"
-for timing in "${timings[@]}"; do
+for timing in "${format_timings[@]}"; do
+    log $LINENO "$timing"
+done
+
+log $LINENO "Printing timings for fio operations"
+for timing in "${fio_run_timings[@]}"; do
     log $LINENO "$timing"
 done

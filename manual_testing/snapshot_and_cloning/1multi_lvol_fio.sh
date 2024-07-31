@@ -67,7 +67,7 @@ verify_checksums() {
     local files=("$@")
     local base_checksums=()
     for file in "${files[@]}"; do
-        log "Verifying checksum for file: $file"
+        # log "Verifying checksum for file: $file"
         checksum=$(sudo md5sum $file | awk '{print $1}')
         base_checksums+=("$checksum")
     done
@@ -218,6 +218,7 @@ for fs_type in "${FS_TYPES[@]}"; do
 
             log "Generating checksums for base volume"
             base_checksums=($(verify_checksums "${test_files[@]}"))
+            echo "BASE CHECKSUM: $base_checksums"
 
             log "Creating snapshot for volume: $lvol_name"
             snapshot_name="${lvol_name}_snapshot"
