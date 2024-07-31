@@ -1337,6 +1337,7 @@ def restart_storage_node(
             return False
         lvol.status = lvol.STATUS_ONLINE
         lvol.io_error = False
+        lvol.health_check = True
         lvol.write_to_db(db_controller.kv_store)
 
     logger.info("Done")
