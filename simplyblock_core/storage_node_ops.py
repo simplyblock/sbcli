@@ -100,7 +100,8 @@ def addNvmeDevices(cluster, rpc_client, devs, snode):
                 if bdev['name'].startswith(nvme_controller):
                     nvme_bdevs.append(bdev['name'])
         else:
-            nvme_controller = "nvme_%s" % index
+            pci_st = str(pcie).replace("0", "").replace(":", "").replace(".", "")
+            nvme_controller = "nvme_%s" % pci_st
             nvme_bdevs, err = rpc_client.bdev_nvme_controller_attach(nvme_controller, pcie)
             time.sleep(2)
 
