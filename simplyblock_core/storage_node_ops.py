@@ -95,35 +95,39 @@ def addNvmeDevices(cluster, rpc_client, devs, snode):
 
         if pcie in ctr_map:
             nvme_controller = ctr_map[pcie]
+            nvme_bdevs = []
+            for bdev in rpc_client.get_bdevs():
+                if bdev['name'].startswith(nvme_controller):
+                    nvme_bdevs.append(bdev['name'])
         else:
             nvme_controller = "nvme_%s" % index
-            ret, err = rpc_client.bdev_nvme_controller_attach(nvme_controller, pcie)
+            nvme_bdevs, err = rpc_client.bdev_nvme_controller_attach(nvme_controller, pcie)
             time.sleep(2)
 
-        nvme_bdev = f"{nvme_controller}n1"
-        rpc_client.bdev_examine(nvme_bdev)
-        time.sleep(5)
-        ret = rpc_client.get_bdevs(nvme_bdev)
-        nvme_dict = ret[0]
-        nvme_driver_data = nvme_dict['driver_specific']['nvme'][0]
-        model_number = nvme_driver_data['ctrlr_data']['model_number']
-        total_size = nvme_dict['block_size'] * nvme_dict['num_blocks']
+        for nvme_bdev in nvme_bdevs:
+            rpc_client.bdev_examine(nvme_bdev)
+            time.sleep(3)
+            ret = rpc_client.get_bdevs(nvme_bdev)
+            nvme_dict = ret[0]
+            nvme_driver_data = nvme_dict['driver_specific']['nvme'][0]
+            model_number = nvme_driver_data['ctrlr_data']['model_number']
+            total_size = nvme_dict['block_size'] * nvme_dict['num_blocks']
 
-        devices.append(
-            NVMeDevice({
-                'uuid': str(uuid.uuid4()),
-                'device_name': nvme_dict['name'],
-                'size': total_size,
-                'physical_label': next_physical_label,
-                'pcie_address': nvme_driver_data['pci_address'],
-                'model_id': model_number,
-                'serial_number': nvme_driver_data['ctrlr_data']['serial_number'],
-                'nvme_bdev': nvme_bdev,
-                'nvme_controller': nvme_controller,
-                'node_id': snode.get_id(),
-                'cluster_id': snode.cluster_id,
-                'status': NVMeDevice.STATUS_ONLINE
-        }))
+            devices.append(
+                NVMeDevice({
+                    'uuid': str(uuid.uuid4()),
+                    'device_name': nvme_dict['name'],
+                    'size': total_size,
+                    'physical_label': next_physical_label,
+                    'pcie_address': nvme_driver_data['pci_address'],
+                    'model_id': model_number,
+                    'serial_number': nvme_driver_data['ctrlr_data']['serial_number'],
+                    'nvme_bdev': nvme_bdev,
+                    'nvme_controller': nvme_controller,
+                    'node_id': snode.get_id(),
+                    'cluster_id': snode.cluster_id,
+                    'status': NVMeDevice.STATUS_ONLINE
+            }))
         next_physical_label += 1
     return devices
 
