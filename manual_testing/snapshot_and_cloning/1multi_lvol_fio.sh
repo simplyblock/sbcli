@@ -229,10 +229,10 @@ for fs_type in "${FS_TYPES[@]}"; do
 
             log "Creating clone from snapshot: $snapshot_name"
             snapshot_id=$(sbcli-lvol snapshot list | grep -i $snapshot_name | awk '{print $2}')
-            clone_name="${snapshot_name}_clone"
+            clone_name="${snapshot_name}_cl"
             sbcli-lvol snapshot clone $snapshot_id $clone_name
 
-            log "Listing clones"
+            log "Listing clones."
             sbcli-lvol lvol list
 
             log "Fetching clone logical volume ID for: $clone_name"
