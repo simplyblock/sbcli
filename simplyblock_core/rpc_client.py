@@ -233,12 +233,13 @@ class RPCClient:
         params = {"name": device_name}
         return self._request("bdev_nvme_reset_controller", params)
 
-    def create_lvstore(self, name, bdev_name, cluster_sz, clear_method):
+    def create_lvstore(self, name, bdev_name, cluster_sz, clear_method, num_md_pages_per_cluster_ratio):
         params = {
             "bdev_name": bdev_name,
             "lvs_name": name,
             "cluster_sz": cluster_sz,
             "clear_method": clear_method,
+            "num_md_pages_per_cluster_ratio": num_md_pages_per_cluster_ratio,
         }
         return self._request("bdev_lvol_create_lvstore", params)
 
