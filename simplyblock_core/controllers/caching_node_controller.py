@@ -218,7 +218,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spd
             logger.error(f"Failed to start nbd dev")
             return False
 
-        jm_percent = int((ssd_size / supported_ssd_size) * 100)
+        jm_percent = int((supported_ssd_size/ssd_size) * 100)
         result, error = cnode_api.make_gpt_partitions(nbd_device, jm_percent)
         if error:
             logger.error(f"Failed to make partitions")
