@@ -894,7 +894,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
             ret = rpc_client.bdev_nvme_attach_controller_tcp(name, dev.nvmf_nqn, dev.nvmf_ip, dev.nvmf_port)
             if not ret:
                 logger.error(f"Failed to connect to device: {name}")
-                continue
+                return False
 
             dev.remote_bdev = f"{name}n1"
             idx = -1
@@ -1295,7 +1295,7 @@ def restart_storage_node(
             ret = rpc_client.bdev_nvme_attach_controller_tcp(name, dev.nvmf_nqn, dev.nvmf_ip, dev.nvmf_port)
             if not ret:
                 logger.warning(f"Failed to connect to device: {name}")
-                continue
+                return False
 
             dev.remote_bdev = f"{name}n1"
             idx = -1
