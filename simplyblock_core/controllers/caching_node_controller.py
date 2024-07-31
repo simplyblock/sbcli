@@ -200,13 +200,11 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spd
         return False
 
     mem = mem - 1024*1024
-    # mem = int(mem*constants.CACHING_NODE_MEMORY_FACTOR)
     snode.hugepages = mem
     logger.info(f"Hugepages to be used: {utils.humanbytes(mem)}")
 
     ssd_size = ssd_dev.size
     supported_ssd_size = mem * 100 / 2.25
-    # split_factor = math.ceil(ssd_size/supported_ssd_size)
 
     logger.info(f"Supported SSD size: {utils.humanbytes(supported_ssd_size)}")
     logger.info(f"SSD size: {utils.humanbytes(ssd_size)}")
@@ -219,8 +217,9 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spd
         if not nbd_device:
             logger.error(f"Failed to start nbd dev")
             return False
-        # cnode_api = SNodeClient(snode.api_endpoint)
-        result, error = cnode_api.make_gpt_partitions(nbd_device, supported_ssd_size)
+
+        jm_percent = int((ssd_size / supported_ssd_size) * 100)
+        result, error = cnode_api.make_gpt_partitions(nbd_device, jm_percent)
         if error:
             logger.error(f"Failed to make partitions")
             logger.error(error)

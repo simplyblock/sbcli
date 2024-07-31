@@ -112,10 +112,10 @@ class CNodeClient:
     def disconnect_all(self):
         return self._request("POST", "cnode/disconnect_all")
 
-    def make_gpt_partitions(self, nbd_device, partition_size):
+    def make_gpt_partitions(self, nbd_device, jm_percent):
         params = {
             "nbd_device": nbd_device,
-            "partition_size": partition_size,
+            "jm_percent": jm_percent,
         }
         return self._request("POST", "cnode/make_gpt_partitions", params)
 
