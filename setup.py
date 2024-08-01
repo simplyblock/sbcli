@@ -68,12 +68,22 @@ setup(
     install_requires=[
         "foundationdb",
         "requests",
+        "numpy",
         "typing",
         "prettytable",
         "docker",
         "psutil",
         "py-cpuinfo",
+        "pytest",
+        "mock",
+        "setuptools",
+        "flask",
+        "kubernetes",
+        "PyYAML",
+        "urllib3",
         "graypy",
+        "boto3",
+        "jinja2",
     ],
     entry_points={
         'console_scripts': [
