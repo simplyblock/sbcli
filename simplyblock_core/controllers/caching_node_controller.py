@@ -74,7 +74,7 @@ def addNvmeDevices(cluster, rpc_client, devs, snode):
     return devices
 
 
-def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spdk_mem, spdk_image=None, namespace=None):
+def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spdk_mem, spdk_image=None, namespace=None, multipathing=True):
     db_controller = DBController()
     kv_store = db_controller.kv_store
 
@@ -134,7 +134,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spd
     snode.cpu = node_info['cpu_count']
     snode.cpu_hz = node_info['cpu_hz']
     snode.memory = node_info['memory']
-    # snode.hugepages = node_info['hugepages']
+    snode.multipathing = multipathing
 
     # check for memory
     if "memory_details" in node_info and node_info['memory_details']:
@@ -435,11 +435,12 @@ def connect(caching_node_id, lvol_id):
         logger.error("Failed to connect to local subsystem")
         return False
 
-    snode = db_controller.get_storage_node_by_id(lvol.node_id)
-    for nic in snode.data_nics:
-        ip = nic.ip4_address
-        ret, _ = cnode_client.connect_nvme(ip, "4420", subsystem_nqn)
-        break
+    if cnode.multipathing:
+        snode = db_controller.get_storage_node_by_id(lvol.node_id)
+        for nic in snode.data_nics:
+            ip = nic.ip4_address
+            ret, _ = cnode_client.connect_nvme(ip, "4420", subsystem_nqn)
+            break
 
     time.sleep(5)
     cnode_info, _ = cnode_client.info()
