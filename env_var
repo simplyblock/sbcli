@@ -1,7 +1,7 @@
-SIMPLY_BLOCK_COMMAND_NAME=sbcli-lvol
-SIMPLY_BLOCK_VERSION=1.2.2
+SIMPLY_BLOCK_COMMAND_NAME=sbcli-alsh
+SIMPLY_BLOCK_VERSION=1.3.3
 
 
-SIMPLY_BLOCK_DOCKER_IMAGE=simplyblock/simplyblock:lvol
+SIMPLY_BLOCK_DOCKER_IMAGE=simplyblock/simplyblock:lvolalsh
 
 DOCKER_USER=hamdysimplyblock

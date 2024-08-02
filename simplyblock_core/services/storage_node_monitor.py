@@ -1,29 +1,15 @@
 # coding=utf-8
-import logging
-import os
-
 import time
-import sys
-from datetime import datetime
 
 
-from simplyblock_core import constants, kv_store, cluster_ops, storage_node_ops, distr_controller
+from simplyblock_core import constants, kv_store, cluster_ops, storage_node_ops, utils
 from simplyblock_core.controllers import health_controller, device_controller, tasks_controller
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
 
-# Import the GELF logger
-from graypy import GELFUDPHandler
 
-# configure logging
-logger_handler = logging.StreamHandler(stream=sys.stdout)
-logger_handler.setFormatter(logging.Formatter('%(asctime)s: %(levelname)s: %(message)s'))
-gelf_handler = GELFUDPHandler('0.0.0.0', constants.GELF_PORT)
-logger = logging.getLogger()
-logger.addHandler(gelf_handler)
-logger.addHandler(logger_handler)
-logger.setLevel(logging.DEBUG)
+logger = utils.get_logger(__name__)
 
 
 # get DB controller

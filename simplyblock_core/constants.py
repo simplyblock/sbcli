@@ -44,15 +44,15 @@ weights = {
 }
 
 # To use 75% of hugepages to calculate ssd size to use for the ocf bdev
-CACHING_NODE_MEMORY_FACTOR = 0.75
+CACHING_NODE_MEMORY_FACTOR = 1
 
-HEALTH_CHECK_INTERVAL_SEC = 60
+HEALTH_CHECK_INTERVAL_SEC = 10
 
 GRAYLOG_CHECK_INTERVAL_SEC = 60
 
 FDB_CHECK_INTERVAL_SEC = 60
 
-SIMPLY_BLOCK_DOCKER_IMAGE = "simplyblock/simplyblock:lvol"
+SIMPLY_BLOCK_DOCKER_IMAGE = "simplyblock/simplyblock:lvolalsh"
 SIMPLY_BLOCK_CLI_NAME = "sbcli-lvol"
 TASK_EXEC_INTERVAL_SEC = 30
 TASK_EXEC_RETRY_COUNT = 8
