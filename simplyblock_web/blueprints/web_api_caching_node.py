@@ -36,6 +36,7 @@ def add_node_to_cluster():
     spdk_mem = None
     spdk_image = None
     namespace = None
+    multipathing = True
 
     if 'spdk_cpu_mask' in cl_data:
         spdk_cpu_mask = cl_data['spdk_cpu_mask']
@@ -52,9 +53,12 @@ def add_node_to_cluster():
     if 'namespace' in cl_data:
         namespace = cl_data['namespace']
 
+    if 'multipathing' in cl_data:
+        multipathing = bool(cl_data['multipathing'])
+
     t = threading.Thread(
         target=caching_node_controller.add_node,
-        args=(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spdk_mem, spdk_image, namespace))
+        args=(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spdk_mem, spdk_image, namespace, multipathing))
     t.start()
 
     return utils.get_response(True)
