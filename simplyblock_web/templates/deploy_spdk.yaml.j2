@@ -37,11 +37,6 @@ spec:
         - name: script-config
           configMap:
             name: caching-node-restart-script-cm
-      tolerations:
-        - effect: NoSchedule
-          key: dedicated
-          operator: Equal
-          value: simplyblock-cache 
       initContainers:
         - name: copy-script
           image: busybox
@@ -86,10 +81,10 @@ spec:
           mountPath: /script
         resources:
           limits:
-            hugepages-2Mi: {{ MEM_GEGA }}Gi
-            memory: 4096Mi
+            hugepages-2Mi: 2Gi
+            memory: 1024Mi
           requests:
-            memory: 4096Mi
+            memory: 1024Mi
 
       - name: spdk-proxy-container
         image: {{ SPDK_IMAGE }}

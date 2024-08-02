@@ -23,6 +23,28 @@ from simplyblock_core.models.storage_node import StorageNode
 logger = logging.getLogger()
 TOP_DIR = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 
+def _add_grafana_dashboards(username, password, cluster_ip):
+    url = f"http://{username}:{password}@{cluster_ip}/grafana/api/dashboards/import"
+    headers = {'Content-Type': 'application/json'}
+    dirpath, _, filenames = next(os.walk(os.path.join(constants.INSTALL_DIR, "scripts", "dashboards")))
+    ret = True
+    for filename in filenames:
+        with open(os.path.join(dirpath, filename), 'r') as f:
+            st = f.read()
+            # st = st.replace("$Cluster", cluster_id)
+            st = json.loads(st)
+        payload = json.dumps(st)
+        response = requests.post(url, headers=headers, data=payload)
+        logger.debug(response.status_code)
+        logger.debug(response.text)
+        if response.status_code == 200:
+            resp = response.json()
+            logger.info(f"Dashboard: {resp['title']}, imported: {resp['imported']}")
+        else:
+            logger.error(f"Error importing dashboard, status code:{response.status_code} text:{response.text}")
+            ret = False
+    return ret
+
 
 def _add_graylog_input(cluster_ip, password):
     url = f"http://{cluster_ip}/graylog/api/system/inputs"
@@ -164,6 +186,10 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     cluster_events.cluster_create(c)
 
     mgmt_node_ops.add_mgmt_node(DEV_IP, c.uuid)
+
+    logger.info("Applying dashboard...")
+    ret = _add_grafana_dashboards("admin", c.secret, DEV_IP)
+    logger.info(f"Applying dashboard > {ret}")
 
     logger.info("New Cluster has been created")
     logger.info(c.uuid)

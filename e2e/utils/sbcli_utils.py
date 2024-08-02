@@ -331,7 +331,7 @@ class SbcliUtils:
         """Get Storage Node details for given node id
         """
         node_details = self.get_request(api_url=f"/storagenode/{storage_node_id}")
-        self.logger.debug(f"Node Details: {node_details}")
+        self.logger.info(f"Node Details: {node_details}")
         return node_details["results"]
 
     def get_device_details(self, storage_node_id):
@@ -364,9 +364,8 @@ class SbcliUtils:
             if actual_status == status:
                 return True
             else:
-                self.logger.info(f"Expected Status: {status} / Actual Status: {actual_status}")
-                sleep_n_sec(1)
-                timeout -= 1
+                sleep_n_sec(5)
+                timeout -= 5
         raise TimeoutError(f"Timed out waiting for node status, {node_id},"
                            f"Expected status: {status}, Actual status: {actual_status}")
 

@@ -14,7 +14,7 @@ from flask import request
 from kubernetes.client import ApiException
 from jinja2 import Environment, FileSystemLoader
 
-from simplyblock_core import constants, shell_utils
+from simplyblock_core import constants
 
 from simplyblock_web import utils, node_utils
 
@@ -111,8 +111,6 @@ def spdk_process_start():
     else:
         spdk_mem = 64096
 
-    spdk_mem_gega = int(spdk_mem / 1024)
-
     spdk_image = constants.SIMPLY_BLOCK_SPDK_CORE_IMAGE
     if node_utils.get_host_arch() == "aarch64":
         spdk_image = constants.SIMPLY_BLOCK_SPDK_CORE_IMAGE_ARM64
@@ -134,7 +132,6 @@ def spdk_process_start():
             'SPDK_IMAGE': spdk_image,
             'SPDK_CPU_MASK': spdk_cpu_mask,
             'SPDK_MEM': spdk_mem,
-            'MEM_GEGA': spdk_mem_gega,
             'SERVER_IP': data['server_ip'],
             'RPC_PORT': data['rpc_port'],
             'RPC_USERNAME': data['rpc_username'],
@@ -280,75 +277,3 @@ def disconnect_all():
     logger.debug(out)
     logger.debug(err)
     return utils.get_response(ret_code)
-
-
-
-
-@bp.route('/make_gpt_partitions', methods=['POST'])
-def make_gpt_partitions_for_nbd():
-    nbd_device = '/dev/nbd0'
-    jm_percent = 10
-
-    try:
-        data = request.get_json()
-        nbd_device = data['nbd_device']
-        jm_percent = data['jm_percent']
-    except:
-        pass
-
-    cmd_list = [
-        f"parted -fs {nbd_device} mklabel gpt",
-        f"parted -f {nbd_device} mkpart journal \"0%\" \"{jm_percent}%\""
-    ]
-    sg_cmd_list = [
-        f"sgdisk -t 1:6527994e-2c5a-4eec-9613-8f5944074e8b {nbd_device}",
-    ]
-
-    for cmd in cmd_list+sg_cmd_list:
-        logger.debug(cmd)
-        out, err, ret_code = shell_utils.run_command(cmd)
-        logger.debug(out)
-        logger.debug(ret_code)
-        if ret_code != 0:
-            logger.error(err)
-            return utils.get_response(False, f"Error running cmd: {cmd}, returncode: {ret_code}, output: {out}, err: {err}")
-        time.sleep(1)
-
-    return utils.get_response(True)
-
-
-
-@bp.route('/delete_dev_gpt_partitions', methods=['POST'])
-def delete_gpt_partitions_for_dev():
-
-    data = request.get_json()
-
-    if "device_pci" not in data:
-        return utils.get_response(False, "Required parameter is missing: device_pci")
-
-    device_pci = data['device_pci']
-
-    cmd_list = [
-        f"echo -n \"{device_pci}\" > /sys/bus/pci/drivers/uio_pci_generic/unbind",
-        f"echo -n \"{device_pci}\" > /sys/bus/pci/drivers/nvme/bind",
-    ]
-
-    for cmd in cmd_list:
-        logger.debug(cmd)
-        ret = os.popen(cmd).read().strip()
-        logger.debug(ret)
-        time.sleep(1)
-
-    device_name = os.popen(f"ls /sys/devices/pci0000:00/{device_pci}/nvme/nvme*/ | grep nvme").read().strip()
-    cmd_list = [
-        f"parted -fs /dev/{device_name} mklabel gpt",
-        f"echo -n \"{device_pci}\" > /sys/bus/pci/drivers/nvme/unbind",
-    ]
-
-    for cmd in cmd_list:
-        logger.debug(cmd)
-        ret = os.popen(cmd).read().strip()
-        logger.debug(ret)
-        time.sleep(1)
-
-    return utils.get_response(True)

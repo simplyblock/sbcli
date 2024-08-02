@@ -1,15 +1,28 @@
 # coding=utf-8
+import logging
 import time
+import sys
 
 
-from simplyblock_core import constants, kv_store, storage_node_ops, utils
+from simplyblock_core import constants, kv_store, storage_node_ops
 from simplyblock_core.controllers import device_controller, tasks_events, health_controller
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.nvme_device import NVMeDevice
+
+# Import the GELF logger
+from graypy import GELFUDPHandler
+
 from simplyblock_core.models.storage_node import StorageNode
 
 
-logger = utils.get_logger(__name__)
+# configure logging
+logger_handler = logging.StreamHandler(stream=sys.stdout)
+logger_handler.setFormatter(logging.Formatter('%(asctime)s: %(levelname)s: %(message)s'))
+gelf_handler = GELFUDPHandler('0.0.0.0', constants.GELF_PORT)
+logger = logging.getLogger()
+logger.addHandler(gelf_handler)
+logger.addHandler(logger_handler)
+logger.setLevel(logging.DEBUG)
 
 # get DB controller
 db_controller = kv_store.DBController()
@@ -178,7 +191,7 @@ def task_runner_node(task):
 
     # resetting node
     logger.info(f"Restart node {node.get_id()}")
-    ret = storage_node_ops.restart_storage_node(node.get_id(), force=True)
+    ret = storage_node_ops.restart_storage_node(node.get_id())
     if ret:
         logger.info(f"Node restart succeeded")
 

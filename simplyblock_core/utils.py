@@ -5,11 +5,9 @@ import os
 import random
 import re
 import string
-import sys
 
 import docker
 from prettytable import PrettyTable
-from graypy import GELFUDPHandler
 
 from simplyblock_core import constants
 from simplyblock_core import shell_utils
@@ -410,20 +408,7 @@ def get_host_arch():
     out, _, _ = shell_utils.run_command("uname -m")
     return out
 
-
 def decimal_to_hex_power_of_2(decimal_number):
     power_result = 2 ** decimal_number
     hex_result = hex(power_result)
     return hex_result
-
-
-def get_logger(name):
-    logger = logging.getLogger(name)
-    logger.setLevel(constants.LOG_LEVEL)
-    logger_handler = logging.StreamHandler(stream=sys.stdout)
-    logger_handler.setFormatter(logging.Formatter('%(asctime)s: %(levelname)s: %(message)s'))
-    logger.addHandler(logger_handler)
-
-    gelf_handler = GELFUDPHandler('0.0.0.0', constants.GELF_PORT)
-    logger.addHandler(gelf_handler)
-    return logger

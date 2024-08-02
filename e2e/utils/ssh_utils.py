@@ -120,10 +120,8 @@ class SshUtils:
                 output = stdout.read().decode()
                 error = stderr.read().decode()
 
-            if output:
-                self.logger.debug(f"Command output: {output}")
-            if error:
-                self.logger.debug(f"Command error: {error}")
+            self.logger.debug(f"Command output: {output}")
+            self.logger.debug(f"Command error: {error}")
 
             if not output and not error:
                 self.logger.warning(f"Command '{command}' executed but returned no output or error.")
@@ -232,7 +230,7 @@ class SshUtils:
         self.logger.info(f"{command}")
 
         start_time = time.time()
-        output, error = self.exec_command(node=node, command=command, timeout=runtime)
+        output, error = self.exec_command(node=node, command=command, timeout=runtime + 300)
         end_time = time.time()
 
         total_time = end_time - start_time
@@ -307,20 +305,5 @@ class SshUtils:
             location (str): Location to perform ls
         """
         cmd = f"sudo ls -l {location}"
-        output, error = self.exec_command(node=node, command=cmd)
-        return output
-    
-    def stop_docker_containers(self, node, container_name=None):
-        """Stops given docker container. Stops all if no name is given
-
-        Args:
-            node (str): Node IP
-            container_name (str): Name of container to stop
-        """
-        if container_name:
-            cmd = f"sudo docker stop {container_name}"
-        else:
-            cmd = f"sudo docker stop $(sudo docker ps -a -q)"
-        
         output, error = self.exec_command(node=node, command=cmd)
         return output

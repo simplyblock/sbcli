@@ -1,7 +1,9 @@
 # coding=utf-8
+import logging
 import os
 
 import time
+import sys
 from datetime import datetime
 
 
@@ -9,14 +11,22 @@ from simplyblock_core import constants, kv_store, utils
 from simplyblock_core.controllers import mgmt_events
 from simplyblock_core.models.mgmt_node import MgmtNode
 
+# Import the GELF logger
+from graypy import GELFUDPHandler
 
-logger = utils.get_logger(__name__)
+# configure logging
+logger_handler = logging.StreamHandler(stream=sys.stdout)
+logger_handler.setFormatter(logging.Formatter('%(asctime)s: %(levelname)s: %(message)s'))
+gelf_handler = GELFUDPHandler('0.0.0.0', constants.GELF_PORT)
+logger = logging.getLogger()
+logger.addHandler(gelf_handler)
+logger.addHandler(logger_handler)
+logger.setLevel(logging.DEBUG)
 
 
 # get DB controller
 db_store = kv_store.KVStore()
 db_controller = kv_store.DBController(kv_store=db_store)
-
 
 def set_node_online(node):
     if node.status == MgmtNode.STATUS_UNREACHABLE:

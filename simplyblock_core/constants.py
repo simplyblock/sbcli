@@ -44,9 +44,9 @@ weights = {
 }
 
 # To use 75% of hugepages to calculate ssd size to use for the ocf bdev
-CACHING_NODE_MEMORY_FACTOR = 1
+CACHING_NODE_MEMORY_FACTOR = 0.75
 
-HEALTH_CHECK_INTERVAL_SEC = 10
+HEALTH_CHECK_INTERVAL_SEC = 60
 
 GRAYLOG_CHECK_INTERVAL_SEC = 60
 

@@ -108,8 +108,7 @@ groups:
               model:
                 alias: ""
                 bucketAggs:
-                    - field: function
-                      id: "2"
+                    - id: "2"
                       settings:
                         min_doc_count: "1"
                         order: desc

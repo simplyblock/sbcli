@@ -194,12 +194,6 @@ def restart_device(device_id, force=False):
             device_obj = dev
             break
 
-    task_id = tasks_controller.get_active_dev_restart_task(snode.cluster_id, device_id)
-    if task_id:
-        logger.error(f"Restart task found: {task_id}, can not restart device")
-        if force is False:
-            return False
-
     logger.info(f"Restarting device {device_id}")
     device_set_unavailable(device_id)
 
@@ -285,12 +279,6 @@ def device_remove(device_id, force=True):
         if dev.get_id() == device_id:
             device = dev
             break
-
-    task_id = tasks_controller.get_active_dev_restart_task(snode.cluster_id, device_id)
-    if task_id:
-        logger.error(f"Restart task found: {task_id}, can not remove device")
-        if force is False:
-            return False
 
     logger.info("Sending device event")
     distr_controller.send_dev_status_event(device, NVMeDevice.STATUS_REMOVED)
@@ -428,11 +416,6 @@ def reset_storage_device(dev_id):
 
     if device.status == NVMeDevice.STATUS_REMOVED:
         logger.error(f"Device status: {device.status} is removed")
-        return False
-
-    task_id = tasks_controller.get_active_dev_restart_task(snode.cluster_id, dev_id)
-    if task_id:
-        logger.error(f"Restart task found: {task_id}, can not reset device")
         return False
 
     logger.info("Setting devices to unavailable")

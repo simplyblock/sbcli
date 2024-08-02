@@ -164,7 +164,7 @@ def check_node(node_id, with_devices=True):
                 logger.info(f"Checking bdev: {remote_device.remote_bdev} ... ok")
             else:
                 logger.info(f"Checking bdev: {remote_device.remote_bdev} ... not found")
-            # node_remote_devices_check &= bool(ret)
+            node_remote_devices_check &= bool(ret)
 
     return is_node_online and node_devices_check and node_remote_devices_check
 
