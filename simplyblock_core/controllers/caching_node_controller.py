@@ -140,18 +140,17 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spd
     if "memory_details" in node_info and node_info['memory_details']:
         memory_details = node_info['memory_details']
         logger.info("Node Memory info")
-        logger.info(f"Total: {utils.humanbytes(memory_details['total'])}")
-        logger.info(f"Free: {utils.humanbytes(memory_details['free'])}")
-        # logger.info(f"Hugepages Total: {utils.humanbytes(memory_details['huge_total'])}")
+        logger.info(f"RAM Total: {utils.humanbytes(memory_details['total'])}")
+        logger.info(f"RAM Free: {utils.humanbytes(memory_details['free'])}")
+        logger.info(f"HP Total: {utils.humanbytes(memory_details['huge_total'])}")
         # huge_free = memory_details['huge_free']
-        # logger.info(f"Hugepages Free: {utils.humanbytes(huge_free)}")
+        logger.info(f"HP Free: {utils.humanbytes(memory_details['huge_free'])}")
         # if huge_free < 1 * 1024 * 1024:
         #     logger.warning(f"Free hugepages are less than 1G: {utils.humanbytes(huge_free)}")
         if not spdk_mem:
-            spdk_mem = memory_details['free']
+            spdk_mem = memory_details['huge_free']
 
-    logger.info(f"Trying to set hugepages for: {utils.humanbytes(spdk_mem)}")
-    logger.info("Deploying SPDK")
+    logger.info(f"Deploying SPDK with HP: {utils.humanbytes(spdk_mem)}")
     results, err = snode_api.spdk_process_start(
         spdk_cpu_mask, spdk_mem, spdk_image, snode.mgmt_ip,
         snode.rpc_port, snode.rpc_username, snode.rpc_password, namespace)
@@ -174,19 +173,19 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spd
         logger.error("Pod is not running, exiting")
         return False
 
+    time.sleep(10)
+
     # creating RPCClient instance
     rpc_client = RPCClient(
         snode.mgmt_ip, snode.rpc_port,
         snode.rpc_username, snode.rpc_password,
         timeout=60*5, retry=5)
 
-    # get new node info after starting spdk
-    node_info, _ = snode_api.info()
-    mem = node_info['memory_details']['huge_free']
-    logger.info(f"Free Hugepages detected: {utils.humanbytes(mem)}")
+    # # get new node info after starting spdk
+    # node_info, _ = snode_api.info()
+    # mem = node_info['memory_details']['huge_free']
+    # logger.info(f"Free Hugepages detected: {utils.humanbytes(mem)}")
 
-    time.sleep(60)
-    
     # adding devices
     nvme_devs = addNvmeDevices(cluster, rpc_client, node_info['spdk_pcie_list'], snode)
     if not nvme_devs:
@@ -197,16 +196,16 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spd
     snode.write_to_db(db_controller.kv_store)
     ssd_dev = nvme_devs[0]
 
-    if mem < 1024*1024:
+    if spdk_mem < 1024*1024:
         logger.error("Hugepages must be larger than 1G")
         return False
 
-    mem = int(mem*constants.CACHING_NODE_MEMORY_FACTOR)
+    mem = spdk_mem - 1024*1024
     snode.hugepages = mem
     logger.info(f"Hugepages to be used: {utils.humanbytes(mem)}")
 
     ssd_size = ssd_dev.size
-    supported_ssd_size = mem * 100 / 2
+    supported_ssd_size = mem * 100 / 2.25
     split_factor = math.ceil(ssd_size/supported_ssd_size)
 
     logger.info(f"Supported SSD size: {utils.humanbytes(supported_ssd_size)}")
