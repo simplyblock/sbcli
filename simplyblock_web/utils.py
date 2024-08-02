@@ -100,5 +100,5 @@ def get_aws_region():
     response = requests.get('http://169.254.169.254/latest/meta-data/placement/availability-zone')
     availability_zone = response.text
 
-    region = availability_zone[:-1]
+    region = availability_zone[:-1] if "Error 404" not in availability_zone else "us-east-1"
     return region
