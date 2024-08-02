@@ -142,13 +142,18 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spd
         logger.info("Node Memory info")
         logger.info(f"RAM Total: {utils.humanbytes(memory_details['total'])}")
         logger.info(f"RAM Free: {utils.humanbytes(memory_details['free'])}")
-        logger.info(f"HP Total: {utils.humanbytes(memory_details['huge_total'])}")
-        # huge_free = memory_details['huge_free']
-        logger.info(f"HP Free: {utils.humanbytes(memory_details['huge_free'])}")
+        huge_total = memory_details['huge_total']
+        logger.info(f"HP Total: {utils.humanbytes(huge_total)}")
+        huge_free = memory_details['huge_free']
+        logger.info(f"HP Free: {utils.humanbytes(huge_free)}")
         # if huge_free < 1 * 1024 * 1024:
         #     logger.warning(f"Free hugepages are less than 1G: {utils.humanbytes(huge_free)}")
         if not spdk_mem:
-            spdk_mem = memory_details['huge_free']
+            if huge_total > 1024 * 1024 * 1024:
+                spdk_mem = huge_total
+            else:
+                logger.error(f"Free hugepages are less than 1G: {utils.humanbytes(huge_total)}")
+                return False
 
     logger.info(f"Deploying SPDK with HP: {utils.humanbytes(spdk_mem)}")
     results, err = snode_api.spdk_process_start(
@@ -200,7 +205,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spd
         logger.error("Hugepages must be larger than 1G")
         return False
 
-    mem = spdk_mem - 1024*1024
+    mem = spdk_mem - 1024*1024*1024
     snode.hugepages = mem
     logger.info(f"Hugepages to be used: {utils.humanbytes(mem)}")
 

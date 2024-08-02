@@ -585,8 +585,8 @@ class CLIWrapper:
         sub_command.add_argument("--memory", help='SPDK huge memory allocation, default is Max hugepages available', dest='spdk_mem')
         sub_command.add_argument("--spdk-image", help='SPDK image uri', dest='spdk_image')
         sub_command.add_argument("--namespace", help='k8s namespace to deploy on',)
-        sub_command.add_argument("--multipathing", help='Enable multipathing for lvol connection, default: True',
-                                 type=bool, default=True)
+        sub_command.add_argument("--multipathing", help='Enable multipathing for lvol connection, default: on',
+                                 default="on", choices=["on", "off"])
 
         self.add_sub_command(subparser, 'list', 'List Caching nodes')
 
@@ -1069,7 +1069,7 @@ class CLIWrapper:
                 data_nics = []
                 spdk_image = args.spdk_image
                 namespace = args.namespace
-                multipathing = args.multipathing
+                multipathing = args.multipathing == "on"
 
                 spdk_cpu_mask = None
                 if args.spdk_cpu_mask:
