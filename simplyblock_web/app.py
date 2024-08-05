@@ -31,7 +31,6 @@ app.register_blueprint(web_api_snapshot.bp)
 app.register_blueprint(web_api_storage_node.bp)
 app.register_blueprint(web_api_pool.bp)
 app.register_blueprint(web_api_caching_node.bp)
-# app.register_blueprint(web_api_deployer.bp)
 
 
 @app.before_request

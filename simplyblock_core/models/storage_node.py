@@ -85,10 +85,9 @@ class StorageNode(BaseModel):
         "spdk_image": {"type": str, "default": ""},
         "spdk_debug": {"type": bool, "default": False},
 
-
-        "ec2_metadata": {"type": dict, "default": {}},
-        "ec2_instance_id": {"type": str, "default": ""},
-        "ec2_public_ip": {"type": str, "default": ""},
+        "cloud_instance_id": {"type": str, "default": ""},
+        "cloud_instance_type": {"type": str, "default": ""},
+        "cloud_instance_public_ip": {"type": str, "default": ""},
 
         # IO buffer options
         "iobuf_small_pool_count": {"type": int, "default": 0},
