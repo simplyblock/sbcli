@@ -42,6 +42,10 @@ services:
       GRAYLOG_ELASTICSEARCH_HOSTS: "http://opensearch:9200"
       GRAYLOG_MONGODB_URI: "mongodb://mongodb:27017/graylog"
       GRAYLOG_SKIP_PREFLIGHT_CHECKS: "true"
+      GRAYLOG_ROTATION_STRATEGY: "time"
+      GRAYLOG_RETENTION_STRATEGY: "delete"
+      GRAYLOG_ELASTICSEARCH_MAX_NUMBER_OF_INDICES: "${MAX_NUMBER_OF_INDICES}"
+      GRAYLOG_ELASTICSEARCH_MAX_TIME_PER_INDEX: "1d"
     ports:
     - "5044:5044/tcp"   # Beats
     - "5140:5140/udp"   # Syslog
@@ -190,8 +194,6 @@ services:
     restart: "always"
     deploy:
       mode: global
-      placement:
-        constraints: [node.role == worker]
     networks:
       - monitoring-net
 
@@ -216,24 +218,13 @@ services:
     networks:
       - monitoring-net
 
-  CleanupGraylog:
-    image: $SIMPLYBLOCK_DOCKER_IMAGE
-    environment:
-      LOG_DELETION_INTERVAL: "${LOG_DELETION_INTERVAL}"
-    command: "python simplyblock_core/workers/cleanup_graylog.py"
-    deploy:
-      placement:
-        constraints: [node.role == manager]
-    networks:
-      - monitoring-net
-
 volumes:
   mongodb_data:
   os_data:
   graylog_data:
   graylog_journal:
   grafana_data:
-  graylog_config:  
+  graylog_config:
   prometheus_data:
   thanos_compactor_data:
 
