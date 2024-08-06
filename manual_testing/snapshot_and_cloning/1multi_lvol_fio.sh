@@ -1,12 +1,106 @@
 #!/bin/bash
 
+set -e
+
 # Variables
 POOL_NAME="snap_test_pool"
-LVOL_SIZE="160G"
+LVOL_SIZE="80G"
 FS_TYPES=("ext4" "xfs")
 CONFIGURATIONS=("1+0" "2+1" "4+1" "4+2" "8+1" "8+2")
 WORKLOAD_SIZE=("5G" "10G" "20G" "40G")
 MOUNT_DIR="/mnt"
+
+# Description:
+# This script performs comprehensive testing of logical volume configurations, filesystem types, and workload sizes.
+# It covers a total of 48 test cases combining different configurations and workloads. The detailed combinations are:
+#
+# 1. Filesystem Types:
+#    - ext4
+#    - xfs
+#
+# 2. Configurations:
+#    - 1+0
+#    - 2+1
+#    - 4+1
+#    - 4+2
+#    - 8+1
+#    - 8+2
+#
+# 3. Workload Sizes:
+#    - 5G
+#    - 10G
+#    - 20G
+#    - 40G
+#
+# The total number of test cases is calculated by multiplying the number of filesystem types, configurations, and workload sizes:
+# 2 (Filesystem Types) * 6 (Configurations) * 4 (Workload Sizes) = 48 Test Cases
+#
+# The combinations are:
+#
+# For Filesystem Type "ext4" with all configurations and workload sizes:
+# - ext4, 1+0, 5G
+# - ext4, 1+0, 10G
+# - ext4, 1+0, 20G
+# - ext4, 1+0, 40G
+# - ext4, 2+1, 5G
+# - ext4, 2+1, 10G
+# - ext4, 2+1, 20G
+# - ext4, 2+1, 40G
+# - ext4, 4+1, 5G
+# - ext4, 4+1, 10G
+# - ext4, 4+1, 20G
+# - ext4, 4+1, 40G
+# - ext4, 4+2, 5G
+# - ext4, 4+2, 10G
+# - ext4, 4+2, 20G
+# - ext4, 4+2, 40G
+# - ext4, 8+1, 5G
+# - ext4, 8+1, 10G
+# - ext4, 8+1, 20G
+# - ext4, 8+1, 40G
+# - ext4, 8+2, 5G
+# - ext4, 8+2, 10G
+# - ext4, 8+2, 20G
+# - ext4, 8+2, 40G
+#
+# For Filesystem Type "xfs" with all configurations and workload sizes:
+# - xfs, 1+0, 5G
+# - xfs, 1+0, 10G
+# - xfs, 1+0, 20G
+# - xfs, 1+0, 40G
+# - xfs, 2+1, 5G
+# - xfs, 2+1, 10G
+# - xfs, 2+1, 20G
+# - xfs, 2+1, 40G
+# - xfs, 4+1, 5G
+# - xfs, 4+1, 10G
+# - xfs, 4+1, 20G
+# - xfs, 4+1, 40G
+# - xfs, 4+2, 5G
+# - xfs, 4+2, 10G
+# - xfs, 4+2, 20G
+# - xfs, 4+2, 40G
+# - xfs, 8+1, 5G
+# - xfs, 8+1, 10G
+# - xfs, 8+1, 20G
+# - xfs, 8+1, 40G
+# - xfs, 8+2, 5G
+# - xfs, 8+2, 10G
+# - xfs, 8+2, 20G
+# - xfs, 8+2, 40G
+#
+# The script performs the following steps for each combination:
+# - Creates logical volumes with specified configurations.
+# - Connects logical volumes.
+# - Formats the logical volumes with the specified filesystem.
+# - Mounts the logical volumes.
+# - Runs fio workloads of different sizes on the mounted logical volumes.
+# - Generates and verifies checksums for test files.
+# - Creates snapshots and clones from the snapshots.
+# - Runs fio workloads on the clones.
+# - Verifies the integrity of data by comparing checksums before and after workloads.
+# - Cleans up by unmounting, disconnecting, and deleting logical volumes, snapshots, and pools.
+
 
 # Helper functions
 log() {
@@ -200,11 +294,23 @@ for fs_type in "${FS_TYPES[@]}"; do
             npcs=${config##*+}
             lvol_name="lvol_${ndcs}_${npcs}"
             mount_point="$MOUNT_DIR/$lvol_name"
+            # log "Unmounting $mount_point"
+            # sudo umount  $mount_point
+
+            # log "Removing mount point: $mount_point"
+            # sudo rm -rf $mount_point
+
+            # log "Creating mount point directory: $mount_point"
+            # sudo mkdir -p $mount_point
+            
+            # log "Mounting device: /dev/$device at $mount_point"
+            # sudo mount /dev/$device $mount_point
             
             run_fio_workload $mount_point $size &
         done
 
         wait
+        sleep 10
 
         # Perform checksum, snapshot, clone, and other operations
         for config in "${CONFIGURATIONS[@]}"; do
@@ -221,7 +327,8 @@ for fs_type in "${FS_TYPES[@]}"; do
             echo "BASE CHECKSUM: $base_checksums"
 
             log "Creating snapshot for volume: $lvol_name"
-            snapshot_name="${lvol_name}_snapshot"
+            snapshot_name="${lvol_name}_ss_${size}_${fs_type}"
+            lvol_id=$(sbcli-lvol lvol list | grep -i $lvol_name | awk '{print $2}')
             sbcli-lvol snapshot add $lvol_id $snapshot_name
 
             log "Listing snapshots"
@@ -253,7 +360,7 @@ for fs_type in "${FS_TYPES[@]}"; do
             log "Finding files in clone mount point: $clone_mount_point"
             clone_files=($(sudo find $clone_mount_point -type f))
             
-            log "Generating checksums for clone"
+            log "Generating checksums for clone: $clone_mount_point"
             clone_checksums=($(verify_checksums "${clone_files[@]}"))
 
             log "Running fio workload on clone mount point: $clone_mount_point"
@@ -262,6 +369,8 @@ for fs_type in "${FS_TYPES[@]}"; do
             run_fio_workload $clone_workload_dir $size &
 
             wait
+            
+            sleep 10
 
             log "Verifying that the base volume has not been changed"
             base_checksums_after=($(verify_checksums "${test_files[@]}"))
@@ -279,6 +388,8 @@ for fs_type in "${FS_TYPES[@]}"; do
                 base_checksum="${base_checksums[$i]}"
                 base_checksum_after="${base_checksums_after[$i]}"
 
+                log "Checksum for $file on base volume Before: $base_checksum, After: $base_checksum_after"
+
                 if [ "$base_checksum" != "$base_checksum_after" ]; then
                     log "Checksum mismatch for $file on base volume after workload"
                 else
@@ -290,6 +401,7 @@ for fs_type in "${FS_TYPES[@]}"; do
                 file="${clone_files[$i]}"
                 clone_checksum="${clone_checksums[$i]}"
                 clone_checksum_after="${clone_checksums_after[$i]}"
+                log "Checksum for $file on clone volume Before: $clone_checksum, After: $clone_checksum_after"
                 if [ "$clone_checksum" != "$clone_checksum_after" ]; then
                     log "Checksum mismatch for $file on clone after workload"
                 else
@@ -306,8 +418,12 @@ for fs_type in "${FS_TYPES[@]}"; do
             log "Deleting clone logical volume: $clone_id"
             sbcli-lvol lvol delete $clone_id
 
+            log "Deleting clone dir: $clone_mount_point"
+            sudo rm -rf $clone_mount_point
+
             log "TEST Execution Completed for NDCS: $ndcs, NPCS: $npcs, FIO Size: $size, FS Type: $fs_type"
         done
+        # delete_snapshots
     done
 
 unmount_all

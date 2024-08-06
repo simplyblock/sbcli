@@ -11,12 +11,6 @@ delete_snapshots() {
         echo "Deleting snapshot: $snapshot"
         sbcli-lvol snapshot delete $snapshot --force
     done
-
-    snapshots=$(sbcli-lvol snapshot list |  awk '{print $2}')
-    for snapshot in $snapshots; do
-        echo "Deleting snapshot: $snapshot"
-        sbcli-lvol snapshot delete $snapshot --force
-    done
 }
 
 delete_lvols() {
@@ -28,6 +22,12 @@ delete_lvols() {
     done
 
     lvols=$(sbcli-lvol lvol list | grep -i clone | awk '{print $2}')
+    for lvol in $lvols; do
+        echo "Deleting logical volume: $lvol"
+        sbcli-lvol lvol delete $lvol
+    done
+
+    lvols=$(sbcli-lvol lvol list | grep -i cl | awk '{print $2}')
     for lvol in $lvols; do
         echo "Deleting logical volume: $lvol"
         sbcli-lvol lvol delete $lvol
