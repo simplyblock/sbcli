@@ -71,6 +71,10 @@ class StorageNode(BaseModel):
         "hugepages": {"type": int, "default": 0},
         "health_check": {"type": bool, "default": True},
         "enable_test_device": {"type": bool, "default": False},
+        "number_of_distribs": {"type": int, "default": 4},
+        "lvstore": {"type": str, 'default': ""},
+        "raid": {"type": str, 'default': ""},
+        "lvstore_stack": {"type": List[dict], 'default': []},
 
         # spdk params
         "spdk_cpu_mask": {"type": str, "default": ""},

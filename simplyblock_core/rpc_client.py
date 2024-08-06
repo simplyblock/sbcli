@@ -416,6 +416,12 @@ class RPCClient:
         }
         return self._request("bdev_raid_create", params)
 
+    def bdev_raid_delete(self, name):
+        params = {
+            "name": name
+        }
+        return self._request("bdev_raid_delete", params)
+
     def bdev_set_qos_limit(self, name, rw_ios_per_sec, rw_mbytes_per_sec, r_mbytes_per_sec, w_mbytes_per_sec):
         params = {
             "name": name
@@ -524,7 +530,7 @@ class RPCClient:
         return self._request("bdev_nvme_set_options", params)
 
     def bdev_set_options(self, bdev_io_pool_size, bdev_io_cache_size, iobuf_small_cache_size, iobuf_large_cache_size):
-        params = {}
+        params = {"bdev_auto_examine": False}
         if bdev_io_pool_size > 0:
             params['bdev_io_pool_size'] = bdev_io_pool_size
         if bdev_io_cache_size > 0:
@@ -662,6 +668,10 @@ class RPCClient:
     def bdev_examine(self, name):
         params = {"name": name}
         return self._request("bdev_examine", params)
+
+    def bdev_wait_for_examine(self):
+        return self._request("bdev_wait_for_examine")
+
 
     def nbd_start_disk(self, bdev_name, nbd_device="/dev/nbd0"):
         params = {

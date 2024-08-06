@@ -473,9 +473,8 @@ def validate_aes_xts_keys(key1: str, key2: str) -> Tuple[bool, str]:
 
 
 def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp, use_crypto,
-                distr_vuid, distr_ndcs, distr_npcs,
-                max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes,
-                distr_bs=None, distr_chunk_bs=None, with_snapshot=False, max_size=0, crypto_key1=None, crypto_key2=None):
+                distr_vuid, max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes,
+                with_snapshot=False, max_size=0, crypto_key1=None, crypto_key2=None):
 
     logger.info(f"Adding LVol: {name}")
     host_node = None
@@ -559,22 +558,6 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
     else:
         vuid = distr_vuid
 
-    if distr_ndcs == 0 and distr_npcs == 0:
-        if ha_type == "single":
-            distr_ndcs = 4
-            distr_npcs = 1
-        else:
-            if dev_count == 3:
-                distr_ndcs = 1
-            elif dev_count in [4, 5]:
-                distr_ndcs = 2
-            elif dev_count >= 6:
-                distr_ndcs = 4
-            distr_npcs = 1
-    else:
-        if distr_ndcs + distr_npcs >= dev_count:
-            return False, f"ndcs+npcs: {distr_ndcs+distr_npcs} must be less than online devices count: {dev_count}"
-
     if max_size:
         if max_size < size:
             return False, f"Max size:{max_size} must be larger than size {size}"
@@ -597,7 +580,6 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
     lvol.guid = _generate_hex_string(16)
     lvol.vuid = vuid
     lvol.lvol_bdev = f"LVOL_{vuid}"
-    lvol.lvs_name = f"LVS_{vuid}"
 
     lvol.crypto_bdev = ''
     lvol.comp_bdev = ''
@@ -606,12 +588,26 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
     lvol.lvol_type = 'lvol'
     lvol.nqn = cl.nqn + ":lvol:" + lvol.uuid
 
-    lvol.ndcs = distr_ndcs
-    lvol.npcs = distr_npcs
-    lvol.distr_bs = distr_bs
-    lvol.distr_chunk_bs = distr_chunk_bs
-    lvol.distr_page_size = (distr_npcs+distr_npcs)*cl.page_size_in_blocks
+    lvol.ndcs = cl.distr_ndcs
+    lvol.npcs = cl.distr_npcs
+    lvol.distr_bs = cl.distr_bs
+    lvol.distr_chunk_bs = cl.distr_chunk_bs
+    #lvol.distr_page_size = (distr_npcs+distr_npcs)*cl.page_size_in_blocks
 
+
+
+    nodes = _get_next_3_nodes(cl.get_id(), lvol.size)
+    if not nodes:
+        return False, f"No nodes found with enough resources to create the LVol"
+
+    if host_node:
+        nodes.insert(0, host_node)
+    else:
+        host_node = nodes[0]
+
+    lvol.hostname = host_node.hostname
+    lvol.node_id = host_node.get_id()
+    lvol.lvs_name = host_node.lvstore
     lvol.base_bdev = f"distr_{lvol.vuid}_{name}"
     lvol.top_bdev = f"{lvol.lvs_name}/{lvol.lvol_bdev}"
 
@@ -655,31 +651,31 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
     # else:
     lvol.bdev_stack.extend(
         [
-            {
-                "type": "bdev_distr",
-                "name": lvol.base_bdev,
-                "params": {
-                    "name": lvol.base_bdev,
-                    "vuid": lvol.vuid,
-                    "ndcs": lvol.ndcs,
-                    "npcs": lvol.npcs,
-                    "num_blocks": int(lvol.max_size / lvol.distr_bs),
-                    "block_size": lvol.distr_bs,
-                    "chunk_size": lvol.distr_chunk_bs,
-                    "pba_page_size": lvol.distr_page_size,
-                }
-            },
-            {
-                "type": "bdev_lvstore",
-                "name": lvol.lvs_name,
-                "params": {
-                    "name": lvol.lvs_name,
-                    "bdev_name": lvol.base_bdev,
-                    "cluster_sz": lvol.distr_page_size,
-                    "clear_method": "none",
-                    "num_md_pages_per_cluster_ratio": 1,
-                }
-            },
+            #{
+            #    "type": "bdev_distr",
+            #    "name": lvol.base_bdev,
+            #    "params": {
+            #        "name": lvol.base_bdev,
+            #        "vuid": lvol.vuid,
+            #        "ndcs": lvol.ndcs,
+            #        "npcs": lvol.npcs,
+            #        "num_blocks": int(lvol.max_size / lvol.distr_bs),
+            #        "block_size": lvol.distr_bs,
+            #        "chunk_size": lvol.distr_chunk_bs,
+            #        "pba_page_size": lvol.distr_page_size,
+            #    }
+            #},
+            #{
+            #    "type": "bdev_lvstore",
+            #    "name": lvol.lvs_name,
+            #    "params": {
+            #        "name": lvol.lvs_name,
+            #        "bdev_name": lvol.base_bdev,
+            #        "cluster_sz": lvol.distr_page_size,
+            #        "clear_method": "none",
+            #        "num_md_pages_per_cluster_ratio": 1,
+            #    }
+            #},
             {
                 "type": "bdev_lvol",
                 "name": lvol.lvol_bdev,
@@ -714,17 +710,6 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
         lvol.lvol_type += ',crypto'
         lvol.top_bdev = lvol.crypto_bdev
 
-    nodes = _get_next_3_nodes(cl.get_id(), lvol.size)
-    if not nodes:
-        return False, f"No nodes found with enough resources to create the LVol"
-
-    if host_node:
-        nodes.insert(0, host_node)
-    else:
-        host_node = nodes[0]
-
-    lvol.hostname = host_node.hostname
-    lvol.node_id = host_node.get_id()
 
     if ha_type == 'single':
         ret, error = add_lvol_on_node(lvol, host_node)
@@ -890,24 +875,6 @@ def add_lvol_on_node(lvol, snode, ha_comm_addrs=None, ha_inode_self=None):
 def recreate_lvol_on_node(lvol, snode, ha_comm_addrs=None, ha_inode_self=None):
     rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
 
-    for bdev in lvol.bdev_stack:
-        name = bdev['name']
-        type = bdev['type']
-        params = bdev['params']
-        if type == "bdev_distr":
-            params['jm_names'] = get_jm_names(snode)
-            params['ha_comm_addrs'] = ha_comm_addrs
-            params['ha_inode_self'] = ha_inode_self
-            params['distrib_cpu_mask'] = snode.distrib_cpu_mask
-            ret = rpc_client.bdev_distrib_create(**params)
-            if ret:
-                ret = distr_controller.send_cluster_map_to_node(snode)
-                if not ret:
-                    return False, "Failed to send cluster map"
-                time.sleep(3)
-                ret = rpc_client.bdev_examine(name)
-                time.sleep(5)
-
     logger.info("creating subsystem %s", lvol.nqn)
     ret = rpc_client.subsystem_create(lvol.nqn, 'sbcli-cn', lvol.uuid)
     logger.debug(ret)
@@ -933,6 +900,11 @@ def recreate_lvol_on_node(lvol, snode, ha_comm_addrs=None, ha_inode_self=None):
             logger.info(f"Setting ANA state: {is_optimized}")
             ret = rpc_client.nvmf_subsystem_listener_set_ana_state(
                 lvol.nqn, iface.ip4_address, "4420", is_optimized)
+
+    ret = rpc_client.bdev_examine(snode.raid)
+    time.sleep(1)
+    ret = rpc_client.bdev_wait_for_examine()
+    time.sleep(1)
 
     logger.info("Add BDev to subsystem")
     ret = rpc_client.nvmf_subsystem_add_ns(lvol.nqn, lvol.top_bdev, lvol.uuid, lvol.guid)
@@ -1027,6 +999,7 @@ def delete_lvol_from_node(lvol_id, node_id, clear_data=True):
     _remove_bdev_stack(lvol.bdev_stack[::-1], rpc_client)
     lvol.deletion_status = 'bdevs_deleted'
     lvol.write_to_db(db_controller.kv_store)
+    return True
 
     # 3- clear alceml devices
     if clear_data:
@@ -1456,7 +1429,14 @@ def get_cluster_map(lvol_id):
 
     snode = db_controller.get_storage_node_by_id(lvol.node_id)
     rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
-    ret = rpc_client.distr_get_cluster_map(lvol.base_bdev)
+    distribs_list = []
+    for bdev in snode.lvstore_stack:
+        type = bdev['type']
+        if type == "bdev_raid":
+            distribs_list = bdev["distribs_list"]
+            if not distribs_list:
+                logger.error(f"Failed to get LVol cluster map: {lvol_id}")
+    ret = rpc_client.distr_get_cluster_map(distribs_list[0])
     if not ret:
         logger.error(f"Failed to get LVol cluster map: {lvol_id}")
         return False
@@ -1590,4 +1570,3 @@ def inflate_lvol(lvol_id):
     else:
         logger.error(f"Failed to inflate LVol: {lvol_id}")
     return ret
-
