@@ -182,6 +182,7 @@ def storage_node_add():
     max_lvol = req_data['max_lvol']
     max_snap = req_data['max_snap']
     max_prov = req_data['max_prov']
+    number_of_distribs = req_data.get('number_of_distribs', 4)
 
     spdk_image = None
     if 'spdk_image' in req_data:
@@ -200,6 +201,6 @@ def storage_node_add():
 
     out = storage_node_ops.add_node(
         cluster_id, node_ip, ifname, data_nics, max_lvol, max_snap, max_prov,
-        spdk_image=spdk_image, spdk_debug=spdk_debug)
+        spdk_image=spdk_image, spdk_debug=spdk_debug, number_of_distribs=number_of_distribs)
 
     return utils.get_response(out)

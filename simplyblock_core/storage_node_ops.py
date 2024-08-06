@@ -15,7 +15,7 @@ from simplyblock_core import constants, scripts, distr_controller
 from simplyblock_core import utils
 from simplyblock_core.controllers import lvol_controller, storage_events, snapshot_controller, device_events, \
     device_controller, tasks_controller
-from simplyblock_core.kv_store import DBController
+from simplyblock_core.kv_store import DBController, KVStore
 from simplyblock_core import shell_utils
 from simplyblock_core.models.iface import IFace
 from simplyblock_core.models.nvme_device import NVMeDevice, JMDevice
@@ -277,7 +277,6 @@ def _create_jm_stack_on_raid(rpc_client, jm_nvme_bdevs, snode, after_restart):
 
 
 def _create_jm_stack_on_device(rpc_client, nvme, snode, after_restart):
-
     alceml_id = nvme.get_id()
     alceml_name = device_controller.get_alceml_name(alceml_id)
     logger.info(f"adding {alceml_name}")
@@ -539,11 +538,11 @@ def _prepare_cluster_devices_on_restart(snode):
         if snode.alceml_cpu_cores:
             alceml_cpu_mask = utils.decimal_to_hex_power_of_2(snode.alceml_cpu_cores[snode.alceml_cpu_index])
             ret = rpc_client.bdev_alceml_create(jm_device.alceml_bdev, jm_device.nvme_bdev, jm_device.get_id(),
-                                            pba_init_mode=2, alceml_cpu_mask=alceml_cpu_mask)
+                                                pba_init_mode=2, alceml_cpu_mask=alceml_cpu_mask)
             snode.alceml_cpu_index = (snode.alceml_cpu_index + 1) % len(snode.alceml_cpu_cores)
         else:
             ret = rpc_client.bdev_alceml_create(jm_device.alceml_bdev, jm_device.nvme_bdev, jm_device.get_id(),
-                                            pba_init_mode=2)
+                                                pba_init_mode=2)
         if not ret:
             logger.error(f"Failed to create alceml bdev: {jm_device.alceml_bdev}")
             return False
@@ -588,7 +587,8 @@ def _connect_to_remote_devs(this_node):
 def add_node(cluster_id, node_ip, iface_name, data_nics_list,
              max_lvol, max_snap, max_prov, spdk_image=None, spdk_debug=False,
              small_bufsize=0, large_bufsize=0,
-             num_partitions_per_dev=0, jm_percent=0, number_of_devices=0, enable_test_device=False):
+
+             num_partitions_per_dev=0, jm_percent=0, number_of_devices=0, enable_test_device=False, number_of_distribs=0):
     db_controller = DBController()
     kv_store = db_controller.kv_store
 
@@ -600,7 +600,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
     logger.info(f"Adding Storage node: {node_ip}")
     timeout = 60
     if spdk_image:
-        timeout = 5*60
+        timeout = 5 * 60
     snode_api = SNodeClient(node_ip, timeout=timeout)
     node_info, _ = snode_api.info()
     logger.info(f"Node found: {node_info['hostname']}")
@@ -660,6 +660,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
     if cloud_instance['type']:
         ins_type = cloud_instance['type']
         supported_type, storage_devices, device_size = utils.get_total_size_per_instance_type(ins_type)
+
         if not supported_type:
             logger.warning(f"Unsupported instance-type {ins_type} for deployment")
             if not number_of_devices:
@@ -680,7 +681,8 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
         number_of_alceml_devices, max_lvol, max_snap, cpu_count, len(poller_cpu_cores) or cpu_count)
 
     # Calculate minimum huge page memory
-    minimum_hp_memory = utils.calculate_minimum_hp_memory(small_pool_count, large_pool_count, max_lvol, max_snap, cpu_count)
+    minimum_hp_memory = utils.calculate_minimum_hp_memory(small_pool_count, large_pool_count, max_lvol, max_snap,
+                                                          cpu_count)
 
     # Calculate minimum sys memory
     minimum_sys_memory = utils.calculate_minimum_sys_memory(max_prov)
@@ -700,7 +702,8 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
                                                       int(memory_details['free']),
                                                       int(memory_details['huge_total']))
     if not satisfied:
-        logger.error(f"Not enough memory for the provided max_lvo: {max_lvol}, max_snap: {max_snap}, max_prov: {max_prov}.. Exiting")
+        logger.error(
+            f"Not enough memory for the provided max_lvo: {max_lvol}, max_snap: {max_snap}, max_prov: {max_prov}.. Exiting")
         return False
 
     logger.info("Joining docker swarm...")
@@ -762,6 +765,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
     snode.api_endpoint = node_ip
     snode.host_secret = utils.generate_string(20)
     snode.ctrl_secret = utils.generate_string(20)
+    snode.number_of_distribs = number_of_distribs
 
     if 'cpu_count' in node_info:
         snode.cpu = node_info['cpu_count']
@@ -814,6 +818,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
         if not ret:
             logger.error("Failed to set iobuf options")
             return False
+    rpc_client.bdev_set_options(0, 0, 0, 0)
 
     # 2- set socket implementation options
     ret = rpc_client.sock_impl_set_options()
@@ -915,6 +920,10 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
         logger.info(f"connected to devices count: {count}")
         time.sleep(3)
 
+    if cluster.status == cluster.STATUS_UNREADY:
+        logger.info("Done")
+        return "Success"
+
     logger.info("Sending cluster map")
     ret = distr_controller.send_cluster_map_to_node(snode)
     if not ret:
@@ -929,10 +938,29 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
 
     for dev in snode.nvme_devices:
         distr_controller.send_dev_status_event(dev, NVMeDevice.STATUS_ONLINE)
+    # Create distribs
+    max_size = cluster.cluster_max_size
+    ret = create_lvstore(snode, cluster.distr_ndcs, cluster.distr_npcs, cluster.distr_bs,
+                         cluster.distr_chunk_bs, cluster.page_size_in_blocks, max_size)
+    if not ret:
+        return False, "Failed to create distribs on node"
 
     storage_events.snode_add(snode)
     logger.info("Done")
     return "Success"
+
+
+def get_number_of_online_devices(cluster_id):
+    dev_count = 0
+    db_controller = DBController()
+    snodes = db_controller.get_storage_nodes_by_cluster_id(cluster_id)
+    online_nodes = []
+    for node in snodes:
+        if node.status == node.STATUS_ONLINE:
+            online_nodes.append(node)
+            for dev in node.nvme_devices:
+                if dev.status == dev.STATUS_ONLINE:
+                    dev_count += 1
 
 
 def delete_storage_node(node_id):
@@ -1126,7 +1154,8 @@ def restart_storage_node(
         number_of_alceml_devices, snode.max_lvol, snode.max_snap, snode.cpu, len(snode.poller_cpu_cores) or snode.cpu)
 
     # Calculate minimum huge page memory
-    minimum_hp_memory = utils.calculate_minimum_hp_memory(small_pool_count, large_pool_count, snode.max_lvol, snode.max_snap, snode.cpu)
+    minimum_hp_memory = utils.calculate_minimum_hp_memory(small_pool_count, large_pool_count, snode.max_lvol,
+                                                          snode.max_snap, snode.cpu)
 
     # Calculate minimum sys memory
     minimum_sys_memory = utils.calculate_minimum_sys_memory(snode.max_prov)
@@ -1145,8 +1174,8 @@ def restart_storage_node(
                                                       int(memory_details['free']),
                                                       int(memory_details['huge_total']))
     if not satisfied:
-        logger.error(f"Not enough memory for the provided max_lvo: {snode.max_lvol}, max_snap: {snode.max_snap}, max_prov: {utils.humanbytes(snode.max_prov)}.. Exiting")
-
+        logger.error(
+            f"Not enough memory for the provided max_lvo: {snode.max_lvol}, max_snap: {snode.max_snap}, max_prov: {utils.humanbytes(snode.max_prov)}.. Exiting")
 
     spdk_debug = snode.spdk_debug
     if set_spdk_debug:
@@ -1161,7 +1190,6 @@ def restart_storage_node(
         logger.error(f"Failed to start spdk: {err}")
         return False
     time.sleep(3)
-
 
     if small_bufsize:
         snode.iobuf_small_bufsize = small_bufsize
@@ -1185,6 +1213,7 @@ def restart_storage_node(
         if not ret:
             logger.error("Failed to set iobuf options")
             return False
+    rpc_client.bdev_set_options(0, 0, 0, 0)
 
     # 2- set socket implementation options
     ret = rpc_client.sock_impl_set_options()
@@ -1335,22 +1364,32 @@ def restart_storage_node(
         distr_controller.send_dev_status_event(dev, NVMeDevice.STATUS_ONLINE)
         tasks_controller.add_device_mig_task(dev.get_id())
 
-    # logger.info("Sending cluster map to current node")
-    # ret = distr_controller.send_cluster_map_to_node(snode)
-    # if not ret:
-    #     return False, "Failed to send cluster map"
-    # time.sleep(3)
+    # Create distribs, raid0, and lvstore and expose lvols to the fabrics
+    if snode.lvstore_stack:
+        ret = recreate_lvstore(snode)
+        if not ret:
+            return False, "Failed to create distribs on node"
+        time.sleep(1)
+        ret = rpc_client.bdev_examine(snode.raid)
+        time.sleep(1)
+        ret = rpc_client.bdev_wait_for_examine()
+        time.sleep(1)
 
-    for lvol_id in snode.lvols:
-        lvol = lvol_controller.recreate_lvol(lvol_id, snode)
-        if not lvol:
-            logger.error(f"Failed to create LVol: {lvol_id}")
-            return False
-        lvol.status = lvol.STATUS_ONLINE
-        lvol.io_error = False
-        lvol.health_check = True
-        lvol.write_to_db(db_controller.kv_store)
+        #logger.info("Sending cluster map to current node")
+        #ret = distr_controller.send_cluster_map_to_node(snode)
+        #if not ret:
+        #    return False, "Failed to send cluster map"
+        #time.sleep(3)
 
+        for lvol_id in snode.lvols:
+            lvol = lvol_controller.recreate_lvol(lvol_id, snode)
+            if not lvol:
+                logger.error(f"Failed to create LVol: {lvol_id}")
+                return False
+            lvol.status = lvol.STATUS_ONLINE
+            lvol.io_error = False
+            lvol.health_check = True
+            lvol.write_to_db(db_controller.kv_store)
     logger.info("Done")
     return "Success"
 
@@ -1494,11 +1533,12 @@ def shutdown_storage_node(node_id, force=False):
         snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
 
     logger.debug("Removing LVols")
-    for lvol_id in snode.lvols:
-        logger.debug(lvol_id)
-        lvol = db_controller.get_lvol_by_id(lvol_id)
-        lvol_controller._remove_bdev_stack([lvol.bdev_stack[0]], rpc_client)
-        time.sleep(1)
+    _remove_bdev_stack(snode.lvstore_stack, rpc_client, remove_distr_only=True)
+#    for lvol_id in snode.lvols:
+#        logger.debug(lvol_id)
+#        lvol = db_controller.get_lvol_by_id(lvol_id)
+#        lvol_controller._remove_bdev_stack([lvol.bdev_stack[0]], rpc_client)
+#        time.sleep(1)
 
     for dev in snode.nvme_devices:
         if dev.status in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_READONLY]:
@@ -2042,7 +2082,7 @@ def health_check(node_id):
                 since = ""
                 try:
                     start = datetime.datetime.fromisoformat(state['StartedAt'].split('.')[0])
-                    since = str(datetime.datetime.now()-start).split('.')[0]
+                    since = str(datetime.datetime.now() - start).split('.')[0]
                 except:
                     pass
                 clean_name = name.split(".")[0].replace("/", "")
@@ -2166,3 +2206,150 @@ def set_node_status(node_id, status):
         _connect_to_remote_devs(snode)
 
     return True
+
+
+def recreate_lvstore(snode):
+    ret, err = _create_bdev_stack(snode)
+    if err:
+        logger.error(f"Failed to recreate lvstore on node {snode.get_id()}")
+        logger.error(err)
+        return False
+    return True
+
+def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blocks, max_size):
+    lvstore_stack = []
+    distrib_list = []
+    size = max_size // snode.number_of_distribs
+    distr_page_size = (npcs + npcs) * page_size_in_blocks
+    for _ in range(snode.number_of_distribs):
+        distrib_vuid = utils.get_random_vuid()
+        distrib_name = f"distrib_{distrib_vuid}"
+        lvs_name = f"LVS_{distrib_vuid}"
+        lvstore_stack.extend(
+            [
+                {
+                    "type": "bdev_distr",
+                    "name": distrib_name,
+                    "params": {
+                        "name": distrib_name,
+                        "vuid": distrib_vuid,
+                        "ndcs": ndcs,
+                        "npcs": npcs,
+                        "num_blocks": size // distr_bs,
+                        "block_size": distr_bs,
+                        "chunk_size": distr_chunk_bs,
+                        "pba_page_size": distr_page_size,
+                    }
+                }
+            ]
+        )
+        distrib_list.append(distrib_name)
+    raid_device = f"raid_0{utils.get_random_vuid()}"
+    lvstore_stack.extend(
+        [
+            {
+                "type": "bdev_raid",
+                "name": raid_device,
+                "params":
+                    {"name": raid_device,
+                     "raid_level": "0",
+                     "base_bdevs": distrib_list},
+                "distribs_list": distrib_list
+            },
+            {
+                "type": "bdev_lvstore",
+                "name": lvs_name,
+                "params": {
+                    "name": lvs_name,
+                    "bdev_name": raid_device,
+                    "cluster_sz": distr_page_size,
+                    "clear_method": "none",
+                    "num_md_pages_per_cluster_ratio": 1,
+                }
+            }
+
+        ]
+    )
+
+    ret, err = _create_bdev_stack(snode, lvstore_stack)
+    if err:
+        logger.error(f"Failed to create lvstore on node {snode.get_id()}")
+        logger.error(err)
+        return False
+
+
+    snode.lvstore = lvs_name
+    snode.lvstore_stack = lvstore_stack
+    snode.raid = raid_device
+    db_controller = DBController(KVStore())
+    snode.write_to_db(db_controller.kv_store)
+    return True
+
+
+def _create_bdev_stack(snode, lvstore_stack=None):
+    rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
+
+    created_bdevs = []
+    if not lvstore_stack:
+        # Restart case
+        stack = snode.lvstore_stack
+    else:
+        stack = lvstore_stack
+
+    for bdev in stack:
+        type = bdev['type']
+        name = bdev['name']
+        params = bdev['params']
+
+        if type == "bdev_distr":
+            params['jm_names'] = lvol_controller.get_jm_names(snode)
+            params['distrib_cpu_mask'] = snode.distrib_cpu_mask
+            ret = rpc_client.bdev_distrib_create(**params)
+            if ret:
+                ret = distr_controller.send_cluster_map_to_node(snode)
+                if not ret:
+                    return False, "Failed to send cluster map"
+                time.sleep(3)
+
+        elif type == "bdev_lvstore" and lvstore_stack:
+            ret = rpc_client.create_lvstore(**params)
+
+        elif type == "bdev_raid":
+            distribs_list = bdev["distribs_list"]
+            ret = rpc_client.bdev_raid_create(name, distribs_list)
+        else:
+            logger.debug(f"Unknown BDev type: {type}")
+            continue
+
+        if ret:
+            bdev['status'] = "created"
+            created_bdevs.insert(0, bdev)
+        else:
+            if created_bdevs:
+                # rollback
+                _remove_bdev_stack(created_bdevs, rpc_client)
+            return False, f"Failed to create BDev: {name}"
+
+    return True, None
+
+
+def _remove_bdev_stack(bdev_stack, rpc_client, remove_distr_only=False):
+    for bdev in reversed(bdev_stack):
+        if 'status' in bdev and bdev['status'] == 'deleted':
+            continue
+        type = bdev['type']
+        name = bdev['name']
+        if type == "bdev_distr":
+            ret = rpc_client.bdev_distrib_delete(name)
+        elif type == "bdev_raid":
+            ret = rpc_client.bdev_raid_delete(name)
+        elif type == "bdev_lvstore" and not remove_distr_only:
+            ret = rpc_client.bdev_lvol_delete_lvstore(name)
+        else:
+            logger.debug(f"Unknown BDev type: {type}")
+            continue
+        if not ret:
+            logger.error(f"Failed to delete BDev {name}")
+
+        bdev['status'] = 'deleted'
+        time.sleep(5)

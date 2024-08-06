@@ -46,6 +46,7 @@ class CLIWrapper:
         sub_command.add_argument("--max-lvol", help='Max lvol per storage node', dest='max_lvol', type=int)
         sub_command.add_argument("--max-snap", help='Max snapshot per storage node', dest='max_snap', type=int)
         sub_command.add_argument("--max-prov", help='Max provisioning size of all storage nodes', dest='max_prov')
+        sub_command.add_argument("--number-of-distribs", help='The number of distirbs to be created on the node', dest='number_of_distribs', type=int, default=4)
         sub_command.add_argument("--number-of-devices", help='Number of devices per storage node if it\'s not supported EC2 instance', dest='number_of_devices', type=int)
 
         sub_command.add_argument("--spdk-image", help='SPDK image uri', dest='spdk_image')
@@ -246,6 +247,14 @@ class CLIWrapper:
                                  dest='contact_point', default='')
         sub_command.add_argument("--grafana-endpoint", help='the endpoint url for grafana',
                                  dest='grafana_endpoint', default='')
+        sub_command.add_argument("--distr-ndcs", help='(Dev) set ndcs manually, default: 1', type=int, default=1)
+        sub_command.add_argument("--distr-npcs", help='(Dev) set npcs manually, default: 1', type=int, default=1)
+        sub_command.add_argument("--distr-bs", help='(Dev) distrb bdev block size, default: 4096', type=int,
+                                 default=4096)
+        sub_command.add_argument("--distr-chunk-bs", help='(Dev) distrb bdev chunk block size, default: 4096', type=int,
+                                 default=4096)
+        sub_command.add_argument("--ha-type", help='LVol HA type (single, ha), default is cluster HA type',
+                                 dest='ha_type', choices=["single", "ha", "default"], default='single')
 
         # add cluster
         sub_command = self.add_sub_command(subparser, 'add', 'Add new cluster')
@@ -259,6 +268,18 @@ class CLIWrapper:
                                  type=int, required=False, dest="prov_cap_warn")
         sub_command.add_argument("--prov-cap-crit", help='Capacity critical level in percent, default=190',
                                  type=int, required=False, dest="prov_cap_crit")
+        sub_command.add_argument("--distr-ndcs", help='(Dev) set ndcs manually, default: 4', type=int, default=0)
+        sub_command.add_argument("--distr-npcs", help='(Dev) set npcs manually, default: 1', type=int, default=0)
+        sub_command.add_argument("--distr-bs", help='(Dev) distrb bdev block size, default: 4096', type=int,
+                                 default=4096)
+        sub_command.add_argument("--distr-chunk-bs", help='(Dev) distrb bdev chunk block size, default: 4096', type=int,
+                                 default=4096)
+        sub_command.add_argument("--ha-type", help='LVol HA type (single, ha), default is cluster HA type',
+                                 dest='ha_type', choices=["single", "ha", "default"], default='default')
+
+        # Activate cluster
+        sub_command = self.add_sub_command(subparser, 'activate', 'Create distribs and raid0 bdevs on all the storage node and move the cluster to active state')
+        sub_command.add_argument("cluster_id", help='the cluster UUID')
 
         # show cluster list
         self.add_sub_command(subparser, 'list', 'Show clusters list')
@@ -356,8 +377,7 @@ class CLIWrapper:
                                  required=False, action='store_true')
         sub_command.add_argument("--max-size", help='LVol max size', dest='max_size', default="0")
         sub_command.add_argument("--host-id", help='Primary storage node UUID or Hostname', dest='host_id')
-        sub_command.add_argument("--ha-type", help='LVol HA type (single, ha), default is cluster HA type',
-                                 dest='ha_type', choices=["single", "ha", "default"], default='default')
+
         #
         # sub_command.add_argument("--compress",
         #                          help='Use inline data compression and de-compression on the logical volume',
@@ -374,12 +394,8 @@ class CLIWrapper:
         sub_command.add_argument("--max-w-mbytes", help='Maximum Write Mega Bytes Per Second', type=int)
         sub_command.add_argument("--distr-vuid", help='(Dev) set vuid manually, default: random (1-99999)', type=int,
                                  default=0)
-        sub_command.add_argument("--distr-ndcs", help='(Dev) set ndcs manually, default: 4', type=int, default=0)
-        sub_command.add_argument("--distr-npcs", help='(Dev) set npcs manually, default: 1', type=int, default=0)
-        sub_command.add_argument("--distr-bs", help='(Dev) distrb bdev block size, default: 4096', type=int,
-                                 default=4096)
-        sub_command.add_argument("--distr-chunk-bs", help='(Dev) distrb bdev chunk block size, default: 4096', type=int,
-                                 default=4096)
+        sub_command.add_argument("--ha-type", help='LVol HA type (single, ha), default is cluster HA type',
+                                 dest='ha_type', choices=["single", "ha", "default"], default='default')
 
 
         # set lvol params
@@ -673,12 +689,14 @@ class CLIWrapper:
                 max_prov = self.parse_size(args.max_prov)
                 number_of_devices = args.number_of_devices
                 enable_test_device = args.enable_test_device
+                number_of_distribs = args.number_of_distribs
                 if max_prov < 1 * 1024 * 1024 * 1024:
                     return f"Max provisioning memory:{args.max_prov} must be larger than 1G"
 
                 out = storage_ops.add_node(
                     cluster_id, node_ip, ifname, data_nics, max_lvol, max_snap, max_prov, spdk_image, spdk_debug,
-                    small_bufsize, large_bufsize, num_partitions_per_dev, jm_percent, number_of_devices, enable_test_device)
+                    small_bufsize, large_bufsize, num_partitions_per_dev, jm_percent, number_of_devices, enable_test_device, number_of_distribs)
+
                 return out
 
             elif sub_command == "list":
@@ -817,6 +835,9 @@ class CLIWrapper:
                 ret = self.cluster_create(args)
             elif sub_command == 'add':
                 ret = self.cluster_add(args)
+            elif sub_command == 'activate':
+                cluster_id = args.cluster_id
+                ret = cluster_ops.cluster_activate(cluster_id)
             elif sub_command == 'status':
                 cluster_id = args.cluster_id
                 ret = cluster_ops.show_cluster(cluster_id)
@@ -895,20 +916,14 @@ class CLIWrapper:
                 comp = None
                 crypto = args.encrypt
                 distr_vuid = args.distr_vuid
-                distr_ndcs = args.distr_ndcs
-                distr_npcs = args.distr_npcs
-                distr_bs = args.distr_bs
-                distr_chunk_bs = args.distr_chunk_bs
                 with_snapshot = args.snapshot
                 results, error = lvol_controller.add_lvol_ha(
                     name, size, host_id, ha_type, pool, comp, crypto,
-                    distr_vuid, distr_ndcs, distr_npcs,
+                    distr_vuid,
                     args.max_rw_iops,
                     args.max_rw_mbytes,
                     args.max_r_mbytes,
                     args.max_w_mbytes,
-                    distr_bs,
-                    distr_chunk_bs,
                     with_snapshot=with_snapshot,
                     max_size=max_size,
                     crypto_key1=args.crypto_key1,
@@ -1140,9 +1155,15 @@ class CLIWrapper:
         cap_crit = args.cap_crit
         prov_cap_warn = args.prov_cap_warn
         prov_cap_crit = args.prov_cap_crit
+        distr_ndcs = args.distr_ndcs
+        distr_npcs = args.distr_npcs
+        distr_bs = args.distr_bs
+        distr_chunk_bs = args.distr_chunk_bs
+        ha_type = args.ha_type
 
         return cluster_ops.add_cluster(
-            blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit)
+            blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
+            distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type)
 
     def cluster_create(self, args):
         page_size_in_blocks = args.page_size
@@ -1153,6 +1174,11 @@ class CLIWrapper:
         prov_cap_warn = args.prov_cap_warn
         prov_cap_crit = args.prov_cap_crit
         ifname = args.ifname
+        distr_ndcs = args.distr_ndcs
+        distr_npcs = args.distr_npcs
+        distr_bs = args.distr_bs
+        distr_chunk_bs = args.distr_chunk_bs
+        ha_type = args.ha_type
         log_del_interval = args.log_del_interval
         metrics_retention_period = args.metrics_retention_period
         contact_point = args.contact_point
@@ -1161,7 +1187,8 @@ class CLIWrapper:
         return cluster_ops.create_cluster(
             blk_size, page_size_in_blocks,
             CLI_PASS, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
-            ifname, log_del_interval, metrics_retention_period, contact_point, grafana_endpoint)
+            ifname, log_del_interval, metrics_retention_period, contact_point, grafana_endpoint,
+            distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type)
 
     def query_yes_no(self, question, default="yes"):
         """Ask a yes/no question via raw_input() and return their answer.
