@@ -608,6 +608,12 @@ class CLIWrapper:
         sub_command = self.add_sub_command(subparser, 'recreate', 'recreate Caching node bdevs')
         sub_command.add_argument("node_id", help='Caching node UUID')
 
+        sub_command = self.add_sub_command(subparser, 'get-lvol-stats', 'Get LVol stats')
+        sub_command.add_argument("node_id", help='Caching node UUID')
+        sub_command.add_argument("lvol_id", help='LVol UUID')
+        sub_command.add_argument("--duration", help='collection duration in seconds, default: 5', type=int, default=5)
+
+
     def init_parser(self):
         self.parser = argparse.ArgumentParser(prog=constants.SIMPLY_BLOCK_CLI_NAME, description='SimplyBlock management CLI')
         self.parser.add_argument("-d", '--debug', help='Print debug messages', required=False, action='store_true')
@@ -1104,6 +1110,8 @@ class CLIWrapper:
             if sub_command == "recreate":
                 ret = caching_node_controller.recreate(args.node_id)
 
+            if sub_command == "get-lvol-stats":
+                ret = caching_node_controller.get_lvol_stats(args.node_id, args.lvol_id, args.duration)
 
         else:
             self.parser.print_help()

@@ -731,3 +731,43 @@ def remove_node(node_id, force=False):
 
     snode.remove(db_controller.kv_store)
     logger.info("done")
+
+
+def get_lvol_stats(caching_node_id, lvol_id, duration=5):
+    db_controller = DBController()
+    cnode = db_controller.get_caching_node_by_id(caching_node_id)
+    if not cnode:
+        logger.info(f"Caching node uuid not found: {caching_node_id}")
+        cnode = db_controller.get_caching_node_by_hostname(caching_node_id)
+        if not cnode:
+            logger.error("Caching node not found")
+            return False
+
+    lvol = db_controller.get_lvol_by_id(lvol_id)
+    if not lvol:
+        logger.error(f"LVol not found: {lvol_id}")
+        return False
+
+    rpc_client = RPCClient(
+        cnode.mgmt_ip, cnode.rpc_port,
+        cnode.rpc_username, cnode.rpc_password,
+        timeout=3, retry=2)
+
+    ocf_bdev = None
+    for lv in cnode.lvols:
+        if lv.lvol_id == lvol.get_id():
+            ocf_bdev = lv.ocf_bdev
+
+    if not ocf_bdev:
+        logger.error(f"LVol is not connected to caching node")
+        return False
+
+    logger.info("Getting bdev stats: %s", ocf_bdev)
+
+    while True:
+        stats_dict = rpc_client.get_lvol_stats(ocf_bdev)
+        print(datetime.datetime.now())
+        print(json.dumps(stats_dict, indent=2))
+        time.sleep(duration)
+
+    return True
