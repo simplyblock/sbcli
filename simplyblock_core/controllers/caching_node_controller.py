@@ -187,7 +187,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spd
         timeout=60*5, retry=5)
 
     # # get new node info after starting spdk
-    # node_info, _ = cnode_api.info()
+    node_info, _ = cnode_api.info()
     # mem = node_info['memory_details']['huge_free']
     # logger.info(f"Free Hugepages detected: {utils.humanbytes(mem)}")
 
