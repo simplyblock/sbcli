@@ -462,7 +462,7 @@ def connect(caching_node_id, lvol_id):
     logger.info(f"Device path: {dev_path}")
 
     cached_lvol = CachedLVol()
-    cached_lvol.uuid = str(uuid.uuid4())
+    cached_lvol.uuid = lvol.get_id()
     cached_lvol.lvol_id = lvol.get_id()
     cached_lvol.lvol = lvol
     cached_lvol.hostname = cnode.hostname
@@ -715,3 +715,40 @@ def remove_node(node_id, force=False):
 
     snode.remove(db_controller.kv_store)
     logger.info("done")
+
+
+def get_io_stats(lvol_uuid, history, records_count=20, parse_sizes=True):
+    lvol = db_controller.get_lvol_by_id(lvol_uuid)
+    if not lvol:
+        logger.error(f"LVol not found: {lvol_uuid}")
+        return False
+
+    if history:
+        records_number = utils.parse_history_param(history)
+        if not records_number:
+            logger.error(f"Error parsing history string: {history}")
+            return False
+    else:
+        records_number = 20
+
+    records_list = db_controller.get_cached_lvol_stats(lvol.get_id(), limit=records_number)
+    new_records = utils.process_records(records_list, records_count)
+
+    if not parse_sizes:
+        return new_records
+
+    out = []
+    for record in new_records:
+        out.append({
+            "Date": time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(record['date'])),
+            "Read bytes": utils.humanbytes(record["read_bytes"]),
+            "Read speed": utils.humanbytes(record['read_bytes_ps']),
+            "Read IOPS": record['read_io_ps'],
+            "Read lat": record['read_latency_ps'],
+            "Write bytes": utils.humanbytes(record["write_bytes"]),
+            "Write speed": utils.humanbytes(record['write_bytes_ps']),
+            "Write IOPS": record['write_io_ps'],
+            "Write lat": record['write_latency_ps'],
+        })
+    return out
+

@@ -9,9 +9,8 @@ import uuid
 from typing import Tuple
 
 from simplyblock_core import utils, constants, distr_controller
-from simplyblock_core.controllers import snapshot_controller, pool_controller, lvol_events
+from simplyblock_core.controllers import snapshot_controller, pool_controller, lvol_events, caching_node_controller
 from simplyblock_core.kv_store import DBController
-from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.lvol_model import LVol
@@ -1015,6 +1014,13 @@ def delete_lvol(id_or_name, force_delete=False):
     # set status
     lvol.status = LVol.STATUS_IN_DELETION
     lvol.write_to_db(db_controller.kv_store)
+
+    # disconnect from caching nodes:
+    cnodes = db_controller.get_caching_nodes()
+    for cnode in cnodes:
+        for lv in cnode.lvols:
+            if lv.lvol_id == lvol.get_id():
+                caching_node_controller.disconnect(cnode.get_id(), lvol.get_id())
 
     if lvol.ha_type == 'single':
         ret = delete_lvol_from_node(lvol.get_id(), lvol.node_id)

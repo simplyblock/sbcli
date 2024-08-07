@@ -126,3 +126,7 @@ class LVolStatObject(StatsObject):
 
 class PoolStatObject(LVolStatObject):
     pass
+
+
+class CachedLVolStatObject(StatsObject):
+    pass

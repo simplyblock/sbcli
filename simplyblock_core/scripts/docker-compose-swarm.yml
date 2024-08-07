@@ -79,6 +79,17 @@ services:
     networks:
       - hostnet
 
+  CachedLVolStatsCollector:
+    image: $SIMPLYBLOCK_DOCKER_IMAGE
+    command: "python simplyblock_core/services/cached_lvol_stat_collector.py"
+    deploy:
+      placement:
+        constraints: [node.role == manager]
+    volumes:
+      - "/etc/foundationdb:/etc/foundationdb"
+    networks:
+      - hostnet
+
   PortStatsCollector:
     image: $SIMPLYBLOCK_DOCKER_IMAGE
     command: "python simplyblock_core/services/port_stat_collector.py"
