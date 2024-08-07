@@ -1111,7 +1111,11 @@ class CLIWrapper:
                 ret = caching_node_controller.recreate(args.node_id)
 
             if sub_command == "get-lvol-stats":
-                ret = caching_node_controller.get_io_stats(args.lvol_id, args.history)
+                data = caching_node_controller.get_io_stats(args.lvol_id, args.history)
+                if data:
+                    ret = utils.print_table(data)
+                else:
+                    return False
 
         else:
             self.parser.print_help()
