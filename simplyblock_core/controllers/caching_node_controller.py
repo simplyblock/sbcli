@@ -388,8 +388,8 @@ def connect(caching_node_id, lvol_id):
             ret = rpc_client.bdev_nvme_attach_controller_tcp_caching(rem_name, lvol.nqn, nic.ip4_address, "4420")
             logger.debug(ret)
             if not ret:
-                logger.error("Failed to connect to LVol")
-                return False
+                logger.warning("Failed to connect to LVol")
+                # return False
 
     elif lvol.ha_type == "ha":
         for nodes_id in lvol.nodes:
