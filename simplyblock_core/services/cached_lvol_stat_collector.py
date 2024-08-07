@@ -34,6 +34,7 @@ def add_lvol_stats(lvol, stats_dict):
             "unmap_latency_ticks": stats['unmap_latency_ticks'],
         })
 
+        last_record = None
         if lvol.get_id() in last_object_record:
             last_record = last_object_record[lvol.get_id()]
         else:
