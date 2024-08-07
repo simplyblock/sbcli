@@ -609,9 +609,9 @@ class CLIWrapper:
         sub_command.add_argument("node_id", help='Caching node UUID')
 
         sub_command = self.add_sub_command(subparser, 'get-lvol-stats', 'Get LVol stats')
-        sub_command.add_argument("node_id", help='Caching node UUID')
         sub_command.add_argument("lvol_id", help='LVol UUID')
-        sub_command.add_argument("--duration", help='collection duration in seconds, default: 5', type=int, default=5)
+        sub_command.add_argument("--history", help='(XXdYYh), list history records (one for every 15 minutes) '
+                                                   'for XX days and YY hours (up to 10 days in total).')
 
 
     def init_parser(self):
@@ -1111,7 +1111,7 @@ class CLIWrapper:
                 ret = caching_node_controller.recreate(args.node_id)
 
             if sub_command == "get-lvol-stats":
-                ret = caching_node_controller.get_lvol_stats(args.node_id, args.lvol_id, args.duration)
+                ret = caching_node_controller.get_io_stats(args.lvol_id, args.history)
 
         else:
             self.parser.print_help()

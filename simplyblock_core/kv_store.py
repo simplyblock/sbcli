@@ -19,7 +19,7 @@ from simplyblock_core.models.mgmt_node import MgmtNode
 from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.stats import DeviceStatObject, NodeStatObject, ClusterStatObject, LVolStatObject, \
-    PoolStatObject
+    PoolStatObject, CachedLVolStatObject
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.models.lvol_model import LVol
 
@@ -230,6 +230,10 @@ class DBController:
         if isinstance(lvol, str):
             lvol = self.get_lvol_by_id(lvol)
         stats = LVolStatObject().read_from_db(self.kv_store, id="%s/%s" % (lvol.pool_uuid, lvol.uuid), limit=limit, reverse=True)
+        return stats
+
+    def get_cached_lvol_stats(self, lvol_id, limit=20):
+        stats = CachedLVolStatObject().read_from_db(self.kv_store, id="%s/%s" % (lvol_id, lvol_id), limit=limit, reverse=True)
         return stats
 
     def get_pool_stats(self, pool, limit=20):

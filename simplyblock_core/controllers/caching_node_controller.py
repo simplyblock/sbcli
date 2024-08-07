@@ -478,7 +478,7 @@ def connect(caching_node_id, lvol_id):
     logger.info(f"Device path: {dev_path}")
 
     cached_lvol = CachedLVol()
-    cached_lvol.uuid = str(uuid.uuid4())
+    cached_lvol.uuid = lvol.get_id()
     cached_lvol.lvol_id = lvol.get_id()
     cached_lvol.lvol = lvol
     cached_lvol.hostname = cnode.hostname
@@ -733,41 +733,38 @@ def remove_node(node_id, force=False):
     logger.info("done")
 
 
-def get_lvol_stats(caching_node_id, lvol_id, duration=5):
-    db_controller = DBController()
-    cnode = db_controller.get_caching_node_by_id(caching_node_id)
-    if not cnode:
-        logger.info(f"Caching node uuid not found: {caching_node_id}")
-        cnode = db_controller.get_caching_node_by_hostname(caching_node_id)
-        if not cnode:
-            logger.error("Caching node not found")
-            return False
-
-    lvol = db_controller.get_lvol_by_id(lvol_id)
+def get_io_stats(lvol_uuid, history, records_count=20, parse_sizes=True):
+    lvol = db_controller.get_lvol_by_id(lvol_uuid)
     if not lvol:
-        logger.error(f"LVol not found: {lvol_id}")
+        logger.error(f"LVol not found: {lvol_uuid}")
         return False
 
-    rpc_client = RPCClient(
-        cnode.mgmt_ip, cnode.rpc_port,
-        cnode.rpc_username, cnode.rpc_password,
-        timeout=3, retry=2)
+    if history:
+        records_number = utils.parse_history_param(history)
+        if not records_number:
+            logger.error(f"Error parsing history string: {history}")
+            return False
+    else:
+        records_number = 20
 
-    ocf_bdev = None
-    for lv in cnode.lvols:
-        if lv.lvol_id == lvol.get_id():
-            ocf_bdev = lv.ocf_bdev
+    records_list = db_controller.get_cached_lvol_stats(lvol.get_id(), limit=records_number)
+    new_records = utils.process_records(records_list, records_count)
 
-    if not ocf_bdev:
-        logger.error(f"LVol is not connected to caching node")
-        return False
+    if not parse_sizes:
+        return new_records
 
-    logger.info("Getting bdev stats: %s", ocf_bdev)
+    out = []
+    for record in new_records:
+        out.append({
+            "Date": time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(record['date'])),
+            "Read bytes": utils.humanbytes(record["read_bytes"]),
+            "Read speed": utils.humanbytes(record['read_bytes_ps']),
+            "Read IOPS": record['read_io_ps'],
+            "Read lat": record['read_latency_ps'],
+            "Write bytes": utils.humanbytes(record["write_bytes"]),
+            "Write speed": utils.humanbytes(record['write_bytes_ps']),
+            "Write IOPS": record['write_io_ps'],
+            "Write lat": record['write_latency_ps'],
+        })
+    return out
 
-    while True:
-        stats_dict = rpc_client.get_lvol_stats(ocf_bdev)
-        print(datetime.datetime.now())
-        print(json.dumps(stats_dict, indent=2))
-        time.sleep(duration)
-
-    return True
