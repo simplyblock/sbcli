@@ -732,7 +732,7 @@ def get_io_stats(lvol_uuid, history, records_count=20, parse_sizes=True):
         records_number = 20
 
     records_list = db_controller.get_cached_lvol_stats(lvol.get_id(), limit=records_number)
-    new_records = utils.process_records(records_list, records_count)
+    new_records = utils.process_records(records_list, min(records_count, len(records_list)))
 
     if not parse_sizes:
         return new_records
