@@ -420,12 +420,15 @@ def connect(caching_node_id, lvol_id):
     logger.info("Creating OCF BDev")
     # create ocf device
     cach_bdev = f"ocf_{mini_id}"
-    dev = cnode.cache_bdev
-    ret = rpc_client.bdev_ocf_create(cach_bdev, 'wt', dev, f"{rem_name}n1")
-    logger.debug(ret)
+
+    ret = rpc_client.get_bdevs(cach_bdev)
     if not ret:
-        logger.error("Failed to create OCF bdev")
-        return False
+        dev = cnode.cache_bdev
+        ret = rpc_client.bdev_ocf_create(cach_bdev, 'wt', dev, f"{rem_name}n1")
+        logger.debug(ret)
+        if not ret:
+            logger.error("Failed to create OCF bdev")
+            return False
 
     # logger.info("Creating local subsystem")
     # create subsystem (local)
@@ -450,10 +453,13 @@ def connect(caching_node_id, lvol_id):
     logger.info("Connecting to local subsystem")
     # make nvme connect to nqn
     cnode_client = CNodeClient(cnode.api_endpoint)
-    ret, _ = cnode_client.connect_nvme('127.0.0.1', "4420", subsystem_nqn)
-    if not ret:
-        logger.error("Failed to connect to local subsystem")
-        return False
+    try:
+        ret, _ = cnode_client.connect_nvme('127.0.0.1', "4420", subsystem_nqn)
+        if not ret:
+            logger.error("Failed to connect to local subsystem")
+            return False
+    except:
+        pass
 
     if cnode.multipathing:
         snode = db_controller.get_storage_node_by_id(lvol.node_id)
