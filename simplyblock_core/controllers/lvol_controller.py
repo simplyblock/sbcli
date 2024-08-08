@@ -747,19 +747,6 @@ def _create_bdev_stack(lvol, snode):
 
 def add_lvol_on_node(lvol, snode):
     rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
-    # spdk_mem_info_before = rpc_client.ultra21_util_get_malloc_stats()
-    #
-    # # Validate adding lvol on storage node
-    # snode_api = SNodeClient(snode.api_endpoint)
-    # result, _ = snode_api.info()
-    # memory_free = result["memory_details"]["free"]
-    # huge_free = result["memory_details"]["huge_free"]
-    #
-    # total_node_capacity = db_controller.get_snode_size(snode.get_id())
-    # error = utils.validate_add_lvol_or_snap_on_node(memory_free, huge_free, snode.max_lvol, lvol.size,  total_node_capacity, len(snode.lvols))
-    # if error:
-    #     logger.error(error)
-    #     return False, f"Failed to add lvol on node {snode.get_id()}"
 
     ret, msg = _create_bdev_stack(lvol, snode)
     if not ret:
@@ -798,31 +785,16 @@ def add_lvol_on_node(lvol, snode):
             return False, "Failed to add bdev to subsystem"
 
     elif lvol.connection_type == "nbd":
-        nbd_device = rpc_client.nbd_start_disk(lvol.top_bdev)
-        if not nbd_device:
-            logger.error(f"Failed to start nbd dev")
-            return False
-        lvol.nbd_device = nbd_device
+        pass
+        # nbd_device = rpc_client.nbd_start_disk(lvol.top_bdev)
+        # if not nbd_device:
+        #     logger.error(f"Failed to start nbd dev")
+        #     return False
+        # lvol.nbd_device = nbd_device
     else:
         logger.error(f"Unknown connection_type: {lvol.connection_type}")
         return False
 
-    # logger.info("Sending cluster map to LVol")
-    # ret = distr_controller.send_cluster_map_to_node(snode)
-    # if not ret:
-    #     return False, "Failed to send cluster map"
-    #
-    # spdk_mem_info_after = rpc_client.ultra21_util_get_malloc_stats()
-    # logger.debug("ultra21_util_get_malloc_stats:")
-    # logger.debug(spdk_mem_info_after)
-
-    # diff = {}
-    # for key in spdk_mem_info_after.keys():
-    #     diff[key] = spdk_mem_info_after[key] - spdk_mem_info_before[key]
-
-    # logger.info("spdk mem diff:")
-    # logger.info(json.dumps(diff, indent=2))
-    # lvol.mem_diff = diff
 
     return True, None
 
@@ -1102,9 +1074,9 @@ def list_lvols(is_json, cluster_id, pool_id_or_name):
             "Name": lvol.lvol_name,
             "Size": utils.humanbytes(lvol.size),
             "Hostname": lvol.hostname,
-            "HA": lvol.ha_type,
-            "VUID": lvol.vuid,
-            "Mod": f"{lvol.ndcs}x{lvol.npcs}",
+            "Conn": lvol.connection_type,
+            # "VUID": lvol.vuid,
+            # "Mod": f"{lvol.ndcs}x{lvol.npcs}",
             "Status": lvol.status,
             "IO Err": lvol.io_error,
             "Health": lvol.health_check,

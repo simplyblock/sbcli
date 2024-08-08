@@ -391,7 +391,7 @@ def connect(caching_node_id, lvol_id):
                 logger.error("Caching node not found")
                 return False
 
-    for clvol in cnode.lvols:
+    for clvol in cnode.connected_lvols:
         if clvol.lvol_id == lvol_id:
             logger.info(f"Already connected, dev path: {clvol.device_path}")
             return False
@@ -400,85 +400,28 @@ def connect(caching_node_id, lvol_id):
         logger.error("Caching node and LVol are in different clusters")
         return False
 
-    logger.info("Connecting to remote LVOL")
-    mini_id = lvol.get_id().split("-")[0]
-    rem_name = f"rem_{mini_id}"
-    rpc_client = RPCClient(
-        cnode.mgmt_ip, cnode.rpc_port, cnode.rpc_username, cnode.rpc_password,
-        timeout=60*5, retry=5)
-    # create nvmef connection
-    if lvol.ha_type == 'single':
-        snode = db_controller.get_storage_node_by_id(lvol.node_id)
-        for nic in snode.data_nics:
-            ret = rpc_client.bdev_nvme_attach_controller_tcp_caching(rem_name, lvol.nqn, nic.ip4_address, "4420")
-            logger.debug(ret)
-            if not ret:
-                logger.warning("Failed to connect to LVol")
-                # return False
-
-    elif lvol.ha_type == "ha":
-        for nodes_id in lvol.nodes:
-            snode = db_controller.get_storage_node_by_id(nodes_id)
-            for nic in snode.data_nics:
-                ret = rpc_client.bdev_nvme_attach_controller_tcp_caching(rem_name, lvol.nqn, nic.ip4_address, "4420")
-                logger.debug(ret)
-                # if not ret:
-                #     logger.error("Failed to connect to LVol")
-                #     return False
-
-    logger.info("Creating OCF BDev")
-    # create ocf device
-    cach_bdev = f"ocf_{mini_id}"
-    dev = cnode.cache_bdev
-    ret = rpc_client.bdev_ocf_create(cach_bdev, 'wt', dev, f"{rem_name}n1")
-    logger.debug(ret)
-    if not ret:
-        logger.error("Failed to create OCF bdev")
-        return False
-
-    # logger.info("Creating local subsystem")
-    # create subsystem (local)
     subsystem_nqn = lvol.nqn
-    logger.info("Creating subsystem %s", subsystem_nqn)
-    ret = rpc_client.subsystem_create(subsystem_nqn, 'sbcli-cn', lvol.get_id())
-    ret = rpc_client.transport_list("TCP")
-    if not ret:
-        ret = rpc_client.transport_create("TCP")
-    ret = rpc_client.listeners_create(subsystem_nqn, "TCP", '127.0.0.1', "4420")
-    ret = rpc_client.nvmf_subsystem_listener_set_ana_state(subsystem_nqn, '127.0.0.1', "4420", is_optimized=True)
-
-    # add cached device to subsystem
-    # logger.info(f"Add {cach_bdev} to subsystem {subsystem_nqn}")
-    # ret = rpc_client.nvmf_subsystem_add_ns(subsystem_nqn, cach_bdev)
-    ret = rpc_client.nvmf_subsystem_add_ns(subsystem_nqn, cach_bdev, lvol.uuid, lvol.guid)
-
-    if not ret:
-        logger.error(f"Failed to add: {cach_bdev} to the subsystem: {subsystem_nqn}")
-        return False
-
-    logger.info("Connecting to local subsystem")
-    # make nvme connect to nqn
-    cnode_client = CNodeClient(cnode.api_endpoint)
-    ret, _ = cnode_client.connect_nvme('127.0.0.1', "4420", subsystem_nqn)
-    if not ret:
-        logger.error("Failed to connect to local subsystem")
-        return False
-
-    if cnode.multipathing:
+    dev_path = None
+    if lvol.connection_type == "nvmf":
+        cnode_client = CNodeClient(cnode.api_endpoint)
         snode = db_controller.get_storage_node_by_id(lvol.node_id)
         for nic in snode.data_nics:
             ip = nic.ip4_address
             ret, _ = cnode_client.connect_nvme(ip, "4420", subsystem_nqn)
             break
 
-    time.sleep(5)
-    cnode_info, _ = cnode_client.info()
-    nvme_devs = cnode_info['nvme_devices']
-    dev_path = None
-    for dev in nvme_devs:
-        if dev['model_id'] == lvol.get_id():
-            dev_path = dev['device_path']
-            break
+        time.sleep(3)
+        cnode_info, _ = cnode_client.info()
+        nvme_devs = cnode_info['nvme_devices']
+        dev_path = None
+        for dev in nvme_devs:
+            if dev['model_id'] == lvol.get_id():
+                dev_path = dev['device_path']
+                break
+
+    elif lvol.connection_type == "nbd":
+        rpc_client = RPCClient(cnode.mgmt_ip, cnode.rpc_port, cnode.rpc_username, cnode.rpc_password)
+        dev_path = rpc_client.nbd_start_disk(lvol.top_bdev)
 
     if not dev_path:
         logger.error(f"Device path was not found")
@@ -493,16 +436,15 @@ def connect(caching_node_id, lvol_id):
     cached_lvol.hostname = cnode.hostname
 
     cached_lvol.local_nqn = subsystem_nqn
-    cached_lvol.ocf_bdev = cach_bdev
     cached_lvol.device_path = dev_path
 
     tmp = []
-    for lv in cnode.lvols:
+    for lv in cnode.connected_lvols:
         if lv.lvol_id != lvol.get_id():
             tmp.append(lv)
 
     tmp.append(cached_lvol)
-    cnode.lvols = tmp
+    cnode.connected_lvols = tmp
     cnode.write_to_db(db_controller.kv_store)
 
     return dev_path
@@ -529,7 +471,7 @@ def disconnect(caching_node_id, lvol_id):
                 return False
 
     caching_lvol = None
-    for clvol in cnode.lvols:
+    for clvol in cnode.connected_lvols:
         if clvol.lvol_id == lvol_id:
             caching_lvol = clvol
             break
@@ -537,56 +479,28 @@ def disconnect(caching_node_id, lvol_id):
         logger.error("LVol is not connected.")
         return False
 
-    # logger.info("Disconnecting LVol")
-    # disconnect local nvme
-    cnode_client = CNodeClient(cnode.api_endpoint)
-    subsystem_nqn = lvol.nqn
+    if lvol.connection_type == "nvmf":
+        try:
+            cnode_client = CNodeClient(cnode.api_endpoint)
+            ret, _ = cnode_client.disconnect_nqn(lvol.nqn)
+            if not ret:
+                logger.error("failed to disconnect local connecting")
 
-    try:
-        ret, _ = cnode_client.disconnect_nqn(subsystem_nqn)
-    except:
-        pass
-    # if not ret:
-    #     logger.error("failed to disconnect local connecting")
-    #     return False
+        except Exception as e:
+            logger.exception(e)
 
-    # remove subsystem
-    rpc_client = RPCClient(
-        cnode.mgmt_ip, cnode.rpc_port, cnode.rpc_username, cnode.rpc_password, timeout=120)
-
-    ret = rpc_client.subsystem_delete(subsystem_nqn)
-
-    # remove ocf bdev
-    mini_id = lvol.get_id().split("-")[0]
-    rem_name = f"rem_{mini_id}"
-    cach_bdev = f"ocf_{mini_id}"
-
-    ret = rpc_client.bdev_ocf_delete(cach_bdev)
-    if not ret:
-        logger.error("failed to delete ocf bdev")
-        return False
-
-    # disconnect lvol controller/s
-    ret = rpc_client.bdev_nvme_detach_controller(rem_name)
-    if not ret:
-        logger.error("failed to disconnect remote connecting")
-        return False
+    elif lvol.connection_type == "nbd":
+        rpc_client = RPCClient(cnode.mgmt_ip, cnode.rpc_port, cnode.rpc_username, cnode.rpc_password)
+        rpc_client.nbd_stop_disk(caching_lvol.device_path)
 
     # remove lvol id from node lvol list
     n_list = []
-    for clvol in cnode.lvols:
+    for clvol in cnode.connected_lvols:
         if clvol.lvol_id != lvol_id:
             n_list.append(clvol)
-    cnode.lvols = n_list
+    cnode.connected_lvols = n_list
     cnode.write_to_db(db_controller.kv_store)
 
-    # if lvol.ha_type == 'single':
-    #     ret = rpc_client.bdev_nvme_detach_controller(lvol.get_id())
-    #
-    # elif lvol.ha_type == "ha":
-    #     for nodes_id in lvol.nodes:
-    #         snode = db_controller.get_storage_node_by_id(nodes_id)
-    #         ret = rpc_client.bdev_nvme_attach_controller_tcp(lvol.get_id(), lvol.nqn, nic.ip4_address, "4420")
     return True
 
 
