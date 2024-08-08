@@ -11,6 +11,7 @@ import docker
 
 from simplyblock_core import utils, scripts, constants
 from simplyblock_core.cnode_client import CNodeClient
+from simplyblock_core.controllers import lvol_controller
 from simplyblock_core.kv_store import DBController
 from simplyblock_core.models.caching_node import CachingNode, CachedLVol
 from simplyblock_core.models.iface import IFace
@@ -644,22 +645,32 @@ def remove_node(node_id, force=False):
         logger.error(f"Can not find caching node: {node_id}")
         return False
 
-    if snode.lvols:
+    if snode.connected_lvols:
         if force:
-            for clvol in snode.lvols:
+            for clvol in snode.connected_lvols:
                 logger.info(f"Disconnecting LVol {clvol.lvol_id}")
                 disconnect(node_id, clvol.lvol_id)
         else:
             logger.error("Connected LVols found on the node, use --force to disconnect all")
             return False
 
-    logger.info("Removing node")
+    if snode.lvols:
+        if force:
+            for lvol_id in snode.lvols:
+                ret = lvol_controller.delete_lvol(lvol_id, force=True)
+                # logger.info(f"Disconnecting LVol {clvol.lvol_id}")
+                # disconnect(node_id, clvol.lvol_id)
+        else:
+            logger.error("LVols found on the node, use --force to delete all")
+            return False
 
+    rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
+    rpc_client.bdev_lvol_delete_lvstore("lvs_1")
+    logger.info("Removing node")
     try:
         snode_api = CNodeClient(snode.api_endpoint)
         results, err = snode_api.spdk_process_kill()
         ret = snode_api.delete_dev_gpt_partitions(snode.nvme_devices[0].pcie_address)
-
     except:
         pass
 
