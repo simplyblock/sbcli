@@ -137,7 +137,6 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spd
     snode.cpu = node_info['cpu_count']
     snode.cpu_hz = node_info['cpu_hz']
     snode.memory = node_info['memory']
-    snode.multipathing = multipathing
 
     # check for memory
     if "memory_details" in node_info and node_info['memory_details']:
