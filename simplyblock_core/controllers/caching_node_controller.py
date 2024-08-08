@@ -606,7 +606,7 @@ def list_lvols(caching_node_id):
 
     data = []
 
-    for clvol in cnode.lvols:
+    for clvol in cnode.connected_lvols:
         lvol = clvol.lvol
         logger.debug(clvol)
         logger.debug("*" * 20)

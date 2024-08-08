@@ -872,10 +872,10 @@ def delete_lvol_from_node(lvol_id, node_id, clear_data=True):
         ret = rpc_client.subsystem_delete(lvol.nqn)
         if not ret:
             logger.warning(f"Failed to remove subsystem: {lvol.nqn}")
-    elif lvol.connection_type == "nbd":
-        ret = rpc_client.nbd_stop_disk(lvol.nbd_device)
-        if not ret:
-            logger.warning(f"Failed to stop nbd: {lvol.nbd_device}")
+    # elif lvol.connection_type == "nbd":
+    #     ret = rpc_client.nbd_stop_disk(lvol.nbd_device)
+    #     if not ret:
+    #         logger.warning(f"Failed to stop nbd: {lvol.nbd_device}")
 
     time.sleep(1)
 

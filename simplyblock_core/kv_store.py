@@ -229,7 +229,7 @@ class DBController:
     def get_lvol_stats(self, lvol, limit=20):
         if isinstance(lvol, str):
             lvol = self.get_lvol_by_id(lvol)
-        stats = LVolStatObject().read_from_db(self.kv_store, id="%s/%s" % (lvol.pool_uuid, lvol.uuid), limit=limit, reverse=True)
+        stats = LVolStatObject().read_from_db(self.kv_store, id="%s/%s" % (lvol.uuid, lvol.uuid), limit=limit, reverse=True)
         return stats
 
     def get_cached_lvol_stats(self, lvol_id, limit=20):
