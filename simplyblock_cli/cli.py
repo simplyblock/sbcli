@@ -582,13 +582,18 @@ class CLIWrapper:
         sub_command.add_argument("cluster_id", help='UUID of the cluster to which the node will belong')
         sub_command.add_argument("node_ip", help='IP of caching node to add')
         sub_command.add_argument("ifname", help='Management interface name')
-        sub_command.add_argument("--cpu-mask", help='SPDK app CPU mask, default is all cores found',
-                                 dest='spdk_cpu_mask')
+        sub_command.add_argument("--cpu-mask", help='SPDK app CPU mask, default is all cores found', dest='spdk_cpu_mask')
         sub_command.add_argument("--memory", help='SPDK huge memory allocation, default is Max hugepages available', dest='spdk_mem')
         sub_command.add_argument("--spdk-image", help='SPDK image uri', dest='spdk_image')
         sub_command.add_argument("--namespace", help='k8s namespace to deploy on',)
-        sub_command.add_argument("--multipathing", help='Enable multipathing for lvol connection, default: on',
-                                 default="on", choices=["on", "off"])
+
+        sub_command.add_argument("--s3-data-path", help='s3 fuse mount point', dest="s3_data_path")
+        sub_command.add_argument("--initial-stor-size", help='s3 size', dest="initial_stor_size")
+        sub_command.add_argument("--min-ftl-buffer-percent", help='FTL buffer partition percent',
+                                 dest="min_ftl_buffer_percent", type=int)
+        sub_command.add_argument("--lvstore-cluster-size", help='LVS cluster size', dest="lvstore_cluster_size")
+        sub_command.add_argument("--num-md-pages-per-cluster-ratio", help='LVS md cluster ratio', dest="num_md_pages_per_cluster_ratio")
+
 
         self.add_sub_command(subparser, 'list', 'List Caching nodes')
 
@@ -1079,7 +1084,12 @@ class CLIWrapper:
                 data_nics = []
                 spdk_image = args.spdk_image
                 namespace = args.namespace
-                multipathing = args.multipathing == "on"
+
+                s3_data_path = args.s3_data_path
+                initial_stor_size = args.initial_stor_size
+                min_ftl_buffer_percent = args.min_ftl_buffer_percent
+                lvstore_cluster_size = args.lvstore_cluster_size
+                num_md_pages_per_cluster_ratio = args.num_md_pages_per_cluster_ratio
 
                 spdk_cpu_mask = None
                 if args.spdk_cpu_mask:
@@ -1095,7 +1105,14 @@ class CLIWrapper:
                         return f"SPDK memory:{args.spdk_mem} must be larger than 1G"
 
                 ret = caching_node_controller.add_node(
-                    cluster_id, node_ip, ifname, data_nics, spdk_cpu_mask, spdk_mem, spdk_image, namespace, multipathing)
+                    cluster_id, node_ip, ifname, data_nics, spdk_cpu_mask, spdk_mem, spdk_image,
+                    namespace,
+                    s3_data_path=s3_data_path,
+                    initial_stor_size=initial_stor_size,
+                    min_ftl_buffer_percent=min_ftl_buffer_percent,
+                    lvstore_cluster_size=lvstore_cluster_size,
+                    num_md_pages_per_cluster_ratio=num_md_pages_per_cluster_ratio,
+                )
 
             if sub_command == "list":
                 #cluster_id

@@ -72,7 +72,11 @@ def addNvmeDevices(rpc_client, devs, snode):
     return devices
 
 
-def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spdk_mem, spdk_image=None, namespace=None, multipathing=True):
+def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spdk_mem, spdk_image=None,
+             namespace=None, multipathing=True, s3_data_path=None, initial_stor_size=None, min_ftl_buffer_percent=None,
+             lvstore_cluster_size=None, num_md_pages_per_cluster_ratio=None):
+
+
     db_controller = DBController()
     kv_store = db_controller.kv_store
 
@@ -208,45 +212,45 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spd
     logger.info(f"Hugepages to be used: {utils.humanbytes(mem)}")
 
     ssd_size = ssd_dev.size
-    supported_ssd_size = ssd_size / 2
-    # supported_ssd_size = mem * 100 / 2.25
+    supported_ssd_size = mem * 100 / 2.25
 
     logger.info(f"Supported SSD size: {utils.humanbytes(supported_ssd_size)}")
     logger.info(f"SSD size: {utils.humanbytes(ssd_size)}")
 
-    # if supported_ssd_size < ssd_size:
-    if len(nvme_devs) < 2:
-        # logger.info(f"SSD size is bigger than the supported size, creating partition")
+    supported_percent = int(supported_ssd_size*100/ssd_size)
 
-        nbd_device = rpc_client.nbd_start_disk(ssd_dev.nvme_bdev)
-        time.sleep(3)
-        if not nbd_device:
-            logger.error(f"Failed to start nbd dev")
-            return False
+    if not min_ftl_buffer_percent:
+        min_ftl_buffer_percent = 50
 
-        jm_percent = int((supported_ssd_size/ssd_size) * 100)
-        result, error = cnode_api.make_gpt_partitions(nbd_device, jm_percent)
-        if error:
-            logger.error(f"Failed to make partitions")
-            logger.error(error)
-            return False
-        time.sleep(3)
-        rpc_client.nbd_stop_disk(nbd_device)
-        time.sleep(1)
-        rpc_client.bdev_nvme_detach_controller(ssd_dev.nvme_controller)
-        time.sleep(1)
-        rpc_client.bdev_nvme_controller_attach(ssd_dev.nvme_controller, ssd_dev.pcie_address)
-        time.sleep(1)
-        # rpc_client.bdev_examine(ssd_dev.nvme_bdev)
-        time.sleep(1)
+    nbd_device = rpc_client.nbd_start_disk(ssd_dev.nvme_bdev)
+    time.sleep(2)
+    if not nbd_device:
+        logger.error(f"Failed to start nbd dev")
+        return False
 
-        cache_bdev = f"{ssd_dev.nvme_bdev}p1"
-        cache_size = int(supported_ssd_size)
+    jm_percent = min(supported_percent, (100-min_ftl_buffer_percent))
+    result, error = cnode_api.make_gpt_partitions(nbd_device, jm_percent)
+    if error:
+        logger.error(f"Failed to make partitions")
+        logger.error(error)
+        return False
+    time.sleep(3)
+    rpc_client.nbd_stop_disk(nbd_device)
+    time.sleep(1)
+    rpc_client.bdev_nvme_detach_controller(ssd_dev.nvme_controller)
+    time.sleep(1)
+    rpc_client.bdev_nvme_controller_attach(ssd_dev.nvme_controller, ssd_dev.pcie_address)
+    time.sleep(1)
+    # rpc_client.bdev_examine(ssd_dev.nvme_bdev)
+    time.sleep(1)
 
-    else:
+    cache_bdev = f"{ssd_dev.nvme_bdev}p1"
+    cache_size = int((jm_percent*ssd_size)/100)
 
-        cache_bdev = ssd_dev.nvme_bdev
-        cache_size = ssd_dev.size
+    # else:
+    #
+    #     cache_bdev = ssd_dev.nvme_bdev
+    #     cache_size = ssd_dev.size
 
     logger.info(f"Cache size: {utils.humanbytes(cache_size)}")
 
@@ -258,8 +262,10 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spd
 
 
     filename = "/dev/nvme1n1"
+    if s3_data_path:
+        filename = s3_data_path
 
-    ret = rpc_client.bdev_aio_create("aio_1", filename, 512)
+    ret = rpc_client.bdev_aio_create("aio_1", filename)
     if not ret:
         logger.error("Failed ot create bdev")
         return False
@@ -281,8 +287,15 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spd
         return False
 
     # create lvs
-
-    ret = rpc_client.create_lvstore("lvs_1", "ocf_1")
+    md_pages_ratio = 1
+    if num_md_pages_per_cluster_ratio:
+        md_pages_ratio = num_md_pages_per_cluster_ratio
+    cluster_sz = None
+    if lvstore_cluster_size:
+        cluster_sz = lvstore_cluster_size
+    ret = rpc_client.create_lvstore(
+        "lvs_1", "ocf_1", num_md_pages_per_cluster_ratio=md_pages_ratio,
+        cluster_sz=cluster_sz)
     if not ret:
         logger.error("Failed ot create bdev")
         return False

@@ -233,8 +233,15 @@ class RPCClient:
         params = {"name": device_name}
         return self._request("bdev_nvme_reset_controller", params)
 
-    def create_lvstore(self, name, bdev_name):
-        params = {"bdev_name": bdev_name, "lvs_name": name}
+    def create_lvstore(self, name, bdev_name, num_md_pages_per_cluster_ratio=None, cluster_sz=None):
+        params = {
+            "bdev_name": bdev_name,
+            "lvs_name": name,
+        }
+        if num_md_pages_per_cluster_ratio:
+            params['num_md_pages_per_cluster_ratio'] = num_md_pages_per_cluster_ratio
+        if cluster_sz:
+            params['cluster_sz'] = cluster_sz
         return self._request("bdev_lvol_create_lvstore", params)
 
     def create_lvol(self, name, size_in_mib, lvs_name):
@@ -707,11 +714,11 @@ class RPCClient:
         }
         return self._request("bdev_ftl_create", params)
 
-
     def bdev_aio_create(self, name, filename, block_size):
         params = {
             "name": name,
             "filename": filename,
-            "block_size": block_size,
         }
+        if params:
+            params["block_size"] = block_size
         return self._request("bdev_aio_create", params)
