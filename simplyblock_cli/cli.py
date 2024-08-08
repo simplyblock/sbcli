@@ -349,6 +349,8 @@ class CLIWrapper:
         sub_command = self.add_sub_command(subparser, 'add', 'Add a new logical volume')
         sub_command.add_argument("name", help='LVol name or id')
         sub_command.add_argument("size", help='LVol size: 10M, 10G, 10(bytes)')
+        sub_command.add_argument("--connection-type", help='connection type, nvmf or nbd, default:nvmf', dest="connection_type",
+                                 default="nvmf", choices=["nvmf", "nbd"])
         sub_command.add_argument("--pool", help='Pool UUID or name')
         sub_command.add_argument("--snapshot", "-s", help='Make LVol with snapshot capability, default is False',
                                  required=False, action='store_true')
@@ -909,7 +911,9 @@ class CLIWrapper:
                     with_snapshot=with_snapshot,
                     max_size=max_size,
                     crypto_key1=args.crypto_key1,
-                    crypto_key2=args.crypto_key2)
+                    crypto_key2=args.crypto_key2,
+                    connection_type=args.connection_type,
+                )
                 if results:
                     ret = results
                 else:

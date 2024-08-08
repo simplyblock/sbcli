@@ -286,12 +286,13 @@ def check_lvol_on_node(lvol_id, node_id):
                 logger.error(f"Checking LVol: {bdev_name} ... failed")
                 passed = False
 
-        ret = rpc_client.subsystem_list(lvol.nqn)
-        if ret:
-            logger.info(f"Checking subsystem ... ok")
-        else:
-            logger.info(f"Checking subsystem ... not found")
-            passed = False
+        if lvol.connection_type == "nvmf":
+            ret = rpc_client.subsystem_list(lvol.nqn)
+            if ret:
+                logger.info(f"Checking subsystem ... ok")
+            else:
+                logger.info(f"Checking subsystem ... not found")
+                passed = False
 
         # logger.info("Checking Distr map ...")
         # ret = rpc_client.distr_get_cluster_map(lvol.base_bdev)

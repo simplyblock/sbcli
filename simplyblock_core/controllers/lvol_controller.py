@@ -475,7 +475,8 @@ def validate_aes_xts_keys(key1: str, key2: str) -> Tuple[bool, str]:
 def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp, use_crypto,
                 distr_vuid, distr_ndcs, distr_npcs,
                 max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes,
-                distr_bs=None, distr_chunk_bs=None, with_snapshot=False, max_size=0, crypto_key1=None, crypto_key2=None):
+                distr_bs=None, distr_chunk_bs=None, with_snapshot=False, max_size=0, crypto_key1=None, crypto_key2=None,
+                connection_type="nvmf"):
 
     logger.info(f"Adding LVol: {name}")
     host_node = None
@@ -595,9 +596,10 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
     lvol.bdev_stack = []
     lvol.uuid = str(uuid.uuid4())
     lvol.guid = _generate_hex_string(16)
-    # lvol.vuid = vuid
     lvol.lvol_bdev = f"lvs_1/{name}"
     lvol.lvs_name = f"lvs_1"
+
+    lvol.connection_type = connection_type or "nvmf"
 
     lvol.crypto_bdev = ''
     lvol.comp_bdev = ''
@@ -614,7 +616,6 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
 
     lvol.base_bdev = lvol.lvol_bdev
     lvol.top_bdev = lvol.base_bdev
-
 
     lvol.bdev_stack.append({
         "type": "bdev_lvol",
@@ -764,36 +765,47 @@ def add_lvol_on_node(lvol, snode):
     if not ret:
         return False, msg
 
-    logger.info("creating subsystem %s", lvol.nqn)
-    ret = rpc_client.subsystem_create(lvol.nqn, 'sbcli-cn', lvol.uuid)
-    logger.debug(ret)
+    if lvol.connection_type == "nvmf":
+        logger.info("creating subsystem %s", lvol.nqn)
+        ret = rpc_client.subsystem_create(lvol.nqn, 'sbcli-cn', lvol.uuid)
+        logger.debug(ret)
 
-    # add listeners
-    logger.info("adding listeners")
-    for iface in snode.data_nics:
-        if iface.ip4_address:
-            tr_type = iface.get_transport_type()
-            ret = rpc_client.transport_list()
-            found = False
-            if ret:
-                for ty in ret:
-                    if ty['trtype'] == tr_type:
-                        found = True
-            if found is False:
-                ret = rpc_client.transport_create(tr_type)
-            logger.info("adding listener for %s on IP %s" % (lvol.nqn, iface.ip4_address))
-            ret = rpc_client.listeners_create(lvol.nqn, tr_type, iface.ip4_address, "4420")
-            is_optimized = False
-            # if lvol.node_id == snode.get_id():
-            #     is_optimized = True
-            logger.info(f"Setting ANA state: {is_optimized}")
-            ret = rpc_client.nvmf_subsystem_listener_set_ana_state(
-                lvol.nqn, iface.ip4_address, "4420", is_optimized)
+        # add listeners
+        logger.info("adding listeners")
+        for iface in snode.data_nics:
+            if iface.ip4_address:
+                tr_type = iface.get_transport_type()
+                ret = rpc_client.transport_list()
+                found = False
+                if ret:
+                    for ty in ret:
+                        if ty['trtype'] == tr_type:
+                            found = True
+                if found is False:
+                    ret = rpc_client.transport_create(tr_type)
+                logger.info("adding listener for %s on IP %s" % (lvol.nqn, iface.ip4_address))
+                ret = rpc_client.listeners_create(lvol.nqn, tr_type, iface.ip4_address, "4420")
+                is_optimized = False
+                # if lvol.node_id == snode.get_id():
+                #     is_optimized = True
+                logger.info(f"Setting ANA state: {is_optimized}")
+                ret = rpc_client.nvmf_subsystem_listener_set_ana_state(
+                    lvol.nqn, iface.ip4_address, "4420", is_optimized)
 
-    logger.info("Add BDev to subsystem")
-    ret = rpc_client.nvmf_subsystem_add_ns(lvol.nqn, lvol.top_bdev, lvol.uuid, lvol.guid)
-    if not ret:
-        return False, "Failed to add bdev to subsystem"
+        logger.info("Add BDev to subsystem")
+        ret = rpc_client.nvmf_subsystem_add_ns(lvol.nqn, lvol.top_bdev, lvol.uuid, lvol.guid)
+        if not ret:
+            return False, "Failed to add bdev to subsystem"
+
+    elif lvol.connection_type == "nbd":
+        nbd_device = rpc_client.nbd_start_disk(lvol.top_bdev)
+        if not nbd_device:
+            logger.error(f"Failed to start nbd dev")
+            return False
+        lvol.nbd_device = nbd_device
+    else:
+        logger.error(f"Unknown connection_type: {lvol.connection_type}")
+        return False
 
     # logger.info("Sending cluster map to LVol")
     # ret = distr_controller.send_cluster_map_to_node(snode)
@@ -1140,26 +1152,30 @@ def connect_lvol(uuid):
         return False
 
     out = []
-    nodes_ids = []
-    if lvol.ha_type == 'single':
-        nodes_ids.append(lvol.node_id)
+    if lvol.connection_type == "nvmf":
+        nodes_ids = []
+        if lvol.ha_type == 'single':
+            nodes_ids.append(lvol.node_id)
 
-    elif lvol.ha_type == "ha":
-        nodes_ids.extend(lvol.nodes)
+        elif lvol.ha_type == "ha":
+            nodes_ids.extend(lvol.nodes)
 
-    for nodes_id in nodes_ids:
-        snode = db_controller.get_storage_node_by_id(nodes_id)
-        for nic in snode.data_nics:
-            transport = nic.get_transport_type().lower()
-            ip = nic.ip4_address
-            port = 4420
-            out.append({
-                "transport": transport,
-                "ip": ip,
-                "port": port,
-                "nqn": lvol.nqn,
-                "connect": f"sudo nvme connect --transport={transport} --traddr={ip} --trsvcid={port} --nqn={lvol.nqn}",
-            })
+        for nodes_id in nodes_ids:
+            snode = db_controller.get_storage_node_by_id(nodes_id)
+            for nic in snode.data_nics:
+                transport = nic.get_transport_type().lower()
+                ip = nic.ip4_address
+                port = 4420
+                out.append({
+                    "transport": transport,
+                    "ip": ip,
+                    "port": port,
+                    "nqn": lvol.nqn,
+                    "connect": f"sudo nvme connect --transport={transport} --traddr={ip} --trsvcid={port} --nqn={lvol.nqn}",
+                })
+    elif lvol.connection_type == "nbd":
+        out.append({"connect": lvol.nbd_device})
+
     return out
 
 

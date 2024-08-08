@@ -63,6 +63,9 @@ class LVol(BaseModel):
 
         "deletion_status": {"type": str, 'default': ""},
 
+        "connection_type": {"type": str, 'default': "nvmf"},  # options: nvmf, nbd
+        "nbd_device": {"type": str, 'default': ""},
+
     }
 
     def __init__(self, data=None):

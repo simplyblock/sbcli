@@ -657,10 +657,9 @@ class RPCClient:
         params = {"name": name}
         return self._request("bdev_examine", params)
 
-    def nbd_start_disk(self, bdev_name, nbd_device="/dev/nbd0"):
+    def nbd_start_disk(self, bdev_name):
         params = {
             "bdev_name": bdev_name,
-            "nbd_device": nbd_device,
         }
         return self._request("nbd_start_disk", params)
 
