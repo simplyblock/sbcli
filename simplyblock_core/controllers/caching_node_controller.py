@@ -372,10 +372,10 @@ def connect(caching_node_id, lvol_id):
         logger.error(f"LVol must be online, lvol status: {lvol.status}")
         return False
 
-    pool = db_controller.get_pool_by_id(lvol.pool_uuid)
-    if pool.status == Pool.STATUS_INACTIVE:
-        logger.error(f"Pool is disabled")
-        return False
+    # pool = db_controller.get_pool_by_id(lvol.pool_uuid)
+    # if pool.status == Pool.STATUS_INACTIVE:
+    #     logger.error(f"Pool is disabled")
+    #     return False
 
     cnode = None
     if caching_node_id == 'this':
@@ -396,9 +396,9 @@ def connect(caching_node_id, lvol_id):
             logger.info(f"Already connected, dev path: {clvol.device_path}")
             return False
 
-    if cnode.cluster_id != pool.cluster_id:
-        logger.error("Caching node and LVol are in different clusters")
-        return False
+    # if cnode.cluster_id != pool.cluster_id:
+    #     logger.error("Caching node and LVol are in different clusters")
+    #     return False
 
     subsystem_nqn = lvol.nqn
     dev_path = None
@@ -483,8 +483,6 @@ def disconnect(caching_node_id, lvol_id):
         try:
             cnode_client = CNodeClient(cnode.api_endpoint)
             ret, _ = cnode_client.disconnect_nqn(lvol.nqn)
-            if not ret:
-                logger.error("failed to disconnect local connecting")
 
         except Exception as e:
             logger.exception(e)
@@ -572,7 +570,7 @@ def list_nodes(is_json=False):
             "Hostname": node.hostname,
             "Management IP": node.mgmt_ip,
             "LVols": f"{len(node.lvols)}",
-            "Conn LVols": f"{len(node.lvols)}",
+            "Conn LVols": f"{len(node.connected_lvols)}",
             "Cache": utils.humanbytes(node.cache_size),
             "HugeP": utils.humanbytes(node.hugepages),
             "Status": node.status,
