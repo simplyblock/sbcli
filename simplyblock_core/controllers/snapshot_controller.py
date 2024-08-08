@@ -57,11 +57,11 @@ def add(lvol_id, snapshot_name):
     return snap.uuid
 
 
-def list():
+def list(all=False):
     snaps = db_controller.get_snapshots()
     data = []
     for snap in snaps:
-        if snap.deleted is True:
+        if all is False and snap.deleted is True:
             continue
         logger.debug(snap)
         data.append({
@@ -86,7 +86,7 @@ def delete(snapshot_uuid):
         logger.error(f"Storage node not found {snap.lvol.node_id}")
         return False
 
-    for lvol in db_controller.get_lvols(snode.cluster_id):
+    for lvol in db_controller.get_lvols():
         if lvol.cloned_from_snap and lvol.cloned_from_snap == snapshot_uuid:
             logger.warning(f"Soft delete snapshot with clones, lvol ID: {lvol.get_id()}")
             snap.deleted = True

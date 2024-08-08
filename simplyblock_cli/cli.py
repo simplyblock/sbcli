@@ -562,7 +562,8 @@ class CLIWrapper:
         sub_command.add_argument("id", help='LVol UUID')
         sub_command.add_argument("name", help='snapshot name')
 
-        self.add_sub_command(subparser, 'list', 'List snapshots')
+        sub_command = self.add_sub_command(subparser, 'list', 'List snapshots')
+        sub_command.add_argument("--all", help='List all snapshots', required=False, action='store_true')
 
         sub_command = self.add_sub_command(subparser, 'delete', 'Delete a snapshot')
         sub_command.add_argument("id", help='snapshot UUID')
@@ -1062,7 +1063,7 @@ class CLIWrapper:
             if sub_command == "add":
                 ret = snapshot_controller.add(args.id, args.name)
             if sub_command == "list":
-                ret = snapshot_controller.list()
+                ret = snapshot_controller.list(args.all)
             if sub_command == "delete":
                 ret = snapshot_controller.delete(args.id)
             if sub_command == "clone":

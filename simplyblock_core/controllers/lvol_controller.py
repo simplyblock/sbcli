@@ -1075,7 +1075,7 @@ def list_lvols(is_json, cluster_id, pool_id_or_name):
             "Size": utils.humanbytes(lvol.size),
             "Hostname": lvol.hostname,
             "Conn": lvol.connection_type,
-            # "VUID": lvol.vuid,
+            "Type": lvol.lvol_type,
             # "Mod": f"{lvol.ndcs}x{lvol.npcs}",
             "Status": lvol.status,
             "IO Err": lvol.io_error,
