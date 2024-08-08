@@ -106,7 +106,7 @@ class DBController:
         return None
 
     def get_storage_node_by_id(self, id):
-        ret = StorageNode().read_from_db(self.kv_store, id)
+        ret = CachingNode().read_from_db(self.kv_store, id)
         if ret:
             return ret[0]
 

@@ -591,7 +591,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
     lvol.size = size
     lvol.max_size = max_size
     lvol.status = LVol.STATUS_ONLINE
-    # lvol.ha_type = ha_type
+    lvol.ha_type = "single"
     lvol.bdev_stack = []
     lvol.uuid = str(uuid.uuid4())
     lvol.guid = _generate_hex_string(16)
@@ -620,7 +620,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
         "type": "bdev_lvol",
         "name": lvol.lvol_bdev,
         "params": {
-            "name": lvol.lvol_bdev,
+            "name": lvol.lvol_name,
             "size_in_mib": int(lvol.size / (1000 * 1000)),
             "lvs_name": lvol.lvs_name
         }
@@ -704,7 +704,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
     # pool.write_to_db(db_controller.kv_store)
 
     lvol.write_to_db(db_controller.kv_store)
-    lvol_events.lvol_create(lvol)
+    # lvol_events.lvol_create(lvol)
 
     # set QOS
     if max_rw_iops or max_rw_mbytes or max_r_mbytes or max_w_mbytes:

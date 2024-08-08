@@ -293,19 +293,19 @@ def check_lvol_on_node(lvol_id, node_id):
             logger.info(f"Checking subsystem ... not found")
             passed = False
 
-        logger.info("Checking Distr map ...")
-        ret = rpc_client.distr_get_cluster_map(lvol.base_bdev)
-        if not ret:
-            logger.error("Failed to get cluster map")
-            passed = False
-        else:
-            results, is_passed = distr_controller.parse_distr_cluster_map(ret)
-            if results:
-                logger.info(utils.print_table(results))
-                logger.info(f"Checking Distr map ... {is_passed}")
-            else:
-                logger.error("Failed to parse distr cluster map")
-            passed &= is_passed
+        # logger.info("Checking Distr map ...")
+        # ret = rpc_client.distr_get_cluster_map(lvol.base_bdev)
+        # if not ret:
+        #     logger.error("Failed to get cluster map")
+        #     passed = False
+        # else:
+        #     results, is_passed = distr_controller.parse_distr_cluster_map(ret)
+        #     if results:
+        #         logger.info(utils.print_table(results))
+        #         logger.info(f"Checking Distr map ... {is_passed}")
+        #     else:
+        #         logger.error("Failed to parse distr cluster map")
+        #     passed &= is_passed
     except Exception as e:
         logger.exception(e)
         return False

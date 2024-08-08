@@ -47,7 +47,7 @@ def addNvmeDevices(rpc_client, devs, snode):
             time.sleep(2)
 
         for nvme_bdev in nvme_bdevs:
-            rpc_client.bdev_examine(nvme_bdev)
+            # rpc_client.bdev_examine(nvme_bdev)
             time.sleep(3)
             ret = rpc_client.get_bdevs(nvme_bdev)
             nvme_dict = ret[0]
@@ -214,8 +214,9 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spd
     logger.info(f"Supported SSD size: {utils.humanbytes(supported_ssd_size)}")
     logger.info(f"SSD size: {utils.humanbytes(ssd_size)}")
 
-    if supported_ssd_size < ssd_size:
-        logger.info(f"SSD size is bigger than the supported size, creating partition")
+    # if supported_ssd_size < ssd_size:
+    if len(nvme_devs) < 2:
+        # logger.info(f"SSD size is bigger than the supported size, creating partition")
 
         nbd_device = rpc_client.nbd_start_disk(ssd_dev.nvme_bdev)
         time.sleep(3)
@@ -258,7 +259,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spd
 
     filename = "/dev/nvme1n1"
 
-    ret = rpc_client.bdev_aio_create("aio_1", filename, 4096)
+    ret = rpc_client.bdev_aio_create("aio_1", filename, 512)
     if not ret:
         logger.error("Failed ot create bdev")
         return False
