@@ -418,7 +418,8 @@ def decimal_to_hex_power_of_2(decimal_number):
 
 
 def get_logger(name):
-    log_level = os.getenv("LOG_LEVEL", constants.LOG_LEVEL).upper()
+    log_level = os.getenv("LOG_LEVEL")
+    log_level = log_level.upper() if log_level else constants.LOG_LEVEL
 
     logger = logging.getLogger(name)
     logger.setLevel(log_level)
