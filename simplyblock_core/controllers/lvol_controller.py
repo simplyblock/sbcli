@@ -873,6 +873,10 @@ def _remove_bdev_stack(bdev_stack, rpc_client):
             ret = rpc_client.lvol_compress_delete(name)
         elif type == "crypto":
             ret = rpc_client.lvol_crypto_delete(name)
+        elif type == "bdev_lvol":
+            ret = rpc_client.delete_lvol(name)
+        elif type == "bdev_lvol_clone":
+            ret = rpc_client.delete_lvol(name)
         else:
             logger.debug(f"Unknown BDev type: {type}")
             continue
@@ -992,9 +996,13 @@ def delete_lvol(id_or_name, force_delete=False):
                 return False
 
     # remove from storage node
-    if lvol.get_id() in snode.lvols:
-        snode.lvols.remove(lvol.get_id())
-        snode.write_to_db(db_controller.kv_store)
+    tmp = []
+    for lv in snode.lvols:
+        if lv.lvol_id != lvol.get_id():
+            tmp.append(lv)
+
+    snode.lvols = tmp
+    snode.write_to_db(db_controller.kv_store)
 
     # # remove from pool
     # if lvol.get_id() in pool.lvols:
