@@ -74,7 +74,7 @@ class CachingNode(BaseModel):
         "rpc_username": {"type": str, 'default': ""},
         "rpc_password": {"type": str, 'default': ""},
         "data_nics": {"type": List[IFace], 'default': []},
-        "lvols": {"type": List[LVol], 'default': []},
+        "lvols": {"type": List[str], 'default': []},
         "connected_lvols": {"type": List[CachedLVol], 'default': []},
         "node_lvs": {"type": str, 'default': "lvs"},
         "services": {"type": List[str], 'default': []},

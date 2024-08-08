@@ -969,9 +969,9 @@ def delete_lvol(id_or_name, force_delete=False):
 
     # remove from storage node
     tmp = []
-    for lv in snode.lvols:
-        if lv.lvol_id != lvol.get_id():
-            tmp.append(lv)
+    for lvol_id in snode.lvols:
+        if lvol_id != lvol.get_id():
+            tmp.append(lvol_id)
 
     snode.lvols = tmp
     snode.write_to_db(db_controller.kv_store)

@@ -571,9 +571,9 @@ def list_nodes(is_json=False):
             "UUID": node.uuid,
             "Hostname": node.hostname,
             "Management IP": node.mgmt_ip,
-            "LVOLs": f"{len(node.lvols)}",
+            "LVols": f"{len(node.lvols)}",
+            "Conn LVols": f"{len(node.lvols)}",
             "Cache": utils.humanbytes(node.cache_size),
-            "Ram": utils.humanbytes(node.memory),
             "HugeP": utils.humanbytes(node.hugepages),
             "Status": node.status,
             # "Updated At": datetime.datetime.strptime(node.updated_at, "%Y-%m-%d %H:%M:%S.%f").strftime(
