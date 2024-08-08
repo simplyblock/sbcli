@@ -418,8 +418,10 @@ def decimal_to_hex_power_of_2(decimal_number):
 
 
 def get_logger(name):
+    log_level = os.getenv("LOG_LEVEL", constants.LOG_LEVEL).upper()
+
     logger = logging.getLogger(name)
-    logger.setLevel(constants.LOG_LEVEL)
+    logger.setLevel(log_level)
     logger_handler = logging.StreamHandler(stream=sys.stdout)
     logger_handler.setFormatter(logging.Formatter('%(asctime)s: %(levelname)s: %(message)s'))
     logger.addHandler(logger_handler)
