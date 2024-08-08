@@ -24,193 +24,53 @@ class CLIWrapper:
         self.db_store = kv_store.KVStore()
         self.init_parser()
 
-        #
-        #----------------- storage-node -----------------
-        #
 
-        subparser = self.add_command('storage-node', 'Storage node commands', aliases=['sn'])
-        # Add storage node
-        sub_command = self.add_sub_command(subparser, "deploy", 'Deploy local services for remote ops (local run)')
+        # Caching node cli
+        subparser = self.add_command('caching-node', 'Caching client node commands', aliases=['cn'])
+
+        sub_command = self.add_sub_command(subparser, 'add-node', 'Add new Caching node to the cluster')
+        sub_command.add_argument("cluster_id", help='UUID of the cluster to which the node will belong')
+        sub_command.add_argument("node_ip", help='IP of caching node to add')
+        sub_command.add_argument("ifname", help='Management interface name')
+        sub_command.add_argument("--cpu-mask", help='SPDK app CPU mask, default is all cores found', dest='spdk_cpu_mask')
+        sub_command.add_argument("--memory", help='SPDK huge memory allocation, default is Max hugepages available', dest='spdk_mem')
+        sub_command.add_argument("--spdk-image", help='SPDK image uri', dest='spdk_image')
+        sub_command.add_argument("--namespace", help='k8s namespace to deploy on',)
+
+        sub_command.add_argument("--s3-data-path", help='s3 fuse mount point', dest="s3_data_path")
+        sub_command.add_argument("--initial-stor-size", help='s3 size', dest="initial_stor_size")
+        sub_command.add_argument("--min-ftl-buffer-percent", help='FTL buffer partition percent',
+                                 dest="min_ftl_buffer_percent", type=int)
+        sub_command.add_argument("--lvstore-cluster-size", help='LVS cluster size', dest="lvstore_cluster_size")
+        sub_command.add_argument("--num-md-pages-per-cluster-ratio", help='LVS md cluster ratio',
+                                 dest="num_md_pages_per_cluster_ratio", type=int)
+
+        sub_command = self.add_sub_command(subparser, 'deploy', 'Deploy caching node on this machine (local exec)')
         sub_command.add_argument("--ifname", help='Management interface name, default: eth0')
 
-        self.add_sub_command(subparser, "deploy-cleaner", 'clean local deploy (local run)')
+        self.add_sub_command(subparser, 'list', 'List Caching nodes')
+        sub_command = self.add_sub_command(subparser, 'list-lvols', 'List connected lvols')
+        sub_command.add_argument("id", help='Caching Node UUID')
 
-        sub_command = self.add_sub_command(subparser, "add-node", 'Add storage node by ip')
-        sub_command.add_argument("cluster_id", help='UUID of the cluster to which the node will belong')
-        sub_command.add_argument("node_ip", help='IP of storage node to add')
-        sub_command.add_argument("ifname", help='Management interface name')
-        sub_command.add_argument("--partitions", help='Number of partitions to create per device', type=int, default=0)
-        sub_command.add_argument("--jm-percent", help='Number in percent to use for JM from each device',
-                                 type=int, default=3, dest='jm_percent')
-        sub_command.add_argument("--data-nics", help='Data interface names', nargs='+', dest='data_nics')
-        sub_command.add_argument("--max-lvol", help='Max lvol per storage node', dest='max_lvol', type=int)
-        sub_command.add_argument("--max-snap", help='Max snapshot per storage node', dest='max_snap', type=int)
-        sub_command.add_argument("--max-prov", help='Max provisioning size of all storage nodes', dest='max_prov')
-        sub_command.add_argument("--number-of-devices", help='Number of devices per storage node if it\'s not supported EC2 instance', dest='number_of_devices', type=int)
+        sub_command = self.add_sub_command(subparser, 'remove', 'Remove Caching node from the cluster')
+        sub_command.add_argument("id", help='Caching Node UUID')
+        sub_command.add_argument("--force", help='Force remove', required=False, action='store_true')
 
-        sub_command.add_argument("--spdk-image", help='SPDK image uri', dest='spdk_image')
-        sub_command.add_argument("--spdk-debug", help='Enable spdk debug logs', dest='spdk_debug', required=False, action='store_true')
+        sub_command = self.add_sub_command(subparser, 'connect', 'Connect to LVol')
+        sub_command.add_argument("node_id", help='Caching node UUID')
+        sub_command.add_argument("lvol_id", help='LVol UUID')
 
-        sub_command.add_argument("--iobuf_small_bufsize", help='bdev_set_options param', dest='small_bufsize',  type=int, default=0)
-        sub_command.add_argument("--iobuf_large_bufsize", help='bdev_set_options param', dest='large_bufsize',  type=int, default=0)
+        sub_command = self.add_sub_command(subparser, 'disconnect', 'Disconnect LVol from Caching node')
+        sub_command.add_argument("node_id", help='Caching node UUID')
+        sub_command.add_argument("lvol_id", help='LVol UUID')
 
-        # delete storage node
-        sub_command = self.add_sub_command(subparser, "delete", 'Delete storage node obj')
-        sub_command.add_argument("node_id", help='UUID of storage node')
+        sub_command = self.add_sub_command(subparser, 'recreate', 'recreate Caching node bdevs')
+        sub_command.add_argument("node_id", help='Caching node UUID')
 
-        # remove storage node
-        sub_command = self.add_sub_command(subparser, "remove", 'Remove storage node')
-        sub_command.add_argument("node_id", help='UUID of storage node')
-        sub_command.add_argument("--force-remove", help='Force remove all LVols and snapshots',
-                                 dest='force_remove', required=False, action='store_true')
-        sub_command.add_argument("--force-migrate", help='Force migrate All LVols to other nodes',
-                                 dest='force_migrate', required=False, action='store_true')
-        # List all storage nodes
-        sub_command = self.add_sub_command(subparser, "list", 'List storage nodes')
-        sub_command.add_argument("--cluster-id", help='id of the cluster for which nodes are listed', dest='cluster_id')
-        sub_command.add_argument("--json", help='Print outputs in json format', action='store_true')
-
-        sub_command = self.add_sub_command(subparser, "get", 'Get storage node info')
-        sub_command.add_argument("id", help='UUID of storage node')
-
-        # Restart storage node
-        sub_command = self.add_sub_command(
-            subparser, "restart", 'Restart a storage node', usage='All functions and device drivers will be reset. '
-                                  'During restart, the node does not accept IO. In a high-availability setup, '
-                                  'this will not impact operations')
-        sub_command.add_argument("node_id", help='UUID of storage node')
-        sub_command.add_argument("--max-lvol", help='Max lvol per storage node', dest='max_lvol', type=int, default=0)
-        sub_command.add_argument("--max-snap", help='Max snapshot per storage node', dest='max_snap', type=int, default=0)
-        sub_command.add_argument("--max-prov", help='Max provisioning size of all storage nodes', dest='max_prov', default="")
-        sub_command.add_argument("--number-of-devices", help='Number of devices per storage node if it\'s not supported EC2 instance', dest='number_of_devices', type=int, default=0)
-
-        sub_command.add_argument("--spdk-image", help='SPDK image uri', dest='spdk_image')
-        sub_command.add_argument("--spdk-debug", help='Enable spdk debug logs', dest='spdk_debug', required=False, action='store_true')
-
-        sub_command.add_argument("--iobuf_small_bufsize", help='bdev_set_options param', dest='small_bufsize',  type=int, default=0)
-        sub_command.add_argument("--iobuf_large_bufsize", help='bdev_set_options param', dest='large_bufsize',  type=int, default=0)
-
-        # sub_command.add_argument("-t", '--test', help='Run smart test on the NVMe devices', action='store_true')
-
-        # Shutdown storage node
-        sub_command = self.add_sub_command(
-            subparser, "shutdown", 'Shutdown a storage node', usage='Once the command is issued, the node will stop accepting '
-                                   'IO,but IO, which was previously received, will still be processed. '
-                                   'In a high-availability setup, this will not impact operations.')
-        sub_command.add_argument("node_id", help='UUID of storage node')
-        sub_command.add_argument("--force", help='Force node shutdown', required=False, action='store_true')
-
-        # Suspend storage node
-        sub_command = self.add_sub_command(
-            subparser, "suspend", 'Suspend a storage node', usage='The node will stop accepting new IO, but will finish '
-                                  'processing any IO, which has been received already.')
-        sub_command.add_argument("node_id", help='UUID of storage node')
-        sub_command.add_argument("--force", help='Force node suspend', required=False, action='store_true')
-
-        # Resume storage node
-        sub_command = self.add_sub_command(subparser, "resume", 'Resume a storage node')
-        sub_command.add_argument("node_id", help='UUID of storage node')
-
-        sub_command = self.add_sub_command(subparser, "get-io-stats", 'Get node IO statistics')
-        sub_command.add_argument("node_id", help='Node ID')
-        sub_command.add_argument("--history", help='list history records -one for every 15 minutes- '
-                                                   'for XX days and YY hours -up to 10 days in total-, format: XXdYYh')
-
-        sub_command = self.add_sub_command(
-            subparser, 'get-capacity', 'Get node capacity statistics')
-        sub_command.add_argument("node_id", help='Node ID')
-        sub_command.add_argument("--history", help='list history records -one for every 15 minutes- '
-                                                   'for XX days and YY hours -up to 10 days in total-, format: XXdYYh')
-
-        # List storage devices of the storage node
-        sub_command = self.add_sub_command(subparser, "list-devices", 'List storage devices')
-        sub_command.add_argument("node_id", help='the node\'s UUID')
-        sub_command.add_argument(
-            "-s", '--sort', help='Sort the outputs', required=False, nargs=1, choices=['node-seq', 'dev-seq', 'serial'])
-        sub_command.add_argument(
-            "--json", help='Print outputs in json format', required=False, action='store_true')
-
-        sub_command = self.add_sub_command(subparser, "device-testing-mode", 'Set device testing mode')
-        sub_command.add_argument("device_id", help='Device UUID')
-        sub_command.add_argument("mode", help='Testing mode', choices=[
-            'full_pass_through', 'io_error_on_read', 'io_error_on_write',
-            'io_error_on_unmap', 'io_error_on_all', 'discard_io_all',
-            'hotplug_removal'], default='full_pass_through')
-
-        sub_command = self.add_sub_command(subparser, "get-device", 'Get storage device by id')
-        sub_command.add_argument("device_id", help='the devices\'s UUID')
-
-        # Reset storage device
-        sub_command = self.add_sub_command(
-            subparser, "reset-device", 'Reset storage device',
-            usage="Hardware device reset. Resetting the device can return the device from an "
-                  "unavailable into online state, if successful")
-        sub_command.add_argument("device_id", help='the devices\'s UUID')
-
-        # Reset storage device
-        sub_command = self.add_sub_command(subparser, "restart-device", 'Restart storage device',
-                                           usage="a previously removed or unavailable device may be returned into "
-                                                 "online state. If the device is not physically present, accessible "
-                                                 "or healthy, it will flip back into unavailable state again.")
-        sub_command.add_argument("id", help='the devices\'s UUID')
-
-        # Add a new storage device
-        sub_command = self.add_sub_command(subparser, 'add-device', 'Add a new storage device',
-                                           usage="Adding a device will include a previously detected device "
-                                                 "(currently in \"new\" state) into cluster and will launch and "
-                                                 "auto-rebalancing background process in which some cluster "
-                                                 "capacity is re-distributed to this newly added device.")
-        sub_command = self.add_sub_command(
-            subparser, 'remove-device', 'Remove a storage device', usage='The device will become unavailable, independently '
-                                        'if it was physically removed from the server. This function can be used if '
-                                        'auto-detection of removal did not work or if the device must be maintained '
-                                        'otherwise while remaining inserted into the server. ')
-        sub_command.add_argument("device_id", help='Storage device ID')
-        sub_command.add_argument("--force", help='Force device remove', required=False, action='store_true')
-
-        # sub_command = self.add_sub_command(
-        #     subparser, 'set-failed-device', 'Set storage device to failed state. ', usage='This command can be used, '
-        #                                     'if an administrator believes that the device must be changed, '
-        #                                     'but its status and health state do not lead to an automatic detection '
-        #                                     'of the failure state. Attention!!! The failed state is final, all data '
-        #                                     'on the device will be automatically recovered to other devices '
-        #                                     'in the cluster. ')
-
-        sub_command = self.add_sub_command(
-            subparser, 'get-capacity-device', 'Get device capacity')
-        sub_command.add_argument("device_id", help='Storage device ID')
-        sub_command.add_argument("--history", help='list history records -one for every 15 minutes- '
-                                                   'for XX days and YY hours -up to 10 days in total-, format: XXdYYh')
-
-        sub_command = self.add_sub_command(
-            subparser, 'get-io-stats-device', 'Get device IO statistics')
-        sub_command.add_argument("device_id", help='Storage device ID')
-        sub_command.add_argument("--history", help='list history records -one for every 15 minutes- '
-                                                   'for XX days and YY hours -up to 10 days in total-, format: XXdYYh')
-
-        sub_command = self.add_sub_command(subparser, 'port-list', 'Get Data interfaces list for a node')
-        sub_command.add_argument("node_id", help='Storage node ID')
-
-        sub_command = self.add_sub_command(subparser, 'port-io-stats', 'Get Data interfaces IO stats')
-        sub_command.add_argument("port_id", help='Data port ID')
-        sub_command.add_argument("--history", help='list history records -one for every 15 minutes- '
-                                                   'for XX days and YY hours -up to 10 days in total, format: XXdYYh')
-
-        # check storage node
-        sub_command = self.add_sub_command(subparser, "check", 'Health check storage node')
-        sub_command.add_argument("id", help='UUID of storage node')
-
-        # check device
-        sub_command = self.add_sub_command(subparser, "check-device", 'Health check device')
-        sub_command.add_argument("id", help='device UUID')
-
-        # node info
-        sub_command = self.add_sub_command(subparser, "info", 'Get node information')
-        sub_command.add_argument("id", help='Node UUID')
-
-        # node info-spdk
-        sub_command = self.add_sub_command(subparser, "info-spdk", 'Get SPDK memory information')
-        sub_command.add_argument("id", help='Node UUID')
+        sub_command = self.add_sub_command(subparser, 'get-lvol-stats', 'Get LVol stats')
+        sub_command.add_argument("lvol_id", help='LVol UUID')
+        sub_command.add_argument("--history", help='(XXdYYh), list history records (one for every 15 minutes) '
+                                                   'for XX days and YY hours (up to 10 days in total).')
 
         #
         # ----------------- cluster -----------------
@@ -396,10 +256,10 @@ class CLIWrapper:
         sub_command.add_argument("--pool", help='List LVols in particular Pool ID or name', dest="pool")
         sub_command.add_argument("--json", help='Print outputs in json format', required=False, action='store_true')
 
-        # Get the size and max_size of the lvol
-        sub_command = self.add_sub_command(subparser, 'list-mem', 'Get the size and max_size of the lvol')
-        sub_command.add_argument("--json", help='Print outputs in json format', required=False, action='store_true')
-        sub_command.add_argument("--csv", help='Print outputs in csv format', required=False, action='store_true')
+        # # Get the size and max_size of the lvol
+        # sub_command = self.add_sub_command(subparser, 'list-mem', 'Get the size and max_size of the lvol')
+        # sub_command.add_argument("--json", help='Print outputs in json format', required=False, action='store_true')
+        # sub_command.add_argument("--csv", help='Print outputs in csv format', required=False, action='store_true')
 
         # get lvol
         sub_command = self.add_sub_command(subparser, 'get', 'Get LVol details')
@@ -461,11 +321,11 @@ class CLIWrapper:
         sub_command.add_argument("--history", help='(XXdYYh), list history records (one for every 15 minutes) '
                                                    'for XX days and YY hours (up to 10 days in total).')
 
-        sub_command = self.add_sub_command(subparser, 'send-cluster-map', 'send cluster map')
-        sub_command.add_argument("id", help='LVol id')
-
-        sub_command = self.add_sub_command(subparser, 'get-cluster-map', 'get cluster map')
-        sub_command.add_argument("id", help='LVol id')
+        # sub_command = self.add_sub_command(subparser, 'send-cluster-map', 'send cluster map')
+        # sub_command.add_argument("id", help='LVol id')
+        #
+        # sub_command = self.add_sub_command(subparser, 'get-cluster-map', 'get cluster map')
+        # sub_command.add_argument("id", help='LVol id')
 
         # check lvol
         sub_command = self.add_sub_command(subparser, "check", 'Health check LVol')
@@ -556,6 +416,9 @@ class CLIWrapper:
         sub_command.add_argument("--history", help='(XXdYYh), list history records (one for every 15 minutes) '
                                                    'for XX days and YY hours (up to 10 days in total).')
 
+
+
+
         subparser = self.add_command('snapshot', 'Snapshot commands')
 
         sub_command = self.add_sub_command(subparser, 'add', 'Create new snapshot')
@@ -573,52 +436,8 @@ class CLIWrapper:
         sub_command.add_argument("lvol_name", help='LVol name')
         sub_command.add_argument("--resize", help='New LVol size: 10M, 10G, 10(bytes)')
 
-        # Caching node cli
-        subparser = self.add_command('caching-node', 'Caching client node commands', aliases=['cn'])
 
-        sub_command = self.add_sub_command(subparser, 'deploy', 'Deploy caching node on this machine (local exec)')
-        sub_command.add_argument("--ifname", help='Management interface name, default: eth0')
 
-        sub_command = self.add_sub_command(subparser, 'add-node', 'Add new Caching node to the cluster')
-        sub_command.add_argument("cluster_id", help='UUID of the cluster to which the node will belong')
-        sub_command.add_argument("node_ip", help='IP of caching node to add')
-        sub_command.add_argument("ifname", help='Management interface name')
-        sub_command.add_argument("--cpu-mask", help='SPDK app CPU mask, default is all cores found', dest='spdk_cpu_mask')
-        sub_command.add_argument("--memory", help='SPDK huge memory allocation, default is Max hugepages available', dest='spdk_mem')
-        sub_command.add_argument("--spdk-image", help='SPDK image uri', dest='spdk_image')
-        sub_command.add_argument("--namespace", help='k8s namespace to deploy on',)
-
-        sub_command.add_argument("--s3-data-path", help='s3 fuse mount point', dest="s3_data_path")
-        sub_command.add_argument("--initial-stor-size", help='s3 size', dest="initial_stor_size")
-        sub_command.add_argument("--min-ftl-buffer-percent", help='FTL buffer partition percent',
-                                 dest="min_ftl_buffer_percent", type=int)
-        sub_command.add_argument("--lvstore-cluster-size", help='LVS cluster size', dest="lvstore_cluster_size")
-        sub_command.add_argument("--num-md-pages-per-cluster-ratio", help='LVS md cluster ratio',
-                                 dest="num_md_pages_per_cluster_ratio", type=int)
-
-        self.add_sub_command(subparser, 'list', 'List Caching nodes')
-        sub_command = self.add_sub_command(subparser, 'list-lvols', 'List connected lvols')
-        sub_command.add_argument("id", help='Caching Node UUID')
-
-        sub_command = self.add_sub_command(subparser, 'remove', 'Remove Caching node from the cluster')
-        sub_command.add_argument("id", help='Caching Node UUID')
-        sub_command.add_argument("--force", help='Force remove', required=False, action='store_true')
-
-        sub_command = self.add_sub_command(subparser, 'connect', 'Connect to LVol')
-        sub_command.add_argument("node_id", help='Caching node UUID')
-        sub_command.add_argument("lvol_id", help='LVol UUID')
-
-        sub_command = self.add_sub_command(subparser, 'disconnect', 'Disconnect LVol from Caching node')
-        sub_command.add_argument("node_id", help='Caching node UUID')
-        sub_command.add_argument("lvol_id", help='LVol UUID')
-
-        sub_command = self.add_sub_command(subparser, 'recreate', 'recreate Caching node bdevs')
-        sub_command.add_argument("node_id", help='Caching node UUID')
-
-        sub_command = self.add_sub_command(subparser, 'get-lvol-stats', 'Get LVol stats')
-        sub_command.add_argument("lvol_id", help='LVol UUID')
-        sub_command.add_argument("--history", help='(XXdYYh), list history records (one for every 15 minutes) '
-                                                   'for XX days and YY hours (up to 10 days in total).')
 
 
     def init_parser(self):

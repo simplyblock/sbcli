@@ -4,13 +4,11 @@ from simplyblock_cli.cli import CLIWrapper
 
 
 COMMANDS = [
-    "storage-node",
-    "cluster",
-    "lvol",
-    "mgmt",
-    "pool",
-    "snapshot",
     "caching-node",
+    "lvol",
+    "snapshot",
+    "cluster",
+    "mgmt",
 ]
 
 
