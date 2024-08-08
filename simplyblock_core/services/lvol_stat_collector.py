@@ -14,10 +14,10 @@ logger = utils.get_logger(__name__)
 last_object_record = {}
 
 
-def add_lvol_stats(pool, lvol, stats_dict):
+def add_lvol_stats(lvol, stats_dict):
     now = int(time.time())
     data = {
-        "pool_id": pool.get_id(),
+        "pool_id": lvol.get_id(),
         "uuid": lvol.get_id(),
         "date": now}
 
@@ -41,7 +41,7 @@ def add_lvol_stats(pool, lvol, stats_dict):
             last_record = last_object_record[lvol.get_id()]
         else:
             last_record = LVolStatObject(
-                data={"uuid": lvol.get_id(), "pool_id": pool.get_id()}
+                data={"uuid": lvol.get_id(), "pool_id": lvol.get_id()}
             ).get_last(db_controller.kv_store)
         if last_record:
             time_diff = (now - last_record.date)
@@ -102,33 +102,17 @@ db_controller = kv_store.DBController()
 logger.info("Starting stats collector...")
 while True:
 
-    pools = db_controller.get_pools()
     all_lvols = db_controller.get_lvols()  # pass
-    for pool in pools:
-        lvols = []
-        for lvol in all_lvols:
-            if lvol.pool_uuid == pool.get_id():
-                lvols.append(lvol)
 
-        if not lvols:
-            logger.error("LVols list is empty")
+    for lvol in all_lvols:
+        snode = db_controller.get_storage_node_by_id(lvol.node_id)
+        rpc_client = RPCClient(
+            snode.mgmt_ip, snode.rpc_port,
+            snode.rpc_username, snode.rpc_password,
+            timeout=3, retry=2)
 
-        stat_records = []
-        for lvol in lvols:
-            # if lvol.status != lvol.STATUS_ONLINE:
-            #     logger.warning(f"LVol in not online, id: {lvol.get_id()}, status: {lvol.status}")
-            #     continue
-            snode = db_controller.get_storage_node_by_hostname(lvol.hostname)
-            rpc_client = RPCClient(
-                snode.mgmt_ip, snode.rpc_port,
-                snode.rpc_username, snode.rpc_password,
-                timeout=3, retry=2)
-
-            logger.info("Getting lVol stats: %s", lvol.uuid)
-            stats_dict = rpc_client.get_lvol_stats(lvol.top_bdev)
-            record = add_lvol_stats(pool, lvol, stats_dict)
-            stat_records.append(record)
-        if stat_records:
-            add_pool_stats(pool, stat_records)
+        logger.info("Getting lVol stats: %s", lvol.uuid)
+        stats_dict = rpc_client.get_lvol_stats(lvol.top_bdev)
+        record = add_lvol_stats(lvol, stats_dict)
 
     time.sleep(constants.LVOL_STAT_COLLECTOR_INTERVAL_SEC)
