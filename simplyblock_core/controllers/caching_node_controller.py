@@ -176,7 +176,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spd
         logger.error("Pod is not running, exiting")
         return False
 
-    time.sleep(10)
+    time.sleep(1)
 
     # creating RPCClient instance
     rpc_client = RPCClient(
@@ -208,7 +208,8 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spd
     logger.info(f"Hugepages to be used: {utils.humanbytes(mem)}")
 
     ssd_size = ssd_dev.size
-    supported_ssd_size = mem * 100 / 2.25
+    supported_ssd_size = ssd_size / 2
+    # supported_ssd_size = mem * 100 / 2.25
 
     logger.info(f"Supported SSD size: {utils.humanbytes(supported_ssd_size)}")
     logger.info(f"SSD size: {utils.humanbytes(ssd_size)}")
@@ -235,7 +236,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spd
         time.sleep(1)
         rpc_client.bdev_nvme_controller_attach(ssd_dev.nvme_controller, ssd_dev.pcie_address)
         time.sleep(1)
-        rpc_client.bdev_examine(ssd_dev.nvme_bdev)
+        # rpc_client.bdev_examine(ssd_dev.nvme_bdev)
         time.sleep(1)
 
         cache_bdev = f"{ssd_dev.nvme_bdev}p1"
@@ -251,17 +252,40 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spd
     snode.cache_bdev = cache_bdev
     snode.cache_size = cache_size
 
-    # create tmp ocf
-    logger.info(f"Creating first ocf bdev...")
 
-    ret = rpc_client.bdev_malloc_create("malloc_tmp", 512, int((100*1024*1024)/512))
+
+
+
+    filename = "/dev/nvme1n1"
+
+    ret = rpc_client.bdev_aio_create("aio_1", filename, 4096)
     if not ret:
-        logger.error("Failed ot create tmp malloc")
+        logger.error("Failed ot create bdev")
         return False
-    ret = rpc_client.bdev_ocf_create("ocf_tmp", 'wt', cache_bdev, "malloc_tmp")
+
+    # ret = rpc_client.bdev_ftl_create("ftl_1", "aio_1", f"{ssd_dev.nvme_bdev}p2")
+    # if not ret:
+    #     logger.error("Failed ot create bdev")
+    #     return False
+    #
+    # ret = rpc_client.bdev_passthru_create("pass_1", "ftl_1")
+    #
+    # if not ret:
+    #     logger.error("Failed ot create bdev")
+    #     return False
+
+    ret = rpc_client.bdev_ocf_create("ocf_1", 'wt', cache_bdev, "aio_1")
     if not ret:
-        logger.error("Failed ot create tmp OCF BDev")
+        logger.error("Failed ot create bdev")
         return False
+
+    # create lvs
+
+    ret = rpc_client.create_lvstore("lvs_1", "ocf_1")
+    if not ret:
+        logger.error("Failed ot create bdev")
+        return False
+
     logger.info("Setting node status to Active")
     snode.status = CachingNode.STATUS_ONLINE
     snode.write_to_db(kv_store)

@@ -692,3 +692,27 @@ class RPCClient:
     def thread_set_cpumask(self, app_thread_process_id, app_thread_mask):
         params = {"id": app_thread_process_id, "cpumask": app_thread_mask}
         return self._request("thread_set_cpumask", params)
+
+    def bdev_passthru_create(self, name, base_bdev_name):
+        params = {
+            "name": name,
+            "base_bdev_name": base_bdev_name
+        }
+        return self._request("bdev_passthru_create", params)
+
+    def bdev_ftl_create(self, name, base_bdev, cache):
+        params = {
+            "name": name,
+            "base_bdev": base_bdev,
+            "cache": cache
+        }
+        return self._request("bdev_ftl_create", params)
+
+
+    def bdev_aio_create(self, name, filename, block_size):
+        params = {
+            "name": name,
+            "filename": filename,
+            "block_size": block_size,
+        }
+        return self._request("bdev_aio_create", params)

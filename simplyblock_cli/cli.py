@@ -349,7 +349,7 @@ class CLIWrapper:
         sub_command = self.add_sub_command(subparser, 'add', 'Add a new logical volume')
         sub_command.add_argument("name", help='LVol name or id')
         sub_command.add_argument("size", help='LVol size: 10M, 10G, 10(bytes)')
-        sub_command.add_argument("pool", help='Pool UUID or name')
+        sub_command.add_argument("--pool", help='Pool UUID or name')
         sub_command.add_argument("--snapshot", "-s", help='Make LVol with snapshot capability, default is False',
                                  required=False, action='store_true')
         sub_command.add_argument("--max-size", help='LVol max size', dest='max_size', default="0")
