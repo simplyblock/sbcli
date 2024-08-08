@@ -722,3 +722,10 @@ class RPCClient:
         if block_size:
             params["block_size"] = block_size
         return self._request("bdev_aio_create", params)
+
+    def bdev_lvol_resize(self, name, size_in_mib):
+        params = {
+            "name": name,
+            "size_in_mib": size_in_mib
+        }
+        return self._request("bdev_lvol_resize", params)
