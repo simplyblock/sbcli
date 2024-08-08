@@ -27,71 +27,27 @@ def add(lvol_id, snapshot_name):
         logger.error(f"LVol not found: {lvol_id}")
         return False
 
-    # pool = db_controller.get_pool_by_id(lvol.pool_uuid)
-    # if pool.status == Pool.STATUS_INACTIVE:
-    #     logger.error(f"Pool is disabled")
-    #     return False
-
     logger.info(f"Creating snapshot: {snapshot_name} from LVol: {lvol.id}")
     snode = db_controller.get_storage_node_by_id(lvol.node_id)
 
-##############################################################################
-
-    # snode_api = SNodeClient(snode.api_endpoint)
-    # result, _ = snode_api.info()
-    # memory_free = result["memory_details"]["free"]
-    # huge_free = result["memory_details"]["huge_free"]
-    # total_node_capacity = db_controller.get_snode_size(snode.get_id())
-    #
-    # error = utils.validate_add_lvol_or_snap_on_node(memory_free, huge_free, snode.max_snap, lvol.size, total_node_capacity,
-    #                                                 len(db_controller.get_snapshots_by_node_id(snode.get_id())))
-    #
-    # if error:
-    #     logger.error(f"Failed to add snap on node {snode.get_id()}")
-    #     logger.error(error)
-    #     return False
-
-##############################################################################
     snap_count = 0
     for sn in db_controller.get_snapshots():
         if sn.lvol.get_id() == lvol_id:
             snap_count += 1
-    #
+
     rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
-    # spdk_mem_info_before = rpc_client.ultra21_util_get_malloc_stats()
-    #
-    # num_blocks = int(lvol.size / lvol.distr_bs)
-    # new_vuid = utils.get_random_vuid()
-    # base_name = f"distr_{new_vuid}_{snap_count}"
-    # ret = rpc_client.bdev_distrib_create(
-    #     base_name, new_vuid, lvol.ndcs, lvol.npcs, num_blocks,
-    #     lvol.distr_bs, lvol_controller.get_jm_names(snode), lvol.distr_chunk_bs,
-    #     None, None, lvol.distr_page_size, distrib_cpu_mask=snode.distrib_cpu_mask)
-    # if not ret:
-    #     logger.error("Failed to create Distr bdev")
-    #     return False, "Failed to create Distr bdev"
-    #
-    # ret = distr_controller.send_cluster_map_to_node(snode)
-    # if not ret:
-    #     return False, "Failed to send cluster map"
-    #
-    # ret = rpc_client.ultra21_lvol_bmap_init(
-    #     base_name, num_blocks, lvol.distr_bs, int(lvol.distr_page_size / lvol.distr_bs), num_blocks * 10)
-    # if not ret:
-    #     return False, "Failed to init distr bdev"
+    snap_name = f"{snapshot_name}_{snap_count}"
+    snap_bdev = f"{lvol.lvs_name}/{snap_name}"
 
-    logger.info("Creating Snapshot bdev")
-
-    snap_name = f"{lvol.snapshot_name}_{snap_count}"
     ret = rpc_client.lvol_create_snapshot(lvol.lvol_bdev, snap_name)
     if not ret:
         return False, "Failed to create snapshot lvol bdev"
 
-##############################################################################
+
     snap = SnapShot()
     snap.uuid = str(uuid.uuid4())
     snap.snap_name = snapshot_name
-    snap.snap_bdev = snap_name
+    snap.snap_bdev = snap_bdev
     snap.created_at = int(time.time())
     snap.lvol = lvol
 
@@ -204,26 +160,10 @@ def clone(snapshot_id, clone_name, new_size=0):
             logger.error(msg)
             return False, msg
 
-    # # Validate cloning snap on storage node
-    # snode_api = SNodeClient(snode.api_endpoint)
-    # result, _ = snode_api.info()
-    # memory_free = result["memory_details"]["free"]
-    # huge_free = result["memory_details"]["huge_free"]
-    # total_node_capacity = db_controller.get_snode_size(snode.get_id())
-    # error = utils.validate_add_lvol_or_snap_on_node(memory_free, huge_free, snode.max_lvol, snap.lvol.size,  total_node_capacity, len(snode.lvols))
-    # if error:
-    #     logger.error(error)
-    #     return False, f"Failed to add lvol on node {snode.get_id()}"
     lvol = LVol()
     lvol.lvol_name = clone_name
     lvol.size = snap.lvol.size
-    # lvol.vuid = snap.lvol.vuid
-    # lvol.distr_bs = snap.lvol.distr_bs
-    # lvol.ndcs = snap.lvol.ndcs
-    # lvol.npcs = snap.lvol.npcs
-    # lvol.distr_chunk_bs = snap.lvol.distr_chunk_bs
-    # lvol.distr_page_size = snap.lvol.distr_page_size
-    # lvol.distr_page_size = snap.lvol.distr_page_size
+
     if new_size:
         if snap.lvol.size >= new_size:
             msg=f"New size {new_size} must be higher than the original size {snap.lvol.size}"
@@ -239,38 +179,8 @@ def clone(snapshot_id, clone_name, new_size=0):
 
     # jm_names = lvol_controller.get_jm_names(snode)
     rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
-    # spdk_mem_info_before = rpc_client.ultra21_util_get_malloc_stats()
-    #
-    # num_blocks = int(lvol.size / lvol.distr_bs)
-    # new_vuid = utils.get_random_vuid()
-    # name = f"distr_{new_vuid}_1"
-    # ret = rpc_client.bdev_distrib_create(
-    #     name, new_vuid, lvol.ndcs, lvol.npcs, num_blocks,
-    #     lvol.distr_bs, jm_names, lvol.distr_chunk_bs, None, None, lvol.distr_page_size,
-    #     distrib_cpu_mask=snode.distrib_cpu_mask)
-    # if not ret:
-    #     msg="Failed to create Distr bdev"
-    #     logger.error(msg)
-    #     return False, msg
-    # if ret == "?":
-    #     logger.error(f"Failed to create Distr bdev, ret={ret}")
-    #     # return False
-    #
-    # logger.info("Sending cluster map to the lvol")
-    # ret = distr_controller.send_cluster_map_to_node(snode)
-    # if not ret:
-    #     msg = "Failed to send cluster map"
-    #     logger.error(msg)
-    #     return False, msg
 
     logger.info("Creating clone bdev")
-    # block_len = lvol.distr_bs
-    # page_len = int(lvol.distr_page_size / lvol.distr_bs)
-    # max_num_blocks = snap.lvol.max_size
-    # ret = rpc_client.ultra21_lvol_bmap_init(name, num_blocks, block_len, page_len, max_num_blocks)
-    # if not ret:
-    #     return False, "Failed to init distr bdev"
-
 
     lvol_name = f"clone_{lvol.lvol_name}"
     lvol_bdev = f"{lvol.lvs_name}/{lvol_name}"
@@ -284,7 +194,6 @@ def clone(snapshot_id, clone_name, new_size=0):
             return False, "Failed to create clone lvol bdev"
         lvol.size = new_size
 
-    ##############################################################################
 
     lvol_id = str(uuid.uuid4())
     # lvs_name = snap.lvol.lvol_bdev.split("/")[0]
@@ -330,20 +239,6 @@ def clone(snapshot_id, clone_name, new_size=0):
     lvol.ha_type = snap.lvol.ha_type
     lvol.status = LVol.STATUS_ONLINE
 
-    # spdk_mem_info_after = rpc_client.ultra21_util_get_malloc_stats()
-    # logger.debug("ultra21_util_get_malloc_stats:")
-    # logger.debug(spdk_mem_info_after)
-
-    # diff = {}
-    # for key in spdk_mem_info_after.keys():
-    #     diff[key] = spdk_mem_info_after[key] - spdk_mem_info_before[key]
-    #
-    # logger.info("spdk mem diff:")
-    # logger.info(json.dumps(diff, indent=2))
-    # lvol.mem_diff = diff
-
-    # pool.lvols.append(lvol_id)
-    # pool.write_to_db(db_controller.kv_store)
     lvol.write_to_db(db_controller.kv_store)
     snode.lvols.append(lvol_id)
     snode.write_to_db(db_controller.kv_store)
