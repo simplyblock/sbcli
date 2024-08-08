@@ -80,9 +80,9 @@ while True:
     cnodes = db_controller.get_caching_nodes()
     for node in cnodes:
         rpc_client = RPCClient(node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password, timeout=3, retry=1)
-        for cached_lvol in node.lvols:
+        for cached_lvol in node.connected_lvols:
             logger.info("Getting lVol stats: %s", cached_lvol.uuid)
-            stats_dict = rpc_client.get_lvol_stats(cached_lvol.ocf_bdev)
+            stats_dict = rpc_client.get_lvol_stats(cached_lvol.top_bdev)
             add_lvol_stats(cached_lvol.lvol, stats_dict)
 
     logger.info(f"Sleeping for {constants.CACHED_LVOL_STAT_COLLECTOR_INTERVAL_SEC} seconds")
