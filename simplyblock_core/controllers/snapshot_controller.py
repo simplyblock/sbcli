@@ -160,9 +160,9 @@ def clone(snapshot_id, clone_name, new_size=0):
             logger.error(msg)
             return False, msg
 
-    lvol = LVol()
+    lvol = LVol(data=snap.lvol.to_dict())
     lvol.lvol_name = clone_name
-    lvol.size = snap.lvol.size
+    # lvol.size = snap.lvol.size
 
     if new_size:
         if snap.lvol.size >= new_size:
@@ -198,14 +198,14 @@ def clone(snapshot_id, clone_name, new_size=0):
     lvol_id = str(uuid.uuid4())
     # lvs_name = snap.lvol.lvol_bdev.split("/")[0]
     # bdev_stack.append({"type": "ultra_lvol", "name": lvol_name})
-    bdev_stack = {
+    bdev_stack = [{
         "type": "bdev_lvol",
         "name": lvol_bdev,
         "params": {
             "name": lvol_name
         }
-    }
-    lvol_type = 'lvol'
+    }]
+    # lvol_type = 'lvol'
 
     subsystem_nqn = snode.subsystem + ":lvol:" + lvol_id
     logger.info("creating subsystem %s", subsystem_nqn)
@@ -227,16 +227,16 @@ def clone(snapshot_id, clone_name, new_size=0):
     lvol.bdev_stack = bdev_stack
     lvol.uuid = lvol_id
     lvol.lvol_bdev = lvol_bdev
-    lvol.top_bdev = lvol.lvol_bdev
+    lvol.top_bdev = lvol_bdev
     # lvol.base_bdev = name
     # lvol.hostname = snode.hostname
-    lvol.node_id = snode.get_id()
-    lvol.mode = 'read-write'
-    lvol.lvol_type = lvol_type
+    # lvol.node_id = snode.get_id()
+    # lvol.mode = 'read-write'
+    lvol.lvol_type = "clone"
     lvol.cloned_from_snap = snapshot_id
     lvol.nqn = subsystem_nqn
     # lvol.pool_uuid = pool.id
-    lvol.ha_type = snap.lvol.ha_type
+    # lvol.ha_type = snap.lvol.ha_type
     lvol.status = LVol.STATUS_ONLINE
 
     lvol.write_to_db(db_controller.kv_store)
