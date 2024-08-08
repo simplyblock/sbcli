@@ -891,8 +891,17 @@ def delete_lvol_from_node(lvol_id, node_id, clear_data=True):
     rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
 
     # 1- remove subsystem
-    logger.info(f"Removing subsystem")
-    ret = rpc_client.subsystem_delete(lvol.nqn)
+    if lvol.connection_type == "nvmf":
+        logger.info(f"Removing subsystem")
+        ret = rpc_client.subsystem_delete(lvol.nqn)
+        if not ret:
+            logger.warning(f"Failed to remove subsystem: {lvol.nqn}")
+    elif lvol.connection_type == "nbd":
+        ret = rpc_client.nbd_stop_disk(lvol.nbd_device)
+        if not ret:
+            logger.warning(f"Failed to stop nbd: {lvol.nbd_device}")
+
+    time.sleep(1)
 
     # 2- remove bdevs
     logger.info(f"Removing bdev stack")
@@ -900,30 +909,30 @@ def delete_lvol_from_node(lvol_id, node_id, clear_data=True):
     lvol.deletion_status = 'bdevs_deleted'
     lvol.write_to_db(db_controller.kv_store)
 
-    # 3- clear alceml devices
-    if clear_data:
-        logger.info(f"Clearing Alceml devices")
-        for node in db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id):
-            if node.status == StorageNode.STATUS_ONLINE:
-                rpc_node = RPCClient(node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password)
-                for dev in node.nvme_devices:
-                    if dev.status != NVMeDevice.STATUS_JM:
-                        ret = rpc_node.alceml_unmap_vuid(dev.alceml_bdev, lvol.vuid)
-
-        lvol.deletion_status = 'alceml_unmapped'
-        lvol.write_to_db(db_controller.kv_store)
-
-        # 4- clear JM
-        jm_device = snode.jm_device
-        ret = rpc_client.alceml_unmap_vuid(jm_device.alceml_bdev, lvol.vuid)
-        if not ret:
-            logger.error(f"Failed to unmap jm alceml {jm_device.alceml_bdev} with vuid {lvol.vuid}")
-        # ret = rpc_client.bdev_jm_unmap_vuid(jm_device.jm_bdev, lvol.vuid)
-        # if not ret:
-        #     logger.error(f"Failed to unmap jm {jm_device.jm_bdev} with vuid {lvol.vuid}")
-
-        lvol.deletion_status = 'jm_unmapped'
-        lvol.write_to_db(db_controller.kv_store)
+    # # 3- clear alceml devices
+    # if clear_data:
+    #     logger.info(f"Clearing Alceml devices")
+    #     for node in db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id):
+    #         if node.status == StorageNode.STATUS_ONLINE:
+    #             rpc_node = RPCClient(node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password)
+    #             for dev in node.nvme_devices:
+    #                 if dev.status != NVMeDevice.STATUS_JM:
+    #                     ret = rpc_node.alceml_unmap_vuid(dev.alceml_bdev, lvol.vuid)
+    #
+    #     lvol.deletion_status = 'alceml_unmapped'
+    #     lvol.write_to_db(db_controller.kv_store)
+    #
+    #     # 4- clear JM
+    #     jm_device = snode.jm_device
+    #     ret = rpc_client.alceml_unmap_vuid(jm_device.alceml_bdev, lvol.vuid)
+    #     if not ret:
+    #         logger.error(f"Failed to unmap jm alceml {jm_device.alceml_bdev} with vuid {lvol.vuid}")
+    #     # ret = rpc_client.bdev_jm_unmap_vuid(jm_device.jm_bdev, lvol.vuid)
+    #     # if not ret:
+    #     #     logger.error(f"Failed to unmap jm {jm_device.jm_bdev} with vuid {lvol.vuid}")
+    #
+    #     lvol.deletion_status = 'jm_unmapped'
+    #     lvol.write_to_db(db_controller.kv_store)
 
     return True
 
@@ -936,10 +945,10 @@ def delete_lvol(id_or_name, force_delete=False):
             logger.error(f"lvol not found: {id_or_name}")
             return False
 
-    pool = db_controller.get_pool_by_id(lvol.pool_uuid)
-    if pool.status == Pool.STATUS_INACTIVE:
-        logger.error(f"Pool is disabled")
-        return False
+    # pool = db_controller.get_pool_by_id(lvol.pool_uuid)
+    # if pool.status == Pool.STATUS_INACTIVE:
+    #     logger.error(f"Pool is disabled")
+    #     return False
 
     logger.debug(lvol)
     snode = db_controller.get_storage_node_by_id(lvol.node_id)
@@ -965,12 +974,12 @@ def delete_lvol(id_or_name, force_delete=False):
     lvol.status = LVol.STATUS_IN_DELETION
     lvol.write_to_db(db_controller.kv_store)
 
-    # disconnect from caching nodes:
-    cnodes = db_controller.get_caching_nodes()
-    for cnode in cnodes:
-        for lv in cnode.lvols:
-            if lv.lvol_id == lvol.get_id():
-                caching_node_controller.disconnect(cnode.get_id(), lvol.get_id())
+    # # disconnect from caching nodes:
+    # cnodes = db_controller.get_caching_nodes()
+    # for cnode in cnodes:
+    #     for lv in cnode.lvols:
+    #         if lv.lvol_id == lvol.get_id():
+    #             caching_node_controller.disconnect(cnode.get_id(), lvol.get_id())
 
     if lvol.ha_type == 'single':
         ret = delete_lvol_from_node(lvol.get_id(), lvol.node_id)
@@ -987,12 +996,12 @@ def delete_lvol(id_or_name, force_delete=False):
         snode.lvols.remove(lvol.get_id())
         snode.write_to_db(db_controller.kv_store)
 
-    # remove from pool
-    if lvol.get_id() in pool.lvols:
-        pool.lvols.remove(lvol.get_id())
-        pool.write_to_db(db_controller.kv_store)
+    # # remove from pool
+    # if lvol.get_id() in pool.lvols:
+    #     pool.lvols.remove(lvol.get_id())
+    #     pool.write_to_db(db_controller.kv_store)
 
-    lvol_events.lvol_delete(lvol)
+    # lvol_events.lvol_delete(lvol)
     lvol.remove(db_controller.kv_store)
 
     # if lvol is clone and snapshot is deleted, then delete snapshot
