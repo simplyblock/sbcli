@@ -74,7 +74,7 @@ def addNvmeDevices(rpc_client, devs, snode):
 
 
 def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spdk_mem, spdk_image=None,
-             namespace=None, multipathing=True, s3_data_path=None, initial_stor_size=None, min_ftl_buffer_percent=None,
+             namespace=None, s3_data_path=None, initial_stor_size=None, min_ftl_buffer_percent=None,
              lvstore_cluster_size=None, num_md_pages_per_cluster_ratio=None):
 
 

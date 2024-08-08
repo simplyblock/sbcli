@@ -36,7 +36,11 @@ def add_node_to_cluster():
     spdk_mem = None
     spdk_image = None
     namespace = None
-    multipathing = True
+    s3_data_path = None
+    initial_stor_size = None
+    min_ftl_buffer_percent = None
+    lvstore_cluster_size = None
+    num_md_pages_per_cluster_ratio = None
 
     if 'spdk_cpu_mask' in cl_data:
         spdk_cpu_mask = cl_data['spdk_cpu_mask']
@@ -53,12 +57,26 @@ def add_node_to_cluster():
     if 'namespace' in cl_data:
         namespace = cl_data['namespace']
 
-    if 'multipathing' in cl_data:
-        multipathing = bool(cl_data['multipathing'])
+    if 's3_data_path' in cl_data:
+        s3_data_path = bool(cl_data['s3_data_path'])
+
+    if 'initial_stor_size' in cl_data:
+        initial_stor_size = bool(cl_data['initial_stor_size'])
+
+    if 'min_ftl_buffer_percent' in cl_data:
+        min_ftl_buffer_percent = bool(cl_data['min_ftl_buffer_percent'])
+
+    if 'lvstore_cluster_size' in cl_data:
+        lvstore_cluster_size = bool(cl_data['lvstore_cluster_size'])
+
+    if 'num_md_pages_per_cluster_ratio' in cl_data:
+        num_md_pages_per_cluster_ratio = bool(cl_data['num_md_pages_per_cluster_ratio'])
 
     t = threading.Thread(
         target=caching_node_controller.add_node,
-        args=(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spdk_mem, spdk_image, namespace, multipathing))
+        args=(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spdk_mem, spdk_image, namespace,
+              s3_data_path, initial_stor_size, min_ftl_buffer_percent, lvstore_cluster_size,
+              num_md_pages_per_cluster_ratio))
     t.start()
 
     return utils.get_response(True)

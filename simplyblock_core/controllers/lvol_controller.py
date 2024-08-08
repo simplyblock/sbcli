@@ -487,105 +487,10 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
             if not host_node:
                 return False, f"Can not find node: {host_id_or_name}"
 
-    # pool = None
-    # for p in db_controller.get_pools():
-    #     if pool_id_or_name == p.id or pool_id_or_name == p.pool_name:
-    #         pool = p
-    #         break
-    # if not pool:
-    #     return False, f"Pool not found: {pool_id_or_name}"
-    #
+    if not host_node:
+        host_node = db_controller.get_caching_nodes()[0]
+
     cluster_obj = db_controller.get_clusters()[0]
-    # if cl.status not in [cl.STATUS_ACTIVE, cl.STATUS_DEGRADED]:
-    #     return False, f"Cluster is not active, status: {cl.status}"
-    #
-    # if ha_type == "default":
-    #     ha_type = "single"
-    #
-    # max_rw_iops = max_rw_iops or 0
-    # max_rw_mbytes = max_rw_mbytes or 0
-    # max_r_mbytes = max_r_mbytes or 0
-    # max_w_mbytes = max_w_mbytes or 0
-    #
-    # result, error = validate_add_lvol_func(name, size, None, pool_id_or_name,
-    #                                        max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes)
-    #
-    # if error:
-    #     logger.error(error)
-    #     return False, error
-
-    # cluster_size_prov = 0
-    # cluster_size_total = 0
-    # for lvol in db_controller.get_lvols(cl.get_id()):
-    #     cluster_size_prov += lvol.size
-    #
-    # dev_count = 0
-    # snodes = db_controller.get_storage_nodes_by_cluster_id(cl.get_id())
-    # online_nodes = []
-    # for node in snodes:
-    #     if node.status == node.STATUS_ONLINE:
-    #         online_nodes.append(node)
-    #         for dev in node.nvme_devices:
-    #             if dev.status == dev.STATUS_ONLINE:
-    #                 dev_count += 1
-    #                 cluster_size_total += dev.size
-    #
-    # if len(online_nodes) == 0:
-    #     logger.error("No online Storage nodes found")
-    #     return False, "No online Storage nodes found"
-    #
-    # if dev_count == 0:
-    #     logger.error("No NVMe devices found in the cluster")
-    #     return False, "No NVMe devices found in the cluster"
-    # elif dev_count < 8:
-    #     logger.warning("Number of active cluster devices are less than 8")
-    #     # return False, "Number of active cluster devices are less than 8"
-    #
-    # if len(online_nodes) < 3 and ha_type == "ha":
-    #     logger.error("Storage nodes are less than 3 in ha cluster")
-    #     return False, "Storage nodes are less than 3 in ha cluster"
-
-    # cluster_size_prov_util = int(((cluster_size_prov+size) / cluster_size_total) * 100)
-    #
-    # if cl.prov_cap_crit and cl.prov_cap_crit < cluster_size_prov_util:
-    #     msg = f"Cluster provisioned cap critical would be, util: {cluster_size_prov_util}% of cluster util: {cl.prov_cap_crit}"
-    #     logger.error(msg)
-    #     return False, msg
-    #
-    # elif cl.prov_cap_warn and cl.prov_cap_warn < cluster_size_prov_util:
-    #     logger.warning(f"Cluster provisioned cap warning, util: {cluster_size_prov_util}% of cluster util: {cl.prov_cap_warn}")
-    #
-    # if distr_vuid == 0:
-    #     vuid = utils.get_random_vuid()
-    # else:
-    #     vuid = distr_vuid
-    #
-    # if distr_ndcs == 0 and distr_npcs == 0:
-    #     if ha_type == "single":
-    #         distr_ndcs = 4
-    #         distr_npcs = 1
-    #     else:
-    #         if dev_count == 3:
-    #             distr_ndcs = 1
-    #         elif dev_count in [4, 5]:
-    #             distr_ndcs = 2
-    #         elif dev_count >= 6:
-    #             distr_ndcs = 4
-    #         distr_npcs = 1
-    # else:
-    #     if distr_ndcs + distr_npcs >= dev_count:
-    #         return False, f"ndcs+npcs: {distr_ndcs+distr_npcs} must be less than online devices count: {dev_count}"
-
-    # if max_size:
-    #     if max_size < size:
-    #         return False, f"Max size:{max_size} must be larger than size {size}"
-    # else:
-    #     records = db_controller.get_cluster_capacity(cl)
-    #     if records:
-    #         max_size = records[0]['size_total']
-    #     else:
-    #         max_size = size * 10
-
     logger.info(f"Max size: {utils.humanbytes(max_size)}")
     lvol = LVol()
     lvol.lvol_name = name
@@ -607,12 +512,6 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
     lvol.mode = 'read-write'
     lvol.lvol_type = 'lvol'
     lvol.nqn = cluster_obj.nqn + ":lvol:" + lvol.uuid
-
-    # lvol.ndcs = distr_ndcs
-    # lvol.npcs = distr_npcs
-    # lvol.distr_bs = distr_bs
-    # lvol.distr_chunk_bs = distr_chunk_bs
-    # lvol.distr_page_size = (distr_npcs+distr_npcs)*cl.page_size_in_blocks
 
     lvol.base_bdev = lvol.lvol_bdev
     lvol.top_bdev = lvol.base_bdev
@@ -664,14 +563,6 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
         lvol.lvol_type += ',compress'
         lvol.top_bdev = lvol.comp_bdev
 
-    # nodes = _get_next_3_nodes(cl.get_id(), lvol.size)
-    # if not nodes:
-    #     return False, f"No nodes found with enough resources to create the LVol"
-    #
-    # if host_node:
-    #     nodes.insert(0, host_node)
-    # else:
-    #     host_node = nodes[0]
 
     lvol.hostname = host_node.hostname
     lvol.node_id = host_node.get_id()
@@ -681,29 +572,8 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
     if error:
         return ret, error
 
-    # elif ha_type == "ha":
-    #     three_nodes = nodes[:3]
-    #     nodes_ids = []
-    #     nodes_ips = []
-    #     for node in three_nodes:
-    #         nodes_ids.append(node.get_id())
-    #         port = 10000 + int(random.random() * 60000)
-    #         nodes_ips.append(f"{node.mgmt_ip}:{port}")
-    #
-    #     ha_address = ",".join(nodes_ips)
-    #     for index, node in enumerate(three_nodes):
-    #         ret, error = add_lvol_on_node(lvol, node, ha_address, index)
-    #         if error:
-    #             return ret, error
-    #     lvol.nodes = nodes_ids
-
     host_node.lvols.append(lvol.uuid)
     host_node.write_to_db(db_controller.kv_store)
-
-    # lvol.pool_uuid = pool.id
-    # pool.lvols.append(lvol.uuid)
-    # pool.write_to_db(db_controller.kv_store)
-
     lvol.write_to_db(db_controller.kv_store)
     # lvol_events.lvol_create(lvol)
 
