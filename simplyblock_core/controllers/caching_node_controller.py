@@ -294,7 +294,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spd
     if lvstore_cluster_size:
         cluster_sz = lvstore_cluster_size
     ret = rpc_client.create_lvstore(
-        "lvs_1", "ocf_1", num_md_pages_per_cluster_ratio=md_pages_ratio,
+        "lvs_1", "ocf_1", num_md_pages_per_cluster_ratio=int(md_pages_ratio),
         cluster_sz=cluster_sz)
     if not ret:
         logger.error("Failed ot create bdev")

@@ -714,11 +714,11 @@ class RPCClient:
         }
         return self._request("bdev_ftl_create", params)
 
-    def bdev_aio_create(self, name, filename, block_size):
+    def bdev_aio_create(self, name, filename, block_size=None):
         params = {
             "name": name,
             "filename": filename,
         }
-        if params:
+        if block_size:
             params["block_size"] = block_size
         return self._request("bdev_aio_create", params)

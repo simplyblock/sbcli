@@ -592,11 +592,10 @@ class CLIWrapper:
         sub_command.add_argument("--min-ftl-buffer-percent", help='FTL buffer partition percent',
                                  dest="min_ftl_buffer_percent", type=int)
         sub_command.add_argument("--lvstore-cluster-size", help='LVS cluster size', dest="lvstore_cluster_size")
-        sub_command.add_argument("--num-md-pages-per-cluster-ratio", help='LVS md cluster ratio', dest="num_md_pages_per_cluster_ratio")
-
+        sub_command.add_argument("--num-md-pages-per-cluster-ratio", help='LVS md cluster ratio',
+                                 dest="num_md_pages_per_cluster_ratio", type=int)
 
         self.add_sub_command(subparser, 'list', 'List Caching nodes')
-
         sub_command = self.add_sub_command(subparser, 'list-lvols', 'List connected lvols')
         sub_command.add_argument("id", help='Caching Node UUID')
 
