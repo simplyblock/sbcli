@@ -15,6 +15,7 @@ class SshUtils:
     def __init__(self, bastion_server):
         self.ssh_connections = dict()
         self.bastion_server = bastion_server
+        self.base_cmd = os.environ.get("SBCLI_CMD", "sbcli-dev")
         self.logger = setup_logger(__name__)
 
     def connect(self, address: str, port: int=22,
@@ -136,14 +137,14 @@ class SshUtils:
             self.logger.error(f"SSH connection failed: {e}")
             return "", str(e)
 
-    def format_disk(self, node, device):
+    def format_disk(self, node, device, fs_type="ext4"):
         """Format disk on the given node
 
         Args:
             node (str): Node to perform ssh operation on
             device (str): Device path
         """
-        command = f"sudo mkfs.ext4 {device}"
+        command = f"sudo mkfs.{fs_type} {device}"
         self.exec_command(node, command)
 
     def mount_path(self, node, device, mount_path):
@@ -160,8 +161,7 @@ class SshUtils:
         except Exception as e:
             self.logger.info(e)
 
-        command = f"sudo mkdir {mount_path}"
-        self.exec_command(node, command)
+        self.make_directory(node=node, dir_name=mount_path)
 
         command = f"sudo mount {device} {mount_path}"
         self.exec_command(node, command)
@@ -212,6 +212,8 @@ class SshUtils:
         size = kwargs.get("size", "10MiB")
         time_based = kwargs.get("time_based", True)
         time_based = "--time_based" if time_based else ""
+        numjobs = kwargs.get("numjobs", 1)
+        nrfiles = kwargs.get("nrfiles", 1)
         
         output_format = kwargs.get("output_format", '')
         output_format = f' --output-format={output_format} ' if output_format else ''
@@ -221,8 +223,8 @@ class SshUtils:
 
         command = (f"sudo fio --name={name} {location} --ioengine={ioengine} --direct=1 --iodepth={iodepth} "
                    f"{time_based} --runtime={runtime} --rw={rw} --bs={bs} --size={size} --rwmixread={rwmixread} "
-                   "--verify=md5 --numjobs=1 --verify_dump=1 --verify_fatal=1 --verify_state_save=1 --verify_backlog=10 "
-                   f"--group_reporting{output_format}{output_file}")
+                   f"--verify=md5 --numjobs={numjobs} --nrfiles={nrfiles} --verify_dump=1 --verify_fatal=1 "
+                   f"--verify_state_save=1 --verify_backlog=10 --group_reporting{output_format}{output_file}")
         
         if kwargs.get("debug", None):
             command = f"{command} --debug=all"
@@ -320,7 +322,108 @@ class SshUtils:
         if container_name:
             cmd = f"sudo docker stop {container_name}"
         else:
-            cmd = f"sudo docker stop $(sudo docker ps -a -q)"
+            cmd = "sudo docker stop $(sudo docker ps -a -q)"
         
         output, error = self.exec_command(node=node, command=cmd)
         return output
+
+    def get_mount_points(self, node, base_path):
+        """Get all mount points on the node."""
+        cmd = "mount | grep %s | awk '{print $3}'" % base_path
+        output, error = self.exec_command(node=node, command=cmd)
+        return output.strip().split()
+
+    def remove_dir(self, node, dir_path):
+        """Remove directory on the node."""
+        cmd = f"sudo rm -rf {dir_path}"
+        output, error = self.exec_command(node=node, command=cmd)
+        return output, error
+
+    def disconnect_nvme(self, node, nqn_grep):
+        """Disconnect NVMe device on the node."""
+        cmd = f"sudo nvme disconnect -d {nqn_grep}"
+        output, error = self.exec_command(node=node, command=cmd)
+        return output, error
+
+    def get_nvme_subsystems(self, node, nqn_filter="lvol"):
+        """Get NVMe subsystems on the node."""
+        cmd = "sudo nvme list-subsys | grep -i %s | awk '{print $3}' | cut -d '=' -f 2" % nqn_filter
+        output, error = self.exec_command(node=node, command=cmd)
+        return output.strip().split()
+
+    def get_snapshots(self, node):
+        """Get all snapshots on the node."""
+        cmd = "%s snapshot list | grep -i ss | awk '{{print $2}}'" % self.base_cmd
+        output, error = self.exec_command(node=node, command=cmd)
+        return output.strip().split()
+
+    def get_lvol_id(self, node, lvol_name):
+        """Get logical volume IDs on the node."""
+        cmd = "%s lvol list | grep -i %s | awk '{{print $2}}'" % (self.base_cmd, lvol_name)
+        output, error = self.exec_command(node=node, command=cmd)
+        return output.strip().split()
+    
+    def get_snapshot_id(self, node, snapshot_name):
+        cmd = "%s snapshot list | grep -i '%s' | awk '{print $2}'" % (self.base_cmd, snapshot_name)
+        output, error = self.exec_command(node=node, command=cmd)
+
+        return output.strip()
+
+    def add_snapshot(self, node, lvol_id, snapshot_name):
+        cmd = f"{self.base_cmd} snapshot add {lvol_id} {snapshot_name}"
+        self.exec_command(node=node, command=cmd)
+    
+    def add_clone(self, node, snapshot_id, clone_name):
+        cmd = f"{self.base_cmd} snapshot clone {snapshot_id} {clone_name}"
+        self.exec_command(node=node, command=cmd)
+
+    def delete_snapshot(self, node, snapshot_id):
+        cmd = "%s snapshot list | grep -i '%s' | awk '{print $4}'" % (self.base_cmd, snapshot_id)
+        output, error = self.exec_command(node=node, command=cmd)
+        self.logger.info(f"Deleting snapshot: {output}")
+        cmd = f"{self.base_cmd} snapshot delete {snapshot_id} --force"
+        output, error = self.exec_command(node=node, command=cmd)
+
+        return output, error
+
+    def delete_all_snapshots(self, node):
+        cmd = "%s snapshot list | grep -i ss | awk '{print $2}'" % self.base_cmd
+        output, error = self.exec_command(node=node, command=cmd)
+
+        list_snapshot = output.strip().split()
+        for snapshot_id in list_snapshot:
+            self.delete_snapshot(node=node, snapshot_id=snapshot_id)
+
+    def find_files(self, node, directory):
+        command = f"find {directory} -maxdepth 1 -type f"
+        stdout, _ = self.exec_command(node, command)
+        return stdout.splitlines()
+
+    def generate_checksums(self, node, files):
+        checksums = {}
+        for file in files:
+            command = f"md5sum {file}"
+            stdout, _ = self.exec_command(node, command)
+            checksum, _ = stdout.split()
+            checksums[file] = checksum
+        return checksums
+
+    def verify_checksums(self, node, files, checksums):
+        for file in files:
+            command = f"md5sum {file}"
+            stdout, _ = self.exec_command(node, command)
+            checksum, _ = stdout.split()
+            self.logger.info(f"Checksum for file {file}: Actul: {checksum}, Expected: {checksums[file]}")
+            if checksum != checksums[file]:
+                raise ValueError(f"Checksum mismatch for file {file}")
+            else:
+                self.logger.info(f"Checksum match for file: {file}")
+
+    def delete_files(self, node, files):
+        for file in files:
+            command = f"rm -f {file}"
+            self.exec_command(node, command)
+
+    def make_directory(self, node, dir_name):
+        cmd = f"sudo mkdir -p {dir_name}"
+        self.exec_command(node, cmd)
