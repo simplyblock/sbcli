@@ -265,23 +265,22 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spd
     if s3_data_path:
         filename = s3_data_path
 
-    ret = rpc_client.bdev_aio_create("aio_1", filename)
+    ret = rpc_client.bdev_aio_create("aio_1", filename, 4096)
     if not ret:
         logger.error("Failed ot create bdev")
         return False
 
-    # ret = rpc_client.bdev_ftl_create("ftl_1", "aio_1", f"{ssd_dev.nvme_bdev}p2")
-    # if not ret:
-    #     logger.error("Failed ot create bdev")
-    #     return False
-    #
-    # ret = rpc_client.bdev_passthru_create("pass_1", "ftl_1")
-    #
-    # if not ret:
-    #     logger.error("Failed ot create bdev")
-    #     return False
+    ret = rpc_client.bdev_passthru_create("ftl_cache_1", f"{ssd_dev.nvme_bdev}p2", 4096)
+    if not ret:
+        logger.error("Failed ot create bdev")
+        return False
 
-    ret = rpc_client.bdev_ocf_create("ocf_1", 'wt', cache_bdev, "aio_1")
+    ret = rpc_client.bdev_ftl_create("ftl_1", "aio_1", "ftl_cache_1")
+    if not ret:
+        logger.error("Failed ot create bdev")
+        return False
+
+    ret = rpc_client.bdev_ocf_create("ocf_1", 'wt', cache_bdev, "ftl_1")
     if not ret:
         logger.error("Failed ot create bdev")
         return False
@@ -294,8 +293,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spd
     if lvstore_cluster_size:
         cluster_sz = lvstore_cluster_size
     ret = rpc_client.create_lvstore(
-        "lvs_1", "ocf_1", num_md_pages_per_cluster_ratio=int(md_pages_ratio),
-        cluster_sz=cluster_sz)
+        "lvs_1", "ocf_1", num_md_pages_per_cluster_ratio=int(md_pages_ratio), cluster_sz=cluster_sz)
     if not ret:
         logger.error("Failed ot create bdev")
         return False
