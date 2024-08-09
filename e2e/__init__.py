@@ -8,8 +8,8 @@ from e2e_tests.cloning_and_snapshot.multi_lvol_snapshot_fio import TestMultiLvol
 
 def get_all_tests():
     tests = [
-        # TestSingleNodeOutage,
-        # TestSingleNodeMultipleFioPerfValidation,
+        TestSingleNodeOutage,
+        TestSingleNodeMultipleFioPerfValidation,
         # TestSingleNodeFailure,
         TestMultiLvolFio
     ]
