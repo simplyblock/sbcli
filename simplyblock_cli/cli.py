@@ -585,6 +585,8 @@ class CLIWrapper:
         sub_command.add_argument("--memory", help='SPDK huge memory allocation, default is Max hugepages available', dest='spdk_mem')
         sub_command.add_argument("--spdk-image", help='SPDK image uri', dest='spdk_image')
         sub_command.add_argument("--namespace", help='k8s namespace to deploy on',)
+        sub_command.add_argument("--multipathing", help='Enable multipathing for lvol connection, default: on',
+                                 default="on", choices=["on", "off"])
 
         self.add_sub_command(subparser, 'list', 'List Caching nodes')
 
@@ -605,6 +607,12 @@ class CLIWrapper:
 
         sub_command = self.add_sub_command(subparser, 'recreate', 'recreate Caching node bdevs')
         sub_command.add_argument("node_id", help='Caching node UUID')
+
+        sub_command = self.add_sub_command(subparser, 'get-lvol-stats', 'Get LVol stats')
+        sub_command.add_argument("lvol_id", help='LVol UUID')
+        sub_command.add_argument("--history", help='(XXdYYh), list history records (one for every 15 minutes) '
+                                                   'for XX days and YY hours (up to 10 days in total).')
+
 
     def init_parser(self):
         self.parser = argparse.ArgumentParser(prog=constants.SIMPLY_BLOCK_CLI_NAME, description='SimplyBlock management CLI')
@@ -1067,6 +1075,7 @@ class CLIWrapper:
                 data_nics = []
                 spdk_image = args.spdk_image
                 namespace = args.namespace
+                multipathing = args.multipathing == "on"
 
                 spdk_cpu_mask = None
                 if args.spdk_cpu_mask:
@@ -1082,7 +1091,7 @@ class CLIWrapper:
                         return f"SPDK memory:{args.spdk_mem} must be larger than 1G"
 
                 ret = caching_node_controller.add_node(
-                    cluster_id, node_ip, ifname, data_nics, spdk_cpu_mask, spdk_mem, spdk_image, namespace)
+                    cluster_id, node_ip, ifname, data_nics, spdk_cpu_mask, spdk_mem, spdk_image, namespace, multipathing)
 
             if sub_command == "list":
                 #cluster_id
@@ -1101,6 +1110,12 @@ class CLIWrapper:
             if sub_command == "recreate":
                 ret = caching_node_controller.recreate(args.node_id)
 
+            if sub_command == "get-lvol-stats":
+                data = caching_node_controller.get_io_stats(args.lvol_id, args.history)
+                if data:
+                    ret = utils.print_table(data)
+                else:
+                    return False
 
         else:
             self.parser.print_help()

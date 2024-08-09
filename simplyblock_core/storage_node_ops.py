@@ -95,35 +95,40 @@ def addNvmeDevices(cluster, rpc_client, devs, snode):
 
         if pcie in ctr_map:
             nvme_controller = ctr_map[pcie]
+            nvme_bdevs = []
+            for bdev in rpc_client.get_bdevs():
+                if bdev['name'].startswith(nvme_controller):
+                    nvme_bdevs.append(bdev['name'])
         else:
-            nvme_controller = "nvme_%s" % index
-            ret, err = rpc_client.bdev_nvme_controller_attach(nvme_controller, pcie)
+            pci_st = str(pcie).replace("0", "").replace(":", "").replace(".", "")
+            nvme_controller = "nvme_%s" % pci_st
+            nvme_bdevs, err = rpc_client.bdev_nvme_controller_attach(nvme_controller, pcie)
             time.sleep(2)
 
-        nvme_bdev = f"{nvme_controller}n1"
-        rpc_client.bdev_examine(nvme_bdev)
-        time.sleep(5)
-        ret = rpc_client.get_bdevs(nvme_bdev)
-        nvme_dict = ret[0]
-        nvme_driver_data = nvme_dict['driver_specific']['nvme'][0]
-        model_number = nvme_driver_data['ctrlr_data']['model_number']
-        total_size = nvme_dict['block_size'] * nvme_dict['num_blocks']
+        for nvme_bdev in nvme_bdevs:
+            rpc_client.bdev_examine(nvme_bdev)
+            time.sleep(3)
+            ret = rpc_client.get_bdevs(nvme_bdev)
+            nvme_dict = ret[0]
+            nvme_driver_data = nvme_dict['driver_specific']['nvme'][0]
+            model_number = nvme_driver_data['ctrlr_data']['model_number']
+            total_size = nvme_dict['block_size'] * nvme_dict['num_blocks']
 
-        devices.append(
-            NVMeDevice({
-                'uuid': str(uuid.uuid4()),
-                'device_name': nvme_dict['name'],
-                'size': total_size,
-                'physical_label': next_physical_label,
-                'pcie_address': nvme_driver_data['pci_address'],
-                'model_id': model_number,
-                'serial_number': nvme_driver_data['ctrlr_data']['serial_number'],
-                'nvme_bdev': nvme_bdev,
-                'nvme_controller': nvme_controller,
-                'node_id': snode.get_id(),
-                'cluster_id': snode.cluster_id,
-                'status': NVMeDevice.STATUS_ONLINE
-        }))
+            devices.append(
+                NVMeDevice({
+                    'uuid': str(uuid.uuid4()),
+                    'device_name': nvme_dict['name'],
+                    'size': total_size,
+                    'physical_label': next_physical_label,
+                    'pcie_address': nvme_driver_data['pci_address'],
+                    'model_id': model_number,
+                    'serial_number': nvme_driver_data['ctrlr_data']['serial_number'],
+                    'nvme_bdev': nvme_bdev,
+                    'nvme_controller': nvme_controller,
+                    'node_id': snode.get_id(),
+                    'cluster_id': snode.cluster_id,
+                    'status': NVMeDevice.STATUS_ONLINE
+            }))
         next_physical_label += 1
     return devices
 
@@ -601,40 +606,27 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
             logger.error(f"This node is part of another cluster: {node_info['cluster_id']}")
             return False
 
-    ec2_metadata = None
-    if "ec2_metadata" in node_info and node_info['ec2_metadata']:
-        ec2_metadata = node_info['ec2_metadata']
-        """"
-         "ec2_metadata": {
-              "accountId": "565979732541",
-              "architecture": "x86_64",
-              "availabilityZone": "eu-west-1a",
-              "billingProducts": [
-                "bp-6fa54006"
-              ],
-              "devpayProductCodes": null,
-              "imageId": "ami-08e592fbb0f535224",
-              "instanceId": "i-0ba9e766df57bc62c",
-              "instanceType": "m6id.large",
-              "kernelId": null,
-              "marketplaceProductCodes": null,
-              "pendingTime": "2024-03-24T19:39:14Z",
-              "privateIp": "172.31.23.236",
-              "ramdiskId": null,
-              "region": "eu-west-1",
-              "version": "2017-09-30"
-        }
-        """""
-        logger.debug(json.dumps(ec2_metadata,indent=2))
-        logger.info(f"EC2 Instance found: {ec2_metadata['instanceId']}")
-        logger.info(f"EC2 Instance type: {ec2_metadata['instanceType']}")
-        logger.info(f"EC2 Instance privateIp: {ec2_metadata['privateIp']}")
-        logger.info(f"EC2 Instance region: {ec2_metadata['region']}")
+    cloud_instance = node_info['cloud_instance']
+    """"
+     "cloud_instance": {
+          "id": "565979732541",
+          "type": "m6id.large",
+          "cloud": "google",
+          "ip": "10.10.10.10",
+          "public_ip": "20.20.20.20",
+    }
+    """""
+    logger.debug(json.dumps(cloud_instance, indent=2))
+    logger.info(f"Instance id: {cloud_instance['id']}")
+    logger.info(f"Instance cloud: {cloud_instance['cloud']}")
+    logger.info(f"Instance type: {cloud_instance['type']}")
+    logger.info(f"Instance privateIp: {cloud_instance['ip']}")
+    logger.info(f"Instance public_ip: {cloud_instance['public_ip']}")
 
-        for node in db_controller.get_storage_nodes():
-            if node.ec2_instance_id and node.ec2_instance_id == ec2_metadata['instanceId']:
-                logger.error(f"Node already exists, try remove it first: {ec2_metadata['instanceId']}")
-                return False
+    for node in db_controller.get_storage_nodes():
+        if node.cloud_instance_id and node.cloud_instance_id == cloud_instance['id']:
+            logger.error(f"Node already exists, try remove it first: {cloud_instance['id']}")
+            return False
 
     # Tune cpu maks parameters
     cpu_count = node_info["cpu_count"]
@@ -662,18 +654,19 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
         distrib_cpu_mask = utils.generate_mask(distrib_cpu_cores)
 
     # Calculate pool count
-    if ec2_metadata and ec2_metadata.get('instanceType'):
-        supported_type, storage_devices, device_size = utils.get_total_size_per_instance_type(ec2_metadata["instanceType"])
+    if cloud_instance['type']:
+        ins_type = cloud_instance['type']
+        supported_type, storage_devices, device_size = utils.get_total_size_per_instance_type(ins_type)
         if not supported_type:
-            logger.warning(f"Unsupported ec2 instance-type {ec2_metadata['instanceType']} for deployment")
+            logger.warning(f"Unsupported instance-type {ins_type} for deployment")
             if not number_of_devices:
-                logger.error(f"Unsupported ec2 instance-type {ec2_metadata['instanceType']} "
+                logger.error(f"Unsupported instance-type {ins_type} "
                              "for deployment, please specify --number-of-devices")
                 return False
         else:
             number_of_devices = storage_devices
     else:
-        logger.warning("Can not get ec2 instance type for this instance.")
+        logger.warning("Can not get instance type for this instance.")
         if not number_of_devices:
             logger.error("Unsupported instance type please specify --number-of-devices.")
             return False
@@ -696,7 +689,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
         logger.info(f"Total: {utils.humanbytes(memory_details['total'])}")
         logger.info(f"Free: {utils.humanbytes(memory_details['free'])}")
     else:
-        logger.error(f"Cannot get memory info from the ec2 instance.. Exiting")
+        logger.error(f"Cannot get memory info from the instance.. Exiting")
         return False
 
     satisfied, spdk_mem = utils.calculate_spdk_memory(minimum_hp_memory,
@@ -750,12 +743,9 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
     snode.baseboard_sn = node_info['system_id']
     snode.system_uuid = node_info['system_id']
 
-    if ec2_metadata:
-        snode.ec2_metadata = ec2_metadata
-        snode.ec2_instance_id = ec2_metadata['instanceId']
-
-    if "ec2_public_ip" in node_info and node_info['ec2_public_ip']:
-        snode.ec2_public_ip = node_info['ec2_public_ip']
+    snode.cloud_instance_id = cloud_instance['id']
+    snode.cloud_instance_type = cloud_instance['type']
+    snode.cloud_instance_public_ip = cloud_instance['public_ip']
 
     snode.hostname = hostname
     snode.host_nqn = subsystem_nqn
@@ -904,7 +894,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
             ret = rpc_client.bdev_nvme_attach_controller_tcp(name, dev.nvmf_nqn, dev.nvmf_ip, dev.nvmf_port)
             if not ret:
                 logger.error(f"Failed to connect to device: {name}")
-                continue
+                return False
 
             dev.remote_bdev = f"{name}n1"
             idx = -1
@@ -1088,7 +1078,7 @@ def restart_storage_node(
 
     snode_api = SNodeClient(snode.api_endpoint)
     node_info, _ = snode_api.info()
-    logger.info(f"Node info: {node_info}")
+    logger.debug(f"Node info: {node_info}")
 
     logger.info("Restarting SPDK")
 
@@ -1104,20 +1094,20 @@ def restart_storage_node(
         snode.spdk_image = img
 
     # Calculate pool count
-    if snode.ec2_metadata and snode.ec2_metadata.get('instanceType'):
-        supported_type, storage_devices, device_size = utils.get_total_size_per_instance_type(snode.ec2_metadata["instanceType"])
+    if snode.cloud_instance_type:
+        supported_type, storage_devices, device_size = utils.get_total_size_per_instance_type(snode.cloud_instance_type)
         if not supported_type:
-            logger.warning(f"Unsupported ec2 instance-type {snode.ec2_metadata['instanceType']} for deployment")
+            logger.warning(f"Unsupported instance-type {snode.cloud_instance_type} for deployment")
             if not number_of_devices:
                 if not snode.number_of_devices:
-                    logger.error(f"Unsupported ec2 instance-type {snode.ec2_metadata['instanceType']} "
+                    logger.error(f"Unsupported instance-type {snode.cloud_instance_type} "
                                  "for deployment, please specify --number-of-devices")
                     return False
                 number_of_devices = snode.number_of_devices
         else:
             number_of_devices = storage_devices
     else:
-        logger.warning("Can not get ec2 instance type for this instance..")
+        logger.warning("Can not get instance type for this instance..")
         if not number_of_devices:
             if snode.number_of_devices:
                 number_of_devices = snode.number_of_devices
@@ -1144,7 +1134,7 @@ def restart_storage_node(
         logger.info(f"Total: {utils.humanbytes(memory_details['total'])}")
         logger.info(f"Free: {utils.humanbytes(memory_details['free'])}")
     else:
-        logger.error(f"Cannot get memory info from the ec2 instance.. Exiting")
+        logger.error(f"Cannot get memory info from the instance.. Exiting")
 
     satisfied, spdk_mem = utils.calculate_spdk_memory(minimum_hp_memory,
                                                       minimum_sys_memory,
@@ -1305,7 +1295,7 @@ def restart_storage_node(
             ret = rpc_client.bdev_nvme_attach_controller_tcp(name, dev.nvmf_nqn, dev.nvmf_ip, dev.nvmf_port)
             if not ret:
                 logger.warning(f"Failed to connect to device: {name}")
-                continue
+                return False
 
             dev.remote_bdev = f"{name}n1"
             idx = -1
@@ -1383,16 +1373,13 @@ def list_storage_nodes(is_json, cluster_id=None):
             "Management IP": node.mgmt_ip,
             "Devices": f"{total_devices}/{online_devices}",
             "LVols": f"{len(node.lvols)}",
-            # "Data NICs": "\n".join([d.if_name for d in node.data_nics]),
             "Status": node.status,
             "Health": node.health_check,
 
-            "EC2 ID": node.ec2_instance_id,
-            "EC2 Type": node.ec2_metadata['instanceType'] if node.ec2_metadata else "",
-            "EC2 Ext IP": node.ec2_public_ip,
+            "Cloud ID": node.cloud_instance_id,
+            "Cloud Type": node.cloud_instance_type,
+            "Ext IP": node.cloud_instance_public_ip,
 
-            # "Updated At": datetime.datetime.strptime(node.updated_at, "%Y-%m-%d %H:%M:%S.%f").strftime(
-            #     "%H:%M:%S, %d/%m/%Y"),
         })
 
     if not data:
