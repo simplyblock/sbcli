@@ -146,7 +146,7 @@ run_fio_workload() {
     local mount_point=$1
     local size=$2
     log "Running fio workload on mount point: $mount_point with size: $size"
-    sudo fio --directory=$mount_point --readwrite=write --bs=4K-128K --size=$size --name=test --numjobs=3
+    sudo fio --directory=$mount_point --readwrite=write --bs=4K-128K --size=$size --name=test --numjobs=1 --nrfiles=5
 }
 
 generate_checksums() {
