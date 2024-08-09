@@ -422,7 +422,7 @@ def get_logger(name):
     logger = logging.getLogger()
     log_level = os.getenv("LOG_LEVEL")
     log_level = log_level.upper() if log_level else constants.LOG_LEVEL
-    logging.getLogger().setLevel(log_level)
+    logger.setLevel(log_level)
 
     logger_handler = logging.StreamHandler(stream=sys.stdout)
     logger_handler.setFormatter(logging.Formatter('%(asctime)s: %(levelname)s: %(message)s'))
