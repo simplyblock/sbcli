@@ -418,13 +418,11 @@ def decimal_to_hex_power_of_2(decimal_number):
 
 
 def get_logger(name):
-    logger = logging.getLogger(name)
+    # first configure a root logger
+    logger = logging.getLogger()
     log_level = os.getenv("LOG_LEVEL")
     log_level = log_level.upper() if log_level else constants.LOG_LEVEL
     logging.getLogger().setLevel(log_level)
-    # Update the log level for all existing loggers
-    for logger_name in logging.Logger.manager.loggerDict:
-        logging.getLogger(logger_name).setLevel(log_level)
 
     logger_handler = logging.StreamHandler(stream=sys.stdout)
     logger_handler.setFormatter(logging.Formatter('%(asctime)s: %(levelname)s: %(message)s'))
@@ -432,4 +430,4 @@ def get_logger(name):
 
     gelf_handler = GELFUDPHandler('0.0.0.0', constants.GELF_PORT)
     logger.addHandler(gelf_handler)
-    return logger
+    return logging.getLogger(name)
