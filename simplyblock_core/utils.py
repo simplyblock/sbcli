@@ -420,9 +420,14 @@ def decimal_to_hex_power_of_2(decimal_number):
 def get_logger(name):
     # first configure a root logger
     logger = logging.getLogger()
-    log_level = os.getenv("LOG_LEVEL")
+    log_level = os.getenv("SIMPLYBLOCK_LOG_LEVEL")
     log_level = log_level.upper() if log_level else constants.LOG_LEVEL
-    logger.setLevel(log_level)
+
+    try:
+        logger.setLevel(log_level)
+    except ValueError as e:
+        logger.warning(f'Invalid SIMPLYBLOCK_LOG_LEVEL: {str(e)}')
+        logger.setLevel(constants.LOG_LEVEL)
 
     logger_handler = logging.StreamHandler(stream=sys.stdout)
     logger_handler.setFormatter(logging.Formatter('%(asctime)s: %(levelname)s: %(message)s'))
