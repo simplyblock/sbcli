@@ -418,12 +418,21 @@ def decimal_to_hex_power_of_2(decimal_number):
 
 
 def get_logger(name):
-    logger = logging.getLogger(name)
-    logger.setLevel(constants.LOG_LEVEL)
+    # first configure a root logger
+    logger = logging.getLogger()
+    log_level = os.getenv("SIMPLYBLOCK_LOG_LEVEL")
+    log_level = log_level.upper() if log_level else constants.LOG_LEVEL
+
+    try:
+        logger.setLevel(log_level)
+    except ValueError as e:
+        logger.warning(f'Invalid SIMPLYBLOCK_LOG_LEVEL: {str(e)}')
+        logger.setLevel(constants.LOG_LEVEL)
+
     logger_handler = logging.StreamHandler(stream=sys.stdout)
     logger_handler.setFormatter(logging.Formatter('%(asctime)s: %(levelname)s: %(message)s'))
     logger.addHandler(logger_handler)
 
     gelf_handler = GELFUDPHandler('0.0.0.0', constants.GELF_PORT)
     logger.addHandler(gelf_handler)
-    return logger
+    return logging.getLogger(name)
