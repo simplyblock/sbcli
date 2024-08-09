@@ -421,7 +421,7 @@ def get_logger(name):
     logger = logging.getLogger(name)
     log_level = os.getenv("LOG_LEVEL")
     log_level = log_level.upper() if log_level else constants.LOG_LEVEL
-
+    logging.getLogger().setLevel(log_level)
     # Update the log level for all existing loggers
     for logger_name in logging.Logger.manager.loggerDict:
         logging.getLogger(logger_name).setLevel(log_level)
