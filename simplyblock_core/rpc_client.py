@@ -524,8 +524,10 @@ class RPCClient:
         }
         return self._request("bdev_nvme_set_options", params)
 
-    def bdev_set_options(self, bdev_io_pool_size, bdev_io_cache_size, iobuf_small_cache_size, iobuf_large_cache_size):
-        params = {}
+    def bdev_set_options(self, bdev_io_pool_size, bdev_io_cache_size, iobuf_small_cache_size, iobuf_large_cache_size, bdev_auto_examine=False):
+        params = {
+            "bdev_auto_examine": bdev_auto_examine
+        }
         if bdev_io_pool_size > 0:
             params['bdev_io_pool_size'] = bdev_io_pool_size
         if bdev_io_cache_size > 0:
@@ -702,7 +704,8 @@ class RPCClient:
     def bdev_passthru_create(self, name, base_bdev_name, block_sz=None):
         params = {
             "name": name,
-            "base_bdev_name": base_bdev_name
+            "base_bdev_name": base_bdev_name,
+            "md_sz": 64
         }
         if block_sz:
             params["block_sz"] = block_sz

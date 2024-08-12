@@ -98,7 +98,6 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spd
         logger.error("Node already exists, try remove it first.")
         return False
 
-    node_info, _ = cnode_api.info()
     results, err = cnode_api.join_db(db_connection=cluster.db_connection)
 
     data_nics = []
@@ -188,6 +187,17 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spd
         snode.rpc_username, snode.rpc_password,
         timeout=60*5, retry=5)
 
+    ret = rpc_client.bdev_set_options(0,0,0,0,
+                                      bdev_auto_examine=False)
+    if not ret:
+        logger.error("Failed to set options")
+        return False
+
+    ret = rpc_client.framework_start_init()
+    if not ret:
+        logger.error("Failed to start framework")
+        return False
+
     # # get new node info after starting spdk
     node_info, _ = cnode_api.info()
     # mem = node_info['memory_details']['huge_free']
@@ -241,8 +251,8 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spd
     time.sleep(1)
     rpc_client.bdev_nvme_controller_attach(ssd_dev.nvme_controller, ssd_dev.pcie_address)
     time.sleep(1)
-    # rpc_client.bdev_examine(ssd_dev.nvme_bdev)
-    time.sleep(1)
+    rpc_client.bdev_examine(ssd_dev.nvme_bdev)
+    time.sleep(3)
 
     cache_bdev = f"{ssd_dev.nvme_bdev}p1"
     cache_size = int((jm_percent*ssd_size)/100)

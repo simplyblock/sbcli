@@ -187,7 +187,7 @@ def spdk_process_start():
 
     container = node_docker.containers.run(
         spdk_image,
-        f"/root/scripts/run_spdk_tgt.sh {spdk_cpu_mask} {spdk_mem}",
+        f"/root/scripts/run_spdk_tgt_wait_rpc.sh {spdk_cpu_mask} {spdk_mem}",
         name="spdk",
         detach=True,
         privileged=True,
