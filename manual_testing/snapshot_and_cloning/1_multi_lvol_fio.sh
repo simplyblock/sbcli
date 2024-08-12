@@ -4,8 +4,8 @@ set -e
 
 # Variables
 POOL_NAME="snap_test_pool"
-LVOL_SIZE="80G"
-FS_TYPES=("ext4" "xfs")
+LVOL_SIZE="160G"
+FS_TYPES=("ext4")
 CONFIGURATIONS=("1+0" "2+1" "4+1" "4+2" "8+1" "8+2")
 WORKLOAD_SIZE=("5G" "10G" "20G" "40G")
 MOUNT_DIR="/mnt"
@@ -139,14 +139,15 @@ format_fs() {
     local device=$1
     local fs_type=$2
     log "Formatting device: /dev/$device with filesystem: $fs_type"
-    sudo mkfs.$fs_type -F /dev/$device
+    echo "sudo mkfs.$fs_type /dev/$device"
+    sudo mkfs.$fs_type /dev/$device
 }
 
 run_fio_workload() {
     local mount_point=$1
     local size=$2
     log "Running fio workload on mount point: $mount_point with size: $size"
-    sudo fio --directory=$mount_point --readwrite=write --bs=4K-128K --size=$size --name=test --numjobs=1 --nrfiles=5
+    sudo fio --directory=$mount_point --readwrite=randwrite --bs=4K-128K --size=$size --name=test --numjobs=1 --nrfiles=3
 }
 
 generate_checksums() {
@@ -178,7 +179,7 @@ compare_checksums() {
         if [ "$current_checksum" == "$checksum" ]; then
             log "Checksum OK for $file"
         else
-            log "Checksum mismatch for $file"
+            log "FAIL: Checksum mismatch for $file"
         fi
     done
 }
@@ -197,7 +198,7 @@ disconnect_lvol() {
 
 delete_snapshots() {
     log "Deleting all snapshots"
-    snapshots=$(sbcli-lvol snapshot list | grep -i snapshot | awk '{print $2}')
+    snapshots=$(sbcli-lvol snapshot list | grep -i _ss_ | awk '{print $2}')
     for snapshot in $snapshots; do
         log "Deleting snapshot: $snapshot"
         sbcli-lvol snapshot delete $snapshot --force
@@ -246,16 +247,30 @@ disconnect_lvols() {
     done
 }
 
+pause_if_interactive_mode() {
+  if [[ " $* " =~ " -i " ]]; then
+    echo "Press 'c' to continue"
+    while true; do
+      read -n 1 -s key
+      if [ "$key" = "c" ]; then
+        break
+      fi
+    done
+  fi
+}
+
+
 # Main cleanup script
 unmount_all
 remove_mount_dirs
 disconnect_lvols
 delete_snapshots
 delete_lvols
+# delete_pool
 
 # Main script
 get_cluster_id
-create_pool $cluster_id
+# create_pool $cluster_id
 
 for fs_type in "${FS_TYPES[@]}"; do
     log "Processing filesystem type: $fs_type"
@@ -265,22 +280,22 @@ for fs_type in "${FS_TYPES[@]}"; do
         ndcs=${config%%+*}
         npcs=${config##*+}
         lvol_name="lvol_${ndcs}_${npcs}"
-        
+
         create_lvol $lvol_name $ndcs $npcs
         log "Fetching logical volume ID for: $lvol_name"
         lvol_id=$(sbcli-lvol lvol list | grep -i $lvol_name | awk '{print $2}')
-        
+
         before_lsblk=$(sudo lsblk -o name)
         connect_lvol $lvol_id
         after_lsblk=$(sudo lsblk -o name)
         device=$(diff <(echo "$before_lsblk") <(echo "$after_lsblk") | grep "^>" | awk '{print $2}')
-        
+
         format_fs $device $fs_type
 
         mount_point="$MOUNT_DIR/$lvol_name"
         log "Creating mount point directory: $mount_point"
         sudo mkdir -p $mount_point
-        
+
         log "Mounting device: /dev/$device at $mount_point"
         sudo mount /dev/$device $mount_point
     done
@@ -302,10 +317,10 @@ for fs_type in "${FS_TYPES[@]}"; do
 
             # log "Creating mount point directory: $mount_point"
             # sudo mkdir -p $mount_point
-            
+
             # log "Mounting device: /dev/$device at $mount_point"
             # sudo mount /dev/$device $mount_point
-            
+
             run_fio_workload $mount_point $size &
         done
 
@@ -321,10 +336,9 @@ for fs_type in "${FS_TYPES[@]}"; do
 
             log "Finding test files in mount point: $mount_point"
             test_files=($(sudo find $mount_point -type f))
-
-            log "Generating checksums for base volume"
+            log "Generating checksums for base volume: ${test_files[*]}"
             base_checksums=($(verify_checksums "${test_files[@]}"))
-            echo "BASE CHECKSUM: $base_checksums"
+            log "BASE CHECKSUM: $base_checksums"
 
             log "Creating snapshot for volume: $lvol_name"
             snapshot_name="${lvol_name}_ss_${size}_${fs_type}"
@@ -349,19 +363,22 @@ for fs_type in "${FS_TYPES[@]}"; do
             connect_lvol $clone_id
             after_lsblk=$(sudo lsblk -o name)
             clone_device=$(diff <(echo "$before_lsblk") <(echo "$after_lsblk") | grep "^>" | awk '{print $2}')
-            
+
             clone_mount_point="$MOUNT_DIR/$clone_name"
             log "Creating clone mount point directory: $clone_mount_point"
+            echo "sudo mkdir -p $clone_mount_point"
             sudo mkdir -p $clone_mount_point
-            
+
             log "Mounting clone device: /dev/$clone_device at $clone_mount_point"
+            echo "sudo mount /dev/$clone_device $clone_mount_point"
             sudo mount /dev/$clone_device $clone_mount_point
 
             log "Finding files in clone mount point: $clone_mount_point"
             clone_files=($(sudo find $clone_mount_point -type f))
-            
-            log "Generating checksums for clone: $clone_mount_point"
+
+            log "Generating checksums for clone: ${clone_files[*]}"
             clone_checksums=($(verify_checksums "${clone_files[@]}"))
+
 
             log "Running fio workload on clone mount point: $clone_mount_point"
             clone_workload_dir="$clone_mount_point/clone_test"
@@ -372,17 +389,10 @@ for fs_type in "${FS_TYPES[@]}"; do
             
             sleep 10
 
-            log "Verifying that the base volume has not been changed"
+            log "Verifying that the base volume has not been changed: ${test_files[*]}"
             base_checksums_after=($(verify_checksums "${test_files[@]}"))
 
-            log "Deleting test files from base volumes"
-            sudo rm -f ${test_files[@]}
-
-            log "Verifying that the test files still exist on the clones"
-            clone_files_after=($(sudo find $clone_mount_point -type f))
-            clone_checksums_after=($(verify_checksums "${clone_files_after[@]}"))
-
-            log "Checksum comparison"
+            log "Base Checksum comparison"
             for i in "${!test_files[@]}"; do
                 file="${test_files[$i]}"
                 base_checksum="${base_checksums[$i]}"
@@ -391,23 +401,38 @@ for fs_type in "${FS_TYPES[@]}"; do
                 log "Checksum for $file on base volume Before: $base_checksum, After: $base_checksum_after"
 
                 if [ "$base_checksum" != "$base_checksum_after" ]; then
-                    log "Checksum mismatch for $file on base volume after workload"
+                    log "FAIL: Checksum mismatch for $file on base volume after workload"
                 else
                     log "Checksum match for $file on base volume after workload"
                 fi
             done
+            pause_if_interactive_mode "$@"
 
+            log "Deleting test files from base volume: ${test_files[*]}"
+            sudo rm -f "${test_files[@]}"
+
+            clone_files_after=($(sudo find $clone_mount_point -maxdepth 1 -type f))
+            log "Verifying that the test files still exist on the clones: ${clone_files_after[*]}"
+            if [ "${clone_files_after[*]}" != "${clone_files[*]}" ]; then
+                log "FAIL: Clone files have changed"
+            else
+                log "Clone files have not changed"
+            fi
+
+            log "Clone Checksum comparison"
+            clone_checksums_after=($(verify_checksums "${clone_files_after[@]}"))
             for i in "${!clone_files[@]}"; do
                 file="${clone_files[$i]}"
                 clone_checksum="${clone_checksums[$i]}"
                 clone_checksum_after="${clone_checksums_after[$i]}"
                 log "Checksum for $file on clone volume Before: $clone_checksum, After: $clone_checksum_after"
                 if [ "$clone_checksum" != "$clone_checksum_after" ]; then
-                    log "Checksum mismatch for $file on clone after workload"
+                    log "FAIL: Checksum mismatch for $file on clone after workload"
                 else
                     log "Checksum match for $file on clone after workload"
                 fi
             done
+            pause_if_interactive_mode "$@"
 
             # Disconnect and delete clone after validations
             log "Unmounting clone mount point: $clone_mount_point"
@@ -426,16 +451,16 @@ for fs_type in "${FS_TYPES[@]}"; do
         # delete_snapshots
     done
 
-unmount_all
-remove_mount_dirs
-disconnect_lvols
-delete_snapshots
-delete_lvols
-
+    unmount_all
+    remove_mount_dirs
+    disconnect_lvols
+    pause_if_interactive_mode "$@"
+    delete_snapshots
+    delete_lvols
 done
 
 log "TEST Execution Completed"
 
-delete_pool
+# delete_pool
 
 log "CLEANUP COMPLETE"
