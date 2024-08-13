@@ -8,7 +8,7 @@ LVOL_SIZE="160G"
 # cloning for xfs does not work well
 FS_TYPES=("ext4")
 CONFIGS=("1+0" "2+1" "4+1" "4+2" "8+1" "8+2")
-WORKLOAD_SIZE=("5G" "10G" "20G" "40G")
+WORKLOAD_SIZE=("5GiB" "10GiB" "20GiB" "40GiB")
 MOUNT_DIR="/mnt"
 
 # Description:
@@ -28,10 +28,10 @@ MOUNT_DIR="/mnt"
 #    - 8+2
 #
 # 3. Workload Sizes:
-#    - 5G
-#    - 10G
-#    - 20G
-#    - 40G
+#    - 5GiB
+#    - 10GiB
+#    - 20GiB
+#    - 40GiB
 #
 # The total number of test cases is calculated by multiplying the number of filesystem types, configurations, and workload sizes:
 # 2 (Filesystem Types) * 6 (Configurations) * 4 (Workload Sizes) = 48 Test Cases
@@ -149,7 +149,7 @@ run_fio_workload() {
     local size=$2
     local nrfiles=$3
     log "Running fio workload on mount point: $mount_point with size: $size"
-    sudo fio --directory=$mount_point --readwrite=randwrite --bs=4K-128K --size=$size --name=test --numjobs=1 --nrfiles=$nrfiles
+    sudo fio --directory=$mount_point --readwrite=randwrite --bs=256K --size=$size --name=test --numjobs=1 --nrfiles=$nrfiles
 }
 
 generate_checksums() {
