@@ -182,6 +182,7 @@ compare_checksums() {
             log "Checksum OK for $file"
         else
             log "FAIL: Checksum mismatch for $file"
+            exit 1
         fi
     done
 }
@@ -419,6 +420,7 @@ for fs_type in "${FS_TYPES[@]}"; do
             log "Checksum. On base volume: ${base_chksums_arr[$i]}, on clone: ${clone_checksums[*]}"
             if [ "${base_chksums_arr[$i]}" != "${clone_checksums[*]}" ]; then
                 log "FAIL: Checksums mismatch on clone for ${clone_files[*]}"
+                exit 1
             else
                 log "Checksums match on clone for ${clone_files[*]}"
             fi
@@ -452,6 +454,7 @@ for fs_type in "${FS_TYPES[@]}"; do
             log "Checksum. Before: ${base_chksums_arr[$i]}, After: ${base_checksums_after[*]}"
             if [ "${base_chksums_arr[$i]}" != "${base_checksums_after[*]}" ]; then
                 log "FAIL: Checksums mismatch for ${test_files[*]}"
+                exit 1
             else
                 log "Checksums match for ${test_files[*]}"
             fi
@@ -486,6 +489,7 @@ for fs_type in "${FS_TYPES[@]}"; do
             log "Checksum. Before: ${base_chksums_arr[$i]}, After: ${clone_checksums[*]}"
             if [ "${base_chksums_arr[$i]}" != "${clone_checksums[*]}" ]; then
                 log "FAIL: Clone files have changed ${clone_files[*]}"
+                exit 1
             else
                 log "Checksums match on clone for ${clone_files[*]}"
             fi
@@ -513,7 +517,9 @@ for fs_type in "${FS_TYPES[@]}"; do
 
             log "TEST Execution Completed for NDCS: $ndcs, NPCS: $npcs, FIO Size: $size, FS Type: $fs_type"
         done
-        # pause_if_interactive_mode "$@"
+
+        log "delete_snapshots"
+        pause_if_interactive_mode "$@"
         delete_snapshots
 
 
