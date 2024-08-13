@@ -93,6 +93,17 @@ class CachingNode(BaseModel):
         "hugepages": {"type": int, "default": 0},
         "multipathing": {"type": bool, "default": True},
 
+        "spdk_mem": {"type": int, "default": 0},
+        "spdk_image": {"type": str, "default": ""},
+        "spdk_cpu_mask": {"type": str, "default": ""},
+
+        "namespace": {"type": str, "default": ""},
+        "s3_data_path": {"type": str, "default": ""},
+        "ftl_buffer_size": {"type": int, "default": 0},
+        "lvstore_cluster_size": {"type": int, "default": 4096},
+        "num_md_pages_per_cluster_ratio": {"type": int, "default": 1},
+        "ftl_uuid": {"type": str, "default": ""},
+
     }
 
     def __init__(self, data=None):

@@ -1,6 +1,7 @@
 # coding=utf-8
 import json
 import logging
+import math
 import os
 import random
 import re
@@ -427,3 +428,37 @@ def get_logger(name):
     gelf_handler = GELFUDPHandler('0.0.0.0', constants.GELF_PORT)
     logger.addHandler(gelf_handler)
     return logger
+
+
+def parse_size(size_string: str):
+    try:
+        x = int(size_string)
+        return x
+    except Exception:
+        pass
+    try:
+        if size_string:
+            size_string = size_string.lower()
+            size_string = size_string.replace(" ", "")
+            size_string = size_string.replace("b", "")
+            size_number = int(size_string[:-1])
+            size_v = size_string[-1]
+            one_k = 1000
+            multi = 0
+            if size_v == "k":
+                multi = 1
+            elif size_v == "m":
+                multi = 2
+            elif size_v == "g":
+                multi = 3
+            elif size_v == "t":
+                multi = 4
+            else:
+                print(f"Error parsing size: {size_string}")
+                return -1
+            return size_number * math.pow(one_k, multi)
+        else:
+            return -1
+    except:
+        print(f"Error parsing size: {size_string}")
+        return -1

@@ -734,3 +734,12 @@ class RPCClient:
             "size_in_mib": size_in_mib
         }
         return self._request("bdev_lvol_resize", params)
+
+    def bdev_ftl_load(self, name, base_bdev, cache, uuid):
+        params = {
+            "name": name,
+            "base_bdev": base_bdev,
+            "cache": cache,
+            "uuid": uuid
+        }
+        return self._request("bdev_ftl_load", params)
