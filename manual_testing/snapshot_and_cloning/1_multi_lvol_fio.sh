@@ -3,7 +3,7 @@
 set -e
 
 # Variables
-POOL_NAME="snap_test_pool"
+POOL_NAME="testing1"
 LVOL_SIZE="160G"
 FS_TYPES=("ext4")
 CONFIGURATIONS=("1+0" "2+1" "4+1" "4+2" "8+1" "8+2")
