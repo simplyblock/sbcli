@@ -315,11 +315,14 @@ def _create_jm_stack_on_device(rpc_client, nvme, snode, after_restart):
 
 
 def _create_storage_device_stack(rpc_client, nvme, snode, after_restart):
-    test_name = f"{nvme.nvme_bdev}_test"
-    ret = rpc_client.bdev_passtest_create(test_name, nvme.nvme_bdev)
-    if not ret:
-        logger.error(f"Failed to create passtest bdev {test_name}")
-        return False
+    nvme_bdev = nvme.nvme_bdev
+    if snode.enable_test_device:
+        test_name = f"{nvme.nvme_bdev}_test"
+        ret = rpc_client.bdev_passtest_create(test_name, nvme_bdev)
+        if not ret:
+            logger.error(f"Failed to create passtest bdev {test_name}")
+            return False
+        nvme_bdev = test_name
     alceml_id = nvme.get_id()
     alceml_name = device_controller.get_alceml_name(alceml_id)
     logger.info(f"adding {alceml_name}")
@@ -329,11 +332,11 @@ def _create_storage_device_stack(rpc_client, nvme, snode, after_restart):
 
     if snode.alceml_cpu_cores:
         alceml_cpu_mask = utils.decimal_to_hex_power_of_2(snode.alceml_cpu_cores[snode.alceml_cpu_index])
-        ret = rpc_client.bdev_alceml_create(alceml_name, test_name, alceml_id, pba_init_mode=pba_init_mode,
+        ret = rpc_client.bdev_alceml_create(alceml_name, nvme_bdev, alceml_id, pba_init_mode=pba_init_mode,
                                             alceml_cpu_mask=alceml_cpu_mask)
         snode.alceml_cpu_index = (snode.alceml_cpu_index + 1) % len(snode.alceml_cpu_cores)
     else:
-        ret = rpc_client.bdev_alceml_create(alceml_name, test_name, alceml_id, pba_init_mode=pba_init_mode)
+        ret = rpc_client.bdev_alceml_create(alceml_name, nvme_bdev, alceml_id, pba_init_mode=pba_init_mode)
 
 
     if not ret:
@@ -371,8 +374,8 @@ def _create_storage_device_stack(rpc_client, nvme, snode, after_restart):
     if not ret:
         logger.error(f"Failed to add: {pt_name} to the subsystem: {subsystem_nqn}")
         return False
-
-    nvme.testing_bdev = test_name
+    if snode.enable_test_device:
+        nvme.testing_bdev = test_name
     nvme.alceml_bdev = alceml_name
     nvme.pt_bdev = pt_name
     nvme.nvmf_nqn = subsystem_nqn
@@ -585,7 +588,7 @@ def _connect_to_remote_devs(this_node):
 def add_node(cluster_id, node_ip, iface_name, data_nics_list,
              max_lvol, max_snap, max_prov, spdk_image=None, spdk_debug=False,
              small_bufsize=0, large_bufsize=0,
-             num_partitions_per_dev=0, jm_percent=0, number_of_devices=0):
+             num_partitions_per_dev=0, jm_percent=0, number_of_devices=0, enable_test_device=False):
     db_controller = DBController()
     kv_store = db_controller.kv_store
 
@@ -790,6 +793,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
     snode.iobuf_large_pool_count = large_pool_count or 0
     snode.iobuf_small_bufsize = small_bufsize or 0
     snode.iobuf_large_bufsize = large_bufsize or 0
+    snode.enable_test_device = enable_test_device
 
     snode.num_partitions_per_dev = num_partitions_per_dev
     snode.jm_percent = jm_percent
@@ -2068,7 +2072,8 @@ def health_check(node_id):
         logger.info(f"getting device bdevs")
         for dev in snode.nvme_devices:
             nvme_bdev = rpc_client.get_bdevs(dev.nvme_bdev)
-            testing_bdev = rpc_client.get_bdevs(dev.testing_bdev)
+            if snode.enable_test_device:
+                testing_bdev = rpc_client.get_bdevs(dev.testing_bdev)
             alceml_bdev = rpc_client.get_bdevs(dev.alceml_bdev)
             pt_bdev = rpc_client.get_bdevs(dev.pt_bdev)
 
