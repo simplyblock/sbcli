@@ -53,6 +53,8 @@ class CLIWrapper:
 
         sub_command.add_argument("--iobuf_small_bufsize", help='bdev_set_options param', dest='small_bufsize',  type=int, default=0)
         sub_command.add_argument("--iobuf_large_bufsize", help='bdev_set_options param', dest='large_bufsize',  type=int, default=0)
+        sub_command.add_argument("--enable-test-device", help='Enable creation of test device', action='store_true')
+
 
         # delete storage node
         sub_command = self.add_sub_command(subparser, "delete", 'Delete storage node obj')
@@ -670,12 +672,13 @@ class CLIWrapper:
                 max_snap = args.max_snap
                 max_prov = self.parse_size(args.max_prov)
                 number_of_devices = args.number_of_devices
+                enable_test_device = args.enable_test_device
                 if max_prov < 1 * 1024 * 1024 * 1024:
                     return f"Max provisioning memory:{args.max_prov} must be larger than 1G"
 
                 out = storage_ops.add_node(
                     cluster_id, node_ip, ifname, data_nics, max_lvol, max_snap, max_prov, spdk_image, spdk_debug,
-                    small_bufsize, large_bufsize, num_partitions_per_dev, jm_percent, number_of_devices)
+                    small_bufsize, large_bufsize, num_partitions_per_dev, jm_percent, number_of_devices, enable_test_device)
                 return out
 
             elif sub_command == "list":
