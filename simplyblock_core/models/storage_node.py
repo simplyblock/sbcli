@@ -70,6 +70,7 @@ class StorageNode(BaseModel):
         "memory": {"type": int, "default": 0},
         "hugepages": {"type": int, "default": 0},
         "health_check": {"type": bool, "default": True},
+        "enable_test_device": {"type": bool, "default": False},
 
         # spdk params
         "spdk_cpu_mask": {"type": str, "default": ""},
