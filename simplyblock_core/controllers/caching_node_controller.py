@@ -44,7 +44,7 @@ def addNvmeDevices(rpc_client, devs, snode):
             nvme_bdevs, err = rpc_client.bdev_nvme_controller_attach(nvme_controller, pcie)
             time.sleep(2)
 
-        rpc_client.bdev_examine(nvme_controller)
+        rpc_client.bdev_examine(f"{nvme_controller}n1")
         time.sleep(3)
         nvme_bdevs = []
         for bdev in rpc_client.get_bdevs():
@@ -831,7 +831,7 @@ def remove_node(node_id, force=False):
     if snode.lvols:
         if force:
             for lvol_id in snode.lvols:
-                ret = lvol_controller.delete_lvol(lvol_id, force=True)
+                ret = lvol_controller.delete_lvol(lvol_id, force_delete=True)
                 # logger.info(f"Disconnecting LVol {clvol.lvol_id}")
                 # disconnect(node_id, clvol.lvol_id)
         else:
