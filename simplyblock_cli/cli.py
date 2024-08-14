@@ -48,6 +48,8 @@ class CLIWrapper:
         sub_command = self.add_sub_command(subparser, 'deploy', 'Deploy caching node on this machine (local exec)')
         sub_command.add_argument("--ifname", help='Management interface name, default: eth0')
 
+        self.add_sub_command(subparser, "deploy-cleaner", 'clean local deploy (local run)')
+
         self.add_sub_command(subparser, 'list', 'List Caching nodes')
         sub_command = self.add_sub_command(subparser, 'list-lvols', 'List connected lvols')
         sub_command.add_argument("id", help='Caching Node UUID')
@@ -899,6 +901,9 @@ class CLIWrapper:
             sub_command = args_dict['caching-node']
             if sub_command == "deploy":
                 ret = caching_node_controller.deploy(args.ifname)
+
+            elif sub_command == "deploy-cleaner":
+                ret = storage_ops.deploy_cleaner()
 
             if sub_command == "add-node":
                 cluster_id = args.cluster_id
