@@ -37,8 +37,8 @@ def add_node_to_cluster():
     spdk_image = None
     namespace = None
     s3_data_path = None
-    initial_stor_size = None
-    min_ftl_buffer_percent = None
+    blocked_pcie = None
+    ftl_buffer_size = None
     lvstore_cluster_size = None
     num_md_pages_per_cluster_ratio = None
 
@@ -58,25 +58,25 @@ def add_node_to_cluster():
         namespace = cl_data['namespace']
 
     if 's3_data_path' in cl_data:
-        s3_data_path = bool(cl_data['s3_data_path'])
+        s3_data_path = cl_data['s3_data_path']
 
-    if 'initial_stor_size' in cl_data:
-        initial_stor_size = bool(cl_data['initial_stor_size'])
+    if 'blocked_pcie' in cl_data:
+        blocked_pcie = cl_data['blocked_pcie']
 
-    if 'min_ftl_buffer_percent' in cl_data:
-        min_ftl_buffer_percent = bool(cl_data['min_ftl_buffer_percent'])
+    if 'ftl_buffer_size' in cl_data:
+        ftl_buffer_size = cl_data['ftl_buffer_size']
 
     if 'lvstore_cluster_size' in cl_data:
-        lvstore_cluster_size = bool(cl_data['lvstore_cluster_size'])
+        lvstore_cluster_size = cl_data['lvstore_cluster_size']
 
     if 'num_md_pages_per_cluster_ratio' in cl_data:
-        num_md_pages_per_cluster_ratio = bool(cl_data['num_md_pages_per_cluster_ratio'])
+        num_md_pages_per_cluster_ratio = cl_data['num_md_pages_per_cluster_ratio']
 
     t = threading.Thread(
         target=caching_node_controller.add_node,
         args=(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spdk_mem, spdk_image, namespace,
-              s3_data_path, initial_stor_size, min_ftl_buffer_percent, lvstore_cluster_size,
-              num_md_pages_per_cluster_ratio))
+              s3_data_path, ftl_buffer_size, lvstore_cluster_size,
+              num_md_pages_per_cluster_ratio, blocked_pcie))
     t.start()
 
     return utils.get_response(True)
@@ -194,4 +194,24 @@ def recreate_caching_node(uuid):
         return utils.get_response_error(f"Caching node not found: {uuid}", 404)
 
     data = caching_node_controller.recreate(cnode.get_id())
+    return utils.get_response(data)
+
+
+@bp.route('/cachingnode/restart', methods=['POST'])
+def restart_caching_node():
+
+    cl_data = request.get_json()
+    if 'node_id' not in cl_data:
+        return utils.get_response(None, "missing required param: node_id", 400)
+
+    node_id = cl_data['node_id']
+    cnode = db_controller.get_caching_node_by_id(node_id)
+    if not cnode:
+        return utils.get_response_error(f"Caching node not found: {node_id}", 404)
+
+    node_ip = None
+    if "node_ip" in cl_data:
+        node_ip = cl_data['node_ip']
+
+    data = caching_node_controller.restart_node(node_id, node_ip)
     return utils.get_response(data)

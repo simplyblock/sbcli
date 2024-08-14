@@ -28,7 +28,7 @@ class LVol(BaseModel):
         "crypto_bdev": {"type": str, 'default': ""},
         "top_bdev": {"type": str, 'default': ""},
 
-        "nvme_dev": {"type": NVMeDevice, 'default': None},
+        # "nvme_dev": {"type": NVMeDevice, 'default': None},
         "pool_uuid": {"type": str, 'default': ""},
         "hostname": {"type": str, 'default': ""},
         "node_id": {"type": str, 'default': ""},

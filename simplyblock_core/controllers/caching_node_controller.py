@@ -356,7 +356,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spd
     return True
 
 
-def restart_node(node_id, node_ip, s3_data_path=None, ftl_buffer_size=None,
+def restart_node(node_id, node_ip=None, s3_data_path=None, ftl_buffer_size=None,
                  lvstore_cluster_size=None, num_md_pages_per_cluster_ratio=None, blocked_pcie=None):
 
     db_controller = DBController()
@@ -374,7 +374,7 @@ def restart_node(node_id, node_ip, s3_data_path=None, ftl_buffer_size=None,
         snode.s3_data_path = s3_data_path
 
     if ftl_buffer_size:
-        snode.ftl_buffer_size = ftl_buffer_size
+        snode.ftl_buffer_size = utils.parse_size(ftl_buffer_size)
 
     if lvstore_cluster_size:
         snode.lvstore_cluster_size = lvstore_cluster_size
