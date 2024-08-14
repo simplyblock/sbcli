@@ -127,6 +127,10 @@ def spdk_process_start():
     node_name = os.environ.get("HOSTNAME")
     logger.debug(f"deploying caching node spdk on worker: {node_name}")
 
+    blocked_pcie = ""
+    if 'blocked_pcie' in data and data['blocked_pcie']:
+        blocked_pcie = data['blocked_pcie']
+
     try:
         env = Environment(loader=FileSystemLoader(os.path.join(TOP_DIR, 'templates')), trim_blocks=True, lstrip_blocks=True)
         template = env.get_template('deploy_spdk.yaml.j2')
@@ -141,6 +145,7 @@ def spdk_process_start():
             'RPC_PASSWORD': data['rpc_password'],
             'HOSTNAME': node_name,
             'NAMESPACE': namespace,
+            'BLOCKED_PCIE': blocked_pcie,
         }
         dep = yaml.safe_load(template.render(values))
         logger.debug(dep)
@@ -282,27 +287,28 @@ def disconnect_all():
     return utils.get_response(ret_code)
 
 
-
-
 @bp.route('/make_gpt_partitions', methods=['POST'])
 def make_gpt_partitions_for_nbd():
     nbd_device = '/dev/nbd0'
-    jm_percent = 10
+    partitions = []
 
     try:
         data = request.get_json()
         nbd_device = data['nbd_device']
-        jm_percent = data['jm_percent']
+        partitions = data['partitions']  # [["0%", "50%"], ["50%", "100%"]]
     except:
         pass
 
+    if not partitions:
+        return utils.get_response(False, f"Partition param not found")
+
     cmd_list = [
         f"parted -fs {nbd_device} mklabel gpt",
-        f"parted -f {nbd_device} mkpart journal \"0%\" \"{jm_percent}%\""
     ]
-    sg_cmd_list = [
-        f"sgdisk -t 1:6527994e-2c5a-4eec-9613-8f5944074e8b {nbd_device}",
-    ]
+    sg_cmd_list = []
+    for index, partition in enumerate(partitions):
+        cmd_list.append(f"parted -f {nbd_device} mkpart part_{(index+1)} \"{partition[0]}\" \"{partition[1]}\" ")
+        sg_cmd_list.append(f"sgdisk -t {(index+1)}:6527994e-2c5a-4eec-9613-8f5944074e8b {nbd_device}")
 
     for cmd in cmd_list+sg_cmd_list:
         logger.debug(cmd)
