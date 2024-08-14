@@ -76,7 +76,7 @@ class CLIWrapper:
 
         sub_command = self.add_sub_command(subparser, 'restart', 'restart Caching node')
         sub_command.add_argument("id", help='Caching node UUID')
-        sub_command.add_argument("node_ip", help='Caching node IP')
+        sub_command.add_argument("--node-ip", help='Caching node new IP', dest="node_ip")
 
         #
         # ----------------- cluster -----------------

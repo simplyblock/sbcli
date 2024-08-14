@@ -62,8 +62,8 @@ def addNvmeDevices(rpc_client, devs, snode):
             driver_specific = nvme_dict['driver_specific']
             if "nvme" in driver_specific:
                 nvme_driver_data = driver_specific['nvme'][0]
+                pcie_address = nvme_driver_data['pci_address']
                 model_number = nvme_driver_data['ctrlr_data']['model_number']
-                pcie_address = nvme_driver_data['ctrlr_data']['pci_address']
                 serial_number = nvme_driver_data['ctrlr_data']['serial_number']
 
             devices.append(
@@ -202,10 +202,10 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spd
 
     time.sleep(1)
 
-    snode.spdk_mem = spdk_mem
-    snode.spdk_image = spdk_image
-    snode.spdk_cpu_mask = spdk_cpu_mask
-    snode.namespace = namespace
+    snode.spdk_mem = spdk_mem or 0
+    snode.spdk_image = spdk_image or ""
+    snode.spdk_cpu_mask = spdk_cpu_mask or ""
+    snode.namespace = namespace or ""
 
     # creating RPCClient instance
     rpc_client = RPCClient(
@@ -375,7 +375,7 @@ def restart_node(node_id, node_ip):
         node_ip = snode.mgmt_ip
 
     logger.info(f"Restarting Caching node: {node_ip}")
-    cnode_api = CNodeClient(node_ip)
+    cnode_api = CNodeClient(node_ip + ":5000")
 
     node_info, _ = cnode_api.info()
     logger.info(f"Node found: {node_info['hostname']}")
