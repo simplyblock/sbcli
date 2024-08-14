@@ -914,7 +914,7 @@ class CLIWrapper:
                 namespace = args.namespace
 
                 s3_data_path = args.s3_data_path
-                ftl_buffer_size = args.min_ftl_buffer_percent
+                ftl_buffer_size = args.ftl_buffer_size
                 lvstore_cluster_size = args.lvstore_cluster_size
                 num_md_pages_per_cluster_ratio = args.num_md_pages_per_cluster_ratio
 

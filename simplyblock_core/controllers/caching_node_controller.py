@@ -55,18 +55,26 @@ def addNvmeDevices(rpc_client, devs, snode):
             time.sleep(3)
             ret = rpc_client.get_bdevs(nvme_bdev)
             nvme_dict = ret[0]
-            nvme_driver_data = nvme_dict['driver_specific']['nvme'][0]
-            model_number = nvme_driver_data['ctrlr_data']['model_number']
             total_size = nvme_dict['block_size'] * nvme_dict['num_blocks']
+            model_number = ""
+            pcie_address = ""
+            serial_number = ""
+            driver_specific = nvme_dict['driver_specific']
+            if "nvme" in driver_specific:
+                nvme_driver_data = driver_specific['nvme'][0]
+                model_number = nvme_driver_data['ctrlr_data']['model_number']
+                pcie_address = nvme_driver_data['ctrlr_data']['pci_address']
+                serial_number = nvme_driver_data['ctrlr_data']['serial_number']
 
             devices.append(
                 NVMeDevice({
                     'uuid': str(uuid.uuid4()),
                     'device_name': nvme_dict['name'],
                     'size': total_size,
-                    'pcie_address': nvme_driver_data['pci_address'],
+                    'driver_specific': driver_specific,
+                    'pcie_address': pcie_address,
                     'model_id': model_number,
-                    'serial_number': nvme_driver_data['ctrlr_data']['serial_number'],
+                    'serial_number': serial_number,
                     'nvme_bdev': nvme_bdev,
                     'nvme_controller': nvme_controller,
                     'node_id': snode.get_id(),
