@@ -353,8 +353,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spd
     return True
 
 
-
-def resrart_node(node_id, node_ip, ):
+def restart_node(node_id, node_ip):
 
     db_controller = DBController()
     kv_store = db_controller.kv_store
@@ -363,6 +362,9 @@ def resrart_node(node_id, node_ip, ):
     if not snode:
         logger.error("Node not found")
         return False
+
+    if not node_ip:
+        node_ip = snode.mgmt_ip
 
     logger.info(f"Restarting Caching node: {node_ip}")
     cnode_api = CNodeClient(node_ip)

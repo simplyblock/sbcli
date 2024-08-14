@@ -72,6 +72,10 @@ class CLIWrapper:
         sub_command.add_argument("--history", help='(XXdYYh), list history records (one for every 15 minutes) '
                                                    'for XX days and YY hours (up to 10 days in total).')
 
+        sub_command = self.add_sub_command(subparser, 'restart', 'restart Caching node')
+        sub_command.add_argument("id", help='Caching node UUID')
+        sub_command.add_argument("node_ip", help='Caching node IP')
+
         #
         # ----------------- cluster -----------------
         #
@@ -934,6 +938,8 @@ class CLIWrapper:
             if sub_command == "list":
                 #cluster_id
                 ret = caching_node_controller.list_nodes()
+            if sub_command == "restart":
+                ret = caching_node_controller.restart_node(args.id, args.node_ip)
             if sub_command == "list-lvols":
                 ret = caching_node_controller.list_lvols(args.id)
             if sub_command == "remove":
