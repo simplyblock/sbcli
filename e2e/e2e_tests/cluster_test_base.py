@@ -53,8 +53,11 @@ class TestClusterBase:
                 address=node,
                 bastion_server_address=self.bastion_server,
             )
+        self.unmount_all(base_path=self.mount_path)
         self.ssh_obj.unmount_path(node=self.mgmt_nodes[0],
                                   device=self.mount_path)
+        self.ssh_obj.delete_all_snapshots(node=self.mgmt_nodes[0])
+        self.disconnect_lvols()
         self.sbcli_utils.delete_all_lvols()
         self.sbcli_utils.delete_all_storage_pools()
         session = boto3.Session(
@@ -70,16 +73,22 @@ class TestClusterBase:
         self.logger.info("Inside teardown function")
         self.ssh_obj.kill_processes(node=self.mgmt_nodes[0],
                                     process_name="fio")
-        lvol_id = self.sbcli_utils.get_lvol_id(lvol_name=self.lvol_name)
-        if lvol_id is not None:
-            lvol_details = self.sbcli_utils.get_lvol_details(lvol_id=lvol_id)
-            nqn = lvol_details[0]["nqn"]
-            self.ssh_obj.unmount_path(node=self.mgmt_nodes[0],
-                                      device=self.mount_path)
+        self.ssh_obj.delete_all_snapshots(node=self.mgmt_nodes[0])
+        lvols = self.sbcli_utils.list_lvols()
+        self.unmount_all(base_path=self.mount_path)
+        self.ssh_obj.unmount_path(node=self.mgmt_nodes[0],
+                                  device=self.mount_path)
+        if lvols is not None:
+            for _, lvol_id in lvols.items():
+                lvol_details = self.sbcli_utils.get_lvol_details(lvol_id=lvol_id)
+                nqn = lvol_details[0]["nqn"]
+                self.ssh_obj.unmount_path(node=self.mgmt_nodes[0],
+                                          device=self.mount_path)
+                self.ssh_obj.exec_command(node=self.mgmt_nodes[0],
+                                          command=f"sudo nvme disconnect -n {nqn}")
+            self.disconnect_lvols()
             self.sbcli_utils.delete_all_lvols()
-            self.sbcli_utils.delete_all_storage_pools()
-            self.ssh_obj.exec_command(node=self.mgmt_nodes[0],
-                                      command=f"sudo nvme disconnect -n {nqn}")
+        self.sbcli_utils.delete_all_storage_pools()
         for node, ssh in self.ssh_obj.ssh_connections.items():
             self.logger.info(f"Closing node ssh connection for {node}")
             ssh.close()
@@ -165,3 +174,39 @@ class TestClusterBase:
                         f"Device {device_id} is not in online state. {device['Reported Status']}"
                     assert device["Actual Status"] == "online", \
                         f"Device {device_id} is not in online state. {device['Actual Status']}"
+
+    def unmount_all(self, base_path=None):
+        """ Unmount all mount points """
+        self.logger.info("Unmounting all mount points")
+        if not base_path:
+            base_path = self.mount_path 
+        mount_points = self.ssh_obj.get_mount_points(node=self.mgmt_nodes[0], base_path=base_path)
+        for mount_point in mount_points:
+            self.logger.info(f"Unmounting {mount_point}")
+            self.ssh_obj.unmount_path(node=self.mgmt_nodes[0], device=mount_point)
+
+    def remove_mount_dirs(self):
+        """ Remove all mount point directories """
+        self.logger.info("Removing all mount point directories")
+        mount_dirs = self.ssh_obj.get_mount_points(node=self.mgmt_nodes[0], base_path=self.mount_path)
+        for mount_dir in mount_dirs:
+            self.logger.info(f"Removing directory {mount_dir}")
+            self.ssh_obj.remove_dir(node=self.mgmt_nodes[0], dir_path=mount_dir)
+
+    def disconnect_lvols(self):
+        """ Disconnect all NVMe devices with NQN containing 'lvol' """
+        self.logger.info("Disconnecting all NVMe devices with NQN containing 'lvol'")
+        subsystems = self.ssh_obj.get_nvme_subsystems(node=self.mgmt_nodes[0], nqn_filter="lvol")
+        for subsys in subsystems:
+            self.logger.info(f"Disconnecting NVMe subsystem: {subsys}")
+            self.ssh_obj.disconnect_nvme(node=self.mgmt_nodes[0], nqn_grep=subsys)
+
+    def delete_snapshots(self):
+        """ Delete all snapshots """
+        self.logger.info("Deleting all snapshots")
+        snapshots = self.ssh_obj.get_snapshots(node=self.mgmt_nodes[0])
+        for snapshot in snapshots:
+            self.logger.info(f"Deleting snapshot: {snapshot}")
+            delete_snapshot_command = f"sbcli-lvol snapshot delete {snapshot} --force"
+            self.ssh_obj.exec_command(node=self.mgmt_nodes[0], command=delete_snapshot_command)
+            

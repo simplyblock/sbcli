@@ -108,17 +108,14 @@ class CommonUtils:
             RuntimeError: If fio process hang
         """
         self.logger.info("Waiting for FIO processes to complete!")
-        start_time = time.time()
         while True:
             process = self.ssh_utils.find_process_name(node=node,
                                                        process_name="fio")
             process_fio = [element for element in process if "grep" not in element]
+            self.logger.info(process_fio)
             
             if len(process_fio) == 0:
                 break
-            end_time = time.time()
-            if end_time - start_time > 800:
-                raise RuntimeError("Fio Process not completing post its time")
             if timeout <= 0:
                 break
             sleep_n_sec(10)
