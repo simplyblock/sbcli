@@ -72,16 +72,19 @@ class CNodeClient:
     def spdk_process_start(
             self, spdk_cpu_mask, spdk_mem, spdk_image, server_ip, rpc_port, rpc_username, rpc_password, namespace=None):
         params = {
-            "spdk_cpu_mask": spdk_cpu_mask,
-            "spdk_mem": spdk_mem,
-            "spdk_image": spdk_image,
             "server_ip": server_ip,
             "rpc_port": rpc_port,
             "rpc_username": rpc_username,
-            "rpc_password": rpc_password,
-        }
+            "rpc_password": rpc_password}
         if namespace:
             params["namespace"] = namespace
+        if spdk_cpu_mask:
+            params["spdk_cpu_mask"] = spdk_cpu_mask
+        if spdk_mem:
+            params["spdk_mem"] = spdk_mem
+        if spdk_image:
+            params["spdk_image"] = spdk_image
+
         return self._request("POST", "cnode/spdk_process_start", params)
 
     def join_db(self, db_connection):
