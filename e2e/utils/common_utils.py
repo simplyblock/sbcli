@@ -112,6 +112,7 @@ class CommonUtils:
             process = self.ssh_utils.find_process_name(node=node,
                                                        process_name="fio")
             process_fio = [element for element in process if "grep" not in element]
+            self.logger.info(process_fio)
             
             if len(process_fio) == 0:
                 break

@@ -387,6 +387,14 @@ class SshUtils:
         return output, error
 
     def delete_all_snapshots(self, node):
+        cmd = "%s snapshot list | grep -i snapshot | awk '{print $2}'" % self.base_cmd
+        output, error = self.exec_command(node=node, command=cmd)
+
+        list_snapshot = output.strip().split()
+        for snapshot_id in list_snapshot:
+            self.delete_snapshot(node=node, snapshot_id=snapshot_id)
+
+        
         cmd = "%s snapshot list | grep -i ss | awk '{print $2}'" % self.base_cmd
         output, error = self.exec_command(node=node, command=cmd)
 

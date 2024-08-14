@@ -175,9 +175,11 @@ class TestClusterBase:
                     assert device["Actual Status"] == "online", \
                         f"Device {device_id} is not in online state. {device['Actual Status']}"
 
-    def unmount_all(self, base_path):
+    def unmount_all(self, base_path=None):
         """ Unmount all mount points """
         self.logger.info("Unmounting all mount points")
+        if not base_path:
+            base_path = self.mount_path 
         mount_points = self.ssh_obj.get_mount_points(node=self.mgmt_nodes[0], base_path=base_path)
         for mount_point in mount_points:
             self.logger.info(f"Unmounting {mount_point}")
@@ -207,3 +209,4 @@ class TestClusterBase:
             self.logger.info(f"Deleting snapshot: {snapshot}")
             delete_snapshot_command = f"sbcli-lvol snapshot delete {snapshot} --force"
             self.ssh_obj.exec_command(node=self.mgmt_nodes[0], command=delete_snapshot_command)
+            

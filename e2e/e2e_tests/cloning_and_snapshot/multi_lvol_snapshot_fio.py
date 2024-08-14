@@ -47,6 +47,7 @@ class TestMultiLvolFio(TestClusterBase):
         super().__init__(**kwargs)
         self.logger = setup_logger(__name__)
         self.lvol_size = "100G"
+        self.mount_path = "/mnt"
 
     def run(self):
         """Performs each step of the test case"""
@@ -56,6 +57,7 @@ class TestMultiLvolFio(TestClusterBase):
         self.sbcli_utils.add_storage_pool(
             pool_name=self.pool_name
         )
+        lvol_vs_disk = {}
 
         for config in ["1+0", "2+1", "4+1", "4+2", "8+1", "8+2"]:
             ndcs, npcs = config.split('+')
@@ -69,6 +71,9 @@ class TestMultiLvolFio(TestClusterBase):
                 distr_ndcs=int(ndcs),
                 distr_npcs=int(npcs)
             )
+            lvols = self.sbcli_utils.list_lvols()
+            assert lvol_name in list(lvols.keys()), \
+                f"Lvol {lvol_name} present in list of lvols post add: {lvols}"
             lvol_id = self.sbcli_utils.get_lvol_id(lvol_name=lvol_name)
             connect_str = self.sbcli_utils.get_lvol_connect_str(lvol_name=lvol_name)
 
@@ -84,12 +89,14 @@ class TestMultiLvolFio(TestClusterBase):
             for device in final_devices:
                 if device not in initial_devices:
                     self.logger.info(f"Using disk: /dev/{device.strip()}")
-                    disk_use = f"/dev/{device.strip()}"
+                    lvol_vs_disk[lvol_name] = f"/dev/{device.strip()}"
                     break
 
-            self.ssh_obj.unmount_path(node=self.mgmt_nodes[0], device=disk_use)
+            self.ssh_obj.unmount_path(node=self.mgmt_nodes[0], device=lvol_vs_disk[lvol_name])
         
         lvol_list = self.sbcli_utils.list_lvols()
+
+
 
         for fs_type in ["ext4", "xfs"]:
             self.logger.info(f"Processing filesystem type: {fs_type}")
@@ -98,12 +105,15 @@ class TestMultiLvolFio(TestClusterBase):
                 ndcs, npcs = config.split('+')
                 lvol_name = f"lvol_{ndcs}_{npcs}"
                 mount_point = f"{self.mount_path}/{lvol_name}"
-                self.ssh_obj.unmount_path(node=self.mgmt_nodes[0], device=disk_use)
                 self.logger.info(f"Formating lvol: {lvol_name} with fs type: {fs_type} And moutning at {mount_point}")
-                self.ssh_obj.format_disk(node=self.mgmt_nodes[0], device=disk_use, fs_type=fs_type)
-                self.ssh_obj.mount_path(node=self.mgmt_nodes[0], device=disk_use, mount_path=mount_point)
+                self.ssh_obj.format_disk(node=self.mgmt_nodes[0],
+                                         device=lvol_vs_disk[lvol_name],
+                                         fs_type=fs_type)
+                self.ssh_obj.mount_path(node=self.mgmt_nodes[0],
+                                        device=lvol_vs_disk[lvol_name],
+                                        mount_path=mount_point)
 
-            for size in ["5G", "10G", "20G", "40G"]:
+            for size in ["5GiB", "10GiB", "20GiB", "40GiB"]:
                 for config in ["1+0", "2+1", "4+1", "4+2", "8+1", "8+2"]:
                     ndcs, npcs = config.split('+')
                     lvol_name = f"lvol_{ndcs}_{npcs}"
