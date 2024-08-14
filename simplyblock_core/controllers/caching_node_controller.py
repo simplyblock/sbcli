@@ -367,8 +367,8 @@ def restart_node(node_id, node_ip=None, s3_data_path=None, ftl_buffer_size=None,
         logger.error("Node not found")
         return False
 
-    if not node_ip:
-        node_ip = snode.mgmt_ip
+    if node_ip:
+        snode.mgmt_ip = node_ip.split(":")[0]
 
     if s3_data_path:
         snode.s3_data_path = s3_data_path
@@ -385,13 +385,12 @@ def restart_node(node_id, node_ip=None, s3_data_path=None, ftl_buffer_size=None,
     if blocked_pcie:
         snode.blocked_pcie = blocked_pcie
 
-    logger.info(f"Restarting Caching node: {node_ip}")
-    cnode_api = CNodeClient(node_ip + ":5000")
+    logger.info(f"Restarting Caching node: {snode.mgmt_ip}")
+    cnode_api = CNodeClient(snode.mgmt_ip  + ":5000")
 
     node_info, _ = cnode_api.info()
     logger.info(f"Node found: {node_info['hostname']}")
 
-    snode.mgmt_ip = node_ip
 
     logger.info(f"Deploying SPDK")
     results, err = cnode_api.spdk_process_start(
