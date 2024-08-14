@@ -306,14 +306,8 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spd
 
     logger.info(f"Cache size: {utils.humanbytes(ocf_cache_size)}")
 
-    ssd_dev = nvme_devs[0]
-
-    snode.cache_bdev = nvme_devs[1].device_name
+    snode.cache_bdev = nvme_devs[2].device_name
     snode.cache_size = ocf_cache_size
-
-
-
-
 
     filename = "/dev/nvme1n1"
     if snode.s3_data_path:
@@ -324,7 +318,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spd
         logger.error("Failed ot create bdev")
         return False
 
-    ret = rpc_client.bdev_passthru_create("ftl_cache_1", nvme_devs[2].device_name, 4096)
+    ret = rpc_client.bdev_passthru_create("ftl_cache_1", nvme_devs[1].device_name, 4096)
     if not ret:
         logger.error("Failed ot create bdev")
         return False
@@ -448,7 +442,7 @@ def restart_node(node_id, node_ip):
         logger.error("Failed ot create bdev")
         return False
 
-    ret = rpc_client.bdev_passthru_create("ftl_cache_1", nvme_devs[2].device_name, 4096)
+    ret = rpc_client.bdev_passthru_create("ftl_cache_1", nvme_devs[1].device_name, 4096)
     if not ret:
         logger.error("Failed ot create bdev")
         return False
@@ -627,7 +621,6 @@ def connect(caching_node_id, lvol_id):
     cached_lvol = CachedLVol()
     cached_lvol.uuid = lvol.get_id()
     cached_lvol.lvol_id = lvol.get_id()
-    cached_lvol.lvol = lvol
     cached_lvol.hostname = cnode.hostname
 
     cached_lvol.local_nqn = subsystem_nqn
@@ -802,7 +795,7 @@ def list_lvols(caching_node_id):
     data = []
 
     for clvol in cnode.connected_lvols:
-        lvol = clvol.lvol
+        lvol = db_controller.get_lvol_by_id(clvol.lvol_id)
         logger.debug(clvol)
         logger.debug("*" * 20)
         data.append({

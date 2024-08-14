@@ -14,7 +14,6 @@ class CachedLVol(BaseModel):
     attributes = {
         "uuid": {"type": str, 'default': ""},
         "lvol_id": {"type": str, 'default': ""},
-        "lvol": {"type": LVol, 'default': None},
         "hostname": {"type": str, 'default': ""},
         "local_nqn": {"type": str, 'default': ""},
         "ocf_bdev": {"type": str, 'default': ""},
