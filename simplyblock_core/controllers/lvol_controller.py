@@ -615,12 +615,13 @@ def _create_bdev_stack(lvol, snode):
     return True, None
 
 
-def add_lvol_on_node(lvol, snode):
+def add_lvol_on_node(lvol, snode, create_bdev_stack=True):
     rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
 
-    ret, msg = _create_bdev_stack(lvol, snode)
-    if not ret:
-        return False, msg
+    if create_bdev_stack:
+        ret, msg = _create_bdev_stack(lvol, snode)
+        if not ret:
+            return False, msg
 
     if lvol.connection_type == "nvmf":
         logger.info("creating subsystem %s", lvol.nqn)

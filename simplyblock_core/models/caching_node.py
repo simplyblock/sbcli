@@ -102,6 +102,7 @@ class CachingNode(BaseModel):
         "lvstore_cluster_size": {"type": int, "default": 4096},
         "num_md_pages_per_cluster_ratio": {"type": int, "default": 1},
         "ftl_uuid": {"type": str, "default": ""},
+        "blocked_pcie": {"type": str, "default": ""},
 
     }
 

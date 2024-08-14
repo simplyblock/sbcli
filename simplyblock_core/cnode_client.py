@@ -70,7 +70,8 @@ class CNodeClient:
         return self._request("GET", "cnode/info")
 
     def spdk_process_start(
-            self, spdk_cpu_mask, spdk_mem, spdk_image, server_ip, rpc_port, rpc_username, rpc_password, namespace=None):
+            self, spdk_cpu_mask, spdk_mem, spdk_image, server_ip, rpc_port, rpc_username, rpc_password,
+            namespace=None, blocked_pcie=None):
         params = {
             "server_ip": server_ip,
             "rpc_port": rpc_port,
@@ -84,6 +85,8 @@ class CNodeClient:
             params["spdk_mem"] = spdk_mem
         if spdk_image:
             params["spdk_image"] = spdk_image
+        if blocked_pcie:
+            params["blocked_pcie"] = blocked_pcie
 
         return self._request("POST", "cnode/spdk_process_start", params)
 

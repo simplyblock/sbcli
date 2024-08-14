@@ -86,7 +86,7 @@ def addNvmeDevices(rpc_client, devs, snode):
 
 def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spdk_mem, spdk_image=None,
              namespace=None, s3_data_path=None, ftl_buffer_size=None,
-             lvstore_cluster_size=None, num_md_pages_per_cluster_ratio=None):
+             lvstore_cluster_size=None, num_md_pages_per_cluster_ratio=None, blocked_pcie=None):
 
 
     db_controller = DBController()
@@ -180,7 +180,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spd
     logger.info(f"Deploying SPDK with HP: {utils.humanbytes(spdk_mem)}")
     results, err = cnode_api.spdk_process_start(
         spdk_cpu_mask, spdk_mem, spdk_image, snode.mgmt_ip,
-        snode.rpc_port, snode.rpc_username, snode.rpc_password, namespace)
+        snode.rpc_port, snode.rpc_username, snode.rpc_password, namespace, blocked_pcie)
     if not results:
         logger.error(f"Failed to start spdk: {err}")
         return False
@@ -206,6 +206,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spd
     snode.spdk_image = spdk_image or ""
     snode.spdk_cpu_mask = spdk_cpu_mask or ""
     snode.namespace = namespace or ""
+    snode.blocked_pcie = blocked_pcie or ""
 
     # creating RPCClient instance
     rpc_client = RPCClient(
@@ -355,7 +356,8 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spd
     return True
 
 
-def restart_node(node_id, node_ip):
+def restart_node(node_id, node_ip, s3_data_path=None, ftl_buffer_size=None,
+                 lvstore_cluster_size=None, num_md_pages_per_cluster_ratio=None, blocked_pcie=None):
 
     db_controller = DBController()
     kv_store = db_controller.kv_store
@@ -368,6 +370,21 @@ def restart_node(node_id, node_ip):
     if not node_ip:
         node_ip = snode.mgmt_ip
 
+    if s3_data_path:
+        snode.s3_data_path = s3_data_path
+
+    if ftl_buffer_size:
+        snode.ftl_buffer_size = ftl_buffer_size
+
+    if lvstore_cluster_size:
+        snode.lvstore_cluster_size = lvstore_cluster_size
+
+    if num_md_pages_per_cluster_ratio:
+        snode.num_md_pages_per_cluster_ratio = num_md_pages_per_cluster_ratio
+
+    if blocked_pcie:
+        snode.blocked_pcie = blocked_pcie
+
     logger.info(f"Restarting Caching node: {node_ip}")
     cnode_api = CNodeClient(node_ip + ":5000")
 
@@ -379,7 +396,7 @@ def restart_node(node_id, node_ip):
     logger.info(f"Deploying SPDK")
     results, err = cnode_api.spdk_process_start(
         snode.spdk_cpu_mask, snode.spdk_mem, snode.spdk_image, snode.mgmt_ip,
-        snode.rpc_port, snode.rpc_username, snode.rpc_password, snode.namespace)
+        snode.rpc_port, snode.rpc_username, snode.rpc_password, snode.namespace, snode.blocked_pcie)
 
     if not results:
         logger.error(f"Failed to start spdk: {err}")
@@ -459,29 +476,26 @@ def restart_node(node_id, node_ip):
         return False
     time.sleep(1)
     rpc_client.bdev_examine("ocf_1")
+    time.sleep(3)
 
-    # # create lvs
-    # md_pages_ratio = 1
-    # if snode.num_md_pages_per_cluster_ratio:
-    #     md_pages_ratio = snode.num_md_pages_per_cluster_ratio
-    # cluster_sz = 4096
-    # if snode.lvstore_cluster_size:
-    #     cluster_sz = snode.lvstore_cluster_size
-    # ret = rpc_client.create_lvstore(
-    #     "lvs_1", "ocf_1", num_md_pages_per_cluster_ratio=int(md_pages_ratio), cluster_sz=cluster_sz)
-    # if not ret:
-    #     logger.error("Failed ot create bdev")
-    #     return False
+    for lvol_id in snode.lvols:
+        lvol = db_controller.get_lvol_by_id(lvol_id)
+        while True:
+            ret = rpc_client.get_bdevs(lvol.top_bdev)
+            if ret:
+
+                break
+            else:
+                logger.error(f"Failed ot get bdev: {lvol.top_bdev}")
+                time.sleep(3)
+
+        lvol_controller.add_lvol_on_node(lvol, snode, create_bdev_stack=False)
 
     logger.info("Setting node status to Active")
     snode.status = CachingNode.STATUS_ONLINE
     snode.write_to_db(kv_store)
-
     logger.info("Done")
     return True
-
-
-
 
 
 def recreate(node_id):

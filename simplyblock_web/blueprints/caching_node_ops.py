@@ -185,9 +185,13 @@ def spdk_process_start():
         spdk_image = data['spdk_image']
         node_docker.images.pull(spdk_image)
 
+    blocked_pcie = ""
+    if 'blocked_pcie' in data and data['blocked_pcie']:
+        blocked_pcie = data['blocked_pcie']
+
     container = node_docker.containers.run(
         spdk_image,
-        f"/root/scripts/run_spdk_tgt_wait_rpc.sh {spdk_cpu_mask} {spdk_mem}",
+        f"/root/scripts/run_spdk_tgt_wait_rpc.sh {spdk_cpu_mask} {spdk_mem} {blocked_pcie}",
         name="spdk",
         detach=True,
         privileged=True,
