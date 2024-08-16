@@ -743,3 +743,9 @@ class RPCClient:
             "uuid": uuid
         }
         return self._request("bdev_ftl_load", params)
+
+    def bdev_ftl_unload(self, name):
+        params = {
+            "name": name
+        }
+        return self._request("bdev_ftl_unload", params)

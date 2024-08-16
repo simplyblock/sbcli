@@ -386,7 +386,7 @@ def restart_node(node_id, node_ip=None, s3_data_path=None, ftl_buffer_size=None,
         snode.blocked_pcie = blocked_pcie
 
     logger.info(f"Restarting Caching node: {snode.mgmt_ip}")
-    cnode_api = CNodeClient(snode.mgmt_ip  + ":5000")
+    cnode_api = CNodeClient(snode.mgmt_ip + ":5000")
 
     node_info, _ = cnode_api.info()
     logger.info(f"Node found: {node_info['hostname']}")
@@ -902,3 +902,36 @@ def get_io_stats(lvol_uuid, history, records_count=20, parse_sizes=True):
         })
     return out
 
+
+def shutdown_node(node_id):
+
+    db_controller = DBController()
+
+    snode = db_controller.get_caching_node_by_id(node_id)
+    if not snode:
+        logger.error("Node not found")
+        return False
+
+    logger.info("Shutting down node")
+
+    rpc_client = RPCClient(
+        snode.mgmt_ip, snode.rpc_port,
+        snode.rpc_username, snode.rpc_password)
+
+    resp = rpc_client.bdev_ftl_unload("ftl_1")
+    if not resp:
+        logger.error("failed to unload ftl device")
+        return False
+
+    logger.info("Stopping SPDK")
+    cnode_api = CNodeClient(snode.mgmt_ip + ":5000")
+
+    results, err = cnode_api.spdk_process_kill()
+
+    logger.info("Setting node status to offline")
+
+    snode.status = CachingNode.STATUS_OFFLINE
+    snode.write_to_db(db_controller.kv_store)
+
+    logger.info("Done")
+    return True

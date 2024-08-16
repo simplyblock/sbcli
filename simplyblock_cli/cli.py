@@ -87,6 +87,9 @@ class CLIWrapper:
         sub_command.add_argument("--num-md-pages-per-cluster-ratio", help='LVS md cluster ratio',
                                  dest="num_md_pages_per_cluster_ratio", type=int)
 
+        sub_command = self.add_sub_command(subparser, 'shutdown', 'shutdown Caching node')
+        sub_command.add_argument("id", help='Caching node UUID')
+
         #
         # ----------------- cluster -----------------
         #
@@ -983,6 +986,9 @@ class CLIWrapper:
                     ret = utils.print_table(data)
                 else:
                     return False
+
+            if sub_command == "shutdown":
+                ret = caching_node_controller.shutdown_node(args.node_id)
 
         else:
             self.parser.print_help()
