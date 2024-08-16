@@ -108,21 +108,18 @@ class CommonUtils:
             RuntimeError: If fio process hang
         """
         self.logger.info("Waiting for FIO processes to complete!")
-        start_time = time.time()
         while True:
             process = self.ssh_utils.find_process_name(node=node,
                                                        process_name="fio")
             process_fio = [element for element in process if "grep" not in element]
+            self.logger.info(process_fio)
             
             if len(process_fio) == 0:
                 break
-            end_time = time.time()
-            if end_time - start_time > 800:
-                raise RuntimeError("Fio Process not completing post its time")
             if timeout <= 0:
                 break
-            sleep_n_sec(60)
-            timeout = timeout - 60
+            sleep_n_sec(10)
+            timeout = timeout - 10
             
 
         for thread in threads:
@@ -183,6 +180,39 @@ class CommonUtils:
             self.logger.info(device)
 
         return nodes, devices
+    
+    def start_ec2_instance(self, ec2_client, instance_id):
+        """Start ec2 instance
+
+        Args:
+            ec2_client (EC2): EC2 class object from boto3
+            instance_id (str): Instance id to start
+        """
+        response = ec2_client.start_instances(InstanceIds=[instance_id])
+        print(f'Successfully started instance {instance_id}: {response}')
+
+        start_waiter = ec2_client.get_waiter('instance_running')
+        self.logger.info(f"Waiting for instance {instance_id} to start...")
+        start_waiter.wait(InstanceIds=[instance_id])
+        self.logger.info(f'Instance {instance_id} has been successfully started.')
+
+        sleep_n_sec(30)
+
+    def stop_ec2_instance(self, ec2_client, instance_id):
+        """Stop ec2 instance
+
+        Args:
+            ec2_client (EC2): EC2 class object from boto3
+            instance_id (str): Instance id to stop
+        """
+        response = ec2_client.stop_instances(InstanceIds=[instance_id])
+        self.logger.info(f'Successfully stopped instance {instance_id}: {response}')
+        stop_waiter = ec2_client.get_waiter('instance_stopped')
+        self.logger.info(f"Waiting for instance {instance_id} to stop...")
+        stop_waiter.wait(InstanceIds=[instance_id])
+        self.logger.info((f'Instance {instance_id} has been successfully stopped.'))
+        
+        sleep_n_sec(30)
     
 
 def sleep_n_sec(seconds):

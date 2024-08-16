@@ -1,18 +1,16 @@
 # coding=utf-8
-import logging
-
 import time
-import sys
 from datetime import datetime
 
 
 from simplyblock_core.controllers import health_controller, storage_events, device_events
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.rpc_client import RPCClient
-from simplyblock_core import constants, kv_store
+from simplyblock_core import constants, kv_store, utils
 
-# Import the GELF logger
-from graypy import GELFUDPHandler
+
+logger = utils.get_logger(__name__)
+
 
 def set_node_health_check(snode, health_check_status):
     snode = db_controller.get_storage_node_by_id(snode.get_id())
@@ -39,15 +37,6 @@ def set_device_health_check(cluster_id, device, health_check_status):
                     device_events.device_health_check_change(
                         dev, dev.health_check, old_status, caused_by="monitor")
 
-
-# configure logging
-logger_handler = logging.StreamHandler(stream=sys.stdout)
-logger_handler.setFormatter(logging.Formatter('%(asctime)s: %(levelname)s: %(message)s'))
-gelf_handler = GELFUDPHandler('0.0.0.0', constants.GELF_PORT)
-logger = logging.getLogger()
-logger.addHandler(gelf_handler)
-logger.addHandler(logger_handler)
-logger.setLevel(logging.DEBUG)
 
 # get DB controller
 db_store = kv_store.KVStore()
@@ -125,7 +114,7 @@ while True:
                         logger.info(f"Checking bdev: {remote_device.remote_bdev} ... ok")
                     else:
                         logger.info(f"Checking bdev: {remote_device.remote_bdev} ... not found")
-                    # node_remote_devices_check &= bool(ret)
+                    node_remote_devices_check &= bool(ret)
 
                 health_check_status = is_node_online and node_devices_check and node_remote_devices_check
             set_node_health_check(snode, health_check_status)

@@ -241,10 +241,11 @@ class SbcliUtils:
         """
         lvol_data = dict()
         data = self.get_request(api_url="/lvol")
-        self.logger.info(f"LVOL List: {data}")
+        # self.logger.info(f"LVOL List: {data}")
         for lvol_info in data["results"]:
             lvol_data[lvol_info["lvol_name"]] = lvol_info["id"]
             self.logger.info(f"Lvol hostname: {lvol_info['hostname']}")
+        self.logger.info(f"LVOL List: {lvol_data}")
         return lvol_data
 
     def get_lvol_by_id(self, lvol_id):
@@ -312,7 +313,7 @@ class SbcliUtils:
         """
         lvol_id = self.get_lvol_id(lvol_name=lvol_name)
         if not lvol_id:
-            self.logger.info("Lvol does not exist. Exiting")
+            self.logger.info(f"Lvol {lvol_name} does not exist. Exiting")
             return
 
         data = self.get_request(api_url=f"/lvol/connect/{lvol_id}")
@@ -331,7 +332,7 @@ class SbcliUtils:
         """Get Storage Node details for given node id
         """
         node_details = self.get_request(api_url=f"/storagenode/{storage_node_id}")
-        self.logger.info(f"Node Details: {node_details}")
+        self.logger.debug(f"Node Details: {node_details}")
         return node_details["results"]
 
     def get_device_details(self, storage_node_id):
@@ -364,8 +365,9 @@ class SbcliUtils:
             if actual_status == status:
                 return True
             else:
-                sleep_n_sec(5)
-                timeout -= 5
+                self.logger.info(f"Expected Status: {status} / Actual Status: {actual_status}")
+                sleep_n_sec(1)
+                timeout -= 1
         raise TimeoutError(f"Timed out waiting for node status, {node_id},"
                            f"Expected status: {status}, Actual status: {actual_status}")
 

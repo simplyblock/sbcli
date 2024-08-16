@@ -90,6 +90,7 @@ class CachingNode(BaseModel):
         "cpu_hz": {"type": int, "default": 0},
         "memory": {"type": int, "default": 0},
         "hugepages": {"type": int, "default": 0},
+        "multipathing": {"type": bool, "default": True},
 
     }
 
