@@ -108,7 +108,6 @@ class CommonUtils:
             RuntimeError: If fio process hang
         """
         self.logger.info("Waiting for FIO processes to complete!")
-        start_time = time.time()
         while True:
             process = self.ssh_utils.find_process_name(node=node,
                                                        process_name="fio")
@@ -116,13 +115,12 @@ class CommonUtils:
             self.logger.info(f"Process info: {process_fio}")
             
             if len(process_fio) == 0:
-                break 
+                break
             if timeout <= 0:
                 break
             sleep_n_sec(10)
             timeout = timeout - 10
             
-
         for thread in threads:
             thread.join(timeout=30)
         end_time = time.time()
