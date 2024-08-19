@@ -27,7 +27,7 @@ class RPCClient:
 
     # ref: https://spdk.io/doc/jsonrpc.html
 
-    def __init__(self, ip_address, port, username, password, timeout=60, retry=10):
+    def __init__(self, ip_address, port, username, password, timeout=5, retry=3):
         self.ip_address = ip_address
         self.port = port
         self.url = 'http://%s:%s/' % (self.ip_address, self.port)
@@ -702,3 +702,17 @@ class RPCClient:
         if vuid is not None:
             params["vuid"] = vuid
         return self._request("distr_migration_status", params)
+
+    def bdev_distrib_permanent_failure_migration(self, name, storage_ID):
+        params = {
+            "name": name,
+            "storage_ID": storage_ID
+        }
+        return self._request("bdev_distrib_permanent_failure_migration", params)
+
+    def bdev_distrib_migration_status(self, name, storage_ID):
+        params = {
+            "name": name,
+            "storage_ID": storage_ID
+        }
+        return self._request("bdev_distrib_migration_status", params)
