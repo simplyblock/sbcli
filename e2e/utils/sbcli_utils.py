@@ -385,7 +385,7 @@ class SbcliUtils:
                 if actual_status in status:
                     if len(device_ids) == total_devices and all(list(device_ids.values())):
                         return device_details
-                self.logger.info(f"Expected Status: {status} / Actual Status: {actual_status}")
+                self.logger.info(f"Device ID: {device['id']} Expected Status: {status} / Actual Status: {actual_status}")
             sleep_n_sec(1)
             timeout -= 1
         raise TimeoutError(f"Timed out waiting for device status, Node id: {node_id}, Device id: {list(device_ids.keys())}"
@@ -396,15 +396,17 @@ class SbcliUtils:
         if not device_id:
             node_details = self.get_storage_node_details(storage_node_id=node_id)
             while timeout > 0:
-                    node_details = self.get_storage_node_details(storage_node_id=node_id)
-                    actual_status = node_details[0]["health_check"]
-                    status = status if isinstance(status, list) else [status]
-                    if actual_status in status:
-                        return node_details[0]
-                    else:
-                        self.logger.info(f"Expected Status: {status} / Actual Status: {actual_status}")
-                        sleep_n_sec(1)
-                        timeout -= 1
+                node_details = self.get_storage_node_details(storage_node_id=node_id)
+                actual_status = node_details[0]["health_check"]
+                status = status if isinstance(status, list) else [status]
+                if actual_status in status:
+                    return node_details[0]
+                self.logger.info(f"Expected Status: {status} / Actual Status: {actual_status}")
+                sleep_n_sec(1)
+                timeout -= 1
+            if False in status and node_details[0]["status"] != "offline":
+                assert actual_status is True, "Health Status not True for node not in offline state"
+                return node_details[0]
             raise TimeoutError(f"Timed out waiting for node health status, {node_id},"
                                f"Expected status: {status}, Actual status: {actual_status}")
         else:
