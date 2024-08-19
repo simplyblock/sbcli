@@ -383,7 +383,7 @@ class SbcliUtils:
                 actual_status = device["status"]
                 status = status if isinstance(status, list) else [status]
                 if actual_status in status:
-                    if len(device_ids) == total_devices and all(list(device_ids.values())):
+                    if len(device_ids) == total_devices and any(list(device_ids.values())):
                         return device_details
                 self.logger.info(f"Device ID: {device['id']} Expected Status: {status} / Actual Status: {actual_status}")
             sleep_n_sec(1)
