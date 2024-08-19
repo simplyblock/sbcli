@@ -213,6 +213,16 @@ def delete_cluster_id():
     return out
 
 
+def get_node_lsblk():
+    out, err, rc = node_utils.run_command("lsblk -J")
+    if rc != 0:
+        logger.error(err)
+        return []
+    data = json.loads(out)
+    return data
+
+
+
 @bp.route('/info', methods=['GET'])
 def get_info():
 
@@ -238,6 +248,8 @@ def get_info():
         "network_interface": node_utils.get_nics_data(),
 
         "cloud_instance": CLOUD_INFO,
+
+        "lsblk": get_node_lsblk(),
     }
     return utils.get_response(out)
 
@@ -381,3 +393,28 @@ if CLOUD_INFO:
     SYSTEM_ID = CLOUD_INFO["id"]
 else:
     SYSTEM_ID, _, _ = node_utils.run_command("dmidecode -s system-uuid")
+
+
+@bp.route('/bind_device_to_spdk', methods=['POST'])
+def bind_device_to_spdk():
+    data = request.get_json()
+    if "device_pci" not in data:
+        return utils.get_response(False, "Required parameter is missing: device_pci")
+
+    device_pci = data['device_pci']
+
+    cmd_list = [
+        f"echo -n \"{device_pci}\" > /sys/bus/pci/drivers/nvme/unbind",
+        f"echo \"\" > /sys/bus/pci/devices/{device_pci}/driver_override",
+        f"echo -n \"{device_pci}\" > /sys/bus/pci/drivers/uio_pci_generic/bind",
+        f"echo \"uio_pci_generic\" > /sys/bus/pci/devices/{device_pci}/driver_override",
+        f"echo -n \"{device_pci}\" > /sys/bus/pci/drivers_probe",
+    ]
+
+    for cmd in cmd_list:
+        logger.debug(cmd)
+        ret = os.popen(cmd).read().strip()
+        logger.debug(ret)
+        time.sleep(1)
+
+    return utils.get_response(True)

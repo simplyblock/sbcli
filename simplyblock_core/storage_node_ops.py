@@ -81,7 +81,11 @@ def _get_if_ip_address(ifname):
     exit(1)
 
 
-def addNvmeDevices(cluster, rpc_client, devs, snode):
+def addNvmeDevices(snode, devs):
+    rpc_client = RPCClient(
+        snode.mgmt_ip, snode.rpc_port,
+        snode.rpc_username, snode.rpc_password, timeout=60, retry=10)
+
     devices = []
     ret = rpc_client.bdev_nvme_controller_list()
     ctr_map = {}
@@ -92,7 +96,7 @@ def addNvmeDevices(cluster, rpc_client, devs, snode):
         pass
 
     next_physical_label = get_next_physical_device_order()
-    for index, pcie in enumerate(devs):
+    for pcie in devs:
 
         if pcie in ctr_map:
             nvme_controller = ctr_map[pcie]
@@ -311,6 +315,8 @@ def _create_jm_stack_on_device(rpc_client, nvme, snode, after_restart):
         'status': JMDevice.STATUS_ONLINE,
         'alceml_bdev': alceml_name,
         'nvme_bdev': nvme.nvme_bdev,
+        "serial_number": nvme.serial_number,
+        "device_data_dict": nvme.to_dict(),
         'jm_bdev': jm_bdev
     })
 
@@ -800,7 +806,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
     # creating RPCClient instance
     rpc_client = RPCClient(
         snode.mgmt_ip, snode.rpc_port,
-        snode.rpc_username, snode.rpc_password)
+        snode.rpc_username, snode.rpc_password, timeout=60, retry=10)
 
     # 1- set iobuf options
     if (snode.iobuf_small_pool_count or snode.iobuf_large_pool_count or
@@ -856,7 +862,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
     node_info, _ = snode_api.info()
 
     # discover devices
-    nvme_devs = addNvmeDevices(cluster, rpc_client, node_info['spdk_pcie_list'], snode)
+    nvme_devs = addNvmeDevices(snode, node_info['spdk_pcie_list'])
     if not nvme_devs:
         logger.error("No NVMe devices was found!")
         return False
@@ -926,6 +932,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
 
     for dev in snode.nvme_devices:
         distr_controller.send_dev_status_event(dev, NVMeDevice.STATUS_ONLINE)
+        tasks_controller.add_new_device_mig_task(dev.get_id())
 
     storage_events.snode_add(snode)
     logger.info("Done")
@@ -1238,7 +1245,7 @@ def restart_storage_node(
 
     cluster = db_controller.get_cluster_by_id(snode.cluster_id)
     node_info, _ = snode_api.info()
-    nvme_devs = addNvmeDevices(cluster, rpc_client, node_info['spdk_pcie_list'], snode)
+    nvme_devs = addNvmeDevices(snode, node_info['spdk_pcie_list'])
     if not nvme_devs:
         logger.error("No NVMe devices was found!")
         return False
@@ -1265,18 +1272,15 @@ def restart_storage_node(
             db_dev.status = NVMeDevice.STATUS_REMOVED
             distr_controller.send_dev_status_event(db_dev, db_dev.status)
 
-    # todo: handle new devices
-    # for dev in nvme_devs:
-    #     if dev.serial_number not in known_devices_sn:
-    #         logger.info(f"New device found: {dev.get_id()}")
-    #         dev.status = NVMeDevice.STATUS_NEW
-    #         new_devices.append(dev)
-    #         snode.nvme_devices.append(dev)
+    if snode.jm_device and "serial_number" in snode.jm_device.device_data_dict:
+        known_devices_sn.append(snode.jm_device.device_data_dict['serial_number'])
 
-    # dev_order = get_next_cluster_device_order(db_controller, snode.cluster_id)
-    # for index, nvme in enumerate(new_devices):
-    #     nvme.cluster_device_order = dev_order
-    #     dev_order += 1
+    for dev in nvme_devs:
+        if dev.serial_number not in known_devices_sn:
+            logger.info(f"New device found: {dev.get_id()}")
+            dev.status = NVMeDevice.STATUS_NEW
+            new_devices.append(dev)
+            snode.nvme_devices.append(dev)
 
     # prepare devices
     ret = _prepare_cluster_devices_on_restart(snode)

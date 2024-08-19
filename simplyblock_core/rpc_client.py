@@ -716,3 +716,23 @@ class RPCClient:
             "storage_ID": storage_ID
         }
         return self._request("bdev_distrib_migration_status", params)
+
+    def bdev_distrib_expansion_migration(self, name, storage_ID):
+        params = {
+            "name": name,
+            "storage_ID": storage_ID}
+        return self._request("bdev_distrib_expansion_migration", params)
+
+    def bdev_raid_add_base_bdev(self, raid_bdev, base_bdev):
+        params = {
+            "raid_bdev": raid_bdev,
+            "base_bdev": base_bdev,
+        }
+        return self._request("bdev_raid_add_base_bdev", params)
+
+    def bdev_raid_remove_base_bdev(self, raid_bdev, base_bdev):
+        params = {
+            "raid_bdev": raid_bdev,
+            "base_bdev": base_bdev,
+        }
+        return self._request("bdev_raid_add_base_bdev", params)
