@@ -988,7 +988,7 @@ class CLIWrapper:
                     return False
 
             if sub_command == "shutdown":
-                ret = caching_node_controller.shutdown_node(args.node_id)
+                ret = caching_node_controller.shutdown_node(args.id)
 
         else:
             self.parser.print_help()
