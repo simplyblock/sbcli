@@ -377,6 +377,7 @@ class SbcliUtils:
         device_details = self.get_device_details(storage_node_id=node_id)
         total_devices = len(device_details)
         while timeout > 0:
+            self.logger.info(f"Retrying Device Status check")
             device_details = self.get_device_details(storage_node_id=node_id)
             for device in device_details:
                 device_ids[device['id']] = device['status']
