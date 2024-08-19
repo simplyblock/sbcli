@@ -91,8 +91,6 @@ class TestSnapshotBatchCloneLVOLs(TestClusterBase):
             self.ssh_obj.remove_dir(node=self.mgmt_nodes[0],
                                     dir_path=clone_detail['mount'])
             self.disconnect_lvol(clone_detail['id'])
-            self.sbcli_utils.delete_lvol(lvol_name=clone_name)
-            self.delete_snapshots()
 
     def connect_and_test_clone(self, clone_name):
         """Connects the clone, mounts it, lists files, runs FIO, and then disconnects it."""

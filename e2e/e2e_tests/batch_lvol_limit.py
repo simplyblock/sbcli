@@ -76,7 +76,6 @@ class TestBatchLVOLsLimit(TestClusterBase):
             self.ssh_obj.remove_dir(node=self.mgmt_nodes[0],
                                     dir_path=lvol_detail['mount'])
             self.disconnect_lvol(lvol_detail['id'])
-            self.sbcli_utils.delete_lvol(lvol_name=lvol_detail)
 
     def connect_and_test_lvol(self, lvol_name, fs_type):
         """Connects the LVOL, formats, mounts, and runs FIO."""
