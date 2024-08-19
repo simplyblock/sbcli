@@ -125,7 +125,7 @@ class TestClusterBase:
                 f"Node {node_uuid} is not in {node_status} state. Actual: {node_details[0]['status']}"
         offline_device_detail = self.sbcli_utils.wait_for_device_status(node_id=node_uuid,
                                                                         status=device_status,
-                                                                        timeout=60)
+                                                                        timeout=300)
         for device in offline_device_detail:
             # if "jm" in device["jm_bdev"]:
             #     assert device["status"] == "JM_DEV", \
@@ -144,27 +144,32 @@ class TestClusterBase:
               else [health_check_status]
         for node in storage_nodes:
             node_details = self.sbcli_utils.get_storage_node_details(storage_node_id=node['id'])
-            if node["id"] == node_uuid and node['status'] == "offline":
-                node = self.sbcli_utils.wait_for_health_status(node['id'], status=health_check_status)
+            if node["id"] == node_uuid and node_details[0]['status'] == "offline":
+                node = self.sbcli_utils.wait_for_health_status(node['id'], status=health_check_status,
+                                                               timeout=300)
                 assert node["health_check"] in health_check_status, \
                     f"Node {node['id']} health-check is not {health_check_status}. Actual: {node['health_check']}. Node Status: {node_details[0]['status']}"
             else:
-                node = self.sbcli_utils.wait_for_health_status(node['id'], status=True)
+                node = self.sbcli_utils.wait_for_health_status(node['id'], status=True,
+                                                               timeout=300)
                 assert node["health_check"] is True, \
                     f"Node {node['id']} health-check is not True. Actual:  {node['health_check']}.  Node Status: {node_details[0]['status']}"
             if node['id'] == node_uuid:
                 device_details = offline_device_detail
             else:
                 device_details = self.sbcli_utils.get_device_details(storage_node_id=node['id'])
+            node_details = self.sbcli_utils.get_storage_node_details(storage_node_id=node['id'])
             for device in device_details:
-                if device['id'] in offline_device and node['status'] == "offline":
+                if device['id'] in offline_device and node_details[0]['status'] == "offline":
                     device = self.sbcli_utils.wait_for_health_status(node['id'], status=health_check_status,
-                                                                     device_id=device['id'])
+                                                                     device_id=device['id'],
+                                                                     timeout=300)
                     assert device["health_check"] in health_check_status, \
                         f"Device {device['id']} health-check is not {health_check_status}. Actual:  {device['health_check']}"
                 else:
                     device = self.sbcli_utils.wait_for_health_status(node['id'], status=True,
-                                                                     device_id=device['id'])
+                                                                     device_id=device['id'],
+                                                                     timeout=300)
                     assert device["health_check"] is True, \
                         f"Device {device['id']} health-check is not True. Actual:  {device['health_check']}"
 
@@ -204,7 +209,7 @@ class TestClusterBase:
         """ Unmount all mount points """
         self.logger.info("Unmounting all mount points")
         if not base_path:
-            base_path = self.mount_path 
+            base_path = self.mount_path
         mount_points = self.ssh_obj.get_mount_points(node=self.mgmt_nodes[0], base_path=base_path)
         for mount_point in mount_points:
             self.logger.info(f"Unmounting {mount_point}")

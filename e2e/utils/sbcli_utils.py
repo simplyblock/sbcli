@@ -365,10 +365,9 @@ class SbcliUtils:
             status = status if isinstance(status, list) else [status]
             if actual_status in status:
                 return node_details[0]
-            else:
-                self.logger.info(f"Expected Status: {status} / Actual Status: {actual_status}")
-                sleep_n_sec(1)
-                timeout -= 1
+            self.logger.info(f"Expected Status: {status} / Actual Status: {actual_status}")
+            sleep_n_sec(1)
+            timeout -= 1
         raise TimeoutError(f"Timed out waiting for node status, {node_id},"
                            f"Expected status: {status}, Actual status: {actual_status}")
     
