@@ -345,7 +345,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spd
     # # cache_size = int((jm_percent*ssd_size)/100)
 
 
-    make_parts(snode, ssd_dev, mem)
+    make_parts(snode, ssd_dev)
 
     # search for devices
     nvme_devs = addNvmeDevices(rpc_client, [ssd_dev.pcie_address], snode)
@@ -490,8 +490,8 @@ def restart_node(node_id, node_ip=None, s3_data_path=None, ftl_buffer_size=None,
         logger.error("No NVMe devices was found!")
         return False
 
-    if len(nvme_devs) < len(snode.nvme_devices):
-        make_parts(snode, snode.nvme_devices[0])
+    if len(nvme_devs) == 1:
+        make_parts(snode,nvme_devs[0])
 
     nvme_devs = addNvmeDevices(rpc_client, [snode.nvme_devices[0].pcie_address], snode)
     if not nvme_devs:
