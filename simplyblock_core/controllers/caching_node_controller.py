@@ -262,9 +262,11 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spd
     ocf_cache_size = min(ocf_cache_size, (supported_ssd_size-ftl_buffer_size))
     logger.info(f"OCF cache size: {utils.humanbytes(ocf_cache_size)}")
 
+    st = utils.humanbytes(ftl_buffer_size).replace(" ", "")
+    en = utils.humanbytes(ftl_buffer_size+ocf_cache_size).replace(" ", "")
     partitions = [
-        ["0", f"{utils.humanbytes(ftl_buffer_size)}"],
-        [f"{utils.humanbytes(ftl_buffer_size)}", f"{utils.humanbytes(ftl_buffer_size+ocf_cache_size)}", ],
+        ["0", f"{st}"],
+        [f"{st}", f"{en}", ],
     ]
 
     nbd_device = rpc_client.nbd_start_disk(ssd_dev.nvme_bdev)
@@ -326,10 +328,10 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spd
         return False
     snode.ftl_uuid = ret["uuid"]
 
-    # ret = rpc_client.bdev_ocf_create("ocf_1", 'wt', snode.cache_bdev, "ftl_1", 64)
-    # if not ret:
-    #     logger.error("Failed ot create bdev")
-    #     return False
+    ret = rpc_client.bdev_ocf_create("ocf_1", 'wt', snode.cache_bdev, "ftl_1", 64)
+    if not ret:
+        logger.error("Failed ot create bdev")
+        return False
 
     # create lvs
     md_pages_ratio = 1
@@ -337,7 +339,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spd
         md_pages_ratio = snode.num_md_pages_per_cluster_ratio
 
     ret = rpc_client.create_lvstore(
-        "lvs_1", "ftl_1", num_md_pages_per_cluster_ratio=int(md_pages_ratio),
+        "lvs_1", "ocf_1", num_md_pages_per_cluster_ratio=int(md_pages_ratio),
         cluster_sz=snode.lvstore_cluster_size)
     if not ret:
         logger.error("Failed ot create bdev")
@@ -457,13 +459,12 @@ def restart_node(node_id, node_ip=None, s3_data_path=None, ftl_buffer_size=None,
         logger.error("Failed ot create bdev")
         return False
 
-    # ret = rpc_client.bdev_ocf_create("ocf_1", 'wt', snode.cache_bdev, "ftl_1", 64)
-    # if not ret:
-    #     logger.error("Failed ot create bdev")
-    #     return False
+    ret = rpc_client.bdev_ocf_create("ocf_1", 'wt', snode.cache_bdev, "ftl_1", 64)
+    if not ret:
+        logger.error("Failed ot create bdev")
+        return False
     time.sleep(1)
-    # rpc_client.bdev_examine("ocf_1")
-    rpc_client.bdev_examine("ftl_1")
+    rpc_client.bdev_examine("ocf_1")
     time.sleep(3)
 
     for lvol_id in snode.lvols:
