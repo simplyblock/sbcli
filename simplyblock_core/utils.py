@@ -432,10 +432,10 @@ def get_logger(name):
 
 def parse_size(size_string: str):
     try:
-        x = int(size_string)
-        return x
+        return int(size_string)
     except Exception:
         pass
+
     try:
         if size_string:
             size_string = size_string.lower()
@@ -456,7 +456,7 @@ def parse_size(size_string: str):
             else:
                 print(f"Error parsing size: {size_string}")
                 return -1
-            return size_number * math.pow(one_k, multi)
+            return int(size_number * math.pow(one_k, multi))
         else:
             return -1
     except:

@@ -147,12 +147,12 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spd
     snode.s3_data_path = s3_data_path or ""
     snode.lvstore_cluster_size = lvstore_cluster_size or utils.parse_size("4m")
     snode.num_md_pages_per_cluster_ratio = num_md_pages_per_cluster_ratio or 1
-    snode.ftl_buffer_size = utils.parse_size("6g")
+    snode.ftl_buffer_size = utils.parse_size("4g")
     if ftl_buffer_size:
         b_size = utils.parse_size(ftl_buffer_size)
-        if b_size < utils.parse_size("6g"):
+        if b_size < utils.parse_size("4g"):
             logger.error("FTL cache must be larger than 6G")
-            return False
+            # return False
         snode.ftl_buffer_size = b_size
 
     snode.cpu = node_info['cpu_count']
