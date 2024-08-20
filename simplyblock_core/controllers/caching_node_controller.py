@@ -84,6 +84,56 @@ def addNvmeDevices(rpc_client, devs, snode):
     return devices
 
 
+def make_parts(snode, ssd_dev):
+
+    ssd_size = ssd_dev.size
+    supported_ssd_size = snode.hugepages * 100 / 2.25
+
+    logger.info(f"Supported SSD size: {utils.humanbytes(supported_ssd_size)}")
+    logger.info(f"Current SSD size: {utils.humanbytes(ssd_size)}")
+
+    ftl_buffer_size = snode.ftl_buffer_size
+    logger.info(f"FTL buffer size: {utils.humanbytes(ftl_buffer_size)}")
+
+    ocf_cache_size = ssd_size - ftl_buffer_size
+    ocf_cache_size = min(ocf_cache_size, (supported_ssd_size-ftl_buffer_size))
+    logger.info(f"OCF cache size: {utils.humanbytes(ocf_cache_size)}")
+
+    st = utils.humanbytes(ftl_buffer_size).replace(" ", "")
+    en = utils.humanbytes(ftl_buffer_size+ocf_cache_size).replace(" ", "")
+    partitions = [
+        ["0", f"{st}"],
+        [f"{st}", f"{en}", ],
+    ]
+    # creating RPCClient instance
+    rpc_client = RPCClient(
+        snode.mgmt_ip, snode.rpc_port,
+        snode.rpc_username, snode.rpc_password)
+
+    nbd_device = rpc_client.nbd_start_disk(ssd_dev.nvme_bdev)
+    time.sleep(2)
+    if not nbd_device:
+        logger.error(f"Failed to start nbd dev")
+        return False
+
+    cnode_api = CNodeClient(snode.api_endpoint)
+    result, error = cnode_api.make_gpt_partitions(nbd_device, partitions)
+    if error:
+        logger.error(f"Failed to make partitions")
+        logger.error(error)
+        return False
+    time.sleep(3)
+    rpc_client.nbd_stop_disk(nbd_device)
+    time.sleep(1)
+    rpc_client.bdev_nvme_detach_controller(ssd_dev.nvme_controller)
+    time.sleep(1)
+    rpc_client.bdev_nvme_controller_attach(ssd_dev.nvme_controller, ssd_dev.pcie_address)
+    time.sleep(1)
+    rpc_client.bdev_examine(ssd_dev.nvme_bdev)
+    time.sleep(3)
+
+
+
 def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spdk_mem, spdk_image=None,
              namespace=None, s3_data_path=None, ftl_buffer_size=None,
              lvstore_cluster_size=None, num_md_pages_per_cluster_ratio=None, blocked_pcie=None,
@@ -248,53 +298,56 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spd
     mem = spdk_mem - 1024*1024*1024
     snode.hugepages = mem
     logger.info(f"Hugepages to be used: {utils.humanbytes(mem)}")
+    #
+    # ssd_size = ssd_dev.size
+    # supported_ssd_size = mem * 100 / 2.25
+    #
+    # logger.info(f"Supported SSD size: {utils.humanbytes(supported_ssd_size)}")
+    # logger.info(f"Current SSD size: {utils.humanbytes(ssd_size)}")
+    #
+    # ftl_buffer_size = snode.ftl_buffer_size
+    # logger.info(f"FTL buffer size: {utils.humanbytes(ftl_buffer_size)}")
+    #
+    # ocf_cache_size = ssd_size - ftl_buffer_size
+    # ocf_cache_size = min(ocf_cache_size, (supported_ssd_size-ftl_buffer_size))
+    # logger.info(f"OCF cache size: {utils.humanbytes(ocf_cache_size)}")
+    #
+    # st = utils.humanbytes(ftl_buffer_size).replace(" ", "")
+    # en = utils.humanbytes(ftl_buffer_size+ocf_cache_size).replace(" ", "")
+    # partitions = [
+    #     ["0", f"{st}"],
+    #     [f"{st}", f"{en}", ],
+    # ]
+    #
+    # nbd_device = rpc_client.nbd_start_disk(ssd_dev.nvme_bdev)
+    # time.sleep(2)
+    # if not nbd_device:
+    #     logger.error(f"Failed to start nbd dev")
+    #     return False
+    #
+    # # jm_percent = min(supported_percent, (100-min_ftl_buffer_percent))
+    # result, error = cnode_api.make_gpt_partitions(nbd_device, partitions)
+    # if error:
+    #     logger.error(f"Failed to make partitions")
+    #     logger.error(error)
+    #     return False
+    # time.sleep(3)
+    # rpc_client.nbd_stop_disk(nbd_device)
+    # time.sleep(1)
+    # rpc_client.bdev_nvme_detach_controller(ssd_dev.nvme_controller)
+    # time.sleep(1)
+    # rpc_client.bdev_nvme_controller_attach(ssd_dev.nvme_controller, ssd_dev.pcie_address)
+    # time.sleep(1)
+    # rpc_client.bdev_examine(ssd_dev.nvme_bdev)
+    # time.sleep(3)
+    #
+    # # cache_bdev = f"{ssd_dev.nvme_bdev}p1"
+    # # cache_size = int((jm_percent*ssd_size)/100)
 
-    ssd_size = ssd_dev.size
-    supported_ssd_size = mem * 100 / 2.25
 
-    logger.info(f"Supported SSD size: {utils.humanbytes(supported_ssd_size)}")
-    logger.info(f"Current SSD size: {utils.humanbytes(ssd_size)}")
+    make_parts(snode, ssd_dev, mem)
 
-    ftl_buffer_size = snode.ftl_buffer_size
-    logger.info(f"FTL buffer size: {utils.humanbytes(ftl_buffer_size)}")
-
-    ocf_cache_size = ssd_size - ftl_buffer_size
-    ocf_cache_size = min(ocf_cache_size, (supported_ssd_size-ftl_buffer_size))
-    logger.info(f"OCF cache size: {utils.humanbytes(ocf_cache_size)}")
-
-    st = utils.humanbytes(ftl_buffer_size).replace(" ", "")
-    en = utils.humanbytes(ftl_buffer_size+ocf_cache_size).replace(" ", "")
-    partitions = [
-        ["0", f"{st}"],
-        [f"{st}", f"{en}", ],
-    ]
-
-    nbd_device = rpc_client.nbd_start_disk(ssd_dev.nvme_bdev)
-    time.sleep(2)
-    if not nbd_device:
-        logger.error(f"Failed to start nbd dev")
-        return False
-
-    # jm_percent = min(supported_percent, (100-min_ftl_buffer_percent))
-    result, error = cnode_api.make_gpt_partitions(nbd_device, partitions)
-    if error:
-        logger.error(f"Failed to make partitions")
-        logger.error(error)
-        return False
-    time.sleep(3)
-    rpc_client.nbd_stop_disk(nbd_device)
-    time.sleep(1)
-    rpc_client.bdev_nvme_detach_controller(ssd_dev.nvme_controller)
-    time.sleep(1)
-    rpc_client.bdev_nvme_controller_attach(ssd_dev.nvme_controller, ssd_dev.pcie_address)
-    time.sleep(1)
-    rpc_client.bdev_examine(ssd_dev.nvme_bdev)
-    time.sleep(3)
-
-    # cache_bdev = f"{ssd_dev.nvme_bdev}p1"
-    # cache_size = int((jm_percent*ssd_size)/100)
-
-    # adding devices
+    # search for devices
     nvme_devs = addNvmeDevices(rpc_client, [ssd_dev.pcie_address], snode)
     if not nvme_devs:
         logger.error("No NVMe devices was found!")
@@ -303,10 +356,10 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spd
     snode.nvme_devices = nvme_devs
     snode.write_to_db(db_controller.kv_store)
 
-    logger.info(f"Cache size: {utils.humanbytes(ocf_cache_size)}")
+    logger.info(f"Cache size: {utils.humanbytes(nvme_devs[2].size)}")
 
     snode.cache_bdev = nvme_devs[2].device_name
-    snode.cache_size = ocf_cache_size
+    snode.cache_size = nvme_devs[2].size
 
     filename = "/dev/nvme1n1"
     if snode.s3_data_path:
@@ -391,6 +444,8 @@ def restart_node(node_id, node_ip=None, s3_data_path=None, ftl_buffer_size=None,
         logger.error(f"Failed to start spdk: {err}")
         return False
 
+    snode.write_to_db(db_controller.kv_store)
+
     retries = 20
     while retries > 0:
         resp, _ = cnode_api.spdk_process_is_up()
@@ -431,6 +486,14 @@ def restart_node(node_id, node_ip=None, s3_data_path=None, ftl_buffer_size=None,
     # logger.info(f"Free Hugepages detected: {utils.humanbytes(mem)}")
 
     nvme_devs = addNvmeDevices(rpc_client, node_info['spdk_pcie_list'], snode)
+    if not nvme_devs:
+        logger.error("No NVMe devices was found!")
+        return False
+
+    if len(nvme_devs) < len(snode.nvme_devices):
+        make_parts(snode, snode.nvme_devices[0])
+
+    nvme_devs = addNvmeDevices(rpc_client, [snode.nvme_devices[0].pcie_address], snode)
     if not nvme_devs:
         logger.error("No NVMe devices was found!")
         return False
