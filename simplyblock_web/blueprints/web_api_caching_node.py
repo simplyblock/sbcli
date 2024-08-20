@@ -226,3 +226,19 @@ def restart_caching_node():
 
     data = caching_node_controller.restart_node(node_id, node_ip)
     return utils.get_response(data)
+
+
+@bp.route('/cachingnode/shutdown', methods=['POST'])
+def restart_caching_node():
+
+    cl_data = request.get_json()
+    if 'node_id' not in cl_data:
+        return utils.get_response(None, "missing required param: node_id", 400)
+
+    node_id = cl_data['node_id']
+    cnode = db_controller.get_caching_node_by_id(node_id)
+    if not cnode:
+        return utils.get_response_error(f"Caching node not found: {node_id}", 404)
+
+    data = caching_node_controller.shutdown_node(node_id)
+    return utils.get_response(data)
