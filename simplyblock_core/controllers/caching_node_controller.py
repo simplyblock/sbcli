@@ -147,6 +147,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spd
     snode.s3_data_path = s3_data_path or ""
     snode.lvstore_cluster_size = lvstore_cluster_size or utils.parse_size("4m")
     snode.num_md_pages_per_cluster_ratio = num_md_pages_per_cluster_ratio or 1
+    snode.ftl_buffer_size = utils.parse_size("6g")
     if ftl_buffer_size:
         b_size = utils.parse_size(ftl_buffer_size)
         if b_size < utils.parse_size("6g"):
@@ -252,23 +253,18 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spd
     supported_ssd_size = mem * 100 / 2.25
 
     logger.info(f"Supported SSD size: {utils.humanbytes(supported_ssd_size)}")
-    logger.info(f"SSD size: {utils.humanbytes(ssd_size)}")
+    logger.info(f"Current SSD size: {utils.humanbytes(ssd_size)}")
 
-    supported_percent = int(supported_ssd_size*100/ssd_size)
-
-    ftl_buffer_size = utils.parse_size("6g")
-    if snode.ftl_buffer_size:
-        ftl_buffer_size = snode.ftl_buffer_size
+    ftl_buffer_size = snode.ftl_buffer_size
+    logger.info(f"FTL buffer size: {utils.humanbytes(ftl_buffer_size)}")
 
     ocf_cache_size = ssd_size - ftl_buffer_size
-    ocf_cache_size = min(ocf_cache_size, supported_ssd_size)
-
-    first_part_perc = (int(ftl_buffer_size * 100 / ssd_size))
-    second_part_perc = (int(ocf_cache_size * 100 / (ssd_size-ftl_buffer_size)))
+    ocf_cache_size = min(ocf_cache_size, (supported_ssd_size-ftl_buffer_size))
+    logger.info(f"OCF cache size: {utils.humanbytes(ocf_cache_size)}")
 
     partitions = [
-        ["0%", f"{first_part_perc}%"],
-        [f"{first_part_perc}%", f"{min(first_part_perc+second_part_perc, 100)}%", ],
+        ["0", f"{utils.humanbytes(ftl_buffer_size)}"],
+        [f"{utils.humanbytes(ftl_buffer_size)}", f"{utils.humanbytes(ftl_buffer_size+ocf_cache_size)}", ],
     ]
 
     nbd_device = rpc_client.nbd_start_disk(ssd_dev.nvme_bdev)
