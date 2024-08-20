@@ -387,6 +387,7 @@ class SbcliUtils:
                 device_ids[device['id']] = device['status']
                 actual_status = device["status"]
                 status = status if isinstance(status, list) else [status]
+                self.logger.info(f"Device statuses: {device_ids}")
                 if actual_status in status:
                     if len(device_ids) == total_devices and all(list(device_ids.values())):
                         return device_details

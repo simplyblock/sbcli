@@ -138,8 +138,10 @@ class TestSingleNodeFailure(TestClusterBase):
                     host_id=no_lvol_node_uuid,
                 )
             except HTTPError as e:
-                self.logger.info(json.dumps(json.loads(e.response.text), indent=4))
-                self.logger.info(f"Lvol addition failed for node {no_lvol_node_uuid}. Error:{e.response.text}")
+                error = json.loads(e.response.text)
+                self.logger.info(f"Lvol addition failed for node {no_lvol_node_uuid}. Error:{error}")
+                assert "Failed to create BDev: distr_" in error["error"], f"Unexpected error: {error['error']}"
+                assert "test_lvol_fail" in error["error"], f"Incorrect LVOL error: {error['error']}"
                 lvols = self.sbcli_utils.list_lvols()
                 assert f"{self.lvol_name}_fail" not in list(lvols.keys()), \
                     (f"Lvol {self.lvol_name}_fail present in list of lvols post add: {lvols}. "
