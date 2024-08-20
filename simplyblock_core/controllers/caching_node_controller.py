@@ -195,8 +195,11 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spd
     snode.ctrl_secret = utils.generate_string(20)
 
     snode.s3_data_path = s3_data_path or ""
-    snode.lvstore_cluster_size = utils.parse_size(lvstore_cluster_size) or utils.parse_size(
-        constants.LVSTORE_CLUSTER_SIZE)
+    if lvstore_cluster_size:
+        if utils.parse_size(lvstore_cluster_size) > 0:
+            snode.lvstore_cluster_size = utils.parse_size(lvstore_cluster_size)
+        else:
+            snode.lvstore_cluster_size = utils.parse_size(constants.LVSTORE_CLUSTER_SIZE)
     snode.num_md_pages_per_cluster_ratio = num_md_pages_per_cluster_ratio or 1
     snode.ftl_buffer_size = utils.parse_size(constants.FTL_BUFFER_SIZE)
     if ftl_buffer_size:
@@ -491,8 +494,8 @@ def restart_node(node_id, node_ip=None, s3_data_path=None, ftl_buffer_size=None,
         logger.error("No NVMe devices was found!")
         return False
 
-    if len(nvme_devs) == 1:
-        make_parts(snode,nvme_devs[0])
+    if len(nvme_devs) < 3:
+        make_parts(snode, nvme_devs[0])
 
     nvme_devs = addNvmeDevices(rpc_client, [snode.nvme_devices[0].pcie_address], snode)
     if not nvme_devs:
