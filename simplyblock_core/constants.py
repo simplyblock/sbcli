@@ -89,3 +89,7 @@ INSTANCE_STORAGE_DATA = {
         'i3en.24xlarge': {'number_of_devices': 8, 'size_per_device_gb': 7500},
         'i3en.metal': {'number_of_devices': 8, 'size_per_device_gb': 7500},
     }
+
+
+LVSTORE_CLUSTER_SIZE = "4k"
+FTL_BUFFER_SIZE = "4g"

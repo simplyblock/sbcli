@@ -195,14 +195,14 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spd
     snode.ctrl_secret = utils.generate_string(20)
 
     snode.s3_data_path = s3_data_path or ""
-    snode.lvstore_cluster_size = lvstore_cluster_size or utils.parse_size("4m")
+    snode.lvstore_cluster_size = utils.parse_size(lvstore_cluster_size) or utils.parse_size(
+        constants.LVSTORE_CLUSTER_SIZE)
     snode.num_md_pages_per_cluster_ratio = num_md_pages_per_cluster_ratio or 1
-    snode.ftl_buffer_size = utils.parse_size("4g")
+    snode.ftl_buffer_size = utils.parse_size(constants.FTL_BUFFER_SIZE)
     if ftl_buffer_size:
         b_size = utils.parse_size(ftl_buffer_size)
-        if b_size < utils.parse_size("4g"):
-            logger.error("FTL cache must be larger than 6G")
-            # return False
+        if b_size < snode.ftl_buffer_size:
+            logger.warning(f"FTL cache must be larger than: {constants.FTL_BUFFER_SIZE}")
         snode.ftl_buffer_size = b_size
 
     snode.cpu = node_info['cpu_count']
@@ -406,7 +406,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spd
     return True
 
 
-def restart_node(node_id, node_ip=None, s3_data_path=None, ftl_buffer_size=None,blocked_pcie=None):
+def restart_node(node_id, node_ip=None, s3_data_path=None, ftl_buffer_size=None, blocked_pcie=None):
 
     db_controller = DBController()
     kv_store = db_controller.kv_store
@@ -445,6 +445,7 @@ def restart_node(node_id, node_ip=None, s3_data_path=None, ftl_buffer_size=None,
         return False
 
     snode.write_to_db(db_controller.kv_store)
+    logger.warning(snode.to_dict())
 
     retries = 20
     while retries > 0:
@@ -498,8 +499,10 @@ def restart_node(node_id, node_ip=None, s3_data_path=None, ftl_buffer_size=None,
         logger.error("No NVMe devices was found!")
         return False
 
+    snode = db_controller.get_caching_node_by_id(node_id)
     snode.nvme_devices = nvme_devs
     snode.write_to_db(db_controller.kv_store)
+    logger.warning(snode.to_dict())
 
 
     filename = "/dev/nvme1n1"
@@ -544,6 +547,7 @@ def restart_node(node_id, node_ip=None, s3_data_path=None, ftl_buffer_size=None,
         lvol_controller.add_lvol_on_node(lvol, snode, create_bdev_stack=False)
 
     logger.info("Setting node status to Active")
+    snode = db_controller.get_caching_node_by_id(node_id)
     snode.status = CachingNode.STATUS_ONLINE
     snode.write_to_db(kv_store)
     logger.info("Done")
