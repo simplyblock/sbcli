@@ -570,12 +570,14 @@ class RPCClient:
         params = {"name": name}
         return self._request("alceml_get_pages_usage", params)
 
-    def bdev_ocf_create(self, name, mode, cache_name, core_name):
+    def bdev_ocf_create(self, name, mode, cache_name, core_name, cache_line_size=None):
         params = {
             "name": name,
             "mode": mode,
             "cache_bdev_name": cache_name,
             "core_bdev_name": core_name}
+        if cache_line_size:
+            params['cache_line_size'] = cache_line_size
         return self._request("bdev_ocf_create", params)
 
     def bdev_ocf_delete(self, name):

@@ -83,9 +83,6 @@ class CLIWrapper:
         sub_command.add_argument("--s3-data-path", help='s3 fuse mount point', dest="s3_data_path")
         sub_command.add_argument("--ftl-buffer-size", help='FTL buffer size, default 6G',
                                  dest="ftl_buffer_size", default="6G")
-        sub_command.add_argument("--lvstore-cluster-size", help='LVS cluster size', dest="lvstore_cluster_size")
-        sub_command.add_argument("--num-md-pages-per-cluster-ratio", help='LVS md cluster ratio',
-                                 dest="num_md_pages_per_cluster_ratio", type=int)
 
         sub_command = self.add_sub_command(subparser, 'shutdown', 'shutdown Caching node')
         sub_command.add_argument("id", help='Caching node UUID')
@@ -962,8 +959,6 @@ class CLIWrapper:
                     args.id, args.node_ip,
                     s3_data_path=args.s3_data_path,
                     ftl_buffer_size=args.ftl_buffer_size,
-                    lvstore_cluster_size=args.lvstore_cluster_size,
-                    num_md_pages_per_cluster_ratio=args.num_md_pages_per_cluster_ratio,
                     blocked_pcie=args.blocked_pcie)
 
             if sub_command == "list-lvols":

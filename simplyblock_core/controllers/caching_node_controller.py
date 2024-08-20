@@ -86,8 +86,8 @@ def addNvmeDevices(rpc_client, devs, snode):
 
 def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spdk_mem, spdk_image=None,
              namespace=None, s3_data_path=None, ftl_buffer_size=None,
-             lvstore_cluster_size=None, num_md_pages_per_cluster_ratio=None, blocked_pcie=None):
-
+             lvstore_cluster_size=None, num_md_pages_per_cluster_ratio=None, blocked_pcie=None,
+             initial_stor_size=None, s3_bucket_name=None):
 
     db_controller = DBController()
     kv_store = db_controller.kv_store
@@ -145,7 +145,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spd
     snode.ctrl_secret = utils.generate_string(20)
 
     snode.s3_data_path = s3_data_path or ""
-    snode.lvstore_cluster_size = lvstore_cluster_size or 4096
+    snode.lvstore_cluster_size = lvstore_cluster_size or utils.parse_size("4m")
     snode.num_md_pages_per_cluster_ratio = num_md_pages_per_cluster_ratio or 1
     if ftl_buffer_size:
         b_size = utils.parse_size(ftl_buffer_size)
@@ -330,20 +330,19 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spd
         return False
     snode.ftl_uuid = ret["uuid"]
 
-    ret = rpc_client.bdev_ocf_create("ocf_1", 'wt', snode.cache_bdev, "ftl_1")
-    if not ret:
-        logger.error("Failed ot create bdev")
-        return False
+    # ret = rpc_client.bdev_ocf_create("ocf_1", 'wt', snode.cache_bdev, "ftl_1", 64)
+    # if not ret:
+    #     logger.error("Failed ot create bdev")
+    #     return False
 
     # create lvs
     md_pages_ratio = 1
     if snode.num_md_pages_per_cluster_ratio:
         md_pages_ratio = snode.num_md_pages_per_cluster_ratio
-    cluster_sz = 4096
-    if snode.lvstore_cluster_size:
-        cluster_sz = snode.lvstore_cluster_size
+
     ret = rpc_client.create_lvstore(
-        "lvs_1", "ocf_1", num_md_pages_per_cluster_ratio=int(md_pages_ratio), cluster_sz=cluster_sz)
+        "lvs_1", "ftl_1", num_md_pages_per_cluster_ratio=int(md_pages_ratio),
+        cluster_sz=snode.lvstore_cluster_size)
     if not ret:
         logger.error("Failed ot create bdev")
         return False
@@ -356,8 +355,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spd
     return True
 
 
-def restart_node(node_id, node_ip=None, s3_data_path=None, ftl_buffer_size=None,
-                 lvstore_cluster_size=None, num_md_pages_per_cluster_ratio=None, blocked_pcie=None):
+def restart_node(node_id, node_ip=None, s3_data_path=None, ftl_buffer_size=None,blocked_pcie=None):
 
     db_controller = DBController()
     kv_store = db_controller.kv_store
@@ -375,12 +373,6 @@ def restart_node(node_id, node_ip=None, s3_data_path=None, ftl_buffer_size=None,
 
     if ftl_buffer_size:
         snode.ftl_buffer_size = utils.parse_size(ftl_buffer_size)
-
-    if lvstore_cluster_size:
-        snode.lvstore_cluster_size = lvstore_cluster_size
-
-    if num_md_pages_per_cluster_ratio:
-        snode.num_md_pages_per_cluster_ratio = num_md_pages_per_cluster_ratio
 
     if blocked_pcie:
         snode.blocked_pcie = blocked_pcie
@@ -469,12 +461,13 @@ def restart_node(node_id, node_ip=None, s3_data_path=None, ftl_buffer_size=None,
         logger.error("Failed ot create bdev")
         return False
 
-    ret = rpc_client.bdev_ocf_create("ocf_1", 'wt', snode.cache_bdev, "ftl_1")
-    if not ret:
-        logger.error("Failed ot create bdev")
-        return False
+    # ret = rpc_client.bdev_ocf_create("ocf_1", 'wt', snode.cache_bdev, "ftl_1", 64)
+    # if not ret:
+    #     logger.error("Failed ot create bdev")
+    #     return False
     time.sleep(1)
-    rpc_client.bdev_examine("ocf_1")
+    # rpc_client.bdev_examine("ocf_1")
+    rpc_client.bdev_examine("ftl_1")
     time.sleep(3)
 
     for lvol_id in snode.lvols:

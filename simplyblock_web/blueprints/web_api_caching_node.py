@@ -41,6 +41,8 @@ def add_node_to_cluster():
     ftl_buffer_size = None
     lvstore_cluster_size = None
     num_md_pages_per_cluster_ratio = None
+    initial_stor_size = None
+    s3_bucket_name = None
 
     if 'spdk_cpu_mask' in cl_data:
         spdk_cpu_mask = cl_data['spdk_cpu_mask']
@@ -72,11 +74,20 @@ def add_node_to_cluster():
     if 'num_md_pages_per_cluster_ratio' in cl_data:
         num_md_pages_per_cluster_ratio = cl_data['num_md_pages_per_cluster_ratio']
 
+    if 'lvstore_cluster_size' in cl_data:
+        lvstore_cluster_size = cl_data['lvstore_cluster_size']
+
+    if 'initial_stor_size' in cl_data:
+        initial_stor_size = cl_data['initial_stor_size']
+
+    if 's3_bucket_name' in cl_data:
+        s3_bucket_name = cl_data['s3_bucket_name']
+
     t = threading.Thread(
         target=caching_node_controller.add_node,
         args=(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spdk_mem, spdk_image, namespace,
               s3_data_path, ftl_buffer_size, lvstore_cluster_size,
-              num_md_pages_per_cluster_ratio, blocked_pcie))
+              num_md_pages_per_cluster_ratio, blocked_pcie, initial_stor_size, s3_bucket_name))
     t.start()
 
     return utils.get_response(True)
