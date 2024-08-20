@@ -284,6 +284,7 @@ class SbcliUtils:
         }
         if host_id:
             body["host_id"] = host_id
+        
         self.post_request(api_url="/lvol", body=body)
 
     def delete_lvol(self, lvol_name):

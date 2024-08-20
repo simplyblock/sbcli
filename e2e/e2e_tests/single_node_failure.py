@@ -154,6 +154,8 @@ class TestSingleNodeFailure(TestClusterBase):
                 if result['uuid'] != no_lvol_node_uuid:
                     online_node = result['uuid']
                     break
+            self.logger.info(f"Online node id: {online_node}")
+            self.logger.info(f"Offline node id: {no_lvol_node_uuid}")
             self.sbcli_utils.add_lvol(
                     lvol_name=f"{self.lvol_name}_fail",
                     pool_name=self.pool_name,
