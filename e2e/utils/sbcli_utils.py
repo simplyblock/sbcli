@@ -1,4 +1,5 @@
 
+import json
 import requests
 from http import HTTPStatus
 from logger_config import setup_logger
@@ -179,7 +180,8 @@ class SbcliUtils:
 
         return data
 
-    def add_storage_pool(self, pool_name, cluster_id=None, max_rw_iops=0, max_rw_mbytes=0, max_r_mbytes=0, max_w_mbytes=0):
+    def add_storage_pool(self, pool_name, cluster_id=None, max_rw_iops=0, 
+                         max_rw_mbytes=0, max_r_mbytes=0, max_w_mbytes=0):
         """Adds the storage with given name
         """
         pools = self.list_storage_pools()
@@ -256,7 +258,7 @@ class SbcliUtils:
 
     def add_lvol(self, lvol_name, pool_name, size="256M", distr_ndcs=1, distr_npcs=1,
                  distr_bs=4096, distr_chunk_bs=4096, max_rw_iops=0, max_rw_mbytes=0,
-                 max_r_mbytes=0, max_w_mbytes=0):
+                 max_r_mbytes=0, max_w_mbytes=0, host_id=None):
         """Adds lvol with given params
         """
         lvols = self.list_lvols()
@@ -280,6 +282,8 @@ class SbcliUtils:
             "distr_bs": str(distr_bs),
             "distr_chunk_bs": str(distr_chunk_bs),
         }
+        if host_id:
+            body["host_id"] = host_id
         self.post_request(api_url="/lvol", body=body)
 
     def delete_lvol(self, lvol_name):
@@ -377,14 +381,14 @@ class SbcliUtils:
         device_details = self.get_device_details(storage_node_id=node_id)
         total_devices = len(device_details)
         while timeout > 0:
-            self.logger.info(f"Retrying Device Status check")
+            self.logger.info("Retrying Device Status check")
             device_details = self.get_device_details(storage_node_id=node_id)
             for device in device_details:
                 device_ids[device['id']] = device['status']
                 actual_status = device["status"]
                 status = status if isinstance(status, list) else [status]
                 if actual_status in status:
-                    if len(device_ids) == total_devices and any(list(device_ids.values())):
+                    if len(device_ids) == total_devices and all(list(device_ids.values())):
                         return device_details
                 self.logger.info(f"Device ID: {device['id']} Expected Status: {status} / Actual Status: {actual_status}")
             sleep_n_sec(1)

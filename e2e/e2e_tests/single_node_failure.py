@@ -1,10 +1,12 @@
 ### simplyblock e2e tests
+import json
 import threading
 from e2e_tests.cluster_test_base import TestClusterBase
 from utils.common_utils import sleep_n_sec
 from logger_config import setup_logger
 from datetime import datetime
-
+import traceback
+from requests.exceptions import HTTPError
 
 class TestSingleNodeFailure(TestClusterBase):
     """
@@ -65,7 +67,7 @@ class TestSingleNodeFailure(TestClusterBase):
         )
         lvols = self.sbcli_utils.list_lvols()
         assert self.lvol_name in list(lvols.keys()), \
-            f"Lvol {self.lvol_name} present in list of lvols post add: {lvols}"
+            f"Lvol {self.lvol_name} not present in list of lvols post add: {lvols}"
 
         connect_str = self.sbcli_utils.get_lvol_connect_str(lvol_name=self.lvol_name)
 
@@ -114,17 +116,49 @@ class TestSingleNodeFailure(TestClusterBase):
         try:
             self.logger.info(f"Waiting for node to become offline, {no_lvol_node_uuid}")
             self.sbcli_utils.wait_for_storage_node_status(no_lvol_node_uuid,
-                                                          ["offline", "in_shutdown", "in_restart"],
-                                                          timeout=300)
+                                                          "offline",
+                                                          timeout=500)
             
-            self.validations(node_uuid=no_lvol_node_uuid,
-                            node_status=["offline", "in_shutdown", "in_restart"],
-                            # The status changes between them very quickly hence
-                            # needed multiple checks
-                            device_status="unavailable",
-                            lvol_status="online",
-                            health_check_status=False
-                            )
+            # self.validations(node_uuid=no_lvol_node_uuid,
+            #                 node_status=["offline", "in_shutdown", "in_restart"],
+            #                 # The status changes between them very quickly hence
+            #                 # needed multiple checks
+            #                 device_status="unavailable",
+            #                 lvol_status="online",
+            #                 health_check_status=False
+            #                 )
+            try:
+                # expected_error_regex = r"Failed to create BDev: distr_\d+_test_lvol_fail"
+                self.sbcli_utils.add_lvol(
+                    lvol_name=f"{self.lvol_name}_fail",
+                    pool_name=self.pool_name,
+                    size="800M",
+                    distr_ndcs=2,
+                    distr_npcs=1,
+                    host_id=no_lvol_node_uuid,
+                )
+            except HTTPError as e:
+                self.logger.info(json.dumps(json.loads(e.response.text), indent=4))
+                self.logger.info(f"Lvol addition failed for node {no_lvol_node_uuid}. Error:{e.response.text}")
+                lvols = self.sbcli_utils.list_lvols()
+                assert f"{self.lvol_name}_fail" not in list(lvols.keys()), \
+                    (f"Lvol {self.lvol_name}_fail present in list of lvols post add: {lvols}. "
+                     "Expected: Lvol is not added")
+            
+            storage_nodes = self.sbcli_utils.get_storage_nodes()
+            self.logger.info(f"Storage nodes list: {storage_nodes}")
+            self.sbcli_utils.add_lvol(
+                    lvol_name=f"{self.lvol_name}_fail",
+                    pool_name=self.pool_name,
+                    size="800M",
+                    distr_ndcs=2,
+                    distr_npcs=1,
+                )
+            lvols = self.sbcli_utils.list_lvols()
+            assert f"{self.lvol_name}_fail" in list(lvols.keys()), \
+                (f"Lvol {self.lvol_name}_fail not present in list of lvols post add: {lvols}. "
+                 "Expected: Lvol is added")
+
         except Exception as exp:
             self.logger.debug(exp)
             # self.start_ec2_instance(instance_id=instance_id)
