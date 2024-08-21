@@ -233,11 +233,11 @@ jobs:
           MESSAGE="Python E2E tests run triggered on branch **${BRANCH_NAME}**. \n${OVERALL_STATUS}\nGitHub Run: ${GITHUB_RUN_URL}\nAWS Logs: ${AWS_LOGS_URL}\n\nTotal Tests: ${{ env.TOTAL_TESTS }}\nPassed Tests: ${{ env.PASSED_TESTS }}\nFailed Tests: ${{ env.FAILED_TESTS }}\n\n-- Test Cases Passed :white_check_mark:\n${{ env.PASSED_CASES_BULLETS }}\n\n-- Test Cases Failed :x:\n${{ env.FAILED_CASES_BULLETS }}"
 
           curl -X POST -H 'Content-type: application/json' --data "{\"text\":\"${MESSAGE}\"}" $SLACK_WEBHOOK_URL
-      - name: Destroy Cluster
-        if: always()
-        run: |
-          cd $GITHUB_WORKSPACE/simplyBlockDeploy
-          terraform destroy --auto-approve
+      # - name: Destroy Cluster
+      #   if: always()
+      #   run: |
+      #     cd $GITHUB_WORKSPACE/simplyBlockDeploy
+      #     terraform destroy --auto-approve
       - name: 'Cleanup build folder'
         run: |
           ls -la ./
