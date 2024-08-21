@@ -146,7 +146,7 @@ class TestSingleNodeFailure(TestClusterBase):
                     (f"Lvol {self.lvol_name}_fail present in list of lvols post add: {lvols}. "
                      "Expected: Lvol is not added")
             
-            sleep_n_sec(10)
+            # sleep_n_sec(10)
             storage_nodes = self.sbcli_utils.get_storage_nodes()
             online_node = None
             for result in storage_nodes['results']:
