@@ -515,7 +515,7 @@ def restart_node(node_id, node_ip=None, s3_data_path=None, ftl_buffer_size=None,
         logger.error("Failed ot create bdev")
         return False
 
-    ret = rpc_client.bdev_passthru_create("ftl_cache_1", nvme_devs[1].device_name, 4096, reset=0)
+    ret = rpc_client.bdev_passthru_create("ftl_cache_1", nvme_devs[1].device_name, 4096, reset=None)
     if not ret:
         logger.error("Failed ot create bdev")
         return False
