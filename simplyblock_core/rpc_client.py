@@ -711,7 +711,7 @@ class RPCClient:
         }
         if block_sz:
             params["block_sz"] = block_sz
-        if reset:
+        if reset is not None:
             params["reset"] = reset
         return self._request("bdev_passthru_create", params)
 
