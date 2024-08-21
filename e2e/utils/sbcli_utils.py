@@ -396,7 +396,7 @@ class SbcliUtils:
                 self.logger.info(f"Device statuses: {device_ids}")
                 if device['status'] in status:
                     if len(device_ids) == total_devices and self.all_expected_status(device_ids, status):
-                        return device_ids
+                        return device_details
                 self.logger.info(f"Device ID: {device['id']} Expected Status: {status} / Actual Status: {device['status']}")
             sleep_n_sec(1)
             timeout -= 1
