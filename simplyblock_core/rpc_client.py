@@ -712,7 +712,7 @@ class RPCClient:
         if block_sz:
             params["block_sz"] = block_sz
         if reset is not None:
-            params["reset"] = reset
+            params["mode"] = reset
         return self._request("bdev_passthru_create", params)
 
     def bdev_ftl_create(self, name, base_bdev, cache):

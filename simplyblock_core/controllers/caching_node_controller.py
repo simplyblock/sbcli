@@ -387,14 +387,14 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spd
         return False
     snode.ftl_uuid = ret["uuid"]
 
-    ret = rpc_client.bdev_ocf_create("ocf_1", 'wt', snode.cache_bdev, "ftl_1", 64)
-    if not ret:
-        logger.error("Failed ot create bdev")
-        return False
+    # ret = rpc_client.bdev_ocf_create("ocf_1", 'wt', snode.cache_bdev, "ftl_1", 64)
+    # if not ret:
+    #     logger.error("Failed ot create bdev")
+    #     return False
 
     # create lvs
     ret = rpc_client.create_lvstore(
-        "lvs_1", "ocf_1", num_md_pages_per_cluster_ratio=int(snode.num_md_pages_per_cluster_ratio),
+        "lvs_1", "ftl_1", num_md_pages_per_cluster_ratio=int(snode.num_md_pages_per_cluster_ratio),
         cluster_sz=snode.lvstore_cluster_size)
     if not ret:
         logger.error("Failed ot create bdev")
@@ -516,7 +516,7 @@ def restart_node(node_id, node_ip=None, s3_data_path=None, ftl_buffer_size=None,
         logger.error("Failed ot create bdev")
         return False
 
-    ret = rpc_client.bdev_passthru_create("ftl_cache_1", nvme_devs[1].device_name, 4096, reset=None)
+    ret = rpc_client.bdev_passthru_create("ftl_cache_1", nvme_devs[1].device_name, 4096, reset=0)
     if not ret:
         logger.error("Failed ot create bdev")
         return False
@@ -527,12 +527,12 @@ def restart_node(node_id, node_ip=None, s3_data_path=None, ftl_buffer_size=None,
         logger.error("Failed ot create bdev")
         return False
 
-    ret = rpc_client.bdev_ocf_create("ocf_1", 'wt', snode.cache_bdev, "ftl_1", 64)
-    if not ret:
-        logger.error("Failed ot create bdev")
-        return False
-    time.sleep(1)
-    rpc_client.bdev_examine("ocf_1")
+    # ret = rpc_client.bdev_ocf_create("ocf_1", 'wt', snode.cache_bdev, "ftl_1", 64)
+    # if not ret:
+    #     logger.error("Failed ot create bdev")
+    #     return False
+    # time.sleep(1)
+    rpc_client.bdev_examine("ftl_1")
     time.sleep(3)
 
     for lvol_id in snode.lvols:
@@ -664,7 +664,7 @@ def connect(caching_node_id, lvol_id, force=False):
         if clvol.lvol_id == lvol_id:
             logger.warning(f"Already connected, dev path: {clvol.device_path}")
             if not force:
-                return False
+                return clvol.device_path
 
     # if cnode.cluster_id != pool.cluster_id:
     #     logger.error("Caching node and LVol are in different clusters")
