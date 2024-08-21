@@ -118,7 +118,6 @@ class TestSingleNodeFailure(TestClusterBase):
             self.sbcli_utils.wait_for_storage_node_status(no_lvol_node_uuid,
                                                           "offline",
                                                           timeout=500)
-            
             # self.validations(node_uuid=no_lvol_node_uuid,
             #                 node_status=["offline", "in_shutdown", "in_restart"],
             #                 # The status changes between them very quickly hence
@@ -147,7 +146,7 @@ class TestSingleNodeFailure(TestClusterBase):
                     (f"Lvol {self.lvol_name}_fail present in list of lvols post add: {lvols}. "
                      "Expected: Lvol is not added")
             
-            
+            sleep_n_sec(10)
             storage_nodes = self.sbcli_utils.get_storage_nodes()
             online_node = None
             for result in storage_nodes['results']:
