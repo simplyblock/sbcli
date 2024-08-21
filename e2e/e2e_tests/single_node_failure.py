@@ -147,21 +147,12 @@ class TestSingleNodeFailure(TestClusterBase):
                      "Expected: Lvol is not added")
             
             # sleep_n_sec(10)
-            storage_nodes = self.sbcli_utils.get_storage_nodes()
-            online_node = None
-            for result in storage_nodes['results']:
-                if result['uuid'] != no_lvol_node_uuid:
-                    online_node = result['uuid']
-                    break
-            self.logger.info(f"Online node id: {online_node}")
-            self.logger.info(f"Offline node id: {no_lvol_node_uuid}")
             self.sbcli_utils.add_lvol(
                     lvol_name=f"{self.lvol_name}_fail",
                     pool_name=self.pool_name,
                     size="800M",
                     distr_ndcs=2,
                     distr_npcs=1,
-                    host_id=online_node
                 )
             lvols = self.sbcli_utils.list_lvols()
             assert f"{self.lvol_name}_fail" in list(lvols.keys()), \

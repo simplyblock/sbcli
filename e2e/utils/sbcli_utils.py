@@ -376,8 +376,14 @@ class SbcliUtils:
         raise TimeoutError(f"Timed out waiting for node status, {node_id},"
                            f"Expected status: {status}, Actual status: {actual_status}")
     
+    def all_expected_status(self, value_dict, expected_status):
+        value_match = []
+        for _, value in value_dict.items():
+            if value in expected_status:
+                value_match.append(True)
+        return all(value_match)
+    
     def wait_for_device_status(self, node_id, status, timeout=60):
-        actual_status = None
         device_ids = {}
         device_details = self.get_device_details(storage_node_id=node_id)
         total_devices = len(device_details)
@@ -386,13 +392,12 @@ class SbcliUtils:
             device_details = self.get_device_details(storage_node_id=node_id)
             for device in device_details:
                 device_ids[device['id']] = device['status']
-                actual_status = device["status"]
                 status = status if isinstance(status, list) else [status]
                 self.logger.info(f"Device statuses: {device_ids}")
-                if actual_status in status:
-                    if len(device_ids) == total_devices and all(list(device_ids.values())):
-                        return device_details
-                self.logger.info(f"Device ID: {device['id']} Expected Status: {status} / Actual Status: {actual_status}")
+                if device['status'] in status:
+                    if len(device_ids) == total_devices and self.all_expected_status(device_ids, status):
+                        return device_ids
+                self.logger.info(f"Device ID: {device['id']} Expected Status: {status} / Actual Status: {device['status']}")
             sleep_n_sec(1)
             timeout -= 1
         raise TimeoutError(f"Timed out waiting for device status, Node id: {node_id}, Device id: {list(device_ids.keys())}"
