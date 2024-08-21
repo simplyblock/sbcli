@@ -12,8 +12,6 @@ def get_all_tests():
         TestSingleNodeOutage,
         TestSingleNodeMultipleFioPerfValidation,
         TestSingleNodeFailure,
-        TestSingleNodeFailure,
-        TestSingleNodeFailure
         # TestMultiLvolFio, - Enable when testing
     ]
     return tests
