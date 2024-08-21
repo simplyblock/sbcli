@@ -15,6 +15,7 @@ from simplyblock_core.controllers import lvol_controller
 from simplyblock_core.kv_store import DBController
 from simplyblock_core.models.caching_node import CachingNode, CachedLVol
 from simplyblock_core.models.iface import IFace
+from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.pool import Pool
 from simplyblock_core.rpc_client import RPCClient
@@ -546,6 +547,8 @@ def restart_node(node_id, node_ip=None, s3_data_path=None, ftl_buffer_size=None,
                 time.sleep(3)
 
         lvol_controller.add_lvol_on_node(lvol, snode, create_bdev_stack=False)
+        lvol.status = LVol.STATUS_ONLINE
+        lvol.write_to_db(kv_store)
 
     logger.info("Setting node status to Active")
     snode = db_controller.get_caching_node_by_id(node_id)
@@ -635,7 +638,8 @@ def connect(caching_node_id, lvol_id, force=False):
 
     if lvol.status != lvol.STATUS_ONLINE:
         logger.error(f"LVol must be online, lvol status: {lvol.status}")
-        return False
+        if not force:
+            return False
 
     # pool = db_controller.get_pool_by_id(lvol.pool_uuid)
     # if pool.status == Pool.STATUS_INACTIVE:
