@@ -200,7 +200,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spd
     if utils.parse_size(lvstore_cluster_size) > 0:
         snode.lvstore_cluster_size = utils.parse_size(lvstore_cluster_size)
     else:
-        snode.lvstore_cluster_size = utils.parse_size(constants.LVSTORE_CLUSTER_SIZE)
+        snode.lvstore_cluster_size = constants.LVSTORE_CLUSTER_SIZE
 
     snode.num_md_pages_per_cluster_ratio = num_md_pages_per_cluster_ratio or constants.NUM_MD_PAGES_PER_CLUSTER_RATIO
     snode.ftl_buffer_size = utils.parse_size(constants.FTL_BUFFER_SIZE)
