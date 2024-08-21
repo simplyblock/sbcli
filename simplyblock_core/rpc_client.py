@@ -703,7 +703,7 @@ class RPCClient:
         params = {"id": app_thread_process_id, "cpumask": app_thread_mask}
         return self._request("thread_set_cpumask", params)
 
-    def bdev_passthru_create(self, name, base_bdev_name, block_sz=None):
+    def bdev_passthru_create(self, name, base_bdev_name, block_sz=None, reset=None):
         params = {
             "name": name,
             "base_bdev_name": base_bdev_name,
@@ -711,6 +711,8 @@ class RPCClient:
         }
         if block_sz:
             params["block_sz"] = block_sz
+        if reset:
+            params["reset"] = reset
         return self._request("bdev_passthru_create", params)
 
     def bdev_ftl_create(self, name, base_bdev, cache):
