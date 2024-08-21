@@ -197,11 +197,10 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spd
 
     snode.s3_data_path = s3_data_path or ""
 
-    if lvstore_cluster_size:
-        if utils.parse_size(lvstore_cluster_size) > 0:
-            snode.lvstore_cluster_size = utils.parse_size(lvstore_cluster_size)
-        else:
-            snode.lvstore_cluster_size = utils.parse_size(constants.LVSTORE_CLUSTER_SIZE)
+    if utils.parse_size(lvstore_cluster_size) > 0:
+        snode.lvstore_cluster_size = utils.parse_size(lvstore_cluster_size)
+    else:
+        snode.lvstore_cluster_size = utils.parse_size(constants.LVSTORE_CLUSTER_SIZE)
 
     snode.num_md_pages_per_cluster_ratio = num_md_pages_per_cluster_ratio or constants.NUM_MD_PAGES_PER_CLUSTER_RATIO
     snode.ftl_buffer_size = utils.parse_size(constants.FTL_BUFFER_SIZE)
