@@ -195,12 +195,14 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spd
     snode.ctrl_secret = utils.generate_string(20)
 
     snode.s3_data_path = s3_data_path or ""
+
     if lvstore_cluster_size:
         if utils.parse_size(lvstore_cluster_size) > 0:
             snode.lvstore_cluster_size = utils.parse_size(lvstore_cluster_size)
         else:
             snode.lvstore_cluster_size = utils.parse_size(constants.LVSTORE_CLUSTER_SIZE)
-    snode.num_md_pages_per_cluster_ratio = num_md_pages_per_cluster_ratio or 1
+
+    snode.num_md_pages_per_cluster_ratio = num_md_pages_per_cluster_ratio or constants.NUM_MD_PAGES_PER_CLUSTER_RATIO
     snode.ftl_buffer_size = utils.parse_size(constants.FTL_BUFFER_SIZE)
     if ftl_buffer_size:
         b_size = utils.parse_size(ftl_buffer_size)
@@ -390,12 +392,8 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spd
         return False
 
     # create lvs
-    md_pages_ratio = 1
-    if snode.num_md_pages_per_cluster_ratio:
-        md_pages_ratio = snode.num_md_pages_per_cluster_ratio
-
     ret = rpc_client.create_lvstore(
-        "lvs_1", "ocf_1", num_md_pages_per_cluster_ratio=int(md_pages_ratio),
+        "lvs_1", "ocf_1", num_md_pages_per_cluster_ratio=int(snode.num_md_pages_per_cluster_ratio),
         cluster_sz=snode.lvstore_cluster_size)
     if not ret:
         logger.error("Failed ot create bdev")
@@ -553,6 +551,11 @@ def restart_node(node_id, node_ip=None, s3_data_path=None, ftl_buffer_size=None,
     snode = db_controller.get_caching_node_by_id(node_id)
     snode.status = CachingNode.STATUS_ONLINE
     snode.write_to_db(kv_store)
+
+    conn_lvol_list = [v.lvol_id for v in snode.connected_lvols]
+    for lvol_id in conn_lvol_list:
+        connect(node_id, lvol_id, force=True)
+
     logger.info("Done")
     return True
 
@@ -624,7 +627,7 @@ def recreate(node_id):
     return True
 
 
-def connect(caching_node_id, lvol_id):
+def connect(caching_node_id, lvol_id, force=False):
     lvol = db_controller.get_lvol_by_id(lvol_id)
     if not lvol:
         logger.error(f"LVol not found: {lvol_id}")
@@ -655,8 +658,9 @@ def connect(caching_node_id, lvol_id):
 
     for clvol in cnode.connected_lvols:
         if clvol.lvol_id == lvol_id:
-            logger.info(f"Already connected, dev path: {clvol.device_path}")
-            return False
+            logger.warning(f"Already connected, dev path: {clvol.device_path}")
+            if not force:
+                return False
 
     # if cnode.cluster_id != pool.cluster_id:
     #     logger.error("Caching node and LVol are in different clusters")
