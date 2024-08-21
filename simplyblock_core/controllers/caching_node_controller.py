@@ -557,7 +557,10 @@ def restart_node(node_id, node_ip=None, s3_data_path=None, ftl_buffer_size=None,
 
     conn_lvol_list = [v.lvol_id for v in snode.connected_lvols]
     for lvol_id in conn_lvol_list:
-        connect(node_id, lvol_id, force=True)
+        try:
+            connect(node_id, lvol_id, force=True)
+        except:
+            pass
 
     logger.info("Done")
     return True
