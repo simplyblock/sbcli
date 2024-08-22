@@ -4,6 +4,7 @@ from utils.sbcli_utils import SbcliUtils
 from utils.ssh_utils import SshUtils
 from utils.common_utils import CommonUtils
 from logger_config import setup_logger
+from utils.common_utils import sleep_n_sec
 
 
 class TestClusterBase:
@@ -53,6 +54,10 @@ class TestClusterBase:
                 address=node,
                 bastion_server_address=self.bastion_server,
             )
+        # command = "python3 -c \"from importlib.metadata import version;print(f'SBCLI Version: {version('''sbcli-dev''')}')\""
+        # self.ssh_obj.exec_command(
+        #     self.mgmt_nodes[0], command=command
+        # )
         self.unmount_all(base_path=self.mount_path)
         self.ssh_obj.unmount_path(node=self.mgmt_nodes[0],
                                   device=self.mount_path)
@@ -105,6 +110,7 @@ class TestClusterBase:
             health_check_status (bool): Expected health check status
         """
         node_details = self.sbcli_utils.get_storage_node_details(storage_node_id=node_uuid)
+        self.logger.info(f"Storage Node Details: {node_details}")
         device_details = self.sbcli_utils.get_device_details(storage_node_id=node_uuid)
         lvol_id = self.sbcli_utils.get_lvol_id(lvol_name=self.lvol_name)
         lvol_details = self.sbcli_utils.get_lvol_details(lvol_id=lvol_id)
@@ -117,61 +123,89 @@ class TestClusterBase:
 
         if isinstance(node_status, list):
             assert node_details[0]["status"] in node_status, \
-                f"Node {node_uuid} is not in {node_status} state. {node_details[0]['status']}"
+                f"Node {node_uuid} is not in {node_status} state. Actual: {node_details[0]['status']}"
         else:
             assert node_details[0]["status"] == node_status, \
-                f"Node {node_uuid} is not in {node_status} state. {node_details[0]['status']}"
-        for device in device_details:
+                f"Node {node_uuid} is not in {node_status} state. Actual: {node_details[0]['status']}"
+        offline_device_detail = self.sbcli_utils.wait_for_device_status(node_id=node_uuid,
+                                                                        status=device_status,
+                                                                        timeout=300)
+        for device in offline_device_detail:
             # if "jm" in device["jm_bdev"]:
             #     assert device["status"] == "JM_DEV", \
             #         f"JM Device {device['id']} is not in JM_DEV state. {device['status']}"
             # else:
             assert device["status"] == device_status, \
-                f"Device {device['id']} is not in {device_status} state. {device['status']}"
+                f"Device {device['id']} is not in {device_status} state. Actual {device['status']}"
             offline_device.append(device['id'])
 
         for lvol in lvol_details:
             assert lvol["status"] == lvol_status, \
-                f"Lvol {lvol['id']} is not in {lvol_status} state. {lvol['status']}"
+                f"Lvol {lvol['id']} is not in {lvol_status} state. Actual: {lvol['status']}"
 
         storage_nodes = self.sbcli_utils.get_storage_nodes()["results"]
+        health_check_status = health_check_status if isinstance(health_check_status, list)\
+              else [health_check_status]
         for node in storage_nodes:
-            assert node["health_check"] == health_check_status, \
-                f"Node {node['id']} health-check is not {health_check_status}. {node['health_check']}"
-            device_details = self.sbcli_utils.get_device_details(storage_node_id=node["id"])
+            node_details = self.sbcli_utils.get_storage_node_details(storage_node_id=node['id'])
+            if node["id"] == node_uuid and node_details[0]['status'] == "offline":
+                node = self.sbcli_utils.wait_for_health_status(node['id'], status=health_check_status,
+                                                               timeout=300)
+                assert node["health_check"] in health_check_status, \
+                    f"Node {node['id']} health-check is not {health_check_status}. Actual: {node['health_check']}. Node Status: {node_details[0]['status']}"
+            else:
+                node = self.sbcli_utils.wait_for_health_status(node['id'], status=True,
+                                                               timeout=300)
+                assert node["health_check"] is True, \
+                    f"Node {node['id']} health-check is not True. Actual:  {node['health_check']}.  Node Status: {node_details[0]['status']}"
+            if node['id'] == node_uuid:
+                device_details = offline_device_detail
+            else:
+                device_details = self.sbcli_utils.get_device_details(storage_node_id=node['id'])
+            node_details = self.sbcli_utils.get_storage_node_details(storage_node_id=node['id'])
             for device in device_details:
-                assert device["health_check"] == health_check_status, \
-                    f"Device {device['id']} health-check is not {health_check_status}. {device['health_check']}"
+                if device['id'] in offline_device and node_details[0]['status'] == "offline":
+                    device = self.sbcli_utils.wait_for_health_status(node['id'], status=health_check_status,
+                                                                     device_id=device['id'],
+                                                                     timeout=300)
+                    assert device["health_check"] in health_check_status, \
+                        f"Device {device['id']} health-check is not {health_check_status}. Actual:  {device['health_check']}"
+                else:
+                    device = self.sbcli_utils.wait_for_health_status(node['id'], status=True,
+                                                                     device_id=device['id'],
+                                                                     timeout=300)
+                    assert device["health_check"] is True, \
+                        f"Device {device['id']} health-check is not True. Actual:  {device['health_check']}"
 
         for node_id, node in cluster_map_nodes.items():
             if node_id == node_uuid:
                 if isinstance(node_status, list):
                     assert node["Reported Status"] in node_status, \
-                    f"Node {node_id} is not in {node_status} reported state. {node['Reported Status']}"
+                    f"Node {node_id} is not in {node_status} reported state. Actual:  {node['Reported Status']}"
                     assert node["Actual Status"] in node_status, \
-                        f"Node {node_id} is not in {node_status} state. {node['Actual Status']}"
+                        f"Node {node_id} is not in {node_status} state. Actual:  {node['Actual Status']}"
                 else:
                     assert node["Reported Status"] == node_status, \
-                    f"Node {node_id} is not in {node_status} reported state. {node['Reported Status']}"
+                    f"Node {node_id} is not in {node_status} reported state. Actual:  {node['Reported Status']}"
                     assert node["Actual Status"] == node_status, \
-                        f"Node {node_id} is not in {node_status} state. {node['Actual Status']}"
+                        f"Node {node_id} is not in {node_status} state. Actual:  {node['Actual Status']}"
                     
             else:
                 assert node["Reported Status"] == "online", \
-                    f"Node {node_uuid} is not in online state. {node['Reported Status']}"
+                    f"Node {node_uuid} is not in online state. Actual: {node['Reported Status']}"
                 assert node["Actual Status"] == "online", \
-                    f"Node {node_uuid} is not in online state. {node['Actual Status']}"
+                    f"Node {node_uuid} is not in online state. Actual: {node['Actual Status']}"
 
         if device_status is not None:
             for device_id, device in cluster_map_devices.items():
                 if device_id in offline_device:
                     assert device["Reported Status"] == device_status, \
-                        f"Device {device_id} is not in {device_status} state. {device['Reported Status']}"
+                        f"Device {device_id} is not in {device_status} state. Actual: {device['Reported Status']}"
                     assert device["Actual Status"] == device_status, \
-                        f"Device {device_id} is not in {device_status} state. {device['Actual Status']}"
+                        f"Device {device_id} is not in {device_status} state. Actual: {device['Actual Status']}"
                 else:
                     assert device["Reported Status"] == "online", \
-                        f"Device {device_id} is not in online state. {device['Reported Status']}"
+                        f"Device {device_id} is not in online state. Actual: {device['Reported Status']}"
                     assert device["Actual Status"] == "online", \
                         f"Device {device_id} is not in online state. {device['Actual Status']}"
 
@@ -179,7 +213,7 @@ class TestClusterBase:
         """ Unmount all mount points """
         self.logger.info("Unmounting all mount points")
         if not base_path:
-            base_path = self.mount_path 
+            base_path = self.mount_path
         mount_points = self.ssh_obj.get_mount_points(node=self.mgmt_nodes[0], base_path=base_path)
         for mount_point in mount_points:
             self.logger.info(f"Unmounting {mount_point}")

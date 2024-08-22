@@ -112,7 +112,7 @@ class CommonUtils:
             process = self.ssh_utils.find_process_name(node=node,
                                                        process_name="fio")
             process_fio = [element for element in process if "grep" not in element]
-            self.logger.info(process_fio)
+            self.logger.info(f"Process info: {process_fio}")
             
             if len(process_fio) == 0:
                 break
@@ -121,9 +121,9 @@ class CommonUtils:
             sleep_n_sec(10)
             timeout = timeout - 10
             
-
         for thread in threads:
             thread.join(timeout=30)
+        end_time = time.time()
 
         process_list_after = self.ssh_utils.find_process_name(node=node,
                                                               process_name="fio")
@@ -132,6 +132,8 @@ class CommonUtils:
         process_fio = [element for element in process_list_after if "grep" not in element]
 
         assert len(process_fio) == 0, f"FIO process list not empty: {process_list_after}"
+
+        return end_time
             
     def parse_lvol_cluster_map_output(self, output):
         """Parses LVOL cluster map output

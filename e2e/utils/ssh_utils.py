@@ -17,6 +17,7 @@ class SshUtils:
         self.bastion_server = bastion_server
         self.base_cmd = os.environ.get("SBCLI_CMD", "sbcli-dev")
         self.logger = setup_logger(__name__)
+        self.fio_runtime = {}
 
     def connect(self, address: str, port: int=22,
                 bastion_server_address: str=None,
@@ -238,6 +239,7 @@ class SshUtils:
         end_time = time.time()
 
         total_time = end_time - start_time
+        self.fio_runtime[name] = start_time
         self.logger.info(f"Total time taken to run the command: {total_time:.2f} seconds")
     
     def find_process_name(self, node, process_name, return_pid=False):
