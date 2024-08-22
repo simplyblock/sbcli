@@ -14,8 +14,11 @@ def get_all_tests():
         TestSingleNodeOutage,
         TestSingleNodeMultipleFioPerfValidation,
         # TestSingleNodeFailure,
-        # TestMultiLvolFio, - Enable when testing snapshot and cloning
-        # TestMultiLVOLRunFIO, - Enable when testing snapshot and cloning
-        # TestSingleLvolMultipleCloneRunFIO, - Enable when testing snapshot and cloning
+
+        # Enable when testing snapshot and cloning
+
+        # TestMultiLvolFio,
+        # TestMultiLVOLRunFIO,
+        # TestSingleLvolMultipleCloneRunFIO,
     ]
     return tests
