@@ -95,11 +95,14 @@ def update_cluster_status(cluster_id):
 
 def set_node_online(node):
     if node.status != StorageNode.STATUS_ONLINE:
-        storage_node_ops.set_node_status(snode.get_id(), StorageNode.STATUS_ONLINE)
+        storage_node_ops.set_node_status(node.get_id(), StorageNode.STATUS_ONLINE)
 
 
 def set_node_offline(node):
     if node.status != StorageNode.STATUS_UNREACHABLE:
+        for dev in node.nvme_devices:
+            device_controller.device_set_unavailable(dev.get_id())
+
         storage_node_ops.set_node_status(snode.get_id(), StorageNode.STATUS_UNREACHABLE)
         # add node to auto restart
         tasks_controller.add_node_to_auto_restart(node)
