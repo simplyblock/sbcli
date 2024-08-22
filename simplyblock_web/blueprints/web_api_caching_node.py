@@ -229,7 +229,7 @@ def restart_caching_node():
 
 
 @bp.route('/cachingnode/shutdown', methods=['POST'])
-def restart_caching_node():
+def shutdown_caching_node():
 
     cl_data = request.get_json()
     if 'node_id' not in cl_data:
