@@ -554,12 +554,15 @@ def restart_node(node_id, node_ip=None, s3_data_path=None, ftl_buffer_size=None,
     snode.status = CachingNode.STATUS_ONLINE
     snode.write_to_db(kv_store)
 
-    conn_lvol_list = [v.lvol_id for v in snode.connected_lvols]
-    for lvol_id in conn_lvol_list:
-        try:
-            connect(node_id, lvol_id, force=True)
-        except:
-            pass
+    # conn_lvol_list = [v.lvol_id for v in snode.connected_lvols]
+    conn_lvol_list = []
+    for conn_lvol in snode.connected_lvols:
+        ret = connect(node_id, conn_lvol.lvol_id, force=True)
+        if ret:
+            conn_lvol.device_path = ret
+            conn_lvol_list.append(conn_lvol)
+    snode.connected_lvols = conn_lvol_list
+    snode.write_to_db(kv_store)
 
     logger.info("Done")
     return True
@@ -679,7 +682,10 @@ def connect(caching_node_id, lvol_id, force=False):
         snode = db_controller.get_storage_node_by_id(lvol.node_id)
         for nic in snode.data_nics:
             ip = nic.ip4_address
-            ret, _ = cnode_client.connect_nvme(ip, "4420", subsystem_nqn)
+            try:
+                ret, _ = cnode_client.connect_nvme(ip, "4420", subsystem_nqn)
+            except:
+                pass
             break
 
         time.sleep(3)
