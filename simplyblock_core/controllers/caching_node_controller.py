@@ -202,7 +202,12 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spd
     else:
         snode.lvstore_cluster_size = constants.LVSTORE_CLUSTER_SIZE
 
-    snode.num_md_pages_per_cluster_ratio = num_md_pages_per_cluster_ratio or constants.NUM_MD_PAGES_PER_CLUSTER_RATIO
+    if num_md_pages_per_cluster_ratio:
+        try:
+            snode.num_md_pages_per_cluster_ratio = int(num_md_pages_per_cluster_ratio)
+        except:
+            snode.num_md_pages_per_cluster_ratio = constants.NUM_MD_PAGES_PER_CLUSTER_RATIO
+
     snode.ftl_buffer_size = utils.parse_size(constants.FTL_BUFFER_SIZE)
     if ftl_buffer_size:
         b_size = utils.parse_size(ftl_buffer_size)
@@ -394,7 +399,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spd
     # create lvs
     ret = rpc_client.create_lvstore(
         "lvs_1", "ftl_1", num_md_pages_per_cluster_ratio=int(snode.num_md_pages_per_cluster_ratio),
-        cluster_sz=snode.lvstore_cluster_size)
+        cluster_sz=int(snode.lvstore_cluster_size))
     if not ret:
         logger.error("Failed ot create bdev")
         return False

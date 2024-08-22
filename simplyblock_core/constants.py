@@ -90,6 +90,6 @@ INSTANCE_STORAGE_DATA = {
         'i3en.metal': {'number_of_devices': 8, 'size_per_device_gb': 7500},
     }
 
-FTL_BUFFER_SIZE = "4g"
+FTL_BUFFER_SIZE = "6g"
 LVSTORE_CLUSTER_SIZE = 4194304
-NUM_MD_PAGES_PER_CLUSTER_RATIO = 100
+NUM_MD_PAGES_PER_CLUSTER_RATIO = 25
