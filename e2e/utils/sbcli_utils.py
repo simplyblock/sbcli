@@ -378,9 +378,13 @@ class SbcliUtils:
     
     def all_expected_status(self, value_dict, expected_status):
         value_match = []
-        for _, value in value_dict.items():
+        for key, value in value_dict.items():
+            self.logger.info(f"Entity: {key}, Expected: {expected_status}, Actual: {value}")
             if value in expected_status:
                 value_match.append(True)
+            else:
+                value_match.append(False)
+        self.logger.info(f"Value: {value_match}")
         return all(value_match)
     
     def wait_for_device_status(self, node_id, status, timeout=60):
