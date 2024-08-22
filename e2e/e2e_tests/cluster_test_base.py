@@ -54,10 +54,10 @@ class TestClusterBase:
                 address=node,
                 bastion_server_address=self.bastion_server,
             )
-        command = "python3 -c \"from importlib.metadata import version;print(f'SBCLI Version: {version('''sbcli-dev''')}')\""
-        self.ssh_obj.exec_command(
-            self.mgmt_nodes[0], command=command
-        )
+        # command = "python3 -c \"from importlib.metadata import version;print(f'SBCLI Version: {version('''sbcli-dev''')}')\""
+        # self.ssh_obj.exec_command(
+        #     self.mgmt_nodes[0], command=command
+        # )
         self.unmount_all(base_path=self.mount_path)
         self.ssh_obj.unmount_path(node=self.mgmt_nodes[0],
                                   device=self.mount_path)
