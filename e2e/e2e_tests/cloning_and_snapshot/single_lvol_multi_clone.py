@@ -98,6 +98,8 @@ class TestSingleLvolMultipleCloneRunFIO(TestClusterBase):
         mount_point = f"{self.mount_path}/{lvol_name}"
         self.ssh_obj.mount_path(node=self.mgmt_nodes[0], device=lvol_device, mount_path=mount_point)
 
+        return lvol_device
+
     def format_fs(self, device, fs_type):
         """Formats the device with the specified filesystem type"""
         self.logger.info(f"Formatting device: {device} with filesystem: {fs_type}")
@@ -136,11 +138,19 @@ class TestSingleLvolMultipleCloneRunFIO(TestClusterBase):
 
         # Get the clone's LVOL ID and connect it
         clone_id = self.sbcli_utils.get_lvol_id(lvol_name=clone_name)
-        self.connect_and_mount_lvol(clone_name, clone_id)
+        lvol_device = self.connect_and_mount_lvol(clone_name, clone_id)
 
         # Run FIO workload on the clone
         mount_point_clone = f"{self.mount_path}/{clone_name}"
         self.run_fio_workload(mount_point_clone)
+
+        self.logger.info(f"Unmounting disk {lvol_device}")
+        self.ssh_obj.unmount_path(node=self.mgmt_nodes[0],
+                                  device=lvol_device)
+        self.logger.info(f"Removing directory {mount_point_clone}")
+        self.ssh_obj.remove_dir(node=self.mgmt_nodes[0],
+                                dir_path=mount_point_clone)
+        self.disconnect_lvol(clone_id)
 
     def cleanup(self):
         """Cleans up by unmounting, disconnecting, and deleting logical volumes, snapshots, and pools"""

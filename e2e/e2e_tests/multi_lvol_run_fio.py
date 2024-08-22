@@ -10,7 +10,7 @@ class TestMultiLVOLRunFIO(TestClusterBase):
     """
     This script performs the following operations:
 
-    Rerun step 1-4 40 times
+    Rerun step 1-5 40 times
 
     1. Creates a storage pool and logical volumes iteratively.
     2. Connects, formats, and mounts the logical volumes.
@@ -57,9 +57,9 @@ class TestMultiLVOLRunFIO(TestClusterBase):
             assert lvol_name in list(lvols.keys()), \
                 f"Lvol {lvol_name} present in list of lvols post add: {lvols}"
             self.mount_and_run_fio(lvol_name, fs_type)
+            self.cleanup()
 
         self.logger.info("Script execution completed")
-        self.cleanup()
 
         # Print Timings
         self.print_timings()
