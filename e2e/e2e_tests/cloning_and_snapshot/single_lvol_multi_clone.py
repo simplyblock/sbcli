@@ -6,7 +6,7 @@ from e2e_tests.cluster_test_base import TestClusterBase
 from utils.common_utils import sleep_n_sec
 from logger_config import setup_logger
 
-class TestSingleLvolMultipleCloneRunFIO(TestClusterBase):
+class TestManyClonesFromSameSnapshot(TestClusterBase):
     """
     This script creates a storage pool and logical volumes, then iteratively creates clones from snapshots of 
     the logical volumes, formats and mounts them, runs FIO workloads, and measures the time taken for each operation. 

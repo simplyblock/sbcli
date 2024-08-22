@@ -6,7 +6,7 @@ from e2e_tests.cluster_test_base import TestClusterBase
 from utils.common_utils import sleep_n_sec
 from logger_config import setup_logger
 
-class TestMultiLVOLRunFIO(TestClusterBase):
+class TestManyLvolSameNode(TestClusterBase):
     """
     This script performs the following operations:
 
@@ -39,6 +39,8 @@ class TestMultiLVOLRunFIO(TestClusterBase):
             pool_name=self.pool_name
         )
 
+        node_id = self.sbcli_utils.get_node_without_lvols()
+
         for i in range(1, self.num_iterations + 1):
             fs_type = random.choice(["ext4", "xfs"])
 
@@ -51,7 +53,8 @@ class TestMultiLVOLRunFIO(TestClusterBase):
                 pool_name=self.pool_name,
                 size=self.lvol_size,
                 distr_ndcs=2,
-                distr_npcs=1
+                distr_npcs=1,
+                host_id=node_id
             )
             lvols = self.sbcli_utils.list_lvols()
             assert lvol_name in list(lvols.keys()), \

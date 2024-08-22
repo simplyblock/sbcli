@@ -256,7 +256,7 @@ class SbcliUtils:
 
     def add_lvol(self, lvol_name, pool_name, size="256M", distr_ndcs=1, distr_npcs=1,
                  distr_bs=4096, distr_chunk_bs=4096, max_rw_iops=0, max_rw_mbytes=0,
-                 max_r_mbytes=0, max_w_mbytes=0):
+                 max_r_mbytes=0, max_w_mbytes=0, host_id=None):
         """Adds lvol with given params
         """
         lvols = self.list_lvols()
@@ -280,6 +280,8 @@ class SbcliUtils:
             "distr_bs": str(distr_bs),
             "distr_chunk_bs": str(distr_chunk_bs),
         }
+        if host_id:
+            body["host_id"] = host_id
         self.post_request(api_url="/lvol", body=body)
 
     def delete_lvol(self, lvol_name):
