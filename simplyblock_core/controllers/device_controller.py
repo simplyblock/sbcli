@@ -28,8 +28,8 @@ def device_set_state(device_id, state):
             device = dev
             break
 
-    if device.status == state:
-        return True
+    # if device.status == state:
+    #     return True
 
     if state == NVMeDevice.STATUS_ONLINE:
         device.retries_exhausted = False
