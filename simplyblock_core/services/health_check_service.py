@@ -23,19 +23,19 @@ def set_node_health_check(snode, health_check_status):
     storage_events.snode_health_check_change(snode, snode.health_check, old_status, caused_by="monitor")
 
 
-def set_device_health_check(cluster_id, device, health_check_status):
-    if device.health_check == health_check_status:
-        return
-    nodes = db_controller.get_storage_nodes_by_cluster_id(cluster_id)
-    for node in nodes:
-        if node.nvme_devices:
-            for dev in node.nvme_devices:
-                if dev.get_id() == device.get_id():
-                    old_status = dev.health_check
-                    dev.health_check = health_check_status
-                    node.write_to_db(db_store)
-                    device_events.device_health_check_change(
-                        dev, dev.health_check, old_status, caused_by="monitor")
+# def set_device_health_check(cluster_id, device, health_check_status):
+#     if device.health_check == health_check_status:
+#         return
+#     nodes = db_controller.get_storage_nodes_by_cluster_id(cluster_id)
+#     for node in nodes:
+#         if node.nvme_devices:
+#             for dev in node.nvme_devices:
+#                 if dev.get_id() == device.get_id():
+#                     old_status = dev.health_check
+#                     dev.health_check = health_check_status
+#                     node.write_to_db(db_store)
+#                     device_events.device_health_check_change(
+#                         dev, dev.health_check, old_status, caused_by="monitor")
 
 
 # get DB controller
@@ -82,41 +82,41 @@ while True:
             is_node_online = ping_check and node_api_check and node_rpc_check and node_docker_check
 
             health_check_status = is_node_online
-            if not node_rpc_check:
-                logger.info("Putting all devices to unavailable state because RPC check failed")
-                for dev in snode.nvme_devices:
-                    if dev.io_error:
-                        logger.debug(f"Skipping Device action because of io_error {dev.get_id()}")
-                        continue
-                    set_device_health_check(cluster_id, dev, False)
-            else:
-                logger.info(f"Node device count: {len(snode.nvme_devices)}")
-                node_devices_check = True
-                node_remote_devices_check = True
-
-                for dev in snode.nvme_devices:
-                    if dev.io_error:
-                        logger.debug(f"Skipping Device check because of io_error {dev.get_id()}")
-                        continue
-                    ret = health_controller.check_device(dev.get_id())
-                    set_device_health_check(cluster_id, dev, ret)
-                    if dev.status == dev.STATUS_ONLINE:
-                        node_devices_check &= ret
-
-                logger.info(f"Node remote device: {len(snode.remote_devices)}")
-                rpc_client = RPCClient(
-                    snode.mgmt_ip, snode.rpc_port,
-                    snode.rpc_username, snode.rpc_password,
-                    timeout=10, retry=1)
-                for remote_device in snode.remote_devices:
-                    ret = rpc_client.get_bdevs(remote_device.remote_bdev)
-                    if ret:
-                        logger.info(f"Checking bdev: {remote_device.remote_bdev} ... ok")
-                    else:
-                        logger.info(f"Checking bdev: {remote_device.remote_bdev} ... not found")
-                    node_remote_devices_check &= bool(ret)
-
-                health_check_status = is_node_online and node_devices_check and node_remote_devices_check
+            # if not node_rpc_check:
+            #     logger.info("Putting all devices to unavailable state because RPC check failed")
+            #     for dev in snode.nvme_devices:
+            #         if dev.io_error:
+            #             logger.debug(f"Skipping Device action because of io_error {dev.get_id()}")
+            #             continue
+            #         set_device_health_check(cluster_id, dev, False)
+            # else:
+            #     logger.info(f"Node device count: {len(snode.nvme_devices)}")
+            #     node_devices_check = True
+            #     node_remote_devices_check = True
+            #
+            #     for dev in snode.nvme_devices:
+            #         if dev.io_error:
+            #             logger.debug(f"Skipping Device check because of io_error {dev.get_id()}")
+            #             continue
+            #         ret = health_controller.check_device(dev.get_id())
+            #         set_device_health_check(cluster_id, dev, ret)
+            #         if dev.status == dev.STATUS_ONLINE:
+            #             node_devices_check &= ret
+            #
+            #     logger.info(f"Node remote device: {len(snode.remote_devices)}")
+            #     rpc_client = RPCClient(
+            #         snode.mgmt_ip, snode.rpc_port,
+            #         snode.rpc_username, snode.rpc_password,
+            #         timeout=10, retry=1)
+            #     for remote_device in snode.remote_devices:
+            #         ret = rpc_client.get_bdevs(remote_device.remote_bdev)
+            #         if ret:
+            #             logger.info(f"Checking bdev: {remote_device.remote_bdev} ... ok")
+            #         else:
+            #             logger.info(f"Checking bdev: {remote_device.remote_bdev} ... not found")
+            #         node_remote_devices_check &= bool(ret)
+            #
+            #     health_check_status = is_node_online and node_devices_check and node_remote_devices_check
             set_node_health_check(snode, health_check_status)
 
     time.sleep(constants.HEALTH_CHECK_INTERVAL_SEC)

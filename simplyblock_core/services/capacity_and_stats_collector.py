@@ -13,11 +13,11 @@ logger = utils.get_logger(__name__)
 last_object_record = {}
 
 
-def add_device_stats(cl, device, capacity_dict, stats_dict):
+def add_device_stats(cl, device_id, capacity_dict, stats_dict):
     now = int(time.time())
     data = {
         "cluster_id": cl.get_id(),
-        "uuid": device.get_id(),
+        "uuid": device_id,
         "date": now}
 
     if capacity_dict and capacity_dict['res'] == 1:
@@ -54,10 +54,10 @@ def add_device_stats(cl, device, capacity_dict, stats_dict):
             "unmap_latency_ticks": stats['unmap_latency_ticks'],
         })
 
-        if device.get_id() in last_object_record:
-            last_record = last_object_record[device.get_id()]
+        if device_id in last_object_record:
+            last_record = last_object_record[device_id]
         else:
-            last_record = DeviceStatObject(data={"uuid": device.get_id(), "cluster_id": cl.get_id()}
+            last_record = DeviceStatObject(data={"uuid": device_id, "cluster_id": cl.get_id()}
                                            ).get_last(db_controller.kv_store)
         if last_record:
             time_diff = (now - last_record.date)
@@ -81,7 +81,7 @@ def add_device_stats(cl, device, capacity_dict, stats_dict):
 
     stat_obj = DeviceStatObject(data=data)
     stat_obj.write_to_db(db_controller.kv_store)
-    last_object_record[device.get_id()] = stat_obj
+    last_object_record[device_id] = stat_obj
     return stat_obj
 
 
@@ -177,16 +177,11 @@ while True:
                 timeout=3, retry=2)
 
             devices_records = []
-            for device in node.nvme_devices:
-                logger.info("Getting device stats: %s", device.uuid)
-                if device.status not in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_READONLY]:
-                    logger.info(f"Device is skipped: {device.get_id()} status: {device.status}")
-                    continue
-                capacity_dict = rpc_client.alceml_get_capacity(device.alceml_bdev)
-                stats_dict = rpc_client.get_device_stats(device.nvme_bdev)
-                record = add_device_stats(cl, device, capacity_dict, stats_dict)
-                if record:
-                    devices_records.append(record)
+            logger.info("Getting device stats: aio_1")
+            stats_dict = rpc_client.get_device_stats("aio_1")
+            record = add_device_stats(cl, f"{node.get_id()}/aio_1", None, stats_dict)
+            if record:
+                devices_records.append(record)
 
             node_record = add_node_stats(node, devices_records)
             node_records.append(node_record)

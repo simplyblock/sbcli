@@ -380,6 +380,10 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spd
         logger.error("Failed ot create bdev")
         return False
 
+    ret = rpc_client.get_bdevs("aio_1")
+    bdev_dict = ret[0]
+    snode.s3_data_size = int(bdev_dict['block_size'] * bdev_dict['num_blocks'])
+
     ret = rpc_client.bdev_passthru_create("ftl_cache_1", nvme_devs[1].device_name, 4096)
     if not ret:
         logger.error("Failed ot create bdev")
@@ -850,11 +854,13 @@ def list_nodes(is_json=False):
         data.append({
             "UUID": node.uuid,
             "Hostname": node.hostname,
-            "Management IP": node.mgmt_ip,
+            # "Management IP": node.mgmt_ip,
             "LVols": f"{len(node.lvols)}",
             "Conn LVols": f"{len(node.connected_lvols)}",
-            "Cache": utils.humanbytes(node.cache_size),
-            "HugeP": utils.humanbytes(node.hugepages),
+            # "Cache": utils.humanbytes(node.cache_size),
+            # "HugeP": utils.humanbytes(node.hugepages),
+            "Storage": utils.humanbytes(node.s3_data_size),
+            "Health": node.health_check,
             "Status": node.status,
             # "Updated At": datetime.datetime.strptime(node.updated_at, "%Y-%m-%d %H:%M:%S.%f").strftime(
             #     "%H:%M:%S, %d/%m/%Y"),

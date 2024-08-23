@@ -98,11 +98,13 @@ class CachingNode(BaseModel):
 
         "namespace": {"type": str, "default": ""},
         "s3_data_path": {"type": str, "default": ""},
+        "s3_data_size": {"type": int, "default": 0},
         "ftl_buffer_size": {"type": float, "default": 0},
         "lvstore_cluster_size": {"type": int, "default": 4194304},
         "num_md_pages_per_cluster_ratio": {"type": int, "default": 100},
         "ftl_uuid": {"type": str, "default": ""},
         "blocked_pcie": {"type": str, "default": ""},
+        "health_check": {"type": bool, "default": True},
 
     }
 
