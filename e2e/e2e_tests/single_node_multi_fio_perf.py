@@ -110,14 +110,14 @@ class TestLvolFioBase(TestClusterBase):
         fio_result = json.loads(output)
         self.logger.info(f"FIO output for {lvol_name}: {fio_result}")
 
-        job = output['jobs'][0]
+        job = fio_result['jobs'][0]
         job_name = job['job options']['name']
         file_name = job['job options']['directory']
         read_iops = job['read']['iops']
         write_iops = job['write']['iops']
         trim_iops = job['trim']['iops']
         total_iops = read_iops + write_iops + trim_iops
-        disk_name = output['disk_util'][0]['name']
+        disk_name = fio_result['disk_util'][0]['name']
 
         read_bw_kb = job['read']['bw']
         write_bw_kb = job['write']['bw']
