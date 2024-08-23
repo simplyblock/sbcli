@@ -95,6 +95,10 @@ class CLIWrapper:
                                                    'for XX days and YY hours (up to 10 days in total).')
 
 
+        sub_command = self.add_sub_command(subparser, "check", 'Health check node')
+        sub_command.add_argument("id", help='Node UUID')
+
+
         #
         # ----------------- cluster -----------------
         #
@@ -1002,6 +1006,10 @@ class CLIWrapper:
                     ret = utils.print_table(data)
                 else:
                     return False
+
+            if sub_command == "check":
+                node_id = args.id
+                ret = health_controller.check_node(node_id)
 
         else:
             self.parser.print_help()

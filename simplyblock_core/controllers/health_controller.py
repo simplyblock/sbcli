@@ -5,6 +5,7 @@ import logging as log
 import docker
 
 from simplyblock_core import utils, distr_controller
+from simplyblock_core.cnode_client import CNodeClient
 from simplyblock_core.kv_store import DBController
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
@@ -81,9 +82,9 @@ def _check_node_rpc(rpc_ip, rpc_port, rpc_username, rpc_password):
 
 def _check_node_api(ip):
     try:
-        snode_api = SNodeClient(f"{ip}:5000", timeout=3, retry=1)
+        snode_api = CNodeClient(f"{ip}:5000")
         logger.debug(f"Node API={ip}:5000")
-        node_info, _ = snode_api.info()
+        node_info, _ = snode_api.is_live()
         if node_info:
             logger.debug(node_info)
             return True
@@ -139,34 +140,7 @@ def check_node(node_id, with_devices=True):
     logger.info(f"Results : {is_node_online}")
     print("*" * 100)
 
-    node_devices_check = True
-    node_remote_devices_check = True
-
-    if not node_rpc_check:
-        logger.info("Skipping devices checks because RPC check failed")
-    else:
-        logger.info(f"Node device count: {len(snode.nvme_devices)}")
-        for dev in snode.nvme_devices:
-            ret = check_device(dev.get_id())
-            if dev.status in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_UNAVAILABLE]:
-                node_devices_check &= ret
-            print("*" * 100)
-
-        logger.info(f"Node remote device: {len(snode.remote_devices)}")
-
-        rpc_client = RPCClient(
-            snode.mgmt_ip, snode.rpc_port,
-            snode.rpc_username, snode.rpc_password,
-            timeout=3, retry=1)
-        for remote_device in snode.remote_devices:
-            ret = rpc_client.get_bdevs(remote_device.remote_bdev)
-            if ret:
-                logger.info(f"Checking bdev: {remote_device.remote_bdev} ... ok")
-            else:
-                logger.info(f"Checking bdev: {remote_device.remote_bdev} ... not found")
-            # node_remote_devices_check &= bool(ret)
-
-    return is_node_online and node_devices_check and node_remote_devices_check
+    return is_node_online
 
 
 def check_device(device_id):
