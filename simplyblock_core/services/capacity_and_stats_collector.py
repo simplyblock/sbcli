@@ -167,9 +167,9 @@ while True:
             if node.status != 'online':
                 logger.info("Node is not online, skipping")
                 continue
-            if not node.nvme_devices:
-                logger.error("No devices found in node: %s", node.get_id())
-                continue
+            # if not node.nvme_devices:
+            #     logger.error("No devices found in node: %s", node.get_id())
+            #     continue
 
             rpc_client = RPCClient(
                 node.mgmt_ip, node.rpc_port,

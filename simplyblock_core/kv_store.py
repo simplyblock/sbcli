@@ -91,7 +91,7 @@ class DBController:
         return ret
 
     def get_storage_nodes_by_cluster_id(self, cluster_id):
-        ret = StorageNode().read_from_db(self.kv_store)
+        ret = CachingNode().read_from_db(self.kv_store)
         nodes = []
         for n in ret:
             if n.cluster_id == cluster_id:
