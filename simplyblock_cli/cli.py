@@ -69,10 +69,10 @@ class CLIWrapper:
         sub_command = self.add_sub_command(subparser, 'recreate', 'recreate Caching node bdevs')
         sub_command.add_argument("node_id", help='Caching node UUID')
 
-        sub_command = self.add_sub_command(subparser, 'get-lvol-stats', 'Get LVol stats')
-        sub_command.add_argument("lvol_id", help='LVol UUID')
-        sub_command.add_argument("--history", help='(XXdYYh), list history records (one for every 15 minutes) '
-                                                   'for XX days and YY hours (up to 10 days in total).')
+        # sub_command = self.add_sub_command(subparser, 'get-lvol-stats', 'Get LVol stats')
+        # sub_command.add_argument("lvol_id", help='LVol UUID')
+        # sub_command.add_argument("--history", help='(XXdYYh), list history records (one for every 15 minutes) '
+        #                                            'for XX days and YY hours (up to 10 days in total).')
 
         sub_command = self.add_sub_command(subparser, 'restart', 'restart Caching node')
         sub_command.add_argument("id", help='Caching node UUID')
@@ -86,6 +86,14 @@ class CLIWrapper:
 
         sub_command = self.add_sub_command(subparser, 'shutdown', 'shutdown Caching node')
         sub_command.add_argument("id", help='Caching node UUID')
+
+        # get-io-stats
+        sub_command = self.add_sub_command(
+            subparser, 'get-io-stats', 'Get node IO statistics')
+        sub_command.add_argument("id", help='node id')
+        sub_command.add_argument("--history", help='(XXdYYh), list history records (one for every 15 minutes) '
+                                                   'for XX days and YY hours (up to 10 days in total).')
+
 
         #
         # ----------------- cluster -----------------
@@ -984,6 +992,16 @@ class CLIWrapper:
 
             if sub_command == "shutdown":
                 ret = caching_node_controller.shutdown_node(args.id)
+
+            if sub_command == "get-io-stats":
+                node_id = args.id
+                history = args.history
+                data = caching_node_controller.get_node_iostats_history(node_id, history)
+
+                if data:
+                    ret = utils.print_table(data)
+                else:
+                    return False
 
         else:
             self.parser.print_help()

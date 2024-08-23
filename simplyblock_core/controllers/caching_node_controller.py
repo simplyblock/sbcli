@@ -1022,3 +1022,38 @@ def shutdown_node(node_id):
 
     logger.info("Done")
     return True
+
+
+def get_node_iostats_history(node_id, history, records_count=20, parse_sizes=True):
+    db_controller = DBController()
+    node = db_controller.get_caching_node_by_id(node_id)
+    if not node:
+        logger.error("node not found")
+        return False
+
+    if history:
+        records_number = utils.parse_history_param(history)
+        if not records_number:
+            logger.error(f"Error parsing history string: {history}")
+            return False
+    else:
+        records_number = 20
+
+    records = db_controller.get_node_stats(node, records_number)
+    new_records = utils.process_records(records, records_count)
+
+    if not parse_sizes:
+        return new_records
+
+    out = []
+    for record in new_records:
+        out.append({
+            "Date": time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(record['date'])),
+            "Read speed": utils.humanbytes(record['read_bytes_ps']),
+            "Read IOPS": record["read_io_ps"],
+            "Read lat": record["read_latency_ps"],
+            "Write speed": utils.humanbytes(record["write_bytes_ps"]),
+            "Write IOPS": record["write_io_ps"],
+            "Write lat": record["write_latency_ps"],
+        })
+    return out
