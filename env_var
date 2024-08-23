@@ -1,7 +1,7 @@
-SIMPLY_BLOCK_COMMAND_NAME=sbcli-dev
-SIMPLY_BLOCK_VERSION=3.5.8
+SIMPLY_BLOCK_COMMAND_NAME=sbcli-mig
+SIMPLY_BLOCK_VERSION=1.0.239
 
 
-SIMPLY_BLOCK_DOCKER_IMAGE=simplyblock/simplyblock:main
+SIMPLY_BLOCK_DOCKER_IMAGE=simplyblock/simplyblock:add_health_check_dashboard
 
 DOCKER_USER=hamdysimplyblock
