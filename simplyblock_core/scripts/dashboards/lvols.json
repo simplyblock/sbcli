@@ -2376,8 +2376,7 @@
                                 "value": 80
                             }
                         ]
-                    },
-                    "unit": "boolean"
+                    }
                 },
                 "overrides": []
             },
