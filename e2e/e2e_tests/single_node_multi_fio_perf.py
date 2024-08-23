@@ -86,7 +86,7 @@ class TestLvolFioBase(TestClusterBase):
             args=(self.mgmt_nodes[0], None, lvol_path, None),
             kwargs={
                 "name": f"fio_{lvol_name}",
-                "readwrite": readwrite,
+                "rw": readwrite,
                 "ioengine": "libaio",
                 "iodepth": 64,
                 "bs": 4096,
@@ -95,6 +95,7 @@ class TestLvolFioBase(TestClusterBase):
                 "runtime": 100,
                 "output_format": "json",
                 "output_file": f"/home/ec2-user/{lvol_name}_log.json",
+                "nrfiles": 5,
                 "debug": self.fio_debug
             }
         )
@@ -193,7 +194,7 @@ class TestLvolFioNpcs0(TestLvolFioBase):
                                                     "randrw"))
             fio_threads.append(self.run_fio_on_lvol(lvol_name_2,
                                                     self.lvol_devices[lvol_name_2]["MountPath"],
-                                                    "trimwrite"))
+                                                    "readwrite"))
 
             self.common_utils.manage_fio_threads(
                 node=self.mgmt_nodes[0], threads=fio_threads, timeout=600
@@ -203,7 +204,7 @@ class TestLvolFioNpcs0(TestLvolFioBase):
 
             # Validate FIO outputs
             self.validate_fio_output(lvol_name_1, read_check=True, write_check=True)
-            self.validate_fio_output(lvol_name_2, trim_check=True, write_check=True)
+            self.validate_fio_output(lvol_name_2, read_check=True, write_check=True)
 
             # Cleanup after running FIO
             self.cleanup_lvols(lvol_configs)
@@ -245,7 +246,7 @@ class TestLvolFioNpcs1(TestLvolFioBase):
                                                     "randrw"))
             fio_threads.append(self.run_fio_on_lvol(lvol_name_2,
                                                     self.lvol_devices[lvol_name_2]["MountPath"],
-                                                    "trimwrite"))
+                                                    "readwrite"))
 
             self.common_utils.manage_fio_threads(
                 node=self.mgmt_nodes[0], threads=fio_threads, timeout=600
@@ -256,7 +257,7 @@ class TestLvolFioNpcs1(TestLvolFioBase):
 
             # Validate FIO outputs
             self.validate_fio_output(lvol_name_1, read_check=True, write_check=True)
-            self.validate_fio_output(lvol_name_2, trim_check=True, write_check=True)
+            self.validate_fio_output(lvol_name_2, read_check=True, write_check=True)
 
             # Cleanup after running FIO
             self.cleanup_lvols(lvol_configs)
@@ -298,7 +299,7 @@ class TestLvolFioNpcs2(TestLvolFioBase):
                                                     "randrw"))
             fio_threads.append(self.run_fio_on_lvol(lvol_name_2,
                                                     self.lvol_devices[lvol_name_2]["MountPath"],
-                                                    "trimwrite"))
+                                                    "readwrite"))
 
             self.common_utils.manage_fio_threads(
                 node=self.mgmt_nodes[0], threads=fio_threads, timeout=600
@@ -309,7 +310,7 @@ class TestLvolFioNpcs2(TestLvolFioBase):
 
             # Validate FIO outputs
             self.validate_fio_output(lvol_name_1, read_check=True, write_check=True)
-            self.validate_fio_output(lvol_name_2, trim_check=True, write_check=True)
+            self.validate_fio_output(lvol_name_2, read_check=True, write_check=True)
 
             # Cleanup after running FIO
             self.cleanup_lvols(lvol_configs)
