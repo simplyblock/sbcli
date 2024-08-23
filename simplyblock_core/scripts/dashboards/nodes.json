@@ -2402,7 +2402,7 @@
                             }
                         ]
                     },
-                    "unit": "bytes"
+                    "unit": "boolean"
                 },
                 "overrides": []
             },

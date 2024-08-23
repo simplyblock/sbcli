@@ -2377,7 +2377,7 @@
                             }
                         ]
                     },
-                    "unit": "binBps"
+                    "unit": "boolean"
                 },
                 "overrides": []
             },
