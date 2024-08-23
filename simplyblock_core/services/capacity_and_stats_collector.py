@@ -20,10 +20,11 @@ def add_device_stats(cl, device_id, capacity_dict, stats_dict):
         "uuid": device_id,
         "date": now}
 
-    if capacity_dict and capacity_dict['res'] == 1:
-        size_total = int(capacity_dict['npages_nmax']*capacity_dict['pba_page_size'])
-        size_used = int(capacity_dict['npages_used']*capacity_dict['pba_page_size'])
-        size_free = size_total - size_used
+    if capacity_dict and capacity_dict[0]:
+        cap = capacity_dict[0]
+        size_total = int(cap['block_size']*cap['total_data_clusters'])
+        size_free = int(cap['block_size']*cap['free_clusters'])
+        size_used = size_total - size_free
         size_util = 0
         if size_total > 0:
             size_util = int((size_used / size_total) * 100)
@@ -33,10 +34,10 @@ def add_device_stats(cl, device_id, capacity_dict, stats_dict):
             "size_used": size_used,
             "size_free": size_free,
             "size_util": size_util,
-            "capacity_dict": capacity_dict
+            "capacity_dict": cap
         })
-    else:
-        logger.error(f"Error getting Alceml capacity, response={capacity_dict}")
+    # else:
+    #     logger.error(f"Error getting Alceml capacity, response={capacity_dict}")
 
     if stats_dict and stats_dict['bdevs']:
         stats = stats_dict['bdevs'][0]
@@ -177,9 +178,10 @@ while True:
                 timeout=3, retry=2)
 
             devices_records = []
-            logger.info("Getting device stats: aio_1")
-            stats_dict = rpc_client.get_device_stats("aio_1")
-            record = add_device_stats(cl, f"{node.get_id()}/aio_1", None, stats_dict)
+            logger.info("Getting device stats: ftl_1")
+            stats_dict = rpc_client.get_device_stats("ftl_1")
+            capacity_dict = rpc_client.get_lvstore("lvs_1")
+            record = add_device_stats(cl, f"{node.get_id()}/ftl_1", capacity_dict, stats_dict)
             if record:
                 devices_records.append(record)
 

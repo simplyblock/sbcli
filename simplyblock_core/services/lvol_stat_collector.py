@@ -105,7 +105,7 @@ while True:
     all_lvols = db_controller.get_lvols()  # pass
 
     for lvol in all_lvols:
-        snode = db_controller.get_storage_node_by_id(lvol.node_id)
+        snode = db_controller.get_caching_node_by_id(lvol.node_id)
         rpc_client = RPCClient(
             snode.mgmt_ip, snode.rpc_port,
             snode.rpc_username, snode.rpc_password,

@@ -719,7 +719,8 @@ class RPCClient:
         params = {
             "name": name,
             "base_bdev": base_bdev,
-            "cache": cache
+            "cache": cache,
+            "l2p_dram_limit": 512*1024*1024,
         }
         return self._request("bdev_ftl_create", params)
 
@@ -753,3 +754,9 @@ class RPCClient:
             "name": name
         }
         return self._request("bdev_ftl_unload", params)
+
+    def get_lvstore(self, lvs_name):
+        params = {
+            "lvs_name": lvs_name
+        }
+        return self._request("bdev_lvol_get_lvstores", params)
