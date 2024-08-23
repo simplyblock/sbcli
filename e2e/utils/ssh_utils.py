@@ -80,63 +80,75 @@ class SshUtils:
             self.ssh_connections[address].close()
         self.ssh_connections[address] = target_ssh
 
-    def exec_command(self, node, command, timeout=3600):
-        """Executes command on given machine with a timeout.
+    def exec_command(self, node, command, timeout=3600, max_retries=3):
+        """Executes command on given machine with a retry mechanism in case of failure.
 
         Args:
             node (str): Machine to run command on
             command (str): Command to run
             timeout (int): Timeout in seconds
+            max_retries (int): Number of retries in case of failures
 
         Returns:
             str: Output of command
         """
-        ssh_connection = self.ssh_connections[node]
-        if not ssh_connection.get_transport().is_active():
-            self.logger.info(f"Reconnecting SSH to node {node}")
-            self.connect(
-                address=node,
-                is_bastion_server=True if node == self.bastion_server else False
-            )
-            ssh_connection = self.ssh_connections[node]
+        retry_count = 0
+        while retry_count < max_retries:
+            ssh_connection = self.ssh_connections.get(node)
+            try:
+                # Ensure the SSH connection is active, otherwise reconnect
+                if not ssh_connection or not ssh_connection.get_transport().is_active():
+                    self.logger.info(f"Reconnecting SSH to node {node}")
+                    self.connect(
+                        address=node,
+                        is_bastion_server=True if node == self.bastion_server else False
+                    )
+                    ssh_connection = self.ssh_connections[node]
 
-        self.logger.info(f"Command: {command}")
-        try:
-            stdin, stdout, stderr = ssh_connection.exec_command(command, timeout=timeout)
-            
-            output = []
-            error = []
-            if "sudo fio" in command:
-                self.logger.info("Inside while loop")
-                # Read stdout and stderr in a non-blocking way
-                while not stdout.channel.exit_status_ready():
-                    if stdout.channel.recv_ready():
-                        output.append(stdout.channel.recv(1024).decode())
-                    if stderr.channel.recv_stderr_ready():
-                        error.append(stderr.channel.recv_stderr(1024).decode())
-                    time.sleep(0.1)
-                output = " ".join(output)
-                error = " ".join(error)
+                self.logger.info(f"Executing command: {command}")
+                stdin, stdout, stderr = ssh_connection.exec_command(command, timeout=timeout)
+                
+                output = []
+                error = []
+                if "sudo fio" in command:
+                    self.logger.info("Inside while loop")
+                    # Read stdout and stderr in a non-blocking way
+                    while not stdout.channel.exit_status_ready():
+                        if stdout.channel.recv_ready():
+                            output.append(stdout.channel.recv(1024).decode())
+                        if stderr.channel.recv_stderr_ready():
+                            error.append(stderr.channel.recv_stderr(1024).decode())
+                        time.sleep(0.1)
+                    output = " ".join(output)
+                    error = " ".join(error)
 
-            else:
-                output = stdout.read().decode()
-                error = stderr.read().decode()
+                else:
+                    output = stdout.read().decode()
+                    error = stderr.read().decode()
 
-            if output:
-                self.logger.debug(f"Command output: {output}")
-            if error:
-                self.logger.debug(f"Command error: {error}")
+                if output:
+                    self.logger.debug(f"Command output: {output}")
+                if error:
+                    self.logger.debug(f"Command error: {error}")
 
-            if not output and not error:
-                self.logger.warning(f"Command '{command}' executed but returned no output or error.")
+                if not output and not error:
+                    self.logger.warning(f"Command '{command}' executed but returned no output or error.")
 
-            return output, error
-        except paramiko.SSHException as e:
-            self.logger.error(f"SSH command failed: {e}")
-            return "", str(e)
-        except paramiko.ssh_exception.SSHException as e:
-            self.logger.error(f"SSH connection failed: {e}")
-            return "", str(e)
+                return output, error
+
+            except EOFError as e:
+                self.logger.error(f"EOFError occurred while executing command '{command}': {e}. Retrying ({retry_count + 1}/{max_retries})...")
+                retry_count += 1
+                time.sleep(2)  # Short delay before retrying
+
+            except paramiko.SSHException as e:
+                self.logger.error(f"SSH command failed: {e}. Retrying ({retry_count + 1}/{max_retries})...")
+                retry_count += 1
+                time.sleep(2)  # Short delay before retrying
+
+        # If we exhaust retries, return failure
+        self.logger.error(f"Failed to execute command '{command}' on node {node} after {max_retries} retries.")
+        return "", "Command failed after max retries"
 
     def format_disk(self, node, device, fs_type="ext4"):
         """Format disk on the given node

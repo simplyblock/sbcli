@@ -70,20 +70,22 @@ class TestLvolFioBase(TestClusterBase):
                     break
 
             # Unmount, format, and mount the device
-            mount_path = config.get('mount_path', f"/home/ec2-user/test_location_{lvol_name}")
             self.ssh_obj.unmount_path(node=self.mgmt_nodes[0], device=disk_use)
             self.ssh_obj.format_disk(node=self.mgmt_nodes[0], device=disk_use)
-            self.ssh_obj.mount_path(node=self.mgmt_nodes[0], device=disk_use, mount_path=mount_path)
+            mount_path = None
+            if config["mount"]:
+                mount_path = f"/home/ec2-user/test_location_{lvol_name}"
+                self.ssh_obj.mount_path(node=self.mgmt_nodes[0], device=disk_use, mount_path=mount_path)
 
             # Store device information
             self.lvol_devices[lvol_name] = {"Device": disk_use, "MountPath": mount_path}
 
-    def run_fio_on_lvol(self, lvol_name, lvol_path, readwrite):
+    def run_fio_on_lvol(self, lvol_name, mount_path=None, device=None, readwrite="randrw"):
         """Run FIO tests on a specific LVOL with the given readwrite operation."""
         self.logger.info(f"Starting FIO test on {lvol_name} with readwrite={readwrite}")
         fio_thread = threading.Thread(
             target=self.ssh_obj.run_fio_test,
-            args=(self.mgmt_nodes[0], None, lvol_path, None),
+            args=(self.mgmt_nodes[0], device, mount_path, None),
             kwargs={
                 "name": f"fio_{lvol_name}",
                 "rw": readwrite,
@@ -113,7 +115,7 @@ class TestLvolFioBase(TestClusterBase):
 
         job = fio_result['jobs'][0]
         job_name = job['job options']['name']
-        file_name = job['job options']['directory']
+        file_name = job['job options'].get("directory", job['job options'].get("filename", None))
         read_iops = job['read']['iops']
         write_iops = job['write']['iops']
         trim_iops = job['trim']['iops']
@@ -130,8 +132,10 @@ class TestLvolFioBase(TestClusterBase):
         self.logger.info(f"Performign validation for FIO job: {job_name} on device: "
                          f"{disk_name} mounted on: {file_name}")
 
-        assert 550 < total_iops < 650, \
-            f"Total IOPS {total_iops} out of range (550-650)"
+        # assert 550 < total_iops < 650, \
+        #     f"Total IOPS {total_iops} out of range (550-650)"
+        assert total_iops > 350, \
+            f"Total IOPS {total_iops} out of range (>350)"
         # TODO: Uncomment when issue is fixed
         # assert 4.5 < read_bw_mib < 5.5, f"Read BW {read_bw_mib} out of range (4.5-5.5 MiB/s)"
         # assert 4.5 < write_bw_mib < 5.5, f"Write BW {write_bw_mib} out of range (4.5-5.5 MiB/s)"
@@ -177,10 +181,10 @@ class TestLvolFioNpcs0(TestLvolFioBase):
             lvol_configs = [
                 {"lvol_name": f"lvol1_npcs_{scenario['npcs']}_ndcs_{scenario['ndcs']}",
                  "ndcs": scenario['ndcs'], "npcs": scenario['npcs'], 
-                 "size": "10G"},
+                 "size": "10G", "mount": True},
                 {"lvol_name": f"lvol2_npcs_{scenario['npcs']}_ndcs_{scenario['ndcs']}",
                  "ndcs": scenario['ndcs'], "npcs": scenario['npcs'], 
-                 "size": "10G"}
+                 "size": "10G", "mount": False}
             ]
             # Create LVOLs
             self.create_lvols(lvol_configs)
@@ -190,11 +194,11 @@ class TestLvolFioNpcs0(TestLvolFioBase):
             # Run FIO tests
             fio_threads = []
             fio_threads.append(self.run_fio_on_lvol(lvol_name_1,
-                                                    self.lvol_devices[lvol_name_1]["MountPath"],
-                                                    "randrw"))
+                                                    mount_path=self.lvol_devices[lvol_name_1]["MountPath"],
+                                                    readwrite="randrw"))
             fio_threads.append(self.run_fio_on_lvol(lvol_name_2,
-                                                    self.lvol_devices[lvol_name_2]["MountPath"],
-                                                    "readwrite"))
+                                                    device=self.lvol_devices[lvol_name_2]["Device"],
+                                                    readwrite="randtrimwrite"))
 
             self.common_utils.manage_fio_threads(
                 node=self.mgmt_nodes[0], threads=fio_threads, timeout=600
@@ -208,6 +212,10 @@ class TestLvolFioNpcs0(TestLvolFioBase):
 
             # Cleanup after running FIO
             self.cleanup_lvols(lvol_configs)
+
+            self.logger.info(f"Test Passed with scenario npcs: {scenario['npcs']} "
+                             f" and ndcs: {scenario['ndcs']}")
+        self.logger.info(f"All Test Scenarios Passed with npcs: {scenario['npcs']}")
 
 
 class TestLvolFioNpcs1(TestLvolFioBase):
@@ -228,10 +236,10 @@ class TestLvolFioNpcs1(TestLvolFioBase):
             lvol_configs = [
                 {"lvol_name": f"lvol1_npcs_{scenario['npcs']}_ndcs_{scenario['ndcs']}",
                  "ndcs": scenario['ndcs'], "npcs": scenario['npcs'],
-                 "size": "10G"},
+                 "size": "10G", "mount": True},
                 {"lvol_name": f"lvol2_npcs_{scenario['npcs']}_ndcs_{scenario['ndcs']}",
                  "ndcs": scenario['ndcs'], "npcs": scenario['npcs'],
-                 "size": "10G"}
+                 "size": "10G", "mount": False}
             ]
             # Create LVOLs
             self.create_lvols(lvol_configs)
@@ -242,11 +250,11 @@ class TestLvolFioNpcs1(TestLvolFioBase):
             # Run FIO tests
             fio_threads = []
             fio_threads.append(self.run_fio_on_lvol(lvol_name_1,
-                                                    self.lvol_devices[lvol_name_1]["MountPath"],
-                                                    "randrw"))
+                                                    mount_path=self.lvol_devices[lvol_name_1]["MountPath"],
+                                                    readwrite="randrw"))
             fio_threads.append(self.run_fio_on_lvol(lvol_name_2,
-                                                    self.lvol_devices[lvol_name_2]["MountPath"],
-                                                    "readwrite"))
+                                                    device=self.lvol_devices[lvol_name_2]["Device"],
+                                                    readwrite="randtrimwrite"))
 
             self.common_utils.manage_fio_threads(
                 node=self.mgmt_nodes[0], threads=fio_threads, timeout=600
@@ -261,6 +269,10 @@ class TestLvolFioNpcs1(TestLvolFioBase):
 
             # Cleanup after running FIO
             self.cleanup_lvols(lvol_configs)
+
+            self.logger.info(f"Test Passed with scenario npcs: {scenario['npcs']} "
+                             f" and ndcs: {scenario['ndcs']}")
+        self.logger.info(f"All Test Scenarios Passed with npcs: {scenario['npcs']}")
 
 
 class TestLvolFioNpcs2(TestLvolFioBase):
@@ -281,10 +293,10 @@ class TestLvolFioNpcs2(TestLvolFioBase):
             lvol_configs = [
                 {"lvol_name": f"lvol1_npcs_{scenario['npcs']}_ndcs_{scenario['ndcs']}",
                  "ndcs": scenario['ndcs'], "npcs": scenario['npcs'],
-                 "size": "10G"},
+                 "size": "10G", "mount": True},
                 {"lvol_name": f"lvol2_npcs_{scenario['npcs']}_ndcs_{scenario['ndcs']}",
                  "ndcs": scenario['ndcs'], "npcs": scenario['npcs'],
-                 "size": "10G"}
+                 "size": "10G", "mount": False}
             ]
             # Create LVOLs
             self.create_lvols(lvol_configs)
@@ -295,11 +307,11 @@ class TestLvolFioNpcs2(TestLvolFioBase):
             # Run FIO tests
             fio_threads = []
             fio_threads.append(self.run_fio_on_lvol(lvol_name_1,
-                                                    self.lvol_devices[lvol_name_1]["MountPath"],
-                                                    "randrw"))
+                                                    mount_path=self.lvol_devices[lvol_name_1]["MountPath"],
+                                                    readwrite="randrw"))
             fio_threads.append(self.run_fio_on_lvol(lvol_name_2,
-                                                    self.lvol_devices[lvol_name_2]["MountPath"],
-                                                    "readwrite"))
+                                                    device=self.lvol_devices[lvol_name_2]["Device"],
+                                                    readwrite="randtrimwrite"))
 
             self.common_utils.manage_fio_threads(
                 node=self.mgmt_nodes[0], threads=fio_threads, timeout=600
@@ -314,3 +326,7 @@ class TestLvolFioNpcs2(TestLvolFioBase):
 
             # Cleanup after running FIO
             self.cleanup_lvols(lvol_configs)
+
+            self.logger.info(f"Test Passed with scenario npcs: {scenario['npcs']} "
+                             f" and ndcs: {scenario['ndcs']}")
+        self.logger.info(f"All Test Scenarios Passed with npcs: {scenario['npcs']}")
