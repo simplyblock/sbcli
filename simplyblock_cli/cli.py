@@ -94,6 +94,11 @@ class CLIWrapper:
         sub_command.add_argument("--history", help='(XXdYYh), list history records (one for every 15 minutes) '
                                                    'for XX days and YY hours (up to 10 days in total).')
 
+        sub_command = self.add_sub_command(
+            subparser, 'get-capacity', "Get Node capacity")
+        sub_command.add_argument("id", help='Node id')
+        sub_command.add_argument("--history", help='(XXdYYh), list history records (one for every 15 minutes) '
+                                                   'for XX days and YY hours (up to 10 days in total).')
 
         sub_command = self.add_sub_command(subparser, "check", 'Health check node')
         sub_command.add_argument("id", help='Node UUID')
@@ -1002,6 +1007,15 @@ class CLIWrapper:
                 history = args.history
                 data = caching_node_controller.get_node_iostats_history(node_id, history)
 
+                if data:
+                    ret = utils.print_table(data)
+                else:
+                    return False
+
+            if sub_command == "get-capacity":
+                node_id = args.id
+                history = args.history
+                data = storage_ops.get_node_capacity(node_id, history)
                 if data:
                     ret = utils.print_table(data)
                 else:

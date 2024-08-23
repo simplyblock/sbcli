@@ -1057,3 +1057,39 @@ def get_node_iostats_history(node_id, history, records_count=20, parse_sizes=Tru
             "Write lat": record["write_latency_ps"],
         })
     return out
+
+
+def get_node_capacity(node_id, history, records_count=20, parse_sizes=True):
+    db_controller = DBController()
+    this_node = db_controller.get_caching_node_by_id(node_id)
+    if not this_node:
+        logger.error("node Not found")
+        return
+
+    if history:
+        records_number = utils.parse_history_param(history)
+        if not records_number:
+            logger.error(f"Error parsing history string: {history}")
+            return False
+    else:
+        records_number = 20
+
+    records = db_controller.get_node_capacity(this_node, records_number)
+    new_records = utils.process_records(records, records_count)
+
+    if not parse_sizes:
+        return new_records
+
+    out = []
+    for record in new_records:
+        out.append({
+            "Date": time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(record['date'])),
+            "Absolut": utils.humanbytes(record['size_total']),
+            "Provisioned": utils.humanbytes(record['size_prov']),
+            "Used": utils.humanbytes(record['size_used']),
+            "Free": utils.humanbytes(record['size_free']),
+            "Util %": f"{record['size_util']}%",
+            "Prov Util %": f"{record['size_prov_util']}%",
+        })
+    return out
+

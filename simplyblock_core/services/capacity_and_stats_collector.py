@@ -22,8 +22,8 @@ def add_device_stats(cl, device_id, capacity_dict, stats_dict):
 
     if capacity_dict and capacity_dict[0]:
         cap = capacity_dict[0]
-        size_total = int(cap['block_size']*cap['total_data_clusters'])
-        size_free = int(cap['block_size']*cap['free_clusters'])
+        size_total = int(cap['cluster_size']*cap['total_data_clusters'])
+        size_free = int(cap['cluster_size']*cap['free_clusters'])
         size_used = size_total - size_free
         size_util = 0
         if size_total > 0:
