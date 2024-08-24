@@ -80,7 +80,7 @@ class SshUtils:
             self.ssh_connections[address].close()
         self.ssh_connections[address] = target_ssh
 
-    def exec_command(self, node, command, timeout=3600, max_retries=3):
+    def exec_command(self, node, command, timeout=360, max_retries=3):
         """Executes command on given machine with a retry mechanism in case of failure.
 
         Args:

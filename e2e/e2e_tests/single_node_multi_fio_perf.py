@@ -1,3 +1,5 @@
+from datetime import datetime
+import os
 from e2e_tests.cluster_test_base import TestClusterBase
 import threading
 import json
@@ -129,8 +131,15 @@ class TestLvolFioBase(TestClusterBase):
         write_bw_mib = write_bw_kb / 1024
         trim_bw_mib = trim_bw_kb / 1024
 
-        self.logger.info(f"Performign validation for FIO job: {job_name} on device: "
-                         f"{disk_name} mounted on: {file_name}")
+        # Write LVOL details to the text file
+        with open(os.path.join("logs" ,"fio_test_results.log"),
+                  "a", encoding="utf-8") as log_file:
+            log_file.write(f"LVOL: {lvol_name}, Total IOPS: {total_iops}, Read BW: "
+                           f"{read_bw_mib} MiB/s, Write BW: {write_bw_mib} MiB/s, "
+                           f"Trim BW: {trim_bw_mib} MiB/s\n\n")
+
+            self.logger.info(f"Performing validation for FIO job: {job_name} on device: "
+                            f"{disk_name} mounted on: {file_name}")
 
         # assert 550 < total_iops < 650, \
         #     f"Total IOPS {total_iops} out of range (550-650)"
@@ -177,6 +186,13 @@ class TestLvolFioNpcs0(TestLvolFioBase):
             {"npcs": 0, "ndcs": 1}
         ]
 
+        current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        # Write date, time, and LVOL details to the log file
+        with open(os.path.join("logs" ,"fio_test_results.log"),
+                  "a", encoding="utf-8") as log_file:
+            log_file.write(f"Date & Time: {current_time}\n")
+
         for scenario in scenarios:
             lvol_configs = [
                 {"lvol_name": f"lvol1_npcs_{scenario['npcs']}_ndcs_{scenario['ndcs']}",
@@ -208,7 +224,8 @@ class TestLvolFioNpcs0(TestLvolFioBase):
 
             # Validate FIO outputs
             self.validate_fio_output(lvol_name_1, read_check=True, write_check=True)
-            self.validate_fio_output(lvol_name_2, read_check=True, write_check=True)
+            self.validate_fio_output(lvol_name_2, read_check=True, write_check=True,
+                                     trim_check=True)
 
             # Cleanup after running FIO
             self.cleanup_lvols(lvol_configs)
@@ -231,6 +248,12 @@ class TestLvolFioNpcs1(TestLvolFioBase):
             {"npcs": 1, "ndcs": 2},
             {"npcs": 1, "ndcs": 4}
         ]
+        current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        # Write date, time, and LVOL details to the log file
+        with open(os.path.join("logs" ,"fio_test_results.log"),
+                  "a", encoding="utf-8") as log_file:
+            log_file.write(f"Date & Time: {current_time}\n")
 
         for scenario in scenarios:
             lvol_configs = [
@@ -265,7 +288,8 @@ class TestLvolFioNpcs1(TestLvolFioBase):
 
             # Validate FIO outputs
             self.validate_fio_output(lvol_name_1, read_check=True, write_check=True)
-            self.validate_fio_output(lvol_name_2, read_check=True, write_check=True)
+            self.validate_fio_output(lvol_name_2, read_check=True, write_check=True,
+                                     trim_check=True)
 
             # Cleanup after running FIO
             self.cleanup_lvols(lvol_configs)
@@ -288,6 +312,12 @@ class TestLvolFioNpcs2(TestLvolFioBase):
             {"npcs": 2, "ndcs": 4},
             {"npcs": 2, "ndcs": 8}
         ]
+        current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        # Write date, time, and LVOL details to the log file
+        with open(os.path.join("logs" ,"fio_test_results.log"),
+                  "a", encoding="utf-8") as log_file:
+            log_file.write(f"Date & Time: {current_time}\n")
 
         for scenario in scenarios:
             lvol_configs = [
@@ -322,7 +352,8 @@ class TestLvolFioNpcs2(TestLvolFioBase):
 
             # Validate FIO outputs
             self.validate_fio_output(lvol_name_1, read_check=True, write_check=True)
-            self.validate_fio_output(lvol_name_2, read_check=True, write_check=True)
+            self.validate_fio_output(lvol_name_2, read_check=True, write_check=True,
+                                     trim_check=True)
 
             # Cleanup after running FIO
             self.cleanup_lvols(lvol_configs)
