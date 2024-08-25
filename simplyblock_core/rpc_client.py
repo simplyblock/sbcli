@@ -404,8 +404,10 @@ class RPCClient:
         params = {"name": name}
         return self._request2("bdev_alceml_delete", params)
 
-    def get_lvol_stats(self, uuid):
-        params = {"name": uuid}
+    def get_lvol_stats(self, uuid=None):
+        params = None
+        if uuid:
+            params = {"name": uuid}
         return self._request("bdev_get_iostat", params)
 
     def bdev_raid_create(self, name, bdevs_list):

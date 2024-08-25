@@ -44,8 +44,11 @@ def add_lvol_stats(lvol, stats_dict):
                 data={"uuid": lvol.get_id(), "pool_id": lvol.get_id()}
             ).get_last(db_controller.kv_store)
         if last_record:
-            time_diff = (now - last_record.date)
+            time_diff = int(now - last_record.date)
             if time_diff > 0:
+                data['record_duration'] = time_diff
+                data['record_start_time'] = last_record.date
+                data['record_end_time'] = now
                 data['read_bytes_ps'] = int((data['read_bytes'] - last_record['read_bytes']) / time_diff)
                 data['read_io_ps'] = int((data['read_io'] - last_record['read_io']) / time_diff)
                 data['read_latency_ps'] = int((data['read_latency_ticks'] - last_record['read_latency_ticks']) / time_diff)
@@ -102,17 +105,35 @@ db_controller = kv_store.DBController()
 logger.info("Starting stats collector...")
 while True:
 
-    all_lvols = db_controller.get_lvols()  # pass
+    # all_lvols = db_controller.get_lvols()  # pass
 
-    for lvol in all_lvols:
-        snode = db_controller.get_caching_node_by_id(lvol.node_id)
+    for snode in db_controller.get_caching_nodes():
+
+        logger.info("Getting lVol on node: %s", snode.get_id())
+
         rpc_client = RPCClient(
-            snode.mgmt_ip, snode.rpc_port,
-            snode.rpc_username, snode.rpc_password,
+            snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password,
             timeout=3, retry=2)
 
-        logger.info("Getting lVol stats: %s", lvol.uuid)
-        stats_dict = rpc_client.get_lvol_stats(lvol.top_bdev)
-        record = add_lvol_stats(lvol, stats_dict)
+        stats_dict = rpc_client.get_lvol_stats()
+        logger.debug(stats_dict)
+
+        for lvol in db_controller.get_lvols():
+            if lvol.node_id != snode.get_id():
+                continue
+            # snode = db_controller.get_caching_node_by_id(lvol.node_id)
+            # rpc_client = RPCClient(
+            #     snode.mgmt_ip, snode.rpc_port,
+            #     snode.rpc_username, snode.rpc_password,
+            #     timeout=3, retry=2)
+            #
+            logger.info("Getting lVol stats: %s", lvol.top_bdev)
+            # stats_dict = rpc_client.get_lvol_stats(lvol.top_bdev)
+            for st in stats_dict:
+                if st['name'] == lvol.top_bdev:
+                    record = add_lvol_stats(lvol, st)
+                    break
+            else:
+                logger.error("stats not found in node stat dict")
 
     time.sleep(constants.LVOL_STAT_COLLECTOR_INTERVAL_SEC)
