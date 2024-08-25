@@ -57,6 +57,8 @@ def main():
                 test_obj.setup()
                 test_obj.run()
                 logger.info(f"Test {test.__name__} passed on attempt {attempt + 1}")
+                if test.__name__ in errors:
+                    del errors[test.__name__]
                 break  # Test passed, no need for more retries
             except Exception as exp:
                 logger.error(f"Attempt {attempt + 1} failed for test {test.__name__}")
@@ -68,6 +70,11 @@ def main():
         except Exception as _:
             logger.error(f"Error During Teardown for test: {test.__name__}")
             logger.error(traceback.format_exc())
+        finally:
+            if check_for_dumps():
+                logger.info("Found a core dump during test execution. "
+                            "Cannot execute more tests as cluster is not stable. Exiting")
+                break
 
     failed_cases = list(errors.keys())
 
