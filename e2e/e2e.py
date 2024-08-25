@@ -34,7 +34,7 @@ def main():
     logger.info(f"Unexecuted only: {args.unexecuted_only}")
     logger.info(f"Failed case file: {failed_cases_file}")
     logger.info(f"File exists: {os.path.exists(failed_cases_file)}")
-    logger.info(f"Current dir: {os.getcwd())}")
+    logger.info(f"Current dir: {os.getcwd()}")
 
     # Load previously failed cases if '--failed_only' is set
     if args.failed_only and os.path.exists(failed_cases_file):
