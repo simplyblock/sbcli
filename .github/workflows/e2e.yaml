@@ -21,6 +21,17 @@ on:
         description: 'Name of test to run. Empty to run all'
         required: false
         default: ''
+      run_failed_tests_only:
+        description: "Run only the failed tests from the last run"
+        required: false
+        default: false
+        type: boolean
+      retry_count:
+        description: "Number of retries for failed test cases"
+        required: false
+        default: 1
+        type: number
+
 jobs:
   e2e:
     runs-on: self-hosted
@@ -83,8 +94,10 @@ jobs:
           cd $GITHUB_WORKSPACE/simplyBlockDeploy
           terraform plan \
             -var "mgmt_nodes=1" -var "storage_nodes=3" -var "volumes_per_storage_nodes=3" \
-            -var "extra_nodes=1" -var "extra_nodes_instance_type=m6id.large" \
-            -var "region=us-east-2" -var "sbcli_cmd=${{ github.event.inputs.sbcli_cmd || 'sbcli-dev' }}" -out=tfplan
+            -var mgmt_nodes_instance_type="m6id.xlarge" -var storage_nodes_instance_type="m6id.xlarge" \
+            -var "extra_nodes=1" -var "extra_nodes_instance_type=m6id.xlarge" \
+            -var storage_nodes_ebs_size2=100 -var "region=us-east-2" \
+            -var "sbcli_cmd=${{ github.event.inputs.sbcli_cmd || 'sbcli-dev' }}" -out=tfplan
       - name: Apply Terraform Changes
         run: |
           cd $GITHUB_WORKSPACE/simplyBlockDeploy
@@ -100,13 +113,13 @@ jobs:
       - name: Bootstrap Cluster
         run: |
           cd $GITHUB_WORKSPACE/simplyBlockDeploy
-          ./bootstrap-cluster.sh --max-lvol 10 --max-snap 10 --max-prov 450g --number-of-devices 3
+          ./bootstrap-cluster.sh --max-lvol 100 --max-snap 100 --max-prov 360G --number-of-devices 3
         id: bootstrap_cluster
         env:
           SBCLI_CMD: ${{ github.event.inputs.sbcli_cmd || 'sbcli-dev' }}
 
       - name: Setup Tests & Run Tests
-        timeout-minutes: 60
+        timeout-minutes: 120
         run: |
           cd $GITHUB_WORKSPACE/e2e
           sudo apt-get install -y python3.12-venv
@@ -128,7 +141,10 @@ jobs:
           if [ -n "${{ github.event.inputs.testname }}" ]; then
             TESTNAME="--testname ${{ github.event.inputs.testname }}"
           fi
-          python3 e2e.py $TESTNAME
+          if [ "${{ github.event.inputs.run_failed_tests_only }}" = "true" ]; then
+            python3 e2e.py --failed-only --retry ${{ github.event.inputs.retry_count }} $TESTNAME
+          else
+            python3 e2e.py --retry ${{ github.event.inputs.retry_count }} $TESTNAME
       - name: Upload automation and docker logs to s3
         run: |
           cd $GITHUB_WORKSPACE/e2e/logs

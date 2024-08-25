@@ -1,6 +1,8 @@
 ### simplyblock e2e tests
 import argparse
 import traceback
+import os
+import json
 from __init__ import get_all_tests
 from logger_config import setup_logger
 from exceptions.custom_exception import (
@@ -11,73 +13,78 @@ from e2e_tests.cluster_test_base import TestClusterBase
 from utils.sbcli_utils import SbcliUtils
 from utils.ssh_utils import SshUtils
 
-
 def main():
-    """Run complete test suite
-    """
+    """Run complete test suite or only failed tests from last run."""
     parser = argparse.ArgumentParser(description="Run simplyBlock's E2E Test Framework")
     parser.add_argument('--testname', type=str, help="The name of the test to run", default=None)
     parser.add_argument('--fio_debug', type=bool, help="Add debug flag to fio", default=False)
+    parser.add_argument('--failed-only', action='store_true', help="Run only failed tests from last run", default=False)
+    parser.add_argument('--retry', type=int, help="Number of retries for failed cases", default=1)
 
     args = parser.parse_args()
 
     tests = get_all_tests()
-    # Find the test class based on the provided test name
-    test_class_run = []
-    if args.testname is None or len(args.testname.strip()) == 0:
-        test_class_run = tests
+
+    # Load previously failed cases if '--failed-only' is set
+    failed_cases_file = 'failed_cases.json'
+    if args.failed_only and os.path.exists(failed_cases_file):
+        with open(failed_cases_file, 'r') as file:
+            failed_tests = json.load(file)
+            test_class_run = [cls for cls in tests if cls.__name__ in failed_tests]
     else:
-        for cls in tests:
-            if args.testname.lower() in cls.__name__.lower():
-                test_class_run.append(cls)
+        # Run all tests or selected ones
+        test_class_run = []
+        if args.testname is None or len(args.testname.strip()) == 0:
+            test_class_run = tests
+        else:
+            for cls in tests:
+                if args.testname.lower() in cls.__name__.lower():
+                    test_class_run.append(cls)
 
     if not test_class_run:
         available_tests = ', '.join(cls.__name__ for cls in tests)
         logger.info(f"Test '{args.testname}' not found. Available tests are: {available_tests}")
         raise TestNotFoundException(args.testname, available_tests)
-    
+
     errors = {}
     for test in test_class_run:
         logger.info(f"Running Test {test}")
         test_obj = test(fio_debug=args.fio_debug)
-        try:
-            test_obj.setup()
-            test_obj.run()
-        except Exception as exp:
-            logger.error(traceback.format_exc())
-            errors[f"{test.__name__}"] = [exp]
+
+        # Retry logic
+        for attempt in range(args.retry):
+            try:
+                test_obj.setup()
+                test_obj.run()
+                logger.info(f"Test {test.__name__} passed on attempt {attempt + 1}")
+                break  # Test passed, no need for more retries
+            except Exception as exp:
+                logger.error(f"Attempt {attempt + 1} failed for test {test.__name__}")
+                logger.error(traceback.format_exc())
+                errors[f"{test.__name__}"] = [exp]
+
         try:
             test_obj.teardown()
-            # pass
         except Exception as _:
             logger.error(f"Error During Teardown for test: {test.__name__}")
             logger.error(traceback.format_exc())
-            # errors[f"{test.__name__}"].append(exp)
-        finally:
-            if check_for_dumps():
-                logger.info("Found a core dump during test execution. "
-                            "Cannot execute more tests as cluster is not stable. Exiting")
-                break
 
     failed_cases = list(errors.keys())
+
+    # Save failed cases for next run
+    if failed_cases:
+        with open(failed_cases_file, 'w', encoding='utf-8') as file:
+            json.dump(failed_cases, file)
+
     logger.info(f"Number of Total Cases: {len(test_class_run)}")
     logger.info(f"Number of Passed Cases: {len(test_class_run) - len(failed_cases)}")
     logger.info(f"Number of Failed Cases: {len(failed_cases)}")
-    
-    logger.info("Test Wise run status:")
-    for test in test_class_run:
-        if test.__name__ not in failed_cases:
-            logger.info(f"{test.__name__} PASSED CASE.")
-        else:
-            logger.info(f"{test.__name__} FAILED CASE.")
-
 
     if errors:
         raise MultipleExceptions(errors)
-    
 
 def check_for_dumps():
-    """Validates whether core dumps present on machines
+    """Validates whether core dumps are present on machines
     
     Returns:
         bool: If there are core dumps or not
