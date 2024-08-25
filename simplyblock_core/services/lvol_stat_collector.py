@@ -105,35 +105,28 @@ db_controller = kv_store.DBController()
 logger.info("Starting stats collector...")
 while True:
 
-    # all_lvols = db_controller.get_lvols()  # pass
-
     for snode in db_controller.get_caching_nodes():
 
-        logger.info("Getting lVol on node: %s", snode.get_id())
+        logger.info("Getting lVol on node: %s, status: %s", snode.get_id(), snode.status)
+        if snode.status == 'online':
+            rpc_client = RPCClient(
+                snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password,
+                timeout=3, retry=2)
 
-        rpc_client = RPCClient(
-            snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password,
-            timeout=3, retry=2)
+            stats_dict = rpc_client.get_lvol_stats()
+            logger.debug(stats_dict)
 
-        stats_dict = rpc_client.get_lvol_stats()
-        logger.debug(stats_dict)
+            for lvol in db_controller.get_lvols():
+                if lvol.node_id != snode.get_id():
+                    continue
 
-        for lvol in db_controller.get_lvols():
-            if lvol.node_id != snode.get_id():
-                continue
-            # snode = db_controller.get_caching_node_by_id(lvol.node_id)
-            # rpc_client = RPCClient(
-            #     snode.mgmt_ip, snode.rpc_port,
-            #     snode.rpc_username, snode.rpc_password,
-            #     timeout=3, retry=2)
-            #
-            logger.info("Getting lVol stats: %s", lvol.top_bdev)
-            # stats_dict = rpc_client.get_lvol_stats(lvol.top_bdev)
-            for st in stats_dict['bdevs']:
-                if st['name'] == lvol.top_bdev:
-                    record = add_lvol_stats(lvol, st)
-                    break
-            else:
-                logger.error("stats not found in node stat dict")
+                logger.info("Getting lVol stats: %s", lvol.top_bdev)
+
+                for st in stats_dict['bdevs']:
+                    if st['name'] == lvol.top_bdev:
+                        record = add_lvol_stats(lvol, st)
+                        break
+                else:
+                    logger.error("stats not found in node stat dict")
 
     time.sleep(constants.LVOL_STAT_COLLECTOR_INTERVAL_SEC)
