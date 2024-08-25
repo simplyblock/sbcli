@@ -28,18 +28,27 @@ def main():
     # File to store failed test cases for the specific branch
     failed_cases_file = f'failed_cases_{args.branch}.json'
     executed_cases_file = f'executed_cases_{args.branch}.json'
+    test_classes_total = [cls.__name__ for cls in tests]
 
     # Load previously failed cases if '--failed-only' is set
     if args.failed_only and os.path.exists(failed_cases_file):
-        with open(failed_cases_file, 'r') as file:
+        logger.info("Running failed cases only")
+        with open(failed_cases_file, 'r', encoding='utf-8') as file:
             failed_tests = json.load(file)
-            test_class_run = [cls for cls in tests if cls.__name__ in failed_tests]
+            test_class_run = [cls for cls in tests 
+                              if any(ft in f'{cls.__name__}' for ft in failed_tests)]
+
+            logger.info(f"Running failed cases only: {test_class_run}")
     elif args.unexecuted_only and os.path.exists(executed_cases_file):
-        with open(executed_cases_file, 'r') as file:
+        logger.info("Running unexecuted cases only")
+        with open(executed_cases_file, 'r', encoding='utf-8') as file:
             executed_tests = json.load(file)
-            test_class_run = [cls for cls in tests if cls.__name__ not in executed_tests]
+            test_class_run = [cls for cls in tests 
+                              if all(unet not in f'{cls.__name__}' for unet in failed_tests)]
+            logger.info(f"Running unexecuted cases only: {test_class_run}")
     else:
         # Run all tests or selected ones
+        logger.info("Running all or selected cases")
         test_class_run = []
         if args.testname is None or len(args.testname.strip()) == 0:
             test_class_run = tests
@@ -63,9 +72,11 @@ def main():
         for attempt in range(args.retry):
             try:
                 test_obj.setup()
-                test_obj.run()
                 executed_tests.append(test.__name__)
+                test_obj.run()
                 logger.info(f"Test {test.__name__} passed on attempt {attempt + 1}")
+                if f"{test.__name__}" in errors:
+                    del errors[f"{test.__name__}"]
                 break  # Test passed, no need for more retries
             except Exception as exp:
                 logger.error(f"Attempt {attempt + 1} failed for test {test.__name__}")
