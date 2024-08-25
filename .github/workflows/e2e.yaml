@@ -26,16 +26,16 @@ on:
         required: false
         default: false
         type: boolean
-      retry_count:
-        description: "Number of retries for failed test cases"
-        required: false
-        default: 1
-        type: number
       run_unexecuted_tests:
         description: "Run tests that were not executed in the last run"
         required: false
         default: false
         type: boolean
+      retry_count:
+        description: "Number of retries for failed test cases"
+        required: false
+        default: 1
+        type: number
 
 jobs:
   e2e:
