@@ -575,7 +575,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
     host_node.lvols.append(lvol.uuid)
     host_node.write_to_db(db_controller.kv_store)
     lvol.write_to_db(db_controller.kv_store)
-    # lvol_events.lvol_create(lvol)
+    lvol_events.lvol_create(lvol)
 
     # set QOS
     if max_rw_iops or max_rw_mbytes or max_r_mbytes or max_w_mbytes:
@@ -598,6 +598,7 @@ def _create_bdev_stack(lvol, snode):
 
         elif type == "bdev_lvol":
             ret = rpc_client.create_lvol(**params)
+            lvol.lvol_uuid = ret
 
         else:
             logger.debug(f"Unknown BDev type: {type}")
@@ -665,7 +666,6 @@ def add_lvol_on_node(lvol, snode, create_bdev_stack=True):
     else:
         logger.error(f"Unknown connection_type: {lvol.connection_type}")
         return False
-
 
     return True, None
 

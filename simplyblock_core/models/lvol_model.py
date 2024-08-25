@@ -14,6 +14,7 @@ class LVol(BaseModel):
 
     attributes = {
         "lvol_name": {"type": str, 'default': ""},
+        "lvol_uuid": {"type": str, 'default': ""},
         "size": {"type": int, 'default': 0},
         "max_size": {"type": int, 'default': 0},
         "uuid": {"type": str, 'default': ""},
