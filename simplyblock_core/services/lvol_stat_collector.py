@@ -14,15 +14,15 @@ logger = utils.get_logger(__name__)
 last_object_record = {}
 
 
-def add_lvol_stats(lvol, stats_dict):
+def add_lvol_stats(lvol, stats_data):
     now = int(time.time())
     data = {
         "pool_id": lvol.get_id(),
         "uuid": lvol.get_id(),
         "date": now}
 
-    if stats_dict and stats_dict['bdevs']:
-        stats = stats_dict['bdevs'][0]
+    if stats_data:
+        stats = stats_data
         data.update({
             "read_bytes": stats['bytes_read'],
             "read_io": stats['num_read_ops'],
@@ -129,7 +129,7 @@ while True:
             #
             logger.info("Getting lVol stats: %s", lvol.top_bdev)
             # stats_dict = rpc_client.get_lvol_stats(lvol.top_bdev)
-            for st in stats_dict:
+            for st in stats_dict['bdevs']:
                 if st['name'] == lvol.top_bdev:
                     record = add_lvol_stats(lvol, st)
                     break
