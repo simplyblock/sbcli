@@ -11,7 +11,7 @@ import docker
 
 from simplyblock_core import utils, scripts, constants
 from simplyblock_core.cnode_client import CNodeClient
-from simplyblock_core.controllers import lvol_controller
+from simplyblock_core.controllers import lvol_controller, snapshot_controller
 from simplyblock_core.kv_store import DBController
 from simplyblock_core.models.caching_node import CachingNode, CachedLVol
 from simplyblock_core.models.iface import IFace
@@ -928,6 +928,13 @@ def remove_node(node_id, force=False):
             logger.error("Connected LVols found on the node, use --force to disconnect all")
             return False
 
+    # delete snapshots
+    snaps = db_controller.get_snapshots()
+    for snap in snaps:
+        if snap.lvol.node_id == node_id:
+            logger.warning(f"Deleting Snapshot: {snap.get_id()}")
+            snapshot_controller.delete(snap.get_id())
+
     if snode.lvols:
         if force:
             for lvol_id in snode.lvols:
@@ -991,13 +998,17 @@ def get_io_stats(lvol_uuid, history, records_count=20, parse_sizes=True):
 
 
 def shutdown_node(node_id):
-
     db_controller = DBController()
-
     snode = db_controller.get_caching_node_by_id(node_id)
     if not snode:
         logger.error("Node not found")
         return False
+
+    # disconnect lvols
+    if snode.connected_lvols:
+        for clvol in snode.connected_lvols:
+            logger.info(f"Disconnecting LVol {clvol.lvol_id}")
+            disconnect(node_id, clvol.lvol_id)
 
     logger.info("Shutting down node")
 
