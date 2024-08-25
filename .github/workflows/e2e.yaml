@@ -145,6 +145,7 @@ jobs:
             python3 e2e.py --failed-only --retry ${{ github.event.inputs.retry_count }} $TESTNAME
           else
             python3 e2e.py --retry ${{ github.event.inputs.retry_count }} $TESTNAME
+          fi
       - name: Upload automation and docker logs to s3
         run: |
           cd $GITHUB_WORKSPACE/e2e/logs
