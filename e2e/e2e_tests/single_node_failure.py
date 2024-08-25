@@ -65,6 +65,7 @@ class TestSingleNodeFailure(TestClusterBase):
             distr_ndcs=2,
             distr_npcs=1
         )
+        raise Exception("Testing failure runs and retry runs")
         lvols = self.sbcli_utils.list_lvols()
         assert self.lvol_name in list(lvols.keys()), \
             f"Lvol {self.lvol_name} not present in list of lvols post add: {lvols}"
