@@ -153,9 +153,9 @@ jobs:
             TESTNAME="--testname ${{ github.event.inputs.testname }}"
           fi
           if [ "${{ github.event.inputs.run_failed_tests_only }}" = "true" ]; then
-            python3 e2e.py --failed-only --retry ${{ github.event.inputs.retry_count }} --branch $BRANCH_NAME $TESTNAME
+            python3 e2e.py --failed_only --retry ${{ github.event.inputs.retry_count }} --branch $BRANCH_NAME $TESTNAME
           elif [ "${{ github.event.inputs.run_unexecuted_tests }}" = "true" ]; then
-            python3 e2e.py --unexecuted-only --retry ${{ github.event.inputs.retry_count }} --branch $BRANCH_NAME $TESTNAME
+            python3 e2e.py --unexecuted_only --retry ${{ github.event.inputs.retry_count }} --branch $BRANCH_NAME $TESTNAME
           else
             python3 e2e.py --retry ${{ github.event.inputs.retry_count }} --branch $BRANCH_NAME $TESTNAME
           fi

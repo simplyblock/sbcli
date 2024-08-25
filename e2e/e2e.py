@@ -16,8 +16,8 @@ def main():
     parser = argparse.ArgumentParser(description="Run simplyBlock's E2E Test Framework")
     parser.add_argument('--testname', type=str, help="The name of the test to run", default=None)
     parser.add_argument('--fio_debug', type=bool, help="Add debug flag to fio", default=False)
-    parser.add_argument('--failed-only', action='store_true', help="Run only failed tests from last run", default=False)
-    parser.add_argument('--unexecuted-only', action='store_true', help="Run only unexecuted tests from last run", default=False)
+    parser.add_argument('--failed_only', action='store_true', help="Run only failed tests from last run", default=False)
+    parser.add_argument('--unexecuted_only', action='store_true', help="Run only unexecuted tests from last run", default=False)
     parser.add_argument('--branch', type=str, help="Branch name to uniquely store test results", required=True)
     parser.add_argument('--retry', type=int, help="Number of retries for failed cases", default=1)
 
@@ -30,7 +30,11 @@ def main():
     executed_cases_file = f'executed_cases_{args.branch}.json'
     test_classes_total = [cls.__name__ for cls in tests]
 
-    # Load previously failed cases if '--failed-only' is set
+    logger.info(f"Failed only: {args.failed_only}")
+    logger.info(f"Unexecuted only: {args.unexecuted_only}")
+
+
+    # Load previously failed cases if '--failed_only' is set
     if args.failed_only and os.path.exists(failed_cases_file):
         logger.info("Running failed cases only")
         with open(failed_cases_file, 'r', encoding='utf-8') as file:
