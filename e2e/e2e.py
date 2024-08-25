@@ -48,6 +48,7 @@ def main():
                 if args.testname.lower() in cls.__name__.lower():
                     test_class_run.append(cls)
 
+    logger.info(f"List of tests to run: {test_class_run}")
     if not test_class_run:
         available_tests = ', '.join(cls.__name__ for cls in tests)
         logger.info(f"Test '{args.testname}' not found. Available tests are: {available_tests}")
