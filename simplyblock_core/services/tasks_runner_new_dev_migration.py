@@ -56,7 +56,7 @@ def task_runner(task):
 
         device = db_controller.get_storage_devices(task.device_id)
         lvol = db_controller.get_lvol_by_id(task.function_params["lvol_id"])
-        rsp = rpc_client.bdev_distrib_expansion_migration(lvol.base_bdev, device.cluster_device_order)
+        rsp = rpc_client.distr_migration_expansion_start(lvol.base_bdev, device.cluster_device_order)
         if not rsp:
             logger.error(f"Failed to start device migration task, storage_ID: {device.cluster_device_order}")
             task.function_result = "Failed to start device migration task"
@@ -74,23 +74,23 @@ def task_runner(task):
     if "migration" in task.function_params:
 
         mig_info = task.function_params["migration"]
-        res = rpc_client.bdev_distrib_migration_status(**mig_info)
+        res = rpc_client.distr_migration_status(**mig_info)
         if res:
-            migration_status = res["migration_status"]  # "Pending", "Succeeded", or "Failed"
-            if migration_status == "Succeeded":
+            migration_status = res["status"]
+            if migration_status == "completed":
                 task.status = JobSchedule.STATUS_DONE
                 task.function_result = migration_status
                 task.write_to_db(db_controller.kv_store)
                 return True
 
-            elif migration_status == "Failed":
+            elif migration_status == "failed":
                 task.status = JobSchedule.STATUS_DONE
                 task.function_result = migration_status
                 task.write_to_db(db_controller.kv_store)
                 return True
 
             else:
-                task.function_result = f"Status: {migration_status}"
+                task.function_result = f"Status: {migration_status}, progress:{res['progress']}"
                 task.write_to_db(db_controller.kv_store)
         else:
             logger.error("Failed to get mig status")

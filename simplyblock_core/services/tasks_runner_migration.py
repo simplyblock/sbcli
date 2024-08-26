@@ -37,7 +37,7 @@ def task_runner(task):
         task.write_to_db(db_controller.kv_store)
         return False
 
-    if "migration_ids" not in task.function_params:
+    if "migration" not in task.function_params:
         if task.retry >= 2:
             all_devs_online = True
             for node in db_controller.get_storage_nodes_by_cluster_id(task.cluster_id):
@@ -53,44 +53,34 @@ def task_runner(task):
                 return False
 
         device = db_controller.get_storage_devices(task.device_id)
-        rsp = rpc_client.distr_migration_to_primary_start(device.cluster_device_order)
+        lvol = db_controller.get_lvol_by_id(task.function_params["lvol_id"])
+
+        rsp = rpc_client.distr_migration_to_primary_start(device.cluster_device_order, lvol.base_bdev)
         if not rsp:
             logger.error(f"Failed to start device migration task, storage_ID: {device.cluster_device_order}")
             task.function_result = "Failed to start device migration task"
             task.retry += 1
             task.write_to_db(db_controller.kv_store)
             return False
-        task.function_params = {"migration_ids": rsp}
+        task.function_params['migration'] = {
+            "name": lvol.base_bdev,
+            "storage_ID": device.cluster_device_order}
         task.write_to_db(db_controller.kv_store)
         time.sleep(3)
 
-    if "migration_ids" in task.function_params:
-        completed_count = 0
-        error_count = 0
-        progress = 0
-        count = len(task.function_params["migration_ids"])
-        for vuid in task.function_params["migration_ids"]:
-            res = rpc_client.distr_migration_status(vuid)
-            for st in res:
-                if st["vuid"] == vuid:
-                    if st['status'] == "completed":
-                        completed_count += 1
-                    if st['error'] == 1:
-                        error_count += 1
-                    progress += st['progress']
-        if count == completed_count:
-            if error_count >= 1:
-                task.function_params = {}
-                task.function_result = "mig completed with errors, retrying"
-                task.write_to_db(db_controller.kv_store)
-            else:
+    if "migration" in task.function_params:
+        mig_info = task.function_params["migration"]
+        res = rpc_client.distr_migration_status(**mig_info)
+        for st in res:
+            if st['status'] == "completed":
                 task.status = JobSchedule.STATUS_DONE
                 task.function_result = "Done"
+                if st['error'] == 1:
+                    task.function_result = "mig completed with errors"
                 task.write_to_db(db_controller.kv_store)
                 return True
-        else:
-            progress = int(progress / count)
-            task.function_result = f"progress: {progress}%, errors: {error_count}"
+
+            task.function_result = f"progress: {st['progress']}%, errors: {st['error'] }"
             task.write_to_db(db_controller.kv_store)
 
     task.retry += 1

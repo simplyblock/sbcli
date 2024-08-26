@@ -693,8 +693,11 @@ class RPCClient:
         params = {"id": app_thread_process_id, "cpumask": app_thread_mask}
         return self._request("thread_set_cpumask", params)
 
-    def distr_migration_to_primary_start(self, storage_ID):
-        params = {"storage_ID": storage_ID}
+    def distr_migration_to_primary_start(self, storage_ID, name):
+        params = {
+            "name": name,
+            "storage_ID": storage_ID,
+        }
         return self._request("distr_migration_to_primary_start", params)
 
     def distr_migration_status(self, vuid=None):
@@ -703,25 +706,18 @@ class RPCClient:
             params["vuid"] = vuid
         return self._request("distr_migration_status", params)
 
-    def bdev_distrib_permanent_failure_migration(self, name, storage_ID):
+    def distr_migration_failure_start(self, name, storage_ID):
         params = {
             "name": name,
             "storage_ID": storage_ID
         }
-        return self._request("bdev_distrib_permanent_failure_migration", params)
+        return self._request("distr_migration_failure_start", params)
 
-    def bdev_distrib_migration_status(self, name, storage_ID):
-        params = {
-            "name": name,
-            "storage_ID": storage_ID
-        }
-        return self._request("bdev_distrib_migration_status", params)
-
-    def bdev_distrib_expansion_migration(self, name, storage_ID):
+    def distr_migration_expansion_start(self, name, storage_ID):
         params = {
             "name": name,
             "storage_ID": storage_ID}
-        return self._request("bdev_distrib_expansion_migration", params)
+        return self._request("distr_migration_expansion_start", params)
 
     def bdev_raid_add_base_bdev(self, raid_bdev, base_bdev):
         params = {
