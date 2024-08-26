@@ -26,15 +26,21 @@ def main():
     tests = get_all_tests()
 
     # File to store failed test cases for the specific branch
-    failed_cases_file = f'failed_cases_{args.branch}.json'
-    executed_cases_file = f'executed_cases_{args.branch}.json'
-    test_classes_total = [cls.__name__ for cls in tests]
+    base_dir = os.path.join(os.path.expanduser('~'), 'e2e_test_runs_fail_unexec_json')
+    if not os.path.exists(base_dir):
+        os.makedirs(base_dir)
+    failed_cases_file = os.path.join(base_dir,
+                                     f'failed_cases_{args.branch}.json')
+    executed_cases_file = os.path.join(base_dir,
+                                       f'executed_cases_{args.branch}.json')
 
     logger.info(f"Failed only: {args.failed_only}")
     logger.info(f"Unexecuted only: {args.unexecuted_only}")
     logger.info(f"Failed case file: {failed_cases_file}")
     logger.info(f"File exists: {os.path.exists(failed_cases_file)}")
-    logger.info(f"Current dir: {os.getcwd()}")
+
+    onlyfiles = [f for f in os.listdir(base_dir) if os.path.isfile(os.path.join(base_dir, f))]
+    logger.info(f"List of files: {onlyfiles}")
 
     # Load previously failed cases if '--failed_only' is set
     if args.failed_only and os.path.exists(failed_cases_file):
