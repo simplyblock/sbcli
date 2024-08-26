@@ -56,7 +56,7 @@ def main():
         with open(executed_cases_file, 'r', encoding='utf-8') as file:
             executed_tests = json.load(file)
             test_class_run = [cls for cls in tests 
-                              if all(unet not in f'{cls.__name__}' for unet in failed_tests)]
+                              if all(unet not in f'{cls.__name__}' for unet in executed_tests)]
             logger.info(f"Running unexecuted cases only: {test_class_run}")
     else:
         # Run all tests or selected ones
