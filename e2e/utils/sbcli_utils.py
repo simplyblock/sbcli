@@ -241,10 +241,11 @@ class SbcliUtils:
         """
         lvol_data = dict()
         data = self.get_request(api_url="/lvol")
-        self.logger.info(f"LVOL List: {data}")
+        # self.logger.info(f"LVOL List: {data}")
         for lvol_info in data["results"]:
             lvol_data[lvol_info["lvol_name"]] = lvol_info["id"]
             self.logger.info(f"Lvol hostname: {lvol_info['hostname']}")
+        self.logger.info(f"LVOL List: {lvol_data}")
         return lvol_data
 
     def get_lvol_by_id(self, lvol_id):
@@ -255,7 +256,7 @@ class SbcliUtils:
 
     def add_lvol(self, lvol_name, pool_name, size="256M", distr_ndcs=1, distr_npcs=1,
                  distr_bs=4096, distr_chunk_bs=4096, max_rw_iops=0, max_rw_mbytes=0,
-                 max_r_mbytes=0, max_w_mbytes=0):
+                 max_r_mbytes=0, max_w_mbytes=0, host_id=None):
         """Adds lvol with given params
         """
         lvols = self.list_lvols()
@@ -279,6 +280,8 @@ class SbcliUtils:
             "distr_bs": str(distr_bs),
             "distr_chunk_bs": str(distr_chunk_bs),
         }
+        if host_id:
+            body["host_id"] = host_id
         self.post_request(api_url="/lvol", body=body)
 
     def delete_lvol(self, lvol_name):
@@ -312,7 +315,7 @@ class SbcliUtils:
         """
         lvol_id = self.get_lvol_id(lvol_name=lvol_name)
         if not lvol_id:
-            self.logger.info("Lvol does not exist. Exiting")
+            self.logger.info(f"Lvol {lvol_name} does not exist. Exiting")
             return
 
         data = self.get_request(api_url=f"/lvol/connect/{lvol_id}")
