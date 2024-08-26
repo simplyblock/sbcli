@@ -706,6 +706,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
     logger.info("Joining docker swarm...")
     cluster_docker = utils.get_docker_client(cluster_id)
     cluster_ip = cluster_docker.info()["Swarm"]["NodeAddr"]
+    fdb_connection = cluster.db_connection
     results, err = snode_api.join_swarm(
         cluster_ip=cluster_ip,
         join_token=cluster_docker.swarm.attrs['JoinTokens']['Worker'],
@@ -717,7 +718,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
         return False
 
     logger.info("Deploying SPDK")
-    results, err = snode_api.spdk_process_start(spdk_cpu_mask, spdk_mem, spdk_image, spdk_debug, cluster_ip)
+    results, err = snode_api.spdk_process_start(spdk_cpu_mask, spdk_mem, spdk_image, spdk_debug, cluster_ip, fdb_connection)
     time.sleep(10)
     if not results:
         logger.error(f"Failed to start spdk: {err}")
@@ -1155,13 +1156,14 @@ def restart_storage_node(
 
     cluster_docker = utils.get_docker_client(snode.cluster_id)
     cluster_ip = cluster_docker.info()["Swarm"]["NodeAddr"]
-    results, err = snode_api.spdk_process_start(snode.spdk_cpu_mask, spdk_mem, img, spdk_debug, cluster_ip)
+    cluster = db_controller.get_cluster_by_id(snode.cluster_id)
+    results, err = snode_api.spdk_process_start(snode.spdk_cpu_mask, spdk_mem, img, spdk_debug, cluster_ip,
+                                                cluster.db_connection)
 
     if not results:
         logger.error(f"Failed to start spdk: {err}")
         return False
     time.sleep(3)
-
 
     if small_bufsize:
         snode.iobuf_small_bufsize = small_bufsize
@@ -1226,7 +1228,6 @@ def restart_storage_node(
         logger.error("Failed to set nvme options")
         return False
 
-    cluster = db_controller.get_cluster_by_id(snode.cluster_id)
     node_info, _ = snode_api.info()
     nvme_devs = addNvmeDevices(cluster, rpc_client, node_info['spdk_pcie_list'], snode)
     if not nvme_devs:

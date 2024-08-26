@@ -427,6 +427,10 @@ def spdk_process_start():
     if 'spdk_image' in data and data['spdk_image']:
         spdk_image = data['spdk_image']
 
+    fdb_connection = ""
+    if 'fdb_connection' in data and data['fdb_connection']:
+        fdb_connection = data['fdb_connection']
+
     if _is_pod_up():
         logger.info("SPDK deployment found, removing...")
         spdk_process_kill()
@@ -448,6 +452,7 @@ def spdk_process_start():
             'RPC_PASSWORD': data['rpc_password'],
             'HOSTNAME': node_name,
             'NAMESPACE': namespace,
+            'FDB_CONNECTION': fdb_connection,
         }
         dep = yaml.safe_load(template.render(values))
         logger.debug(dep)
