@@ -129,11 +129,11 @@ def get_active_node_mig_task(cluster_id, node_id):
 
 
 def add_device_failed_mig_task(device_id):
-    # device = db_controller.get_storage_devices(device_id)
-    # for node in db_controller.get_storage_nodes_by_cluster_id(device.cluster_id):
-    #     for lvol_id in node.lvols:
-    #         _add_task(JobSchedule.FN_FAILED_DEV_MIG, device.cluster_id, node.get_id(), device.get_id(),
-    #                   max_retry=0, function_params={'lvol_id': lvol_id})
+    device = db_controller.get_storage_devices(device_id)
+    for node in db_controller.get_storage_nodes_by_cluster_id(device.cluster_id):
+        for lvol_id in node.lvols:
+            _add_task(JobSchedule.FN_FAILED_DEV_MIG, device.cluster_id, node.get_id(), device.get_id(),
+                      max_retry=0, function_params={'lvol_id': lvol_id})
     return True
 
 
