@@ -23,6 +23,15 @@ spec:
         - name: host-sys
           hostPath:
             path: /sys
+        - name: host-proc
+          hostPath:
+            path: /proc
+        - name: host-rootfs
+          hostPath:
+            path: /
+        - name: foundationdb
+          hostPath:
+            path: /etc/foundationdb
         - name: host-modules
           hostPath:
             path: /lib/modules
@@ -41,27 +50,28 @@ spec:
         - effect: NoSchedule
           key: dedicated
           operator: Equal
-          value: simplyblock
-{#      initContainers:#}
-{#        - name: copy-script#}
-{#          image: busybox#}
-{#          command: ["sh", "-c", "cp /config/restart_script.py /script/restart_script.py"]#}
-{#          volumeMounts:#}
+          value: simplyblock-storage-plane
+
+      initContainers:
+        - name: copy-script
+          image: busybox
+          command: ["sh", "-c", "echo \"{{ FDB_CONNECTION }}\" > /etc/foundationdb/fdb.cluster"]
+          volumeMounts:
 {#            - name: script-volume#}
 {#              mountPath: /script#}
-{#            - name: script-config#}
-{#              mountPath: /config#}
+            - name: foundationdb
+              mountPath: /etc/foundationdb
 
       containers:
 
       - name: spdk-container
         image: {{ SPDK_IMAGE }}
         imagePullPolicy: "Always"
-        command: ["/root/scripts/run_spdk_tgt.sh", "{{ SPDK_CPU_MASK }}", "{{ SPDK_MEM }}"]
-        lifecycle:
-          postStart:
-            exec:
-              command: ["/usr/bin/python3", "/script/restart_script.py"]
+        command: ["/root/scripts/run_distr.sh", "{{ SPDK_CPU_MASK }}", "{{ SPDK_MEM }}"]
+{#        lifecycle:#}
+{#          postStart:#}
+{#            exec:#}
+{#              command: ["/usr/bin/python3", "/script/restart_script.py"]#}
         env:
           - name: SPDKCSI_SECRET
             valueFrom:
@@ -110,42 +120,32 @@ spec:
         - name: RPC_PASSWORD
           value: "{{ RPC_PASSWORD }}"
 
+      - name: node-exporter
+        image: prom/node-exporter:v1.7.0
+        user: root
+        command:
+          - '--path.procfs=/host/proc'
+          - '--path.sysfs=/host/sys'
+          - '--path.rootfs=/host'
+          - '--collector.filesystem.ignored-mount-points="^(/rootfs|/host|)/(sys|proc|dev|host|etc)($$|/)"'
+          - '--collector.filesystem.ignored-fs-types="^(sys|proc|auto|cgroup|devpts|ns|au|fuse\.lxc|mqueue)(fs|)$$"'
+          - '--no-collector.ipvs'
+        volumeMounts:
+        - name: host-sys
+          mountPath: /host/sys
+          readOnly: true
+        - name: host-proc
+          mountPath: /host/proc
+          readOnly: true
+        - name: host-rootfs
+          mountPath: /rootfs
+          readOnly: true
 
-
-
-
-
-
-  DistrEventCollector:
-    image: $SIMPLYBLOCK_DOCKER_IMAGE
-    command: "python simplyblock_core/services/distr_event_collector.py"
-    networks:
-      - hostnet
-    deploy:
-      mode: global
-      placement:
-        constraints: [node.role == worker]
-    volumes:
-      - "/etc/foundationdb:/etc/foundationdb"
-
-
-
-  node-exporter:
-    image: prom/node-exporter:v1.7.0
-    user: root
-    volumes:
-      - /proc:/host/proc:ro
-      - /sys:/host/sys:ro
-      - /:/rootfs:ro
-    command:
-      - '--path.procfs=/host/proc'
-      - '--path.sysfs=/host/sys'
-      - '--path.rootfs=/host'
-      - '--collector.filesystem.ignored-mount-points="^(/rootfs|/host|)/(sys|proc|dev|host|etc)($$|/)"'
-      - '--collector.filesystem.ignored-fs-types="^(sys|proc|auto|cgroup|devpts|ns|au|fuse\.lxc|mqueue)(fs|)$$"'
-      - '--no-collector.ipvs'
-    restart: "always"
-    deploy:
-      mode: global
-    networks:
-      - monitoring-net
+      - name: distr-event-collector
+        image: {{ SIMPLYBLOCK_DOCKER_IMAGE }}
+        imagePullPolicy: "Always"
+        command: ["python", "simplyblock_core/services/distr_event_collector.py"]
+        volumeMounts:
+        - name: foundationdb
+          mountPath: /etc/foundationdb
+          readOnly: true

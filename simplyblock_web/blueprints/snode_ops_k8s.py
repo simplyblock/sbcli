@@ -4,6 +4,7 @@ import logging
 import math
 import os
 import time
+import traceback
 
 import cpuinfo
 import requests
@@ -11,6 +12,8 @@ from flask import Blueprint
 from flask import request
 from kubernetes import client, config
 from kubernetes.client import ApiException
+from jinja2 import Environment, FileSystemLoader
+import yaml
 
 from simplyblock_web import utils, node_utils
 from simplyblock_core import scripts, constants, shell_utils
@@ -32,7 +35,7 @@ config.load_incluster_config()
 k8s_apps_v1 = client.AppsV1Api()
 k8s_core_v1 = client.CoreV1Api()
 
-# TOP_DIR = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+TOP_DIR = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 # spdk_deploy_yaml = os.path.join(TOP_DIR, 'static/deploy_spdk.yaml')
 
 
@@ -97,100 +100,100 @@ def scan_devices():
     }
     return utils.get_response(out)
 
-
-@bp.route('/spdk_process_start', methods=['POST'])
-def spdk_process_start():
-    try:
-        data = request.get_json()
-    except:
-        data = {}
-
-    set_debug = None
-    if 'spdk_debug' in data and data['spdk_debug']:
-        set_debug = data['spdk_debug']
-
-    spdk_cpu_mask = None
-    if 'spdk_cpu_mask' in data:
-        spdk_cpu_mask = data['spdk_cpu_mask']
-
-    spdk_mem = None
-    if 'spdk_mem' in data:
-        spdk_mem = data['spdk_mem']
-
-    if spdk_mem:
-        spdk_mem = int(utils.parse_size(spdk_mem) / (1000 * 1000))
-    else:
-        spdk_mem = 4000
-
-    node_docker = get_docker_client()
-    nodes = node_docker.containers.list(all=True)
-    for node in nodes:
-        if node.attrs["Name"] in ["/spdk", "/spdk_proxy"]:
-            logger.info(f"{node.attrs['Name']} container found, removing...")
-            node.stop()
-            node.remove(force=True)
-            time.sleep(2)
-
-    spdk_debug = ""
-    if set_debug:
-        spdk_debug = "1"
-
-    spdk_image = constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE
-    if 'spdk_image' in data and data['spdk_image']:
-        spdk_image = data['spdk_image']
-        # node_docker.images.pull(spdk_image)
-
-    if "cluster_ip" in data and data['cluster_ip']:
-        cluster_ip = data['cluster_ip']
-        log_config = LogConfig(type=LogConfig.types.GELF, config={"gelf-address": f"udp://{cluster_ip}:12201"})
-    else:
-        log_config = LogConfig(type=LogConfig.types.JOURNALD)
-
-    container = node_docker.containers.run(
-        spdk_image,
-        f"/root/scripts/run_distr.sh {spdk_cpu_mask} {spdk_mem} {spdk_debug}",
-        name="spdk",
-        detach=True,
-        privileged=True,
-        network_mode="host",
-        log_config=log_config,
-        volumes=[
-            '/etc/simplyblock:/etc/simplyblock',
-            '/var/tmp:/var/tmp',
-            '/dev:/dev',
-            '/lib/modules/:/lib/modules/',
-            '/var/lib/systemd/coredump/:/var/lib/systemd/coredump/',
-            '/sys:/sys'],
-        # restart_policy={"Name": "on-failure", "MaximumRetryCount": 99}
-    )
-    container2 = node_docker.containers.run(
-        constants.SIMPLY_BLOCK_SPDK_CORE_IMAGE,
-        "python /root/scripts/spdk_http_proxy.py",
-        name="spdk_proxy",
-        detach=True,
-        network_mode="host",
-        log_config=log_config,
-        volumes=[
-            '/var/tmp:/var/tmp',
-            '/etc/foundationdb:/etc/foundationdb'],
-        restart_policy={"Name": "always"}
-    )
-    retries = 10
-    while retries > 0:
-        info = node_docker.containers.get(container.attrs['Id'])
-        status = info.attrs['State']["Status"]
-        is_running = info.attrs['State']["Running"]
-        if not is_running:
-            logger.info("Container is not running, waiting...")
-            time.sleep(3)
-            retries -= 1
-        else:
-            logger.info(f"Container status: {status}, Is Running: {is_running}")
-            return utils.get_response(True)
-
-    return utils.get_response(
-        False, f"Container create max retries reached, Container status: {status}, Is Running: {is_running}")
-
+#
+# @bp.route('/spdk_process_start', methods=['POST'])
+# def spdk_process_start():
+#     try:
+#         data = request.get_json()
+#     except:
+#         data = {}
+#
+#     set_debug = None
+#     if 'spdk_debug' in data and data['spdk_debug']:
+#         set_debug = data['spdk_debug']
+#
+#     spdk_cpu_mask = None
+#     if 'spdk_cpu_mask' in data:
+#         spdk_cpu_mask = data['spdk_cpu_mask']
+#
+#     spdk_mem = None
+#     if 'spdk_mem' in data:
+#         spdk_mem = data['spdk_mem']
+#
+#     if spdk_mem:
+#         spdk_mem = int(utils.parse_size(spdk_mem) / (1000 * 1000))
+#     else:
+#         spdk_mem = 4000
+#
+#     node_docker = get_docker_client()
+#     nodes = node_docker.containers.list(all=True)
+#     for node in nodes:
+#         if node.attrs["Name"] in ["/spdk", "/spdk_proxy"]:
+#             logger.info(f"{node.attrs['Name']} container found, removing...")
+#             node.stop()
+#             node.remove(force=True)
+#             time.sleep(2)
+#
+#     spdk_debug = ""
+#     if set_debug:
+#         spdk_debug = "1"
+#
+#     spdk_image = constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE
+#     if 'spdk_image' in data and data['spdk_image']:
+#         spdk_image = data['spdk_image']
+#         # node_docker.images.pull(spdk_image)
+#
+#     if "cluster_ip" in data and data['cluster_ip']:
+#         cluster_ip = data['cluster_ip']
+#         log_config = LogConfig(type=LogConfig.types.GELF, config={"gelf-address": f"udp://{cluster_ip}:12201"})
+#     else:
+#         log_config = LogConfig(type=LogConfig.types.JOURNALD)
+#
+#     container = node_docker.containers.run(
+#         spdk_image,
+#         f"/root/scripts/run_distr.sh {spdk_cpu_mask} {spdk_mem} {spdk_debug}",
+#         name="spdk",
+#         detach=True,
+#         privileged=True,
+#         network_mode="host",
+#         log_config=log_config,
+#         volumes=[
+#             '/etc/simplyblock:/etc/simplyblock',
+#             '/var/tmp:/var/tmp',
+#             '/dev:/dev',
+#             '/lib/modules/:/lib/modules/',
+#             '/var/lib/systemd/coredump/:/var/lib/systemd/coredump/',
+#             '/sys:/sys'],
+#         # restart_policy={"Name": "on-failure", "MaximumRetryCount": 99}
+#     )
+#     container2 = node_docker.containers.run(
+#         constants.SIMPLY_BLOCK_SPDK_CORE_IMAGE,
+#         "python /root/scripts/spdk_http_proxy.py",
+#         name="spdk_proxy",
+#         detach=True,
+#         network_mode="host",
+#         log_config=log_config,
+#         volumes=[
+#             '/var/tmp:/var/tmp',
+#             '/etc/foundationdb:/etc/foundationdb'],
+#         restart_policy={"Name": "always"}
+#     )
+#     retries = 10
+#     while retries > 0:
+#         info = node_docker.containers.get(container.attrs['Id'])
+#         status = info.attrs['State']["Status"]
+#         is_running = info.attrs['State']["Running"]
+#         if not is_running:
+#             logger.info("Container is not running, waiting...")
+#             time.sleep(3)
+#             retries -= 1
+#         else:
+#             logger.info(f"Container status: {status}, Is Running: {is_running}")
+#             return utils.get_response(True)
+#
+#     return utils.get_response(
+#         False, f"Container create max retries reached, Container status: {status}, Is Running: {is_running}")
+#
 
 def get_cluster_id():
     out, _, _ = node_utils.run_command(f"cat {cluster_id_file}")
@@ -238,52 +241,52 @@ def get_info():
 
 @bp.route('/join_swarm', methods=['POST'])
 def join_swarm():
-    data = request.get_json()
-    cluster_ip = data['cluster_ip']
-    cluster_id = data['cluster_id']
-    join_token = data['join_token']
-    db_connection = data['db_connection']
-
-    logger.info("Setting DB connection")
-    scripts.set_db_config(db_connection)
-    set_cluster_id(cluster_id)
-
-    logger.info("Joining Swarm")
-    node_docker = get_docker_client()
-    if node_docker.info()["Swarm"]["LocalNodeState"] == "active":
-        logger.info("Node is part of another swarm, leaving swarm")
-        node_docker.swarm.leave(force=True)
-        time.sleep(2)
-    node_docker.swarm.join([f"{cluster_ip}:2377"], join_token)
-    retries = 10
-    while retries > 0:
-        if node_docker.info()["Swarm"]["LocalNodeState"] == "active":
-            break
-        logger.info("Waiting for node to be active...")
-        retries -= 1
-        time.sleep(1)
-    logger.info("Joining docker swarm > Done")
-
-    try:
-        nodes = node_docker.containers.list(all=True)
-        for node in nodes:
-            if node.attrs["Name"] == "/spdk_proxy":
-                node_docker.containers.get(node.attrs["Id"]).restart()
-                break
-    except:
-        pass
+    # data = request.get_json()
+    # cluster_ip = data['cluster_ip']
+    # cluster_id = data['cluster_id']
+    # join_token = data['join_token']
+    # db_connection = data['db_connection']
+    #
+    # logger.info("Setting DB connection")
+    # scripts.set_db_config(db_connection)
+    # set_cluster_id(cluster_id)
+    #
+    # logger.info("Joining Swarm")
+    # node_docker = get_docker_client()
+    # if node_docker.info()["Swarm"]["LocalNodeState"] == "active":
+    #     logger.info("Node is part of another swarm, leaving swarm")
+    #     node_docker.swarm.leave(force=True)
+    #     time.sleep(2)
+    # node_docker.swarm.join([f"{cluster_ip}:2377"], join_token)
+    # retries = 10
+    # while retries > 0:
+    #     if node_docker.info()["Swarm"]["LocalNodeState"] == "active":
+    #         break
+    #     logger.info("Waiting for node to be active...")
+    #     retries -= 1
+    #     time.sleep(1)
+    # logger.info("Joining docker swarm > Done")
+    #
+    # try:
+    #     nodes = node_docker.containers.list(all=True)
+    #     for node in nodes:
+    #         if node.attrs["Name"] == "/spdk_proxy":
+    #             node_docker.containers.get(node.attrs["Id"]).restart()
+    #             break
+    # except:
+    #     pass
 
     return utils.get_response(True)
 
 
 @bp.route('/leave_swarm', methods=['GET'])
 def leave_swarm():
-    delete_cluster_id()
-    try:
-        node_docker = get_docker_client()
-        node_docker.swarm.leave(force=True)
-    except:
-        pass
+    # delete_cluster_id()
+    # try:
+    #     node_docker = get_docker_client()
+    #     node_docker.swarm.leave(force=True)
+    # except:
+    #     pass
     return utils.get_response(True)
 
 
@@ -417,9 +420,9 @@ def spdk_process_start():
 
     spdk_mem_gega = int(spdk_mem / 1024)
 
-    spdk_image = constants.SIMPLY_BLOCK_SPDK_CORE_IMAGE
-    if node_utils.get_host_arch() == "aarch64":
-        spdk_image = constants.SIMPLY_BLOCK_SPDK_CORE_IMAGE_ARM64
+    spdk_image = constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE
+    # if node_utils.get_host_arch() == "aarch64":
+    #     spdk_image = constants.SIMPLY_BLOCK_SPDK_CORE_IMAGE_ARM64
 
     if 'spdk_image' in data and data['spdk_image']:
         spdk_image = data['spdk_image']
@@ -433,7 +436,7 @@ def spdk_process_start():
 
     try:
         env = Environment(loader=FileSystemLoader(os.path.join(TOP_DIR, 'templates')), trim_blocks=True, lstrip_blocks=True)
-        template = env.get_template('caching_deploy_spdk.yaml.j2')
+        template = env.get_template('storage_deploy_spdk.yaml.j2')
         values = {
             'SPDK_IMAGE': spdk_image,
             'SPDK_CPU_MASK': spdk_cpu_mask,
