@@ -2,7 +2,7 @@
 
 # Variables
 POOL_NAME="lvol_test_pool"
-LVOL_NAME="lvol_2_1"
+LVOL_NAME="lvol_1_1"
 LVOL_SIZE="250G"
 FS_TYPE="ext4" # Can be changed to xfs or mixed as needed
 MOUNT_DIR="/mnt"
@@ -35,7 +35,7 @@ create_pool() {
 create_lvol() {
     lvol_name=$1
     log $LINENO "Creating logical volume: $lvol_name with configuration 2+1"
-    sbcli-lvol lvol add --distr-ndcs 2 --distr-npcs 1 --max-size $LVOL_SIZE $lvol_name $LVOL_SIZE $POOL_NAME
+    sbcli-lvol lvol add --max-size $LVOL_SIZE $lvol_name $LVOL_SIZE $POOL_NAME
 }
 
 connect_lvol() {

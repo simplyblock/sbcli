@@ -2,7 +2,7 @@
 
 # Variables
 POOL_NAME="snap_test_pool"
-LVOL_NAME="lvol_2_1"
+LVOL_NAME="lvol_1_1"
 LVOL_SIZE="250G"
 FS_TYPE="ext4" # Can be changed to xfs or mixed as needed
 MOUNT_DIR="/mnt"
@@ -32,7 +32,7 @@ create_pool() {
 
 create_lvol() {
     log $LINENO "Creating logical volume: $LVOL_NAME with configuration 2+1 and snapshot capability"
-    sbcli-lvol lvol add --distr-ndcs 2 --distr-npcs 1 --max-size $LVOL_SIZE --snapshot $LVOL_NAME $LVOL_SIZE $POOL_NAME
+    sbcli-lvol lvol add --max-size $LVOL_SIZE --snapshot $LVOL_NAME $LVOL_SIZE $POOL_NAME
 }
 
 connect_lvol() {

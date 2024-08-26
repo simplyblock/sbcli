@@ -254,8 +254,10 @@ class SbcliUtils:
         data = self.get_request(api_url=f"/lvol/{lvol_id}")
         return data
 
-    def add_lvol(self, lvol_name, pool_name, size="256M", distr_ndcs=1, distr_npcs=1,
-                 distr_bs=4096, distr_chunk_bs=4096, max_rw_iops=0, max_rw_mbytes=0,
+    # def add_lvol(self, lvol_name, pool_name, size="256M", distr_ndcs=1, distr_npcs=1,
+    #              distr_bs=4096, distr_chunk_bs=4096, max_rw_iops=0, max_rw_mbytes=0,
+    #              max_r_mbytes=0, max_w_mbytes=0, host_id=None):
+    def add_lvol(self, lvol_name, pool_name, size="256M", max_rw_iops=0, max_rw_mbytes=0,
                  max_r_mbytes=0, max_w_mbytes=0, host_id=None):
         """Adds lvol with given params
         """
@@ -275,10 +277,10 @@ class SbcliUtils:
             "max_rw_mbytes": str(max_rw_mbytes),
             "max_r_mbytes": str(max_r_mbytes),
             "max_w_mbytes": str(max_w_mbytes),
-            "distr_ndcs": str(distr_ndcs),
-            "distr_npcs": str(distr_npcs),
-            "distr_bs": str(distr_bs),
-            "distr_chunk_bs": str(distr_chunk_bs),
+            # "distr_ndcs": str(distr_ndcs),
+            # "distr_npcs": str(distr_npcs),
+            # "distr_bs": str(distr_bs),
+            # "distr_chunk_bs": str(distr_chunk_bs),
         }
         if host_id:
             body["host_id"] = host_id

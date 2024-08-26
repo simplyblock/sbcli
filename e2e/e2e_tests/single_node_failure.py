@@ -59,8 +59,8 @@ class TestSingleNodeFailure(TestClusterBase):
             lvol_name=self.lvol_name,
             pool_name=self.pool_name,
             size="800M",
-            distr_ndcs=2,
-            distr_npcs=1
+            # distr_ndcs=2,
+            # distr_npcs=1
         )
         lvols = self.sbcli_utils.list_lvols()
         assert self.lvol_name in list(lvols.keys()), \

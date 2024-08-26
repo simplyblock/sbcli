@@ -42,8 +42,8 @@ class TestSnapshotBatchCloneLVOLs(TestClusterBase):
             lvol_name=lvol_name,
             pool_name=self.pool_name,
             size=self.lvol_size,
-            distr_ndcs=2,
-            distr_npcs=1
+            # distr_ndcs=2,
+            # distr_npcs=1
         )
 
         lvol_id = self.sbcli_utils.get_lvol_id(lvol_name=lvol_name)

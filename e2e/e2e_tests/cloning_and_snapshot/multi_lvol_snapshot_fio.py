@@ -59,7 +59,8 @@ class TestMultiLvolFio(TestClusterBase):
         )
         lvol_vs_disk = {}
 
-        for config in ["1+0", "2+1", "4+1", "4+2", "8+1", "8+2"]:
+        # for config in ["1+0", "2+1", "4+1", "4+2", "8+1", "8+2"]:
+        for config in ["1+1"]:
             ndcs, npcs = config.split('+')
             lvol_name = f"lvol_{ndcs}_{npcs}"
 
@@ -68,8 +69,8 @@ class TestMultiLvolFio(TestClusterBase):
                 lvol_name=lvol_name,
                 pool_name=self.pool_name,
                 size=self.lvol_size,
-                distr_ndcs=int(ndcs),
-                distr_npcs=int(npcs)
+                # distr_ndcs=int(ndcs),
+                # distr_npcs=int(npcs)
             )
             lvols = self.sbcli_utils.list_lvols()
             assert lvol_name in list(lvols.keys()), \

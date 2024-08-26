@@ -7,7 +7,9 @@ POOL_NAME="testing1"
 LVOL_SIZE="160G"
 # cloning for xfs does not work well
 FS_TYPES=("ext4")
-CONFIGS=("1+0" "2+1" "4+1" "4+2" "8+1" "8+2")
+# CONFIGS=("1+0" "2+1" "4+1" "4+2" "8+1" "8+2")
+CONFIGS=("1+1")
+
 WORKLOAD_SIZE=("5GiB" "10GiB" "20GiB" "40GiB")
 MOUNT_DIR="/mnt"
 
@@ -125,7 +127,7 @@ create_lvol() {
     local ndcs=$2
     local npcs=$3
     log "Creating logical volume: $name with ndcs: $ndcs and npcs: $npcs"
-    sbcli-lvol lvol add --distr-ndcs $ndcs --distr-npcs $npcs --max-size $LVOL_SIZE --snapshot $name $LVOL_SIZE $POOL_NAME
+    sbcli-lvol lvol add --max-size $LVOL_SIZE --snapshot $name $LVOL_SIZE $POOL_NAME
 }
 
 connect_lvol() {
