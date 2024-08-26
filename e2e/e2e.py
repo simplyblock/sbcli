@@ -117,8 +117,12 @@ def main():
             os.remove(failed_cases_file)  # Clear file if all tests passed
 
     # Save executed cases for next run
-    with open(executed_cases_file, 'w') as file:
-        json.dump(executed_tests, file)
+    if executed_tests:
+        with open(executed_cases_file, 'w') as file:
+            json.dump(executed_tests, file)
+    else:
+        if os.path.exists(executed_cases_file):
+            os.remove(executed_cases_file)  # Clear file if no tests executed the run
 
     logger.info(f"Number of Total Cases: {len(test_class_run)}")
     logger.info(f"Number of Passed Cases: {len(test_class_run) - len(failed_cases)}")
