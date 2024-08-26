@@ -700,10 +700,10 @@ class RPCClient:
         }
         return self._request("distr_migration_to_primary_start", params)
 
-    def distr_migration_status(self, vuid=None):
-        params = {}
-        if vuid is not None:
-            params["vuid"] = vuid
+    def distr_migration_status(self, name, storage_ID=None):
+        params = {"name": name}
+        if storage_ID:
+            params["storage_ID"] = storage_ID
         return self._request("distr_migration_status", params)
 
     def distr_migration_failure_start(self, name, storage_ID):
