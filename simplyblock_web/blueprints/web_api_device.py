@@ -61,15 +61,16 @@ def device_capacity(uuid, history):
 @bp.route('/device/iostats/<string:uuid>/history/<string:history>', methods=['GET'])
 @bp.route('/device/iostats/<string:uuid>', methods=['GET'], defaults={'history': None})
 def device_iostats(uuid, history):
-    devices = db_controller.get_storage_device_by_id(uuid)
-    if not devices:
+    device = db_controller.get_storage_device_by_id(uuid)
+    if not device:
         return utils.get_response_error(f"devices not found: {uuid}", 404)
 
     data = device_controller.get_device_iostats(uuid, history, parse_sizes=False)
-    if data:
-        return utils.get_response(data)
-    else:
-        return utils.get_response(False)
+    ret = {
+        "object_data": device.get_clean_dict(),
+        "stats": data or []
+    }
+    return utils.get_response(ret)
 
 
 @bp.route('/device/reset/<string:uuid>', methods=['GET'])
