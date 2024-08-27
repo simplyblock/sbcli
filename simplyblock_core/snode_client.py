@@ -111,8 +111,8 @@ class SNodeClient:
     def make_gpt_partitions(self, nbd_device, jm_percent, num_partitions):
         params = {
             "nbd_device": nbd_device,
-            "jm_percent": str(jm_percent),
-            "num_partitions": str(num_partitions),
+            "jm_percent": int(jm_percent),
+            "num_partitions": int(num_partitions),
         }
         return self._request("POST", "make_gpt_partitions", params)
 

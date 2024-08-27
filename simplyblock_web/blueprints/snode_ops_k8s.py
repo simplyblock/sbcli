@@ -293,7 +293,7 @@ def leave_swarm():
 @bp.route('/make_gpt_partitions', methods=['POST'])
 def make_gpt_partitions_for_nbd():
     nbd_device = '/dev/nbd0'
-    jm_percent = '3'
+    jm_percent = 3
     num_partitions = 1
 
     try:
