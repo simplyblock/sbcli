@@ -65,8 +65,7 @@ def task_runner(task):
             return False
 
         task.function_params['migration'] = {
-            "name": lvol.base_bdev,
-            "storage_ID":  device.cluster_device_order
+            "name": lvol.base_bdev
         }
         task.write_to_db(db_controller.kv_store)
         time.sleep(3)
