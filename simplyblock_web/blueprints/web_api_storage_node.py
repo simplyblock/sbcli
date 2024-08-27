@@ -196,10 +196,38 @@ def storage_node_add():
         data_nics = req_data['data_nics']
         data_nics = data_nics.split(",")
 
+    namespace = "default"
+    if 'namespace' in req_data:
+        namespace = req_data['namespace']
+
+    jm_percent = 0
+    if 'jm_percent' in req_data:
+        jm_percent = req_data['jm_percent']
+
+    partitions = 0
+    if 'partitions' in req_data:
+        partitions = req_data['partitions']
+
+    number_of_devices = 0
+    if 'number_of_devices' in req_data:
+        number_of_devices = req_data['number_of_devices']
+
+    iobuf_small_pool_count = 0
+    if 'iobuf_small_pool_count' in req_data:
+        iobuf_small_pool_count = req_data['iobuf_small_pool_count']
+
+    iobuf_large_pool_count = 0
+    if 'iobuf_large_pool_count' in req_data:
+        iobuf_large_pool_count = req_data['iobuf_large_pool_count']
+
     try:
         out = storage_node_ops.add_node(
             cluster_id, node_ip, ifname, data_nics, max_lvol, max_snap, max_prov,
-            spdk_image=spdk_image, spdk_debug=spdk_debug)
+            spdk_image=spdk_image, spdk_debug=spdk_debug, namespace=namespace, jm_percent=jm_percent,
+            num_partitions_per_dev=partitions, number_of_devices=number_of_devices, small_bufsize=iobuf_small_pool_count,
+            large_bufsize=iobuf_large_pool_count
+        )
+
         return utils.get_response(out)
     except Exception as e:
         return utils.get_response(False, str(e))

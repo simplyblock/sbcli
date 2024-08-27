@@ -588,7 +588,7 @@ def _connect_to_remote_devs(this_node):
 def add_node(cluster_id, node_ip, iface_name, data_nics_list,
              max_lvol, max_snap, max_prov, spdk_image=None, spdk_debug=False,
              small_bufsize=0, large_bufsize=0,
-             num_partitions_per_dev=0, jm_percent=0, number_of_devices=0, enable_test_device=False):
+             num_partitions_per_dev=0, jm_percent=0, number_of_devices=0, enable_test_device=False, namespace=None):
     db_controller = DBController()
     kv_store = db_controller.kv_store
 
@@ -718,10 +718,15 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
         logger.error(f"Failed to Join docker swarm: {err}")
         return False
 
+    rpc_user, rpc_pass = utils.generate_rpc_user_and_pass()
+    mgmt_ip = node_info['network_interface'][iface_name]['ip']
+
     logger.info("Deploying SPDK")
     results = None
     try:
-        results, err = snode_api.spdk_process_start(spdk_cpu_mask, spdk_mem, spdk_image, spdk_debug, cluster_ip, fdb_connection)
+        results, err = snode_api.spdk_process_start(
+            spdk_cpu_mask, spdk_mem, spdk_image, spdk_debug, cluster_ip, fdb_connection,
+            namespace, mgmt_ip, constants.RPC_HTTP_PROXY_PORT, rpc_user, rpc_pass)
     except Exception as e:
         logger.error(e)
         return False
@@ -744,7 +749,6 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
                 'net_type': device['net_type']}))
 
     hostname = node_info['hostname']
-    rpc_user, rpc_pass = utils.generate_rpc_user_and_pass()
     BASE_NQN = cluster.nqn.split(":")[0]
     subsystem_nqn = f"{BASE_NQN}:{hostname}"
     # creating storage node object
@@ -762,7 +766,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
     snode.host_nqn = subsystem_nqn
     snode.subsystem = subsystem_nqn
     snode.data_nics = data_nics
-    snode.mgmt_ip = node_info['network_interface'][iface_name]['ip']
+    snode.mgmt_ip = mgmt_ip
     snode.rpc_port = constants.RPC_HTTP_PROXY_PORT
     snode.rpc_username = rpc_user
     snode.rpc_password = rpc_pass
