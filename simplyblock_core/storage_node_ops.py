@@ -682,6 +682,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
     # Calculate minimum huge page memory
     minimum_hp_memory = utils.calculate_minimum_hp_memory(small_pool_count, large_pool_count, max_lvol, max_snap, cpu_count)
 
+    max_prov = int(utils.parse_size(max_prov))
     # Calculate minimum sys memory
     minimum_sys_memory = utils.calculate_minimum_sys_memory(max_prov)
 
