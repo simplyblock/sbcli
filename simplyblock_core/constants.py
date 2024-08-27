@@ -79,6 +79,7 @@ INSTANCE_STORAGE_DATA = {
         'i4i.16xlarge': {'number_of_devices': 4, 'size_per_device_gb': 3750},
         'i4i.24xlarge': {'number_of_devices': 6, 'size_per_device_gb': 3750},
         'i4i.32xlarge': {'number_of_devices': 8, 'size_per_device_gb': 3750},
+
         'i4i.metal': {'number_of_devices': 8, 'size_per_device_gb': 3750},
         'i3en.large': {'number_of_devices': 1, 'size_per_device_gb': 1250},
         'i3en.xlarge': {'number_of_devices': 1, 'size_per_device_gb': 2500},
@@ -88,4 +89,10 @@ INSTANCE_STORAGE_DATA = {
         'i3en.12xlarge': {'number_of_devices': 4, 'size_per_device_gb': 7500},
         'i3en.24xlarge': {'number_of_devices': 8, 'size_per_device_gb': 7500},
         'i3en.metal': {'number_of_devices': 8, 'size_per_device_gb': 7500},
+
+        'm6id.large': {'number_of_devices': 1, 'size_per_device_gb': 116},
+        'm6id.xlarge': {'number_of_devices': 1, 'size_per_device_gb': 237},
+        'm6id.2xlarge': {'number_of_devices': 1, 'size_per_device_gb': 474},
+        'm6id.4xlarge': {'number_of_devices': 1, 'size_per_device_gb': 950},
+        'm6id.8xlarge': {'number_of_devices': 1, 'size_per_device_gb': 1900},
     }
