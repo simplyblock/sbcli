@@ -198,7 +198,7 @@ services:
       - monitoring-net
 
   grafana:
-    image: grafana/grafana:10.0.12
+    image: grafana/grafana:10.3.7
     environment:
       GF_SECURITY_ADMIN_USER: "admin"
       GF_SECURITY_ADMIN_PASSWORD: "${CLUSTER_SECRET}"
