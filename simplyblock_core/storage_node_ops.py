@@ -718,7 +718,13 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
         return False
 
     logger.info("Deploying SPDK")
-    results, err = snode_api.spdk_process_start(spdk_cpu_mask, spdk_mem, spdk_image, spdk_debug, cluster_ip, fdb_connection)
+    results = None
+    try:
+        results, err = snode_api.spdk_process_start(spdk_cpu_mask, spdk_mem, spdk_image, spdk_debug, cluster_ip, fdb_connection)
+    except Exception as e:
+        logger.error(e)
+        return False
+
     time.sleep(10)
     if not results:
         logger.error(f"Failed to start spdk: {err}")
