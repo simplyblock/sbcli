@@ -202,7 +202,7 @@ def storage_node_add():
 
     jm_percent = 0
     if 'jm_percent' in req_data:
-        jm_percent = req_data['jm_percent']
+        jm_percent = int(req_data['jm_percent'])
 
     partitions = 0
     if 'partitions' in req_data:
