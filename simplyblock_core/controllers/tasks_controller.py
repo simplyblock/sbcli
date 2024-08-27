@@ -49,16 +49,19 @@ def _add_task(function_name, cluster_id, node_id, device_id):
 
 
 def add_device_mig_task(device_id):
-    device = db_controller.get_storage_devices(device_id)
-    return _add_task(JobSchedule.FN_DEV_MIG, device.cluster_id, device.node_id, device.get_id())
+    return True
+    # device = db_controller.get_storage_devices(device_id)
+    # return _add_task(JobSchedule.FN_DEV_MIG, device.cluster_id, device.node_id, device.get_id())
 
 
 def add_device_to_auto_restart(device):
-    return _add_task(JobSchedule.FN_DEV_RESTART, device.cluster_id, device.node_id, device.get_id())
+    return True
+    # return _add_task(JobSchedule.FN_DEV_RESTART, device.cluster_id, device.node_id, device.get_id())
 
 
 def add_node_to_auto_restart(node):
-    return _add_task(JobSchedule.FN_NODE_RESTART, node.cluster_id, node.get_id(), "")
+    return True
+    # return _add_task(JobSchedule.FN_NODE_RESTART, node.cluster_id, node.get_id(), "")
 
 
 def list_tasks(cluster_id):
