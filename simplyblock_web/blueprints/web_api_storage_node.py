@@ -179,8 +179,8 @@ def storage_node_add():
     cluster_id = req_data['cluster_id']
     node_ip = req_data['node_ip']
     ifname = req_data['ifname']
-    max_lvol = req_data['max_lvol']
-    max_snap = req_data['max_snap']
+    max_lvol = int(req_data['max_lvol'])
+    max_snap = int(req_data['max_snap'])
     max_prov = req_data['max_prov']
 
     spdk_image = None
@@ -206,19 +206,19 @@ def storage_node_add():
 
     partitions = 0
     if 'partitions' in req_data:
-        partitions = req_data['partitions']
+        partitions = int(req_data['partitions'])
 
     number_of_devices = 0
     if 'number_of_devices' in req_data:
-        number_of_devices = req_data['number_of_devices']
+        number_of_devices = int(req_data['number_of_devices'])
 
     iobuf_small_pool_count = 0
     if 'iobuf_small_pool_count' in req_data:
-        iobuf_small_pool_count = req_data['iobuf_small_pool_count']
+        iobuf_small_pool_count = int(req_data['iobuf_small_pool_count'])
 
     iobuf_large_pool_count = 0
     if 'iobuf_large_pool_count' in req_data:
-        iobuf_large_pool_count = req_data['iobuf_large_pool_count']
+        iobuf_large_pool_count = int(req_data['iobuf_large_pool_count'])
 
     try:
         out = storage_node_ops.add_node(
