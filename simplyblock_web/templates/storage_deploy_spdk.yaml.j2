@@ -43,9 +43,6 @@ spec:
             medium: HugePages
         - name: script-volume
           emptyDir: {}
-{#        - name: script-config#}
-{#          configMap:#}
-{#            name: caching-node-restart-script-cm#}
       tolerations:
         - effect: NoSchedule
           key: dedicated
@@ -57,8 +54,6 @@ spec:
           image: busybox
           command: ["sh", "-c", "echo \"{{ FDB_CONNECTION }}\" > /etc/foundationdb/fdb.cluster"]
           volumeMounts:
-{#            - name: script-volume#}
-{#              mountPath: /script#}
             - name: foundationdb
               mountPath: /etc/foundationdb
 
@@ -68,10 +63,6 @@ spec:
         image: {{ SPDK_IMAGE }}
         imagePullPolicy: "Always"
         command: ["/root/scripts/run_distr.sh", "{{ SPDK_CPU_MASK }}", "{{ SPDK_MEM }}"]
-{#        lifecycle:#}
-{#          postStart:#}
-{#            exec:#}
-{#              command: ["/usr/bin/python3", "/script/restart_script.py"]#}
         env:
           - name: SPDKCSI_SECRET
             valueFrom:
@@ -120,26 +111,26 @@ spec:
         - name: RPC_PASSWORD
           value: "{{ RPC_PASSWORD }}"
 
-      - name: node-exporter
-        image: prom/node-exporter:v1.7.0
-        user: root
-        command:
-          - '--path.procfs=/host/proc'
-          - '--path.sysfs=/host/sys'
-          - '--path.rootfs=/host'
-          - '--collector.filesystem.ignored-mount-points="^(/rootfs|/host|)/(sys|proc|dev|host|etc)($$|/)"'
-          - '--collector.filesystem.ignored-fs-types="^(sys|proc|auto|cgroup|devpts|ns|au|fuse\.lxc|mqueue)(fs|)$$"'
-          - '--no-collector.ipvs'
-        volumeMounts:
-        - name: host-sys
-          mountPath: /host/sys
-          readOnly: true
-        - name: host-proc
-          mountPath: /host/proc
-          readOnly: true
-        - name: host-rootfs
-          mountPath: /rootfs
-          readOnly: true
+{#      - name: node-exporter#}
+{#        image: prom/node-exporter:v1.7.0#}
+{#        user: root#}
+{#        command:#}
+{#          - '--path.procfs=/host/proc'#}
+{#          - '--path.sysfs=/host/sys'#}
+{#          - '--path.rootfs=/host'#}
+{#          - '--collector.filesystem.ignored-mount-points="^(/rootfs|/host|)/(sys|proc|dev|host|etc)($$|/)"'#}
+{#          - '--collector.filesystem.ignored-fs-types="^(sys|proc|auto|cgroup|devpts|ns|au|fuse\.lxc|mqueue)(fs|)$$"'#}
+{#          - '--no-collector.ipvs'#}
+{#        volumeMounts:#}
+{#        - name: host-sys#}
+{#          mountPath: /host/sys#}
+{#          readOnly: true#}
+{#        - name: host-proc#}
+{#          mountPath: /host/proc#}
+{#          readOnly: true#}
+{#        - name: host-rootfs#}
+{#          mountPath: /rootfs#}
+{#          readOnly: true#}
 
       - name: distr-event-collector
         image: {{ SIMPLYBLOCK_DOCKER_IMAGE }}
