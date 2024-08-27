@@ -453,6 +453,7 @@ def spdk_process_start():
             'HOSTNAME': node_name,
             'NAMESPACE': namespace,
             'FDB_CONNECTION': fdb_connection,
+            'SIMPLYBLOCK_DOCKER_IMAGE': constants.SIMPLY_BLOCK_DOCKER_IMAGE,
         }
         dep = yaml.safe_load(template.render(values))
         logger.debug(dep)
