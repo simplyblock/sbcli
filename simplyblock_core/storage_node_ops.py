@@ -1175,7 +1175,7 @@ def restart_storage_node(
         fdb_connection = cluster.db_connection
         results, err = snode_api.spdk_process_start(
             snode.spdk_cpu_mask, spdk_mem, spdk_image, spdk_debug, cluster_ip, fdb_connection,
-            snode.namespace, snode.mgmt_ip, constants.RPC_HTTP_PROXY_PORT, snode.rpc_user, snode.rpc_pass)
+            snode.namespace, snode.mgmt_ip, constants.RPC_HTTP_PROXY_PORT, snode.rpc_username, snode.rpc_password)
     except Exception as e:
         logger.error(e)
         return False
