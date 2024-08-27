@@ -604,10 +604,10 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
     snode_api = SNodeClient(node_ip, timeout=timeout)
     node_info, _ = snode_api.info()
     logger.info(f"Node found: {node_info['hostname']}")
-    if "cluster_id" in node_info and node_info['cluster_id']:
-        if node_info['cluster_id'] != cluster_id:
-            logger.error(f"This node is part of another cluster: {node_info['cluster_id']}")
-            return False
+    # if "cluster_id" in node_info and node_info['cluster_id']:
+    #     if node_info['cluster_id'] != cluster_id:
+    #         logger.error(f"This node is part of another cluster: {node_info['cluster_id']}")
+    #         return False
 
     cloud_instance = node_info['cloud_instance']
     """"

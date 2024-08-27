@@ -196,10 +196,10 @@ def storage_node_add():
         data_nics = req_data['data_nics']
         data_nics = data_nics.split(",")
 
-
-
-    out = storage_node_ops.add_node(
-        cluster_id, node_ip, ifname, data_nics, max_lvol, max_snap, max_prov,
-        spdk_image=spdk_image, spdk_debug=spdk_debug)
-
-    return utils.get_response(out)
+    try:
+        out = storage_node_ops.add_node(
+            cluster_id, node_ip, ifname, data_nics, max_lvol, max_snap, max_prov,
+            spdk_image=spdk_image, spdk_debug=spdk_debug)
+        return utils.get_response(out)
+    except Exception as e:
+        return utils.get_response(False, str(e))
