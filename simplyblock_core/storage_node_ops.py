@@ -762,6 +762,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
     snode.cloud_instance_type = cloud_instance['type']
     snode.cloud_instance_public_ip = cloud_instance['public_ip']
 
+    snode.namespace = namespace
     snode.hostname = hostname
     snode.host_nqn = subsystem_nqn
     snode.subsystem = subsystem_nqn
@@ -1168,8 +1169,16 @@ def restart_storage_node(
     cluster_docker = utils.get_docker_client(snode.cluster_id)
     cluster_ip = cluster_docker.info()["Swarm"]["NodeAddr"]
     cluster = db_controller.get_cluster_by_id(snode.cluster_id)
-    results, err = snode_api.spdk_process_start(snode.spdk_cpu_mask, spdk_mem, img, spdk_debug, cluster_ip,
-                                                cluster.db_connection)
+
+    results = None
+    try:
+        fdb_connection = cluster.db_connection
+        results, err = snode_api.spdk_process_start(
+            snode.spdk_cpu_mask, spdk_mem, spdk_image, spdk_debug, cluster_ip, fdb_connection,
+            snode.namespace, snode.mgmt_ip, constants.RPC_HTTP_PROXY_PORT, snode.rpc_user, snode.rpc_pass)
+    except Exception as e:
+        logger.error(e)
+        return False
 
     if not results:
         logger.error(f"Failed to start spdk: {err}")
