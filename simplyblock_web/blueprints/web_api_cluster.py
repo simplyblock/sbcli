@@ -88,8 +88,12 @@ def cluster_iostats(uuid, history):
         logger.error(f"Cluster not found {uuid}")
         return utils.get_response_error(f"Cluster not found: {uuid}", 404)
 
-    out = cluster_ops.get_iostats_history(uuid, history, parse_sizes=False)
-    return utils.get_response(out)
+    data = cluster_ops.get_iostats_history(uuid, history, parse_sizes=False)
+    ret = {
+        "object_data": cluster.get_clean_dict(),
+        "stats": data or []
+    }
+    return utils.get_response(ret)
 
 
 @bp.route('/cluster/status/<string:uuid>', methods=['GET'])

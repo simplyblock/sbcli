@@ -206,4 +206,8 @@ def pool_iostats(uuid, history):
     records_count = 20
     new_records = core_utils.process_records(out, records_count)
 
-    return utils.get_response(new_records)
+    ret = {
+        "object_data": pool.get_clean_dict(),
+        "stats": new_records or []
+    }
+    return utils.get_response(ret)

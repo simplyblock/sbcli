@@ -15,8 +15,9 @@ class Cluster(BaseModel):
     STATUS_DEGRADED = "degraded"
 
     STATUS_CODE_MAP = {
-        STATUS_ACTIVE: 0,
-        STATUS_INACTIVE: 1,
+        STATUS_ACTIVE: 1,
+        STATUS_INACTIVE: 2,
+        STATUS_READONLY: 3,
 
         STATUS_SUSPENDED: 10,
         STATUS_DEGRADED: 11,
@@ -60,6 +61,11 @@ class Cluster(BaseModel):
             return self.STATUS_CODE_MAP[self.status]
         else:
             return -1
+
+    def get_clean_dict(self):
+        data = super(Cluster, self).get_clean_dict()
+        data['status_code'] = self.get_status_code()
+        return data
 
 
 class ClusterMap(BaseModel):
