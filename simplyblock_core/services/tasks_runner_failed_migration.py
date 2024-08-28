@@ -90,7 +90,7 @@ def task_runner(task):
                 return True
 
             else:
-                task.function_result = f"Status: {migration_status}, progress:{res['progress']}"
+                task.function_result = f"Status: {migration_status}, progress:{res[0]['progress']}"
                 task.write_to_db(db_controller.kv_store)
         else:
             logger.error("Failed to get mig status")
