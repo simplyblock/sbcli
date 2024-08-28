@@ -75,7 +75,7 @@ def task_runner(task):
         mig_info = task.function_params["migration"]
         res = rpc_client.distr_migration_status(**mig_info)
         if res:
-            migration_status = res["status"]
+            migration_status = res[0]["status"]
             if migration_status == "completed":
                 task.status = JobSchedule.STATUS_DONE
                 task.function_result = migration_status
