@@ -136,8 +136,19 @@ def storage_node_shutdown(uuid):
     if not node:
         return utils.get_response_error(f"node not found: {uuid}", 404)
 
-    out = storage_node_ops.shutdown_storage_node(uuid)
-    return utils.get_response(out)
+    force = False
+    try:
+        args = request.args
+        force = bool(args.get('force', False))
+    except:
+        pass
+
+    threading.Thread(
+        target=storage_node_ops.shutdown_storage_node,
+        args=(uuid, force)
+    ).start()
+
+    return utils.get_response(True)
 
 
 @bp.route('/storagenode/restart/<string:uuid>', methods=['GET'])
@@ -220,14 +231,13 @@ def storage_node_add():
     if 'iobuf_large_pool_count' in req_data:
         iobuf_large_pool_count = int(req_data['iobuf_large_pool_count'])
 
-    try:
-        out = storage_node_ops.add_node(
+    threading.Thread(
+        target=storage_node_ops.add_node,
+        args=(
             cluster_id, node_ip, ifname, data_nics, max_lvol, max_snap, max_prov,
-            spdk_image=spdk_image, spdk_debug=spdk_debug, namespace=namespace, jm_percent=jm_percent,
-            num_partitions_per_dev=partitions, number_of_devices=number_of_devices, small_bufsize=iobuf_small_pool_count,
-            large_bufsize=iobuf_large_pool_count
+            spdk_image, spdk_debug, iobuf_small_pool_count, iobuf_large_pool_count,
+            partitions, jm_percent, number_of_devices, False, namespace
         )
+    ).start()
 
-        return utils.get_response(out)
-    except Exception as e:
-        return utils.get_response(False, str(e))
+    return utils.get_response(True)
