@@ -63,11 +63,11 @@ def storagenode_iostats(uuid, history):
         return utils.get_response_error(f"node not found: {uuid}", 404)
 
     data = storage_node_ops.get_node_iostats_history(uuid, history, parse_sizes=False)
-
-    if data:
-        return utils.get_response(data)
-    else:
-        return utils.get_response(False)
+    ret = {
+        "object_data": node.get_clean_dict(),
+        "stats": data or []
+    }
+    return utils.get_response(ret)
 
 
 @bp.route('/storagenode/port/<string:uuid>', methods=['GET'])

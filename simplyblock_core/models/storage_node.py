@@ -117,3 +117,8 @@ class StorageNode(BaseModel):
             return self.STATUS_CODE_MAP[self.status]
         else:
             return -1
+
+    def get_clean_dict(self):
+        data = super(StorageNode, self).get_clean_dict()
+        data['status_code'] = self.get_status_code()
+        return data
