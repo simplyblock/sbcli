@@ -1520,13 +1520,16 @@ def shutdown_storage_node(node_id, force=False):
     snode_api = SNodeClient(snode.api_endpoint)
     results, err = snode_api.spdk_process_kill()
 
-    distr_controller.send_node_status_event(snode, StorageNode.STATUS_OFFLINE)
-
     logger.info("Setting node status to offline")
     snode = db_controller.get_storage_node_by_id(node_id)
     old_status = snode.status
     snode.status = StorageNode.STATUS_OFFLINE
     snode.write_to_db(db_controller.kv_store)
+
+    for dev in snode.nvme_devices:
+        if dev.status in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_READONLY]:
+            device_controller.device_set_unavailable(dev.get_id())
+    distr_controller.send_node_status_event(snode, StorageNode.STATUS_OFFLINE)
 
     # send event log
     storage_events.snode_status_change(snode, snode.status, old_status)

@@ -9,9 +9,8 @@ import uuid
 from typing import Tuple
 
 from simplyblock_core import utils, constants, distr_controller
-from simplyblock_core.controllers import snapshot_controller, pool_controller, lvol_events
+from simplyblock_core.controllers import snapshot_controller, pool_controller, lvol_events, caching_node_controller
 from simplyblock_core.kv_store import DBController
-from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.lvol_model import LVol
@@ -394,8 +393,8 @@ def _get_next_3_nodes(cluster_id, lvol_size=0):
 
             node_stats[node.get_id()] = node_st
 
-    if len(online_nodes) < 3:
-        return online_nodes
+    # if len(online_nodes) < 3:
+    #     return online_nodes
     cluster_stats = utils.dict_agg([node_stats[k] for k in node_stats])
 
     nodes_weight = utils.get_weights(node_stats, cluster_stats)
@@ -423,7 +422,7 @@ def _get_next_3_nodes(cluster_id, lvol_size=0):
     #############
 
     selected_node_ids = []
-    while len(selected_node_ids) < 3:
+    while len(selected_node_ids) < min(len(online_nodes), 3):
         r_index = random.randint(0, n_start)
         print(f"Random is {r_index}/{n_start}")
         for node_id in node_start_end:
@@ -1094,6 +1093,13 @@ def delete_lvol(id_or_name, force_delete=False):
     lvol.status = LVol.STATUS_IN_DELETION
     lvol.write_to_db(db_controller.kv_store)
 
+    # disconnect from caching nodes:
+    cnodes = db_controller.get_caching_nodes()
+    for cnode in cnodes:
+        for lv in cnode.lvols:
+            if lv.lvol_id == lvol.get_id():
+                caching_node_controller.disconnect(cnode.get_id(), lvol.get_id())
+
     if lvol.ha_type == 'single':
         ret = delete_lvol_from_node(lvol.get_id(), lvol.node_id)
         if not ret:
@@ -1408,7 +1414,9 @@ def get_io_stats(lvol_uuid, history, records_count=20, parse_sizes=True):
         records_number = 20
 
     records_list = db_controller.get_lvol_stats(lvol, limit=records_number)
-    new_records = utils.process_records(records_list, records_count)
+    if not records_list:
+        return False
+    new_records = utils.process_records(records_list, min(records_count, len(records_list)))
 
     if not parse_sizes:
         return new_records

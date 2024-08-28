@@ -14,7 +14,7 @@ INSTALL_DIR = os.path.dirname(os.path.realpath(__file__))
 NODE_MONITOR_INTERVAL_SEC = 3
 DEVICE_MONITOR_INTERVAL_SEC = 5
 STAT_COLLECTOR_INTERVAL_SEC = 60*5  # 5 minutes
-LVOL_STAT_COLLECTOR_INTERVAL_SEC = 60
+LVOL_STAT_COLLECTOR_INTERVAL_SEC = 5
 LVOL_MONITOR_INTERVAL_SEC = 120
 DEV_MONITOR_INTERVAL_SEC = 10
 DEV_STAT_COLLECTOR_INTERVAL_SEC = 2
@@ -23,6 +23,7 @@ DISTR_EVENT_COLLECTOR_INTERVAL_SEC = 2
 DISTR_EVENT_COLLECTOR_NUM_OF_EVENTS = 10
 CAP_MONITOR_INTERVAL_SEC = 30
 SSD_VENDOR_WHITE_LIST = ["1d0f:cd01", "1d0f:cd00"]
+CACHED_LVOL_STAT_COLLECTOR_INTERVAL_SEC = 5
 
 PMEM_DIR = '/tmp/pmem'
 
@@ -43,8 +44,6 @@ weights = {
     "w_b": 10
 }
 
-# To use 75% of hugepages to calculate ssd size to use for the ocf bdev
-CACHING_NODE_MEMORY_FACTOR = 1
 
 HEALTH_CHECK_INTERVAL_SEC = 10
 
@@ -80,6 +79,7 @@ INSTANCE_STORAGE_DATA = {
         'i4i.16xlarge': {'number_of_devices': 4, 'size_per_device_gb': 3750},
         'i4i.24xlarge': {'number_of_devices': 6, 'size_per_device_gb': 3750},
         'i4i.32xlarge': {'number_of_devices': 8, 'size_per_device_gb': 3750},
+
         'i4i.metal': {'number_of_devices': 8, 'size_per_device_gb': 3750},
         'i3en.large': {'number_of_devices': 1, 'size_per_device_gb': 1250},
         'i3en.xlarge': {'number_of_devices': 1, 'size_per_device_gb': 2500},
@@ -89,4 +89,10 @@ INSTANCE_STORAGE_DATA = {
         'i3en.12xlarge': {'number_of_devices': 4, 'size_per_device_gb': 7500},
         'i3en.24xlarge': {'number_of_devices': 8, 'size_per_device_gb': 7500},
         'i3en.metal': {'number_of_devices': 8, 'size_per_device_gb': 7500},
+
+        'm6id.large': {'number_of_devices': 1, 'size_per_device_gb': 116},
+        'm6id.xlarge': {'number_of_devices': 1, 'size_per_device_gb': 237},
+        'm6id.2xlarge': {'number_of_devices': 1, 'size_per_device_gb': 474},
+        'm6id.4xlarge': {'number_of_devices': 1, 'size_per_device_gb': 950},
+        'm6id.8xlarge': {'number_of_devices': 1, 'size_per_device_gb': 1900},
     }

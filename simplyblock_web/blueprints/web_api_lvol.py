@@ -54,10 +54,11 @@ def lvol_iostats(uuid, history):
             return utils.get_response_error(f"Pool secret doesn't mach the value in the request header", 400)
 
     data = lvol_controller.get_io_stats(uuid, history, parse_sizes=False)
-    if data:
-        return utils.get_response(data)
-    else:
-        return utils.get_response(False)
+    ret = {
+        "object_data": lvol.get_clean_dict(),
+        "stats": data or []
+    }
+    return utils.get_response(ret)
 
 
 @bp.route('/lvol/capacity/<string:uuid>', methods=['GET'])

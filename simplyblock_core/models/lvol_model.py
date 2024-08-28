@@ -12,6 +12,12 @@ class LVol(BaseModel):
     STATUS_OFFLINE = 'offline'
     STATUS_IN_DELETION = 'in_deletion'
 
+    STATUS_CODE_MAP = {
+        STATUS_ONLINE: 1,
+        STATUS_OFFLINE: 2,
+        STATUS_IN_DELETION: 3,
+    }
+
     attributes = {
         "lvol_name": {"type": str, 'default': ""},
         "size": {"type": int, 'default': 0},
@@ -72,3 +78,14 @@ class LVol(BaseModel):
 
     def get_id(self):
         return self.uuid
+
+    def get_status_code(self):
+        if self.status in self.STATUS_CODE_MAP:
+            return self.STATUS_CODE_MAP[self.status]
+        else:
+            return -1
+
+    def get_clean_dict(self):
+        data = super(LVol, self).get_clean_dict()
+        data['status_code'] = self.get_status_code()
+        return data

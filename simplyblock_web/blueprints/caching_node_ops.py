@@ -139,7 +139,10 @@ def scan_devices():
 
 @bp.route('/spdk_process_start', methods=['POST'])
 def spdk_process_start():
-    data = request.get_json()
+    try:
+        data = request.get_json()
+    except:
+        data = {}
 
     spdk_cpu_mask = None
     if 'spdk_cpu_mask' in data:
@@ -409,10 +412,12 @@ def make_gpt_partitions_for_nbd():
 
     cmd_list = [
         f"parted -fs {nbd_device} mklabel gpt",
-        f"parted -f {nbd_device} mkpart journal \"0%\" \"{jm_percent}%\""
+        f"parted -f {nbd_device} mkpart journal \"0%\" \"{jm_percent}%\"",
+        f"parted -f {nbd_device} mkpart part \"{jm_percent}%\" \"100%\" ",
     ]
     sg_cmd_list = [
         f"sgdisk -t 1:6527994e-2c5a-4eec-9613-8f5944074e8b {nbd_device}",
+        f"sgdisk -t 2:6527994e-2c5a-4eec-9613-8f5944074e8b {nbd_device}",
     ]
 
     for cmd in cmd_list+sg_cmd_list:

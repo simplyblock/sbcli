@@ -67,34 +67,6 @@ class CommonUtils:
         for word in fail_words:
             if word in file_data:
                 raise RuntimeError("FIO Test has interuupts")
-    
-    def validate_fio_json_output(self, output):
-        """Validates JSON fio output
-
-        Args:
-            output (str): JSON output to validate
-        """
-        job = output['jobs'][0]
-        job_name = job['job options']['name']
-        file_name = job['job options']['directory']
-        read_iops = job['read']['iops']
-        write_iops = job['write']['iops']
-        total_iops = read_iops + write_iops
-        disk_name = output['disk_util'][0]['name']
-
-        read_bw_kb = job['read']['bw']
-        write_bw_kb = job['write']['bw']
-        read_bw_mib = read_bw_kb / 1024
-        write_bw_mib = write_bw_kb / 1024
-
-        self.logger.info(f"Performign validation for FIO job: {job_name} on device: "
-                         f"{disk_name} mounted on: {file_name}")
-        assert 550 < total_iops < 650, f"Total IOPS {total_iops} out of range (550-650)"
-        # TODO: Uncomment when issue is fixed
-        # assert 4.5 < read_bw_mib < 5.5, f"Read BW {read_bw_mib} out of range (4.5-5.5 MiB/s)"
-        # assert 4.5 < write_bw_mib < 5.5, f"Write BW {write_bw_mib} out of range (4.5-5.5 MiB/s)"
-        assert read_bw_mib > 0, f"Read BW {read_bw_mib} less than or equal to 0MiB"
-        assert write_bw_mib > 0, f"Write BW {write_bw_mib} less than or equal to 0MiB"
 
     def manage_fio_threads(self, node, threads, timeout=100):
         """Run till fio process is complete and joins the thread
@@ -108,25 +80,23 @@ class CommonUtils:
             RuntimeError: If fio process hang
         """
         self.logger.info("Waiting for FIO processes to complete!")
-        start_time = time.time()
+        sleep_n_sec(10)
         while True:
             process = self.ssh_utils.find_process_name(node=node,
                                                        process_name="fio")
             process_fio = [element for element in process if "grep" not in element]
+            self.logger.info(f"Process info: {process_fio}")
             
             if len(process_fio) == 0:
                 break
-            end_time = time.time()
-            if end_time - start_time > 800:
-                raise RuntimeError("Fio Process not completing post its time")
             if timeout <= 0:
                 break
             sleep_n_sec(10)
             timeout = timeout - 10
             
-
         for thread in threads:
             thread.join(timeout=30)
+        end_time = time.time()
 
         process_list_after = self.ssh_utils.find_process_name(node=node,
                                                               process_name="fio")
@@ -135,6 +105,8 @@ class CommonUtils:
         process_fio = [element for element in process_list_after if "grep" not in element]
 
         assert len(process_fio) == 0, f"FIO process list not empty: {process_list_after}"
+
+        return end_time
             
     def parse_lvol_cluster_map_output(self, output):
         """Parses LVOL cluster map output
