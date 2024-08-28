@@ -18,7 +18,7 @@ class StorageNode(BaseModel):
     STATUS_RESTARTING = 'in_restart'
 
     STATUS_IN_CREATION = 'in_restart'  # 'in_creation'
-    STATUS_UNREACHABLE = 'offline'  # 'unreachable'
+    STATUS_UNREACHABLE = 'unreachable'
 
     STATUS_CODE_MAP = {
         STATUS_ONLINE: 0,
