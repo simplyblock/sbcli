@@ -10,14 +10,15 @@ from simplyblock_core.models.job_schedule import JobSchedule
 logger = logging.getLogger()
 db_controller = kv_store.DBController()
 
+
 def _validate_new_task_dev_restart(cluster_id, node_id, device_id):
     tasks = db_controller.get_job_tasks(cluster_id)
     for task in tasks:
-        if task.function_name == JobSchedule.FN_DEV_RESTART and task.device_id == device_id:
+        if task.function_name == JobSchedule.FN_DEV_RESTART and task.device_id == device_id and task.canceled is False:
             if task.status != JobSchedule.STATUS_DONE:
                 logger.info(f"Task found, skip adding new task: {task.get_id()}")
                 return False
-        elif task.function_name == JobSchedule.FN_NODE_RESTART and task.node_id == node_id:
+        elif task.function_name == JobSchedule.FN_NODE_RESTART and task.node_id == node_id and task.canceled is False:
             if task.status != JobSchedule.STATUS_DONE:
                 logger.info(f"Task found, skip adding new task: {task.get_id()}")
                 return False
