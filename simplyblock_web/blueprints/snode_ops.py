@@ -143,7 +143,7 @@ def spdk_process_start():
         # restart_policy={"Name": "on-failure", "MaximumRetryCount": 99}
     )
     container2 = node_docker.containers.run(
-        spdk_image,
+        constants.SIMPLY_BLOCK_SPDK_CORE_IMAGE,
         "python /root/scripts/spdk_http_proxy_server.py",
         name="spdk_proxy",
         detach=True,
