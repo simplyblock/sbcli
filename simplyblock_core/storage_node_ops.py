@@ -257,6 +257,40 @@ def _create_jm_stack_on_raid(rpc_client, jm_nvme_bdevs, snode, after_restart):
         logger.error(f"Failed to create alceml bdev: {alceml_name}")
         return False
 
+    alceml_id = str(uuid.uuid4())
+    # add pass through
+    pt_name = f"{alceml_name}_PT"
+    ret = rpc_client.bdev_PT_NoExcl_create(pt_name, alceml_name)
+    if not ret:
+        logger.error(f"Failed to create pt noexcl bdev: {pt_name}")
+        return False
+
+    subsystem_nqn = snode.subsystem + ":dev:" + alceml_id
+    logger.info("creating subsystem %s", subsystem_nqn)
+    ret = rpc_client.subsystem_create(subsystem_nqn, 'sbcli-cn', alceml_id)
+    IP = None
+    for iface in snode.data_nics:
+        if iface.ip4_address:
+            tr_type = iface.get_transport_type()
+            ret = rpc_client.transport_list()
+            found = False
+            if ret:
+                for ty in ret:
+                    if ty['trtype'] == tr_type:
+                        found = True
+            if found is False:
+                ret = rpc_client.transport_create(tr_type)
+            logger.info("adding listener for %s on IP %s" % (subsystem_nqn, iface.ip4_address))
+            ret = rpc_client.listeners_create(subsystem_nqn, tr_type, iface.ip4_address, "4420")
+            IP = iface.ip4_address
+            break
+    logger.info(f"add {pt_name} to subsystem")
+    ret = rpc_client.nvmf_subsystem_add_ns(subsystem_nqn, pt_name)
+    if not ret:
+        logger.error(f"Failed to add: {pt_name} to the subsystem: {subsystem_nqn}")
+        return False
+
+
     jm_bdev = f"jm_{snode.get_id()}"
     ret = rpc_client.bdev_jm_create(jm_bdev, alceml_name, jm_cpu_mask=snode.jm_cpu_mask)
     if not ret:
@@ -265,14 +299,19 @@ def _create_jm_stack_on_raid(rpc_client, jm_nvme_bdevs, snode, after_restart):
     ret = rpc_client.get_bdevs(raid_bdev)
 
     return JMDevice({
-        'uuid': str(uuid.uuid4()),
+        'uuid': alceml_id,
         'device_name': jm_bdev,
         'size': ret[0]["block_size"] * ret[0]["num_blocks"],
         'status': JMDevice.STATUS_ONLINE,
         'jm_nvme_bdev_list': jm_nvme_bdevs,
         'raid_bdev': raid_bdev,
         'alceml_bdev': alceml_name,
-        'jm_bdev': jm_bdev
+        'jm_bdev': jm_bdev,
+
+        'pt_bdev': pt_name,
+        'nvmf_nqn': subsystem_nqn,
+        'nvmf_ip': IP,
+        'nvmf_port': 4420,
     })
 
 
@@ -297,6 +336,39 @@ def _create_jm_stack_on_device(rpc_client, nvme, snode, after_restart):
         logger.error(f"Failed to create alceml bdev: {alceml_name}")
         return False
 
+
+    # add pass through
+    pt_name = f"{alceml_name}_PT"
+    ret = rpc_client.bdev_PT_NoExcl_create(pt_name, alceml_name)
+    if not ret:
+        logger.error(f"Failed to create pt noexcl bdev: {pt_name}")
+        return False
+
+    subsystem_nqn = snode.subsystem + ":dev:" + alceml_id
+    logger.info("creating subsystem %s", subsystem_nqn)
+    ret = rpc_client.subsystem_create(subsystem_nqn, 'sbcli-cn', alceml_id)
+    IP = None
+    for iface in snode.data_nics:
+        if iface.ip4_address:
+            tr_type = iface.get_transport_type()
+            ret = rpc_client.transport_list()
+            found = False
+            if ret:
+                for ty in ret:
+                    if ty['trtype'] == tr_type:
+                        found = True
+            if found is False:
+                ret = rpc_client.transport_create(tr_type)
+            logger.info("adding listener for %s on IP %s" % (subsystem_nqn, iface.ip4_address))
+            ret = rpc_client.listeners_create(subsystem_nqn, tr_type, iface.ip4_address, "4420")
+            IP = iface.ip4_address
+            break
+    logger.info(f"add {pt_name} to subsystem")
+    ret = rpc_client.nvmf_subsystem_add_ns(subsystem_nqn, pt_name)
+    if not ret:
+        logger.error(f"Failed to add: {pt_name} to the subsystem: {subsystem_nqn}")
+        return False
+
     jm_bdev = f"jm_{snode.get_id()}"
     ret = rpc_client.bdev_jm_create(jm_bdev, alceml_name, jm_cpu_mask=snode.jm_cpu_mask)
     if not ret:
@@ -310,7 +382,12 @@ def _create_jm_stack_on_device(rpc_client, nvme, snode, after_restart):
         'status': JMDevice.STATUS_ONLINE,
         'alceml_bdev': alceml_name,
         'nvme_bdev': nvme.nvme_bdev,
-        'jm_bdev': jm_bdev
+        'jm_bdev': jm_bdev,
+
+        'pt_bdev': pt_name,
+        'nvmf_nqn': subsystem_nqn,
+        'nvmf_ip': IP,
+        'nvmf_port': 4420,
     })
 
 

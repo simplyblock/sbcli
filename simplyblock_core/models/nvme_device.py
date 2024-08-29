@@ -106,6 +106,10 @@ class JMDevice(BaseModel):
         "alceml_bdev": {"type": str, 'default': ""},
         "jm_bdev": {"type": str, 'default': ""},
 
+        "pt_bdev": {"type": str, 'default': ""},
+        "nvmf_nqn": {"type": str, 'default': ""},
+        "nvmf_ip": {"type": str, 'default': ""},
+        "nvmf_port": {"type": int, 'default': 4420},
 
         "health_check": {"type": bool, "default": True},
         "io_error": {"type": bool, 'default': False},
