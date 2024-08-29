@@ -25,10 +25,10 @@ bp = Blueprint("snode", __name__, url_prefix="/snode")
 cluster_id_file = "/etc/foundationdb/sbcli_cluster_id"
 
 node_name = os.environ.get("HOSTNAME")
-deployment_name = f"spdk-deployment-{node_name}"
+deployment_name = f"snode-spdk-deployment-{node_name}"
 default_namespace = 'default'
 namespace_id_file = '/etc/simplyblock/namespace'
-pod_name = 'spdk-deployment'
+pod_name = 'snode-spdk-deployment'
 
 
 config.load_incluster_config()

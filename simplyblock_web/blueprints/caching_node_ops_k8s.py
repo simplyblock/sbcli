@@ -24,10 +24,10 @@ bp = Blueprint("caching_node_k", __name__, url_prefix="/cnode")
 
 
 node_name = os.environ.get("HOSTNAME")
-deployment_name = f"spdk-deployment-{node_name}"
+deployment_name = f"cnode-spdk-deployment-{node_name}"
 default_namespace = 'default'
 namespace_id_file = '/etc/simplyblock/namespace'
-pod_name = 'spdk-deployment'
+pod_name = 'cnode-spdk-deployment'
 
 
 config.load_incluster_config()
@@ -35,7 +35,6 @@ k8s_apps_v1 = client.AppsV1Api()
 k8s_core_v1 = client.CoreV1Api()
 
 TOP_DIR = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
-spdk_deploy_yaml = os.path.join(TOP_DIR, 'static/deploy_spdk.yaml')
 
 
 cpu_info = cpuinfo.get_cpu_info()
