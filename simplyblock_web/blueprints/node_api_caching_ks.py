@@ -73,7 +73,7 @@ def spdk_process_start():
 
     from jinja2 import Environment, FileSystemLoader
     env = Environment(loader=FileSystemLoader(os.path.join(TOP_DIR, 'templates')), trim_blocks=True, lstrip_blocks=True)
-    template = env.get_template('deploy_spdk.yaml.j2')
+    template = env.get_template('caching_deploy_spdk.yaml.j2')
     values = {
         'SPDK_IMAGE': spdk_image,
         'SPDK_CPU_MASK': spdk_cpu_mask,

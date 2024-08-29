@@ -115,14 +115,16 @@ def process_event(event_id):
 
 
 hostname = utils.get_hostname()
-logger.info("Starting Distr event collector...")
+logger.info("Getting node info...")
 while True:
     time.sleep(constants.DISTR_EVENT_COLLECTOR_INTERVAL_SEC)
 
     snode = db_controller.get_storage_node_by_hostname(hostname)
     if not snode:
-        logger.error("This node is not part of the cluster, hostname: %s" % hostname)
+        logger.error("This node is not part of the cluster, hostname: %s, Retrying..." % hostname)
         continue
+
+    logger.info(f"Starting Distr event collector on node: {hostname}")
 
     client = rpc_client.RPCClient(
         snode.mgmt_ip,

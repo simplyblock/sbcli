@@ -100,6 +100,8 @@ class StorageNode(BaseModel):
         "jm_percent": {"type": int, "default": 3},
         "jm_device": {"type": JMDevice, "default": None},
 
+        "namespace": {"type": str, "default": ""},
+
     }
 
     def __init__(self, data=None):
