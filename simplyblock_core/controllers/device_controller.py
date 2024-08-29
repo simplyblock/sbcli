@@ -349,7 +349,6 @@ def device_remove(device_id, force=True):
                 snode.jm_device.jm_nvme_bdev_list.remove(dev_to_remove)
                 snode.write_to_db(db_controller.kv_store)
 
-    tasks_controller.add_device_failed_mig_task(device_id)
     return True
 
 
