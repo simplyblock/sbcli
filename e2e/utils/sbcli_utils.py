@@ -33,15 +33,24 @@ class SbcliUtils:
         request_url = self.cluster_api_url + api_url
         headers = headers if headers else self.headers
         self.logger.info(f"Calling GET for {api_url} with headers: {headers}")
-        resp = requests.get(request_url, headers=headers)
-        if resp.status_code == HTTPStatus.OK:
-            data = resp.json()
-        else:
-            self.logger.error('request failed. status_code', resp.status_code)
-            self.logger.error('request failed. text', resp.text)
-            resp.raise_for_status()
-        return data
-
+        retry = 5
+        while retry > 0:
+            try:
+                resp = requests.get(request_url, headers=headers)
+                if resp.status_code == HTTPStatus.OK:
+                    data = resp.json()
+                else:
+                    self.logger.error('request failed. status_code', resp.status_code)
+                    self.logger.error('request failed. text', resp.text)
+                    resp.raise_for_status()
+                return data
+            except Exception as e:
+                self.logger.debug(f"API call {api_url} failed with error:{e}")
+                retry -= 1
+                if retry == 0:
+                    self.logger.info(f"Retry attemp exhausted. API {api_url} failed with: {e}.")
+                    raise e
+                self.logger.info(f"Retrying API {api_url}. Attempt: {5 - retry + 1}")
 
     def post_request(self, api_url, headers=None, body=None):
         """Performs post request on the given API URL
@@ -57,15 +66,25 @@ class SbcliUtils:
         request_url = self.cluster_api_url + api_url
         headers = headers if headers else self.headers
         self.logger.info(f"Calling POST for {api_url} with headers: {headers}, body: {body}")
-        resp = requests.post(request_url, headers=headers,
-                             json=body, timeout=100)
-        if resp.status_code == HTTPStatus.OK:
-            data = resp.json()
-        else:
-            self.logger.error('request failed. status_code', resp.status_code)
-            self.logger.error('request failed. text', resp.text)
-            resp.raise_for_status()
-        return data
+        retry = 5
+        while retry > 0:
+            try:
+                resp = requests.post(request_url, headers=headers,
+                                     json=body, timeout=100)
+                if resp.status_code == HTTPStatus.OK:
+                    data = resp.json()
+                else:
+                    self.logger.error('request failed. status_code', resp.status_code)
+                    self.logger.error('request failed. text', resp.text)
+                    resp.raise_for_status()
+                return data
+            except Exception as e:
+                self.logger.debug(f"API call {api_url} failed with error:{e}")
+                retry -= 1
+                if retry == 0:
+                    self.logger.info(f"Retry attemp exhausted. API {api_url} failed with: {e}.")
+                    raise e
+                self.logger.info(f"Retrying API {api_url}. Attempt: {5 - retry + 1}")
 
     def delete_request(self, api_url, headers=None):
         """Performs delete request on the given API URL
@@ -80,14 +99,24 @@ class SbcliUtils:
         request_url = self.cluster_api_url + api_url
         headers = headers if headers else self.headers
         self.logger.info(f"Calling DELETE for {api_url} with headers: {headers}")
-        resp = requests.delete(request_url, headers=headers)
-        if resp.status_code == HTTPStatus.OK:
-            data = resp.json()
-        else:
-            self.logger.error('request failed. status_code', resp.status_code)
-            self.logger.error('request failed. text', resp.text)
-            resp.raise_for_status()
-        return data
+        retry = 5
+        while retry > 0:
+            try:
+                resp = requests.delete(request_url, headers=headers)
+                if resp.status_code == HTTPStatus.OK:
+                    data = resp.json()
+                else:
+                    self.logger.error('request failed. status_code', resp.status_code)
+                    self.logger.error('request failed. text', resp.text)
+                    resp.raise_for_status()
+                return data
+            except Exception as e:
+                self.logger.debug(f"API call {api_url} failed with error:{e}")
+                retry -= 1
+                if retry == 0:
+                    self.logger.info(f"Retry attemp exhausted. API {api_url} failed with: {e}.")
+                    raise e
+                self.logger.info(f"Retrying API {api_url}. Attempt: {5 - retry + 1}")
 
     def get_node_without_lvols(self) -> str:
         """
