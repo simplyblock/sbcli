@@ -63,11 +63,11 @@ def storagenode_iostats(uuid, history):
         return utils.get_response_error(f"node not found: {uuid}", 404)
 
     data = storage_node_ops.get_node_iostats_history(uuid, history, parse_sizes=False)
-
-    if data:
-        return utils.get_response(data)
-    else:
-        return utils.get_response(False)
+    ret = {
+        "object_data": node.get_clean_dict(),
+        "stats": data or []
+    }
+    return utils.get_response(ret)
 
 
 @bp.route('/storagenode/port/<string:uuid>', methods=['GET'])
@@ -136,8 +136,19 @@ def storage_node_shutdown(uuid):
     if not node:
         return utils.get_response_error(f"node not found: {uuid}", 404)
 
-    out = storage_node_ops.shutdown_storage_node(uuid)
-    return utils.get_response(out)
+    force = False
+    try:
+        args = request.args
+        force = bool(args.get('force', False))
+    except:
+        pass
+
+    threading.Thread(
+        target=storage_node_ops.shutdown_storage_node,
+        args=(uuid, force)
+    ).start()
+
+    return utils.get_response(True)
 
 
 @bp.route('/storagenode/restart/<string:uuid>', methods=['GET'])
@@ -179,8 +190,8 @@ def storage_node_add():
     cluster_id = req_data['cluster_id']
     node_ip = req_data['node_ip']
     ifname = req_data['ifname']
-    max_lvol = req_data['max_lvol']
-    max_snap = req_data['max_snap']
+    max_lvol = int(req_data['max_lvol'])
+    max_snap = int(req_data['max_snap'])
     max_prov = req_data['max_prov']
 
     spdk_image = None
@@ -196,10 +207,37 @@ def storage_node_add():
         data_nics = req_data['data_nics']
         data_nics = data_nics.split(",")
 
+    namespace = "default"
+    if 'namespace' in req_data:
+        namespace = req_data['namespace']
 
+    jm_percent = 0
+    if 'jm_percent' in req_data:
+        jm_percent = int(req_data['jm_percent'])
 
-    out = storage_node_ops.add_node(
-        cluster_id, node_ip, ifname, data_nics, max_lvol, max_snap, max_prov,
-        spdk_image=spdk_image, spdk_debug=spdk_debug)
+    partitions = 0
+    if 'partitions' in req_data:
+        partitions = int(req_data['partitions'])
 
-    return utils.get_response(out)
+    number_of_devices = 0
+    if 'number_of_devices' in req_data:
+        number_of_devices = int(req_data['number_of_devices'])
+
+    iobuf_small_pool_count = 0
+    if 'iobuf_small_pool_count' in req_data:
+        iobuf_small_pool_count = int(req_data['iobuf_small_pool_count'])
+
+    iobuf_large_pool_count = 0
+    if 'iobuf_large_pool_count' in req_data:
+        iobuf_large_pool_count = int(req_data['iobuf_large_pool_count'])
+
+    threading.Thread(
+        target=storage_node_ops.add_node,
+        args=(
+            cluster_id, node_ip, ifname, data_nics, max_lvol, max_snap, max_prov,
+            spdk_image, spdk_debug, iobuf_small_pool_count, iobuf_large_pool_count,
+            partitions, jm_percent, number_of_devices, False, namespace
+        )
+    ).start()
+
+    return utils.get_response(True)

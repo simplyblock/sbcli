@@ -1,6 +1,7 @@
 # coding=utf-8
 import json
 import logging
+import math
 import os
 import random
 import re
@@ -418,12 +419,55 @@ def decimal_to_hex_power_of_2(decimal_number):
 
 
 def get_logger(name):
-    logger = logging.getLogger(name)
-    logger.setLevel(constants.LOG_LEVEL)
+    # first configure a root logger
+    logger = logging.getLogger()
+    log_level = os.getenv("SIMPLYBLOCK_LOG_LEVEL")
+    log_level = log_level.upper() if log_level else constants.LOG_LEVEL
+
+    try:
+        logger.setLevel(log_level)
+    except ValueError as e:
+        logger.warning(f'Invalid SIMPLYBLOCK_LOG_LEVEL: {str(e)}')
+        logger.setLevel(constants.LOG_LEVEL)
+
     logger_handler = logging.StreamHandler(stream=sys.stdout)
     logger_handler.setFormatter(logging.Formatter('%(asctime)s: %(levelname)s: %(message)s'))
     logger.addHandler(logger_handler)
 
     gelf_handler = GELFUDPHandler('0.0.0.0', constants.GELF_PORT)
     logger.addHandler(gelf_handler)
-    return logger
+    return logging.getLogger(name)
+
+
+def parse_size(size_string: str):
+    try:
+        x = int(size_string)
+        return x
+    except Exception:
+        pass
+    try:
+        if size_string:
+            size_string = size_string.lower()
+            size_string = size_string.replace(" ", "")
+            size_string = size_string.replace("b", "")
+            size_number = int(size_string[:-1])
+            size_v = size_string[-1]
+            one_k = 1000
+            multi = 0
+            if size_v == "k":
+                multi = 1
+            elif size_v == "m":
+                multi = 2
+            elif size_v == "g":
+                multi = 3
+            elif size_v == "t":
+                multi = 4
+            else:
+                print(f"Error parsing size: {size_string}")
+                return -1
+            return size_number * math.pow(one_k, multi)
+        else:
+            return -1
+    except:
+        print(f"Error parsing size: {size_string}")
+        return -1

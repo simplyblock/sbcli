@@ -17,8 +17,8 @@ class StorageNode(BaseModel):
     STATUS_REMOVED = 'removed'
     STATUS_RESTARTING = 'in_restart'
 
-    STATUS_IN_CREATION = 'in_restart'  # 'in_creation'
-    STATUS_UNREACHABLE = 'offline'  # 'unreachable'
+    STATUS_IN_CREATION = 'in_creation'
+    STATUS_UNREACHABLE = 'unreachable'
 
     STATUS_CODE_MAP = {
         STATUS_ONLINE: 0,
@@ -100,6 +100,8 @@ class StorageNode(BaseModel):
         "jm_percent": {"type": int, "default": 3},
         "jm_device": {"type": JMDevice, "default": None},
 
+        "namespace": {"type": str, "default": ""},
+
     }
 
     def __init__(self, data=None):
@@ -115,3 +117,8 @@ class StorageNode(BaseModel):
             return self.STATUS_CODE_MAP[self.status]
         else:
             return -1
+
+    def get_clean_dict(self):
+        data = super(StorageNode, self).get_clean_dict()
+        data['status_code'] = self.get_status_code()
+        return data

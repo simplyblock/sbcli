@@ -144,15 +144,21 @@ def spdk_process_start():
     )
     container2 = node_docker.containers.run(
         constants.SIMPLY_BLOCK_SPDK_CORE_IMAGE,
-        "python /root/scripts/spdk_http_proxy.py",
+        "python /root/scripts/spdk_http_proxy_server.py",
         name="spdk_proxy",
         detach=True,
         network_mode="host",
-        log_config=log_config,
+        log_config=LogConfig(type=LogConfig.types.JOURNALD),
         volumes=[
-            '/var/tmp:/var/tmp',
-            '/etc/foundationdb:/etc/foundationdb'],
-        restart_policy={"Name": "always"}
+            '/var/tmp:/var/tmp'
+        ],
+        environment=[
+            f"SERVER_IP={data['server_ip']}",
+            f"RPC_PORT={data['rpc_port']}",
+            f"RPC_USERNAME={data['rpc_username']}",
+            f"RPC_PASSWORD={data['rpc_password']}",
+        ]
+        # restart_policy={"Name": "always"}
     )
     retries = 10
     while retries > 0:
@@ -223,7 +229,7 @@ def get_info():
         "system_id": SYSTEM_ID,
 
         "cpu_count": CPU_INFO['count'],
-        "cpu_hz": CPU_INFO['hz_advertised'][0],
+        "cpu_hz": CPU_INFO['hz_advertised'][0] if 'hz_advertised' in CPU_INFO else 1,
 
         "memory": node_utils.get_memory(),
         "hugepages": node_utils.get_huge_memory(),
