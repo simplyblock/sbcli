@@ -519,6 +519,16 @@ def device_set_failed(device_id):
     if not dev:
         logger.error("device not found")
 
+    snode = db_controller.get_storage_node_by_id(dev.node_id)
+    if not snode:
+        logger.error("node not found")
+        return False
+
+    task_id = tasks_controller.get_active_dev_restart_task(snode.cluster_id, device_id)
+    if task_id:
+        logger.error(f"Restart task found: {task_id}, can not fail device")
+        return False
+
     if dev.status == NVMeDevice.STATUS_FAILED:
         return True
 

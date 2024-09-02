@@ -70,6 +70,7 @@ def task_runner_device(task):
         task.function_result = "canceled"
         task.status = JobSchedule.STATUS_DONE
         task.write_to_db(db_controller.kv_store)
+        device_controller.device_set_retries_exhausted(device.get_id(), True)
         return True
 
     node = db_controller.get_storage_node_by_id(task.node_id)
