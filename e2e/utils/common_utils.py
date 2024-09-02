@@ -19,38 +19,37 @@ class CommonUtils:
             operations (Dict): Steps performed for each type of entity
         """
         logs = self.sbcli_utils.get_cluster_logs(cluster_id)
-        actual_logs = []
-        for log in logs:
-            actual_logs.append(log["Message"])
-        to_check_in_logs = []
-        for type, steps in operations.items():
-            prev_step = None
-            if type == "Storage Node":
-                for step in steps:
-                    if step == "suspended":
-                        to_check_in_logs.append("Storage node status changed from: online to: suspended")
-                        prev_step = "suspended"
-                    if step == "shutdown":
-                        if prev_step == "suspended":
-                            to_check_in_logs.append("Storage node status changed from: suspended to: in_shutdown")
-                            to_check_in_logs.append("Storage node status changed from: in_shutdown to: offline")
-                        else:
-                            to_check_in_logs.append("Storage node status changed from: online to: offline")
-                            to_check_in_logs.append("Storage node status changed from: offline to: in_shutdown")
-                            to_check_in_logs.append("Storage node status changed from: in_shutdown to: offline")
-                        prev_step = "shutdown"
-                    if step == "restart":
-                        to_check_in_logs.append("Storage node status changed from: offline to: in_restart")
-                        to_check_in_logs.append("Storage node status changed from: in_restart to: online")
-            if type == "Device":
-                for step in steps:
-                    if step == "restart":
-                        to_check_in_logs.append("Device status changed from: online to: unavailable")
-                        # TODO: Change from unavailable to online once bug is fixed.
-                        to_check_in_logs.append("Device restarted")
-
-        for expected_log in to_check_in_logs:
-            assert expected_log in actual_logs, f"Expected event/log {expected_log} not found in Actual logs: {actual_logs}"
+        actual_logs = [log["Message"] for log in logs]
+        
+        status_patterns = {
+            "Storage Node": {
+                "suspended": re.compile(r"Storage node status changed from: .+ to: suspended"),
+                "shutdown": [
+                    re.compile(r"Storage node status changed from: .+ to: in_shutdown"),
+                    re.compile(r"Storage node status changed from: in_shutdown to: offline")
+                ],
+                "restart": [
+                    re.compile(r"Storage node status changed from: offline to: in_restart"),
+                    re.compile(r"Storage node status changed from: in_restart to: online")
+                ]
+            },
+            "Device": {
+                "restart": [
+                    re.compile(r"Device status changed from: .+ to: unavailable"),
+                    # TODO: Change from unavailable to online once bug is fixed.
+                    re.compile(r"Device restarted")
+                ]
+            }
+        }
+        
+        for entity_type, steps in operations.items():
+            for step in steps:
+                patterns = status_patterns.get(entity_type, {}).get(step, [])
+                if not isinstance(patterns, list):
+                    patterns = [patterns]
+                for pattern in patterns:
+                    if not any(pattern.search(log) for log in actual_logs):
+                        raise ValueError(f"Expected pattern not found for {entity_type} step '{step}': {pattern.pattern}")
 
     def validate_fio_test(self, node, log_file):
         """Validates interruptions in FIO log
