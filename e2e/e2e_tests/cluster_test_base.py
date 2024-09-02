@@ -41,7 +41,20 @@ class TestClusterBase:
         """Contains setup required to run the test case
         """
         self.logger.info("Inside setup function")
-        self.mgmt_nodes, self.storage_nodes = self.sbcli_utils.get_all_nodes_ip()
+        retry = 30
+        while retry > 0:
+            try:
+                self.mgmt_nodes, self.storage_nodes = self.sbcli_utils.get_all_nodes_ip()
+                self.sbcli_utils.list_lvols()
+                self.sbcli_utils.list_storage_pools()
+                break
+            except Exception as e:
+                self.logger.debug(f"API call failed with error:{e}")
+                retry -= 1
+                if retry == 0:
+                    self.logger.info(f"Retry attemp exhausted. API failed with: {e}. Exiting")
+                    raise e
+                self.logger.info(f"Retrying Base APIs before starting tests. Attempt: {30 - retry + 1}")
         for node in self.mgmt_nodes:
             self.logger.info(f"**Connecting to management nodes** - {node}")
             self.ssh_obj.connect(
