@@ -3,7 +3,7 @@ import time
 
 
 from simplyblock_core import constants, kv_store, storage_node_ops, utils
-from simplyblock_core.controllers import device_controller, tasks_events, health_controller
+from simplyblock_core.controllers import device_controller, tasks_events, health_controller, tasks_controller
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
@@ -116,6 +116,8 @@ def task_runner_device(task):
         task.function_result = "done"
         task.status = JobSchedule.STATUS_DONE
         task.write_to_db(db_controller.kv_store)
+
+        tasks_controller.add_device_mig_task(device.get_id())
         return True
 
     task.retry += 1
