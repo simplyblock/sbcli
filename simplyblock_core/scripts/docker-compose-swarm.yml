@@ -102,15 +102,14 @@ services:
     volumes:
       - "/etc/foundationdb:/etc/foundationdb"
 
-  DistrEventCollector:
+  MainDistrEventCollector:
     image: $SIMPLYBLOCK_DOCKER_IMAGE
-    command: "python simplyblock_core/services/distr_event_collector.py"
+    command: "python simplyblock_core/services/main_distr_event_collector.py"
     networks:
       - hostnet
     deploy:
-      mode: global
       placement:
-        constraints: [node.role == worker]
+        constraints: [node.role == manager]
     volumes:
       - "/etc/foundationdb:/etc/foundationdb"
 
