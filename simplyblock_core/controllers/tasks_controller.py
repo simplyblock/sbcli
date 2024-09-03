@@ -4,7 +4,7 @@ import time
 import uuid
 
 from simplyblock_core import kv_store, constants, utils
-from simplyblock_core.controllers import tasks_events
+from simplyblock_core.controllers import tasks_events, device_controller
 from simplyblock_core.models.job_schedule import JobSchedule
 
 logger = logging.getLogger()
@@ -96,6 +96,9 @@ def cancel_task(task_id):
     if not task:
         logger.error("Task not found: %s", task_id)
         return False
+
+    if task.device_id:
+        device_controller.device_set_retries_exhausted(task.device_id, True)
 
     task.canceled = True
     task.write_to_db(db_controller.kv_store)
