@@ -21,6 +21,11 @@ on:
         description: 'Name of test to run. Empty to run all'
         required: false
         default: ''
+      send_slack_notification:
+        description: 'Send Slack notification?'
+        required: false
+        default: 'true'
+        type: boolean
 jobs:
   e2e:
     runs-on: self-hosted
@@ -207,7 +212,7 @@ jobs:
           echo "EOF" >> $GITHUB_ENV
 
       - name: Send Slack Notification
-        if: always() && github.ref == 'refs/heads/main' || github.ref == 'refs/heads/pre-release'
+        if: always() && github.ref == 'refs/heads/main' || github.ref == 'refs/heads/pre-release'  && github.event.inputs.send_slack_notification == 'true'
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
           GITHUB_SERVER_URL: ${{ github.server_url }}
