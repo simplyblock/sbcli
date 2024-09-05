@@ -286,6 +286,10 @@ def device_remove(device_id, force=True):
             device = dev
             break
 
+    if device.status in [NVMeDevice.STATUS_REMOVED, NVMeDevice.STATUS_FAILED]:
+        logger.error(f"Unsupported device status: {device.status}")
+        return False
+
     task_id = tasks_controller.get_active_dev_restart_task(snode.cluster_id, device_id)
     if task_id:
         logger.error(f"Restart task found: {task_id}, can not remove device")
@@ -441,8 +445,8 @@ def reset_storage_device(dev_id):
         logger.error(f"Node not found {device.node_id}")
         return False
 
-    if device.status == NVMeDevice.STATUS_REMOVED:
-        logger.error(f"Device status: {device.status} is removed")
+    if device.status in [NVMeDevice.STATUS_REMOVED, NVMeDevice.STATUS_FAILED]:
+        logger.error(f"Unsupported device status: {device.status}")
         return False
 
     task_id = tasks_controller.get_active_dev_restart_task(snode.cluster_id, dev_id)
