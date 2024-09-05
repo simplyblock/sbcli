@@ -6,6 +6,7 @@ import threading
 
 from flask import Blueprint, request
 
+from simplyblock_core.controllers import tasks_controller
 from simplyblock_web import utils
 
 from simplyblock_core import kv_store
@@ -231,13 +232,22 @@ def storage_node_add():
     if 'iobuf_large_pool_count' in req_data:
         iobuf_large_pool_count = int(req_data['iobuf_large_pool_count'])
 
-    threading.Thread(
-        target=storage_node_ops.add_node,
-        args=(
-            cluster_id, node_ip, ifname, data_nics, max_lvol, max_snap, max_prov,
-            spdk_image, spdk_debug, iobuf_small_pool_count, iobuf_large_pool_count,
-            partitions, jm_percent, number_of_devices, False, namespace
-        )
-    ).start()
+    tasks_controller.add_node_add_task(cluster_id, {
+        "cluster_id": cluster_id,
+        "node_ip": node_ip,
+        "iface_name": ifname,
+        "data_nics_list": data_nics,
+        "max_lvol": max_lvol,
+        "max_snap": max_snap,
+        "max_prov": max_prov,
+        "spdk_image": spdk_image,
+        "spdk_debug": spdk_debug,
+        "small_bufsize": iobuf_small_pool_count,
+        "large_bufsize": iobuf_large_pool_count,
+        "num_partitions_per_dev": partitions,
+        "jm_percent": jm_percent,
+        "number_of_devices": number_of_devices,
+        "enable_test_device": False,
+        "namespace": namespace})
 
     return utils.get_response(True)

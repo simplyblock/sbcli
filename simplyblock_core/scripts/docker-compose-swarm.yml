@@ -251,6 +251,18 @@ services:
     networks:
       - hostnet
 
+  TasksNodeAddRunner:
+    image: $SIMPLYBLOCK_DOCKER_IMAGE
+    command: "python simplyblock_core/services/tasks_runner_node_add.py"
+    deploy:
+      placement:
+        constraints: [node.role == manager]
+    volumes:
+      - "/etc/foundationdb:/etc/foundationdb"
+    networks:
+      - hostnet
+
+
 volumes:
   os_data:
 
