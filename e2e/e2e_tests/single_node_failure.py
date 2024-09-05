@@ -113,13 +113,13 @@ class TestSingleNodeFailure(TestClusterBase):
         try:
             self.logger.info(f"Waiting for node to become offline, {no_lvol_node_uuid}")
             self.sbcli_utils.wait_for_storage_node_status(no_lvol_node_uuid,
-                                                          "offline",
+                                                          "unreachable",
                                                           timeout=300)
             
             sleep_n_sec(10)
 
             self.validations(node_uuid=no_lvol_node_uuid,
-                            node_status=["offline", "in_shutdown", "in_restart"],
+                            node_status=["unreachable"],
                             # The status changes between them very quickly hence 
                             # needed multiple checks
                             device_status="unavailable",
@@ -127,6 +127,7 @@ class TestSingleNodeFailure(TestClusterBase):
                             health_check_status=True
                             )
         except Exception as exp:
+            self.logger.info("Cluster status check failed! Waiting for node to be online and exiting")
             self.logger.debug(exp)
             # self.start_ec2_instance(instance_id=instance_id)
             # self.sbcli_utils.restart_node(node_uuid=no_lvol_node_uuid)

@@ -369,4 +369,3 @@ class SbcliUtils:
                 timeout -= 1
         raise TimeoutError(f"Timed out waiting for node status, {node_id},"
                            f"Expected status: {status}, Actual status: {actual_status}")
-
