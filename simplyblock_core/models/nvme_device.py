@@ -111,6 +111,7 @@ class JMDevice(BaseModel):
         "nvmf_nqn": {"type": str, 'default': ""},
         "nvmf_ip": {"type": str, 'default': ""},
         "nvmf_port": {"type": int, 'default': 4420},
+        "remote_bdev": {"type": str, 'default': ""},
 
         "health_check": {"type": bool, "default": True},
         "io_error": {"type": bool, 'default': False},

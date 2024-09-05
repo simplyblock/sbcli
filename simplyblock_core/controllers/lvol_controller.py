@@ -169,6 +169,18 @@ def get_jm_names(snode):
     return [snode.jm_device.jm_bdev] if snode.jm_device else []
 
 
+def get_ha_jm_names(snode_list):
+    jm_list = []
+    if snode_list[0].jm_device:
+        jm_list.append(snode_list[0].jm_device.jm_bdev)
+    else:
+        jm_list.append("JM_LOCAL")
+
+    for snode in snode_list[1:]:
+        jm_list.append(snode.jm_device.jm_bdev)
+
+
+
 # Deprecated
 def add_lvol(name, size, host_id_or_name, pool_id_or_name, use_comp, use_crypto,
              distr_vuid, distr_ndcs, distr_npcs,
@@ -615,6 +627,18 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
     lvol.base_bdev = f"distr_{lvol.vuid}_{name}"
     lvol.top_bdev = lvol.base_bdev
 
+    nodes = _get_next_3_nodes(cl.get_id(), lvol.size)
+    if not nodes:
+        return False, f"No nodes found with enough resources to create the LVol"
+
+    if host_node:
+        nodes.insert(0, host_node)
+    else:
+        host_node = nodes[0]
+
+    lvol.hostname = host_node.hostname
+    lvol.node_id = host_node.get_id()
+
     if with_snapshot:
         lvol.bdev_stack.append({
             "type": "bdev_distr",
@@ -628,6 +652,8 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
                 "block_size": lvol.distr_bs,
                 "chunk_size": lvol.distr_chunk_bs,
                 "pba_page_size": lvol.distr_page_size,
+                "jm_names": get_ha_jm_names(nodes),
+                "ha_is_non_leader": True,
             }
         })
 
@@ -665,6 +691,8 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
                 "block_size": lvol.distr_bs,
                 "chunk_size": lvol.distr_chunk_bs,
                 "pba_page_size": lvol.distr_page_size,
+                "jm_names": get_ha_jm_names(nodes),
+                "ha_is_non_leader": True,
             }
         })
 
@@ -705,17 +733,6 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
         lvol.lvol_type += ',compress'
         lvol.top_bdev = lvol.comp_bdev
 
-    nodes = _get_next_3_nodes(cl.get_id(), lvol.size)
-    if not nodes:
-        return False, f"No nodes found with enough resources to create the LVol"
-
-    if host_node:
-        nodes.insert(0, host_node)
-    else:
-        host_node = nodes[0]
-
-    lvol.hostname = host_node.hostname
-    lvol.node_id = host_node.get_id()
 
     if ha_type == 'single':
         ret, error = add_lvol_on_node(lvol, host_node)

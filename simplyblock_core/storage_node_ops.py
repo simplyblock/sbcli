@@ -669,6 +669,34 @@ def _connect_to_remote_devs(this_node):
     return remote_devices
 
 
+def _connect_to_remote_jm_devs(this_node):
+    db_controller = DBController()
+
+    rpc_client = RPCClient(
+        this_node.mgmt_ip, this_node.rpc_port,
+        this_node.rpc_username, this_node.rpc_password)
+
+    remote_devices = []
+    # connect to remote devs
+    snodes = db_controller.get_storage_nodes_by_cluster_id(this_node.cluster_id)
+    for node_index, node in enumerate(snodes):
+        if node.get_id() == this_node.get_id() or node.status == node.STATUS_OFFLINE:
+            continue
+
+        if node.jm_device:
+            name = f"remote_{node.jm_device.jm_bdev}"
+            logger.info(f"Connecting to {name}")
+            ret = rpc_client.bdev_nvme_attach_controller_tcp(
+                name, node.jm_device.nvmf_nqn, node.jm_device.nvmf_ip, node.jm_device.nvmf_port)
+            if not ret:
+                logger.warning(f"failed to connect to remote JM {node.jm_device.jm_bdev}")
+
+            node.jm_device.remote_bdev = f"{name}n1"
+            remote_devices.append(node.jm_device)
+
+    return remote_devices
+
+
 def add_node(cluster_id, node_ip, iface_name, data_nics_list,
              max_lvol, max_snap, max_prov, spdk_image=None, spdk_debug=False,
              small_bufsize=0, large_bufsize=0,
@@ -973,6 +1001,9 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
     logger.info("Connecting to remote devices")
     remote_devices = _connect_to_remote_devs(snode)
     snode.remote_devices = remote_devices
+
+    logger.info("Connecting to remote JMs")
+    snode.remote_jm_devices = _connect_to_remote_jm_devs(snode)
 
     logger.info("Setting node status to Active")
     snode.status = StorageNode.STATUS_ONLINE
@@ -1394,6 +1425,9 @@ def restart_storage_node(
     remote_devices = _connect_to_remote_devs(snode)
     snode.remote_devices = remote_devices
 
+    logger.info("Connecting to remote JMs")
+    snode.remote_jm_devices = _connect_to_remote_jm_devs(snode)
+
     # make other nodes connect to the new devices
     logger.info("Make other nodes connect to the node devices")
     snodes = db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id)
@@ -1556,6 +1590,18 @@ def list_storage_devices(kv_store, node_id, sort, is_json):
             "Serial Number": device.serial_number,
             "Node ID": device.node_id,
         })
+
+    for device in snode.remote_jm_devices:
+        logger.debug(device)
+        logger.debug("*" * 20)
+        remote_devices.append({
+            "UUID": device.uuid,
+            "Name": device.remote_bdev,
+            "Size": utils.humanbytes(device.size),
+            "Serial Number": device.serial_number,
+            "Node ID": device.node_id,
+        })
+
     if sort and sort in ['node-seq', 'dev-seq', 'serial']:
         if sort == 'serial':
             sort_key = "Serial Number"
@@ -2286,5 +2332,6 @@ def set_node_status(node_id, status):
     if snode.status == StorageNode.STATUS_ONLINE:
         logger.info("Connecting to remote devices")
         _connect_to_remote_devs(snode)
+        _connect_to_remote_jm_devs(snode)
 
     return True
