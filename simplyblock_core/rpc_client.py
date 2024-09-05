@@ -363,7 +363,7 @@ class RPCClient:
 
     def bdev_distrib_create(self, name, vuid, ndcs, npcs, num_blocks, block_size, jm_names,
                             chunk_size, ha_comm_addrs=None, ha_inode_self=None, pba_page_size=2097152,
-                            distrib_cpu_mask=""):
+                            distrib_cpu_mask="", ha_is_non_leader=True):
         """"
             // Optional (not specified = no HA)
             // Comma-separated communication addresses, for each node, e.g. "192.168.10.1:45001,192.168.10.1:32768".
@@ -384,7 +384,8 @@ class RPCClient:
             "num_blocks": num_blocks,
             "block_size": block_size,
             "chunk_size": chunk_size,
-            "pba_page_size": pba_page_size
+            "pba_page_size": pba_page_size,
+            "ha_is_non_leader": ha_is_non_leader,
         }
         if ha_comm_addrs:
             params['ha_comm_addrs'] = ha_comm_addrs
@@ -466,7 +467,8 @@ class RPCClient:
             "fabrics_connect_timeout_us": 100000,
             "fast_io_fail_timeout_sec": 1,
             "num_io_queues": 16384,
-            "ctrlr_loss_timeout_sec": 2,
+            "ctrlr_loss_timeout_sec": 1,
+            "reconnect_delay_sec": 1,
         }
         return self._request("bdev_nvme_attach_controller", params)
 
@@ -529,7 +531,7 @@ class RPCClient:
             "fast_io_fail_timeout_sec": 1,
             "reconnect_delay_sec": 1,
             "keep_alive_timeout_ms": 200,
-            "transport_ack_timeout": 7,
+            "transport_ack_timeout": 1,
             "timeout_us": 100000
         }
         return self._request("bdev_nvme_set_options", params)
