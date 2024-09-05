@@ -169,6 +169,17 @@ def get_jm_names(snode):
     return [snode.jm_device.jm_bdev] if snode.jm_device else []
 
 
+def get_ha_jm_names(snode_list):
+    jm_list = []
+    if snode_list[0].jm_device:
+        jm_list.append(snode_list[0].jm_device.jm_bdev)
+    else:
+        jm_list.append("JM_LOCAL")
+
+    for snode in snode_list[1:]:
+        jm_list.append(snode.jm_device.jm_bdev)
+
+
 def _get_next_3_nodes(cluster_id, lvol_size=0):
     snodes = db_controller.get_storage_nodes_by_cluster_id(cluster_id)
     online_nodes = []
@@ -399,8 +410,6 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
     lvol.distr_bs = cl.distr_bs
     lvol.distr_chunk_bs = cl.distr_chunk_bs
     #lvol.distr_page_size = (distr_npcs+distr_npcs)*cl.page_size_in_blocks
-
-
 
     nodes = _get_next_3_nodes(cl.get_id(), lvol.size)
     if not nodes:
