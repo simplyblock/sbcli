@@ -80,10 +80,15 @@ class StorageNode(BaseModel):
         "spdk_cpu_mask": {"type": str, "default": ""},
         "app_thread_mask": {"type": str, "default": ""},
         "pollers_mask": {"type": str, "default": ""},
-        "poller_cpu_cores": {"type": str, "default": ""},
+        "poller_cpu_cores": {"type": List[int], "default": []},
         "jm_cpu_mask": {"type": str, "default": ""},
         "alceml_cpu_cores": {"type": List[int], "default": []},
+        "alceml_worker_cpu_cores": {"type": List[int], "default": []},
+        "distrib_cpu_cores": {"type": List[int], "default": []},
         "alceml_cpu_index": {"type": int, "default": 0},
+        "alceml_worker_cpu_index": {"type": int, "default": 0},
+        "distrib_cpu_index": {"type": int, "default": 0},
+
         "distrib_cpu_mask": {"type": str, "default": ""},
 
         "spdk_mem": {"type": int, "default": 0},

@@ -48,6 +48,7 @@ class CLIWrapper:
         sub_command.add_argument("--max-prov", help='Max provisioning size of all storage nodes', dest='max_prov')
         sub_command.add_argument("--number-of-distribs", help='The number of distirbs to be created on the node', dest='number_of_distribs', type=int, default=4)
         sub_command.add_argument("--number-of-devices", help='Number of devices per storage node if it\'s not supported EC2 instance', dest='number_of_devices', type=int)
+        sub_command.add_argument("--cpu-mask", help='SPDK app CPU mask, default is all cores found', dest='spdk_cpu_mask')
 
         sub_command.add_argument("--spdk-image", help='SPDK image uri', dest='spdk_image')
         sub_command.add_argument("--spdk-debug", help='Enable spdk debug logs', dest='spdk_debug', required=False, action='store_true')
@@ -680,6 +681,8 @@ class CLIWrapper:
                     self.parser.error(f"Mandatory argument '--max-snap' not provided for {sub_command}")
                 if not args.max_prov:
                     self.parser.error(f"Mandatory argument '--max-prov' not provided for {sub_command}")
+                if not args.spdk_cpu_mask:
+                    self.parser.error(f"Mandatory argument '--cpu-mask' not provided for {sub_command}")
                 cluster_id = args.cluster_id
                 node_ip = args.node_ip
                 ifname = args.ifname
@@ -691,7 +694,10 @@ class CLIWrapper:
                 large_bufsize = args.large_bufsize
                 num_partitions_per_dev = args.partitions
                 jm_percent = args.jm_percent
-
+                if self.validate_cpu_mask(args.spdk_cpu_mask):
+                    spdk_cpu_mask = args.spdk_cpu_mask
+                else:
+                    return f"Invalid cpu mask value: {args.spdk_cpu_mask}"
                 max_lvol = args.max_lvol
                 max_snap = args.max_snap
                 max_prov = self.parse_size(args.max_prov)
@@ -702,7 +708,7 @@ class CLIWrapper:
                     return f"Max provisioning memory:{args.max_prov} must be larger than 1G"
 
                 out = storage_ops.add_node(
-                    cluster_id, node_ip, ifname, data_nics, max_lvol, max_snap, max_prov, spdk_image, spdk_debug,
+                    cluster_id, node_ip, ifname, data_nics, max_lvol, max_snap, max_prov, spdk_cpu_mask, spdk_image, spdk_debug,
                     small_bufsize, large_bufsize, num_partitions_per_dev, jm_percent, number_of_devices, enable_test_device, number_of_distribs)
 
                 return out

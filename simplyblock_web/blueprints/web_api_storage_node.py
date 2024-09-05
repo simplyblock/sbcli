@@ -175,6 +175,8 @@ def storage_node_add():
 
     if 'max_prov' not in req_data:
         return utils.get_response_error("missing required param: max_prov", 400)
+    if 'spdk_cpu_mask' in req_data:
+        return utils.get_response_error(f"missing required param: spdk_cpu_mask", 400)
 
     cluster_id = req_data['cluster_id']
     node_ip = req_data['node_ip']
@@ -197,10 +199,16 @@ def storage_node_add():
         data_nics = req_data['data_nics']
         data_nics = data_nics.split(",")
 
+        msk = req_data['spdk_cpu_mask']
+        if utils.validate_cpu_mask(msk):
+            spdk_cpu_mask = msk
+        else:
+            return utils.get_response_error(f"Invalid cpu mask value: {msk}", 400)
+
 
 
     out = storage_node_ops.add_node(
-        cluster_id, node_ip, ifname, data_nics, max_lvol, max_snap, max_prov,
+        cluster_id, node_ip, ifname, data_nics, max_lvol, max_snap, max_prov, spdk_cpu_mask,
         spdk_image=spdk_image, spdk_debug=spdk_debug, number_of_distribs=number_of_distribs)
 
     return utils.get_response(out)

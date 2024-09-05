@@ -338,7 +338,7 @@ class RPCClient:
         return self._request2("ultra21_bdev_pass_delete", params)
 
     def bdev_alceml_create(self, alceml_name, nvme_name, uuid, pba_init_mode=3,
-                           alceml_cpu_mask=""):
+                           alceml_cpu_mask="", alceml_worker_cpu_mask=""):
         params = {
             "name": alceml_name,
             "cntr_path": nvme_name,
@@ -356,6 +356,8 @@ class RPCClient:
         }
         if alceml_cpu_mask:
             params["bdb_lcpu_mask"] = int(alceml_cpu_mask, 16)
+        if alceml_worker_cpu_mask:
+            params["bdb_lcpu_mask_alt_workers"] = int(alceml_worker_cpu_mask,16)
         return self._request("bdev_alceml_create", params)
 
     def bdev_distrib_create(self, name, vuid, ndcs, npcs, num_blocks, block_size, jm_names,
@@ -711,7 +713,10 @@ class RPCClient:
 
     def bdev_lvol_get_lvstores(self, name):
         params = {"lvs_name": name}
-        return self._request2("bdev_lvol_get_lvstores", params)
+        _, err = self._request2("bdev_lvol_get_lvstores", params)
+        if err:
+            return False
+        return True
 
     def bdev_lvol_resize(self, name, size_in_mib):
         params = {

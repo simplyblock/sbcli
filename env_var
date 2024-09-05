@@ -1,6 +1,6 @@
 
 SIMPLY_BLOCK_COMMAND_NAME=sbcli-lvol-raid
-SIMPLY_BLOCK_VERSION=1.1.13
+SIMPLY_BLOCK_VERSION=1.2.2
 SIMPLY_BLOCK_DOCKER_IMAGE=simplyblock/simplyblock:lvol_raid
 
 DOCKER_USER=hamdysimplyblock
