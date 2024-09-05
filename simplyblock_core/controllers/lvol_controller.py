@@ -179,6 +179,7 @@ def get_ha_jm_names(snode_list):
     for snode in snode_list[1:]:
         name = f"remote_{snode.jm_device.jm_bdev}n1"
         jm_list.append(name)
+    return jm_list
 
 
 

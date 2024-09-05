@@ -1600,8 +1600,8 @@ def list_storage_devices(kv_store, node_id, sort, is_json):
             "UUID": device.uuid,
             "Name": device.remote_bdev,
             "Size": utils.humanbytes(device.size),
-            "Serial Number": device.serial_number,
-            "Node ID": device.node_id,
+            "Serial Number": "",
+            "Node ID": "",
         })
 
     if sort and sort in ['node-seq', 'dev-seq', 'serial']:
