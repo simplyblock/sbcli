@@ -177,7 +177,8 @@ def get_ha_jm_names(snode_list):
         jm_list.append("JM_LOCAL")
 
     for snode in snode_list[1:]:
-        jm_list.append(snode.jm_device.jm_bdev)
+        name = f"remote_{snode.jm_device.jm_bdev}n1"
+        jm_list.append(name)
 
 
 
@@ -785,7 +786,7 @@ def _create_bdev_stack(lvol, snode, ha_comm_addrs, ha_inode_self):
         ret = None
 
         if type == "bdev_distr":
-            params['jm_names'] = get_jm_names(snode)
+            # params['jm_names'] = get_jm_names(snode)
             params['ha_comm_addrs'] = ha_comm_addrs
             params['ha_inode_self'] = ha_inode_self
             params['distrib_cpu_mask'] = snode.distrib_cpu_mask
