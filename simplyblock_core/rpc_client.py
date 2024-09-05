@@ -27,7 +27,7 @@ class RPCClient:
 
     # ref: https://spdk.io/doc/jsonrpc.html
 
-    def __init__(self, ip_address, port, username, password, timeout=60, retry=10):
+    def __init__(self, ip_address, port, username, password, timeout=5, retry=3):
         self.ip_address = ip_address
         self.port = port
         self.url = 'http://%s:%s/' % (self.ip_address, self.port)
@@ -692,3 +692,41 @@ class RPCClient:
     def thread_set_cpumask(self, app_thread_process_id, app_thread_mask):
         params = {"id": app_thread_process_id, "cpumask": app_thread_mask}
         return self._request("thread_set_cpumask", params)
+
+    def distr_migration_to_primary_start(self, storage_ID, name):
+        params = {
+            "name": name,
+            "storage_ID": storage_ID,
+        }
+        return self._request("distr_migration_to_primary_start", params)
+
+    def distr_migration_status(self, name):
+        params = {"name": name}
+        return self._request("distr_migration_status", params)
+
+    def distr_migration_failure_start(self, name, storage_ID):
+        params = {
+            "name": name,
+            "storage_ID": storage_ID
+        }
+        return self._request("distr_migration_failure_start", params)
+
+    def distr_migration_expansion_start(self, name, storage_ID):
+        params = {
+            "name": name,
+            "storage_ID": storage_ID}
+        return self._request("distr_migration_expansion_start", params)
+
+    def bdev_raid_add_base_bdev(self, raid_bdev, base_bdev):
+        params = {
+            "raid_bdev": raid_bdev,
+            "base_bdev": base_bdev,
+        }
+        return self._request("bdev_raid_add_base_bdev", params)
+
+    def bdev_raid_remove_base_bdev(self, raid_bdev, base_bdev):
+        params = {
+            "raid_bdev": raid_bdev,
+            "base_bdev": base_bdev,
+        }
+        return self._request("bdev_raid_add_base_bdev", params)

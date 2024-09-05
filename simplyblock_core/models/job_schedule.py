@@ -11,6 +11,8 @@ class JobSchedule(BaseModel):
     FN_DEV_RESTART = "device_restart"
     FN_NODE_RESTART = "node_restart"
     FN_DEV_MIG = "device_migration"
+    FN_FAILED_DEV_MIG = "failed_device_migration"
+    FN_NEW_DEV_MIG = "new_device_migration"
 
     attributes = {
         "uuid": {"type": str, 'default': ""},
@@ -26,6 +28,7 @@ class JobSchedule(BaseModel):
         "function_result": {"type": str, 'default': ""},
 
         "retry": {"type": int, 'default': 0},
+        "max_retry": {"type": int, 'default': 0},
         "status": {"type": str, 'default': ""},
 
     }

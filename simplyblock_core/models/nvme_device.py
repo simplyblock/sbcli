@@ -105,6 +105,7 @@ class JMDevice(BaseModel):
         "nvme_bdev": {"type": str, 'default': ""},
         "alceml_bdev": {"type": str, 'default': ""},
         "jm_bdev": {"type": str, 'default': ""},
+        "device_data_dict": {"type": dict, 'default': {}},
 
         "pt_bdev": {"type": str, 'default': ""},
         "nvmf_nqn": {"type": str, 'default': ""},

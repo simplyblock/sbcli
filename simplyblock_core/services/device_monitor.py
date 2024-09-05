@@ -36,7 +36,7 @@ while True:
                 logger.info("Adding device to auto restart")
                 auto_restart_devices.append(dev)
 
-        if len(auto_restart_devices) >= 2 or len(online_devices) == 0:
+        if len(auto_restart_devices) >= 2:
             tasks_controller.add_node_to_auto_restart(node)
         elif len(auto_restart_devices) == 1:
             tasks_controller.add_device_to_auto_restart(auto_restart_devices[0])

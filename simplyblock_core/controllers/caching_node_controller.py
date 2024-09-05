@@ -176,7 +176,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spd
         logger.error("Pod is not running, exiting")
         return False
 
-    time.sleep(10)
+    time.sleep(20)
 
     # creating RPCClient instance
     rpc_client = RPCClient(
@@ -209,42 +209,56 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spd
 
     ssd_size = ssd_dev.size
     supported_ssd_size = mem * 100 / 2.25
+    split_factor = math.ceil(ssd_size/supported_ssd_size)
 
     logger.info(f"Supported SSD size: {utils.humanbytes(supported_ssd_size)}")
     logger.info(f"SSD size: {utils.humanbytes(ssd_size)}")
 
+    cache_size = 0
+    cache_bdev = None
     if supported_ssd_size < ssd_size:
-        logger.info(f"SSD size is bigger than the supported size, creating partition")
-
-        nbd_device = rpc_client.nbd_start_disk(ssd_dev.nvme_bdev)
-        time.sleep(3)
-        if not nbd_device:
-            logger.error(f"Failed to start nbd dev")
-            return False
-
-        jm_percent = int((supported_ssd_size/ssd_size) * 100)
-        result, error = cnode_api.make_gpt_partitions(nbd_device, jm_percent)
-        if error:
-            logger.error(f"Failed to make partitions")
-            logger.error(error)
-            return False
-        time.sleep(3)
-        rpc_client.nbd_stop_disk(nbd_device)
-        time.sleep(1)
-        rpc_client.bdev_nvme_detach_controller(ssd_dev.nvme_controller)
-        time.sleep(1)
-        rpc_client.bdev_nvme_controller_attach(ssd_dev.nvme_controller, ssd_dev.pcie_address)
-        time.sleep(1)
-        rpc_client.bdev_examine(ssd_dev.nvme_bdev)
-        time.sleep(1)
-
-        cache_bdev = f"{ssd_dev.nvme_bdev}p1"
-        cache_size = int(supported_ssd_size)
-
+        logger.info(f"SSD size is bigger than the supported size, will use split bdev: {split_factor}")
+        ret = rpc_client.bdev_split(ssd_dev.nvme_bdev, split_factor)
+        cache_bdev = ret[0]
+        cache_size = int(ssd_dev.size/split_factor)
+        snode.cache_split_factor = split_factor
     else:
-
+        snode.cache_split_factor = 0
         cache_bdev = ssd_dev.nvme_bdev
         cache_size = ssd_dev.size
+
+    # if supported_ssd_size < ssd_size:
+    #     logger.info(f"SSD size is bigger than the supported size, creating partition")
+    #
+    #     nbd_device = rpc_client.nbd_start_disk(ssd_dev.nvme_bdev)
+    #     time.sleep(3)
+    #     if not nbd_device:
+    #         logger.error(f"Failed to start nbd dev")
+    #         return False
+    #
+    #     jm_percent = int((supported_ssd_size/ssd_size) * 100)
+    #     result, error = cnode_api.make_gpt_partitions(nbd_device, jm_percent)
+    #     if error:
+    #         logger.error(f"Failed to make partitions")
+    #         logger.error(error)
+    #         return False
+    #     time.sleep(3)
+    #     rpc_client.nbd_stop_disk(nbd_device)
+    #     time.sleep(1)
+    #     rpc_client.bdev_nvme_detach_controller(ssd_dev.nvme_controller)
+    #     time.sleep(1)
+    #     rpc_client.bdev_nvme_controller_attach(ssd_dev.nvme_controller, ssd_dev.pcie_address)
+    #     time.sleep(1)
+    #     rpc_client.bdev_examine(ssd_dev.nvme_bdev)
+    #     time.sleep(1)
+    #
+    #     cache_bdev = f"{ssd_dev.nvme_bdev}p1"
+    #     cache_size = int(supported_ssd_size)
+    #
+    # else:
+    #
+    #     cache_bdev = ssd_dev.nvme_bdev
+    #     cache_size = ssd_dev.size
 
     logger.info(f"Cache size: {utils.humanbytes(cache_size)}")
 

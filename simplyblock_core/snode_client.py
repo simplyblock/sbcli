@@ -119,3 +119,7 @@ class SNodeClient:
     def delete_dev_gpt_partitions(self, device_pci):
         params = {"device_pci": device_pci}
         return self._request("POST", "delete_dev_gpt_partitions", params)
+
+    def bind_device_to_spdk(self, device_pci):
+        params = {"device_pci": device_pci}
+        return self._request("POST", "bind_device_to_spdk", params)

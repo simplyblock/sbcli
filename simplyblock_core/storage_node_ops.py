@@ -18,6 +18,7 @@ from simplyblock_core.controllers import lvol_controller, storage_events, snapsh
 from simplyblock_core.kv_store import DBController
 from simplyblock_core import shell_utils
 from simplyblock_core.models.iface import IFace
+from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.nvme_device import NVMeDevice, JMDevice
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.pci_utils import get_nvme_devices, bind_spdk_driver
@@ -80,7 +81,11 @@ def _get_if_ip_address(ifname):
     exit(1)
 
 
-def addNvmeDevices(cluster, rpc_client, devs, snode):
+def addNvmeDevices(snode, devs):
+    rpc_client = RPCClient(
+        snode.mgmt_ip, snode.rpc_port,
+        snode.rpc_username, snode.rpc_password, timeout=60, retry=10)
+
     devices = []
     ret = rpc_client.bdev_nvme_controller_list()
     ctr_map = {}
@@ -91,7 +96,7 @@ def addNvmeDevices(cluster, rpc_client, devs, snode):
         pass
 
     next_physical_label = get_next_physical_device_order()
-    for index, pcie in enumerate(devs):
+    for pcie in devs:
 
         if pcie in ctr_map:
             nvme_controller = ctr_map[pcie]
@@ -382,6 +387,8 @@ def _create_jm_stack_on_device(rpc_client, nvme, snode, after_restart):
         'status': JMDevice.STATUS_ONLINE,
         'alceml_bdev': alceml_name,
         'nvme_bdev': nvme.nvme_bdev,
+        "serial_number": nvme.serial_number,
+        "device_data_dict": nvme.to_dict(),
         'jm_bdev': jm_bdev,
 
         'pt_bdev': pt_name,
@@ -893,7 +900,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
     # creating RPCClient instance
     rpc_client = RPCClient(
         snode.mgmt_ip, snode.rpc_port,
-        snode.rpc_username, snode.rpc_password)
+        snode.rpc_username, snode.rpc_password, timeout=60, retry=10)
 
     # 1- set iobuf options
     if (snode.iobuf_small_pool_count or snode.iobuf_large_pool_count or
@@ -949,7 +956,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
     node_info, _ = snode_api.info()
 
     # discover devices
-    nvme_devs = addNvmeDevices(cluster, rpc_client, node_info['spdk_pcie_list'], snode)
+    nvme_devs = addNvmeDevices(snode, node_info['spdk_pcie_list'])
     if not nvme_devs:
         logger.error("No NVMe devices was found!")
         return False
@@ -1019,6 +1026,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
 
     for dev in snode.nvme_devices:
         distr_controller.send_dev_status_event(dev, NVMeDevice.STATUS_ONLINE)
+        tasks_controller.add_new_device_mig_task(dev.get_id())
 
     storage_events.snode_add(snode)
     logger.info("Done")
@@ -1056,6 +1064,12 @@ def remove_storage_node(node_id, force_remove=False, force_migrate=False):
     if snode.status == StorageNode.STATUS_ONLINE:
         logger.error(f"Can not remove online node: {node_id}")
         return False
+
+    task_id = tasks_controller.get_active_node_restart_task(snode.cluster_id, snode.get_id())
+    if task_id:
+        logger.error(f"Restart task found: {task_id}, can not remove storage node")
+        if force_remove is False:
+            return False
 
     task_id = tasks_controller.get_active_node_restart_task(snode.cluster_id, snode.get_id())
     if task_id:
@@ -1101,6 +1115,7 @@ def remove_storage_node(node_id, force_remove=False, force_migrate=False):
             dev.status = NVMeDevice.STATUS_FAILED
             distr_controller.send_dev_status_event(dev, NVMeDevice.STATUS_FAILED)
             device_events.device_status_change(dev, NVMeDevice.STATUS_FAILED, old_status)
+            tasks_controller.add_device_failed_mig_task(dev.get_id())
 
     logger.info("Removing storage node")
 
@@ -1153,6 +1168,12 @@ def restart_storage_node(
     if snode.status == StorageNode.STATUS_ONLINE:
         logger.error(f"Can not restart online node: {node_id}")
         return False
+
+    task_id = tasks_controller.get_active_node_restart_task(snode.cluster_id, snode.get_id())
+    if task_id:
+        logger.error(f"Restart task found: {task_id}, can not restart storage node")
+        if force is False:
+            return False
 
     task_id = tasks_controller.get_active_node_restart_task(snode.cluster_id, snode.get_id())
     if task_id:
@@ -1326,7 +1347,7 @@ def restart_storage_node(
         return False
 
     node_info, _ = snode_api.info()
-    nvme_devs = addNvmeDevices(cluster, rpc_client, node_info['spdk_pcie_list'], snode)
+    nvme_devs = addNvmeDevices(snode, node_info['spdk_pcie_list'])
     if not nvme_devs:
         logger.error("No NVMe devices was found!")
         return False
@@ -1353,18 +1374,15 @@ def restart_storage_node(
             db_dev.status = NVMeDevice.STATUS_REMOVED
             distr_controller.send_dev_status_event(db_dev, db_dev.status)
 
-    # todo: handle new devices
-    # for dev in nvme_devs:
-    #     if dev.serial_number not in known_devices_sn:
-    #         logger.info(f"New device found: {dev.get_id()}")
-    #         dev.status = NVMeDevice.STATUS_NEW
-    #         new_devices.append(dev)
-    #         snode.nvme_devices.append(dev)
+    if snode.jm_device and "serial_number" in snode.jm_device.device_data_dict:
+        known_devices_sn.append(snode.jm_device.device_data_dict['serial_number'])
 
-    # dev_order = get_next_cluster_device_order(db_controller, snode.cluster_id)
-    # for index, nvme in enumerate(new_devices):
-    #     nvme.cluster_device_order = dev_order
-    #     dev_order += 1
+    for dev in nvme_devs:
+        if dev.serial_number not in known_devices_sn:
+            logger.info(f"New device found: {dev.get_id()}")
+            dev.status = NVMeDevice.STATUS_NEW
+            new_devices.append(dev)
+            snode.nvme_devices.append(dev)
 
     # prepare devices
     ret = _prepare_cluster_devices_on_restart(snode)
@@ -1625,6 +1643,12 @@ def shutdown_storage_node(node_id, force=False):
         if dev.status in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_READONLY]:
             device_controller.device_set_unavailable(dev.get_id())
     distr_controller.send_node_status_event(snode, StorageNode.STATUS_OFFLINE)
+
+    tasks = db_controller.get_job_tasks(snode.cluster_id)
+    for task in tasks:
+        if task.status in [JobSchedule.STATUS_RUNNING, JobSchedule.STATUS_NEW] and task.node_id == node_id:
+            task.canceled = True
+            task.write_to_db(db_controller.kv_store)
 
     # send event log
     storage_events.snode_status_change(snode, snode.status, old_status)

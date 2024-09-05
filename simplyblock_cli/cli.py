@@ -162,6 +162,8 @@ class CLIWrapper:
                                                  "(currently in \"new\" state) into cluster and will launch and "
                                                  "auto-rebalancing background process in which some cluster "
                                                  "capacity is re-distributed to this newly added device.")
+        sub_command.add_argument("id", help='the devices\'s UUID')
+
         sub_command = self.add_sub_command(
             subparser, 'remove-device', 'Remove a storage device', usage='The device will become unavailable, independently '
                                         'if it was physically removed from the server. This function can be used if '
@@ -170,13 +172,14 @@ class CLIWrapper:
         sub_command.add_argument("device_id", help='Storage device ID')
         sub_command.add_argument("--force", help='Force device remove', required=False, action='store_true')
 
-        # sub_command = self.add_sub_command(
-        #     subparser, 'set-failed-device', 'Set storage device to failed state. ', usage='This command can be used, '
-        #                                     'if an administrator believes that the device must be changed, '
-        #                                     'but its status and health state do not lead to an automatic detection '
-        #                                     'of the failure state. Attention!!! The failed state is final, all data '
-        #                                     'on the device will be automatically recovered to other devices '
-        #                                     'in the cluster. ')
+        sub_command = self.add_sub_command(
+            subparser, 'set-failed-device', 'Set storage device to failed state', usage='This command can be used, '
+                                            'if an administrator believes that the device must be changed, '
+                                            'but its status and health state do not lead to an automatic detection '
+                                            'of the failure state. Attention!!! The failed state is final, all data '
+                                            'on the device will be automatically recovered to other devices '
+                                            'in the cluster. ')
+        sub_command.add_argument("id", help='Storage device ID')
 
         sub_command = self.add_sub_command(
             subparser, 'get-capacity-device', 'Get device capacity')
@@ -734,10 +737,10 @@ class CLIWrapper:
                 ret = device_controller.restart_device(args.id)
 
             elif sub_command == "add-device":
-                ret = "Not implemented!"
+                ret = device_controller.add_device(args.id)
 
             elif sub_command == "set-failed-device":
-                ret = "Not implemented!"
+                ret = device_controller.device_set_failed(args.id)
 
             elif sub_command == "get-capacity-device":
                 device_id = args.device_id
