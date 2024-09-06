@@ -302,14 +302,14 @@ class SbcliUtils:
             "pool": pool_name,
             "comp": False,
             "crypto": False,
-            "max_rw_iops": str(max_rw_iops),
-            "max_rw_mbytes": str(max_rw_mbytes),
-            "max_r_mbytes": str(max_r_mbytes),
-            "max_w_mbytes": str(max_w_mbytes),
-            "distr_ndcs": str(distr_ndcs),
-            "distr_npcs": str(distr_npcs),
-            "distr_bs": str(distr_bs),
-            "distr_chunk_bs": str(distr_chunk_bs),
+            # "max_rw_iops": str(max_rw_iops),
+            # "max_rw_mbytes": str(max_rw_mbytes),
+            # "max_r_mbytes": str(max_r_mbytes),
+            # "max_w_mbytes": str(max_w_mbytes),
+            # "distr_ndcs": str(distr_ndcs),
+            # "distr_npcs": str(distr_npcs),
+            # "distr_bs": str(distr_bs),
+            # "distr_chunk_bs": str(distr_chunk_bs),
         }
         if host_id:
             body["host_id"] = host_id
