@@ -78,10 +78,13 @@ def task_runner(task):
         res = rpc_client.distr_migration_status(**mig_info)
         for st in res:
             if st['status'] == "completed":
-                task.status = JobSchedule.STATUS_DONE
-                task.function_result = "Done"
                 if st['error'] == 1:
-                    task.function_result = "mig completed with errors"
+                    task.function_result = "mig completed with errors, retrying"
+                    task.retry += 1
+                else:
+                    task.status = JobSchedule.STATUS_DONE
+                    task.function_result = "Done"
+
                 task.write_to_db(db_controller.kv_store)
                 return True
 
