@@ -2,6 +2,7 @@
 import datetime
 import json
 import logging as log
+import math
 import os
 
 import pprint
@@ -687,8 +688,9 @@ def _connect_to_remote_devs(this_node):
 
 def add_node(cluster_id, node_ip, iface_name, data_nics_list,
              max_lvol, max_snap, max_prov, spdk_image=None, spdk_debug=False,
-             small_bufsize=0, large_bufsize=0, spdk_cpu_mask = None,
-             num_partitions_per_dev=0, jm_percent=0, number_of_devices=0, enable_test_device=False, namespace=None, number_of_distribs=0):
+             small_bufsize=0, large_bufsize=0, spdk_cpu_mask=None,
+             num_partitions_per_dev=0, jm_percent=0, number_of_devices=0, enable_test_device=False,
+             namespace=None, number_of_distribs=2):
 
     db_controller = DBController()
     kv_store = db_controller.kv_store
@@ -746,6 +748,10 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
     distrib_cpu_index = 0
 
     poller_cpu_cores = []
+
+    if not spdk_cpu_mask:
+        spdk_cpu_mask = hex(int(math.pow(2, cpu_count))-2)
+
     spdk_cores = utils.hexa_to_cpu_list(spdk_cpu_mask)
     if cpu_count < spdk_cores[-1]:
         print(f"ERROR: The cpu mask {spdk_cpu_mask} is greater than the total cpus on the system {cpu_count}")
