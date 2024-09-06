@@ -729,10 +729,10 @@ class RPCClient:
         }
         return self._request("distr_migration_failure_start", params)
 
-    def distr_migration_expansion_start(self, name, storage_ID):
+    def distr_migration_expansion_start(self, name):
         params = {
             "name": name,
-            "storage_ID": storage_ID}
+        }
         return self._request("distr_migration_expansion_start", params)
 
     def bdev_raid_add_base_bdev(self, raid_bdev, base_bdev):

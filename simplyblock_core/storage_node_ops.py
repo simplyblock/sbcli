@@ -1432,7 +1432,7 @@ def restart_storage_node(
         known_devices_sn.append(db_dev.serial_number)
         if db_dev.serial_number in devices_sn:
             logger.info(f"Device found: {db_dev.get_id()}, status {db_dev.status}")
-            if db_dev.status != NVMeDevice.STATUS_JM:
+            if db_dev.status not in [NVMeDevice.STATUS_JM, NVMeDevice.STATUS_FAILED]:
                 db_dev.status = NVMeDevice.STATUS_ONLINE
             active_devices.append(db_dev)
         else:
