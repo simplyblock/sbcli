@@ -178,9 +178,6 @@ def spdk_process_start():
 
     spdk_image = constants.SIMPLY_BLOCK_SPDK_CORE_IMAGE
 
-    if node_utils.get_host_arch() == "aarch64":
-        spdk_image = constants.SIMPLY_BLOCK_SPDK_CORE_IMAGE_ARM64
-
     if 'spdk_image' in data and data['spdk_image']:
         spdk_image = data['spdk_image']
         node_docker.images.pull(spdk_image)
