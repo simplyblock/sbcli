@@ -42,7 +42,7 @@ def task_runner(task):
             all_devs_online = True
             for node in db_controller.get_storage_nodes_by_cluster_id(task.cluster_id):
                 for dev in node.nvme_devices:
-                    if dev.status != NVMeDevice.STATUS_ONLINE:
+                    if dev.status not in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_FAILED]:
                         all_devs_online = False
                         break
 
@@ -54,6 +54,12 @@ def task_runner(task):
 
         device = db_controller.get_storage_devices(task.device_id)
         lvol = db_controller.get_lvol_by_id(task.function_params["lvol_id"])
+
+        if not lvol:
+            task.status = JobSchedule.STATUS_DONE
+            task.function_result = "LVol not found"
+            task.write_to_db(db_controller.kv_store)
+            return True
 
         rsp = rpc_client.distr_migration_to_primary_start(device.cluster_device_order, lvol.base_bdev)
         if not rsp:
