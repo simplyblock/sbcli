@@ -262,10 +262,17 @@ def _create_jm_stack_on_raid(rpc_client, jm_nvme_bdevs, snode, after_restart):
         logger.error(f"Failed to create alceml bdev: {alceml_name}")
         return False
 
+    jm_bdev = f"jm_{snode.get_id()}"
+    ret = rpc_client.bdev_jm_create(jm_bdev, alceml_name, jm_cpu_mask=snode.jm_cpu_mask)
+    if not ret:
+        logger.error(f"Failed to create {jm_bdev}")
+        return False
+
+
     alceml_id = str(uuid.uuid4())
     # add pass through
-    pt_name = f"{alceml_name}_PT"
-    ret = rpc_client.bdev_PT_NoExcl_create(pt_name, alceml_name)
+    pt_name = f"{jm_bdev}_PT"
+    ret = rpc_client.bdev_PT_NoExcl_create(pt_name, jm_bdev)
     if not ret:
         logger.error(f"Failed to create pt noexcl bdev: {pt_name}")
         return False
@@ -296,11 +303,6 @@ def _create_jm_stack_on_raid(rpc_client, jm_nvme_bdevs, snode, after_restart):
         return False
 
 
-    jm_bdev = f"jm_{snode.get_id()}"
-    ret = rpc_client.bdev_jm_create(jm_bdev, alceml_name, jm_cpu_mask=snode.jm_cpu_mask)
-    if not ret:
-        logger.error(f"Failed to create {jm_bdev}")
-        return False
     ret = rpc_client.get_bdevs(raid_bdev)
 
     return JMDevice({
@@ -341,10 +343,15 @@ def _create_jm_stack_on_device(rpc_client, nvme, snode, after_restart):
         logger.error(f"Failed to create alceml bdev: {alceml_name}")
         return False
 
+    jm_bdev = f"jm_{snode.get_id()}"
+    ret = rpc_client.bdev_jm_create(jm_bdev, alceml_name, jm_cpu_mask=snode.jm_cpu_mask)
+    if not ret:
+        logger.error(f"Failed to create {jm_bdev}")
+        return False
 
     # add pass through
-    pt_name = f"{alceml_name}_PT"
-    ret = rpc_client.bdev_PT_NoExcl_create(pt_name, alceml_name)
+    pt_name = f"{jm_bdev}_PT"
+    ret = rpc_client.bdev_PT_NoExcl_create(pt_name, jm_bdev)
     if not ret:
         logger.error(f"Failed to create pt noexcl bdev: {pt_name}")
         return False
@@ -374,11 +381,6 @@ def _create_jm_stack_on_device(rpc_client, nvme, snode, after_restart):
         logger.error(f"Failed to add: {pt_name} to the subsystem: {subsystem_nqn}")
         return False
 
-    jm_bdev = f"jm_{snode.get_id()}"
-    ret = rpc_client.bdev_jm_create(jm_bdev, alceml_name, jm_cpu_mask=snode.jm_cpu_mask)
-    if not ret:
-        logger.error(f"Failed to create {jm_bdev}")
-        return False
 
     return JMDevice({
         'uuid': alceml_id,
@@ -637,6 +639,40 @@ def _prepare_cluster_devices_on_restart(snode):
         if not ret:
             logger.error(f"Failed to create {jm_bdev}")
             return False
+
+        alceml_id = jm_device.uuid
+        # add pass through
+        pt_name = f"{jm_bdev}_PT"
+        ret = rpc_client.bdev_PT_NoExcl_create(pt_name, jm_bdev)
+        if not ret:
+            logger.error(f"Failed to create pt noexcl bdev: {pt_name}")
+            return False
+
+        subsystem_nqn = snode.subsystem + ":dev:" + alceml_id
+        logger.info("creating subsystem %s", subsystem_nqn)
+        ret = rpc_client.subsystem_create(subsystem_nqn, 'sbcli-cn', alceml_id)
+        IP = None
+        for iface in snode.data_nics:
+            if iface.ip4_address:
+                tr_type = iface.get_transport_type()
+                ret = rpc_client.transport_list()
+                found = False
+                if ret:
+                    for ty in ret:
+                        if ty['trtype'] == tr_type:
+                            found = True
+                if found is False:
+                    ret = rpc_client.transport_create(tr_type)
+                logger.info("adding listener for %s on IP %s" % (subsystem_nqn, iface.ip4_address))
+                ret = rpc_client.listeners_create(subsystem_nqn, tr_type, iface.ip4_address, "4420")
+                IP = iface.ip4_address
+                break
+        logger.info(f"add {pt_name} to subsystem")
+        ret = rpc_client.nvmf_subsystem_add_ns(subsystem_nqn, pt_name)
+        if not ret:
+            logger.error(f"Failed to add: {pt_name} to the subsystem: {subsystem_nqn}")
+            return False
+
 
     return True
 
