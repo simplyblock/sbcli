@@ -1,58 +1,105 @@
 ### simplyblock e2e tests
 import argparse
+import os
+import json
 import traceback
 from __init__ import get_all_tests
 from logger_config import setup_logger
-from exceptions.custom_exception import (
-    TestNotFoundException,
-    MultipleExceptions
-)
+from exceptions.custom_exception import TestNotFoundException, MultipleExceptions
 from e2e_tests.cluster_test_base import TestClusterBase
 from utils.sbcli_utils import SbcliUtils
 from utils.ssh_utils import SshUtils
 
 
 def main():
-    """Run complete test suite
-    """
+    """Run the complete test suite or specific tests."""
     parser = argparse.ArgumentParser(description="Run simplyBlock's E2E Test Framework")
     parser.add_argument('--testname', type=str, help="The name of the test to run", default=None)
     parser.add_argument('--fio_debug', type=bool, help="Add debug flag to fio", default=False)
+    parser.add_argument('--failed_only', action='store_true', help="Run only failed tests from last run", default=False)
+    parser.add_argument('--unexecuted_only', action='store_true', help="Run only unexecuted tests from last run", default=False)
+    parser.add_argument('--branch', type=str, help="Branch name to uniquely store test results", required=True)
+    parser.add_argument('--retry', type=int, help="Number of retries for failed cases", default=1)
 
     args = parser.parse_args()
 
     tests = get_all_tests()
-    # Find the test class based on the provided test name
-    test_class_run = []
-    if args.testname is None or len(args.testname.strip()) == 0:
-        test_class_run = tests
-    else:
-        for cls in tests:
-            if args.testname.lower() in cls.__name__.lower():
-                test_class_run.append(cls)
 
+    # File to store failed test cases for the specific branch
+    base_dir = os.path.join(os.path.expanduser('~'), 'e2e_test_runs_fail_unexec_json')
+    if not os.path.exists(base_dir):
+        os.makedirs(base_dir)
+    failed_cases_file = os.path.join(base_dir,
+                                     f'failed_cases_{args.branch}.json')
+    executed_cases_file = os.path.join(base_dir,
+                                       f'executed_cases_{args.branch}.json')
+
+    logger.info(f"Failed only: {args.failed_only}")
+    logger.info(f"Unexecuted only: {args.unexecuted_only}")
+    logger.info(f"Failed case file: {failed_cases_file}")
+    logger.info(f"File exists: {os.path.exists(failed_cases_file)}")
+
+    onlyfiles = [f for f in os.listdir(base_dir) if os.path.isfile(os.path.join(base_dir, f))]
+    logger.info(f"List of files: {onlyfiles}")
+
+    # Load previously failed cases if '--failed_only' is set
+    if args.failed_only and os.path.exists(failed_cases_file):
+        logger.info("Running failed cases only")
+        with open(failed_cases_file, 'r', encoding='utf-8') as file:
+            failed_tests = json.load(file)
+            test_class_run = [cls for cls in tests 
+                              if any(ft in f'{cls.__name__}' for ft in failed_tests)]
+
+            logger.info(f"Running failed cases only: {test_class_run}")
+    elif args.unexecuted_only and os.path.exists(executed_cases_file):
+        logger.info("Running unexecuted cases only")
+        with open(executed_cases_file, 'r', encoding='utf-8') as file:
+            executed_tests = json.load(file)
+            test_class_run = [cls for cls in tests 
+                              if all(unet not in f'{cls.__name__}' for unet in executed_tests)]
+            logger.info(f"Running unexecuted cases only: {test_class_run}")
+    else:
+        # Run all tests or selected ones
+        logger.info("Running all or selected cases")
+        test_class_run = []
+        if args.testname is None or len(args.testname.strip()) == 0:
+            test_class_run = tests
+        else:
+            for cls in tests:
+                if args.testname.lower() in cls.__name__.lower():
+                    test_class_run.append(cls)
+
+    logger.info(f"List of tests to run: {test_class_run}")
     if not test_class_run:
         available_tests = ', '.join(cls.__name__ for cls in tests)
         logger.info(f"Test '{args.testname}' not found. Available tests are: {available_tests}")
         raise TestNotFoundException(args.testname, available_tests)
-    
+
     errors = {}
+    executed_tests = []
     for test in test_class_run:
         logger.info(f"Running Test {test}")
         test_obj = test(fio_debug=args.fio_debug)
-        try:
-            test_obj.setup()
-            test_obj.run()
-        except Exception as exp:
-            logger.error(traceback.format_exc())
-            errors[f"{test.__name__}"] = [exp]
+
+        for attempt in range(args.retry):
+            try:
+                test_obj.setup()
+                executed_tests.append(test.__name__)
+                test_obj.run()
+                logger.info(f"Test {test.__name__} passed on attempt {attempt + 1}")
+                if f"{test.__name__}" in errors:
+                    del errors[f"{test.__name__}"]
+                break  # Test passed, no need for more retries
+            except Exception as exp:
+                logger.error(f"Attempt {attempt + 1} failed for test {test.__name__}")
+                logger.error(traceback.format_exc())
+                errors[f"{test.__name__}"] = [exp]
+
         try:
             test_obj.teardown()
-            # pass
         except Exception as _:
             logger.error(f"Error During Teardown for test: {test.__name__}")
             logger.error(traceback.format_exc())
-            # errors[f"{test.__name__}"].append(exp)
         finally:
             if check_for_dumps():
                 logger.info("Found a core dump during test execution. "
@@ -60,24 +107,33 @@ def main():
                 break
 
     failed_cases = list(errors.keys())
+
+    # Save failed cases for next run
+    if failed_cases:
+        with open(failed_cases_file, 'w') as file:
+            json.dump(failed_cases, file)
+    else:
+        if os.path.exists(failed_cases_file):
+            os.remove(failed_cases_file)  # Clear file if all tests passed
+
+    # Save executed cases for next run
+    if executed_tests:
+        with open(executed_cases_file, 'w') as file:
+            json.dump(executed_tests, file)
+    else:
+        if os.path.exists(executed_cases_file):
+            os.remove(executed_cases_file)  # Clear file if no tests executed the run
+
     logger.info(f"Number of Total Cases: {len(test_class_run)}")
     logger.info(f"Number of Passed Cases: {len(test_class_run) - len(failed_cases)}")
     logger.info(f"Number of Failed Cases: {len(failed_cases)}")
-    
-    logger.info("Test Wise run status:")
-    for test in test_class_run:
-        if test.__name__ not in failed_cases:
-            logger.info(f"{test.__name__} PASSED CASE.")
-        else:
-            logger.info(f"{test.__name__} FAILED CASE.")
-
 
     if errors:
         raise MultipleExceptions(errors)
-    
+
 
 def check_for_dumps():
-    """Validates whether core dumps present on machines
+    """Validates whether core dumps are present on machines
     
     Returns:
         bool: If there are core dumps or not

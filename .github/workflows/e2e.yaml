@@ -21,6 +21,22 @@ on:
         description: 'Name of test to run. Empty to run all'
         required: false
         default: ''
+      run_failed_tests_only:
+        description: "Run only the failed tests from the last run"
+        required: false
+        default: false
+        type: boolean
+      run_unexecuted_tests:
+        description: "Run tests that were not executed in the last run"
+        required: false
+        default: false
+        type: boolean
+      retry_count:
+        description: "Number of retries for failed test cases"
+        required: false
+        default: 1
+        type: number
+
 jobs:
   e2e:
     runs-on: self-hosted
@@ -70,7 +86,7 @@ jobs:
               -backend-config="dynamodb_table=${TFSTATE_DYNAMODB_TABLE}" \
               -backend-config="encrypt=true"
 
-      - name: select or create workspace
+      - name: Select or Create Workspace
         run: |
           cd $GITHUB_WORKSPACE/simplyBlockDeploy
           terraform workspace select -or-create ghiaction-sbclie2e
@@ -116,6 +132,12 @@ jobs:
           source myenv/bin/activate
           python3 -m pip install -r requirements.txt
           echo "Running tests in namespace ${{ steps.get-namespace.outputs.namespace }}"
+
+          # Clean branch name to remove slashes for filename
+          BRANCH_NAME_SAFE=$(echo "${{ github.ref_name }}" | tr '/' '_')
+          export BRANCH_NAME=${BRANCH_NAME_SAFE}
+          export FAILED_CASES_FILE="failed_cases_${BRANCH_NAME_SAFE}.json"
+          export EXECUTED_CASES_FILE="executed_cases_${BRANCH_NAME_SAFE}.json"
           export CLUSTER_ID=${{ steps.bootstrap_cluster.outputs.cluster_id }}
           export CLUSTER_SECRET=${{ steps.bootstrap_cluster.outputs.cluster_secret }}
           export CLUSTER_IP=${{ steps.bootstrap_cluster.outputs.cluster_ip }}
@@ -130,7 +152,13 @@ jobs:
           if [ -n "${{ github.event.inputs.testname }}" ]; then
             TESTNAME="--testname ${{ github.event.inputs.testname }}"
           fi
-          python3 e2e.py $TESTNAME
+          if [ "${{ github.event.inputs.run_failed_tests_only }}" = "true" ]; then
+            python3 e2e.py --failed_only --retry ${{ github.event.inputs.retry_count }} --branch $BRANCH_NAME $TESTNAME
+          elif [ "${{ github.event.inputs.run_unexecuted_tests }}" = "true" ]; then
+            python3 e2e.py --unexecuted_only --retry ${{ github.event.inputs.retry_count }} --branch $BRANCH_NAME $TESTNAME
+          else
+            python3 e2e.py --retry ${{ github.event.inputs.retry_count }} --branch $BRANCH_NAME $TESTNAME
+          fi
       - name: Upload automation and docker logs to s3
         run: |
           cd $GITHUB_WORKSPACE/e2e/logs
