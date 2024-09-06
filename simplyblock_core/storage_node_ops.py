@@ -1250,7 +1250,7 @@ def restart_storage_node(
         node_id, max_lvol=0, max_snap=0, max_prov=0,
         spdk_image=None,
         set_spdk_debug=None,
-        small_bufsize=0, large_bufsize=0, number_of_devices=0, force=False):
+        small_bufsize=0, large_bufsize=0, number_of_devices=0, force=False, node_ip=None):
 
     db_controller = DBController()
     kv_store = db_controller.kv_store
@@ -1277,6 +1277,15 @@ def restart_storage_node(
         logger.error(f"Restart task found: {task_id}, can not restart storage node")
         if force is False:
             return False
+
+    if node_ip:
+        logger.info(f"Restarting on new node with ip: {node_ip}")
+        snode_api = SNodeClient(node_ip)
+        if not snode_api.info():
+            logger.error("Failed to get node info!")
+            return False
+        snode.api_endpoint = node_ip
+        snode.mgmt_ip = node_ip.split(":")[0]
 
     logger.info("Setting node state to restarting")
     old_status = snode.status

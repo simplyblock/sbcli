@@ -86,6 +86,7 @@ class CLIWrapper:
         sub_command.add_argument("--max-lvol", help='Max lvol per storage node', dest='max_lvol', type=int, default=0)
         sub_command.add_argument("--max-snap", help='Max snapshot per storage node', dest='max_snap', type=int, default=0)
         sub_command.add_argument("--max-prov", help='Max provisioning size of all storage nodes', dest='max_prov', default="")
+        sub_command.add_argument("--node-ip", help='Restart Node on new node', dest='node_ip')
         sub_command.add_argument("--number-of-devices", help='Number of devices per storage node if it\'s not supported EC2 instance', dest='number_of_devices', type=int, default=0)
 
         sub_command.add_argument("--spdk-image", help='SPDK image uri', dest='spdk_image')
@@ -762,7 +763,7 @@ class CLIWrapper:
                 ret = storage_ops.restart_storage_node(
                     node_id, max_lvol, max_snap, max_prov,
                     spdk_image, spdk_debug,
-                    small_bufsize, large_bufsize, number_of_devices)
+                    small_bufsize, large_bufsize, number_of_devices, node_ip=args.node_ip)
 
             elif sub_command == "list-devices":
                 ret = self.storage_node_list_devices(args)
