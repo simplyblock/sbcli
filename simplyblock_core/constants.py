@@ -99,3 +99,5 @@ INSTANCE_STORAGE_DATA = {
         'm6id.4xlarge': {'number_of_devices': 1, 'size_per_device_gb': 950},
         'm6id.8xlarge': {'number_of_devices': 1, 'size_per_device_gb': 1900},
     }
+
+MAX_SNAP_COUNT = 15

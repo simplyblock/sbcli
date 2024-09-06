@@ -7,7 +7,7 @@ import uuid
 
 from simplyblock_core.controllers import lvol_controller, snapshot_events
 
-from simplyblock_core import utils, distr_controller
+from simplyblock_core import utils, distr_controller, constants
 from simplyblock_core.kv_store import DBController
 from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.snapshot import SnapShot
@@ -31,6 +31,18 @@ def add(lvol_id, snapshot_name):
     if pool.status == Pool.STATUS_INACTIVE:
         logger.error(f"Pool is disabled")
         return False
+
+    if lvol.cloned_from_snap:
+        snap = db_controller.get_snapshot_by_id(lvol.cloned_from_snap)
+        ref_count = snap.ref_count
+        if snap.snap_ref_id:
+            ref_snap = db_controller.get_snapshot_by_id(snap.snap_ref_id)
+            ref_count = ref_snap.ref_count
+
+        if ref_count >= constants.MAX_SNAP_COUNT:
+            msg = f"Can not create more than {constants.MAX_SNAP_COUNT} snaps from this clone"
+            logger.error(msg)
+            return False, msg
 
     logger.info(f"Creating snapshot: {snapshot_name} from LVol: {lvol.id}")
     snode = db_controller.get_storage_node_by_id(lvol.node_id)
@@ -84,6 +96,17 @@ def add(lvol_id, snapshot_name):
     logger.info(json.dumps(diff, indent=2))
     snap.mem_diff = diff
     snap.write_to_db(db_controller.kv_store)
+
+    if lvol.cloned_from_snap:
+        original_snap = db_controller.get_snapshot_by_id(lvol.cloned_from_snap)
+        if original_snap.snap_ref_id:
+            original_snap = db_controller.get_snapshot_by_id(original_snap.snap_ref_id)
+
+        original_snap.ref_count += 1
+        original_snap.write_to_db(db_controller.kv_store)
+        snap.snap_ref_id = original_snap.get_id()
+        snap.write_to_db(db_controller.kv_store)
+
     logger.info("Done")
     snapshot_events.snapshot_create(snap)
     return snap.uuid
@@ -178,7 +201,17 @@ def clone(snapshot_id, clone_name, new_size=0):
         return False, msg
 
     if snode.status != snode.STATUS_ONLINE:
-        msg="Storage node in not Online"
+        msg = "Storage node in not Online"
+        logger.error(msg)
+        return False, msg
+
+    ref_count = snap.ref_count
+    if snap.snap_ref_id:
+        ref_snap = db_controller.get_snapshot_by_id(snap.snap_ref_id)
+        ref_count = ref_snap.ref_count
+
+    if ref_count >= constants.MAX_SNAP_COUNT:
+        msg = f"Can not create more than {constants.MAX_SNAP_COUNT} clones from this snapshot"
         logger.error(msg)
         return False, msg
 
@@ -235,17 +268,17 @@ def clone(snapshot_id, clone_name, new_size=0):
         }
     ]
 
-    # if new_size:
-    #     if snap.lvol.size >= new_size:
-    #         msg=f"New size {new_size} must be higher than the original size {snap.lvol.size}"
-    #         logger.error(msg)
-    #         return False, msg
-    #
-    #     if snap.lvol.max_size < new_size:
-    #         msg=f"New size {new_size} must be smaller than the max size {snap.lvol.max_size}"
-    #         logger.error(msg)
-    #         return False, msg
-    #     lvol.size = new_size
+    if new_size:
+        if snap.lvol.size >= new_size:
+            msg = f"New size {new_size} must be higher than the original size {snap.lvol.size}"
+            logger.error(msg)
+            return False, msg
+
+        if snap.lvol.max_size < new_size:
+            msg = f"New size {new_size} must be smaller than the max size {snap.lvol.max_size}"
+            logger.error(msg)
+            return False, msg
+        lvol.size = new_size
 
     rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
     spdk_mem_info_before = rpc_client.ultra21_util_get_malloc_stats()
@@ -287,8 +320,17 @@ def clone(snapshot_id, clone_name, new_size=0):
     pool.write_to_db(db_controller.kv_store)
     snode.lvols.append(lvol.uuid)
     snode.write_to_db(db_controller.kv_store)
+
+    if snap.snap_ref_id:
+        ref_snap = db_controller.get_snapshot_by_id(snap.snap_ref_id)
+        ref_snap.ref_count += 1
+        ref_snap.write_to_db(db_controller.kv_store)
+    else:
+        snap.ref_count += 1
+        snap.write_to_db(db_controller.kv_store)
+
     logger.info("Done")
     snapshot_events.snapshot_clone(snap, lvol)
-    # if new_size:
-    #     lvol_controller.resize_lvol(lvol.get_id(), new_size)
+    if new_size:
+        lvol_controller.resize_lvol(lvol.get_id(), new_size)
     return True, lvol.uuid
