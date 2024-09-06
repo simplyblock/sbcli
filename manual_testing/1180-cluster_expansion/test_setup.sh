@@ -263,7 +263,6 @@ for lvol_name in "${lvol_names_arr[@]}"; do
     md5sum $MOUNT_DIR/$lvol_name/base/*
 done
 pause_if_interactive_mode "$@"
-log "Initial md5 checksums:"
 for lvol_name in "${lvol_names_arr[@]}"; do
     mount_point="$MOUNT_DIR/$lvol_name"
     run_fio_workload ${mount_point} 10GiB 2 &
