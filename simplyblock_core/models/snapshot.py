@@ -13,6 +13,7 @@ class SnapShot(BaseModel):
         "lvol": {"type": LVol, 'default': None},
         "created_at": {"type": int, 'default': 0},
         "mem_diff": {"type": dict, 'default': {}},
+        "health_check": {"type": bool, 'default': True},
     }
 
     def __init__(self, data=None):

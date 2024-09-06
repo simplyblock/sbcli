@@ -18,6 +18,9 @@ db_controller = kv_store.DBController(kv_store=db_store)
 
 
 def get_cluster_target_status(cluster_id):
+    cluster = db_controller.get_cluster_by_id(cluster_id)
+    if cluster.status == cluster.STATUS_UNREADY:
+        return Cluster.STATUS_UNREADY
     snodes = db_controller.get_storage_nodes_by_cluster_id(cluster_id)
 
     online_nodes = 0
@@ -73,6 +76,8 @@ def update_cluster_status(cluster_id):
     if cluster.ha_type == "ha":
 
         if cluster.status == Cluster.STATUS_READONLY:
+            return
+        if cluster.status == Cluster.STATUS_UNREADY:
             return
 
         cluster_target_status = get_cluster_target_status(cluster_id)

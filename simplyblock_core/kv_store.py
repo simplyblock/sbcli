@@ -299,7 +299,7 @@ class DBController:
         ret = []
         snaps = SnapShot().read_from_db(self.kv_store)
         for snap in snaps:
-            if snap.lvol.host_id == node_id:
+            if snap.lvol.node_id == node_id:
                 ret.append(snap)
         return ret
 

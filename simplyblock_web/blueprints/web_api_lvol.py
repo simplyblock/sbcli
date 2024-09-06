@@ -98,10 +98,6 @@ def add_lvol():
         | max_size        | Maximum LVol size: 10M, 10G, 10(bytes)
         | ha_type         | LVol HA type, can be (single,ha,default=cluster's ha type), Default=default
         | distr_vuid      | Distr bdev virtual unique ID, Default=0 means random
-        | distr_ndcs      | Distr bdev number of data chunks per stripe, Default=0 means auto set
-        | distr_npcs      | Distr bdev number of parity chunks per stripe, Default=0 means auto set
-        | distr_bs        | Distr bdev block size, Default=4096
-        | distr_chunk_bs  | Distr bdev chunk block size, Default=4096
         | crypto_key1     | the hex value of key1 to be used for lvol encryption
         | crypto_key2     | the hex value of key2 to be used for lvol encryption
         | host_id         | the hostID on which the lvol is created
@@ -147,10 +143,6 @@ def add_lvol():
     ha_type = utils.get_value_or_default(cl_data, "ha_type", "default")
 
     distr_vuid = utils.get_int_value_or_default(cl_data, "distr_vuid", 0)
-    distr_ndcs = utils.get_int_value_or_default(cl_data, "distr_ndcs", 0)
-    distr_npcs = utils.get_int_value_or_default(cl_data, "distr_npcs", 0)
-    distr_bs = utils.get_int_value_or_default(cl_data, "distr_bs", 4096)
-    distr_chunk_bs = utils.get_int_value_or_default(cl_data, "distr_chunk_bs", 4096)
     crypto_key1 = utils.get_value_or_default(cl_data, "crypto_key1", None)
     crypto_key2 = utils.get_value_or_default(cl_data, "crypto_key2", None)
     host_id = utils.get_value_or_default(cl_data, "host_id", None)
@@ -173,10 +165,6 @@ def add_lvol():
         host_id_or_name=host_id,
         ha_type=ha_type,
         distr_vuid=distr_vuid,
-        distr_ndcs=distr_ndcs,
-        distr_npcs=distr_npcs,
-        distr_bs=distr_bs,
-        distr_chunk_bs=distr_chunk_bs,
         crypto_key1=crypto_key1,
         crypto_key2=crypto_key2,
     )
@@ -279,3 +267,15 @@ def create_snapshot():
         cl_data['lvol_id'],
         cl_data['snapshot_name'])
     return utils.get_response(snapID)
+
+
+@bp.route('/lvol/inflate_lvol/<string:uuid>', methods=['PUT'])
+def inflate_lvol(uuid):
+    lvol = db_controller.get_lvol_by_id(uuid)
+    if not lvol:
+        return utils.get_response_error(f"LVol not found: {uuid}", 404)
+    if not lvol.cloned_from_snap:
+        return utils.get_response_error(f"LVol: {uuid} must be cloned LVol not regular one", 404)
+
+    ret = lvol_controller.inflate_lvol(uuid)
+    return utils.get_response(ret)

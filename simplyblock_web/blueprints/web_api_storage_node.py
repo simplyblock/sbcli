@@ -188,12 +188,16 @@ def storage_node_add():
     if 'max_prov' not in req_data:
         return utils.get_response_error("missing required param: max_prov", 400)
 
+    if 'spdk_cpu_mask' in req_data:
+        return utils.get_response_error(f"missing required param: spdk_cpu_mask", 400)
+
     cluster_id = req_data['cluster_id']
     node_ip = req_data['node_ip']
     ifname = req_data['ifname']
     max_lvol = int(req_data['max_lvol'])
     max_snap = int(req_data['max_snap'])
     max_prov = req_data['max_prov']
+    number_of_distribs = req_data.get('number_of_distribs', 4)
 
     spdk_image = None
     if 'spdk_image' in req_data:
@@ -224,6 +228,13 @@ def storage_node_add():
     if 'number_of_devices' in req_data:
         number_of_devices = int(req_data['number_of_devices'])
 
+    msk = req_data['spdk_cpu_mask']
+    if utils.validate_cpu_mask(msk):
+        spdk_cpu_mask = msk
+    else:
+        return utils.get_response_error(f"Invalid cpu mask value: {msk}", 400)
+
+
     iobuf_small_pool_count = 0
     if 'iobuf_small_pool_count' in req_data:
         iobuf_small_pool_count = int(req_data['iobuf_small_pool_count'])
@@ -240,6 +251,7 @@ def storage_node_add():
         "max_lvol": max_lvol,
         "max_snap": max_snap,
         "max_prov": max_prov,
+        "spdk_cpu_mask": spdk_cpu_mask,
         "spdk_image": spdk_image,
         "spdk_debug": spdk_debug,
         "small_bufsize": iobuf_small_pool_count,
