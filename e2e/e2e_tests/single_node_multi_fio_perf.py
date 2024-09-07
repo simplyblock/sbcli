@@ -50,9 +50,9 @@ class TestLvolFioBase(TestClusterBase):
                 distr_npcs=config['npcs'],
                 distr_bs=4096,
                 distr_chunk_bs=4096,
-                max_rw_iops=600,
-                max_r_mbytes=5,
-                max_w_mbytes=5
+                max_rw_iops=6000,
+                max_r_mbytes=50,
+                max_w_mbytes=50
             )
 
             initial_devices = self.ssh_obj.get_devices(node=self.mgmt_nodes[0])
