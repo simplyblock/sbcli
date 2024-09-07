@@ -614,6 +614,17 @@ def _prepare_cluster_devices_on_restart(snode):
         snode.rpc_username, snode.rpc_password)
 
     for index, nvme in enumerate(snode.nvme_devices):
+
+        # if nvme.status == NVMeDevice.STATUS_NEW:
+        #     # prepare devices
+        #     if snode.num_partitions_per_dev == 0 or snode.jm_percent == 0:
+        #         ret = _prepare_cluster_devices_jm_on_dev(snode, [nvme])
+        #     else:
+        #         ret = _prepare_cluster_devices_partitions(snode, [nvme])
+        #     if not ret:
+        #         logger.error("Failed to prepare cluster devices")
+        #         return False
+
         if nvme.status not in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_UNAVAILABLE, NVMeDevice.STATUS_READONLY]:
             logger.debug(f"Device is skipped: {nvme.get_id()}, status: {nvme.status}")
             continue
@@ -627,11 +638,23 @@ def _prepare_cluster_devices_on_restart(snode):
     # prepare JM device
     jm_device = snode.jm_device
     if jm_device.jm_nvme_bdev_list:
-        ret = _create_jm_stack_on_raid(rpc_client, jm_device.jm_nvme_bdev_list, snode, after_restart=False)
-        if not ret:
-            logger.error(f"Failed to create JM device")
-            return False
+        all_bdevs_found = True
+        for bdev_name in jm_device.jm_nvme_bdev_list:
+            ret = rpc_client.get_bdevs(bdev_name)
+            if not ret:
+                logger.error(f"BDev not found: {bdev_name}")
+                all_bdevs_found = False
+                break
+
+        if all_bdevs_found:
+            ret = _create_jm_stack_on_raid(rpc_client, jm_device.jm_nvme_bdev_list, snode, after_restart=False)
+            if not ret:
+                logger.error(f"Failed to create JM device")
+                return False
+
+
     else:
+
         alceml_cpu_mask = ""
         alceml_worker_cpu_mask = ""
 
@@ -1498,7 +1521,7 @@ def restart_storage_node(
     ret = _prepare_cluster_devices_on_restart(snode)
     if not ret:
         logger.error("Failed to prepare cluster devices")
-        return False
+        # return False
 
     logger.info("Connecting to remote devices")
     remote_devices = _connect_to_remote_devs(snode)
