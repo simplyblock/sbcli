@@ -1,26 +1,14 @@
 # coding=utf-8
-import logging
 import time
-import sys
-import uuid
 
-from simplyblock_core import constants, kv_store
+from simplyblock_core import constants, kv_store, utils
 from simplyblock_core.controllers import tasks_controller
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
 
-# Import the GELF logger
-from graypy import GELFUDPHandler
 
+logger = utils.get_logger(__name__)
 
-# configure logging
-logger_handler = logging.StreamHandler(stream=sys.stdout)
-logger_handler.setFormatter(logging.Formatter('%(asctime)s: %(levelname)s: %(message)s'))
-gelf_handler = GELFUDPHandler('0.0.0.0', constants.GELF_PORT)
-logger = logging.getLogger()
-logger.addHandler(gelf_handler)
-logger.addHandler(logger_handler)
-logger.setLevel(logging.DEBUG)
 
 # get DB controller
 db_store = kv_store.KVStore()
@@ -48,7 +36,7 @@ while True:
                 logger.info("Adding device to auto restart")
                 auto_restart_devices.append(dev)
 
-        if len(auto_restart_devices) >= 2 or len(online_devices) == 0:
+        if len(auto_restart_devices) >= 2:
             tasks_controller.add_node_to_auto_restart(node)
         elif len(auto_restart_devices) == 1:
             tasks_controller.add_device_to_auto_restart(auto_restart_devices[0])

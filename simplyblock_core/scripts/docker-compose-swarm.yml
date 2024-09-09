@@ -79,6 +79,17 @@ services:
     networks:
       - hostnet
 
+  CachedLVolStatsCollector:
+    image: $SIMPLYBLOCK_DOCKER_IMAGE
+    command: "python simplyblock_core/services/cached_lvol_stat_collector.py"
+    deploy:
+      placement:
+        constraints: [node.role == manager]
+    volumes:
+      - "/etc/foundationdb:/etc/foundationdb"
+    networks:
+      - hostnet
+
   PortStatsCollector:
     image: $SIMPLYBLOCK_DOCKER_IMAGE
     command: "python simplyblock_core/services/port_stat_collector.py"
@@ -91,15 +102,14 @@ services:
     volumes:
       - "/etc/foundationdb:/etc/foundationdb"
 
-  DistrEventCollector:
+  MainDistrEventCollector:
     image: $SIMPLYBLOCK_DOCKER_IMAGE
-    command: "python simplyblock_core/services/distr_event_collector.py"
+    command: "python simplyblock_core/services/main_distr_event_collector.py"
     networks:
       - hostnet
     deploy:
-      mode: global
       placement:
-        constraints: [node.role == worker]
+        constraints: [node.role == manager]
     volumes:
       - "/etc/foundationdb:/etc/foundationdb"
 
@@ -207,6 +217,51 @@ services:
       - "/etc/foundationdb:/etc/foundationdb"
     networks:
       - hostnet
+
+  TasksRunnerFailedMigration:
+    image: $SIMPLYBLOCK_DOCKER_IMAGE
+    command: "python simplyblock_core/services/tasks_runner_failed_migration.py"
+    deploy:
+      placement:
+        constraints: [node.role == manager]
+    volumes:
+      - "/etc/foundationdb:/etc/foundationdb"
+    networks:
+      - hostnet
+
+  TasksRunnerNewDeviceMigration:
+    image: $SIMPLYBLOCK_DOCKER_IMAGE
+    command: "python simplyblock_core/services/tasks_runner_new_dev_migration.py"
+    deploy:
+      placement:
+        constraints: [node.role == manager]
+    volumes:
+      - "/etc/foundationdb:/etc/foundationdb"
+    networks:
+      - hostnet
+
+  NewDeviceDiscovery:
+    image: $SIMPLYBLOCK_DOCKER_IMAGE
+    command: "python simplyblock_core/services/new_device_discovery.py"
+    deploy:
+      placement:
+        constraints: [node.role == manager]
+    volumes:
+      - "/etc/foundationdb:/etc/foundationdb"
+    networks:
+      - hostnet
+
+  TasksNodeAddRunner:
+    image: $SIMPLYBLOCK_DOCKER_IMAGE
+    command: "python simplyblock_core/services/tasks_runner_node_add.py"
+    deploy:
+      placement:
+        constraints: [node.role == manager]
+    volumes:
+      - "/etc/foundationdb:/etc/foundationdb"
+    networks:
+      - hostnet
+
 
 volumes:
   os_data:

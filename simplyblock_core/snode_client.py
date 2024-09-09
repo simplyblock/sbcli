@@ -70,8 +70,16 @@ class SNodeClient:
     def info(self):
         return self._request("GET", "info")
 
-    def spdk_process_start(self, spdk_cpu_mask, spdk_mem, spdk_image=None, spdk_debug=None, cluster_ip=None):
-        params = {"cluster_ip": cluster_ip}
+    def spdk_process_start(self, spdk_cpu_mask, spdk_mem, spdk_image=None, spdk_debug=None, cluster_ip=None,
+                           fdb_connection=None, namespace=None, server_ip=None, rpc_port=None,
+                           rpc_username=None, rpc_password=None):
+        params = {
+            "cluster_ip": cluster_ip,
+            "server_ip": server_ip,
+            "rpc_port": rpc_port,
+            "rpc_username": rpc_username,
+            "rpc_password": rpc_password}
+
         if spdk_cpu_mask:
             params['spdk_cpu_mask'] = spdk_cpu_mask
         if spdk_mem:
@@ -80,6 +88,10 @@ class SNodeClient:
             params['spdk_image'] = spdk_image
         if spdk_debug:
             params['spdk_debug'] = spdk_debug
+        if fdb_connection:
+            params['fdb_connection'] = fdb_connection
+        if namespace:
+            params["namespace"] = namespace
         return self._request("POST", "spdk_process_start", params)
 
     def join_swarm(self, cluster_ip, join_token, db_connection, cluster_id):
@@ -99,11 +111,15 @@ class SNodeClient:
     def make_gpt_partitions(self, nbd_device, jm_percent, num_partitions):
         params = {
             "nbd_device": nbd_device,
-            "jm_percent": jm_percent,
-            "num_partitions": num_partitions,
+            "jm_percent": int(jm_percent),
+            "num_partitions": int(num_partitions),
         }
         return self._request("POST", "make_gpt_partitions", params)
 
     def delete_dev_gpt_partitions(self, device_pci):
         params = {"device_pci": device_pci}
         return self._request("POST", "delete_dev_gpt_partitions", params)
+
+    def bind_device_to_spdk(self, device_pci):
+        params = {"device_pci": device_pci}
+        return self._request("POST", "bind_device_to_spdk", params)

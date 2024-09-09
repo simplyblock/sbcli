@@ -1,28 +1,15 @@
 # coding=utf-8
-import logging
 import time
-import sys
 
 
-from simplyblock_core import constants, kv_store, storage_node_ops
-from simplyblock_core.controllers import device_controller, tasks_events, health_controller
+from simplyblock_core import constants, kv_store, storage_node_ops, utils
+from simplyblock_core.controllers import device_controller, tasks_events, health_controller, tasks_controller
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.nvme_device import NVMeDevice
-
-# Import the GELF logger
-from graypy import GELFUDPHandler
-
 from simplyblock_core.models.storage_node import StorageNode
 
 
-# configure logging
-logger_handler = logging.StreamHandler(stream=sys.stdout)
-logger_handler.setFormatter(logging.Formatter('%(asctime)s: %(levelname)s: %(message)s'))
-gelf_handler = GELFUDPHandler('0.0.0.0', constants.GELF_PORT)
-logger = logging.getLogger()
-logger.addHandler(gelf_handler)
-logger.addHandler(logger_handler)
-logger.setLevel(logging.DEBUG)
+logger = utils.get_logger(__name__)
 
 # get DB controller
 db_controller = kv_store.DBController()
@@ -83,6 +70,7 @@ def task_runner_device(task):
         task.function_result = "canceled"
         task.status = JobSchedule.STATUS_DONE
         task.write_to_db(db_controller.kv_store)
+        device_controller.device_set_retries_exhausted(device.get_id(), True)
         return True
 
     node = db_controller.get_storage_node_by_id(task.node_id)
@@ -128,6 +116,8 @@ def task_runner_device(task):
         task.function_result = "done"
         task.status = JobSchedule.STATUS_DONE
         task.write_to_db(db_controller.kv_store)
+
+        tasks_controller.add_device_mig_task(device.get_id())
         return True
 
     task.retry += 1
@@ -137,7 +127,7 @@ def task_runner_device(task):
 
 def task_runner_node(task):
     node = db_controller.get_storage_node_by_id(task.node_id)
-    if task.retry >= constants.TASK_EXEC_RETRY_COUNT:
+    if task.retry >= task.max_retry:
         task.function_result = "max retry reached"
         task.status = JobSchedule.STATUS_DONE
         task.write_to_db(db_controller.kv_store)

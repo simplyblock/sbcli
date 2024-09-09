@@ -8,6 +8,7 @@ import time
 
 import cpuinfo
 import docker
+import requests
 from docker.types import LogConfig
 from flask import Blueprint
 from flask import request
@@ -15,7 +16,6 @@ from flask import request
 from simplyblock_web import utils, node_utils
 
 from simplyblock_core import scripts, constants, shell_utils
-from ec2_metadata import ec2_metadata
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
@@ -23,26 +23,36 @@ bp = Blueprint("snode", __name__, url_prefix="/snode")
 
 cluster_id_file = "/etc/foundationdb/sbcli_cluster_id"
 
-CPU_INFO = cpuinfo.get_cpu_info()
-HOSTNAME, _, _ = node_utils.run_command("hostname -s")
-SYSTEM_ID = ""
-EC2_PUBLIC_IP = ""
-EC2_MD = ""
 
-try:
-    SYSTEM_ID = ec2_metadata.instance_id
-except:
-    SYSTEM_ID, _, _ = node_utils.run_command("dmidecode -s system-uuid")
+def get_google_cloud_info():
+    try:
+        headers = {'Metadata-Flavor': 'Google'}
+        response = requests.get("http://169.254.169.254/computeMetadata/v1/instance/?recursive=true", headers=headers)
+        data = response.json()
+        return {
+            "id": str(data["id"]),
+            "type": data["machineType"].split("/")[-1],
+            "cloud": "google",
+            "ip": data["networkInterfaces"][0]["ip"],
+            "public_ip": data["networkInterfaces"][0]["accessConfigs"][0]["externalIp"],
+        }
+    except:
+        pass
 
-try:
-    EC2_PUBLIC_IP = ec2_metadata.public_ipv4
-except:
-    pass
 
-try:
-    EC2_MD = ec2_metadata.instance_identity_document
-except:
-    pass
+def get_amazon_cloud_info():
+    try:
+        from ec2_metadata import ec2_metadata
+        data = ec2_metadata.instance_identity_document
+        return {
+            "id": data["instanceId"],
+            "type": data["instanceType"],
+            "cloud": "amazon",
+            "ip": data["privateIp"],
+            "public_ip": ec2_metadata.public_ipv4 or "",
+        }
+    except:
+        pass
 
 
 def get_docker_client():
@@ -134,15 +144,21 @@ def spdk_process_start():
     )
     container2 = node_docker.containers.run(
         constants.SIMPLY_BLOCK_SPDK_CORE_IMAGE,
-        "python /root/scripts/spdk_http_proxy.py",
+        "python /root/scripts/spdk_http_proxy_server.py",
         name="spdk_proxy",
         detach=True,
         network_mode="host",
-        log_config=log_config,
+        log_config=LogConfig(type=LogConfig.types.JOURNALD),
         volumes=[
-            '/var/tmp:/var/tmp',
-            '/etc/foundationdb:/etc/foundationdb'],
-        restart_policy={"Name": "always"}
+            '/var/tmp:/var/tmp'
+        ],
+        environment=[
+            f"SERVER_IP={data['server_ip']}",
+            f"RPC_PORT={data['rpc_port']}",
+            f"RPC_USERNAME={data['rpc_username']}",
+            f"RPC_PASSWORD={data['rpc_password']}",
+        ]
+        # restart_policy={"Name": "always"}
     )
     retries = 10
     while retries > 0:
@@ -203,25 +219,14 @@ def delete_cluster_id():
     return out
 
 
-def get_ec2_meta():
-    stream = os.popen('curl -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 1"')
-    token = stream.read()
-    stream = os.popen(f"curl -H \"X-aws-ec2-metadata-token: {token}\" http://169.254.169.254/latest/dynamic/instance-identity/document")
-    out = stream.read()
-    try:
-        data = json.loads(out)
-        return data
-    except:
-        return {}
+def get_node_lsblk():
+    out, err, rc = node_utils.run_command("lsblk -J")
+    if rc != 0:
+        logger.error(err)
+        return []
+    data = json.loads(out)
+    return data
 
-
-def get_ec2_public_ip():
-    stream = os.popen('curl -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 1"')
-    token = stream.read()
-    stream = os.popen(f"curl -H \"X-aws-ec2-metadata-token: {token}\" http://169.254.169.254/latest/meta-data/public-ipv4")
-    response = stream.read()
-    out = response if "404" not in response else None
-    return out
 
 
 @bp.route('/info', methods=['GET'])
@@ -234,7 +239,7 @@ def get_info():
         "system_id": SYSTEM_ID,
 
         "cpu_count": CPU_INFO['count'],
-        "cpu_hz": CPU_INFO['hz_advertised'][0],
+        "cpu_hz": CPU_INFO['hz_advertised'][0] if 'hz_advertised' in CPU_INFO else 1,
 
         "memory": node_utils.get_memory(),
         "hugepages": node_utils.get_huge_memory(),
@@ -248,9 +253,9 @@ def get_info():
 
         "network_interface": node_utils.get_nics_data(),
 
-        "ec2_metadata": EC2_MD,
+        "cloud_instance": CLOUD_INFO,
 
-        "ec2_public_ip": EC2_PUBLIC_IP,
+        "lsblk": get_node_lsblk(),
     }
     return utils.get_response(out)
 
@@ -372,6 +377,44 @@ def delete_gpt_partitions_for_dev():
     cmd_list = [
         f"parted -fs /dev/{device_name} mklabel gpt",
         f"echo -n \"{device_pci}\" > /sys/bus/pci/drivers/nvme/unbind",
+    ]
+
+    for cmd in cmd_list:
+        logger.debug(cmd)
+        ret = os.popen(cmd).read().strip()
+        logger.debug(ret)
+        time.sleep(1)
+
+    return utils.get_response(True)
+
+
+CPU_INFO = cpuinfo.get_cpu_info()
+HOSTNAME, _, _ = node_utils.run_command("hostname -s")
+SYSTEM_ID = ""
+CLOUD_INFO = get_amazon_cloud_info()
+if not CLOUD_INFO:
+    CLOUD_INFO = get_google_cloud_info()
+
+if CLOUD_INFO:
+    SYSTEM_ID = CLOUD_INFO["id"]
+else:
+    SYSTEM_ID, _, _ = node_utils.run_command("dmidecode -s system-uuid")
+
+
+@bp.route('/bind_device_to_spdk', methods=['POST'])
+def bind_device_to_spdk():
+    data = request.get_json()
+    if "device_pci" not in data:
+        return utils.get_response(False, "Required parameter is missing: device_pci")
+
+    device_pci = data['device_pci']
+
+    cmd_list = [
+        f"echo -n \"{device_pci}\" > /sys/bus/pci/drivers/nvme/unbind",
+        f"echo \"\" > /sys/bus/pci/devices/{device_pci}/driver_override",
+        f"echo -n \"{device_pci}\" > /sys/bus/pci/drivers/uio_pci_generic/bind",
+        f"echo \"uio_pci_generic\" > /sys/bus/pci/devices/{device_pci}/driver_override",
+        f"echo -n \"{device_pci}\" > /sys/bus/pci/drivers_probe",
     ]
 
     for cmd in cmd_list:

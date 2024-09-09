@@ -27,7 +27,7 @@ class RPCClient:
 
     # ref: https://spdk.io/doc/jsonrpc.html
 
-    def __init__(self, ip_address, port, username, password, timeout=60, retry=10):
+    def __init__(self, ip_address, port, username, password, timeout=5, retry=3):
         self.ip_address = ip_address
         self.port = port
         self.url = 'http://%s:%s/' % (self.ip_address, self.port)
@@ -233,14 +233,20 @@ class RPCClient:
         params = {"name": device_name}
         return self._request("bdev_nvme_reset_controller", params)
 
-    def create_lvstore(self, name, bdev_name):
-        params = {"bdev_name": bdev_name, "lvs_name": name}
+    def create_lvstore(self, name, bdev_name, cluster_sz, clear_method, num_md_pages_per_cluster_ratio):
+        params = {
+            "bdev_name": bdev_name,
+            "lvs_name": name,
+            "cluster_sz": cluster_sz,
+            "clear_method": clear_method,
+            "num_md_pages_per_cluster_ratio": num_md_pages_per_cluster_ratio,
+        }
         return self._request("bdev_lvol_create_lvstore", params)
 
-    def create_lvol(self, name, size, lvs_name):
+    def create_lvol(self, name, size_in_mib, lvs_name):
         params = {
             "lvol_name": name,
-            "size": size,
+            "size_in_mib": size_in_mib,
             "lvs_name": lvs_name,
             "thin_provision": True,
         }
@@ -332,7 +338,7 @@ class RPCClient:
         return self._request2("ultra21_bdev_pass_delete", params)
 
     def bdev_alceml_create(self, alceml_name, nvme_name, uuid, pba_init_mode=3,
-                           alceml_cpu_mask=""):
+                           alceml_cpu_mask="", alceml_worker_cpu_mask=""):
         params = {
             "name": alceml_name,
             "cntr_path": nvme_name,
@@ -350,6 +356,8 @@ class RPCClient:
         }
         if alceml_cpu_mask:
             params["bdb_lcpu_mask"] = int(alceml_cpu_mask, 16)
+        if alceml_worker_cpu_mask:
+            params["bdb_lcpu_mask_alt_workers"] = int(alceml_worker_cpu_mask,16)
         return self._request("bdev_alceml_create", params)
 
     def bdev_distrib_create(self, name, vuid, ndcs, npcs, num_blocks, block_size, jm_names,
@@ -409,6 +417,12 @@ class RPCClient:
             "base_bdevs": bdevs_list
         }
         return self._request("bdev_raid_create", params)
+
+    def bdev_raid_delete(self, name):
+        params = {
+            "name": name
+        }
+        return self._request("bdev_raid_delete", params)
 
     def bdev_set_qos_limit(self, name, rw_ios_per_sec, rw_mbytes_per_sec, r_mbytes_per_sec, w_mbytes_per_sec):
         params = {
@@ -518,7 +532,7 @@ class RPCClient:
         return self._request("bdev_nvme_set_options", params)
 
     def bdev_set_options(self, bdev_io_pool_size, bdev_io_cache_size, iobuf_small_cache_size, iobuf_large_cache_size):
-        params = {}
+        params = {"bdev_auto_examine": False}
         if bdev_io_pool_size > 0:
             params['bdev_io_pool_size'] = bdev_io_pool_size
         if bdev_io_cache_size > 0:
@@ -657,6 +671,10 @@ class RPCClient:
         params = {"name": name}
         return self._request("bdev_examine", params)
 
+    def bdev_wait_for_examine(self):
+        return self._request("bdev_wait_for_examine")
+
+
     def nbd_start_disk(self, bdev_name, nbd_device="/dev/nbd0"):
         params = {
             "bdev_name": bdev_name,
@@ -692,3 +710,59 @@ class RPCClient:
     def thread_set_cpumask(self, app_thread_process_id, app_thread_mask):
         params = {"id": app_thread_process_id, "cpumask": app_thread_mask}
         return self._request("thread_set_cpumask", params)
+
+    def distr_migration_to_primary_start(self, storage_ID, name):
+        params = {
+            "name": name,
+            "storage_ID": storage_ID,
+        }
+        return self._request("distr_migration_to_primary_start", params)
+
+    def distr_migration_status(self, name):
+        params = {"name": name}
+        return self._request("distr_migration_status", params)
+
+    def distr_migration_failure_start(self, name, storage_ID):
+        params = {
+            "name": name,
+            "storage_ID": storage_ID
+        }
+        return self._request("distr_migration_failure_start", params)
+
+    def distr_migration_expansion_start(self, name):
+        params = {
+            "name": name,
+        }
+        return self._request("distr_migration_expansion_start", params)
+
+    def bdev_raid_add_base_bdev(self, raid_bdev, base_bdev):
+        params = {
+            "raid_bdev": raid_bdev,
+            "base_bdev": base_bdev,
+        }
+        return self._request("bdev_raid_add_base_bdev", params)
+
+    def bdev_raid_remove_base_bdev(self, raid_bdev, base_bdev):
+        params = {
+            "raid_bdev": raid_bdev,
+            "base_bdev": base_bdev,
+        }
+        return self._request("bdev_raid_add_base_bdev", params)
+
+    def bdev_lvol_get_lvstores(self, name):
+        params = {"lvs_name": name}
+        _, err = self._request2("bdev_lvol_get_lvstores", params)
+        if err:
+            return False
+        return True
+
+    def bdev_lvol_resize(self, name, size_in_mib):
+        params = {
+            "name": name,
+            "size_in_mib": size_in_mib
+        }
+        return self._request("bdev_lvol_resize", params)
+
+    def bdev_lvol_inflate(self, name):
+        params = {"name": name}
+        return self._request("bdev_lvol_inflate", params)

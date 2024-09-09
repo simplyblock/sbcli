@@ -1,17 +1,15 @@
 # coding=utf-8
-import logging
-import os
-
 import time
-import sys
 from datetime import datetime
 
-from simplyblock_core import constants, kv_store
+
+from simplyblock_core import constants, kv_store, utils
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.controllers import health_controller, lvol_events
 
-# Import the GELF logger
-from graypy import GELFUDPHandler
+
+logger = utils.get_logger(__name__)
+
 
 def set_lvol_status(lvol, status):
     if lvol.status != status:
@@ -33,19 +31,18 @@ def set_lvol_health_check(lvol, health_check_status):
     lvol_events.lvol_health_check_change(lvol, lvol.health_check, old_status, caused_by="monitor")
 
 
-# configure logging
-logger_handler = logging.StreamHandler(stream=sys.stdout)
-logger_handler.setFormatter(logging.Formatter('%(asctime)s: %(levelname)s: %(message)s'))
-gelf_handler = GELFUDPHandler('0.0.0.0', constants.GELF_PORT)
-logger = logging.getLogger()
-logger.addHandler(gelf_handler)
-logger.addHandler(logger_handler)
-logger.setLevel(logging.DEBUG)
+def set_snapshot_health_check(snap, health_check_status):
+    snap = db_controller.get_snapshot_by_id(snap.get_id())
+    if snap.health_check == health_check_status:
+        return
+    snap.health_check = health_check_status
+    snap.updated_at = str(datetime.now())
+    snap.write_to_db(db_store)
+
 
 # get DB controller
 db_store = kv_store.KVStore()
 db_controller = kv_store.DBController()
-
 
 logger.info("Starting LVol monitor...")
 while True:
@@ -68,5 +65,10 @@ while True:
             set_lvol_status(lvol, LVol.STATUS_ONLINE)
         else:
             set_lvol_status(lvol, LVol.STATUS_OFFLINE)
+
+    for snap in db_controller.get_snapshots():
+        logger.debug("Checking Snapshot: %s", snap.get_id())
+        ret = health_controller.check_snap(snap.get_id())
+        set_snapshot_health_check(snap, ret)
 
     time.sleep(constants.LVOL_MONITOR_INTERVAL_SEC)

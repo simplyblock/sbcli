@@ -2,6 +2,7 @@ import math
 import random
 import re
 import string
+import requests
 
 from flask import jsonify
 
@@ -93,3 +94,11 @@ def get_cluster_id(request):
         cluster_id = au.split()[0]
         cluster_secret = au.split()[1]
         return cluster_id
+
+
+def get_aws_region():
+    response = requests.get('http://169.254.169.254/latest/meta-data/placement/availability-zone')
+    availability_zone = response.text
+
+    region = availability_zone[:-1] if "404" not in availability_zone else 'us-east-1'
+    return region

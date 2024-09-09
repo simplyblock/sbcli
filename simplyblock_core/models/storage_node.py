@@ -17,8 +17,8 @@ class StorageNode(BaseModel):
     STATUS_REMOVED = 'removed'
     STATUS_RESTARTING = 'in_restart'
 
-    STATUS_IN_CREATION = 'in_restart'  # 'in_creation'
-    STATUS_UNREACHABLE = 'offline'  # 'unreachable'
+    STATUS_IN_CREATION = 'in_creation'
+    STATUS_UNREACHABLE = 'unreachable'
 
     STATUS_CODE_MAP = {
         STATUS_ONLINE: 0,
@@ -70,25 +70,34 @@ class StorageNode(BaseModel):
         "memory": {"type": int, "default": 0},
         "hugepages": {"type": int, "default": 0},
         "health_check": {"type": bool, "default": True},
+        "enable_test_device": {"type": bool, "default": False},
+        "number_of_distribs": {"type": int, "default": 4},
+        "lvstore": {"type": str, 'default': ""},
+        "raid": {"type": str, 'default': ""},
+        "lvstore_stack": {"type": List[dict], 'default': []},
 
         # spdk params
         "spdk_cpu_mask": {"type": str, "default": ""},
         "app_thread_mask": {"type": str, "default": ""},
         "pollers_mask": {"type": str, "default": ""},
-        "poller_cpu_cores": {"type": str, "default": ""},
+        "poller_cpu_cores": {"type": List[int], "default": []},
         "jm_cpu_mask": {"type": str, "default": ""},
         "alceml_cpu_cores": {"type": List[int], "default": []},
+        "alceml_worker_cpu_cores": {"type": List[int], "default": []},
+        "distrib_cpu_cores": {"type": List[int], "default": []},
         "alceml_cpu_index": {"type": int, "default": 0},
+        "alceml_worker_cpu_index": {"type": int, "default": 0},
+        "distrib_cpu_index": {"type": int, "default": 0},
+
         "distrib_cpu_mask": {"type": str, "default": ""},
 
         "spdk_mem": {"type": int, "default": 0},
         "spdk_image": {"type": str, "default": ""},
         "spdk_debug": {"type": bool, "default": False},
 
-
-        "ec2_metadata": {"type": dict, "default": {}},
-        "ec2_instance_id": {"type": str, "default": ""},
-        "ec2_public_ip": {"type": str, "default": ""},
+        "cloud_instance_id": {"type": str, "default": ""},
+        "cloud_instance_type": {"type": str, "default": ""},
+        "cloud_instance_public_ip": {"type": str, "default": ""},
 
         # IO buffer options
         "iobuf_small_pool_count": {"type": int, "default": 0},
@@ -99,6 +108,8 @@ class StorageNode(BaseModel):
         "num_partitions_per_dev": {"type": int, "default": 1},
         "jm_percent": {"type": int, "default": 3},
         "jm_device": {"type": JMDevice, "default": None},
+
+        "namespace": {"type": str, "default": ""},
 
     }
 
@@ -115,3 +126,8 @@ class StorageNode(BaseModel):
             return self.STATUS_CODE_MAP[self.status]
         else:
             return -1
+
+    def get_clean_dict(self):
+        data = super(StorageNode, self).get_clean_dict()
+        data['status_code'] = self.get_status_code()
+        return data

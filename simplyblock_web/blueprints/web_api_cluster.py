@@ -39,8 +39,14 @@ def add_cluster():
 
     if 'page_size_in_blocks' in cl_data:
         page_size_in_blocks = cl_data['page_size_in_blocks']
+    distr_ndcs = cl_data.get('distr_ndcs', 1)
+    distr_npcs = cl_data.get('distr_npcs', 1)
+    distr_bs = cl_data.get('distr_bs', 4096)
+    distr_chunk_bs = cl_data.get('distr_chunk_bs', 4096)
+    ha_type = cl_data.get('ha_type', 'single')
 
-    ret = cluster_ops.add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit)
+    ret = cluster_ops.add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
+                                  distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type)
 
     return utils.get_response(ret)
 
@@ -88,8 +94,12 @@ def cluster_iostats(uuid, history):
         logger.error(f"Cluster not found {uuid}")
         return utils.get_response_error(f"Cluster not found: {uuid}", 404)
 
-    out = cluster_ops.get_iostats_history(uuid, history, parse_sizes=False)
-    return utils.get_response(out)
+    data = cluster_ops.get_iostats_history(uuid, history, parse_sizes=False)
+    ret = {
+        "object_data": cluster.get_clean_dict(),
+        "stats": data or []
+    }
+    return utils.get_response(ret)
 
 
 @bp.route('/cluster/status/<string:uuid>', methods=['GET'])
@@ -134,6 +144,19 @@ def cluster_grace_startup(uuid):
         return utils.get_response_error(f"Cluster not found: {uuid}", 404)
     t = threading.Thread(
         target=cluster_ops.cluster_grace_startup,
+        args=(uuid,))
+    t.start()
+    # FIXME: Any failure within the thread are not handled
+    return utils.get_response(True)
+
+
+@bp.route('/cluster/activate/<string:uuid>', methods=['PUT'])
+def cluster_activate(uuid):
+    cluster = db_controller.get_cluster_by_id(uuid)
+    if not cluster:
+        return utils.get_response_error(f"Cluster not found: {uuid}", 404)
+    t = threading.Thread(
+        target=cluster_ops.cluster_activate,
         args=(uuid,))
     t.start()
     # FIXME: Any failure within the thread are not handled

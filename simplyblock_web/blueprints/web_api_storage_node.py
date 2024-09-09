@@ -6,6 +6,7 @@ import threading
 
 from flask import Blueprint, request
 
+from simplyblock_core.controllers import tasks_controller
 from simplyblock_web import utils
 
 from simplyblock_core import kv_store
@@ -63,11 +64,11 @@ def storagenode_iostats(uuid, history):
         return utils.get_response_error(f"node not found: {uuid}", 404)
 
     data = storage_node_ops.get_node_iostats_history(uuid, history, parse_sizes=False)
-
-    if data:
-        return utils.get_response(data)
-    else:
-        return utils.get_response(False)
+    ret = {
+        "object_data": node.get_clean_dict(),
+        "stats": data or []
+    }
+    return utils.get_response(ret)
 
 
 @bp.route('/storagenode/port/<string:uuid>', methods=['GET'])
@@ -136,8 +137,19 @@ def storage_node_shutdown(uuid):
     if not node:
         return utils.get_response_error(f"node not found: {uuid}", 404)
 
-    out = storage_node_ops.shutdown_storage_node(uuid)
-    return utils.get_response(out)
+    force = False
+    try:
+        args = request.args
+        force = bool(args.get('force', False))
+    except:
+        pass
+
+    threading.Thread(
+        target=storage_node_ops.shutdown_storage_node,
+        args=(uuid, force)
+    ).start()
+
+    return utils.get_response(True)
 
 
 @bp.route('/storagenode/restart/<string:uuid>', methods=['GET'])
@@ -146,9 +158,19 @@ def storage_node_restart(uuid):
     if not node:
         return utils.get_response_error(f"node not found: {uuid}", 404)
 
+    node_ip = None
+    try:
+        args = request.args
+        node_ip = args.get('node_ip', node_ip)
+    except:
+        pass
+
     threading.Thread(
         target=storage_node_ops.restart_storage_node,
-        args=(uuid,)
+        kwargs={
+            "node_id": uuid,
+            "node_ip": node_ip,
+        }
     ).start()
 
     return utils.get_response(True)
@@ -179,9 +201,10 @@ def storage_node_add():
     cluster_id = req_data['cluster_id']
     node_ip = req_data['node_ip']
     ifname = req_data['ifname']
-    max_lvol = req_data['max_lvol']
-    max_snap = req_data['max_snap']
+    max_lvol = int(req_data['max_lvol'])
+    max_snap = int(req_data['max_snap'])
     max_prov = req_data['max_prov']
+    number_of_distribs = req_data.get('number_of_distribs', 4)
 
     spdk_image = None
     if 'spdk_image' in req_data:
@@ -196,10 +219,56 @@ def storage_node_add():
         data_nics = req_data['data_nics']
         data_nics = data_nics.split(",")
 
+    namespace = "default"
+    if 'namespace' in req_data:
+        namespace = req_data['namespace']
 
+    jm_percent = 0
+    if 'jm_percent' in req_data:
+        jm_percent = int(req_data['jm_percent'])
 
-    out = storage_node_ops.add_node(
-        cluster_id, node_ip, ifname, data_nics, max_lvol, max_snap, max_prov,
-        spdk_image=spdk_image, spdk_debug=spdk_debug)
+    partitions = 0
+    if 'partitions' in req_data:
+        partitions = int(req_data['partitions'])
 
-    return utils.get_response(out)
+    number_of_devices = 0
+    if 'number_of_devices' in req_data:
+        number_of_devices = int(req_data['number_of_devices'])
+
+    spdk_cpu_mask = None
+    if 'spdk_cpu_mask' in req_data:
+        msk = req_data['spdk_cpu_mask']
+        if utils.validate_cpu_mask(msk):
+            spdk_cpu_mask = msk
+        else:
+            return utils.get_response_error(f"Invalid cpu mask value: {msk}", 400)
+
+    iobuf_small_pool_count = 0
+    if 'iobuf_small_pool_count' in req_data:
+        iobuf_small_pool_count = int(req_data['iobuf_small_pool_count'])
+
+    iobuf_large_pool_count = 0
+    if 'iobuf_large_pool_count' in req_data:
+        iobuf_large_pool_count = int(req_data['iobuf_large_pool_count'])
+
+    tasks_controller.add_node_add_task(cluster_id, {
+        "cluster_id": cluster_id,
+        "node_ip": node_ip,
+        "iface_name": ifname,
+        "data_nics_list": data_nics,
+        "max_lvol": max_lvol,
+        "max_snap": max_snap,
+        "max_prov": max_prov,
+        "spdk_cpu_mask": spdk_cpu_mask,
+        "spdk_image": spdk_image,
+        "spdk_debug": spdk_debug,
+        "small_bufsize": iobuf_small_pool_count,
+        "large_bufsize": iobuf_large_pool_count,
+        "num_partitions_per_dev": partitions,
+        "jm_percent": jm_percent,
+        "number_of_devices": number_of_devices,
+        "enable_test_device": False,
+        "number_of_distribs": number_of_distribs,
+        "namespace": namespace})
+
+    return utils.get_response(True)

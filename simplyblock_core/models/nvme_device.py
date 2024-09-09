@@ -15,6 +15,17 @@ class NVMeDevice(BaseModel):
     STATUS_FAILED = 'failed'
     STATUS_READONLY = 'read_only'
 
+    STATUS_CODE_MAP = {
+        STATUS_ONLINE: 1,
+        STATUS_NEW: 2,
+        STATUS_UNAVAILABLE: 3,
+        STATUS_REMOVED: 4,
+        STATUS_FAILED: 5,
+        STATUS_READONLY: 6,
+        STATUS_JM: 7
+
+    }
+
     attributes = {
         "uuid": {"type": str, 'default': ""},
         "device_name": {"type": str, 'default': ""},
@@ -63,6 +74,17 @@ class NVMeDevice(BaseModel):
     def get_id(self):
         return self.uuid
 
+    def get_status_code(self):
+        if self.status in self.STATUS_CODE_MAP:
+            return self.STATUS_CODE_MAP[self.status]
+        else:
+            return -1
+
+    def get_clean_dict(self):
+        data = super(NVMeDevice, self).get_clean_dict()
+        data['status_code'] = self.get_status_code()
+        return data
+
 
 class JMDevice(BaseModel):
 
@@ -83,7 +105,12 @@ class JMDevice(BaseModel):
         "nvme_bdev": {"type": str, 'default': ""},
         "alceml_bdev": {"type": str, 'default': ""},
         "jm_bdev": {"type": str, 'default': ""},
+        "device_data_dict": {"type": dict, 'default': {}},
 
+        "pt_bdev": {"type": str, 'default': ""},
+        "nvmf_nqn": {"type": str, 'default': ""},
+        "nvmf_ip": {"type": str, 'default': ""},
+        "nvmf_port": {"type": int, 'default': 4420},
 
         "health_check": {"type": bool, "default": True},
         "io_error": {"type": bool, 'default': False},

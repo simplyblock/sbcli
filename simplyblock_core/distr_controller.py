@@ -4,6 +4,7 @@ import logging
 import re
 
 from simplyblock_core.models.nvme_device import NVMeDevice
+from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.rpc_client import RPCClient
 from simplyblock_core.kv_store import DBController
 
@@ -81,7 +82,6 @@ def get_distr_cluster_map(snodes, target_node):
             logger.debug(f"Device: {dev.get_id()}, status: {dev.status}")
             if dev.status in [NVMeDevice.STATUS_JM, NVMeDevice.STATUS_NEW]:
                 continue
-
             dev_w = int(dev.size/(1024*1024*1024)) or 1
             node_w += dev_w
             name = None
@@ -98,7 +98,7 @@ def get_distr_cluster_map(snodes, target_node):
                 "UUID": dev.get_id(),
                 "bdev_name": name,
                 "status": dev.status,
-                # "physical_label": dev.physical_label
+                "physical_label": dev.physical_label
             }
             dev_w_map.append({
                 "weight": dev_w,

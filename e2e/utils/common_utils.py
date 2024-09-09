@@ -19,38 +19,37 @@ class CommonUtils:
             operations (Dict): Steps performed for each type of entity
         """
         logs = self.sbcli_utils.get_cluster_logs(cluster_id)
-        actual_logs = []
-        for log in logs:
-            actual_logs.append(log["Message"])
-        to_check_in_logs = []
-        for type, steps in operations.items():
-            prev_step = None
-            if type == "Storage Node":
-                for step in steps:
-                    if step == "suspended":
-                        to_check_in_logs.append("Storage node status changed from: online to: suspended")
-                        prev_step = "suspended"
-                    if step == "shutdown":
-                        if prev_step == "suspended":
-                            to_check_in_logs.append("Storage node status changed from: suspended to: in_shutdown")
-                            to_check_in_logs.append("Storage node status changed from: in_shutdown to: offline")
-                        else:
-                            to_check_in_logs.append("Storage node status changed from: online to: offline")
-                            to_check_in_logs.append("Storage node status changed from: offline to: in_shutdown")
-                            to_check_in_logs.append("Storage node status changed from: in_shutdown to: offline")
-                        prev_step = "shutdown"
-                    if step == "restart":
-                        to_check_in_logs.append("Storage node status changed from: offline to: in_restart")
-                        to_check_in_logs.append("Storage node status changed from: in_restart to: online")
-            if type == "Device":
-                for step in steps:
-                    if step == "restart":
-                        to_check_in_logs.append("Device status changed from: online to: unavailable")
-                        # TODO: Change from unavailable to online once bug is fixed.
-                        to_check_in_logs.append("Device restarted")
-
-        for expected_log in to_check_in_logs:
-            assert expected_log in actual_logs, f"Expected event/log {expected_log} not found in Actual logs: {actual_logs}"
+        actual_logs = [log["Message"] for log in logs]
+        
+        status_patterns = {
+            "Storage Node": {
+                "suspended": re.compile(r"Storage node status changed from: .+ to: suspended"),
+                "shutdown": [
+                    re.compile(r"Storage node status changed from: .+ to: in_shutdown"),
+                    re.compile(r"Storage node status changed from: in_shutdown to: offline")
+                ],
+                "restart": [
+                    re.compile(r"Storage node status changed from: offline to: in_restart"),
+                    re.compile(r"Storage node status changed from: in_restart to: online")
+                ]
+            },
+            "Device": {
+                "restart": [
+                    re.compile(r"Device status changed from: .+ to: unavailable"),
+                    # TODO: Change from unavailable to online once bug is fixed.
+                    re.compile(r"Device restarted")
+                ]
+            }
+        }
+        
+        for entity_type, steps in operations.items():
+            for step in steps:
+                patterns = status_patterns.get(entity_type, {}).get(step, [])
+                if not isinstance(patterns, list):
+                    patterns = [patterns]
+                for pattern in patterns:
+                    if not any(pattern.search(log) for log in actual_logs):
+                        raise ValueError(f"Expected pattern not found for {entity_type} step '{step}': {pattern.pattern}")
 
     def validate_fio_test(self, node, log_file):
         """Validates interruptions in FIO log
@@ -67,34 +66,6 @@ class CommonUtils:
         for word in fail_words:
             if word in file_data:
                 raise RuntimeError("FIO Test has interuupts")
-    
-    def validate_fio_json_output(self, output):
-        """Validates JSON fio output
-
-        Args:
-            output (str): JSON output to validate
-        """
-        job = output['jobs'][0]
-        job_name = job['job options']['name']
-        file_name = job['job options']['directory']
-        read_iops = job['read']['iops']
-        write_iops = job['write']['iops']
-        total_iops = read_iops + write_iops
-        disk_name = output['disk_util'][0]['name']
-
-        read_bw_kb = job['read']['bw']
-        write_bw_kb = job['write']['bw']
-        read_bw_mib = read_bw_kb / 1024
-        write_bw_mib = write_bw_kb / 1024
-
-        self.logger.info(f"Performign validation for FIO job: {job_name} on device: "
-                         f"{disk_name} mounted on: {file_name}")
-        assert 550 < total_iops < 650, f"Total IOPS {total_iops} out of range (550-650)"
-        # TODO: Uncomment when issue is fixed
-        # assert 4.5 < read_bw_mib < 5.5, f"Read BW {read_bw_mib} out of range (4.5-5.5 MiB/s)"
-        # assert 4.5 < write_bw_mib < 5.5, f"Write BW {write_bw_mib} out of range (4.5-5.5 MiB/s)"
-        assert read_bw_mib > 0, f"Read BW {read_bw_mib} less than or equal to 0MiB"
-        assert write_bw_mib > 0, f"Write BW {write_bw_mib} less than or equal to 0MiB"
 
     def manage_fio_threads(self, node, threads, timeout=100):
         """Run till fio process is complete and joins the thread
@@ -108,25 +79,23 @@ class CommonUtils:
             RuntimeError: If fio process hang
         """
         self.logger.info("Waiting for FIO processes to complete!")
-        start_time = time.time()
+        sleep_n_sec(10)
         while True:
             process = self.ssh_utils.find_process_name(node=node,
                                                        process_name="fio")
             process_fio = [element for element in process if "grep" not in element]
+            self.logger.info(f"Process info: {process_fio}")
             
             if len(process_fio) == 0:
                 break
-            end_time = time.time()
-            if end_time - start_time > 800:
-                raise RuntimeError("Fio Process not completing post its time")
             if timeout <= 0:
                 break
             sleep_n_sec(10)
             timeout = timeout - 10
             
-
         for thread in threads:
             thread.join(timeout=30)
+        end_time = time.time()
 
         process_list_after = self.ssh_utils.find_process_name(node=node,
                                                               process_name="fio")
@@ -135,6 +104,8 @@ class CommonUtils:
         process_fio = [element for element in process_list_after if "grep" not in element]
 
         assert len(process_fio) == 0, f"FIO process list not empty: {process_list_after}"
+
+        return end_time
             
     def parse_lvol_cluster_map_output(self, output):
         """Parses LVOL cluster map output

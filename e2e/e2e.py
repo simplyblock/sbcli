@@ -33,7 +33,7 @@ def main():
 
     if not test_class_run:
         available_tests = ', '.join(cls.__name__ for cls in tests)
-        print(f"Test '{args.testname}' not found. Available tests are: {available_tests}")
+        logger.info(f"Test '{args.testname}' not found. Available tests are: {available_tests}")
         raise TestNotFoundException(args.testname, available_tests)
     
     errors = {}
@@ -48,6 +48,7 @@ def main():
             errors[f"{test.__name__}"] = [exp]
         try:
             test_obj.teardown()
+            # pass
         except Exception as _:
             logger.error(f"Error During Teardown for test: {test.__name__}")
             logger.error(traceback.format_exc())

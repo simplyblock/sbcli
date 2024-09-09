@@ -46,13 +46,17 @@ class CLIWrapper:
         sub_command.add_argument("--max-lvol", help='Max lvol per storage node', dest='max_lvol', type=int)
         sub_command.add_argument("--max-snap", help='Max snapshot per storage node', dest='max_snap', type=int)
         sub_command.add_argument("--max-prov", help='Max provisioning size of all storage nodes', dest='max_prov')
+        sub_command.add_argument("--number-of-distribs", help='The number of distirbs to be created on the node', dest='number_of_distribs', type=int, default=4)
         sub_command.add_argument("--number-of-devices", help='Number of devices per storage node if it\'s not supported EC2 instance', dest='number_of_devices', type=int)
+        sub_command.add_argument("--cpu-mask", help='SPDK app CPU mask, default is all cores found', dest='spdk_cpu_mask')
 
         sub_command.add_argument("--spdk-image", help='SPDK image uri', dest='spdk_image')
         sub_command.add_argument("--spdk-debug", help='Enable spdk debug logs', dest='spdk_debug', required=False, action='store_true')
 
         sub_command.add_argument("--iobuf_small_bufsize", help='bdev_set_options param', dest='small_bufsize',  type=int, default=0)
         sub_command.add_argument("--iobuf_large_bufsize", help='bdev_set_options param', dest='large_bufsize',  type=int, default=0)
+        sub_command.add_argument("--enable-test-device", help='Enable creation of test device', action='store_true')
+
 
         # delete storage node
         sub_command = self.add_sub_command(subparser, "delete", 'Delete storage node obj')
@@ -82,6 +86,7 @@ class CLIWrapper:
         sub_command.add_argument("--max-lvol", help='Max lvol per storage node', dest='max_lvol', type=int, default=0)
         sub_command.add_argument("--max-snap", help='Max snapshot per storage node', dest='max_snap', type=int, default=0)
         sub_command.add_argument("--max-prov", help='Max provisioning size of all storage nodes', dest='max_prov', default="")
+        sub_command.add_argument("--node-ip", help='Restart Node on new node', dest='node_ip')
         sub_command.add_argument("--number-of-devices", help='Number of devices per storage node if it\'s not supported EC2 instance', dest='number_of_devices', type=int, default=0)
 
         sub_command.add_argument("--spdk-image", help='SPDK image uri', dest='spdk_image')
@@ -160,6 +165,8 @@ class CLIWrapper:
                                                  "(currently in \"new\" state) into cluster and will launch and "
                                                  "auto-rebalancing background process in which some cluster "
                                                  "capacity is re-distributed to this newly added device.")
+        sub_command.add_argument("id", help='the devices\'s UUID')
+
         sub_command = self.add_sub_command(
             subparser, 'remove-device', 'Remove a storage device', usage='The device will become unavailable, independently '
                                         'if it was physically removed from the server. This function can be used if '
@@ -168,13 +175,14 @@ class CLIWrapper:
         sub_command.add_argument("device_id", help='Storage device ID')
         sub_command.add_argument("--force", help='Force device remove', required=False, action='store_true')
 
-        # sub_command = self.add_sub_command(
-        #     subparser, 'set-failed-device', 'Set storage device to failed state. ', usage='This command can be used, '
-        #                                     'if an administrator believes that the device must be changed, '
-        #                                     'but its status and health state do not lead to an automatic detection '
-        #                                     'of the failure state. Attention!!! The failed state is final, all data '
-        #                                     'on the device will be automatically recovered to other devices '
-        #                                     'in the cluster. ')
+        sub_command = self.add_sub_command(
+            subparser, 'set-failed-device', 'Set storage device to failed state', usage='This command can be used, '
+                                            'if an administrator believes that the device must be changed, '
+                                            'but its status and health state do not lead to an automatic detection '
+                                            'of the failure state. Attention!!! The failed state is final, all data '
+                                            'on the device will be automatically recovered to other devices '
+                                            'in the cluster. ')
+        sub_command.add_argument("id", help='Storage device ID')
 
         sub_command = self.add_sub_command(
             subparser, 'get-capacity-device', 'Get device capacity')
@@ -244,6 +252,14 @@ class CLIWrapper:
                                  dest='contact_point', default='')
         sub_command.add_argument("--grafana-endpoint", help='the endpoint url for grafana',
                                  dest='grafana_endpoint', default='')
+        sub_command.add_argument("--distr-ndcs", help='(Dev) set ndcs manually, default: 1', type=int, default=1)
+        sub_command.add_argument("--distr-npcs", help='(Dev) set npcs manually, default: 1', type=int, default=1)
+        sub_command.add_argument("--distr-bs", help='(Dev) distrb bdev block size, default: 4096', type=int,
+                                 default=4096)
+        sub_command.add_argument("--distr-chunk-bs", help='(Dev) distrb bdev chunk block size, default: 4096', type=int,
+                                 default=4096)
+        sub_command.add_argument("--ha-type", help='LVol HA type (single, ha), default is cluster HA type',
+                                 dest='ha_type', choices=["single", "ha", "default"], default='single')
 
         # add cluster
         sub_command = self.add_sub_command(subparser, 'add', 'Add new cluster')
@@ -257,6 +273,18 @@ class CLIWrapper:
                                  type=int, required=False, dest="prov_cap_warn")
         sub_command.add_argument("--prov-cap-crit", help='Capacity critical level in percent, default=190',
                                  type=int, required=False, dest="prov_cap_crit")
+        sub_command.add_argument("--distr-ndcs", help='(Dev) set ndcs manually, default: 4', type=int, default=0)
+        sub_command.add_argument("--distr-npcs", help='(Dev) set npcs manually, default: 1', type=int, default=0)
+        sub_command.add_argument("--distr-bs", help='(Dev) distrb bdev block size, default: 4096', type=int,
+                                 default=4096)
+        sub_command.add_argument("--distr-chunk-bs", help='(Dev) distrb bdev chunk block size, default: 4096', type=int,
+                                 default=4096)
+        sub_command.add_argument("--ha-type", help='LVol HA type (single, ha), default is cluster HA type',
+                                 dest='ha_type', choices=["single", "ha", "default"], default='default')
+
+        # Activate cluster
+        sub_command = self.add_sub_command(subparser, 'activate', 'Create distribs and raid0 bdevs on all the storage node and move the cluster to active state')
+        sub_command.add_argument("cluster_id", help='the cluster UUID')
 
         # show cluster list
         self.add_sub_command(subparser, 'list', 'Show clusters list')
@@ -354,8 +382,7 @@ class CLIWrapper:
                                  required=False, action='store_true')
         sub_command.add_argument("--max-size", help='LVol max size', dest='max_size', default="0")
         sub_command.add_argument("--host-id", help='Primary storage node UUID or Hostname', dest='host_id')
-        sub_command.add_argument("--ha-type", help='LVol HA type (single, ha), default is cluster HA type',
-                                 dest='ha_type', choices=["single", "ha", "default"], default='default')
+
         #
         # sub_command.add_argument("--compress",
         #                          help='Use inline data compression and de-compression on the logical volume',
@@ -372,12 +399,8 @@ class CLIWrapper:
         sub_command.add_argument("--max-w-mbytes", help='Maximum Write Mega Bytes Per Second', type=int)
         sub_command.add_argument("--distr-vuid", help='(Dev) set vuid manually, default: random (1-99999)', type=int,
                                  default=0)
-        sub_command.add_argument("--distr-ndcs", help='(Dev) set ndcs manually, default: 4', type=int, default=0)
-        sub_command.add_argument("--distr-npcs", help='(Dev) set npcs manually, default: 1', type=int, default=0)
-        sub_command.add_argument("--distr-bs", help='(Dev) distrb bdev block size, default: 4096', type=int,
-                                 default=4096)
-        sub_command.add_argument("--distr-chunk-bs", help='(Dev) distrb bdev chunk block size, default: 4096', type=int,
-                                 default=4096)
+        sub_command.add_argument("--ha-type", help='LVol HA type (single, ha), default is cluster HA type',
+                                 dest='ha_type', choices=["single", "ha", "default"], default='default')
 
 
         # set lvol params
@@ -393,6 +416,7 @@ class CLIWrapper:
         sub_command.add_argument("--cluster-id", help='List LVols in particular cluster', dest="cluster_id")
         sub_command.add_argument("--pool", help='List LVols in particular Pool ID or name', dest="pool")
         sub_command.add_argument("--json", help='Print outputs in json format', required=False, action='store_true')
+        sub_command.add_argument("--all", help='List soft deleted LVols', required=False, action='store_true')
 
         # Get the size and max_size of the lvol
         sub_command = self.add_sub_command(subparser, 'list-mem', 'Get the size and max_size of the lvol')
@@ -469,6 +493,11 @@ class CLIWrapper:
         sub_command = self.add_sub_command(subparser, "check", 'Health check LVol')
         sub_command.add_argument("id", help='UUID of LVol')
 
+        # lvol inflate
+        sub_command = self.add_sub_command(subparser, 'inflate', 'Inflate a logical volume',
+                                           usage='All unallocated clusters are allocated and copied from the parent or zero filled if not allocated in the parent. '
+                                                 'Then all dependencies on the parent are removed.')
+        sub_command.add_argument("lvol_id", help='cloned lvol id')
 
         # mgmt-node ops
         subparser = self.add_command('mgmt', 'Management node commands')
@@ -560,10 +589,12 @@ class CLIWrapper:
         sub_command.add_argument("id", help='LVol UUID')
         sub_command.add_argument("name", help='snapshot name')
 
-        self.add_sub_command(subparser, 'list', 'List snapshots')
+        sub_command = self.add_sub_command(subparser, 'list', 'List snapshots')
+        sub_command.add_argument("--all", help='List soft deleted snapshots', required=False, action='store_true')
 
         sub_command = self.add_sub_command(subparser, 'delete', 'Delete a snapshot')
         sub_command.add_argument("id", help='snapshot UUID')
+        sub_command.add_argument("--force", help='Force remove', required=False, action='store_true')
 
         sub_command = self.add_sub_command(subparser, 'clone', 'Create LVol from snapshot')
         sub_command.add_argument("id", help='snapshot UUID')
@@ -585,6 +616,8 @@ class CLIWrapper:
         sub_command.add_argument("--memory", help='SPDK huge memory allocation, default is Max hugepages available', dest='spdk_mem')
         sub_command.add_argument("--spdk-image", help='SPDK image uri', dest='spdk_image')
         sub_command.add_argument("--namespace", help='k8s namespace to deploy on',)
+        sub_command.add_argument("--multipathing", help='Enable multipathing for lvol connection, default: on',
+                                 default="on", choices=["on", "off"])
 
         self.add_sub_command(subparser, 'list', 'List Caching nodes')
 
@@ -605,6 +638,12 @@ class CLIWrapper:
 
         sub_command = self.add_sub_command(subparser, 'recreate', 'recreate Caching node bdevs')
         sub_command.add_argument("node_id", help='Caching node UUID')
+
+        sub_command = self.add_sub_command(subparser, 'get-lvol-stats', 'Get LVol stats')
+        sub_command.add_argument("lvol_id", help='LVol UUID')
+        sub_command.add_argument("--history", help='(XXdYYh), list history records (one for every 15 minutes) '
+                                                   'for XX days and YY hours (up to 10 days in total).')
+
 
     def init_parser(self):
         self.parser = argparse.ArgumentParser(prog=constants.SIMPLY_BLOCK_CLI_NAME, description='SimplyBlock management CLI')
@@ -646,6 +685,8 @@ class CLIWrapper:
                     self.parser.error(f"Mandatory argument '--max-snap' not provided for {sub_command}")
                 if not args.max_prov:
                     self.parser.error(f"Mandatory argument '--max-prov' not provided for {sub_command}")
+                # if not args.spdk_cpu_mask:
+                #     self.parser.error(f"Mandatory argument '--cpu-mask' not provided for {sub_command}")
                 cluster_id = args.cluster_id
                 node_ip = args.node_ip
                 ifname = args.ifname
@@ -657,17 +698,43 @@ class CLIWrapper:
                 large_bufsize = args.large_bufsize
                 num_partitions_per_dev = args.partitions
                 jm_percent = args.jm_percent
+                spdk_cpu_mask = None
+                if args.spdk_cpu_mask:
+                    if self.validate_cpu_mask(args.spdk_cpu_mask):
+                        spdk_cpu_mask = args.spdk_cpu_mask
+                    else:
+                        return f"Invalid cpu mask value: {args.spdk_cpu_mask}"
 
                 max_lvol = args.max_lvol
                 max_snap = args.max_snap
                 max_prov = self.parse_size(args.max_prov)
                 number_of_devices = args.number_of_devices
+                enable_test_device = args.enable_test_device
+                number_of_distribs = args.number_of_distribs
                 if max_prov < 1 * 1024 * 1024 * 1024:
                     return f"Max provisioning memory:{args.max_prov} must be larger than 1G"
 
                 out = storage_ops.add_node(
-                    cluster_id, node_ip, ifname, data_nics, max_lvol, max_snap, max_prov, spdk_image, spdk_debug,
-                    small_bufsize, large_bufsize, num_partitions_per_dev, jm_percent, number_of_devices)
+                    cluster_id=cluster_id,
+                    node_ip=node_ip,
+                    iface_name=ifname,
+                    data_nics_list=data_nics,
+                    max_lvol=max_lvol,
+                    max_snap=max_snap,
+                    max_prov=max_prov,
+                    spdk_image=spdk_image,
+                    spdk_debug=spdk_debug,
+                    small_bufsize=small_bufsize,
+                    large_bufsize=large_bufsize,
+                    spdk_cpu_mask=spdk_cpu_mask,
+                    num_partitions_per_dev=num_partitions_per_dev,
+                    jm_percent=jm_percent,
+                    number_of_devices=number_of_devices,
+                    enable_test_device=enable_test_device,
+                    namespace=None,
+                    number_of_distribs=number_of_distribs
+                )
+
                 return out
 
             elif sub_command == "list":
@@ -696,7 +763,7 @@ class CLIWrapper:
                 ret = storage_ops.restart_storage_node(
                     node_id, max_lvol, max_snap, max_prov,
                     spdk_image, spdk_debug,
-                    small_bufsize, large_bufsize, number_of_devices)
+                    small_bufsize, large_bufsize, number_of_devices, node_ip=args.node_ip)
 
             elif sub_command == "list-devices":
                 ret = self.storage_node_list_devices(args)
@@ -723,10 +790,10 @@ class CLIWrapper:
                 ret = device_controller.restart_device(args.id)
 
             elif sub_command == "add-device":
-                ret = "Not implemented!"
+                ret = device_controller.add_device(args.id)
 
             elif sub_command == "set-failed-device":
-                ret = "Not implemented!"
+                ret = device_controller.device_set_failed(args.id)
 
             elif sub_command == "get-capacity-device":
                 device_id = args.device_id
@@ -806,6 +873,9 @@ class CLIWrapper:
                 ret = self.cluster_create(args)
             elif sub_command == 'add':
                 ret = self.cluster_add(args)
+            elif sub_command == 'activate':
+                cluster_id = args.cluster_id
+                ret = cluster_ops.cluster_activate(cluster_id)
             elif sub_command == 'status':
                 cluster_id = args.cluster_id
                 ret = cluster_ops.show_cluster(cluster_id)
@@ -884,20 +954,14 @@ class CLIWrapper:
                 comp = None
                 crypto = args.encrypt
                 distr_vuid = args.distr_vuid
-                distr_ndcs = args.distr_ndcs
-                distr_npcs = args.distr_npcs
-                distr_bs = args.distr_bs
-                distr_chunk_bs = args.distr_chunk_bs
                 with_snapshot = args.snapshot
                 results, error = lvol_controller.add_lvol_ha(
                     name, size, host_id, ha_type, pool, comp, crypto,
-                    distr_vuid, distr_ndcs, distr_npcs,
+                    distr_vuid,
                     args.max_rw_iops,
                     args.max_rw_mbytes,
                     args.max_r_mbytes,
                     args.max_w_mbytes,
-                    distr_bs,
-                    distr_chunk_bs,
                     with_snapshot=with_snapshot,
                     max_size=max_size,
                     crypto_key1=args.crypto_key1,
@@ -913,7 +977,7 @@ class CLIWrapper:
                     args.id, args.max_rw_iops, args.max_rw_mbytes,
                     args.max_r_mbytes, args.max_w_mbytes)
             elif sub_command == "list":
-                ret = lvol_controller.list_lvols(args.json, args.cluster_id, args.pool)
+                ret = lvol_controller.list_lvols(args.json, args.cluster_id, args.pool, args.all)
             elif sub_command == "list-mem":
                 ret = lvol_controller.list_lvols_mem(args.json, args.csv)
             elif sub_command == "get":
@@ -963,6 +1027,8 @@ class CLIWrapper:
                 ret = health_controller.check_lvol(id)
             elif sub_command == 'move':
                 ret = lvol_controller.move(args.id, args.node_id, args.force)
+            elif sub_command == "inflate":
+                ret = lvol_controller.inflate_lvol(args.lvol_id)
             else:
                 self.parser.print_help()
 
@@ -1046,9 +1112,9 @@ class CLIWrapper:
             if sub_command == "add":
                 ret = snapshot_controller.add(args.id, args.name)
             if sub_command == "list":
-                ret = snapshot_controller.list()
+                ret = snapshot_controller.list(args.all)
             if sub_command == "delete":
-                ret = snapshot_controller.delete(args.id)
+                ret = snapshot_controller.delete(args.id, args.force)
             if sub_command == "clone":
                 new_size = 0
                 if args.resize:
@@ -1067,6 +1133,7 @@ class CLIWrapper:
                 data_nics = []
                 spdk_image = args.spdk_image
                 namespace = args.namespace
+                multipathing = args.multipathing == "on"
 
                 spdk_cpu_mask = None
                 if args.spdk_cpu_mask:
@@ -1082,7 +1149,7 @@ class CLIWrapper:
                         return f"SPDK memory:{args.spdk_mem} must be larger than 1G"
 
                 ret = caching_node_controller.add_node(
-                    cluster_id, node_ip, ifname, data_nics, spdk_cpu_mask, spdk_mem, spdk_image, namespace)
+                    cluster_id, node_ip, ifname, data_nics, spdk_cpu_mask, spdk_mem, spdk_image, namespace, multipathing)
 
             if sub_command == "list":
                 #cluster_id
@@ -1101,6 +1168,12 @@ class CLIWrapper:
             if sub_command == "recreate":
                 ret = caching_node_controller.recreate(args.node_id)
 
+            if sub_command == "get-lvol-stats":
+                data = caching_node_controller.get_io_stats(args.lvol_id, args.history)
+                if data:
+                    ret = utils.print_table(data)
+                else:
+                    return False
 
         else:
             self.parser.print_help()
@@ -1127,9 +1200,15 @@ class CLIWrapper:
         cap_crit = args.cap_crit
         prov_cap_warn = args.prov_cap_warn
         prov_cap_crit = args.prov_cap_crit
+        distr_ndcs = args.distr_ndcs
+        distr_npcs = args.distr_npcs
+        distr_bs = args.distr_bs
+        distr_chunk_bs = args.distr_chunk_bs
+        ha_type = args.ha_type
 
         return cluster_ops.add_cluster(
-            blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit)
+            blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
+            distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type)
 
     def cluster_create(self, args):
         page_size_in_blocks = args.page_size
@@ -1140,6 +1219,11 @@ class CLIWrapper:
         prov_cap_warn = args.prov_cap_warn
         prov_cap_crit = args.prov_cap_crit
         ifname = args.ifname
+        distr_ndcs = args.distr_ndcs
+        distr_npcs = args.distr_npcs
+        distr_bs = args.distr_bs
+        distr_chunk_bs = args.distr_chunk_bs
+        ha_type = args.ha_type
         log_del_interval = args.log_del_interval
         metrics_retention_period = args.metrics_retention_period
         contact_point = args.contact_point
@@ -1148,7 +1232,8 @@ class CLIWrapper:
         return cluster_ops.create_cluster(
             blk_size, page_size_in_blocks,
             CLI_PASS, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
-            ifname, log_del_interval, metrics_retention_period, contact_point, grafana_endpoint)
+            ifname, log_del_interval, metrics_retention_period, contact_point, grafana_endpoint,
+            distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type)
 
     def query_yes_no(self, question, default="yes"):
         """Ask a yes/no question via raw_input() and return their answer.

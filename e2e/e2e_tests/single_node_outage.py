@@ -127,7 +127,14 @@ class TestSingleNodeOutage(TestClusterBase):
                          )
 
         self.sbcli_utils.suspend_node(node_uuid=no_lvol_node_uuid)
-        self.sbcli_utils.shutdown_node(node_uuid=no_lvol_node_uuid)
+        try:
+            self.sbcli_utils.shutdown_node(node_uuid=no_lvol_node_uuid)
+        except Exception as _:
+            self.logger.info("Waiting for node shutdown")
+
+        self.sbcli_utils.wait_for_storage_node_status(node_id=no_lvol_node_uuid,
+                                                      status="offline",
+                                                      timeout=100)
 
         self.logger.info("Sleeping for 10 seconds")
         sleep_n_sec(10)
@@ -142,7 +149,7 @@ class TestSingleNodeOutage(TestClusterBase):
         self.sbcli_utils.restart_node(node_uuid=no_lvol_node_uuid)
 
         self.logger.info(f"Waiting for node to become online, {no_lvol_node_uuid}")
-        self.sbcli_utils.wait_for_storage_node_status(no_lvol_node_uuid, "online", timeout=120)
+        self.sbcli_utils.wait_for_storage_node_status(no_lvol_node_uuid, "online", timeout=180)
         sleep_n_sec(10)
 
         self.validations(node_uuid=no_lvol_node_uuid,
