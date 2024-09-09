@@ -24,7 +24,7 @@ on:
       send_slack_notification:
         description: 'Send Slack notification?'
         required: false
-        default: 'true'
+        default: ${{ (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/pre-release) && 'true' || 'false' }}
         type: boolean
 jobs:
   e2e:
@@ -112,6 +112,9 @@ jobs:
         env:
           SBCLI_CMD: ${{ github.event.inputs.sbcli_cmd || 'sbcli-dev' }}
 
+      - name: Record Test Start Time
+        run: echo "TEST_START_TIME=$(date +%s)" >> $GITHUB_ENV
+
       - name: Setup Tests & Run Tests
         timeout-minutes: 120
         run: |
@@ -136,6 +139,21 @@ jobs:
             TESTNAME="--testname ${{ github.event.inputs.testname }}"
           fi
           python3 e2e.py $TESTNAME
+      
+      - name: Record Test End Time
+        run: echo "TEST_END_TIME=$(date +%s)" >> $GITHUB_ENV
+      
+      - name: Calculate Total Time Taken
+        run: |
+          TEST_TIME=$(($TEST_END_TIME - $TEST_START_TIME))
+          TEST_TIME_HOURS=$(($TEST_TIME / 3600))
+          TEST_TIME_MINS=$((($TEST_TIME % 3600) / 60))
+          TEST_TIME_SECS=$(($TEST_TIME % 60))
+          echo "Test runtime: ${TEST_TIME_HOURS}h ${TEST_TIME_MINS}m ${TEST_TIME_SECS}s"
+          echo "TEST_TIME_HOURS=$TEST_TIME_HOURS" >> $GITHUB_ENV
+          echo "TEST_TIME_MINS=$TEST_TIME_MINS" >> $GITHUB_ENV
+          echo "TEST_TIME_SECS=$TEST_TIME_SECS" >> $GITHUB_ENV
+
       - name: Upload automation and docker logs to s3
         run: |
           cd $GITHUB_WORKSPACE/e2e/logs
@@ -151,7 +169,7 @@ jobs:
           RUN_ID: ${{ github.run_id }}
 
       - name: Parse test results
-        if: always() && github.ref == 'refs/heads/main' || github.ref == 'refs/heads/pre-release'
+        if: always() && github.event.inputs.send_slack_notification == 'true'
         id: parse_results
         run: |
           cd $GITHUB_WORKSPACE/e2e/logs
@@ -214,7 +232,7 @@ jobs:
           echo "EOF" >> $GITHUB_ENV
 
       - name: Send Slack Notification
-        if: always() && github.ref == 'refs/heads/main' || github.ref == 'refs/heads/pre-release'  && github.event.inputs.send_slack_notification == 'true'
+        if: always() && github.event.inputs.send_slack_notification == 'true'
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
           GITHUB_SERVER_URL: ${{ github.server_url }}
@@ -229,6 +247,9 @@ jobs:
           PASSED_CASES_BULLETS: ${{ env.PASSED_CASES_BULLETS }}
           FAILED_CASES_BULLETS: ${{ env.FAILED_CASES_BULLETS }}
           BRANCH_NAME: ${{ github.ref_name }}
+          TEST_TIME_HOURS: ${{ env.TEST_TIME_HOURS }}
+          TEST_TIME_MINS: ${{ env.TEST_TIME_MINS }}
+          TEST_TIME_SECS: ${{ env.TEST_TIME_SECS }}
         run: |
           GITHUB_RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}"
           AWS_LOGS_URL="https://s3.console.aws.amazon.com/s3/buckets/${S3_BUCKET_NAME}?prefix=${RUN_ID}/&region=us-east-2"
@@ -237,9 +258,13 @@ jobs:
           else
             OVERALL_STATUS=":x: Overall Status: FAILURE"
           fi
-          MESSAGE="Python E2E tests run triggered on branch **${BRANCH_NAME}**. \n${OVERALL_STATUS}\nGitHub Run: ${GITHUB_RUN_URL}\nAWS Logs: ${AWS_LOGS_URL}\n\nTotal Tests: ${{ env.TOTAL_TESTS }}\nPassed Tests: ${{ env.PASSED_TESTS }}\nFailed Tests: ${{ env.FAILED_TESTS }}\n\n-- Test Cases Passed :white_check_mark:\n${{ env.PASSED_CASES_BULLETS }}\n\n-- Test Cases Failed :x:\n${{ env.FAILED_CASES_BULLETS }}"
+
+          TIME_TAKEN="${TEST_TIME_HOURS}h ${TEST_TIME_MINS}m ${TEST_TIME_SECS}s"
+
+          MESSAGE="Python E2E tests run triggered on branch **${BRANCH_NAME}**. \nTotal Time Taken to run the tests: ${TIME_TAKEN}. \n\n${OVERALL_STATUS}\nGitHub Run: ${GITHUB_RUN_URL}\nAWS Logs: ${AWS_LOGS_URL}\n\nTotal Tests: ${{ env.TOTAL_TESTS }}\nPassed Tests: ${{ env.PASSED_TESTS }}\nFailed Tests: ${{ env.FAILED_TESTS }}\n\n-- Test Cases Passed :white_check_mark:\n${{ env.PASSED_CASES_BULLETS }}\n\n-- Test Cases Failed :x:\n${{ env.FAILED_CASES_BULLETS }}"
 
           curl -X POST -H 'Content-type: application/json' --data "{\"text\":\"${MESSAGE}\"}" $SLACK_WEBHOOK_URL
+
       - name: Destroy Cluster
         if: always()
         run: |
