@@ -24,7 +24,7 @@ on:
       send_slack_notification:
         description: 'Send Slack notification?'
         required: false
-        default: ${{ (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/pre-release') && 'true' || 'false' }}
+        default: true
         type: boolean
       ndcs:
         description: 'Number of data chunks'
@@ -198,7 +198,7 @@ jobs:
           RUN_ID: ${{ github.run_id }}
 
       - name: Parse test results
-        if: always() && github.event.inputs.send_slack_notification == 'true'
+        if: always() && (github.event.inputs.send_slack_notification == 'true')
         id: parse_results
         run: |
           cd $GITHUB_WORKSPACE/e2e/logs
