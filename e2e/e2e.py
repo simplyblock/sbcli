@@ -47,11 +47,7 @@ def main():
     errors = {}
     for test in test_class_run:
         logger.info(f"Running Test {test}")
-        # Pass the new arguments (ndcs, npcs, bs, chunk_bs) to the custom test class if applicable
-        if args.run_npcs_tests:
-            test_obj = test(fio_debug=args.fio_debug)
-        else:
-            test_obj = test(fio_debug=args.fio_debug, ndcs=args.ndcs, npcs=args.npcs, bs=args.bs, chunk_bs=args.chunk_bs)
+        test_obj = test(fio_debug=args.fio_debug)
         try:
             test_obj.setup()
             test_obj.run()
