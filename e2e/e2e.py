@@ -1,7 +1,7 @@
 ### simplyblock e2e tests
 import argparse
 import traceback
-from __init__ import get_all_tests, get_custom_tests
+from __init__ import get_all_tests
 from logger_config import setup_logger
 from exceptions.custom_exception import (
     TestNotFoundException,
