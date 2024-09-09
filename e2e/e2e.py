@@ -26,8 +26,10 @@ def main():
 
     args = parser.parse_args()
 
-    if args.ndcs==0 and args.npcs == 0:
+    if args.ndcs == 0 and args.npcs == 0:
         tests = get_all_tests(custom=False)
+    else:
+        tests = get_all_tests(custom=True)
 
     test_class_run = []
     if args.testname is None or len(args.testname.strip()) == 0:
