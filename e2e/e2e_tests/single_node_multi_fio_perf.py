@@ -361,3 +361,49 @@ class TestLvolFioNpcs2(TestLvolFioBase):
             self.logger.info(f"Test Passed with scenario npcs: {scenario['npcs']} "
                              f" and ndcs: {scenario['ndcs']}")
         self.logger.info(f"All Test Scenarios Passed with npcs: {scenario['npcs']}")
+
+class TestLvolFioNpcsCustom(TestLvolFioBase):
+    """
+    Test class for LVOLs without requiring ndcs or npcs.
+    Inherits from TestLvolFioBase.
+    """
+
+    def run(self):
+        """Custom test scenario without requiring ndcs or npcs."""
+        # Define custom test configurations that don't require ndcs or npcs
+        lvol_configs = [
+            {"lvol_name": "lvol_custom_1", "size": "4G", "mount": True},
+            {"lvol_name": "lvol_custom_2", "size": "4G", "mount": False}
+        ]
+        
+        # Create LVOLs
+        self.create_lvols(lvol_configs)
+
+        lvol_name_1 = lvol_configs[0]['lvol_name']
+        lvol_name_2 = lvol_configs[1]['lvol_name']
+
+        # Run FIO tests
+        fio_threads = []
+        fio_threads.append(self.run_fio_on_lvol(lvol_name_1,
+                                                mount_path=self.lvol_devices[lvol_name_1]["MountPath"],
+                                                readwrite="randrw"))
+        fio_threads.append(self.run_fio_on_lvol(lvol_name_2,
+                                                device=self.lvol_devices[lvol_name_2]["Device"],
+                                                readwrite="randtrimwrite"))
+
+        self.common_utils.manage_fio_threads(
+            node=self.mgmt_nodes[0], threads=fio_threads, timeout=600
+        )
+
+        for thread in fio_threads:
+            thread.join()
+
+        # Validate FIO outputs
+        self.validate_fio_output(lvol_name_1, read_check=True, write_check=True)
+        self.validate_fio_output(lvol_name_2, read_check=True, write_check=True, trim_check=True)
+
+        # Cleanup after running FIO
+        self.cleanup_lvols(lvol_configs)
+
+        self.logger.info(f"Test completed.")
+

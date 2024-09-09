@@ -10,11 +10,11 @@ on:
   workflow_dispatch:
     inputs:
       simplyBlockDeploy_branch:
-        description: ''
+        description: 'Branch for simplyBlockDeploy'
         required: true
         default: 'main'
       sbcli_cmd:
-        description: ''
+        description: 'Command for sbcli execution'
         required: true
         default: 'sbcli-dev'
       testname:
@@ -24,8 +24,25 @@ on:
       send_slack_notification:
         description: 'Send Slack notification?'
         required: false
-        default: ${{ (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/pre-release) && 'true' || 'false' }}
+        default: ${{ (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/pre-release') ? 'true' : 'false' }}
         type: boolean
+      ndcs:
+        description: 'Number of data chunks'
+        required: false
+        default: 1
+      npcs:
+        description: 'Number of parity chunks'
+        required: false
+        default: 1
+      bs:
+        description: 'Block size'
+        required: false
+        default: 4096
+      chunk_bs:
+        description: 'Chunk block size'
+        required: false
+        default: 4096
+
 jobs:
   e2e:
     runs-on: self-hosted
@@ -47,6 +64,7 @@ jobs:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION }}
+
       - uses: actions/checkout@master
         name: Checkout code simplyBlockDeploy
         with:
@@ -75,14 +93,11 @@ jobs:
               -backend-config="dynamodb_table=${TFSTATE_DYNAMODB_TABLE}" \
               -backend-config="encrypt=true"
 
-      - name: select or create workspace
+      - name: Select or create workspace
         run: |
           cd $GITHUB_WORKSPACE/simplyBlockDeploy
           terraform workspace select -or-create ghiaction-sbclie2e
-      - name: Validate Terraform Configuration
-        run: |
-          cd $GITHUB_WORKSPACE/simplyBlockDeploy
-          terraform validate
+
       - name: Plan Terraform Changes
         run: |
           cd $GITHUB_WORKSPACE/simplyBlockDeploy
@@ -92,25 +107,21 @@ jobs:
             -var "extra_nodes=1" -var "extra_nodes_instance_type=m6id.xlarge" \
             -var storage_nodes_ebs_size2=100 -var "region=us-east-2" \
             -var "sbcli_cmd=${{ github.event.inputs.sbcli_cmd || 'sbcli-dev' }}" -out=tfplan
+
       - name: Apply Terraform Changes
         run: |
           cd $GITHUB_WORKSPACE/simplyBlockDeploy
           terraform apply tfplan
-      - name: Get Terraform Outputs
-        id: terraform_outputs
-        run: |
-          cd $GITHUB_WORKSPACE/simplyBlockDeploy
-          output_bastion_public_ip=$(terraform output -raw bastion_public_ip)
-          echo "::set-output name=bastion_public_ip::$output_bastion_public_ip"
-          output_key_name=$(terraform output -raw key_name)
-          echo "::set-output name=key_name::$output_key_name"
+
       - name: Bootstrap Cluster
         run: |
           cd $GITHUB_WORKSPACE/simplyBlockDeploy
-          ./bootstrap-cluster.sh --max-lvol 10 --max-snap 10 --max-prov 900G --number-of-devices 3
-        id: bootstrap_cluster
-        env:
-          SBCLI_CMD: ${{ github.event.inputs.sbcli_cmd || 'sbcli-dev' }}
+          ./bootstrap-cluster.sh --sbcli-cmd "${{ github.event.inputs.sbcli_cmd }}" \
+            --max-lvol 10 --max-snap 10 --max-prov 900g --number-of-devices 3 \
+            --distr-ndcs ${{ github.event.inputs.ndcs }} \
+            --distr-npcs ${{ github.event.inputs.npcs }} \
+            --distr-bs ${{ github.event.inputs.bs }} \
+            --distr-chunk-bs ${{ github.event.inputs.chunk_bs }}
 
       - name: Record Test Start Time
         run: echo "TEST_START_TIME=$(date +%s)" >> $GITHUB_ENV
@@ -124,25 +135,20 @@ jobs:
           source myenv/bin/activate
           python3 -m pip install -r requirements.txt
           echo "Running tests in namespace ${{ steps.get-namespace.outputs.namespace }}"
-          export CLUSTER_ID=${{ steps.bootstrap_cluster.outputs.cluster_id }}
-          export CLUSTER_SECRET=${{ steps.bootstrap_cluster.outputs.cluster_secret }}
-          export CLUSTER_IP=${{ steps.bootstrap_cluster.outputs.cluster_ip }}
-          export API_BASE_URL=${{ steps.bootstrap_cluster.outputs.cluster_api_gateway_endpoint }}
-          export BASTION_SERVER=${{ steps.terraform_outputs.outputs.bastion_public_ip }}
-          export KEY_NAME=${{ steps.terraform_outputs.outputs.key_name }}
-          export AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }}
-          export AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          export AWS_REGION=${{ secrets.AWS_REGION }}
-          export SBCLI_CMD=${{ github.event.inputs.sbcli_cmd || 'sbcli-dev' }}
           TESTNAME=""
           if [ -n "${{ github.event.inputs.testname }}" ]; then
             TESTNAME="--testname ${{ github.event.inputs.testname }}"
           fi
-          python3 e2e.py $TESTNAME
-      
+          
+          python3 e2e.py --ndcs "${{ github.event.inputs.ndcs }}" \
+                          --npcs "${{ github.event.inputs.npcs }}" \
+                          --bs "${{ github.event.inputs.bs }}" \
+                          --chunk_bs "${{ github.event.inputs.chunk_bs }}" \
+                          $TESTNAME
+
       - name: Record Test End Time
         run: echo "TEST_END_TIME=$(date +%s)" >> $GITHUB_ENV
-      
+
       - name: Calculate Total Time Taken
         run: |
           TEST_TIME=$(($TEST_END_TIME - $TEST_START_TIME))
@@ -154,85 +160,8 @@ jobs:
           echo "TEST_TIME_MINS=$TEST_TIME_MINS" >> $GITHUB_ENV
           echo "TEST_TIME_SECS=$TEST_TIME_SECS" >> $GITHUB_ENV
 
-      - name: Upload automation and docker logs to s3
-        run: |
-          cd $GITHUB_WORKSPACE/e2e/logs
-          ./upload_logs.sh
-          cd $GITHUB_WORKSPACE/simplyBlockDeploy
-          ./upload_docker_logs_to_s3.sh
-        if: always()
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          AWS_REGION: ${{ secrets.AWS_REGION }}
-          S3_BUCKET_NAME: "simplyblock-e2e-test-logs"
-          RUN_ID: ${{ github.run_id }}
-
-      - name: Parse test results
-        if: always() && github.event.inputs.send_slack_notification == 'true'
-        id: parse_results
-        run: |
-          cd $GITHUB_WORKSPACE/e2e/logs
-          echo "Looking for the latest non-empty log file..."
-          # Find the latest non-empty log file
-          COUNTER=0
-          MAX_ATTEMPTS=10
-          while [ $COUNTER -lt $MAX_ATTEMPTS ]; do
-            LATEST_LOG=$(ls -t *.log | head -n 1)
-            if [ -s "$LATEST_LOG" ]; then
-              echo "Found non-empty log file: $LATEST_LOG"
-              break
-            fi
-            echo "Attempt $((COUNTER + 1)): No non-empty log file found. Retrying..."
-            COUNTER=$((COUNTER + 1))
-            sleep 1  # Add a small delay to avoid rapid looping
-          done
-          if [ ! -s "$LATEST_LOG" ]; then
-            echo "No non-empty log file found after $MAX_ATTEMPTS attempts"
-            exit 1
-          fi
-          echo "Parsing the identified log file: $LATEST_LOG"
-          # Parse the identified log file
-          echo "Total tests"
-          TOTAL_TESTS=$(grep -i "Number of Total Cases" "$LATEST_LOG" | awk '{print $NF}')
-          echo "number Passed tests"
-          PASSED_TESTS=$(grep -i "Number of Passed Cases" "$LATEST_LOG" | awk '{print $NF}')
-          echo "number Failed tests"
-          FAILED_TESTS=$(grep -i "Number of Failed Cases" "$LATEST_LOG" | awk '{print $NF}')
-          echo "List Passed tests"
-          PASSED_CASES=$(grep "PASSED CASE" "$LATEST_LOG" | awk -F 'INFO - | FAILED CASE' '{print $2}')
-          echo "List Failed tests"
-          FAILED_CASES=$(grep "FAILED CASE" "$LATEST_LOG" | awk -F 'INFO - | FAILED CASE' '{print $2}')
-          # Format passed and failed cases as bullet points
-          echo "Adding PASSED cases with bullets: $PASSED_CASES"
-          echo "Adding FAILED cases with bullets: $PASSED_CASES"
-          PASSED_CASES_BULLETS=$(echo "$PASSED_CASES" | awk '{printf "    • %s\n", $0}')
-          FAILED_CASES_BULLETS=$(echo "$FAILED_CASES" | awk '{printf "    • %s\n", $0}')
-          echo "PASSED cases with bullets: $PASSED_CASES_BULLETS"
-          echo "FAILED cases with bullets: $FAILED_CASES_BULLETS"
-          echo "TOTAL_TESTS=${TOTAL_TESTS}"
-          echo "PASSED_TESTS=${PASSED_TESTS}"
-          echo "FAILED_TESTS=${FAILED_TESTS}"
-          echo "PASSED_CASES=${PASSED_CASES}"
-          echo "FAILED_CASES=${FAILED_CASES}"
-          echo "PASSED_TESTS=${PASSED_TESTS}" >> $GITHUB_ENV
-          echo "FAILED_TESTS=${FAILED_TESTS}" >> $GITHUB_ENV
-          echo "TOTAL_TESTS=${TOTAL_TESTS}" >> $GITHUB_ENV
-          echo "PASSED_CASES<<EOF" >> $GITHUB_ENV
-          echo "${PASSED_CASES}" >> $GITHUB_ENV
-          echo "EOF" >> $GITHUB_ENV
-          echo "FAILED_CASES<<EOF" >> $GITHUB_ENV
-          echo "${FAILED_CASES}" >> $GITHUB_ENV
-          echo "EOF" >> $GITHUB_ENV
-          echo "PASSED_CASES_BULLETS<<EOF" >> $GITHUB_ENV
-          echo "${PASSED_CASES_BULLETS}" >> $GITHUB_ENV
-          echo "EOF" >> $GITHUB_ENV
-          echo "FAILED_CASES_BULLETS<<EOF" >> $GITHUB_ENV
-          echo "${FAILED_CASES_BULLETS}" >> $GITHUB_ENV
-          echo "EOF" >> $GITHUB_ENV
-
       - name: Send Slack Notification
-        if: always() && github.event.inputs.send_slack_notification == 'true'
+        if: always() && (github.event.inputs.send_slack_notification == 'true')
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
           GITHUB_SERVER_URL: ${{ github.server_url }}
@@ -250,6 +179,10 @@ jobs:
           TEST_TIME_HOURS: ${{ env.TEST_TIME_HOURS }}
           TEST_TIME_MINS: ${{ env.TEST_TIME_MINS }}
           TEST_TIME_SECS: ${{ env.TEST_TIME_SECS }}
+          NDCS: ${{ github.event.inputs.ndcs }}
+          NPCS: ${{ github.event.inputs.npcs }}
+          CHUNK_BS: ${{ github.event.inputs.chunk_bs }}
+          BS: ${{ github.event.inputs.bs }}
         run: |
           GITHUB_RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}"
           AWS_LOGS_URL="https://s3.console.aws.amazon.com/s3/buckets/${S3_BUCKET_NAME}?prefix=${RUN_ID}/&region=us-east-2"
@@ -261,7 +194,7 @@ jobs:
 
           TIME_TAKEN="${TEST_TIME_HOURS}h ${TEST_TIME_MINS}m ${TEST_TIME_SECS}s"
 
-          MESSAGE="Python E2E tests run triggered on branch **${BRANCH_NAME}**. \nTotal Time Taken to run the tests: ${TIME_TAKEN}. \n\n${OVERALL_STATUS}\nGitHub Run: ${GITHUB_RUN_URL}\nAWS Logs: ${AWS_LOGS_URL}\n\nTotal Tests: ${{ env.TOTAL_TESTS }}\nPassed Tests: ${{ env.PASSED_TESTS }}\nFailed Tests: ${{ env.FAILED_TESTS }}\n\n-- Test Cases Passed :white_check_mark:\n${{ env.PASSED_CASES_BULLETS }}\n\n-- Test Cases Failed :x:\n${{ env.FAILED_CASES_BULLETS }}"
+          MESSAGE="Python E2E tests run triggered on branch **${BRANCH_NAME}**. \nTotal Time Taken to run the tests: ${TIME_TAKEN}. \n\n${OVERALL_STATUS}\nGitHub Run: ${GITHUB_RUN_URL}\nAWS Logs: ${AWS_LOGS_URL}\n\n**Configuration**: \nNDCS: ${{ env.NDCS }}\nNPCS: ${{ env.NPCS }}\nBlock Size: ${{ env.BS }}\nChunk Block Size: ${{ env.CHUNK_BS }}\n\nTotal Tests: ${{ env.TOTAL_TESTS }}\nPassed Tests: ${{ env.PASSED_TESTS }}\nFailed Tests: ${{ env.FAILED_TESTS }}\n\n-- Test Cases Passed :white_check_mark:\n${{ env.PASSED_CASES_BULLETS }}\n\n-- Test Cases Failed :x:\n${{ env.FAILED_CASES_BULLETS }}"
 
           curl -X POST -H 'Content-type: application/json' --data "{\"text\":\"${MESSAGE}\"}" $SLACK_WEBHOOK_URL
 
@@ -270,7 +203,8 @@ jobs:
         run: |
           cd $GITHUB_WORKSPACE/simplyBlockDeploy
           terraform destroy --auto-approve
-      - name: 'Cleanup build folder'
+
+      - name: Cleanup build folder
         run: |
           ls -la ./
           rm -rf ./* || true

@@ -62,8 +62,8 @@ class TestSingleNodeFailure(TestClusterBase):
             lvol_name=self.lvol_name,
             pool_name=self.pool_name,
             size="800M",
-            distr_ndcs=2,
-            distr_npcs=1
+            # distr_ndcs=2,
+            # distr_npcs=1
         )
         lvols = self.sbcli_utils.list_lvols()
         assert self.lvol_name in list(lvols.keys()), \
@@ -132,8 +132,8 @@ class TestSingleNodeFailure(TestClusterBase):
                     lvol_name=f"{self.lvol_name}_fail",
                     pool_name=self.pool_name,
                     size="800M",
-                    distr_ndcs=2,
-                    distr_npcs=1,
+                    # distr_ndcs=2,
+                    # distr_npcs=1,
                     host_id=no_lvol_node_uuid,
                 )
             except HTTPError as e:
@@ -150,8 +150,8 @@ class TestSingleNodeFailure(TestClusterBase):
                     lvol_name=f"{self.lvol_name}_fail",
                     pool_name=self.pool_name,
                     size="800M",
-                    distr_ndcs=2,
-                    distr_npcs=1,
+                    # distr_ndcs=2,
+                    # distr_npcs=1,
                 )
             lvols = self.sbcli_utils.list_lvols()
             assert f"{self.lvol_name}_fail" in list(lvols.keys()), \
