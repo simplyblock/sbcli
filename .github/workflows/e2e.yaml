@@ -24,7 +24,7 @@ on:
       send_slack_notification:
         description: 'Send Slack notification?'
         required: false
-        default: ${{ (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/pre-release') ? 'true' : 'false' }}
+        default: ${{ (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/pre-release') && 'true' || 'false' }}
         type: boolean
       ndcs:
         description: 'Number of data chunks'
