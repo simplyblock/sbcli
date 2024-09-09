@@ -33,7 +33,7 @@ class SbcliUtils:
         request_url = self.cluster_api_url + api_url
         headers = headers if headers else self.headers
         self.logger.info(f"Calling GET for {api_url} with headers: {headers}")
-        retry = 5
+        retry = 10
         while retry > 0:
             try:
                 resp = requests.get(request_url, headers=headers)
@@ -50,7 +50,7 @@ class SbcliUtils:
                 if retry == 0:
                     self.logger.info(f"Retry attemp exhausted. API {api_url} failed with: {e}.")
                     raise e
-                self.logger.info(f"Retrying API {api_url}. Attempt: {5 - retry + 1}")
+                self.logger.info(f"Retrying API {api_url}. Attempt: {10 - retry + 1}")
 
     def post_request(self, api_url, headers=None, body=None):
         """Performs post request on the given API URL
@@ -66,7 +66,7 @@ class SbcliUtils:
         request_url = self.cluster_api_url + api_url
         headers = headers if headers else self.headers
         self.logger.info(f"Calling POST for {api_url} with headers: {headers}, body: {body}")
-        retry = 5
+        retry = 10
         while retry > 0:
             try:
                 resp = requests.post(request_url, headers=headers,
@@ -84,7 +84,7 @@ class SbcliUtils:
                 if retry == 0:
                     self.logger.info(f"Retry attemp exhausted. API {api_url} failed with: {e}.")
                     raise e
-                self.logger.info(f"Retrying API {api_url}. Attempt: {5 - retry + 1}")
+                self.logger.info(f"Retrying API {api_url}. Attempt: {10 - retry + 1}")
 
     def delete_request(self, api_url, headers=None):
         """Performs delete request on the given API URL
@@ -99,7 +99,7 @@ class SbcliUtils:
         request_url = self.cluster_api_url + api_url
         headers = headers if headers else self.headers
         self.logger.info(f"Calling DELETE for {api_url} with headers: {headers}")
-        retry = 5
+        retry = 10
         while retry > 0:
             try:
                 resp = requests.delete(request_url, headers=headers)
@@ -116,7 +116,7 @@ class SbcliUtils:
                 if retry == 0:
                     self.logger.info(f"Retry attemp exhausted. API {api_url} failed with: {e}.")
                     raise e
-                self.logger.info(f"Retrying API {api_url}. Attempt: {5 - retry + 1}")
+                self.logger.info(f"Retrying API {api_url}. Attempt: {10 - retry + 1}")
 
     def get_node_without_lvols(self) -> str:
         """
