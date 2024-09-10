@@ -56,6 +56,13 @@ def task_runner(task):
 
         device = db_controller.get_storage_devices(task.device_id)
         lvol = db_controller.get_lvol_by_id(task.function_params["lvol_id"])
+
+        if not lvol:
+            task.status = JobSchedule.STATUS_DONE
+            task.function_result = "LVol not found"
+            task.write_to_db(db_controller.kv_store)
+            return True
+
         rsp = rpc_client.distr_migration_expansion_start(lvol.base_bdev)
         if not rsp:
             logger.error(f"Failed to start device migration task, storage_ID: {device.cluster_device_order}")
