@@ -13,7 +13,7 @@ class SnapShot(BaseModel):
         "lvol": {"type": LVol, 'default': None},
         "created_at": {"type": int, 'default': 0},
         "snap_ref_id": {"type": str, 'default': ""},
-        "snap_ref_count": {"type": int, 'default': 0},
+        "ref_count": {"type": int, 'default': 0},
         "mem_diff": {"type": dict, 'default': {}},
         "health_check": {"type": bool, 'default': True},
     }
