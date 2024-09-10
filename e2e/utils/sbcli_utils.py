@@ -300,7 +300,7 @@ class SbcliUtils:
             "name": lvol_name,
             "size": size,
             "pool": pool_name,
-            "comp": False,
+            # "comp": False,
             "crypto": False,
             "max_rw_iops": str(max_rw_iops),
             "max_rw_mbytes": str(max_rw_mbytes),
