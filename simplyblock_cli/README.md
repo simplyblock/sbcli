@@ -27,20 +27,25 @@ optional arguments:
 
 ```bash
 usage: sbcli-new caching-node [-h]
-                              {add-node,deploy,list,list-lvols,remove,connect,disconnect,recreate,get-lvol-stats}
+                              {add-node,deploy,deploy-cleaner,list,list-lvols,remove,connect,disconnect,recreate,restart,shutdown,get-io-stats,get-capacity,check}
                               ...
 
 positional arguments:
-  {add-node,deploy,list,list-lvols,remove,connect,disconnect,recreate,get-lvol-stats}
+  {add-node,deploy,deploy-cleaner,list,list-lvols,remove,connect,disconnect,recreate,restart,shutdown,get-io-stats,get-capacity,check}
     add-node            Add new Caching node to the cluster
     deploy              Deploy caching node on this machine (local exec)
+    deploy-cleaner      clean local deploy (local run)
     list                List Caching nodes
     list-lvols          List connected lvols
     remove              Remove Caching node from the cluster
     connect             Connect to LVol
     disconnect          Disconnect LVol from Caching node
     recreate            recreate Caching node bdevs
-    get-lvol-stats      Get LVol stats
+    restart             restart Caching node
+    shutdown            shutdown Caching node
+    get-io-stats        Get node IO statistics
+    get-capacity        Get Node capacity
+    check               Health check node
 
 optional arguments:
   -h, --help            show this help message and exit
@@ -56,9 +61,9 @@ usage: sbcli-new caching-node add-node [-h] [--cpu-mask SPDK_CPU_MASK]
                                        [--memory SPDK_MEM]
                                        [--spdk-image SPDK_IMAGE]
                                        [--namespace NAMESPACE]
+                                       [--blocked-pcie BLOCKED_PCIE]
                                        [--s3-data-path S3_DATA_PATH]
-                                       [--initial-stor-size INITIAL_STOR_SIZE]
-                                       [--min-ftl-buffer-percent MIN_FTL_BUFFER_PERCENT]
+                                       [--ftl-buffer-size FTL_BUFFER_SIZE]
                                        [--lvstore-cluster-size LVSTORE_CLUSTER_SIZE]
                                        [--num-md-pages-per-cluster-ratio NUM_MD_PAGES_PER_CLUSTER_RATIO]
                                        cluster_id node_ip ifname
@@ -78,12 +83,12 @@ optional arguments:
                         SPDK image uri
   --namespace NAMESPACE
                         k8s namespace to deploy on
+  --blocked-pcie BLOCKED_PCIE
+                        block pcie from spdk
   --s3-data-path S3_DATA_PATH
                         s3 fuse mount point
-  --initial-stor-size INITIAL_STOR_SIZE
-                        s3 size
-  --min-ftl-buffer-percent MIN_FTL_BUFFER_PERCENT
-                        FTL buffer partition percent
+  --ftl-buffer-size FTL_BUFFER_SIZE
+                        FTL buffer size, default 6G
   --lvstore-cluster-size LVSTORE_CLUSTER_SIZE
                         LVS cluster size
   --num-md-pages-per-cluster-ratio NUM_MD_PAGES_PER_CLUSTER_RATIO
@@ -101,6 +106,18 @@ usage: sbcli-new caching-node deploy [-h] [--ifname IFNAME]
 optional arguments:
   -h, --help       show this help message and exit
   --ifname IFNAME  Management interface name, default: eth0
+
+```
+
+    
+### Clean local deploy (local run)
+
+
+```bash
+usage: sbcli-new caching-node deploy-cleaner [-h]
+
+optional arguments:
+  -h, --help  show this help message and exit
 
 ```
 
@@ -195,19 +212,92 @@ optional arguments:
 ```
 
     
-### Get lvol stats
+### Restart caching node
 
 
 ```bash
-usage: sbcli-new caching-node get-lvol-stats [-h] [--history HISTORY] lvol_id
+usage: sbcli-new caching-node restart [-h] [--node-ip NODE_IP]
+                                      [--blocked-pcie BLOCKED_PCIE]
+                                      [--s3-data-path S3_DATA_PATH]
+                                      [--ftl-buffer-size FTL_BUFFER_SIZE]
+                                      id
 
 positional arguments:
-  lvol_id            LVol UUID
+  id                    Caching node UUID
+
+optional arguments:
+  -h, --help            show this help message and exit
+  --node-ip NODE_IP     Caching node new IP
+  --blocked-pcie BLOCKED_PCIE
+                        block pcie from spdk
+  --s3-data-path S3_DATA_PATH
+                        s3 fuse mount point
+  --ftl-buffer-size FTL_BUFFER_SIZE
+                        FTL buffer size, default 6G
+
+```
+
+    
+### Shutdown caching node
+
+
+```bash
+usage: sbcli-new caching-node shutdown [-h] id
+
+positional arguments:
+  id          Caching node UUID
+
+optional arguments:
+  -h, --help  show this help message and exit
+
+```
+
+    
+### Get node io statistics
+
+
+```bash
+usage: sbcli-new caching-node get-io-stats [-h] [--history HISTORY] id
+
+positional arguments:
+  id                 node id
 
 optional arguments:
   -h, --help         show this help message and exit
   --history HISTORY  (XXdYYh), list history records (one for every 15 minutes)
                      for XX days and YY hours (up to 10 days in total).
+
+```
+
+    
+### Get node capacity
+
+
+```bash
+usage: sbcli-new caching-node get-capacity [-h] [--history HISTORY] id
+
+positional arguments:
+  id                 Node id
+
+optional arguments:
+  -h, --help         show this help message and exit
+  --history HISTORY  (XXdYYh), list history records (one for every 15 minutes)
+                     for XX days and YY hours (up to 10 days in total).
+
+```
+
+    
+### Health check node
+
+
+```bash
+usage: sbcli-new caching-node check [-h] id
+
+positional arguments:
+  id          Node UUID
+
+optional arguments:
+  -h, --help  show this help message and exit
 
 ```
 
