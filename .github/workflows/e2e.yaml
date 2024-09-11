@@ -210,9 +210,11 @@ jobs:
           while true; do
             NODE_STATUS=$(ssh -i "$HOME/.ssh/${{ steps.terraform_outputs.outputs.key_name }}" -o StrictHostKeyChecking=no \
               -o ProxyCommand="ssh -o StrictHostKeyChecking=no -i \"$HOME/.ssh/${{ steps.terraform_outputs.outputs.key_name }}\" -W %h:%p ec2-user@${{ steps.terraform_outputs.outputs.bastion_public_ip }}" \
-              ec2-user@${{ steps.terraform_outputs.outputs.mgmt_private_ip }}"
-              sbcli-dev sn list | grep -Eo 'online|offline'")
+              ec2-user@${{ steps.terraform_outputs.outputs.mgmt_private_ip }} \
+              "sbcli-dev sn list | grep -Eo 'online|offline'")
+              
             ONLINE_NODES=$(echo "$NODE_STATUS" | grep -c "online")
+            
             if [ "$ONLINE_NODES" -ge 3 ]; then
               echo "All 3 storage nodes are online."
               break
