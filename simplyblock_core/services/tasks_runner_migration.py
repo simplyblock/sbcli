@@ -87,6 +87,8 @@ def task_runner(task):
                 if st['error'] == 1:
                     task.function_result = "mig completed with errors, retrying"
                     task.retry += 1
+                    task.status = JobSchedule.STATUS_RETRYING
+
                 else:
                     task.status = JobSchedule.STATUS_DONE
                     task.function_result = "Done"
