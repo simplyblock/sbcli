@@ -412,7 +412,7 @@ class RPCClient:
     def bdev_raid_create(self, name, bdevs_list):
         params = {
             "name": name,
-            "raid_level": "0",
+            "raid_level": "1",
             "strip_size_kb": 4,
             "base_bdevs": bdevs_list
         }

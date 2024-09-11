@@ -25,10 +25,16 @@ db_controller = kv_store.DBController()
 document_name = 'AWS-RunShellScript'
 output_key_prefix = 'ssm-output'
 
-region = utils.get_aws_region()
-ssm = boto3.client('ssm', region_name=region)
-s3 = boto3.client('s3', region_name=region)
-
+region = None
+ssm = None
+s3 = None
+try:
+    region = utils.get_aws_region()
+    ssm = boto3.client('ssm', region_name=region)
+    s3 = boto3.client('s3', region_name=region)
+    logger.info("boto3 client created!")
+except Exception as e:
+    logger.error(f"Exception while connecting to AWS: {e}")
 
 def get_instance_tf_engine_instance_id(workspace: str):
     tag_value = f'{workspace}-tfengine'
