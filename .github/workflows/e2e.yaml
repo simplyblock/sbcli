@@ -208,12 +208,22 @@ jobs:
       - name: Wait for Storage Nodes to Become Online
         run: |
           while true; do
-            NODE_STATUS=$(ssh -i "$HOME/.ssh/${{ steps.terraform_outputs.outputs.key_name }}" \
-              -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no \
-              -o ProxyCommand="ssh -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -i \"$HOME/.ssh/${{ steps.terraform_outputs.outputs.key_name }}\" -W %h:%p ec2-user@${{ steps.terraform_outputs.outputs.bastion_public_ip }}" \
-              ec2-user@${{ steps.terraform_outputs.outputs.mgmt_private_ip }} \
-              "sbcli-dev sn list | grep -Eo 'online|offline'")
+            echo "Checking storage node status..."
             
+            NODE_STATUS=$(ssh -i "$HOME/.ssh/${{ steps.terraform_outputs.outputs.key_name }}" \
+                    -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no \
+                    -o ProxyCommand="ssh -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -i \"$HOME/.ssh/${{ steps.terraform_outputs.outputs.key_name }}\" -W %h:%p ec2-user@${{ steps.terraform_outputs.outputs.bastion_public_ip }}" \
+                    ec2-user@${{ steps.terraform_outputs.outputs.mgmt_private_ip }} \
+              "sbcli-dev sn list | grep -Eo 'online|offline'" || echo "SSH command failed")
+
+            SSH_EXIT_CODE=$?
+            if [ $SSH_EXIT_CODE -ne 0 ]; then
+              echo "SSH command failed with exit code $SSH_EXIT_CODE. Retrying..."
+              sleep 30
+              continue
+            fi
+
+            echo "Node Status: $NODE_STATUS"
             ONLINE_NODES=$(echo "$NODE_STATUS" | grep -c "online")
             
             if [ "$ONLINE_NODES" -ge 3 ]; then
@@ -224,7 +234,7 @@ jobs:
               sleep 30
             fi
           done
-
+        shell: /usr/bin/bash -e {0}
 
       - name: Activate Cluster
         run: |
