@@ -199,7 +199,7 @@ jobs:
             --namespace spdk-csi \
             --create-namespace \
             --set csiConfig.simplybk.uuid="${{ steps.bootstrap_cluster.outputs.cluster_id }}" \
-            --set csiConfig.simplybk.ip="http://${{ steps.bootstrap_cluster.outputs.cluster_api_gateway_endpoint }}" \
+            --set csiConfig.simplybk.ip="${{ steps.bootstrap_cluster.outputs.cluster_api_gateway_endpoint }}" \
             --set csiSecret.simplybk.secret="${{ steps.bootstrap_cluster.outputs.cluster_secret }}" \
             --set logicalVolume.pool_name="testing1" \
             --set logicalVolume.snapshot="True" \
