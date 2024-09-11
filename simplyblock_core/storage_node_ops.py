@@ -2551,8 +2551,41 @@ def _create_bdev_stack(snode, lvstore_stack=None):
                     return False, "Failed to send cluster map"
                 time.sleep(3)
 
-        elif type == "bdev_lvstore" and lvstore_stack:
-            ret = rpc_client.create_lvstore(**params)
+        elif type == "bdev_lvstore":
+            #ret = rpc_client.create_lvstore(**params)
+            raid_nqn = f"nqn.2023-02.io.simlpyblock:subsystem_raid"
+
+            logger.info("creating subsystem %s", raid_nqn)
+            ret = rpc_client.subsystem_create(raid_nqn, 'sbcli-cn', "123456")
+            logger.debug(ret)
+
+            # add listeners
+            logger.info("adding listeners")
+            for iface in snode.data_nics:
+                if iface.ip4_address:
+                    tr_type = iface.get_transport_type()
+                    ret = rpc_client.transport_list()
+                    found = False
+                    if ret:
+                        for ty in ret:
+                            if ty['trtype'] == tr_type:
+                                found = True
+                    if found is False:
+                        ret = rpc_client.transport_create(tr_type)
+                    logger.info("adding listener for %s on IP %s" % (raid_nqn, iface.ip4_address))
+                    ret = rpc_client.listeners_create(raid_nqn, tr_type, iface.ip4_address, "4420")
+                    is_optimized = False
+                    # if lvol.node_id == snode.get_id():
+                    #     is_optimized = True
+                    logger.info(f"Setting ANA state: {is_optimized}")
+                    ret = rpc_client.nvmf_subsystem_listener_set_ana_state(
+                        raid_nqn, iface.ip4_address, "4420", is_optimized)
+
+            logger.info("Add BDev to subsystem")
+            ret = rpc_client.nvmf_subsystem_add_ns(raid_nqn, params['bdev_name'])
+            if not ret:
+                return False, "Failed to add bdev to subsystem"
+
 
         elif type == "bdev_raid":
             distribs_list = bdev["distribs_list"]

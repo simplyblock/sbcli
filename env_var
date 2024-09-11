@@ -1,7 +1,7 @@
-SIMPLY_BLOCK_COMMAND_NAME=sbcli-dev
+SIMPLY_BLOCK_COMMAND_NAME=sbcli-dev1
 SIMPLY_BLOCK_VERSION=3.7.9
 
 
-SIMPLY_BLOCK_DOCKER_IMAGE=simplyblock/simplyblock:main
+SIMPLY_BLOCK_DOCKER_IMAGE=simplyblock/simplyblock:main_restart
 
 DOCKER_USER=hamdysimplyblock
