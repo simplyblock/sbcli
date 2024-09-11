@@ -40,20 +40,6 @@ def task_runner(task):
         return False
 
     if "migration" not in task.function_params:
-        # if task.retry >= 2:
-        #     all_devs_online = True
-        #     for node in db_controller.get_storage_nodes_by_cluster_id(task.cluster_id):
-        #         for dev in node.nvme_devices:
-        #             if dev.status != NVMeDevice.STATUS_ONLINE:
-        #                 all_devs_online = False
-        #                 break
-        #
-        #     if not all_devs_online:
-        #         task.function_result = "Some devs are offline, retrying"
-        #         task.retry += 1
-        #         task.write_to_db(db_controller.kv_store)
-        #         return False
-
         device = db_controller.get_storage_devices(task.device_id)
         lvol = db_controller.get_lvol_by_id(task.function_params["lvol_id"])
 
@@ -89,13 +75,17 @@ def task_runner(task):
         mig_info = task.function_params["migration"]
         res = rpc_client.distr_migration_status(**mig_info)
         if res:
-            migration_status = res[0]["status"]
+            res_data = res[0]
+            migration_status = res_data["status"]
             if migration_status == "completed":
+                if res_data['error'] == 1:
+                    task.function_result = "mig completed with errors"
+                else:
+                    task.function_result = "Done"
+
                 task.status = JobSchedule.STATUS_DONE
-                task.function_result = migration_status
                 task.write_to_db(db_controller.kv_store)
                 return True
-
             elif migration_status == "failed":
                 task.status = JobSchedule.STATUS_DONE
                 task.function_result = migration_status
@@ -103,7 +93,7 @@ def task_runner(task):
                 return True
 
             else:
-                task.function_result = f"Status: {migration_status}, progress:{res[0]['progress']}"
+                task.function_result = f"Status: {migration_status}, progress:{res_data['progress']}"
                 task.write_to_db(db_controller.kv_store)
         else:
             logger.error("Failed to get mig status")

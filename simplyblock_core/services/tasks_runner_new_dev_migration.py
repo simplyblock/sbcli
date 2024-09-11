@@ -88,10 +88,15 @@ def task_runner(task):
         mig_info = task.function_params["migration"]
         res = rpc_client.distr_migration_status(**mig_info)
         if res:
-            migration_status = res[0]["status"]
+            res_data = res[0]
+            migration_status = res_data["status"]
             if migration_status == "completed":
+                if res_data['error'] == 1:
+                    task.function_result = "mig completed with errors"
+                else:
+                    task.function_result = "Done"
+
                 task.status = JobSchedule.STATUS_DONE
-                task.function_result = migration_status
                 task.write_to_db(db_controller.kv_store)
                 return True
 
@@ -102,7 +107,7 @@ def task_runner(task):
                 return True
 
             else:
-                task.function_result = f"Status: {migration_status}, progress:{res[0]['progress']}"
+                task.function_result = f"Status: {migration_status}, progress:{res_data['progress']}"
                 task.write_to_db(db_controller.kv_store)
         else:
             logger.error("Failed to get mig status")
