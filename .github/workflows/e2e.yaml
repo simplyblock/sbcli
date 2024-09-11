@@ -120,9 +120,11 @@ jobs:
           cd $GITHUB_WORKSPACE/simplyBlockDeploy
           terraform plan \
             -var "mgmt_nodes=1" -var "storage_nodes=3" -var "volumes_per_storage_nodes=3" \
-            -var mgmt_nodes_instance_type="m6g.2xlarge" -var storage_nodes_instance_type="m6g.2xlarge" \
+            -var storage_nodes_instance_type="m6g.2xlarge" \
+            -var "storage_nodes_arch=arm64" -var "snode_deploy_on_k8s=true" \
             -var "extra_nodes=1" -var "extra_nodes_instance_type=m6gd.xlarge" \
             -var storage_nodes_ebs_size2=100 -var "region=us-east-2" \
+            -var "extra_nodes_arch=arm64" \
             -var "sbcli_cmd=${{ github.event.inputs.sbcli_cmd || 'sbcli-dev' }}" -out=tfplan
 
       - name: Apply Terraform Changes
@@ -178,8 +180,8 @@ jobs:
           helm install spdk-csi ./ \
             --namespace spdk-csi \
             --create-namespace \
-            --set csiConfig.simplybk.uuid="${{ steps.bootstrap_cluster.outputs.cluster_api_gateway_endpoint }}" \
-            --set csiConfig.simplybk.ip="http://${{ steps.terraform_outputs.outputs.bastion_public_ip }}" \
+            --set csiConfig.simplybk.uuid="${{ steps.bootstrap_cluster.outputs.cluster_id }}" \
+            --set csiConfig.simplybk.ip="http://${{ steps.bootstrap_cluster.outputs.cluster_api_gateway_endpoint }}" \
             --set csiSecret.simplybk.secret="${{ steps.bootstrap_cluster.outputs.cluster_secret }}" \
             --set logicalVolume.pool_name="testing1" \
             --set logicalVolume.snapshot="True" \
@@ -190,7 +192,7 @@ jobs:
           while true; do
             NODE_STATUS=$(ssh -i "$HOME/.ssh/${{ steps.terraform_outputs.outputs.key_name }}" -o StrictHostKeyChecking=no \
               -o ProxyCommand="ssh -o StrictHostKeyChecking=no -i \"$HOME/.ssh/${{ steps.terraform_outputs.outputs.key_name }}\" -W %h:%p ec2-user@${{ steps.terraform_outputs.outputs.bastion_public_ip }}" \
-              ec2-user@${{ steps.terraform_outputs.outputs.bastion_public_ip }} "
+              ec2-user@${{ steps.terraform_outputs.outputs.mgmt_private_ips }} "
               sbcli-dev sn list | grep -Eo 'online|offline'")
             ONLINE_NODES=$(echo "$NODE_STATUS" | grep -c "online")
             if [ "$ONLINE_NODES" -ge 3 ]; then
@@ -201,6 +203,17 @@ jobs:
               sleep 30
             fi
           done
+
+      - name: Activate Cluster
+        run: |
+          echo "Sleeping for 30 seconds before cluster activate"
+          sleep 30
+
+          ssh -i "$HOME/.ssh/${{ steps.terraform_outputs.outputs.key_name }}" -o StrictHostKeyChecking=no \
+            -o ProxyCommand="ssh -o StrictHostKeyChecking=no -i \"$HOME/.ssh/${{ steps.terraform_outputs.outputs.key_name }}\" -W %h:%p ec2-user@${{ steps.terraform_outputs.outputs.bastion_public_ip }}" \
+            ec2-user@${{ steps.terraform_outputs.outputs.mgmt_private_ip }} "
+          ${{ github.event.inputs.sbcli_cmd }} cluster activate ${{ steps.bootstrap_cluster.outputs.cluster_id }}
+          "
 
       - name: Record Test Start Time
         run: echo "TEST_START_TIME=$(date +%s)" >> $GITHUB_ENV
