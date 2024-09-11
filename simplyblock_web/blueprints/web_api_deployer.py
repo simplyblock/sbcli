@@ -36,6 +36,7 @@ try:
 except Exception as e:
     logger.error(f"Exception while connecting to AWS: {e}")
 
+
 def get_instance_tf_engine_instance_id(workspace: str):
     tag_value = f'{workspace}-tfengine'
     tag_key = 'Name'

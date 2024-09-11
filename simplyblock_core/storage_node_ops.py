@@ -518,7 +518,8 @@ def _prepare_cluster_devices_partitions(snode, devices):
     jm_devices = []
     dev_order = get_next_cluster_device_order(db_controller, snode.cluster_id)
     for index, nvme in enumerate(devices):
-        if nvme.status not in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_UNAVAILABLE, NVMeDevice.STATUS_READONLY]:
+        if nvme.status not in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_UNAVAILABLE,
+                               NVMeDevice.STATUS_READONLY, NVMeDevice.STATUS_NEW]:
             logger.debug(f"Device is skipped: {nvme.get_id()}, status: {nvme.status}")
             continue
 
