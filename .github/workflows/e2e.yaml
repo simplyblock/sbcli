@@ -170,6 +170,7 @@ jobs:
             --distr-npcs ${{ github.event.inputs.npcs }} \
             --distr-bs ${{ github.event.inputs.bs }} \
             --distr-chunk-bs ${{ github.event.inputs.chunk_bs }} \
+            --k8s-snode \
             --spdk-debug
         id: bootstrap_cluster
         env:
