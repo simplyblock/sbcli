@@ -2326,9 +2326,9 @@
                 "description": "Cluster",
                 "hide": 0,
                 "includeAll": false,
-                "label": "Cluster",
+                "label": "cluster",
                 "multi": true,
-                "name": "Cluster",
+                "name": "cluster",
                 "options": [],
                 "query": {
                     "query": "query_result((cluster_read_io{cluster=~\".*\"}  and on() (absent(_{_=\"admin\"}) and absent(_{_=\"${__user.login}\"}))) or on() (cluster_read_io{cluster=\"${__user.login}\"}  unless on() (absent(_{_!=\"admin\"}) and absent(_{_=\"${user.login}\"}))))",
