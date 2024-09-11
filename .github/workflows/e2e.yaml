@@ -13,6 +13,10 @@ on:
         description: 'Branch for simplyBlockDeploy'
         required: true
         default: 'main'
+      spdk_csi_branch:
+        description: 'Branch for spdk-csi'
+        required: true
+        default: 'master'
       sbcli_cmd:
         description: 'Command for sbcli execution'
         required: true
@@ -73,6 +77,14 @@ jobs:
           path: 'simplyBlockDeploy'
           token: ${{ secrets.GH_ACCESS_KEY_ID_HAMDI }}
 
+      - uses: actions/checkout@master
+        name: Checkout code spdk-csi
+        with:
+          repository: simplyblock-io/spdk-csi
+          ref: refs/heads/${{ github.event.inputs.spdk_csi_branch || 'master'}}
+          path: 'spdk-csi'
+          token: ${{ secrets.GH_ACCESS_KEY_ID_HAMDI }}
+
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v2
         with:
@@ -97,17 +109,19 @@ jobs:
         run: |
           cd $GITHUB_WORKSPACE/simplyBlockDeploy
           terraform workspace select -or-create ghiaction-sbclie2e
+
       - name: Validate Terraform Configuration
         run: |
           cd $GITHUB_WORKSPACE/simplyBlockDeploy
           terraform validate
+
       - name: Plan Terraform Changes
         run: |
           cd $GITHUB_WORKSPACE/simplyBlockDeploy
           terraform plan \
             -var "mgmt_nodes=1" -var "storage_nodes=3" -var "volumes_per_storage_nodes=3" \
-            -var mgmt_nodes_instance_type="m6id.xlarge" -var storage_nodes_instance_type="m6i.xlarge" \
-            -var "extra_nodes=1" -var "extra_nodes_instance_type=m6id.xlarge" \
+            -var mgmt_nodes_instance_type="m6g.2xlarge" -var storage_nodes_instance_type="m6g.2xlarge" \
+            -var "extra_nodes=1" -var "extra_nodes_instance_type=m6gd.xlarge" \
             -var storage_nodes_ebs_size2=100 -var "region=us-east-2" \
             -var "sbcli_cmd=${{ github.event.inputs.sbcli_cmd || 'sbcli-dev' }}" -out=tfplan
 
@@ -115,6 +129,7 @@ jobs:
         run: |
           cd $GITHUB_WORKSPACE/simplyBlockDeploy
           terraform apply tfplan
+
       - name: Get Terraform Outputs
         id: terraform_outputs
         run: |
@@ -123,18 +138,69 @@ jobs:
           echo "::set-output name=bastion_public_ip::$output_bastion_public_ip"
           output_key_name=$(terraform output -raw key_name)
           echo "::set-output name=key_name::$output_key_name"
+          output_extra_node_public_ip=$(terraform output -raw extra_nodes_public_ips)
+          echo "::set-output name=extra_node_public_ip::$output_extra_node_public_ip"
+
       - name: Bootstrap Cluster
         run: |
           cd $GITHUB_WORKSPACE/simplyBlockDeploy
+          echo "Sleeping for 30 seconds before bootstrap-cluster"
+          sleep 30
           ./bootstrap-cluster.sh --sbcli-cmd "${{ github.event.inputs.sbcli_cmd }}" \
             --max-lvol 10 --max-snap 10 --max-prov 900G --number-of-devices 3 \
             --distr-ndcs ${{ github.event.inputs.ndcs }} \
             --distr-npcs ${{ github.event.inputs.npcs }} \
             --distr-bs ${{ github.event.inputs.bs }} \
-            --distr-chunk-bs ${{ github.event.inputs.chunk_bs }}
+            --distr-chunk-bs ${{ github.event.inputs.chunk_bs }} \
+            --spdk-debug
         id: bootstrap_cluster
         env:
           SBCLI_CMD: ${{ github.event.inputs.sbcli_cmd || 'sbcli-dev' }}
+
+      - name: Bootstrap k3s
+        run: |
+          echo "Sleeping for 30 seconds before bootstrap-k3s"
+          sleep 30
+          cd $GITHUB_WORKSPACE/simplyBlockDeploy
+          ./bootstrap-k3s.sh --k8s-snode
+        id: bootstrap_k3s
+
+      - name: Configure Kubeconfig
+        run: |
+          scp -i "$HOME/.ssh/${{ steps.terraform_outputs.outputs.key_name }}" ec2-user@${{ steps.terraform_outputs.outputs.extra_node_public_ip }}:/etc/rancher/k3s/k3s.yaml $HOME/.kube/config
+          sed -i "s/server: https:\/\/\(localhost\|127.0.0.1\)\(:[0-9]*\)/server: https:\/\/${{ steps.terraform_outputs.outputs.extra_node_public_ip }}\2/" $HOME/.kube/config
+
+      - name: Install Helm Chart for spdk-csi
+        run: |
+          cd $GITHUB_WORKSPACE/spdk-csi/charts/latest/spdk-csi/
+          echo "Sleeping for 120 seconds before helm install"
+          sleep 120
+          helm install spdk-csi ./ \
+            --namespace spdk-csi \
+            --create-namespace \
+            --set csiConfig.simplybk.uuid="${{ steps.bootstrap_cluster.outputs.cluster_api_gateway_endpoint }}" \
+            --set csiConfig.simplybk.ip="http://${{ steps.terraform_outputs.outputs.bastion_public_ip }}" \
+            --set csiSecret.simplybk.secret="${{ steps.bootstrap_cluster.outputs.cluster_secret }}" \
+            --set logicalVolume.pool_name="testing1" \
+            --set logicalVolume.snapshot="True" \
+            --set image.simplyblock.tag="main"
+
+      - name: Wait for Storage Nodes to Become Online
+        run: |
+          while true; do
+            NODE_STATUS=$(ssh -i "$HOME/.ssh/${{ steps.terraform_outputs.outputs.key_name }}" -o StrictHostKeyChecking=no \
+              -o ProxyCommand="ssh -o StrictHostKeyChecking=no -i \"$HOME/.ssh/${{ steps.terraform_outputs.outputs.key_name }}\" -W %h:%p ec2-user@${{ steps.terraform_outputs.outputs.bastion_public_ip }}" \
+              ec2-user@${{ steps.terraform_outputs.outputs.bastion_public_ip }} "
+              sbcli-dev sn list | grep -Eo 'online|offline'")
+            ONLINE_NODES=$(echo "$NODE_STATUS" | grep -c "online")
+            if [ "$ONLINE_NODES" -ge 3 ]; then
+              echo "All 3 storage nodes are online."
+              break
+            else
+              echo "$ONLINE_NODES nodes online. Waiting for more nodes to come online..."
+              sleep 30
+            fi
+          done
 
       - name: Record Test Start Time
         run: echo "TEST_START_TIME=$(date +%s)" >> $GITHUB_ENV
