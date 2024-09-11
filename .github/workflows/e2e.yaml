@@ -169,6 +169,7 @@ jobs:
 
       - name: Configure Kubeconfig
         run: |
+          mkdir $HOME/.kube
           scp -i "$HOME/.ssh/${{ steps.terraform_outputs.outputs.key_name }}" ec2-user@${{ steps.terraform_outputs.outputs.extra_node_public_ip }}:/etc/rancher/k3s/k3s.yaml $HOME/.kube/config
           sed -i "s/server: https:\/\/\(localhost\|127.0.0.1\)\(:[0-9]*\)/server: https:\/\/${{ steps.terraform_outputs.outputs.extra_node_public_ip }}\2/" $HOME/.kube/config
 
@@ -391,3 +392,4 @@ jobs:
           rm -rf ./* || true
           rm -rf ./.??* || true
           ls -la ./
+          rm -rf $HOME/.kube
