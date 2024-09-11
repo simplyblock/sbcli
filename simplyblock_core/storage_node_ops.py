@@ -524,6 +524,7 @@ def _prepare_cluster_devices_partitions(snode, devices):
         if nvme.status not in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_UNAVAILABLE,
                                NVMeDevice.STATUS_READONLY, NVMeDevice.STATUS_NEW]:
             logger.debug(f"Device is skipped: {nvme.get_id()}, status: {nvme.status}")
+            new_devices.append(nvme)
             continue
 
         # look for partitions
@@ -1299,13 +1300,14 @@ def restart_storage_node(
             return False
 
     if node_ip:
-        logger.info(f"Restarting on new node with ip: {node_ip}")
-        snode_api = SNodeClient(node_ip)
-        if not snode_api.info():
-            logger.error("Failed to get node info!")
-            return False
-        snode.api_endpoint = node_ip
-        snode.mgmt_ip = node_ip.split(":")[0]
+        if node_ip != snode.api_endpoint:
+            logger.info(f"Restarting on new node with ip: {node_ip}")
+            snode_api = SNodeClient(node_ip, timeout=5, retry=3)
+            if not snode_api.info():
+                logger.error("Failed to get node info!")
+                return False
+            snode.api_endpoint = node_ip
+            snode.mgmt_ip = node_ip.split(":")[0]
 
     logger.info("Setting node state to restarting")
     old_status = snode.status
