@@ -88,16 +88,12 @@ def add_lvol():
         | name (required) | LVol name or id
         | size (required) | LVol size: 10M, 10G, 10(bytes)
         | pool (required) | Pool UUID or name
-        | comp            | Create a new compress LVol
         | crypto          | Create a new crypto LVol
-        | snapshot        | Create a Lvol with snapshot capability
         | max_rw_iops     | Maximum Read Write IO Per Second
         | max_rw_mbytes   | Maximum Read Write Mega Bytes Per Second
         | max_r_mbytes    | Maximum Read Mega Bytes Per Second
         | max_w_mbytes    | Maximum Write Mega Bytes Per Second
-        | max_size        | Maximum LVol size: 10M, 10G, 10(bytes)
         | ha_type         | LVol HA type, can be (single,ha,default=cluster's ha type), Default=default
-        | distr_vuid      | Distr bdev virtual unique ID, Default=0 means random
         | crypto_key1     | the hex value of key1 to be used for lvol encryption
         | crypto_key2     | the hex value of key2 to be used for lvol encryption
         | host_id         | the hostID on which the lvol is created
@@ -133,16 +129,12 @@ def add_lvol():
     rw_mbytes = utils.get_int_value_or_default(cl_data, "max_rw_mbytes", 0)
     r_mbytes = utils.get_int_value_or_default(cl_data, "max_r_mbytes", 0)
     w_mbytes = utils.get_int_value_or_default(cl_data, "max_w_mbytes", 0)
-    max_size = utils.get_int_value_or_default(cl_data, "max_size", 0)
+    # max_size = utils.get_int_value_or_default(cl_data, "max_size", 0)
 
-    compression = utils.get_value_or_default(cl_data, "comp", False)
     encryption = utils.get_value_or_default(cl_data, "crypto", False)
-    snapshot = utils.get_value_or_default(cl_data, "snapshot", False)
-
 
     ha_type = utils.get_value_or_default(cl_data, "ha_type", "default")
 
-    distr_vuid = utils.get_int_value_or_default(cl_data, "distr_vuid", 0)
     crypto_key1 = utils.get_value_or_default(cl_data, "crypto_key1", None)
     crypto_key2 = utils.get_value_or_default(cl_data, "crypto_key2", None)
     host_id = utils.get_value_or_default(cl_data, "host_id", None)
@@ -152,11 +144,9 @@ def add_lvol():
         size=size,
         pool_id_or_name=pool.get_id(),
 
-        use_comp=compression,
         use_crypto=encryption,
-        with_snapshot=snapshot,
 
-        max_size=max_size,
+        max_size=0,
         max_rw_iops=rw_iops,
         max_rw_mbytes=rw_mbytes,
         max_r_mbytes=r_mbytes,
@@ -164,9 +154,11 @@ def add_lvol():
 
         host_id_or_name=host_id,
         ha_type=ha_type,
-        distr_vuid=distr_vuid,
         crypto_key1=crypto_key1,
         crypto_key2=crypto_key2,
+
+        use_comp=False,
+        distr_vuid=0
     )
 
     return utils.get_response(ret, error, http_code=400)
