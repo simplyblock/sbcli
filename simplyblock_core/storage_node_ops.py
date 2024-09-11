@@ -570,11 +570,8 @@ def _prepare_cluster_devices_jm_on_dev(snode, devices):
     # Set device cluster order
     dev_order = get_next_cluster_device_order(db_controller, snode.cluster_id)
     for index, nvme in enumerate(devices):
-        nvme.cluster_device_order = dev_order
-        dev_order += 1
         if nvme.size < jm_device.size:
             jm_device = nvme
-        device_events.device_create(nvme)
     jm_device.status = NVMeDevice.STATUS_JM
 
     rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
@@ -582,7 +579,7 @@ def _prepare_cluster_devices_jm_on_dev(snode, devices):
     new_devices = []
     for index, nvme in enumerate(devices):
         if nvme.status not in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_UNAVAILABLE,
-                               NVMeDevice.STATUS_JM, NVMeDevice.STATUS_READONLY]:
+                               NVMeDevice.STATUS_JM, NVMeDevice.STATUS_READONLY, NVMeDevice.STATUS_NEW]:
             logger.debug(f"Device is not online or unavailable: {nvme.get_id()}, status: {nvme.status}")
             continue
 
@@ -602,6 +599,8 @@ def _prepare_cluster_devices_jm_on_dev(snode, devices):
             new_devices.append(new_device)
             device_events.device_create(new_device)
 
+        device_events.device_create(nvme)
+
     snode.nvme_devices = new_devices
     return True
 
@@ -614,16 +613,6 @@ def _prepare_cluster_devices_on_restart(snode):
         snode.rpc_username, snode.rpc_password)
 
     for index, nvme in enumerate(snode.nvme_devices):
-
-        # if nvme.status == NVMeDevice.STATUS_NEW:
-        #     # prepare devices
-        #     if snode.num_partitions_per_dev == 0 or snode.jm_percent == 0:
-        #         ret = _prepare_cluster_devices_jm_on_dev(snode, [nvme])
-        #     else:
-        #         ret = _prepare_cluster_devices_partitions(snode, [nvme])
-        #     if not ret:
-        #         logger.error("Failed to prepare cluster devices")
-        #         return False
 
         if nvme.status not in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_UNAVAILABLE, NVMeDevice.STATUS_READONLY]:
             logger.debug(f"Device is skipped: {nvme.get_id()}, status: {nvme.status}")
@@ -1289,6 +1278,10 @@ def restart_storage_node(
         logger.error(f"Can not restart online node: {node_id}")
         return False
 
+    if snode.status == StorageNode.STATUS_RESTARTING:
+        logger.error(f"Node is in restart: {node_id}")
+        return False
+
     task_id = tasks_controller.get_active_node_restart_task(snode.cluster_id, snode.get_id())
     if task_id:
         logger.error(f"Restart task found: {task_id}, can not restart storage node")
@@ -1517,11 +1510,20 @@ def restart_storage_node(
             new_devices.append(dev)
             snode.nvme_devices.append(dev)
 
-    # prepare devices
-    ret = _prepare_cluster_devices_on_restart(snode)
-    if not ret:
-        logger.error("Failed to prepare cluster devices")
-        # return False
+    if node_ip:
+        # prepare devices on new node
+        if snode.num_partitions_per_dev == 0 or snode.jm_percent == 0:
+            ret = _prepare_cluster_devices_jm_on_dev(snode, nvme_devs)
+        else:
+            ret = _prepare_cluster_devices_partitions(snode, nvme_devs)
+        if not ret:
+            logger.error("Failed to prepare cluster devices")
+            # return False
+    else:
+        ret = _prepare_cluster_devices_on_restart(snode)
+        if not ret:
+            logger.error("Failed to prepare cluster devices")
+            # return False
 
     logger.info("Connecting to remote devices")
     remote_devices = _connect_to_remote_devs(snode)
