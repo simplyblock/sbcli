@@ -62,19 +62,19 @@ jobs:
           go-version: '1.22'
       - run: go version
 
-      - name: Setup Helm
-        uses: azure/setup-helm@v4.2.0
-        with:
-          version: 'v3.15.4'
-        id: install
-      - run: helm version
+      - name: Install Helm v3.15.4
+        run: |
+          curl -L https://get.helm.sh/helm-v3.15.4-linux-amd64.tar.gz -o helm-v3.15.4-linux-amd64.tar.gz
+          tar -zxvf helm-v3.15.4-linux-amd64.tar.gz
+          sudo mv linux-amd64/helm /usr/local/bin/helm
+          helm version
 
-      - name: Setup kubectl
-        uses: azure/setup-kubectl@v4
-        with:
-          version: 'v1.31.0'
-        id: install
-      - run: kubcetl version
+      - name: Install kubectl v1.31.0
+        run: |
+          curl -LO "https://dl.k8s.io/release/v1.31.0/bin/linux/amd64/kubectl"
+          chmod +x kubectl
+          sudo mv kubectl /usr/local/bin/
+          kubectl version --client
 
       - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v4
