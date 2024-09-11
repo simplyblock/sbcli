@@ -409,10 +409,10 @@ class RPCClient:
         params = {"name": uuid}
         return self._request("bdev_get_iostat", params)
 
-    def bdev_raid_create(self, name, bdevs_list):
+    def bdev_raid_create(self, name, bdevs_list, raid_level="0"):
         params = {
             "name": name,
-            "raid_level": "1",
+            "raid_level": raid_level,
             "strip_size_kb": 4,
             "base_bdevs": bdevs_list
         }
