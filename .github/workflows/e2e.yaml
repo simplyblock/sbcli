@@ -418,16 +418,16 @@ jobs:
 
           curl -X POST -H 'Content-type: application/json' --data "{\"text\":\"${MESSAGE}\"}" $SLACK_WEBHOOK_URL
 
-      # - name: Destroy Cluster
-      #   if: always()
-      #   run: |
-      #     cd $GITHUB_WORKSPACE/simplyBlockDeploy
-      #     terraform destroy --auto-approve
+      - name: Destroy Cluster
+        if: always()
+        run: |
+          cd $GITHUB_WORKSPACE/simplyBlockDeploy
+          terraform destroy --auto-approve
 
-      # - name: Cleanup build folder
-      #   run: |
-      #     ls -la ./
-      #     rm -rf ./* || true
-      #     rm -rf ./.??* || true
-      #     ls -la ./
-      #     rm -rf $HOME/.kube
+      - name: Cleanup build folder
+        run: |
+          ls -la ./
+          rm -rf ./* || true
+          rm -rf ./.??* || true
+          ls -la ./
+          rm -rf $HOME/.kube
