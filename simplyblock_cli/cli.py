@@ -229,6 +229,10 @@ class CLIWrapper:
         sub_command = self.add_sub_command(subparser, 'create',
                                            'Create an new cluster with this node as mgmt (local run)')
         sub_command.add_argument(
+            "--user", help='The user to be created for dashboard access',nargs=1,required=True)
+        sub_command.add_argument(
+            "--user-email", help='The user email to be added',nargs=1,required=True,dest="user_email")
+        sub_command.add_argument(
             "--blk_size", help='The block size in bytes', type=int, choices=[512, 4096], default=512)
 
         sub_command.add_argument(
@@ -1228,12 +1232,14 @@ class CLIWrapper:
         metrics_retention_period = args.metrics_retention_period
         contact_point = args.contact_point
         grafana_endpoint = args.grafana_endpoint
+        user = args.user
+        user_email = args.user_email
 
         return cluster_ops.create_cluster(
             blk_size, page_size_in_blocks,
             CLI_PASS, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
             ifname, log_del_interval, metrics_retention_period, contact_point, grafana_endpoint,
-            distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type)
+            distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, user, user_email)
 
     def query_yes_no(self, question, default="yes"):
         """Ask a yes/no question via raw_input() and return their answer.

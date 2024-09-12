@@ -17,12 +17,43 @@ from simplyblock_core import utils, scripts, constants, mgmt_node_ops, storage_n
 from simplyblock_core.controllers import cluster_events, device_controller, storage_events
 from simplyblock_core.kv_store import DBController, KVStore
 from simplyblock_core.models.cluster import Cluster
+from simplyblock_core.models.user import User
 from simplyblock_core.rpc_client import RPCClient
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
 
 logger = logging.getLogger()
 TOP_DIR = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+
+
+
+def _create_user(cluster_id, grafana_url,grafana_secret,user, user_email):
+    if not grafana_url.startswith("https://"):
+        if grafana_url.startswith("http://"):
+            grafana_url = grafana_url.replace("http://", "https://", 1)
+        else:
+            grafana_url = "https://" + grafana_url
+    
+    url = f"{grafana_url}/api/admin/users"
+    password = utils.generate_string(20)
+    headers = {
+        'X-Requested-By': '',
+        'Content-Type': 'application/json',
+    }
+    payload = json.dumps({
+        "name": user,
+        "email": user_email,
+        "login": cluster_id,
+        "password": password
+    })
+    session = requests.session()
+    session.auth = ("admin", grafana_secret)
+    response = session.request("POST", url, headers=headers, data=payload)
+    logger.debug(response.text)
+    logger.debug(f"password for {user} is {password}")
+    return response.status_code == 200
+
+
 
 
 def _add_graylog_input(cluster_ip, password):
@@ -54,7 +85,7 @@ def _add_graylog_input(cluster_ip, password):
 
 def create_cluster(blk_size, page_size_in_blocks, cli_pass,
                    cap_warn, cap_crit, prov_cap_warn, prov_cap_crit, ifname, log_del_interval, metrics_retention_period,
-                   contact_point, grafana_endpoint, distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type):
+                   contact_point, grafana_endpoint, distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, user, user_email):
     logger.info("Installing dependencies...")
     ret = scripts.install_deps()
     logger.info("Installing dependencies > Done")
@@ -160,6 +191,30 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
                                log_del_interval, metrics_retention_period)
     logger.info("Deploying swarm stack > Done")
 
+    #grafana is done deploying here I have to check ret for exit code and create user for cluster 
+    
+    if ret != 0:
+        logger.error("deploying swarm stack failed")
+    
+    logger.info("deploying swarm stack succeeded")
+    
+    logger.info(f"creating user for cluster-id {c.uuid}")
+
+    _create_user(c.uuid,grafana_endpoint,c.secret, user,user_email)
+
+    # u = User()
+    # u.uuid = str(uuid.uuid4())
+    # u.userlogin = c.name
+    # u.username = c.uuid
+    # u.email = user_email
+    # u.secret = utils.generate_string(20)
+    # u.updated_at = int(time.time())
+
+
+    
+    
+    
+    
     logger.info("Configuring DB...")
     out = scripts.set_db_config_single()
     logger.info("Configuring DB > Done")
@@ -170,6 +225,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
 
     c.updated_at = int(time.time())
     db_controller = DBController(KVStore())
+    u.write_to_db(db_controller.kv_store)
     c.write_to_db(db_controller.kv_store)
 
     cluster_events.cluster_create(c)
