@@ -1303,11 +1303,23 @@ def restart_storage_node(
         if node_ip != snode.api_endpoint:
             logger.info(f"Restarting on new node with ip: {node_ip}")
             snode_api = SNodeClient(node_ip, timeout=5, retry=3)
-            if not snode_api.info():
+            node_info = snode_api.info()
+            if not node_info:
                 logger.error("Failed to get node info!")
                 return False
             snode.api_endpoint = node_ip
             snode.mgmt_ip = node_ip.split(":")[0]
+            data_nics = []
+            for nic in snode.data_nics:
+                device = node_info['network_interface'][nic.if_name]
+                data_nics.append(
+                    IFace({
+                        'uuid': str(uuid.uuid4()),
+                        'if_name': device['name'],
+                        'ip4_address': device['ip'],
+                        'status': device['status'],
+                        'net_type': device['net_type']}))
+            snode.data_nics = data_nics
 
     logger.info("Setting node state to restarting")
     old_status = snode.status
@@ -1492,6 +1504,7 @@ def restart_storage_node(
 
     new_devices = []
     active_devices = []
+    removed_devices = []
     known_devices_sn = []
     devices_sn = [d.serial_number for d in nvme_devs]
     for db_dev in snode.nvme_devices:
@@ -1504,6 +1517,7 @@ def restart_storage_node(
         else:
             logger.info(f"Device not found: {db_dev.get_id()}")
             db_dev.status = NVMeDevice.STATUS_REMOVED
+            removed_devices.append(db_dev)
             distr_controller.send_dev_status_event(db_dev, db_dev.status)
 
     if snode.jm_device and "serial_number" in snode.jm_device.device_data_dict:
@@ -1525,6 +1539,7 @@ def restart_storage_node(
         if not ret:
             logger.error("Failed to prepare cluster devices")
             # return False
+        snode.nvme_devices.extend(removed_devices)
     else:
         ret = _prepare_cluster_devices_on_restart(snode)
         if not ret:
