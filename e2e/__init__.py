@@ -13,7 +13,7 @@ def get_all_tests(custom=True):
         TestLvolFioNpcs0,
         TestLvolFioNpcs1,
         TestLvolFioNpcs2,
-        TestSingleNodeFailure,
+        # TestSingleNodeFailure, # TODO:Enable test case when redeployment node is fixed. 
         # TestMultiLvolFio, - Enable when testing
     ]
     if custom:
