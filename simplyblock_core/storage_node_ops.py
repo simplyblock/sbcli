@@ -254,7 +254,7 @@ def _create_jm_stack_on_raid(rpc_client, jm_nvme_bdevs, snode, after_restart):
     alceml_name = f"alceml_jm_{snode.get_id()}"
     pba_init_mode = 3
     if after_restart:
-        pba_init_mode = 2
+        pba_init_mode = 1
     alceml_cpu_mask = ""
     alceml_worker_cpu_mask = ""
     if snode.alceml_cpu_cores:
@@ -337,7 +337,7 @@ def _create_jm_stack_on_device(rpc_client, nvme, snode, after_restart):
 
     pba_init_mode = 3
     if after_restart:
-        pba_init_mode = 2
+        pba_init_mode = 1
     alceml_cpu_mask = ""
     alceml_worker_cpu_mask = ""
     if snode.alceml_cpu_cores:
@@ -425,7 +425,7 @@ def _create_storage_device_stack(rpc_client, nvme, snode, after_restart):
     logger.info(f"adding {alceml_name}")
     pba_init_mode = 3
     if after_restart:
-        pba_init_mode = 2
+        pba_init_mode = 1
     alceml_cpu_mask = ""
     alceml_worker_cpu_mask = ""
 
@@ -641,7 +641,7 @@ def _prepare_cluster_devices_on_restart(snode):
                 break
 
         if all_bdevs_found:
-            ret = _create_jm_stack_on_raid(rpc_client, jm_device.jm_nvme_bdev_list, snode, after_restart=False)
+            ret = _create_jm_stack_on_raid(rpc_client, jm_device.jm_nvme_bdev_list, snode, after_restart=True)
             if not ret:
                 logger.error(f"Failed to create JM device")
                 return False
@@ -661,7 +661,7 @@ def _prepare_cluster_devices_on_restart(snode):
             snode.alceml_worker_cpu_index = (snode.alceml_worker_cpu_index + 1) % len(snode.alceml_worker_cpu_cores)
 
         ret = rpc_client.bdev_alceml_create(jm_device.alceml_bdev, jm_device.nvme_bdev, jm_device.get_id(),
-                                                pba_init_mode=2, alceml_cpu_mask=alceml_cpu_mask, alceml_worker_cpu_mask=alceml_worker_cpu_mask)
+                                                pba_init_mode=1, alceml_cpu_mask=alceml_cpu_mask, alceml_worker_cpu_mask=alceml_worker_cpu_mask)
 
         if not ret:
             logger.error(f"Failed to create alceml bdev: {jm_device.alceml_bdev}")
