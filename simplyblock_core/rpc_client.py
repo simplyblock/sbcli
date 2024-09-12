@@ -416,6 +416,8 @@ class RPCClient:
             "strip_size_kb": 4,
             "base_bdevs": bdevs_list
         }
+        if raid_level == "1":
+            params["strip_size_kb"] = 0
         return self._request("bdev_raid_create", params)
 
     def bdev_raid_delete(self, name):
