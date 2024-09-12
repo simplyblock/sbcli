@@ -1624,15 +1624,22 @@ def restart_storage_node(
         #    return False, "Failed to send cluster map"
         #time.sleep(3)
 
-        for lvol_id in snode.lvols:
-            lvol = lvol_controller.recreate_lvol(lvol_id, snode)
-            if not lvol:
-                logger.error(f"Failed to create LVol: {lvol_id}")
-                return False
-            lvol.status = lvol.STATUS_ONLINE
-            lvol.io_error = False
-            lvol.health_check = True
-            lvol.write_to_db(db_controller.kv_store)
+        if snode.lvols:
+            for lvol_id in snode.lvols:
+                lvol = lvol_controller.recreate_lvol(lvol_id, snode)
+                if not lvol:
+                    logger.error(f"Failed to create LVol: {lvol_id}")
+                    return False
+                lvol.status = lvol.STATUS_ONLINE
+                lvol.io_error = False
+                lvol.health_check = True
+                lvol.write_to_db(db_controller.kv_store)
+        else:
+            temp_rpc_client = RPCClient(
+                    snode.mgmt_ip, snode.rpc_port,
+                    snode.rpc_username, snode.rpc_password)
+            temp_rpc_client.bdev_examine(snode.raid)
+
     logger.info("Done")
     return "Success"
 
