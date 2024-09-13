@@ -26,7 +26,7 @@ TOP_DIR = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 
 
 
-def _create_user(cluster_id, grafana_url,grafana_secret,update_secret):
+def _create_user(cluster_id, grafana_url,grafana_secret,user_secret,update_secret):
     if not grafana_url.startswith("https://"):
         if grafana_url.startswith("http://"):
             grafana_url = grafana_url.replace("http://", "https://", 1)
@@ -44,14 +44,14 @@ def _create_user(cluster_id, grafana_url,grafana_secret,update_secret):
         oldsecret = get_secret(cluster_id)
         payload = json.dumps({
             "old_password": oldsecret,
-            "new_password": grafana_secret
+            "new_password": user_secret
         })
         url = f"{grafana_url}/api/user/password"
     else:
         payload = json.dumps({
             "name": cluster_id,
             "login": cluster_id,
-            "password": grafana_secret
+            "password": user_secret
         })
         url = f"{grafana_url}/api/admin/users"
         
@@ -297,7 +297,7 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
     cluster.secret = utils.generate_string(20)
     cluster.db_connection = default_cluster.db_connection
 
-    _create_user(cluster.uuid,grafana_url,cluster.secret,False)
+    _create_user(cluster.uuid,grafana_url,default_cluster.secret,cluster.secret,False)
 
 
     if distr_ndcs == 0 and distr_npcs == 0:
@@ -594,7 +594,10 @@ def get_secret(cluster_id):
 
 
 def set_secret(cluster_id, secret,grafana_url):
+    
     db_controller = DBController()
+    clusters = db_controller.get_clusters()
+    
     cluster = db_controller.get_cluster_by_id(cluster_id)
     if not cluster:
         logger.error(f"Cluster not found {cluster_id}")
@@ -607,7 +610,7 @@ def set_secret(cluster_id, secret,grafana_url):
 
     cluster.secret = secret
     cluster.write_to_db(db_controller.kv_store)
-    _create_user(cluster_id,grafana_url,secret,True)
+    _create_user(cluster_id,grafana_url,clusters[0].secret,secret,True)
     return "Done"
 
 
