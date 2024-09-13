@@ -32,13 +32,24 @@ def _create_user(cluster_id, grafana_url,grafana_secret,update_secret):
             grafana_url = grafana_url.replace("http://", "https://", 1)
         else:
             grafana_url = "https://" + grafana_url
+    url = f"{grafana_url}/api/health"
+
+    while True:
+        response = requests.get(url)
+        if response.status_code == 200:
+            print("grafana API is up,proceeding with the script.")
+            break
+        print("waiting for grafana api to come up")        
+        time.sleep(5)
+    
     
     session = requests.session()
     session.auth = ("admin", grafana_secret)
     headers = {
         'X-Requested-By': '',
         'Content-Type': 'application/json',
-    }
+    }        
+    
     if update_secret:
         oldsecret = get_secret(cluster_id)
         payload = json.dumps({
