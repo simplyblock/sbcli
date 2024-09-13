@@ -25,6 +25,60 @@ logger = logging.getLogger()
 TOP_DIR = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 
 
+def _create_update_user(cluster_id, grafana_url, grafana_secret, user_secret, update_secret=False):
+    if not grafana_url.startswith("https://"):
+        if grafana_url.startswith("http://"):
+            grafana_url = grafana_url.replace("http://", "https://", 1)
+        else:
+            grafana_url = "https://" + grafana_url
+
+    session = requests.session()
+    session.auth = ("admin", grafana_secret)
+    headers = {
+        'X-Requested-By': '',
+        'Content-Type': 'application/json',
+    }        
+    
+    if update_secret:
+        url = f"{grafana_url}/api/users/lookup?loginOrEmail={cluster_id}"
+        response = session.request("GET", url, headers=headers)
+        userid = response.json().get("id")
+        
+        payload = json.dumps({
+            "password": user_secret
+        })
+        
+        url = f"{grafana_url}/api/admin/users/{userid}/password"
+        
+        while True:
+            response = session.request("PUT", url, headers=headers, data=payload)
+            if response.status_code == 200:
+                logger.debug(f"user create/update {cluster_id} succeeded")
+                break
+            logger.debug(response.status_code)
+            logger.debug("waiting for grafana api to come up")        
+            time.sleep(5)
+
+        return response.status_code == 200
+    else:
+        payload = json.dumps({
+            "name": cluster_id,
+            "login": cluster_id,
+            "password": user_secret
+        })
+        url = f"{grafana_url}/api/admin/users"
+        while True:
+            response = session.request("POST", url, headers=headers, data=payload)
+            if response.status_code == 200:
+                logger.debug(f"user create/update {cluster_id} succeeded")
+                break
+            logger.debug(response.status_code)
+            logger.debug("waiting for grafana api to come up")        
+            time.sleep(5)
+
+        return response.status_code == 200
+
+
 def _add_graylog_input(cluster_ip, password):
     url = f"http://{cluster_ip}/graylog/api/system/inputs"
     payload = json.dumps({
@@ -116,7 +170,8 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     c.distr_bs = distr_bs
     c.distr_chunk_bs = distr_chunk_bs
     c.ha_type = ha_type
-
+    c.grafana_endpoint = grafana_endpoint
+    
     alerts_template_folder = os.path.join(TOP_DIR, "simplyblock_core/scripts/alerting/")
     alert_resources_file = "alert_resources.yaml"
 
@@ -159,6 +214,11 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     ret = scripts.deploy_stack(cli_pass, DEV_IP, constants.SIMPLY_BLOCK_DOCKER_IMAGE, c.secret, c.uuid,
                                log_del_interval, metrics_retention_period)
     logger.info("Deploying swarm stack > Done")
+
+    if ret == 0:
+        logger.info("deploying swarm stack succeeded")
+    else:
+        logger.error("deploying swarm stack failed")
 
     logger.info("Configuring DB...")
     out = scripts.set_db_config_single()
@@ -244,8 +304,11 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
     cluster.ha_type = default_cluster.ha_type
     cluster.nqn = f"{constants.CLUSTER_NQN}:{cluster.uuid}"
     cluster.cli_pass = default_cluster.cli_pass
-    cluster.secret = default_cluster.secret
+    cluster.secret = utils.generate_string(20)
     cluster.db_connection = default_cluster.db_connection
+    cluster.grafana_endpoint = default_cluster.grafana_endpoint
+
+    _create_update_user(cluster.uuid, cluster.grafana_endpoint, default_cluster.secret, cluster.secret)
 
     if distr_ndcs == 0 and distr_npcs == 0:
         cluster.distr_ndcs = 4
@@ -541,7 +604,10 @@ def get_secret(cluster_id):
 
 
 def set_secret(cluster_id, secret):
+    
     db_controller = DBController()
+    clusters = db_controller.get_clusters()
+    
     cluster = db_controller.get_cluster_by_id(cluster_id)
     if not cluster:
         logger.error(f"Cluster not found {cluster_id}")
@@ -550,9 +616,12 @@ def set_secret(cluster_id, secret):
     secret = secret.strip()
     if len(secret) < 20:
         return "Secret must be at least 20 char"
-
+    
+    _create_update_user(cluster_id, clusters[0].grafana_endpoint, clusters[0].secret, secret, update_secret=True)
+    
     cluster.secret = secret
     cluster.write_to_db(db_controller.kv_store)
+    
     return "Done"
 
 
