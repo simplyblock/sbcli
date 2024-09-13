@@ -2329,31 +2329,31 @@
     "templating": {
         "list": [
             {
-                "allValue": ".*",
                 "current": {
-                    "selected": true,
-                    "text": [
-                        "All"
-                    ],
-                    "value": [
-                        "$__all"
-                    ]
+                    "selected": false,
+                    "text": "76aa3622-8918-4539-adb2-7c4b1852be14",
+                    "value": "76aa3622-8918-4539-adb2-7c4b1852be14"
                 },
-                "definition": "label_values(cluster)",
+                "datasource": {
+                    "type": "prometheus",
+                    "uid": "PBFA97CFB590B2093"
+                },
+                "definition": "query_result((cluster_read_io{cluster=~\".*\"}  and on() (absent(_{_=\"admin\"}) and absent(_{_=\"${__user.login}\"}))) or on() (cluster_read_io{cluster=\"${__user.login}\"}  unless on() (absent(_{_!=\"admin\"}) and absent(_{_=\"${user.login}\"}))))",
+                "description": "cluster",
                 "hide": 0,
-                "includeAll": true,
+                "includeAll": false,
                 "label": "cluster",
                 "multi": true,
                 "name": "cluster",
                 "options": [],
                 "query": {
-                    "query": "label_values(cluster)",
+                    "query": "query_result((cluster_read_io{cluster=~\".*\"}  and on() (absent(_{_=\"admin\"}) and absent(_{_=\"${__user.login}\"}))) or on() (cluster_read_io{cluster=\"${__user.login}\"}  unless on() (absent(_{_!=\"admin\"}) and absent(_{_=\"${user.login}\"}))))",
                     "refId": "PrometheusVariableQueryEditor-VariableQuery"
                 },
-                "refresh": 1,
-                "regex": "",
+                "refresh": 2,
+                "regex": "/.*cluster=\"([^\"]*).*/",
                 "skipUrlSync": false,
-                "sort": 0,
+                "sort": 1,
                 "type": "query"
             },
             {
