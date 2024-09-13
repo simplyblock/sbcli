@@ -149,3 +149,12 @@ def add_new_device_mig_task(device_id):
             _add_task(JobSchedule.FN_NEW_DEV_MIG, device.cluster_id, node.get_id(), device.get_id(),
                       max_retry=0, function_params={'lvol_id': lvol_id})
     return True
+
+
+def get_active_node_task(cluster_id, node_id):
+    tasks = db_controller.get_job_tasks(cluster_id)
+    for task in tasks:
+        if task.node_id == node_id:
+            if task.status == JobSchedule.STATUS_RUNNING and task.canceled is False:
+                return task.uuid
+    return False
