@@ -3,7 +3,7 @@ import time
 
 
 from simplyblock_core import constants, kv_store, utils
-from simplyblock_core.controllers import tasks_events
+from simplyblock_core.controllers import tasks_events, tasks_controller
 from simplyblock_core.models.job_schedule import JobSchedule
 
 
@@ -26,7 +26,6 @@ def task_runner(task):
         return True
 
     if task.status == JobSchedule.STATUS_NEW:
-        active_task_node_ids.append(task.node_id)
         task.status = JobSchedule.STATUS_RUNNING
         task.write_to_db(db_controller.kv_store)
         tasks_events.task_updated(task)
@@ -87,7 +86,7 @@ def task_runner(task):
                 if st['error'] == 1:
                     task.function_result = "mig completed with errors, retrying"
                     task.retry += 1
-                    task.status = JobSchedule.STATUS_RETRYING
+                    task.status = JobSchedule.STATUS_NEW
 
                 else:
                     task.status = JobSchedule.STATUS_DONE
@@ -106,7 +105,7 @@ def task_runner(task):
 
 # get DB controller
 db_controller = kv_store.DBController()
-active_task_node_ids = []
+
 logger.info("Starting Tasks runner...")
 while True:
     time.sleep(3)
@@ -119,15 +118,16 @@ while True:
             for task in tasks:
                 delay_seconds = 5
                 if task.function_name == JobSchedule.FN_DEV_MIG:
-                    if task.status == JobSchedule.STATUS_NEW and task.node_id in active_task_node_ids:
-                        continue
+                    if task.status == JobSchedule.STATUS_NEW:
+                        active_task = tasks_controller.get_active_node_mig_task(task.cluster_id, task.node_id)
+                        if active_task:
+                            logger.info("task found on same node, retry")
+                            continue
                     if task.status != JobSchedule.STATUS_DONE:
                         # get new task object because it could be changed from cancel task
                         task = db_controller.get_task_by_id(task.uuid)
                         res = task_runner(task)
                         if res:
                             tasks_events.task_updated(task)
-                            if task.node_id in active_task_node_ids:
-                                active_task_node_ids.remove(task.node_id)
                         else:
                             time.sleep(delay_seconds)
