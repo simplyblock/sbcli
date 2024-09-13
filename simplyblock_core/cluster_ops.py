@@ -195,8 +195,6 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     ret = scripts.deploy_stack(cli_pass, DEV_IP, constants.SIMPLY_BLOCK_DOCKER_IMAGE, c.secret, c.uuid,
                                log_del_interval, metrics_retention_period)
     logger.info("Deploying swarm stack > Done")
-
-    #grafana is done deploying here I have to check ret for exit code and create user for cluster 
     
     if ret != 0:
         logger.error("deploying swarm stack failed")
@@ -205,7 +203,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     
     logger.info(f"creating user for cluster-id {c.uuid}")
 
-    _create_user(c.uuid,grafana_endpoint,c.secret)
+    _create_user(c.uuid,grafana_endpoint,c.secret,False)
     
     
     
@@ -297,7 +295,7 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
     cluster.secret = default_cluster.secret
     cluster.db_connection = default_cluster.db_connection
 
-    _create_user(cluster.uuid,grafana_url,cluster.secret)
+    _create_user(cluster.uuid,grafana_url,cluster.secret,False)
 
 
     if distr_ndcs == 0 and distr_npcs == 0:
@@ -593,7 +591,7 @@ def get_secret(cluster_id):
     return cluster.secret
 
 
-def set_secret(cluster_id, secret):
+def set_secret(cluster_id, secret,grafana_url):
     db_controller = DBController()
     cluster = db_controller.get_cluster_by_id(cluster_id)
     if not cluster:
@@ -607,7 +605,7 @@ def set_secret(cluster_id, secret):
 
     cluster.secret = secret
     cluster.write_to_db(db_controller.kv_store)
-    
+    _create_user(cluster_id,grafana_url,secret,True)
     return "Done"
 
 

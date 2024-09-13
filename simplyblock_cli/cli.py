@@ -337,6 +337,7 @@ class CLIWrapper:
         sub_command = self.add_sub_command(subparser, 'upd-secret', 'Updates the cluster secret')
         sub_command.add_argument("cluster_id", help='cluster uuid')
         sub_command.add_argument("secret", help='new 20 characters password')
+        sub_command.add_argument("--grafana-url",help='grafana endpoint',required=True,dest="grafana_url")
 
         # check cluster
         sub_command = self.add_sub_command(subparser, "check", 'Health check cluster')
@@ -913,7 +914,8 @@ class CLIWrapper:
             elif sub_command == "upd-secret":
                 cluster_id = args.cluster_id
                 secret = args.secret
-                ret = cluster_ops.set_secret(cluster_id, secret)
+                grafana_url = args.garfana_url
+                ret = cluster_ops.set_secret(cluster_id, secret,grafana_url)
             elif sub_command == "get-logs":
                 cluster_id = args.cluster_id
                 ret = cluster_ops.get_logs(cluster_id)
