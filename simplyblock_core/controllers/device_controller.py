@@ -445,7 +445,7 @@ def reset_storage_device(dev_id):
         logger.error(f"Node not found {device.node_id}")
         return False
 
-    if device.status in [NVMeDevice.STATUS_REMOVED, NVMeDevice.STATUS_FAILED]:
+    if device.status in [NVMeDevice.STATUS_REMOVED, NVMeDevice.STATUS_FAILED, NVMeDevice.STATUS_FAILED_AND_MIGRATED]:
         logger.error(f"Unsupported device status: {device.status}")
         return False
 
@@ -656,3 +656,7 @@ def add_device(device_id):
                 snode.write_to_db(db_controller.kv_store)
 
     return "Done"
+
+
+def device_set_failed_and_migrated(device_id):
+    return device_set_state(device_id, NVMeDevice.STATUS_FAILED_AND_MIGRATED)

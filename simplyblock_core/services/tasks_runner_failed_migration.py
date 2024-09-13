@@ -5,7 +5,7 @@ import sys
 
 
 from simplyblock_core import constants, kv_store
-from simplyblock_core.controllers import tasks_events, tasks_controller
+from simplyblock_core.controllers import tasks_events, tasks_controller, device_controller
 from simplyblock_core.models.job_schedule import JobSchedule
 
 
@@ -81,6 +81,7 @@ def task_runner(task):
                 if res_data['error'] == 1:
                     task.function_result = "mig completed with errors"
                 else:
+                    device_controller.device_set_failed_and_migrated(task.device_id)
                     task.function_result = "Done"
 
                 task.status = JobSchedule.STATUS_DONE

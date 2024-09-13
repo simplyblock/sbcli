@@ -13,6 +13,7 @@ class NVMeDevice(BaseModel):
     STATUS_UNAVAILABLE = 'unavailable'
     STATUS_REMOVED = 'removed'
     STATUS_FAILED = 'failed'
+    STATUS_FAILED_AND_MIGRATED = 'failed_and_migrated'
     STATUS_READONLY = 'read_only'
 
     attributes = {
