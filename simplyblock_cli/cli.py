@@ -914,7 +914,7 @@ class CLIWrapper:
             elif sub_command == "upd-secret":
                 cluster_id = args.cluster_id
                 secret = args.secret
-                grafana_url = args.garfana_url
+                grafana_url = args.grafana_url
                 ret = cluster_ops.set_secret(cluster_id, secret,grafana_url)
             elif sub_command == "get-logs":
                 cluster_id = args.cluster_id
