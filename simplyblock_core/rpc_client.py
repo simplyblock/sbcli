@@ -249,6 +249,7 @@ class RPCClient:
             "size_in_mib": size_in_mib,
             "lvs_name": lvs_name,
             "thin_provision": True,
+            "clear_method": "unmap",
         }
         return self._request("bdev_lvol_create", params)
 
