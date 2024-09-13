@@ -1230,14 +1230,12 @@ class CLIWrapper:
         metrics_retention_period = args.metrics_retention_period
         contact_point = args.contact_point
         grafana_endpoint = args.grafana_endpoint
-        user = args.user
-        user_email = args.user_email
 
         return cluster_ops.create_cluster(
             blk_size, page_size_in_blocks,
             CLI_PASS, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
             ifname, log_del_interval, metrics_retention_period, contact_point, grafana_endpoint,
-            distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, user, user_email)
+            distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type)
 
     def query_yes_no(self, question, default="yes"):
         """Ask a yes/no question via raw_input() and return their answer.
