@@ -17,7 +17,6 @@ from simplyblock_core import utils, scripts, constants, mgmt_node_ops, storage_n
 from simplyblock_core.controllers import cluster_events, device_controller, storage_events
 from simplyblock_core.kv_store import DBController, KVStore
 from simplyblock_core.models.cluster import Cluster
-from simplyblock_core.models.user import User
 from simplyblock_core.rpc_client import RPCClient
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
@@ -27,30 +26,36 @@ TOP_DIR = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 
 
 
-def _create_user(cluster_id, grafana_url,grafana_secret,user, user_email):
+def _create_user(cluster_id, grafana_url,grafana_secret,update_secret):
     if not grafana_url.startswith("https://"):
         if grafana_url.startswith("http://"):
             grafana_url = grafana_url.replace("http://", "https://", 1)
         else:
             grafana_url = "https://" + grafana_url
     
-    url = f"{grafana_url}/api/admin/users"
-    password = utils.generate_string(20)
+    session = requests.session()
+    session.auth = ("admin", grafana_secret)
     headers = {
         'X-Requested-By': '',
         'Content-Type': 'application/json',
     }
-    payload = json.dumps({
-        "name": user,
-        "email": user_email,
-        "login": cluster_id,
-        "password": password
-    })
-    session = requests.session()
-    session.auth = ("admin", grafana_secret)
+    if update_secret:
+        oldsecret = get_secret(cluster_id)
+        payload = json.dumps({
+            "old_password": oldsecret,
+            "new_password": grafana_secret
+        })
+        url = f"{grafana_url}/api/user/password"
+    else:
+        payload = json.dumps({
+            "name": cluster_id,
+            "login": cluster_id,
+            "password": grafana_secret
+        })
+        url = f"{grafana_url}/api/admin/users"
+
     response = session.request("POST", url, headers=headers, data=payload)
     logger.debug(response.text)
-    logger.debug(f"password for {user} is {password}")
     return response.status_code == 200
 
 
@@ -200,17 +205,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     
     logger.info(f"creating user for cluster-id {c.uuid}")
 
-    _create_user(c.uuid,grafana_endpoint,c.secret, user,user_email)
-
-    # u = User()
-    # u.uuid = str(uuid.uuid4())
-    # u.userlogin = c.name
-    # u.username = c.uuid
-    # u.email = user_email
-    # u.secret = utils.generate_string(20)
-    # u.updated_at = int(time.time())
-
-
+    _create_user(c.uuid,grafana_endpoint,c.secret)
     
     
     
@@ -284,7 +279,7 @@ def deploy_spdk(node_docker, spdk_cpu_mask, spdk_mem):
 
 
 def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
-                distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type):
+                distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, grafana_url):
     db_controller = DBController()
     clusters = db_controller.get_clusters()
     if not clusters:
@@ -302,6 +297,9 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
     cluster.cli_pass = default_cluster.cli_pass
     cluster.secret = default_cluster.secret
     cluster.db_connection = default_cluster.db_connection
+
+    _create_user(cluster.uuid,grafana_url,cluster.secret)
+
 
     if distr_ndcs == 0 and distr_npcs == 0:
         cluster.distr_ndcs = 4
@@ -603,12 +601,14 @@ def set_secret(cluster_id, secret):
         logger.error(f"Cluster not found {cluster_id}")
         return False
 
+    
     secret = secret.strip()
     if len(secret) < 20:
         return "Secret must be at least 20 char"
 
     cluster.secret = secret
     cluster.write_to_db(db_controller.kv_store)
+    
     return "Done"
 
 

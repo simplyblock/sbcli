@@ -229,10 +229,6 @@ class CLIWrapper:
         sub_command = self.add_sub_command(subparser, 'create',
                                            'Create an new cluster with this node as mgmt (local run)')
         sub_command.add_argument(
-            "--user", help='The user to be created for dashboard access',nargs=1,required=True)
-        sub_command.add_argument(
-            "--user-email", help='The user email to be added',nargs=1,required=True,dest="user_email")
-        sub_command.add_argument(
             "--blk_size", help='The block size in bytes', type=int, choices=[512, 4096], default=512)
 
         sub_command.add_argument(
@@ -267,6 +263,7 @@ class CLIWrapper:
 
         # add cluster
         sub_command = self.add_sub_command(subparser, 'add', 'Add new cluster')
+        sub_command.add_argument("--grafana-url",help='grafana endpoint',required=True,dest="grafana_url")
         sub_command.add_argument("--blk_size", help='The block size in bytes', type=int, choices=[512, 4096], default=512)
         sub_command.add_argument("--page_size", help='The size of a data page in bytes', type=int, default=2097152)
         sub_command.add_argument("--cap-warn", help='Capacity warning level in percent, default=80',
@@ -1209,10 +1206,11 @@ class CLIWrapper:
         distr_bs = args.distr_bs
         distr_chunk_bs = args.distr_chunk_bs
         ha_type = args.ha_type
+        grafana_url = args.grafana_url
 
         return cluster_ops.add_cluster(
             blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
-            distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type)
+            distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, grafana_url)
 
     def cluster_create(self, args):
         page_size_in_blocks = args.page_size
