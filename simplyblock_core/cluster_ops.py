@@ -32,7 +32,7 @@ def _create_user(cluster_id, grafana_url,grafana_secret,update_secret):
             grafana_url = grafana_url.replace("http://", "https://", 1)
         else:
             grafana_url = "https://" + grafana_url
-    url = f"{grafana_url}/api/health"
+    url = f"{grafana_url}/login"
 
     while True:
         response = requests.get(url)
