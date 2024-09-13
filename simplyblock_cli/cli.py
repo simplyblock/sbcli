@@ -1205,7 +1205,7 @@ class CLIWrapper:
         distr_bs = args.distr_bs
         distr_chunk_bs = args.distr_chunk_bs
         ha_type = args.ha_type
-        
+
         return cluster_ops.add_cluster(
             blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
             distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type)
