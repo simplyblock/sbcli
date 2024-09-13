@@ -169,15 +169,17 @@ def get_jm_names(snode):
     return [snode.jm_device.jm_bdev] if snode.jm_device else []
 
 
-def get_ha_jm_names(snode_list):
+def get_ha_jm_names(current_node, snode_list):
     jm_list = []
-    if snode_list[0].jm_device:
-        jm_list.append(snode_list[0].jm_device.jm_bdev)
+    if current_node.jm_device:
+        jm_list.append(current_node.jm_device.jm_bdev)
     else:
         jm_list.append("JM_LOCAL")
 
-    for snode in snode_list[1:]:
-        name = f"remote_{snode.jm_device.jm_bdev}n1"
+    for node in snode_list:
+        if node.get_id() == current_node.get_id():
+            continue
+        name = f"remote_{node.jm_device.jm_bdev}n1"
         jm_list.append(name)
     return jm_list
 
