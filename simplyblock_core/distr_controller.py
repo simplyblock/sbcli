@@ -98,7 +98,7 @@ def get_distr_cluster_map(snodes, target_node):
                 "UUID": dev.get_id(),
                 "bdev_name": name,
                 "status": dev.status,
-                # "physical_label": dev.physical_label
+                "physical_label": dev.physical_label
             }
             dev_w_map.append({
                 "weight": dev_w,

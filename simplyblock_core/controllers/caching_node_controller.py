@@ -627,8 +627,7 @@ def deploy(ifname):
     )
     logger.info("Pulling SPDK images")
     spdk_core = constants.SIMPLY_BLOCK_SPDK_CORE_IMAGE
-    if utils.get_host_arch() == "aarch64":
-        spdk_core = constants.SIMPLY_BLOCK_SPDK_CORE_IMAGE_ARM64
+
     node_docker.images.pull(spdk_core)
     return f"{dev_ip}:5000"
 

@@ -13,6 +13,7 @@ class Cluster(BaseModel):
     STATUS_INACTIVE = "inactive"
     STATUS_SUSPENDED = "suspended"
     STATUS_DEGRADED = "degraded"
+    STATUS_UNREADY = "unready"
 
     STATUS_CODE_MAP = {
         STATUS_ACTIVE: 1,
@@ -36,6 +37,11 @@ class Cluster(BaseModel):
         "dhchap": {"type": str, "default": ""},
         "cli_pass": {"type": str, "default": ""},
         "db_connection": {"type": str, "default": ""},
+        "distr_ndcs": {"type": int, 'default': 0},
+        "distr_npcs": {"type": int, 'default': 0},
+        "distr_bs": {"type": int, 'default': 0},
+        "distr_chunk_bs": {"type": int, 'default': 0},
+        "cluster_max_size": {"type": int, 'default': 0},
 
         ## cluster-level: cap-warn ( % ), cap-crit ( % ), prov-cap-warn ( % ), prov-cap-crit. ( % )
         "cap_warn": {"type": int, "default": 80},
@@ -46,6 +52,7 @@ class Cluster(BaseModel):
         "secret": {"type": str, "default": ""},
         "status": {"type": str, "default": ""},
         "updated_at": {"type": str, "default": ""},
+        "grafana_endpoint": {"type": str, "default": ""}
     }
 
     def __init__(self, data=None):

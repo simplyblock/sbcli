@@ -50,9 +50,9 @@ class TestLvolFioBase(TestClusterBase):
                 distr_npcs=config['npcs'],
                 distr_bs=4096,
                 distr_chunk_bs=4096,
-                max_rw_iops=600,
-                max_r_mbytes=5,
-                max_w_mbytes=5
+                max_rw_iops=6000,
+                max_r_mbytes=50,
+                max_w_mbytes=50
             )
 
             initial_devices = self.ssh_obj.get_devices(node=self.mgmt_nodes[0])
@@ -197,10 +197,10 @@ class TestLvolFioNpcs0(TestLvolFioBase):
             lvol_configs = [
                 {"lvol_name": f"lvol1_npcs_{scenario['npcs']}_ndcs_{scenario['ndcs']}",
                  "ndcs": scenario['ndcs'], "npcs": scenario['npcs'], 
-                 "size": "10G", "mount": True},
+                 "size": "4G", "mount": True},
                 {"lvol_name": f"lvol2_npcs_{scenario['npcs']}_ndcs_{scenario['ndcs']}",
                  "ndcs": scenario['ndcs'], "npcs": scenario['npcs'], 
-                 "size": "10G", "mount": False}
+                 "size": "4G", "mount": False}
             ]
             # Create LVOLs
             self.create_lvols(lvol_configs)
@@ -259,10 +259,10 @@ class TestLvolFioNpcs1(TestLvolFioBase):
             lvol_configs = [
                 {"lvol_name": f"lvol1_npcs_{scenario['npcs']}_ndcs_{scenario['ndcs']}",
                  "ndcs": scenario['ndcs'], "npcs": scenario['npcs'],
-                 "size": "10G", "mount": True},
+                 "size": "4G", "mount": True},
                 {"lvol_name": f"lvol2_npcs_{scenario['npcs']}_ndcs_{scenario['ndcs']}",
                  "ndcs": scenario['ndcs'], "npcs": scenario['npcs'],
-                 "size": "10G", "mount": False}
+                 "size": "4G", "mount": False}
             ]
             # Create LVOLs
             self.create_lvols(lvol_configs)
@@ -323,10 +323,10 @@ class TestLvolFioNpcs2(TestLvolFioBase):
             lvol_configs = [
                 {"lvol_name": f"lvol1_npcs_{scenario['npcs']}_ndcs_{scenario['ndcs']}",
                  "ndcs": scenario['ndcs'], "npcs": scenario['npcs'],
-                 "size": "10G", "mount": True},
+                 "size": "4G", "mount": True},
                 {"lvol_name": f"lvol2_npcs_{scenario['npcs']}_ndcs_{scenario['ndcs']}",
                  "ndcs": scenario['ndcs'], "npcs": scenario['npcs'],
-                 "size": "10G", "mount": False}
+                 "size": "4G", "mount": False}
             ]
             # Create LVOLs
             self.create_lvols(lvol_configs)
