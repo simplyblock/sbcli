@@ -26,7 +26,7 @@ TOP_DIR = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 
 
 
-def _create_user(cluster_id, grafana_url,grafana_secret,user_secret,update_secret):
+def _create_update_user(cluster_id, grafana_url,grafana_secret,user_secret,update_secret):
     if not grafana_url.startswith("https://"):
         if grafana_url.startswith("http://"):
             grafana_url = grafana_url.replace("http://", "https://", 1)
@@ -176,7 +176,8 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     c.distr_bs = distr_bs
     c.distr_chunk_bs = distr_chunk_bs
     c.ha_type = ha_type
-
+    c.grafana_endpoint = grafana_endpoint
+    
     alerts_template_folder = os.path.join(TOP_DIR, "simplyblock_core/scripts/alerting/")
     alert_resources_file = "alert_resources.yaml"
 
@@ -293,7 +294,7 @@ def deploy_spdk(node_docker, spdk_cpu_mask, spdk_mem):
 
 
 def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
-                distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, grafana_url):
+                distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type):
     db_controller = DBController()
     clusters = db_controller.get_clusters()
     if not clusters:
@@ -311,8 +312,9 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
     cluster.cli_pass = default_cluster.cli_pass
     cluster.secret = utils.generate_string(20)
     cluster.db_connection = default_cluster.db_connection
+    cluster.grafana_endpoint = default_cluster.grafana_endpoint
 
-    _create_user(cluster.uuid,grafana_url,default_cluster.secret,cluster.secret,False)
+    _create_update_user(cluster.uuid,cluster.grafana_endpoint,default_cluster.secret,cluster.secret,False)
 
 
     if distr_ndcs == 0 and distr_npcs == 0:
@@ -608,7 +610,7 @@ def get_secret(cluster_id):
     return cluster.secret
 
 
-def set_secret(cluster_id, secret,grafana_url):
+def set_secret(cluster_id, secret):
     
     db_controller = DBController()
     clusters = db_controller.get_clusters()
@@ -622,7 +624,8 @@ def set_secret(cluster_id, secret,grafana_url):
     secret = secret.strip()
     if len(secret) < 20:
         return "Secret must be at least 20 char"
-    _create_user(cluster_id,grafana_url,clusters[0].secret,secret,True)
+    
+    _create_update_user(cluster_id,clusters[0].grafana_endpoint,clusters[0].secret,secret,True)
     
     cluster.secret = secret
     cluster.write_to_db(db_controller.kv_store)

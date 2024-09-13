@@ -263,7 +263,6 @@ class CLIWrapper:
 
         # add cluster
         sub_command = self.add_sub_command(subparser, 'add', 'Add new cluster')
-        sub_command.add_argument("--grafana-url",help='grafana endpoint',required=True,dest="grafana_url")
         sub_command.add_argument("--blk_size", help='The block size in bytes', type=int, choices=[512, 4096], default=512)
         sub_command.add_argument("--page_size", help='The size of a data page in bytes', type=int, default=2097152)
         sub_command.add_argument("--cap-warn", help='Capacity warning level in percent, default=80',
@@ -337,7 +336,6 @@ class CLIWrapper:
         sub_command = self.add_sub_command(subparser, 'upd-secret', 'Updates the cluster secret')
         sub_command.add_argument("cluster_id", help='cluster uuid')
         sub_command.add_argument("secret", help='new 20 characters password')
-        sub_command.add_argument("--grafana-url",help='grafana endpoint',required=True,dest="grafana_url")
 
         # check cluster
         sub_command = self.add_sub_command(subparser, "check", 'Health check cluster')
@@ -914,8 +912,7 @@ class CLIWrapper:
             elif sub_command == "upd-secret":
                 cluster_id = args.cluster_id
                 secret = args.secret
-                grafana_url = args.grafana_url
-                ret = cluster_ops.set_secret(cluster_id, secret,grafana_url)
+                ret = cluster_ops.set_secret(cluster_id, secret)
             elif sub_command == "get-logs":
                 cluster_id = args.cluster_id
                 ret = cluster_ops.get_logs(cluster_id)
@@ -1208,11 +1205,10 @@ class CLIWrapper:
         distr_bs = args.distr_bs
         distr_chunk_bs = args.distr_chunk_bs
         ha_type = args.ha_type
-        grafana_url = args.grafana_url
-
+        
         return cluster_ops.add_cluster(
             blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
-            distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, grafana_url)
+            distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type)
 
     def cluster_create(self, args):
         page_size_in_blocks = args.page_size
