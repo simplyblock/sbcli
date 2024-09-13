@@ -41,12 +41,26 @@ def _create_user(cluster_id, grafana_url,grafana_secret,user_secret,update_secre
     }        
     
     if update_secret:
-        oldsecret = get_secret(cluster_id)
+        url = f"{grafana_url}/api/users/lookup?loginOrEmail={cluster_id}"
+        response = session.request("GET", url, headers=headers)
+        userid = response.json().get("id")
+        
         payload = json.dumps({
-            "old_password": oldsecret,
-            "new_password": user_secret
+            "password": user_secret
         })
-        url = f"{grafana_url}/api/user/password"
+        
+        url = f"{grafana_url}/api/admin/users/{userid}/password"
+        
+        while True:
+            response = session.request("PUT", url, headers=headers, data=payload)
+            if response.status_code == 200:
+                logger.debug(f"user create/update {cluster_id} succeeded")
+                break
+            logger.debug(response.status_code)
+            logger.debug("waiting for grafana api to come up")        
+            time.sleep(5)
+
+        return response.status_code == 200
     else:
         payload = json.dumps({
             "name": cluster_id,
@@ -54,18 +68,19 @@ def _create_user(cluster_id, grafana_url,grafana_secret,user_secret,update_secre
             "password": user_secret
         })
         url = f"{grafana_url}/api/admin/users"
-        
-        
-    while True:
-        response = session.request("POST", url, headers=headers, data=payload)
-        if response.status_code == 200:
-            logger.debug(f"user create/update {cluster_id} succeeded")
-            break
-        logger.debug(response.status_code)
-        logger.debug("waiting for grafana api to come up")        
-        time.sleep(5)
+        while True:
+            response = session.request("POST", url, headers=headers, data=payload)
+            if response.status_code == 200:
+                logger.debug(f"user create/update {cluster_id} succeeded")
+                break
+            logger.debug(response.status_code)
+            logger.debug("waiting for grafana api to come up")        
+            time.sleep(5)
 
-    return response.status_code == 200
+        return response.status_code == 200
+        
+        
+    
 
 
 
