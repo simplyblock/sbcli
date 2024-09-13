@@ -2523,7 +2523,7 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
                     "bdev_name": raid_device,
                     "cluster_sz": distr_page_size,
                     "clear_method": "unmap",
-                    "num_md_pages_per_cluster_ratio": 3,
+                    "num_md_pages_per_cluster_ratio": 1,
                 }
             }
 

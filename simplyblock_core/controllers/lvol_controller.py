@@ -807,33 +807,6 @@ def delete_lvol_from_node(lvol_id, node_id, clear_data=True):
     lvol.write_to_db(db_controller.kv_store)
     return True
 
-    # 3- clear alceml devices
-    if clear_data:
-        logger.info(f"Clearing Alceml devices")
-        for node in db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id):
-            if node.status == StorageNode.STATUS_ONLINE:
-                rpc_node = RPCClient(node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password)
-                for dev in node.nvme_devices:
-                    if dev.status != NVMeDevice.STATUS_JM:
-                        ret = rpc_node.alceml_unmap_vuid(dev.alceml_bdev, lvol.vuid)
-
-        lvol.deletion_status = 'alceml_unmapped'
-        lvol.write_to_db(db_controller.kv_store)
-
-        # 4- clear JM
-        jm_device = snode.jm_device
-        ret = rpc_client.alceml_unmap_vuid(jm_device.alceml_bdev, lvol.vuid)
-        if not ret:
-            logger.error(f"Failed to unmap jm alceml {jm_device.alceml_bdev} with vuid {lvol.vuid}")
-        # ret = rpc_client.bdev_jm_unmap_vuid(jm_device.jm_bdev, lvol.vuid)
-        # if not ret:
-        #     logger.error(f"Failed to unmap jm {jm_device.jm_bdev} with vuid {lvol.vuid}")
-
-        lvol.deletion_status = 'jm_unmapped'
-        lvol.write_to_db(db_controller.kv_store)
-
-    return True
-
 
 def delete_lvol(id_or_name, force_delete=False):
     lvol = db_controller.get_lvol_by_id(id_or_name)
@@ -1344,6 +1317,7 @@ def move(lvol_id, node_id, force=False):
     else:
         logger.error("Failed to migrate lvol")
         return False
+
 
 def inflate_lvol(lvol_id):
 
