@@ -208,14 +208,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     if ret != 0:
         logger.error("deploying swarm stack failed")
     
-    logger.info("deploying swarm stack succeeded")
-    
-    logger.info(f"creating user for cluster-id {c.uuid}")
-
-    _create_user(c.uuid,grafana_endpoint,c.secret,False)
-    
-    
-    
+    logger.info("deploying swarm stack succeeded")    
     
     logger.info("Configuring DB...")
     out = scripts.set_db_config_single()
@@ -301,7 +294,7 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
     cluster.ha_type = default_cluster.ha_type
     cluster.nqn = f"{constants.CLUSTER_NQN}:{cluster.uuid}"
     cluster.cli_pass = default_cluster.cli_pass
-    cluster.secret = default_cluster.secret
+    cluster.secret = utils.generate_string(20)
     cluster.db_connection = default_cluster.db_connection
 
     _create_user(cluster.uuid,grafana_url,cluster.secret,False)
