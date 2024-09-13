@@ -32,17 +32,7 @@ def _create_user(cluster_id, grafana_url,grafana_secret,update_secret):
             grafana_url = grafana_url.replace("http://", "https://", 1)
         else:
             grafana_url = "https://" + grafana_url
-    url = f"{grafana_url}/login"
 
-    while True:
-        response = requests.get(url)
-        if response.status_code == 200:
-            logger.debug("grafana API is up,proceeding with the script.")
-            break
-        logger.debug("waiting for grafana api to come up")        
-        time.sleep(5)
-    
-    
     session = requests.session()
     session.auth = ("admin", grafana_secret)
     headers = {
@@ -64,9 +54,17 @@ def _create_user(cluster_id, grafana_url,grafana_secret,update_secret):
             "password": grafana_secret
         })
         url = f"{grafana_url}/api/admin/users"
+        
+        
+    while True:
+        response = session.request("POST", url, headers=headers, data=payload)
+        if response.status_code == 200:
+            logger.debug(f"user create/update {cluster_id} succeeded")
+            break
+        logger.debug(response.status_code)
+        logger.debug("waiting for grafana api to come up")        
+        time.sleep(5)
 
-    response = session.request("POST", url, headers=headers, data=payload)
-    logger.debug(response.text)
     return response.status_code == 200
 
 
