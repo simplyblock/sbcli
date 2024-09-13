@@ -37,9 +37,9 @@ def _create_user(cluster_id, grafana_url,grafana_secret,update_secret):
     while True:
         response = requests.get(url)
         if response.status_code == 200:
-            print("grafana API is up,proceeding with the script.")
+            logger.debug("grafana API is up,proceeding with the script.")
             break
-        print("waiting for grafana api to come up")        
+        logger.debug("waiting for grafana api to come up")        
         time.sleep(5)
     
     
