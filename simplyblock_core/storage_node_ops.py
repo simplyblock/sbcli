@@ -1155,10 +1155,11 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
         distr_controller.send_dev_status_event(dev, NVMeDevice.STATUS_ONLINE)
         tasks_controller.add_new_device_mig_task(dev.get_id())
 
+    nodes = db_controller.get_storage_nodes_by_cluster_id(cluster_id)
     # Create distribs
     max_size = cluster.cluster_max_size
     ret = create_lvstore(snode, cluster.distr_ndcs, cluster.distr_npcs, cluster.distr_bs,
-                         cluster.distr_chunk_bs, cluster.page_size_in_blocks, max_size)
+                         cluster.distr_chunk_bs, cluster.page_size_in_blocks, max_size, nodes)
     if not ret:
         return False, "Failed to create distribs on node"
 
@@ -2523,12 +2524,16 @@ def recreate_lvstore(snode):
     return True
 
 
-def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blocks, max_size):
+def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blocks, max_size, nodes):
     lvstore_stack = []
     distrib_list = []
     size = max_size // snode.number_of_distribs
     distr_page_size = (ndcs + npcs) * page_size_in_blocks
     cluster_sz = ndcs * page_size_in_blocks
+    if len(nodes) > 3:
+        nodes = nodes[:3]
+    jm_names = lvol_controller.get_ha_jm_names(nodes)
+
     for _ in range(snode.number_of_distribs):
         distrib_vuid = utils.get_random_vuid()
         distrib_name = f"distrib_{distrib_vuid}"
@@ -2540,6 +2545,7 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
                     "name": distrib_name,
                     "params": {
                         "name": distrib_name,
+                        "jm_names": jm_names,
                         "vuid": distrib_vuid,
                         "ndcs": ndcs,
                         "npcs": npcs,
@@ -2611,7 +2617,6 @@ def _create_bdev_stack(snode, lvstore_stack=None):
         params = bdev['params']
 
         if type == "bdev_distr":
-            params['jm_names'] = lvol_controller.get_jm_names(snode)
             if snode.distrib_cpu_cores:
                 distrib_cpu_mask = utils.decimal_to_hex_power_of_2(snode.distrib_cpu_cores[snode.distrib_cpu_index])
                 params['distrib_cpu_mask'] = distrib_cpu_mask

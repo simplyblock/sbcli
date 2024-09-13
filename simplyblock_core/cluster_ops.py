@@ -382,7 +382,7 @@ def cluster_activate(cl_id):
             logger.info(f"Node {snode.get_id()} already has lvstore {snode.lvstore}... skipping")
             continue
         ret = storage_node_ops.create_lvstore(snode, cluster.distr_ndcs, cluster.distr_npcs, cluster.distr_bs,
-                                              cluster.distr_chunk_bs, cluster.page_size_in_blocks, max_size)
+                                              cluster.distr_chunk_bs, cluster.page_size_in_blocks, max_size, snodes)
         if not ret:
             logger.error("Failed to activate cluster")
             return False
