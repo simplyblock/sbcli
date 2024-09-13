@@ -2475,11 +2475,13 @@ def recreate_lvstore(snode):
         return False
     return True
 
+
 def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blocks, max_size):
     lvstore_stack = []
     distrib_list = []
     size = max_size // snode.number_of_distribs
-    distr_page_size = (npcs + npcs) * page_size_in_blocks
+    distr_page_size = (ndcs + npcs) * page_size_in_blocks
+    cluster_sz = ndcs * page_size_in_blocks
     for _ in range(snode.number_of_distribs):
         distrib_vuid = utils.get_random_vuid()
         distrib_name = f"distrib_{distrib_vuid}"
@@ -2521,7 +2523,7 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
                 "params": {
                     "name": lvs_name,
                     "bdev_name": raid_device,
-                    "cluster_sz": distr_page_size,
+                    "cluster_sz": cluster_sz,
                     "clear_method": "unmap",
                     "num_md_pages_per_cluster_ratio": 1,
                 }
