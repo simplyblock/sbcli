@@ -9,11 +9,11 @@ from e2e_tests.cloning_and_snapshot.multi_lvol_snapshot_fio import TestMultiLvol
 
 def get_all_tests(custom=True):
     tests = [
+        TestSingleNodeOutage,
         TestLvolFioNpcsCustom,
         TestLvolFioNpcs0,
         TestLvolFioNpcs1,
         TestLvolFioNpcs2,
-        TestSingleNodeOutage,
         # TestSingleNodeFailure, # TODO:Enable test case when redeployment node is fixed. 
         # TestMultiLvolFio, - Enable when testing
     ]
