@@ -607,10 +607,11 @@ def set_secret(cluster_id, secret,grafana_url):
     secret = secret.strip()
     if len(secret) < 20:
         return "Secret must be at least 20 char"
-
+    _create_user(cluster_id,grafana_url,clusters[0].secret,secret,True)
+    
     cluster.secret = secret
     cluster.write_to_db(db_controller.kv_store)
-    _create_user(cluster_id,grafana_url,clusters[0].secret,secret,True)
+    
     return "Done"
 
 
