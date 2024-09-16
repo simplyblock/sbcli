@@ -1303,7 +1303,7 @@ def restart_storage_node(
         if node_ip != snode.api_endpoint:
             logger.info(f"Restarting on new node with ip: {node_ip}")
             snode_api = SNodeClient(node_ip, timeout=5, retry=3)
-            node_info = snode_api.info()
+            node_info, _ = snode_api.info()
             if not node_info:
                 logger.error("Failed to get node info!")
                 return False
