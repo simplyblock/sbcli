@@ -122,7 +122,7 @@ jobs:
       - name: Select or create workspace
         run: |
           cd $GITHUB_WORKSPACE/simplyBlockDeploy
-          terraform workspace select -or-create ghiaction-sbclie2e
+          terraform workspace select -or-create ghiaction-sbclie2ek8s
 
       - name: Validate Terraform Configuration
         run: |
