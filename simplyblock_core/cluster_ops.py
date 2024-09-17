@@ -363,13 +363,13 @@ def cluster_activate(cl_id):
     max_size = records[0]['size_total']
 
     for snode in snodes:
+        if snode.lvstore:
+            logger.info(f"Node {snode.get_id()} already has lvstore {snode.lvstore}... skipping")
+            continue
         logger.info("Sending cluster map")
         ret = distr_controller.send_cluster_map_to_node(snode)
         if not ret:
             return False, "Failed to send cluster map"
-        ret = distr_controller.send_cluster_map_add_node(snode)
-        if not ret:
-            return False, "Failed to send cluster map add node"
         time.sleep(3)
         logger.info("Sending cluster event updates")
         distr_controller.send_node_status_event(snode, StorageNode.STATUS_ONLINE)
@@ -378,6 +378,9 @@ def cluster_activate(cl_id):
         storage_events.snode_add(snode)
 
     for snode in snodes:
+        if snode.lvstore:
+            logger.info(f"Node {snode.get_id()} already has lvstore {snode.lvstore}... skipping")
+            continue
         ret = storage_node_ops.create_lvstore(snode, cluster.distr_ndcs, cluster.distr_npcs, cluster.distr_bs,
                                               cluster.distr_chunk_bs, cluster.page_size_in_blocks, max_size, snodes)
         if not ret:
