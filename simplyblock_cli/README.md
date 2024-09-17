@@ -29,11 +29,11 @@ optional arguments:
 
 ```bash
 usage: sbcli storage-node [-h]
-                          {deploy,deploy-cleaner,add-node,delete,remove,list,get,restart,shutdown,suspend,resume,get-io-stats,get-capacity,list-devices,device-testing-mode,get-device,reset-device,restart-device,add-device,remove-device,get-capacity-device,get-io-stats-device,port-list,port-io-stats,check,check-device,info,info-spdk}
+                          {deploy,deploy-cleaner,add-node,delete,remove,list,get,restart,shutdown,suspend,resume,get-io-stats,get-capacity,list-devices,device-testing-mode,get-device,reset-device,restart-device,add-device,remove-device,set-failed-device,get-capacity-device,get-io-stats-device,port-list,port-io-stats,check,check-device,info,info-spdk}
                           ...
 
 positional arguments:
-  {deploy,deploy-cleaner,add-node,delete,remove,list,get,restart,shutdown,suspend,resume,get-io-stats,get-capacity,list-devices,device-testing-mode,get-device,reset-device,restart-device,add-device,remove-device,get-capacity-device,get-io-stats-device,port-list,port-io-stats,check,check-device,info,info-spdk}
+  {deploy,deploy-cleaner,add-node,delete,remove,list,get,restart,shutdown,suspend,resume,get-io-stats,get-capacity,list-devices,device-testing-mode,get-device,reset-device,restart-device,add-device,remove-device,set-failed-device,get-capacity-device,get-io-stats-device,port-list,port-io-stats,check,check-device,info,info-spdk}
     deploy              Deploy local services for remote ops (local run)
     deploy-cleaner      clean local deploy (local run)
     add-node            Add storage node by ip
@@ -55,6 +55,7 @@ positional arguments:
     restart-device      Restart storage device
     add-device          Add a new storage device
     remove-device       Remove a storage device
+    set-failed-device   Set storage device to failed state
     get-capacity-device
                         Get device capacity
     get-io-stats-device
@@ -104,12 +105,15 @@ optional arguments:
 usage: sbcli storage-node add-node [-h] [--partitions PARTITIONS]
                                    [--jm-percent JM_PERCENT]
                                    [--data-nics DATA_NICS [DATA_NICS ...]]
-                                   [--memory SPDK_MEM]
+                                   [--max-lvol MAX_LVOL] [--max-snap MAX_SNAP]
+                                   [--max-prov MAX_PROV]
+                                   [--number-of-distribs NUMBER_OF_DISTRIBS]
+                                   [--number-of-devices NUMBER_OF_DEVICES]
+                                   [--cpu-mask SPDK_CPU_MASK]
                                    [--spdk-image SPDK_IMAGE] [--spdk-debug]
-                                   [--iobuf_small_pool_count SMALL_POOL_COUNT]
-                                   [--iobuf_large_pool_count LARGE_POOL_COUNT]
                                    [--iobuf_small_bufsize SMALL_BUFSIZE]
                                    [--iobuf_large_bufsize LARGE_BUFSIZE]
+                                   [--enable-test-device]
                                    cluster_id node_ip ifname
 
 positional arguments:
@@ -125,18 +129,24 @@ optional arguments:
                         Number in percent to use for JM from each device
   --data-nics DATA_NICS [DATA_NICS ...]
                         Data interface names
-  --memory SPDK_MEM     SPDK huge memory allocation, default is 4G
+  --max-lvol MAX_LVOL   Max lvol per storage node
+  --max-snap MAX_SNAP   Max snapshot per storage node
+  --max-prov MAX_PROV   Max provisioning size of all storage nodes
+  --number-of-distribs NUMBER_OF_DISTRIBS
+                        The number of distirbs to be created on the node
+  --number-of-devices NUMBER_OF_DEVICES
+                        Number of devices per storage node if it's not
+                        supported EC2 instance
+  --cpu-mask SPDK_CPU_MASK
+                        SPDK app CPU mask, default is all cores found
   --spdk-image SPDK_IMAGE
                         SPDK image uri
   --spdk-debug          Enable spdk debug logs
-  --iobuf_small_pool_count SMALL_POOL_COUNT
-                        bdev_set_options param
-  --iobuf_large_pool_count LARGE_POOL_COUNT
-                        bdev_set_options param
   --iobuf_small_bufsize SMALL_BUFSIZE
                         bdev_set_options param
   --iobuf_large_bufsize LARGE_BUFSIZE
                         bdev_set_options param
+  --enable-test-device  Enable creation of test device
 
 ```
 
@@ -208,10 +218,11 @@ optional arguments:
 All functions and device drivers will be reset. During restart, the node does not accept IO. In a high-availability setup, this will not impact operations
 
 ```bash
-usage: sbcli storage-node restart [-h] [--memory SPDK_MEM]
+usage: sbcli storage-node restart [-h] [--max-lvol MAX_LVOL]
+                                  [--max-snap MAX_SNAP] [--max-prov MAX_PROV]
+                                  [--node-ip NODE_IP]
+                                  [--number-of-devices NUMBER_OF_DEVICES]
                                   [--spdk-image SPDK_IMAGE] [--spdk-debug]
-                                  [--iobuf_small_pool_count SMALL_POOL_COUNT]
-                                  [--iobuf_large_pool_count LARGE_POOL_COUNT]
                                   [--iobuf_small_bufsize SMALL_BUFSIZE]
                                   [--iobuf_large_bufsize LARGE_BUFSIZE]
                                   node_id
@@ -221,14 +232,16 @@ positional arguments:
 
 optional arguments:
   -h, --help            show this help message and exit
-  --memory SPDK_MEM     SPDK huge memory allocation, default is 4G
+  --max-lvol MAX_LVOL   Max lvol per storage node
+  --max-snap MAX_SNAP   Max snapshot per storage node
+  --max-prov MAX_PROV   Max provisioning size of all storage nodes
+  --node-ip NODE_IP     Restart Node on new node
+  --number-of-devices NUMBER_OF_DEVICES
+                        Number of devices per storage node if it's not
+                        supported EC2 instance
   --spdk-image SPDK_IMAGE
                         SPDK image uri
   --spdk-debug          Enable spdk debug logs
-  --iobuf_small_pool_count SMALL_POOL_COUNT
-                        bdev_set_options param
-  --iobuf_large_pool_count LARGE_POOL_COUNT
-                        bdev_set_options param
   --iobuf_small_bufsize SMALL_BUFSIZE
                         bdev_set_options param
   --iobuf_large_bufsize LARGE_BUFSIZE
@@ -408,7 +421,10 @@ optional arguments:
 Adding a device will include a previously detected device (currently in "new" state) into cluster and will launch and auto-rebalancing background process in which some cluster capacity is re-distributed to this newly added device.
 
 ```bash
-usage: sbcli storage-node add-device [-h]
+usage: sbcli storage-node add-device [-h] id
+
+positional arguments:
+  id          the devices's UUID
 
 optional arguments:
   -h, --help  show this help message and exit
@@ -428,6 +444,21 @@ positional arguments:
 optional arguments:
   -h, --help  show this help message and exit
   --force     Force device remove
+
+```
+
+    
+### Set storage device to failed state
+This command can be used, if an administrator believes that the device must be changed, but its status and health state do not lead to an automatic detection of the failure state. Attention!!! The failed state is final, all data on the device will be automatically recovered to other devices in the cluster. 
+
+```bash
+usage: sbcli storage-node set-failed-device [-h] id
+
+positional arguments:
+  id          Storage device ID
+
+optional arguments:
+  -h, --help  show this help message and exit
 
 ```
 
@@ -567,14 +598,16 @@ optional arguments:
 
 ```bash
 usage: sbcli cluster [-h]
-                     {create,add,list,status,get,suspend,unsuspend,get-capacity,get-io-stats,get-logs,get-secret,upd-secret,check,update,graceful-shutdown,graceful-startup,list-tasks,delete}
+                     {create,add,activate,list,status,get,suspend,unsuspend,get-capacity,get-io-stats,get-logs,get-secret,upd-secret,check,update,graceful-shutdown,graceful-startup,list-tasks,cancel-task,delete}
                      ...
 
 positional arguments:
-  {create,add,list,status,get,suspend,unsuspend,get-capacity,get-io-stats,get-logs,get-secret,upd-secret,check,update,graceful-shutdown,graceful-startup,list-tasks,delete}
+  {create,add,activate,list,status,get,suspend,unsuspend,get-capacity,get-io-stats,get-logs,get-secret,upd-secret,check,update,graceful-shutdown,graceful-startup,list-tasks,cancel-task,delete}
     create              Create an new cluster with this node as mgmt (local
                         run)
     add                 Add new cluster
+    activate            Create distribs and raid0 bdevs on all the storage
+                        node and move the cluster to active state
     list                Show clusters list
     status              Show cluster status
     get                 Show cluster info
@@ -590,6 +623,7 @@ positional arguments:
     graceful-shutdown   Graceful shutdown of storage nodes
     graceful-startup    Graceful startup of storage nodes
     list-tasks          List tasks by cluster ID
+    cancel-task         Cancel task by ID
     delete              Delete Cluster
 
 optional arguments:
@@ -611,6 +645,10 @@ usage: sbcli cluster create [-h] [--blk_size {512,4096}]
                             [--metrics-retention-period METRICS_RETENTION_PERIOD]
                             [--contact-point CONTACT_POINT]
                             [--grafana-endpoint GRAFANA_ENDPOINT]
+                            [--distr-ndcs DISTR_NDCS]
+                            [--distr-npcs DISTR_NPCS] [--distr-bs DISTR_BS]
+                            [--distr-chunk-bs DISTR_CHUNK_BS]
+                            [--ha-type {single,ha,default}]
 
 optional arguments:
   -h, --help            show this help message and exit
@@ -634,6 +672,15 @@ optional arguments:
                         the email or slack webhook url to be used for alerting
   --grafana-endpoint GRAFANA_ENDPOINT
                         the endpoint url for grafana
+  --distr-ndcs DISTR_NDCS
+                        (Dev) set ndcs manually, default: 1
+  --distr-npcs DISTR_NPCS
+                        (Dev) set npcs manually, default: 1
+  --distr-bs DISTR_BS   (Dev) distrb bdev block size, default: 4096
+  --distr-chunk-bs DISTR_CHUNK_BS
+                        (Dev) distrb bdev chunk block size, default: 4096
+  --ha-type {single,ha,default}
+                        LVol HA type (single, ha), default is cluster HA type
 
 ```
 
@@ -646,6 +693,10 @@ usage: sbcli cluster add [-h] [--blk_size {512,4096}] [--page_size PAGE_SIZE]
                          [--cap-warn CAP_WARN] [--cap-crit CAP_CRIT]
                          [--prov-cap-warn PROV_CAP_WARN]
                          [--prov-cap-crit PROV_CAP_CRIT]
+                         [--distr-ndcs DISTR_NDCS] [--distr-npcs DISTR_NPCS]
+                         [--distr-bs DISTR_BS]
+                         [--distr-chunk-bs DISTR_CHUNK_BS]
+                         [--ha-type {single,ha,default}]
 
 optional arguments:
   -h, --help            show this help message and exit
@@ -659,6 +710,30 @@ optional arguments:
                         Capacity warning level in percent, default=180
   --prov-cap-crit PROV_CAP_CRIT
                         Capacity critical level in percent, default=190
+  --distr-ndcs DISTR_NDCS
+                        (Dev) set ndcs manually, default: 4
+  --distr-npcs DISTR_NPCS
+                        (Dev) set npcs manually, default: 1
+  --distr-bs DISTR_BS   (Dev) distrb bdev block size, default: 4096
+  --distr-chunk-bs DISTR_CHUNK_BS
+                        (Dev) distrb bdev chunk block size, default: 4096
+  --ha-type {single,ha,default}
+                        LVol HA type (single, ha), default is cluster HA type
+
+```
+
+    
+### Create distribs and raid0 bdevs on all the storage node and move the cluster to active state
+
+
+```bash
+usage: sbcli cluster activate [-h] cluster_id
+
+positional arguments:
+  cluster_id  the cluster UUID
+
+optional arguments:
+  -h, --help  show this help message and exit
 
 ```
 
@@ -893,6 +968,21 @@ optional arguments:
 ```
 
     
+### Cancel task by id
+
+
+```bash
+usage: sbcli cluster cancel-task [-h] id
+
+positional arguments:
+  id          UUID of the Task
+
+optional arguments:
+  -h, --help  show this help message and exit
+
+```
+
+    
 ### Delete cluster
 This is only possible, if no storage nodes and pools are attached to the cluster
 
@@ -913,11 +1003,11 @@ optional arguments:
 
 ```bash
 usage: sbcli lvol [-h]
-                  {add,qos-set,list,list-mem,get,delete,connect,resize,create-snapshot,clone,move,get-capacity,get-io-stats,send-cluster-map,get-cluster-map,check}
+                  {add,qos-set,list,list-mem,get,delete,connect,resize,create-snapshot,clone,move,get-capacity,get-io-stats,send-cluster-map,get-cluster-map,check,inflate}
                   ...
 
 positional arguments:
-  {add,qos-set,list,list-mem,get,delete,connect,resize,create-snapshot,clone,move,get-capacity,get-io-stats,send-cluster-map,get-cluster-map,check}
+  {add,qos-set,list,list-mem,get,delete,connect,resize,create-snapshot,clone,move,get-capacity,get-io-stats,send-cluster-map,get-cluster-map,check,inflate}
     add                 Add a new logical volume
     qos-set             Change qos settings for an active logical volume
     list                List LVols
@@ -934,6 +1024,7 @@ positional arguments:
     send-cluster-map    send cluster map
     get-cluster-map     get cluster map
     check               Health check LVol
+    inflate             Inflate a logical volume
 
 optional arguments:
   -h, --help            show this help message and exit
@@ -946,14 +1037,13 @@ optional arguments:
 
 ```bash
 usage: sbcli lvol add [-h] [--snapshot] [--max-size MAX_SIZE]
-                      [--host-id HOST_ID] [--ha-type {single,ha,default}]
-                      [--encrypt] [--crypto-key1 CRYPTO_KEY1]
-                      [--crypto-key2 CRYPTO_KEY2] [--max-rw-iops MAX_RW_IOPS]
+                      [--host-id HOST_ID] [--encrypt]
+                      [--crypto-key1 CRYPTO_KEY1] [--crypto-key2 CRYPTO_KEY2]
+                      [--max-rw-iops MAX_RW_IOPS]
                       [--max-rw-mbytes MAX_RW_MBYTES]
                       [--max-r-mbytes MAX_R_MBYTES]
                       [--max-w-mbytes MAX_W_MBYTES] [--distr-vuid DISTR_VUID]
-                      [--distr-ndcs DISTR_NDCS] [--distr-npcs DISTR_NPCS]
-                      [--distr-bs DISTR_BS] [--distr-chunk-bs DISTR_CHUNK_BS]
+                      [--ha-type {single,ha,default}]
                       name size pool
 
 positional arguments:
@@ -966,8 +1056,6 @@ optional arguments:
   --snapshot, -s        Make LVol with snapshot capability, default is False
   --max-size MAX_SIZE   LVol max size
   --host-id HOST_ID     Primary storage node UUID or Hostname
-  --ha-type {single,ha,default}
-                        LVol HA type (single, ha), default is cluster HA type
   --encrypt             Use inline data encryption and de-cryption on the
                         logical volume
   --crypto-key1 CRYPTO_KEY1
@@ -984,13 +1072,8 @@ optional arguments:
                         Maximum Write Mega Bytes Per Second
   --distr-vuid DISTR_VUID
                         (Dev) set vuid manually, default: random (1-99999)
-  --distr-ndcs DISTR_NDCS
-                        (Dev) set ndcs manually, default: 4
-  --distr-npcs DISTR_NPCS
-                        (Dev) set npcs manually, default: 1
-  --distr-bs DISTR_BS   (Dev) distrb bdev block size, default: 4096
-  --distr-chunk-bs DISTR_CHUNK_BS
-                        (Dev) distrb bdev chunk block size, default: 4096
+  --ha-type {single,ha,default}
+                        LVol HA type (single, ha), default is cluster HA type
 
 ```
 
@@ -1027,6 +1110,7 @@ optional arguments:
 
 ```bash
 usage: sbcli lvol list [-h] [--cluster-id CLUSTER_ID] [--pool POOL] [--json]
+                       [--all]
 
 optional arguments:
   -h, --help            show this help message and exit
@@ -1034,6 +1118,7 @@ optional arguments:
                         List LVols in particular cluster
   --pool POOL           List LVols in particular Pool ID or name
   --json                Print outputs in json format
+  --all                 List soft deleted LVols
 
 ```
 
@@ -1237,6 +1322,21 @@ usage: sbcli lvol check [-h] id
 
 positional arguments:
   id          UUID of LVol
+
+optional arguments:
+  -h, --help  show this help message and exit
+
+```
+
+    
+### Inflate a logical volume
+All unallocated clusters are allocated and copied from the parent or zero filled if not allocated in the parent. Then all dependencies on the parent are removed.
+
+```bash
+usage: sbcli lvol inflate [-h] lvol_id
+
+positional arguments:
+  lvol_id     cloned lvol id
 
 optional arguments:
   -h, --help  show this help message and exit
@@ -1577,10 +1677,11 @@ optional arguments:
 
 
 ```bash
-usage: sbcli snapshot list [-h]
+usage: sbcli snapshot list [-h] [--all]
 
 optional arguments:
   -h, --help  show this help message and exit
+  --all       List soft deleted snapshots
 
 ```
 
@@ -1589,13 +1690,14 @@ optional arguments:
 
 
 ```bash
-usage: sbcli snapshot delete [-h] id
+usage: sbcli snapshot delete [-h] [--force] id
 
 positional arguments:
   id          snapshot UUID
 
 optional arguments:
   -h, --help  show this help message and exit
+  --force     Force remove
 
 ```
 
@@ -1622,11 +1724,11 @@ optional arguments:
 
 ```bash
 usage: sbcli caching-node [-h]
-                          {deploy,add-node,list,list-lvols,remove,connect,disconnect,recreate}
+                          {deploy,add-node,list,list-lvols,remove,connect,disconnect,recreate,get-lvol-stats}
                           ...
 
 positional arguments:
-  {deploy,add-node,list,list-lvols,remove,connect,disconnect,recreate}
+  {deploy,add-node,list,list-lvols,remove,connect,disconnect,recreate,get-lvol-stats}
     deploy              Deploy caching node on this machine (local exec)
     add-node            Add new Caching node to the cluster
     list                List Caching nodes
@@ -1635,6 +1737,7 @@ positional arguments:
     connect             Connect to LVol
     disconnect          Disconnect LVol from Caching node
     recreate            recreate Caching node bdevs
+    get-lvol-stats      Get LVol stats
 
 optional arguments:
   -h, --help            show this help message and exit
@@ -1663,6 +1766,7 @@ usage: sbcli caching-node add-node [-h] [--cpu-mask SPDK_CPU_MASK]
                                    [--memory SPDK_MEM]
                                    [--spdk-image SPDK_IMAGE]
                                    [--namespace NAMESPACE]
+                                   [--multipathing {on,off}]
                                    cluster_id node_ip ifname
 
 positional arguments:
@@ -1680,6 +1784,8 @@ optional arguments:
                         SPDK image uri
   --namespace NAMESPACE
                         k8s namespace to deploy on
+  --multipathing {on,off}
+                        Enable multipathing for lvol connection, default: on
 
 ```
 
@@ -1770,6 +1876,23 @@ positional arguments:
 
 optional arguments:
   -h, --help  show this help message and exit
+
+```
+
+    
+### Get lvol stats
+
+
+```bash
+usage: sbcli caching-node get-lvol-stats [-h] [--history HISTORY] lvol_id
+
+positional arguments:
+  lvol_id            LVol UUID
+
+optional arguments:
+  -h, --help         show this help message and exit
+  --history HISTORY  (XXdYYh), list history records (one for every 15 minutes)
+                     for XX days and YY hours (up to 10 days in total).
 
 ```
 

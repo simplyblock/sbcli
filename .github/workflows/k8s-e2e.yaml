@@ -286,7 +286,7 @@ jobs:
                           --npcs "${{ github.event.inputs.npcs }}" \
                           --bs "${{ github.event.inputs.bs }}" \
                           --chunk_bs "${{ github.event.inputs.chunk_bs }}" \
-                          --run_k8s True
+                          --run_k8s True \
                           $TESTNAME
 
       - name: Record Test End Time

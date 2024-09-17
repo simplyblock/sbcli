@@ -27,7 +27,7 @@ class RPCClient:
 
     # ref: https://spdk.io/doc/jsonrpc.html
 
-    def __init__(self, ip_address, port, username, password, timeout=5, retry=3):
+    def __init__(self, ip_address, port, username, password, timeout=50, retry=3):
         self.ip_address = ip_address
         self.port = port
         self.url = 'http://%s:%s/' % (self.ip_address, self.port)
@@ -249,6 +249,7 @@ class RPCClient:
             "size_in_mib": size_in_mib,
             "lvs_name": lvs_name,
             "thin_provision": True,
+            "clear_method": "unmap",
         }
         return self._request("bdev_lvol_create", params)
 
@@ -409,13 +410,15 @@ class RPCClient:
         params = {"name": uuid}
         return self._request("bdev_get_iostat", params)
 
-    def bdev_raid_create(self, name, bdevs_list):
+    def bdev_raid_create(self, name, bdevs_list, raid_level="0"):
         params = {
             "name": name,
-            "raid_level": "0",
+            "raid_level": raid_level,
             "strip_size_kb": 4,
             "base_bdevs": bdevs_list
         }
+        if raid_level == "1":
+            params["strip_size_kb"] = 0
         return self._request("bdev_raid_create", params)
 
     def bdev_raid_delete(self, name):

@@ -298,13 +298,13 @@ class CLIWrapper:
         sub_command = self.add_sub_command(subparser, 'get', 'Show cluster info')
         sub_command.add_argument("id", help='the cluster UUID')
 
-        sub_command = self.add_sub_command(
-            subparser, 'suspend', 'Suspend cluster')
-        sub_command.add_argument("cluster_id", help='the cluster UUID')
+        #sub_command = self.add_sub_command(
+        #    subparser, 'suspend', 'Suspend cluster')
+        #sub_command.add_argument("cluster_id", help='the cluster UUID')
 
-        sub_command = self.add_sub_command(
-            subparser, 'unsuspend', 'Unsuspend cluster')
-        sub_command.add_argument("cluster_id", help='the cluster UUID')
+        #sub_command = self.add_sub_command(
+        #    subparser, 'unsuspend', 'Unsuspend cluster')
+        #sub_command.add_argument("cluster_id", help='the cluster UUID')
 
         sub_command = self.add_sub_command(
             subparser, 'get-capacity', 'Get cluster capacity')

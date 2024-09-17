@@ -152,18 +152,15 @@ def storage_node_shutdown(uuid):
     return utils.get_response(True)
 
 
-@bp.route('/storagenode/restart/<string:uuid>', methods=['GET'])
-def storage_node_restart(uuid):
+@bp.route('/storagenode/restart', methods=['PUT'])
+def storage_node_restart():
+    req_data = request.get_json()
+    uuid = req_data.get("uuid", "")
+    node_ip = req_data.get("node_ip", "")
+
     node = db_controller.get_storage_node_by_id(uuid)
     if not node:
         return utils.get_response_error(f"node not found: {uuid}", 404)
-
-    node_ip = None
-    try:
-        args = request.args
-        node_ip = args.get('node_ip', node_ip)
-    except:
-        pass
 
     threading.Thread(
         target=storage_node_ops.restart_storage_node,
