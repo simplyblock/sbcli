@@ -31,19 +31,19 @@ on:
         default: true
         type: boolean
       ndcs:
-        description: 'Number of data chunks'
+        description: 'Value for NDCS'
         required: false
         default: 1
       npcs:
-        description: 'Number of parity chunks'
+        description: 'Value for NPCS'
         required: false
         default: 1
       bs:
-        description: 'Block size'
+        description: 'Value for Block size'
         required: false
         default: 4096
       chunk_bs:
-        description: 'Chunk block size'
+        description: 'Value for Chunk block size'
         required: false
         default: 4096
 
