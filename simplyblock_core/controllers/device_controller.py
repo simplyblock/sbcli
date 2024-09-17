@@ -261,7 +261,7 @@ def set_device_testing_mode(device_id, mode):
     if not snode:
         logger.error("node not found")
         return False
-    if not snode.nable_test_device:
+    if not snode.enable_test_device:
         logger.error("Test device is disabled on this storage node")
         return False
 
