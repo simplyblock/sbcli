@@ -7,14 +7,14 @@ from e2e_tests.cloning_and_snapshot.multi_lvol_snapshot_fio import TestMultiLvol
 
 
 
-def get_all_tests(custom=True):
+def get_all_tests(custom=True, k8s_test=False):
     tests = [
         TestSingleNodeOutage,
         TestLvolFioNpcsCustom,
         TestLvolFioNpcs0,
         TestLvolFioNpcs1,
         TestLvolFioNpcs2,
-        # TestSingleNodeFailure, # TODO:Enable test case when redeployment node is fixed. 
+        TestSingleNodeFailure,
         # TestMultiLvolFio, - Enable when testing
     ]
     if not custom:
@@ -23,4 +23,6 @@ def get_all_tests(custom=True):
         tests.remove(TestLvolFioNpcs0)
         tests.remove(TestLvolFioNpcs1)
         tests.remove(TestLvolFioNpcs2)
+    if k8s_test:
+        tests.remove(TestSingleNodeFailure)
     return tests

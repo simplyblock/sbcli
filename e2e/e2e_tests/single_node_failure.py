@@ -110,8 +110,10 @@ class TestSingleNodeFailure(TestClusterBase):
                          )
         
         sleep_n_sec(30)
-        
-        self.ssh_obj.stop_docker_containers(node=node_ip, container_name="spdk")
+        if not self.k8s_test:
+            self.ssh_obj.stop_docker_containers(node=node_ip, container_name="spdk")
+        else:
+            # TODO: Add K8s deployment delete step
         
         try:
             self.logger.info(f"Waiting for node to become offline, {no_lvol_node_uuid}")

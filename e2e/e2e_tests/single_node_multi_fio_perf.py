@@ -41,19 +41,29 @@ class TestLvolFioBase(TestClusterBase):
 
         for config in lvol_configs:
             lvol_name = config['lvol_name']
-            # Create LVOL
-            self.sbcli_utils.add_lvol(
-                lvol_name=lvol_name,
-                pool_name=self.pool_name,
-                size=config['size'],
-                # distr_ndcs=config['ndcs'],
-                # distr_npcs=config['npcs'],
-                # distr_bs=4096,
-                # distr_chunk_bs=4096,
-                max_rw_iops=6000,
-                max_r_mbytes=50,
-                max_w_mbytes=50
-            )
+            if "ndcs" in lvol_configs:
+                self.sbcli_utils.add_lvol(
+                    lvol_name=lvol_name,
+                    pool_name=self.pool_name,
+                    size=config['size'],
+                    max_rw_iops=6000,
+                    max_r_mbytes=50,
+                    max_w_mbytes=50,
+                    distr_ndcs=config['ndcs'],
+                    distr_npcs=config['npcs'],
+                    distr_bs=4096,
+                    distr_chunk_bs=4096,
+                )
+            else:
+                # Create LVOL
+                self.sbcli_utils.add_lvol(
+                    lvol_name=lvol_name,
+                    pool_name=self.pool_name,
+                    size=config['size'],
+                    max_rw_iops=6000,
+                    max_r_mbytes=50,
+                    max_w_mbytes=50
+                )
 
             initial_devices = self.ssh_obj.get_devices(node=self.mgmt_nodes[0])
 

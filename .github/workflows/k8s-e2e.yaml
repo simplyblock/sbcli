@@ -1,4 +1,4 @@
-name: E2E Tests
+name: E2E K8s Tests
 
 on:
   push:
@@ -62,18 +62,41 @@ jobs:
           go-version: '1.22'
       - run: go version
 
+      - name: Install Helm v3.15.4
+        run: |
+          curl -L https://get.helm.sh/helm-v3.15.4-linux-amd64.tar.gz -o helm-v3.15.4-linux-amd64.tar.gz
+          tar -zxvf helm-v3.15.4-linux-amd64.tar.gz
+          sudo mv linux-amd64/helm /usr/local/bin/helm
+          helm version
+
+      - name: Install kubectl v1.31.0
+        run: |
+          curl -LO "https://dl.k8s.io/release/v1.31.0/bin/linux/amd64/kubectl"
+          chmod +x kubectl
+          sudo mv kubectl /usr/local/bin/
+          kubectl version --client
+
       - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION }}
+
       - uses: actions/checkout@master
         name: Checkout code simplyBlockDeploy
         with:
           repository: simplyblock-io/simplyBlockDeploy
           ref: refs/heads/${{ github.event.inputs.simplyBlockDeploy_branch || 'main'}}
           path: 'simplyBlockDeploy'
+          token: ${{ secrets.GH_ACCESS_KEY_ID_HAMDI }}
+
+      - uses: actions/checkout@master
+        name: Checkout code spdk-csi
+        with:
+          repository: simplyblock-io/spdk-csi
+          ref: refs/heads/${{ github.event.inputs.spdk_csi_branch || 'master'}}
+          path: 'spdk-csi'
           token: ${{ secrets.GH_ACCESS_KEY_ID_HAMDI }}
 
       - name: Setup Terraform
@@ -96,22 +119,26 @@ jobs:
               -backend-config="dynamodb_table=${TFSTATE_DYNAMODB_TABLE}" \
               -backend-config="encrypt=true"
 
-      - name: Select or Create Workspace
+      - name: Select or create workspace
         run: |
           cd $GITHUB_WORKSPACE/simplyBlockDeploy
           terraform workspace select -or-create ghiaction-sbclie2e
+
       - name: Validate Terraform Configuration
         run: |
           cd $GITHUB_WORKSPACE/simplyBlockDeploy
           terraform validate
+
       - name: Plan Terraform Changes
         run: |
           cd $GITHUB_WORKSPACE/simplyBlockDeploy
           terraform plan \
             -var "mgmt_nodes=1" -var "storage_nodes=3" -var "volumes_per_storage_nodes=3" \
-            -var mgmt_nodes_instance_type="m6id.xlarge" -var storage_nodes_instance_type="m6i.xlarge" \
-            -var "extra_nodes=1" -var "extra_nodes_instance_type=m6id.xlarge" \
+            -var storage_nodes_instance_type="m6g.2xlarge" \
+            -var "storage_nodes_arch=arm64" -var "snode_deploy_on_k8s=true" \
+            -var "extra_nodes=1" -var "extra_nodes_instance_type=m6gd.xlarge" \
             -var storage_nodes_ebs_size2=100 -var "region=us-east-2" \
+            -var "extra_nodes_arch=arm64" \
             -var "sbcli_cmd=${{ github.event.inputs.sbcli_cmd || 'sbcli-dev' }}" -out=tfplan
 
       - name: Apply Terraform Changes
@@ -127,14 +154,106 @@ jobs:
           echo "::set-output name=bastion_public_ip::$output_bastion_public_ip"
           output_key_name=$(terraform output -raw key_name)
           echo "::set-output name=key_name::$output_key_name"
+          output_extra_node_public_ip=$(terraform output -raw extra_nodes_public_ips)
+          echo "::set-output name=extra_node_public_ip::$output_extra_node_public_ip"
+          output_mgmt_private_ip=$(terraform output -raw mgmt_private_ips)
+          echo "::set-output name=mgmt_private_ip::$output_mgmt_private_ip"
 
       - name: Bootstrap Cluster
         run: |
           cd $GITHUB_WORKSPACE/simplyBlockDeploy
-          ./bootstrap-cluster.sh --max-lvol 10 --max-snap 10 --max-prov 900G --number-of-devices 3
+          echo "Sleeping for 30 seconds before bootstrap-cluster"
+          sleep 30
+          ./bootstrap-cluster.sh --sbcli-cmd "${{ github.event.inputs.sbcli_cmd }}" \
+            --max-lvol 10 --max-snap 10 --max-prov 900G --number-of-devices 3 \
+            --distr-ndcs ${{ github.event.inputs.ndcs }} \
+            --distr-npcs ${{ github.event.inputs.npcs }} \
+            --distr-bs ${{ github.event.inputs.bs }} \
+            --distr-chunk-bs ${{ github.event.inputs.chunk_bs }} \
+            --k8s-snode \
+            --spdk-debug
         id: bootstrap_cluster
         env:
           SBCLI_CMD: ${{ github.event.inputs.sbcli_cmd || 'sbcli-dev' }}
+
+      - name: Bootstrap k3s
+        run: |
+          echo "Sleeping for 30 seconds before bootstrap-k3s"
+          sleep 30
+          cd $GITHUB_WORKSPACE/simplyBlockDeploy
+          ./bootstrap-k3s.sh --k8s-snode
+        id: bootstrap_k3s
+
+      - name: Configure Kubeconfig
+        run: |
+          mkdir -p $HOME/.kube
+          scp -i "$HOME/.ssh/${{ steps.terraform_outputs.outputs.key_name }}" ec2-user@${{ steps.terraform_outputs.outputs.extra_node_public_ip }}:/etc/rancher/k3s/k3s.yaml $HOME/.kube/config
+          sed -i "s/server: https:\/\/\(localhost\|127.0.0.1\)\(:[0-9]*\)/server: https:\/\/${{ steps.terraform_outputs.outputs.extra_node_public_ip }}\2/" $HOME/.kube/config
+
+      - name: Install Helm Chart for spdk-csi
+        run: |
+          cd $GITHUB_WORKSPACE/spdk-csi/charts/latest/spdk-csi/
+          echo "Sleeping for 120 seconds before helm install"
+          sleep 120
+          helm install spdk-csi ./ \
+            --namespace spdk-csi \
+            --create-namespace \
+            --set csiConfig.simplybk.uuid="${{ steps.bootstrap_cluster.outputs.cluster_id }}" \
+            --set csiConfig.simplybk.ip="${{ steps.bootstrap_cluster.outputs.cluster_api_gateway_endpoint }}" \
+            --set csiSecret.simplybk.secret="${{ steps.bootstrap_cluster.outputs.cluster_secret }}" \
+            --set logicalVolume.pool_name="testing1" \
+            --set logicalVolume.snapshot="True" \
+            --set image.simplyblock.tag="main"
+
+      # - name: Wait for Storage Nodes to Become Online
+      #   run: |
+      #     echo "Sleeping for 120 seconds before helm install"
+      #     sleep 120
+      #     while true; do
+      #       echo "Checking storage node status..."
+            
+      #       NODE_STATUS=$(ssh -i "$HOME/.ssh/${{ steps.terraform_outputs.outputs.key_name }}" \
+      #         -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no \
+      #         -o ProxyCommand="ssh -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -i \"$HOME/.ssh/${{ steps.terraform_outputs.outputs.key_name }}\" -W %h:%p ec2-user@${{ steps.terraform_outputs.outputs.bastion_public_ip }}" \
+      #         ec2-user@${{ steps.terraform_outputs.outputs.mgmt_private_ip }} \
+      #         "sbcli-dev sn list | grep -Eo 'online|offline'" || echo "SSH command failed")
+
+      #       SSH_EXIT_CODE=$?
+      #       if [ $SSH_EXIT_CODE -ne 0 ]; then
+      #         echo "SSH command failed with exit code $SSH_EXIT_CODE. Retrying..."
+      #         sleep 30
+      #         continue
+      #       fi
+
+      #       if [ -z "$NODE_STATUS" ]; then
+      #         echo "No output from sbcli-dev sn list. Retrying..."
+      #         sleep 30
+      #         continue
+      #       fi
+
+      #       echo "Node Status: $NODE_STATUS"
+      #       ONLINE_NODES=$(echo "$NODE_STATUS" | grep -c "online")
+            
+      #       if [ "$ONLINE_NODES" -ge 3 ]; then
+      #         echo "All 3 storage nodes are online."
+      #         break
+      #       else
+      #         echo "$ONLINE_NODES nodes online. Waiting for more nodes to come online..."
+      #         sleep 30
+      #       fi
+      #     done
+      #   shell: /usr/bin/bash -e {0}
+      
+      - name: Sleep after Helm Installation
+        run: sleep 500
+
+      - name: Activate Cluster
+        run: |
+          ssh -i "$HOME/.ssh/${{ steps.terraform_outputs.outputs.key_name }}" -o StrictHostKeyChecking=no \
+            -o ProxyCommand="ssh -o StrictHostKeyChecking=no -i \"$HOME/.ssh/${{ steps.terraform_outputs.outputs.key_name }}\" -W %h:%p ec2-user@${{ steps.terraform_outputs.outputs.bastion_public_ip }}" \
+            ec2-user@${{ steps.terraform_outputs.outputs.mgmt_private_ip }} "
+          ${{ github.event.inputs.sbcli_cmd }} cluster activate ${{ steps.bootstrap_cluster.outputs.cluster_id }}
+          "
 
       - name: Record Test Start Time
         run: echo "TEST_START_TIME=$(date +%s)" >> $GITHUB_ENV
@@ -162,8 +281,14 @@ jobs:
           if [ -n "${{ github.event.inputs.testname }}" ]; then
             TESTNAME="--testname ${{ github.event.inputs.testname }}"
           fi
-          python3 e2e.py $TESTNAME
-        
+          
+          python3 e2e.py --ndcs "${{ github.event.inputs.ndcs }}" \
+                          --npcs "${{ github.event.inputs.npcs }}" \
+                          --bs "${{ github.event.inputs.bs }}" \
+                          --chunk_bs "${{ github.event.inputs.chunk_bs }}" \
+                          --run_k8s
+                          $TESTNAME
+
       - name: Record Test End Time
         if: always() 
         run: echo "TEST_END_TIME=$(date +%s)" >> $GITHUB_ENV
@@ -300,10 +425,11 @@ jobs:
         run: |
           cd $GITHUB_WORKSPACE/simplyBlockDeploy
           terraform destroy --auto-approve
-      
-      - name: 'Cleanup build folder'
+
+      - name: Cleanup build folder
         run: |
           ls -la ./
           rm -rf ./* || true
           rm -rf ./.??* || true
           ls -la ./
+          rm -rf $HOME/.kube

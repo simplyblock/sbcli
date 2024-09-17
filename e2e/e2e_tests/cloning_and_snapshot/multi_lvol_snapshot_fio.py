@@ -58,8 +58,13 @@ class TestMultiLvolFio(TestClusterBase):
             pool_name=self.pool_name
         )
         lvol_vs_disk = {}
+        if self.ndcs == 0 and self.npcs == 0:
+            lvol_config_list = ["1+0", "2+1", "4+1", "4+2", "8+1", "8+2"]
+        else:
+            lvol_config_list = [f"{self.ndcs}+{self.npcs}" ]
 
-        for config in ["1+0", "2+1", "4+1", "4+2", "8+1", "8+2"]:
+
+        for config in lvol_config_list:
             ndcs, npcs = config.split('+')
             lvol_name = f"lvol_{ndcs}_{npcs}"
 
@@ -96,12 +101,9 @@ class TestMultiLvolFio(TestClusterBase):
         
         lvol_list = self.sbcli_utils.list_lvols()
 
-
-
         for fs_type in ["ext4", "xfs"]:
             self.logger.info(f"Processing filesystem type: {fs_type}")
-
-            for config in ["1+0", "2+1", "4+1", "4+2", "8+1", "8+2"]:
+            for config in lvol_config_list:
                 ndcs, npcs = config.split('+')
                 lvol_name = f"lvol_{ndcs}_{npcs}"
                 mount_point = f"{self.mount_path}/{lvol_name}"
@@ -114,7 +116,7 @@ class TestMultiLvolFio(TestClusterBase):
                                         mount_path=mount_point)
 
             for size in ["5GiB", "10GiB", "20GiB", "40GiB"]:
-                for config in ["1+0", "2+1", "4+1", "4+2", "8+1", "8+2"]:
+                for config in lvol_config_list:
                     ndcs, npcs = config.split('+')
                     lvol_name = f"lvol_{ndcs}_{npcs}"
                     lvol_id = lvol_list[lvol_name]

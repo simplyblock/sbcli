@@ -29,8 +29,13 @@ class TestClusterBase:
         self.common_utils = CommonUtils(self.sbcli_utils, self.ssh_obj)
         self.mgmt_nodes = None
         self.storage_nodes = None
+        self.ndcs = kwargs.get("ndcs", 1)
+        self.npcs = kwargs.get("npcs", 1)
+        self.bs = kwargs.get("bs", 4096)
+        self.chunk_bs = kwargs.get("chunk_bs", 4096)
+        self.k8s_test = kwargs.get("k8s_run", False)
         self.pool_name = "test_pool"
-        self.lvol_name = "test_lvol"
+        self.lvol_name = f"test_lvl_{self.ndcs}_{self.npcs}"
         self.mount_path = "/home/ec2-user/test_location"
         self.log_path = f"{os.path.dirname(self.mount_path)}/log_file.log"
         self.base_cmd = os.environ.get("SBCLI_CMD", "sbcli-dev")

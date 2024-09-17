@@ -23,13 +23,15 @@ def main():
     parser.add_argument('--npcs', type=int, help="Number of parity chunks (npcs)", default=1)
     parser.add_argument('--bs', type=int, help="Block size (bs)", default=4096)
     parser.add_argument('--chunk_bs', type=int, help="Chunk block size (chunk_bs)", default=4096)
+    parser.add_argument('--run_k8s', type=bool, help="Run K8s setup", default=False)
+
 
     args = parser.parse_args()
 
     if args.ndcs == 0 and args.npcs == 0:
-        tests = get_all_tests(custom=False)
+        tests = get_all_tests(custom=False, k8s_test=args.run_k8s)
     else:
-        tests = get_all_tests(custom=True)
+        tests = get_all_tests(custom=True, k8s_test=args.run_k8s)
 
     test_class_run = []
     if args.testname is None or len(args.testname.strip()) == 0:
@@ -47,7 +49,12 @@ def main():
     errors = {}
     for test in test_class_run:
         logger.info(f"Running Test {test}")
-        test_obj = test(fio_debug=args.fio_debug)
+        test_obj = test(fio_debug=args.fio_debug,
+                        ndcs=args.ndcs,
+                        npcs=args.npcs,
+                        bs=args.bs,
+                        chunk_bs=args.chunk_bs,
+                        k8s_run=args.run_k8s)
         try:
             test_obj.setup()
             test_obj.run()
