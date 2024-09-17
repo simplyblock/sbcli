@@ -181,7 +181,7 @@ def get_ha_jm_names(current_node, snode_list):
             continue
         name = f"remote_{node.jm_device.jm_bdev}n1"
         jm_list.append(name)
-    return jm_list
+    return jm_list[:3]
 
 
 def _get_next_3_nodes(cluster_id, lvol_size=0):
