@@ -122,7 +122,7 @@ jobs:
       - name: Select or create workspace
         run: |
           cd $GITHUB_WORKSPACE/simplyBlockDeploy
-          terraform workspace select -or-create ghiaction-sbclie2e
+          terraform workspace select -or-create ghiaction-sbclie2ek8s
 
       - name: Validate Terraform Configuration
         run: |
@@ -286,7 +286,7 @@ jobs:
                           --npcs "${{ github.event.inputs.npcs }}" \
                           --bs "${{ github.event.inputs.bs }}" \
                           --chunk_bs "${{ github.event.inputs.chunk_bs }}" \
-                          --run_k8s
+                          --run_k8s True \
                           $TESTNAME
 
       - name: Record Test End Time
@@ -416,7 +416,7 @@ jobs:
 
           TIME_TAKEN="${TEST_TIME_HOURS}h ${TEST_TIME_MINS}m ${TEST_TIME_SECS}s"
 
-          MESSAGE="Python E2E K8s tests run triggered on branch *${BRANCH_NAME}*. \nTotal Time Taken to run the tests: ${TIME_TAKEN}. \n\n${OVERALL_STATUS}\nGitHub Run: ${GITHUB_RUN_URL}\nAWS Logs: ${AWS_LOGS_URL}\n\n*Configuration*: *NDCS: ${{ env.NDCS }}, NPCS: ${{ env.NPCS }}, Block Size: ${{ env.BS }}, Chunk Block Size: ${{ env.CHUNK_BS }}*\n\nTotal Tests: *${{ env.TOTAL_TESTS }}*, Passed Tests: *${{ env.PASSED_TESTS }}*, Failed Tests: *${{ env.FAILED_TESTS }}*\n\n-- Test Cases Passed :white_check_mark:\n${{ env.PASSED_CASES_BULLETS }}\n\n-- Test Cases Failed :x:\n${{ env.FAILED_CASES_BULLETS }}"
+          MESSAGE="Python E2E *K8s* tests run triggered on branch *${BRANCH_NAME}*. \nTotal Time Taken to run the tests: ${TIME_TAKEN}. \n\n${OVERALL_STATUS}\nGitHub Run: ${GITHUB_RUN_URL}\nAWS Logs: ${AWS_LOGS_URL}\n\n*Configuration*: *NDCS: ${{ env.NDCS }}, NPCS: ${{ env.NPCS }}, Block Size: ${{ env.BS }}, Chunk Block Size: ${{ env.CHUNK_BS }}*\n\nTotal Tests: *${{ env.TOTAL_TESTS }}*, Passed Tests: *${{ env.PASSED_TESTS }}*, Failed Tests: *${{ env.FAILED_TESTS }}*\n\n-- Test Cases Passed :white_check_mark:\n${{ env.PASSED_CASES_BULLETS }}\n\n-- Test Cases Failed :x:\n${{ env.FAILED_CASES_BULLETS }}"
 
           curl -X POST -H 'Content-type: application/json' --data "{\"text\":\"${MESSAGE}\"}" $SLACK_WEBHOOK_URL
 
