@@ -204,6 +204,7 @@ def restart_device(device_id, force=False):
             return False
 
     logger.info(f"Restarting device {device_id}")
+    device_set_retries_exhausted(device_id, True)
     device_set_unavailable(device_id)
 
     ret = _def_create_device_stack(device_obj, snode, force=force)
