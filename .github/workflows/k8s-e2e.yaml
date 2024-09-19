@@ -57,13 +57,13 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
     
-    - name: Set send_slack_notification for scheduled and push events
-        if: github.event_name == 'schedule' || github.event_name == 'push'
-        run: echo "send_slack_notification=true" >> $GITHUB_ENV
+      - name: Set send_slack_notification for scheduled and push events
+          if: github.event_name == 'schedule' || github.event_name == 'push'
+          run: echo "send_slack_notification=true" >> $GITHUB_ENV
 
-    - name: Set send_slack_notification for manual workflow_dispatch
-      if: github.event_name == 'workflow_dispatch'
-      run: echo "send_slack_notification=${{ github.event.inputs.send_slack_notification }}" >> $GITHUB_ENV
+      - name: Set send_slack_notification for manual workflow_dispatch
+        if: github.event_name == 'workflow_dispatch'
+        run: echo "send_slack_notification=${{ github.event.inputs.send_slack_notification }}" >> $GITHUB_ENV
 
       - uses: actions/setup-go@v5
         with:
