@@ -707,10 +707,6 @@ def recreate_lvol_on_node(lvol, snode, ha_comm_addrs=None, ha_inode_self=None):
             ret = rpc_client.nvmf_subsystem_listener_set_ana_state(
                 lvol.nqn, iface.ip4_address, "4420", is_optimized)
 
-    ret = rpc_client.bdev_examine(snode.raid)
-    time.sleep(1)
-    ret = rpc_client.bdev_wait_for_examine()
-    time.sleep(1)
 
     logger.info("Add BDev to subsystem")
     ret = rpc_client.nvmf_subsystem_add_ns(lvol.nqn, lvol.top_bdev, lvol.uuid, lvol.guid)

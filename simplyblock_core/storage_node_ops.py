@@ -1623,6 +1623,11 @@ def restart_storage_node(
         #if not ret:
         #    return False, "Failed to send cluster map"
         #time.sleep(3)
+        temp_rpc_client = RPCClient(
+                snode.mgmt_ip, snode.rpc_port,
+                snode.rpc_username, snode.rpc_password)
+        temp_rpc_client.bdev_examine(snode.raid)
+        time.sleep(3)
 
         if snode.lvols:
             for lvol_id in snode.lvols:
@@ -1634,11 +1639,6 @@ def restart_storage_node(
                 lvol.io_error = False
                 lvol.health_check = True
                 lvol.write_to_db(db_controller.kv_store)
-        else:
-            temp_rpc_client = RPCClient(
-                    snode.mgmt_ip, snode.rpc_port,
-                    snode.rpc_username, snode.rpc_password)
-            temp_rpc_client.bdev_examine(snode.raid)
 
     logger.info("Done")
     return "Success"
@@ -2518,7 +2518,7 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
                 "distribs_list": distrib_list
             },
             {
-                "type": "bdev_lvstore",
+                "type": "=",
                 "name": lvs_name,
                 "params": {
                     "name": lvs_name,
