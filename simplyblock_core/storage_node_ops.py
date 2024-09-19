@@ -2518,7 +2518,7 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
                 "distribs_list": distrib_list
             },
             {
-                "type": "=",
+                "type": "bdev_lvstore",
                 "name": lvs_name,
                 "params": {
                     "name": lvs_name,
