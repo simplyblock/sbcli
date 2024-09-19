@@ -11,13 +11,19 @@ on:
     inputs:
       simplyBlockDeploy_branch:
         description: 'Branch for simplyBlockDeploy'
+        description: 'Branch for simplyBlockDeploy'
         required: true
         default: 'main'
       spdk_csi_branch:
         description: 'Branch for spdk-csi'
         required: true
         default: 'master'
+      spdk_csi_branch:
+        description: 'Branch for spdk-csi'
+        required: true
+        default: 'master'
       sbcli_cmd:
+        description: 'Command for sbcli execution'
         description: 'Command for sbcli execution'
         required: true
         default: 'sbcli-dev'
@@ -25,6 +31,28 @@ on:
         description: 'Name of test to run. Empty to run all'
         required: false
         default: ''
+      send_slack_notification:
+        description: 'Send Slack notification?'
+        required: false
+        default: true
+        type: boolean
+      ndcs:
+        description: 'Value for NDCS'
+        required: false
+        default: 1
+      npcs:
+        description: 'Value for NPCS'
+        required: false
+        default: 1
+      bs:
+        description: 'Value for Block size'
+        required: false
+        default: 4096
+      chunk_bs:
+        description: 'Value for Chunk block size'
+        required: false
+        default: 4096
+
       send_slack_notification:
         description: 'Send Slack notification?'
         required: false
