@@ -1069,6 +1069,10 @@ def restart_storage_node(
         logger.error(f"Can not restart online node: {node_id}")
         return False
 
+    if snode.status == StorageNode.STATUS_REMOVED:
+        logger.error(f"Can not restart removed node: {node_id}")
+        return False
+
     task_id = tasks_controller.get_active_node_restart_task(snode.cluster_id, snode.get_id())
     if task_id:
         logger.error(f"Restart task found: {task_id}, can not restart storage node")
