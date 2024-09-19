@@ -174,10 +174,10 @@ jobs:
           sleep 30
           ./bootstrap-cluster.sh --sbcli-cmd "${{ github.event.inputs.sbcli_cmd }}" \
             --max-lvol 10 --max-snap 10 --max-prov 900G --number-of-devices 3 \
-            --distr-ndcs ${{ github.event.inputs.ndcs }} \
-            --distr-npcs ${{ github.event.inputs.npcs }} \
-            --distr-bs ${{ github.event.inputs.bs }} \
-            --distr-chunk-bs ${{ github.event.inputs.chunk_bs }} \
+            --distr-ndcs ${{ github.event.inputs.ndcs || 1 }} \
+            --distr-npcs ${{ github.event.inputs.npcs || 1 }} \
+            --distr-bs ${{ github.event.inputs.bs || 4096 }} \
+            --distr-chunk-bs ${{ github.event.inputs.chunk_bs || 4096 }} \
             --k8s-snode \
             --spdk-debug
         id: bootstrap_cluster
