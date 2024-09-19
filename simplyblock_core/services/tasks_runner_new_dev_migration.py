@@ -97,8 +97,8 @@ def task_runner(task):
                     del task.function_params['migration']
                 else:
                     task.function_result = "Done"
+                    task.status = JobSchedule.STATUS_DONE
 
-                task.status = JobSchedule.STATUS_DONE
                 task.write_to_db(db_controller.kv_store)
                 return True
 
