@@ -57,6 +57,14 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Set send_slack_notification for scheduled and push events
+        if: github.event_name == 'schedule' || github.event_name == 'push'
+        run: echo "send_slack_notification=true" >> $GITHUB_ENV
+
+      - name: Set send_slack_notification for manual workflow_dispatch
+        if: github.event_name == 'workflow_dispatch'
+        run: echo "send_slack_notification=${{ github.event.inputs.send_slack_notification }}" >> $GITHUB_ENV
+
       - uses: actions/setup-go@v5
         with:
           go-version: '1.22'
@@ -131,7 +139,13 @@ jobs:
       - name: Bootstrap Cluster
         run: |
           cd $GITHUB_WORKSPACE/simplyBlockDeploy
-          ./bootstrap-cluster.sh --max-lvol 10 --max-snap 10 --max-prov 900G --number-of-devices 3
+          ./bootstrap-cluster.sh --sbcli-cmd "${{ github.event.inputs.sbcli_cmd }}" \
+            --max-lvol 10 --max-snap 10 --max-prov 900G --number-of-devices 3 \
+            --distr-ndcs ${{ github.event.inputs.ndcs || 1 }} \
+            --distr-npcs ${{ github.event.inputs.npcs || 1 }} \
+            --distr-bs ${{ github.event.inputs.bs || 4096 }} \
+            --distr-chunk-bs ${{ github.event.inputs.chunk_bs || 4096 }} \
+            --spdk-debug
         id: bootstrap_cluster
         env:
           SBCLI_CMD: ${{ github.event.inputs.sbcli_cmd || 'sbcli-dev' }}
@@ -195,7 +209,7 @@ jobs:
           RUN_ID: ${{ github.run_id }}
 
       - name: Parse test results
-        if: always() && (github.event.inputs.send_slack_notification == 'true')
+        if: always() && (github.event_name == 'schedule' || env.send_slack_notification == 'true')
         id: parse_results
         run: |
           cd $GITHUB_WORKSPACE/e2e/logs
@@ -258,7 +272,7 @@ jobs:
           echo "EOF" >> $GITHUB_ENV
 
       - name: Send Slack Notification
-        if: always() && (github.event.inputs.send_slack_notification == 'true')
+        if: always() && (github.event_name == 'schedule' || env.send_slack_notification == 'true')
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
           GITHUB_SERVER_URL: ${{ github.server_url }}
