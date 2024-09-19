@@ -1179,15 +1179,9 @@ def remove_storage_node(node_id, force_remove=False, force_migrate=False):
         logger.error(f"Can not remove online node: {node_id}")
         return False
 
-    task_id = tasks_controller.get_active_node_restart_task(snode.cluster_id, snode.get_id())
+    task_id = tasks_controller.get_active_node_task(snode.cluster_id, snode.get_id())
     if task_id:
-        logger.error(f"Restart task found: {task_id}, can not remove storage node")
-        if force_remove is False:
-            return False
-
-    task_id = tasks_controller.get_active_node_restart_task(snode.cluster_id, snode.get_id())
-    if task_id:
-        logger.error(f"Restart task found: {task_id}, can not remove storage node")
+        logger.error(f"Task found: {task_id}, can not remove storage node")
         if force_remove is False:
             return False
 
@@ -1281,6 +1275,10 @@ def restart_storage_node(
 
     if snode.status == StorageNode.STATUS_ONLINE:
         logger.error(f"Can not restart online node: {node_id}")
+        return False
+
+    if snode.status == StorageNode.STATUS_REMOVED:
+        logger.error(f"Can not restart removed node: {node_id}")
         return False
 
     if snode.status == StorageNode.STATUS_RESTARTING:

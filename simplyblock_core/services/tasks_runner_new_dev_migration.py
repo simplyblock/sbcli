@@ -40,22 +40,34 @@ def task_runner(task):
         return False
 
     if "migration" not in task.function_params:
-        # if task.retry >= 2:
-        #     all_devs_online = True
-        #     for node in db_controller.get_storage_nodes_by_cluster_id(task.cluster_id):
-        #         for dev in node.nvme_devices:
-        #             if dev.status != NVMeDevice.STATUS_ONLINE:
-        #                 all_devs_online = False
-        #                 break
-        #
-        #     if not all_devs_online:
-        #         task.function_result = "Some devs are offline, retrying"
-        #         task.retry += 1
-        #         task.write_to_db(db_controller.kv_store)
-        #         return False
+        all_devs_online = True
+        for node in db_controller.get_storage_nodes_by_cluster_id(task.cluster_id):
+            for dev in node.nvme_devices:
+                if dev.status not in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_FAILED_AND_MIGRATED]:
+                    all_devs_online = False
+                    break
+
+        if not all_devs_online:
+            task.function_result = "Some devs are offline, retrying"
+            task.retry += 1
+            task.write_to_db(db_controller.kv_store)
+            return False
 
         device = db_controller.get_storage_devices(task.device_id)
         lvol = db_controller.get_lvol_by_id(task.function_params["lvol_id"])
+
+        if not lvol:
+            task.status = JobSchedule.STATUS_DONE
+            task.function_result = "LVol not found"
+            task.write_to_db(db_controller.kv_store)
+            return True
+
+        if not device:
+            task.status = JobSchedule.STATUS_DONE
+            task.function_result = "Device not found"
+            task.write_to_db(db_controller.kv_store)
+            return True
+
         rsp = rpc_client.distr_migration_expansion_start(lvol.base_bdev)
         if not rsp:
             logger.error(f"Failed to start device migration task, storage_ID: {device.cluster_device_order}")
@@ -75,10 +87,18 @@ def task_runner(task):
         mig_info = task.function_params["migration"]
         res = rpc_client.distr_migration_status(**mig_info)
         if res:
-            migration_status = res[0]["status"]
+            res_data = res[0]
+            migration_status = res_data["status"]
             if migration_status == "completed":
-                task.status = JobSchedule.STATUS_DONE
-                task.function_result = migration_status
+                if res_data['error'] == 1:
+                    task.function_result = "mig completed with errors, retrying"
+                    task.retry += 1
+                    task.status = JobSchedule.STATUS_NEW
+                    del task.function_params['migration']
+                else:
+                    task.function_result = "Done"
+                    task.status = JobSchedule.STATUS_DONE
+
                 task.write_to_db(db_controller.kv_store)
                 return True
 
@@ -89,7 +109,7 @@ def task_runner(task):
                 return True
 
             else:
-                task.function_result = f"Status: {migration_status}, progress:{res[0]['progress']}"
+                task.function_result = f"Status: {migration_status}, progress:{res_data['progress']}"
                 task.write_to_db(db_controller.kv_store)
         else:
             logger.error("Failed to get mig status")
