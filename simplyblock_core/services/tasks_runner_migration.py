@@ -40,8 +40,7 @@ def task_runner(task):
         all_devs_online = True
         for node in db_controller.get_storage_nodes_by_cluster_id(task.cluster_id):
             for dev in node.nvme_devices:
-                if dev.status not in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_FAILED,
-                                      NVMeDevice.STATUS_FAILED_AND_MIGRATED]:
+                if dev.status not in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_FAILED_AND_MIGRATED]:
                     all_devs_online = False
                     break
 
@@ -87,7 +86,7 @@ def task_runner(task):
                     task.function_result = "mig completed with errors, retrying"
                     task.retry += 1
                     task.status = JobSchedule.STATUS_NEW
-
+                    del task.function_params['migration']
                 else:
                     task.status = JobSchedule.STATUS_DONE
                     task.function_result = "Done"
