@@ -57,6 +57,14 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Set send_slack_notification for scheduled and push events
+        if: github.event_name == 'schedule' || github.event_name == 'push'
+        run: echo "send_slack_notification=true" >> $GITHUB_ENV
+
+      - name: Set send_slack_notification for manual workflow_dispatch
+        if: github.event_name == 'workflow_dispatch'
+        run: echo "send_slack_notification=${{ github.event.inputs.send_slack_notification }}" >> $GITHUB_ENV
+
       - uses: actions/setup-go@v5
         with:
           go-version: '1.22'
@@ -195,7 +203,7 @@ jobs:
           RUN_ID: ${{ github.run_id }}
 
       - name: Parse test results
-        if: always() && (github.event.inputs.send_slack_notification == 'true')
+        if: always() && (github.event_name == 'schedule' || env.send_slack_notification == 'true')
         id: parse_results
         run: |
           cd $GITHUB_WORKSPACE/e2e/logs
@@ -258,7 +266,7 @@ jobs:
           echo "EOF" >> $GITHUB_ENV
 
       - name: Send Slack Notification
-        if: always() && (github.event.inputs.send_slack_notification == 'true')
+        if: always() && (github.event_name == 'schedule' || env.send_slack_notification == 'true')
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
           GITHUB_SERVER_URL: ${{ github.server_url }}
