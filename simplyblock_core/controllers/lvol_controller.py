@@ -801,14 +801,6 @@ def delete_lvol_from_node(lvol_id, node_id, clear_data=True):
     logger.info(f"Removing subsystem")
     ret = rpc_client.subsystem_delete(lvol.nqn)
 
-    ## don't remove bdev stack until the last vuid
-    for lv in db_controller.get_lvols(snode.cluster_id):
-        if lv.get_id() == lvol_id:
-            continue
-        if lv.vuid == lvol.vuid:
-            logger.debug("Other bdevs found using the same vuid, skipping bdev remove")
-            return True
-
     # 2- remove bdevs
     logger.info(f"Removing bdev stack")
     _remove_bdev_stack(lvol.bdev_stack[::-1], rpc_client)
