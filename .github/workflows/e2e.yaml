@@ -138,7 +138,7 @@ jobs:
             -var storage_nodes_ebs_size2=100 -var "region=us-east-2" \
             -var "sbcli_cmd=$SBCLI_CMD" -out=tfplan
         env:
-          SBCLI_CMD: $SBCLI_CMD
+          SBCLI_CMD: ${{ env.SBCLI_CMD }}
 
       - name: Apply Terraform Changes
         run: |
@@ -166,7 +166,7 @@ jobs:
             --spdk-debug
         id: bootstrap_cluster
         env:
-          SBCLI_CMD: $SBCLI_CMD
+          SBCLI_CMD: ${{ env.SBCLI_CMD }}
 
       - name: Record Test Start Time
         run: echo "TEST_START_TIME=$(date +%s)" >> $GITHUB_ENV
@@ -196,7 +196,7 @@ jobs:
           fi
           python3 e2e.py $TESTNAME
         env:
-          SBCLI_CMD: $SBCLI_CMD
+          SBCLI_CMD: ${{ env.SBCLI_CMD }}
         
       - name: Record Test End Time
         if: always() 
