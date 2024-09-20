@@ -401,14 +401,13 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
     #lvol.distr_page_size = (distr_npcs+distr_npcs)*cl.page_size_in_blocks
 
 
-
-    nodes = _get_next_3_nodes(cl.get_id(), lvol.size)
-    if not nodes:
-        return False, f"No nodes found with enough resources to create the LVol"
-
+    nodes = []
     if host_node:
         nodes.insert(0, host_node)
     else:
+        nodes = _get_next_3_nodes(cl.get_id(), lvol.size)
+        if not nodes:
+            return False, f"No nodes found with enough resources to create the LVol"
         host_node = nodes[0]
 
     lvol.hostname = host_node.hostname
