@@ -118,6 +118,9 @@ while True:
     clusters = db_controller.get_clusters()
     for cluster in clusters:
         cluster_id = cluster.get_id()
+        if cluster.status == Cluster.STATUS_IN_ACTIVATION:
+            logger.info(f"Cluster status is: {cluster.status}, skipping monitoring")
+            continue
 
         nodes = db_controller.get_storage_nodes_by_cluster_id(cluster_id)
         for snode in nodes:

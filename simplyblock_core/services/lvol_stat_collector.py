@@ -115,9 +115,9 @@ while True:
 
         stat_records = []
         for lvol in lvols:
-            # if lvol.status != lvol.STATUS_ONLINE:
-            #     logger.warning(f"LVol in not online, id: {lvol.get_id()}, status: {lvol.status}")
-            #     continue
+            if lvol.status == lvol.STATUS_IN_DELETION:
+                logger.warning(f"LVol in deletion, id: {lvol.get_id()}, status: {lvol.status}.. skipping")
+                continue
             snode = db_controller.get_storage_node_by_hostname(lvol.hostname)
             rpc_client = RPCClient(
                 snode.mgmt_ip, snode.rpc_port,

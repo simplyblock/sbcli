@@ -54,6 +54,9 @@ while True:
         if lvol.io_error:
             logger.debug(f"Skipping LVol health check because of io_error {lvol.get_id()}")
             continue
+        if lvol.status == lvol.STATUS_IN_DELETION:
+            logger.warning(f"LVol in deletion, id: {lvol.get_id()}, status: {lvol.status}.. skipping")
+            continue
         ret = health_controller.check_lvol(lvol.get_id())
         if not ret:
             time.sleep(5)
