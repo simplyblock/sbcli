@@ -6,7 +6,7 @@ class JobSchedule(BaseModel):
 
     STATUS_NEW = 'new'
     STATUS_RUNNING = 'running'
-    STATUS_RETRYING = 'retrying'
+    # STATUS_RETRYING = 'retrying'
     STATUS_DONE = 'done'
 
     FN_DEV_RESTART = "device_restart"
