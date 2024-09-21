@@ -401,14 +401,13 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
     #lvol.distr_page_size = (distr_npcs+distr_npcs)*cl.page_size_in_blocks
 
 
-
-    nodes = _get_next_3_nodes(cl.get_id(), lvol.size)
-    if not nodes:
-        return False, f"No nodes found with enough resources to create the LVol"
-
+    nodes = []
     if host_node:
         nodes.insert(0, host_node)
     else:
+        nodes = _get_next_3_nodes(cl.get_id(), lvol.size)
+        if not nodes:
+            return False, f"No nodes found with enough resources to create the LVol"
         host_node = nodes[0]
 
     lvol.hostname = host_node.hostname
@@ -707,10 +706,6 @@ def recreate_lvol_on_node(lvol, snode, ha_comm_addrs=None, ha_inode_self=None):
             ret = rpc_client.nvmf_subsystem_listener_set_ana_state(
                 lvol.nqn, iface.ip4_address, "4420", is_optimized)
 
-    ret = rpc_client.bdev_examine(snode.raid)
-    time.sleep(1)
-    ret = rpc_client.bdev_wait_for_examine()
-    time.sleep(1)
 
     logger.info("Add BDev to subsystem")
     ret = rpc_client.nvmf_subsystem_add_ns(lvol.nqn, lvol.top_bdev, lvol.uuid, lvol.guid)

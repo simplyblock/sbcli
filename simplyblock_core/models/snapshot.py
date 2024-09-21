@@ -16,6 +16,8 @@ class SnapShot(BaseModel):
         "ref_count": {"type": int, 'default': 0},
         "mem_diff": {"type": dict, 'default': {}},
         "health_check": {"type": bool, 'default': True},
+        "cluster_id": {"type": str, 'default': ""},
+        "pool_uuid": {"type": str, 'default': ""},
     }
 
     def __init__(self, data=None):

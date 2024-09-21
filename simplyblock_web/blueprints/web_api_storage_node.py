@@ -21,17 +21,14 @@ db_controller = kv_store.DBController()
 @bp.route('/storagenode', methods=['GET'], defaults={'uuid': None})
 @bp.route('/storagenode/<string:uuid>', methods=['GET'])
 def list_storage_nodes(uuid):
+    cluster_id = utils.get_cluster_id(request)
     if uuid:
         node = db_controller.get_storage_node_by_id(uuid)
-        if not node:
-            node = db_controller.get_storage_node_by_hostname(uuid)
-
-        if node:
+        if node and node.cluster_id == cluster_id:
             nodes = [node]
         else:
             return utils.get_response_error(f"node not found: {uuid}", 404)
     else:
-        cluster_id = utils.get_cluster_id(request)
         nodes = db_controller.get_storage_nodes_by_cluster_id(cluster_id)
     data = []
     for node in nodes:

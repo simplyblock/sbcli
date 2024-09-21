@@ -39,16 +39,17 @@ def delete_snapshot(uuid):
 
 @bp.route('/snapshot', methods=['GET'])
 def list_snapshots():
+    cluster_id = utils.get_cluster_id(request)
     snaps = db_controller.get_snapshots()
     data = []
     for snap in snaps:
-        pool = db_controller.get_pool_by_id(snap.lvol.pool_uuid)
+        if snap.cluster_id != cluster_id:
+            continue
         data.append({
             "uuid": snap.uuid,
-            "name": pool.pool_name,
+            "name": snap.pool_name,
             "size": str(snap.lvol.size),
-            "pool_name": snap.snap_bdev,
-            "pool_id": snap.lvol.pool_uuid,
+            "pool_id": snap.pool_uuid,
             "source_uuid": snap.lvol.get_id(),
             "created_at": str(snap.created_at),
         })

@@ -81,6 +81,8 @@ def add(lvol_id, snapshot_name):
 ##############################################################################
     snap = SnapShot()
     snap.uuid = str(uuid.uuid4())
+    snap.pool_uuid = pool.get_id()
+    snap.cluster_id = pool.cluster_id
     snap.snap_name = snapshot_name
     snap.snap_bdev = f"{lvol.lvs_name}/{snapshot_name}"
     snap.created_at = int(time.time())

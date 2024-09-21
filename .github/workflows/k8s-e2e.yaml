@@ -224,7 +224,8 @@ jobs:
             --set csiSecret.simplybk.secret="${{ steps.bootstrap_cluster.outputs.cluster_secret }}" \
             --set logicalVolume.pool_name="testing1" \
             --set logicalVolume.snapshot="True" \
-            --set image.simplyblock.tag="main"
+            --set image.spdkcsi.tag=master-arm64 \
+            --set storagenode.spdkImage=simplyblock/spdk:main-latest
 
       # - name: Wait for Storage Nodes to Become Online
       #   run: |
@@ -266,7 +267,7 @@ jobs:
       #   shell: /usr/bin/bash -e {0}
       
       - name: Sleep after Helm Installation
-        run: sleep 500
+        run: sleep 1000
 
       - name: Activate Cluster
         run: |

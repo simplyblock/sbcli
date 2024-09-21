@@ -17,20 +17,17 @@ bp = Blueprint("pool", __name__)
 db_controller = kv_store.DBController()
 
 
-@bp.route('/pool', defaults={'uuid': None, "cluster_id": None}, methods=['GET'])
-@bp.route('/pool/<string:uuid>', defaults={"cluster_id": None}, methods=['GET'])
-@bp.route('/pool/cluster_id/<string:cluster_id>', defaults={'uuid': None,}, methods=['GET'])
-def list_pools(uuid, cluster_id):
+@bp.route('/pool', defaults={'uuid': None}, methods=['GET'])
+@bp.route('/pool/<string:uuid>', methods=['GET'])
+def list_pools(uuid):
+    cluster_id = utils.get_cluster_id(request)
     if uuid:
         pool = db_controller.get_pool_by_id(uuid)
-        if pool:
+        if pool and pool.cluster_id == cluster_id:
             pools = [pool]
         else:
             return utils.get_response_error(f"Pool not found: {uuid}", 404)
-    elif cluster_id:
-        pools = db_controller.get_pools(cluster_id)
     else:
-        cluster_id = utils.get_cluster_id(request)
         pools = db_controller.get_pools(cluster_id)
     data = []
     for pool in pools:
@@ -60,9 +57,9 @@ def add_pool():
         return utils.get_response_error("missing required param: cluster_id", 400)
 
     name = pool_data['name']
-    cluster_id = pool_data['cluster_id']
+    cluster_id = utils.get_cluster_id(request)
     for p in db_controller.get_pools():
-        if p.pool_name == name:
+        if p.pool_name == name and p.cluster_id == cluster_id:
             return utils.get_response_error(f"Pool found with the same name: {name}", 400)
 
     pool_secret = True

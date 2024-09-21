@@ -1158,6 +1158,11 @@ def delete_storage_node(node_id):
         logger.error(f"Node must be in removed status")
         return False
 
+    task_id = tasks_controller.get_active_node_task(snode.cluster_id, snode.get_id())
+    if task_id:
+        logger.error(f"Task found: {task_id}, can not delete storage node")
+        return False
+
     snode.remove(db_controller.kv_store)
 
     for lvol in db_controller.get_lvols(snode.cluster_id):
@@ -1179,15 +1184,9 @@ def remove_storage_node(node_id, force_remove=False, force_migrate=False):
         logger.error(f"Can not remove online node: {node_id}")
         return False
 
-    task_id = tasks_controller.get_active_node_restart_task(snode.cluster_id, snode.get_id())
+    task_id = tasks_controller.get_active_node_task(snode.cluster_id, snode.get_id())
     if task_id:
-        logger.error(f"Restart task found: {task_id}, can not remove storage node")
-        if force_remove is False:
-            return False
-
-    task_id = tasks_controller.get_active_node_restart_task(snode.cluster_id, snode.get_id())
-    if task_id:
-        logger.error(f"Restart task found: {task_id}, can not remove storage node")
+        logger.error(f"Task found: {task_id}, can not remove storage node")
         if force_remove is False:
             return False
 
@@ -1281,6 +1280,10 @@ def restart_storage_node(
 
     if snode.status == StorageNode.STATUS_ONLINE:
         logger.error(f"Can not restart online node: {node_id}")
+        return False
+
+    if snode.status == StorageNode.STATUS_REMOVED:
+        logger.error(f"Can not restart removed node: {node_id}")
         return False
 
     if snode.status == StorageNode.STATUS_RESTARTING:
@@ -1623,6 +1626,11 @@ def restart_storage_node(
         #if not ret:
         #    return False, "Failed to send cluster map"
         #time.sleep(3)
+        temp_rpc_client = RPCClient(
+                snode.mgmt_ip, snode.rpc_port,
+                snode.rpc_username, snode.rpc_password)
+        temp_rpc_client.bdev_examine(snode.raid)
+        time.sleep(3)
 
         if snode.lvols:
             for lvol_id in snode.lvols:
@@ -1634,11 +1642,6 @@ def restart_storage_node(
                 lvol.io_error = False
                 lvol.health_check = True
                 lvol.write_to_db(db_controller.kv_store)
-        else:
-            temp_rpc_client = RPCClient(
-                    snode.mgmt_ip, snode.rpc_port,
-                    snode.rpc_username, snode.rpc_password)
-            temp_rpc_client.bdev_examine(snode.raid)
 
     logger.info("Done")
     return "Success"
@@ -2544,7 +2547,7 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
     snode.raid = raid_device
     db_controller = DBController(KVStore())
     snode.write_to_db(db_controller.kv_store)
-    time.sleep(30)
+    time.sleep(3)
     return True
 
 

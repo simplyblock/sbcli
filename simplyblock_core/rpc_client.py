@@ -27,7 +27,7 @@ class RPCClient:
 
     # ref: https://spdk.io/doc/jsonrpc.html
 
-    def __init__(self, ip_address, port, username, password, timeout=50, retry=3):
+    def __init__(self, ip_address, port, username, password, timeout=60, retry=3):
         self.ip_address = ip_address
         self.port = port
         self.url = 'http://%s:%s/' % (self.ip_address, self.port)
@@ -676,7 +676,6 @@ class RPCClient:
 
     def bdev_wait_for_examine(self):
         return self._request("bdev_wait_for_examine")
-
 
     def nbd_start_disk(self, bdev_name, nbd_device="/dev/nbd0"):
         params = {
