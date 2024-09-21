@@ -1585,44 +1585,6 @@ def restart_storage_node(
     logger.info("Connecting to remote JMs")
     snode.remote_jm_devices = _connect_to_remote_jm_devs(snode)
 
-    # make other nodes connect to the new devices
-    logger.info("Make other nodes connect to the node devices")
-    snodes = db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id)
-    for node_index, node in enumerate(snodes):
-        if node.get_id() == snode.get_id() or node.status != StorageNode.STATUS_ONLINE:
-            continue
-        logger.info(f"Connecting to node: {node.get_id()}")
-        rpc_client = RPCClient(node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password)
-        count = 0
-        for dev in snode.nvme_devices:
-            if dev.status != 'online':
-                continue
-            name = f"remote_{dev.alceml_bdev}"
-            ret = rpc_client.bdev_nvme_controller_list(name)
-            if ret:
-                logger.debug(f"controller found, removing")
-                rpc_client.bdev_nvme_detach_controller(name)
-                time.sleep(1)
-            ret = rpc_client.bdev_nvme_attach_controller_tcp(name, dev.nvmf_nqn, dev.nvmf_ip, dev.nvmf_port)
-            if not ret:
-                logger.warning(f"Failed to connect to device: {name}")
-                return False
-
-            dev.remote_bdev = f"{name}n1"
-            idx = -1
-            for i, d in enumerate(node.remote_devices):
-                if d.get_id() == dev.get_id():
-                    idx = i
-                    break
-            if idx >= 0:
-                node.remote_devices[idx] = dev
-            else:
-                node.remote_devices.append(dev)
-            count += 1
-        node.write_to_db(kv_store)
-        logger.info(f"connected to devices count: {count}")
-        time.sleep(3)
-
     logger.info("Setting node status to Online")
     old_status = snode.status
     snode.status = StorageNode.STATUS_ONLINE
@@ -1632,7 +1594,18 @@ def restart_storage_node(
     logger.info("Sending node event update")
     distr_controller.send_node_status_event(snode, StorageNode.STATUS_ONLINE)
 
-    logger.info("Sending devices event updates")
+    # make other nodes connect to the new devices
+    logger.info("Make other nodes connect to the node devices")
+    snodes = db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id)
+    for node in snodes:
+        if node.get_id() == snode.get_id() or node.status != StorageNode.STATUS_ONLINE:
+            continue
+        node.remote_devices = _connect_to_remote_devs(node)
+        node.remote_jm_devices = _connect_to_remote_jm_devs(node)
+        node.write_to_db(kv_store)
+
+        time.sleep(3)
+
     logger.info("Starting migration tasks")
     for dev in snode.nvme_devices:
         if dev.status != NVMeDevice.STATUS_ONLINE:
