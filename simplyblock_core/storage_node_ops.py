@@ -752,8 +752,8 @@ def _connect_to_remote_jm_devs(this_node):
 
         if node.jm_device:
             name = f"remote_{node.jm_device.jm_bdev}"
-            logger.info(f"Connecting to {name}")
-            ret = rpc_client.bdev_nvme_attach_controller_tcp_jm(
+            logger.info(f"Connecting {this_node.get_id()} to {name}")
+            ret = rpc_client.bdev_nvme_attach_controller_tcp(
                 name, node.jm_device.nvmf_nqn, node.jm_device.nvmf_ip, node.jm_device.nvmf_port)
             if not ret:
                 logger.warning(f"failed to connect to remote JM {node.jm_device.jm_bdev}")
