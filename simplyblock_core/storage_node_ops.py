@@ -1533,6 +1533,7 @@ def restart_storage_node(
             new_devices.append(dev)
             snode.nvme_devices.append(dev)
 
+    snode.write_to_db(db_controller.kv_store)
     if node_ip:
         # prepare devices on new node
         if snode.num_partitions_per_dev == 0 or snode.jm_percent == 0:
@@ -1551,7 +1552,9 @@ def restart_storage_node(
 
     logger.info("Connecting to remote devices")
     remote_devices = _connect_to_remote_devs(snode)
+    snode = db_controller.get_storage_node_by_id(node_id)
     snode.remote_devices = remote_devices
+    snode.write_to_db(db_controller.kv_store)
 
     # make other nodes connect to the new devices
     logger.info("Make other nodes connect to the node devices")
