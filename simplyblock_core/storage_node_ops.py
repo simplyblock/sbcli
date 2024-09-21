@@ -285,9 +285,9 @@ def _create_jm_stack_on_raid(rpc_client, jm_nvme_bdevs, snode, after_restart):
         logger.error(f"Failed to create pt noexcl bdev: {pt_name}")
         return False
 
-    subsystem_nqn = snode.subsystem + ":dev:" + alceml_id
+    subsystem_nqn = snode.subsystem + ":dev:" + jm_bdev
     logger.info("creating subsystem %s", subsystem_nqn)
-    ret = rpc_client.subsystem_create(subsystem_nqn, 'sbcli-cn', alceml_id)
+    ret = rpc_client.subsystem_create(subsystem_nqn, 'sbcli-cn', jm_bdev)
     IP = None
     for iface in snode.data_nics:
         if iface.ip4_address:
@@ -367,9 +367,9 @@ def _create_jm_stack_on_device(rpc_client, nvme, snode, after_restart):
         logger.error(f"Failed to create pt noexcl bdev: {pt_name}")
         return False
 
-    subsystem_nqn = snode.subsystem + ":dev:" + alceml_id
+    subsystem_nqn = snode.subsystem + ":dev:" + jm_bdev
     logger.info("creating subsystem %s", subsystem_nqn)
-    ret = rpc_client.subsystem_create(subsystem_nqn, 'sbcli-cn', alceml_id)
+    ret = rpc_client.subsystem_create(subsystem_nqn, 'sbcli-cn', jm_bdev)
     IP = None
     for iface in snode.data_nics:
         if iface.ip4_address:
@@ -673,7 +673,6 @@ def _prepare_cluster_devices_on_restart(snode):
             logger.error(f"Failed to create {jm_bdev}")
             return False
 
-        alceml_id = jm_device.uuid
         # add pass through
         pt_name = f"{jm_bdev}_PT"
         ret = rpc_client.bdev_PT_NoExcl_create(pt_name, jm_bdev)
@@ -681,9 +680,9 @@ def _prepare_cluster_devices_on_restart(snode):
             logger.error(f"Failed to create pt noexcl bdev: {pt_name}")
             return False
 
-        subsystem_nqn = snode.subsystem + ":dev:" + alceml_id
+        subsystem_nqn = snode.subsystem + ":dev:" + jm_bdev
         logger.info("creating subsystem %s", subsystem_nqn)
-        ret = rpc_client.subsystem_create(subsystem_nqn, 'sbcli-cn', alceml_id)
+        ret = rpc_client.subsystem_create(subsystem_nqn, 'sbcli-cn', jm_bdev)
         IP = None
         for iface in snode.data_nics:
             if iface.ip4_address:
@@ -705,7 +704,6 @@ def _prepare_cluster_devices_on_restart(snode):
         if not ret:
             logger.error(f"Failed to add: {pt_name} to the subsystem: {subsystem_nqn}")
             return False
-
 
     return True
 
@@ -1555,7 +1553,7 @@ def restart_storage_node(
             logger.info(f"Device not found: {db_dev.get_id()}")
             db_dev.status = NVMeDevice.STATUS_REMOVED
             removed_devices.append(db_dev)
-            distr_controller.send_dev_status_event(db_dev, db_dev.status)
+            # distr_controller.send_dev_status_event(db_dev, db_dev.status)
 
     if snode.jm_device and "serial_number" in snode.jm_device.device_data_dict:
         known_devices_sn.append(snode.jm_device.device_data_dict['serial_number'])
