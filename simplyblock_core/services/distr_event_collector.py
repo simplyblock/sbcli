@@ -29,8 +29,8 @@ def process_device_event(event):
                 if dev.cluster_device_order == storage_id:
                     if dev.status not in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_READONLY]:
                         logger.info(f"The storage device is not online, skipping. status: {dev.status}")
-                        event.status = 'skipped'
-                        return
+                        # event.status = 'skipped'
+                        # return
                     device = dev
                     break
 
