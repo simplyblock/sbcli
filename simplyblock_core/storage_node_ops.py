@@ -1596,8 +1596,8 @@ def restart_storage_node(
     snode.write_to_db(kv_store)
     storage_events.snode_status_change(snode, snode.status, old_status)
 
-    logger.info("Sending node event update")
-    distr_controller.send_node_status_event(snode, StorageNode.STATUS_ONLINE)
+    # logger.info("Sending node event update")
+    # distr_controller.send_node_status_event(snode, StorageNode.STATUS_ONLINE)
 
     # make other nodes connect to the new devices
     logger.info("Make other nodes connect to the node devices")
@@ -1617,7 +1617,7 @@ def restart_storage_node(
             logger.info(f"Device is not online: {dev.get_id()}, status: {dev.status}")
             continue
 
-        distr_controller.send_dev_status_event(dev, NVMeDevice.STATUS_ONLINE)
+        # distr_controller.send_dev_status_event(dev, NVMeDevice.STATUS_ONLINE)
         tasks_controller.add_device_mig_task(dev.get_id())
 
     # Create distribs, raid0, and lvstore and expose lvols to the fabrics
