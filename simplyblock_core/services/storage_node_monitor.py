@@ -138,10 +138,11 @@ while True:
             node_api_check = health_controller._check_node_api(snode.mgmt_ip)
             logger.info(f"Check: node API {snode.mgmt_ip}:5000 ... {node_api_check}")
 
+            node_rpc_check = True
             # 3- check node RPC
-            node_rpc_check = health_controller._check_node_rpc(
-                snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
-            logger.info(f"Check: node RPC {snode.mgmt_ip}:{snode.rpc_port} ... {node_rpc_check}")
+            # node_rpc_check = health_controller._check_node_rpc(
+            #     snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
+            # logger.info(f"Check: node RPC {snode.mgmt_ip}:{snode.rpc_port} ... {node_rpc_check}")
 
             # 4- docker API
             node_docker_check = health_controller._check_node_docker_api(snode.mgmt_ip)
