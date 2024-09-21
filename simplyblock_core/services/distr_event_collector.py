@@ -24,17 +24,14 @@ def process_device_event(event):
         storage_id = event.storage_id
 
         device = None
-        device_node = None
         for node in db_controller.get_storage_nodes():
             for dev in node.nvme_devices:
                 if dev.cluster_device_order == storage_id:
                     if dev.status not in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_READONLY]:
                         logger.info(f"The storage device is not online, skipping. status: {dev.status}")
-                        event.status = 'skipped'
-                        return
-
+                        # event.status = 'skipped'
+                        # return
                     device = dev
-                    device_node = node
                     break
 
         if not device:
@@ -50,6 +47,7 @@ def process_device_event(event):
             else:
                 logger.info(f"Removing remote storage id: {storage_id} from node: {node_id}")
                 new_remote_devices = []
+                device_node = db_controller.get_storage_node_by_id(node_id)
                 rpc_client = RPCClient(device_node.mgmt_ip, device_node.rpc_port,
                                        device_node.rpc_username, device_node.rpc_password)
                 for rem_dev in device_node.remote_devices:
