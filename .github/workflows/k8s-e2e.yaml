@@ -136,6 +136,20 @@ jobs:
         run: |
           cd $GITHUB_WORKSPACE/simplyBlockDeploy
           terraform validate
+      
+      - name: Set SBCLI_CMD based on branch and input
+        run: |
+          if [[ "${GITHUB_REF##*/}" == *"pre-release"* ]]; then
+            echo "Branch is pre-release. Setting SBCLI_CMD to sbcli-pre."
+            echo "SBCLI_CMD=sbcli-pre" >> $GITHUB_ENV
+          elif [[ "${GITHUB_REF##*/}" == "sbcli" ]]; then
+            echo "Branch is sbcli. Setting SBCLI_CMD to sbcli."
+            echo "SBCLI_CMD=sbcli" >> $GITHUB_ENV
+          else
+            echo "Setting SBCLI_CMD to input or default to sbcli-dev."
+            echo "SBCLI_CMD=${{ github.event.inputs.sbcli_cmd || 'sbcli-dev' }}" >> $GITHUB_ENV
+          fi
+        shell: bash
 
       - name: Plan Terraform Changes
         run: |
@@ -147,7 +161,9 @@ jobs:
             -var "extra_nodes=1" -var "extra_nodes_instance_type=m6gd.xlarge" \
             -var storage_nodes_ebs_size2=100 -var "region=us-east-2" \
             -var "extra_nodes_arch=arm64" \
-            -var "sbcli_cmd=${{ github.event.inputs.sbcli_cmd || 'sbcli-dev' }}" -out=tfplan
+            -var "sbcli_cmd=$SBCLI_CMD" -out=tfplan
+        env:
+          SBCLI_CMD: ${{ env.SBCLI_CMD }}
 
       - name: Apply Terraform Changes
         run: |
@@ -170,19 +186,16 @@ jobs:
       - name: Bootstrap Cluster
         run: |
           cd $GITHUB_WORKSPACE/simplyBlockDeploy
-          echo "Sleeping for 30 seconds before bootstrap-cluster"
-          sleep 30
-          ./bootstrap-cluster.sh --sbcli-cmd "${{ github.event.inputs.sbcli_cmd }}" \
+          ./bootstrap-cluster.sh --sbcli-cmd "$SBCLI_CMD" \
             --max-lvol 10 --max-snap 10 --max-prov 900G --number-of-devices 3 \
             --distr-ndcs ${{ github.event.inputs.ndcs || 1 }} \
             --distr-npcs ${{ github.event.inputs.npcs || 1 }} \
             --distr-bs ${{ github.event.inputs.bs || 4096 }} \
             --distr-chunk-bs ${{ github.event.inputs.chunk_bs || 4096 }} \
-            --k8s-snode \
             --spdk-debug
         id: bootstrap_cluster
         env:
-          SBCLI_CMD: ${{ github.event.inputs.sbcli_cmd || 'sbcli-dev' }}
+          SBCLI_CMD: ${{ env.SBCLI_CMD }}
 
       - name: Bootstrap k3s
         run: |
@@ -253,15 +266,17 @@ jobs:
       #   shell: /usr/bin/bash -e {0}
       
       - name: Sleep after Helm Installation
-        run: sleep 500
+        run: sleep 1000
 
       - name: Activate Cluster
         run: |
           ssh -i "$HOME/.ssh/${{ steps.terraform_outputs.outputs.key_name }}" -o StrictHostKeyChecking=no \
             -o ProxyCommand="ssh -o StrictHostKeyChecking=no -i \"$HOME/.ssh/${{ steps.terraform_outputs.outputs.key_name }}\" -W %h:%p ec2-user@${{ steps.terraform_outputs.outputs.bastion_public_ip }}" \
             ec2-user@${{ steps.terraform_outputs.outputs.mgmt_private_ip }} "
-          ${{ github.event.inputs.sbcli_cmd }} cluster activate ${{ steps.bootstrap_cluster.outputs.cluster_id }}
+            $SBCLI_CMD cluster activate ${{ steps.bootstrap_cluster.outputs.cluster_id }}
           "
+        env:
+          SBCLI_CMD: ${{ env.SBCLI_CMD }}
 
       - name: Record Test Start Time
         run: echo "TEST_START_TIME=$(date +%s)" >> $GITHUB_ENV
@@ -284,7 +299,7 @@ jobs:
           export AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }}
           export AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }}
           export AWS_REGION=${{ secrets.AWS_REGION }}
-          export SBCLI_CMD=${{ github.event.inputs.sbcli_cmd || 'sbcli-dev' }}
+          export SBCLI_CMD=${SBCLI_CMD}
           TESTNAME=""
           if [ -n "${{ github.event.inputs.testname }}" ]; then
             TESTNAME="--testname ${{ github.event.inputs.testname }}"
@@ -296,6 +311,8 @@ jobs:
                           --chunk_bs "${{ github.event.inputs.chunk_bs }}" \
                           --run_k8s True
                           $TESTNAME
+        env:
+          SBCLI_CMD: ${{ env.SBCLI_CMD }}
 
       - name: Record Test End Time
         if: always() 

@@ -14,6 +14,7 @@ class Cluster(BaseModel):
     STATUS_SUSPENDED = "suspended"
     STATUS_DEGRADED = "degraded"
     STATUS_UNREADY = "unready"
+    STATUS_IN_ACTIVATION = "in_activation"
 
     STATUS_CODE_MAP = {
         STATUS_ACTIVE: 1,

@@ -108,10 +108,26 @@ jobs:
         run: |
           cd $GITHUB_WORKSPACE/simplyBlockDeploy
           terraform workspace select -or-create ghiaction-sbclie2e
+
       - name: Validate Terraform Configuration
         run: |
           cd $GITHUB_WORKSPACE/simplyBlockDeploy
           terraform validate
+
+      - name: Set SBCLI_CMD based on branch and input
+        run: |
+          if [[ "${GITHUB_REF##*/}" == *"pre-release"* ]]; then
+            echo "Branch is pre-release. Setting SBCLI_CMD to sbcli-pre."
+            echo "SBCLI_CMD=sbcli-pre" >> $GITHUB_ENV
+          elif [[ "${GITHUB_REF##*/}" == "sbcli" ]]; then
+            echo "Branch is sbcli. Setting SBCLI_CMD to sbcli."
+            echo "SBCLI_CMD=sbcli" >> $GITHUB_ENV
+          else
+            echo "Setting SBCLI_CMD to input or default to sbcli-dev."
+            echo "SBCLI_CMD=${{ github.event.inputs.sbcli_cmd || 'sbcli-dev' }}" >> $GITHUB_ENV
+          fi
+        shell: bash
+
       - name: Plan Terraform Changes
         run: |
           cd $GITHUB_WORKSPACE/simplyBlockDeploy
@@ -120,7 +136,9 @@ jobs:
             -var mgmt_nodes_instance_type="m6id.xlarge" -var storage_nodes_instance_type="m6i.xlarge" \
             -var "extra_nodes=1" -var "extra_nodes_instance_type=m6id.xlarge" \
             -var storage_nodes_ebs_size2=100 -var "region=us-east-2" \
-            -var "sbcli_cmd=${{ github.event.inputs.sbcli_cmd || 'sbcli-dev' }}" -out=tfplan
+            -var "sbcli_cmd=$SBCLI_CMD" -out=tfplan
+        env:
+          SBCLI_CMD: ${{ env.SBCLI_CMD }}
 
       - name: Apply Terraform Changes
         run: |
@@ -139,7 +157,7 @@ jobs:
       - name: Bootstrap Cluster
         run: |
           cd $GITHUB_WORKSPACE/simplyBlockDeploy
-          ./bootstrap-cluster.sh --sbcli-cmd "${{ github.event.inputs.sbcli_cmd }}" \
+          ./bootstrap-cluster.sh --sbcli-cmd "$SBCLI_CMD" \
             --max-lvol 10 --max-snap 10 --max-prov 900G --number-of-devices 3 \
             --distr-ndcs ${{ github.event.inputs.ndcs || 1 }} \
             --distr-npcs ${{ github.event.inputs.npcs || 1 }} \
@@ -148,7 +166,7 @@ jobs:
             --spdk-debug
         id: bootstrap_cluster
         env:
-          SBCLI_CMD: ${{ github.event.inputs.sbcli_cmd || 'sbcli-dev' }}
+          SBCLI_CMD: ${{ env.SBCLI_CMD }}
 
       - name: Record Test Start Time
         run: echo "TEST_START_TIME=$(date +%s)" >> $GITHUB_ENV
@@ -171,12 +189,14 @@ jobs:
           export AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }}
           export AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }}
           export AWS_REGION=${{ secrets.AWS_REGION }}
-          export SBCLI_CMD=${{ github.event.inputs.sbcli_cmd || 'sbcli-dev' }}
+          export SBCLI_CMD=${SBCLI_CMD}
           TESTNAME=""
           if [ -n "${{ github.event.inputs.testname }}" ]; then
             TESTNAME="--testname ${{ github.event.inputs.testname }}"
           fi
           python3 e2e.py $TESTNAME
+        env:
+          SBCLI_CMD: ${{ env.SBCLI_CMD }}
         
       - name: Record Test End Time
         if: always() 

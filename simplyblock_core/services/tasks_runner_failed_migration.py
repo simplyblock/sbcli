@@ -35,6 +35,7 @@ def task_runner(task):
 
     if snode.status != StorageNode.STATUS_ONLINE:
         task.function_result = "node is not online, retrying"
+        task.status = JobSchedule.STATUS_NEW
         task.retry += 1
         task.write_to_db(db_controller.kv_store)
         return False
@@ -84,6 +85,7 @@ def task_runner(task):
                     task.status = JobSchedule.STATUS_DONE
                 else:
                     task.function_result = "Failed to complete migration, retrying"
+                    task.status = JobSchedule.STATUS_NEW
                     task.retry += 1
                     del task.function_params["migration"]
                 task.write_to_db(db_controller.kv_store)
@@ -91,6 +93,7 @@ def task_runner(task):
 
             elif migration_status == "failed":
                 task.function_result = "Failed to complete migration, retrying"
+                task.status = JobSchedule.STATUS_NEW
                 task.retry += 1
                 del task.function_params["migration"]
                 task.write_to_db(db_controller.kv_store)

@@ -345,6 +345,7 @@ def cluster_activate(cl_id):
     if cluster.status != Cluster.STATUS_UNREADY:
         logger.error(f"Failed to activate cluster, Cluster is not in an UNREADY state")
         return False
+    set_cluster_status(cl_id, Cluster.STATUS_IN_ACTIVATION)
     snodes = db_controller.get_storage_nodes_by_cluster_id(cl_id)
     online_nodes = []
     dev_count = 0
@@ -358,6 +359,7 @@ def cluster_activate(cl_id):
     minimum_devices = cluster.distr_ndcs + cluster.distr_npcs + 1
     if dev_count < minimum_devices:
         logger.error(f"Failed to activate cluster, No enough online device.. Minimum is {minimum_devices}")
+        set_cluster_status(cl_id, Cluster.STATUS_UNREADY)
         return False
     records = db_controller.get_cluster_capacity(cluster)
     max_size = records[0]['size_total']
@@ -369,6 +371,7 @@ def cluster_activate(cl_id):
         logger.info("Sending cluster map")
         ret = distr_controller.send_cluster_map_to_node(snode)
         if not ret:
+            set_cluster_status(cl_id, Cluster.STATUS_UNREADY)
             return False, "Failed to send cluster map"
         time.sleep(3)
         logger.info("Sending cluster event updates")
@@ -385,6 +388,7 @@ def cluster_activate(cl_id):
                                               cluster.distr_chunk_bs, cluster.page_size_in_blocks, max_size, snodes)
         if not ret:
             logger.error("Failed to activate cluster")
+            set_cluster_status(cl_id, Cluster.STATUS_UNREADY)
             return False
 
     cluster.status = Cluster.STATUS_ACTIVE

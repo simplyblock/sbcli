@@ -19,20 +19,21 @@ bp = Blueprint("lvol", __name__)
 db_controller = kv_store.DBController()
 
 
-@bp.route('/lvol', defaults={'uuid': None, "cluster_id": None}, methods=['GET'])
-@bp.route('/lvol/<string:uuid>', defaults={"cluster_id": None}, methods=['GET'])
-@bp.route('/lvol/cluster_id/<string:cluster_id>', defaults={'uuid': None,}, methods=['GET'])
-def list_lvols(uuid, cluster_id):
+@bp.route('/lvol', defaults={'uuid': None}, methods=['GET'])
+@bp.route('/lvol/<string:uuid>', methods=['GET'])
+def list_lvols(uuid):
+    cluster_id = utils.get_cluster_id(request)
+    lvols = []
     if uuid:
         lvol = db_controller.get_lvol_by_id(uuid)
         if lvol:
-            lvols = [lvol]
-        else:
+            node = db_controller.get_storage_node_by_id(lvol.node_id)
+            if node.cluster_id == cluster_id:
+                lvols = [lvol]
+
+        if not lvols:
             return utils.get_response_error(f"LVol not found: {uuid}", 404)
-    elif cluster_id:
-        lvols = db_controller.get_lvols(cluster_id)
     else:
-        cluster_id = utils.get_cluster_id(request)
         lvols = db_controller.get_lvols(cluster_id)
     data = []
     for lvol in lvols:

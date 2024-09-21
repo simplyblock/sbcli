@@ -32,6 +32,7 @@ def task_runner(task):
 
     if snode.status != StorageNode.STATUS_ONLINE:
         task.function_result = "node is not online, retrying"
+        task.status = JobSchedule.STATUS_NEW
         task.retry += 1
         task.write_to_db(db_controller.kv_store)
         return False
@@ -46,6 +47,7 @@ def task_runner(task):
 
         if not all_devs_online:
             task.function_result = "Some devs are offline, retrying"
+            task.status = JobSchedule.STATUS_NEW
             task.retry += 1
             task.write_to_db(db_controller.kv_store)
             return False
