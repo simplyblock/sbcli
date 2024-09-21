@@ -1158,6 +1158,11 @@ def delete_storage_node(node_id):
         logger.error(f"Node must be in removed status")
         return False
 
+    task_id = tasks_controller.get_active_node_task(snode.cluster_id, snode.get_id())
+    if task_id:
+        logger.error(f"Task found: {task_id}, can not delete storage node")
+        return False
+
     snode.remove(db_controller.kv_store)
 
     for lvol in db_controller.get_lvols(snode.cluster_id):
