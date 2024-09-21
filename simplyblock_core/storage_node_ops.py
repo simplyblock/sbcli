@@ -2547,7 +2547,7 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
     snode.raid = raid_device
     db_controller = DBController(KVStore())
     snode.write_to_db(db_controller.kv_store)
-    time.sleep(30)
+    time.sleep(3)
     return True
 
 

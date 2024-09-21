@@ -368,22 +368,6 @@ def cluster_activate(cl_id):
         if snode.lvstore:
             logger.info(f"Node {snode.get_id()} already has lvstore {snode.lvstore}... skipping")
             continue
-        logger.info("Sending cluster map")
-        ret = distr_controller.send_cluster_map_to_node(snode)
-        if not ret:
-            set_cluster_status(cl_id, Cluster.STATUS_UNREADY)
-            return False, "Failed to send cluster map"
-        time.sleep(3)
-        logger.info("Sending cluster event updates")
-        distr_controller.send_node_status_event(snode, StorageNode.STATUS_ONLINE)
-        for dev in snode.nvme_devices:
-            distr_controller.send_dev_status_event(dev, NVMeDevice.STATUS_ONLINE)
-        storage_events.snode_add(snode)
-
-    for snode in snodes:
-        if snode.lvstore:
-            logger.info(f"Node {snode.get_id()} already has lvstore {snode.lvstore}... skipping")
-            continue
         ret = storage_node_ops.create_lvstore(snode, cluster.distr_ndcs, cluster.distr_npcs, cluster.distr_bs,
                                               cluster.distr_chunk_bs, cluster.page_size_in_blocks, max_size)
         if not ret:
