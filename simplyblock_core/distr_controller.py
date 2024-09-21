@@ -87,17 +87,20 @@ def get_distr_cluster_map(snodes, target_node):
             name = None
             if snode.get_id() == target_node.get_id():
                 name = dev.alceml_bdev
+                dev_status = dev.status
             else:
                 for dev2 in target_node.remote_devices:
                     if dev2.get_id() == dev.get_id():
                         name = dev2.remote_bdev
+                        dev_status = dev.status
                         break
             if not name:
                 name = f"remote_{dev.alceml_bdev}n1"
+                dev_status = NVMeDevice.STATUS_UNAVAILABLE
             dev_map[dev.cluster_device_order] = {
                 "UUID": dev.get_id(),
                 "bdev_name": name,
-                "status": dev.status,
+                "status": dev_status,
                 "physical_label": dev.physical_label
             }
             dev_w_map.append({
