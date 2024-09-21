@@ -123,3 +123,6 @@ class SNodeClient:
     def bind_device_to_spdk(self, device_pci):
         params = {"device_pci": device_pci}
         return self._request("POST", "bind_device_to_spdk", params)
+
+    def spdk_process_is_up(self):
+        return self._request("GET", "spdk_process_is_up")
