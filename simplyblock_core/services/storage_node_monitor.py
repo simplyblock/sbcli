@@ -138,6 +138,10 @@ while True:
             node_api_check = health_controller._check_node_api(snode.mgmt_ip)
             logger.info(f"Check: node API {snode.mgmt_ip}:5000 ... {node_api_check}")
 
+            # 3- check spdk_process
+            spdk_process = health_controller._check_spdk_process_up(snode.mgmt_ip)
+            logger.info(f"Check: spdk process {snode.mgmt_ip}:5000 ... {spdk_process}")
+
             node_rpc_check = True
             # 3- check node RPC
             # node_rpc_check = health_controller._check_node_rpc(
@@ -148,7 +152,7 @@ while True:
             node_docker_check = health_controller._check_node_docker_api(snode.mgmt_ip)
             logger.info(f"Check: node docker API {snode.mgmt_ip}:2375 ... {node_docker_check}")
 
-            is_node_online = ping_check and node_api_check and node_rpc_check and node_docker_check
+            is_node_online = ping_check and node_api_check and node_rpc_check and node_docker_check and spdk_process
             if is_node_online:
                 set_node_online(snode)
             else:
