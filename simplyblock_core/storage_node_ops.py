@@ -1614,8 +1614,6 @@ def restart_storage_node(
     snode.write_to_db(kv_store)
     storage_events.snode_status_change(snode, snode.status, old_status)
 
-    # logger.info("Sending node event update")
-    # distr_controller.send_node_status_event(snode, StorageNode.STATUS_ONLINE)
 
     # make other nodes connect to the new devices
     logger.info("Make other nodes connect to the node devices")
@@ -1627,7 +1625,8 @@ def restart_storage_node(
         node.remote_jm_devices = _connect_to_remote_jm_devs(node)
         node.write_to_db(kv_store)
 
-        time.sleep(3)
+        logger.info(f"Sending cluster map to node {node.get_id()}")
+        distr_controller.send_cluster_map_to_node(node)
 
     logger.info("Starting migration tasks")
     for dev in snode.nvme_devices:
