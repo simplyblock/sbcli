@@ -627,6 +627,7 @@ def _prepare_cluster_devices_on_restart(snode):
         if not dev:
             logger.error(f"Failed to create dev stack {nvme.get_id()}")
             return False
+        nvme.status = NVMeDevice.STATUS_ONLINE
         device_events.device_restarted(dev)
 
     # prepare JM device
@@ -912,7 +913,9 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
         logger.error(f"Failed to Join docker swarm: {err}")
         return False
 
-    rpc_user, rpc_pass = utils.generate_rpc_user_and_pass()
+    #rpc_user, rpc_pass = utils.generate_rpc_user_and_pass()
+    rpc_user = "rpc_username"
+    rpc_pass = "rpc_password"
     mgmt_ip = node_info['network_interface'][iface_name]['ip']
 
     logger.info("Deploying SPDK")
@@ -1565,6 +1568,8 @@ def restart_storage_node(
             new_devices.append(dev)
             snode.nvme_devices.append(dev)
 
+    snode.write_to_db(kv_store)
+
     if node_ip:
         # prepare devices on new node
         if snode.num_partitions_per_dev == 0 or snode.jm_percent == 0:
@@ -1580,6 +1585,8 @@ def restart_storage_node(
         if not ret:
             logger.error("Failed to prepare cluster devices")
             # return False
+
+    snode.write_to_db(kv_store)
 
     logger.info("Connecting to remote devices")
     remote_devices = _connect_to_remote_devs(snode)
