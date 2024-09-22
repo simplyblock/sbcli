@@ -749,7 +749,7 @@ class RPCClient:
             "raid_bdev": raid_bdev,
             "base_bdev": base_bdev,
         }
-        return self._request("bdev_raid_add_base_bdev", params)
+        return self._request("bdev_raid_remove_base_bdev", params)
 
     def bdev_lvol_get_lvstores(self, name):
         params = {"lvs_name": name}

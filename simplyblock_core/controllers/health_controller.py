@@ -70,7 +70,7 @@ def _check_node_rpc(rpc_ip, rpc_port, rpc_username, rpc_password):
     try:
         rpc_client = RPCClient(
             rpc_ip, rpc_port, rpc_username, rpc_password,
-            timeout=30, retry=1)
+            timeout=60, retry=3)
         ret = rpc_client.get_version()
         if ret:
             logger.debug(f"SPDK version: {ret['version']}")
@@ -84,9 +84,9 @@ def _check_node_api(ip):
     try:
         snode_api = SNodeClient(f"{ip}:5000", timeout=3, retry=1)
         logger.debug(f"Node API={ip}:5000")
-        node_info, _ = snode_api.info()
-        if node_info:
-            logger.debug(node_info)
+        is_up, _ = snode_api.spdk_process_is_up()
+        logger.debug(f"SPDK is {is_up}")
+        if is_up:
             return True
     except Exception as e:
         logger.debug(e)

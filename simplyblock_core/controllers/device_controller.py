@@ -204,6 +204,7 @@ def restart_device(device_id, force=False):
             return False
 
     logger.info(f"Restarting device {device_id}")
+    device_set_retries_exhausted(device_id, True)
     device_set_unavailable(device_id)
 
     ret = _def_create_device_stack(device_obj, snode, force=force)
@@ -261,7 +262,7 @@ def set_device_testing_mode(device_id, mode):
     if not snode:
         logger.error("node not found")
         return False
-    if not snode.nable_test_device:
+    if not snode.enable_test_device:
         logger.error("Test device is disabled on this storage node")
         return False
 

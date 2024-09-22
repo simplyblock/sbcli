@@ -154,11 +154,6 @@ while True:
             else:
                 set_node_offline(snode)
 
-            if not ping_check and not node_rpc_check:
-                # node is dead, set devices offline
-                for dev in snode.nvme_devices:
-                    device_controller.device_set_unavailable(dev.get_id())
-
         update_cluster_status(cluster_id)
 
     logger.info(f"Sleeping for {constants.NODE_MONITOR_INTERVAL_SEC} seconds")

@@ -721,7 +721,7 @@ def _connect_to_remote_devs(this_node):
     # connect to remote devs
     snodes = db_controller.get_storage_nodes_by_cluster_id(this_node.cluster_id)
     for node_index, node in enumerate(snodes):
-        if node.get_id() == this_node.get_id() or node.status == node.STATUS_OFFLINE:
+        if node.get_id() == this_node.get_id() or node.status != StorageNode.STATUS_ONLINE:
             continue
         for index, dev in enumerate(node.nvme_devices):
             if dev.status != NVMeDevice.STATUS_ONLINE:
@@ -1521,7 +1521,7 @@ def restart_storage_node(
             logger.info(f"Device not found: {db_dev.get_id()}")
             db_dev.status = NVMeDevice.STATUS_REMOVED
             removed_devices.append(db_dev)
-            distr_controller.send_dev_status_event(db_dev, db_dev.status)
+            # distr_controller.send_dev_status_event(db_dev, db_dev.status)
 
     if snode.jm_device and "serial_number" in snode.jm_device.device_data_dict:
         known_devices_sn.append(snode.jm_device.device_data_dict['serial_number'])
@@ -1533,6 +1533,7 @@ def restart_storage_node(
             new_devices.append(dev)
             snode.nvme_devices.append(dev)
 
+    snode.write_to_db(db_controller.kv_store)
     if node_ip:
         # prepare devices on new node
         if snode.num_partitions_per_dev == 0 or snode.jm_percent == 0:
@@ -1551,7 +1552,9 @@ def restart_storage_node(
 
     logger.info("Connecting to remote devices")
     remote_devices = _connect_to_remote_devs(snode)
+    snode = db_controller.get_storage_node_by_id(node_id)
     snode.remote_devices = remote_devices
+    snode.write_to_db(db_controller.kv_store)
 
     # make other nodes connect to the new devices
     logger.info("Make other nodes connect to the node devices")
@@ -1592,6 +1595,7 @@ def restart_storage_node(
         time.sleep(3)
 
     logger.info("Setting node status to Online")
+    snode = db_controller.get_storage_node_by_id(node_id)
     old_status = snode.status
     snode.status = StorageNode.STATUS_ONLINE
     snode.write_to_db(kv_store)
@@ -1612,13 +1616,16 @@ def restart_storage_node(
 
     # Create distribs, raid0, and lvstore and expose lvols to the fabrics
     if snode.lvstore_stack:
+        temp_rpc_client = RPCClient(
+                snode.mgmt_ip, snode.rpc_port,
+                snode.rpc_username, snode.rpc_password)
         ret = recreate_lvstore(snode)
         if not ret:
             return False, "Failed to create distribs on node"
         time.sleep(1)
-        ret = rpc_client.bdev_examine(snode.raid)
+        ret = temp_rpc_client.bdev_examine(snode.raid)
         time.sleep(1)
-        ret = rpc_client.bdev_wait_for_examine()
+        ret = temp_rpc_client.bdev_wait_for_examine()
         time.sleep(1)
 
         #logger.info("Sending cluster map to current node")
@@ -1626,11 +1633,9 @@ def restart_storage_node(
         #if not ret:
         #    return False, "Failed to send cluster map"
         #time.sleep(3)
-        temp_rpc_client = RPCClient(
-                snode.mgmt_ip, snode.rpc_port,
-                snode.rpc_username, snode.rpc_password)
-        temp_rpc_client.bdev_examine(snode.raid)
-        time.sleep(3)
+
+        # temp_rpc_client.bdev_examine(snode.raid)
+        # time.sleep(3)
 
         if snode.lvols:
             for lvol_id in snode.lvols:
