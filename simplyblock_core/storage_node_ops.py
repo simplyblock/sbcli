@@ -720,19 +720,25 @@ def _connect_to_remote_devs(this_node):
     # connect to remote devs
     snodes = db_controller.get_storage_nodes_by_cluster_id(this_node.cluster_id)
     for node_index, node in enumerate(snodes):
-        if node.get_id() == this_node.get_id() or node.status == node.STATUS_OFFLINE:
+        if node.get_id() == this_node.get_id() or node.status != StorageNode.STATUS_ONLINE:
             continue
+        logger.info(f"Connecting to node {node.get_id()}")
         for index, dev in enumerate(node.nvme_devices):
             if dev.status != NVMeDevice.STATUS_ONLINE:
                 logger.debug(f"Device is not online: {dev.get_id()}, status: {dev.status}")
                 continue
+
             name = f"remote_{dev.alceml_bdev}"
-            logger.info(f"Connecting to {name}")
-            ret = rpc_client.bdev_nvme_attach_controller_tcp(name, dev.nvmf_nqn, dev.nvmf_ip, dev.nvmf_port)
-            if not ret:
-                logger.error(f"Failed to connect to device: {dev.get_id()}")
-                continue
-            dev.remote_bdev = f"{name}n1"
+            bdev_name = f"{name}n1"
+            ret = rpc_client.get_bdevs(bdev_name)
+            if ret:
+                logger.info(f"bdev found {bdev_name}")
+            else:
+                ret = rpc_client.bdev_nvme_attach_controller_tcp(name, dev.nvmf_nqn, dev.nvmf_ip, dev.nvmf_port)
+                if not ret:
+                    logger.error(f"Failed to connect to device: {dev.get_id()}")
+                    continue
+            dev.remote_bdev = bdev_name
             remote_devices.append(dev)
     return remote_devices
 
@@ -748,18 +754,25 @@ def _connect_to_remote_jm_devs(this_node):
     # connect to remote devs
     snodes = db_controller.get_storage_nodes_by_cluster_id(this_node.cluster_id)
     for node_index, node in enumerate(snodes):
-        if node.get_id() == this_node.get_id() or node.status == node.STATUS_OFFLINE:
+        if node.get_id() == this_node.get_id() or node.status != StorageNode.STATUS_ONLINE:
             continue
 
+        logger.info(f"Connecting to node {node.get_id()}")
         if node.jm_device:
             name = f"remote_{node.jm_device.jm_bdev}"
-            logger.info(f"Connecting {this_node.get_id()} to {name}")
-            ret = rpc_client.bdev_nvme_attach_controller_tcp(
-                name, node.jm_device.nvmf_nqn, node.jm_device.nvmf_ip, node.jm_device.nvmf_port)
-            if not ret:
-                logger.warning(f"failed to connect to remote JM {node.jm_device.jm_bdev}")
+            bdev_name = f"{name}n1"
+            ret = rpc_client.get_bdevs(bdev_name)
+            if ret:
+                logger.info(f"bdev found {bdev_name}")
+            else:
+                logger.info(f"Connecting {this_node.get_id()} to {name}")
+                ret = rpc_client.bdev_nvme_attach_controller_tcp(
+                    name, node.jm_device.nvmf_nqn, node.jm_device.nvmf_ip, node.jm_device.nvmf_port)
+                if not ret:
+                    logger.error(f"failed to connect to remote JM {node.jm_device.jm_bdev}")
+                    continue
 
-            node.jm_device.remote_bdev = f"{name}n1"
+            node.jm_device.remote_bdev = bdev_name
             remote_devices.append(node.jm_device)
 
     return remote_devices
