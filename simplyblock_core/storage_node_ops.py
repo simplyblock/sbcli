@@ -2509,6 +2509,7 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
     if len(nodes) > 3:
         nodes = nodes[:3]
     jm_names = lvol_controller.get_ha_jm_names(snode, nodes)
+    jm_vuid = utils.get_random_vuid()
 
     for _ in range(snode.number_of_distribs):
         distrib_vuid = utils.get_random_vuid()
@@ -2522,6 +2523,7 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
                     "params": {
                         "name": distrib_name,
                         "jm_names": jm_names,
+                        "jm_vuid": jm_vuid,
                         "vuid": distrib_vuid,
                         "ndcs": ndcs,
                         "npcs": npcs,
