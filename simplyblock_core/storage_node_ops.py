@@ -2514,8 +2514,7 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
     size = max_size // snode.number_of_distribs
     distr_page_size = (ndcs + npcs) * page_size_in_blocks
     cluster_sz = ndcs * page_size_in_blocks
-    strip_size_kb = int((ndcs + npcs) * snode.number_of_distribs * 64)
-
+    strip_size_kb = int((ndcs + npcs) * 64)
     strip_size_kb = utils.nearest_upper_power_of_2(strip_size_kb)
     for _ in range(snode.number_of_distribs):
         distrib_vuid = utils.get_random_vuid()
