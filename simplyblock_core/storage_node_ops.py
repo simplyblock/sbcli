@@ -254,6 +254,7 @@ def _create_jm_stack_on_raid(rpc_client, jm_nvme_bdevs, snode, after_restart):
     alceml_name = f"alceml_jm_{snode.get_id()}"
 
     nvme_bdev = raid_bdev
+    test_name = ""
     if snode.enable_test_device:
         test_name = f"{raid_bdev}_test"
         ret = rpc_client.bdev_passtest_create(test_name, raid_bdev)
@@ -330,6 +331,7 @@ def _create_jm_stack_on_raid(rpc_client, jm_nvme_bdevs, snode, after_restart):
         'jm_nvme_bdev_list': jm_nvme_bdevs,
         'raid_bdev': raid_bdev,
         'alceml_bdev': alceml_name,
+        'testing_bdev': test_name,
         'jm_bdev': jm_bdev,
 
         'pt_bdev': pt_name,
@@ -345,6 +347,7 @@ def _create_jm_stack_on_device(rpc_client, nvme, snode, after_restart):
     logger.info(f"adding {alceml_name}")
 
     nvme_bdev = nvme.nvme_bdev
+    test_name = ""
     if snode.enable_test_device:
         test_name = f"{nvme.nvme_bdev}_test"
         ret = rpc_client.bdev_passtest_create(test_name, nvme.nvme_bdev)
@@ -420,6 +423,7 @@ def _create_jm_stack_on_device(rpc_client, nvme, snode, after_restart):
         "serial_number": nvme.serial_number,
         "device_data_dict": nvme.to_dict(),
         'jm_bdev': jm_bdev,
+        'testing_bdev': test_name,
 
         'pt_bdev': pt_name,
         'nvmf_nqn': subsystem_nqn,
@@ -667,12 +671,11 @@ def _prepare_cluster_devices_on_restart(snode):
     else:
         nvme_bdev = jm_device.nvme_bdev
         if snode.enable_test_device:
-            test_name = f"{jm_device.nvme_bdev}_test"
-            ret = rpc_client.bdev_passtest_create(test_name, jm_device.nvme_bdev)
+            ret = rpc_client.bdev_passtest_create(jm_device.testing_bdev, jm_device.nvme_bdev)
             if not ret:
-                logger.error(f"Failed to create passtest bdev {test_name}")
+                logger.error(f"Failed to create passtest bdev {jm_device.testing_bdev}")
                 return False
-            nvme_bdev = test_name
+            nvme_bdev = jm_device.testing_bdev
         alceml_cpu_mask = ""
         alceml_worker_cpu_mask = ""
 
