@@ -379,7 +379,6 @@ class RPCClient:
             "name": name,
             "jm_names": ",".join(jm_names),
             "vuid": vuid,
-            "jm_vuid": jm_vuid,
             "ndcs": ndcs,
             "npcs": npcs,
             "num_blocks": num_blocks,
