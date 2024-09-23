@@ -252,6 +252,16 @@ def _create_jm_stack_on_raid(rpc_client, jm_nvme_bdevs, snode, after_restart):
         logger.error(f"Failed to create raid_jm_{snode.get_id()}")
         return False
     alceml_name = f"alceml_jm_{snode.get_id()}"
+
+    nvme_bdev = raid_bdev
+    test_name = ""
+    if snode.enable_test_device:
+        test_name = f"{raid_bdev}_test"
+        ret = rpc_client.bdev_passtest_create(test_name, raid_bdev)
+        if not ret:
+            logger.error(f"Failed to create passtest bdev {test_name}")
+            return False
+        nvme_bdev = test_name
     pba_init_mode = 3
     if after_restart:
         pba_init_mode = 1
@@ -264,7 +274,7 @@ def _create_jm_stack_on_raid(rpc_client, jm_nvme_bdevs, snode, after_restart):
         alceml_worker_cpu_mask = utils.decimal_to_hex_power_of_2(snode.alceml_worker_cpu_cores[snode.alceml_worker_cpu_index])
         snode.alceml_worker_cpu_index = (snode.alceml_worker_cpu_index + 1) % len(snode.alceml_worker_cpu_cores)
 
-    ret = rpc_client.bdev_alceml_create(alceml_name, raid_bdev, str(uuid.uuid4()), pba_init_mode=pba_init_mode,
+    ret = rpc_client.bdev_alceml_create(alceml_name, nvme_bdev, str(uuid.uuid4()), pba_init_mode=pba_init_mode,
                                         alceml_cpu_mask=alceml_cpu_mask, alceml_worker_cpu_mask=alceml_worker_cpu_mask)
     if not ret:
         logger.error(f"Failed to create alceml bdev: {alceml_name}")
@@ -321,6 +331,7 @@ def _create_jm_stack_on_raid(rpc_client, jm_nvme_bdevs, snode, after_restart):
         'jm_nvme_bdev_list': jm_nvme_bdevs,
         'raid_bdev': raid_bdev,
         'alceml_bdev': alceml_name,
+        'testing_bdev': test_name,
         'jm_bdev': jm_bdev,
 
         'pt_bdev': pt_name,
@@ -335,6 +346,15 @@ def _create_jm_stack_on_device(rpc_client, nvme, snode, after_restart):
     alceml_name = device_controller.get_alceml_name(alceml_id)
     logger.info(f"adding {alceml_name}")
 
+    nvme_bdev = nvme.nvme_bdev
+    test_name = ""
+    if snode.enable_test_device:
+        test_name = f"{nvme.nvme_bdev}_test"
+        ret = rpc_client.bdev_passtest_create(test_name, nvme.nvme_bdev)
+        if not ret:
+            logger.error(f"Failed to create passtest bdev {test_name}")
+            return False
+        nvme_bdev = test_name
     pba_init_mode = 3
     if after_restart:
         pba_init_mode = 1
@@ -347,7 +367,7 @@ def _create_jm_stack_on_device(rpc_client, nvme, snode, after_restart):
         alceml_worker_cpu_mask = utils.decimal_to_hex_power_of_2(snode.alceml_worker_cpu_cores[snode.alceml_worker_cpu_index])
         snode.alceml_worker_cpu_index = (snode.alceml_worker_cpu_index + 1) % len(snode.alceml_worker_cpu_cores)
 
-    ret = rpc_client.bdev_alceml_create(alceml_name, nvme.nvme_bdev, alceml_id, pba_init_mode=pba_init_mode,
+    ret = rpc_client.bdev_alceml_create(alceml_name, nvme_bdev, alceml_id, pba_init_mode=pba_init_mode,
                                             alceml_cpu_mask=alceml_cpu_mask, alceml_worker_cpu_mask=alceml_worker_cpu_mask)
 
     if not ret:
@@ -403,6 +423,7 @@ def _create_jm_stack_on_device(rpc_client, nvme, snode, after_restart):
         "serial_number": nvme.serial_number,
         "device_data_dict": nvme.to_dict(),
         'jm_bdev': jm_bdev,
+        'testing_bdev': test_name,
 
         'pt_bdev': pt_name,
         'nvmf_nqn': subsystem_nqn,
@@ -649,7 +670,13 @@ def _prepare_cluster_devices_on_restart(snode):
 
 
     else:
-
+        nvme_bdev = jm_device.nvme_bdev
+        if snode.enable_test_device:
+            ret = rpc_client.bdev_passtest_create(jm_device.testing_bdev, jm_device.nvme_bdev)
+            if not ret:
+                logger.error(f"Failed to create passtest bdev {jm_device.testing_bdev}")
+                return False
+            nvme_bdev = jm_device.testing_bdev
         alceml_cpu_mask = ""
         alceml_worker_cpu_mask = ""
 
@@ -661,7 +688,7 @@ def _prepare_cluster_devices_on_restart(snode):
             alceml_worker_cpu_mask = utils.decimal_to_hex_power_of_2(snode.alceml_worker_cpu_cores[snode.alceml_worker_cpu_index])
             snode.alceml_worker_cpu_index = (snode.alceml_worker_cpu_index + 1) % len(snode.alceml_worker_cpu_cores)
 
-        ret = rpc_client.bdev_alceml_create(jm_device.alceml_bdev, jm_device.nvme_bdev, jm_device.get_id(),
+        ret = rpc_client.bdev_alceml_create(jm_device.alceml_bdev, nvme_bdev, jm_device.get_id(),
                                                 pba_init_mode=1, alceml_cpu_mask=alceml_cpu_mask, alceml_worker_cpu_mask=alceml_worker_cpu_mask)
 
         if not ret:
@@ -1581,8 +1608,7 @@ def restart_storage_node(
             new_devices.append(dev)
             snode.nvme_devices.append(dev)
 
-    snode.write_to_db(kv_store)
-
+    snode.write_to_db(db_controller.kv_store)
     if node_ip:
         # prepare devices on new node
         if snode.num_partitions_per_dev == 0 or snode.jm_percent == 0:
@@ -1603,7 +1629,9 @@ def restart_storage_node(
 
     logger.info("Connecting to remote devices")
     remote_devices = _connect_to_remote_devs(snode)
+    snode = db_controller.get_storage_node_by_id(node_id)
     snode.remote_devices = remote_devices
+    snode.write_to_db(db_controller.kv_store)
 
     logger.info("Connecting to remote JMs")
     snode.remote_jm_devices = _connect_to_remote_jm_devs(snode)
@@ -1639,13 +1667,16 @@ def restart_storage_node(
 
     # Create distribs, raid0, and lvstore and expose lvols to the fabrics
     if snode.lvstore_stack:
+        temp_rpc_client = RPCClient(
+                snode.mgmt_ip, snode.rpc_port,
+                snode.rpc_username, snode.rpc_password)
         ret = recreate_lvstore(snode)
         if not ret:
             return False, "Failed to create distribs on node"
         time.sleep(1)
-        ret = rpc_client.bdev_examine(snode.raid)
+        ret = temp_rpc_client.bdev_examine(snode.raid)
         time.sleep(1)
-        ret = rpc_client.bdev_wait_for_examine()
+        ret = temp_rpc_client.bdev_wait_for_examine()
         time.sleep(1)
 
         #logger.info("Sending cluster map to current node")
@@ -1653,11 +1684,9 @@ def restart_storage_node(
         #if not ret:
         #    return False, "Failed to send cluster map"
         #time.sleep(3)
-        temp_rpc_client = RPCClient(
-                snode.mgmt_ip, snode.rpc_port,
-                snode.rpc_username, snode.rpc_password)
-        temp_rpc_client.bdev_examine(snode.raid)
-        time.sleep(3)
+
+        # temp_rpc_client.bdev_examine(snode.raid)
+        # time.sleep(3)
 
         if snode.lvols:
             for lvol_id in snode.lvols:
@@ -2557,7 +2586,7 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
             ]
         )
         distrib_list.append(distrib_name)
-    raid_device = f"raid_0{utils.get_random_vuid()}"
+    raid_device = f"raid0_{utils.get_random_vuid()}"
     lvstore_stack.extend(
         [
             {

@@ -142,6 +142,13 @@ class CLIWrapper:
             'io_error_on_unmap', 'io_error_on_all', 'discard_io_all',
             'hotplug_removal'], default='full_pass_through')
 
+        sub_command = self.add_sub_command(subparser, "jm-device-testing-mode", 'Set device testing mode')
+        sub_command.add_argument("device_id", help='Device UUID')
+        sub_command.add_argument("mode", help='Testing mode', choices=[
+            'full_pass_through', 'io_error_on_read', 'io_error_on_write',
+            'io_error_on_unmap', 'io_error_on_all', 'discard_io_all',
+            'hotplug_removal'], default='full_pass_through')
+
         sub_command = self.add_sub_command(subparser, "get-device", 'Get storage device by id')
         sub_command.add_argument("device_id", help='the devices\'s UUID')
 
@@ -770,6 +777,8 @@ class CLIWrapper:
 
             elif sub_command == "device-testing-mode":
                 ret = device_controller.set_device_testing_mode(args.device_id, args.mode)
+            elif sub_command == "jm-device-testing-mode":
+                ret = device_controller.set_jm_device_testing_mode(args.device_id, args.mode)
 
             elif sub_command == "remove-device":
                 ret = device_controller.device_remove(args.device_id, args.force)
