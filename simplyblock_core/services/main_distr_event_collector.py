@@ -76,28 +76,27 @@ def process_device_event(event):
 
 def process_lvol_event(event):
     if event.message in ["error_open", 'error_read', "error_write", "error_unmap"]:
-        vuid = event.object_dict['vuid']
-        lvol = None
+        # vuid = event.object_dict['vuid']
+        node_id = event.node_id
+        lvols = []
         for lv in db_controller.get_lvols():  # pass
-            if lv.vuid == vuid:
-                lvol = lv
-                break
+            if lv.node_id == node_id:
+                lvols.append(lv)
 
-        if not lvol:
-            logger.error(f"LVol with vuid {vuid} not found")
-            event.status = 'lvol_not_found'
+        if not lvols:
+            logger.error(f"LVols on node {node_id} not found")
+            event.status = 'lvols_not_found'
         else:
-            lvol.io_error = True
-            if lvol.status == LVol.STATUS_ONLINE:
-                logger.info("Setting LVol to offline")
-                old_status = lvol.status
-                lvol.status = LVol.STATUS_OFFLINE
-                lvol.write_to_db(db_controller.kv_store)
-                lvol_events.lvol_status_change(lvol, lvol.status, old_status, caused_by="monitor")
-                lvol_events.lvol_io_error_change(lvol, True, False, caused_by="monitor")
-                event.status = 'processed'
-            else:
-                event.status = 'skipped'
+            for lvol in lvols:
+                if lvol.status == LVol.STATUS_ONLINE:
+                    logger.info("Setting LVol to offline")
+                    lvol.io_error = True
+                    old_status = lvol.status
+                    lvol.status = LVol.STATUS_OFFLINE
+                    lvol.write_to_db(db_controller.kv_store)
+                    lvol_events.lvol_status_change(lvol, lvol.status, old_status, caused_by="monitor")
+                    lvol_events.lvol_io_error_change(lvol, True, False, caused_by="monitor")
+            event.status = 'processed'
     else:
         logger.error(f"Unknown LVol event message: {event.message}")
         event.status = "event_unknown"
