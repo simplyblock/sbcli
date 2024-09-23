@@ -2633,7 +2633,7 @@ def _create_bdev_stack(snode, lvstore_stack=None):
 
         elif type == "bdev_raid":
             distribs_list = bdev["distribs_list"]
-            strip_size_kb = bdev["strip_size_kb"]
+            strip_size_kb = params["strip_size_kb"]
             ret = rpc_client.bdev_raid_create(name, distribs_list, strip_size_kb)
         else:
             logger.debug(f"Unknown BDev type: {type}")
