@@ -173,7 +173,7 @@ while True:
                 if snode.jm_device.status in [JMDevice.STATUS_ONLINE, JMDevice.STATUS_UNAVAILABLE]:
                     ret = health_controller.check_jm_device(snode.jm_device.get_id())
                     if ret:
-                        logger.error(f"JM bdev is online: {snode.jm_device.get_id()}")
+                        logger.info(f"JM bdev is online: {snode.jm_device.get_id()}")
                         if snode.jm_device.status != JMDevice.STATUS_ONLINE:
                             device_controller.set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_ONLINE)
                     else:
