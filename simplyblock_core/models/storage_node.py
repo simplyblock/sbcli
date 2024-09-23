@@ -108,6 +108,7 @@ class StorageNode(BaseModel):
         "num_partitions_per_dev": {"type": int, "default": 1},
         "jm_percent": {"type": int, "default": 3},
         "jm_device": {"type": JMDevice, "default": None},
+        "remote_jm_devices": {"type": List[JMDevice], 'default': []},
 
         "namespace": {"type": str, "default": ""},
 

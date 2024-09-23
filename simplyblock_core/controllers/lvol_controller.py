@@ -169,6 +169,21 @@ def get_jm_names(snode):
     return [snode.jm_device.jm_bdev] if snode.jm_device else []
 
 
+def get_ha_jm_names(current_node, snode_list):
+    jm_list = []
+    if current_node.jm_device:
+        jm_list.append(current_node.jm_device.jm_bdev)
+    else:
+        jm_list.append("JM_LOCAL")
+
+    for node in snode_list:
+        if node.get_id() == current_node.get_id():
+            continue
+        name = f"remote_{node.jm_device.jm_bdev}n1"
+        jm_list.append(name)
+    return jm_list[:3]
+
+
 def _get_next_3_nodes(cluster_id, lvol_size=0):
     snodes = db_controller.get_storage_nodes_by_cluster_id(cluster_id)
     online_nodes = []
@@ -564,7 +579,7 @@ def _create_bdev_stack(lvol, snode, ha_comm_addrs, ha_inode_self):
         ret = None
 
         if type == "bdev_distr":
-            params['jm_names'] = get_jm_names(snode)
+            # params['jm_names'] = get_jm_names(snode)
             params['ha_comm_addrs'] = ha_comm_addrs
             params['ha_inode_self'] = ha_inode_self
             params['distrib_cpu_mask'] = snode.distrib_cpu_mask
