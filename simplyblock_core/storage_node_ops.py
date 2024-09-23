@@ -2525,6 +2525,7 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
     size = max_size // snode.number_of_distribs
     distr_page_size = (ndcs + npcs) * page_size_in_blocks
     cluster_sz = ndcs * page_size_in_blocks
+    strip_size_kb = int((ndcs + npcs) * snode.number_of_distribs * 64)
     if len(nodes) > 3:
         nodes = nodes[:3]
     jm_names = lvol_controller.get_ha_jm_names(snode, nodes)
@@ -2561,10 +2562,12 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
             {
                 "type": "bdev_raid",
                 "name": raid_device,
-                "params":
-                    {"name": raid_device,
-                     "raid_level": "0",
-                     "base_bdevs": distrib_list},
+                "params": {
+                    "name": raid_device,
+                    "raid_level": "0",
+                    "base_bdevs": distrib_list,
+                    "strip_size_kb": strip_size_kb
+                },
                 "distribs_list": distrib_list
             },
             {
@@ -2630,7 +2633,8 @@ def _create_bdev_stack(snode, lvstore_stack=None):
 
         elif type == "bdev_raid":
             distribs_list = bdev["distribs_list"]
-            ret = rpc_client.bdev_raid_create(name, distribs_list)
+            strip_size_kb = bdev["strip_size_kb"]
+            ret = rpc_client.bdev_raid_create(name, distribs_list, strip_size_kb)
         else:
             logger.debug(f"Unknown BDev type: {type}")
             continue
