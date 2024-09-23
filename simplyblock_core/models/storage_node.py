@@ -109,6 +109,7 @@ class StorageNode(BaseModel):
         "jm_percent": {"type": int, "default": 3},
         "jm_device": {"type": JMDevice, "default": None},
         "remote_jm_devices": {"type": List[JMDevice], 'default': []},
+        "enable_ha_jm": {"type": bool, "default": False},
 
         "namespace": {"type": str, "default": ""},
 

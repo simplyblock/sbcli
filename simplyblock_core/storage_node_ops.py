@@ -809,7 +809,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
              max_lvol, max_snap, max_prov, spdk_image=None, spdk_debug=False,
              small_bufsize=0, large_bufsize=0, spdk_cpu_mask=None,
              num_partitions_per_dev=0, jm_percent=0, number_of_devices=0, enable_test_device=False,
-             namespace=None, number_of_distribs=2):
+             namespace=None, number_of_distribs=2, enable_ha_jm=False):
 
     db_controller = DBController()
     kv_store = db_controller.kv_store
@@ -1013,6 +1013,9 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
     snode.host_secret = utils.generate_string(20)
     snode.ctrl_secret = utils.generate_string(20)
     snode.number_of_distribs = number_of_distribs
+    snode.enable_ha_jm = enable_ha_jm
+    if enable_ha_jm:
+        spdk_image = constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE_JM
 
     if 'cpu_count' in node_info:
         snode.cpu = node_info['cpu_count']
@@ -1133,8 +1136,9 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
     remote_devices = _connect_to_remote_devs(snode)
     snode.remote_devices = remote_devices
 
-    logger.info("Connecting to remote JMs")
-    snode.remote_jm_devices = _connect_to_remote_jm_devs(snode)
+    if snode.enable_ha_jm:
+        logger.info("Connecting to remote JMs")
+        snode.remote_jm_devices = _connect_to_remote_jm_devs(snode)
 
     logger.info("Setting node status to Active")
     snode.status = StorageNode.STATUS_ONLINE
@@ -1148,7 +1152,6 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
             continue
         logger.info(f"Connecting to node: {node.get_id()}")
         rpc_client = RPCClient(node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password)
-        count = 0
         for dev in snode.nvme_devices:
             if dev.status != NVMeDevice.STATUS_ONLINE:
                 logger.debug(f"Device is not online: {dev.get_id()}, status: {dev.status}")
@@ -1169,11 +1172,11 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
                 node.remote_devices[idx] = dev
             else:
                 node.remote_devices.append(dev)
-            count += 1
 
-        node.remote_jm_devices = _connect_to_remote_jm_devs(node)
+        if node.enable_ha_jm:
+            node.remote_jm_devices = _connect_to_remote_jm_devs(node)
         node.write_to_db(kv_store)
-        logger.info(f"connected to devices count: {count}")
+        logger.info(f"connected to devices count: {len(node.remote_devices)}")
         time.sleep(3)
 
     if cluster.status == cluster.STATUS_UNREADY:
@@ -1633,8 +1636,9 @@ def restart_storage_node(
     snode.remote_devices = remote_devices
     snode.write_to_db(db_controller.kv_store)
 
-    logger.info("Connecting to remote JMs")
-    snode.remote_jm_devices = _connect_to_remote_jm_devs(snode)
+    if snode.enable_ha_jm:
+        logger.info("Connecting to remote JMs")
+        snode.remote_jm_devices = _connect_to_remote_jm_devs(snode)
 
     logger.info("Setting node status to Online")
     old_status = snode.status
@@ -1650,7 +1654,8 @@ def restart_storage_node(
         if node.get_id() == snode.get_id() or node.status != StorageNode.STATUS_ONLINE:
             continue
         node.remote_devices = _connect_to_remote_devs(node)
-        node.remote_jm_devices = _connect_to_remote_jm_devs(node)
+        if node.enable_ha_jm:
+            node.remote_jm_devices = _connect_to_remote_jm_devs(node)
         node.write_to_db(kv_store)
 
         logger.info(f"Sending cluster map to node {node.get_id()}")
@@ -1678,15 +1683,6 @@ def restart_storage_node(
         time.sleep(1)
         ret = temp_rpc_client.bdev_wait_for_examine()
         time.sleep(1)
-
-        #logger.info("Sending cluster map to current node")
-        #ret = distr_controller.send_cluster_map_to_node(snode)
-        #if not ret:
-        #    return False, "Failed to send cluster map"
-        #time.sleep(3)
-
-        # temp_rpc_client.bdev_examine(snode.raid)
-        # time.sleep(3)
 
         if snode.lvols:
             for lvol_id in snode.lvols:
@@ -2533,8 +2529,10 @@ def set_node_status(node_id, status):
 
     if snode.status == StorageNode.STATUS_ONLINE:
         logger.info("Connecting to remote devices")
-        _connect_to_remote_devs(snode)
-        _connect_to_remote_jm_devs(snode)
+        snode.remote_devices = _connect_to_remote_devs(snode)
+        if snode.enable_ha_jm:
+            snode.remote_jm_devices = _connect_to_remote_jm_devs(snode)
+        snode.write_to_db(db_controller.kv_store)
 
     return True
 
@@ -2556,9 +2554,13 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
     cluster_sz = ndcs * page_size_in_blocks
     strip_size_kb = int((ndcs + npcs) * 64)
     strip_size_kb = utils.nearest_upper_power_of_2(strip_size_kb)
-    if len(nodes) > 3:
-        nodes = nodes[:3]
-    jm_names = lvol_controller.get_ha_jm_names(snode, nodes)
+    if snode.enable_ha_jm:
+        if len(nodes) > 3:
+            nodes = nodes[:3]
+        jm_names = lvol_controller.get_ha_jm_names(snode, nodes)
+    else:
+        jm_names = lvol_controller.get_jm_names(snode)
+
     jm_vuid = utils.get_random_vuid()
 
     for _ in range(snode.number_of_distribs):

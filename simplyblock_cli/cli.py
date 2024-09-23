@@ -56,6 +56,7 @@ class CLIWrapper:
         sub_command.add_argument("--iobuf_small_bufsize", help='bdev_set_options param', dest='small_bufsize',  type=int, default=0)
         sub_command.add_argument("--iobuf_large_bufsize", help='bdev_set_options param', dest='large_bufsize',  type=int, default=0)
         sub_command.add_argument("--enable-test-device", help='Enable creation of test device', action='store_true')
+        sub_command.add_argument("--enable-ha-jm", help='Enable HA JM for ditrib creation', action='store_true')
 
 
         # delete storage node
@@ -717,6 +718,7 @@ class CLIWrapper:
                 max_prov = self.parse_size(args.max_prov)
                 number_of_devices = args.number_of_devices
                 enable_test_device = args.enable_test_device
+                enable_ha_jm = args.enable_ha_jm
                 number_of_distribs = args.number_of_distribs
                 if max_prov < 1 * 1024 * 1024 * 1024:
                     return f"Max provisioning memory:{args.max_prov} must be larger than 1G"
@@ -739,7 +741,8 @@ class CLIWrapper:
                     number_of_devices=number_of_devices,
                     enable_test_device=enable_test_device,
                     namespace=None,
-                    number_of_distribs=number_of_distribs
+                    number_of_distribs=number_of_distribs,
+                    enable_ha_jm=enable_ha_jm
                 )
 
                 return out
