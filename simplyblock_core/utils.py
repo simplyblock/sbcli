@@ -589,3 +589,11 @@ def parse_size(size_string: str):
     except:
         print(f"Error parsing size: {size_string}")
         return -1
+
+
+def nearest_upper_power_of_2(n):
+    # Check if n is already a power of 2
+    if (n & (n - 1)) == 0:
+        return n
+    # Otherwise, return the nearest upper power of 2
+    return 1 << n.bit_length()
