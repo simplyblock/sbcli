@@ -363,7 +363,7 @@ class RPCClient:
 
     def bdev_distrib_create(self, name, vuid, ndcs, npcs, num_blocks, block_size, jm_names,
                             chunk_size, ha_comm_addrs=None, ha_inode_self=None, pba_page_size=2097152,
-                            distrib_cpu_mask="", ha_is_non_leader=True, jm_vuid=1):
+                            distrib_cpu_mask="", ha_is_non_leader=True, jm_vuid=0):
         """"
             // Optional (not specified = no HA)
             // Comma-separated communication addresses, for each node, e.g. "192.168.10.1:45001,192.168.10.1:32768".
@@ -388,6 +388,8 @@ class RPCClient:
             "pba_page_size": pba_page_size,
             "ha_is_non_leader": ha_is_non_leader,
         }
+        if jm_vuid > 0:
+            params["jm_vuid"] = jm_vuid
         if ha_comm_addrs:
             params['ha_comm_addrs'] = ha_comm_addrs
             params['ha_inode_self'] = ha_inode_self

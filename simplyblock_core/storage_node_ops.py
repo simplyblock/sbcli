@@ -2554,14 +2554,15 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
     cluster_sz = ndcs * page_size_in_blocks
     strip_size_kb = int((ndcs + npcs) * 64)
     strip_size_kb = utils.nearest_upper_power_of_2(strip_size_kb)
+    jm_vuid = 0
     if snode.enable_ha_jm:
         if len(nodes) > 3:
             nodes = nodes[:3]
         jm_names = lvol_controller.get_ha_jm_names(snode, nodes)
+        jm_vuid = utils.get_random_vuid()
     else:
         jm_names = lvol_controller.get_jm_names(snode)
 
-    jm_vuid = utils.get_random_vuid()
 
     for _ in range(snode.number_of_distribs):
         distrib_vuid = utils.get_random_vuid()
