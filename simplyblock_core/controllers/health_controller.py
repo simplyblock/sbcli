@@ -178,6 +178,13 @@ def check_node(node_id, with_devices=True):
             else:
                 logger.info(f"Checking bdev: {remote_device.remote_bdev} ... not found")
             # node_remote_devices_check &= bool(ret)
+        if snode.jm_device:
+            jm_device = snode.jm_device
+            ret = check_jm_device(jm_device.get_id())
+            if ret:
+                logger.info(f"Checking jm bdev: {jm_device.jm_bdev} ... ok")
+            else:
+                logger.info(f"Checking jm bdev: {jm_device.jm_bdev} ... not found")
         lvstore_check = True
         if snode.lvstore and snode.lvstore_stack:
             distribs_list = []
@@ -226,6 +233,11 @@ def check_device(device_id):
     db_controller = DBController()
     device = db_controller.get_storage_device_by_id(device_id)
     if not device:
+        # is jm device ?
+        for node in db_controller.get_storage_nodes():
+            if node.jm_device and node.jm_device.get_id() == device_id:
+                return check_jm_device(node.jm_device.get_id())
+
         logger.error("device not found")
         return False
 
@@ -394,3 +406,44 @@ def check_snap(snap_id):
 
     ret = rpc_client.get_bdevs(snap.snap_bdev)
     return ret
+
+
+def check_jm_device(device_id):
+    db_controller = DBController()
+    jm_device = None
+    snode = None
+    for node in db_controller.get_storage_nodes():
+        if node.jm_device.get_id() == device_id:
+            jm_device = node.jm_device
+            snode = node
+            break
+    if not jm_device:
+        logger.error("device not found")
+        return False
+
+    if snode.status in [StorageNode.STATUS_OFFLINE, StorageNode.STATUS_REMOVED]:
+        logger.info(f"Skipping ,node status is {snode.status}")
+        return True
+
+    if jm_device.status in [NVMeDevice.STATUS_REMOVED, NVMeDevice.STATUS_FAILED]:
+        logger.info(f"Skipping ,device status is {jm_device.status}")
+        return True
+
+    passed = True
+    try:
+        rpc_client = RPCClient(
+            snode.mgmt_ip, snode.rpc_port,
+            snode.rpc_username, snode.rpc_password)
+
+        ret = rpc_client.get_bdevs(jm_device.jm_bdev)
+        if ret:
+            logger.debug(f"Checking bdev: {jm_device.jm_bdev} ... ok")
+        else:
+            logger.debug(f"Checking bdev: {jm_device.jm_bdev} ... not found")
+            passed = False
+
+    except Exception as e:
+        logger.error(f"Failed to connect to node's SPDK: {e}")
+        passed = False
+
+    return passed

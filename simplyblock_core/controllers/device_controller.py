@@ -689,3 +689,24 @@ def add_device(device_id):
 
 def device_set_failed_and_migrated(device_id):
     return device_set_state(device_id, NVMeDevice.STATUS_FAILED_AND_MIGRATED)
+
+
+def set_jm_device_state(device_id, state):
+    db_controller = DBController()
+    jm_device = None
+    snode = None
+    for node in db_controller.get_storage_nodes():
+        if node.jm_device.get_id() == device_id:
+            jm_device = node.jm_device
+            snode = node
+            break
+    if not jm_device:
+        logger.error("device not found")
+        return False
+
+    if jm_device.status == state:
+        return True
+
+    jm_device.status = state
+    snode.write_to_db(db_controller.kv_store)
+    return True

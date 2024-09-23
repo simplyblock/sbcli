@@ -5,7 +5,7 @@ import time
 from simplyblock_core import constants, kv_store, cluster_ops, storage_node_ops, utils
 from simplyblock_core.controllers import health_controller, device_controller, tasks_controller
 from simplyblock_core.models.cluster import Cluster
-from simplyblock_core.models.nvme_device import NVMeDevice
+from simplyblock_core.models.nvme_device import NVMeDevice, JMDevice
 from simplyblock_core.models.storage_node import StorageNode
 
 
@@ -113,6 +113,16 @@ def set_node_offline(node):
         tasks_controller.add_node_to_auto_restart(node)
 
 
+def set_jm_device_status(node):
+    if node.status != StorageNode.STATUS_UNREACHABLE:
+        for dev in node.nvme_devices:
+            device_controller.device_set_unavailable(dev.get_id())
+
+        storage_node_ops.set_node_status(snode.get_id(), StorageNode.STATUS_UNREACHABLE)
+        # add node to auto restart
+        tasks_controller.add_node_to_auto_restart(node)
+
+
 logger.info("Starting node monitor")
 while True:
     clusters = db_controller.get_clusters()
@@ -157,6 +167,19 @@ while True:
                 set_node_online(snode)
             else:
                 set_node_offline(snode)
+
+            # check JM device
+            if snode.jm_device:
+                if snode.jm_device.status in [JMDevice.STATUS_ONLINE, JMDevice.STATUS_UNAVAILABLE]:
+                    ret = health_controller.check_jm_device(snode.jm_device.get_id())
+                    if ret:
+                        logger.error(f"JM bdev is online: {snode.jm_device.get_id()}")
+                        if snode.jm_device.status != JMDevice.STATUS_ONLINE:
+                            device_controller.set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_ONLINE)
+                    else:
+                        logger.error(f"JM bdev is offline: {snode.jm_device.get_id()}")
+                        if snode.jm_device.status != JMDevice.STATUS_UNAVAILABLE:
+                            device_controller.set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_UNAVAILABLE)
 
         update_cluster_status(cluster_id)
 
