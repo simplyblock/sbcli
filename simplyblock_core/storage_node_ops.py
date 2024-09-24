@@ -2678,7 +2678,7 @@ def _create_bdev_stack(snode, lvstore_stack=None):
         else:
             if created_bdevs:
                 # rollback
-                _remove_bdev_stack(created_bdevs, rpc_client)
+                _remove_bdev_stack(created_bdevs[::-1], rpc_client)
             return False, f"Failed to create BDev: {name}"
 
     return True, None
