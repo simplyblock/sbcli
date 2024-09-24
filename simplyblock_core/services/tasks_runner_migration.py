@@ -17,7 +17,11 @@ from simplyblock_core.rpc_client import RPCClient
 def task_runner(task):
 
     snode = db_controller.get_storage_node_by_id(task.node_id)
-    rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password, timeout=5, retry=2)
+    if not snode:
+        task.status = JobSchedule.STATUS_DONE
+        task.function_result = f"Node not found: {task.node_id}"
+        task.write_to_db(db_controller.kv_store)
+        return True
 
     if task.canceled:
         task.function_result = "canceled"
@@ -37,6 +41,8 @@ def task_runner(task):
         task.write_to_db(db_controller.kv_store)
         return False
 
+    rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password,
+                           timeout=5, retry=2)
     if "migration" not in task.function_params:
         all_devs_online = True
         for node in db_controller.get_storage_nodes_by_cluster_id(task.cluster_id):
