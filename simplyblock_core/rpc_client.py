@@ -385,10 +385,11 @@ class RPCClient:
             "block_size": block_size,
             "chunk_size": chunk_size,
             "pba_page_size": pba_page_size,
-            "ha_is_non_leader": ha_is_non_leader,
         }
         if jm_vuid > 0:
             params["jm_vuid"] = jm_vuid
+            params["ha_is_non_leader"] = ha_is_non_leader
+
         if ha_comm_addrs:
             params['ha_comm_addrs'] = ha_comm_addrs
             params['ha_inode_self'] = ha_inode_self
