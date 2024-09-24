@@ -74,7 +74,8 @@ def disconnect_device(device):
 def get_distr_cluster_map(snodes, target_node):
     map_cluster = {}
     map_prob = []
-    for snode in snodes:
+    local_node_index = 0
+    for index, snode in enumerate(snodes):
         dev_map = {}
         dev_w_map = []
         node_w = 0
@@ -88,6 +89,7 @@ def get_distr_cluster_map(snodes, target_node):
             if snode.get_id() == target_node.get_id():
                 name = dev.alceml_bdev
                 dev_status = dev.status
+                local_node_index = index
             else:
                 for dev2 in target_node.remote_devices:
                     if dev2.get_id() == dev.get_id():
@@ -118,7 +120,8 @@ def get_distr_cluster_map(snodes, target_node):
         "UUID_node_target": "",
         "timestamp": datetime.datetime.now().isoformat("T", "seconds")+'Z',
         "map_cluster": map_cluster,
-        "map_prob": map_prob
+        "map_prob": map_prob,
+        'ppln1': local_node_index
     }
     return cl_map
 
