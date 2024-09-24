@@ -1853,7 +1853,7 @@ def shutdown_storage_node(node_id, force=False):
     storage_events.snode_status_change(snode, snode.status, old_status)
 
     rpc_client = RPCClient(
-        snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
+        snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password, timeout=10, retry=1)
 
     logger.debug("Removing LVols")
     _remove_bdev_stack(snode.lvstore_stack, rpc_client, remove_distr_only=True)

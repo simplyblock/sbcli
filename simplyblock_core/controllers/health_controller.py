@@ -66,11 +66,11 @@ def _check_node_docker_api(ip):
     # return False
 
 
-def _check_node_rpc(rpc_ip, rpc_port, rpc_username, rpc_password):
+def _check_node_rpc(rpc_ip, rpc_port, rpc_username, rpc_password, timeout=60, retry=3):
     try:
         rpc_client = RPCClient(
             rpc_ip, rpc_port, rpc_username, rpc_password,
-            timeout=60, retry=3)
+            timeout=timeout, retry=retry)
         ret = rpc_client.get_version()
         if ret:
             logger.debug(f"SPDK version: {ret['version']}")
@@ -319,7 +319,7 @@ def check_remote_device(device_id):
             if node.get_id() == snode.get_id():
                 continue
             logger.info(f"Connecting to node: {node.get_id()}")
-            rpc_client = RPCClient(node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password)
+            rpc_client = RPCClient(node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password, timeout=5, retry=1)
             name = f"remote_{device.alceml_bdev}n1"
             ret = rpc_client.get_bdevs(name)
             if ret:
