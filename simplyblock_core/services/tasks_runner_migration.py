@@ -53,13 +53,7 @@ def task_runner(task):
             return False
 
         device = db_controller.get_storage_devices(task.device_id)
-        lvol = db_controller.get_lvol_by_id(task.function_params["lvol_id"])
-
-        if not lvol:
-            task.status = JobSchedule.STATUS_DONE
-            task.function_result = "LVol not found"
-            task.write_to_db(db_controller.kv_store)
-            return True
+        distr_name = task.function_params["distr_name"]
 
         if not device:
             task.status = JobSchedule.STATUS_DONE
@@ -67,7 +61,7 @@ def task_runner(task):
             task.write_to_db(db_controller.kv_store)
             return True
 
-        rsp = rpc_client.distr_migration_to_primary_start(device.cluster_device_order, lvol.base_bdev)
+        rsp = rpc_client.distr_migration_to_primary_start(device.cluster_device_order, distr_name)
         if not rsp:
             logger.error(f"Failed to start device migration task, storage_ID: {device.cluster_device_order}")
             task.function_result = "Failed to start device migration task"
@@ -75,7 +69,7 @@ def task_runner(task):
             task.write_to_db(db_controller.kv_store)
             return False
         task.function_params['migration'] = {
-            "name": lvol.base_bdev}
+            "name": distr_name}
         task.write_to_db(db_controller.kv_store)
         time.sleep(3)
 
