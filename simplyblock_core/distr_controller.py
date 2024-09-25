@@ -27,7 +27,7 @@ def send_node_status_event(node, node_status):
         if node.status != node.STATUS_ONLINE:
             continue
         logger.info(f"Sending to: {node.get_id()}")
-        rpc_client = RPCClient(node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password)
+        rpc_client = RPCClient(node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password, timeout=5, retry=1)
         ret = rpc_client.distr_status_events_update(events)
 
 
@@ -47,7 +47,7 @@ def send_dev_status_event(device, dev_status):
         if node.status != node.STATUS_ONLINE:
             continue
         logger.info(f"Sending to: {node.get_id()}")
-        rpc_client = RPCClient(node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password)
+        rpc_client = RPCClient(node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password, timeout=5, retry=1)
         ret = rpc_client.distr_status_events_update(events)
         if not ret:
             logger.warning("Failed to send event update")
@@ -186,7 +186,7 @@ def parse_distr_cluster_map(map_string):
 def send_cluster_map_to_node(node):
     db_controller = DBController()
     snodes = db_controller.get_storage_nodes_by_cluster_id(node.cluster_id)
-    rpc_client = RPCClient(node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password)
+    rpc_client = RPCClient(node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password, timeout=5, retry=1)
     cluster_map_data = get_distr_cluster_map(snodes, node)
     cluster_map_data['UUID_node_target'] = node.get_id()
     ret = rpc_client.distr_send_cluster_map(cluster_map_data)
@@ -204,7 +204,7 @@ def send_cluster_map_add_node(snode):
         if node.status != node.STATUS_ONLINE:
             continue
         logger.info(f"Sending to: {node.get_id()}")
-        rpc_client = RPCClient(node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password)
+        rpc_client = RPCClient(node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password, timeout=5, retry=1)
 
         cluster_map_data = get_distr_cluster_map([snode], node)
         cl_map = {
