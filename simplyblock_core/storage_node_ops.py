@@ -286,42 +286,40 @@ def _create_jm_stack_on_raid(rpc_client, jm_nvme_bdevs, snode, after_restart):
         logger.error(f"Failed to create {jm_bdev}")
         return False
 
-    alceml_id = str(uuid.uuid4())
-    pt_name = ""
-    subsystem_nqn = ""
-    IP = ""
-    if snode.enable_ha_jm:
-        # add pass through
-        pt_name = f"{jm_bdev}_PT"
-        ret = rpc_client.bdev_PT_NoExcl_create(pt_name, jm_bdev)
-        if not ret:
-            logger.error(f"Failed to create pt noexcl bdev: {pt_name}")
-            return False
 
-        subsystem_nqn = snode.subsystem + ":dev:" + jm_bdev
-        logger.info("creating subsystem %s", subsystem_nqn)
-        ret = rpc_client.subsystem_create(subsystem_nqn, 'sbcli-cn', jm_bdev)
-        IP = None
-        for iface in snode.data_nics:
-            if iface.ip4_address:
-                tr_type = iface.get_transport_type()
-                ret = rpc_client.transport_list()
-                found = False
-                if ret:
-                    for ty in ret:
-                        if ty['trtype'] == tr_type:
-                            found = True
-                if found is False:
-                    ret = rpc_client.transport_create(tr_type)
-                logger.info("adding listener for %s on IP %s" % (subsystem_nqn, iface.ip4_address))
-                ret = rpc_client.listeners_create(subsystem_nqn, tr_type, iface.ip4_address, "4420")
-                IP = iface.ip4_address
-                break
-        logger.info(f"add {pt_name} to subsystem")
-        ret = rpc_client.nvmf_subsystem_add_ns(subsystem_nqn, pt_name)
-        if not ret:
-            logger.error(f"Failed to add: {pt_name} to the subsystem: {subsystem_nqn}")
-            return False
+    alceml_id = str(uuid.uuid4())
+    # add pass through
+    pt_name = f"{jm_bdev}_PT"
+    ret = rpc_client.bdev_PT_NoExcl_create(pt_name, jm_bdev)
+    if not ret:
+        logger.error(f"Failed to create pt noexcl bdev: {pt_name}")
+        return False
+
+    subsystem_nqn = snode.subsystem + ":dev:" + jm_bdev
+    logger.info("creating subsystem %s", subsystem_nqn)
+    ret = rpc_client.subsystem_create(subsystem_nqn, 'sbcli-cn', jm_bdev)
+    IP = None
+    for iface in snode.data_nics:
+        if iface.ip4_address:
+            tr_type = iface.get_transport_type()
+            ret = rpc_client.transport_list()
+            found = False
+            if ret:
+                for ty in ret:
+                    if ty['trtype'] == tr_type:
+                        found = True
+            if found is False:
+                ret = rpc_client.transport_create(tr_type)
+            logger.info("adding listener for %s on IP %s" % (subsystem_nqn, iface.ip4_address))
+            ret = rpc_client.listeners_create(subsystem_nqn, tr_type, iface.ip4_address, "4420")
+            IP = iface.ip4_address
+            break
+    logger.info(f"add {pt_name} to subsystem")
+    ret = rpc_client.nvmf_subsystem_add_ns(subsystem_nqn, pt_name)
+    if not ret:
+        logger.error(f"Failed to add: {pt_name} to the subsystem: {subsystem_nqn}")
+        return False
+
 
     ret = rpc_client.get_bdevs(raid_bdev)
 
@@ -382,41 +380,38 @@ def _create_jm_stack_on_device(rpc_client, nvme, snode, after_restart):
         logger.error(f"Failed to create {jm_bdev}")
         return False
 
-    pt_name = ""
-    subsystem_nqn = ""
-    IP = ""
-    if snode.enable_ha_jm:
-        # add pass through
-        pt_name = f"{jm_bdev}_PT"
-        ret = rpc_client.bdev_PT_NoExcl_create(pt_name, jm_bdev)
-        if not ret:
-            logger.error(f"Failed to create pt noexcl bdev: {pt_name}")
-            return False
+    # add pass through
+    pt_name = f"{jm_bdev}_PT"
+    ret = rpc_client.bdev_PT_NoExcl_create(pt_name, jm_bdev)
+    if not ret:
+        logger.error(f"Failed to create pt noexcl bdev: {pt_name}")
+        return False
 
-        subsystem_nqn = snode.subsystem + ":dev:" + jm_bdev
-        logger.info("creating subsystem %s", subsystem_nqn)
-        ret = rpc_client.subsystem_create(subsystem_nqn, 'sbcli-cn', jm_bdev)
-        IP = None
-        for iface in snode.data_nics:
-            if iface.ip4_address:
-                tr_type = iface.get_transport_type()
-                ret = rpc_client.transport_list()
-                found = False
-                if ret:
-                    for ty in ret:
-                        if ty['trtype'] == tr_type:
-                            found = True
-                if found is False:
-                    ret = rpc_client.transport_create(tr_type)
-                logger.info("adding listener for %s on IP %s" % (subsystem_nqn, iface.ip4_address))
-                ret = rpc_client.listeners_create(subsystem_nqn, tr_type, iface.ip4_address, "4420")
-                IP = iface.ip4_address
-                break
-        logger.info(f"add {pt_name} to subsystem")
-        ret = rpc_client.nvmf_subsystem_add_ns(subsystem_nqn, pt_name)
-        if not ret:
-            logger.error(f"Failed to add: {pt_name} to the subsystem: {subsystem_nqn}")
-            return False
+    subsystem_nqn = snode.subsystem + ":dev:" + jm_bdev
+    logger.info("creating subsystem %s", subsystem_nqn)
+    ret = rpc_client.subsystem_create(subsystem_nqn, 'sbcli-cn', jm_bdev)
+    IP = None
+    for iface in snode.data_nics:
+        if iface.ip4_address:
+            tr_type = iface.get_transport_type()
+            ret = rpc_client.transport_list()
+            found = False
+            if ret:
+                for ty in ret:
+                    if ty['trtype'] == tr_type:
+                        found = True
+            if found is False:
+                ret = rpc_client.transport_create(tr_type)
+            logger.info("adding listener for %s on IP %s" % (subsystem_nqn, iface.ip4_address))
+            ret = rpc_client.listeners_create(subsystem_nqn, tr_type, iface.ip4_address, "4420")
+            IP = iface.ip4_address
+            break
+    logger.info(f"add {pt_name} to subsystem")
+    ret = rpc_client.nvmf_subsystem_add_ns(subsystem_nqn, pt_name)
+    if not ret:
+        logger.error(f"Failed to add: {pt_name} to the subsystem: {subsystem_nqn}")
+        return False
+
 
     return JMDevice({
         'uuid': alceml_id,
@@ -706,38 +701,37 @@ def _prepare_cluster_devices_on_restart(snode):
             logger.error(f"Failed to create {jm_bdev}")
             return False
 
-        if snode.enable_ha_jm:
-            # add pass through
-            pt_name = f"{jm_bdev}_PT"
-            ret = rpc_client.bdev_PT_NoExcl_create(pt_name, jm_bdev)
-            if not ret:
-                logger.error(f"Failed to create pt noexcl bdev: {pt_name}")
-                return False
+        # add pass through
+        pt_name = f"{jm_bdev}_PT"
+        ret = rpc_client.bdev_PT_NoExcl_create(pt_name, jm_bdev)
+        if not ret:
+            logger.error(f"Failed to create pt noexcl bdev: {pt_name}")
+            return False
 
-            subsystem_nqn = snode.subsystem + ":dev:" + jm_bdev
-            logger.info("creating subsystem %s", subsystem_nqn)
-            ret = rpc_client.subsystem_create(subsystem_nqn, 'sbcli-cn', jm_bdev)
-            IP = None
-            for iface in snode.data_nics:
-                if iface.ip4_address:
-                    tr_type = iface.get_transport_type()
-                    ret = rpc_client.transport_list()
-                    found = False
-                    if ret:
-                        for ty in ret:
-                            if ty['trtype'] == tr_type:
-                                found = True
-                    if found is False:
-                        ret = rpc_client.transport_create(tr_type)
-                    logger.info("adding listener for %s on IP %s" % (subsystem_nqn, iface.ip4_address))
-                    ret = rpc_client.listeners_create(subsystem_nqn, tr_type, iface.ip4_address, "4420")
-                    IP = iface.ip4_address
-                    break
-            logger.info(f"add {pt_name} to subsystem")
-            ret = rpc_client.nvmf_subsystem_add_ns(subsystem_nqn, pt_name)
-            if not ret:
-                logger.error(f"Failed to add: {pt_name} to the subsystem: {subsystem_nqn}")
-                return False
+        subsystem_nqn = snode.subsystem + ":dev:" + jm_bdev
+        logger.info("creating subsystem %s", subsystem_nqn)
+        ret = rpc_client.subsystem_create(subsystem_nqn, 'sbcli-cn', jm_bdev)
+        IP = None
+        for iface in snode.data_nics:
+            if iface.ip4_address:
+                tr_type = iface.get_transport_type()
+                ret = rpc_client.transport_list()
+                found = False
+                if ret:
+                    for ty in ret:
+                        if ty['trtype'] == tr_type:
+                            found = True
+                if found is False:
+                    ret = rpc_client.transport_create(tr_type)
+                logger.info("adding listener for %s on IP %s" % (subsystem_nqn, iface.ip4_address))
+                ret = rpc_client.listeners_create(subsystem_nqn, tr_type, iface.ip4_address, "4420")
+                IP = iface.ip4_address
+                break
+        logger.info(f"add {pt_name} to subsystem")
+        ret = rpc_client.nvmf_subsystem_add_ns(subsystem_nqn, pt_name)
+        if not ret:
+            logger.error(f"Failed to add: {pt_name} to the subsystem: {subsystem_nqn}")
+            return False
 
     return True
 
@@ -1142,9 +1136,8 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
     remote_devices = _connect_to_remote_devs(snode)
     snode.remote_devices = remote_devices
 
-    if snode.enable_ha_jm:
-        logger.info("Connecting to remote JMs")
-        snode.remote_jm_devices = _connect_to_remote_jm_devs(snode)
+    logger.info("Connecting to remote JMs")
+    snode.remote_jm_devices = _connect_to_remote_jm_devs(snode)
 
     logger.info("Setting node status to Active")
     snode.status = StorageNode.STATUS_ONLINE
@@ -1179,10 +1172,9 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
             else:
                 node.remote_devices.append(dev)
 
-        if node.enable_ha_jm:
-            node.remote_jm_devices = _connect_to_remote_jm_devs(node)
+        node.remote_jm_devices = _connect_to_remote_jm_devs(node)
         node.write_to_db(kv_store)
-        logger.info(f"connected to devices count: {len(node.remote_devices)}")
+        logger.info(f"connected to devices count: {len(node.remote_devices) + len(node.remote_jm_devices)}")
         time.sleep(3)
 
     if cluster.status == cluster.STATUS_UNREADY:
@@ -1643,9 +1635,8 @@ def restart_storage_node(
     snode.remote_devices = remote_devices
     snode.write_to_db(db_controller.kv_store)
 
-    if snode.enable_ha_jm:
-        logger.info("Connecting to remote JMs")
-        snode.remote_jm_devices = _connect_to_remote_jm_devs(snode)
+    logger.info("Connecting to remote JMs")
+    snode.remote_jm_devices = _connect_to_remote_jm_devs(snode)
 
     logger.info("Setting node status to Online")
     old_status = snode.status
@@ -1661,8 +1652,7 @@ def restart_storage_node(
         if node.get_id() == snode.get_id() or node.status != StorageNode.STATUS_ONLINE:
             continue
         node.remote_devices = _connect_to_remote_devs(node)
-        if node.enable_ha_jm:
-            node.remote_jm_devices = _connect_to_remote_jm_devs(node)
+        node.remote_jm_devices = _connect_to_remote_jm_devs(node)
         node.write_to_db(kv_store)
 
         logger.info(f"Sending cluster map to node {node.get_id()}")
