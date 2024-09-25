@@ -63,7 +63,7 @@ def spdk_process_start():
     else:
         spdk_mem = 64096
 
-    spdk_image = constants.SIMPLY_BLOCK_SPDK_CORE_IMAGE
+    spdk_image = constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE
     if 'spdk_image' in data and data['spdk_image']:
         spdk_image = data['spdk_image']
         # node_docker.images.pull(spdk_image)
@@ -82,6 +82,7 @@ def spdk_process_start():
         'RPC_PORT': data['rpc_port'],
         'RPC_USERNAME': data['rpc_username'],
         'RPC_PASSWORD': data['rpc_password'],
+        'SIMPLYBLOCK_DOCKER_IMAGE': constants.SIMPLY_BLOCK_DOCKER_IMAGE,
     }
     dep = yaml.safe_load(template.render(values))
     resp = k8s_apps_v1.create_namespaced_deployment(body=dep, namespace=namespace)

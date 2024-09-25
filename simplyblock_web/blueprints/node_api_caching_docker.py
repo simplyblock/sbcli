@@ -64,7 +64,7 @@ def spdk_process_start():
             node.remove(force=True)
             time.sleep(2)
 
-    spdk_image = constants.SIMPLY_BLOCK_SPDK_CORE_IMAGE
+    spdk_image = constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE
     if 'spdk_image' in data and data['spdk_image']:
         spdk_image = data['spdk_image']
         node_docker.images.pull(spdk_image)
@@ -92,8 +92,8 @@ def spdk_process_start():
     rpc_password = data['rpc_password']
 
     container2 = node_docker.containers.run(
-        constants.SIMPLY_BLOCK_SPDK_CORE_IMAGE,
-        "python /root/scripts/spdk_http_proxy_server.py",
+        constants.SIMPLY_BLOCK_DOCKER_IMAGE,
+        "python simplyblock_core/services/spdk_http_proxy_server.py",
         name="spdk_proxy",
         detach=True,
         network_mode="host",

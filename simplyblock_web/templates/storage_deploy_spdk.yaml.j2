@@ -95,9 +95,9 @@ spec:
             memory: 4096Mi
 
       - name: spdk-proxy-container
-        image: {{ SPDK_IMAGE }}
+        image: {{ SIMPLYBLOCK_DOCKER_IMAGE }}
         imagePullPolicy: "Always"
-        command: ["python", "/root/scripts/spdk_http_proxy_server.py"]
+        command: ["python", "simplyblock_core/services/spdk_http_proxy_server.py"]
         volumeMounts:
         - name: socket-dir
           mountPath: /var/tmp

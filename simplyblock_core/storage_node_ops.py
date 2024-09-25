@@ -2357,9 +2357,7 @@ def deploy(ifname):
         ]
     )
     logger.info("Pulling SPDK images")
-    logger.debug(constants.SIMPLY_BLOCK_SPDK_CORE_IMAGE)
     logger.debug(constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE)
-    node_docker.images.pull(constants.SIMPLY_BLOCK_SPDK_CORE_IMAGE)
     node_docker.images.pull(constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE)
     return f"{dev_ip}:5000"
 
