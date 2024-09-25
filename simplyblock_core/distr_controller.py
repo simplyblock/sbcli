@@ -151,8 +151,11 @@ def parse_distr_cluster_map(map_string):
             }
             nd = db_controller.get_storage_node_by_id(node_id)
             if nd:
-                data["Actual Status"] = nd.status
-                if nd.status == status:
+                node_status = nd.status
+                if node_status == StorageNode.STATUS_SCHEDULABLE:
+                    node_status = StorageNode.STATUS_UNREACHABLE
+                data["Actual Status"] = node_status
+                if node_status == status:
                     data["Results"] = "ok"
                 else:
                     data["Results"] = "failed"
