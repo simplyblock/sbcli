@@ -12,8 +12,7 @@ from http.server import ThreadingHTTPServer
 from http.server import BaseHTTPRequestHandler
 
 
-TIMEOUT = 30
-TIMEOUT_LONG = 5*60  # 5 min
+TIMEOUT = 5*60  # 5 min
 rpc_sock = '/var/tmp/spdk.sock'
 logger_handler = logging.StreamHandler(stream=sys.stdout)
 logger_handler.setFormatter(logging.Formatter('%(asctime)s: %(levelname)s: %(message)s'))
@@ -35,12 +34,8 @@ def get_env_var(name, default=None, is_required=False):
 def rpc_call(req):
     req_data = json.loads(req.decode('ascii'))
     print(req_data)
-    method = req_data['method']
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    if "create" in method or "delete" in method:
-        sock.settimeout(TIMEOUT_LONG)
-    else:
-        sock.settimeout(TIMEOUT)
+    sock.settimeout(TIMEOUT)
     sock.connect(rpc_sock)
     sock.sendall(req)
 
@@ -51,7 +46,6 @@ def rpc_call(req):
     buf = ''
     closed = False
     response = None
-
 
     while not closed:
         newdata = sock.recv(1024)
