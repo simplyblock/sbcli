@@ -248,7 +248,10 @@ class CLIWrapper:
                                            'In case of HA SNode, make the current node as primary')
         sub_command.add_argument("id", help='id')
 
-        # check lvol
+        # show connection string
+        sub_command = self.add_sub_command(subparser, 'connect', 'Get raid connection strings')
+        sub_command.add_argument("id", help='Snode id')
+
         #
         # ----------------- cluster -----------------
         #
@@ -904,6 +907,12 @@ class CLIWrapper:
             elif sub_command == "make-primary":
                 id = args.id
                 ret = storage_ops.make_sec_new_primary(id)
+
+            elif sub_command == "connect":
+                id = args.id
+                data = lvol_controller.connect_raid(id)
+                if data:
+                    ret = "\n".join(con['connect'] for con in data)
             else:
                 self.parser.print_help()
 

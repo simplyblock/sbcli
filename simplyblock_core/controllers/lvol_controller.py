@@ -1044,6 +1044,30 @@ def connect_lvol(uuid):
     return out
 
 
+def connect_raid(uuid):
+    out = []
+    snode = db_controller.get_storage_node_by_id(uuid)
+    if not snode:
+        logger.error(f"node not found: {uuid}")
+        return False
+    if not snode.lvstore:
+        logger.error(f"Cluster is not activate yet, no raid created yet,")
+        return False
+    raid_nqn = f"nqn.2023-02.io.simlpyblock:subsystem_{snode.raid}"
+    for nic in snode.data_nics:
+        transport = nic.get_transport_type().lower()
+        ip = nic.ip4_address
+        port = 4420
+        out.append({
+            "transport": transport,
+            "ip": ip,
+            "port": port,
+            "nqn": raid_nqn,
+            "connect": f"sudo nvme connect --transport={transport} --traddr={ip} --trsvcid={port} --nqn={raid_nqn}",
+        })
+    return out
+
+
 def resize_lvol(id, new_size):
     lvol = db_controller.get_lvol_by_id(id)
     if not lvol:
