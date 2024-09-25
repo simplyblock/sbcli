@@ -32,6 +32,8 @@ class StorageNode(BaseModel):
         STATUS_RESTARTING: 12,
 
         STATUS_UNREACHABLE: 20,
+
+        STATUS_SCHEDULABLE: 30,
     }
 
     attributes = {
