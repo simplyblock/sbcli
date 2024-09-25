@@ -107,20 +107,7 @@ def set_node_offline(node):
     if node.status != StorageNode.STATUS_UNREACHABLE:
         for dev in node.nvme_devices:
             device_controller.device_set_unavailable(dev.get_id())
-
         storage_node_ops.set_node_status(snode.get_id(), StorageNode.STATUS_UNREACHABLE)
-        # add node to auto restart
-        tasks_controller.add_node_to_auto_restart(node)
-
-
-def set_jm_device_status(node):
-    if node.status != StorageNode.STATUS_UNREACHABLE:
-        for dev in node.nvme_devices:
-            device_controller.device_set_unavailable(dev.get_id())
-
-        storage_node_ops.set_node_status(snode.get_id(), StorageNode.STATUS_UNREACHABLE)
-        # add node to auto restart
-        tasks_controller.add_node_to_auto_restart(node)
 
 
 logger.info("Starting node monitor")
@@ -167,6 +154,10 @@ while True:
                 set_node_online(snode)
             else:
                 set_node_offline(snode)
+                if ping_check and node_api_check and not spdk_process:
+                    # add node to auto restart
+                    if cluster.status != Cluster.STATUS_UNREADY:
+                        tasks_controller.add_node_to_auto_restart(snode)
 
             # check JM device
             if snode.jm_device:
