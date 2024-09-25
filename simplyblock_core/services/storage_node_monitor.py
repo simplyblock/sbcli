@@ -159,6 +159,11 @@ while True:
                     if cluster.status != Cluster.STATUS_UNREADY:
                         tasks_controller.add_node_to_auto_restart(snode)
 
+                if not ping_check and not node_api_check and not spdk_process:
+                    # restart on new node
+                    storage_node_ops.set_node_status(snode.get_id(), StorageNode.STATUS_SCHEDULABLE)
+                continue
+
             # check JM device
             if snode.jm_device:
                 if snode.jm_device.status in [JMDevice.STATUS_ONLINE, JMDevice.STATUS_UNAVAILABLE]:

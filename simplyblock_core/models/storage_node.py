@@ -19,6 +19,7 @@ class StorageNode(BaseModel):
 
     STATUS_IN_CREATION = 'in_creation'
     STATUS_UNREACHABLE = 'unreachable'
+    STATUS_SCHEDULABLE = 'schedulable'
 
     STATUS_CODE_MAP = {
         STATUS_ONLINE: 0,

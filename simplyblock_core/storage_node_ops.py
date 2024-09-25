@@ -1372,7 +1372,8 @@ def restart_storage_node(
 
     if snode.status == StorageNode.STATUS_RESTARTING:
         logger.error(f"Node is in restart: {node_id}")
-        return False
+        if force is False:
+            return False
 
     task_id = tasks_controller.get_active_node_restart_task(snode.cluster_id, snode.get_id())
     if task_id:

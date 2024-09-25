@@ -108,8 +108,11 @@ def get_distr_cluster_map(snodes, target_node):
             dev_w_map.append({
                 "weight": dev_w,
                 "id": dev.cluster_device_order})
+        node_status = snode.status
+        if node_status == StorageNode.STATUS_SCHEDULABLE:
+            node_status = StorageNode.STATUS_UNREACHABLE
         map_cluster[snode.get_id()] = {
-            "status": snode.status,
+            "status": node_status,
             "devices": dev_map}
         map_prob.append({
             "weight": node_w,
