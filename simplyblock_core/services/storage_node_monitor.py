@@ -154,14 +154,15 @@ while True:
                 set_node_online(snode)
             else:
                 set_node_offline(snode)
-                if ping_check and node_api_check and not spdk_process:
+                if not ping_check and not node_api_check and not spdk_process:
+                    # restart on new node
+                    storage_node_ops.set_node_status(snode.get_id(), StorageNode.STATUS_SCHEDULABLE)
+
+                elif ping_check and node_api_check and not spdk_process:
                     # add node to auto restart
                     if cluster.status != Cluster.STATUS_UNREADY:
                         tasks_controller.add_node_to_auto_restart(snode)
 
-                if not ping_check and not node_api_check and not spdk_process:
-                    # restart on new node
-                    storage_node_ops.set_node_status(snode.get_id(), StorageNode.STATUS_SCHEDULABLE)
                 continue
 
             # check JM device

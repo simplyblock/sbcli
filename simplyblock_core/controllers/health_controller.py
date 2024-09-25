@@ -82,7 +82,7 @@ def _check_node_rpc(rpc_ip, rpc_port, rpc_username, rpc_password, timeout=60, re
 
 def _check_node_api(ip):
     try:
-        snode_api = SNodeClient(f"{ip}:5000", timeout=3, retry=1)
+        snode_api = SNodeClient(f"{ip}:5000", timeout=10, retry=2)
         logger.debug(f"Node API={ip}:5000")
         info, _ = snode_api.info()
         if info:
@@ -95,7 +95,7 @@ def _check_node_api(ip):
 
 def _check_spdk_process_up(ip):
     try:
-        snode_api = SNodeClient(f"{ip}:5000", timeout=3, retry=1)
+        snode_api = SNodeClient(f"{ip}:5000", timeout=10, retry=2)
         logger.debug(f"Node API={ip}:5000")
         is_up, _ = snode_api.spdk_process_is_up()
         logger.debug(f"SPDK is {is_up}")
