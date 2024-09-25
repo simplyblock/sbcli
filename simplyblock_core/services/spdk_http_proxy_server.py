@@ -8,11 +8,9 @@ import socket
 import ssl
 import sys
 
-try:
-    from BaseHTTPServer import HTTPServer, BaseHTTPRequestHandler
-except ImportError:
-    from http.server import HTTPServer
-    from http.server import BaseHTTPRequestHandler
+from http.server import ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler
+
 
 TIMEOUT = 30
 TIMEOUT_LONG = 5*60  # 5 min
@@ -135,7 +133,7 @@ def run_server(host, port, user, password, cert=None):
 
     try:
         ServerHandler.key = key
-        httpd = HTTPServer((host, port), ServerHandler)
+        httpd = ThreadingHTTPServer((host, port), ServerHandler)
         httpd.timeout = TIMEOUT
         if cert is not None:
             httpd.socket = ssl.wrap_socket(httpd.socket, certfile=cert, server_side=True)
