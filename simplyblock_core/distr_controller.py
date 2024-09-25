@@ -123,7 +123,7 @@ def get_distr_cluster_map(snodes, target_node):
         "timestamp": datetime.datetime.now().isoformat("T", "seconds")+'Z',
         "map_cluster": map_cluster,
         "map_prob": map_prob,
-        'ppln1': local_node_index
+        # 'ppln1': local_node_index
     }
     return cl_map
 
