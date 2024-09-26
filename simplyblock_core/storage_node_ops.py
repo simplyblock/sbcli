@@ -244,13 +244,15 @@ def _search_for_partitions(rpc_client, nvme_device):
 
 def _create_jm_stack_on_raid(rpc_client, jm_nvme_bdevs, snode, after_restart):
     raid_bdev = f"raid_jm_{snode.get_id()}"
-    raid_level = "0"
     if len(jm_nvme_bdevs) > 1:
         raid_level = "1"
-    ret = rpc_client.bdev_raid_create(raid_bdev, jm_nvme_bdevs, raid_level)
-    if not ret:
-        logger.error(f"Failed to create raid_jm_{snode.get_id()}")
-        return False
+        ret = rpc_client.bdev_raid_create(raid_bdev, jm_nvme_bdevs, raid_level)
+        if not ret:
+            logger.error(f"Failed to create raid_jm_{snode.get_id()}")
+            return False
+    else:
+        raid_bdev = jm_nvme_bdevs[0]
+
     alceml_name = f"alceml_jm_{snode.get_id()}"
 
     nvme_bdev = raid_bdev
@@ -323,7 +325,7 @@ def _create_jm_stack_on_raid(rpc_client, jm_nvme_bdevs, snode, after_restart):
             logger.error(f"Failed to add: {pt_name} to the subsystem: {subsystem_nqn}")
             return False
 
-    ret = rpc_client.get_bdevs(raid_bdev)
+    ret = rpc_client.get_bdevs(jm_bdev)
 
     return JMDevice({
         'uuid': alceml_id,

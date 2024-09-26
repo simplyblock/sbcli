@@ -114,7 +114,27 @@ while True:
                         logger.info(f"Checking bdev: {remote_device.remote_bdev} ... ok")
                     else:
                         logger.info(f"Checking bdev: {remote_device.remote_bdev} ... not found")
-                    # node_remote_devices_check &= bool(ret)
+                    node_remote_devices_check &= bool(ret)
+
+                if snode.jm_device:
+                    jm_device = snode.jm_device
+                    logger.info(f"Node node jm: {jm_device}")
+                    ret = health_controller.check_jm_device(jm_device.get_id())
+                    if ret:
+                        logger.info(f"Checking jm bdev: {jm_device.jm_bdev} ... ok")
+                    else:
+                        logger.info(f"Checking jm bdev: {jm_device.jm_bdev} ... not found")
+                    node_devices_check &= ret
+
+                if snode.enable_ha_jm:
+                    logger.info(f"Node remote JMs: {len(snode.remote_jm_devices)}")
+                    for remote_device in snode.remote_jm_devices:
+                        ret = rpc_client.get_bdevs(remote_device.remote_bdev)
+                        if ret:
+                            logger.info(f"Checking bdev: {remote_device.remote_bdev} ... ok")
+                        else:
+                            logger.info(f"Checking bdev: {remote_device.remote_bdev} ... not found")
+                        node_remote_devices_check &= bool(ret)
 
                 health_check_status = is_node_online and node_devices_check and node_remote_devices_check
             set_node_health_check(snode, health_check_status)
