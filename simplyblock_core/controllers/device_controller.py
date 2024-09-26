@@ -449,9 +449,11 @@ def device_remove(device_id, force=True):
                 jm_nvme_bdevs.remove(dev_to_remove)
                 if len(jm_nvme_bdevs) > 0:
                     new_jm = storage_node_ops._create_jm_stack_on_raid(rpc_client, jm_nvme_bdevs, snode, after_restart=True)
-                    snode.jm_device = new_jm
-                    snode.write_to_db(db_controller.kv_store)
-                    set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_ONLINE)
+                    if new_jm:
+                        snode = db_controller.get_storage_node_by_id(snode.get_id())
+                        snode.jm_device = new_jm
+                        snode.write_to_db(db_controller.kv_store)
+                        set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_ONLINE)
 
                     # make other nodes connect to new jm
                     if snode.enable_ha_jm:

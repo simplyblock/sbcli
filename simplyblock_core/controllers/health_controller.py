@@ -180,7 +180,7 @@ def check_node(node_id, with_devices=True):
 
         if snode.jm_device:
             jm_device = snode.jm_device
-            logger.info(f"Node node jm: {jm_device}")
+            logger.info(f"Node JM: {jm_device.get_id()}")
             ret = check_jm_device(jm_device.get_id())
             if ret:
                 logger.info(f"Checking jm bdev: {jm_device.jm_bdev} ... ok")
