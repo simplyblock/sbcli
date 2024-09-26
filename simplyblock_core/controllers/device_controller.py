@@ -268,9 +268,9 @@ def restart_device(device_id, force=False):
                 ret = rpc_client.bdev_PT_NoExcl_delete(snode.jm_device.pt_bdev)
 
             ret = rpc_client.bdev_jm_delete(snode.jm_device.jm_bdev)
+            ret = rpc_client.bdev_alceml_delete(snode.jm_device.alceml_bdev)
             if snode.jm_device.testing_bdev:
                 ret = rpc_client.bdev_passtest_delete(snode.jm_device.testing_bdev)
-            ret = rpc_client.bdev_alceml_delete(snode.jm_device.alceml_bdev)
             if len(snode.jm_device.jm_nvme_bdev_list) == 2:
                 ret = rpc_client.bdev_raid_delete(snode.jm_device.raid_bdev)
 
@@ -437,9 +437,9 @@ def device_remove(device_id, force=True):
                     ret = rpc_client.bdev_PT_NoExcl_delete(snode.jm_device.pt_bdev)
 
                 ret = rpc_client.bdev_jm_delete(snode.jm_device.jm_bdev)
+                ret = rpc_client.bdev_alceml_delete(snode.jm_device.alceml_bdev)
                 if snode.jm_device.testing_bdev:
                     ret = rpc_client.bdev_passtest_delete(snode.jm_device.testing_bdev)
-                ret = rpc_client.bdev_alceml_delete(snode.jm_device.alceml_bdev)
                 if len(snode.jm_device.jm_nvme_bdev_list) == 2:
                     ret = rpc_client.bdev_raid_delete(snode.jm_device.raid_bdev)
 
