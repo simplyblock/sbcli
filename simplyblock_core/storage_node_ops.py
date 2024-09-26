@@ -1427,7 +1427,6 @@ def restart_storage_node(
 
     logger.info("Restarting SPDK")
 
-    img = snode.spdk_image
     if max_lvol:
         snode.max_lvol = max_lvol
     if max_snap:
@@ -1435,8 +1434,7 @@ def restart_storage_node(
     if max_prov:
         snode.max_prov = max_prov
     if spdk_image:
-        img = spdk_image
-        snode.spdk_image = img
+        snode.spdk_image = spdk_image
 
     # Calculate pool count
     if snode.cloud_instance_type:
@@ -1505,7 +1503,7 @@ def restart_storage_node(
     try:
         fdb_connection = cluster.db_connection
         results, err = snode_api.spdk_process_start(
-            snode.spdk_cpu_mask, spdk_mem, spdk_image, spdk_debug, cluster_ip, fdb_connection,
+            snode.spdk_cpu_mask, spdk_mem, snode.spdk_image, spdk_debug, cluster_ip, fdb_connection,
             snode.namespace, snode.mgmt_ip, constants.RPC_HTTP_PROXY_PORT, snode.rpc_username, snode.rpc_password)
     except Exception as e:
         logger.error(e)
