@@ -965,6 +965,8 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
     rpc_user = "rpc_username"
     rpc_pass = "rpc_password"
     mgmt_ip = node_info['network_interface'][iface_name]['ip']
+    if enable_ha_jm:
+        spdk_image = constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE_JM
 
     logger.info("Deploying SPDK")
     results = None
@@ -1022,8 +1024,6 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
     snode.ctrl_secret = utils.generate_string(20)
     snode.number_of_distribs = number_of_distribs
     snode.enable_ha_jm = enable_ha_jm
-    if enable_ha_jm:
-        spdk_image = constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE_JM
 
     if 'cpu_count' in node_info:
         snode.cpu = node_info['cpu_count']
