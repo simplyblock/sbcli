@@ -2608,6 +2608,14 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
                 },
                 "distribs_list": distrib_list
             },
+            # {
+            #     "type": "bdev_ptnonexcl",
+            #     "name": "raid_PT",
+            #     "params": {
+            #         "name": "raid_PT",
+            #         "base_bdev_name": raid_device
+            #     }
+            # },
             {
                 "type": "bdev_lvstore",
                 "name": lvs_name,
@@ -2649,7 +2657,6 @@ def _create_bdev_stack(snode, lvstore_stack=None):
     else:
         stack = lvstore_stack
 
-    raid_device = None
     for bdev in stack:
         type = bdev['type']
         name = bdev['name']
@@ -2670,11 +2677,34 @@ def _create_bdev_stack(snode, lvstore_stack=None):
         elif type == "bdev_lvstore" and lvstore_stack:
             ret = rpc_client.create_lvstore(**params)
 
+        elif type == "bdev_ptnonexcl":
+            ret = rpc_client.bdev_PT_NoExcl_create(**params)
+            if ret:
+                try:
+                    # add pass through
+                    pt_name = "raid_PT"
+                    subsystem_nqn = snode.subsystem + ":dev:raid"
+                    logger.info("creating raid subsystem %s", subsystem_nqn)
+                    ret = rpc_client.subsystem_create(subsystem_nqn, 'sbcli-cn', 'sbcli-cn')
+                    for iface in snode.data_nics:
+                        if iface.ip4_address:
+                            tr_type = iface.get_transport_type()
+                            logger.info("adding listener for %s on IP %s" % (subsystem_nqn, iface.ip4_address))
+                            ret = rpc_client.listeners_create(subsystem_nqn, tr_type, iface.ip4_address, "4420")
+                            break
+                    logger.info(f"add {pt_name} to subsystem")
+                    ret = rpc_client.nvmf_subsystem_add_ns(subsystem_nqn, pt_name)
+                    if not ret:
+                        logger.error(f"Failed to add: {pt_name} to the subsystem: {subsystem_nqn}")
+                        return False
+                except:
+                    pass
+
         elif type == "bdev_raid":
             distribs_list = bdev["distribs_list"]
             strip_size_kb = params["strip_size_kb"]
             ret = rpc_client.bdev_raid_create(name, distribs_list, strip_size_kb=strip_size_kb)
-            raid_device = name
+
         else:
             logger.debug(f"Unknown BDev type: {type}")
             continue
@@ -2687,33 +2717,6 @@ def _create_bdev_stack(snode, lvstore_stack=None):
                 # rollback
                 _remove_bdev_stack(created_bdevs[::-1], rpc_client)
             return False, f"Failed to create BDev: {name}"
-
-    if raid_device:
-        try:
-            # add pass through
-            rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
-            pt_name = "raid_PT"
-            ret = rpc_client.bdev_PT_NoExcl_create(pt_name, raid_device)
-            if not ret:
-                logger.error(f"Failed to create pt noexcl bdev: {pt_name}")
-                return False
-
-            subsystem_nqn = snode.subsystem + ":dev:raid"
-            logger.info("creating raid subsystem %s", subsystem_nqn)
-            ret = rpc_client.subsystem_create(subsystem_nqn, 'sbcli-cn', 'sbcli-cn')
-            for iface in snode.data_nics:
-                if iface.ip4_address:
-                    tr_type = iface.get_transport_type()
-                    logger.info("adding listener for %s on IP %s" % (subsystem_nqn, iface.ip4_address))
-                    ret = rpc_client.listeners_create(subsystem_nqn, tr_type, iface.ip4_address, "4420")
-                    break
-            logger.info(f"add {pt_name} to subsystem")
-            ret = rpc_client.nvmf_subsystem_add_ns(subsystem_nqn, pt_name)
-            if not ret:
-                logger.error(f"Failed to add: {pt_name} to the subsystem: {subsystem_nqn}")
-                return False
-        except:
-            pass
 
     return True, None
 
@@ -2730,6 +2733,8 @@ def _remove_bdev_stack(bdev_stack, rpc_client, remove_distr_only=False):
             ret = rpc_client.bdev_raid_delete(name)
         elif type == "bdev_lvstore" and not remove_distr_only:
             ret = rpc_client.bdev_lvol_delete_lvstore(name)
+        elif type == "bdev_ptnonexcl":
+            ret = rpc_client.bdev_PT_NoExcl_delete(name)
         else:
             logger.debug(f"Unknown BDev type: {type}")
             continue
