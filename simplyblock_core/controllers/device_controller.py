@@ -4,7 +4,8 @@ import logging
 from simplyblock_core import distr_controller, utils, storage_node_ops
 from simplyblock_core.controllers import device_events, lvol_controller, tasks_controller
 from simplyblock_core.kv_store import DBController
-from simplyblock_core.models.nvme_device import NVMeDevice
+from simplyblock_core.models.nvme_device import NVMeDevice, JMDevice
+from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.rpc_client import RPCClient
 
 
@@ -248,6 +249,53 @@ def restart_device(device_id, force=False):
     logger.info("Setting device online")
     device_set_online(device_id)
     device_events.device_restarted(device_obj)
+
+    # add to jm raid
+    if snode.jm_device and snode.jm_device.raid_bdev:
+        nvme_controller = device_obj.nvme_controller
+        jm_part = None
+        for part in snode.jm_device.jm_nvme_bdev_list:
+            if part.startswith(nvme_controller):
+                jm_part = part
+                break
+        if snode.jm_device.status == NVMeDevice.STATUS_ONLINE:
+            set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_UNAVAILABLE)
+            # delete jm stack
+            if snode.enable_ha_jm:
+                ret = rpc_client.subsystem_delete(snode.jm_device.nvmf_nqn)
+
+            if snode.jm_device.pt_bdev:
+                ret = rpc_client.bdev_PT_NoExcl_delete(snode.jm_device.pt_bdev)
+
+            ret = rpc_client.bdev_jm_delete(snode.jm_device.jm_bdev)
+            if snode.jm_device.testing_bdev:
+                ret = rpc_client.bdev_passtest_delete(snode.jm_device.testing_bdev)
+            ret = rpc_client.bdev_alceml_delete(snode.jm_device.alceml_bdev)
+            if len(snode.jm_device.jm_nvme_bdev_list) == 2:
+                ret = rpc_client.bdev_raid_delete(snode.jm_device.raid_bdev)
+
+        # create jm
+        jm_nvme_bdevs = snode.jm_device.jm_nvme_bdev_list
+        if jm_part not in jm_nvme_bdevs:
+            jm_nvme_bdevs.append(jm_part)
+        new_jm = storage_node_ops._create_jm_stack_on_raid(rpc_client, jm_nvme_bdevs, snode, after_restart=True)
+        if new_jm:
+            snode = db_controller.get_storage_node_by_id(snode.get_id())
+            snode.jm_device = new_jm
+            snode.write_to_db(db_controller.kv_store)
+            set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_ONLINE)
+
+        # make other nodes connect to new jm
+        if snode.enable_ha_jm:
+            logger.info("Make other nodes connect to the new devices")
+            snodes = db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id)
+            for node_index, node in enumerate(snodes):
+                if node.get_id() == snode.get_id() or node.status != StorageNode.STATUS_ONLINE:
+                    continue
+                node.remote_jm_devices = storage_node_ops._connect_to_remote_jm_devs(node)
+                node.write_to_db(db_controller.kv_store)
+                logger.info(f"connected to devices count: {len(node.remote_devices)}")
+
     return "Done"
 
 
@@ -377,10 +425,51 @@ def device_remove(device_id, force=True):
                 break
 
         if dev_to_remove:
-            ret = rpc_client.bdev_raid_remove_base_bdev(snode.jm_device.raid_bdev, dev_to_remove)
-            if ret:
-                snode.jm_device.jm_nvme_bdev_list.remove(dev_to_remove)
-                snode.write_to_db(db_controller.kv_store)
+            if len(snode.jm_device.jm_nvme_bdev_list) <= 2:
+
+                set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_UNAVAILABLE)
+
+                # delete jm stack
+                if snode.enable_ha_jm:
+                    ret = rpc_client.subsystem_delete(snode.jm_device.nvmf_nqn)
+
+                if snode.jm_device.pt_bdev:
+                    ret = rpc_client.bdev_PT_NoExcl_delete(snode.jm_device.pt_bdev)
+
+                ret = rpc_client.bdev_jm_delete(snode.jm_device.jm_bdev)
+                if snode.jm_device.testing_bdev:
+                    ret = rpc_client.bdev_passtest_delete(snode.jm_device.testing_bdev)
+                ret = rpc_client.bdev_alceml_delete(snode.jm_device.alceml_bdev)
+                if len(snode.jm_device.jm_nvme_bdev_list) == 2:
+                    ret = rpc_client.bdev_raid_delete(snode.jm_device.raid_bdev)
+
+
+                # create jm
+                jm_nvme_bdevs = snode.jm_device.jm_nvme_bdev_list
+                jm_nvme_bdevs.remove(dev_to_remove)
+                if len(jm_nvme_bdevs) > 0:
+                    new_jm = storage_node_ops._create_jm_stack_on_raid(rpc_client, jm_nvme_bdevs, snode, after_restart=True)
+                    snode.jm_device = new_jm
+                    snode.write_to_db(db_controller.kv_store)
+                    set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_ONLINE)
+
+                    # make other nodes connect to new jm
+                    if snode.enable_ha_jm:
+                        logger.info("Make other nodes connect to the new devices")
+                        snodes = db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id)
+                        for node_index, node in enumerate(snodes):
+                            if node.get_id() == snode.get_id() or node.status != StorageNode.STATUS_ONLINE:
+                                continue
+                            node.remote_jm_devices = storage_node_ops._connect_to_remote_jm_devs(node)
+                            node.write_to_db(db_controller.kv_store)
+                            logger.info(f"connected to devices count: {len(node.remote_devices)}")
+                            time.sleep(3)
+
+            elif len(snode.jm_device.jm_nvme_bdev_list) > 2:
+                ret = rpc_client.bdev_raid_remove_base_bdev(snode.jm_device.raid_bdev, dev_to_remove)
+                if ret:
+                    snode.jm_device.jm_nvme_bdev_list.remove(dev_to_remove)
+                    snode.write_to_db(db_controller.kv_store)
 
     return True
 
