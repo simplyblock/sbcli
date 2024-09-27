@@ -325,7 +325,7 @@ def _create_jm_stack_on_raid(rpc_client, jm_nvme_bdevs, snode, after_restart):
             logger.error(f"Failed to add: {pt_name} to the subsystem: {subsystem_nqn}")
             return False
 
-    ret = rpc_client.get_bdevs(jm_bdev)
+    ret = rpc_client.get_bdevs(raid_bdev)
 
     return JMDevice({
         'uuid': alceml_id,
