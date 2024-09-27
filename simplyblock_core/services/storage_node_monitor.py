@@ -144,13 +144,7 @@ while True:
             spdk_process = health_controller._check_spdk_process_up(snode.mgmt_ip)
             logger.info(f"Check: spdk process {snode.mgmt_ip}:5000 ... {spdk_process}")
 
-            # node_rpc_check = True
-            # 3- check node RPC
-            node_rpc_check = health_controller._check_node_rpc(
-                snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password, timeout=5, retry=1)
-            logger.info(f"Check: node RPC {snode.mgmt_ip}:{snode.rpc_port} ... {node_rpc_check}")
-
-            is_node_online = ping_check and node_api_check and node_rpc_check and spdk_process
+            is_node_online = ping_check and node_api_check and spdk_process
             if is_node_online:
                 set_node_online(snode)
 
@@ -171,8 +165,8 @@ while True:
             else:
                 set_node_offline(snode)
                 if snode.jm_device.status != JMDevice.STATUS_UNAVAILABLE:
-                    device_controller.set_jm_device_state(snode.jm_device.get_id(),
-                                                          JMDevice.STATUS_UNAVAILABLE)
+                    device_controller.set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_UNAVAILABLE)
+
                 if not ping_check and not node_api_check and not spdk_process:
                     # restart on new node
                     storage_node_ops.set_node_status(snode.get_id(), StorageNode.STATUS_SCHEDULABLE)
