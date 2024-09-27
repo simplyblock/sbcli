@@ -772,8 +772,8 @@ def remove_jm_device(device_id, force=False):
 
     ret = rpc_client.bdev_alceml_delete(snode.jm_device.alceml_bdev)
 
-    if snode.jm_device.testing_bdev:
-        ret = rpc_client.bdev_passtest_delete(snode.jm_device.testing_bdev)
+    # if snode.jm_device.testing_bdev:
+    #     ret = rpc_client.bdev_passtest_delete(snode.jm_device.testing_bdev)
 
     if len(snode.jm_device.jm_nvme_bdev_list) == 2:
         ret = rpc_client.bdev_raid_delete(snode.jm_device.raid_bdev)
