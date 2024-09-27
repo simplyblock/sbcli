@@ -306,8 +306,8 @@ jobs:
             TESTNAME="--testname ${{ github.event.inputs.testname }}"
           fi
           
-          python3 e2e.py --ndcs "${{ github.event.inputs.ndcs }}" \
-                          --npcs "${{ github.event.inputs.npcs }}" \
+          python3 e2e.py  --ndcs $(( ${{ github.event.inputs.ndcs }} )) \
+                          --npcs $(( ${{ github.event.inputs.npcs }} )) \
                           --bs "${{ github.event.inputs.bs }}" \
                           --chunk_bs "${{ github.event.inputs.chunk_bs }}" \
                           --run_k8s True
