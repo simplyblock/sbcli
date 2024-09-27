@@ -792,8 +792,8 @@ def _connect_to_remote_jm_devs(this_node):
         if node.get_id() == this_node.get_id() or node.status != StorageNode.STATUS_ONLINE:
             continue
 
-        logger.info(f"Connecting to node {node.get_id()}")
-        if node.jm_device:
+        if node.jm_device and node.jm_device.status == NVMeDevice.STATUS_ONLINE:
+            logger.info(f"Connecting to JM on node: {node.get_id()}")
             name = f"remote_{node.jm_device.jm_bdev}"
             bdev_name = f"{name}n1"
             ret = rpc_client.get_bdevs(bdev_name)

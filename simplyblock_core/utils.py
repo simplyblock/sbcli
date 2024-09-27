@@ -261,7 +261,7 @@ def process_records(records, records_count):
 
 def ping_host(ip):
     logger.debug(f"Pinging ip ... {ip}")
-    response = os.system(f"ping -c 3 -W 3 {ip} > /dev/null")
+    response = os.system(f"ping -c 1 -W 3 {ip} > /dev/null")
     if response == 0:
         logger.debug(f"{ip} is UP")
         return True

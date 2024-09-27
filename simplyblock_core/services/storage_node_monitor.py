@@ -136,36 +136,33 @@ while True:
                 logger.info(f"Check 2: ping mgmt ip {snode.mgmt_ip} ... {ping_check}")
 
             # 2- check node API
-            node_api_check = False
-            spdk_process = False
-            node_rpc_check = False
-            if ping_check:
-                node_api_check = health_controller._check_node_api(snode.mgmt_ip)
-                logger.info(f"Check: node API {snode.mgmt_ip}:5000 ... {node_api_check}")
 
-                # 3- check spdk_process
-                spdk_process = health_controller._check_spdk_process_up(snode.mgmt_ip)
-                logger.info(f"Check: spdk process {snode.mgmt_ip}:5000 ... {spdk_process}")
+            node_api_check = health_controller._check_node_api(snode.mgmt_ip)
+            logger.info(f"Check: node API {snode.mgmt_ip}:5000 ... {node_api_check}")
 
-                # node_rpc_check = True
-                # 3- check node RPC
-                node_rpc_check = health_controller._check_node_rpc(
-                    snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password, timeout=5, retry=1)
-                logger.info(f"Check: node RPC {snode.mgmt_ip}:{snode.rpc_port} ... {node_rpc_check}")
+            # 3- check spdk_process
+            spdk_process = health_controller._check_spdk_process_up(snode.mgmt_ip)
+            logger.info(f"Check: spdk process {snode.mgmt_ip}:5000 ... {spdk_process}")
 
-                # check JM device
-                if snode.jm_device:
-                    if snode.jm_device.status in [JMDevice.STATUS_ONLINE, JMDevice.STATUS_UNAVAILABLE]:
-                        ret = health_controller.check_jm_device(snode.jm_device.get_id())
-                        if ret:
-                            logger.info(f"JM bdev is online: {snode.jm_device.get_id()}")
-                            if snode.jm_device.status != JMDevice.STATUS_ONLINE:
-                                device_controller.set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_ONLINE)
-                        else:
-                            logger.error(f"JM bdev is offline: {snode.jm_device.get_id()}")
-                            if snode.jm_device.status != JMDevice.STATUS_UNAVAILABLE:
-                                device_controller.set_jm_device_state(snode.jm_device.get_id(),
-                                                                      JMDevice.STATUS_UNAVAILABLE)
+            # node_rpc_check = True
+            # 3- check node RPC
+            node_rpc_check = health_controller._check_node_rpc(
+                snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password, timeout=5, retry=1)
+            logger.info(f"Check: node RPC {snode.mgmt_ip}:{snode.rpc_port} ... {node_rpc_check}")
+
+            # check JM device
+            if snode.jm_device:
+                if snode.jm_device.status in [JMDevice.STATUS_ONLINE, JMDevice.STATUS_UNAVAILABLE]:
+                    ret = health_controller.check_jm_device(snode.jm_device.get_id())
+                    if ret:
+                        logger.info(f"JM bdev is online: {snode.jm_device.get_id()}")
+                        if snode.jm_device.status != JMDevice.STATUS_ONLINE:
+                            device_controller.set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_ONLINE)
+                    else:
+                        logger.error(f"JM bdev is offline: {snode.jm_device.get_id()}")
+                        if snode.jm_device.status != JMDevice.STATUS_UNAVAILABLE:
+                            device_controller.set_jm_device_state(snode.jm_device.get_id(),
+                                                                  JMDevice.STATUS_UNAVAILABLE)
 
             is_node_online = ping_check and node_api_check and node_rpc_check and spdk_process
             if is_node_online:
@@ -178,7 +175,7 @@ while True:
 
                 elif ping_check and node_api_check and not spdk_process:
                     # add node to auto restart
-                    if cluster.status != Cluster.STATUS_UNREADY:
+                    if cluster.status == Cluster.STATUS_ACTIVE:
                         tasks_controller.add_node_to_auto_restart(snode)
 
         update_cluster_status(cluster_id)

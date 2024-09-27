@@ -230,6 +230,14 @@ class CLIWrapper:
         sub_command = self.add_sub_command(subparser, "info-spdk", 'Get SPDK memory information')
         sub_command.add_argument("id", help='Node UUID')
 
+        sub_command = self.add_sub_command(subparser, 'remove-jm-device', 'Remove JM device')
+        sub_command.add_argument("jm_device_id", help='JM device ID')
+        sub_command.add_argument("--force", help='Force device remove', required=False, action='store_true')
+
+        sub_command = self.add_sub_command(subparser, 'restart-jm-device', 'Restart JM device')
+        sub_command.add_argument("jm_device_id", help='JM device ID')
+        sub_command.add_argument("--force", help='Force device remove', required=False, action='store_true')
+
         #
         # ----------------- cluster -----------------
         #
@@ -878,6 +886,12 @@ class CLIWrapper:
 
             elif sub_command == "get":
                 ret = storage_ops.get(args.id)
+
+            elif sub_command == "remove-jm-device":
+                ret = device_controller.remove_jm_device(args.jm_device_id, args.force)
+
+            elif sub_command == "restart-jm-device":
+                ret = device_controller.restart_jm_device(args.jm_device_id, args.force)
 
             else:
                 self.parser.print_help()
