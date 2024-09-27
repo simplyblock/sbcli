@@ -718,15 +718,12 @@ def set_jm_device_state(device_id, state):
         logger.error("device not found")
         return False
 
-    if jm_device.status == state:
-        return True
-
-    jm_device.status = state
-    snode.write_to_db(db_controller.kv_store)
+    if jm_device.status != state:
+        jm_device.status = state
+        snode.write_to_db(db_controller.kv_store)
 
     if snode.enable_ha_jm and state in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_UNAVAILABLE]:
         # make other nodes connect to the new devices
-        logger.info("Make other nodes connect to the new devices")
         snodes = db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id)
         for node_index, node in enumerate(snodes):
             if node.get_id() == snode.get_id() or node.status != StorageNode.STATUS_ONLINE:
