@@ -252,19 +252,20 @@ def restart_device(device_id, force=False):
 
     # add to jm raid
     if snode.jm_device and snode.jm_device.raid_bdev:
-        nvme_controller = device_obj.nvme_controller
-        jm_part = None
-        for part in snode.jm_device.jm_nvme_bdev_list:
-            if part.startswith(nvme_controller):
-                jm_part = part
-                break
+        # looking for jm partition
+        rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
+        jm_dev_part = f"{dev.nvme_bdev[:-1]}1"
+        ret = rpc_client.get_bdevs(jm_dev_part)
+        if ret:
+            logger.info(f"JM part found: {jm_dev_part}")
+            if snode.jm_device.status == JMDevice.STATUS_UNAVAILABLE:
+                restart_jm_device(snode.jm_device.get_id(), force=True)
 
-        if not jm_part:
-            if snode.jm_device.status == NVMeDevice.STATUS_ONLINE:
+            if snode.jm_device.status == JMDevice.STATUS_ONLINE and \
+                    jm_dev_part not in snode.jm_device.jm_nvme_bdev_list:
                 remove_jm_device(snode.jm_device.get_id(), force=True)
                 time.sleep(3)
-
-            restart_jm_device(snode.jm_device.get_id(), force=True)
+                restart_jm_device(snode.jm_device.get_id(), force=True)
 
     return "Done"
 
