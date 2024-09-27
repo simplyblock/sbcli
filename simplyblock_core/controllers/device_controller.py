@@ -295,26 +295,26 @@ def set_device_testing_mode(device_id, mode):
     return ret
 
 
-def set_jm_device_testing_mode(device_id, mode):
-    db_controller = DBController()
-    snode = db_controller.get_storage_by_jm_id(device_id)
-    if not snode:
-        logger.error("node not found")
-        return False
-    jm_device = snode.jm_device
-
-    if not snode.enable_test_device:
-        logger.error("Test device is disabled on this storage node")
-        return False
-
-    logger.info(f"Set device:{device_id} Test mode:{mode}")
-    # creating RPCClient instance
-    rpc_client = RPCClient(
-        snode.mgmt_ip, snode.rpc_port,
-        snode.rpc_username, snode.rpc_password)
-
-    ret = rpc_client.bdev_passtest_mode(jm_device.testing_bdev, mode)
-    return ret
+# def set_jm_device_testing_mode(device_id, mode):
+#     db_controller = DBController()
+#     snode = db_controller.get_storage_by_jm_id(device_id)
+#     if not snode:
+#         logger.error("node not found")
+#         return False
+#     jm_device = snode.jm_device
+#
+#     if not snode.enable_test_device:
+#         logger.error("Test device is disabled on this storage node")
+#         return False
+#
+#     logger.info(f"Set device:{device_id} Test mode:{mode}")
+#     # creating RPCClient instance
+#     rpc_client = RPCClient(
+#         snode.mgmt_ip, snode.rpc_port,
+#         snode.rpc_username, snode.rpc_password)
+#
+#     ret = rpc_client.bdev_passtest_mode(jm_device.testing_bdev, mode)
+#     return ret
 
 
 def device_remove(device_id, force=True):
