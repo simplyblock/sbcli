@@ -66,7 +66,7 @@ def _check_node_docker_api(ip):
     # return False
 
 
-def _check_node_rpc(rpc_ip, rpc_port, rpc_username, rpc_password, timeout=60, retry=3):
+def _check_node_rpc(rpc_ip, rpc_port, rpc_username, rpc_password, timeout=5, retry=2):
     try:
         rpc_client = RPCClient(
             rpc_ip, rpc_port, rpc_username, rpc_password,

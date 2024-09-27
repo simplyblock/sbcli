@@ -150,25 +150,29 @@ while True:
                 snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password, timeout=5, retry=1)
             logger.info(f"Check: node RPC {snode.mgmt_ip}:{snode.rpc_port} ... {node_rpc_check}")
 
-            # check JM device
-            if snode.jm_device:
-                if snode.jm_device.status in [JMDevice.STATUS_ONLINE, JMDevice.STATUS_UNAVAILABLE]:
-                    ret = health_controller.check_jm_device(snode.jm_device.get_id())
-                    if ret:
-                        logger.info(f"JM bdev is online: {snode.jm_device.get_id()}")
-                        if snode.jm_device.status != JMDevice.STATUS_ONLINE:
-                            device_controller.set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_ONLINE)
-                    else:
-                        logger.error(f"JM bdev is offline: {snode.jm_device.get_id()}")
-                        if snode.jm_device.status != JMDevice.STATUS_UNAVAILABLE:
-                            device_controller.set_jm_device_state(snode.jm_device.get_id(),
-                                                                  JMDevice.STATUS_UNAVAILABLE)
-
             is_node_online = ping_check and node_api_check and node_rpc_check and spdk_process
             if is_node_online:
                 set_node_online(snode)
+
+                # check JM device
+                if snode.jm_device:
+                    if snode.jm_device.status in [JMDevice.STATUS_ONLINE, JMDevice.STATUS_UNAVAILABLE]:
+                        ret = health_controller.check_jm_device(snode.jm_device.get_id())
+                        if ret:
+                            logger.info(f"JM bdev is online: {snode.jm_device.get_id()}")
+                            if snode.jm_device.status != JMDevice.STATUS_ONLINE:
+                                device_controller.set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_ONLINE)
+                        else:
+                            logger.error(f"JM bdev is offline: {snode.jm_device.get_id()}")
+                            if snode.jm_device.status != JMDevice.STATUS_UNAVAILABLE:
+                                device_controller.set_jm_device_state(snode.jm_device.get_id(),
+                                                                      JMDevice.STATUS_UNAVAILABLE)
+
             else:
                 set_node_offline(snode)
+                if snode.jm_device.status != JMDevice.STATUS_UNAVAILABLE:
+                    device_controller.set_jm_device_state(snode.jm_device.get_id(),
+                                                          JMDevice.STATUS_UNAVAILABLE)
                 if not ping_check and not node_api_check and not spdk_process:
                     # restart on new node
                     storage_node_ops.set_node_status(snode.get_id(), StorageNode.STATUS_SCHEDULABLE)
