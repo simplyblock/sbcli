@@ -28,7 +28,7 @@ node_name = os.environ.get("HOSTNAME")
 deployment_name = f"snode-spdk-deployment-{node_name}"
 default_namespace = 'default'
 namespace_id_file = '/etc/simplyblock/namespace'
-pod_name = 'snode-spdk-deployment'
+pod_name = deployment_name[:50]
 
 
 config.load_incluster_config()
