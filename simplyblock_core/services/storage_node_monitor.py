@@ -105,9 +105,16 @@ def set_node_online(node):
 
 def set_node_offline(node):
     if node.status != StorageNode.STATUS_UNREACHABLE:
+        # set node unavailable
+        storage_node_ops.set_node_status(snode.get_id(), StorageNode.STATUS_UNREACHABLE)
+
+        # set devices unavailable
         for dev in node.nvme_devices:
             device_controller.device_set_unavailable(dev.get_id())
-        storage_node_ops.set_node_status(snode.get_id(), StorageNode.STATUS_UNREACHABLE)
+
+        # set jm dev offline
+        if snode.jm_device.status != JMDevice.STATUS_UNAVAILABLE:
+            device_controller.set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_UNAVAILABLE)
 
 
 logger.info("Starting node monitor")
@@ -164,8 +171,6 @@ while True:
 
             else:
                 set_node_offline(snode)
-                if snode.jm_device.status != JMDevice.STATUS_UNAVAILABLE:
-                    device_controller.set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_UNAVAILABLE)
 
                 if not ping_check and not node_api_check and not spdk_process:
                     # restart on new node

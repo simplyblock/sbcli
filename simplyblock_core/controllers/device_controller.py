@@ -37,8 +37,8 @@ def device_set_state(device_id, state):
 
     old_status = dev.status
     device.status = state
-    distr_controller.send_dev_status_event(device, device.status)
     snode.write_to_db(db_controller.kv_store)
+    distr_controller.send_dev_status_event(device, device.status)
     device_events.device_status_change(device, device.status, old_status)
     return True
 
