@@ -270,15 +270,15 @@ jobs:
       - name: Sleep after Helm Installation
         run: sleep 300
 
-      - name: Activate Cluster
-        run: |
-          ssh -i "$HOME/.ssh/${{ steps.terraform_outputs.outputs.key_name }}" -o StrictHostKeyChecking=no \
-            -o ProxyCommand="ssh -o StrictHostKeyChecking=no -i \"$HOME/.ssh/${{ steps.terraform_outputs.outputs.key_name }}\" -W %h:%p ec2-user@${{ steps.terraform_outputs.outputs.bastion_public_ip }}" \
-            ec2-user@${{ steps.terraform_outputs.outputs.mgmt_private_ip }} "
-            $SBCLI_CMD cluster activate ${{ steps.bootstrap_cluster.outputs.cluster_id }}
-          "
-        env:
-          SBCLI_CMD: ${{ env.SBCLI_CMD }}
+      # - name: Activate Cluster
+      #   run: |
+      #     ssh -i "$HOME/.ssh/${{ steps.terraform_outputs.outputs.key_name }}" -o StrictHostKeyChecking=no \
+      #       -o ProxyCommand="ssh -o StrictHostKeyChecking=no -i \"$HOME/.ssh/${{ steps.terraform_outputs.outputs.key_name }}\" -W %h:%p ec2-user@${{ steps.terraform_outputs.outputs.bastion_public_ip }}" \
+      #       ec2-user@${{ steps.terraform_outputs.outputs.mgmt_private_ip }} "
+      #       $SBCLI_CMD cluster activate ${{ steps.bootstrap_cluster.outputs.cluster_id }}
+      #     "
+      #   env:
+      #     SBCLI_CMD: ${{ env.SBCLI_CMD }}
 
       - name: Record Test Start Time
         run: echo "TEST_START_TIME=$(date +%s)" >> $GITHUB_ENV
