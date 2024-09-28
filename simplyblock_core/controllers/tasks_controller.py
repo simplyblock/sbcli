@@ -25,6 +25,15 @@ def _validate_new_task_dev_restart(cluster_id, node_id, device_id):
     return True
 
 
+def _validate_new_task_node_restart(cluster_id, node_id):
+    tasks = db_controller.get_job_tasks(cluster_id)
+    for task in tasks:
+        if task.function_name == JobSchedule.FN_NODE_RESTART and task.node_id == node_id and task.canceled is False:
+            if task.status != JobSchedule.STATUS_DONE:
+                return task.get_id()
+    return True
+
+
 def _add_task(function_name, cluster_id, node_id, device_id,
               max_retry=constants.TASK_EXEC_RETRY_COUNT, function_params=None):
 
@@ -32,7 +41,7 @@ def _add_task(function_name, cluster_id, node_id, device_id,
         if not _validate_new_task_dev_restart(cluster_id, node_id, device_id):
             return False
     elif function_name == JobSchedule.FN_NODE_RESTART:
-        task_id = get_active_node_restart_task(cluster_id, node_id)
+        task_id = _validate_new_task_node_restart(cluster_id, node_id)
         if task_id:
             logger.info(f"Task found, skip adding new task: {task_id}")
             return False

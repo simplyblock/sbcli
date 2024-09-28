@@ -1389,12 +1389,6 @@ def restart_storage_node(
         if force is False:
             return False
 
-    task_id = tasks_controller.get_active_node_restart_task(snode.cluster_id, snode.get_id())
-    if task_id:
-        logger.error(f"Restart task found: {task_id}, can not restart storage node")
-        if force is False:
-            return False
-
     if node_ip:
         if node_ip != snode.api_endpoint:
             logger.info(f"Restarting on new node with ip: {node_ip}")
