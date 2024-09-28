@@ -690,14 +690,21 @@ def add_device(device_id):
 
     tasks_controller.add_new_device_mig_task(device_id)
 
-    # add device to jm raid
-    if snode.jm_device.raid_bdev and snode.jm_device.jm_nvme_bdev_list < 2:
-        nvme_bdev = jm_part.nvme_bdev
-        if nvme_bdev not in snode.jm_device.jm_nvme_bdev_list:
-            ret = rpc_client.bdev_raid_add_base_bdev(snode.jm_device.raid_bdev, nvme_bdev)
-            if ret:
-                snode.jm_device.jm_nvme_bdev_list.append(nvme_bdev)
-                snode.write_to_db(db_controller.kv_store)
+    # add to jm raid
+    if snode.jm_device and snode.jm_device.raid_bdev:
+        # looking for jm partition
+        rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
+        jm_dev_part = f"{dev.nvme_bdev[:-1]}1"
+        ret = rpc_client.get_bdevs(jm_dev_part)
+        if ret:
+            logger.info(f"JM part found: {jm_dev_part}")
+            if snode.jm_device.status == JMDevice.STATUS_UNAVAILABLE:
+                restart_jm_device(snode.jm_device.get_id(), force=True)
+
+            if snode.jm_device.status == JMDevice.STATUS_ONLINE and \
+                    jm_dev_part not in snode.jm_device.jm_nvme_bdev_list:
+                remove_jm_device(snode.jm_device.get_id(), force=True)
+                restart_jm_device(snode.jm_device.get_id(), force=True)
 
     return "Done"
 
