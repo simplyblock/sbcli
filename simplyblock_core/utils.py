@@ -478,6 +478,8 @@ def calculate_minimum_hp_memory(small_pool_count, large_pool_count, lvol_count, 
     pool_consumption = (small_pool_count * 8 + large_pool_count * 128) / 1024 + 1092
     max_prov_tb = max_prov / (1024 * 1024 * 1024 * 1024)
     memory_consumption = (4 * cpu_count + 1.0277 * pool_consumption + 7 * lvol_count) * (1024 * 1024) + (250 * 1024 * 1024) * 1.1 * max_prov_tb + constants.EXTRA_HUGE_PAGE_MEMORY
+    # TODO: adjust the formula
+    memory_consumption *= 1.8
     return memory_consumption
 
 
@@ -496,6 +498,7 @@ def calculate_spdk_memory(minimum_hp_memory, minimum_sys_memory, free_sys_memory
                        f"Minimum system memory: {humanbytes(minimum_sys_memory)}")
         return False, 0
     spdk_mem = minimum_hp_memory + (total_free_memory - minimum_hp_memory - minimum_sys_memory) * 0.2
+    spdk_mem = minimum_hp_memory
     logger.debug(f"SPDK memory is {humanbytes(spdk_mem)}")
     return True, spdk_mem
 
