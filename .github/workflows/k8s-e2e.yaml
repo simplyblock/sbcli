@@ -225,6 +225,7 @@ jobs:
             --set logicalVolume.pool_name="testing1" \
             --set logicalVolume.snapshot="True" \
             --set image.spdkcsi.tag=master-arm64 \
+            --set image.simplyblock.tag=main \
             --set storagenode.spdkImage=simplyblock/spdk:main-latest
 
       # - name: Wait for Storage Nodes to Become Online
@@ -267,7 +268,7 @@ jobs:
       #   shell: /usr/bin/bash -e {0}
       
       - name: Sleep after Helm Installation
-        run: sleep 1000
+        run: sleep 600
 
       - name: Activate Cluster
         run: |
