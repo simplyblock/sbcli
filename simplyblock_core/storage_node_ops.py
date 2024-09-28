@@ -968,8 +968,11 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
     rpc_user = "rpc_username"
     rpc_pass = "rpc_password"
     mgmt_ip = node_info['network_interface'][iface_name]['ip']
-    if enable_ha_jm:
-        spdk_image = constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE_JM
+    if not spdk_image:
+        if enable_ha_jm:
+            spdk_image = constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE_JM
+        else:
+            spdk_image = constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE
 
     logger.info("Deploying SPDK")
     results = None
