@@ -192,7 +192,7 @@ jobs:
             --distr-npcs ${{ github.event.inputs.npcs || 1 }} \
             --distr-bs ${{ github.event.inputs.bs || 4096 }} \
             --distr-chunk-bs ${{ github.event.inputs.chunk_bs || 4096 }} \
-            --spdk-debug
+            --k8s-snode
         id: bootstrap_cluster
         env:
           SBCLI_CMD: ${{ env.SBCLI_CMD }}
