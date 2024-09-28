@@ -26,6 +26,7 @@ class RPCException(Exception):
 class RPCClient:
 
     # ref: https://spdk.io/doc/jsonrpc.html
+    DEFAULT_ALLOWED_METHODS = ["HEAD", "GET", "PUT", "DELETE", "OPTIONS", "TRACE", "POST"]
 
     def __init__(self, ip_address, port, username, password, timeout=60, retry=3):
         self.ip_address = ip_address
@@ -37,7 +38,8 @@ class RPCClient:
         self.session = requests.session()
         self.session.auth = (self.username, self.password)
         self.session.verify = False
-        retries = Retry(total=retry, backoff_factor=1, connect=retry, read=retry)
+        retries = Retry(total=retry, backoff_factor=1, connect=retry, read=retry,
+                        allowed_methods=self.DEFAULT_ALLOWED_METHODS)
         self.session.mount("http://", HTTPAdapter(max_retries=retries))
         self.session.timeout = self.timeout
 
