@@ -251,7 +251,7 @@ def restart_device(device_id, force=False):
     device_events.device_restarted(device_obj)
 
     # add to jm raid
-    if snode.jm_device and snode.jm_device.raid_bdev:
+    if snode.jm_device and snode.jm_device.raid_bdev and snode.jm_device.status != JMDevice.STATUS_REMOVED:
         # looking for jm partition
         rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
         jm_dev_part = f"{dev.nvme_bdev[:-1]}1"
