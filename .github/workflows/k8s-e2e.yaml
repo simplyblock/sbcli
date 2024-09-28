@@ -268,7 +268,7 @@ jobs:
       #   shell: /usr/bin/bash -e {0}
       
       - name: Sleep after Helm Installation
-        run: sleep 600
+        run: sleep 300
 
       - name: Activate Cluster
         run: |
