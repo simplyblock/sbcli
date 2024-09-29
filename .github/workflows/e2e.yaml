@@ -167,7 +167,6 @@ jobs:
             --distr-npcs $NPCS \
             --distr-bs $BS \
             --distr-chunk-bs $CHUNK_BS \
-            --spdk-debug
         id: bootstrap_cluster
         env:
           SBCLI_CMD: ${{ env.SBCLI_CMD }}
