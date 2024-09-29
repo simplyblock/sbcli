@@ -170,7 +170,7 @@ jobs:
         id: bootstrap_cluster
         env:
           SBCLI_CMD: ${{ env.SBCLI_CMD }}
-          NDCD: ${{ env.NDCS }}
+          NDCS: ${{ env.NDCS }}
           NPCS: ${{ env.NPCS }}
           BS: ${{ env.BS }}
           CHUNK_BS: ${{ env.CHUNK_BS }}
@@ -205,7 +205,7 @@ jobs:
                   --ndcs ${{ NDCS }} --npcs ${{ NPCS }} --bs {{ BS }} --chunk_bs {{ CHUNK_BS }}
         env:
           SBCLI_CMD: ${{ env.SBCLI_CMD }}
-          NDCD: ${{ env.NDCS }}
+          NDCS: ${{ env.NDCS }}
           NPCS: ${{ env.NPCS }}
           BS: ${{ env.BS }}
           CHUNK_BS: ${{ env.CHUNK_BS }}

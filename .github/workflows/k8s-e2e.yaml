@@ -202,7 +202,7 @@ jobs:
         env:
           SBCLI_CMD: ${{ env.SBCLI_CMD }}
           SBCLI_CMD: ${{ env.SBCLI_CMD }}
-          NDCD: ${{ env.NDCS }}
+          NDCS: ${{ env.NDCS }}
           NPCS: ${{ env.NPCS }}
           BS: ${{ env.BS }}
           CHUNK_BS: ${{ env.CHUNK_BS }}
@@ -322,7 +322,7 @@ jobs:
                   --run_k8s True
         env:
           SBCLI_CMD: ${{ env.SBCLI_CMD }}
-          NDCD: ${{ env.NDCS }}
+          NDCS: ${{ env.NDCS }}
           NPCS: ${{ env.NPCS }}
           BS: ${{ env.BS }}
           CHUNK_BS: ${{ env.CHUNK_BS }}
