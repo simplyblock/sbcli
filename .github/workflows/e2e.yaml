@@ -114,7 +114,7 @@ jobs:
           cd $GITHUB_WORKSPACE/simplyBlockDeploy
           terraform validate
 
-      - name: Set SBCLI_CMD based on branch and input
+      - name: Set parameters based on branch and input
         run: |
           if [[ "${GITHUB_REF##*/}" == *"pre-release"* ]]; then
             echo "Branch is pre-release. Setting SBCLI_CMD to sbcli-pre."
@@ -126,6 +126,10 @@ jobs:
             echo "Setting SBCLI_CMD to input or default to sbcli-dev."
             echo "SBCLI_CMD=${{ github.event.inputs.sbcli_cmd || 'sbcli-dev' }}" >> $GITHUB_ENV
           fi
+          echo "NDCS=${{ github.event.inputs.ndcs || 1 }}" >> $GITHUB_ENV
+          echo "NPCS=${{ github.event.inputs.npcs || 1 }}" >> $GITHUB_ENV
+          echo "BS=${{ github.event.inputs.bs || 4096 }}" >> $GITHUB_ENV
+          echo "CHUNK_BS=${{ github.event.inputs.chunk_bs || 4096 }}" >> $GITHUB_ENV
         shell: bash
 
       - name: Plan Terraform Changes
@@ -159,14 +163,17 @@ jobs:
           cd $GITHUB_WORKSPACE/simplyBlockDeploy
           ./bootstrap-cluster.sh --sbcli-cmd "$SBCLI_CMD" \
             --max-lvol 10 --max-snap 10 --max-prov 900G --number-of-devices 3 \
-            --distr-ndcs ${{ github.event.inputs.ndcs || 1 }} \
-            --distr-npcs ${{ github.event.inputs.npcs || 1 }} \
-            --distr-bs ${{ github.event.inputs.bs || 4096 }} \
-            --distr-chunk-bs ${{ github.event.inputs.chunk_bs || 4096 }} \
-            --spdk-debug
+            --distr-ndcs $NDCS \
+            --distr-npcs $NPCS \
+            --distr-bs $BS \
+            --distr-chunk-bs $CHUNK_BS \
         id: bootstrap_cluster
         env:
           SBCLI_CMD: ${{ env.SBCLI_CMD }}
+          NDCS: ${{ env.NDCS }}
+          NPCS: ${{ env.NPCS }}
+          BS: ${{ env.BS }}
+          CHUNK_BS: ${{ env.CHUNK_BS }}
 
       - name: Record Test Start Time
         run: echo "TEST_START_TIME=$(date +%s)" >> $GITHUB_ENV
@@ -194,9 +201,14 @@ jobs:
           if [ -n "${{ github.event.inputs.testname }}" ]; then
             TESTNAME="--testname ${{ github.event.inputs.testname }}"
           fi
-          python3 e2e.py $TESTNAME
+          python3 e2e.py $TESTNAME \
+                  --ndcs $NDCS --npcs $NPCS --bs $BS --chunk_bs $CHUNK_BS
         env:
           SBCLI_CMD: ${{ env.SBCLI_CMD }}
+          NDCS: ${{ env.NDCS }}
+          NPCS: ${{ env.NPCS }}
+          BS: ${{ env.BS }}
+          CHUNK_BS: ${{ env.CHUNK_BS }}
         
       - name: Record Test End Time
         if: always() 
@@ -310,10 +322,10 @@ jobs:
           TEST_TIME_HOURS: ${{ env.TEST_TIME_HOURS }}
           TEST_TIME_MINS: ${{ env.TEST_TIME_MINS }}
           TEST_TIME_SECS: ${{ env.TEST_TIME_SECS }}
-          NDCS: ${{ github.event.inputs.ndcs }}
-          NPCS: ${{ github.event.inputs.npcs }}
-          CHUNK_BS: ${{ github.event.inputs.chunk_bs }}
-          BS: ${{ github.event.inputs.bs }}
+          NDCS: ${{ env.NDCS }}
+          NPCS: ${{ env.NPCS }}
+          CHUNK_BS: ${{ env.CHUNK_BS }}
+          BS: ${{ env.BS }}
         run: |
           GITHUB_RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}"
           AWS_LOGS_URL="https://s3.console.aws.amazon.com/s3/buckets/${S3_BUCKET_NAME}?prefix=${RUN_ID}/&region=us-east-2"
@@ -325,7 +337,7 @@ jobs:
 
           TIME_TAKEN="${TEST_TIME_HOURS}h ${TEST_TIME_MINS}m ${TEST_TIME_SECS}s"
 
-          MESSAGE="Python E2E tests run triggered on branch *${BRANCH_NAME}*. \nTotal Time Taken to run the tests: ${TIME_TAKEN}. \n\n${OVERALL_STATUS}\nGitHub Run: ${GITHUB_RUN_URL}\nAWS Logs: ${AWS_LOGS_URL}\n\n*Configuration*: *NDCS: ${{ env.NDCS }}, NPCS: ${{ env.NPCS }}, Block Size: ${{ env.BS }}, Chunk Block Size: ${{ env.CHUNK_BS }}*\n\nTotal Tests: *${{ env.TOTAL_TESTS }}*, Passed Tests: *${{ env.PASSED_TESTS }}*, Failed Tests: *${{ env.FAILED_TESTS }}*\n\n-- Test Cases Passed :white_check_mark:\n${{ env.PASSED_CASES_BULLETS }}\n\n-- Test Cases Failed :x:\n${{ env.FAILED_CASES_BULLETS }}"
+          MESSAGE="Python E2E tests run triggered on branch *${BRANCH_NAME}*. \nTotal Time Taken to run the tests: ${TIME_TAKEN}. \n\n${OVERALL_STATUS}\nGitHub Run: ${GITHUB_RUN_URL}\nAWS Logs: ${AWS_LOGS_URL}\n\n*Configuration*: *NDCS: ${NDCS}, NPCS: ${NPCS}, Block Size: ${BS}, Chunk Block Size: ${CHUNK_BS}*\n\nTotal Tests: *${TOTAL_TESTS}*, Passed Tests: *${PASSED_TESTS}*, Failed Tests: *${FAILED_TESTS}*\n\n-- Test Cases Passed :white_check_mark:\n${PASSED_CASES_BULLETS}\n\n-- Test Cases Failed :x:\n${FAILED_CASES_BULLETS}"
 
           curl -X POST -H 'Content-type: application/json' --data "{\"text\":\"${MESSAGE}\"}" $SLACK_WEBHOOK_URL
 
