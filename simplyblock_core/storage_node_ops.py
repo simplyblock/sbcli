@@ -328,7 +328,7 @@ def _create_jm_stack_on_raid(rpc_client, jm_nvme_bdevs, snode, after_restart):
     ret = rpc_client.get_bdevs(raid_bdev)
 
     return JMDevice({
-        'uuid': alceml_id,
+        'uuid': snode.get_id(),
         'device_name': jm_bdev,
         'size': ret[0]["block_size"] * ret[0]["num_blocks"],
         'status': JMDevice.STATUS_ONLINE,
