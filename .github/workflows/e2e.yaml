@@ -325,7 +325,7 @@ jobs:
           NDCS: ${{ env.NDCS }}
           NPCS: ${{ env.NPCS }}
           CHUNK_BS: ${{ env.CHUNK_BS }}
-          BS: ${{ env.bs }}
+          BS: ${{ env.BS }}
         run: |
           GITHUB_RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}"
           AWS_LOGS_URL="https://s3.console.aws.amazon.com/s3/buckets/${S3_BUCKET_NAME}?prefix=${RUN_ID}/&region=us-east-2"
