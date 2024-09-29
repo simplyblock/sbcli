@@ -3,7 +3,7 @@ import threading
 import time
 
 
-from simplyblock_core import constants, kv_store, utils, rpc_client
+from simplyblock_core import constants, kv_store, utils, rpc_client, distr_controller
 from simplyblock_core.controllers import events_controller, device_controller, lvol_events
 from simplyblock_core.models.lvol_model import LVol
 
@@ -25,7 +25,6 @@ def process_device_event(event):
         storage_id = event.storage_id
 
         device = None
-        device_node = None
         for node in db_controller.get_storage_nodes():
             for dev in node.nvme_devices:
                 if dev.cluster_device_order == storage_id:
@@ -35,7 +34,6 @@ def process_device_event(event):
                         return
 
                     device = dev
-                    device_node = node
                     break
 
         if not device:
@@ -44,60 +42,63 @@ def process_device_event(event):
             return
 
         device_id = device.get_id()
-        if event.message == 'SPDK_BDEV_EVENT_REMOVE':
-            if device.node_id == node_id:
-                logger.info(f"Removing storage id: {storage_id} from node: {node_id}")
-                device_controller.device_remove(device_id)
-            else:
-                logger.info(f"Removing remote storage id: {storage_id} from node: {node_id}")
-                new_remote_devices = []
-                rpc_client = RPCClient(device_node.mgmt_ip, device_node.rpc_port,
-                                       device_node.rpc_username, device_node.rpc_password)
-                for rem_dev in device_node.remote_devices:
-                    if rem_dev.get_id() == device.get_id():
-                        ctrl_name = rem_dev.remote_bdev[:-2]
-                        rpc_client.bdev_nvme_detach_controller(ctrl_name)
-                    else:
-                        new_remote_devices.append(rem_dev)
-                device_node.remote_devices = new_remote_devices
-                device_node.write_to_db(db_controller.kv_store)
+        node = db_controller.get_storage_node_by_id(node_id)
+        if device.node_id != node_id:
+            logger.info(f"Removing remote storage id: {storage_id} from node: {node_id}")
+            new_remote_devices = []
+            rpc_client = RPCClient(node.mgmt_ip, node.rpc_port,
+                                   node.rpc_username, node.rpc_password)
+            for rem_dev in node.remote_devices:
+                if rem_dev.get_id() == device.get_id():
+                    ctrl_name = rem_dev.remote_bdev[:-2]
+                    rpc_client.bdev_nvme_detach_controller(ctrl_name)
+                else:
+                    new_remote_devices.append(rem_dev)
+            node.remote_devices = new_remote_devices
+            node.write_to_db(db_controller.kv_store)
+            distr_controller.send_cluster_map_to_node(node)
 
-        elif event.message in ['error_write', 'error_unmap']:
-            logger.info(f"Setting device to read-only")
-            device_controller.device_set_io_error(device_id, True)
-            device_controller.device_set_read_only(device_id)
         else:
-            logger.info(f"Setting device to unavailable")
-            device_controller.device_set_io_error(device_id, True)
-            device_controller.device_set_unavailable(device_id)
+            if event.message == 'SPDK_BDEV_EVENT_REMOVE':
+                if device.node_id == node_id:
+                    logger.info(f"Removing storage id: {storage_id} from node: {node_id}")
+                    device_controller.device_remove(device_id)
+
+            elif event.message in ['error_write', 'error_unmap']:
+                logger.info(f"Setting device to read-only")
+                device_controller.device_set_io_error(device_id, True)
+                device_controller.device_set_read_only(device_id)
+            else:
+                logger.info(f"Setting device to unavailable")
+                device_controller.device_set_io_error(device_id, True)
+                device_controller.device_set_unavailable(device_id)
 
         event.status = 'processed'
 
 
 def process_lvol_event(event):
     if event.message in ["error_open", 'error_read', "error_write", "error_unmap"]:
-        vuid = event.object_dict['vuid']
-        lvol = None
+        # vuid = event.object_dict['vuid']
+        node_id = event.node_id
+        lvols = []
         for lv in db_controller.get_lvols():  # pass
-            if lv.vuid == vuid:
-                lvol = lv
-                break
+            if lv.node_id == node_id:
+                lvols.append(lv)
 
-        if not lvol:
-            logger.error(f"LVol with vuid {vuid} not found")
-            event.status = 'lvol_not_found'
+        if not lvols:
+            logger.error(f"LVols on node {node_id} not found")
+            event.status = 'lvols_not_found'
         else:
-            lvol.io_error = True
-            if lvol.status == LVol.STATUS_ONLINE:
-                logger.info("Setting LVol to offline")
-                old_status = lvol.status
-                lvol.status = LVol.STATUS_OFFLINE
-                lvol.write_to_db(db_controller.kv_store)
-                lvol_events.lvol_status_change(lvol, lvol.status, old_status, caused_by="monitor")
-                lvol_events.lvol_io_error_change(lvol, True, False, caused_by="monitor")
-                event.status = 'processed'
-            else:
-                event.status = 'skipped'
+            for lvol in lvols:
+                if lvol.status == LVol.STATUS_ONLINE:
+                    logger.info("Setting LVol to offline")
+                    lvol.io_error = True
+                    old_status = lvol.status
+                    lvol.status = LVol.STATUS_OFFLINE
+                    lvol.write_to_db(db_controller.kv_store)
+                    lvol_events.lvol_status_change(lvol, lvol.status, old_status, caused_by="monitor")
+                    lvol_events.lvol_io_error_change(lvol, True, False, caused_by="monitor")
+            event.status = 'processed'
     else:
         logger.error(f"Unknown LVol event message: {event.message}")
         event.status = "event_unknown"

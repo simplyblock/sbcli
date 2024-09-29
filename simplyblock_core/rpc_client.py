@@ -26,6 +26,7 @@ class RPCException(Exception):
 class RPCClient:
 
     # ref: https://spdk.io/doc/jsonrpc.html
+    DEFAULT_ALLOWED_METHODS = ["HEAD", "GET", "PUT", "DELETE", "OPTIONS", "TRACE", "POST"]
 
     def __init__(self, ip_address, port, username, password, timeout=60, retry=3):
         self.ip_address = ip_address
@@ -37,7 +38,8 @@ class RPCClient:
         self.session = requests.session()
         self.session.auth = (self.username, self.password)
         self.session.verify = False
-        retries = Retry(total=retry, backoff_factor=1, connect=retry, read=retry)
+        retries = Retry(total=retry, backoff_factor=1, connect=retry, read=retry,
+                        allowed_methods=self.DEFAULT_ALLOWED_METHODS)
         self.session.mount("http://", HTTPAdapter(max_retries=retries))
         self.session.timeout = self.timeout
 
@@ -363,7 +365,7 @@ class RPCClient:
 
     def bdev_distrib_create(self, name, vuid, ndcs, npcs, num_blocks, block_size, jm_names,
                             chunk_size, ha_comm_addrs=None, ha_inode_self=None, pba_page_size=2097152,
-                            distrib_cpu_mask=""):
+                            distrib_cpu_mask="", ha_is_non_leader=True, jm_vuid=0):
         """"
             // Optional (not specified = no HA)
             // Comma-separated communication addresses, for each node, e.g. "192.168.10.1:45001,192.168.10.1:32768".
@@ -384,8 +386,12 @@ class RPCClient:
             "num_blocks": num_blocks,
             "block_size": block_size,
             "chunk_size": chunk_size,
-            "pba_page_size": pba_page_size
+            "pba_page_size": pba_page_size,
         }
+        if jm_vuid > 0:
+            params["jm_vuid"] = jm_vuid
+            params["ha_is_non_leader"] = ha_is_non_leader
+
         if ha_comm_addrs:
             params['ha_comm_addrs'] = ha_comm_addrs
             params['ha_inode_self'] = ha_inode_self
@@ -410,11 +416,11 @@ class RPCClient:
         params = {"name": uuid}
         return self._request("bdev_get_iostat", params)
 
-    def bdev_raid_create(self, name, bdevs_list, raid_level="0"):
+    def bdev_raid_create(self, name, bdevs_list, raid_level="0", strip_size_kb=4):
         params = {
             "name": name,
             "raid_level": raid_level,
-            "strip_size_kb": 4,
+            "strip_size_kb": strip_size_kb,
             "base_bdevs": bdevs_list
         }
         if raid_level == "1":
@@ -467,6 +473,20 @@ class RPCClient:
             "fast_io_fail_timeout_sec": 1,
             "num_io_queues": 16384,
             "ctrlr_loss_timeout_sec": 2,
+        }
+        return self._request("bdev_nvme_attach_controller", params)
+
+    def bdev_nvme_attach_controller_tcp_jm(self, name, nqn, ip, port):
+        params = {
+            "name": name,
+            "trtype": "tcp",
+            "traddr": ip,
+            "adrfam": "ipv4",
+            "trsvcid": str(port),
+            "subnqn": nqn,
+            "fast_io_fail_timeout_sec": 1,
+            "ctrlr_loss_timeout_sec": 1,
+            "reconnect_delay_sec": 1,
         }
         return self._request("bdev_nvme_attach_controller", params)
 

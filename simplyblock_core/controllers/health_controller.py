@@ -66,11 +66,11 @@ def _check_node_docker_api(ip):
     # return False
 
 
-def _check_node_rpc(rpc_ip, rpc_port, rpc_username, rpc_password):
+def _check_node_rpc(rpc_ip, rpc_port, rpc_username, rpc_password, timeout=5, retry=2):
     try:
         rpc_client = RPCClient(
             rpc_ip, rpc_port, rpc_username, rpc_password,
-            timeout=60, retry=3)
+            timeout=timeout, retry=retry)
         ret = rpc_client.get_version()
         if ret:
             logger.debug(f"SPDK version: {ret['version']}")
@@ -82,12 +82,24 @@ def _check_node_rpc(rpc_ip, rpc_port, rpc_username, rpc_password):
 
 def _check_node_api(ip):
     try:
-        snode_api = SNodeClient(f"{ip}:5000", timeout=3, retry=1)
+        snode_api = SNodeClient(f"{ip}:5000", timeout=5, retry=2)
+        logger.debug(f"Node API={ip}:5000")
+        info, _ = snode_api.info()
+        if info:
+            logger.debug(f"Hostname: {info['hostname']}")
+            return True
+    except Exception as e:
+        logger.debug(e)
+    return False
+
+
+def _check_spdk_process_up(ip):
+    try:
+        snode_api = SNodeClient(f"{ip}:5000", timeout=5, retry=2)
         logger.debug(f"Node API={ip}:5000")
         is_up, _ = snode_api.spdk_process_is_up()
         logger.debug(f"SPDK is {is_up}")
-        if is_up:
-            return True
+        return is_up
     except Exception as e:
         logger.debug(e)
     return False
@@ -148,13 +160,12 @@ def check_node(node_id, with_devices=True):
     else:
         logger.info(f"Node device count: {len(snode.nvme_devices)}")
         for dev in snode.nvme_devices:
-            ret = check_device(dev.get_id())
             if dev.status in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_UNAVAILABLE]:
+                ret = check_device(dev.get_id())
                 node_devices_check &= ret
             print("*" * 100)
 
         logger.info(f"Node remote device: {len(snode.remote_devices)}")
-
         rpc_client = RPCClient(
             snode.mgmt_ip, snode.rpc_port,
             snode.rpc_username, snode.rpc_password,
@@ -165,7 +176,28 @@ def check_node(node_id, with_devices=True):
                 logger.info(f"Checking bdev: {remote_device.remote_bdev} ... ok")
             else:
                 logger.info(f"Checking bdev: {remote_device.remote_bdev} ... not found")
-            # node_remote_devices_check &= bool(ret)
+            node_remote_devices_check &= bool(ret)
+
+        if snode.jm_device:
+            jm_device = snode.jm_device
+            logger.info(f"Node JM: {jm_device.get_id()}")
+            ret = check_jm_device(jm_device.get_id())
+            if ret:
+                logger.info(f"Checking jm bdev: {jm_device.jm_bdev} ... ok")
+            else:
+                logger.info(f"Checking jm bdev: {jm_device.jm_bdev} ... not found")
+            node_devices_check &= ret
+
+        if snode.enable_ha_jm:
+            logger.info(f"Node remote JMs: {len(snode.remote_jm_devices)}")
+            for remote_device in snode.remote_jm_devices:
+                ret = rpc_client.get_bdevs(remote_device.remote_bdev)
+                if ret:
+                    logger.info(f"Checking bdev: {remote_device.remote_bdev} ... ok")
+                else:
+                    logger.info(f"Checking bdev: {remote_device.remote_bdev} ... not found")
+                node_remote_devices_check &= bool(ret)
+
         lvstore_check = True
         if snode.lvstore and snode.lvstore_stack:
             distribs_list = []
@@ -177,7 +209,7 @@ def check_node(node_id, with_devices=True):
             for distr in distribs_list:
                 ret = rpc_client.get_bdevs(distr)
                 if ret:
-                    logger.info("Checking distr bdev : {distr} ... ok")
+                    logger.info(f"Checking distr bdev : {distr} ... ok")
                     logger.info("Checking Distr map ...")
                     ret = rpc_client.distr_get_cluster_map(distr)
                     if not ret:
@@ -192,19 +224,19 @@ def check_node(node_id, with_devices=True):
                             logger.error("Failed to parse distr cluster map")
                         lvstore_check &= is_passed
                 else:
-                    logger.info("Checking distr bdev : {distr} ... not found")
+                    logger.info(f"Checking distr bdev : {distr} ... not found")
                     lvstore_check = False
             ret = rpc_client.get_bdevs(snode.raid)
             if ret:
-                logger.info("Checking raid bdev: {snode.raid} ... ok")
+                logger.info(f"Checking raid bdev: {snode.raid} ... ok")
             else:
-                logger.info("Checking raid bdev: {snode.raid} ... not found")
+                logger.info(f"Checking raid bdev: {snode.raid} ... not found")
                 lvstore_check = False
             ret = rpc_client.bdev_lvol_get_lvstores(snode.lvstore)
             if ret:
-                logger.info("Checking lvstore: {snode.lvstore} ... ok")
+                logger.info(f"Checking lvstore: {snode.lvstore} ... ok")
             else:
-                logger.info("Checking lvstore: {snode.lvstore} ... not found")
+                logger.info(f"Checking lvstore: {snode.lvstore} ... not found")
                 lvstore_check = False
 
     return is_node_online and node_devices_check and node_remote_devices_check and lvstore_check
@@ -214,6 +246,11 @@ def check_device(device_id):
     db_controller = DBController()
     device = db_controller.get_storage_device_by_id(device_id)
     if not device:
+        # is jm device ?
+        for node in db_controller.get_storage_nodes():
+            if node.jm_device and node.jm_device.get_id() == device_id:
+                return check_jm_device(node.jm_device.get_id())
+
         logger.error("device not found")
         return False
 
@@ -295,7 +332,7 @@ def check_remote_device(device_id):
             if node.get_id() == snode.get_id():
                 continue
             logger.info(f"Connecting to node: {node.get_id()}")
-            rpc_client = RPCClient(node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password)
+            rpc_client = RPCClient(node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password, timeout=5, retry=1)
             name = f"remote_{device.alceml_bdev}n1"
             ret = rpc_client.get_bdevs(name)
             if ret:
@@ -382,3 +419,44 @@ def check_snap(snap_id):
 
     ret = rpc_client.get_bdevs(snap.snap_bdev)
     return ret
+
+
+def check_jm_device(device_id):
+    db_controller = DBController()
+    jm_device = None
+    snode = None
+    for node in db_controller.get_storage_nodes():
+        if node.jm_device.get_id() == device_id:
+            jm_device = node.jm_device
+            snode = node
+            break
+    if not jm_device:
+        logger.error("device not found")
+        return False
+
+    if snode.status in [StorageNode.STATUS_OFFLINE, StorageNode.STATUS_REMOVED]:
+        logger.info(f"Skipping ,node status is {snode.status}")
+        return True
+
+    if jm_device.status in [NVMeDevice.STATUS_REMOVED, NVMeDevice.STATUS_FAILED]:
+        logger.info(f"Skipping ,device status is {jm_device.status}")
+        return True
+
+    passed = True
+    try:
+        rpc_client = RPCClient(
+            snode.mgmt_ip, snode.rpc_port,
+            snode.rpc_username, snode.rpc_password)
+
+        ret = rpc_client.get_bdevs(jm_device.jm_bdev)
+        if ret:
+            logger.debug(f"Checking bdev: {jm_device.jm_bdev} ... ok")
+        else:
+            logger.debug(f"Checking bdev: {jm_device.jm_bdev} ... not found")
+            passed = False
+
+    except Exception as e:
+        logger.error(f"Failed to connect to node's SPDK: {e}")
+        passed = False
+
+    return passed

@@ -192,7 +192,7 @@ jobs:
             --distr-npcs ${{ github.event.inputs.npcs || 1 }} \
             --distr-bs ${{ github.event.inputs.bs || 4096 }} \
             --distr-chunk-bs ${{ github.event.inputs.chunk_bs || 4096 }} \
-            --spdk-debug
+            --k8s-snode
         id: bootstrap_cluster
         env:
           SBCLI_CMD: ${{ env.SBCLI_CMD }}
@@ -225,6 +225,7 @@ jobs:
             --set logicalVolume.pool_name="testing1" \
             --set logicalVolume.snapshot="True" \
             --set image.spdkcsi.tag=master-arm64 \
+            --set image.simplyblock.tag=main \
             --set storagenode.spdkImage=simplyblock/spdk:main-latest
 
       # - name: Wait for Storage Nodes to Become Online
@@ -267,17 +268,17 @@ jobs:
       #   shell: /usr/bin/bash -e {0}
       
       - name: Sleep after Helm Installation
-        run: sleep 1000
+        run: sleep 300
 
-      - name: Activate Cluster
-        run: |
-          ssh -i "$HOME/.ssh/${{ steps.terraform_outputs.outputs.key_name }}" -o StrictHostKeyChecking=no \
-            -o ProxyCommand="ssh -o StrictHostKeyChecking=no -i \"$HOME/.ssh/${{ steps.terraform_outputs.outputs.key_name }}\" -W %h:%p ec2-user@${{ steps.terraform_outputs.outputs.bastion_public_ip }}" \
-            ec2-user@${{ steps.terraform_outputs.outputs.mgmt_private_ip }} "
-            $SBCLI_CMD cluster activate ${{ steps.bootstrap_cluster.outputs.cluster_id }}
-          "
-        env:
-          SBCLI_CMD: ${{ env.SBCLI_CMD }}
+      # - name: Activate Cluster
+      #   run: |
+      #     ssh -i "$HOME/.ssh/${{ steps.terraform_outputs.outputs.key_name }}" -o StrictHostKeyChecking=no \
+      #       -o ProxyCommand="ssh -o StrictHostKeyChecking=no -i \"$HOME/.ssh/${{ steps.terraform_outputs.outputs.key_name }}\" -W %h:%p ec2-user@${{ steps.terraform_outputs.outputs.bastion_public_ip }}" \
+      #       ec2-user@${{ steps.terraform_outputs.outputs.mgmt_private_ip }} "
+      #       $SBCLI_CMD cluster activate ${{ steps.bootstrap_cluster.outputs.cluster_id }}
+      #     "
+      #   env:
+      #     SBCLI_CMD: ${{ env.SBCLI_CMD }}
 
       - name: Record Test Start Time
         run: echo "TEST_START_TIME=$(date +%s)" >> $GITHUB_ENV
@@ -306,11 +307,11 @@ jobs:
             TESTNAME="--testname ${{ github.event.inputs.testname }}"
           fi
           
-          python3 e2e.py --ndcs "${{ github.event.inputs.ndcs }}" \
-                          --npcs "${{ github.event.inputs.npcs }}" \
-                          --bs "${{ github.event.inputs.bs }}" \
-                          --chunk_bs "${{ github.event.inputs.chunk_bs }}" \
-                          --run_k8s True
+          python3 e2e.py  --ndcs ${{ github.event.inputs.ndcs || 1 }} \
+                          --npcs ${{ github.event.inputs.npcs || 1 }} \
+                          --bs ${{ github.event.inputs.bs || 4096 }} \
+                          --chunk_bs ${{ github.event.inputs.chunk_bs || 4096 }} \
+                          --run_k8s True \
                           $TESTNAME
         env:
           SBCLI_CMD: ${{ env.SBCLI_CMD }}

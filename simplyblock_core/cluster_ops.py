@@ -336,7 +336,7 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
     return cluster.get_id()
 
 
-def cluster_activate(cl_id):
+def cluster_activate(cl_id, force=False):
     db_controller = DBController()
     cluster = db_controller.get_cluster_by_id(cl_id)
     if not cluster:
@@ -344,7 +344,8 @@ def cluster_activate(cl_id):
         return False
     if cluster.status != Cluster.STATUS_UNREADY:
         logger.error(f"Failed to activate cluster, Cluster is not in an UNREADY state")
-        return False
+        if not force:
+            return False
     set_cluster_status(cl_id, Cluster.STATUS_IN_ACTIVATION)
     snodes = db_controller.get_storage_nodes_by_cluster_id(cl_id)
     online_nodes = []
@@ -367,17 +368,18 @@ def cluster_activate(cl_id):
     for snode in snodes:
         if snode.lvstore:
             logger.info(f"Node {snode.get_id()} already has lvstore {snode.lvstore}... skipping")
-            continue
+            if not force:
+                continue
         ret = storage_node_ops.create_lvstore(snode, cluster.distr_ndcs, cluster.distr_npcs, cluster.distr_bs,
-                                              cluster.distr_chunk_bs, cluster.page_size_in_blocks, max_size)
+                                              cluster.distr_chunk_bs, cluster.page_size_in_blocks, max_size, snodes)
         if not ret:
             logger.error("Failed to activate cluster")
             set_cluster_status(cl_id, Cluster.STATUS_UNREADY)
             return False
 
-    cluster.status = Cluster.STATUS_ACTIVE
     cluster.cluster_max_size = max_size
     cluster.write_to_db(db_controller.kv_store)
+    set_cluster_status(cl_id, Cluster.STATUS_ACTIVE)
     logger.info("Cluster activated successfully")
     return True
 
@@ -688,14 +690,14 @@ def update_cluster(cl_id):
     except Exception as e:
         print(e)
 
-    for node in db_controller.get_storage_nodes_by_cluster_id(cl_id):
-        node_docker = docker.DockerClient(base_url=f"tcp://{node.mgmt_ip}:2375", version="auto")
-        logger.info(f"Pulling image {constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE}")
-        node_docker.images.pull(constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE)
-        if node.status == StorageNode.STATUS_ONLINE:
-            storage_node_ops.shutdown_storage_node(node.get_id(), force=True)
-            time.sleep(3)
-        storage_node_ops.restart_storage_node(node.get_id())
+    # for node in db_controller.get_storage_nodes_by_cluster_id(cl_id):
+    #     node_docker = docker.DockerClient(base_url=f"tcp://{node.mgmt_ip}:2375", version="auto")
+    #     logger.info(f"Pulling image {constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE}")
+    #     node_docker.images.pull(constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE)
+    #     if node.status == StorageNode.STATUS_ONLINE:
+    #         storage_node_ops.shutdown_storage_node(node.get_id(), force=True)
+    #         time.sleep(3)
+    #     storage_node_ops.restart_storage_node(node.get_id())
 
     logger.info("Done")
     return True

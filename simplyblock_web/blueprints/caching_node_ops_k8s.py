@@ -112,7 +112,7 @@ def spdk_process_start():
 
     spdk_mem_gega = int(spdk_mem / 1024)
 
-    spdk_image = constants.SIMPLY_BLOCK_SPDK_CORE_IMAGE
+    spdk_image = constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE
 
     if 'spdk_image' in data and data['spdk_image']:
         spdk_image = data['spdk_image']
@@ -138,6 +138,7 @@ def spdk_process_start():
             'RPC_PASSWORD': data['rpc_password'],
             'HOSTNAME': node_name,
             'NAMESPACE': namespace,
+            'SIMPLYBLOCK_DOCKER_IMAGE': constants.SIMPLY_BLOCK_DOCKER_IMAGE,
         }
         dep = yaml.safe_load(template.render(values))
         logger.debug(dep)

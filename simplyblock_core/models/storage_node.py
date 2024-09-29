@@ -19,6 +19,7 @@ class StorageNode(BaseModel):
 
     STATUS_IN_CREATION = 'in_creation'
     STATUS_UNREACHABLE = 'unreachable'
+    STATUS_SCHEDULABLE = 'schedulable'
 
     STATUS_CODE_MAP = {
         STATUS_ONLINE: 0,
@@ -31,6 +32,8 @@ class StorageNode(BaseModel):
         STATUS_RESTARTING: 12,
 
         STATUS_UNREACHABLE: 20,
+
+        STATUS_SCHEDULABLE: 30,
     }
 
     attributes = {
@@ -108,6 +111,8 @@ class StorageNode(BaseModel):
         "num_partitions_per_dev": {"type": int, "default": 1},
         "jm_percent": {"type": int, "default": 3},
         "jm_device": {"type": JMDevice, "default": None},
+        "remote_jm_devices": {"type": List[JMDevice], 'default': []},
+        "enable_ha_jm": {"type": bool, "default": False},
 
         "namespace": {"type": str, "default": ""},
 

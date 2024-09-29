@@ -56,6 +56,7 @@ class CLIWrapper:
         sub_command.add_argument("--iobuf_small_bufsize", help='bdev_set_options param', dest='small_bufsize',  type=int, default=0)
         sub_command.add_argument("--iobuf_large_bufsize", help='bdev_set_options param', dest='large_bufsize',  type=int, default=0)
         sub_command.add_argument("--enable-test-device", help='Enable creation of test device', action='store_true')
+        sub_command.add_argument("--enable-ha-jm", help='Enable HA JM for ditrib creation', action='store_true')
 
 
         # delete storage node
@@ -94,6 +95,8 @@ class CLIWrapper:
 
         sub_command.add_argument("--iobuf_small_bufsize", help='bdev_set_options param', dest='small_bufsize',  type=int, default=0)
         sub_command.add_argument("--iobuf_large_bufsize", help='bdev_set_options param', dest='large_bufsize',  type=int, default=0)
+
+        sub_command.add_argument("--force", help='Force restart', required=False, action='store_true')
 
         # sub_command.add_argument("-t", '--test', help='Run smart test on the NVMe devices', action='store_true')
 
@@ -141,6 +144,13 @@ class CLIWrapper:
             'full_pass_through', 'io_error_on_read', 'io_error_on_write',
             'io_error_on_unmap', 'io_error_on_all', 'discard_io_all',
             'hotplug_removal'], default='full_pass_through')
+
+        # sub_command = self.add_sub_command(subparser, "jm-device-testing-mode", 'Set device testing mode')
+        # sub_command.add_argument("device_id", help='Device UUID')
+        # sub_command.add_argument("mode", help='Testing mode', choices=[
+        #     'full_pass_through', 'io_error_on_read', 'io_error_on_write',
+        #     'io_error_on_unmap', 'io_error_on_all', 'discard_io_all',
+        #     'hotplug_removal'], default='full_pass_through')
 
         sub_command = self.add_sub_command(subparser, "get-device", 'Get storage device by id')
         sub_command.add_argument("device_id", help='the devices\'s UUID')
@@ -220,6 +230,14 @@ class CLIWrapper:
         sub_command = self.add_sub_command(subparser, "info-spdk", 'Get SPDK memory information')
         sub_command.add_argument("id", help='Node UUID')
 
+        sub_command = self.add_sub_command(subparser, 'remove-jm-device', 'Remove JM device')
+        sub_command.add_argument("jm_device_id", help='JM device ID')
+        sub_command.add_argument("--force", help='Force device remove', required=False, action='store_true')
+
+        sub_command = self.add_sub_command(subparser, 'restart-jm-device', 'Restart JM device')
+        sub_command.add_argument("jm_device_id", help='JM device ID')
+        sub_command.add_argument("--force", help='Force device remove', required=False, action='store_true')
+
         #
         # ----------------- cluster -----------------
         #
@@ -285,6 +303,7 @@ class CLIWrapper:
         # Activate cluster
         sub_command = self.add_sub_command(subparser, 'activate', 'Create distribs and raid0 bdevs on all the storage node and move the cluster to active state')
         sub_command.add_argument("cluster_id", help='the cluster UUID')
+        sub_command.add_argument("--force", help='Force recreate distr and lv stores', required=False, action='store_true')
 
         # show cluster list
         self.add_sub_command(subparser, 'list', 'Show clusters list')
@@ -710,6 +729,7 @@ class CLIWrapper:
                 max_prov = self.parse_size(args.max_prov)
                 number_of_devices = args.number_of_devices
                 enable_test_device = args.enable_test_device
+                enable_ha_jm = args.enable_ha_jm
                 number_of_distribs = args.number_of_distribs
                 if max_prov < 1 * 1024 * 1024 * 1024:
                     return f"Max provisioning memory:{args.max_prov} must be larger than 1G"
@@ -732,7 +752,8 @@ class CLIWrapper:
                     number_of_devices=number_of_devices,
                     enable_test_device=enable_test_device,
                     namespace=None,
-                    number_of_distribs=number_of_distribs
+                    number_of_distribs=number_of_distribs,
+                    enable_ha_jm=enable_ha_jm
                 )
 
                 return out
@@ -763,13 +784,15 @@ class CLIWrapper:
                 ret = storage_ops.restart_storage_node(
                     node_id, max_lvol, max_snap, max_prov,
                     spdk_image, spdk_debug,
-                    small_bufsize, large_bufsize, number_of_devices, node_ip=args.node_ip)
+                    small_bufsize, large_bufsize, number_of_devices, node_ip=args.node_ip, force=args.force)
 
             elif sub_command == "list-devices":
                 ret = self.storage_node_list_devices(args)
 
             elif sub_command == "device-testing-mode":
                 ret = device_controller.set_device_testing_mode(args.device_id, args.mode)
+            # elif sub_command == "jm-device-testing-mode":
+            #     ret = device_controller.set_jm_device_testing_mode(args.device_id, args.mode)
 
             elif sub_command == "remove-device":
                 ret = device_controller.device_remove(args.device_id, args.force)
@@ -864,6 +887,12 @@ class CLIWrapper:
             elif sub_command == "get":
                 ret = storage_ops.get(args.id)
 
+            elif sub_command == "remove-jm-device":
+                ret = device_controller.remove_jm_device(args.jm_device_id, args.force)
+
+            elif sub_command == "restart-jm-device":
+                ret = device_controller.restart_jm_device(args.jm_device_id, args.force)
+
             else:
                 self.parser.print_help()
 
@@ -875,7 +904,7 @@ class CLIWrapper:
                 ret = self.cluster_add(args)
             elif sub_command == 'activate':
                 cluster_id = args.cluster_id
-                ret = cluster_ops.cluster_activate(cluster_id)
+                ret = cluster_ops.cluster_activate(cluster_id, args.force)
             elif sub_command == 'status':
                 cluster_id = args.cluster_id
                 ret = cluster_ops.show_cluster(cluster_id)

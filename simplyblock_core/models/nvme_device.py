@@ -105,6 +105,7 @@ class JMDevice(BaseModel):
         "raid_bdev": {"type": str, 'default': ""},
         "nvme_bdev": {"type": str, 'default': ""},
         "alceml_bdev": {"type": str, 'default': ""},
+        "testing_bdev": {"type": str, 'default': ""},
         "jm_bdev": {"type": str, 'default': ""},
         "device_data_dict": {"type": dict, 'default': {}},
 
@@ -112,6 +113,7 @@ class JMDevice(BaseModel):
         "nvmf_nqn": {"type": str, 'default': ""},
         "nvmf_ip": {"type": str, 'default': ""},
         "nvmf_port": {"type": int, 'default': 4420},
+        "remote_bdev": {"type": str, 'default': ""},
 
         "health_check": {"type": bool, "default": True},
         "io_error": {"type": bool, 'default': False},

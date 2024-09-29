@@ -20,7 +20,11 @@ from simplyblock_core.rpc_client import RPCClient
 def task_runner(task):
 
     snode = db_controller.get_storage_node_by_id(task.node_id)
-    rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password, timeout=5, retry=2)
+    if not snode:
+        task.status = JobSchedule.STATUS_DONE
+        task.function_result = f"Node not found: {task.node_id}"
+        task.write_to_db(db_controller.kv_store)
+        return True
 
     if task.canceled:
         task.function_result = "canceled"
@@ -40,6 +44,7 @@ def task_runner(task):
         task.write_to_db(db_controller.kv_store)
         return False
 
+    rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password, timeout=5, retry=2)
     if "migration" not in task.function_params:
         all_devs_online = True
         for node in db_controller.get_storage_nodes_by_cluster_id(task.cluster_id):
@@ -56,13 +61,7 @@ def task_runner(task):
             return False
 
         device = db_controller.get_storage_devices(task.device_id)
-        lvol = db_controller.get_lvol_by_id(task.function_params["lvol_id"])
-
-        if not lvol:
-            task.status = JobSchedule.STATUS_DONE
-            task.function_result = "LVol not found"
-            task.write_to_db(db_controller.kv_store)
-            return True
+        distr_name = task.function_params["distr_name"]
 
         if not device:
             task.status = JobSchedule.STATUS_DONE
@@ -70,7 +69,7 @@ def task_runner(task):
             task.write_to_db(db_controller.kv_store)
             return True
 
-        rsp = rpc_client.distr_migration_expansion_start(lvol.base_bdev)
+        rsp = rpc_client.distr_migration_expansion_start(distr_name)
         if not rsp:
             logger.error(f"Failed to start device migration task, storage_ID: {device.cluster_device_order}")
             task.function_result = "Failed to start device migration task"
@@ -79,7 +78,7 @@ def task_runner(task):
             return False
 
         task.function_params['migration'] = {
-            "name": lvol.base_bdev
+            "name": distr_name
         }
         task.write_to_db(db_controller.kv_store)
         time.sleep(3)

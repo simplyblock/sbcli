@@ -478,14 +478,14 @@ def calculate_minimum_hp_memory(small_pool_count, large_pool_count, lvol_count, 
     pool_consumption = (small_pool_count * 8 + large_pool_count * 128) / 1024 + 1092
     max_prov_tb = max_prov / (1024 * 1024 * 1024 * 1024)
     memory_consumption = (4 * cpu_count + 1.0277 * pool_consumption + 7 * lvol_count) * (1024 * 1024) + (250 * 1024 * 1024) * 1.1 * max_prov_tb + constants.EXTRA_HUGE_PAGE_MEMORY
-    return memory_consumption
+    return int(memory_consumption)
 
 
 def calculate_minimum_sys_memory(max_prov):
     max_prov_tb = max_prov / (1024 * 1024 * 1024 * 1024)
     minimum_sys_memory = (250 * 1024 * 1024) * 1.1 * max_prov_tb + constants.EXTRA_SYS_MEMORY
     logger.debug(f"Minimum system memory is {humanbytes(minimum_sys_memory)}")
-    return minimum_sys_memory
+    return int(minimum_sys_memory)
 
 
 def calculate_spdk_memory(minimum_hp_memory, minimum_sys_memory, free_sys_memory, huge_total_memory):
@@ -495,8 +495,7 @@ def calculate_spdk_memory(minimum_hp_memory, minimum_sys_memory, free_sys_memory
                        f"Minimum huge pages memory: {humanbytes(minimum_hp_memory)}, "
                        f"Minimum system memory: {humanbytes(minimum_sys_memory)}")
         return False, 0
-    spdk_mem = minimum_hp_memory + (total_free_memory - minimum_hp_memory - minimum_sys_memory) * 0.2
-    spdk_mem = minimum_hp_memory
+    spdk_mem = int(minimum_hp_memory + (total_free_memory - minimum_hp_memory - minimum_sys_memory) * 0.2)
     logger.debug(f"SPDK memory is {humanbytes(spdk_mem)}")
     return True, spdk_mem
 
@@ -589,3 +588,11 @@ def parse_size(size_string: str):
     except:
         print(f"Error parsing size: {size_string}")
         return -1
+
+
+def nearest_upper_power_of_2(n):
+    # Check if n is already a power of 2
+    if (n & (n - 1)) == 0:
+        return n
+    # Otherwise, return the nearest upper power of 2
+    return 1 << n.bit_length()
