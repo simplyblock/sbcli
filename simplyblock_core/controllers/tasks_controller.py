@@ -31,7 +31,7 @@ def _validate_new_task_node_restart(cluster_id, node_id):
         if task.function_name == JobSchedule.FN_NODE_RESTART and task.node_id == node_id and task.canceled is False:
             if task.status != JobSchedule.STATUS_DONE:
                 return task.get_id()
-    return True
+    return False
 
 
 def _add_task(function_name, cluster_id, node_id, device_id,
