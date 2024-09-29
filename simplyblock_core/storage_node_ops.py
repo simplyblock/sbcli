@@ -918,8 +918,10 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
             return False
 
     max_prov = int(utils.parse_size(max_prov))
-    number_of_split = num_partitions_per_dev if num_partitions_per_dev else num_partitions_per_dev + 1
+    number_of_split = num_partitions_per_dev if num_partitions_per_dev else 1
     number_of_alceml_devices = number_of_devices * number_of_split
+    # for jm
+    number_of_alceml_devices += 1
     small_pool_count, large_pool_count = utils.calculate_pool_count(
         number_of_alceml_devices, number_of_distribs, cpu_count, len(poller_cpu_cores) or cpu_count)
 
@@ -936,7 +938,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
         logger.info("Node Memory info")
         logger.info(f"Total: {utils.humanbytes(memory_details['total'])}")
         logger.info(f"Free: {utils.humanbytes(memory_details['free'])}")
-        logger.info(f"Minimum required huge pages memory is : {minimum_hp_memory}")
+        logger.info(f"Minimum required huge pages memory is : {utils.humanbytes(minimum_hp_memory)}")
     else:
         logger.error(f"Cannot get memory info from the instance.. Exiting")
         return False
@@ -1477,7 +1479,7 @@ def restart_storage_node(
         logger.info("Node Memory info")
         logger.info(f"Total: {utils.humanbytes(memory_details['total'])}")
         logger.info(f"Free: {utils.humanbytes(memory_details['free'])}")
-        logger.info(f"Minimum required huge pages memory is : {minimum_hp_memory}")
+        logger.info(f"Minimum required huge pages memory is : {utils.humanbytes(minimum_hp_memory)}")
     else:
         logger.error(f"Cannot get memory info from the instance.. Exiting")
         return False
