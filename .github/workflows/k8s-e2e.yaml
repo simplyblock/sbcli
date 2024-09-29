@@ -201,7 +201,6 @@ jobs:
         id: bootstrap_cluster
         env:
           SBCLI_CMD: ${{ env.SBCLI_CMD }}
-          SBCLI_CMD: ${{ env.SBCLI_CMD }}
           NDCS: ${{ env.NDCS }}
           NPCS: ${{ env.NPCS }}
           BS: ${{ env.BS }}
