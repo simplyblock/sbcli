@@ -661,8 +661,10 @@ class RPCClient:
             params["bdb_lcpu_mask"] = int(jm_cpu_mask, 16)
         return self._request("bdev_jm_create", params)
 
-    def bdev_jm_delete(self, name):
+    def bdev_jm_delete(self, name, safe_removal=False):
         params = {"name": name}
+        if safe_removal is True:
+            params["safe_removal"] = True
         return self._request("bdev_jm_delete", params)
 
     def ultra21_util_get_malloc_stats(self):

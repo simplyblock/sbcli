@@ -775,7 +775,10 @@ def remove_jm_device(device_id, force=False):
     if snode.jm_device.pt_bdev:
         ret = rpc_client.bdev_PT_NoExcl_delete(snode.jm_device.pt_bdev)
 
-    ret = rpc_client.bdev_jm_delete(snode.jm_device.jm_bdev)
+    if snode.enable_ha_jm:
+        ret = rpc_client.bdev_jm_delete(snode.jm_device.jm_bdev, safe_removal=True)
+    else:
+        ret = rpc_client.bdev_jm_delete(snode.jm_device.jm_bdev, safe_removal=False)
 
     ret = rpc_client.bdev_alceml_delete(snode.jm_device.alceml_bdev)
 

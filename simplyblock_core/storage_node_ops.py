@@ -1877,10 +1877,10 @@ def shutdown_storage_node(node_id, force=False):
     for dev in snode.nvme_devices:
         distr_controller.disconnect_device(dev)
 
-
-    # delete jm
-    logger.info("Removing JM")
-    rpc_client.bdev_jm_delete(f"jm_{snode.get_id()}")
+    if snode.jm_device:
+        # delete jm
+        logger.info("Removing JM")
+        rpc_client.bdev_jm_delete(snode.jm_device.jm_bdev)
 
     logger.info("Stopping SPDK")
     snode_api = SNodeClient(snode.api_endpoint)
@@ -2744,4 +2744,4 @@ def _remove_bdev_stack(bdev_stack, rpc_client, remove_distr_only=False):
             logger.error(f"Failed to delete BDev {name}")
 
         bdev['status'] = 'deleted'
-        time.sleep(5)
+        time.sleep(1)
