@@ -15,7 +15,7 @@ import docker
 from simplyblock_core import constants, scripts, distr_controller
 from simplyblock_core import utils
 from simplyblock_core.controllers import lvol_controller, storage_events, snapshot_controller, device_events, \
-    device_controller, tasks_controller
+    device_controller, tasks_controller, health_controller
 from simplyblock_core.kv_store import DBController, KVStore
 from simplyblock_core import shell_utils
 from simplyblock_core.models.iface import IFace
@@ -1313,13 +1313,9 @@ def remove_storage_node(node_id, force_remove=False, force_migrate=False):
         for dev in snode.nvme_devices:
             if dev.status == NVMeDevice.STATUS_JM:
                 continue
-            if dev.status == 'online':
+            if dev.status == NVMeDevice.STATUS_ONLINE:
                 distr_controller.disconnect_device(dev)
-            old_status = dev.status
-            dev.status = NVMeDevice.STATUS_FAILED
-            distr_controller.send_dev_status_event(dev, NVMeDevice.STATUS_FAILED)
-            device_events.device_status_change(dev, NVMeDevice.STATUS_FAILED, old_status)
-            tasks_controller.add_device_failed_mig_task(dev.get_id())
+            device_controller.device_set_failed(dev.get_id())
 
     logger.info("Removing storage node")
 
@@ -1332,24 +1328,20 @@ def remove_storage_node(node_id, force_remove=False, force_migrate=False):
         pass
 
     try:
-        snode_api = SNodeClient(snode.api_endpoint, timeout=20)
-        snode_api.spdk_process_kill()
-        snode_api.leave_swarm()
-        pci_address = []
-        for dev in snode.nvme_devices:
-            if dev.pcie_address not in pci_address:
-                ret = snode_api.delete_dev_gpt_partitions(dev.pcie_address)
-                logger.debug(ret)
-                pci_address.append(dev.pcie_address)
+        if health_controller._check_node_api(snode.mgmt_ip):
+            snode_api = SNodeClient(snode.api_endpoint, timeout=20)
+            snode_api.spdk_process_kill()
+            snode_api.leave_swarm()
+            pci_address = []
+            for dev in snode.nvme_devices:
+                if dev.pcie_address not in pci_address:
+                    ret = snode_api.delete_dev_gpt_partitions(dev.pcie_address)
+                    logger.debug(ret)
+                    pci_address.append(dev.pcie_address)
     except Exception as e:
         logger.exception(e)
 
-    old_status = snode.status
-    snode.status = StorageNode.STATUS_REMOVED
-    snode.write_to_db(db_controller.kv_store)
-    logger.info("Sending node event update")
-    distr_controller.send_node_status_event(snode, snode.status)
-    storage_events.snode_status_change(snode, StorageNode.STATUS_REMOVED, old_status)
+    set_node_status(node_id, StorageNode.STATUS_REMOVED)
     logger.info("done")
 
 
@@ -1411,15 +1403,9 @@ def restart_storage_node(
             snode.data_nics = data_nics
 
     logger.info("Setting node state to restarting")
-    old_status = snode.status
-    snode.status = StorageNode.STATUS_RESTARTING
-    snode.write_to_db(kv_store)
-    logger.info("Sending node event update")
-    distr_controller.send_node_status_event(snode, snode.status)
-    storage_events.snode_status_change(snode, snode.status, old_status)
+    set_node_status(node_id, StorageNode.STATUS_RESTARTING)
 
     logger.info(f"Restarting Storage node: {snode.mgmt_ip}")
-
     snode_api = SNodeClient(snode.api_endpoint, timeout=5*60, retry=3)
     node_info, _ = snode_api.info()
     logger.debug(f"Node info: {node_info}")
@@ -1647,11 +1633,7 @@ def restart_storage_node(
         snode.remote_jm_devices = _connect_to_remote_jm_devs(snode)
 
     logger.info("Setting node status to Online")
-    old_status = snode.status
-    snode.status = StorageNode.STATUS_ONLINE
-    snode.write_to_db(kv_store)
-    storage_events.snode_status_change(snode, snode.status, old_status)
-
+    set_node_status(node_id, StorageNode.STATUS_ONLINE)
 
     # make other nodes connect to the new devices
     logger.info("Make other nodes connect to the node devices")
@@ -1847,52 +1829,37 @@ def shutdown_storage_node(node_id, force=False):
             return False
 
     logger.info("Shutting down node")
-    old_status = snode.status
-    snode.status = StorageNode.STATUS_IN_SHUTDOWN
-    snode.write_to_db(db_controller.kv_store)
-    storage_events.snode_status_change(snode, snode.status, old_status)
+    set_node_status(node_id, StorageNode.STATUS_IN_SHUTDOWN)
 
-    rpc_client = RPCClient(
-        snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password, timeout=10, retry=1)
+    if health_controller._check_node_rpc(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password):
 
-    logger.debug("Removing LVols")
-    _remove_bdev_stack(snode.lvstore_stack, rpc_client, remove_distr_only=True)
-#    for lvol_id in snode.lvols:
-#        logger.debug(lvol_id)
-#        lvol = db_controller.get_lvol_by_id(lvol_id)
-#        lvol_controller._remove_bdev_stack([lvol.bdev_stack[0]], rpc_client)
-#        time.sleep(1)
+        rpc_client = RPCClient(
+            snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password, timeout=10, retry=1)
+
+        logger.debug("Removing LVols")
+        _remove_bdev_stack(snode.lvstore_stack, rpc_client, remove_distr_only=True)
+
+        if snode.jm_device:
+            # delete jm
+            logger.info("Removing JM")
+            rpc_client.bdev_jm_delete(snode.jm_device.jm_bdev)
 
     for dev in snode.nvme_devices:
         if dev.status in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_READONLY]:
             device_controller.device_set_unavailable(dev.get_id())
-    distr_controller.send_node_status_event(snode, StorageNode.STATUS_IN_SHUTDOWN)
 
-    # shutdown node
     # make other nodes disconnect from this node
     logger.info("disconnect all other nodes connections to this node")
     for dev in snode.nvme_devices:
         distr_controller.disconnect_device(dev)
 
-    if snode.jm_device:
-        # delete jm
-        logger.info("Removing JM")
-        rpc_client.bdev_jm_delete(snode.jm_device.jm_bdev)
-
     logger.info("Stopping SPDK")
-    snode_api = SNodeClient(snode.api_endpoint)
-    results, err = snode_api.spdk_process_kill()
+    if health_controller._check_node_api(snode.mgmt_ip):
+        snode_api = SNodeClient(snode.api_endpoint)
+        results, err = snode_api.spdk_process_kill()
 
     logger.info("Setting node status to offline")
-    snode = db_controller.get_storage_node_by_id(node_id)
-    old_status = snode.status
-    snode.status = StorageNode.STATUS_OFFLINE
-    snode.write_to_db(db_controller.kv_store)
-
-    for dev in snode.nvme_devices:
-        if dev.status in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_READONLY]:
-            device_controller.device_set_unavailable(dev.get_id())
-    distr_controller.send_node_status_event(snode, StorageNode.STATUS_OFFLINE)
+    set_node_status(node_id, StorageNode.STATUS_OFFLINE)
 
     tasks = db_controller.get_job_tasks(snode.cluster_id)
     for task in tasks:
@@ -1900,8 +1867,6 @@ def shutdown_storage_node(node_id, force=False):
             task.canceled = True
             task.write_to_db(db_controller.kv_store)
 
-    # send event log
-    storage_events.snode_status_change(snode, snode.status, old_status)
     logger.info("Done")
     return True
 
@@ -1943,7 +1908,6 @@ def suspend_storage_node(node_id, force=False):
             return False
 
     logger.info("Suspending node")
-    distr_controller.send_node_status_event(snode, StorageNode.STATUS_SUSPENDED)
     for dev in snode.nvme_devices:
         if dev.status == NVMeDevice.STATUS_ONLINE:
             device_controller.device_set_unavailable(dev.get_id())
@@ -1962,12 +1926,7 @@ def suspend_storage_node(node_id, force=False):
             lvol.write_to_db(db_controller.kv_store)
 
     logger.info("Setting node status to suspended")
-    snode = db_controller.get_storage_node_by_id(node_id)
-    old_status = snode.status
-    snode.status = StorageNode.STATUS_SUSPENDED
-    snode.write_to_db(db_controller.kv_store)
-
-    storage_events.snode_status_change(snode, snode.status, old_status)
+    set_node_status(node_id, StorageNode.STATUS_SUSPENDED)
     logger.info("Done")
     return True
 
@@ -1990,10 +1949,6 @@ def resume_storage_node(node_id):
         return False
 
     logger.info("Resuming node")
-
-    logger.info("Sending cluster event updates")
-    distr_controller.send_node_status_event(snode, StorageNode.STATUS_ONLINE)
-
     for dev in snode.nvme_devices:
         if dev.status == NVMeDevice.STATUS_UNAVAILABLE:
             device_controller.device_set_online(dev.get_id())
@@ -2012,12 +1967,7 @@ def resume_storage_node(node_id):
             lvol.write_to_db(db_controller.kv_store)
 
     logger.info("Setting node status to online")
-    snode = db_controller.get_storage_node_by_id(node_id)
-    old_status = snode.status
-    snode.status = StorageNode.STATUS_ONLINE
-    snode.write_to_db(db_controller.kv_store)
-
-    storage_events.snode_status_change(snode, snode.status, old_status)
+    set_node_status(node_id, StorageNode.STATUS_ONLINE)
     logger.info("Done")
     return True
 
