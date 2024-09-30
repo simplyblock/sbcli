@@ -410,14 +410,14 @@ def calculate_core_allocation(cpu_cores):
         alceml_cpu_cores = [cpu_cores[pos - 1] for pos in [1]]
         alceml_cpu_worker_cores = [cpu_cores[pos - 1] for pos in [1]]
         distrib_cpu_cores = [cpu_cores[pos - 1] for pos in [2, 4]]
-    elif len(cpu_cores == 5):
+    elif len(cpu_cores) == 5:
         app_thread_core = [cpu_cores[pos - 1] for pos in [5]]
         jm_cpu_core = [cpu_cores[pos - 1] for pos in [4]]
         poller_cpu_cores = [cpu_cores[pos - 1] for pos in [2, 3]]
         alceml_cpu_cores = [cpu_cores[pos - 1] for pos in [1]]
         alceml_cpu_worker_cores = [cpu_cores[pos - 1] for pos in [1]]
         distrib_cpu_cores = [cpu_cores[pos - 1] for pos in [2, 3]]
-    elif len(cpu_cores == 4):
+    elif len(cpu_cores) == 4:
         app_thread_core = [cpu_cores[pos - 1] for pos in [4]]
         jm_cpu_core = [cpu_cores[pos - 1] for pos in [4]]
         poller_cpu_cores = [cpu_cores[pos - 1] for pos in [2, 3]]
