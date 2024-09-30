@@ -238,6 +238,13 @@ class CLIWrapper:
         sub_command.add_argument("jm_device_id", help='JM device ID')
         sub_command.add_argument("--force", help='Force device remove', required=False, action='store_true')
 
+        sub_command = self.add_sub_command(subparser, 'send-cluster-map', 'send cluster map')
+        sub_command.add_argument("id", help='id')
+
+        sub_command = self.add_sub_command(subparser, 'get-cluster-map', 'get cluster map')
+        sub_command.add_argument("id", help='id')
+
+        # check lvol
         #
         # ----------------- cluster -----------------
         #
@@ -502,13 +509,6 @@ class CLIWrapper:
         sub_command.add_argument("--history", help='(XXdYYh), list history records (one for every 15 minutes) '
                                                    'for XX days and YY hours (up to 10 days in total).')
 
-        sub_command = self.add_sub_command(subparser, 'send-cluster-map', 'send cluster map')
-        sub_command.add_argument("id", help='LVol id')
-
-        sub_command = self.add_sub_command(subparser, 'get-cluster-map', 'get cluster map')
-        sub_command.add_argument("id", help='LVol id')
-
-        # check lvol
         sub_command = self.add_sub_command(subparser, "check", 'Health check LVol')
         sub_command.add_argument("id", help='UUID of LVol')
 
@@ -893,6 +893,12 @@ class CLIWrapper:
             elif sub_command == "restart-jm-device":
                 ret = device_controller.restart_jm_device(args.jm_device_id, args.force)
 
+            elif sub_command == "send-cluster-map":
+                id = args.id
+                ret = storage_ops.send_cluster_map(id)
+            elif sub_command == "get-cluster-map":
+                id = args.id
+                ret = storage_ops.get_cluster_map(id)
             else:
                 self.parser.print_help()
 
@@ -1045,12 +1051,6 @@ class CLIWrapper:
                 id = args.id
                 history = args.history
                 ret = lvol_controller.get_capacity(id, history)
-            elif sub_command == "send-cluster-map":
-                id = args.id
-                ret = lvol_controller.send_cluster_map(id)
-            elif sub_command == "get-cluster-map":
-                id = args.id
-                ret = lvol_controller.get_cluster_map(id)
             elif sub_command == "check":
                 id = args.id
                 ret = health_controller.check_lvol(id)

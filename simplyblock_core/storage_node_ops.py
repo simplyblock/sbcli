@@ -1258,7 +1258,7 @@ def delete_storage_node(node_id):
 
     for lvol in db_controller.get_lvols(snode.cluster_id):
         logger.info(f"Sending cluster map to LVol: {lvol.get_id()}")
-        lvol_controller.send_cluster_map(lvol.get_id())
+        send_cluster_map(lvol.get_id())
 
     storage_events.snode_delete(snode)
     logger.info("done")
@@ -2692,3 +2692,41 @@ def _remove_bdev_stack(bdev_stack, rpc_client, remove_distr_only=False):
 
         bdev['status'] = 'deleted'
         time.sleep(1)
+
+
+def send_cluster_map(node_id):
+    db_controller = DBController()
+    snode = db_controller.get_storage_node_by_id(node_id)
+    if not snode:
+        logger.error(f"snode not found: {node_id}")
+        return False
+
+    logger.info("Sending cluster map")
+    return distr_controller.send_cluster_map_to_node(snode)
+
+
+def get_cluster_map(node_id):
+    db_controller = DBController()
+    snode = db_controller.get_storage_node_by_id(node_id)
+    if not snode:
+        logger.error(f"snode not found: {node_id}")
+        return False
+
+    rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
+    distribs_list = []
+    for bdev in snode.lvstore_stack:
+        type = bdev['type']
+        if type == "bdev_raid":
+            distribs_list = bdev["distribs_list"]
+            if not distribs_list:
+                logger.error(f"Failed to get cluster map: {node_id}")
+    for distr in distribs_list:
+        ret = rpc_client.distr_get_cluster_map(distr)
+        if not ret:
+            logger.error(f"Failed to get distr cluster map: {distr}")
+            return False
+        logger.debug(ret)
+        print("*"*100)
+        results, is_passed = distr_controller.parse_distr_cluster_map(ret)
+        print(utils.print_table(results))
+    return True

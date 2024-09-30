@@ -1191,42 +1191,6 @@ def get_io_stats(lvol_uuid, history, records_count=20, parse_sizes=True):
     return out
 
 
-def send_cluster_map(lvol_id):
-    lvol = db_controller.get_lvol_by_id(lvol_id)
-    if not lvol:
-        logger.error(f"LVol not found: {lvol_id}")
-        return False
-
-    snode = db_controller.get_storage_node_by_id(lvol.node_id)
-    logger.info("Sending cluster map")
-    return distr_controller.send_cluster_map_to_node(snode)
-
-
-def get_cluster_map(lvol_id):
-    lvol = db_controller.get_lvol_by_id(lvol_id)
-    if not lvol:
-        logger.error(f"LVol not found: {lvol_id}")
-        return False
-
-    snode = db_controller.get_storage_node_by_id(lvol.node_id)
-    rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
-    distribs_list = []
-    for bdev in snode.lvstore_stack:
-        type = bdev['type']
-        if type == "bdev_raid":
-            distribs_list = bdev["distribs_list"]
-            if not distribs_list:
-                logger.error(f"Failed to get LVol cluster map: {lvol_id}")
-    ret = rpc_client.distr_get_cluster_map(distribs_list[0])
-    if not ret:
-        logger.error(f"Failed to get LVol cluster map: {lvol_id}")
-        return False
-    logger.debug(ret)
-    print("*"*100)
-    results, is_passed = distr_controller.parse_distr_cluster_map(ret)
-    return utils.print_table(results)
-
-
 def migrate(lvol_id, node_id):
 
     lvol = db_controller.get_lvol_by_id(lvol_id)
