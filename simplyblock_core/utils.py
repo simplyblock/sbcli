@@ -495,7 +495,7 @@ def calculate_spdk_memory(minimum_hp_memory, minimum_sys_memory, free_sys_memory
                        f"Minimum huge pages memory: {humanbytes(minimum_hp_memory)}, "
                        f"Minimum system memory: {humanbytes(minimum_sys_memory)}")
         return False, 0
-    spdk_mem = int(minimum_hp_memory + (total_free_memory - minimum_hp_memory - minimum_sys_memory) * 0.2)
+    spdk_mem = int(minimum_hp_memory)
     logger.debug(f"SPDK memory is {humanbytes(spdk_mem)}")
     return True, spdk_mem
 
