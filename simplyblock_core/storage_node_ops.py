@@ -1063,7 +1063,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
     snode.alceml_cpu_cores = alceml_cpu_cores
     snode.alceml_worker_cpu_cores = alceml_worker_cpu_cores
     snode.distrib_cpu_cores = distrib_cpu_cores
-    snode.jc_singleton_mask = jc_singleton_mask or 0
+    snode.jc_singleton_mask = jc_singleton_mask or ""
 
     snode.poller_cpu_cores = poller_cpu_cores or []
 

@@ -91,7 +91,7 @@ class StorageNode(BaseModel):
         "alceml_cpu_index": {"type": int, "default": 0},
         "alceml_worker_cpu_index": {"type": int, "default": 0},
         "distrib_cpu_index": {"type": int, "default": 0},
-        "jc_singleton_mask": {"type": int, "default": 0},
+        "jc_singleton_mask": {"type": str, "default": ""},
 
 
         "distrib_cpu_mask": {"type": str, "default": ""},
