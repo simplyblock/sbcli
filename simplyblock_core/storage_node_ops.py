@@ -578,10 +578,13 @@ def _prepare_cluster_devices_partitions(snode, devices):
             if not new_device:
                 logger.error("failed to create dev stack")
                 return False
-            new_device.cluster_device_order = dev_order
-            dev_order += 1
+            if nvme.status == NVMeDevice.STATUS_NEW:
+                new_device.status = NVMeDevice.STATUS_NEW
+            else:
+                new_device.cluster_device_order = dev_order
+                dev_order += 1
+                device_events.device_create(new_device)
             new_devices.append(new_device)
-            device_events.device_create(new_device)
 
     snode.nvme_devices = new_devices
 
@@ -2498,6 +2501,31 @@ def recreate_lvstore(snode):
         logger.error(err)
         return False
     return True
+
+
+def get_next_ha_jm_names(current_node):
+    db_controller = DBController(KVStore())
+    jm_list = []
+    if current_node.jm_device:
+        jm_list.append(current_node.jm_device.jm_bdev)
+    else:
+        jm_list.append("JM_LOCAL")
+
+    jm_count = {}
+    for node in db_controller.get_storage_nodes_by_cluster_id(current_node.cluster_id):
+        if node.get_id() == current_node.get_id() or node.status != StorageNode.STATUS_ONLINE:
+            continue
+        if node.jm_device:
+            jm_count[node.jm_device.jm_bdev] = 1 + jm_count.get(node.jm_device.jm_bdev, 0)
+        for rem_jm_device in node.remote_jm_devices:
+            jm_count[rem_jm_device.jm_bdev] = 1 + jm_count.get(rem_jm_device.jm_bdev, 0)
+
+    jm_count = dict(sorted(jm_count.items(), key=lambda x: x[1]))
+
+    jm_list.append(f"remote_{list(jm_count.keys())[0].jm_bdev}n1")
+    jm_list.append(f"remote_{list(jm_count.keys())[1].jm_bdev}n1")
+
+    return jm_list
 
 
 def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blocks, max_size, nodes):
