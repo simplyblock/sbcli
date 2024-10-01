@@ -15,6 +15,7 @@ spec:
     spec:
       nodeSelector:
         kubernetes.io/hostname: {{ HOSTNAME }}
+      restartPolicy: "Never"
       hostNetwork: true
       volumes:
         - name: socket-dir
@@ -89,10 +90,10 @@ spec:
           mountPath: /script
         resources:
           limits:
-            hugepages-2Mi: {{ MEM_GEGA }}Gi
-            memory: 4096Mi
+            hugepages-2Mi: 10Gi
+            memory: 6Gi
           requests:
-            memory: 4096Mi
+            memory: 6Gi
 
       - name: spdk-proxy-container
         image: {{ SIMPLYBLOCK_DOCKER_IMAGE }}
