@@ -89,10 +89,10 @@ spec:
           mountPath: /script
         resources:
           limits:
-            hugepages-2Mi: 10Gi
-            memory: 6Gi
+            hugepages-2Mi: 20Gi
+            memory: 10Gi
           requests:
-            memory: 6Gi
+            memory: 10Gi
 
       - name: spdk-proxy-container
         image: {{ SIMPLYBLOCK_DOCKER_IMAGE }}
