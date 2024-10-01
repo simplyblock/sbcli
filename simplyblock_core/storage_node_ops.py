@@ -880,6 +880,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
     alceml_worker_cpu_index = 0
     distrib_cpu_index = 0
 
+
     poller_cpu_cores = []
 
     if not spdk_cpu_mask:
@@ -893,11 +894,13 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
         print(f"ERROR: The provided cpu mask {spdk_cpu_mask} has values greater than 63, which is not allowed")
         return False
     if len(spdk_cores) >= 4:
-        app_thread_core, jm_cpu_core, poller_cpu_cores, alceml_cpu_cores, alceml_worker_cpu_cores, distrib_cpu_cores = utils.calculate_core_allocation(
+        app_thread_core, jm_cpu_core, poller_cpu_cores, alceml_cpu_cores, alceml_worker_cpu_cores, distrib_cpu_cores, jc_singleton_core = utils.calculate_core_allocation(
             spdk_cores)
 
         pollers_mask = utils.generate_mask(poller_cpu_cores)
         app_thread_mask = utils.generate_mask(app_thread_core)
+        if jc_singleton_core:
+            jc_singleton_mask = utils.decimal_to_hex_power_of_2(jc_singleton_core[0])
         #spdk_cpu_mask = utils.generate_mask(spdk_cores)
         jm_cpu_mask = utils.generate_mask(jm_cpu_core)
         #distrib_cpu_mask = utils.generate_mask(distrib_cpu_cores)
@@ -1060,6 +1063,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
     snode.alceml_cpu_cores = alceml_cpu_cores
     snode.alceml_worker_cpu_cores = alceml_worker_cpu_cores
     snode.distrib_cpu_cores = distrib_cpu_cores
+    snode.jc_singleton_mask = jc_singleton_mask or 0
 
     snode.poller_cpu_cores = poller_cpu_cores or []
 
@@ -1129,6 +1133,13 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
     if not ret:
         logger.error("Failed to set nvme options")
         return False
+
+    # 7- set jc singleton mask
+    if snode.jc_singleton_mask:
+        ret = rpc_client.jc_set_hint_lcpu_mask(snode.jc_singleton_mask)
+        if not ret:
+            logger.error("Failed to set jc singleton mask")
+            return False
 
     # get new node info after starting spdk
     node_info, _ = snode_api.info()
@@ -1565,6 +1576,13 @@ def restart_storage_node(
     if not ret:
         logger.error("Failed to set nvme options")
         return False
+
+    # 7- set jc singleton mask
+    if snode.jc_singleton_mask:
+        ret = rpc_client.jc_set_hint_lcpu_mask(snode.jc_singleton_mask)
+        if not ret:
+            logger.error("Failed to set jc singleton mask")
+            return False
 
     node_info, _ = snode_api.info()
     nvme_devs = addNvmeDevices(snode, node_info['spdk_pcie_list'])

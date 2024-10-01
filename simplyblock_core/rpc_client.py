@@ -728,6 +728,11 @@ class RPCClient:
         params = {"poll_groups_mask": poll_groups_mask}
         return self._request("nvmf_set_config", params)
 
+    def jc_set_hint_lcpu_mask(self, jc_singleton_mask):
+        params = {"hint_lcpu_mask": int(jc_singleton_mask, 16)}
+        return self._request("jc_set_hint_lcpu_mask", params)
+
+
     def thread_get_stats(self):
         return self._request("thread_get_stats")
 
