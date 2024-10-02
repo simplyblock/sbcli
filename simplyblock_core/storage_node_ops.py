@@ -1027,6 +1027,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
     snode.subsystem = subsystem_nqn
     snode.data_nics = data_nics
     snode.mgmt_ip = mgmt_ip
+    snode.primary_ip = mgmt_ip
     snode.rpc_port = constants.RPC_HTTP_PROXY_PORT
     snode.rpc_username = rpc_user
     snode.rpc_password = rpc_pass
@@ -1416,6 +1417,7 @@ def restart_storage_node(
                         'status': device['status'],
                         'net_type': device['net_type']}))
             snode.data_nics = data_nics
+            snode.hostname = node_info['hostname']
 
     logger.info("Setting node state to restarting")
     set_node_status(node_id, StorageNode.STATUS_RESTARTING)
@@ -2794,4 +2796,7 @@ def make_sec_new_primary(node_id):
         if dev.status == NVMeDevice.STATUS_NEW:
             device_controller.add_device(dev.get_id())
 
+    snode = db_controller.get_storage_node_by_id(node_id)
+    snode.primary_ip = snode.mgmt_ip
+    snode.write_to_db(db_controller.kv_store)
     return True

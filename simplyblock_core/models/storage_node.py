@@ -52,6 +52,7 @@ class StorageNode(BaseModel):
         "create_dt": {"type": str, 'default': str(datetime.now())},
         "remove_dt": {"type": str, 'default': str(datetime.now())},
         "mgmt_ip": {"type": str, 'default': ""},
+        "primary_ip": {"type": str, 'default': ""},
         "rpc_port": {"type": int, 'default': -1},
         "rpc_username": {"type": str, 'default': ""},
         "rpc_password": {"type": str, 'default': ""},
