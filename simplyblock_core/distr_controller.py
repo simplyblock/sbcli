@@ -75,6 +75,8 @@ def get_distr_cluster_map(snodes, target_node):
     map_cluster = {}
     map_prob = []
     local_node_index = 0
+    db_controller = DBController()
+    cluster = db_controller.get_cluster_by_id(target_node.cluster_id)
     for index, snode in enumerate(snodes):
         dev_map = {}
         dev_w_map = []
@@ -122,9 +124,10 @@ def get_distr_cluster_map(snodes, target_node):
         "UUID_node_target": "",
         "timestamp": datetime.datetime.now().isoformat("T", "seconds")+'Z',
         "map_cluster": map_cluster,
-        "map_prob": map_prob,
-        'ppln1': local_node_index
+        "map_prob": map_prob
     }
+    if cluster.enable_node_affinity:
+        cl_map['ppln1'] = local_node_index
     return cl_map
 
 

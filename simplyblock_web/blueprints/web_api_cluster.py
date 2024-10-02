@@ -30,6 +30,7 @@ def add_cluster():
     prov_cap_warn = 0
     prov_cap_crit = 0
 
+
     cl_data = request.get_json()
     if 'blk_size' in cl_data:
         if cl_data['blk_size'] not in [512, 4096]:
@@ -44,9 +45,10 @@ def add_cluster():
     distr_bs = cl_data.get('distr_bs', 4096)
     distr_chunk_bs = cl_data.get('distr_chunk_bs', 4096)
     ha_type = cl_data.get('ha_type', 'single')
+    enable_node_affinity = cl_data.get('enable_node_affinity', False)
 
     ret = cluster_ops.add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
-                                  distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type)
+                                  distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, enable_node_affinity)
 
     return utils.get_response(ret)
 

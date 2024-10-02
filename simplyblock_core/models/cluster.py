@@ -53,7 +53,8 @@ class Cluster(BaseModel):
         "secret": {"type": str, "default": ""},
         "status": {"type": str, "default": ""},
         "updated_at": {"type": str, "default": ""},
-        "grafana_endpoint": {"type": str, "default": ""}
+        "grafana_endpoint": {"type": str, "default": ""},
+        "enable_node_affinity": {"type": bool, 'default': False},
     }
 
     def __init__(self, data=None):
