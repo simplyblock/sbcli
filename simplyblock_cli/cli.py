@@ -244,6 +244,10 @@ class CLIWrapper:
         sub_command = self.add_sub_command(subparser, 'get-cluster-map', 'get cluster map')
         sub_command.add_argument("id", help='id')
 
+        sub_command = self.add_sub_command(subparser, 'make-primary',
+                                           'In case of HA SNode, make the current node as primary')
+        sub_command.add_argument("id", help='id')
+
         # check lvol
         #
         # ----------------- cluster -----------------
@@ -901,6 +905,9 @@ class CLIWrapper:
             elif sub_command == "get-cluster-map":
                 id = args.id
                 ret = storage_ops.get_cluster_map(id)
+            elif sub_command == "make-primary":
+                id = args.id
+                ret = storage_ops.make_sec_new_primary(id)
             else:
                 self.parser.print_help()
 

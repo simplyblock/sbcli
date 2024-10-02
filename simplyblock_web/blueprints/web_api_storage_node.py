@@ -266,3 +266,13 @@ def storage_node_add():
         "namespace": namespace})
 
     return utils.get_response(True)
+
+
+@bp.route('/storagenode/make-sec-new-primary/<string:uuid>', methods=['GET'])
+def make_primary(uuid):
+    node = db_controller.get_storage_node_by_id(uuid)
+    if not node:
+        return utils.get_response_error(f"node not found: {uuid}", 404)
+
+    out = storage_node_ops.make_sec_new_primary(uuid)
+    return utils.get_response(out)

@@ -2777,3 +2777,21 @@ def get_cluster_map(node_id):
         results, is_passed = distr_controller.parse_distr_cluster_map(ret)
         print(utils.print_table(results))
     return True
+
+
+def make_sec_new_primary(node_id):
+    db_controller = DBController()
+    snode = db_controller.get_storage_node_by_id(node_id)
+    if not snode:
+        logger.error(f"snode not found: {node_id}")
+        return False
+
+    for dev in snode.nvme_devices:
+        if dev.status == NVMeDevice.STATUS_REMOVED:
+            device_controller.device_set_failed(dev.get_id())
+
+    for dev in snode.nvme_devices:
+        if dev.status == NVMeDevice.STATUS_NEW:
+            device_controller.add_device(dev.get_id())
+
+    return True
