@@ -879,6 +879,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
     alceml_cpu_index = 0
     alceml_worker_cpu_index = 0
     distrib_cpu_index = 0
+    jc_singleton_mask = ""
 
 
     poller_cpu_cores = []
