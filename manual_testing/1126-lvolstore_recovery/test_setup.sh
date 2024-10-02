@@ -3,14 +3,15 @@
 set -e
 
 # Variables
-SBCLI_CMD="sbcli-dm"
+SBCLI_CMD="sbcli-dev"
 POOL_NAME="testing1"
-LVOL_SIZE="2G"
+LVOL_SIZE="300G"
 # cloning for xfs does not work well
-FS_TYPES=("xfs" "ext4")
-CONFIGS=("1+0" "1+1" "2+1" "4+1")
+FS_TYPES=("xfs")
 MOUNT_DIR="/mnt"
-NUM_DISTRIBS=20
+LVOL_CFG="1+1"
+INITIAL_WORKLOAD_SIZE="295GiB"
+NUM_LVOLS=10
 
 
 # Helper functions
@@ -33,8 +34,7 @@ create_pool() {
 create_lvol() {
     local name=$1
     local host_id=$2
-    CONFIGS=("1+0" "1+1" "2+1" "4+1")
-    config=${CONFIGS[RANDOM % ${#CONFIGS[@]}]}
+    local config=$3
     ndcs=${config%%+*}
     npcs=${config##*+}
 
@@ -44,18 +44,10 @@ create_lvol() {
     else
         pool=""
     fi
-    cmd="$SBCLI_CMD lvol add --distr-ndcs $ndcs --distr-npcs $npcs --distr-bs 4096 --distr-chunk-bs 4096 --host-id $host_id $name $LVOL_SIZE $pool"
+    cmd="$SBCLI_CMD -d lvol add --host-id $host_id $name $LVOL_SIZE $pool"
     echo "Running command: $cmd"
     $cmd
 
-}
-
-connect_lvol() {
-    local lvol_id=$1
-    log "Connecting logical volume: $lvol_id"
-    connect_command="$SBCLI_CMD -d lvol connect $lvol_id"
-    log "Running connect command: $connect_command"
-    eval sudo $connect_command
 }
 
 connect_lvol() {
@@ -74,12 +66,15 @@ format_fs() {
     sudo mkfs.$fs_type /dev/$device
 }
 
-run_fio_workload() {
+
+run_fio_initial_workload() {
     local mount_point=$1
     local size=$2
     local nrfiles=$3
-    log "Running fio workload on mount point: $mount_point with size: $size"
-    sudo fio --directory=$mount_point --readwrite=randrw --bs=4K-128K --size=$size --name=test --numjobs=1 --nrfiles=$nrfiles --time_based=1 --runtime=36000
+    log "Running fio workload on mount point: $mount_point/base with size: $size"
+    sudo fio --directory=$mount_point/base --readwrite=randwrite --bs=256K --size=$size --name=test --numjobs=1 \
+        --nrfiles=$nrfiles --direct=1 --ioengine=aiolib --iodepth=64 --verify=md5 --verify_dump=1 --verify_fatal=0 \
+        --verify_state_save=1 --verify_backlog=10
 }
 
 generate_checksums() {
@@ -183,6 +178,27 @@ pause_if_interactive_mode() {
 }
 
 
+get_capacity_utilisation() {
+    ALL_LVOLS=($($SBCLI_CMD lvol list | grep -i lvol | awk '{print $4}'))
+    for lvol_name in "${ALL_LVOLS[@]}"; do
+        mount_point="$MOUNT_DIR/$lvol_name"
+        eval sudo fstrim ${mount_point}
+        eval sudo fstrim -v ${mount_point}
+    done
+    df -h /mnt/lvol_*
+    eval $SBCLI_CMD cluster get-capacity ${cluster_id} | sed -n '4p'
+    ALL_DEVICES=($($SBCLI_CMD cluster status $cluster_id | grep -i online | awk '{print $2}'))
+    log "Devices utilisation:"
+    for device in "${ALL_DEVICES[@]}"; do
+        eval $SBCLI_CMD sn get-capacity-device ${device} | sed -n '4p'
+    done
+    log "Base file checksums:"
+    for lvol_name in "${ALL_LVOLS[@]}"; do
+        md5sum $MOUNT_DIR/$lvol_name/base/* || true
+    done
+}
+
+
 # Main cleanup script
 unmount_all
 remove_mount_dirs
@@ -197,18 +213,17 @@ create_pool $cluster_id
 
 
 SN_IDS=($(${SBCLI_CMD} sn list | grep -Eo '^[|][ ]+[a-f0-9-]+[ ]+[|]' | awk '{print $2}'))
-unset 'SN_IDS[-1]'
 log "Storage nodes used for LVOLs: ${SN_IDS[*]}"
 pause_if_interactive_mode "$@"
 
 # create and mount all LVOLs
 lvol_names_arr=()
-for ((i=1; i<=NUM_DISTRIBS; i++)); do
-    log "Create lvol # $i out of $NUM_DISTRIBS"
+host_id=${SN_IDS[0]}
+for i in $(seq 1 $NUM_LVOLS); do
+    log "Create lvol # $i"
     fs_type=$(shuf -n 1 -e "${FS_TYPES[@]}")
-    lvol_name="lvol_${fs_type}_${i}"
-    host_id=$(shuf -n 1 -e "${SN_IDS[@]}")
-    create_lvol $lvol_name $host_id
+    lvol_name="lvol_${i}"
+    create_lvol $lvol_name $host_id $LVOL_CFG
     # pause_if_interactive_mode "$@"
     log "Fetching logical volume ID for: $lvol_name"
     lvol_id=$($SBCLI_CMD lvol list | grep -i "$lvol_name " | awk '{print $2}')
@@ -228,21 +243,19 @@ for ((i=1; i<=NUM_DISTRIBS; i++)); do
 
     log "Mounting device: /dev/$device at $mount_point"
     sudo mount /dev/$device $mount_point
+    sudo mkdir -p $mount_point/base
     lvol_names_arr[$i]=$lvol_name
-
-    # pause_if_interactive_mode "$@"
 done
-
-pause_if_interactive_mode "$@"
 
 # Step 2: Start fio on all LVOLs simultaneously and perform all operations afterward.
 # ALL_LVOLS=$($SBCLI_CMD lvol list | grep -i lvol | awk '{print $4}')
 for lvol_name in "${lvol_names_arr[@]}"; do
     mount_point="$MOUNT_DIR/$lvol_name"
-    run_fio_workload ${mount_point} 1GiB 1 &
+    run_fio_initial_workload ${mount_point} $INITIAL_WORKLOAD_SIZE 5 &
 done
-
-wait
 
 log "TEST preparation completed"
 
+# $SBCLI_CMD -d sn suspend $host_id
+# $SBCLI_CMD -d sn shutdown $host_id
+# $SBCLI_CMD -d sn restart $host_id

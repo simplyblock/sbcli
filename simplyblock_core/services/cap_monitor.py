@@ -27,7 +27,7 @@ while True:
         size_prov = records[0].size_prov_util
         logger.debug(f"cluster abs util: {size_util}, prov util: {size_prov}")
         if cl.cap_crit:
-            if cl.cap_crit < size_util:
+            if cl.cap_crit <= size_util:
                 logger.warning(f"Cluster absolute cap critical, util: {size_util}% of cluster util: {cl.cap_crit}, "
                                f"putting the cluster in read_only mode")
                 cluster_events.cluster_cap_crit(cl, size_util)

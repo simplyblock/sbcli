@@ -3,7 +3,7 @@
 set -e
 
 # Variables
-SBCLI_CMD="sbcli-dm"
+SBCLI_CMD="sbcli-ha"
 POOL_NAME="testing1"
 LVOL_SIZE="2G"
 # cloning for xfs does not work well
@@ -28,26 +28,6 @@ create_pool() {
     local cluster_id=$1
     log "Creating pool: $POOL_NAME with cluster ID: $cluster_id"
     $SBCLI_CMD pool add $POOL_NAME $cluster_id
-}
-
-create_lvol() {
-    local name=$1
-    local host_id=$2
-    CONFIGS=("1+0" "1+1" "2+1" "4+1")
-    config=${CONFIGS[RANDOM % ${#CONFIGS[@]}]}
-    ndcs=${config%%+*}
-    npcs=${config##*+}
-
-    log "Creating logical volume: $name with ndcs: $ndcs and npcs: $npcs"
-    if [ $SBCLI_CMD != "sbcli-new" ]; then
-        pool="$POOL_NAME"
-    else
-        pool=""
-    fi
-    cmd="$SBCLI_CMD lvol add --distr-ndcs $ndcs --distr-npcs $npcs --distr-bs 4096 --distr-chunk-bs 4096 --host-id $host_id $name $LVOL_SIZE $pool"
-    echo "Running command: $cmd"
-    $cmd
-
 }
 
 connect_lvol() {
@@ -189,4 +169,3 @@ remove_mount_dirs
 disconnect_lvols
 delete_snapshots
 delete_lvols
-delete_pool
