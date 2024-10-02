@@ -1,4 +1,5 @@
 # coding=utf-8
+import json
 import logging
 import time
 import uuid
@@ -80,14 +81,17 @@ def add_node_to_auto_restart(node):
     return _add_task(JobSchedule.FN_NODE_RESTART, node.cluster_id, node.get_id(), "")
 
 
-def list_tasks(cluster_id):
+def list_tasks(cluster_id, is_json=False):
     cluster = db_controller.get_cluster_by_id(cluster_id)
     if not cluster:
         logger.error("Cluster not found: %s", cluster_id)
         return False
 
-    data = []
     tasks = db_controller.get_job_tasks(cluster_id)
+    if tasks and is_json is True:
+        return json.dumps(tasks, indent=2)
+
+    data = []
     for task in tasks:
         data.append({
             "Task ID": task.uuid,

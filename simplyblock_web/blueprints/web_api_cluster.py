@@ -3,12 +3,11 @@
 import json
 import logging
 import threading
-import time
-import uuid
 
 from flask import Blueprint
 from flask import request
 
+from simplyblock_core.controllers import tasks_controller
 from simplyblock_web import utils
 
 from simplyblock_core import kv_store, cluster_ops
@@ -124,6 +123,21 @@ def cluster_get_logs(uuid):
 
     data = cluster_ops.get_logs(uuid, is_json=True)
     return utils.get_response(json.loads(data))
+
+
+@bp.route('/cluster/get-tasks/<string:uuid>', methods=['GET'])
+def cluster_get_tasks(uuid):
+    cluster = db_controller.get_cluster_by_id(uuid)
+    if not cluster:
+        return utils.get_response_error(f"Cluster not found: {uuid}", 404)
+    if cluster.status == Cluster.STATUS_INACTIVE:
+        return utils.get_response("Cluster is inactive")
+
+    data = []
+    tasks = tasks_controller.list_tasks(uuid, is_json=True)
+    for t in tasks:
+        data.append(t.get_clean_dict())
+    return utils.get_response(data)
 
 
 @bp.route('/cluster/gracefulshutdown/<string:uuid>', methods=['PUT'])
