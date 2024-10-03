@@ -795,3 +795,10 @@ class RPCClient:
     def bdev_lvol_inflate(self, name):
         params = {"name": name}
         return self._request("bdev_lvol_inflate", params)
+
+    def bdev_distrib_toggle_cluster_full(self, name, cluster_full=False):
+        params = {
+            "name": name,
+            "cluster_full": cluster_full,
+        }
+        return self._request("bdev_distrib_toggle_cluster_full", params)

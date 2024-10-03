@@ -456,9 +456,14 @@ def cluster_set_read_only(cl_id):
     if ret:
         st = db_controller.get_storage_nodes_by_cluster_id(cl_id)
         for node in st:
-            for dev in node.nvme_devices:
-                if dev.status == NVMeDevice.STATUS_ONLINE:
-                    device_controller.device_set_read_only(dev.get_id())
+            rpc_client = RPCClient(
+                node.mgmt_ip, node.rpc_port,
+                node.rpc_username, node.rpc_password, timeout=5, retry=2)
+
+            for bdev in node.lvstore_stack:
+                if bdev['type'] == "bdev_distr":
+                    rpc_client.bdev_distrib_toggle_cluster_full(bdev['name'], cluster_full=True)
+
     return True
 
 
@@ -476,9 +481,14 @@ def cluster_set_active(cl_id):
     if ret:
         st = db_controller.get_storage_nodes_by_cluster_id(cl_id)
         for node in st:
-            for dev in node.nvme_devices:
-                if dev.status == NVMeDevice.STATUS_READONLY:
-                    device_controller.device_set_online(dev.get_id())
+            rpc_client = RPCClient(
+                node.mgmt_ip, node.rpc_port,
+                node.rpc_username, node.rpc_password, timeout=5, retry=2)
+
+            for bdev in node.lvstore_stack:
+                if bdev['type'] == "bdev_distr":
+                    rpc_client.bdev_distrib_toggle_cluster_full(bdev['name'], cluster_full=False)
+
     return True
 
 
