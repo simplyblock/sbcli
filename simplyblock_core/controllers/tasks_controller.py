@@ -87,11 +87,13 @@ def list_tasks(cluster_id, is_json=False):
         logger.error("Cluster not found: %s", cluster_id)
         return False
 
+    data = []
     tasks = db_controller.get_job_tasks(cluster_id)
     if tasks and is_json is True:
-        return json.dumps(tasks, indent=2)
+        for t in tasks:
+            data.append(t.get_clean_dict())
+        return json.dumps(data, indent=2)
 
-    data = []
     for task in tasks:
         data.append({
             "Task ID": task.uuid,
