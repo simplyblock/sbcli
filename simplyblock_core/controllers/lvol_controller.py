@@ -186,31 +186,32 @@ def get_ha_jm_names(current_node, snode_list):
 
 def _get_next_3_nodes(cluster_id, lvol_size=0):
     snodes = db_controller.get_storage_nodes_by_cluster_id(cluster_id)
-    online_nodes = []
+    # online_nodes = []
     node_stats = {}
     for node in snodes:
         if node.status == node.STATUS_ONLINE:
             # Validate Eligible nodes for adding lvol
-            snode_api = SNodeClient(node.api_endpoint)
-            result, _ = snode_api.info()
-            memory_free = result["memory_details"]["free"]
-            huge_free = result["memory_details"]["huge_free"]
-            total_node_capacity = db_controller.get_snode_size(node.get_id())
-            error = utils.validate_add_lvol_or_snap_on_node(memory_free, huge_free, node.max_lvol, lvol_size,  total_node_capacity, len(node.lvols))
-            if error:
-                logger.warning(error)
-                continue
-
-            online_nodes.append(node)
-            node_stat_list = db_controller.get_node_stats(node, limit=1000)
-            combined_record = utils.sum_records(node_stat_list)
+            # snode_api = SNodeClient(node.api_endpoint)
+            # result, _ = snode_api.info()
+            # memory_free = result["memory_details"]["free"]
+            # huge_free = result["memory_details"]["huge_free"]
+            # total_node_capacity = db_controller.get_snode_size(node.get_id())
+            # error = utils.validate_add_lvol_or_snap_on_node(memory_free, huge_free, node.max_lvol, lvol_size,  total_node_capacity, len(node.lvols))
+            # if error:
+            #     logger.warning(error)
+            #     continue
+            #
+            # online_nodes.append(node)
+            # node_stat_list = db_controller.get_node_stats(node, limit=1000)
+            # combined_record = utils.sum_records(node_stat_list)
             node_st = {
-                "lvol": len(node.lvols),
-                "cpu": 1 + (node.cpu * node.cpu_hz),
-                "r_io": combined_record.read_io_ps,
-                "w_io": combined_record.write_io_ps,
-                "r_b": combined_record.read_bytes_ps,
-                "w_b": combined_record.write_bytes_ps}
+                "lvol": len(node.lvols) or 1,
+                # "cpu": 1 + (node.cpu * node.cpu_hz),
+                # "r_io": combined_record.read_io_ps,
+                # "w_io": combined_record.write_io_ps,
+                # "r_b": combined_record.read_bytes_ps,
+                # "w_b": combined_record.write_bytes_ps
+            }
 
             node_stats[node.get_id()] = node_st
 
@@ -243,7 +244,7 @@ def _get_next_3_nodes(cluster_id, lvol_size=0):
     #############
 
     selected_node_ids = []
-    while len(selected_node_ids) < min(len(online_nodes), 3):
+    while len(selected_node_ids) < min(len(node_stats), 3):
         r_index = random.randint(0, n_start)
         print(f"Random is {r_index}/{n_start}")
         for node_id in node_start_end:

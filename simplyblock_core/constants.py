@@ -37,12 +37,12 @@ DEVICE_OVERLOAD_CAPACITY_THRESHOLD = 50
 CLUSTER_NQN = "nqn.2023-02.io.simplyblock"
 
 weights = {
-    "lvol": 50,
-    "cpu": 10,
-    "r_io": 10,
-    "w_io": 10,
-    "r_b": 10,
-    "w_b": 10
+    "lvol": 100,
+    # "cpu": 10,
+    # "r_io": 10,
+    # "w_io": 10,
+    # "r_b": 10,
+    # "w_b": 10
 }
 
 
