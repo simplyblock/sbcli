@@ -347,7 +347,7 @@ def calculate_core_allocation(cpu_cores):
     https://docs.google.com/spreadsheets/d/14vxL9W31-7oFT6tEeLNuaJJO0FwG9cZK/edit?gid=1468847899#gid=1468847899
     '''
 
-    if len(cpu_cores) == 23:
+    if len(cpu_cores) >= 23:
         app_thread_core = [cpu_cores[pos - 1] for pos in [16]]
         jm_cpu_core = [cpu_cores[pos - 1] for pos in [17, 22]]
         poller_cpu_cores = [cpu_cores[pos - 1] for pos in [6, 7, 8, 14, 15, 18, 19, 20]]
@@ -355,7 +355,7 @@ def calculate_core_allocation(cpu_cores):
         alceml_cpu_worker_cores = [cpu_cores[pos - 1] for pos in [13, 21]]
         distrib_cpu_cores = [cpu_cores[pos - 1] for pos in [4, 5, 9, 10, 11, 12]]
         jc_singleton_core = [cpu_cores[pos - 1] for pos in [23]]
-    elif len(cpu_cores) == 21:
+    elif len(cpu_cores) >= 21:
         app_thread_core = [cpu_cores[pos - 1] for pos in [14]]
         jm_cpu_core = [cpu_cores[pos - 1] for pos in [15, 21]]
         poller_cpu_cores = [cpu_cores[pos - 1] for pos in [4, 5, 6, 7, 13, 16, 17]]
@@ -363,7 +363,7 @@ def calculate_core_allocation(cpu_cores):
         alceml_cpu_worker_cores = [cpu_cores[pos - 1] for pos in [12, 20]]
         distrib_cpu_cores = [cpu_cores[pos - 1] for pos in [3, 8, 9, 10, 11, 19]]
         jc_singleton_core = [cpu_cores[pos - 1] for pos in [18]]
-    elif len(cpu_cores) == 19:
+    elif len(cpu_cores) >= 19:
         app_thread_core = [cpu_cores[pos - 1] for pos in [13]]
         jm_cpu_core = [cpu_cores[pos - 1] for pos in [14]]
         poller_cpu_cores = [cpu_cores[pos - 1] for pos in [5, 6, 7, 12, 15, 16]]
@@ -371,7 +371,7 @@ def calculate_core_allocation(cpu_cores):
         alceml_cpu_worker_cores = [cpu_cores[pos - 1] for pos in [11, 19]]
         distrib_cpu_cores = [cpu_cores[pos - 1] for pos in [3, 4, 8, 9, 10, 18]]
         jc_singleton_core = [cpu_cores[pos - 1] for pos in [17]]
-    elif len(cpu_cores) == 17:
+    elif len(cpu_cores) >= 17:
         app_thread_core = [cpu_cores[pos - 1] for pos in [12]]
         jm_cpu_core = [cpu_cores[pos - 1] for pos in [13]]
         poller_cpu_cores = [cpu_cores[pos - 1] for pos in [4, 5, 6, 11, 14]]
@@ -379,7 +379,7 @@ def calculate_core_allocation(cpu_cores):
         alceml_cpu_worker_cores = [cpu_cores[pos - 1] for pos in [10]]
         distrib_cpu_cores = [cpu_cores[pos - 1] for pos in [3, 7, 8, 9, 16, 17]]
         jc_singleton_core = [cpu_cores[pos - 1] for pos in [15]]
-    elif len(cpu_cores) == 15:
+    elif len(cpu_cores) >= 15:
         app_thread_core = [cpu_cores[pos - 1] for pos in [11]]
         jm_cpu_core = [cpu_cores[pos - 1] for pos in [12]]
         poller_cpu_cores = [cpu_cores[pos - 1] for pos in [5, 6, 10, 13]]
@@ -387,7 +387,7 @@ def calculate_core_allocation(cpu_cores):
         alceml_cpu_worker_cores = [cpu_cores[pos - 1] for pos in [9]]
         distrib_cpu_cores = [cpu_cores[pos - 1] for pos in [3, 4, 7, 8, 15]]
         jc_singleton_core = [cpu_cores[pos - 1] for pos in [14]]
-    elif len(cpu_cores) == 13:
+    elif len(cpu_cores) >= 13:
         app_thread_core = [cpu_cores[pos - 1] for pos in [9]]
         jm_cpu_core = [cpu_cores[pos - 1] for pos in [10]]
         poller_cpu_cores = [cpu_cores[pos - 1] for pos in [3, 4, 5, 11]]
@@ -395,7 +395,7 @@ def calculate_core_allocation(cpu_cores):
         alceml_cpu_worker_cores = [cpu_cores[pos - 1] for pos in [8]]
         distrib_cpu_cores = [cpu_cores[pos - 1] for pos in [2, 6, 7, 13]]
         jc_singleton_core = [cpu_cores[pos - 1] for pos in [12]]
-    elif len(cpu_cores) == 11:
+    elif len(cpu_cores) >= 11:
         app_thread_core = [cpu_cores[pos - 1] for pos in [8]]
         jm_cpu_core = [cpu_cores[pos - 1] for pos in [9]]
         poller_cpu_cores = [cpu_cores[pos - 1] for pos in [3, 4, 10]]
@@ -403,7 +403,7 @@ def calculate_core_allocation(cpu_cores):
         alceml_cpu_worker_cores = [cpu_cores[pos - 1] for pos in [7]]
         distrib_cpu_cores = [cpu_cores[pos - 1] for pos in [2, 5, 6]]
         jc_singleton_core = [cpu_cores[pos - 1] for pos in [11]]
-    elif len(cpu_cores) == 9:
+    elif len(cpu_cores) >= 9:
         app_thread_core = [cpu_cores[pos - 1] for pos in [7]]
         jm_cpu_core = [cpu_cores[pos - 1] for pos in [8]]
         poller_cpu_cores = [cpu_cores[pos - 1] for pos in [3, 4]]
@@ -411,7 +411,7 @@ def calculate_core_allocation(cpu_cores):
         alceml_cpu_worker_cores = [cpu_cores[pos - 1] for pos in [4, 9]]
         distrib_cpu_cores = [cpu_cores[pos - 1] for pos in [2, 5, 6]]
         jc_singleton_core = [cpu_cores[pos - 1] for pos in [7]]
-    elif len(cpu_cores) == 7:
+    elif len(cpu_cores) >= 7:
         app_thread_core = [cpu_cores[pos - 1] for pos in [6]]
         jm_cpu_core = [cpu_cores[pos - 1] for pos in [7]]
         poller_cpu_cores = [cpu_cores[pos - 1] for pos in [3, 5]]
@@ -419,7 +419,7 @@ def calculate_core_allocation(cpu_cores):
         alceml_cpu_worker_cores = [cpu_cores[pos - 1] for pos in [1]]
         distrib_cpu_cores = [cpu_cores[pos - 1] for pos in [2, 4]]
         jc_singleton_core = [cpu_cores[pos - 1] for pos in [6]]
-    elif len(cpu_cores) == 5:
+    elif len(cpu_cores) >= 5:
         app_thread_core = [cpu_cores[pos - 1] for pos in [5]]
         jm_cpu_core = [cpu_cores[pos - 1] for pos in [4]]
         poller_cpu_cores = [cpu_cores[pos - 1] for pos in [2, 3]]
@@ -427,7 +427,7 @@ def calculate_core_allocation(cpu_cores):
         alceml_cpu_worker_cores = [cpu_cores[pos - 1] for pos in [1]]
         distrib_cpu_cores = [cpu_cores[pos - 1] for pos in [2, 3]]
         jc_singleton_core = [cpu_cores[pos - 1] for pos in [5]]
-    elif len(cpu_cores) == 4:
+    elif len(cpu_cores) >= 4:
         app_thread_core = [cpu_cores[pos - 1] for pos in [4]]
         jm_cpu_core = [cpu_cores[pos - 1] for pos in [4]]
         poller_cpu_cores = [cpu_cores[pos - 1] for pos in [2, 3]]
