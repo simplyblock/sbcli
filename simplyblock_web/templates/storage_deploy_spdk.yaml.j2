@@ -90,9 +90,9 @@ spec:
         resources:
           limits:
             hugepages-2Mi: {{ MEM_GEGA }}Gi
-            memory: 8Gi
+            memory: 10Gi
           requests:
-            memory: 8Gi
+            memory: 10Gi
 
       - name: spdk-proxy-container
         image: {{ SIMPLYBLOCK_DOCKER_IMAGE }}
