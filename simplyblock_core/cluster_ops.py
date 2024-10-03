@@ -170,7 +170,10 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     c.distr_bs = distr_bs
     c.distr_chunk_bs = distr_chunk_bs
     c.ha_type = ha_type
-    c.grafana_endpoint = grafana_endpoint
+    if grafana_endpoint:
+        c.grafana_endpoint = grafana_endpoint
+    else:
+        c.grafana_endpoint = f"http://{DEV_IP}/grafana"
     c.enable_node_affinity = enable_node_affinity
     
     alerts_template_folder = os.path.join(TOP_DIR, "simplyblock_core/scripts/alerting/")

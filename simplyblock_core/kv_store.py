@@ -316,3 +316,9 @@ class DBController:
         for dev in snode.nvme_devices:
             total_node_capacity += dev.size
         return total_node_capacity
+
+    def get_jm_device_by_id(self, jm_id):
+        for node in self.get_storage_nodes():
+            if node.jm_device and node.jm_device.get_id() == jm_id:
+                return node.jm_device
+        return None

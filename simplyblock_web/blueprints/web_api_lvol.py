@@ -230,7 +230,7 @@ def resize_lvol(uuid):
 
     cl_data = request.get_json()
     if 'size' not in cl_data:
-        return utils.get_response(None, "missing required param: new_size", 400)
+        return utils.get_response(None, "missing required param: size", 400)
 
     new_size = utils.parse_size(cl_data['size'])
 

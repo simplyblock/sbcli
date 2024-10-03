@@ -781,37 +781,45 @@ def _connect_to_remote_devs(this_node):
     return remote_devices
 
 
-def _connect_to_remote_jm_devs(this_node):
+def _connect_to_remote_jm_devs(this_node, jm_ids=[]):
     db_controller = DBController()
 
     rpc_client = RPCClient(
         this_node.mgmt_ip, this_node.rpc_port,
         this_node.rpc_username, this_node.rpc_password, timeout=5, retry=2)
 
+    node_bdevs = rpc_client.get_bdevs()
+    node_bdev_names = [b['name'] for b in node_bdevs]
     remote_devices = []
-    # connect to remote devs
-    snodes = db_controller.get_storage_nodes_by_cluster_id(this_node.cluster_id)
-    for node_index, node in enumerate(snodes):
-        if node.get_id() == this_node.get_id() or node.status != StorageNode.STATUS_ONLINE:
-            continue
+    if jm_ids:
+        for jm_id in jm_ids:
+            jm_dev = db_controller.get_jm_device_by_id(jm_id)
+            remote_devices.append(jm_dev)
+    elif len(this_node.remote_jm_devices) > 0:
+        remote_devices = this_node.remote_jm_devices
+    else:
+        for node in db_controller.get_storage_nodes_by_cluster_id(this_node.cluster_id):
+            if node.get_id() == this_node.get_id() or node.status != StorageNode.STATUS_ONLINE:
+                continue
+            if node.jm_device:
+                remote_devices.append(node.jm_device)
 
-        if node.jm_device and node.jm_device.status == NVMeDevice.STATUS_ONLINE:
-            logger.info(f"Connecting to JM on node: {node.get_id()}")
-            name = f"remote_{node.jm_device.jm_bdev}"
-            bdev_name = f"{name}n1"
-            ret = rpc_client.get_bdevs(bdev_name)
+    for jm_dev in remote_devices:
+        name = f"remote_{jm_dev.jm_bdev}"
+        bdev_name = f"{name}n1"
+        jm_dev.remote_bdev = bdev_name
+        if bdev_name in node_bdev_names:
+            logger.info(f"bdev found {bdev_name}")
+            jm_dev.status = JMDevice.STATUS_ONLINE
+        else:
+            logger.info(f"Connecting {this_node.get_id()} to {name}")
+            ret = rpc_client.bdev_nvme_attach_controller_tcp(
+                name, jm_dev.nvmf_nqn, jm_dev.nvmf_ip, jm_dev.nvmf_port)
             if ret:
-                logger.info(f"bdev found {bdev_name}")
+                jm_dev.status = JMDevice.STATUS_ONLINE
             else:
-                logger.info(f"Connecting {this_node.get_id()} to {name}")
-                ret = rpc_client.bdev_nvme_attach_controller_tcp(
-                    name, node.jm_device.nvmf_nqn, node.jm_device.nvmf_ip, node.jm_device.nvmf_port)
-                if not ret:
-                    logger.error(f"failed to connect to remote JM {node.jm_device.jm_bdev}")
-                    continue
-
-            node.jm_device.remote_bdev = bdev_name
-            remote_devices.append(node.jm_device)
+                logger.error(f"failed to connect to remote JM {name}")
+                jm_dev.status = JMDevice.STATUS_UNAVAILABLE
 
     return remote_devices
 
@@ -1209,7 +1217,8 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
             else:
                 node.remote_devices.append(dev)
 
-        if node.enable_ha_jm:
+        if snode.jm_device and node.enable_ha_jm:
+            node.remote_jm_devices.append(snode.jm_device)
             node.remote_jm_devices = _connect_to_remote_jm_devs(node)
         node.write_to_db(kv_store)
         logger.info(f"connected to devices count: {len(node.remote_devices)}")
@@ -2540,28 +2549,32 @@ def recreate_lvstore(snode):
     return True
 
 
-def get_next_ha_jm_names(current_node):
+def get_next_ha_jms(current_node):
     db_controller = DBController(KVStore())
+    jm_count = {}
+    for node in db_controller.get_storage_nodes_by_cluster_id(current_node.cluster_id):
+        if node.get_id() == current_node.get_id() or node.status != StorageNode.STATUS_ONLINE:
+            continue
+        if node.jm_device:
+            jm_count[node.jm_device.get_id()] = 1 + jm_count.get(node.jm_device.get_id(), 0)
+        for rem_jm_device in node.remote_jm_devices:
+            if rem_jm_device.get_id() != current_node.jm_device.get_id():
+                jm_count[rem_jm_device.get_id()] = 1 + jm_count.get(rem_jm_device.get_id(), 0)
+
+    jm_count = dict(sorted(jm_count.items(), key=lambda x: x[1]))
+    return list(jm_count.keys())[:2]
+
+
+def get_node_jm_names(current_node):
     jm_list = []
     if current_node.jm_device:
         jm_list.append(current_node.jm_device.jm_bdev)
     else:
         jm_list.append("JM_LOCAL")
 
-    jm_count = {}
-    for node in db_controller.get_storage_nodes_by_cluster_id(current_node.cluster_id):
-        if node.get_id() == current_node.get_id() or node.status != StorageNode.STATUS_ONLINE:
-            continue
-        if node.jm_device:
-            jm_count[node.jm_device.jm_bdev] = 1 + jm_count.get(node.jm_device.jm_bdev, 0)
-        for rem_jm_device in node.remote_jm_devices:
-            jm_count[rem_jm_device.jm_bdev] = 1 + jm_count.get(rem_jm_device.jm_bdev, 0)
-
-    jm_count = dict(sorted(jm_count.items(), key=lambda x: x[1]))
-
-    jm_list.append(f"remote_{list(jm_count.keys())[0].jm_bdev}n1")
-    jm_list.append(f"remote_{list(jm_count.keys())[1].jm_bdev}n1")
-
+    if current_node.enable_ha_jm:
+        for jm_dev in current_node.remote_jm_devices[:2]:
+            jm_list.append(f"remote_{jm_dev.jm_bdev}n1")
     return jm_list
 
 
@@ -2575,13 +2588,10 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
     strip_size_kb = utils.nearest_upper_power_of_2(strip_size_kb)
     jm_vuid = 0
     if snode.enable_ha_jm:
-        if len(nodes) > 3:
-            nodes = nodes[:3]
-        jm_names = lvol_controller.get_ha_jm_names(snode, nodes)
         jm_vuid = utils.get_random_vuid()
-    else:
-        jm_names = lvol_controller.get_jm_names(snode)
-
+        online_jms = get_next_ha_jms(snode)
+        snode.remote_jm_devices = _connect_to_remote_jm_devs(snode, online_jms)
+        snode.write_to_db()
 
     for _ in range(snode.number_of_distribs):
         distrib_vuid = utils.get_random_vuid()
@@ -2594,7 +2604,6 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
                     "name": distrib_name,
                     "params": {
                         "name": distrib_name,
-                        "jm_names": jm_names,
                         "jm_vuid": jm_vuid,
                         "vuid": distrib_vuid,
                         "ndcs": ndcs,
@@ -2622,14 +2631,6 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
                 },
                 "distribs_list": distrib_list
             },
-            # {
-            #     "type": "bdev_ptnonexcl",
-            #     "name": "raid_PT",
-            #     "params": {
-            #         "name": "raid_PT",
-            #         "base_bdev_name": raid_device
-            #     }
-            # },
             {
                 "type": "bdev_lvstore",
                 "name": lvs_name,
@@ -2651,13 +2652,11 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
         logger.error(err)
         return False
 
-
     snode.lvstore = lvs_name
     snode.lvstore_stack = lvstore_stack
     snode.raid = raid_device
-    db_controller = DBController(KVStore())
-    snode.write_to_db(db_controller.kv_store)
-    time.sleep(3)
+    snode.write_to_db()
+    time.sleep(1)
     return True
 
 
@@ -2677,6 +2676,7 @@ def _create_bdev_stack(snode, lvstore_stack=None):
         params = bdev['params']
 
         if type == "bdev_distr":
+            params['jm_names'] = get_node_jm_names(snode)
             if snode.distrib_cpu_cores:
                 distrib_cpu_mask = utils.decimal_to_hex_power_of_2(snode.distrib_cpu_cores[snode.distrib_cpu_index])
                 params['distrib_cpu_mask'] = distrib_cpu_mask
@@ -2693,26 +2693,6 @@ def _create_bdev_stack(snode, lvstore_stack=None):
 
         elif type == "bdev_ptnonexcl":
             ret = rpc_client.bdev_PT_NoExcl_create(**params)
-            if ret:
-                try:
-                    # add pass through
-                    pt_name = "raid_PT"
-                    subsystem_nqn = snode.subsystem + ":dev:raid"
-                    logger.info("creating raid subsystem %s", subsystem_nqn)
-                    ret = rpc_client.subsystem_create(subsystem_nqn, 'sbcli-cn', 'sbcli-cn')
-                    for iface in snode.data_nics:
-                        if iface.ip4_address:
-                            tr_type = iface.get_transport_type()
-                            logger.info("adding listener for %s on IP %s" % (subsystem_nqn, iface.ip4_address))
-                            ret = rpc_client.listeners_create(subsystem_nqn, tr_type, iface.ip4_address, "4420")
-                            break
-                    logger.info(f"add {pt_name} to subsystem")
-                    ret = rpc_client.nvmf_subsystem_add_ns(subsystem_nqn, pt_name)
-                    if not ret:
-                        logger.error(f"Failed to add: {pt_name} to the subsystem: {subsystem_nqn}")
-                        return False
-                except:
-                    pass
 
         elif type == "bdev_raid":
             distribs_list = bdev["distribs_list"]
