@@ -47,8 +47,12 @@ def add_cluster():
     enable_node_affinity = cl_data.get('enable_node_affinity', False)
     qpair_count = cl_data.get('qpair_count', 256)
 
+    max_queue_size = cl_data.get('max_queue_size', 128)
+    inflight_io_threshold = cl_data.get('inflight_io_threshold', 4)
+
     ret = cluster_ops.add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
-                                  distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, enable_node_affinity, qpair_count)
+                                  distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, enable_node_affinity,
+                                  qpair_count, max_queue_size, inflight_io_threshold)
 
     return utils.get_response(ret)
 

@@ -70,6 +70,7 @@ class LVol(BaseModel):
         "io_error": {"type": bool, 'default': False},
 
         "deletion_status": {"type": str, 'default': ""},
+        "lvol_priority_class": {"type": int, 'default': 0},
 
     }
 

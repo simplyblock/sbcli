@@ -1,4 +1,3 @@
-
 import json
 
 import requests
@@ -265,7 +264,7 @@ class RPCClient:
         }
         return self._request("bdev_lvol_create_lvstore", params)
 
-    def create_lvol(self, name, size_in_mib, lvs_name):
+    def create_lvol(self, name, size_in_mib, lvs_name, lvol_priority_class=0):
         params = {
             "lvol_name": name,
             "size_in_mib": size_in_mib,
@@ -273,6 +272,8 @@ class RPCClient:
             "thin_provision": True,
             "clear_method": "unmap",
         }
+        if lvol_priority_class:
+            params["lvol_priority_class"] = lvol_priority_class
         return self._request("bdev_lvol_create", params)
 
     def delete_lvol(self, name):
@@ -360,6 +361,22 @@ class RPCClient:
         params = {"name": name}
         return self._request2("ultra21_bdev_pass_delete", params)
 
+    def qos_vbdev_create(self, qos_bdev, base_bdev_name, base_nvme_hw_name, max_queue_size,
+                         inflight_io_threshold):
+        params = {
+            "base_bdev_name": base_bdev_name,
+            "name": qos_bdev,
+            "base_nvme_hw_name": base_nvme_hw_name,
+            "max_queue_size": max_queue_size,
+            "inflight_io_threshold": inflight_io_threshold
+        }
+
+        return self._request("qos_vbdev_create", params)
+
+    def qos_vbdev_delete(self, name):
+        params = {"name": name}
+        return self._request2("qos_vbdev_delete", params)
+
     def bdev_alceml_create(self, alceml_name, nvme_name, uuid, pba_init_mode=3,
                            alceml_cpu_mask="", alceml_worker_cpu_mask=""):
         params = {
@@ -381,7 +398,7 @@ class RPCClient:
         if alceml_cpu_mask:
             params["bdb_lcpu_mask"] = int(alceml_cpu_mask, 16)
         if alceml_worker_cpu_mask:
-            params["bdb_lcpu_mask_alt_workers"] = int(alceml_worker_cpu_mask,16)
+            params["bdb_lcpu_mask_alt_workers"] = int(alceml_worker_cpu_mask, 16)
         return self._request("bdev_alceml_create", params)
 
     def bdev_distrib_create(self, name, vuid, ndcs, npcs, num_blocks, block_size, jm_names,
@@ -733,7 +750,6 @@ class RPCClient:
             "nbd_device": nbd_device
         }
         return self._request("nbd_stop_disk", params)
-
 
     def bdev_jm_unmap_vuid(self, name, vuid):
         params = {"name": name, "vuid": vuid}

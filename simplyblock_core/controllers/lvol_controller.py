@@ -277,7 +277,7 @@ def validate_aes_xts_keys(key1: str, key2: str) -> Tuple[bool, str]:
 
 def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp, use_crypto,
                 distr_vuid, max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes,
-                with_snapshot=False, max_size=0, crypto_key1=None, crypto_key2=None):
+                with_snapshot=False, max_size=0, crypto_key1=None, crypto_key2=None, lvol_priority_class=0):
 
     logger.info(f"Adding LVol: {name}")
     host_node = None
@@ -400,6 +400,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
     lvol.npcs = cl.distr_npcs
     lvol.distr_bs = cl.distr_bs
     lvol.distr_chunk_bs = cl.distr_chunk_bs
+    lvol.lvol_priority_class = lvol_priority_class
     #lvol.distr_page_size = (distr_npcs+distr_npcs)*cl.page_size_in_blocks
 
 
@@ -456,8 +457,8 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
     #         }
     #     })
     # else:
-    lvol.bdev_stack.extend(
-        [
+    #lvol.bdev_stack.extend(
+    #    [
             #{
             #    "type": "bdev_distr",
             #    "name": lvol.base_bdev,
@@ -483,17 +484,22 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
             #        "num_md_pages_per_cluster_ratio": 1,
             #    }
             #},
-            {
-                "type": "bdev_lvol",
-                "name": lvol.lvol_bdev,
-                "params": {
-                    "name": lvol.lvol_bdev,
-                    "size_in_mib": int(lvol.size/(1000*1000)),
-                    "lvs_name": lvol.lvs_name
-                }
-            }
-        ]
-    )
+
+    #    ]
+    #)
+    lvol_dict = {
+        "type": "bdev_lvol",
+        "name": lvol.lvol_bdev,
+        "params": {
+            "name": lvol.lvol_bdev,
+            "size_in_mib": int(lvol.size / (1000 * 1000)),
+            "lvs_name": lvol.lvs_name
+        }
+    }
+
+    if lvol.lvol_priority_class:
+        lvol_dict["lvol_priority_class"] = lvol.lvol_priority_class
+    lvol.bdev_stack = [lvol_dict]
 
     if use_crypto:
         if crypto_key1 == None or crypto_key2 == None:
@@ -970,7 +976,7 @@ def list_lvols(is_json, cluster_id, pool_id_or_name, all=False):
             "Size": utils.humanbytes(lvol.size),
             "Hostname": lvol.hostname,
             "HA": lvol.ha_type,
-            "VUID": lvol.vuid,
+            "Priority": lvol.lvol_priority_class,
             "Mod": f"{lvol.ndcs}x{lvol.npcs}",
             "Status": lvol.status,
             "IO Err": lvol.io_error,

@@ -380,6 +380,11 @@ def device_remove(device_id, force=True):
         logger.error(f"Failed to remove bdev: {device.alceml_bdev}")
         if not force:
             return False
+    ret = rpc_client.qos_vbdev_delete(device.qos_bdev)
+    if not ret:
+        logger.error(f"Failed to remove bdev: {device.qos_bdev}")
+        if not force:
+            return False
     if snode.enable_test_device:
         ret = rpc_client.bdev_passtest_delete(device.testing_bdev)
         if not ret:

@@ -57,6 +57,9 @@ class Cluster(BaseModel):
         "updated_at": {"type": str, "default": ""},
         "grafana_endpoint": {"type": str, "default": ""},
         "enable_node_affinity": {"type": bool, 'default': False},
+        "max_queue_size": {"type": int, "default": 128},
+        "inflight_io_threshold": {"type": int, "default": 4},
+        "enable_qos": {"type": bool, 'default': False}
     }
 
     def __init__(self, data=None):
