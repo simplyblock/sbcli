@@ -3,12 +3,11 @@
 import json
 import logging
 import threading
-import time
-import uuid
 
 from flask import Blueprint
 from flask import request
 
+from simplyblock_core.controllers import tasks_controller
 from simplyblock_web import utils
 
 from simplyblock_core import kv_store, cluster_ops
@@ -30,6 +29,7 @@ def add_cluster():
     prov_cap_warn = 0
     prov_cap_crit = 0
 
+
     cl_data = request.get_json()
     if 'blk_size' in cl_data:
         if cl_data['blk_size'] not in [512, 4096]:
@@ -39,8 +39,15 @@ def add_cluster():
 
     if 'page_size_in_blocks' in cl_data:
         page_size_in_blocks = cl_data['page_size_in_blocks']
+    distr_ndcs = cl_data.get('distr_ndcs', 1)
+    distr_npcs = cl_data.get('distr_npcs', 1)
+    distr_bs = cl_data.get('distr_bs', 4096)
+    distr_chunk_bs = cl_data.get('distr_chunk_bs', 4096)
+    ha_type = cl_data.get('ha_type', 'single')
+    enable_node_affinity = cl_data.get('enable_node_affinity', False)
 
-    ret = cluster_ops.add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit)
+    ret = cluster_ops.add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
+                                  distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, enable_node_affinity)
 
     return utils.get_response(ret)
 
@@ -118,6 +125,21 @@ def cluster_get_logs(uuid):
     return utils.get_response(json.loads(data))
 
 
+@bp.route('/cluster/get-tasks/<string:uuid>', methods=['GET'])
+def cluster_get_tasks(uuid):
+    cluster = db_controller.get_cluster_by_id(uuid)
+    if not cluster:
+        return utils.get_response_error(f"Cluster not found: {uuid}", 404)
+    if cluster.status == Cluster.STATUS_INACTIVE:
+        return utils.get_response("Cluster is inactive")
+
+    data = []
+    tasks = tasks_controller.list_tasks(uuid, is_json=True)
+    for t in tasks:
+        data.append(t.get_clean_dict())
+    return utils.get_response(data)
+
+
 @bp.route('/cluster/gracefulshutdown/<string:uuid>', methods=['PUT'])
 def cluster_grace_shutdown(uuid):
     cluster = db_controller.get_cluster_by_id(uuid)
@@ -138,6 +160,19 @@ def cluster_grace_startup(uuid):
         return utils.get_response_error(f"Cluster not found: {uuid}", 404)
     t = threading.Thread(
         target=cluster_ops.cluster_grace_startup,
+        args=(uuid,))
+    t.start()
+    # FIXME: Any failure within the thread are not handled
+    return utils.get_response(True)
+
+
+@bp.route('/cluster/activate/<string:uuid>', methods=['PUT'])
+def cluster_activate(uuid):
+    cluster = db_controller.get_cluster_by_id(uuid)
+    if not cluster:
+        return utils.get_response_error(f"Cluster not found: {uuid}", 404)
+    t = threading.Thread(
+        target=cluster_ops.cluster_activate,
         args=(uuid,))
     t.start()
     # FIXME: Any failure within the thread are not handled

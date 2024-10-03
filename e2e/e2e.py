@@ -13,16 +13,26 @@ from utils.ssh_utils import SshUtils
 
 
 def main():
-    """Run complete test suite
-    """
+    """Run complete test suite"""
     parser = argparse.ArgumentParser(description="Run simplyBlock's E2E Test Framework")
     parser.add_argument('--testname', type=str, help="The name of the test to run", default=None)
     parser.add_argument('--fio_debug', type=bool, help="Add debug flag to fio", default=False)
+    
+    # New arguments for ndcs, npcs, bs, chunk_bs with default values
+    parser.add_argument('--ndcs', type=int, help="Number of data chunks (ndcs)", default=1)
+    parser.add_argument('--npcs', type=int, help="Number of parity chunks (npcs)", default=1)
+    parser.add_argument('--bs', type=int, help="Block size (bs)", default=4096)
+    parser.add_argument('--chunk_bs', type=int, help="Chunk block size (chunk_bs)", default=4096)
+    parser.add_argument('--run_k8s', type=bool, help="Run K8s setup", default=False)
+
 
     args = parser.parse_args()
 
-    tests = get_all_tests()
-    # Find the test class based on the provided test name
+    if args.ndcs == 0 and args.npcs == 0:
+        tests = get_all_tests(custom=False, k8s_test=args.run_k8s)
+    else:
+        tests = get_all_tests(custom=True, k8s_test=args.run_k8s)
+
     test_class_run = []
     if args.testname is None or len(args.testname.strip()) == 0:
         test_class_run = tests
@@ -35,11 +45,16 @@ def main():
         available_tests = ', '.join(cls.__name__ for cls in tests)
         logger.info(f"Test '{args.testname}' not found. Available tests are: {available_tests}")
         raise TestNotFoundException(args.testname, available_tests)
-    
+
     errors = {}
     for test in test_class_run:
         logger.info(f"Running Test {test}")
-        test_obj = test(fio_debug=args.fio_debug)
+        test_obj = test(fio_debug=args.fio_debug,
+                        ndcs=args.ndcs,
+                        npcs=args.npcs,
+                        bs=args.bs,
+                        chunk_bs=args.chunk_bs,
+                        k8s_run=args.run_k8s)
         try:
             test_obj.setup()
             test_obj.run()
@@ -52,7 +67,6 @@ def main():
         except Exception as _:
             logger.error(f"Error During Teardown for test: {test.__name__}")
             logger.error(traceback.format_exc())
-            # errors[f"{test.__name__}"].append(exp)
         finally:
             if check_for_dumps():
                 logger.info("Found a core dump during test execution. "
@@ -63,7 +77,7 @@ def main():
     logger.info(f"Number of Total Cases: {len(test_class_run)}")
     logger.info(f"Number of Passed Cases: {len(test_class_run) - len(failed_cases)}")
     logger.info(f"Number of Failed Cases: {len(failed_cases)}")
-    
+
     logger.info("Test Wise run status:")
     for test in test_class_run:
         if test.__name__ not in failed_cases:
@@ -71,10 +85,9 @@ def main():
         else:
             logger.info(f"{test.__name__} FAILED CASE.")
 
-
     if errors:
         raise MultipleExceptions(errors)
-    
+
 
 def check_for_dumps():
     """Validates whether core dumps present on machines
@@ -109,18 +122,6 @@ def check_for_dumps():
         logger.info(f"Closing node ssh connection for {node}")
         ssh.close()
     return core_exist
-
-
-def generate_report():
-    """
-    If any of the above conditions are not true, the relevant outputs from logs or cli commands should be placed
-    automatically in a bug report; we may just create a shared folder and place a textfile bug report per run
-    there under the date of the run: No failure report file → everthing went ok.
-    failure report file for a particular date and time → contains relevant logs of the run
-    (fio output, output of sbcli sn list, sbcli sn list-devices, sbcli cluster status, sbcli cluster get-logs,
-    sbcli lvol get, sbcli lvol get-cluster-map, spdk log)
-    """
-    pass
 
 
 logger = setup_logger(__name__)

@@ -31,6 +31,15 @@ def set_lvol_health_check(lvol, health_check_status):
     lvol_events.lvol_health_check_change(lvol, lvol.health_check, old_status, caused_by="monitor")
 
 
+def set_snapshot_health_check(snap, health_check_status):
+    snap = db_controller.get_snapshot_by_id(snap.get_id())
+    if snap.health_check == health_check_status:
+        return
+    snap.health_check = health_check_status
+    snap.updated_at = str(datetime.now())
+    snap.write_to_db(db_store)
+
+
 # get DB controller
 db_store = kv_store.KVStore()
 db_controller = kv_store.DBController()
@@ -45,6 +54,9 @@ while True:
         if lvol.io_error:
             logger.debug(f"Skipping LVol health check because of io_error {lvol.get_id()}")
             continue
+        if lvol.status == lvol.STATUS_IN_DELETION:
+            logger.warning(f"LVol in deletion, id: {lvol.get_id()}, status: {lvol.status}.. skipping")
+            continue
         ret = health_controller.check_lvol(lvol.get_id())
         if not ret:
             time.sleep(5)
@@ -56,5 +68,10 @@ while True:
             set_lvol_status(lvol, LVol.STATUS_ONLINE)
         else:
             set_lvol_status(lvol, LVol.STATUS_OFFLINE)
+
+    for snap in db_controller.get_snapshots():
+        logger.debug("Checking Snapshot: %s", snap.get_id())
+        ret = health_controller.check_snap(snap.get_id())
+        set_snapshot_health_check(snap, ret)
 
     time.sleep(constants.LVOL_MONITOR_INTERVAL_SEC)

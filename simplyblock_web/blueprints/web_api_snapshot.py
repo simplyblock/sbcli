@@ -39,16 +39,17 @@ def delete_snapshot(uuid):
 
 @bp.route('/snapshot', methods=['GET'])
 def list_snapshots():
+    cluster_id = utils.get_cluster_id(request)
     snaps = db_controller.get_snapshots()
     data = []
     for snap in snaps:
-        pool = db_controller.get_pool_by_id(snap.lvol.pool_uuid)
+        if snap.cluster_id != cluster_id:
+            continue
         data.append({
             "uuid": snap.uuid,
-            "name": pool.pool_name,
+            "name": snap.pool_name,
             "size": str(snap.lvol.size),
-            "pool_name": snap.snap_bdev,
-            "pool_id": snap.lvol.pool_uuid,
+            "pool_id": snap.pool_uuid,
             "source_uuid": snap.lvol.get_id(),
             "created_at": str(snap.created_at),
         })
@@ -63,8 +64,12 @@ def clone_snapshot():
     if 'clone_name' not in cl_data:
         return utils.get_response(None, "missing required param: clone_name", 400)
 
+    new_size = 0
+    if 'new_size' in cl_data:
+        new_size = utils.parse_size(cl_data['new_size'])
+
     res, msg = snapshot_controller.clone(
-        cl_data['snapshot_id'], cl_data['clone_name'])
+        cl_data['snapshot_id'], cl_data['clone_name'], new_size)
     if res:
         return utils.get_response(msg)
     return utils.get_response(None, msg)

@@ -26,8 +26,9 @@ class RPCException(Exception):
 class RPCClient:
 
     # ref: https://spdk.io/doc/jsonrpc.html
+    DEFAULT_ALLOWED_METHODS = ["HEAD", "GET", "PUT", "DELETE", "OPTIONS", "TRACE", "POST"]
 
-    def __init__(self, ip_address, port, username, password, timeout=5, retry=3):
+    def __init__(self, ip_address, port, username, password, timeout=60, retry=3):
         self.ip_address = ip_address
         self.port = port
         self.url = 'http://%s:%s/' % (self.ip_address, self.port)
@@ -37,7 +38,8 @@ class RPCClient:
         self.session = requests.session()
         self.session.auth = (self.username, self.password)
         self.session.verify = False
-        retries = Retry(total=retry, backoff_factor=1, connect=retry, read=retry)
+        retries = Retry(total=retry, backoff_factor=1, connect=retry, read=retry,
+                        allowed_methods=self.DEFAULT_ALLOWED_METHODS)
         self.session.mount("http://", HTTPAdapter(max_retries=retries))
         self.session.timeout = self.timeout
 
@@ -233,16 +235,23 @@ class RPCClient:
         params = {"name": device_name}
         return self._request("bdev_nvme_reset_controller", params)
 
-    def create_lvstore(self, name, bdev_name):
-        params = {"bdev_name": bdev_name, "lvs_name": name}
+    def create_lvstore(self, name, bdev_name, cluster_sz, clear_method, num_md_pages_per_cluster_ratio):
+        params = {
+            "bdev_name": bdev_name,
+            "lvs_name": name,
+            "cluster_sz": cluster_sz,
+            "clear_method": clear_method,
+            "num_md_pages_per_cluster_ratio": num_md_pages_per_cluster_ratio,
+        }
         return self._request("bdev_lvol_create_lvstore", params)
 
-    def create_lvol(self, name, size, lvs_name):
+    def create_lvol(self, name, size_in_mib, lvs_name):
         params = {
             "lvol_name": name,
-            "size": size,
+            "size_in_mib": size_in_mib,
             "lvs_name": lvs_name,
             "thin_provision": True,
+            "clear_method": "unmap",
         }
         return self._request("bdev_lvol_create", params)
 
@@ -332,7 +341,7 @@ class RPCClient:
         return self._request2("ultra21_bdev_pass_delete", params)
 
     def bdev_alceml_create(self, alceml_name, nvme_name, uuid, pba_init_mode=3,
-                           alceml_cpu_mask=""):
+                           alceml_cpu_mask="", alceml_worker_cpu_mask=""):
         params = {
             "name": alceml_name,
             "cntr_path": nvme_name,
@@ -350,11 +359,13 @@ class RPCClient:
         }
         if alceml_cpu_mask:
             params["bdb_lcpu_mask"] = int(alceml_cpu_mask, 16)
+        if alceml_worker_cpu_mask:
+            params["bdb_lcpu_mask_alt_workers"] = int(alceml_worker_cpu_mask,16)
         return self._request("bdev_alceml_create", params)
 
     def bdev_distrib_create(self, name, vuid, ndcs, npcs, num_blocks, block_size, jm_names,
                             chunk_size, ha_comm_addrs=None, ha_inode_self=None, pba_page_size=2097152,
-                            distrib_cpu_mask="", ha_is_non_leader=True):
+                            distrib_cpu_mask="", ha_is_non_leader=True, jm_vuid=0):
         """"
             // Optional (not specified = no HA)
             // Comma-separated communication addresses, for each node, e.g. "192.168.10.1:45001,192.168.10.1:32768".
@@ -376,8 +387,11 @@ class RPCClient:
             "block_size": block_size,
             "chunk_size": chunk_size,
             "pba_page_size": pba_page_size,
-            "ha_is_non_leader": ha_is_non_leader,
         }
+        if jm_vuid > 0:
+            params["jm_vuid"] = jm_vuid
+            params["ha_is_non_leader"] = ha_is_non_leader
+
         if ha_comm_addrs:
             params['ha_comm_addrs'] = ha_comm_addrs
             params['ha_inode_self'] = ha_inode_self
@@ -402,14 +416,22 @@ class RPCClient:
         params = {"name": uuid}
         return self._request("bdev_get_iostat", params)
 
-    def bdev_raid_create(self, name, bdevs_list):
+    def bdev_raid_create(self, name, bdevs_list, raid_level="0", strip_size_kb=4):
         params = {
             "name": name,
-            "raid_level": "0",
-            "strip_size_kb": 4,
+            "raid_level": raid_level,
+            "strip_size_kb": strip_size_kb,
             "base_bdevs": bdevs_list
         }
+        if raid_level == "1":
+            params["strip_size_kb"] = 0
         return self._request("bdev_raid_create", params)
+
+    def bdev_raid_delete(self, name):
+        params = {
+            "name": name
+        }
+        return self._request("bdev_raid_delete", params)
 
     def bdev_set_qos_limit(self, name, rw_ios_per_sec, rw_mbytes_per_sec, r_mbytes_per_sec, w_mbytes_per_sec):
         params = {
@@ -528,12 +550,12 @@ class RPCClient:
             "reconnect_delay_sec": 1,
             "keep_alive_timeout_ms": 200,
             "transport_ack_timeout": 7,
-            "timeout_us": 100000
+            "timeout_us": 500000
         }
         return self._request("bdev_nvme_set_options", params)
 
     def bdev_set_options(self, bdev_io_pool_size, bdev_io_cache_size, iobuf_small_cache_size, iobuf_large_cache_size):
-        params = {}
+        params = {"bdev_auto_examine": False}
         if bdev_io_pool_size > 0:
             params['bdev_io_pool_size'] = bdev_io_pool_size
         if bdev_io_cache_size > 0:
@@ -639,8 +661,10 @@ class RPCClient:
             params["bdb_lcpu_mask"] = int(jm_cpu_mask, 16)
         return self._request("bdev_jm_create", params)
 
-    def bdev_jm_delete(self, name):
+    def bdev_jm_delete(self, name, safe_removal=False):
         params = {"name": name}
+        if safe_removal is True:
+            params["safe_removal"] = True
         return self._request("bdev_jm_delete", params)
 
     def ultra21_util_get_malloc_stats(self):
@@ -672,6 +696,9 @@ class RPCClient:
         params = {"name": name}
         return self._request("bdev_examine", params)
 
+    def bdev_wait_for_examine(self):
+        return self._request("bdev_wait_for_examine")
+
     def nbd_start_disk(self, bdev_name, nbd_device="/dev/nbd0"):
         params = {
             "bdev_name": bdev_name,
@@ -701,6 +728,11 @@ class RPCClient:
         params = {"poll_groups_mask": poll_groups_mask}
         return self._request("nvmf_set_config", params)
 
+    def jc_set_hint_lcpu_mask(self, jc_singleton_mask):
+        params = {"hint_lcpu_mask": int(jc_singleton_mask, 16)}
+        return self._request("jc_set_hint_lcpu_mask", params)
+
+
     def thread_get_stats(self):
         return self._request("thread_get_stats")
 
@@ -726,10 +758,10 @@ class RPCClient:
         }
         return self._request("distr_migration_failure_start", params)
 
-    def distr_migration_expansion_start(self, name, storage_ID):
+    def distr_migration_expansion_start(self, name):
         params = {
             "name": name,
-            "storage_ID": storage_ID}
+        }
         return self._request("distr_migration_expansion_start", params)
 
     def bdev_raid_add_base_bdev(self, raid_bdev, base_bdev):
@@ -744,4 +776,22 @@ class RPCClient:
             "raid_bdev": raid_bdev,
             "base_bdev": base_bdev,
         }
-        return self._request("bdev_raid_add_base_bdev", params)
+        return self._request("bdev_raid_remove_base_bdev", params)
+
+    def bdev_lvol_get_lvstores(self, name):
+        params = {"lvs_name": name}
+        _, err = self._request2("bdev_lvol_get_lvstores", params)
+        if err:
+            return False
+        return True
+
+    def bdev_lvol_resize(self, name, size_in_mib):
+        params = {
+            "name": name,
+            "size_in_mib": size_in_mib
+        }
+        return self._request("bdev_lvol_resize", params)
+
+    def bdev_lvol_inflate(self, name):
+        params = {"name": name}
+        return self._request("bdev_lvol_inflate", params)

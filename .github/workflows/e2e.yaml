@@ -10,17 +10,43 @@ on:
   workflow_dispatch:
     inputs:
       simplyBlockDeploy_branch:
-        description: ''
+        description: 'Branch for simplyBlockDeploy'
         required: true
         default: 'main'
+      spdk_csi_branch:
+        description: 'Branch for spdk-csi'
+        required: true
+        default: 'master'
       sbcli_cmd:
-        description: ''
+        description: 'Command for sbcli execution'
         required: true
         default: 'sbcli-dev'
       testname:
         description: 'Name of test to run. Empty to run all'
         required: false
         default: ''
+      send_slack_notification:
+        description: 'Send Slack notification?'
+        required: false
+        default: true
+        type: boolean
+      ndcs:
+        description: 'Value for NDCS'
+        required: false
+        default: 1
+      npcs:
+        description: 'Value for NPCS'
+        required: false
+        default: 1
+      bs:
+        description: 'Value for Block size'
+        required: false
+        default: 4096
+      chunk_bs:
+        description: 'Value for Chunk block size'
+        required: false
+        default: 4096
+
 jobs:
   e2e:
     runs-on: self-hosted
@@ -30,6 +56,14 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+
+      - name: Set send_slack_notification for scheduled and push events
+        if: github.event_name == 'schedule' || github.event_name == 'push'
+        run: echo "send_slack_notification=true" >> $GITHUB_ENV
+
+      - name: Set send_slack_notification for manual workflow_dispatch
+        if: github.event_name == 'workflow_dispatch'
+        run: echo "send_slack_notification=${{ github.event.inputs.send_slack_notification }}" >> $GITHUB_ENV
 
       - uses: actions/setup-go@v5
         with:
@@ -70,27 +104,51 @@ jobs:
               -backend-config="dynamodb_table=${TFSTATE_DYNAMODB_TABLE}" \
               -backend-config="encrypt=true"
 
-      - name: select or create workspace
+      - name: Select or Create Workspace
         run: |
           cd $GITHUB_WORKSPACE/simplyBlockDeploy
           terraform workspace select -or-create ghiaction-sbclie2e
+
       - name: Validate Terraform Configuration
         run: |
           cd $GITHUB_WORKSPACE/simplyBlockDeploy
           terraform validate
+
+      - name: Set parameters based on branch and input
+        run: |
+          if [[ "${GITHUB_REF##*/}" == *"pre-release"* ]]; then
+            echo "Branch is pre-release. Setting SBCLI_CMD to sbcli-pre."
+            echo "SBCLI_CMD=sbcli-pre" >> $GITHUB_ENV
+          elif [[ "${GITHUB_REF##*/}" == "sbcli" ]]; then
+            echo "Branch is sbcli. Setting SBCLI_CMD to sbcli."
+            echo "SBCLI_CMD=sbcli" >> $GITHUB_ENV
+          else
+            echo "Setting SBCLI_CMD to input or default to sbcli-dev."
+            echo "SBCLI_CMD=${{ github.event.inputs.sbcli_cmd || 'sbcli-dev' }}" >> $GITHUB_ENV
+          fi
+          echo "NDCS=${{ github.event.inputs.ndcs || 1 }}" >> $GITHUB_ENV
+          echo "NPCS=${{ github.event.inputs.npcs || 1 }}" >> $GITHUB_ENV
+          echo "BS=${{ github.event.inputs.bs || 4096 }}" >> $GITHUB_ENV
+          echo "CHUNK_BS=${{ github.event.inputs.chunk_bs || 4096 }}" >> $GITHUB_ENV
+        shell: bash
+
       - name: Plan Terraform Changes
         run: |
           cd $GITHUB_WORKSPACE/simplyBlockDeploy
           terraform plan \
             -var "mgmt_nodes=1" -var "storage_nodes=3" -var "volumes_per_storage_nodes=3" \
-            -var mgmt_nodes_instance_type="m6id.xlarge" -var storage_nodes_instance_type="m6id.xlarge" \
+            -var mgmt_nodes_instance_type="m6id.xlarge" -var storage_nodes_instance_type="m6i.xlarge" \
             -var "extra_nodes=1" -var "extra_nodes_instance_type=m6id.xlarge" \
             -var storage_nodes_ebs_size2=100 -var "region=us-east-2" \
-            -var "sbcli_cmd=${{ github.event.inputs.sbcli_cmd || 'sbcli-dev' }}" -out=tfplan
+            -var "sbcli_cmd=$SBCLI_CMD" -out=tfplan
+        env:
+          SBCLI_CMD: ${{ env.SBCLI_CMD }}
+
       - name: Apply Terraform Changes
         run: |
           cd $GITHUB_WORKSPACE/simplyBlockDeploy
           terraform apply tfplan
+
       - name: Get Terraform Outputs
         id: terraform_outputs
         run: |
@@ -99,13 +157,26 @@ jobs:
           echo "::set-output name=bastion_public_ip::$output_bastion_public_ip"
           output_key_name=$(terraform output -raw key_name)
           echo "::set-output name=key_name::$output_key_name"
+
       - name: Bootstrap Cluster
         run: |
           cd $GITHUB_WORKSPACE/simplyBlockDeploy
-          ./bootstrap-cluster.sh --max-lvol 100 --max-snap 100 --max-prov 360G --number-of-devices 3
+          ./bootstrap-cluster.sh --sbcli-cmd "$SBCLI_CMD" \
+            --max-lvol 10 --max-snap 10 --max-prov 900G --number-of-devices 3 \
+            --distr-ndcs $NDCS \
+            --distr-npcs $NPCS \
+            --distr-bs $BS \
+            --distr-chunk-bs $CHUNK_BS \
         id: bootstrap_cluster
         env:
-          SBCLI_CMD: ${{ github.event.inputs.sbcli_cmd || 'sbcli-dev' }}
+          SBCLI_CMD: ${{ env.SBCLI_CMD }}
+          NDCS: ${{ env.NDCS }}
+          NPCS: ${{ env.NPCS }}
+          BS: ${{ env.BS }}
+          CHUNK_BS: ${{ env.CHUNK_BS }}
+
+      - name: Record Test Start Time
+        run: echo "TEST_START_TIME=$(date +%s)" >> $GITHUB_ENV
 
       - name: Setup Tests & Run Tests
         timeout-minutes: 120
@@ -125,12 +196,36 @@ jobs:
           export AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }}
           export AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }}
           export AWS_REGION=${{ secrets.AWS_REGION }}
-          export SBCLI_CMD=${{ github.event.inputs.sbcli_cmd || 'sbcli-dev' }}
+          export SBCLI_CMD=${SBCLI_CMD}
           TESTNAME=""
           if [ -n "${{ github.event.inputs.testname }}" ]; then
             TESTNAME="--testname ${{ github.event.inputs.testname }}"
           fi
-          python3 e2e.py $TESTNAME
+          python3 e2e.py $TESTNAME \
+                  --ndcs $NDCS --npcs $NPCS --bs $BS --chunk_bs $CHUNK_BS
+        env:
+          SBCLI_CMD: ${{ env.SBCLI_CMD }}
+          NDCS: ${{ env.NDCS }}
+          NPCS: ${{ env.NPCS }}
+          BS: ${{ env.BS }}
+          CHUNK_BS: ${{ env.CHUNK_BS }}
+        
+      - name: Record Test End Time
+        if: always() 
+        run: echo "TEST_END_TIME=$(date +%s)" >> $GITHUB_ENV
+
+      - name: Calculate Total Time Taken
+        if: always()
+        run: |
+          TEST_TIME=$(($TEST_END_TIME - $TEST_START_TIME))
+          TEST_TIME_HOURS=$(($TEST_TIME / 3600))
+          TEST_TIME_MINS=$((($TEST_TIME % 3600) / 60))
+          TEST_TIME_SECS=$(($TEST_TIME % 60))
+          echo "Test runtime: ${TEST_TIME_HOURS}h ${TEST_TIME_MINS}m ${TEST_TIME_SECS}s"
+          echo "TEST_TIME_HOURS=$TEST_TIME_HOURS" >> $GITHUB_ENV
+          echo "TEST_TIME_MINS=$TEST_TIME_MINS" >> $GITHUB_ENV
+          echo "TEST_TIME_SECS=$TEST_TIME_SECS" >> $GITHUB_ENV
+
       - name: Upload automation and docker logs to s3
         run: |
           cd $GITHUB_WORKSPACE/e2e/logs
@@ -146,7 +241,7 @@ jobs:
           RUN_ID: ${{ github.run_id }}
 
       - name: Parse test results
-        if: always() && github.ref == 'refs/heads/main' || github.ref == 'refs/heads/pre-release'
+        if: always() && (github.event_name == 'schedule' || env.send_slack_notification == 'true')
         id: parse_results
         run: |
           cd $GITHUB_WORKSPACE/e2e/logs
@@ -209,7 +304,7 @@ jobs:
           echo "EOF" >> $GITHUB_ENV
 
       - name: Send Slack Notification
-        if: always() && github.ref == 'refs/heads/main' || github.ref == 'refs/heads/pre-release'
+        if: always() && (github.event_name == 'schedule' || env.send_slack_notification == 'true')
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
           GITHUB_SERVER_URL: ${{ github.server_url }}
@@ -224,6 +319,13 @@ jobs:
           PASSED_CASES_BULLETS: ${{ env.PASSED_CASES_BULLETS }}
           FAILED_CASES_BULLETS: ${{ env.FAILED_CASES_BULLETS }}
           BRANCH_NAME: ${{ github.ref_name }}
+          TEST_TIME_HOURS: ${{ env.TEST_TIME_HOURS }}
+          TEST_TIME_MINS: ${{ env.TEST_TIME_MINS }}
+          TEST_TIME_SECS: ${{ env.TEST_TIME_SECS }}
+          NDCS: ${{ env.NDCS }}
+          NPCS: ${{ env.NPCS }}
+          CHUNK_BS: ${{ env.CHUNK_BS }}
+          BS: ${{ env.BS }}
         run: |
           GITHUB_RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}"
           AWS_LOGS_URL="https://s3.console.aws.amazon.com/s3/buckets/${S3_BUCKET_NAME}?prefix=${RUN_ID}/&region=us-east-2"
@@ -232,14 +334,19 @@ jobs:
           else
             OVERALL_STATUS=":x: Overall Status: FAILURE"
           fi
-          MESSAGE="Python E2E tests run triggered on branch **${BRANCH_NAME}**. \n${OVERALL_STATUS}\nGitHub Run: ${GITHUB_RUN_URL}\nAWS Logs: ${AWS_LOGS_URL}\n\nTotal Tests: ${{ env.TOTAL_TESTS }}\nPassed Tests: ${{ env.PASSED_TESTS }}\nFailed Tests: ${{ env.FAILED_TESTS }}\n\n-- Test Cases Passed :white_check_mark:\n${{ env.PASSED_CASES_BULLETS }}\n\n-- Test Cases Failed :x:\n${{ env.FAILED_CASES_BULLETS }}"
+
+          TIME_TAKEN="${TEST_TIME_HOURS}h ${TEST_TIME_MINS}m ${TEST_TIME_SECS}s"
+
+          MESSAGE="Python E2E tests run triggered on branch *${BRANCH_NAME}*. \nTotal Time Taken to run the tests: ${TIME_TAKEN}. \n\n${OVERALL_STATUS}\nGitHub Run: ${GITHUB_RUN_URL}\nAWS Logs: ${AWS_LOGS_URL}\n\n*Configuration*: *NDCS: ${NDCS}, NPCS: ${NPCS}, Block Size: ${BS}, Chunk Block Size: ${CHUNK_BS}*\n\nTotal Tests: *${TOTAL_TESTS}*, Passed Tests: *${PASSED_TESTS}*, Failed Tests: *${FAILED_TESTS}*\n\n-- Test Cases Passed :white_check_mark:\n${PASSED_CASES_BULLETS}\n\n-- Test Cases Failed :x:\n${FAILED_CASES_BULLETS}"
 
           curl -X POST -H 'Content-type: application/json' --data "{\"text\":\"${MESSAGE}\"}" $SLACK_WEBHOOK_URL
+
       - name: Destroy Cluster
         if: always()
         run: |
           cd $GITHUB_WORKSPACE/simplyBlockDeploy
           terraform destroy --auto-approve
+      
       - name: 'Cleanup build folder'
         run: |
           ls -la ./

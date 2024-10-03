@@ -21,17 +21,14 @@ db_controller = kv_store.DBController()
 @bp.route('/storagenode', methods=['GET'], defaults={'uuid': None})
 @bp.route('/storagenode/<string:uuid>', methods=['GET'])
 def list_storage_nodes(uuid):
+    cluster_id = utils.get_cluster_id(request)
     if uuid:
         node = db_controller.get_storage_node_by_id(uuid)
-        if not node:
-            node = db_controller.get_storage_node_by_hostname(uuid)
-
-        if node:
+        if node and node.cluster_id == cluster_id:
             nodes = [node]
         else:
             return utils.get_response_error(f"node not found: {uuid}", 404)
     else:
-        cluster_id = utils.get_cluster_id(request)
         nodes = db_controller.get_storage_nodes_by_cluster_id(cluster_id)
     data = []
     for node in nodes:
@@ -152,15 +149,22 @@ def storage_node_shutdown(uuid):
     return utils.get_response(True)
 
 
-@bp.route('/storagenode/restart/<string:uuid>', methods=['GET'])
-def storage_node_restart(uuid):
+@bp.route('/storagenode/restart', methods=['PUT'])
+def storage_node_restart():
+    req_data = request.get_json()
+    uuid = req_data.get("uuid", "")
+    node_ip = req_data.get("node_ip", "")
+
     node = db_controller.get_storage_node_by_id(uuid)
     if not node:
         return utils.get_response_error(f"node not found: {uuid}", 404)
 
     threading.Thread(
         target=storage_node_ops.restart_storage_node,
-        args=(uuid,)
+        kwargs={
+            "node_id": uuid,
+            "node_ip": node_ip,
+        }
     ).start()
 
     return utils.get_response(True)
@@ -194,6 +198,7 @@ def storage_node_add():
     max_lvol = int(req_data['max_lvol'])
     max_snap = int(req_data['max_snap'])
     max_prov = req_data['max_prov']
+    number_of_distribs = req_data.get('number_of_distribs', 4)
 
     spdk_image = None
     if 'spdk_image' in req_data:
@@ -224,6 +229,14 @@ def storage_node_add():
     if 'number_of_devices' in req_data:
         number_of_devices = int(req_data['number_of_devices'])
 
+    spdk_cpu_mask = None
+    if 'spdk_cpu_mask' in req_data:
+        msk = req_data['spdk_cpu_mask']
+        if utils.validate_cpu_mask(msk):
+            spdk_cpu_mask = msk
+        else:
+            return utils.get_response_error(f"Invalid cpu mask value: {msk}", 400)
+
     iobuf_small_pool_count = 0
     if 'iobuf_small_pool_count' in req_data:
         iobuf_small_pool_count = int(req_data['iobuf_small_pool_count'])
@@ -240,6 +253,7 @@ def storage_node_add():
         "max_lvol": max_lvol,
         "max_snap": max_snap,
         "max_prov": max_prov,
+        "spdk_cpu_mask": spdk_cpu_mask,
         "spdk_image": spdk_image,
         "spdk_debug": spdk_debug,
         "small_bufsize": iobuf_small_pool_count,
@@ -248,6 +262,17 @@ def storage_node_add():
         "jm_percent": jm_percent,
         "number_of_devices": number_of_devices,
         "enable_test_device": False,
+        "number_of_distribs": number_of_distribs,
         "namespace": namespace})
 
     return utils.get_response(True)
+
+
+@bp.route('/storagenode/make-sec-new-primary/<string:uuid>', methods=['GET'])
+def make_primary(uuid):
+    node = db_controller.get_storage_node_by_id(uuid)
+    if not node:
+        return utils.get_response_error(f"node not found: {uuid}", 404)
+
+    out = storage_node_ops.make_sec_new_primary(uuid)
+    return utils.get_response(out)

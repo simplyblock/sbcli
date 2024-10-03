@@ -5,7 +5,7 @@ import sys
 
 
 from simplyblock_core import constants, kv_store
-from simplyblock_core.controllers import tasks_events, tasks_controller
+from simplyblock_core.controllers import tasks_events, tasks_controller, device_controller
 from simplyblock_core.models.job_schedule import JobSchedule
 
 
@@ -20,7 +20,11 @@ from simplyblock_core.rpc_client import RPCClient
 def task_runner(task):
 
     snode = db_controller.get_storage_node_by_id(task.node_id)
-    rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password, timeout=5, retry=2)
+    if not snode:
+        task.status = JobSchedule.STATUS_DONE
+        task.function_result = f"Node not found: {task.node_id}"
+        task.write_to_db(db_controller.kv_store)
+        return True
 
     if task.canceled:
         task.function_result = "canceled"
@@ -35,28 +39,25 @@ def task_runner(task):
 
     if snode.status != StorageNode.STATUS_ONLINE:
         task.function_result = "node is not online, retrying"
+        task.status = JobSchedule.STATUS_NEW
         task.retry += 1
         task.write_to_db(db_controller.kv_store)
         return False
 
+    rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password,
+                           timeout=5, retry=2)
     if "migration" not in task.function_params:
-        # if task.retry >= 2:
-        #     all_devs_online = True
-        #     for node in db_controller.get_storage_nodes_by_cluster_id(task.cluster_id):
-        #         for dev in node.nvme_devices:
-        #             if dev.status != NVMeDevice.STATUS_ONLINE:
-        #                 all_devs_online = False
-        #                 break
-        #
-        #     if not all_devs_online:
-        #         task.function_result = "Some devs are offline, retrying"
-        #         task.retry += 1
-        #         task.write_to_db(db_controller.kv_store)
-        #         return False
-
         device = db_controller.get_storage_devices(task.device_id)
-        lvol = db_controller.get_lvol_by_id(task.function_params["lvol_id"])
-        rsp = rpc_client.distr_migration_failure_start(lvol.base_bdev, device.cluster_device_order)
+        distr_name = task.function_params["distr_name"]
+
+        if not device:
+            task.status = JobSchedule.STATUS_DONE
+            task.function_result = "Device not found"
+            task.write_to_db(db_controller.kv_store)
+            return True
+
+
+        rsp = rpc_client.distr_migration_failure_start(distr_name, device.cluster_device_order)
         if not rsp:
             logger.error(f"Failed to start device migration task, storage_ID: {device.cluster_device_order}")
             task.function_result = "Failed to start device migration task"
@@ -66,7 +67,7 @@ def task_runner(task):
 
         task.function_params = {
             "migration": {
-                "name": lvol.base_bdev}
+                "name": distr_name}
         }
         task.write_to_db(db_controller.kv_store)
         time.sleep(3)
@@ -76,21 +77,31 @@ def task_runner(task):
         mig_info = task.function_params["migration"]
         res = rpc_client.distr_migration_status(**mig_info)
         if res:
-            migration_status = res[0]["status"]
+            res_data = res[0]
+            migration_status = res_data["status"]
             if migration_status == "completed":
-                task.status = JobSchedule.STATUS_DONE
-                task.function_result = migration_status
+                if res_data['error'] == 0:
+                    device_controller.device_set_failed_and_migrated(task.device_id)
+                    task.function_result = "Done"
+                    task.status = JobSchedule.STATUS_DONE
+                else:
+                    task.function_result = "Failed to complete migration, retrying"
+                    task.status = JobSchedule.STATUS_NEW
+                    task.retry += 1
+                    del task.function_params["migration"]
                 task.write_to_db(db_controller.kv_store)
                 return True
 
             elif migration_status == "failed":
-                task.status = JobSchedule.STATUS_DONE
-                task.function_result = migration_status
+                task.function_result = "Failed to complete migration, retrying"
+                task.status = JobSchedule.STATUS_NEW
+                task.retry += 1
+                del task.function_params["migration"]
                 task.write_to_db(db_controller.kv_store)
                 return True
 
             else:
-                task.function_result = f"Status: {migration_status}, progress:{res[0]['progress']}"
+                task.function_result = f"Status: {migration_status}, progress:{res_data['progress']}"
                 task.write_to_db(db_controller.kv_store)
         else:
             logger.error("Failed to get mig status")

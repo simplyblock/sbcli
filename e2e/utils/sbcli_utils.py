@@ -33,7 +33,7 @@ class SbcliUtils:
         request_url = self.cluster_api_url + api_url
         headers = headers if headers else self.headers
         self.logger.info(f"Calling GET for {api_url} with headers: {headers}")
-        retry = 5
+        retry = 10
         while retry > 0:
             try:
                 resp = requests.get(request_url, headers=headers)
@@ -50,7 +50,7 @@ class SbcliUtils:
                 if retry == 0:
                     self.logger.info(f"Retry attempt exhausted. API {api_url} failed with: {e}.")
                     raise e
-                self.logger.info(f"Retrying API {api_url}. Attempt: {5 - retry + 1}")
+                self.logger.info(f"Retrying API {api_url}. Attempt: {10 - retry + 1}")
 
     def post_request(self, api_url, headers=None, body=None):
         """Performs post request on the given API URL
@@ -66,7 +66,7 @@ class SbcliUtils:
         request_url = self.cluster_api_url + api_url
         headers = headers if headers else self.headers
         self.logger.info(f"Calling POST for {api_url} with headers: {headers}, body: {body}")
-        retry = 5
+        retry = 10
         while retry > 0:
             try:
                 resp = requests.post(request_url, headers=headers,
@@ -84,7 +84,7 @@ class SbcliUtils:
                 if retry == 0:
                     self.logger.info(f"Retry attempt exhausted. API {api_url} failed with: {e}.")
                     raise e
-                self.logger.info(f"Retrying API {api_url}. Attempt: {5 - retry + 1}")
+                self.logger.info(f"Retrying API {api_url}. Attempt: {10 - retry + 1}")
 
     def delete_request(self, api_url, headers=None):
         """Performs delete request on the given API URL
@@ -99,7 +99,7 @@ class SbcliUtils:
         request_url = self.cluster_api_url + api_url
         headers = headers if headers else self.headers
         self.logger.info(f"Calling DELETE for {api_url} with headers: {headers}")
-        retry = 5
+        retry = 10
         while retry > 0:
             try:
                 resp = requests.delete(request_url, headers=headers)
@@ -150,7 +150,7 @@ class SbcliUtils:
                 if retry == 0:
                     self.logger.info(f"Retry attempt exhausted. API {api_url} failed with: {e}.")
                     raise e
-                self.logger.info(f"Retrying API {api_url}. Attempt: {5 - retry + 1}")
+                self.logger.info(f"Retrying API {api_url}. Attempt: {10 - retry + 1}")
 
     def get_node_without_lvols(self) -> str:
         """
@@ -323,7 +323,7 @@ class SbcliUtils:
         data = self.get_request(api_url=f"/lvol/{lvol_id}")
         return data
 
-    def add_lvol(self, lvol_name, pool_name, size="256M", distr_ndcs=1, distr_npcs=1,
+    def add_lvol(self, lvol_name, pool_name, size="256M", distr_ndcs=0, distr_npcs=0,
                  distr_bs=4096, distr_chunk_bs=4096, max_rw_iops=0, max_rw_mbytes=0,
                  max_r_mbytes=0, max_w_mbytes=0, host_id=None):
         """Adds lvol with given params
@@ -338,17 +338,17 @@ class SbcliUtils:
             "name": lvol_name,
             "size": size,
             "pool": pool_name,
-            "comp": False,
             "crypto": False,
             "max_rw_iops": str(max_rw_iops),
             "max_rw_mbytes": str(max_rw_mbytes),
             "max_r_mbytes": str(max_r_mbytes),
             "max_w_mbytes": str(max_w_mbytes),
-            "distr_ndcs": str(distr_ndcs),
-            "distr_npcs": str(distr_npcs),
-            "distr_bs": str(distr_bs),
-            "distr_chunk_bs": str(distr_chunk_bs),
         }
+        if distr_ndcs != 0 and distr_npcs != 0:
+            body["distr_ndcs"] = str(distr_ndcs)
+            body["distr_npcs"] = str(distr_ndcs)
+            body["bs"] = str(distr_ndcs)
+            body["chunk_bs"] = str(distr_ndcs)
         if host_id:
             body["host_id"] = host_id
         

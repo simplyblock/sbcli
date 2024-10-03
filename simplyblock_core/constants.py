@@ -11,7 +11,7 @@ LOG_WEB_DEBUG = True
 
 INSTALL_DIR = os.path.dirname(os.path.realpath(__file__))
 
-NODE_MONITOR_INTERVAL_SEC = 3
+NODE_MONITOR_INTERVAL_SEC = 5
 DEVICE_MONITOR_INTERVAL_SEC = 5
 STAT_COLLECTOR_INTERVAL_SEC = 60*5  # 5 minutes
 LVOL_STAT_COLLECTOR_INTERVAL_SEC = 5
@@ -52,13 +52,11 @@ GRAYLOG_CHECK_INTERVAL_SEC = 60
 
 FDB_CHECK_INTERVAL_SEC = 60
 
-SIMPLY_BLOCK_DOCKER_IMAGE = "simplyblock/simplyblock:ha-jm"
-SIMPLY_BLOCK_CLI_NAME = "sbcli-ha"
+SIMPLY_BLOCK_DOCKER_IMAGE = "simplyblock/simplyblock:main"
+SIMPLY_BLOCK_CLI_NAME = "sbcli-dev"
 TASK_EXEC_INTERVAL_SEC = 30
 TASK_EXEC_RETRY_COUNT = 8
 
-SIMPLY_BLOCK_SPDK_CORE_IMAGE = "simplyblock/spdk-core:latest"
-SIMPLY_BLOCK_SPDK_CORE_IMAGE_ARM64 = "simplyblock/spdk-core:latest-arm64"
 SIMPLY_BLOCK_SPDK_ULTRA_IMAGE = "simplyblock/spdk:feature-journal-ha-latest"
 
 GELF_PORT = 12201
@@ -67,8 +65,11 @@ MIN_HUGE_PAGE_MEMORY_FOR_LVOL = 209715200
 MIN_SYS_MEMORY_FOR_LVOL = 524288000
 EXTRA_SMALL_POOL_COUNT = 1024
 EXTRA_LARGE_POOL_COUNT = 128
+# EXTRA_SMALL_POOL_COUNT = 0
+# EXTRA_LARGE_POOL_COUNT = 0
 EXTRA_HUGE_PAGE_MEMORY = 2147483648
-EXTRA_SYS_MEMORY = 2147483648
+#EXTRA_SYS_MEMORY = 2147483648
+EXTRA_SYS_MEMORY = 0
 
 INSTANCE_STORAGE_DATA = {
         'i4i.large': {'number_of_devices': 1, 'size_per_device_gb': 468},
@@ -97,3 +98,5 @@ INSTANCE_STORAGE_DATA = {
         'm6id.4xlarge': {'number_of_devices': 1, 'size_per_device_gb': 950},
         'm6id.8xlarge': {'number_of_devices': 1, 'size_per_device_gb': 1900},
     }
+
+MAX_SNAP_COUNT = 15

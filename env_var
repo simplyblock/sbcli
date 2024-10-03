@@ -1,7 +1,7 @@
-SIMPLY_BLOCK_COMMAND_NAME=sbcli-ha
-SIMPLY_BLOCK_VERSION=0.0.5
+SIMPLY_BLOCK_COMMAND_NAME=sbcli-dev
+SIMPLY_BLOCK_VERSION=3.8.92
 
 
-SIMPLY_BLOCK_DOCKER_IMAGE=simplyblock/simplyblock:ha-jm
+SIMPLY_BLOCK_DOCKER_IMAGE=simplyblock/simplyblock:main
 
 DOCKER_USER=hamdysimplyblock

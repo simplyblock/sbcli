@@ -13,6 +13,7 @@ class NVMeDevice(BaseModel):
     STATUS_UNAVAILABLE = 'unavailable'
     STATUS_REMOVED = 'removed'
     STATUS_FAILED = 'failed'
+    STATUS_FAILED_AND_MIGRATED = 'failed_and_migrated'
     STATUS_READONLY = 'read_only'
 
     STATUS_CODE_MAP = {
@@ -104,6 +105,7 @@ class JMDevice(BaseModel):
         "raid_bdev": {"type": str, 'default': ""},
         "nvme_bdev": {"type": str, 'default': ""},
         "alceml_bdev": {"type": str, 'default': ""},
+        "testing_bdev": {"type": str, 'default': ""},
         "jm_bdev": {"type": str, 'default': ""},
         "device_data_dict": {"type": dict, 'default': {}},
 

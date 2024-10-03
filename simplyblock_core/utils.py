@@ -3,6 +3,7 @@ import json
 import logging
 import math
 import os
+import psutil
 import random
 import re
 import string
@@ -319,6 +320,126 @@ def calculate_core_allocation(cpu_count):
 
     return app_thread_core, jm_cpu_core, poller_cpu_cores, alceml_cpu_cores, distrib_cpu_cores
 
+def hexa_to_cpu_list(cpu_mask):
+    # Convert the hex string to an integer
+    mask_int = int(cpu_mask, 16)
+
+    # Initialize an empty list to hold the positions of the 1s
+    cpu_list = []
+
+    # Iterate over each bit position
+    position = 0
+    while mask_int > 0:
+        # Check if the least significant bit is 1
+        if mask_int & 1:
+            cpu_list.append(position)
+
+        # Shift the mask right by 1 bit to check the next bit
+        mask_int >>= 1
+        position += 1
+
+    return cpu_list
+
+def calculate_core_allocation(cpu_cores):
+
+    '''
+    Calculation is according to mask until 24 vcpu table
+    https://docs.google.com/spreadsheets/d/14vxL9W31-7oFT6tEeLNuaJJO0FwG9cZK/edit?gid=1468847899#gid=1468847899
+    '''
+
+    if len(cpu_cores) == 23:
+        app_thread_core = [cpu_cores[pos - 1] for pos in [16]]
+        jm_cpu_core = [cpu_cores[pos - 1] for pos in [17, 22]]
+        poller_cpu_cores = [cpu_cores[pos - 1] for pos in [6, 7, 8, 14, 15, 18, 19, 20]]
+        alceml_cpu_cores = [cpu_cores[pos - 1] for pos in [1, 2, 3]]
+        alceml_cpu_worker_cores = [cpu_cores[pos - 1] for pos in [13, 21]]
+        distrib_cpu_cores = [cpu_cores[pos - 1] for pos in [4, 5, 9, 10, 11, 12]]
+        jc_singleton_core = [cpu_cores[pos - 1] for pos in [23]]
+    elif len(cpu_cores) == 21:
+        app_thread_core = [cpu_cores[pos - 1] for pos in [14]]
+        jm_cpu_core = [cpu_cores[pos - 1] for pos in [15, 21]]
+        poller_cpu_cores = [cpu_cores[pos - 1] for pos in [4, 5, 6, 7, 13, 16, 17]]
+        alceml_cpu_cores = [cpu_cores[pos - 1] for pos in [1, 2]]
+        alceml_cpu_worker_cores = [cpu_cores[pos - 1] for pos in [12, 20]]
+        distrib_cpu_cores = [cpu_cores[pos - 1] for pos in [3, 8, 9, 10, 11, 19]]
+        jc_singleton_core = [cpu_cores[pos - 1] for pos in [18]]
+    elif len(cpu_cores) == 19:
+        app_thread_core = [cpu_cores[pos - 1] for pos in [13]]
+        jm_cpu_core = [cpu_cores[pos - 1] for pos in [14]]
+        poller_cpu_cores = [cpu_cores[pos - 1] for pos in [5, 6, 7, 12, 15, 16]]
+        alceml_cpu_cores = [cpu_cores[pos - 1] for pos in [1, 2]]
+        alceml_cpu_worker_cores = [cpu_cores[pos - 1] for pos in [11, 19]]
+        distrib_cpu_cores = [cpu_cores[pos - 1] for pos in [3, 4, 8, 9, 10, 18]]
+        jc_singleton_core = [cpu_cores[pos - 1] for pos in [17]]
+    elif len(cpu_cores) == 17:
+        app_thread_core = [cpu_cores[pos - 1] for pos in [12]]
+        jm_cpu_core = [cpu_cores[pos - 1] for pos in [13]]
+        poller_cpu_cores = [cpu_cores[pos - 1] for pos in [4, 5, 6, 11, 14]]
+        alceml_cpu_cores = [cpu_cores[pos - 1] for pos in [1, 2]]
+        alceml_cpu_worker_cores = [cpu_cores[pos - 1] for pos in [10]]
+        distrib_cpu_cores = [cpu_cores[pos - 1] for pos in [3, 7, 8, 9, 16, 17]]
+        jc_singleton_core = [cpu_cores[pos - 1] for pos in [15]]
+    elif len(cpu_cores) == 15:
+        app_thread_core = [cpu_cores[pos - 1] for pos in [11]]
+        jm_cpu_core = [cpu_cores[pos - 1] for pos in [12]]
+        poller_cpu_cores = [cpu_cores[pos - 1] for pos in [5, 6, 10, 13]]
+        alceml_cpu_cores = [cpu_cores[pos - 1] for pos in [1, 2]]
+        alceml_cpu_worker_cores = [cpu_cores[pos - 1] for pos in [9]]
+        distrib_cpu_cores = [cpu_cores[pos - 1] for pos in [3, 4, 7, 8, 15]]
+        jc_singleton_core = [cpu_cores[pos - 1] for pos in [14]]
+    elif len(cpu_cores) == 13:
+        app_thread_core = [cpu_cores[pos - 1] for pos in [9]]
+        jm_cpu_core = [cpu_cores[pos - 1] for pos in [10]]
+        poller_cpu_cores = [cpu_cores[pos - 1] for pos in [3, 4, 5, 11]]
+        alceml_cpu_cores = [cpu_cores[pos - 1] for pos in [1]]
+        alceml_cpu_worker_cores = [cpu_cores[pos - 1] for pos in [8]]
+        distrib_cpu_cores = [cpu_cores[pos - 1] for pos in [2, 6, 7, 13]]
+        jc_singleton_core = [cpu_cores[pos - 1] for pos in [12]]
+    elif len(cpu_cores) == 11:
+        app_thread_core = [cpu_cores[pos - 1] for pos in [8]]
+        jm_cpu_core = [cpu_cores[pos - 1] for pos in [9]]
+        poller_cpu_cores = [cpu_cores[pos - 1] for pos in [3, 4, 10]]
+        alceml_cpu_cores = [cpu_cores[pos - 1] for pos in [1]]
+        alceml_cpu_worker_cores = [cpu_cores[pos - 1] for pos in [7]]
+        distrib_cpu_cores = [cpu_cores[pos - 1] for pos in [2, 5, 6]]
+        jc_singleton_core = [cpu_cores[pos - 1] for pos in [11]]
+    elif len(cpu_cores) == 9:
+        app_thread_core = [cpu_cores[pos - 1] for pos in [7]]
+        jm_cpu_core = [cpu_cores[pos - 1] for pos in [8]]
+        poller_cpu_cores = [cpu_cores[pos - 1] for pos in [3, 4]]
+        alceml_cpu_cores = [cpu_cores[pos - 1] for pos in [1]]
+        alceml_cpu_worker_cores = [cpu_cores[pos - 1] for pos in [4, 9]]
+        distrib_cpu_cores = [cpu_cores[pos - 1] for pos in [2, 5, 6]]
+        jc_singleton_core = [cpu_cores[pos - 1] for pos in [7]]
+    elif len(cpu_cores) == 7:
+        app_thread_core = [cpu_cores[pos - 1] for pos in [6]]
+        jm_cpu_core = [cpu_cores[pos - 1] for pos in [7]]
+        poller_cpu_cores = [cpu_cores[pos - 1] for pos in [3, 5]]
+        alceml_cpu_cores = [cpu_cores[pos - 1] for pos in [1]]
+        alceml_cpu_worker_cores = [cpu_cores[pos - 1] for pos in [1]]
+        distrib_cpu_cores = [cpu_cores[pos - 1] for pos in [2, 4]]
+        jc_singleton_core = [cpu_cores[pos - 1] for pos in [6]]
+    elif len(cpu_cores) == 5:
+        app_thread_core = [cpu_cores[pos - 1] for pos in [5]]
+        jm_cpu_core = [cpu_cores[pos - 1] for pos in [4]]
+        poller_cpu_cores = [cpu_cores[pos - 1] for pos in [2, 3]]
+        alceml_cpu_cores = [cpu_cores[pos - 1] for pos in [1]]
+        alceml_cpu_worker_cores = [cpu_cores[pos - 1] for pos in [1]]
+        distrib_cpu_cores = [cpu_cores[pos - 1] for pos in [2, 3]]
+        jc_singleton_core = [cpu_cores[pos - 1] for pos in [5]]
+    elif len(cpu_cores) == 4:
+        app_thread_core = [cpu_cores[pos - 1] for pos in [4]]
+        jm_cpu_core = [cpu_cores[pos - 1] for pos in [4]]
+        poller_cpu_cores = [cpu_cores[pos - 1] for pos in [2, 3]]
+        alceml_cpu_cores = [cpu_cores[pos - 1] for pos in [1]]
+        alceml_cpu_worker_cores = [cpu_cores[pos - 1] for pos in [1]]
+        distrib_cpu_cores = [cpu_cores[pos - 1] for pos in [2, 3]]
+        jc_singleton_core = [cpu_cores[pos - 1] for pos in [4]]
+    else:
+        app_thread_core = jm_cpu_core = poller_cpu_cores = alceml_cpu_cores = alceml_cpu_worker_cores = distrib_cpu_cores = jc_singleton_core = []
+
+    return app_thread_core, jm_cpu_core, poller_cpu_cores, alceml_cpu_cores, alceml_cpu_worker_cores, distrib_cpu_cores, jc_singleton_core
+
 
 def generate_mask(cores):
     mask = 0
@@ -326,10 +447,12 @@ def generate_mask(cores):
         mask |= (1 << core)
     return f'0x{mask:X}'
 
-def calculate_pool_count(alceml_count, lvol_count, snap_count, cpu_count, poller_count):
+def calculate_pool_count(alceml_count, number_of_distribs, cpu_count, poller_count):
     '''
     				        Small pool count				            Large pool count
     Create JM			    256						                    32					                    For each JM
+
+    RAID                    256                                         32                                      2 one for raid of JM and one for raid of ditribs
 
     Create Alceml 			256						                    32					                    For each Alceml
 
@@ -341,34 +464,39 @@ def calculate_pool_count(alceml_count, lvol_count, snap_count, cpu_count, poller
 
     Subsystem add NS		128 * poll_groups_mask||CPUCount		    16 * poll_groups_mask||CPUCount		    Calculated or one time
 
-    Create snapshot			512						                    64					                    For each snapshot
+    ####Create snapshot			512						                    64					                    For each snapshot
 
-    Clone lvol			    256						                    32					                    For each clone
+    ####Clone lvol			    256						                    32					                    For each clone
+
     '''
     poller_number = poller_count if poller_count else cpu_count
-    small_pool_count = (3 + alceml_count + lvol_count + 2 * snap_count + 1) * 256 + poller_number * 127 + 384 + 128 * poller_number + constants.EXTRA_SMALL_POOL_COUNT
-    large_pool_count = (3 + alceml_count + lvol_count + 2 * snap_count + 1) * 32 + poller_number * 15 + 384 + 16 * poller_number + constants.EXTRA_LARGE_POOL_COUNT
+    #small_pool_count = (3 + alceml_count + lvol_count + 2 * snap_count + 1) * 256 + poller_number * 127 + 384 + 128 * poller_number + constants.EXTRA_SMALL_POOL_COUNT
+
+    small_pool_count = (6 + alceml_count + number_of_distribs) * 256 + poller_number * 127 + 384 + 128 * poller_number + constants.EXTRA_SMALL_POOL_COUNT
+    #large_pool_count = (3 + alceml_count + lvol_count + 2 * snap_count + 1) * 32 + poller_number * 15 + 384 + 16 * poller_number + constants.EXTRA_LARGE_POOL_COUNT
+    large_pool_count = (6 + alceml_count + number_of_distribs) * 32 + poller_number * 15 + 384 + 16 * poller_number + constants.EXTRA_LARGE_POOL_COUNT
     return small_pool_count, large_pool_count
 
 
-def calculate_minimum_hp_memory(small_pool_count, large_pool_count, lvol_count, snap_count, cpu_count):
+def calculate_minimum_hp_memory(small_pool_count, large_pool_count, lvol_count, max_prov, cpu_count):
     '''
-    1092 (initial consumption) + 4 * CPU + 1.0277 * POOL_COUNT(Sum in MB) + (7 + 6) * lvol_count + 12 * snap_count
+    1092 (initial consumption) + 4 * CPU + 1.0277 * POOL_COUNT(Sum in MB) + (7) * lvol_count
     then you can amend the expected memory need for the creation of lvols (6MB),
     connection number over lvols (7MB per connection), creation of snaps (12MB),
     extra buffer 2GB
     return: minimum_hp_memory in bytes
     '''
     pool_consumption = (small_pool_count * 8 + large_pool_count * 128) / 1024 + 1092
-    memory_consumption = (4 * cpu_count + 1.0277 * pool_consumption + (6 + 7) * lvol_count + 12 * snap_count) * (1024 * 1024) + constants.EXTRA_HUGE_PAGE_MEMORY
-    return memory_consumption
+    max_prov_tb = max_prov / (1024 * 1024 * 1024 * 1024)
+    memory_consumption = (4 * cpu_count + 1.0277 * pool_consumption + 7 * lvol_count) * (1024 * 1024) + (250 * 1024 * 1024) * 1.1 * max_prov_tb + constants.EXTRA_HUGE_PAGE_MEMORY
+    return int(memory_consumption)
 
 
 def calculate_minimum_sys_memory(max_prov):
     max_prov_tb = max_prov / (1024 * 1024 * 1024 * 1024)
     minimum_sys_memory = (250 * 1024 * 1024) * 1.1 * max_prov_tb + constants.EXTRA_SYS_MEMORY
     logger.debug(f"Minimum system memory is {humanbytes(minimum_sys_memory)}")
-    return minimum_sys_memory
+    return int(minimum_sys_memory)
 
 
 def calculate_spdk_memory(minimum_hp_memory, minimum_sys_memory, free_sys_memory, huge_total_memory):
@@ -378,7 +506,7 @@ def calculate_spdk_memory(minimum_hp_memory, minimum_sys_memory, free_sys_memory
                        f"Minimum huge pages memory: {humanbytes(minimum_hp_memory)}, "
                        f"Minimum system memory: {humanbytes(minimum_sys_memory)}")
         return False, 0
-    spdk_mem = minimum_hp_memory + (total_free_memory - minimum_hp_memory - minimum_sys_memory) * 0.2
+    spdk_mem = int(minimum_hp_memory)
     logger.debug(f"SPDK memory is {humanbytes(spdk_mem)}")
     return True, spdk_mem
 
@@ -471,3 +599,11 @@ def parse_size(size_string: str):
     except:
         print(f"Error parsing size: {size_string}")
         return -1
+
+
+def nearest_upper_power_of_2(n):
+    # Check if n is already a power of 2
+    if (n & (n - 1)) == 0:
+        return n
+    # Otherwise, return the nearest upper power of 2
+    return 1 << n.bit_length()

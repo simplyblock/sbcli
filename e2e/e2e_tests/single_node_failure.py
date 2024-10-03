@@ -62,8 +62,8 @@ class TestSingleNodeFailure(TestClusterBase):
             lvol_name=self.lvol_name,
             pool_name=self.pool_name,
             size="800M",
-            distr_ndcs=2,
-            distr_npcs=1
+            # distr_ndcs=2,
+            # distr_npcs=1
         )
         lvols = self.sbcli_utils.list_lvols()
         assert self.lvol_name in list(lvols.keys()), \
@@ -110,8 +110,11 @@ class TestSingleNodeFailure(TestClusterBase):
                          )
         
         sleep_n_sec(30)
-        
-        self.ssh_obj.stop_docker_containers(node=node_ip, container_name="spdk")
+        if not self.k8s_test:
+            self.ssh_obj.stop_docker_containers(node=node_ip, container_name="spdk")
+        else:
+            # TODO: Add K8s deployment delete step
+            pass
         
         try:
             self.logger.info(f"Waiting for node to become offline, {no_lvol_node_uuid}")
@@ -132,8 +135,8 @@ class TestSingleNodeFailure(TestClusterBase):
                     lvol_name=f"{self.lvol_name}_fail",
                     pool_name=self.pool_name,
                     size="800M",
-                    distr_ndcs=2,
-                    distr_npcs=1,
+                    # distr_ndcs=2,
+                    # distr_npcs=1,
                     host_id=no_lvol_node_uuid,
                 )
             except HTTPError as e:
@@ -150,8 +153,8 @@ class TestSingleNodeFailure(TestClusterBase):
                     lvol_name=f"{self.lvol_name}_fail",
                     pool_name=self.pool_name,
                     size="800M",
-                    distr_ndcs=2,
-                    distr_npcs=1,
+                    # distr_ndcs=2,
+                    # distr_npcs=1,
                 )
             lvols = self.sbcli_utils.list_lvols()
             assert f"{self.lvol_name}_fail" in list(lvols.keys()), \
@@ -171,7 +174,7 @@ class TestSingleNodeFailure(TestClusterBase):
         # self.sbcli_utils.restart_node(node_uuid=no_lvol_node_uuid)
         self.logger.info(f"Waiting for node to become online, {no_lvol_node_uuid}")
         self.sbcli_utils.wait_for_storage_node_status(no_lvol_node_uuid, "online", timeout=300)
-
+        sleep_n_sec(30)
         self.validations(node_uuid=no_lvol_node_uuid,
                          node_status="online",
                          device_status="online",

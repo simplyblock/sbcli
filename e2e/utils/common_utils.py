@@ -30,7 +30,7 @@ class CommonUtils:
                 ],
                 "restart": [
                     re.compile(r"Storage node status changed from: offline to: in_restart"),
-                    re.compile(r"Storage node status changed from: in_restart to: online")
+                    re.compile(r"Storage node status changed from: offline to: online")
                 ]
             },
             "Device": {

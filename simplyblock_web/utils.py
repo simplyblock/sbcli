@@ -97,8 +97,11 @@ def get_cluster_id(request):
 
 
 def get_aws_region():
-    response = requests.get('http://169.254.169.254/latest/meta-data/placement/availability-zone')
-    availability_zone = response.text
+    try:
+        from ec2_metadata import ec2_metadata
+        data = ec2_metadata.instance_identity_document
+        return data["region"]
+    except:
+        pass
 
-    region = availability_zone[:-1]
-    return region
+    return 'us-east-1'

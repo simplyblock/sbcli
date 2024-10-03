@@ -19,6 +19,7 @@ class StorageNode(BaseModel):
 
     STATUS_IN_CREATION = 'in_creation'
     STATUS_UNREACHABLE = 'unreachable'
+    STATUS_SCHEDULABLE = 'schedulable'
 
     STATUS_CODE_MAP = {
         STATUS_ONLINE: 0,
@@ -31,6 +32,8 @@ class StorageNode(BaseModel):
         STATUS_RESTARTING: 12,
 
         STATUS_UNREACHABLE: 20,
+
+        STATUS_SCHEDULABLE: 30,
     }
 
     attributes = {
@@ -49,6 +52,7 @@ class StorageNode(BaseModel):
         "create_dt": {"type": str, 'default': str(datetime.now())},
         "remove_dt": {"type": str, 'default': str(datetime.now())},
         "mgmt_ip": {"type": str, 'default': ""},
+        "primary_ip": {"type": str, 'default': ""},
         "rpc_port": {"type": int, 'default': -1},
         "rpc_username": {"type": str, 'default': ""},
         "rpc_password": {"type": str, 'default': ""},
@@ -71,15 +75,26 @@ class StorageNode(BaseModel):
         "hugepages": {"type": int, "default": 0},
         "health_check": {"type": bool, "default": True},
         "enable_test_device": {"type": bool, "default": False},
+        "number_of_distribs": {"type": int, "default": 4},
+        "lvstore": {"type": str, 'default': ""},
+        "raid": {"type": str, 'default': ""},
+        "lvstore_stack": {"type": List[dict], 'default': []},
 
         # spdk params
         "spdk_cpu_mask": {"type": str, "default": ""},
         "app_thread_mask": {"type": str, "default": ""},
         "pollers_mask": {"type": str, "default": ""},
-        "poller_cpu_cores": {"type": str, "default": ""},
+        "poller_cpu_cores": {"type": List[int], "default": []},
         "jm_cpu_mask": {"type": str, "default": ""},
         "alceml_cpu_cores": {"type": List[int], "default": []},
+        "alceml_worker_cpu_cores": {"type": List[int], "default": []},
+        "distrib_cpu_cores": {"type": List[int], "default": []},
         "alceml_cpu_index": {"type": int, "default": 0},
+        "alceml_worker_cpu_index": {"type": int, "default": 0},
+        "distrib_cpu_index": {"type": int, "default": 0},
+        "jc_singleton_mask": {"type": str, "default": ""},
+
+
         "distrib_cpu_mask": {"type": str, "default": ""},
 
         "spdk_mem": {"type": int, "default": 0},
@@ -100,6 +115,7 @@ class StorageNode(BaseModel):
         "jm_percent": {"type": int, "default": 3},
         "jm_device": {"type": JMDevice, "default": None},
         "remote_jm_devices": {"type": List[JMDevice], 'default': []},
+        "enable_ha_jm": {"type": bool, "default": False},
 
         "namespace": {"type": str, "default": ""},
 
