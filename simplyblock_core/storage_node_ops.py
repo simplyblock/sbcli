@@ -1396,6 +1396,10 @@ def restart_storage_node(
         if force is False:
             return False
 
+    logger.info("Setting node state to restarting")
+    set_node_status(node_id, StorageNode.STATUS_RESTARTING)
+    snode = db_controller.get_storage_node_by_id(node_id)
+
     if node_ip:
         if node_ip != snode.api_endpoint:
             logger.info(f"Restarting on new node with ip: {node_ip}")
@@ -1418,9 +1422,6 @@ def restart_storage_node(
                         'net_type': device['net_type']}))
             snode.data_nics = data_nics
             snode.hostname = node_info['hostname']
-
-    logger.info("Setting node state to restarting")
-    set_node_status(node_id, StorageNode.STATUS_RESTARTING)
 
     logger.info(f"Restarting Storage node: {snode.mgmt_ip}")
     snode_api = SNodeClient(snode.api_endpoint, timeout=5*60, retry=3)
