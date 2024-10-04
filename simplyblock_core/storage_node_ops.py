@@ -929,6 +929,9 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
     except Exception:
         pass
     max_prov = int(utils.parse_size(max_prov))
+    if max_prov <= 0:
+        logger.error(f"Incorrect max-prov value {max_prov}")
+        return False
     number_of_split = num_partitions_per_dev if num_partitions_per_dev else 1
     number_of_alceml_devices = number_of_devices * number_of_split
     # for jm
@@ -1445,6 +1448,9 @@ def restart_storage_node(
         except Exception:
             pass
         snode.max_prov = int(utils.parse_size(max_prov))
+    if snode.max_prov <= 0:
+        logger.error(f"Incorrect max-prov value {max_prov}")
+        return False
     if spdk_image:
         snode.spdk_image = spdk_image
 
