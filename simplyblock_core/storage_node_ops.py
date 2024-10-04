@@ -1444,7 +1444,7 @@ def restart_storage_node(
             max_prov = f"{max_prov}g"
         except Exception:
             pass
-        snode.max_prov = max_prov
+        snode.max_prov = int(utils.parse_size(max_prov))
     if spdk_image:
         snode.spdk_image = spdk_image
 
