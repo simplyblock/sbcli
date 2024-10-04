@@ -39,13 +39,13 @@ class CLIWrapper:
         sub_command.add_argument("cluster_id", help='UUID of the cluster to which the node will belong')
         sub_command.add_argument("node_ip", help='IP of storage node to add')
         sub_command.add_argument("ifname", help='Management interface name')
-        sub_command.add_argument("--partitions", help='Number of partitions to create per device', type=int, default=0)
+        sub_command.add_argument("--partitions", help='Number of partitions to create per device', type=int, default=1)
         sub_command.add_argument("--jm-percent", help='Number in percent to use for JM from each device',
                                  type=int, default=3, dest='jm_percent')
         sub_command.add_argument("--data-nics", help='Data interface names', nargs='+', dest='data_nics')
         sub_command.add_argument("--max-lvol", help='Max lvol per storage node', dest='max_lvol', type=int)
-        sub_command.add_argument("--max-snap", help='Max snapshot per storage node', dest='max_snap', type=int)
-        sub_command.add_argument("--max-prov", help='Max provisioning size of all storage nodes', dest='max_prov')
+        sub_command.add_argument("--max-snap", help='Max snapshot per storage node', dest='max_snap', type=int, default=500)
+        sub_command.add_argument("--max-prov", help='Maximum amount of GB to be provisioned via all storage nodes', dest='max_prov')
         sub_command.add_argument("--number-of-distribs", help='The number of distirbs to be created on the node', dest='number_of_distribs', type=int, default=4)
         sub_command.add_argument("--number-of-devices", help='Number of devices per storage node if it\'s not supported EC2 instance', dest='number_of_devices', type=int)
         sub_command.add_argument("--cpu-mask", help='SPDK app CPU mask, default is all cores found', dest='spdk_cpu_mask')
@@ -56,7 +56,7 @@ class CLIWrapper:
         sub_command.add_argument("--iobuf_small_bufsize", help='bdev_set_options param', dest='small_bufsize',  type=int, default=0)
         sub_command.add_argument("--iobuf_large_bufsize", help='bdev_set_options param', dest='large_bufsize',  type=int, default=0)
         sub_command.add_argument("--enable-test-device", help='Enable creation of test device', action='store_true')
-        sub_command.add_argument("--enable-ha-jm", help='Enable HA JM for ditrib creation', action='store_true')
+        sub_command.add_argument("--disable-ha-jm", help='Disable HA JM for distrib creation', action='store_false', dest='enable_ha_jm', default=True)
 
 
         # delete storage node
@@ -706,8 +706,6 @@ class CLIWrapper:
             elif sub_command == "add-node":
                 if not args.max_lvol:
                     self.parser.error(f"Mandatory argument '--max-lvol' not provided for {sub_command}")
-                if not args.max_snap:
-                    self.parser.error(f"Mandatory argument '--max-snap' not provided for {sub_command}")
                 if not args.max_prov:
                     self.parser.error(f"Mandatory argument '--max-prov' not provided for {sub_command}")
                 # if not args.spdk_cpu_mask:
@@ -732,13 +730,11 @@ class CLIWrapper:
 
                 max_lvol = args.max_lvol
                 max_snap = args.max_snap
-                max_prov = self.parse_size(args.max_prov)
+                max_prov = args.max_prov
                 number_of_devices = args.number_of_devices
                 enable_test_device = args.enable_test_device
                 enable_ha_jm = args.enable_ha_jm
                 number_of_distribs = args.number_of_distribs
-                if max_prov < 1 * 1024 * 1024 * 1024:
-                    return f"Max provisioning memory:{args.max_prov} must be larger than 1G"
 
                 out = storage_ops.add_node(
                     cluster_id=cluster_id,
@@ -781,7 +777,7 @@ class CLIWrapper:
 
                 max_lvol = args.max_lvol
                 max_snap = args.max_snap
-                max_prov = self.parse_size(args.max_prov) if args.max_prov else 0
+                max_prov = args.max_prov if args.max_prov else 0
                 number_of_devices = args.number_of_devices
 
                 small_bufsize = args.small_bufsize

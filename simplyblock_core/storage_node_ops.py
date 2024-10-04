@@ -923,7 +923,11 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
         if not number_of_devices:
             logger.error("Unsupported instance type please specify --number-of-devices.")
             return False
-
+    try:
+        max_prov = int(max_prov)
+        max_prov = f"{max_prov}g"
+    except Exception:
+        pass
     max_prov = int(utils.parse_size(max_prov))
     number_of_split = num_partitions_per_dev if num_partitions_per_dev else 1
     number_of_alceml_devices = number_of_devices * number_of_split
@@ -1435,6 +1439,11 @@ def restart_storage_node(
     if max_snap:
         snode.max_snap = max_snap
     if max_prov:
+        try:
+            max_prov = int(max_prov)
+            max_prov = f"{max_prov}g"
+        except Exception:
+            pass
         snode.max_prov = max_prov
     if spdk_image:
         snode.spdk_image = spdk_image
