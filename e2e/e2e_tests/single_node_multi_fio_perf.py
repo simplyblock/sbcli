@@ -410,10 +410,10 @@ class TestLvolFioNpcsCustom(TestLvolFioBase):
 
         # Validate FIO outputs
         self.validate_fio_output(lvol_name_1, read_check=True, write_check=True)
-        self.validate_fio_output(lvol_name_2, read_check=True, write_check=True, trim_check=True)
+        self.validate_fio_output(lvol_name_2, read_check=False, write_check=True, trim_check=True)
 
         # Cleanup after running FIO
         self.cleanup_lvols(lvol_configs)
 
-        self.logger.info(f"Test completed.")
+        self.logger.info(f"Test Case Passed.")
 

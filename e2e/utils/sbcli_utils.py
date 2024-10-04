@@ -48,7 +48,7 @@ class SbcliUtils:
                 self.logger.debug(f"API call {api_url} failed with error:{e}")
                 retry -= 1
                 if retry == 0:
-                    self.logger.info(f"Retry attemptexhausted. API {api_url} failed with: {e}.")
+                    self.logger.info(f"Retry attempt exhausted. API {api_url} failed with: {e}.")
                     raise e
                 self.logger.info(f"Retrying API {api_url}. Attempt: {10 - retry + 1}")
 
@@ -82,7 +82,7 @@ class SbcliUtils:
                 self.logger.debug(f"API call {api_url} failed with error:{e}")
                 retry -= 1
                 if retry == 0:
-                    self.logger.info(f"Retry attemptexhausted. API {api_url} failed with: {e}.")
+                    self.logger.info(f"Retry attempt exhausted. API {api_url} failed with: {e}.")
                     raise e
                 self.logger.info(f"Retrying API {api_url}. Attempt: {10 - retry + 1}")
 
@@ -116,7 +116,7 @@ class SbcliUtils:
                 if retry == 0:
                     self.logger.info(f"Retry attempt exhausted. API {api_url} failed with: {e}.")
                     raise e
-                self.logger.info(f"Retrying API {api_url}. Attempt: {10 - retry + 1}")
+                self.logger.info(f"Retrying API {api_url}. Attempt: {5 - retry + 1}")
 
     def put_request(self, api_url, headers=None, body=None):
         """Performs put request on the given API URL
@@ -132,7 +132,7 @@ class SbcliUtils:
         request_url = self.cluster_api_url + api_url
         headers = headers if headers else self.headers
         self.logger.info(f"Calling POST for {api_url} with headers: {headers}, body: {body}")
-        retry = 10
+        retry = 5
         while retry > 0:
             try:
                 resp = requests.put(request_url, headers=headers,
@@ -195,10 +195,10 @@ class SbcliUtils:
         """
         # TODO: parse and display error accordingly: {'results': True, 'status': True}
         body = {
-            "uuid": node_uuid,
+            "uuid": node_uuid
         }
-        self.put_request(api_url="/storagenode/restart/",
-                         body=body)
+
+        self.put_request(api_url="/storagenode/restart/", body=body)
 
     def get_all_nodes_ip(self):
         """Return all nodes part of cluster

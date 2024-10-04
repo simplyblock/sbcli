@@ -4,6 +4,7 @@ from e2e_tests.single_node_multi_fio_perf import (
     TestLvolFioNpcs0, TestLvolFioNpcs1, TestLvolFioNpcs2, TestLvolFioNpcsCustom
 )
 from e2e_tests.cloning_and_snapshot.multi_lvol_snapshot_fio import TestMultiLvolFio
+from e2e_tests.ha_journal.lvol_journal_device_node_restart import TestDeviceNodeRestart
 
 
 
@@ -15,6 +16,7 @@ def get_all_tests(custom=True, k8s_test=False):
         TestLvolFioNpcs1,
         TestLvolFioNpcs2,
         TestSingleNodeFailure,
+        # TestDeviceNodeRestart
         # TestMultiLvolFio, - Enable when testing
     ]
     if not custom:
