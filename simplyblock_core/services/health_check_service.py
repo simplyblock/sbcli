@@ -134,7 +134,7 @@ while True:
                             logger.info(f"Checking bdev: {remote_device.remote_bdev} ... ok")
                         else:
                             logger.info(f"Checking bdev: {remote_device.remote_bdev} ... not found")
-                        node_remote_devices_check &= bool(ret)
+                        # node_remote_devices_check &= bool(ret)
 
                 lvstore_check = True
                 if snode.lvstore and snode.lvstore_stack:
