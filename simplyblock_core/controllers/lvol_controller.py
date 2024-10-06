@@ -346,6 +346,11 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
         logger.error("Storage nodes are less than 3 in ha cluster")
         return False, "Storage nodes are less than 3 in ha cluster"
 
+    if host_node and host_node.status != StorageNode.STATUS_ONLINE:
+        mgs = f"Storage node is not online. ID: {host_node.get_id()} status: {host_node.status}"
+        logger.error(mgs)
+        return False, mgs
+
     cluster_size_prov_util = int(((cluster_size_prov+size) / cluster_size_total) * 100)
 
     if cl.prov_cap_crit and cl.prov_cap_crit < cluster_size_prov_util:
