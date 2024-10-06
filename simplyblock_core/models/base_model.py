@@ -4,8 +4,6 @@ import pprint
 import json
 from typing import Mapping
 
-from simplyblock_core.kv_store import KVStore
-
 
 class BaseModel(object):
     def __init__(self):
@@ -105,6 +103,7 @@ class BaseModel(object):
 
     def write_to_db(self, kv_store=None):
         if not kv_store:
+            from simplyblock_core.kv_store import KVStore
             kv_store = KVStore()
         try:
             prefix = "%s/%s/%s" % (self.object_type, self.name, self.get_id())
