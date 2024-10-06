@@ -55,6 +55,7 @@ while True:
 
             if snode.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_UNREACHABLE]:
                 logger.info(f"Node status is: {snode.status}, skipping")
+                set_node_health_check(snode, False)
                 continue
 
             # 1- check node ping
@@ -117,7 +118,7 @@ while True:
 
                 if snode.jm_device:
                     jm_device = snode.jm_device
-                    logger.info(f"Node node jm: {jm_device}")
+                    logger.info(f"Node JM: {jm_device}")
                     ret = health_controller.check_jm_device(jm_device.get_id())
                     if ret:
                         logger.info(f"Checking jm bdev: {jm_device.jm_bdev} ... ok")
