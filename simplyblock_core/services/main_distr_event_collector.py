@@ -33,10 +33,6 @@ def process_device_event(event):
                         logger.info(f"The storage device is not online, skipping. status: {dev.status}")
                         event.status = 'skipped'
                         return
-                    if node.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED]:
-                        logger.info(f"Node is not online, skipping. status: {node.status}")
-                        event.status = 'skipped'
-                        return
 
                     device = dev
                     break
@@ -64,6 +60,11 @@ def process_device_event(event):
             device_controller.device_set_unavailable(device_id)
 
         else:
+            if node.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED]:
+                logger.info(f"Node is not online, skipping. status: {node.status}")
+                event.status = 'skipped'
+                return
+
             if event.message == 'SPDK_BDEV_EVENT_REMOVE':
                 if device.node_id == node_id:
                     logger.info(f"Removing storage id: {storage_id} from node: {node_id}")
