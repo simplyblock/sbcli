@@ -215,8 +215,9 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     shutil.rmtree(temp_dir)
 
     logger.info("Deploying swarm stack ...")
+    log_level = "DEBUG" if constants.LOG_WEB_DEBUG else "INFO"
     ret = scripts.deploy_stack(cli_pass, DEV_IP, constants.SIMPLY_BLOCK_DOCKER_IMAGE, c.secret, c.uuid,
-                               log_del_interval, metrics_retention_period)
+                               log_del_interval, metrics_retention_period, log_level=log_level)
     logger.info("Deploying swarm stack > Done")
 
     if ret == 0:
