@@ -33,6 +33,17 @@ def process_device_event(event):
                     if dev.status not in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_READONLY]:
                         logger.info(f"The storage device is not online, skipping. status: {dev.status}")
                         event.status = 'skipped'
+                        node_status_event = {
+                            "timestamp": datetime.datetime.now().isoformat("T", "seconds") + 'Z',
+                            "event_type": "device_status",
+                            "storage_ID": storage_id,
+                            "status": dev.status}
+                        events = {"events": [node_status_event]}
+                        snode = db_controller.get_storage_node_by_id(node_id)
+                        rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
+                        ret = rpc_client.distr_status_events_update(events)
+                        if not ret:
+                            logger.warning("Failed to send event update")
                         return
 
                     device = dev
