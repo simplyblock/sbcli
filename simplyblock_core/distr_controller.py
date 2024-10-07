@@ -43,7 +43,7 @@ def send_dev_status_event(device, dev_status):
     logger.debug(node_status_event)
     snodes = db_controller.get_storage_nodes_by_cluster_id(device.cluster_id)
     for node in snodes:
-        if node.status != node.STATUS_ONLINE:
+        if node.status != StorageNode.STATUS_ONLINE:
             continue
         logging.debug(f"Sending event updates, device: {storage_ID}, status: {dev_status}, node: {node.get_id()}")
         rpc_client = RPCClient(node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password, timeout=3, retry=1)

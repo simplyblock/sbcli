@@ -57,7 +57,7 @@ def process_device_event(event):
                     new_remote_devices.append(rem_dev)
             node.remote_devices = new_remote_devices
             node.write_to_db(db_controller.kv_store)
-            device_controller.device_set_unavailable(device_id)
+            distr_controller.send_dev_status_event(device, NVMeDevice.STATUS_UNAVAILABLE)
 
         else:
             if node.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED]:
