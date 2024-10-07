@@ -186,9 +186,6 @@ def storage_node_add():
     if 'max_lvol' not in req_data:
         return utils.get_response_error("missing required param: max_lvol", 400)
 
-    if 'max_snap' not in req_data:
-        return utils.get_response_error("missing required param: max_snap", 400)
-
     if 'max_prov' not in req_data:
         return utils.get_response_error("missing required param: max_prov", 400)
 
@@ -196,9 +193,10 @@ def storage_node_add():
     node_ip = req_data['node_ip']
     ifname = req_data['ifname']
     max_lvol = int(req_data['max_lvol'])
-    max_snap = int(req_data['max_snap'])
+    max_snap = int(req_data.get('max_snap', 500))
     max_prov = req_data['max_prov']
-    number_of_distribs = req_data.get('number_of_distribs', 4)
+    number_of_distribs = int(req_data.get('number_of_distribs', 4))
+    disable_ha_jm = bool(req_data.get('disable_ha_jm', False))
 
     spdk_image = None
     if 'spdk_image' in req_data:
@@ -217,11 +215,11 @@ def storage_node_add():
     if 'namespace' in req_data:
         namespace = req_data['namespace']
 
-    jm_percent = 0
+    jm_percent = 3
     if 'jm_percent' in req_data:
         jm_percent = int(req_data['jm_percent'])
 
-    partitions = 0
+    partitions = 1
     if 'partitions' in req_data:
         partitions = int(req_data['partitions'])
 
@@ -263,7 +261,8 @@ def storage_node_add():
         "number_of_devices": number_of_devices,
         "enable_test_device": False,
         "number_of_distribs": number_of_distribs,
-        "namespace": namespace})
+        "namespace": namespace,
+        "enable_ha_jm": not disable_ha_jm})
 
     return utils.get_response(True)
 

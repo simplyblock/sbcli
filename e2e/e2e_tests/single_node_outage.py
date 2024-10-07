@@ -143,7 +143,7 @@ class TestSingleNodeOutage(TestClusterBase):
                          node_status="offline",
                          device_status="unavailable",
                          lvol_status="online",
-                         health_check_status=True
+                         health_check_status=False
                          )
 
         self.sbcli_utils.restart_node(node_uuid=no_lvol_node_uuid)

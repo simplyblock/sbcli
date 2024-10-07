@@ -138,11 +138,12 @@ class TestSingleNodeFailure(TestClusterBase):
                     # distr_ndcs=2,
                     # distr_npcs=1,
                     host_id=no_lvol_node_uuid,
+                    retry=2
                 )
             except HTTPError as e:
                 error = json.loads(e.response.text)
                 self.logger.info(f"Lvol addition failed for node {no_lvol_node_uuid}. Error:{error}")
-                assert "Failed to create BDev: " in error["error"], f"Unexpected error: {error['error']}"
+                assert "Storage node is not online" in error["error"], f"Unexpected error: {error['error']}"
                 lvols = self.sbcli_utils.list_lvols()
                 assert f"{self.lvol_name}_fail" not in list(lvols.keys()), \
                     (f"Lvol {self.lvol_name}_fail present in list of lvols post add: {lvols}. "
@@ -150,15 +151,15 @@ class TestSingleNodeFailure(TestClusterBase):
             
             sleep_n_sec(10)
             self.sbcli_utils.add_lvol(
-                    lvol_name=f"{self.lvol_name}_fail",
+                    lvol_name=f"{self.lvol_name}_2",
                     pool_name=self.pool_name,
                     size="800M",
                     # distr_ndcs=2,
                     # distr_npcs=1,
                 )
             lvols = self.sbcli_utils.list_lvols()
-            assert f"{self.lvol_name}_fail" in list(lvols.keys()), \
-                (f"Lvol {self.lvol_name}_fail not present in list of lvols post add: {lvols}. "
+            assert f"{self.lvol_name}_2" in list(lvols.keys()), \
+                (f"Lvol {self.lvol_name}_2 not present in list of lvols post add: {lvols}. "
                  "Expected: Lvol is added")
 
         except Exception as exp:

@@ -80,6 +80,19 @@ def device_set_read_only(device_id):
 
 
 def device_set_online(device_id):
+    db_controller = DBController()
+    dev = db_controller.get_storage_devices(device_id)
+    snode = db_controller.get_storage_node_by_id(dev.node_id)
+    logger.info("Make other nodes connect to the node devices")
+    snodes = db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id)
+    for node in snodes:
+        if node.get_id() == snode.get_id() or node.status != StorageNode.STATUS_ONLINE:
+            continue
+        node.remote_devices = storage_node_ops._connect_to_remote_devs(node)
+        if node.enable_ha_jm:
+            node.remote_jm_devices = storage_node_ops._connect_to_remote_jm_devs(node)
+        node.write_to_db()
+
     ret = device_set_state(device_id, NVMeDevice.STATUS_ONLINE)
     if ret:
         logger.info("Adding task to device data migration")

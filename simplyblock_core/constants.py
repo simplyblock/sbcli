@@ -7,7 +7,7 @@ KVD_DB_TIMEOUT_MS = 10000
 SPK_DIR = '/home/ec2-user/spdk'
 RPC_HTTP_PROXY_PORT = 8080
 LOG_LEVEL = logging.INFO
-LOG_WEB_DEBUG = True
+LOG_WEB_DEBUG = False
 
 INSTALL_DIR = os.path.dirname(os.path.realpath(__file__))
 
@@ -37,12 +37,12 @@ DEVICE_OVERLOAD_CAPACITY_THRESHOLD = 50
 CLUSTER_NQN = "nqn.2023-02.io.simplyblock"
 
 weights = {
-    "lvol": 50,
-    "cpu": 10,
-    "r_io": 10,
-    "w_io": 10,
-    "r_b": 10,
-    "w_b": 10
+    "lvol": 100,
+    # "cpu": 10,
+    # "r_io": 10,
+    # "w_io": 10,
+    # "r_b": 10,
+    # "w_b": 10
 }
 
 

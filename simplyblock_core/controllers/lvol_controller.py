@@ -165,52 +165,34 @@ def validate_add_lvol_func(name, size, host_id_or_name, pool_id_or_name,
     return True, ""
 
 
-def get_jm_names(snode):
-    return [snode.jm_device.jm_bdev] if snode.jm_device else []
-
-
-def get_ha_jm_names(current_node, snode_list):
-    jm_list = []
-    if current_node.jm_device:
-        jm_list.append(current_node.jm_device.jm_bdev)
-    else:
-        jm_list.append("JM_LOCAL")
-
-    for node in snode_list:
-        if node.get_id() == current_node.get_id():
-            continue
-        name = f"remote_{node.jm_device.jm_bdev}n1"
-        jm_list.append(name)
-    return jm_list[:3]
-
-
 def _get_next_3_nodes(cluster_id, lvol_size=0):
     snodes = db_controller.get_storage_nodes_by_cluster_id(cluster_id)
-    online_nodes = []
+    # online_nodes = []
     node_stats = {}
     for node in snodes:
         if node.status == node.STATUS_ONLINE:
             # Validate Eligible nodes for adding lvol
-            snode_api = SNodeClient(node.api_endpoint)
-            result, _ = snode_api.info()
-            memory_free = result["memory_details"]["free"]
-            huge_free = result["memory_details"]["huge_free"]
-            total_node_capacity = db_controller.get_snode_size(node.get_id())
-            error = utils.validate_add_lvol_or_snap_on_node(memory_free, huge_free, node.max_lvol, lvol_size,  total_node_capacity, len(node.lvols))
-            if error:
-                logger.warning(error)
-                continue
-
-            online_nodes.append(node)
-            node_stat_list = db_controller.get_node_stats(node, limit=1000)
-            combined_record = utils.sum_records(node_stat_list)
+            # snode_api = SNodeClient(node.api_endpoint)
+            # result, _ = snode_api.info()
+            # memory_free = result["memory_details"]["free"]
+            # huge_free = result["memory_details"]["huge_free"]
+            # total_node_capacity = db_controller.get_snode_size(node.get_id())
+            # error = utils.validate_add_lvol_or_snap_on_node(memory_free, huge_free, node.max_lvol, lvol_size,  total_node_capacity, len(node.lvols))
+            # if error:
+            #     logger.warning(error)
+            #     continue
+            #
+            # online_nodes.append(node)
+            # node_stat_list = db_controller.get_node_stats(node, limit=1000)
+            # combined_record = utils.sum_records(node_stat_list)
             node_st = {
-                "lvol": len(node.lvols),
-                "cpu": 1 + (node.cpu * node.cpu_hz),
-                "r_io": combined_record.read_io_ps,
-                "w_io": combined_record.write_io_ps,
-                "r_b": combined_record.read_bytes_ps,
-                "w_b": combined_record.write_bytes_ps}
+                "lvol": len(node.lvols)+1,
+                # "cpu": 1 + (node.cpu * node.cpu_hz),
+                # "r_io": combined_record.read_io_ps,
+                # "w_io": combined_record.write_io_ps,
+                # "r_b": combined_record.read_bytes_ps,
+                # "w_b": combined_record.write_bytes_ps
+            }
 
             node_stats[node.get_id()] = node_st
 
@@ -243,7 +225,7 @@ def _get_next_3_nodes(cluster_id, lvol_size=0):
     #############
 
     selected_node_ids = []
-    while len(selected_node_ids) < min(len(online_nodes), 3):
+    while len(selected_node_ids) < min(len(node_stats), 3):
         r_index = random.randint(0, n_start)
         print(f"Random is {r_index}/{n_start}")
         for node_id in node_start_end:
@@ -363,6 +345,11 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
     if len(online_nodes) < 3 and ha_type == "ha":
         logger.error("Storage nodes are less than 3 in ha cluster")
         return False, "Storage nodes are less than 3 in ha cluster"
+
+    if host_node and host_node.status != StorageNode.STATUS_ONLINE:
+        mgs = f"Storage node is not online. ID: {host_node.get_id()} status: {host_node.status}"
+        logger.error(mgs)
+        return False, mgs
 
     cluster_size_prov_util = int(((cluster_size_prov+size) / cluster_size_total) * 100)
 

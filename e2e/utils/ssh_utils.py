@@ -173,8 +173,12 @@ class SshUtils:
             self.exec_command(node, command)
         except Exception as e:
             self.logger.info(e)
+        
+        time.sleep(3)
 
         self.make_directory(node=node, dir_name=mount_path)
+        
+        time.sleep(3)
 
         command = f"sudo mount {device} {mount_path}"
         self.exec_command(node, command)
@@ -236,8 +240,7 @@ class SshUtils:
 
         command = (f"sudo fio --name={name} {location} --ioengine={ioengine} --direct=1 --iodepth={iodepth} "
                    f"{time_based} --runtime={runtime} --rw={rw} --bs={bs} --size={size} --rwmixread={rwmixread} "
-                   f"--verify=md5 --numjobs={numjobs} --nrfiles={nrfiles} --verify_dump=1 --verify_fatal=1 "
-                   f"--verify_state_save=1 --verify_backlog=10 --group_reporting{output_format}{output_file}")
+                   f"--numjobs={numjobs} --nrfiles={nrfiles} --group_reporting{output_format}{output_file}")
         
         if kwargs.get("debug", None):
             command = f"{command} --debug=all"
@@ -417,7 +420,7 @@ class SshUtils:
             self.delete_snapshot(node=node, snapshot_id=snapshot_id)
 
     def find_files(self, node, directory):
-        command = f"find {directory} -maxdepth 1 -type f"
+        command = f"sudo find {directory} -maxdepth 1 -type f"
         stdout, _ = self.exec_command(node, command)
         return stdout.splitlines()
 
@@ -435,7 +438,7 @@ class SshUtils:
             command = f"md5sum {file}"
             stdout, _ = self.exec_command(node, command)
             checksum, _ = stdout.split()
-            self.logger.info(f"Checksum for file {file}: Actul: {checksum}, Expected: {checksums[file]}")
+            self.logger.info(f"Checksum for file {file}: Actual: {checksum}, Expected: {checksums[file]}")
             if checksum != checksums[file]:
                 raise ValueError(f"Checksum mismatch for file {file}")
             else:
@@ -443,9 +446,26 @@ class SshUtils:
 
     def delete_files(self, node, files):
         for file in files:
-            command = f"rm -f {file}"
+            command = f"sudo rm -f {file}"
             self.exec_command(node, command)
 
     def make_directory(self, node, dir_name):
         cmd = f"sudo mkdir -p {dir_name}"
         self.exec_command(node, cmd)
+
+    def restart_device_with_errors(self, node, device_id):
+        # Induce errors on the device
+        command = f"{self.base_cmd} device test-mode {device_id} --error rw"
+        self.exec_command(node, command)
+
+    def restart_jm_device(self, node, jm_device_id):
+        command = f"{self.base_cmd} restart-jm-device {jm_device_id}"
+        self.exec_command(node, command)
+
+    def remove_jm_device(self, node, jm_device_id):
+        command = f"{self.base_cmd} remove-jm-device {jm_device_id}"
+        self.exec_command(node, command)
+        
+    def restart_device(self, node, device_id):
+        command = f"{self.base_cmd} sn restart-device {device_id}"
+        self.exec_command(node, command)

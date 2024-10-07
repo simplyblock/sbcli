@@ -170,7 +170,10 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     c.distr_bs = distr_bs
     c.distr_chunk_bs = distr_chunk_bs
     c.ha_type = ha_type
-    c.grafana_endpoint = grafana_endpoint
+    if grafana_endpoint:
+        c.grafana_endpoint = grafana_endpoint
+    else:
+        c.grafana_endpoint = f"http://{DEV_IP}/grafana"
     c.enable_node_affinity = enable_node_affinity
     
     alerts_template_folder = os.path.join(TOP_DIR, "simplyblock_core/scripts/alerting/")
@@ -212,8 +215,9 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     shutil.rmtree(temp_dir)
 
     logger.info("Deploying swarm stack ...")
+    log_level = "DEBUG" if constants.LOG_WEB_DEBUG else "INFO"
     ret = scripts.deploy_stack(cli_pass, DEV_IP, constants.SIMPLY_BLOCK_DOCKER_IMAGE, c.secret, c.uuid,
-                               log_del_interval, metrics_retention_period)
+                               log_del_interval, metrics_retention_period, log_level=log_level)
     logger.info("Deploying swarm stack > Done")
 
     if ret == 0:
@@ -456,9 +460,14 @@ def cluster_set_read_only(cl_id):
     if ret:
         st = db_controller.get_storage_nodes_by_cluster_id(cl_id)
         for node in st:
-            for dev in node.nvme_devices:
-                if dev.status == NVMeDevice.STATUS_ONLINE:
-                    device_controller.device_set_read_only(dev.get_id())
+            rpc_client = RPCClient(
+                node.mgmt_ip, node.rpc_port,
+                node.rpc_username, node.rpc_password, timeout=5, retry=2)
+
+            for bdev in node.lvstore_stack:
+                if bdev['type'] == "bdev_distr":
+                    rpc_client.bdev_distrib_toggle_cluster_full(bdev['name'], cluster_full=True)
+
     return True
 
 
@@ -476,9 +485,14 @@ def cluster_set_active(cl_id):
     if ret:
         st = db_controller.get_storage_nodes_by_cluster_id(cl_id)
         for node in st:
-            for dev in node.nvme_devices:
-                if dev.status == NVMeDevice.STATUS_READONLY:
-                    device_controller.device_set_online(dev.get_id())
+            rpc_client = RPCClient(
+                node.mgmt_ip, node.rpc_port,
+                node.rpc_username, node.rpc_password, timeout=5, retry=2)
+
+            for bdev in node.lvstore_stack:
+                if bdev['type'] == "bdev_distr":
+                    rpc_client.bdev_distrib_toggle_cluster_full(bdev['name'], cluster_full=False)
+
     return True
 
 

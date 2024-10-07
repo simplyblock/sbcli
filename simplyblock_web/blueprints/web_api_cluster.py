@@ -133,11 +133,8 @@ def cluster_get_tasks(uuid):
     if cluster.status == Cluster.STATUS_INACTIVE:
         return utils.get_response("Cluster is inactive")
 
-    data = []
     tasks = tasks_controller.list_tasks(uuid, is_json=True)
-    for t in tasks:
-        data.append(t.get_clean_dict())
-    return utils.get_response(data)
+    return utils.get_response(json.loads(tasks))
 
 
 @bp.route('/cluster/gracefulshutdown/<string:uuid>', methods=['PUT'])
