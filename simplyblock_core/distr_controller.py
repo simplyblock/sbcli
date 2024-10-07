@@ -34,7 +34,6 @@ def send_node_status_event(node, node_status):
 def send_dev_status_event(device, dev_status):
     db_controller = DBController()
     storage_ID = device.cluster_device_order
-    logging.info(f"Sending event updates, device: {storage_ID}, status: {dev_status}")
     node_status_event = {
         "timestamp": datetime.datetime.now().isoformat("T", "seconds") + 'Z',
         "event_type": "device_status",
@@ -46,7 +45,7 @@ def send_dev_status_event(device, dev_status):
     for node in snodes:
         if node.status != node.STATUS_ONLINE:
             continue
-        logger.info(f"Sending to: {node.get_id()}")
+        logging.debug(f"Sending event updates, device: {storage_ID}, status: {dev_status}, node: {node.get_id()}")
         rpc_client = RPCClient(node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password, timeout=10)
         ret = rpc_client.distr_status_events_update(events)
         if not ret:
@@ -82,7 +81,6 @@ def get_distr_cluster_map(snodes, target_node):
         dev_w_map = []
         node_w = 0
         for i, dev in enumerate(snode.nvme_devices):
-            logger.debug(f"Device: {dev.get_id()}, status: {dev.status}")
             if dev.status in [NVMeDevice.STATUS_JM, NVMeDevice.STATUS_NEW]:
                 continue
             dev_w = int(dev.size/(1024*1024*1024)) or 1
@@ -101,6 +99,7 @@ def get_distr_cluster_map(snodes, target_node):
             if not name:
                 name = f"remote_{dev.alceml_bdev}n1"
                 dev_status = NVMeDevice.STATUS_UNAVAILABLE
+            logger.debug(f"Device: {dev.get_id()}, status: {dev_status}, bdev_name: {name}")
             dev_map[dev.cluster_device_order] = {
                 "UUID": dev.get_id(),
                 "bdev_name": name,

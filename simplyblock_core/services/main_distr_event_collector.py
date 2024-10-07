@@ -56,7 +56,7 @@ def process_device_event(event):
                     new_remote_devices.append(rem_dev)
             node.remote_devices = new_remote_devices
             node.write_to_db(db_controller.kv_store)
-            distr_controller.send_cluster_map_to_node(node)
+            device_controller.device_set_unavailable(device_id)
 
         else:
             if event.message == 'SPDK_BDEV_EVENT_REMOVE':
