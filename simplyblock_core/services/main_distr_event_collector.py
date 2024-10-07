@@ -9,6 +9,7 @@ from simplyblock_core.models.lvol_model import LVol
 
 
 from simplyblock_core.models.nvme_device import NVMeDevice
+from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.rpc_client import RPCClient
 
 
@@ -30,6 +31,10 @@ def process_device_event(event):
                 if dev.cluster_device_order == storage_id:
                     if dev.status not in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_READONLY]:
                         logger.info(f"The storage device is not online, skipping. status: {dev.status}")
+                        event.status = 'skipped'
+                        return
+                    if node.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED]:
+                        logger.info(f"Node is not online, skipping. status: {node.status}")
                         event.status = 'skipped'
                         return
 
