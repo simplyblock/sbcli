@@ -429,6 +429,14 @@ class SbcliUtils:
         self.logger.debug(f"Cluster Logs: {cluster_logs}")
         return cluster_logs["results"]
     
+    def get_cluster_tasks(self, cluster_id=None):
+        """Get Cluster tasks for given cluster id
+        """
+        cluster_id = self.cluster_id if not cluster_id else cluster_id
+        cluster_tasks = self.get_request(api_url=f"/cluster/get-tasks/{cluster_id}")
+        self.logger.debug(f"Cluster Tasks: {cluster_tasks}")
+        return cluster_tasks["results"]
+    
     def wait_for_storage_node_status(self, node_id, status, timeout=60):
         actual_status = None
         while timeout > 0:
@@ -510,3 +518,6 @@ class SbcliUtils:
             raise TimeoutError(f"Timed out waiting for device status, Node id: {node_id}, Device id: {device_id}"
                                 f"Expected status: {status}, Actual status: {actual_status}")
 
+    def list_migration_tasks(self, cluster_id):
+        """List all migration tasks for a given cluster."""
+        return self.get_request(f"/cluster/list-tasks/{cluster_id}")
