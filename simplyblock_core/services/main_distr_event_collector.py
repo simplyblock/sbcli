@@ -70,6 +70,7 @@ def process_device_event(event):
 
             dev_node = db_controller.get_storage_node_by_id(device.node_id)
             if dev_node.status == StorageNode.STATUS_ONLINE:
+                device_controller.device_set_io_error(device_id, True)
                 device_controller.device_set_unavailable(device_id)
 
         else:
