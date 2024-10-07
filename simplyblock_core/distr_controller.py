@@ -46,7 +46,7 @@ def send_dev_status_event(device, dev_status):
         if node.status != node.STATUS_ONLINE:
             continue
         logging.debug(f"Sending event updates, device: {storage_ID}, status: {dev_status}, node: {node.get_id()}")
-        rpc_client = RPCClient(node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password, timeout=10)
+        rpc_client = RPCClient(node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password, timeout=3, retry=1)
         ret = rpc_client.distr_status_events_update(events)
         if not ret:
             logger.warning("Failed to send event update")
