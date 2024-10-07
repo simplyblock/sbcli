@@ -68,10 +68,6 @@ while True:
             node_api_check = health_controller._check_node_api(snode.mgmt_ip)
             logger.info(f"Check: node API {snode.mgmt_ip}:5000 ... {node_api_check}")
 
-            if snode.status == StorageNode.STATUS_OFFLINE:
-                set_node_health_check(snode, ping_check & node_api_check)
-                continue
-
             # 3- check node RPC
             node_rpc_check = health_controller._check_node_rpc(
                 snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
