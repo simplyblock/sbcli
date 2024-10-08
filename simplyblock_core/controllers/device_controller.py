@@ -621,39 +621,6 @@ def add_device(device_id):
 
     logger.info(f"Adding device {device_id}")
 
-
-
-    #######################################
-
-    rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
-
-    # look for partitions
-    partitioned_devices = storage_node_ops._search_for_partitions(rpc_client, device_obj)
-    logger.debug("partitioned_devices")
-    logger.debug(partitioned_devices)
-
-    if len(partitioned_devices) == 2:
-        logger.info("Partitioned devices found")
-    else:
-        logger.info(f"Creating partitions for {device_obj.nvme_bdev}")
-        storage_node_ops._create_device_partitions(rpc_client, device_obj, snode)
-        partitioned_devices = storage_node_ops._search_for_partitions(rpc_client, device_obj)
-
-        if len(partitioned_devices) == 2:
-            logger.info("Device partitions created")
-        else:
-            logger.error("Failed to create partitions")
-            return False
-
-    jm_part = partitioned_devices[0]
-    device_part = partitioned_devices[1]
-
-    device_obj.device_name = device_part.device_name
-    device_obj.nvme_bdev = device_part.nvme_bdev
-    device_obj.size = device_part.size
-
-    #######################################
-
     ret = _def_create_device_stack(device_obj, snode)
     if not ret:
         logger.error("Failed to create device stack")
