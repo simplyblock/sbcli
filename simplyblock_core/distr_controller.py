@@ -98,7 +98,8 @@ def get_distr_cluster_map(snodes, target_node):
                         break
             if not name:
                 name = f"remote_{dev.alceml_bdev}n1"
-                dev_status = NVMeDevice.STATUS_UNAVAILABLE
+                if dev_status == NVMeDevice.STATUS_ONLINE:
+                    dev_status = NVMeDevice.STATUS_UNAVAILABLE
             logger.debug(f"Device: {dev.get_id()}, status: {dev_status}, bdev_name: {name}")
             dev_map[dev.cluster_device_order] = {
                 "UUID": dev.get_id(),
