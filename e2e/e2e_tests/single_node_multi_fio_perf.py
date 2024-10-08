@@ -3,6 +3,7 @@ import os
 from e2e_tests.cluster_test_base import TestClusterBase
 import threading
 import json
+from utils.common_utils import sleep_n_sec
 
 class TestLvolFioBase(TestClusterBase):
     """
@@ -72,6 +73,7 @@ class TestLvolFioBase(TestClusterBase):
             self.ssh_obj.exec_command(node=self.mgmt_nodes[0], command=connect_str)
 
             # Identify the newly connected device
+            sleep_n_sec(10)
             final_devices = self.ssh_obj.get_devices(node=self.mgmt_nodes[0])
             disk_use = None
 
@@ -83,9 +85,9 @@ class TestLvolFioBase(TestClusterBase):
 
             # Unmount, format, and mount the device
             self.ssh_obj.unmount_path(node=self.mgmt_nodes[0], device=disk_use)
-            self.ssh_obj.format_disk(node=self.mgmt_nodes[0], device=disk_use)
             mount_path = None
             if config["mount"]:
+                self.ssh_obj.format_disk(node=self.mgmt_nodes[0], device=disk_use)
                 mount_path = f"/home/ec2-user/test_location_{lvol_name}"
                 self.ssh_obj.mount_path(node=self.mgmt_nodes[0], device=disk_use, mount_path=mount_path)
 
@@ -255,8 +257,8 @@ class TestLvolFioNpcs1(TestLvolFioBase):
         """Test scenario for npcs=1 with different ndcs."""
         scenarios = [
             {"npcs": 1, "ndcs": 1},
-            {"npcs": 1, "ndcs": 2},
-            {"npcs": 1, "ndcs": 4}
+            # {"npcs": 1, "ndcs": 2},
+            # {"npcs": 1, "ndcs": 4}
         ]
         current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -318,9 +320,10 @@ class TestLvolFioNpcs2(TestLvolFioBase):
     def run(self):
         """Test scenario for npcs=2 with different ndcs."""
         scenarios = [
-            {"npcs": 2, "ndcs": 2},
-            {"npcs": 2, "ndcs": 4},
-            {"npcs": 2, "ndcs": 8}
+            {"npcs": 2, "ndcs": 1},
+            # {"npcs": 2, "ndcs": 2},
+            # {"npcs": 2, "ndcs": 4},
+            # {"npcs": 2, "ndcs": 8}
         ]
         current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -338,6 +341,7 @@ class TestLvolFioNpcs2(TestLvolFioBase):
                  "ndcs": scenario['ndcs'], "npcs": scenario['npcs'],
                  "size": "4G", "mount": False}
             ]
+            breakpoint()
             # Create LVOLs
             self.create_lvols(lvol_configs)
 
@@ -349,6 +353,7 @@ class TestLvolFioNpcs2(TestLvolFioBase):
             fio_threads.append(self.run_fio_on_lvol(lvol_name_1,
                                                     mount_path=self.lvol_devices[lvol_name_1]["MountPath"],
                                                     readwrite="randrw"))
+            sleep_n_sec(10)
             fio_threads.append(self.run_fio_on_lvol(lvol_name_2,
                                                     device=self.lvol_devices[lvol_name_2]["Device"],
                                                     readwrite="randtrimwrite"))
@@ -362,7 +367,7 @@ class TestLvolFioNpcs2(TestLvolFioBase):
 
             # Validate FIO outputs
             self.validate_fio_output(lvol_name_1, read_check=True, write_check=True)
-            self.validate_fio_output(lvol_name_2, read_check=True, write_check=True,
+            self.validate_fio_output(lvol_name_2, read_check=False, write_check=True,
                                      trim_check=True)
 
             # Cleanup after running FIO

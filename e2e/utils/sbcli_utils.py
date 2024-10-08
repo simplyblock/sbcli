@@ -247,8 +247,7 @@ class SbcliUtils:
 
         return data
 
-    def add_storage_pool(self, pool_name, cluster_id=None, max_rw_iops=0, 
-                         max_rw_mbytes=0, max_r_mbytes=0, max_w_mbytes=0):
+    def add_storage_pool(self, pool_name, cluster_id=None, max_rw_iops=0, max_rw_mbytes=0, max_r_mbytes=0, max_w_mbytes=0):
         """Adds the storage with given name
         """
         pools = self.list_storage_pools()
@@ -389,7 +388,7 @@ class SbcliUtils:
             return
 
         data = self.get_request(api_url=f"/lvol/connect/{lvol_id}")
-        self.logger.debug(f"Connect lvol resp: {data}")
+        self.logger.info(f"Connect lvol resp: {data}")
         return data["results"][0]["connect"]
 
     def get_cluster_status(self, cluster_id=None):
@@ -397,7 +396,7 @@ class SbcliUtils:
         """
         cluster_id = self.cluster_id if not cluster_id else cluster_id
         cluster_details = self.get_request(api_url=f"/cluster/status/{cluster_id}")
-        self.logger.debug(f"Cluster Status: {cluster_details}")
+        self.logger.info(f"Cluster Status: {cluster_details}")
         return cluster_details["results"]
 
     def get_storage_node_details(self, storage_node_id):
@@ -411,14 +410,14 @@ class SbcliUtils:
         """Get Device details for given node id
         """
         device_details = self.get_request(api_url=f"/device/list/{storage_node_id}")
-        self.logger.debug(f"Device Details: {device_details}")
+        self.logger.info(f"Device Details: {device_details}")
         return device_details["results"]
 
     def get_lvol_details(self, lvol_id):
         """Get lvol details for given lvol id
         """
         lvol_details = self.get_request(api_url=f"/lvol/{lvol_id}")
-        self.logger.debug(f"Lvol Details: {lvol_details}")
+        self.logger.info(f"Lvol Details: {lvol_details}")
         return lvol_details["results"]
 
     def get_cluster_logs(self, cluster_id=None):
@@ -426,7 +425,7 @@ class SbcliUtils:
         """
         cluster_id = self.cluster_id if not cluster_id else cluster_id
         cluster_logs = self.get_request(api_url=f"/cluster/get-logs/{cluster_id}")
-        self.logger.debug(f"Cluster Logs: {cluster_logs}")
+        self.logger.info(f"Cluster Logs: {cluster_logs}")
         return cluster_logs["results"]
     
     def wait_for_storage_node_status(self, node_id, status, timeout=60):
@@ -509,4 +508,3 @@ class SbcliUtils:
                 timeout -= 1
             raise TimeoutError(f"Timed out waiting for device status, Node id: {node_id}, Device id: {device_id}"
                                 f"Expected status: {status}, Actual status: {actual_status}")
-
