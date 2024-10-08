@@ -46,7 +46,7 @@ def send_dev_status_event(device, dev_status):
         if node.status != StorageNode.STATUS_ONLINE:
             continue
         logging.debug(f"Sending event updates, device: {storage_ID}, status: {dev_status}, node: {node.get_id()}")
-        rpc_client = RPCClient(node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password, timeout=3, retry=1)
+        rpc_client = RPCClient(node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password, timeout=5, retry=2)
         ret = rpc_client.distr_status_events_update(events)
         if not ret:
             logger.warning("Failed to send event update")
@@ -59,7 +59,7 @@ def disconnect_device(device):
         if node.status != node.STATUS_ONLINE:
             continue
         new_remote_devices = []
-        rpc_client = RPCClient(node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password, timeout=5, retry=1)
+        rpc_client = RPCClient(node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password, timeout=5, retry=2)
         for rem_dev in node.remote_devices:
             if rem_dev.get_id() == device.get_id():
                 ctrl_name = rem_dev.remote_bdev[:-2]
