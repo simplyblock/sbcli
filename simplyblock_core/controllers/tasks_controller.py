@@ -74,11 +74,13 @@ def add_device_mig_task(device_id):
 
 
 def add_device_to_auto_restart(device):
-    return _add_task(JobSchedule.FN_DEV_RESTART, device.cluster_id, device.node_id, device.get_id())
+    return True
+    # return _add_task(JobSchedule.FN_DEV_RESTART, device.cluster_id, device.node_id, device.get_id())
 
 
 def add_node_to_auto_restart(node):
-    return _add_task(JobSchedule.FN_NODE_RESTART, node.cluster_id, node.get_id(), "")
+    return True
+    # return _add_task(JobSchedule.FN_NODE_RESTART, node.cluster_id, node.get_id(), "")
 
 
 def list_tasks(cluster_id, is_json=False):
