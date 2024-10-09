@@ -80,6 +80,19 @@ def device_set_read_only(device_id):
 
 
 def device_set_online(device_id):
+    db_controller = DBController()
+    dev = db_controller.get_storage_devices(device_id)
+    snode = db_controller.get_storage_node_by_id(dev.node_id)
+    logger.info("Make other nodes connect to the node devices")
+    snodes = db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id)
+    for node in snodes:
+        if node.get_id() == snode.get_id() or node.status != StorageNode.STATUS_ONLINE:
+            continue
+        node.remote_devices = storage_node_ops._connect_to_remote_devs(node)
+        if node.enable_ha_jm:
+            node.remote_jm_devices = storage_node_ops._connect_to_remote_jm_devs(node)
+        node.write_to_db()
+
     ret = device_set_state(device_id, NVMeDevice.STATUS_ONLINE)
     if ret:
         logger.info("Adding task to device data migration")
@@ -607,39 +620,6 @@ def add_device(device_id):
             break
 
     logger.info(f"Adding device {device_id}")
-
-
-
-    #######################################
-
-    rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
-
-    # look for partitions
-    partitioned_devices = storage_node_ops._search_for_partitions(rpc_client, device_obj)
-    logger.debug("partitioned_devices")
-    logger.debug(partitioned_devices)
-
-    if len(partitioned_devices) == 2:
-        logger.info("Partitioned devices found")
-    else:
-        logger.info(f"Creating partitions for {device_obj.nvme_bdev}")
-        storage_node_ops._create_device_partitions(rpc_client, device_obj, snode)
-        partitioned_devices = storage_node_ops._search_for_partitions(rpc_client, device_obj)
-
-        if len(partitioned_devices) == 2:
-            logger.info("Device partitions created")
-        else:
-            logger.error("Failed to create partitions")
-            return False
-
-    jm_part = partitioned_devices[0]
-    device_part = partitioned_devices[1]
-
-    device_obj.device_name = device_part.device_name
-    device_obj.nvme_bdev = device_part.nvme_bdev
-    device_obj.size = device_part.size
-
-    #######################################
 
     ret = _def_create_device_stack(device_obj, snode)
     if not ret:

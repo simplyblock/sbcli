@@ -52,13 +52,14 @@ class SbcliUtils:
                     raise e
                 self.logger.info(f"Retrying API {api_url}. Attempt: {10 - retry + 1}")
 
-    def post_request(self, api_url, headers=None, body=None):
+    def post_request(self, api_url, headers=None, body=None, retry=10):
         """Performs post request on the given API URL
 
         Args:
             api_url (str): Endpoint to request
             headers (dict, optional): Headers needed. Defaults to None.
             body (dict, optional): Body to send in request. Defaults to None.
+            retry (int, optional): number of retries if request failed. Default is 10.
 
         Returns:
             dict: response returned
@@ -66,7 +67,6 @@ class SbcliUtils:
         request_url = self.cluster_api_url + api_url
         headers = headers if headers else self.headers
         self.logger.info(f"Calling POST for {api_url} with headers: {headers}, body: {body}")
-        retry = 10
         while retry > 0:
             try:
                 resp = requests.post(request_url, headers=headers,
@@ -325,7 +325,7 @@ class SbcliUtils:
 
     def add_lvol(self, lvol_name, pool_name, size="256M", distr_ndcs=0, distr_npcs=0,
                  distr_bs=4096, distr_chunk_bs=4096, max_rw_iops=0, max_rw_mbytes=0,
-                 max_r_mbytes=0, max_w_mbytes=0, host_id=None):
+                 max_r_mbytes=0, max_w_mbytes=0, host_id=None, retry=10):
         """Adds lvol with given params
         """
         lvols = self.list_lvols()
@@ -352,7 +352,7 @@ class SbcliUtils:
         if host_id:
             body["host_id"] = host_id
         
-        self.post_request(api_url="/lvol", body=body)
+        self.post_request(api_url="/lvol", body=body, retry=retry)
 
     def delete_lvol(self, lvol_name):
         """Deletes lvol with given name

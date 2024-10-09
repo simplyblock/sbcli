@@ -1,4 +1,5 @@
 # coding=utf-8
+import datetime
 import threading
 import time
 
@@ -9,6 +10,7 @@ from simplyblock_core.models.lvol_model import LVol
 
 
 from simplyblock_core.models.nvme_device import NVMeDevice
+from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.rpc_client import RPCClient
 
 
@@ -31,6 +33,17 @@ def process_device_event(event):
                     if dev.status not in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_READONLY]:
                         logger.info(f"The storage device is not online, skipping. status: {dev.status}")
                         event.status = 'skipped'
+                        node_status_event = {
+                            "timestamp": datetime.datetime.now().isoformat("T", "seconds") + 'Z',
+                            "event_type": "device_status",
+                            "storage_ID": storage_id,
+                            "status": dev.status}
+                        events = {"events": [node_status_event]}
+                        snode = db_controller.get_storage_node_by_id(node_id)
+                        rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
+                        ret = rpc_client.distr_status_events_update(events)
+                        if not ret:
+                            logger.warning("Failed to send event update")
                         return
 
                     device = dev
@@ -56,9 +69,27 @@ def process_device_event(event):
                     new_remote_devices.append(rem_dev)
             node.remote_devices = new_remote_devices
             node.write_to_db(db_controller.kv_store)
-            distr_controller.send_cluster_map_to_node(node)
+            node_status_event = {
+                "timestamp": datetime.datetime.now().isoformat("T", "seconds") + 'Z',
+                "event_type": "device_status",
+                "storage_ID": storage_id,
+                "status": NVMeDevice.STATUS_UNAVAILABLE}
+            events = {"events": [node_status_event]}
+            ret = rpc_client.distr_status_events_update(events)
+            if not ret:
+                logger.warning("Failed to send event update")
+
+            dev_node = db_controller.get_storage_node_by_id(device.node_id)
+            if dev_node.status == StorageNode.STATUS_ONLINE:
+                device_controller.device_set_io_error(device_id, True)
+                device_controller.device_set_unavailable(device_id)
 
         else:
+            if node.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED]:
+                logger.info(f"Node is not online, skipping. status: {node.status}")
+                event.status = 'skipped'
+                return
+
             if event.message == 'SPDK_BDEV_EVENT_REMOVE':
                 if device.node_id == node_id:
                     logger.info(f"Removing storage id: {storage_id} from node: {node_id}")

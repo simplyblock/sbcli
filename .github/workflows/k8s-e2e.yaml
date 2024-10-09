@@ -235,7 +235,7 @@ jobs:
             --set logicalVolume.snapshot="True" \
             --set image.spdkcsi.tag=master-arm64 \
             --set image.simplyblock.tag=main \
-            --set storagenode.spdkImage=simplyblock/spdk:main-latest
+            --set storagenode.spdkImage=simplyblock/spdk:feature-journal-ha-latest
 
       # - name: Wait for Storage Nodes to Become Online
       #   run: |

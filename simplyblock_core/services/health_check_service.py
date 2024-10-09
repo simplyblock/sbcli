@@ -4,6 +4,7 @@ from datetime import datetime
 
 
 from simplyblock_core.controllers import health_controller, storage_events, device_events
+from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.rpc_client import RPCClient
 from simplyblock_core import constants, kv_store, utils, distr_controller
@@ -55,6 +56,9 @@ while True:
 
             if snode.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_UNREACHABLE]:
                 logger.info(f"Node status is: {snode.status}, skipping")
+                set_node_health_check(snode, False)
+                for dev in snode.nvme_devices:
+                    set_device_health_check(cluster_id, dev, False)
                 continue
 
             # 1- check node ping
@@ -64,10 +68,6 @@ while True:
             # 2- check node API
             node_api_check = health_controller._check_node_api(snode.mgmt_ip)
             logger.info(f"Check: node API {snode.mgmt_ip}:5000 ... {node_api_check}")
-
-            if snode.status == StorageNode.STATUS_OFFLINE:
-                set_node_health_check(snode, ping_check & node_api_check)
-                continue
 
             # 3- check node RPC
             node_rpc_check = health_controller._check_node_rpc(
@@ -108,16 +108,17 @@ while True:
                     snode.rpc_username, snode.rpc_password,
                     timeout=10, retry=1)
                 for remote_device in snode.remote_devices:
-                    ret = rpc_client.get_bdevs(remote_device.remote_bdev)
-                    if ret:
-                        logger.info(f"Checking bdev: {remote_device.remote_bdev} ... ok")
-                    else:
-                        logger.info(f"Checking bdev: {remote_device.remote_bdev} ... not found")
-                    node_remote_devices_check &= bool(ret)
+                    if db_controller.get_storage_device_by_id(remote_device.get_id()).status == NVMeDevice.STATUS_ONLINE:
+                        ret = rpc_client.get_bdevs(remote_device.remote_bdev)
+                        if ret:
+                            logger.info(f"Checking bdev: {remote_device.remote_bdev} ... ok")
+                        else:
+                            logger.info(f"Checking bdev: {remote_device.remote_bdev} ... not found")
+                        node_remote_devices_check &= bool(ret)
 
                 if snode.jm_device:
                     jm_device = snode.jm_device
-                    logger.info(f"Node node jm: {jm_device}")
+                    logger.info(f"Node JM: {jm_device}")
                     ret = health_controller.check_jm_device(jm_device.get_id())
                     if ret:
                         logger.info(f"Checking jm bdev: {jm_device.jm_bdev} ... ok")
@@ -133,7 +134,7 @@ while True:
                             logger.info(f"Checking bdev: {remote_device.remote_bdev} ... ok")
                         else:
                             logger.info(f"Checking bdev: {remote_device.remote_bdev} ... not found")
-                        node_remote_devices_check &= bool(ret)
+                        # node_remote_devices_check &= bool(ret)
 
                 lvstore_check = True
                 if snode.lvstore and snode.lvstore_stack:

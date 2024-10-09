@@ -170,7 +170,10 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     c.distr_bs = distr_bs
     c.distr_chunk_bs = distr_chunk_bs
     c.ha_type = ha_type
-    c.grafana_endpoint = grafana_endpoint
+    if grafana_endpoint:
+        c.grafana_endpoint = grafana_endpoint
+    else:
+        c.grafana_endpoint = f"http://{DEV_IP}/grafana"
     c.enable_node_affinity = enable_node_affinity
     
     alerts_template_folder = os.path.join(TOP_DIR, "simplyblock_core/scripts/alerting/")
@@ -212,8 +215,9 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     shutil.rmtree(temp_dir)
 
     logger.info("Deploying swarm stack ...")
+    log_level = "DEBUG" if constants.LOG_WEB_DEBUG else "INFO"
     ret = scripts.deploy_stack(cli_pass, DEV_IP, constants.SIMPLY_BLOCK_DOCKER_IMAGE, c.secret, c.uuid,
-                               log_del_interval, metrics_retention_period)
+                               log_del_interval, metrics_retention_period, log_level=log_level)
     logger.info("Deploying swarm stack > Done")
 
     if ret == 0:
