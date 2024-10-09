@@ -545,9 +545,9 @@ class RPCClient:
         params = {
             "bdev_retry_count": 0,
             "transport_retry_count": 0,
-            "ctrlr_loss_timeout_sec": 6,
-            "fast_io_fail_timeout_sec": 5,
-            "reconnect_delay_sec": 5,
+            "ctrlr_loss_timeout_sec": 2,
+            "fast_io_fail_timeout_sec": 1,
+            "reconnect_delay_sec": 1,
             "keep_alive_timeout_ms": 200,
             "transport_ack_timeout": 7,
             "timeout_us": 500000
