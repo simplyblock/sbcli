@@ -8,6 +8,7 @@ import socket
 import ssl
 import sys
 
+from http.server import HTTPServer
 from http.server import ThreadingHTTPServer
 from http.server import BaseHTTPRequestHandler
 
@@ -127,7 +128,8 @@ def run_server(host, port, user, password, cert=None):
 
     try:
         ServerHandler.key = key
-        httpd = ThreadingHTTPServer((host, port), ServerHandler)
+        # httpd = ThreadingHTTPServer((host, port), ServerHandler)
+        httpd = HTTPServer((host, port), ServerHandler)
         httpd.timeout = TIMEOUT
         if cert is not None:
             httpd.socket = ssl.wrap_socket(httpd.socket, certfile=cert, server_side=True)
