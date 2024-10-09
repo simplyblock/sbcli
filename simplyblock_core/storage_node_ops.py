@@ -1288,9 +1288,9 @@ def delete_storage_node(node_id):
 
     snode.remove(db_controller.kv_store)
 
-    for lvol in db_controller.get_lvols(snode.cluster_id):
-        logger.info(f"Sending cluster map to LVol: {lvol.get_id()}")
-        send_cluster_map(lvol.get_id())
+    for node in db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id):
+        logger.info(f"Sending cluster map to node: {node.get_id()}")
+        send_cluster_map(node.get_id())
 
     storage_events.snode_delete(snode)
     logger.info("done")
@@ -1697,16 +1697,15 @@ def restart_storage_node(
             node.remote_jm_devices = _connect_to_remote_jm_devs(node)
         node.write_to_db(kv_store)
 
-        logger.info(f"Sending cluster map to node {node.get_id()}")
-        distr_controller.send_cluster_map_to_node(node)
+    logger.info(f"Sending device status event")
+    for dev in snode.nvme_devices:
+        distr_controller.send_dev_status_event(dev, dev.status)
 
     logger.info("Starting migration tasks")
     for dev in snode.nvme_devices:
         if dev.status != NVMeDevice.STATUS_ONLINE:
-            logger.info(f"Device is not online: {dev.get_id()}, status: {dev.status}")
+            logger.debug(f"Device is not online: {dev.get_id()}, status: {dev.status}")
             continue
-
-        # distr_controller.send_dev_status_event(dev, NVMeDevice.STATUS_ONLINE)
         tasks_controller.add_device_mig_task(dev.get_id())
 
     # Create distribs, raid0, and lvstore and expose lvols to the fabrics

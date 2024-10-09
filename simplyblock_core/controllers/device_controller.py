@@ -660,11 +660,9 @@ def add_device(device_id):
         else:
             node.remote_devices.append(device_obj)
         node.write_to_db(db_controller.kv_store)
-        distr_controller.send_cluster_map_to_node(node)
         time.sleep(1)
 
-    # send cluster map to current node:
-    distr_controller.send_cluster_map_to_node(snode)
+    distr_controller.send_dev_status_event(device_obj, device_obj.status)
 
     device_events.device_create(device_obj)
 
