@@ -150,16 +150,15 @@ def process_event(event_id):
 def start_event_collector_on_node(node_id):
     logger.info(f"Starting Distr event collector on node: {node_id}")
 
+    snode = db_controller.get_storage_node_by_id(node_id)
+    client = rpc_client.RPCClient(
+        snode.mgmt_ip,
+        snode.rpc_port,
+        snode.rpc_username,
+        snode.rpc_password,
+        timeout=10, retry=2)
+
     while True:
-
-        snode = db_controller.get_storage_node_by_id(node_id)
-        client = rpc_client.RPCClient(
-            snode.mgmt_ip,
-            snode.rpc_port,
-            snode.rpc_username,
-            snode.rpc_password,
-            timeout=10, retry=2)
-
         try:
             events = client.distr_status_events_discard_then_get(0, constants.DISTR_EVENT_COLLECTOR_NUM_OF_EVENTS)
             if events:
@@ -178,13 +177,13 @@ def start_event_collector_on_node(node_id):
                 client.distr_status_events_discard_then_get(len(events), 0)
             else:
                 logger.info("no events found, sleeping")
+                time.sleep(constants.DISTR_EVENT_COLLECTOR_INTERVAL_SEC)
+
 
         except Exception as e:
             logger.error("Failed to process distr events")
             logger.exception(e)
-
-        time.sleep(constants.DISTR_EVENT_COLLECTOR_INTERVAL_SEC)
-
+            time.sleep(constants.DISTR_EVENT_COLLECTOR_INTERVAL_SEC)
 
 
 threads_maps = {}
