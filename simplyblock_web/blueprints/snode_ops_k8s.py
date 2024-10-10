@@ -352,6 +352,7 @@ def spdk_process_start():
             'SPDK_CPU_MASK': spdk_cpu_mask,
             'SPDK_MEM': spdk_mem,
             'MEM_GEGA': spdk_mem_gega,
+            'MEM2_GEGA': spdk_mem_gega+4,
             'SERVER_IP': data['server_ip'],
             'RPC_PORT': data['rpc_port'],
             'RPC_USERNAME': data['rpc_username'],

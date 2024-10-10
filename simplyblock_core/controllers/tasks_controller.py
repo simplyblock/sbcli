@@ -7,6 +7,7 @@ import uuid
 from simplyblock_core import kv_store, constants, utils
 from simplyblock_core.controllers import tasks_events, device_controller
 from simplyblock_core.models.job_schedule import JobSchedule
+from simplyblock_core.models.storage_node import StorageNode
 
 logger = logging.getLogger()
 db_controller = kv_store.DBController()
@@ -155,6 +156,8 @@ def get_active_node_mig_task(cluster_id, node_id):
 def add_device_failed_mig_task(device_id):
     device = db_controller.get_storage_devices(device_id)
     for node in db_controller.get_storage_nodes_by_cluster_id(device.cluster_id):
+        if node.status == StorageNode.STATUS_REMOVED:
+            continue
         for bdev in node.lvstore_stack:
             if bdev['type'] == "bdev_distr":
                 _add_task(JobSchedule.FN_FAILED_DEV_MIG, device.cluster_id, node.get_id(), device.get_id(),
