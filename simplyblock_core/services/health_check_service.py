@@ -54,7 +54,7 @@ while True:
         for snode in snodes:
             logger.info("Node: %s, status %s", snode.get_id(), snode.status)
 
-            if snode.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_UNREACHABLE]:
+            if snode.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_UNREACHABLE, StorageNode.STATUS_SUSPENDED]:
                 logger.info(f"Node status is: {snode.status}, skipping")
                 set_node_health_check(snode, False)
                 for dev in snode.nvme_devices:
