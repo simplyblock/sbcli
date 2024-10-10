@@ -57,7 +57,7 @@ SIMPLY_BLOCK_CLI_NAME = "sbcli-ga"
 TASK_EXEC_INTERVAL_SEC = 30
 TASK_EXEC_RETRY_COUNT = 8
 
-SIMPLY_BLOCK_SPDK_ULTRA_IMAGE = "simplyblock/spdk:feature-journal-ha-latest"
+SIMPLY_BLOCK_SPDK_ULTRA_IMAGE = "simplyblock/spdk:release-ga-1.0-latest"
 
 GELF_PORT = 12201
 
