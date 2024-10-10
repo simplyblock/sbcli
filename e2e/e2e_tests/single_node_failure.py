@@ -119,7 +119,7 @@ class TestSingleNodeFailure(TestClusterBase):
         try:
             self.logger.info(f"Waiting for node to become offline, {no_lvol_node_uuid}")
             self.sbcli_utils.wait_for_storage_node_status(no_lvol_node_uuid,
-                                                          "offline",
+                                                          "unreachable",
                                                           timeout=500)
             # self.validations(node_uuid=no_lvol_node_uuid,
             #                 node_status=["offline", "in_shutdown", "in_restart"],
