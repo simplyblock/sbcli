@@ -172,12 +172,13 @@ def task_runner_node(task):
         task.write_to_db(db_controller.kv_store)
         return False
 
+
     # shutting down node
     logger.info(f"Shutdown node {node.get_id()}")
     ret = storage_node_ops.shutdown_storage_node(node.get_id(), force=True)
     if ret:
         logger.info(f"Node shutdown succeeded")
-    time.sleep(3)
+    time.sleep(60)
 
     # resetting node
     logger.info(f"Restart node {node.get_id()}")
