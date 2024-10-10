@@ -123,7 +123,7 @@ class TestDeviceNodeRestart(TestClusterBase):
         # Step 3: Start fio workloads on each lvol
         self.logger.info("Starting fio workloads on the logical volumes with different configurations.")
         fio_threads = []
-        fio_configs = [("randrw", "4K"), ("read", "8K"), ("write", "16K"), ("trimwrite", "32K")]
+        fio_configs = [("randrw", "4K"), ("read", "8K"), ("write", "16K"), ("randtrimwrite", "32K")]
 
         for i, (rw, bs) in enumerate(fio_configs):
             lvol_name = f"test_lvol_{i+1}"
@@ -241,7 +241,7 @@ class TestDeviceNodeRestart(TestClusterBase):
         self.logger.info("Deleting two files and creating one new test file.")
         self.ssh_obj.delete_files(self.mgmt_nodes[0], remounted_testfiles[:2])
         self.ssh_obj.exec_command(self.mgmt_nodes[0], 
-                                  f"sudo dd if=/dev/zero of={lvol_fio_path["test_lvol_1"]["mount_path"]}/new_testfile bs=1M count=10")
+                                  f"sudo dd if=/dev/zero of={lvol_fio_path['test_lvol_1']['mount_path']}/new_testfile bs=1M count=10")
 
         remounted_testfiles[1] = f'{lvol_fio_path["test_lvol_1"]["mount_path"]}/new_testfile'
         remounted_testfiles = remounted_testfiles[1:]
@@ -263,6 +263,13 @@ class TestDeviceNodeRestart(TestClusterBase):
         self.logger.info("Stopping container on node 1 (ungraceful shutdown).")
         node_ip = self.journal_manager.sn_journal_map[self.lvol_sn_node]['primary_journal'][1]
         self.ssh_obj.stop_docker_containers(node_ip, "spdk")
+        self.sbcli_utils.wait_for_storage_node_status(self.lvol_sn_node,
+                                                      "unreachable",
+                                                      timeout=300)
+
+        sleep_n_sec(420)
+
+        self.sbcli_utils.restart_node(node_uuid=self.lvol_sn_node)
 
         sleep_n_sec(420)
 

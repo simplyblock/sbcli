@@ -245,6 +245,14 @@ class TestClusterBase:
         for mount_dir in mount_dirs:
             self.logger.info(f"Removing directory {mount_dir}")
             self.ssh_obj.remove_dir(node=self.mgmt_nodes[0], dir_path=mount_dir)
+    
+    def disconnect_lvol(self, lvol_device):
+        """Disconnects the logical volume."""
+        nqn_lvol = self.ssh_obj.get_nvme_subsystems(node=self.mgmt_nodes[0],
+                                                    nqn_filter=lvol_device)
+        for nqn in nqn_lvol:
+            self.logger.info(f"Disconnecting NVMe subsystem: {nqn}")
+            self.ssh_obj.disconnect_nvme(node=self.mgmt_nodes[0], nqn_grep=nqn)
 
     def disconnect_lvols(self):
         """ Disconnect all NVMe devices with NQN containing 'lvol' """

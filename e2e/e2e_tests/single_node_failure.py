@@ -119,8 +119,9 @@ class TestSingleNodeFailure(TestClusterBase):
         try:
             self.logger.info(f"Waiting for node to become offline, {no_lvol_node_uuid}")
             self.sbcli_utils.wait_for_storage_node_status(no_lvol_node_uuid,
-                                                          "offline",
+                                                          "unreachable",
                                                           timeout=500)
+            sleep_n_sec(30)
             # self.validations(node_uuid=no_lvol_node_uuid,
             #                 node_status=["offline", "in_shutdown", "in_restart"],
             #                 # The status changes between them very quickly hence
@@ -165,7 +166,6 @@ class TestSingleNodeFailure(TestClusterBase):
         except Exception as exp:
             self.logger.debug(exp)
             # self.start_ec2_instance(instance_id=instance_id)
-            # self.sbcli_utils.restart_node(node_uuid=no_lvol_node_uuid)
             sleep_n_sec(420)
             self.sbcli_utils.restart_node(node_uuid=no_lvol_node_uuid)
             self.logger.info(f"Waiting for node to become online, {no_lvol_node_uuid}")
@@ -173,7 +173,7 @@ class TestSingleNodeFailure(TestClusterBase):
                                                           "online",
                                                           timeout=300)
             raise exp
-        
+
         sleep_n_sec(420)
         self.sbcli_utils.restart_node(node_uuid=no_lvol_node_uuid)
         self.logger.info(f"Waiting for node to become online, {no_lvol_node_uuid}")
