@@ -476,15 +476,15 @@ class SshUtils:
 
     def restart_device_with_errors(self, node, device_id):
         # Induce errors on the device
-        command = f"{self.base_cmd} device test-mode {device_id} --error rw"
+        command = f"{self.base_cmd} sn device test-mode {device_id} --error rw"
         self.exec_command(node, command)
 
     def restart_jm_device(self, node, jm_device_id):
-        command = f"{self.base_cmd} restart-jm-device {jm_device_id}"
+        command = f"{self.base_cmd} sn restart-jm-device {jm_device_id}"
         self.exec_command(node, command)
 
     def remove_jm_device(self, node, jm_device_id):
-        command = f"{self.base_cmd} remove-jm-device {jm_device_id}"
+        command = f"{self.base_cmd} sn remove-jm-device {jm_device_id}"
         self.exec_command(node, command)
         
     def restart_device(self, node, device_id):

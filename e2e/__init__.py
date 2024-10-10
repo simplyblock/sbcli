@@ -18,8 +18,15 @@ def get_all_tests(custom=True, k8s_test=False):
         TestLvolFioNpcs1,
         TestLvolFioNpcs2,
         TestSingleNodeFailure,
+        # TestManyLvolSameNode,
+        # TestBatchLVOLsLimit,
+
+        # Enable when testing snapshot and cloning
+
+        # TestMultiLvolFio,
+        # TestSnapshotBatchCloneLVOLs,
+        # TestManyClonesFromSameSnapshot,
         # TestDeviceNodeRestart
-        # TestMultiLvolFio, - Enable when testing
     ]
     if not custom:
         tests.remove(TestLvolFioNpcsCustom)

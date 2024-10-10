@@ -226,7 +226,7 @@ class TestLvolFioNpcs0(TestLvolFioBase):
                                                     readwrite="randrw"))
             fio_threads.append(self.run_fio_on_lvol(lvol_name_2,
                                                     device=self.lvol_devices[lvol_name_2]["Device"],
-                                                    readwrite="randtrimwrite"))
+                                                    readwrite="trimwrite"))
 
             self.common_utils.manage_fio_threads(
                 node=self.mgmt_nodes[0], threads=fio_threads, timeout=600
@@ -236,7 +236,7 @@ class TestLvolFioNpcs0(TestLvolFioBase):
 
             # Validate FIO outputs
             self.validate_fio_output(lvol_name_1, read_check=True, write_check=True)
-            self.validate_fio_output(lvol_name_2, read_check=True, write_check=True,
+            self.validate_fio_output(lvol_name_2, read_check=False, write_check=True,
                                      trim_check=True)
 
             # Cleanup after running FIO
@@ -300,7 +300,7 @@ class TestLvolFioNpcs1(TestLvolFioBase):
 
             # Validate FIO outputs
             self.validate_fio_output(lvol_name_1, read_check=True, write_check=True)
-            self.validate_fio_output(lvol_name_2, read_check=True, write_check=True,
+            self.validate_fio_output(lvol_name_2, read_check=False, write_check=True,
                                      trim_check=True)
 
             # Cleanup after running FIO
