@@ -271,6 +271,10 @@ class TestDeviceNodeRestart(TestClusterBase):
 
         self.sbcli_utils.restart_node(node_uuid=self.lvol_sn_node)
 
+        sleep_n_sec(420)
+
+        self.sbcli_utils.restart_node(node_uuid=self.lvol_sn_node)
+
         # Step 14: Restart node 1, reconnect NVMe devices, and re-mount
         self.logger.info(f"Waiting for node to become online, {self.lvol_sn_node}")
         self.sbcli_utils.wait_for_storage_node_status(self.lvol_sn_node,
@@ -333,9 +337,6 @@ class TestDeviceNodeRestart(TestClusterBase):
         
         # Log the journal map for all lvols
         self.logger.info(f"Lvol Journal Map: {self.journal_manager.get_all_sn()}")
-    
-    def get_node_ip(self, node_id):
-        return self.sbcli_utils.get_storage_node_details(node_id)[0]["mgmt_ip"]
 
     def stop_and_restart_based_on_journals(self):
         """

@@ -150,41 +150,43 @@ def process_event(event_id):
 def start_event_collector_on_node(node_id):
     logger.info(f"Starting Distr event collector on node: {node_id}")
 
+    snode = db_controller.get_storage_node_by_id(node_id)
+    client = rpc_client.RPCClient(
+        snode.mgmt_ip,
+        snode.rpc_port,
+        snode.rpc_username,
+        snode.rpc_password,
+        timeout=10, retry=2)
+
     while True:
+        page = 1
+        while True:
+            try:
+                events = client.distr_status_events_discard_then_get(
+                    0, constants.DISTR_EVENT_COLLECTOR_NUM_OF_EVENTS * page)
+                if events:
+                    logger.info(f"Found events: {len(events)}")
+                    event_ids = []
+                    for ev in events:
+                        logger.debug(ev)
+                        ev_id = events_controller.log_distr_event(snode.cluster_id, snode.get_id(), ev)
+                        event_ids.append(ev_id)
 
-        snode = db_controller.get_storage_node_by_id(node_id)
-        client = rpc_client.RPCClient(
-            snode.mgmt_ip,
-            snode.rpc_port,
-            snode.rpc_username,
-            snode.rpc_password,
-            timeout=10, retry=2)
+                    for eid in event_ids:
+                        logger.info(f"Processing event: {eid}")
+                        process_event(eid)
 
-        try:
-            events = client.distr_status_events_discard_then_get(0, constants.DISTR_EVENT_COLLECTOR_NUM_OF_EVENTS)
-            if events:
-                logger.info(f"Found events: {len(events)}")
-                event_ids = []
-                for ev in events:
-                    logger.debug(ev)
-                    ev_id = events_controller.log_distr_event(snode.cluster_id, snode.get_id(), ev)
-                    event_ids.append(ev_id)
-
-                for eid in event_ids:
-                    logger.info(f"Processing event: {eid}")
-                    process_event(eid)
-
-                logger.info(f"Discarding events: {len(events)}")
-                client.distr_status_events_discard_then_get(len(events), 0)
-            else:
-                logger.info("no events found, sleeping")
-
-        except Exception as e:
-            logger.error("Failed to process distr events")
-            logger.exception(e)
-
+                    logger.info(f"Discarding events: {len(events)}")
+                    client.distr_status_events_discard_then_get(len(events), 0)
+                    page *= 10
+                else:
+                    logger.info("no events found, sleeping")
+                    break
+            except Exception as e:
+                logger.error("Failed to process distr events")
+                logger.exception(e)
+                break
         time.sleep(constants.DISTR_EVENT_COLLECTOR_INTERVAL_SEC)
-
 
 
 threads_maps = {}
