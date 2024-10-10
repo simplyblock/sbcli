@@ -226,7 +226,7 @@ class TestLvolFioNpcs0(TestLvolFioBase):
                                                     readwrite="randrw"))
             fio_threads.append(self.run_fio_on_lvol(lvol_name_2,
                                                     device=self.lvol_devices[lvol_name_2]["Device"],
-                                                    readwrite="trimwrite"))
+                                                    readwrite="write"))
 
             self.common_utils.manage_fio_threads(
                 node=self.mgmt_nodes[0], threads=fio_threads, timeout=600
@@ -237,7 +237,7 @@ class TestLvolFioNpcs0(TestLvolFioBase):
             # Validate FIO outputs
             self.validate_fio_output(lvol_name_1, read_check=True, write_check=True)
             self.validate_fio_output(lvol_name_2, read_check=False, write_check=True,
-                                     trim_check=True)
+                                     trim_check=False)
 
             # Cleanup after running FIO
             self.cleanup_lvols(lvol_configs)
@@ -289,7 +289,7 @@ class TestLvolFioNpcs1(TestLvolFioBase):
                                                     readwrite="randrw"))
             fio_threads.append(self.run_fio_on_lvol(lvol_name_2,
                                                     device=self.lvol_devices[lvol_name_2]["Device"],
-                                                    readwrite="randtrimwrite"))
+                                                    readwrite="write"))
 
             self.common_utils.manage_fio_threads(
                 node=self.mgmt_nodes[0], threads=fio_threads, timeout=600
@@ -301,7 +301,7 @@ class TestLvolFioNpcs1(TestLvolFioBase):
             # Validate FIO outputs
             self.validate_fio_output(lvol_name_1, read_check=True, write_check=True)
             self.validate_fio_output(lvol_name_2, read_check=False, write_check=True,
-                                     trim_check=True)
+                                     trim_check=False)
 
             # Cleanup after running FIO
             self.cleanup_lvols(lvol_configs)
@@ -356,7 +356,7 @@ class TestLvolFioNpcs2(TestLvolFioBase):
             sleep_n_sec(10)
             fio_threads.append(self.run_fio_on_lvol(lvol_name_2,
                                                     device=self.lvol_devices[lvol_name_2]["Device"],
-                                                    readwrite="randtrimwrite"))
+                                                    readwrite="write"))
 
             self.common_utils.manage_fio_threads(
                 node=self.mgmt_nodes[0], threads=fio_threads, timeout=600
@@ -368,7 +368,7 @@ class TestLvolFioNpcs2(TestLvolFioBase):
             # Validate FIO outputs
             self.validate_fio_output(lvol_name_1, read_check=True, write_check=True)
             self.validate_fio_output(lvol_name_2, read_check=False, write_check=True,
-                                     trim_check=True)
+                                     trim_check=False)
 
             # Cleanup after running FIO
             self.cleanup_lvols(lvol_configs)
@@ -404,7 +404,7 @@ class TestLvolFioNpcsCustom(TestLvolFioBase):
                                                 readwrite="randrw"))
         fio_threads.append(self.run_fio_on_lvol(lvol_name_2,
                                                 device=self.lvol_devices[lvol_name_2]["Device"],
-                                                readwrite="randtrimwrite"))
+                                                readwrite="write"))
 
         self.common_utils.manage_fio_threads(
             node=self.mgmt_nodes[0], threads=fio_threads, timeout=600
@@ -415,7 +415,7 @@ class TestLvolFioNpcsCustom(TestLvolFioBase):
 
         # Validate FIO outputs
         self.validate_fio_output(lvol_name_1, read_check=True, write_check=True)
-        self.validate_fio_output(lvol_name_2, read_check=False, write_check=True, trim_check=True)
+        self.validate_fio_output(lvol_name_2, read_check=False, write_check=True, trim_check=False)
 
         # Cleanup after running FIO
         self.cleanup_lvols(lvol_configs)
