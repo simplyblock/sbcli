@@ -1683,6 +1683,10 @@ def restart_storage_node(
         logger.info("Connecting to remote JMs")
         snode.remote_jm_devices = _connect_to_remote_jm_devs(snode)
 
+    logger.info(f"Sending device status event")
+    for dev in snode.nvme_devices:
+        distr_controller.send_dev_status_event(dev, dev.status)
+
     logger.info("Setting node status to Online")
     set_node_status(node_id, StorageNode.STATUS_ONLINE)
 
@@ -1697,9 +1701,6 @@ def restart_storage_node(
             node.remote_jm_devices = _connect_to_remote_jm_devs(node)
         node.write_to_db(kv_store)
 
-    logger.info(f"Sending device status event")
-    for dev in snode.nvme_devices:
-        distr_controller.send_dev_status_event(dev, dev.status)
 
     logger.info("Starting migration tasks")
     for dev in snode.nvme_devices:
