@@ -124,7 +124,6 @@ def rpc_method():
     data = request.get_json()
     method = data.get('method')
     params = data.get('params')
-    result = True
     if method == "spdk_get_version":
         result = {"version": "mock"}
 
@@ -133,6 +132,15 @@ def rpc_method():
 
     elif method == "alceml_get_pages_usage":
         result = {"res":1,"npages_allocated":400,"npages_used":354,"npages_nmax":51100,"pba_page_size":2097152,"nvols":9}
+
+    elif method == "ultra21_util_get_malloc_stats":
+        result = {"socket_id":0,
+                  "heap_totalsz_bytes":2130706432,
+                  "heap_freesz_bytes":9285696,
+                  "greatest_free_size":1052800,
+                  "free_count":1306,
+                  "alloc_count":2951,
+                  "heap_allocsz_bytes":2121420736}
 
     else:
         result = [bdev_info]

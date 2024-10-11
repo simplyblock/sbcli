@@ -641,7 +641,7 @@ def add_lvol_on_node(lvol, snode, ha_comm_addrs=None, ha_inode_self=None):
             found = False
             if ret:
                 for ty in ret:
-                    if ty['trtype'] == tr_type:
+                    if "trtype" in ty and ty['trtype'] == tr_type:
                         found = True
             if found is False:
                 ret = rpc_client.transport_create(tr_type)
@@ -695,7 +695,7 @@ def recreate_lvol_on_node(lvol, snode, ha_comm_addrs=None, ha_inode_self=None):
             found = False
             if ret:
                 for ty in ret:
-                    if ty['trtype'] == tr_type:
+                    if 'trtype' in ty and ty['trtype'] == tr_type:
                         found = True
             if found is False:
                 ret = rpc_client.transport_create(tr_type)
