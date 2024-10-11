@@ -31,6 +31,8 @@ def rpc_method():
     data = request.get_json()
     method = data.get('method')
     params = data.get('params')
+    if method == "spdk_get_version":
+        return jsonify({"jsonrpc": "2.0", "id": 1, "result": {"version": "mock"}})
     info = {
       "name": "nvme_1cn1",
       "aliases": [
