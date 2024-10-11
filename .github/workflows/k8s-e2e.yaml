@@ -234,8 +234,8 @@ jobs:
             --set logicalVolume.pool_name="testing1" \
             --set logicalVolume.snapshot="True" \
             --set image.spdkcsi.tag=master-arm64 \
-            --set image.simplyblock.tag=main \
-            --set storagenode.spdkImage=simplyblock/spdk:feature-journal-ha-latest
+            --set image.simplyblock.tag=release-ga-1.0 \
+            --set storagenode.spdkImage=simplyblock/spdk:release-ga-1.0-latest
 
       # - name: Wait for Storage Nodes to Become Online
       #   run: |
