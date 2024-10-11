@@ -2306,7 +2306,7 @@ def get_node_port_iostats(port_id, history=None, records_count=20):
     return utils.print_table(out)
 
 
-def deploy(ifname):
+def deploy(ifname, mock_port=5000):
     if not ifname:
         ifname = "eth0"
 
@@ -2327,10 +2327,11 @@ def deploy(ifname):
     ret = scripts.configure_docker(dev_ip)
 
     node_docker = docker.DockerClient(base_url=f"tcp://{dev_ip}:2375", version="auto", timeout=60 * 5)
+    cont_name = f"SNodeAPI_{mock_port}"
     # create the api container
     nodes = node_docker.containers.list(all=True)
     for node in nodes:
-        if node.attrs["Name"] == "/SNodeAPI":
+        if node.attrs["Name"] == f"/{cont_name}":
             logger.info("SNodeAPI container found, removing...")
             node.stop()
             node.remove(force=True)
@@ -2339,10 +2340,10 @@ def deploy(ifname):
     logger.info("Creating SNodeAPI container")
     container = node_docker.containers.run(
         constants.SIMPLY_BLOCK_DOCKER_IMAGE,
-        "python simplyblock_web/node_webapp.py storage_node",
+        f"python simplyblock_web/node_webapp.py storage_node_mock {mock_port}",
         detach=True,
         privileged=True,
-        name="SNodeAPI",
+        name=cont_name,
         network_mode="host",
         volumes=[
             '/etc/foundationdb:/etc/foundationdb',
@@ -2353,13 +2354,11 @@ def deploy(ifname):
             '/sys:/sys'],
         restart_policy={"Name": "always"},
         environment=[
+            f"MOCK_PORT={mock_port}",
             f"DOCKER_IP={dev_ip}"
         ]
     )
-    logger.info("Pulling SPDK images")
-    logger.debug(constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE)
-    node_docker.images.pull(constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE)
-    return f"{dev_ip}:5000"
+    return f"{dev_ip}:{mock_port}"
 
 
 def deploy_cleaner():

@@ -122,14 +122,16 @@ class ServerHandler(BaseHTTPRequestHandler):
                 self.do_INTERNALERROR()
 
 
-def run_server(host, port, user, password, cert=None):
+def run_server(host, port, user, password, cert=None, is_threading_enabled=False):
     # encoding user and password
     key = base64.b64encode((user+':'+password).encode(encoding='ascii')).decode('ascii')
 
     try:
         ServerHandler.key = key
-        # httpd = ThreadingHTTPServer((host, port), ServerHandler)
-        httpd = HTTPServer((host, port), ServerHandler)
+        if is_threading_enabled:
+            httpd = ThreadingHTTPServer((host, port), ServerHandler)
+        else:
+            httpd = HTTPServer((host, port), ServerHandler)
         httpd.timeout = TIMEOUT
         if cert is not None:
             httpd.socket = ssl.wrap_socket(httpd.socket, certfile=cert, server_side=True)
@@ -140,6 +142,7 @@ def run_server(host, port, user, password, cert=None):
         httpd.socket.close()
 
 
+is_threading_enabled = get_env_var("MULTI_THREADING_ENABLED", is_required=False, default=False)
 server_ip = get_env_var("SERVER_IP", is_required=True)
 rpc_port = get_env_var("RPC_PORT", is_required=True)
 rpc_username = get_env_var("RPC_USERNAME", is_required=True)
@@ -150,4 +153,5 @@ try:
 except Exception:
     rpc_port = 8080
 
-run_server(server_ip, rpc_port, rpc_username, rpc_password)
+is_threading_enabled = bool(is_threading_enabled)
+run_server(server_ip, rpc_port, rpc_username, rpc_password, is_threading_enabled=is_threading_enabled)

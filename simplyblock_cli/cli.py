@@ -32,6 +32,7 @@ class CLIWrapper:
         # Add storage node
         sub_command = self.add_sub_command(subparser, "deploy", 'Deploy local services for remote ops (local run)')
         sub_command.add_argument("--ifname", help='Management interface name, default: eth0')
+        sub_command.add_argument("--port", help='instance port')
 
         self.add_sub_command(subparser, "deploy-cleaner", 'clean local deploy (local run)')
 
@@ -698,7 +699,7 @@ class CLIWrapper:
             sub_command = args_dict['storage-node']
 
             if sub_command == "deploy":
-                ret = storage_ops.deploy(args.ifname)
+                ret = storage_ops.deploy(args.ifname, args.port)
 
             elif sub_command == "deploy-cleaner":
                 ret = storage_ops.deploy_cleaner()
