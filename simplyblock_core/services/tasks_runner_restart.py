@@ -162,8 +162,8 @@ def task_runner_node(task):
     # is node reachable?
     ping_check = health_controller._check_node_ping(node.mgmt_ip)
     logger.info(f"Check: ping mgmt ip {node.mgmt_ip} ... {ping_check}")
-    node_api_check = health_controller._check_node_api(node.mgmt_ip)
-    logger.info(f"Check: node API {node.mgmt_ip}:5000 ... {node_api_check}")
+    node_api_check = health_controller._check_node_api(node.api_endpoint)
+    logger.info(f"Check: node API {node.api_endpoint} ... {node_api_check}")
     if not ping_check or not node_api_check:
         # node is unreachable, retry
         logger.info(f"Node is not reachable: {task.node_id}, retry")

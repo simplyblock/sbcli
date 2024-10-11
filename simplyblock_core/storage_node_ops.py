@@ -406,7 +406,7 @@ def _create_jm_stack_on_device(rpc_client, nvme, snode, after_restart):
                 found = False
                 if ret:
                     for ty in ret:
-                        if ty['trtype'] == tr_type:
+                        if 'trtype' in ty and ty['trtype'] == tr_type:
                             found = True
                 if found is False:
                     ret = rpc_client.transport_create(tr_type)
@@ -489,7 +489,7 @@ def _create_storage_device_stack(rpc_client, nvme, snode, after_restart):
             found = False
             if ret:
                 for ty in ret:
-                    if ty['trtype'] == tr_type:
+                    if 'trtype' in ty and ty['trtype'] == tr_type:
                         found = True
             if found is False:
                 ret = rpc_client.transport_create(tr_type)
@@ -1362,7 +1362,7 @@ def remove_storage_node(node_id, force_remove=False, force_migrate=False):
         pass
 
     try:
-        if health_controller._check_node_api(snode.mgmt_ip):
+        if health_controller._check_node_api(snode.api_endpoint):
             snode_api = SNodeClient(snode.api_endpoint, timeout=20)
             snode_api.spdk_process_kill()
             snode_api.leave_swarm()
@@ -1907,7 +1907,7 @@ def shutdown_storage_node(node_id, force=False):
         distr_controller.disconnect_device(dev)
 
     logger.info("Stopping SPDK")
-    if health_controller._check_node_api(snode.mgmt_ip):
+    if health_controller._check_node_api(snode.api_endpoint):
         snode_api = SNodeClient(snode.api_endpoint)
         results, err = snode_api.spdk_process_kill()
 
@@ -2466,7 +2466,7 @@ def health_check(node_id):
 
     try:
         logger.info("Connecting to node's API")
-        snode_api = SNodeClient(f"{snode.mgmt_ip}:5000")
+        snode_api = SNodeClient(snode.api_endpoint)
         node_info, _ = snode_api.info()
         logger.info(f"Node info: {node_info['hostname']}")
 
@@ -2482,7 +2482,7 @@ def get_info(node_id):
         logger.error(f"Can not find storage node: {node_id}")
         return False
 
-    snode_api = SNodeClient(f"{snode.mgmt_ip}:5000")
+    snode_api = SNodeClient(snode.api_endpoint)
     node_info, _ = snode_api.info()
     return json.dumps(node_info, indent=2)
 

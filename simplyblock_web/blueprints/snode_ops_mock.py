@@ -235,7 +235,7 @@ def get_node_lsblk():
 
 
 
-spdk_pcie_list = [f"0000:00:{i}d.0" for i in range(1,9)]
+spdk_pcie_list = [f"0000:00:{i}d.0" for i in range(1,3)]
 
 
 @bp.route('/info', methods=['GET'])
