@@ -31,7 +31,73 @@ def rpc_method():
     data = request.get_json()
     method = data.get('method')
     params = data.get('params')
-    return utils.get_response({"jsonrpc":"2.0","id":1,"result":True})
+    info = {
+      "name": "nvme_1cn1",
+      "aliases": [
+        "fa688ea2-2e38-5624-b834-a88e9e875df0"
+      ],
+      "product_name": "NVMe disk",
+      "block_size": 512,
+      "num_blocks": 209715200,
+      "uuid": "fa688ea2-2e38-5624-b834-a88e9e875df0",
+      "assigned_rate_limits": {
+        "rw_ios_per_sec": 0,
+        "rw_mbytes_per_sec": 0,
+        "r_mbytes_per_sec": 0,
+        "w_mbytes_per_sec": 0
+      },
+      "claimed": False,
+      "zoned": False,
+      "supported_io_types": {
+        "read": True,
+        "write": True,
+        "unmap": False,
+        "write_zeroes": True,
+        "flush": True,
+        "reset": True,
+        "compare": False,
+        "compare_and_write": False,
+        "abort": True,
+        "nvme_admin": True,
+        "nvme_io": True
+      },
+      "driver_specific": {
+        "nvme": [
+          {
+            "pci_address": "0000:00:1c.0",
+            "trid": {
+              "trtype": "PCIe",
+              "traddr": "0000:00:1c.0"
+            },
+            "ctrlr_data": {
+              "cntlid": 0,
+              "vendor_id": "0x1d0f",
+              "model_number": "Amazon Elastic Block Store",
+              "serial_number": "vol00ade7db96108da77",
+              "firmware_revision": "2.0",
+              "subnqn": "nqn:2008-08.com.amazon.aws:ebs:vol00ade7db96108da77",
+              "oacs": {
+                "security": 0,
+                "format": 0,
+                "firmware": 0,
+                "ns_manage": 0
+              },
+              "multi_ctrlr": False,
+              "ana_reporting": False
+            },
+            "vs": {
+              "nvme_version": "1.4"
+            },
+            "ns_data": {
+              "id": 1,
+              "can_share": False
+            }
+          }
+        ],
+        "mp_policy": "active_passive"
+      }
+    }
+    return utils.get_response({"jsonrpc":"2.0","id":1,"result":[info], "method": method, "params": params})
 
 
 MODES = [
