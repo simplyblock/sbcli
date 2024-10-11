@@ -42,6 +42,7 @@ class RPCClient:
                         allowed_methods=self.DEFAULT_ALLOWED_METHODS)
         self.session.mount("http://", HTTPAdapter(max_retries=retries))
         self.session.timeout = self.timeout
+        self.session.headers['Content-Type'] = "application/json"
 
     def _request(self, method, params=None):
         ret, _ = self._request2(method, params)

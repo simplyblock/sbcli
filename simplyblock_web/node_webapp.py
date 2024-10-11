@@ -4,7 +4,7 @@ import argparse
 import logging
 import os
 
-from flask import Flask, request
+from flask import Flask, request, jsonify
 
 import utils
 from simplyblock_core import constants
@@ -97,7 +97,7 @@ def rpc_method():
         "mp_policy": "active_passive"
       }
     }
-    return utils.get_response({"jsonrpc":"2.0","id":1,"result":[info], "method": method, "params": params})
+    return jsonify({"jsonrpc":"2.0","id":1,"result":[info], "method": method, "params": params})
 
 
 MODES = [
