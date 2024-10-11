@@ -20,37 +20,24 @@ app = Flask(__name__)
 app.url_map.strict_slashes = False
 app.config['JSONIFY_PRETTYPRINT_REGULAR'] = True
 
-
-@app.route('/', methods=['GET'])
-def status():
-    return utils.get_response("Live")
-
-
-@app.route('/', methods=['POST'])
-def rpc_method():
-    data = request.get_json()
-    method = data.get('method')
-    params = data.get('params')
-    if method == "spdk_get_version":
-        return jsonify({"jsonrpc": "2.0", "id": 1, "result": {"version": "mock"}})
-    info = {
-      "name": "nvme_1cn1",
-      "aliases": [
+bdev_info = {
+    "name": "nvme_1cn1",
+    "aliases": [
         "fa688ea2-2e38-5624-b834-a88e9e875df0"
-      ],
-      "product_name": "NVMe disk",
-      "block_size": 512,
-      "num_blocks": 209715200,
-      "uuid": "fa688ea2-2e38-5624-b834-a88e9e875df0",
-      "assigned_rate_limits": {
+    ],
+    "product_name": "NVMe disk",
+    "block_size": 512,
+    "num_blocks": 209715200,
+    "uuid": "fa688ea2-2e38-5624-b834-a88e9e875df0",
+    "assigned_rate_limits": {
         "rw_ios_per_sec": 0,
         "rw_mbytes_per_sec": 0,
         "r_mbytes_per_sec": 0,
         "w_mbytes_per_sec": 0
-      },
-      "claimed": False,
-      "zoned": False,
-      "supported_io_types": {
+    },
+    "claimed": False,
+    "zoned": False,
+    "supported_io_types": {
         "read": True,
         "write": True,
         "unmap": False,
@@ -62,44 +49,95 @@ def rpc_method():
         "abort": True,
         "nvme_admin": True,
         "nvme_io": True
-      },
-      "driver_specific": {
+    },
+    "driver_specific": {
         "nvme": [
-          {
-            "pci_address": "0000:00:1c.0",
-            "trid": {
-              "trtype": "PCIe",
-              "traddr": "0000:00:1c.0"
-            },
-            "ctrlr_data": {
-              "cntlid": 0,
-              "vendor_id": "0x1d0f",
-              "model_number": "Amazon Elastic Block Store",
-              "serial_number": "vol00ade7db96108da77",
-              "firmware_revision": "2.0",
-              "subnqn": "nqn:2008-08.com.amazon.aws:ebs:vol00ade7db96108da77",
-              "oacs": {
-                "security": 0,
-                "format": 0,
-                "firmware": 0,
-                "ns_manage": 0
-              },
-              "multi_ctrlr": False,
-              "ana_reporting": False
-            },
-            "vs": {
-              "nvme_version": "1.4"
-            },
-            "ns_data": {
-              "id": 1,
-              "can_share": False
+            {
+                "pci_address": "0000:00:1c.0",
+                "trid": {
+                    "trtype": "PCIe",
+                    "traddr": "0000:00:1c.0"
+                },
+                "ctrlr_data": {
+                    "cntlid": 0,
+                    "vendor_id": "0x1d0f",
+                    "model_number": "Amazon Elastic Block Store",
+                    "serial_number": "vol00ade7db96108da77",
+                    "firmware_revision": "2.0",
+                    "subnqn": "nqn:2008-08.com.amazon.aws:ebs:vol00ade7db96108da77",
+                    "oacs": {
+                        "security": 0,
+                        "format": 0,
+                        "firmware": 0,
+                        "ns_manage": 0
+                    },
+                    "multi_ctrlr": False,
+                    "ana_reporting": False
+                },
+                "vs": {
+                    "nvme_version": "1.4"
+                },
+                "ns_data": {
+                    "id": 1,
+                    "can_share": False
+                }
             }
-          }
         ],
         "mp_policy": "active_passive"
-      }
     }
-    return jsonify({"jsonrpc":"2.0","id":1,"result":[info], "method": method, "params": params})
+}
+
+bdev_io_stats = {
+    "tick_rate":2900000000,
+    "ticks":2811277115586,
+    "bdevs":[{
+        "name":"nvme_1cn1",
+        "bytes_read":45502976,
+        "num_read_ops":10323,
+        "bytes_written":775093760,
+        "num_write_ops":82220,
+        "bytes_unmapped":0,
+        "num_unmap_ops":0,
+        "bytes_copied":0,
+        "num_copy_ops":0,
+        "read_latency_ticks":15501865718,
+        "max_read_latency_ticks":21379600,
+        "min_read_latency_ticks":515468,
+        "write_latency_ticks":202590975730,
+        "max_write_latency_ticks":81989542,
+        "min_write_latency_ticks":679586,
+        "unmap_latency_ticks":0,
+        "max_unmap_latency_ticks":0,
+        "min_unmap_latency_ticks":0,
+        "copy_latency_ticks":0,
+        "max_copy_latency_ticks":0,
+        "min_copy_latency_ticks":0,
+        "io_error":{},
+        "driver_specific":{}}]}
+@app.route('/', methods=['GET'])
+def status():
+    return utils.get_response("Live")
+
+
+@app.route('/', methods=['POST'])
+def rpc_method():
+    data = request.get_json()
+    method = data.get('method')
+    params = data.get('params')
+    result = True
+    if method == "spdk_get_version":
+        result = {"version": "mock"}
+
+    elif method == "bdev_get_iostat":
+        result = bdev_io_stats
+
+    elif method == "alceml_get_pages_usage":
+        result = {"res":1,"npages_allocated":400,"npages_used":354,"npages_nmax":51100,"pba_page_size":2097152,"nvols":9}
+
+    else:
+        result = [bdev_info]
+
+    return jsonify({"jsonrpc":"2.0","id":1,"result":result})
 
 
 MODES = [

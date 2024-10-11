@@ -92,7 +92,7 @@ class RPCClient:
         data = self._request("nvmf_get_subsystems")
         if data and nqn_name:
             for d in data:
-                if d['nqn'] == nqn_name:
+                if 'nqn' in d and d['nqn'] == nqn_name:
                     return [d]
             return []
         else:
