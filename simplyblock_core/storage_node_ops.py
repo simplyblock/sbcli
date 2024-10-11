@@ -991,6 +991,8 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
     #rpc_user, rpc_pass = utils.generate_rpc_user_and_pass()
     rpc_user = "rpc_username"
     rpc_pass = "rpc_password"
+    # rpc_port = constants.RPC_HTTP_PROXY_PORT
+    rpc_port = node_ip.split(":")[1]
     mgmt_ip = node_info['network_interface'][iface_name]['ip']
     if not spdk_image:
         spdk_image = constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE
@@ -1000,7 +1002,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
     try:
         results, err = snode_api.spdk_process_start(
             spdk_cpu_mask, spdk_mem, spdk_image, spdk_debug, cluster_ip, fdb_connection,
-            namespace, mgmt_ip, constants.RPC_HTTP_PROXY_PORT, rpc_user, rpc_pass)
+            namespace, mgmt_ip, rpc_port, rpc_user, rpc_pass)
     except Exception as e:
         logger.error(e)
         return False
@@ -1043,7 +1045,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
     snode.data_nics = data_nics
     snode.mgmt_ip = mgmt_ip
     snode.primary_ip = mgmt_ip
-    snode.rpc_port = constants.RPC_HTTP_PROXY_PORT
+    snode.rpc_port = rpc_port
     snode.rpc_username = rpc_user
     snode.rpc_password = rpc_pass
     snode.cluster_id = cluster_id
@@ -1531,7 +1533,7 @@ def restart_storage_node(
         fdb_connection = cluster.db_connection
         results, err = snode_api.spdk_process_start(
             snode.spdk_cpu_mask, spdk_mem, snode.spdk_image, spdk_debug, cluster_ip, fdb_connection,
-            snode.namespace, snode.mgmt_ip, constants.RPC_HTTP_PROXY_PORT, snode.rpc_username, snode.rpc_password)
+            snode.namespace, snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
     except Exception as e:
         logger.error(e)
         return False
