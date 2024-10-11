@@ -23,9 +23,11 @@ bp = Blueprint("snode", __name__, url_prefix="/snode")
 
 
 cluster_id_file = "/etc/foundationdb/sbcli_cluster_id"
-MOCK_PORT = os.environ["MOCK_PORT"]
+MOCK_PORT = os.environ.get("MOCK_PORT") or 5050
+NUM_OF_DEVICES = os.environ.get("NUM_OF_DEVICES") or 2
 CPU_INFO = cpuinfo.get_cpu_info()
 HOSTNAME, _, _ = node_utils.run_command("hostname -s")
+spdk_pcie_list = [f"0000:00:{i}d.0" for i in range(0, int(NUM_OF_DEVICES))]
 
 
 def get_google_cloud_info():
@@ -232,10 +234,6 @@ def get_node_lsblk():
         return []
     data = json.loads(out)
     return data
-
-
-
-spdk_pcie_list = [f"0000:00:{i}d.0" for i in range(1,3)]
 
 
 @bp.route('/info', methods=['GET'])

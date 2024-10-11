@@ -1007,7 +1007,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
         logger.error(e)
         return False
 
-    time.sleep(10)
+    # time.sleep(10)
     if not results:
         logger.error(f"Failed to start spdk: {err}")
         return False
@@ -2308,7 +2308,7 @@ def get_node_port_iostats(port_id, history=None, records_count=20):
     return utils.print_table(out)
 
 
-def deploy(ifname, mock_port=5000):
+def deploy(ifname, mock_port=5000, num_of_devices=2):
     if not ifname:
         ifname = "eth0"
 
@@ -2357,7 +2357,8 @@ def deploy(ifname, mock_port=5000):
         restart_policy={"Name": "always"},
         environment=[
             f"MOCK_PORT={mock_port}",
-            f"DOCKER_IP={dev_ip}"
+            f"DOCKER_IP={dev_ip}",
+            f"NUM_OF_DEVICES={num_of_devices}",
         ]
     )
     return f"{dev_ip}:{mock_port}"
