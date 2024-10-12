@@ -575,7 +575,7 @@ def _create_bdev_stack(lvol, snode, ha_comm_addrs, ha_inode_self):
                 ret = distr_controller.send_cluster_map_to_node(snode)
                 if not ret:
                     return False, "Failed to send cluster map"
-                time.sleep(3)
+                # time.sleep(3)
 
         elif type == "bmap_init":
             ret = rpc_client.ultra21_lvol_bmap_init(**params)

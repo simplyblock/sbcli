@@ -31,7 +31,7 @@ def send_node_status_event(node, node_status):
         ret = rpc_client.distr_status_events_update(events)
 
 
-def send_dev_status_event(device, dev_status):
+def send_dev_status_event(device, dev_status, target_node=None):
     db_controller = DBController()
     storage_ID = device.cluster_device_order
     node_status_event = {
@@ -41,7 +41,10 @@ def send_dev_status_event(device, dev_status):
         "status": dev_status}
     events = {"events": [node_status_event]}
     logger.debug(node_status_event)
-    snodes = db_controller.get_storage_nodes_by_cluster_id(device.cluster_id)
+    if target_node:
+        snodes = [target_node]
+    else:
+        snodes = db_controller.get_storage_nodes_by_cluster_id(device.cluster_id)
     for node in snodes:
         if node.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED]:
             continue
