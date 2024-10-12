@@ -33,7 +33,7 @@ def get_env_var(name, default=None, is_required=False):
 
 def rpc_call(req):
     req_data = json.loads(req.decode('ascii'))
-    logger.debug("Request data: "+req_data)
+    logger.debug(f"Request data: {str(req_data)}")
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     sock.settimeout(TIMEOUT)
     sock.connect(rpc_sock)
@@ -63,7 +63,7 @@ def rpc_call(req):
     if not response and len(buf) > 0:
         raise
 
-    logger.debug("Response data: "+buf)
+    logger.debug(f"Response data: {buf}")
 
     return buf
 
