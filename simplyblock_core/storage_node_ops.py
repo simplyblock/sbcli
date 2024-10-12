@@ -790,7 +790,10 @@ def _connect_to_remote_jm_devs(this_node, jm_ids=[]):
         this_node.rpc_username, this_node.rpc_password, timeout=10, retry=2)
 
     node_bdevs = rpc_client.get_bdevs()
-    node_bdev_names = [b['name'] for b in node_bdevs]
+    if node_bdevs:
+        node_bdev_names = [b['name'] for b in node_bdevs]
+    else:
+        node_bdev_names = []
     remote_devices = []
     if jm_ids:
         for jm_id in jm_ids:
