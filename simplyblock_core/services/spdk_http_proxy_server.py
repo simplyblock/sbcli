@@ -141,7 +141,7 @@ def run_server(host, port, user, password, cert=None, is_threading_enabled=False
         httpd.socket.close()
 
 
-TIMEOUT = get_env_var("TIMEOUT", is_required=False, default=60*5)
+TIMEOUT = int(get_env_var("TIMEOUT", is_required=False, default=60*5))
 is_threading_enabled = get_env_var("MULTI_THREADING_ENABLED", is_required=False, default=False)
 server_ip = get_env_var("SERVER_IP", is_required=True)
 rpc_port = get_env_var("RPC_PORT", is_required=True)
