@@ -813,7 +813,13 @@ def _connect_to_remote_jm_devs(this_node, jm_ids=[]):
         for jm_id in online_jms:
             jm_dev = db_controller.get_jm_device_by_id(jm_id)
             if jm_dev:
-                remote_devices.append(jm_dev)
+                found = False
+                for jm in remote_devices:
+                    if jm.get_id() == jm_dev.get_id():
+                        found = True
+                        break
+                if not found:
+                    remote_devices.append(jm_dev)
 
     for jm_dev in remote_devices:
         name = f"remote_{jm_dev.jm_bdev}"
