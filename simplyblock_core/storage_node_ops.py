@@ -514,15 +514,14 @@ def _create_storage_device_stack(rpc_client, nvme, snode, after_restart):
     return nvme
 
 
-def _create_device_partitions(rpc_client, nvme, snode):
+def _create_device_partitions(rpc_client, nvme, snode, num_partitions_per_dev, jm_percent):
     nbd_device = rpc_client.nbd_start_disk(nvme.nvme_bdev)
     time.sleep(3)
     if not nbd_device:
         logger.error(f"Failed to start nbd dev")
         return False
     snode_api = SNodeClient(snode.api_endpoint)
-    result, error = snode_api.make_gpt_partitions(
-        nbd_device, snode.jm_percent, snode.num_partitions_per_dev)
+    result, error = snode_api.make_gpt_partitions(nbd_device, jm_percent, num_partitions_per_dev)
     if error:
         logger.error(f"Failed to make partitions")
         logger.error(error)
@@ -563,7 +562,7 @@ def _prepare_cluster_devices_partitions(snode, devices):
             logger.info("Partitioned devices found")
         else:
             logger.info(f"Creating partitions for {nvme.nvme_bdev}")
-            _create_device_partitions(rpc_client, nvme, snode)
+            _create_device_partitions(rpc_client, nvme, snode, snode.num_partitions_per_dev, snode.jm_percent)
             partitioned_devices = _search_for_partitions(rpc_client, nvme)
             if len(partitioned_devices) == (1 + snode.num_partitions_per_dev):
                 logger.info("Device partitions created")
