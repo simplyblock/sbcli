@@ -2557,6 +2557,7 @@ def set_node_status(node_id, status):
         snode.remote_devices = _connect_to_remote_devs(snode)
         if snode.enable_ha_jm:
             snode.remote_jm_devices = _connect_to_remote_jm_devs(snode)
+        snode.health_check = True
         snode.write_to_db(db_controller.kv_store)
 
     return True
