@@ -1004,7 +1004,8 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
     try:
         results, err = snode_api.spdk_process_start(
             spdk_cpu_mask, spdk_mem, spdk_image, spdk_debug, cluster_ip, fdb_connection,
-            namespace, mgmt_ip, constants.RPC_HTTP_PROXY_PORT, rpc_user, rpc_pass)
+            namespace, mgmt_ip, constants.RPC_HTTP_PROXY_PORT, rpc_user, rpc_pass,
+            multi_threading_enabled=constants.SPDK_PROXY_MULTI_THREADING_ENABLED, timeout=constants.SPDK_PROXY_TIMEOUT)
     except Exception as e:
         logger.error(e)
         return False
@@ -1535,7 +1536,8 @@ def restart_storage_node(
         fdb_connection = cluster.db_connection
         results, err = snode_api.spdk_process_start(
             snode.spdk_cpu_mask, spdk_mem, snode.spdk_image, spdk_debug, cluster_ip, fdb_connection,
-            snode.namespace, snode.mgmt_ip, constants.RPC_HTTP_PROXY_PORT, snode.rpc_username, snode.rpc_password)
+            snode.namespace, snode.mgmt_ip, constants.RPC_HTTP_PROXY_PORT, snode.rpc_username, snode.rpc_password,
+            multi_threading_enabled=constants.SPDK_PROXY_MULTI_THREADING_ENABLED, timeout=constants.SPDK_PROXY_TIMEOUT)
     except Exception as e:
         logger.error(e)
         return False

@@ -96,6 +96,17 @@ def spdk_process_start():
     if 'spdk_mem' in data:
         spdk_mem = data['spdk_mem']
 
+    multi_threading_enabled = False
+    if 'multi_threading_enabled' in data:
+        multi_threading_enabled = bool(data['multi_threading_enabled'])
+
+    timeout = 60*5
+    if 'timeout' in data:
+        try:
+            timeout = int(data['timeout'])
+        except:
+            pass
+
     if spdk_mem:
         spdk_mem = int(utils.parse_size(spdk_mem) / (1000 * 1000))
     else:
@@ -157,6 +168,8 @@ def spdk_process_start():
             f"RPC_PORT={data['rpc_port']}",
             f"RPC_USERNAME={data['rpc_username']}",
             f"RPC_PASSWORD={data['rpc_password']}",
+            f"MULTI_THREADING_ENABLED={multi_threading_enabled}",
+            f"TIMEOUT={timeout}",
         ]
         # restart_policy={"Name": "always"}
     )
