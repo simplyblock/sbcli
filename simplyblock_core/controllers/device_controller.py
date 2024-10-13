@@ -672,7 +672,7 @@ def add_device(device_id):
     if snode.jm_device and snode.jm_device.raid_bdev:
         # looking for jm partition
         rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
-        jm_dev_part = f"{dev.nvme_bdev[:-1]}1"
+        jm_dev_part = f"{dev.nvme_bdev[:-2]}p1"
         ret = rpc_client.get_bdevs(jm_dev_part)
         if ret:
             logger.info(f"JM part found: {jm_dev_part}")
@@ -714,6 +714,10 @@ def set_jm_device_state(device_id, state):
         for node_index, node in enumerate(snodes):
             if node.get_id() == snode.get_id() or node.status != StorageNode.STATUS_ONLINE:
                 continue
+            for jm_dev in node.remote_jm_devices:
+                if jm_dev.get_id() == device_id and jm_device.status != JMDevice.STATUS_ONLINE:
+                    node.remote_jm_devices.remove(jm_dev)
+                    break
             logger.info(f"Connecting to node: {node.get_id()}")
             node.remote_jm_devices = storage_node_ops._connect_to_remote_jm_devs(node)
             node.write_to_db(db_controller.kv_store)
@@ -796,7 +800,7 @@ def restart_jm_device(device_id, force=False):
         for dev in snode.nvme_devices:
             if dev.status != NVMeDevice.STATUS_ONLINE:
                 continue
-            dev_part = f"{dev.nvme_bdev[:-1]}1"
+            dev_part = f"{dev.nvme_bdev[:-2]}p1"
             if dev_part in bdevs_names:
                 if dev_part not in jm_nvme_bdevs:
                     jm_nvme_bdevs.append(dev_part)

@@ -798,15 +798,23 @@ def _connect_to_remote_jm_devs(this_node, jm_ids=[]):
     if jm_ids:
         for jm_id in jm_ids:
             jm_dev = db_controller.get_jm_device_by_id(jm_id)
-            remote_devices.append(jm_dev)
+            if jm_dev:
+                remote_devices.append(jm_dev)
     elif len(this_node.remote_jm_devices) > 0:
         remote_devices = this_node.remote_jm_devices
     else:
         for node in db_controller.get_storage_nodes_by_cluster_id(this_node.cluster_id):
             if node.get_id() == this_node.get_id() or node.status != StorageNode.STATUS_ONLINE:
                 continue
-            if node.jm_device:
+            if node.jm_device and node.jm_device.status == JMDevice.STATUS_ONLINE:
                 remote_devices.append(node.jm_device)
+
+    if len(remote_devices) < 2:
+        online_jms = get_next_ha_jms(this_node)
+        for jm_id in online_jms:
+            jm_dev = db_controller.get_jm_device_by_id(jm_id)
+            if jm_dev:
+                remote_devices.append(jm_dev)
 
     for jm_dev in remote_devices:
         name = f"remote_{jm_dev.jm_bdev}"
@@ -1354,6 +1362,10 @@ def remove_storage_node(node_id, force_remove=False, force_migrate=False):
                 distr_controller.disconnect_device(dev)
             device_controller.device_set_failed(dev.get_id())
 
+    if snode.jm_device:
+        logger.info("Removing JM")
+        device_controller.remove_jm_device(snode.jm_device.get_id(), force=True)
+
     logger.info("Removing storage node")
 
     logger.debug("Leaving swarm...")
@@ -1687,6 +1699,7 @@ def restart_storage_node(
 
     if snode.enable_ha_jm:
         logger.info("Connecting to remote JMs")
+        snode.remote_jm_devices = []
         snode.remote_jm_devices = _connect_to_remote_jm_devs(snode)
 
     logger.info("Setting node status to Online")
@@ -1714,6 +1727,9 @@ def restart_storage_node(
             continue
         tasks_controller.add_device_mig_task(dev.get_id())
 
+    if cluster.status == cluster.STATUS_UNREADY:
+        logger.info("Done")
+        return "Success"
     # Create distribs, raid0, and lvstore and expose lvols to the fabrics
     if snode.lvstore_stack:
         temp_rpc_client = RPCClient(
@@ -2562,12 +2578,15 @@ def get_next_ha_jms(current_node):
     for node in db_controller.get_storage_nodes_by_cluster_id(current_node.cluster_id):
         if node.get_id() == current_node.get_id() or node.status != StorageNode.STATUS_ONLINE:
             continue
-        if node.jm_device:
+        if node.jm_device and node.jm_device.status == JMDevice.STATUS_ONLINE:
             jm_count[node.jm_device.get_id()] = 1 + jm_count.get(node.jm_device.get_id(), 0)
         for rem_jm_device in node.remote_jm_devices:
             if rem_jm_device.get_id() != current_node.jm_device.get_id():
-                jm_count[rem_jm_device.get_id()] = 1 + jm_count.get(rem_jm_device.get_id(), 0)
-
+                try:
+                    if db_controller.get_jm_device_by_id(rem_jm_device.get_id()).status == JMDevice.STATUS_ONLINE:
+                        jm_count[rem_jm_device.get_id()] = 1 + jm_count.get(rem_jm_device.get_id(), 0)
+                except :
+                    pass
     jm_count = dict(sorted(jm_count.items(), key=lambda x: x[1]))
     return list(jm_count.keys())[:2]
 
@@ -2597,6 +2616,7 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
     if snode.enable_ha_jm:
         jm_vuid = utils.get_random_vuid()
         online_jms = get_next_ha_jms(snode)
+        logger.debug(f"online_jms: {str(online_jms)}")
         snode.remote_jm_devices = _connect_to_remote_jm_devs(snode, online_jms)
         snode.write_to_db()
 
