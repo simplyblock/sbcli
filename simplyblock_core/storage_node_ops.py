@@ -1988,6 +1988,10 @@ def suspend_storage_node(node_id, force=False):
         if dev.status == NVMeDevice.STATUS_ONLINE:
             device_controller.device_set_unavailable(dev.get_id())
 
+    logger.info("Set JM Unavailable")
+    if snode.jm_device and snode.jm_device.status != JMDevice.STATUS_UNAVAILABLE:
+        device_controller.set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_UNAVAILABLE)
+
     rpc_client = RPCClient(
         snode.mgmt_ip, snode.rpc_port,
         snode.rpc_username, snode.rpc_password)
@@ -2028,6 +2032,10 @@ def resume_storage_node(node_id):
     for dev in snode.nvme_devices:
         if dev.status == NVMeDevice.STATUS_UNAVAILABLE:
             device_controller.device_set_online(dev.get_id())
+
+    logger.info("Set JM Online")
+    if snode.jm_device and snode.jm_device.status == JMDevice.STATUS_UNAVAILABLE:
+        device_controller.set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_ONLINE)
 
     rpc_client = RPCClient(
         snode.mgmt_ip, snode.rpc_port,
