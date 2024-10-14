@@ -1264,7 +1264,6 @@ class CLIWrapper:
         contact_point = args.contact_point
         grafana_endpoint = args.grafana_endpoint
         enable_node_affinity = args.enable_node_affinity
-        enable_node_affinity = True
 
         return cluster_ops.create_cluster(
             blk_size, page_size_in_blocks,
