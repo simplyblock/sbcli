@@ -34,6 +34,4 @@ def get_all_tests(custom=True, k8s_test=False):
         tests.remove(TestLvolFioNpcs0)
         tests.remove(TestLvolFioNpcs1)
         tests.remove(TestLvolFioNpcs2)
-    if k8s_test:
-        tests.remove(TestSingleNodeFailure)
     return tests
