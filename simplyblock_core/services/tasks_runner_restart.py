@@ -178,7 +178,7 @@ def task_runner_node(task):
     ret = storage_node_ops.shutdown_storage_node(node.get_id(), force=True)
     if ret:
         logger.info(f"Node shutdown succeeded")
-    time.sleep(60)
+    time.sleep(3)
 
     # resetting node
     logger.info(f"Restart node {node.get_id()}")
