@@ -34,7 +34,7 @@ def process_device_event(event):
                         logger.info(f"The storage device is not online, skipping. status: {dev.status}")
                         event.status = 'skipped'
                         n = db_controller.get_storage_node_by_id(node_id)
-                        distr_controller.send_dev_status_event(device, NVMeDevice.STATUS_UNAVAILABLE, n)
+                        distr_controller.send_dev_status_event(dev, NVMeDevice.STATUS_UNAVAILABLE, n)
                         return
 
                     device = dev
