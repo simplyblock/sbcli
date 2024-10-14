@@ -826,7 +826,7 @@ def _connect_to_remote_jm_devs(this_node, jm_ids=[]):
         bdev_name = f"{name}n1"
         jm_dev.remote_bdev = bdev_name
         if bdev_name in node_bdev_names:
-            logger.info(f"bdev found {bdev_name}")
+            logger.debug(f"bdev found {bdev_name}")
             jm_dev.status = JMDevice.STATUS_ONLINE
         else:
             logger.info(f"Connecting {this_node.get_id()} to {name}")
