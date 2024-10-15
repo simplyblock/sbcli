@@ -79,6 +79,10 @@ class StorageNode(BaseModel):
         "lvstore": {"type": str, 'default': ""},
         "raid": {"type": str, 'default': ""},
         "lvstore_stack": {"type": List[dict], 'default': []},
+        "lvstore_stack_secondary_1": {"type": List[dict], 'default': []},
+        "lvstore_stack_secondary_2": {"type": List[dict], 'default': []},
+        "secondary_node_id_1": {"type": List[dict], 'default': []},
+        "secondary_node_id_2": {"type": List[dict], 'default': []},
 
         # spdk params
         "spdk_cpu_mask": {"type": str, "default": ""},

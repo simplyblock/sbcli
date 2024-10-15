@@ -403,10 +403,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
     #lvol.distr_page_size = (distr_npcs+distr_npcs)*cl.page_size_in_blocks
 
 
-    nodes = []
-    if host_node:
-        nodes.insert(0, host_node)
-    else:
+    if not host_node:
         nodes = _get_next_3_nodes(cl.get_id(), lvol.size)
         if not nodes:
             return False, f"No nodes found with enough resources to create the LVol"
@@ -524,16 +521,17 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
             return ret, error
 
     elif ha_type == "ha":
-        three_nodes = nodes[:3]
-        nodes_ids = []
+        # three_nodes = nodes[:3]
+        nodes_ids = [host_node.get_id(), host_node.secondary_node_id_1, host_node.secondary_node_id_2]
         nodes_ips = []
-        for node in three_nodes:
-            nodes_ids.append(node.get_id())
+        for node_id in nodes_ids:
+            node = db_controller.get_storage_node_by_id(node_id)
             port = 10000 + int(random.random() * 60000)
             nodes_ips.append(f"{node.mgmt_ip}:{port}")
 
         ha_address = ",".join(nodes_ips)
-        for index, node in enumerate(three_nodes):
+        for index, node_id in enumerate(nodes_ids):
+            node = db_controller.get_storage_node_by_id(node_id)
             ret, error = add_lvol_on_node(lvol, node, ha_address, index)
             if error:
                 return ret, error
