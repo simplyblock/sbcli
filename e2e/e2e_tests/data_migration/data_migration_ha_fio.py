@@ -83,7 +83,7 @@ class FioWorkloadTest(TestClusterBase):
                         if not skip_mount:
                             # Unmount, format, and mount the device
                             fs = self.ssh_obj.get_mount_points(self.mgmt_nodes[0],
-                                                               mount_path)
+                                                               "/mnt")
                             for device in fs:
                                 self.ssh_obj.unmount_path(node=self.mgmt_nodes[0], device=device)
                             self.ssh_obj.unmount_path(node=self.mgmt_nodes[0], device=disk_use)
