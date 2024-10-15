@@ -213,7 +213,7 @@ class FioWorkloadTest(TestClusterBase):
     def run_fio(self, lvol_fio_path):
         self.logger.info("Starting fio workloads on the logical volumes with different configurations.")
         fio_threads = []
-        fio_configs = [("randrw", "4K"), ("read", "32K"), ("write", "64K"), ("trimwrite", "16K")]
+        fio_configs = [("randrw", "4K"), ("read", "32K"), ("write", "64K")]
         for lvol, data in lvol_fio_path.items():
             fio_run = random.choice(fio_configs)
             if data["mount_path"]:
@@ -240,10 +240,10 @@ class FioWorkloadTest(TestClusterBase):
                                 args=(self.mgmt_nodes[0], lvol_fio_path[lvol]["disk"], None, None),
                                 kwargs={
                                     "name": f"fio_{lvol}",
-                                    "rw": fio_configs[3][0],
+                                    "rw": "trimwrite",
                                     "ioengine": "libaio",
                                     "iodepth": 64,
-                                    "bs": fio_configs[3][1],
+                                    "bs": "16K",
                                     "size": "1G",
                                     "time_based": True,
                                     "runtime": 3600,
@@ -336,6 +336,7 @@ class FioWorkloadTest(TestClusterBase):
         self.logger.info(f"Mount paths after suspend: {output}")
 
         fio_process = self.ssh_obj.find_process_name(self.mgmt_nodes[0], 'fio')
+        self.logger.info(f"FIO PROCESS: {fio_process}")
         if not fio_process:
             raise RuntimeError("FIO process was interrupted on unaffected nodes.")
         for fio in process_name:
@@ -394,6 +395,7 @@ class FioWorkloadTest(TestClusterBase):
         self.logger.info(f"node tasks: {node_tasks}")
         for task in node_tasks:
             if task['status'] != 'done' or task['function_result'] != 'Done':
-                raise RuntimeError(f"Migration task {task['id']} on node {node_id} failed or is incomplete.")
+                raise RuntimeError(f"Migration task {task['id']} on node {node_id} failed or is incomplete. Status: {task['status']} "
+                                   f" Result: {task['function_result']}")
         
         self.logger.info(f"All migration tasks for node {node_id} completed successfully.")
