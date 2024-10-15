@@ -1,6 +1,7 @@
 import time
 import paramiko
 import os
+import json
 from logger_config import setup_logger
 from pathlib import Path
 
@@ -469,3 +470,19 @@ class SshUtils:
     def restart_device(self, node, device_id):
         command = f"{self.base_cmd} sn restart-device {device_id}"
         self.exec_command(node, command)
+
+    def get_lvol_vs_device(self, node, lvol_id=None):
+        command = "sudo nvme list --output-format=json"
+        output, _ = self.exec_command(node=node, command=command)
+        data = json.loads(output)
+        nvme_dict = {}
+        self.logger.info(f"LVOL DEVICE output: {data}")
+        for device in data.get('Devices', []):
+            device_path = device.get('DevicePath')
+            model_number = device.get('ModelNumber')
+            if device_path and model_number:
+                nvme_dict[model_number] = device_path
+        self.logger.info(f"LVOL vs device dict output: {nvme_dict}")
+        if lvol_id:
+            return nvme_dict.get(lvol_id)
+        return nvme_dict

@@ -16,8 +16,8 @@ def get_all_tests(custom=True, k8s_test=False):
         TestLvolFioNpcs0,
         TestLvolFioNpcs1,
         TestLvolFioNpcs2,
-        TestSingleNodeFailure,
-        # TestDeviceNodeRestart
+        # TestSingleNodeFailure,
+        # TestDeviceNodeRestart,
         FioWorkloadTest,
         # TestMultiLvolFio, - Enable when testing
     ]

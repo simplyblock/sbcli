@@ -42,7 +42,8 @@ class FioWorkloadTest(TestClusterBase):
                 lvol_name = f"test_lvol_{i+1}_{j+1}"
                 self.sbcli_utils.add_lvol(lvol_name=lvol_name, pool_name=self.pool_name, size="10G", host_id=node_uuid)
                 sn_lvol_data[node_uuid].append(lvol_name)
-                lvol_fio_path[lvol_name] = {"mount_path": None,
+                lvol_fio_path[lvol_name] = {"lvol_id": self.sbcli_utils.get_lvol_id(lvol_name=lvol_name),
+                                            "mount_path": None,
                                             "disk": None}
         
         trim_node = random.choice(list(sn_lvol_data.keys()))
@@ -98,11 +99,11 @@ class FioWorkloadTest(TestClusterBase):
         # Step 6: Continue with node shutdown, restart, and migration task validation
         affected_node = list(sn_lvol_data.keys())[0]
         self.logger.info(f"Shutting down node {affected_node}.")
-        self.shutdown_node_and_verify(affected_node)
 
-        sleep_n_sec(60)
+        self.shutdown_node_and_verify(affected_node, process_name=["fio_test_lvol_1_1", "fio_test_lvol_2_1"])
 
-        # Step 4: Fetch and validate migration tasks for the specific node via API
+        sleep_n_sec(300)
+
         cluster_id = self.cluster_id
         self.logger.info(f"Fetching migration tasks for cluster {cluster_id}.")
         tasks = self.sbcli_utils.get_cluster_tasks(cluster_id)
@@ -110,22 +111,75 @@ class FioWorkloadTest(TestClusterBase):
         self.logger.info(f"Validating migration tasks for node {affected_node}.")
         self.validate_migration_for_node(tasks, affected_node)
 
-        # # Step 5: Stop container on another node
-        # another_node = self.storage_nodes[1]
-        # self.logger.info(f"Killing SPDK container on node {another_node}.")
-        # self.ssh_obj.stop_docker_containers(another_node, "spdk")
+        sleep_n_sec(30)
 
-        # # Step 6: Stop and remove the instance on the third node
-        # third_node = self.storage_nodes[2]
-        # self.logger.info(f"Stopping instance on node {third_node}.")
-        # self.sbcli_utils.shutdown_node(third_node)
-        # self.logger.info(f"Removing node {third_node}.")
-        # # Add logic for removing node here...
+        lvol_list = sn_lvol_data[affected_node]
+        affected_fio = {}
+        for lvol in lvol_list:
+            affected_fio[lvol] = {}
+            affected_fio[lvol]["mount_path"] = lvol_fio_path[lvol]["mount_path"]
+            lvol_fio_path[lvol]["disk"] = self.ssh_obj.get_lvol_vs_device(node=self.mgmt_nodes[0],
+                                                                         lvol_id=lvol_fio_path[lvol]["lvol_id"])
+            affected_fio[lvol]["disk"] = lvol_fio_path[lvol]["disk"]
+            fs_type = "xfs" if lvol[-1] == "1" else "ext4"
+            if lvol_fio_path[lvol]["mount_path"]:
+                self.ssh_obj.mount_path(self.mgmt_nodes[0],
+                                        device=lvol_fio_path[lvol]["disk"],
+                                        mount_path=lvol_fio_path[lvol]["mount_path"])
+        fio_threads.extend(self.run_fio(affected_fio))
 
-        # # Step 7: Check storage utilization across devices
-        # self.logger.info("Checking storage utilization.")
-        # utilization = self.sbcli_utils.get_device_utilization()
-        # self.logger.info(f"Utilization: {utilization}")
+        sleep_n_sec(120)
+
+        # # Step 7: Stop container on another node
+
+        affected_node = list(sn_lvol_data.keys())[1]
+        self.logger.info(f"Stopping docker container on node {affected_node}.")
+
+        self.stop_container_verify(affected_node,
+                                   process_name=["fio_test_lvol_2_1", "fio_test_lvol_2_2"])
+
+        sleep_n_sec(300)
+
+        cluster_id = self.cluster_id
+        self.logger.info(f"Fetching migration tasks for cluster {cluster_id}.")
+        tasks = self.sbcli_utils.get_cluster_tasks(cluster_id)
+
+        self.logger.info(f"Validating migration tasks for node {affected_node}.")
+        self.validate_migration_for_node(tasks, affected_node)
+
+        sleep_n_sec(30)
+
+        lvol_list = sn_lvol_data[affected_node]
+        affected_fio = {}
+        for lvol in lvol_list:
+            affected_fio[lvol] = {}
+            affected_fio[lvol]["mount_path"] = lvol_fio_path[lvol]["mount_path"]
+            lvol_fio_path[lvol]["disk"] = self.ssh_obj.get_lvol_vs_device(node=self.mgmt_nodes[0],
+                                                                         lvol_id=lvol_fio_path[lvol]["lvol_id"])
+            affected_fio[lvol]["disk"] = lvol_fio_path[lvol]["disk"]
+            fs_type = "xfs" if lvol[-1] == "1" else "ext4"
+            if lvol_fio_path[lvol]["mount_path"]:
+                self.ssh_obj.mount_path(self.mgmt_nodes[0],
+                                        device=lvol_fio_path[lvol]["disk"],
+                                        mount_path=lvol_fio_path[lvol]["mount_path"])
+        fio_threads.extend(self.run_fio(affected_fio))
+
+        # Step 8: Stop instance
+
+
+
+
+        # Step 9: Add node
+
+
+        # Step 10: Remove stopped instance
+
+
+
+
+        self.common_utils.manage_fio_threads(node=self.mgmt_nodes[0],
+                                             threads=fio_threads,
+                                             timeout=5000)
 
         # Wait for all fio threads to finish
         for thread in fio_threads:
@@ -182,7 +236,7 @@ class FioWorkloadTest(TestClusterBase):
             thread.start()
         return fio_threads
 
-    def shutdown_node_and_verify(self, node_id):
+    def shutdown_node_and_verify(self, node_id, process_name):
         """Shutdown the node and ensure fio is uninterrupted."""
         output = self.ssh_obj.exec_command(node=self.mgmt_nodes[0], command="sudo df -h")
         print(f"Mount paths before shutdown: {output[0].strip().split('\n')}")
@@ -193,6 +247,13 @@ class FioWorkloadTest(TestClusterBase):
         print(f"Mount paths after suspend: {output[0].strip().split('\n')}")
 
         sleep_n_sec(30)
+
+        fio_process = self.ssh_obj.find_process_name(self.mgmt_nodes[0], 'fio')
+        if not fio_process:
+            raise RuntimeError("FIO process was interrupted on unaffected nodes.")
+        for fio in process_name:
+            assert fio not in fio_process, "FIO Process running on suspended node"
+        self.logger.info("FIO process is running uninterrupted.")
 
         self.sbcli_utils.shutdown_node(node_id)
         self.logger.info(f"Node {node_id} shut down successfully.")
@@ -207,6 +268,8 @@ class FioWorkloadTest(TestClusterBase):
         fio_process = self.ssh_obj.find_process_name(self.mgmt_nodes[0], 'fio')
         if not fio_process:
             raise RuntimeError("FIO process was interrupted on unaffected nodes.")
+        for fio in process_name:
+            assert fio not in fio_process, "FIO Process running on suspended node"
         self.logger.info("FIO process is running uninterrupted.")
 
         sleep_n_sec(30)
@@ -220,6 +283,53 @@ class FioWorkloadTest(TestClusterBase):
 
         output = self.ssh_obj.exec_command(node=self.mgmt_nodes[0], command="sudo df -h")
         print(f"Mount paths after restart: {output[0].strip().split('\n')}")
+
+        fio_process = self.ssh_obj.find_process_name(self.mgmt_nodes[0], 'fio')
+        if not fio_process:
+            raise RuntimeError("FIO process was interrupted on unaffected nodes.")
+        for fio in process_name:
+            assert fio not in fio_process, "FIO Process running on suspended node"
+        self.logger.info("FIO process is running uninterrupted.")
+
+    def stop_container_verify(self, node_id, process_name):
+        """Shutdown the node and ensure fio is uninterrupted."""
+        output = self.ssh_obj.exec_command(node=self.mgmt_nodes[0], command="sudo df -h")
+        print(f"Mount paths before shutdown: {output[0].strip().split('\n')}")
+        
+        node_details = self.sbcli_utils.get_storage_node_details(node_id)
+        node_ip = node_details[0]["mgmt_ip"]
+        self.ssh_obj.stop_docker_containers(node_ip, "spdk")
+
+        self.logger.info(f"Docker container on node {node_id} stopped successfully.")
+
+        output = self.ssh_obj.exec_command(node=self.mgmt_nodes[0], command="sudo df -h")
+        print(f"Mount paths after suspend: {output[0].strip().split('\n')}")
+
+        fio_process = self.ssh_obj.find_process_name(self.mgmt_nodes[0], 'fio')
+        if not fio_process:
+            raise RuntimeError("FIO process was interrupted on unaffected nodes.")
+        for fio in process_name:
+            assert fio not in fio_process, "FIO Process running on suspended node"
+        self.logger.info("FIO process is running uninterrupted.")
+
+        sleep_n_sec(400)
+
+        # Restart node
+        self.sbcli_utils.restart_node(node_id)
+        self.logger.info(f"Node {node_id} restarted successfully.")
+
+        self.sbcli_utils.wait_for_storage_node_status(node_id=node_id, status="online",
+                                                      timeout=500)
+
+        output = self.ssh_obj.exec_command(node=self.mgmt_nodes[0], command="sudo df -h")
+        print(f"Mount paths after restart: {output[0].strip().split('\n')}")
+
+        fio_process = self.ssh_obj.find_process_name(self.mgmt_nodes[0], 'fio')
+        if not fio_process:
+            raise RuntimeError("FIO process was interrupted on unaffected nodes.")
+        for fio in process_name:
+            assert fio not in fio_process, "FIO Process running on suspended node"
+        self.logger.info("FIO process is running uninterrupted.")
 
     def filter_migration_tasks_for_node(self, tasks, node_id):
         """
@@ -250,7 +360,7 @@ class FioWorkloadTest(TestClusterBase):
 
         if not node_tasks:
             raise RuntimeError(f"No migration tasks found for node {node_id}.")
-        
+        print(f"node tasks: {node_tasks}")
         for task in node_tasks:
             if task['status'] != 'done' or task['function_result'] != 'Done':
                 raise RuntimeError(f"Migration task {task['id']} on node {node_id} failed or is incomplete.")
