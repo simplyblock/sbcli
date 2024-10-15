@@ -19,6 +19,7 @@ def get_all_tests(custom=True, k8s_test=False):
         TestLvolFioNpcs1,
         TestLvolFioNpcs2,
         TestSingleNodeFailure,
+        FioWorkloadTest,
         # TestManyLvolSameNode,
         # TestBatchLVOLsLimit,
 
