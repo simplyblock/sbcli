@@ -504,13 +504,13 @@ class SshUtils:
             return nvme_dict.get(lvol_id)
         return nvme_dict
     
-    def get_mount_points(self, node, mount_point):
-        command = f"sudo df -h | grep ${mount_point}"
-        output, _ = self.exec_command(node=node, command=command)
-        lines = output.splitlines()
-        filesystem = []
-        for line in lines[1:]:
-            columns = line.split()
-            if len(columns) > 1:
-                filesystem.append(columns[0])
-        return filesystem
+    # def get_already_mounted_points(self, node, mount_point):
+    #     command = f"sudo df -h | grep ${mount_point}"
+    #     output, _ = self.exec_command(node=node, command=command)
+    #     lines = output.splitlines()
+    #     filesystem = []
+    #     for line in lines[1:]:
+    #         columns = line.split()
+    #         if len(columns) > 1:
+    #             filesystem.append(columns[0])
+    #     return filesystem
