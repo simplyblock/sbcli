@@ -123,7 +123,8 @@ class FioWorkloadTest(TestClusterBase):
         if not fio_process:
             raise RuntimeError("FIO process was interrupted on unaffected nodes.")
         for fio in fio_process_terminated:
-            assert fio not in fio_process, "FIO Process running on restarted node"
+            for running_fio in fio_process:
+                assert fio not in running_fio, "FIO Process running on restarted node"
 
         lvol_list = sn_lvol_data[affected_node]
         affected_fio = {}
@@ -278,7 +279,8 @@ class FioWorkloadTest(TestClusterBase):
         if not fio_process:
             raise RuntimeError("FIO process was interrupted on unaffected nodes.")
         for fio in process_name:
-            assert fio not in fio_process, "FIO Process running on suspended node"
+            for running_fio in fio_process: 
+                assert fio not in running_fio, "FIO Process running on suspended node"
         self.logger.info("FIO process is running uninterrupted.")
 
         self.sbcli_utils.shutdown_node(node_id)
@@ -296,7 +298,8 @@ class FioWorkloadTest(TestClusterBase):
         if not fio_process:
             raise RuntimeError("FIO process was interrupted on unaffected nodes.")
         for fio in process_name:
-            assert fio not in fio_process, "FIO Process running on suspended node"
+            for running_fio in fio_process: 
+                assert fio not in running_fio, "FIO Process running on offline node"
         self.logger.info("FIO process is running uninterrupted.")
 
         sleep_n_sec(30)
@@ -316,7 +319,8 @@ class FioWorkloadTest(TestClusterBase):
         if not fio_process:
             raise RuntimeError("FIO process was interrupted on unaffected nodes.")
         for fio in process_name:
-            assert fio not in fio_process, "FIO Process running on suspended node"
+            for running_fio in fio_process: 
+                assert fio not in running_fio, "FIO Process running on restarted node"
         self.logger.info("FIO process is running uninterrupted.")
 
     def stop_container_verify(self, node_id, process_name):
@@ -340,7 +344,8 @@ class FioWorkloadTest(TestClusterBase):
         if not fio_process:
             raise RuntimeError("FIO process was interrupted on unaffected nodes.")
         for fio in process_name:
-            assert fio not in fio_process, "FIO Process running on suspended node"
+            for running_fio in fio_process: 
+                assert fio not in running_fio, "FIO Process running on crashed container node"
         self.logger.info("FIO process is running uninterrupted.")
 
         sleep_n_sec(400)
@@ -360,7 +365,8 @@ class FioWorkloadTest(TestClusterBase):
         if not fio_process:
             raise RuntimeError("FIO process was interrupted on unaffected nodes.")
         for fio in process_name:
-            assert fio not in fio_process, "FIO Process running on suspended node"
+            for running_fio in fio_process: 
+                assert fio not in running_fio, "FIO Process running on suspended node"
         self.logger.info("FIO process is running uninterrupted.")
 
     def filter_migration_tasks_for_node(self, tasks, node_id):
