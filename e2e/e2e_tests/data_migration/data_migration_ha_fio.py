@@ -100,7 +100,9 @@ class FioWorkloadTest(TestClusterBase):
         affected_node = list(sn_lvol_data.keys())[0]
         self.logger.info(f"Shutting down node {affected_node}.")
 
-        self.shutdown_node_and_verify(affected_node, process_name=["fio_test_lvol_1_1", "fio_test_lvol_2_1"])
+        fio_process_terminated = ["fio_test_lvol_1_1", "fio_test_lvol_1_2"]
+
+        self.shutdown_node_and_verify(affected_node, process_name=fio_process_terminated)
 
         sleep_n_sec(300)
 
@@ -112,6 +114,13 @@ class FioWorkloadTest(TestClusterBase):
         self.validate_migration_for_node(tasks, affected_node)
 
         sleep_n_sec(30)
+
+        fio_process = self.ssh_obj.find_process_name(self.mgmt_nodes[0], 'fio')
+        self.logger.info(f"FIO PROCESS: {fio_process}")
+        if not fio_process:
+            raise RuntimeError("FIO process was interrupted on unaffected nodes.")
+        for fio in fio_process_terminated:
+            assert fio not in fio_process, "FIO Process running on restarted node"
 
         lvol_list = sn_lvol_data[affected_node]
         affected_fio = {}
@@ -240,7 +249,7 @@ class FioWorkloadTest(TestClusterBase):
         """Shutdown the node and ensure fio is uninterrupted."""
         fio_process = self.ssh_obj.find_process_name(self.mgmt_nodes[0], 'fio')
         self.logger.info(f"FIO PROCESS: {fio_process}")
-        
+
         output = self.ssh_obj.exec_command(node=self.mgmt_nodes[0], command="sudo df -h")
         output = output[0].strip().split('\n')
         print(f"Mount paths before suspend: {output}")
