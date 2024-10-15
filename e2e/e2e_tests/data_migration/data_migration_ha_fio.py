@@ -48,12 +48,13 @@ class FioWorkloadTest(TestClusterBase):
                                             "disk": None}
         
         trim_node = random.choice(list(sn_lvol_data.keys()))
-        mount = True
-        skip_mount = False
-
-        fs = self.ssh_obj.get_mount_points(self.mgmt_nodes[0], "/mnt")
-        for device in fs:
-            self.ssh_obj.unmount_path(node=self.mgmt_nodes[0], device=device)
+        fs = "/mnt"
+        while fs:
+            fs = self.ssh_obj.get_mount_points(self.mgmt_nodes[0],
+                                               "/mnt")
+            self.logger.info(f"FS mounts: {fs}")
+            for device in fs:
+                self.ssh_obj.unmount_path(node=self.mgmt_nodes[0], device=device)
 
         device_count = 1
         for node, lvol_list in sn_lvol_data.items():
@@ -73,30 +74,27 @@ class FioWorkloadTest(TestClusterBase):
                 self.logger.info(f"Final: {final_devices}")
 
                 # Step 4: Identify the new device and mount it (if applicable)
-                fs_type = "xfs" if lvol[-1] == "1" else "ext4"
                 for device in final_devices:
                     if device not in initial_devices:
                         disk_use = f"/dev/{device.strip()}"
                         lvol_fio_path[lvol]["disk"] = disk_use
-                        if trim_node == node and mount:
-                            skip_mount = True
-                            mount  = False
-                        if not skip_mount:
-                            # Unmount, format, and mount the device
-                            self.ssh_obj.unmount_path(node=self.mgmt_nodes[0], device=disk_use)
-                            sleep_n_sec(2)
-                            self.ssh_obj.format_disk(node=self.mgmt_nodes[0], device=disk_use, fs_type=fs_type)
-                            sleep_n_sec(2)
-                            mount_path = f"/mnt/device_{device_count}"
-                            device_count += 1
-                            self.ssh_obj.mount_path(node=self.mgmt_nodes[0], device=disk_use, mount_path=mount_path)
-                            lvol_fio_path[lvol]["mount_path"] = mount_path
-                            sleep_n_sec(2)
-                            break
-                        skip_mount = False
+                        break
+                if trim_node == node and lvol[-1] == "2":
+                    continue
+                fs_type = "xfs" if lvol[-1] == "1" else "ext4"
+                # Unmount, format, and mount the device
+                self.ssh_obj.unmount_path(node=self.mgmt_nodes[0], device=disk_use)
+                sleep_n_sec(2)
+                self.ssh_obj.format_disk(node=self.mgmt_nodes[0], device=disk_use, fs_type=fs_type)
+                sleep_n_sec(2)
+                mount_path = f"/mnt/device_{device_count}_{fs_type}"
+                device_count += 1
+                self.ssh_obj.mount_path(node=self.mgmt_nodes[0], device=disk_use, mount_path=mount_path)
+                lvol_fio_path[lvol]["mount_path"] = mount_path
+                sleep_n_sec(2)
 
-        print(f"SN List: {sn_lvol_data}")
-        print(f"LVOL Mounts: {lvol_fio_path}")
+        self.logger.info(f"SN List: {sn_lvol_data}")
+        self.logger.info(f"LVOL Mounts: {lvol_fio_path}")
 
         # Step 5: Run fio workloads with different configurations
         fio_threads = self.run_fio(lvol_fio_path)
@@ -137,10 +135,13 @@ class FioWorkloadTest(TestClusterBase):
             affected_fio[lvol]["disk"] = lvol_fio_path[lvol]["disk"]
             fs_type = "xfs" if lvol[-1] == "1" else "ext4"
             if lvol_fio_path[lvol]["mount_path"]:
-                fs = self.ssh_obj.get_mount_points(self.mgmt_nodes[0],
-                                                   lvol_fio_path[lvol]["mount_path"])
-                for device in fs:
-                    self.ssh_obj.unmount_path(node=self.mgmt_nodes[0], device=device)
+                fs = lvol_fio_path[lvol]["mount_path"]
+                while fs:
+                    fs = self.ssh_obj.get_mount_points(self.mgmt_nodes[0],
+                                                       lvol_fio_path[lvol]["mount_path"])
+                    self.logger.info(f"FS mounts: {fs}")
+                    for device in fs:
+                        self.ssh_obj.unmount_path(node=self.mgmt_nodes[0], device=device)
                 self.ssh_obj.mount_path(self.mgmt_nodes[0],
                                         device=lvol_fio_path[lvol]["disk"],
                                         mount_path=lvol_fio_path[lvol]["mount_path"])
@@ -149,7 +150,6 @@ class FioWorkloadTest(TestClusterBase):
         sleep_n_sec(120)
 
         # # Step 7: Stop container on another node
-
         affected_node = list(sn_lvol_data.keys())[1]
         self.logger.info(f"Stopping docker container on node {affected_node}.")
 
@@ -263,13 +263,13 @@ class FioWorkloadTest(TestClusterBase):
 
         output = self.ssh_obj.exec_command(node=self.mgmt_nodes[0], command="sudo df -h")
         output = output[0].strip().split('\n')
-        print(f"Mount paths before suspend: {output}")
+        self.logger.info(f"Mount paths before suspend: {output}")
         self.sbcli_utils.suspend_node(node_id)
         self.logger.info(f"Node {node_id} suspended successfully.")
 
         output = self.ssh_obj.exec_command(node=self.mgmt_nodes[0], command="sudo df -h")
         output = output[0].strip().split('\n')
-        print(f"Mount paths after suspend: {output}")
+        self.logger.info(f"Mount paths after suspend: {output}")
 
         sleep_n_sec(30)
 
@@ -289,7 +289,7 @@ class FioWorkloadTest(TestClusterBase):
 
         output = self.ssh_obj.exec_command(node=self.mgmt_nodes[0], command="sudo df -h")
         output = output[0].strip().split('\n')
-        print(f"Mount paths after shutdown: {output}")
+        self.logger.info(f"Mount paths after shutdown: {output}")
         
         # Validate fio is running on other nodes
         fio_process = self.ssh_obj.find_process_name(self.mgmt_nodes[0], 'fio')
@@ -310,7 +310,7 @@ class FioWorkloadTest(TestClusterBase):
 
         output = self.ssh_obj.exec_command(node=self.mgmt_nodes[0], command="sudo df -h")
         output = output[0].strip().split('\n')
-        print(f"Mount paths after restart: {output}")
+        self.logger.info(f"Mount paths after restart: {output}")
 
         fio_process = self.ssh_obj.find_process_name(self.mgmt_nodes[0], 'fio')
         if not fio_process:
@@ -323,7 +323,7 @@ class FioWorkloadTest(TestClusterBase):
         """Shutdown the node and ensure fio is uninterrupted."""
         output = self.ssh_obj.exec_command(node=self.mgmt_nodes[0], command="sudo df -h")
         output = output[0].strip().split('\n')
-        print(f"Mount paths before shutdown: {output}")
+        self.logger.info(f"Mount paths before shutdown: {output}")
         
         node_details = self.sbcli_utils.get_storage_node_details(node_id)
         node_ip = node_details[0]["mgmt_ip"]
@@ -333,7 +333,7 @@ class FioWorkloadTest(TestClusterBase):
 
         output = self.ssh_obj.exec_command(node=self.mgmt_nodes[0], command="sudo df -h")
         output = output[0].strip().split('\n')
-        print(f"Mount paths after suspend: {output}")
+        self.logger.info(f"Mount paths after suspend: {output}")
 
         fio_process = self.ssh_obj.find_process_name(self.mgmt_nodes[0], 'fio')
         if not fio_process:
@@ -353,7 +353,7 @@ class FioWorkloadTest(TestClusterBase):
 
         output = self.ssh_obj.exec_command(node=self.mgmt_nodes[0], command="sudo df -h")
         output = output[0].strip().split('\n')
-        print(f"Mount paths after restart: {output}")
+        self.logger.info(f"Mount paths after restart: {output}")
 
         fio_process = self.ssh_obj.find_process_name(self.mgmt_nodes[0], 'fio')
         if not fio_process:
@@ -386,12 +386,12 @@ class FioWorkloadTest(TestClusterBase):
         Raises:
             RuntimeError: If any migration task failed or did not run.
         """
-        print(f"Migration tasks: {tasks}")
+        self.logger.info(f"Migration tasks: {tasks}")
         node_tasks = self.filter_migration_tasks_for_node(tasks, node_id)
 
         if not node_tasks:
             raise RuntimeError(f"No migration tasks found for node {node_id}.")
-        print(f"node tasks: {node_tasks}")
+        self.logger.info(f"node tasks: {node_tasks}")
         for task in node_tasks:
             if task['status'] != 'done' or task['function_result'] != 'Done':
                 raise RuntimeError(f"Migration task {task['id']} on node {node_id} failed or is incomplete.")
