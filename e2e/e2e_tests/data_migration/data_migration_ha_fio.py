@@ -132,10 +132,13 @@ class FioWorkloadTest(TestClusterBase):
             affected_fio[lvol]["disk"] = lvol_fio_path[lvol]["disk"]
             fs_type = "xfs" if lvol[-1] == "1" else "ext4"
             if lvol_fio_path[lvol]["mount_path"]:
+                fs = self.ssh_obj.get_mount_points(self.mgmt_nodes[0],
+                                                   lvol_fio_path[lvol]["mount_path"])
+                for device in fs:
+                    self.ssh_obj.unmount_path(node=self.mgmt_nodes[0], device=device)
                 self.ssh_obj.mount_path(self.mgmt_nodes[0],
                                         device=lvol_fio_path[lvol]["disk"],
-                                        mount_path=lvol_fio_path[lvol]["mount_path"],
-                                        only_mount=True)
+                                        mount_path=lvol_fio_path[lvol]["mount_path"])
         fio_threads.extend(self.run_fio(affected_fio))
 
         sleep_n_sec(120)
@@ -169,10 +172,13 @@ class FioWorkloadTest(TestClusterBase):
             affected_fio[lvol]["disk"] = lvol_fio_path[lvol]["disk"]
             fs_type = "xfs" if lvol[-1] == "1" else "ext4"
             if lvol_fio_path[lvol]["mount_path"]:
+                fs = self.ssh_obj.get_mount_points(self.mgmt_nodes[0],
+                                                   lvol_fio_path[lvol]["mount_path"])
+                for device in fs:
+                    self.ssh_obj.unmount_path(node=self.mgmt_nodes[0], device=device)
                 self.ssh_obj.mount_path(self.mgmt_nodes[0],
                                         device=lvol_fio_path[lvol]["disk"],
-                                        mount_path=lvol_fio_path[lvol]["mount_path"],
-                                        only_mount=True)
+                                        mount_path=lvol_fio_path[lvol]["mount_path"])
         fio_threads.extend(self.run_fio(affected_fio))
 
         # Step 8: Stop instance
