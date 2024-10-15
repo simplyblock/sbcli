@@ -223,8 +223,8 @@ jobs:
       - name: Install Helm Chart for spdk-csi
         run: |
           cd $GITHUB_WORKSPACE/spdk-csi/charts/latest/spdk-csi/
-          echo "Sleeping for 120 seconds before helm install"
-          sleep 120
+          echo "Sleeping for 30 seconds before helm install"
+          sleep 30
           helm install spdk-csi ./ \
             --namespace spdk-csi \
             --create-namespace \
@@ -235,7 +235,7 @@ jobs:
             --set logicalVolume.snapshot="True" \
             --set image.spdkcsi.tag=master-arm64 \
             --set image.simplyblock.tag=main \
-            --set storagenode.spdkImage=simplyblock/spdk:main-latest
+            --set storagenode.spdkImage=simplyblock/spdk:feature-journal-ha-latest
 
       # - name: Wait for Storage Nodes to Become Online
       #   run: |

@@ -133,7 +133,7 @@ class TestClusterBase:
         device_details = self.sbcli_utils.get_device_details(storage_node_id=node_uuid)
         lvol_id = self.sbcli_utils.get_lvol_id(lvol_name=self.lvol_name)
         lvol_details = self.sbcli_utils.get_lvol_details(lvol_id=lvol_id)
-        command = f"{self.base_cmd} lvol get-cluster-map {lvol_id}"
+        command = f"{self.base_cmd} sn get-cluster-map {lvol_details[0]['node_id']}"
         lvol_cluster_map_details, _ = self.ssh_obj.exec_command(node=self.mgmt_nodes[0],
                                                                 command=command)
         self.logger.info(f"LVOL Cluster map: {lvol_cluster_map_details}")
@@ -245,6 +245,14 @@ class TestClusterBase:
         for mount_dir in mount_dirs:
             self.logger.info(f"Removing directory {mount_dir}")
             self.ssh_obj.remove_dir(node=self.mgmt_nodes[0], dir_path=mount_dir)
+    
+    def disconnect_lvol(self, lvol_device):
+        """Disconnects the logical volume."""
+        nqn_lvol = self.ssh_obj.get_nvme_subsystems(node=self.mgmt_nodes[0],
+                                                    nqn_filter=lvol_device)
+        for nqn in nqn_lvol:
+            self.logger.info(f"Disconnecting NVMe subsystem: {nqn}")
+            self.ssh_obj.disconnect_nvme(node=self.mgmt_nodes[0], nqn_grep=nqn)
 
     def disconnect_lvols(self):
         """ Disconnect all NVMe devices with NQN containing 'lvol' """

@@ -123,7 +123,7 @@ class TestDeviceNodeRestart(TestClusterBase):
         # Step 3: Start fio workloads on each lvol
         self.logger.info("Starting fio workloads on the logical volumes with different configurations.")
         fio_threads = []
-        fio_configs = [("randrw", "4K"), ("read", "8K"), ("write", "16K"), ("trimwrite", "32K")]
+        fio_configs = [("randrw", "4K"), ("read", "8K"), ("write", "16K"), ("randtrimwrite", "32K")]
 
         for i, (rw, bs) in enumerate(fio_configs):
             lvol_name = f"test_lvol_{i+1}"
@@ -241,7 +241,7 @@ class TestDeviceNodeRestart(TestClusterBase):
         self.logger.info("Deleting two files and creating one new test file.")
         self.ssh_obj.delete_files(self.mgmt_nodes[0], remounted_testfiles[:2])
         self.ssh_obj.exec_command(self.mgmt_nodes[0], 
-                                  f"sudo dd if=/dev/zero of={lvol_fio_path["test_lvol_1"]["mount_path"]}/new_testfile bs=1M count=10")
+                                  f"sudo dd if=/dev/zero of={lvol_fio_path['test_lvol_1']['mount_path']}/new_testfile bs=1M count=10")
 
         remounted_testfiles[1] = f'{lvol_fio_path["test_lvol_1"]["mount_path"]}/new_testfile'
         remounted_testfiles = remounted_testfiles[1:]
@@ -262,7 +262,18 @@ class TestDeviceNodeRestart(TestClusterBase):
         # Step 13: Ungracefully stop node 1 (container shutdown)
         self.logger.info("Stopping container on node 1 (ungraceful shutdown).")
         node_ip = self.journal_manager.sn_journal_map[self.lvol_sn_node]['primary_journal'][1]
-        self.ssh_obj.stop_docker_containers(node_ip, "spdk")
+        self.ssh_obj.stop_spdk_process(node_ip)
+        self.sbcli_utils.wait_for_storage_node_status(self.lvol_sn_node,
+                                                      "unreachable",
+                                                      timeout=300)
+
+        sleep_n_sec(420)
+
+        self.sbcli_utils.restart_node(node_uuid=self.lvol_sn_node)
+
+        sleep_n_sec(420)
+
+        self.sbcli_utils.restart_node(node_uuid=self.lvol_sn_node)
 
         # Step 14: Restart node 1, reconnect NVMe devices, and re-mount
         self.logger.info(f"Waiting for node to become online, {self.lvol_sn_node}")
@@ -326,9 +337,6 @@ class TestDeviceNodeRestart(TestClusterBase):
         
         # Log the journal map for all lvols
         self.logger.info(f"Lvol Journal Map: {self.journal_manager.get_all_sn()}")
-    
-    def get_node_ip(self, node_id):
-        return self.sbcli_utils.get_storage_node_details(node_id)[0]["mgmt_ip"]
 
     def stop_and_restart_based_on_journals(self):
         """
@@ -369,8 +377,10 @@ class TestDeviceNodeRestart(TestClusterBase):
             # Step 5: Force stop the node with secondary journal 2
             secondary_node_2 = self.extract_node_from_journal(secondary_journal_2[0])
             self.logger.info(f"Forcefully stopping node: {secondary_node_2} (secondary journal 2)")
-            self.ssh_obj.stop_docker_containers(node=secondary_journal_2[1], container_name="spdk")
-            sleep_n_sec(15)
+            self.ssh_obj.stop_spdk_process(node=secondary_journal_2[1])
+            sleep_n_sec(420)
+
+            self.sbcli_utils.restart_node(node_uuid=secondary_node_2)
 
             self.logger.info(f"Waiting for node to become online, {secondary_node_2}")
             self.sbcli_utils.wait_for_storage_node_status(secondary_node_2,

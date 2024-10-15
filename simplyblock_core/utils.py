@@ -413,12 +413,12 @@ def calculate_core_allocation(cpu_cores):
         jc_singleton_core = [cpu_cores[pos - 1] for pos in [7]]
     elif len(cpu_cores) >= 7:
         app_thread_core = [cpu_cores[pos - 1] for pos in [6]]
-        jm_cpu_core = [cpu_cores[pos - 1] for pos in [7]]
+        jm_cpu_core = [cpu_cores[pos - 1] for pos in [5]]
         poller_cpu_cores = [cpu_cores[pos - 1] for pos in [3, 5]]
         alceml_cpu_cores = [cpu_cores[pos - 1] for pos in [1]]
         alceml_cpu_worker_cores = [cpu_cores[pos - 1] for pos in [1]]
         distrib_cpu_cores = [cpu_cores[pos - 1] for pos in [2, 4]]
-        jc_singleton_core = [cpu_cores[pos - 1] for pos in [6]]
+        jc_singleton_core = [cpu_cores[pos - 1] for pos in [7]]
     elif len(cpu_cores) >= 5:
         app_thread_core = [cpu_cores[pos - 1] for pos in [5]]
         jm_cpu_core = [cpu_cores[pos - 1] for pos in [4]]

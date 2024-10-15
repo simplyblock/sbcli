@@ -5,7 +5,7 @@ from datetime import datetime
 def setup_logger(name):
     # Create a custom logger
     logger = logging.getLogger(name)
-    logger.setLevel(logging.INFO)
+    logger.setLevel(logging.DEBUG)
     
     os.makedirs("logs", exist_ok=True)
 

@@ -4,6 +4,7 @@ from datetime import datetime
 
 
 from simplyblock_core.controllers import health_controller, storage_events, device_events
+from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.rpc_client import RPCClient
 from simplyblock_core import constants, kv_store, utils, distr_controller
@@ -53,7 +54,7 @@ while True:
         for snode in snodes:
             logger.info("Node: %s, status %s", snode.get_id(), snode.status)
 
-            if snode.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_UNREACHABLE]:
+            if snode.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_UNREACHABLE, StorageNode.STATUS_SUSPENDED]:
                 logger.info(f"Node status is: {snode.status}, skipping")
                 set_node_health_check(snode, False)
                 for dev in snode.nvme_devices:
@@ -107,12 +108,13 @@ while True:
                     snode.rpc_username, snode.rpc_password,
                     timeout=10, retry=1)
                 for remote_device in snode.remote_devices:
-                    ret = rpc_client.get_bdevs(remote_device.remote_bdev)
-                    if ret:
-                        logger.info(f"Checking bdev: {remote_device.remote_bdev} ... ok")
-                    else:
-                        logger.info(f"Checking bdev: {remote_device.remote_bdev} ... not found")
-                    node_remote_devices_check &= bool(ret)
+                    if db_controller.get_storage_device_by_id(remote_device.get_id()).status == NVMeDevice.STATUS_ONLINE:
+                        ret = rpc_client.get_bdevs(remote_device.remote_bdev)
+                        if ret:
+                            logger.info(f"Checking bdev: {remote_device.remote_bdev} ... ok")
+                        else:
+                            logger.info(f"Checking bdev: {remote_device.remote_bdev} ... not found")
+                        node_remote_devices_check &= bool(ret)
 
                 if snode.jm_device:
                     jm_device = snode.jm_device

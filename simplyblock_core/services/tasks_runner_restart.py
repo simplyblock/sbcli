@@ -172,6 +172,7 @@ def task_runner_node(task):
         task.write_to_db(db_controller.kv_store)
         return False
 
+
     # shutting down node
     logger.info(f"Shutdown node {node.get_id()}")
     ret = storage_node_ops.shutdown_storage_node(node.get_id(), force=True)
@@ -218,4 +219,7 @@ while True:
                             tasks_events.task_updated(task)
                         else:
                             time.sleep(delay_seconds)
-                            delay_seconds *= 2
+                            if task.retry <= 3 and task.function_name == JobSchedule.FN_DEV_RESTART:
+                                delay_seconds *= 1
+                            else:
+                                delay_seconds *= 2

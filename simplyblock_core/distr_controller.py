@@ -24,14 +24,14 @@ def send_node_status_event(node, node_status):
     logger.debug(node_status_event)
     snodes = db_controller.get_storage_nodes_by_cluster_id(node.cluster_id)
     for node in snodes:
-        if node.status != node.STATUS_ONLINE:
+        if node.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED]:
             continue
         logger.info(f"Sending to: {node.get_id()}")
         rpc_client = RPCClient(node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password, timeout=10)
         ret = rpc_client.distr_status_events_update(events)
 
 
-def send_dev_status_event(device, dev_status):
+def send_dev_status_event(device, dev_status, target_node=None):
     db_controller = DBController()
     storage_ID = device.cluster_device_order
     node_status_event = {
@@ -41,12 +41,15 @@ def send_dev_status_event(device, dev_status):
         "status": dev_status}
     events = {"events": [node_status_event]}
     logger.debug(node_status_event)
-    snodes = db_controller.get_storage_nodes_by_cluster_id(device.cluster_id)
+    if target_node:
+        snodes = [target_node]
+    else:
+        snodes = db_controller.get_storage_nodes_by_cluster_id(device.cluster_id)
     for node in snodes:
-        if node.status != StorageNode.STATUS_ONLINE:
+        if node.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED]:
             continue
         logging.debug(f"Sending event updates, device: {storage_ID}, status: {dev_status}, node: {node.get_id()}")
-        rpc_client = RPCClient(node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password, timeout=3, retry=1)
+        rpc_client = RPCClient(node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password, timeout=5, retry=2)
         ret = rpc_client.distr_status_events_update(events)
         if not ret:
             logger.warning("Failed to send event update")
@@ -59,7 +62,7 @@ def disconnect_device(device):
         if node.status != node.STATUS_ONLINE:
             continue
         new_remote_devices = []
-        rpc_client = RPCClient(node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password, timeout=5, retry=1)
+        rpc_client = RPCClient(node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password, timeout=5, retry=2)
         for rem_dev in node.remote_devices:
             if rem_dev.get_id() == device.get_id():
                 ctrl_name = rem_dev.remote_bdev[:-2]
@@ -98,7 +101,8 @@ def get_distr_cluster_map(snodes, target_node):
                         break
             if not name:
                 name = f"remote_{dev.alceml_bdev}n1"
-                dev_status = NVMeDevice.STATUS_UNAVAILABLE
+                if dev_status == NVMeDevice.STATUS_ONLINE:
+                    dev_status = NVMeDevice.STATUS_UNAVAILABLE
             logger.debug(f"Device: {dev.get_id()}, status: {dev_status}, bdev_name: {name}")
             dev_map[dev.cluster_device_order] = {
                 "UUID": dev.get_id(),

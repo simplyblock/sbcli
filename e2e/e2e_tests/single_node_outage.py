@@ -136,8 +136,8 @@ class TestSingleNodeOutage(TestClusterBase):
                                                       status="offline",
                                                       timeout=100)
 
-        self.logger.info("Sleeping for 10 seconds")
-        sleep_n_sec(10)
+        self.logger.info("Sleeping for 30 seconds")
+        sleep_n_sec(30)
 
         self.validations(node_uuid=no_lvol_node_uuid,
                          node_status="offline",

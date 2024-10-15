@@ -2,6 +2,8 @@ import time
 import paramiko
 import os
 import json
+
+import paramiko.ssh_exception
 from logger_config import setup_logger
 from pathlib import Path
 
@@ -49,7 +51,7 @@ class SshUtils:
                     username=username,
                     port=port,
                     pkey=private_key,
-                    timeout=3600)
+                    timeout=360)
         self.logger.info("Connected to bastion server.")
 
         if self.ssh_connections.get(bastion_server_address, None):
@@ -98,7 +100,8 @@ class SshUtils:
             ssh_connection = self.ssh_connections.get(node)
             try:
                 # Ensure the SSH connection is active, otherwise reconnect
-                if not ssh_connection or not ssh_connection.get_transport().is_active():
+                if not ssh_connection or not ssh_connection.get_transport().is_active() \
+                    or retry_count > 0:
                     self.logger.info(f"Reconnecting SSH to node {node}")
                     self.connect(
                         address=node,
@@ -150,7 +153,7 @@ class SshUtils:
         # If we exhaust retries, return failure
         self.logger.error(f"Failed to execute command '{command}' on node {node} after {max_retries} retries.")
         return "", "Command failed after max retries"
-
+    
     def format_disk(self, node, device, fs_type="ext4"):
         """Format disk on the given node
 
@@ -158,7 +161,10 @@ class SshUtils:
             node (str): Node to perform ssh operation on
             device (str): Device path
         """
-        command = f"sudo mkfs.{fs_type} {device}"
+        force = "-F"
+        if fs_type == "xfs":
+            force = "-f"
+        command = f"sudo mkfs.{fs_type} {force} {device}"
         self.exec_command(node, command)
 
     def mount_path(self, node, device, mount_path):
@@ -238,6 +244,11 @@ class SshUtils:
 
         output_file = kwargs.get("output_file", '')
         output_file = f" --output={output_file} " if output_file else ''
+
+        # command = (f"sudo fio --name={name} {location} --ioengine={ioengine} --direct=1 --iodepth={iodepth} "
+        #           f"{time_based} --runtime={runtime} --rw={rw} --bs={bs} --size={size} --rwmixread={rwmixread} "
+        #           f"--verify=md5 --numjobs={numjobs} --nrfiles={nrfiles} --verify_dump=1 --verify_fatal=1 "
+        #           f"--verify_state_save=1 --verify_backlog=10 --group_reporting{output_format}{output_file}")
 
         command = (f"sudo fio --name={name} {location} --ioengine={ioengine} --direct=1 --iodepth={iodepth} "
                    f"{time_based} --runtime={runtime} --rw={rw} --bs={bs} --size={size} --rwmixread={rwmixread} "
@@ -330,18 +341,14 @@ class SshUtils:
         output, error = self.exec_command(node=node, command=cmd)
         return output
     
-    def stop_docker_containers(self, node, container_name=None):
-        """Stops given docker container. Stops all if no name is given
+    def stop_spdk_process(self, node):
+        """Stops spdk process
 
         Args:
             node (str): Node IP
-            container_name (str): Name of container to stop
         """
-        if container_name:
-            cmd = f"sudo docker stop {container_name}"
-        else:
-            cmd = "sudo docker stop $(sudo docker ps -a -q)"
-        
+
+        cmd = "curl 0.0.0.0:5000/snode/spdk_process_kill"
         output, error = self.exec_command(node=node, command=cmd)
         return output
 
@@ -359,7 +366,7 @@ class SshUtils:
 
     def disconnect_nvme(self, node, nqn_grep):
         """Disconnect NVMe device on the node."""
-        cmd = f"sudo nvme disconnect -d {nqn_grep}"
+        cmd = f"sudo nvme disconnect -n {nqn_grep}"
         output, error = self.exec_command(node=node, command=cmd)
         return output, error
 
@@ -434,16 +441,26 @@ class SshUtils:
             checksums[file] = checksum
         return checksums
 
-    def verify_checksums(self, node, files, checksums):
+    def verify_checksums(self, node, files, checksums, clone_base=False):
         for file in files:
             command = f"md5sum {file}"
             stdout, _ = self.exec_command(node, command)
             checksum, _ = stdout.split()
-            self.logger.info(f"Checksum for file {file}: Actual: {checksum}, Expected: {checksums[file]}")
-            if checksum != checksums[file]:
-                raise ValueError(f"Checksum mismatch for file {file}")
+            if clone_base:
+                file_name = file.split("/")[-1]
+                base_dir_name = file.split("/")[1].split("_")
+                base_file_complete = base_dir_name[0] + "_" + base_dir_name[1] + "/" + file_name
+                self.logger.info(f"Checksum for file {file}: Actual: {checksum}, Expected: {checksums[base_file_complete]}")
+                if checksum != checksums[base_file_complete]:
+                    raise ValueError(f"Checksum mismatch for file {file}")
+                else:
+                    self.logger.info(f"Checksum match for file: {file}")
             else:
-                self.logger.info(f"Checksum match for file: {file}")
+                self.logger.info(f"Checksum for file {file}: Actual: {checksum}, Expected: {checksums[file]}")
+                if checksum != checksums[file]:
+                    raise ValueError(f"Checksum mismatch for file {file}")
+                else:
+                    self.logger.info(f"Checksum match for file: {file}")
 
     def delete_files(self, node, files):
         for file in files:
@@ -456,15 +473,15 @@ class SshUtils:
 
     def restart_device_with_errors(self, node, device_id):
         # Induce errors on the device
-        command = f"{self.base_cmd} device test-mode {device_id} --error rw"
+        command = f"{self.base_cmd} sn device test-mode {device_id} --error rw"
         self.exec_command(node, command)
 
     def restart_jm_device(self, node, jm_device_id):
-        command = f"{self.base_cmd} restart-jm-device {jm_device_id}"
+        command = f"{self.base_cmd} sn restart-jm-device {jm_device_id}"
         self.exec_command(node, command)
 
     def remove_jm_device(self, node, jm_device_id):
-        command = f"{self.base_cmd} remove-jm-device {jm_device_id}"
+        command = f"{self.base_cmd} sn remove-jm-device {jm_device_id}"
         self.exec_command(node, command)
         
     def restart_device(self, node, device_id):
