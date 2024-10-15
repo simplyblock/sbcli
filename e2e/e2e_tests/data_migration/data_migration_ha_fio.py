@@ -21,6 +21,7 @@ class FioWorkloadTest(TestClusterBase):
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
+        self.mount_path = "/mnt"
         self.logger = setup_logger(__name__)
 
     def run(self):

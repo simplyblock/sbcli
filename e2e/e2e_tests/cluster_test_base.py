@@ -76,12 +76,18 @@ class TestClusterBase:
         # self.ssh_obj.exec_command(
         #     self.mgmt_nodes[0], command=command
         # )
+        sleep_n_sec(2)
         self.unmount_all(base_path=self.mount_path)
+        sleep_n_sec(2)
         self.ssh_obj.unmount_path(node=self.mgmt_nodes[0],
                                   device=self.mount_path)
+        sleep_n_sec(2)
         self.ssh_obj.delete_all_snapshots(node=self.mgmt_nodes[0])
+        sleep_n_sec(2)
         self.disconnect_lvols()
+        sleep_n_sec(2)
         self.sbcli_utils.delete_all_lvols()
+        sleep_n_sec(2)
         self.sbcli_utils.delete_all_storage_pools()
         session = boto3.Session(
             aws_access_key_id=os.environ.get("AWS_ACCESS_KEY_ID"),
@@ -97,21 +103,29 @@ class TestClusterBase:
         self.ssh_obj.kill_processes(node=self.mgmt_nodes[0],
                                     process_name="fio")
         self.ssh_obj.delete_all_snapshots(node=self.mgmt_nodes[0])
+        sleep_n_sec(2)
         lvols = self.sbcli_utils.list_lvols()
         self.unmount_all(base_path=self.mount_path)
+        sleep_n_sec(2)
         self.ssh_obj.unmount_path(node=self.mgmt_nodes[0],
                                   device=self.mount_path)
+        sleep_n_sec(2)
         if lvols is not None:
             for _, lvol_id in lvols.items():
                 lvol_details = self.sbcli_utils.get_lvol_details(lvol_id=lvol_id)
                 nqn = lvol_details[0]["nqn"]
                 self.ssh_obj.unmount_path(node=self.mgmt_nodes[0],
                                           device=self.mount_path)
+                sleep_n_sec(2)
                 self.ssh_obj.exec_command(node=self.mgmt_nodes[0],
                                           command=f"sudo nvme disconnect -n {nqn}")
+                sleep_n_sec(2)
             self.disconnect_lvols()
+            sleep_n_sec(2)
             self.sbcli_utils.delete_all_lvols()
+            sleep_n_sec(2)
         self.sbcli_utils.delete_all_storage_pools()
+        sleep_n_sec(2)
         self.ssh_obj.remove_dir(self.mgmt_nodes[0], "/mnt/de*")
         for node, ssh in self.ssh_obj.ssh_connections.items():
             self.logger.info(f"Closing node ssh connection for {node}")
