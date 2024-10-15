@@ -167,7 +167,7 @@ class SshUtils:
         command = f"sudo mkfs.{fs_type} {force} {device}"
         self.exec_command(node, command)
 
-    def mount_path(self, node, device, mount_path):
+    def mount_path(self, node, device, mount_path, only_mount=False):
         """Mount device to given path on given node
 
         Args:
@@ -175,17 +175,18 @@ class SshUtils:
             device (str): Device path
             mount_path (_type_): Mount path to perform mount on
         """
-        try:
-            command = f"sudo rm -rf {mount_path}"
-            self.exec_command(node, command)
-        except Exception as e:
-            self.logger.info(e)
-        
-        time.sleep(3)
+        if not only_mount:
+            try:
+                command = f"sudo rm -rf {mount_path}"
+                self.exec_command(node, command)
+            except Exception as e:
+                self.logger.info(e)
+            
+            time.sleep(3)
 
-        self.make_directory(node=node, dir_name=mount_path)
-        
-        time.sleep(3)
+            self.make_directory(node=node, dir_name=mount_path)
+            
+            time.sleep(3)
 
         command = f"sudo mount {device} {mount_path}"
         self.exec_command(node, command)

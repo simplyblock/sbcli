@@ -125,7 +125,8 @@ class FioWorkloadTest(TestClusterBase):
             if lvol_fio_path[lvol]["mount_path"]:
                 self.ssh_obj.mount_path(self.mgmt_nodes[0],
                                         device=lvol_fio_path[lvol]["disk"],
-                                        mount_path=lvol_fio_path[lvol]["mount_path"])
+                                        mount_path=lvol_fio_path[lvol]["mount_path"],
+                                        only_mount=True)
         fio_threads.extend(self.run_fio(affected_fio))
 
         sleep_n_sec(120)
@@ -161,12 +162,11 @@ class FioWorkloadTest(TestClusterBase):
             if lvol_fio_path[lvol]["mount_path"]:
                 self.ssh_obj.mount_path(self.mgmt_nodes[0],
                                         device=lvol_fio_path[lvol]["disk"],
-                                        mount_path=lvol_fio_path[lvol]["mount_path"])
+                                        mount_path=lvol_fio_path[lvol]["mount_path"],
+                                        only_mount=True)
         fio_threads.extend(self.run_fio(affected_fio))
 
         # Step 8: Stop instance
-
-
 
 
         # Step 9: Add node
@@ -238,9 +238,12 @@ class FioWorkloadTest(TestClusterBase):
 
     def shutdown_node_and_verify(self, node_id, process_name):
         """Shutdown the node and ensure fio is uninterrupted."""
+        fio_process = self.ssh_obj.find_process_name(self.mgmt_nodes[0], 'fio')
+        self.logger.info(f"FIO PROCESS: {fio_process}")
+        
         output = self.ssh_obj.exec_command(node=self.mgmt_nodes[0], command="sudo df -h")
         output = output[0].strip().split('\n')
-        print(f"Mount paths before shutdown: {output}")
+        print(f"Mount paths before suspend: {output}")
         self.sbcli_utils.suspend_node(node_id)
         self.logger.info(f"Node {node_id} suspended successfully.")
 
@@ -251,6 +254,7 @@ class FioWorkloadTest(TestClusterBase):
         sleep_n_sec(30)
 
         fio_process = self.ssh_obj.find_process_name(self.mgmt_nodes[0], 'fio')
+        self.logger.info(f"FIO PROCESS: {fio_process}")
         if not fio_process:
             raise RuntimeError("FIO process was interrupted on unaffected nodes.")
         for fio in process_name:
@@ -303,7 +307,7 @@ class FioWorkloadTest(TestClusterBase):
         
         node_details = self.sbcli_utils.get_storage_node_details(node_id)
         node_ip = node_details[0]["mgmt_ip"]
-        self.ssh_obj.stop_docker_containers(node_ip, "spdk")
+        self.ssh_obj.stop_spdk_process(node_ip)
 
         self.logger.info(f"Docker container on node {node_id} stopped successfully.")
 
