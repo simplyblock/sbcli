@@ -239,12 +239,14 @@ class FioWorkloadTest(TestClusterBase):
     def shutdown_node_and_verify(self, node_id, process_name):
         """Shutdown the node and ensure fio is uninterrupted."""
         output = self.ssh_obj.exec_command(node=self.mgmt_nodes[0], command="sudo df -h")
-        print(f"Mount paths before shutdown: {output[0].strip().split('\n')}")
+        output = output[0].strip().split('\n')
+        print(f"Mount paths before shutdown: {output}")
         self.sbcli_utils.suspend_node(node_id)
         self.logger.info(f"Node {node_id} suspended successfully.")
 
         output = self.ssh_obj.exec_command(node=self.mgmt_nodes[0], command="sudo df -h")
-        print(f"Mount paths after suspend: {output[0].strip().split('\n')}")
+        output = output[0].strip().split('\n')
+        print(f"Mount paths after suspend: {output}")
 
         sleep_n_sec(30)
 
@@ -262,7 +264,8 @@ class FioWorkloadTest(TestClusterBase):
                                                       timeout=500)
 
         output = self.ssh_obj.exec_command(node=self.mgmt_nodes[0], command="sudo df -h")
-        print(f"Mount paths after shutdown: {output[0].strip().split('\n')}")
+        output = output[0].strip().split('\n')
+        print(f"Mount paths after shutdown: {output}")
         
         # Validate fio is running on other nodes
         fio_process = self.ssh_obj.find_process_name(self.mgmt_nodes[0], 'fio')
@@ -282,7 +285,8 @@ class FioWorkloadTest(TestClusterBase):
                                                       timeout=500)
 
         output = self.ssh_obj.exec_command(node=self.mgmt_nodes[0], command="sudo df -h")
-        print(f"Mount paths after restart: {output[0].strip().split('\n')}")
+        output = output[0].strip().split('\n')
+        print(f"Mount paths after restart: {output}")
 
         fio_process = self.ssh_obj.find_process_name(self.mgmt_nodes[0], 'fio')
         if not fio_process:
@@ -294,7 +298,8 @@ class FioWorkloadTest(TestClusterBase):
     def stop_container_verify(self, node_id, process_name):
         """Shutdown the node and ensure fio is uninterrupted."""
         output = self.ssh_obj.exec_command(node=self.mgmt_nodes[0], command="sudo df -h")
-        print(f"Mount paths before shutdown: {output[0].strip().split('\n')}")
+        output = output[0].strip().split('\n')
+        print(f"Mount paths before shutdown: {output}")
         
         node_details = self.sbcli_utils.get_storage_node_details(node_id)
         node_ip = node_details[0]["mgmt_ip"]
@@ -303,7 +308,8 @@ class FioWorkloadTest(TestClusterBase):
         self.logger.info(f"Docker container on node {node_id} stopped successfully.")
 
         output = self.ssh_obj.exec_command(node=self.mgmt_nodes[0], command="sudo df -h")
-        print(f"Mount paths after suspend: {output[0].strip().split('\n')}")
+        output = output[0].strip().split('\n')
+        print(f"Mount paths after suspend: {output}")
 
         fio_process = self.ssh_obj.find_process_name(self.mgmt_nodes[0], 'fio')
         if not fio_process:
@@ -322,7 +328,8 @@ class FioWorkloadTest(TestClusterBase):
                                                       timeout=500)
 
         output = self.ssh_obj.exec_command(node=self.mgmt_nodes[0], command="sudo df -h")
-        print(f"Mount paths after restart: {output[0].strip().split('\n')}")
+        output = output[0].strip().split('\n')
+        print(f"Mount paths after restart: {output}")
 
         fio_process = self.ssh_obj.find_process_name(self.mgmt_nodes[0], 'fio')
         if not fio_process:
