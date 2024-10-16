@@ -155,49 +155,47 @@ class CommonUtils:
 
         return nodes, devices
     
-    def start_ec2_instance(self, ec2_client, instance_id):
+    def start_ec2_instance(self, ec2_resource, instance_id):
         """Start ec2 instance
 
         Args:
-            ec2_client (EC2): EC2 class object from boto3
+            ec2_resource (EC2): EC2 class object from boto3
             instance_id (str): Instance id to start
         """
-        response = ec2_client.start_instances(InstanceIds=[instance_id])
-        print(f'Successfully started instance {instance_id}: {response}')
-
-        start_waiter = ec2_client.get_waiter('instance_running')
-        self.logger.info(f"Waiting for instance {instance_id} to start...")
-        start_waiter.wait(InstanceIds=[instance_id])
-        self.logger.info(f'Instance {instance_id} has been successfully started.')
+        instance = ec2_resource.Instance(instance_id)
+        instance.start()
+        self.logger.info(f"Starting instance {instance_id}.")
+        instance.wait_until_running()  # Wait until the instance is fully running
+        self.logger.info(f"Instance {instance_id} is now running.")
 
         sleep_n_sec(30)
 
-    def stop_ec2_instance(self, ec2_client, instance_id):
+    def stop_ec2_instance(self, ec2_resource, instance_id):
         """Stop ec2 instance
 
         Args:
-            ec2_client (EC2): EC2 class object from boto3
+            ec2_resource (EC2): EC2 class object from boto3
             instance_id (str): Instance id to stop
         """
-        response = ec2_client.stop_instances(InstanceIds=[instance_id])
-        self.logger.info(f'Successfully stopped instance {instance_id}: {response}')
-        stop_waiter = ec2_client.get_waiter('instance_stopped')
-        self.logger.info(f"Waiting for instance {instance_id} to stop...")
-        stop_waiter.wait(InstanceIds=[instance_id])
-        self.logger.info((f'Instance {instance_id} has been successfully stopped.'))
-        
+        instance = ec2_resource.Instance(instance_id)
+        instance.stop()
+        self.logger.info(f"Stopping instance {instance_id}.")
+        instance.wait_until_stopped()  # Wait until the instance is fully stopped
+        self.logger.info(f"Instance {instance_id} has stopped.") 
         sleep_n_sec(30)
     
-    def terminate_instance(self, ec2_client, instance_id):
+    def terminate_instance(self, ec2_resource, instance_id):
         # Terminate the given instance
-        instance = ec2_client.Instance(instance_id)
+        instance = ec2_resource.Instance(instance_id)
         instance.terminate()
-        instance.wait_until_terminated()  # Wait until the instance is terminated
+        self.logger.info(f"Terminating instance {instance_id}.")
+        instance.wait_until_terminated()  # Wait until the instance is fully terminated
         self.logger.info(f"Instance {instance_id} has been terminated.")
+        sleep_n_sec(30)
     
-    def create_instance_from_existing(self, ec2_client, instance_id, instance_name):
+    def create_instance_from_existing(self, ec2_resource, instance_id, instance_name):
         # Get the existing instance information
-        instance = ec2_client.Instance(instance_id)
+        instance = ec2_resource.Instance(instance_id)
     
         # Get key details from the existing instance
         instance_type = instance.instance_type
@@ -207,7 +205,7 @@ class CommonUtils:
         subnet_id = instance.subnet_id
         
         # Create a new instance with the same details and give it a name tag
-        new_instance = ec2_client.create_instances(
+        new_instance = ec2_resource.create_instances(
             ImageId=image_id,
             InstanceType=instance_type,
             KeyName=key_name,

@@ -192,11 +192,11 @@ class FioWorkloadTest(TestClusterBase):
 
         self.logger.info("Creating New instance")
         new_node_instance_id, new_node_ip = \
-            self.common_utils.create_instance_from_existing(ec2_client=self.ec2_client, 
+            self.common_utils.create_instance_from_existing(ec2_client=self.ec2_resource, 
                                                             instance_id=instance_id,
                                                             instance_name="e2e-new-instance")
 
-        self.common_utils.stop_ec2_instance(self.ec2_client,
+        self.common_utils.stop_ec2_instance(self.ec2_resource,
                                             instance_id=instance_id)
         
         sleep_n_sec(120)
@@ -261,7 +261,7 @@ class FioWorkloadTest(TestClusterBase):
 
         sn_lvol_data[new_node] = {}
 
-        self.common_utils.terminate_instance(instance_id)
+        self.common_utils.terminate_instance(self.ec2_resource, instance_id)
 
 
         self.common_utils.manage_fio_threads(node=self.mgmt_nodes[0],
@@ -272,7 +272,7 @@ class FioWorkloadTest(TestClusterBase):
         for thread in fio_threads:
             thread.join()
 
-        self.common_utils.terminate_instance(new_node_instance_id)
+        self.common_utils.terminate_instance(self.ec2_resource, new_node_instance_id)
 
         self.logger.info("Test completed successfully.")
 

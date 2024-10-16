@@ -40,7 +40,7 @@ class TestClusterBase:
         self.log_path = f"{os.path.dirname(self.mount_path)}/log_file.log"
         self.base_cmd = os.environ.get("SBCLI_CMD", "sbcli-dev")
         self.fio_debug = kwargs.get("fio_debug", False)
-        self.ec2_client = None
+        self.ec2_resource = None
 
     def setup(self):
         """Contains setup required to run the test case
@@ -94,7 +94,7 @@ class TestClusterBase:
             aws_secret_access_key=os.environ.get("AWS_SECRET_ACCESS_KEY"),
             region_name=os.environ.get("AWS_REGION")
         )
-        self.ec2_client = session.client('ec2')
+        self.ec2_resource = session.resource('ec2')
 
     def teardown(self):
         """Contains teradown required post test case execution
