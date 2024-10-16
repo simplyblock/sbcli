@@ -152,6 +152,37 @@ class SbcliUtils:
                     raise e
                 self.logger.info(f"Retrying API {api_url}. Attempt: {10 - retry + 1}")
 
+    def add_storage_node(self, cluster_id, node_ip, ifname, max_lvol, max_prov, max_snap,
+                         number_of_distribs, number_of_devices, partitions, jm_percent,
+                         disable_ha_jm, enable_test_device, namespace, iobuf_small_pool_count,
+                         iobuf_large_pool_count, spdk_debug, spdk_image, spdk_cpu_mask):
+        """Adds the storage node with given name
+        """
+
+        body = {
+            "cluster_id": cluster_id,
+            "node_ip": node_ip,
+            "ifname": ifname,
+            "max_lvol": max_lvol,
+            "max_prov": max_prov,
+            "max_snap": max_snap,
+            "number_of_distribs": number_of_distribs,
+            "number_of_devices": number_of_devices,
+            "partitions": partitions,
+            "jm_percent": jm_percent,
+            "disable_ha_jm": disable_ha_jm,
+            "enable_test_device": enable_test_device,
+            "namespace": namespace,
+            "iobuf_small_pool_count": iobuf_small_pool_count,
+            "iobuf_large_pool_count": iobuf_large_pool_count,
+            "spdk_debug": spdk_debug,
+            "spdk_image": spdk_image,
+            "spdk_cpu_mask": spdk_cpu_mask
+        }
+
+        self.post_request(api_url="/storagenode/add", body=body)
+        
+    
     def get_node_without_lvols(self) -> str:
         """
         returns a single nodeID which doesn't have any lvol attached

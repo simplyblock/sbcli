@@ -188,6 +188,54 @@ class CommonUtils:
         
         sleep_n_sec(30)
     
+    def terminate_instance(self, ec2_client, instance_id):
+        # Terminate the given instance
+        instance = ec2_client.Instance(instance_id)
+        instance.terminate()
+        instance.wait_until_terminated()  # Wait until the instance is terminated
+        self.logger.info(f"Instance {instance_id} has been terminated.")
+    
+    def create_instance_from_existing(self, ec2_client, instance_id, instance_name):
+        # Get the existing instance information
+        instance = ec2_client.Instance(instance_id)
+    
+        # Get key details from the existing instance
+        instance_type = instance.instance_type
+        image_id = instance.image_id
+        key_name = instance.key_name
+        security_groups = instance.security_groups
+        subnet_id = instance.subnet_id
+        
+        # Create a new instance with the same details and give it a name tag
+        new_instance = ec2_client.create_instances(
+            ImageId=image_id,
+            InstanceType=instance_type,
+            KeyName=key_name,
+            SecurityGroupIds=[sg['GroupId'] for sg in security_groups],
+            SubnetId=subnet_id,
+            MinCount=1,
+            MaxCount=1,
+            TagSpecifications=[
+                {
+                    'ResourceType': 'instance',
+                    'Tags': [
+                        {
+                            'Key': 'Name',
+                            'Value': instance_name
+                        }
+                    ]
+                }
+            ]
+        )
+        new_instance_id = new_instance[0].id
+        new_instance[0].wait_until_running()  # Wait until the instance is running to get the private IP
+        new_instance[0].reload()  # Refresh the instance attributes after it is running
+    
+        private_ip = new_instance[0].private_ip_address
+        
+        self.logger.info(f"New instance created with ID: {new_instance[0].id}")
+        return new_instance_id, private_ip
+    
 
 def sleep_n_sec(seconds):
     """Sleeps for given seconds
