@@ -531,4 +531,4 @@ class SshUtils:
             cmd = f"{cmd} --spdk-debug"
     
         add_node_cmd = f"{cmd} {cluster_id} {node_ip}:5000 {ifname}"
-        self.exec_command(node=node, cmd=add_node_cmd)
+        self.exec_command(node=node, command=add_node_cmd)
