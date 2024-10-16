@@ -233,6 +233,25 @@ class CommonUtils:
         
         self.logger.info(f"New instance created with ID: {new_instance[0].id}")
         return new_instance_id, private_ip
+
+    def get_instance_id_by_name(self, ec2_resource, instance_name):
+        instances = ec2_resource.instances.filter(
+            Filters=[
+                {
+                    'Name': 'tag:Name',
+                    'Values': [instance_name]
+                }
+            ]
+        )
+        
+        # Retrieve the instance ID
+        for instance in instances:
+            if instance.state['Name'] != 'terminated':  # Skip terminated instances
+                self.logger.info(f"Instance found: ID = {instance.id}, Name = {instance_name}")
+                return instance.id
+        
+        self.logger.info(f"No running instance found with the name: {instance_name}")
+        return None
     
 
 def sleep_n_sec(seconds):

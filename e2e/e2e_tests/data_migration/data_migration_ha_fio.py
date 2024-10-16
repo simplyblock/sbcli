@@ -213,7 +213,28 @@ class FioWorkloadTest(TestClusterBase):
         self.logger.info("FIO process is running uninterrupted.")
         
         # Step 9: Add node
-        self.sbcli_utils.add_storage_node(
+        # self.sbcli_utils.add_storage_node(
+        #     cluster_id=self.cluster_id,
+        #     node_ip=new_node_ip,
+        #     ifname="eth0",
+        #     max_lvol=affected_node_details[0]["max_lvol"],
+        #     max_snap=affected_node_details[0]["max_snap"],
+        #     max_prov=affected_node_details[0]["max_prov"],
+        #     number_of_distribs=affected_node_details[0]["number_of_distribs"],
+        #     number_of_devices=affected_node_details[0]["number_of_devices"],
+        #     partitions=affected_node_details[0]["num_partitions_per_dev"],
+        #     jm_percent=affected_node_details[0]["jm_percent"],
+        #     disable_ha_jm=not affected_node_details[0]["enable_ha_jm"],
+        #     enable_test_device=affected_node_details[0]["enable_test_device"],
+        #     namespace=affected_node_details[0]["namespace"],
+        #     iobuf_small_pool_count=affected_node_details[0]["iobuf_small_pool_count"],
+        #     iobuf_large_pool_count=affected_node_details[0]["iobuf_large_pool_count"],
+        #     spdk_debug=affected_node_details[0]["spdk_debug"],
+        #     spdk_image=affected_node_details[0]["spdk_image"],
+        #     spdk_cpu_mask=affected_node_details[0]["spdk_cpu_mask"]
+        # )
+
+        self.ssh_obj.add_storage_node(
             cluster_id=self.cluster_id,
             node_ip=new_node_ip,
             ifname="eth0",
@@ -226,9 +247,8 @@ class FioWorkloadTest(TestClusterBase):
             jm_percent=affected_node_details[0]["jm_percent"],
             disable_ha_jm=not affected_node_details[0]["enable_ha_jm"],
             enable_test_device=affected_node_details[0]["enable_test_device"],
-            namespace=affected_node_details[0]["namespace"],
-            iobuf_small_pool_count=affected_node_details[0]["iobuf_small_pool_count"],
-            iobuf_large_pool_count=affected_node_details[0]["iobuf_large_pool_count"],
+            # iobuf_small_pool_count=affected_node_details[0]["iobuf_small_pool_count"],
+            # iobuf_large_pool_count=affected_node_details[0]["iobuf_large_pool_count"],
             spdk_debug=affected_node_details[0]["spdk_debug"],
             spdk_image=affected_node_details[0]["spdk_image"],
             spdk_cpu_mask=affected_node_details[0]["spdk_cpu_mask"]

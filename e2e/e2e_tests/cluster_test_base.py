@@ -130,6 +130,10 @@ class TestClusterBase:
         for node, ssh in self.ssh_obj.ssh_connections.items():
             self.logger.info(f"Closing node ssh connection for {node}")
             ssh.close()
+        instance_id = self.common_utils.get_instance_id_by_name(ec2_resource=self.ec2_resource,
+                                                                instance_name="e2e-new-instance")
+        self.common_utils.terminate_instance(ec2_resource=self.ec2_resource,
+                                             instance_id=instance_id)
 
     def validations(self, node_uuid, node_status, device_status, lvol_status,
                     health_check_status):

@@ -154,7 +154,7 @@ class SbcliUtils:
 
     def add_storage_node(self, cluster_id, node_ip, ifname, max_lvol, max_prov, max_snap,
                          number_of_distribs, number_of_devices, partitions, jm_percent,
-                         disable_ha_jm, enable_test_device, namespace, iobuf_small_pool_count,
+                         disable_ha_jm, enable_test_device, iobuf_small_pool_count,
                          iobuf_large_pool_count, spdk_debug, spdk_image, spdk_cpu_mask):
         """Adds the storage node with given name
         """
@@ -172,7 +172,6 @@ class SbcliUtils:
             "jm_percent": jm_percent,
             "disable_ha_jm": disable_ha_jm,
             "enable_test_device": enable_test_device,
-            "namespace": namespace,
             "iobuf_small_pool_count": iobuf_small_pool_count,
             "iobuf_large_pool_count": iobuf_large_pool_count,
             "spdk_debug": spdk_debug,
@@ -181,7 +180,7 @@ class SbcliUtils:
         }
 
         self.post_request(api_url="/storagenode/add", body=body)
-        
+
     
     def get_node_without_lvols(self) -> str:
         """

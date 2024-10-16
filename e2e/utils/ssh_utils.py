@@ -514,3 +514,21 @@ class SshUtils:
     #         if len(columns) > 1:
     #             filesystem.append(columns[0])
     #     return filesystem
+
+    def add_storage_node(self, node, cluster_id, node_ip, ifname, max_lvol, max_prov, max_snap,
+                         number_of_distribs, number_of_devices, partitions, jm_percent,
+                         disable_ha_jm, enable_test_device, spdk_debug, spdk_image, spdk_cpu_mask):
+        cmd = (f"{self.base_cmd} storage-node add-node --max-lvol {max_lvol} --max-snap {max_snap} --max-prov {max_prov} "
+               f"--number-of-devices {number_of_devices} --number-of-distribs {number_of_distribs} "
+               f"--partitions {partitions} --jm-percent {jm_percent} "
+               f" --cpu-mask {spdk_cpu_mask} --spdk-image {spdk_image}")
+        
+        if disable_ha_jm:
+            cmd = f"{cmd} --disable-ha-jm"
+        if enable_test_device:
+            cmd = f"{cmd} --enable-test-device"
+        if spdk_debug:
+            cmd = f"{cmd} --spdk-debug"
+    
+        add_node_cmd = f"{cmd} {cluster_id} {node_ip}:5000 {ifname}"
+        self.exec_command(node=node, cmd=add_node_cmd)
