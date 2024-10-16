@@ -135,7 +135,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
             c.swarm.leave(force=True)
             time.sleep(3)
 
-        c.swarm.init()
+        c.swarm.init(DEV_IP)
         logger.info("Configuring docker swarm > Done")
     except Exception as e:
         print(e)
