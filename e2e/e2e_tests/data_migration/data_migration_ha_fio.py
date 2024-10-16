@@ -235,6 +235,7 @@ class FioWorkloadTest(TestClusterBase):
         # )
 
         self.ssh_obj.add_storage_node(
+            node=self.mgmt_nodes[0],
             cluster_id=self.cluster_id,
             node_ip=new_node_ip,
             ifname="eth0",
