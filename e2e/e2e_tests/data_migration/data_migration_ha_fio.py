@@ -192,7 +192,7 @@ class FioWorkloadTest(TestClusterBase):
 
         self.logger.info("Creating New instance")
         new_node_instance_id, new_node_ip = \
-            self.common_utils.create_instance_from_existing(ec2_client=self.ec2_resource, 
+            self.common_utils.create_instance_from_existing(ec2_resource=self.ec2_resource, 
                                                             instance_id=instance_id,
                                                             instance_name="e2e-new-instance")
 
