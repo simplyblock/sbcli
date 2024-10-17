@@ -202,6 +202,18 @@ while True:
                                 if results:
                                     logger.info(utils.print_table(results))
                                     logger.info(f"Checking Distr map ... {is_passed}")
+                                    if not is_passed:
+                                        for result in results:
+                                            if result['Results'] == 'failed':
+                                                if result['Kind'] == "Device":
+                                                    dev = db_controller.get_storage_device_by_id(result['UUID'])
+                                                    distr_controller.send_dev_status_event(dev, dev.status, snode)
+                                                if result['Kind'] == "Node":
+                                                    node = db_controller.get_storage_node_by_id(result['UUID'])
+                                                    distr_controller.send_node_status_event(node, node.status, snode)
+                                        ret = rpc_client.distr_get_cluster_map(distr)
+                                        results, is_passed = distr_controller.parse_distr_cluster_map(ret)
+
                                 else:
                                     logger.error("Failed to parse distr cluster map")
 
