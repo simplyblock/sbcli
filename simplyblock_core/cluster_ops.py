@@ -26,12 +26,6 @@ TOP_DIR = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 
 
 def _create_update_user(cluster_id, grafana_url, grafana_secret, user_secret, update_secret=False):
-    if not grafana_url.startswith("https://"):
-        if grafana_url.startswith("http://"):
-            grafana_url = grafana_url.replace("http://", "https://", 1)
-        else:
-            grafana_url = "https://" + grafana_url
-
     session = requests.session()
     session.auth = ("admin", grafana_secret)
     headers = {

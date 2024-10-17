@@ -829,7 +829,10 @@ def _connect_to_remote_jm_devs(this_node, jm_ids=[]):
             logger.debug(f"bdev found {bdev_name}")
             jm_dev.status = JMDevice.STATUS_ONLINE
         else:
-            logger.info(f"Connecting {this_node.get_id()} to {name}")
+
+            logger.info(f"Connecting {name} to {this_node.get_id()}")
+            ret = rpc_client.bdev_nvme_detach_controller(name)
+            time.sleep(1)
             ret = rpc_client.bdev_nvme_attach_controller_tcp(
                 name, jm_dev.nvmf_nqn, jm_dev.nvmf_ip, jm_dev.nvmf_port)
             if ret:
@@ -1704,7 +1707,10 @@ def restart_storage_node(
 
     if snode.enable_ha_jm:
         logger.info("Connecting to remote JMs")
+        snode.remote_jm_devices = []
         snode.remote_jm_devices = _connect_to_remote_jm_devs(snode)
+
+    snode.write_to_db(db_controller.kv_store)
 
     logger.info("Setting node status to Online")
     set_node_status(node_id, StorageNode.STATUS_ONLINE)

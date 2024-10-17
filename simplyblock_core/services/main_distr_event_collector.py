@@ -50,9 +50,9 @@ def process_device_event(event):
         if device.node_id != node_id:
             logger.info(f"Setting storage id: {storage_id} unavailable")
             distr_controller.send_dev_status_event(device, NVMeDevice.STATUS_UNAVAILABLE, node)
-            if device.status == NVMeDevice.STATUS_ONLINE:
-                device_controller.device_set_io_error(device_id, True)
-                device_controller.device_set_unavailable(device_id)
+            # if device.status == NVMeDevice.STATUS_ONLINE:
+            #     device_controller.device_set_io_error(device_id, True)
+            #     device_controller.device_set_unavailable(device_id)
 
         else:
             if node.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED]:
