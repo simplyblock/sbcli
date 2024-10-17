@@ -196,7 +196,7 @@ class CommonUtils:
     def create_instance_from_existing(self, ec2_resource, instance_id, instance_name):
         # Get the existing instance information
         instance = ec2_resource.Instance(instance_id)
-    
+
         # Get key details from the existing instance
         instance_type = instance.instance_type
         image_id = instance.image_id
@@ -204,6 +204,23 @@ class CommonUtils:
         security_groups = instance.security_groups
         subnet_id = instance.subnet_id
         
+        # Get block device mappings (volumes) from the source instance
+        block_device_mappings = instance.block_device_mappings
+        
+        # Prepare the block device mappings for the new instance
+        new_block_device_mappings = []
+        for device in block_device_mappings:
+            new_block_device_mappings.append({
+                'DeviceName': device['DeviceName'],
+                'Ebs': {
+                    'DeleteOnTermination': device['Ebs']['DeleteOnTermination'],
+                    'VolumeSize': device['Ebs']['VolumeSize'],
+                    'VolumeType': device['Ebs']['VolumeType'],
+                    'Encrypted': device['Ebs'].get('Encrypted', False),  # Optional, only if available
+                    'SnapshotId': device['Ebs']['SnapshotId'],  # Use snapshot ID to recreate the volume
+                }
+            })
+
         # Create a new instance with the same details and give it a name tag
         new_instance = ec2_resource.create_instances(
             ImageId=image_id,
@@ -213,6 +230,7 @@ class CommonUtils:
             SubnetId=subnet_id,
             MinCount=1,
             MaxCount=1,
+            BlockDeviceMappings=new_block_device_mappings,  # Add the block device mappings here
             TagSpecifications=[
                 {
                     'ResourceType': 'instance',
@@ -225,12 +243,12 @@ class CommonUtils:
                 }
             ]
         )
+
         new_instance_id = new_instance[0].id
         new_instance[0].wait_until_running()  # Wait until the instance is running to get the private IP
         new_instance[0].reload()  # Refresh the instance attributes after it is running
-    
+
         private_ip = new_instance[0].private_ip_address
-        
         self.logger.info(f"New instance created with ID: {new_instance[0].id}")
         return new_instance_id, private_ip
 
@@ -263,3 +281,12 @@ def sleep_n_sec(seconds):
     logger = setup_logger(__name__)
     logger.info(f"Sleeping for {seconds} seconds.")
     time.sleep(seconds)
+
+def convert_bytes_to_gb_tb(bytes_value):
+    GB = 10**9  # 1 GB = 1 billion bytes
+    TB = 10**12  # 1 TB = 1 trillion bytes
+    
+    if bytes_value >= TB:
+        return f"{bytes_value / TB:.2f}T"
+    else:
+        return f"{bytes_value / GB:.2f}G"

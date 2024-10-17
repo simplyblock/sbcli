@@ -526,7 +526,7 @@ class SshUtils:
         self.exec_command(node=node, command=cmd)
 
         cmd = f"{self.base_cmd} sn deploy"
-        self.exec_command(node=node, command=cmd)
+        self.exec_command(node=node, command=cmd, timeout=1200)
 
     def add_storage_node(self, node, cluster_id, node_ip, ifname, max_lvol, max_prov, max_snap,
                          number_of_distribs, number_of_devices, partitions, jm_percent,

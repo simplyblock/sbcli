@@ -1,7 +1,7 @@
 import threading
 import json
 from e2e_tests.cluster_test_base import TestClusterBase
-from utils.common_utils import sleep_n_sec
+from utils.common_utils import sleep_n_sec, convert_bytes_to_gb_tb
 from logger_config import setup_logger
 from datetime import datetime
 import traceback
@@ -248,7 +248,7 @@ class FioWorkloadTest(TestClusterBase):
             ifname="eth0",
             max_lvol=affected_node_details[0]["max_lvol"],
             max_snap=affected_node_details[0]["max_snap"],
-            max_prov=affected_node_details[0]["max_prov"],
+            max_prov=convert_bytes_to_gb_tb(affected_node_details[0]["max_prov"]),
             number_of_distribs=affected_node_details[0]["number_of_distribs"],
             number_of_devices=affected_node_details[0]["number_of_devices"],
             partitions=affected_node_details[0]["num_partitions_per_dev"],
