@@ -211,6 +211,11 @@ class FioWorkloadTest(TestClusterBase):
             for running_fio in fio_process: 
                 assert fio not in running_fio, "FIO Process running on suspended node"
         self.logger.info("FIO process is running uninterrupted.")
+
+        self.ssh_obj.connect(
+            address=new_node_ip,
+            bastion_server_address=self.bastion_server,
+        )
         
         # Step 9: Add node
         # self.sbcli_utils.add_storage_node(
@@ -233,6 +238,8 @@ class FioWorkloadTest(TestClusterBase):
         #     spdk_image=affected_node_details[0]["spdk_image"],
         #     spdk_cpu_mask=affected_node_details[0]["spdk_cpu_mask"]
         # )
+
+        self.ssh_obj.deploy_storage_node(node=new_node_ip)
 
         self.ssh_obj.add_storage_node(
             node=self.mgmt_nodes[0],
@@ -274,11 +281,6 @@ class FioWorkloadTest(TestClusterBase):
         
         affected_node_ip = affected_node_details[0]["mgmt_ip"]
         del self.ssh_obj.ssh_connections[affected_node_ip]
-
-        self.ssh_obj.connect(
-            address=new_node_ip,
-            bastion_server_address=self.bastion_server,
-        )
 
         sn_lvol_data[new_node] = {}
 

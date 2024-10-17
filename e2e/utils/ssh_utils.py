@@ -515,9 +515,21 @@ class SshUtils:
     #             filesystem.append(columns[0])
     #     return filesystem
 
+    def deploy_storage_node(self, node):
+        cmd = "sudo yum install -y pip jq"
+        self.exec_command(node=node, command=cmd)
+
+        cmd = f"pip install {self.base_cmd}"
+        self.exec_command(node=node, command=cmd)
+
+        cmd = f"{self.base_cmd} sn deploy"
+        self.exec_command(node=node, command=cmd)
+
     def add_storage_node(self, node, cluster_id, node_ip, ifname, max_lvol, max_prov, max_snap,
                          number_of_distribs, number_of_devices, partitions, jm_percent,
                          disable_ha_jm, enable_test_device, spdk_debug, spdk_image, spdk_cpu_mask):
+
+        
         cmd = (f"{self.base_cmd} storage-node add-node --max-lvol {max_lvol} --max-snap {max_snap} --max-prov {max_prov} "
                f"--number-of-devices {number_of_devices} --number-of-distribs {number_of_distribs} "
                f"--partitions {partitions} --jm-percent {jm_percent} "
