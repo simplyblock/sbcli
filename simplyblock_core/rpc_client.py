@@ -499,7 +499,7 @@ class RPCClient:
             "trsvcid": str(port),
             "subnqn": nqn,
             "fast_io_fail_timeout_sec": 1,
-            "ctrlr_loss_timeout_sec": 3,
+            "ctrlr_loss_timeout_sec": 1,
             "reconnect_delay_sec": 1,
             "fabrics_connect_timeout_us": 100000,
             "multipath":"disable"
