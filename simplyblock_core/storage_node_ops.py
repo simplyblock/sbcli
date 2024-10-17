@@ -751,7 +751,7 @@ def _connect_to_remote_devs(this_node):
 
     rpc_client = RPCClient(
         this_node.mgmt_ip, this_node.rpc_port,
-        this_node.rpc_username, this_node.rpc_password, timeout=10, retry=2)
+        this_node.rpc_username, this_node.rpc_password, timeout=5, retry=2)
 
     remote_devices = []
     # connect to remote devs
@@ -788,7 +788,7 @@ def _connect_to_remote_jm_devs(this_node, jm_ids=[]):
 
     rpc_client = RPCClient(
         this_node.mgmt_ip, this_node.rpc_port,
-        this_node.rpc_username, this_node.rpc_password, timeout=10, retry=2)
+        this_node.rpc_username, this_node.rpc_password, timeout=5, retry=2)
 
     node_bdevs = rpc_client.get_bdevs()
     if node_bdevs:
