@@ -522,6 +522,9 @@ class SshUtils:
         cmd = f"pip install {self.base_cmd}"
         self.exec_command(node=node, command=cmd)
 
+        cmd = "pip list"
+        self.exec_command(node=node, command=cmd)
+
         cmd = f"{self.base_cmd} sn deploy"
         self.exec_command(node=node, command=cmd)
 
