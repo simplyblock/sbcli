@@ -167,7 +167,7 @@ jobs:
             --distr-npcs $NPCS \
             --distr-bs $BS \
             --distr-chunk-bs $CHUNK_BS \
-            --partitions 3 --disable-ha-jm
+            --partitions 3
         id: bootstrap_cluster
         env:
           SBCLI_CMD: ${{ env.SBCLI_CMD }}
