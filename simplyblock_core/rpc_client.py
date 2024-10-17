@@ -559,6 +559,7 @@ class RPCClient:
 
     def bdev_nvme_set_options(self):
         params = {
+            "action_on_timeout": "abort",
             "bdev_retry_count": 0,
             "transport_retry_count": 0,
             "ctrlr_loss_timeout_sec": 2,
