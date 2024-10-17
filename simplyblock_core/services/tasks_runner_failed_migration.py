@@ -65,10 +65,7 @@ def task_runner(task):
             task.write_to_db(db_controller.kv_store)
             return False
 
-        task.function_params = {
-            "migration": {
-                "name": distr_name}
-        }
+        task.function_params['migration'] = {"name": distr_name}
         task.write_to_db(db_controller.kv_store)
         time.sleep(3)
 
