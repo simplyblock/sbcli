@@ -472,7 +472,9 @@ class RPCClient:
             "fabrics_connect_timeout_us": 100000,
             "fast_io_fail_timeout_sec": 1,
             "num_io_queues": 16384,
-            "ctrlr_loss_timeout_sec": 2,
+            "ctrlr_loss_timeout_sec": 3,
+            "multipath":"disable",
+            "reconnect_delay_sec":1
         }
         return self._request("bdev_nvme_attach_controller", params)
 
@@ -485,8 +487,10 @@ class RPCClient:
             "trsvcid": str(port),
             "subnqn": nqn,
             "fast_io_fail_timeout_sec": 1,
-            "ctrlr_loss_timeout_sec": 1,
+            "ctrlr_loss_timeout_sec": 3,
             "reconnect_delay_sec": 1,
+            "fabrics_connect_timeout_us": 100000,
+            "multipath":"disable"
         }
         return self._request("bdev_nvme_attach_controller", params)
 
