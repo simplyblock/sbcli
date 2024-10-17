@@ -472,7 +472,7 @@ class RPCClient:
             "fabrics_connect_timeout_us": 100000,
             "fast_io_fail_timeout_sec": 1,
             "num_io_queues": 16384,
-            "ctrlr_loss_timeout_sec": 3,
+            "ctrlr_loss_timeout_sec": 1,
             "multipath":"disable",
             "reconnect_delay_sec":1
         }
