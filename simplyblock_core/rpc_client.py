@@ -482,11 +482,11 @@ class RPCClient:
             "trsvcid": str(port),
             "subnqn": nqn,
             "fabrics_connect_timeout_us": 100000,
-            "fast_io_fail_timeout_sec": 1,
+            # "fast_io_fail_timeout_sec": 1,
             "num_io_queues": 16384,
-            "ctrlr_loss_timeout_sec": 1,
+            # "ctrlr_loss_timeout_sec": 1,
             "multipath":"disable",
-            "reconnect_delay_sec":1
+            # "reconnect_delay_sec":1
         }
         return self._request("bdev_nvme_attach_controller", params)
 
@@ -559,7 +559,7 @@ class RPCClient:
 
     def bdev_nvme_set_options(self):
         params = {
-            "action_on_timeout": "abort",
+            # "action_on_timeout": "abort",
             "bdev_retry_count": 0,
             "transport_retry_count": 0,
             "ctrlr_loss_timeout_sec": 2,

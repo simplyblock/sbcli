@@ -2031,6 +2031,10 @@ def resume_storage_node(node_id):
     if snode.jm_device and snode.jm_device.status == JMDevice.STATUS_UNAVAILABLE:
         device_controller.set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_ONLINE)
 
+    logger.info("Connecting to remote devices")
+    snode.remote_devices = _connect_to_remote_devs(snode)
+    snode.write_to_db(db_controller.kv_store)
+
     rpc_client = RPCClient(
         snode.mgmt_ip, snode.rpc_port,
         snode.rpc_username, snode.rpc_password)
