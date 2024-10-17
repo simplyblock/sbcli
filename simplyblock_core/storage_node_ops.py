@@ -771,6 +771,8 @@ def _connect_to_remote_devs(this_node):
             if ret:
                 logger.info(f"bdev found {bdev_name}")
             else:
+                ret = rpc_client.bdev_nvme_detach_controller(name)
+                time.sleep(1)
                 ret = rpc_client.bdev_nvme_attach_controller_tcp(name, dev.nvmf_nqn, dev.nvmf_ip, dev.nvmf_port)
                 if not ret:
                     logger.error(f"Failed to connect to device: {dev.get_id()}")

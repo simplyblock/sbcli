@@ -115,6 +115,8 @@ while True:
                             connected_devices.append(remote_device.get_id())
                         else:
                             logger.info(f"Checking bdev: {remote_device.remote_bdev} ... not found")
+                            ret = rpc_client.bdev_nvme_detach_controller(remote_device.remote_bdev)
+                            time.sleep(1)
                             ret = rpc_client.bdev_nvme_attach_controller_tcp(
                                 remote_device.remote_bdev, remote_device.nvmf_nqn, remote_device.nvmf_ip, remote_device.nvmf_port)
                             if ret:
@@ -135,6 +137,8 @@ while True:
                                 logger.info(f"connecting to online device: {dev.get_id()}")
                                 name = f"remote_{dev.alceml_bdev}"
                                 bdev_name = f"{name}n1"
+                                ret = rpc_client.bdev_nvme_detach_controller(name)
+                                time.sleep(1)
                                 ret = rpc_client.bdev_nvme_attach_controller_tcp(
                                     name, dev.nvmf_nqn, dev.nvmf_ip,
                                     dev.nvmf_port)
