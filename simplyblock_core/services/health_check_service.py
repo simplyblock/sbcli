@@ -129,7 +129,7 @@ while True:
                         node_remote_devices_check &= bool(ret)
 
                 for node in db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id):
-                    if node.status != StorageNode.STATUS_ONLINE:
+                    if node.status != StorageNode.STATUS_ONLINE or node.get_id() == snode.get_id():
                         continue
                     for dev in node.nvme_devices:
                         if dev.status == StorageNode.STATUS_ONLINE:
@@ -204,6 +204,7 @@ while True:
                                     logger.info(f"Checking Distr map ... {is_passed}")
                                 else:
                                     logger.error("Failed to parse distr cluster map")
+
                                 lvstore_check &= is_passed
                         else:
                             logger.info(f"Checking distr bdev : {distr} ... not found")
