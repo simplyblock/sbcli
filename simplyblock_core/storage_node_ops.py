@@ -1245,7 +1245,8 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
         logger.info(f"connected to devices count: {len(node.remote_devices)}")
         time.sleep(3)
 
-    if cluster.status == cluster.STATUS_UNREADY:
+    if cluster.status != cluster.STATUS_ACTIVE:
+        logger.warning(f"The cluster status is not active ({cluster.status}), adding the node without distribs and lvstore")
         logger.info("Done")
         return "Success"
 
@@ -1737,7 +1738,8 @@ def restart_storage_node(
             continue
         tasks_controller.add_device_mig_task(dev.get_id())
 
-    if cluster.status == cluster.STATUS_UNREADY:
+    if cluster.status != cluster.STATUS_ACTIVE:
+        logger.warning(f"The cluster status is not active ({cluster.status}), adding the node without distribs and lvstore")
         logger.info("Done")
         return "Success"
     # Create distribs, raid0, and lvstore and expose lvols to the fabrics
@@ -1747,23 +1749,7 @@ def restart_storage_node(
                 snode.rpc_username, snode.rpc_password)
         ret = recreate_lvstore(snode)
         if not ret:
-            return False, "Failed to create distribs on node"
-        time.sleep(1)
-        ret = temp_rpc_client.bdev_examine(snode.raid)
-        time.sleep(1)
-        ret = temp_rpc_client.bdev_wait_for_examine()
-        time.sleep(1)
-
-        if snode.lvols:
-            for lvol_id in snode.lvols:
-                lvol = lvol_controller.recreate_lvol(lvol_id, snode)
-                if not lvol:
-                    logger.error(f"Failed to create LVol: {lvol_id}")
-                    return False
-                lvol.status = lvol.STATUS_ONLINE
-                lvol.io_error = False
-                lvol.health_check = True
-                lvol.write_to_db(db_controller.kv_store)
+            return False, "Failed to recreate lvstore on node"
 
     logger.info("Done")
     return "Success"
@@ -2583,11 +2569,34 @@ def set_node_status(node_id, status):
 
 
 def recreate_lvstore(snode):
+
     ret, err = _create_bdev_stack(snode)
     if err:
         logger.error(f"Failed to recreate lvstore on node {snode.get_id()}")
         logger.error(err)
         return False
+
+    temp_rpc_client = RPCClient(
+            snode.mgmt_ip, snode.rpc_port,
+            snode.rpc_username, snode.rpc_password)
+    time.sleep(1)
+    ret = temp_rpc_client.bdev_examine(snode.raid)
+    time.sleep(1)
+    ret = temp_rpc_client.bdev_wait_for_examine()
+    time.sleep(1)
+
+    if snode.lvols:
+        db_controller = DBController()
+        for lvol_id in snode.lvols:
+            lvol = lvol_controller.recreate_lvol(lvol_id, snode)
+            if not lvol:
+                logger.error(f"Failed to create LVol: {lvol_id}")
+                return False
+            lvol.status = lvol.STATUS_ONLINE
+            lvol.io_error = False
+            lvol.health_check = True
+            lvol.write_to_db(db_controller.kv_store)
+
     return True
 
 

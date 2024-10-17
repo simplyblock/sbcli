@@ -342,9 +342,10 @@ def cluster_activate(cl_id, force=False):
     if not cluster:
         logger.error(f"Cluster not found {cl_id}")
         return False
-    if cluster.status != Cluster.STATUS_UNREADY:
-        logger.error(f"Failed to activate cluster, Cluster is not in an UNREADY state")
+    if cluster.status == Cluster.STATUS_ACTIVE:
+        logger.warning("Cluster is not in an ACTIVE state")
         if not force:
+            logger.warning(f"Failed to activate cluster, Cluster is in an ACTIVE state, use --force to reactivate")
             return False
     set_cluster_status(cl_id, Cluster.STATUS_IN_ACTIVATION)
     snodes = db_controller.get_storage_nodes_by_cluster_id(cl_id)
@@ -367,17 +368,17 @@ def cluster_activate(cl_id, force=False):
 
     for snode in snodes:
         if snode.lvstore:
-            logger.info(f"Node {snode.get_id()} already has lvstore {snode.lvstore}... skipping")
-            if not force:
-                continue
-        ret = storage_node_ops.create_lvstore(snode, cluster.distr_ndcs, cluster.distr_npcs, cluster.distr_bs,
+            logger.warning(f"Node {snode.get_id()} already has lvstore {snode.lvstore}")
+            ret = storage_node_ops.recreate_lvstore(snode)
+        else:
+            ret = storage_node_ops.create_lvstore(snode, cluster.distr_ndcs, cluster.distr_npcs, cluster.distr_bs,
                                               cluster.distr_chunk_bs, cluster.page_size_in_blocks, max_size, snodes)
         if not ret:
             logger.error("Failed to activate cluster")
             set_cluster_status(cl_id, Cluster.STATUS_UNREADY)
             return False
-
-    cluster.cluster_max_size = max_size
+    if not cluster.cluster_max_size:
+        cluster.cluster_max_size = max_size
     cluster.write_to_db(db_controller.kv_store)
     set_cluster_status(cl_id, Cluster.STATUS_ACTIVE)
     logger.info("Cluster activated successfully")

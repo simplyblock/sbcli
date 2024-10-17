@@ -377,6 +377,12 @@ class RPCClient:
             //  This node (device) number, in the group, defined by ha_comm_addrs.
           "ha_inode_self": 1
         """
+        try:
+            ret = self.get_bdevs(name)
+            if ret:
+                return ret
+        except:
+            pass
         params = {
             "name": name,
             "jm_names": ",".join(jm_names),
@@ -417,6 +423,12 @@ class RPCClient:
         return self._request("bdev_get_iostat", params)
 
     def bdev_raid_create(self, name, bdevs_list, raid_level="0", strip_size_kb=4):
+        try:
+            ret = self.get_bdevs(name)
+            if ret:
+                return ret
+        except:
+            pass
         params = {
             "name": name,
             "raid_level": raid_level,
