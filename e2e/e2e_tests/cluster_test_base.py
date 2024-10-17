@@ -134,14 +134,14 @@ class TestClusterBase:
                 ssh.close()
         except Exception as _:
             self.logger.info(traceback.format_exc())
-        try:
-            instance_id = self.common_utils.get_instance_id_by_name(ec2_resource=self.ec2_resource,
-                                                                    instance_name="e2e-new-instance")
-            self.common_utils.terminate_instance(ec2_resource=self.ec2_resource,
-                                                instance_id=instance_id)
-        except Exception as e:
-            self.logger.info(f"Error while deleting instance: {e}")
-            self.logger.info(traceback.format_exc())
+        # try:
+        #     instance_id = self.common_utils.get_instance_id_by_name(ec2_resource=self.ec2_resource,
+        #                                                             instance_name="e2e-new-instance")
+        #     self.common_utils.terminate_instance(ec2_resource=self.ec2_resource,
+        #                                         instance_id=instance_id)
+        # except Exception as e:
+        #     self.logger.info(f"Error while deleting instance: {e}")
+        #     self.logger.info(traceback.format_exc())
 
     def validations(self, node_uuid, node_status, device_status, lvol_status,
                     health_check_status):
