@@ -485,8 +485,10 @@ class RPCClient:
             "trsvcid": str(port),
             "subnqn": nqn,
             "fast_io_fail_timeout_sec": 1,
-            "ctrlr_loss_timeout_sec": 1,
+            "ctrlr_loss_timeout_sec": 3,
             "reconnect_delay_sec": 1,
+            "multipath" : "disable",
+            "fabrics_connect_timeout_us" : 100000
         }
         return self._request("bdev_nvme_attach_controller", params)
 
