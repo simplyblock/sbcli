@@ -193,7 +193,7 @@ def get_active_node_task(cluster_id, node_id):
     tasks = db_controller.get_job_tasks(cluster_id)
     for task in tasks:
         if task.node_id == node_id:
-            if task.status == JobSchedule.STATUS_RUNNING and task.canceled is False:
+            if task.status != JobSchedule.STATUS_DONE and task.canceled is False:
                 return task.uuid
     return False
 

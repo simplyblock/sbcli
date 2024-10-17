@@ -1910,9 +1910,8 @@ def shutdown_storage_node(node_id, force=False):
         _remove_bdev_stack(snode.lvstore_stack, rpc_client, remove_distr_only=True)
 
         if snode.jm_device:
-            # delete jm
             logger.info("Removing JM")
-            rpc_client.bdev_jm_delete(snode.jm_device.jm_bdev)
+            device_controller.remove_jm_device(snode.jm_device.get_id(), force=True)
 
     for dev in snode.nvme_devices:
         if dev.status in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_READONLY]:
