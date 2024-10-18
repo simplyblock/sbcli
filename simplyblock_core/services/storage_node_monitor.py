@@ -106,8 +106,8 @@ def set_node_online(node):
                 device_controller.device_set_online(dev.get_id())
 
         # set jm dev online
-        if snode.jm_device.status == JMDevice.STATUS_UNAVAILABLE:
-            device_controller.set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_ONLINE)
+        if node.jm_device.status == JMDevice.STATUS_UNAVAILABLE:
+            device_controller.set_jm_device_state(node.jm_device.get_id(), JMDevice.STATUS_ONLINE)
 
         # set node online
         storage_node_ops.set_node_status(node.get_id(), StorageNode.STATUS_ONLINE)
@@ -116,7 +116,7 @@ def set_node_online(node):
 def set_node_offline(node):
     if node.status != StorageNode.STATUS_UNREACHABLE:
         # set node unavailable
-        storage_node_ops.set_node_status(snode.get_id(), StorageNode.STATUS_UNREACHABLE)
+        storage_node_ops.set_node_status(node.get_id(), StorageNode.STATUS_UNREACHABLE)
 
         # set devices unavailable
         for dev in node.nvme_devices:
@@ -124,8 +124,8 @@ def set_node_offline(node):
                 device_controller.device_set_unavailable(dev.get_id())
 
         # set jm dev offline
-        if snode.jm_device.status != JMDevice.STATUS_UNAVAILABLE:
-            device_controller.set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_UNAVAILABLE)
+        if node.jm_device.status != JMDevice.STATUS_UNAVAILABLE:
+            device_controller.set_jm_device_state(node.jm_device.get_id(), JMDevice.STATUS_UNAVAILABLE)
 
 
 logger.info("Starting node monitor")
