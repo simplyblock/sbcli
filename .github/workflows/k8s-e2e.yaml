@@ -46,11 +46,7 @@ on:
         description: 'Chunk block size'
         required: false
         default: 4096
-      destroy_cluster:
-        description: 'Destroy cluster?'
-        required: false
-        default: true
-        type: boolean
+
 jobs:
   e2e:
     runs-on: self-hosted
@@ -462,7 +458,7 @@ jobs:
           curl -X POST -H 'Content-type: application/json' --data "{\"text\":\"${MESSAGE}\"}" $SLACK_WEBHOOK_URL
 
       - name: Destroy Cluster
-        if: always() && env.destroy_cluster == 'true'
+        if: always()
         run: |
           cd $GITHUB_WORKSPACE/simplyBlockDeploy
           terraform destroy --auto-approve
