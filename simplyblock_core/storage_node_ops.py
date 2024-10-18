@@ -16,7 +16,6 @@ from simplyblock_core import constants, scripts, distr_controller
 from simplyblock_core import utils
 from simplyblock_core.controllers import lvol_controller, storage_events, snapshot_controller, device_events, \
     device_controller, tasks_controller, health_controller
-from simplyblock_core.controllers.device_controller import set_jm_device_state
 from simplyblock_core.kv_store import DBController, KVStore
 from simplyblock_core import shell_utils
 from simplyblock_core.models.iface import IFace
@@ -744,7 +743,7 @@ def _prepare_cluster_devices_on_restart(snode):
                 logger.error(f"Failed to add: {pt_name} to the subsystem: {subsystem_nqn}")
                 return False
 
-        set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_ONLINE)
+        device_controller.set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_ONLINE)
         return True
 
 
