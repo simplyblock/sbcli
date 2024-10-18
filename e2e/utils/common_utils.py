@@ -193,7 +193,7 @@ class CommonUtils:
         self.logger.info(f"Instance {instance_id} has been terminated.")
         sleep_n_sec(30)
     
-    def create_instance_from_existing(self, ec2_resource, ec2_client, instance_id, instance_name):
+    def create_instance_from_existing(self, ec2_resource, instance_id, instance_name):
         # Get the existing instance information
         instance = ec2_resource.Instance(instance_id)
 
@@ -206,7 +206,6 @@ class CommonUtils:
         
         # Get block device mappings (volumes) from the source instance
         block_device_mappings = instance.block_device_mappings
-
         breakpoint()
         
         # Prepare the block device mappings for the new instance
@@ -214,13 +213,13 @@ class CommonUtils:
         for device in block_device_mappings:
             volume_id = device['Ebs']['VolumeId']
             
-            # Fetch volume details using the VolumeId
-            volume = ec2_client.describe_volumes(VolumeIds=[volume_id])['Volumes'][0]
+            # Fetch the volume using the ec2_resource
+            volume = ec2_resource.Volume(volume_id)
             
             # Extract necessary information for the new instance
-            volume_size = volume['Size']
-            volume_type = volume['VolumeType']
-            encrypted = volume.get('Encrypted', False)
+            volume_size = volume.size
+            volume_type = volume.volume_type
+            encrypted = volume.encrypted
 
             # Create the new block device mapping
             ebs_config = {
@@ -228,7 +227,7 @@ class CommonUtils:
                 'VolumeSize': volume_size,
                 'VolumeType': volume_type,
                 'Encrypted': encrypted,
-                'SnapshotId': volume['SnapshotId'] if 'SnapshotId' in volume else None
+                'SnapshotId': volume.snapshot_id if volume.snapshot_id else None
             }
 
             new_block_device_mappings.append({
@@ -262,7 +261,7 @@ class CommonUtils:
         new_instance_id = new_instance[0].id
         new_instance[0].wait_until_running()  # Wait until the instance is running to get the private IP
         new_instance[0].reload()  # Refresh the instance attributes after it is running
-
+        
         private_ip = new_instance[0].private_ip_address
         
         self.logger.info(f"New instance created with ID: {new_instance[0].id}")
