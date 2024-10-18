@@ -226,9 +226,10 @@ class CommonUtils:
                 'DeleteOnTermination': device['Ebs']['DeleteOnTermination'],
                 'VolumeSize': volume_size,
                 'VolumeType': volume_type,
-                'Encrypted': encrypted,
-                'SnapshotId': volume.snapshot_id if volume.snapshot_id else None
+                'Encrypted': encrypted
             }
+            if volume.snapshot_id:
+                ebs_config['SnapshotId'] = volume.snapshot_id
 
             new_block_device_mappings.append({
                 'DeviceName': device['DeviceName'],
@@ -236,6 +237,7 @@ class CommonUtils:
             })
 
         # Create a new instance with the same details and give it a name tag
+        self.logger.info(f"Block Device mapping: {new_block_device_mappings}")
         new_instance = ec2_resource.create_instances(
             ImageId=image_id,
             InstanceType=instance_type,
