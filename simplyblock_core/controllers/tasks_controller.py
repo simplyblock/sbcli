@@ -77,6 +77,8 @@ def _add_task(function_name, cluster_id, node_id, device_id,
 def add_device_mig_task(device_id):
     device = db_controller.get_storage_devices(device_id)
     for node in db_controller.get_storage_nodes_by_cluster_id(device.cluster_id):
+        if node.status == StorageNode.STATUS_REMOVED:
+            continue
         if not node.lvols:
             continue
         for bdev in node.lvstore_stack:
@@ -178,6 +180,8 @@ def add_device_failed_mig_task(device_id):
 def add_new_device_mig_task(device_id):
     device = db_controller.get_storage_devices(device_id)
     for node in db_controller.get_storage_nodes_by_cluster_id(device.cluster_id):
+        if node.status == StorageNode.STATUS_REMOVED:
+            continue
         for bdev in node.lvstore_stack:
             if bdev['type'] == "bdev_distr":
                 _add_task(JobSchedule.FN_NEW_DEV_MIG, device.cluster_id, node.get_id(), device.get_id(),

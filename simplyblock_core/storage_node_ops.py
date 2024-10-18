@@ -1378,8 +1378,6 @@ def remove_storage_node(node_id, force_remove=False, force_migrate=False):
         logger.info("Removing JM")
         device_controller.remove_jm_device(snode.jm_device.get_id(), force=True)
 
-    logger.info("Removing storage node")
-
     logger.debug("Leaving swarm...")
     try:
         node_docker = docker.DockerClient(base_url=f"tcp://{snode.mgmt_ip}:2375", version="auto")
@@ -1403,6 +1401,12 @@ def remove_storage_node(node_id, force_remove=False, force_migrate=False):
         logger.exception(e)
 
     set_node_status(node_id, StorageNode.STATUS_REMOVED)
+
+    for dev in snode.nvme_devices:
+        if dev.status == NVMeDevice.STATUS_JM:
+            continue
+        device_controller.device_set_failed(dev.get_id())
+
     logger.info("done")
 
 
