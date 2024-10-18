@@ -516,7 +516,8 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
         })
         lvol.lvol_type += ',crypto'
         lvol.top_bdev = lvol.crypto_bdev
-
+        lvol.crypto_key1 = lvol.crypto_key1
+        lvol.crypto_key2 = lvol.crypto_key2
 
     if ha_type == 'single':
         ret, error = add_lvol_on_node(lvol, host_node)
