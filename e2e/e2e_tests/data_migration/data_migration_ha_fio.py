@@ -238,6 +238,7 @@ class FioWorkloadTest(TestClusterBase):
         #     spdk_image=affected_node_details[0]["spdk_image"],
         #     spdk_cpu_mask=affected_node_details[0]["spdk_cpu_mask"]
         # )
+        breakpoint()
 
         self.ssh_obj.deploy_storage_node(node=new_node_ip)
 

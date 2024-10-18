@@ -193,7 +193,7 @@ class CommonUtils:
         self.logger.info(f"Instance {instance_id} has been terminated.")
         sleep_n_sec(30)
     
-    def create_instance_from_existing(self, ec2_resource, instance_id, instance_name):
+    def create_instance_from_existing(self, ec2_resource, ec2_client, instance_id, instance_name):
         # Get the existing instance information
         instance = ec2_resource.Instance(instance_id)
 
@@ -206,23 +206,30 @@ class CommonUtils:
         
         # Get block device mappings (volumes) from the source instance
         block_device_mappings = instance.block_device_mappings
+
+        breakpoint()
         
         # Prepare the block device mappings for the new instance
         new_block_device_mappings = []
         for device in block_device_mappings:
+            volume_id = device['Ebs']['VolumeId']
+            
+            # Fetch volume details using the VolumeId
+            volume = ec2_client.describe_volumes(VolumeIds=[volume_id])['Volumes'][0]
+            
+            # Extract necessary information for the new instance
+            volume_size = volume['Size']
+            volume_type = volume['VolumeType']
+            encrypted = volume.get('Encrypted', False)
+
+            # Create the new block device mapping
             ebs_config = {
                 'DeleteOnTermination': device['Ebs']['DeleteOnTermination'],
-                'VolumeType': device['Ebs']['VolumeType'],
-                'SnapshotId': device['Ebs']['SnapshotId'],  # Use snapshot ID to recreate the volume
+                'VolumeSize': volume_size,
+                'VolumeType': volume_type,
+                'Encrypted': encrypted,
+                'SnapshotId': volume['SnapshotId'] if 'SnapshotId' in volume else None
             }
-            
-            # Check if 'VolumeSize' is available, as it might be missing in some cases
-            if 'VolumeSize' in device['Ebs']:
-                ebs_config['VolumeSize'] = device['Ebs']['VolumeSize']
-
-            # Add encrypted status if available
-            if 'Encrypted' in device['Ebs']:
-                ebs_config['Encrypted'] = device['Ebs']['Encrypted']
 
             new_block_device_mappings.append({
                 'DeviceName': device['DeviceName'],
