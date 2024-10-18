@@ -210,15 +210,23 @@ class CommonUtils:
         # Prepare the block device mappings for the new instance
         new_block_device_mappings = []
         for device in block_device_mappings:
+            ebs_config = {
+                'DeleteOnTermination': device['Ebs']['DeleteOnTermination'],
+                'VolumeType': device['Ebs']['VolumeType'],
+                'SnapshotId': device['Ebs']['SnapshotId'],  # Use snapshot ID to recreate the volume
+            }
+            
+            # Check if 'VolumeSize' is available, as it might be missing in some cases
+            if 'VolumeSize' in device['Ebs']:
+                ebs_config['VolumeSize'] = device['Ebs']['VolumeSize']
+
+            # Add encrypted status if available
+            if 'Encrypted' in device['Ebs']:
+                ebs_config['Encrypted'] = device['Ebs']['Encrypted']
+
             new_block_device_mappings.append({
                 'DeviceName': device['DeviceName'],
-                'Ebs': {
-                    'DeleteOnTermination': device['Ebs']['DeleteOnTermination'],
-                    'VolumeSize': device['Ebs']['VolumeSize'],
-                    'VolumeType': device['Ebs']['VolumeType'],
-                    'Encrypted': device['Ebs'].get('Encrypted', False),  # Optional, only if available
-                    'SnapshotId': device['Ebs']['SnapshotId'],  # Use snapshot ID to recreate the volume
-                }
+                'Ebs': ebs_config
             })
 
         # Create a new instance with the same details and give it a name tag
@@ -243,12 +251,13 @@ class CommonUtils:
                 }
             ]
         )
-
+        
         new_instance_id = new_instance[0].id
         new_instance[0].wait_until_running()  # Wait until the instance is running to get the private IP
         new_instance[0].reload()  # Refresh the instance attributes after it is running
 
         private_ip = new_instance[0].private_ip_address
+        
         self.logger.info(f"New instance created with ID: {new_instance[0].id}")
         return new_instance_id, private_ip
 
