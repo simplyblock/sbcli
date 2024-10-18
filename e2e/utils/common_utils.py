@@ -304,6 +304,6 @@ def convert_bytes_to_gb_tb(bytes_value):
     TB = 10**12  # 1 TB = 1 trillion bytes
     
     if bytes_value >= TB:
-        return f"{bytes_value / TB:.2f}T"
+        return f"{bytes_value // TB}T"
     else:
-        return f"{bytes_value / GB:.2f}G"
+        return f"{bytes_value // GB}G"
