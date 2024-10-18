@@ -74,7 +74,7 @@ def add(lvol_id, snapshot_name):
     spdk_mem_info_before = rpc_client.ultra21_util_get_malloc_stats()
 
     logger.info("Creating Snapshot bdev")
-    ret = rpc_client.lvol_create_snapshot(lvol.lvol_bdev, snapshot_name)
+    ret = rpc_client.lvol_create_snapshot(f"{lvol.lvs_name}/{lvol.lvol_bdev}", snapshot_name)
     if not ret:
         return False, "Failed to create snapshot bdev"
 
