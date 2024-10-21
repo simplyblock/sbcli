@@ -765,29 +765,29 @@ def remove_jm_device(device_id, force=False):
 
     set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_UNAVAILABLE)
 
-    rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
+    if snode.status == StorageNode.STATUS_ONLINE:
+        rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
+        # delete jm stack
+        if snode.enable_ha_jm:
+            ret = rpc_client.subsystem_delete(snode.jm_device.nvmf_nqn)
+            if not ret:
+                logger.error("device not found")
 
-    # delete jm stack
-    if snode.enable_ha_jm:
-        ret = rpc_client.subsystem_delete(snode.jm_device.nvmf_nqn)
-        if not ret:
-            logger.error("device not found")
+        if snode.jm_device.pt_bdev:
+            ret = rpc_client.bdev_PT_NoExcl_delete(snode.jm_device.pt_bdev)
 
-    if snode.jm_device.pt_bdev:
-        ret = rpc_client.bdev_PT_NoExcl_delete(snode.jm_device.pt_bdev)
+        if snode.enable_ha_jm:
+            ret = rpc_client.bdev_jm_delete(snode.jm_device.jm_bdev, safe_removal=True)
+        else:
+            ret = rpc_client.bdev_jm_delete(snode.jm_device.jm_bdev, safe_removal=False)
 
-    if snode.enable_ha_jm:
-        ret = rpc_client.bdev_jm_delete(snode.jm_device.jm_bdev, safe_removal=True)
-    else:
-        ret = rpc_client.bdev_jm_delete(snode.jm_device.jm_bdev, safe_removal=False)
+        ret = rpc_client.bdev_alceml_delete(snode.jm_device.alceml_bdev)
 
-    ret = rpc_client.bdev_alceml_delete(snode.jm_device.alceml_bdev)
+        # if snode.jm_device.testing_bdev:
+        #     ret = rpc_client.bdev_passtest_delete(snode.jm_device.testing_bdev)
 
-    # if snode.jm_device.testing_bdev:
-    #     ret = rpc_client.bdev_passtest_delete(snode.jm_device.testing_bdev)
-
-    # if len(snode.jm_device.jm_nvme_bdev_list) == 2:
-    ret = rpc_client.bdev_raid_delete(snode.jm_device.raid_bdev)
+        # if len(snode.jm_device.jm_nvme_bdev_list) == 2:
+        ret = rpc_client.bdev_raid_delete(snode.jm_device.raid_bdev)
 
     set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_REMOVED)
     return True
