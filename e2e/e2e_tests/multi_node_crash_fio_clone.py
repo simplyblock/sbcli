@@ -96,16 +96,14 @@ class TestMultiFioSnapshotDowntime(TestClusterBase):
         fio_threads = []
         fio_workloads = [("randrw", "4K"), ("read", "32K"), ("write", "64K"), ("trimwrite", "16K")]
 
-        device_count = 1
-        for lvol_name, _ in lvol_vs_node.items():
-            if device_count != 4:
+        for i, lvol_name in enumerate(list(lvol_vs_node.keys())):
+            if i != 3:
                 self.ssh_obj.unmount_path(node=self.mgmt_nodes[0], device=lvol_fio_info[lvol_name]["device"])
                 fs_type = random.choice(["xfs", "ext4"])
                 self.ssh_obj.format_disk(node=self.mgmt_nodes[0], device=lvol_fio_info[lvol_name]["device"], fs_type=fs_type)
-                mount_path = f"/mnt/device_{device_count}_{fs_type}"
+                mount_path = f"/mnt/device_{i+1}_{fs_type}"
                 self.ssh_obj.mount_path(node=self.mgmt_nodes[0], device=lvol_fio_info[lvol_name]["device"], mount_path=mount_path)
                 lvol_fio_info[lvol_name]["mount_path"] = mount_path
-                device_count += 1
 
         for i, lvol_name in enumerate(list(lvol_vs_node.keys())):
             fio_workload = fio_workloads[i%len(fio_workloads)]
@@ -141,7 +139,8 @@ class TestMultiFioSnapshotDowntime(TestClusterBase):
             
             fio_threads.append(fio_thread)
             fio_thread.start()
-
+        
+        sleep_n_sec(200)
         # Step 8: Stop the SPDK process on the node without LVOLs
         self.logger.info("Stopping SPDK process on node without LVOLs")
         self.ssh_obj.stop_spdk_process(node=node_without_lvols_node_ip)
@@ -153,10 +152,14 @@ class TestMultiFioSnapshotDowntime(TestClusterBase):
         fio_process_name = f"fio_{lvol_to_delete}"
         # Find and kill the `fio` process by name
         self.logger.info(f"Looking for fio process with name {fio_process_name}")
-        fio_pid = self.ssh_obj.find_process_name(self.mgmt_nodes[0], fio_process_name)
+        fio_pid = self.ssh_obj.find_process_name(self.mgmt_nodes[0], fio_process_name, return_pid=True)
         if fio_pid:
-            self.logger.info(f"Killing fio process with PID {fio_pid}")
-            self.ssh_obj.exec_command(self.mgmt_nodes[0], f"kill -9 {fio_pid}")
+            for pid in fio_pid:
+                self.logger.info(f"Killing fio process with PID {fio_pid}")
+                self.ssh_obj.kill_processes(
+                    node=self.mgmt_nodes[0],
+                    pid=pid
+                )
         else:
             self.logger.info(f"No fio process found with name {fio_process_name}")
 
