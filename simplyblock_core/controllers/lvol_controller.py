@@ -1070,6 +1070,10 @@ def resize_lvol(id, new_size):
         logger.error(f"New size {new_size} must be smaller than the max size {lvol.max_size}")
         return False
 
+    if lvol.cloned_from_snap:
+        logger.error(f"Can not resize clone!")
+        return False
+
     logger.info(f"Resizing LVol: {lvol.id}, new size: {new_size}")
 
     snode = db_controller.get_storage_node_by_id(lvol.node_id)
