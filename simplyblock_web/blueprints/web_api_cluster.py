@@ -62,7 +62,7 @@ def list_clusters(uuid):
 
     d = cluster.get_clean_dict()
     d['status_code'] = cluster.get_status_code()
-    return utils.get_response(d)
+    return utils.get_response([d])
 
 
 @bp.route('/cluster/capacity/<string:uuid>/history/<string:history>', methods=['GET'])
