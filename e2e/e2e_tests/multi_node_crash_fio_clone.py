@@ -98,22 +98,18 @@ class TestMultiFioSnapshotDowntime(TestClusterBase):
 
         device_count = 1
         for lvol_name, _ in lvol_vs_node.items():
-            if device_count == 3:
-                continue
-            self.ssh_obj.unmount_path(node=self.mgmt_nodes[0], device=lvol_fio_info[lvol_name]["device"])
-            fs_type = random.choice(["xfs", "ext4"])
-            self.ssh_obj.format_disk(node=self.mgmt_nodes[0], device=lvol_fio_info[lvol_name]["device"], fs_type=fs_type)
-            mount_path = f"/mnt/device_{device_count}_{fs_type}"
-            self.ssh_obj.mount_path(node=self.mgmt_nodes[0], device=lvol_fio_info[lvol_name]["device"], mount_path=mount_path)
-            lvol_fio_info[lvol_name]["mount_path"] = mount_path
-            device_count += 1
+            if device_count != 4:
+                self.ssh_obj.unmount_path(node=self.mgmt_nodes[0], device=lvol_fio_info[lvol_name]["device"])
+                fs_type = random.choice(["xfs", "ext4"])
+                self.ssh_obj.format_disk(node=self.mgmt_nodes[0], device=lvol_fio_info[lvol_name]["device"], fs_type=fs_type)
+                mount_path = f"/mnt/device_{device_count}_{fs_type}"
+                self.ssh_obj.mount_path(node=self.mgmt_nodes[0], device=lvol_fio_info[lvol_name]["device"], mount_path=mount_path)
+                lvol_fio_info[lvol_name]["mount_path"] = mount_path
+                device_count += 1
 
         for i, lvol_name in enumerate(list(lvol_vs_node.keys())):
-            if i == 3:
-                fio_workload = fio_workloads[3]
-            else:
-                fio_workload = fio_workloads[i%len(fio_workloads)]
-            # For "trimwrite", don't format or mount the LVOL
+            fio_workload = fio_workloads[i%len(fio_workloads)]
+            
             if fio_workload[0] == "trimwrite":
                 fio_thread = threading.Thread(
                     target=self.ssh_obj.run_fio_test,
