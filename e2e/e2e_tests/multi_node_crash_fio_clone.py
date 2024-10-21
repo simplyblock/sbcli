@@ -11,7 +11,7 @@ class TestMultiFioSnapshotDowntime(TestClusterBase):
         self.fio_size = "10G"
         self.numjobs = 16
         self.iodepth = 1
-        self.fio_runtime = 500  # seconds
+        self.fio_runtime = 1000  # seconds
         self.node_with_lvols = []  # Track nodes with LVOLs
         self.node_id_ip = {}
 
@@ -140,7 +140,7 @@ class TestMultiFioSnapshotDowntime(TestClusterBase):
             fio_threads.append(fio_thread)
             fio_thread.start()
         sleep_n_sec(10)
-        sleep_n_sec(200)
+        sleep_n_sec(100)
         # Step 8: Stop the SPDK process on the node without LVOLs
         self.logger.info("Stopping SPDK process on node without LVOLs")
         self.ssh_obj.stop_spdk_process(node=node_without_lvols_node_ip)
@@ -202,7 +202,7 @@ class TestMultiFioSnapshotDowntime(TestClusterBase):
         self.common_utils.manage_fio_threads(
             node=self.mgmt_nodes[0],
             threads=fio_threads,
-            timeout=1000
+            timeout=2000
         )
         for fio_thread in fio_threads:
             fio_thread.join()
