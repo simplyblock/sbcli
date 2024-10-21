@@ -195,6 +195,7 @@ class TestMultiFioSnapshotDowntime(TestClusterBase):
             target=self.sbcli_utils.wait_for_storage_node_status,
             args=(node_without_lvols, "online", 500)
             )
+        node_wait_thread.start()
 
         # Step 11: Wait for fio threads to complete and validate
         self.logger.info("Waiting for fio workloads to finish")
