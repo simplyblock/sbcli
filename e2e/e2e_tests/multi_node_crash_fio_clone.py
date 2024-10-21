@@ -8,7 +8,7 @@ class TestMultiFioSnapshotDowntime(TestClusterBase):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.lvol_size = "100G"
-        self.fio_size = "40G"
+        self.fio_size = "30G"
         self.numjobs = 16
         self.iodepth = 1
         self.fio_runtime = 500  # seconds
@@ -81,7 +81,7 @@ class TestMultiFioSnapshotDowntime(TestClusterBase):
             new_device = [dev for dev in final_devices if dev not in initial_devices]
             self.logger.info(f"Final devices after LVOL connection: {final_devices}")
             self.logger.info(f"Using device for lvol {lvol_name}: {new_device[0]}")
-            
+
             lvol_fio_info[lvol_name] = {"device": f"/dev/{new_device[0]}" if new_device else None}
 
         # Step 5: Identify the node without LVOLs
@@ -98,8 +98,21 @@ class TestMultiFioSnapshotDowntime(TestClusterBase):
 
         device_count = 1
         for lvol_name, _ in lvol_vs_node.items():
-            fio_workload = fio_workloads[int(lvol_name.split('_')[-1]) % len(fio_workloads)]
-            
+            if device_count == 3:
+                continue
+            self.ssh_obj.unmount_path(node=self.mgmt_nodes[0], device=lvol_fio_info[lvol_name]["device"])
+            fs_type = random.choice(["xfs", "ext4"])
+            self.ssh_obj.format_disk(node=self.mgmt_nodes[0], device=lvol_fio_info[lvol_name]["device"], fs_type=fs_type)
+            mount_path = f"/mnt/device_{device_count}_{fs_type}"
+            self.ssh_obj.mount_path(node=self.mgmt_nodes[0], device=lvol_fio_info[lvol_name]["device"], mount_path=mount_path)
+            lvol_fio_info[lvol_name]["mount_path"] = mount_path
+            device_count += 1
+
+        for i, lvol_name in enumerate(list(lvol_vs_node.keys())):
+            if i == 3:
+                fio_workload = fio_workloads[3]
+            else:
+                fio_workload = fio_workloads[i%len(fio_workloads)]
             # For "trimwrite", don't format or mount the LVOL
             if fio_workload[0] == "trimwrite":
                 fio_thread = threading.Thread(
@@ -116,15 +129,6 @@ class TestMultiFioSnapshotDowntime(TestClusterBase):
                     }
                 )
             else:
-                # Format and mount the LVOL for other workloads
-                self.ssh_obj.unmount_path(node=self.mgmt_nodes[0], device=lvol_fio_info[lvol_name]["device"])
-                fs_type = random.choice(["xfs", "ext4"])
-                self.ssh_obj.format_disk(node=self.mgmt_nodes[0], device=lvol_fio_info[lvol_name]["device"], fs_type=fs_type)
-                mount_path = f"/mnt/device_{device_count}_{fs_type}"
-                self.ssh_obj.mount_path(node=self.mgmt_nodes[0], device=lvol_fio_info[lvol_name]["device"], mount_path=mount_path)
-                lvol_fio_info[lvol_name]["mount_path"] = mount_path
-                device_count += 1
-
                 fio_thread = threading.Thread(
                     target=self.ssh_obj.run_fio_test,
                     args=(self.mgmt_nodes[0], None, mount_path),
@@ -135,7 +139,6 @@ class TestMultiFioSnapshotDowntime(TestClusterBase):
                         "size": self.fio_size,
                         "numjobs": self.numjobs,
                         "iodepth": self.iodepth,
-                        "verify": "md5",
                         "runtime": self.fio_runtime
                     }
                 )
@@ -150,6 +153,24 @@ class TestMultiFioSnapshotDowntime(TestClusterBase):
         # Step 9: Delete one LVOL while node is down
         self.logger.info("Deleting LVOL while node is down")
         lvol_to_delete = list(lvol_vs_node.keys())[0]  # Select the first LVOL for deletion
+
+        fio_process_name = f"fio_{lvol_to_delete}"
+        # Find and kill the `fio` process by name
+        self.logger.info(f"Looking for fio process with name {fio_process_name}")
+        fio_pid = self.ssh_obj.find_process_name(self.mgmt_nodes[0], fio_process_name)
+        if fio_pid:
+            self.logger.info(f"Killing fio process with PID {fio_pid}")
+            self.ssh_obj.exec_command(self.mgmt_nodes[0], f"kill -9 {fio_pid}")
+        else:
+            self.logger.info(f"No fio process found with name {fio_process_name}")
+
+        lvol_nvme = self.ssh_obj.get_nvme_subsystems(node=self.mgmt_nodes[0],
+                                                     nqn_filter=self.sbcli_utils.get_lvol_id(lvol_to_delete)
+                                                     )
+        for nvme in lvol_nvme:
+            self.ssh_obj.disconnect_nvme(node=self.mgmt_nodes[0],
+                                         nqn_grep=nvme)
+        
         self.sbcli_utils.delete_lvol(lvol_name=lvol_to_delete)
 
         del lvol_vs_node[lvol_to_delete]

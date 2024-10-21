@@ -252,7 +252,7 @@ class SshUtils:
 
         command = (f"sudo fio --name={name} {location} --ioengine={ioengine} --direct=1 --iodepth={iodepth} "
                    f"{time_based} --runtime={runtime} --rw={rw} --bs={bs} --size={size} --rwmixread={rwmixread} "
-                   f"--numjobs={numjobs} --nrfiles={nrfiles} --group_reporting{output_format}{output_file}")
+                   f"--verify=md5 --numjobs={numjobs} --nrfiles={nrfiles} --group_reporting{output_format}{output_file}")
         
         if kwargs.get("debug", None):
             command = f"{command} --debug=all"
