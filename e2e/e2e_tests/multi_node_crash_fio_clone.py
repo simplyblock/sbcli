@@ -7,8 +7,8 @@ import random
 class TestMultiFioSnapshotDowntime(TestClusterBase):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        self.lvol_size = "100G"
-        self.fio_size = "4G"
+        self.lvol_size = "300G"
+        self.fio_size = "10G"
         self.numjobs = 16
         self.iodepth = 1
         self.fio_runtime = 500  # seconds
