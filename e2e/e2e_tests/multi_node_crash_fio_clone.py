@@ -111,7 +111,7 @@ class TestMultiFioSnapshotDowntime(TestClusterBase):
             if fio_workload[0] == "trimwrite":
                 fio_thread = threading.Thread(
                     target=self.ssh_obj.run_fio_test,
-                    args=(self.mgmt_nodes[0], lvol_fio_info[lvol_name]["device"], None),
+                    args=(self.mgmt_nodes[0], lvol_fio_info[lvol_name]["device"], None, f"log_file_{lvol_name}.txt"),
                     kwargs={
                         "name": f"fio_{lvol_name}",
                         "rw": fio_workload[0],
@@ -125,7 +125,7 @@ class TestMultiFioSnapshotDowntime(TestClusterBase):
             else:
                 fio_thread = threading.Thread(
                     target=self.ssh_obj.run_fio_test,
-                    args=(self.mgmt_nodes[0], None, lvol_fio_info[lvol_name]["mount_path"]),
+                    args=(self.mgmt_nodes[0], None, lvol_fio_info[lvol_name]["mount_path"], f"log_file_{lvol_name}.txt"),
                     kwargs={
                         "name": f"fio_{lvol_name}",
                         "rw": fio_workload[0],
