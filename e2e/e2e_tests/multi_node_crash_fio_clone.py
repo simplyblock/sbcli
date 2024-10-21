@@ -125,7 +125,7 @@ class TestMultiFioSnapshotDowntime(TestClusterBase):
             else:
                 fio_thread = threading.Thread(
                     target=self.ssh_obj.run_fio_test,
-                    args=(self.mgmt_nodes[0], None, mount_path),
+                    args=(self.mgmt_nodes[0], None, lvol_fio_info[lvol_name]["mount_path"]),
                     kwargs={
                         "name": f"fio_{lvol_name}",
                         "rw": fio_workload[0],
@@ -162,6 +162,8 @@ class TestMultiFioSnapshotDowntime(TestClusterBase):
                 )
         else:
             self.logger.info(f"No fio process found with name {fio_process_name}")
+
+        self.ssh_obj.unmount_path(self.mgmt_nodes[0], lvol_fio_info[lvol_to_delete]["device"])
 
         lvol_nvme = self.ssh_obj.get_nvme_subsystems(node=self.mgmt_nodes[0],
                                                      nqn_filter=self.sbcli_utils.get_lvol_id(lvol_to_delete)
