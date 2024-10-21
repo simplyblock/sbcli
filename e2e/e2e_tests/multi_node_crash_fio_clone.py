@@ -86,7 +86,7 @@ class TestMultiFioSnapshotDowntime(TestClusterBase):
 
         # Step 5: Identify the node without LVOLs
         node_without_lvols = self.sbcli_utils.get_node_without_lvols()
-        node_details = self.sbcli_utils.get_storage_node_details(node_uuid)
+        node_details = self.sbcli_utils.get_storage_node_details(node_without_lvols)
         node_without_lvols_node_ip = node_details[0]["mgmt_ip"]
         self.node_id_ip[node_without_lvols] = node_without_lvols_node_ip
         self.logger.info(f"Node without LVOLs: {node_without_lvols}")
@@ -139,7 +139,7 @@ class TestMultiFioSnapshotDowntime(TestClusterBase):
             
             fio_threads.append(fio_thread)
             fio_thread.start()
-        
+        sleep_n_sec(10)
         sleep_n_sec(200)
         # Step 8: Stop the SPDK process on the node without LVOLs
         self.logger.info("Stopping SPDK process on node without LVOLs")
