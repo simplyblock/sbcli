@@ -51,8 +51,10 @@ class TestMultiFioSnapshotDowntime(TestClusterBase):
 
             sleep_n_sec(3)
             final_devices = self.ssh_obj.get_devices(node=self.mgmt_nodes[0])
-            new_device = [dev for dev in final_devices if dev not in initial_devices][0]
+            new_device = [dev for dev in final_devices if dev not in initial_devices]
             self.logger.info(f"Final devices after LVOL connection: {final_devices}")
+            self.logger.info(f"Using device for lvol {lvol_name}: {new_device[0]}")
+            
             lvol_fio_info[lvol_name] = {"device": f"/dev/{new_device[0]}" if new_device else None}
 
         # Step 4: Create 3 more LVOLs on the same two nodes with LVOLs (to leave 1 node without LVOLs)
@@ -76,8 +78,10 @@ class TestMultiFioSnapshotDowntime(TestClusterBase):
             sleep_n_sec(3)
 
             final_devices = self.ssh_obj.get_devices(node=self.mgmt_nodes[0])
-            new_device = [dev for dev in final_devices if dev not in initial_devices][0]
+            new_device = [dev for dev in final_devices if dev not in initial_devices]
             self.logger.info(f"Final devices after LVOL connection: {final_devices}")
+            self.logger.info(f"Using device for lvol {lvol_name}: {new_device[0]}")
+            
             lvol_fio_info[lvol_name] = {"device": f"/dev/{new_device[0]}" if new_device else None}
 
         # Step 5: Identify the node without LVOLs
