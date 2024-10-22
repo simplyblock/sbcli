@@ -36,7 +36,8 @@ class TestMultiFioSnapshotDowntime(TestClusterBase):
 
             lvol_name = f"test_lvol_{i + 1}"
             self.logger.info(f"Creating LVOL {lvol_name} on node {node_ip}")
-            self.sbcli_utils.add_lvol(lvol_name=lvol_name, pool_name=self.pool_name, size=self.lvol_size, host_id=node_uuid)
+            self.sbcli_utils.add_lvol(lvol_name=lvol_name, pool_name=self.pool_name, size=self.lvol_size, host_id=node_uuid,
+                                      crypto=True)
             lvol_vs_node[lvol_name] = node_uuid
 
             # Get devices and mount them for non-trimwrite workloads
@@ -62,7 +63,8 @@ class TestMultiFioSnapshotDowntime(TestClusterBase):
             node_uuid = self.node_with_lvols[i % 2]  # Distribute the remaining 3 LVOLs across the two nodes
             lvol_name = f"test_lvol_{i + 1}"
             self.logger.info(f"Creating LVOL {lvol_name} on node {node_uuid}")
-            self.sbcli_utils.add_lvol(lvol_name=lvol_name, pool_name=self.pool_name, size=self.lvol_size, host_id=node_uuid)
+            self.sbcli_utils.add_lvol(lvol_name=lvol_name, pool_name=self.pool_name, size=self.lvol_size, host_id=node_uuid,
+                                      crypto=True)
             
             lvol_vs_node[lvol_name] = self.node_id_ip[node_uuid]
 
@@ -143,9 +145,6 @@ class TestMultiFioSnapshotDowntime(TestClusterBase):
             fio_thread.start()
         sleep_n_sec(10)
         sleep_n_sec(100)
-        # Step 8: Stop the SPDK process on the node without LVOLs
-        self.logger.info("Stopping SPDK process on node without LVOLs")
-        self.ssh_obj.stop_spdk_process(node=node_without_lvols_node_ip)
 
         # Step 9: Delete one LVOL while node is down
         self.logger.info("Deleting LVOL while node is down")
@@ -192,6 +191,10 @@ class TestMultiFioSnapshotDowntime(TestClusterBase):
             self.ssh_obj.add_clone(node=self.mgmt_nodes[0], snapshot_id=snapshot_id, clone_name=clone_name)
 
         # Step 10: Wait for node restart validate its status
+
+        # Step 8: Stop the SPDK process on the node without LVOLs
+        self.logger.info("Stopping SPDK process on node without LVOLs")
+        self.ssh_obj.stop_spdk_process(node=node_without_lvols_node_ip)
     
         node_wait_thread = threading.Thread(
             target=self.sbcli_utils.wait_for_storage_node_status,

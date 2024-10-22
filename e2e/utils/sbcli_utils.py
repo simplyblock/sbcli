@@ -354,7 +354,7 @@ class SbcliUtils:
 
     def add_lvol(self, lvol_name, pool_name, size="256M", distr_ndcs=0, distr_npcs=0,
                  distr_bs=4096, distr_chunk_bs=4096, max_rw_iops=0, max_rw_mbytes=0,
-                 max_r_mbytes=0, max_w_mbytes=0, host_id=None, retry=10):
+                 max_r_mbytes=0, max_w_mbytes=0, host_id=None, retry=10, crypto=False):
         """Adds lvol with given params
         """
         lvols = self.list_lvols()
@@ -367,7 +367,7 @@ class SbcliUtils:
             "name": lvol_name,
             "size": size,
             "pool": pool_name,
-            "crypto": False,
+            "crypto": crypto,
             "max_rw_iops": str(max_rw_iops),
             "max_rw_mbytes": str(max_rw_mbytes),
             "max_r_mbytes": str(max_r_mbytes),
