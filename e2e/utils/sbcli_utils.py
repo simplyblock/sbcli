@@ -386,7 +386,7 @@ class SbcliUtils:
         if crypto:
             body["crypto"] = True
             body["crypto_key1"] = key1
-            body["crypto_key1"] = key2
+            body["crypto_key2"] = key2
         
         self.post_request(api_url="/lvol", body=body, retry=retry)
 
