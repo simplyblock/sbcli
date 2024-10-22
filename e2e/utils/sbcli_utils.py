@@ -354,9 +354,13 @@ class SbcliUtils:
 
     def add_lvol(self, lvol_name, pool_name, size="256M", distr_ndcs=0, distr_npcs=0,
                  distr_bs=4096, distr_chunk_bs=4096, max_rw_iops=0, max_rw_mbytes=0,
-                 max_r_mbytes=0, max_w_mbytes=0, host_id=None, retry=10, crypto=False):
+                 max_r_mbytes=0, max_w_mbytes=0, host_id=None, retry=10,
+                 crypto=False, key1=None, key2=None):
         """Adds lvol with given params
         """
+        if crypto:
+            if not key1 or not key2:
+                raise Exception("Need two keys for crypto lvols")
         lvols = self.list_lvols()
         for name in list(lvols.keys()):
             if name == lvol_name:
@@ -367,7 +371,6 @@ class SbcliUtils:
             "name": lvol_name,
             "size": size,
             "pool": pool_name,
-            "crypto": crypto,
             "max_rw_iops": str(max_rw_iops),
             "max_rw_mbytes": str(max_rw_mbytes),
             "max_r_mbytes": str(max_r_mbytes),
@@ -380,6 +383,10 @@ class SbcliUtils:
             body["chunk_bs"] = str(distr_ndcs)
         if host_id:
             body["host_id"] = host_id
+        if crypto:
+            body["crypto"] = True
+            body["crypto_key1"] = key1
+            body["crypto_key1"] = key2
         
         self.post_request(api_url="/lvol", body=body, retry=retry)
 

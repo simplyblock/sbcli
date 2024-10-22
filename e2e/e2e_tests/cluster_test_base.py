@@ -42,6 +42,8 @@ class TestClusterBase:
         self.base_cmd = os.environ.get("SBCLI_CMD", "sbcli-dev")
         self.fio_debug = kwargs.get("fio_debug", False)
         self.ec2_resource = None
+        self.lvol_crypt_keys = ["7b3695268e2a6611a25ac4b1ee15f27f9bf6ea9783dada66a4a730ebf0492bfd",
+                                "78505636c8133d9be42e347f82785b81a879cd8133046f8fc0b36f17b078ad0c"]
 
     def setup(self):
         """Contains setup required to run the test case
