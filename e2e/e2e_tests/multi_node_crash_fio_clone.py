@@ -119,7 +119,8 @@ class TestMultiFioSnapshotDowntime(TestClusterBase):
                         "size": self.fio_size,
                         "numjobs": self.numjobs,
                         "iodepth": self.iodepth,
-                        "runtime": self.fio_runtime
+                        "runtime": self.fio_runtime,
+                        "time_based": False
                     }
                 )
             else:
@@ -133,7 +134,8 @@ class TestMultiFioSnapshotDowntime(TestClusterBase):
                         "size": self.fio_size,
                         "numjobs": self.numjobs,
                         "iodepth": self.iodepth,
-                        "runtime": self.fio_runtime
+                        "runtime": self.fio_runtime,
+                        "time_based": False
                     }
                 )
             
@@ -202,7 +204,7 @@ class TestMultiFioSnapshotDowntime(TestClusterBase):
         self.common_utils.manage_fio_threads(
             node=self.mgmt_nodes[0],
             threads=fio_threads,
-            timeout=2000
+            timeout=3000
         )
         for fio_thread in fio_threads:
             fio_thread.join()
