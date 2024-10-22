@@ -36,9 +36,9 @@ class TestMultiFioSnapshotDowntime(TestClusterBase):
 
             lvol_name = f"test_lvol_{i + 1}"
             self.logger.info(f"Creating LVOL {lvol_name} on node {node_ip}")
-            self.sbcli_utils.add_lvol(lvol_name=lvol_name, pool_name=self.pool_name, size=self.lvol_size, host_id=node_uuid)
-                                    #   crypto=True, key1=self.lvol_crypt_keys[0],
-                                    #   key2=self.lvol_crypt_keys[1])
+            self.sbcli_utils.add_lvol(lvol_name=lvol_name, pool_name=self.pool_name, size=self.lvol_size, host_id=node_uuid,
+                                      crypto=True, key1=self.lvol_crypt_keys[0],
+                                      key2=self.lvol_crypt_keys[1])
             lvol_vs_node[lvol_name] = node_uuid
 
             # Get devices and mount them for non-trimwrite workloads
@@ -64,9 +64,9 @@ class TestMultiFioSnapshotDowntime(TestClusterBase):
             node_uuid = self.node_with_lvols[i % 2]  # Distribute the remaining 3 LVOLs across the two nodes
             lvol_name = f"test_lvol_{i + 1}"
             self.logger.info(f"Creating LVOL {lvol_name} on node {node_uuid}")
-            self.sbcli_utils.add_lvol(lvol_name=lvol_name, pool_name=self.pool_name, size=self.lvol_size, host_id=node_uuid)
-                                    #   crypto=True, key1=self.lvol_crypt_keys[0],
-                                    #   key2=self.lvol_crypt_keys[1])
+            self.sbcli_utils.add_lvol(lvol_name=lvol_name, pool_name=self.pool_name, size=self.lvol_size, host_id=node_uuid,
+                                      crypto=True, key1=self.lvol_crypt_keys[0],
+                                      key2=self.lvol_crypt_keys[1])
             
             lvol_vs_node[lvol_name] = self.node_id_ip[node_uuid]
 
