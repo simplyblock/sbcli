@@ -11,7 +11,7 @@ class TestMultiFioSnapshotDowntime(TestClusterBase):
         self.fio_size = "10G"
         self.numjobs = 16
         self.iodepth = 1
-        self.fio_runtime = 1000  # seconds
+        self.fio_runtime = 500  # seconds
         self.node_with_lvols = []  # Track nodes with LVOLs
         self.node_id_ip = {}
 
@@ -123,8 +123,7 @@ class TestMultiFioSnapshotDowntime(TestClusterBase):
                         "size": self.fio_size,
                         "numjobs": self.numjobs,
                         "iodepth": self.iodepth,
-                        "runtime": self.fio_runtime,
-                        "time_based": False
+                        "runtime": self.fio_runtime
                     }
                 )
             else:
@@ -138,8 +137,7 @@ class TestMultiFioSnapshotDowntime(TestClusterBase):
                         "size": self.fio_size,
                         "numjobs": self.numjobs,
                         "iodepth": self.iodepth,
-                        "runtime": self.fio_runtime,
-                        "time_based": False
+                        "runtime": self.fio_runtime
                     }
                 )
             
@@ -201,7 +199,7 @@ class TestMultiFioSnapshotDowntime(TestClusterBase):
         self.common_utils.manage_fio_threads(
             node=self.mgmt_nodes[0],
             threads=fio_threads,
-            timeout=3000
+            timeout=1500
         )
         for fio_thread in fio_threads:
             fio_thread.join()
