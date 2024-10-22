@@ -195,16 +195,6 @@ class TestMultiFioSnapshotDowntime(TestClusterBase):
         # Step 10: Wait for node restart validate its status
 
         # Step 8: Stop the SPDK process on the node without LVOLs
-        lvol_spdk_stop = list(lvol_vs_node.keys())[0]
-        node_lvol_ip = self.node_id_ip[lvol_vs_node[lvol_spdk_stop]]
-        self.logger.info("Stopping SPDK process on node without LVOLs")
-        self.ssh_obj.stop_spdk_process(node=node_lvol_ip)
-    
-        node_wait_thread = threading.Thread(
-            target=self.sbcli_utils.wait_for_storage_node_status,
-            args=(node_without_lvols, "online", 500)
-            )
-        node_wait_thread.start()
 
         # Step 11: Wait for fio threads to complete and validate
         self.logger.info("Waiting for fio workloads to finish")
@@ -215,6 +205,17 @@ class TestMultiFioSnapshotDowntime(TestClusterBase):
         )
         for fio_thread in fio_threads:
             fio_thread.join()
+
+        lvol_spdk_stop = list(lvol_vs_node.keys())[0]
+        node_lvol_ip = self.node_id_ip[lvol_vs_node[lvol_spdk_stop]]
+        self.logger.info("Stopping SPDK process on node without LVOLs")
+        self.ssh_obj.stop_spdk_process(node=node_lvol_ip)
+
+        node_wait_thread = threading.Thread(
+            target=self.sbcli_utils.wait_for_storage_node_status,
+            args=(node_without_lvols, "online", 500)
+            )
+        node_wait_thread.start()
 
         node_wait_thread.join()
 
