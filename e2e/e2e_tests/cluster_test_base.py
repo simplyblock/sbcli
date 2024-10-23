@@ -110,6 +110,7 @@ class TestClusterBase:
             sleep_n_sec(2)
             lvols = self.sbcli_utils.list_lvols()
             self.unmount_all(base_path=self.mount_path)
+            self.unmount_all(base_path="/mnt/")
             sleep_n_sec(2)
             self.ssh_obj.unmount_path(node=self.mgmt_nodes[0],
                                     device=self.mount_path)
@@ -119,7 +120,7 @@ class TestClusterBase:
                     lvol_details = self.sbcli_utils.get_lvol_details(lvol_id=lvol_id)
                     nqn = lvol_details[0]["nqn"]
                     self.ssh_obj.unmount_path(node=self.mgmt_nodes[0],
-                                            device=self.mount_path)
+                                              device=self.mount_path)
                     sleep_n_sec(2)
                     self.ssh_obj.exec_command(node=self.mgmt_nodes[0],
                                             command=f"sudo nvme disconnect -n {nqn}")
