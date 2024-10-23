@@ -402,6 +402,9 @@ class FioWorkloadTest(TestClusterBase):
         self.sbcli_utils.wait_for_storage_node_status(node_id=node_id, status="online",
                                                       timeout=500)
 
+        self.sbcli_utils.wait_for_health_status(node_id=node_id, status=True,
+                                                timeout=500)
+
         output = self.ssh_obj.exec_command(node=self.mgmt_nodes[0], command="sudo df -h")
         output = output[0].strip().split('\n')
         self.logger.info(f"Mount paths after restart: {output}")
@@ -426,6 +429,8 @@ class FioWorkloadTest(TestClusterBase):
 
         self.logger.info(f"Docker container on node {node_id} stopped successfully.")
 
+        sleep_n_sec(60)
+
         output = self.ssh_obj.exec_command(node=self.mgmt_nodes[0], command="sudo df -h")
         output = output[0].strip().split('\n')
         self.logger.info(f"Mount paths after suspend: {output}")
@@ -441,13 +446,13 @@ class FioWorkloadTest(TestClusterBase):
 
         sleep_n_sec(400)
 
-        # Restart node
-        self.sbcli_utils.restart_node(node_id)
-        self.logger.info(f"Node {node_id} restarted successfully.")
+        self.logger.info(f"Waiting for node {node_id} to be restarted automatically.")
 
         self.sbcli_utils.wait_for_storage_node_status(node_id=node_id, status="online",
                                                       timeout=500)
-
+        self.sbcli_utils.wait_for_health_status(node_id=node_id, status=True,
+                                                timeout=500)
+        
         output = self.ssh_obj.exec_command(node=self.mgmt_nodes[0], command="sudo df -h")
         output = output[0].strip().split('\n')
         self.logger.info(f"Mount paths after restart: {output}")
