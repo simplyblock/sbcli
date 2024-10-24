@@ -878,6 +878,11 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
     #         return False
 
     cloud_instance = node_info['cloud_instance']
+    if not cloud_instance:
+        # Create a static cloud instance from node info
+        cloud_instance = {"id": node_info['system_id'], "type": "None", "cloud": "None",
+                          "ip": node_info['network_interface'][iface_name]["ip"],
+                          "public_ip": node_info['network_interface'][iface_name]["ip"]}
     """"
      "cloud_instance": {
           "id": "565979732541",
