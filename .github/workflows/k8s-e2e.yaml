@@ -277,17 +277,27 @@ jobs:
       #   shell: /usr/bin/bash -e {0}
       
       - name: Sleep after Helm Installation
-        run: sleep 300
+        run: sleep 400
 
-      # - name: Activate Cluster
-      #   run: |
-      #     ssh -i "$HOME/.ssh/${{ steps.terraform_outputs.outputs.key_name }}" -o StrictHostKeyChecking=no \
-      #       -o ProxyCommand="ssh -o StrictHostKeyChecking=no -i \"$HOME/.ssh/${{ steps.terraform_outputs.outputs.key_name }}\" -W %h:%p ec2-user@${{ steps.terraform_outputs.outputs.bastion_public_ip }}" \
-      #       ec2-user@${{ steps.terraform_outputs.outputs.mgmt_private_ip }} "
-      #       $SBCLI_CMD cluster activate ${{ steps.bootstrap_cluster.outputs.cluster_id }}
-      #     "
-      #   env:
-      #     SBCLI_CMD: ${{ env.SBCLI_CMD }}
+      - name: Check Cluster Status
+        run: |
+          CLUSTER_API_GATEWAY_ENDPOINT=${{ steps.bootstrap_cluster.outputs.cluster_api_gateway_endpoint }}
+          CLUSTER_UUID=${{ steps.bootstrap_cluster.outputs.cluster_id }}
+          CLUSTER_SECRET=${{ steps.bootstrap_cluster.outputs.cluster_secret }}
+   
+          response=$(curl -s -X GET "$CLUSTER_API_GATEWAY_ENDPOINT/cluster/$CLUSTER_UUID" \
+            -H "Content-Type: application/json" \
+            -H "Authorization: $CLUSTER_UUID $CLUSTER_SECRET")
+     
+          status=$(echo $response | jq -r '.results[0].status')
+       
+          if [ "$status" != "active" ]; then
+              echo "Cluster status is not active, current status: $status"
+              exit 1
+          else
+              echo "Cluster status is active"
+              exit 0
+          fi
 
       - name: Record Test Start Time
         run: echo "TEST_START_TIME=$(date +%s)" >> $GITHUB_ENV
