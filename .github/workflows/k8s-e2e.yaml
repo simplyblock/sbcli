@@ -235,13 +235,13 @@ jobs:
             --set logicalVolume.snapshot="True" \
             --set image.spdkcsi.tag=master-arm64 \
             --set image.simplyblock.tag=main \
-            --set storagenode.spdkImage=simplyblock/spdk:main-latest
+            --set storagenode.spdkImage=simplyblock/spdk:main-latest \
             --set logicalVolume.distr_ndcs=$NDCS \
-            --set logicalVolume.distr_npcs=$NPCS \
+            --set logicalVolume.distr_npcs=$NPCS
         env:
           NDCS: ${{ env.NDCS }}
           NPCS: ${{ env.NPCS }}
-          
+
       # - name: Wait for Storage Nodes to Become Online
       #   run: |
       #     echo "Sleeping for 120 seconds before helm install"
