@@ -744,8 +744,8 @@ def _prepare_cluster_devices_on_restart(snode):
                 logger.error(f"Failed to add: {pt_name} to the subsystem: {subsystem_nqn}")
                 return False
 
-        device_controller.set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_ONLINE)
-        return True
+    device_controller.set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_ONLINE)
+    return True
 
 
 def _connect_to_remote_devs(this_node):
@@ -1726,9 +1726,6 @@ def restart_storage_node(
     logger.info("Setting node status to Online")
     set_node_status(node_id, StorageNode.STATUS_ONLINE)
 
-
-    time.sleep(5)
-
     # make other nodes connect to the new devices
     logger.info("Make other nodes connect to the node devices")
     snodes = db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id)
@@ -1744,13 +1741,6 @@ def restart_storage_node(
     for dev in snode.nvme_devices:
         distr_controller.send_dev_status_event(dev, dev.status)
 
-    logger.info("Starting migration tasks")
-    for dev in snode.nvme_devices:
-        if dev.status != NVMeDevice.STATUS_ONLINE:
-            logger.debug(f"Device is not online: {dev.get_id()}, status: {dev.status}")
-            continue
-        tasks_controller.add_device_mig_task(dev.get_id())
-
     time.sleep(5)
 
     if cluster.status != cluster.STATUS_ACTIVE:
@@ -1765,6 +1755,13 @@ def restart_storage_node(
         ret = recreate_lvstore(snode)
         if not ret:
             return False, "Failed to recreate lvstore on node"
+
+    logger.info("Starting migration tasks")
+    for dev in snode.nvme_devices:
+        if dev.status != NVMeDevice.STATUS_ONLINE:
+            logger.debug(f"Device is not online: {dev.get_id()}, status: {dev.status}")
+            continue
+        tasks_controller.add_device_mig_task(dev.get_id())
 
     logger.info("Done")
     return "Success"
