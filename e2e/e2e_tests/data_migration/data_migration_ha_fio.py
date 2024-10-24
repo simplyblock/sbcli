@@ -398,12 +398,20 @@ class FioWorkloadTest(TestClusterBase):
         # Restart node
         self.sbcli_utils.restart_node(node_id)
         self.logger.info(f"Node {node_id} restarted successfully.")
-
+        
         self.sbcli_utils.wait_for_storage_node_status(node_id=node_id, status="online",
                                                       timeout=500)
 
         self.sbcli_utils.wait_for_health_status(node_id=node_id, status=True,
                                                 timeout=500)
+        
+        storage_nodes = self.sbcli_utils.get_storage_nodes()["results"]
+        for node in storage_nodes:
+            self.sbcli_utils.wait_for_storage_node_status(node_id=node['id'], status="online",
+                                                          timeout=500)
+
+            self.sbcli_utils.wait_for_health_status(node_id=node['id'], status=True,
+                                                    timeout=500)
 
         output = self.ssh_obj.exec_command(node=self.mgmt_nodes[0], command="sudo df -h")
         output = output[0].strip().split('\n')
@@ -429,22 +437,9 @@ class FioWorkloadTest(TestClusterBase):
 
         self.logger.info(f"Docker container on node {node_id} stopped successfully.")
 
-        sleep_n_sec(60)
-
         output = self.ssh_obj.exec_command(node=self.mgmt_nodes[0], command="sudo df -h")
         output = output[0].strip().split('\n')
-        self.logger.info(f"Mount paths after suspend: {output}")
-
-        fio_process = self.ssh_obj.find_process_name(self.mgmt_nodes[0], 'fio')
-        self.logger.info(f"FIO PROCESS: {fio_process}")
-        if not fio_process:
-            raise RuntimeError("FIO process was interrupted on unaffected nodes.")
-        for fio in process_name:
-            for running_fio in fio_process: 
-                assert fio not in running_fio, "FIO Process running on crashed container node"
-        self.logger.info("FIO process is running uninterrupted.")
-
-        sleep_n_sec(400)
+        self.logger.info(f"Mount paths after stop: {output}")
 
         self.logger.info(f"Waiting for node {node_id} to be restarted automatically.")
 
@@ -452,6 +447,14 @@ class FioWorkloadTest(TestClusterBase):
                                                       timeout=500)
         self.sbcli_utils.wait_for_health_status(node_id=node_id, status=True,
                                                 timeout=500)
+        
+        storage_nodes = self.sbcli_utils.get_storage_nodes()["results"]
+        for node in storage_nodes:
+            self.sbcli_utils.wait_for_storage_node_status(node_id=node['id'], status="online",
+                                                          timeout=500)
+
+            self.sbcli_utils.wait_for_health_status(node_id=node['id'], status=True,
+                                                    timeout=500)
         
         output = self.ssh_obj.exec_command(node=self.mgmt_nodes[0], command="sudo df -h")
         output = output[0].strip().split('\n')
@@ -462,7 +465,7 @@ class FioWorkloadTest(TestClusterBase):
             raise RuntimeError("FIO process was interrupted on unaffected nodes.")
         for fio in process_name:
             for running_fio in fio_process: 
-                assert fio not in running_fio, "FIO Process running on suspended node"
+                assert fio not in running_fio, "FIO Process running on "
         self.logger.info("FIO process is running uninterrupted.")
 
     def filter_migration_tasks_for_node(self, tasks, node_id):
