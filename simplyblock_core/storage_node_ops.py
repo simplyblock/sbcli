@@ -1721,6 +1721,9 @@ def restart_storage_node(
     logger.info("Setting node status to Online")
     set_node_status(node_id, StorageNode.STATUS_ONLINE)
 
+
+    time.sleep(5)
+
     # make other nodes connect to the new devices
     logger.info("Make other nodes connect to the node devices")
     snodes = db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id)
@@ -1742,6 +1745,8 @@ def restart_storage_node(
             logger.debug(f"Device is not online: {dev.get_id()}, status: {dev.status}")
             continue
         tasks_controller.add_device_mig_task(dev.get_id())
+
+    time.sleep(5)
 
     if cluster.status != cluster.STATUS_ACTIVE:
         logger.warning(f"The cluster status is not active ({cluster.status}), adding the node without distribs and lvstore")
@@ -2588,9 +2593,9 @@ def recreate_lvstore(snode):
     temp_rpc_client = RPCClient(
             snode.mgmt_ip, snode.rpc_port,
             snode.rpc_username, snode.rpc_password)
-    time.sleep(1)
+    time.sleep(5)
     ret = temp_rpc_client.bdev_examine(snode.raid)
-    time.sleep(1)
+    time.sleep(5)
     ret = temp_rpc_client.bdev_wait_for_examine()
     time.sleep(1)
 
@@ -2762,6 +2767,7 @@ def _create_bdev_stack(snode, lvstore_stack=None):
             distribs_list = bdev["distribs_list"]
             strip_size_kb = params["strip_size_kb"]
             ret = rpc_client.bdev_raid_create(name, distribs_list, strip_size_kb=strip_size_kb)
+            time.sleep(5)
 
         else:
             logger.debug(f"Unknown BDev type: {type}")
