@@ -629,12 +629,13 @@ def _prepare_cluster_devices_jm_on_dev(snode, devices):
             if not new_device:
                 logger.error("failed to create dev stack")
                 return False
-            new_device.cluster_device_order = dev_order
-            dev_order += 1
+            if nvme.status == NVMeDevice.STATUS_NEW:
+                new_device.status = NVMeDevice.STATUS_NEW
+            else:
+                new_device.cluster_device_order = dev_order
+                dev_order += 1
+                device_events.device_create(new_device)
             new_devices.append(new_device)
-            device_events.device_create(new_device)
-
-        device_events.device_create(nvme)
 
     snode.nvme_devices = new_devices
     return True
