@@ -141,6 +141,13 @@ def task_runner_node(task):
         task.write_to_db(db_controller.kv_store)
         return True
 
+    if node.status == StorageNode.STATUS_RESTARTING:
+        logger.info(f"Node is restarting, stopping task")
+        task.function_result = f"Node is restarting"
+        task.status = JobSchedule.STATUS_DONE
+        task.write_to_db(db_controller.kv_store)
+        return True
+
     if _get_node_unavailable_devices_count(node.get_id()) == 0 and node.status == StorageNode.STATUS_ONLINE:
         logger.info(f"Node is online: {node.get_id()}")
         task.function_result = "Node is online"

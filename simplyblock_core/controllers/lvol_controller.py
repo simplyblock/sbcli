@@ -685,6 +685,12 @@ def add_lvol_on_node(lvol, snode, ha_comm_addrs=None, ha_inode_self=None):
 def recreate_lvol_on_node(lvol, snode, ha_comm_addrs=None, ha_inode_self=None):
     rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
 
+    if "crypto" in lvol.lvol_type:
+        ret = _create_crypto_lvol(
+            rpc_client, lvol.crypto_bdev, f"{lvol.lvs_name}/{lvol.lvol_bdev}", lvol.crypto_key1, lvol.crypto_key2)
+        if not ret:
+            return False, "Failed to create crypto bdev"
+
     logger.info("creating subsystem %s", lvol.nqn)
     ret = rpc_client.subsystem_create(lvol.nqn, 'sbcli-cn', lvol.uuid)
     logger.debug(ret)

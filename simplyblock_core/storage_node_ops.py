@@ -2598,8 +2598,8 @@ def recreate_lvstore(snode):
         for lvol_id in snode.lvols:
             lvol = lvol_controller.recreate_lvol(lvol_id, snode)
             if not lvol:
-                logger.error(f"Failed to create LVol: {lvol_id}")
-                return False
+                logger.error(f"Failed to recreate LVol: {lvol_id}")
+                continue
             lvol.status = lvol.STATUS_ONLINE
             lvol.io_error = False
             lvol.health_check = True
