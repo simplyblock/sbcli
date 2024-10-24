@@ -744,6 +744,7 @@ def _prepare_cluster_devices_on_restart(snode):
                 logger.error(f"Failed to add: {pt_name} to the subsystem: {subsystem_nqn}")
                 return False
 
+    snode.jm_device.status = JMDevice.STATUS_ONLINE
     device_controller.set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_ONLINE)
     return True
 
