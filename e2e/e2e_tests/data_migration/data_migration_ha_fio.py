@@ -456,6 +456,7 @@ class FioWorkloadTest(TestClusterBase):
             self.sbcli_utils.wait_for_health_status(node_id=node['id'], status=True,
                                                     timeout=500)
         
+        sleep_n_sec(300)
         output = self.ssh_obj.exec_command(node=self.mgmt_nodes[0], command="sudo df -h")
         output = output[0].strip().split('\n')
         self.logger.info(f"Mount paths after restart: {output}")
@@ -465,7 +466,7 @@ class FioWorkloadTest(TestClusterBase):
             raise RuntimeError("FIO process was interrupted on unaffected nodes.")
         for fio in process_name:
             for running_fio in fio_process: 
-                assert fio not in running_fio, "FIO Process running on "
+                assert fio not in running_fio, "FIO Process running on crashed node"
         self.logger.info("FIO process is running uninterrupted.")
 
     def filter_migration_tasks_for_node(self, tasks, node_id):

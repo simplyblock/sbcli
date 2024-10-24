@@ -289,17 +289,12 @@ class SshUtils:
             pid (int, optional): Kill the given pid. Defaults to None.
             process_name (str, optional): Kill the process with name. Defaults to None.
         """
-        kill_command = "sudo kill -9 %s"
         if pid:
-            command = kill_command % pid
-            self.exec_command(node, command)
+            kill_command = f"sudo kill -9 {pid}"
+            self.exec_command(node, kill_command)
         if process_name:
-            pids = self.find_process_name(node=node,
-                                          process_name=process_name,
-                                          return_pid=True)
-            for pid in pids:
-                command = kill_command % pid.strip()
-                self.exec_command(node, command)
+            kill_command = f"sudo pkill {process_name}"
+            self.exec_command(node, kill_command)
 
     def read_file(self, node, file_name):
         """Read the given file

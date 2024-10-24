@@ -105,6 +105,23 @@ class TestClusterBase:
         self.logger.info("Inside teardown function")
         self.ssh_obj.kill_processes(node=self.mgmt_nodes[0],
                                     process_name="fio")
+        retry_check = 100
+        while retry_check:
+            fio_process = self.ssh_obj.find_process_name(
+                node=self.mgmt_nodes[0],
+                process_name="fio"
+            )
+            if len(fio_process) <= 2:
+                break
+            self.logger.info(f"Fio process should exit after kill. Still waiting: {fio_process}")
+            retry_check -= 1
+            sleep_n_sec(10)
+
+        if retry_check <=0:
+            self.logger.info("FIO did not exit completely after kill and wait. "
+                             "Some hanging mount points could be present. "
+                             "Needs manual cleanup.")
+
         try:
             self.ssh_obj.delete_all_snapshots(node=self.mgmt_nodes[0])
             sleep_n_sec(2)
