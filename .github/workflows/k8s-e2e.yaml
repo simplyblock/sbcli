@@ -159,7 +159,7 @@ jobs:
         run: |
           cd $GITHUB_WORKSPACE/simplyBlockDeploy
           terraform plan \
-            -var "mgmt_nodes=1" -var "storage_nodes=3" -var "volumes_per_storage_nodes=3" \
+            -var "mgmt_nodes=1" -var "storage_nodes=3" -var "volumes_per_storage_nodes=1" \
             -var storage_nodes_instance_type="m6g.2xlarge" \
             -var "storage_nodes_arch=arm64" -var "snode_deploy_on_k8s=true" \
             -var "extra_nodes=1" -var "extra_nodes_instance_type=m6gd.xlarge" \
@@ -191,8 +191,7 @@ jobs:
         run: |
           cd $GITHUB_WORKSPACE/simplyBlockDeploy
           ./bootstrap-cluster.sh --sbcli-cmd "$SBCLI_CMD" \
-            --max-lvol 10 --max-snap 10 --max-prov 900G --number-of-devices 3 \
-            --max-lvol 10 --max-snap 10 --max-prov 900G --number-of-devices 3 \
+            --max-lvol 10 --max-snap 10 --max-prov 400G --number-of-devices 1 \
             --distr-ndcs $NDCS \
             --distr-npcs $NPCS \
             --distr-bs $BS \
