@@ -84,7 +84,7 @@ def add_device_mig_task(device_id):
         for bdev in node.lvstore_stack:
             if bdev['type'] == "bdev_distr":
                 _add_task(JobSchedule.FN_DEV_MIG, device.cluster_id, node.get_id(), device.get_id(),
-                          max_retry=0, function_params={'distr_name': bdev['name']})
+                          max_retry=-1, function_params={'distr_name': bdev['name']})
     return True
 
 
@@ -110,11 +110,16 @@ def list_tasks(cluster_id, is_json=False):
         return json.dumps(data, indent=2)
 
     for task in tasks:
+        if task.max_retry > 0:
+            retry = f"{task.retry}/{task.max_retry}"
+        else:
+            retry = f"{task.retry}"
+
         data.append({
             "Task ID": task.uuid,
             "Node ID / Device ID": f"{task.node_id}\n{task.device_id}",
             "Function": task.function_name,
-            "Retry": f"{task.retry}/{task.max_retry}",
+            "Retry": retry,
             "Status": task.status,
             "Result": task.function_result,
             "Date": time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(task.date)),
@@ -173,7 +178,7 @@ def add_device_failed_mig_task(device_id):
         for bdev in node.lvstore_stack:
             if bdev['type'] == "bdev_distr":
                 _add_task(JobSchedule.FN_FAILED_DEV_MIG, device.cluster_id, node.get_id(), device.get_id(),
-                          max_retry=0, function_params={'distr_name': bdev['name']})
+                          max_retry=-1, function_params={'distr_name': bdev['name']})
     return True
 
 
@@ -185,7 +190,7 @@ def add_new_device_mig_task(device_id):
         for bdev in node.lvstore_stack:
             if bdev['type'] == "bdev_distr":
                 _add_task(JobSchedule.FN_NEW_DEV_MIG, device.cluster_id, node.get_id(), device.get_id(),
-                          max_retry=0, function_params={'distr_name': bdev['name']})
+                          max_retry=-1, function_params={'distr_name': bdev['name']})
     return True
 
 
