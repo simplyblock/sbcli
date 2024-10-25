@@ -803,3 +803,9 @@ class RPCClient:
             "cluster_full": cluster_full,
         }
         return self._request("bdev_distrib_toggle_cluster_full", params)
+
+    def log_set_print_level(self, level):
+        params = {
+            "level": level
+        }
+        return self._request("log_set_print_level", params)

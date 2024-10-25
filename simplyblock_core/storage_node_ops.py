@@ -1161,6 +1161,8 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
         logger.error("Failed to start framework")
         return False
 
+    rpc_client.log_set_print_level("DEBUG")
+
     # 5- set app_thread cpu mask
     if snode.app_thread_mask:
         ret = rpc_client.thread_get_stats()
@@ -1621,6 +1623,8 @@ def restart_storage_node(
     if not ret:
         logger.error("Failed to start framework")
         return False
+
+    rpc_client.log_set_print_level("DEBUG")
 
     # 5- set app_thread cpu mask
     if snode.app_thread_mask:
