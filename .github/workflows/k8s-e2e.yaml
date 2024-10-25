@@ -235,8 +235,8 @@ jobs:
             --set image.spdkcsi.tag=master-arm64 \
             --set image.simplyblock.tag=main \
             --set storagenode.spdkImage=simplyblock/spdk:main-latest \
-            --set logicalVolume.distr_ndcs="2" \
-            --set logicalVolume.distr_npcs="1"
+            --set logicalVolume.distr_ndcs="${NDCS}" \
+            --set logicalVolume.distr_npcs="${NPCS}"
         env:
           NDCS: ${{ env.NDCS }}
           NPCS: ${{ env.NPCS }}
