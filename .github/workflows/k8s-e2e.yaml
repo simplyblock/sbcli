@@ -33,7 +33,7 @@ on:
       ndcs:
         description: 'Number of data chunks'
         required: false
-        default: 2
+        default: 1
       npcs:
         description: 'Number of parity chunks'
         required: false
@@ -149,7 +149,7 @@ jobs:
             echo "Setting SBCLI_CMD to input or default to sbcli-dev."
             echo "SBCLI_CMD=${{ github.event.inputs.sbcli_cmd || 'sbcli-dev' }}" >> $GITHUB_ENV
           fi
-          echo "NDCS=${{ github.event.inputs.ndcs || 2 }}" >> $GITHUB_ENV
+          echo "NDCS=${{ github.event.inputs.ndcs || 1 }}" >> $GITHUB_ENV
           echo "NPCS=${{ github.event.inputs.npcs || 1 }}" >> $GITHUB_ENV
           echo "BS=${{ github.event.inputs.bs || 4096 }}" >> $GITHUB_ENV
           echo "CHUNK_BS=${{ github.event.inputs.chunk_bs || 4096 }}" >> $GITHUB_ENV
