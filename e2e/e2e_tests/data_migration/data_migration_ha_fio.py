@@ -115,7 +115,7 @@ class FioWorkloadTest(TestClusterBase):
         tasks = self.sbcli_utils.get_cluster_tasks(self.cluster_id)
 
         self.logger.info(f"Validating migration tasks for node {affected_node}.")
-        self.validate_migration_for_node(tasks, None, timestamp)
+        self.validate_migration_for_node(tasks, None)
 
         sleep_n_sec(30)
 
