@@ -8,6 +8,8 @@ from e2e_tests.batch_lvol_limit import TestBatchLVOLsLimit
 from e2e_tests.cloning_and_snapshot.multi_lvol_snapshot_fio import TestMultiLvolFio
 from e2e_tests.ha_journal.lvol_journal_device_node_restart import TestDeviceNodeRestart
 
+from stress_test.lvol_stress_fio_run import TestStressLvolClusterFioRun
+
 
 
 def get_all_tests(custom=True, k8s_test=False):
@@ -34,4 +36,10 @@ def get_all_tests(custom=True, k8s_test=False):
         tests.remove(TestLvolFioNpcs0)
         tests.remove(TestLvolFioNpcs1)
         tests.remove(TestLvolFioNpcs2)
+    return tests
+
+def get_stress_tests():
+    tests = [
+        TestStressLvolClusterFioRun
+    ]
     return tests
