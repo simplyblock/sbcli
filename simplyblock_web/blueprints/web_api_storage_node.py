@@ -154,7 +154,7 @@ def storage_node_restart():
     req_data = request.get_json()
     uuid = req_data.get("uuid", "")
     node_ip = req_data.get("node_ip", "")
-    force = bool(req_data.get("force", False))
+    force = bool(req_data.get("force", ""))
 
     node = db_controller.get_storage_node_by_id(uuid)
     if not node:
