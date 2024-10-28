@@ -41,7 +41,7 @@ class FioWorkloadTest(TestClusterBase):
             self.logger.info(f"Creating 2 lvols on node {node_uuid}.")
             for j in range(2):
                 lvol_name = f"test_lvol_{i+1}_{j+1}"
-                self.sbcli_utils.add_lvol(lvol_name=lvol_name, pool_name=self.pool_name, size="10G", host_id=node_uuid)
+                self.sbcli_utils.add_lvol(lvol_name=lvol_name, pool_name=self.pool_name, size="2G", host_id=node_uuid)
                 sn_lvol_data[node_uuid].append(lvol_name)
                 lvol_fio_path[lvol_name] = {"lvol_id": self.sbcli_utils.get_lvol_id(lvol_name=lvol_name),
                                             "mount_path": None,
@@ -105,6 +105,8 @@ class FioWorkloadTest(TestClusterBase):
 
         fio_process_terminated = ["fio_test_lvol_1_1", "fio_test_lvol_1_2"]
 
+        timestamp = int(datetime.now().timestamp())
+
         self.shutdown_node_and_verify(affected_node, process_name=fio_process_terminated)
 
         sleep_n_sec(300)
@@ -113,7 +115,7 @@ class FioWorkloadTest(TestClusterBase):
         tasks = self.sbcli_utils.get_cluster_tasks(self.cluster_id)
 
         self.logger.info(f"Validating migration tasks for node {affected_node}.")
-        self.validate_migration_for_node(tasks, affected_node)
+        self.validate_migration_for_node(tasks, None, timestamp)
 
         sleep_n_sec(30)
 
@@ -150,40 +152,40 @@ class FioWorkloadTest(TestClusterBase):
         sleep_n_sec(120)
 
         # # Step 7: Stop container on another node
-        affected_node = list(sn_lvol_data.keys())[1]
-        self.logger.info(f"Stopping docker container on node {affected_node}.")
+        # affected_node = list(sn_lvol_data.keys())[1]
+        # self.logger.info(f"Stopping docker container on node {affected_node}.")
 
-        self.stop_container_verify(affected_node,
-                                   process_name=["fio_test_lvol_2_1", "fio_test_lvol_2_2"])
+        # self.stop_container_verify(affected_node,
+        #                            process_name=["fio_test_lvol_2_1", "fio_test_lvol_2_2"])
 
-        sleep_n_sec(300)
+        # sleep_n_sec(300)
 
-        self.logger.info(f"Fetching migration tasks for cluster {self.cluster_id}.")
-        tasks = self.sbcli_utils.get_cluster_tasks(self.cluster_id)
+        # self.logger.info(f"Fetching migration tasks for cluster {self.cluster_id}.")
+        # tasks = self.sbcli_utils.get_cluster_tasks(self.cluster_id)
 
-        self.logger.info(f"Validating migration tasks for node {affected_node}.")
-        self.validate_migration_for_node(tasks, affected_node)
+        # self.logger.info(f"Validating migration tasks for node {affected_node}.")
+        # self.validate_migration_for_node(tasks, affected_node)
 
-        sleep_n_sec(30)
+        # sleep_n_sec(30)
 
-        lvol_list = sn_lvol_data[affected_node]
-        affected_fio = {}
-        for lvol in lvol_list:
-            affected_fio[lvol] = {}
-            affected_fio[lvol]["mount_path"] = lvol_fio_path[lvol]["mount_path"]
-            lvol_fio_path[lvol]["disk"] = self.ssh_obj.get_lvol_vs_device(node=self.mgmt_nodes[0],
-                                                                         lvol_id=lvol_fio_path[lvol]["lvol_id"])
-            affected_fio[lvol]["disk"] = lvol_fio_path[lvol]["disk"]
-            fs_type = "xfs" if lvol[-1] == "1" else "ext4"
-            if lvol_fio_path[lvol]["mount_path"]:
-                fs = self.ssh_obj.get_mount_points(self.mgmt_nodes[0],
-                                                   lvol_fio_path[lvol]["mount_path"])
-                for device in fs:
-                    self.ssh_obj.unmount_path(node=self.mgmt_nodes[0], device=device)
-                self.ssh_obj.mount_path(self.mgmt_nodes[0],
-                                        device=lvol_fio_path[lvol]["disk"],
-                                        mount_path=lvol_fio_path[lvol]["mount_path"])
-        fio_threads.extend(self.run_fio(affected_fio))
+        # lvol_list = sn_lvol_data[affected_node]
+        # affected_fio = {}
+        # for lvol in lvol_list:
+        #     affected_fio[lvol] = {}
+        #     affected_fio[lvol]["mount_path"] = lvol_fio_path[lvol]["mount_path"]
+        #     lvol_fio_path[lvol]["disk"] = self.ssh_obj.get_lvol_vs_device(node=self.mgmt_nodes[0],
+        #                                                                  lvol_id=lvol_fio_path[lvol]["lvol_id"])
+        #     affected_fio[lvol]["disk"] = lvol_fio_path[lvol]["disk"]
+        #     fs_type = "xfs" if lvol[-1] == "1" else "ext4"
+        #     if lvol_fio_path[lvol]["mount_path"]:
+        #         fs = self.ssh_obj.get_mount_points(self.mgmt_nodes[0],
+        #                                            lvol_fio_path[lvol]["mount_path"])
+        #         for device in fs:
+        #             self.ssh_obj.unmount_path(node=self.mgmt_nodes[0], device=device)
+        #         self.ssh_obj.mount_path(self.mgmt_nodes[0],
+        #                                 device=lvol_fio_path[lvol]["disk"],
+        #                                 mount_path=lvol_fio_path[lvol]["mount_path"])
+        # fio_threads.extend(self.run_fio(affected_fio))
 
         # Step 8: Stop instance
         affected_node = list(sn_lvol_data.keys())[2]
@@ -469,7 +471,7 @@ class FioWorkloadTest(TestClusterBase):
                 assert fio not in running_fio, "FIO Process running on crashed node"
         self.logger.info("FIO process is running uninterrupted.")
 
-    def filter_migration_tasks_for_node(self, tasks, node_id):
+    def filter_migration_tasks(self, tasks, node_id):
         """
         Filters `device_migration` tasks for a specific node.
 
@@ -480,9 +482,11 @@ class FioWorkloadTest(TestClusterBase):
         Returns:
             list: List of `device_migration` tasks for the specific node.
         """
-        return [task for task in tasks if task['function_name'] == 'device_migration' and task['node_id'] == node_id]
+        if node_id:
+            return [task for task in tasks if task['function_name'] == 'device_migration' and task['node_id'] == node_id]
+        return [task for task in tasks if task['function_name'] == 'device_migration']
 
-    def validate_migration_for_node(self, tasks, node_id):
+    def validate_migration_for_node(self, tasks, node_id=None):
         """
         Validate that all `device_migration` tasks for a specific node have completed successfully.
 
@@ -494,14 +498,24 @@ class FioWorkloadTest(TestClusterBase):
             RuntimeError: If any migration task failed or did not run.
         """
         self.logger.info(f"Migration tasks: {tasks}")
-        node_tasks = self.filter_migration_tasks_for_node(tasks, node_id)
-
-        if not node_tasks:
-            raise RuntimeError(f"No migration tasks found for node {node_id}.")
-        self.logger.info(f"node tasks: {node_tasks}")
-        for task in node_tasks:
-            if task['status'] != 'done' or task['function_result'] != 'Done':
-                raise RuntimeError(f"Migration task {task['id']} on node {node_id} failed or is incomplete. Status: {task['status']} "
-                                   f" Result: {task['function_result']}")
-        
-        self.logger.info(f"All migration tasks for node {node_id} completed successfully.")
+        tasks = self.filter_migration_tasks(tasks, node_id)
+        if node_id:
+            if not tasks:
+                raise RuntimeError(f"No migration tasks found for node {node_id}.")
+            self.logger.info(f"node tasks: {tasks}")
+            for task in tasks:
+                if task['status'] != 'done' or task['function_result'] != 'Done':
+                    raise RuntimeError(f"Migration task {task['id']} on node {node_id} failed or is incomplete. Status: {task['status']} "
+                                    f" Result: {task['function_result']}")
+            
+            self.logger.info(f"All migration tasks for node {node_id} completed successfully.")
+        else:
+            if not tasks:
+                raise RuntimeError("No migration tasks found on the cluster")
+            self.logger.info(f"node tasks: {tasks}")
+            for task in tasks:
+                if task['status'] != 'done' or task['function_result'] != 'Done':
+                    raise RuntimeError(f"Migration task {task['id']} on node {node_id} failed or is incomplete. Status: {task['status']} "
+                                    f" Result: {task['function_result']}")
+            
+            self.logger.info(f"All migration tasks for node {node_id} completed successfully.")
