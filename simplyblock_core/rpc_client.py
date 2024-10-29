@@ -134,7 +134,13 @@ class RPCClient:
         """
         params = {
             "trtype": trtype,
-            "max_io_qpairs_per_ctrlr": 256
+            "max_io_qpairs_per_ctrlr": 256,
+            "max_queue_depth": 512,
+            "max_io_qpairs_per_ctrlr": 4,
+            "abort_timeout_sec": 5,
+            "ack_timeout": 512,
+            "zcopy": True
+
         }
         return self._request("nvmf_create_transport", params)
 
@@ -546,12 +552,12 @@ class RPCClient:
             # "action_on_timeout": "abort",
             "bdev_retry_count": 0,
             "transport_retry_count": 0,
-            "ctrlr_loss_timeout_sec": 2,
-            "fast_io_fail_timeout_sec": 1,
+            "ctrlr_loss_timeout_sec": 1,
+            "fast_io_fail_timeout_sec": 0,
             "reconnect_delay_sec": 1,
-            "keep_alive_timeout_ms": 200,
-            "transport_ack_timeout": 7,
-            "timeout_us": 500000
+            "keep_alive_timeout_ms": 10000,
+            "transport_ack_timeout": 9,
+            "timeout_us": 0
         }
         return self._request("bdev_nvme_set_options", params)
 
