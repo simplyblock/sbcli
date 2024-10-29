@@ -2622,8 +2622,12 @@ def recreate_lvstore(snode):
 
 
 def get_next_ha_jms(current_node):
+    db_controller = DBController(KVStore())
+    jm_ids = []
     nodes = get_secondary_nodes(current_node)
-    jm_ids = [node.jm_device.get_id() for node in nodes]
+    for node_id in nodes:
+        node = db_controller.get_storage_node_by_id(node_id)
+        jm_ids.append(node.jm_device.get_id())
     return jm_ids
 
 
@@ -2679,6 +2683,8 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
             jm_names.append(db_controller.get_storage_node_by_id(node_id).jm_device.get_id())
         logger.debug(f"online_jms: {str(jm_names)}")
         snode.remote_jm_devices = _connect_to_remote_jm_devs(snode, jm_names)
+        snode.secondary_node_id_1 = secondary_nodes[0]
+        snode.secondary_node_id_2 = secondary_nodes[1]
         snode.write_to_db()
 
     for _ in range(snode.number_of_distribs):
@@ -2750,7 +2756,7 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
     # creating lvstore on secondary
     for node_id in secondary_nodes:
         sec_node_1 = db_controller.get_storage_node_by_id(node_id)
-        ret, err = _create_bdev_stack(sec_node_1, lvstore_stack)
+        ret, err = _create_bdev_stack(sec_node_1, lvstore_stack, jm_names)
         if err:
             logger.error(f"Failed to create lvstore on node {sec_node_1.get_id()}")
             logger.error(err)
@@ -2759,7 +2765,7 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
     return True
 
 
-def _create_bdev_stack(snode, lvstore_stack=None):
+def _create_bdev_stack(snode, lvstore_stack=None, jm_names=None):
     rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
 
     created_bdevs = []
@@ -2775,7 +2781,10 @@ def _create_bdev_stack(snode, lvstore_stack=None):
         params = bdev['params']
 
         if type == "bdev_distr":
-            params['jm_names'] = get_node_jm_names(snode)
+            if jm_names:
+                params['jm_names'] = jm_names
+            else:
+                params['jm_names'] = get_node_jm_names(snode)
             if snode.distrib_cpu_cores:
                 distrib_cpu_mask = utils.decimal_to_hex_power_of_2(snode.distrib_cpu_cores[snode.distrib_cpu_index])
                 params['distrib_cpu_mask'] = distrib_cpu_mask
