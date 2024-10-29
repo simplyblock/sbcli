@@ -83,7 +83,7 @@ class TestStressLvolClusterFioRun(TestClusterBase):
             block_sizes_kb = [4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096]
             
             lvol_name = f"{self.lvol_name}_{fs_type}_{i}_ll"
-            mount = self.lvols_disks_mount[lvol_name]["mount_point"]
+            mount = self.lvols_disks_mount[lvol_name]["mount_path"]
             device = self.lvols_disks_mount[lvol_name]["device"]
             log_file = self.lvols_disks_mount[lvol_name]["log"]
             if mount:
