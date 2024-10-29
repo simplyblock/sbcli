@@ -123,9 +123,9 @@ spec:
         - name: FLUENTD_CONF
           value: "fluentd.conf"
         volumeMounts:
-        - name: log-volume
+        - name: var-log
           mountPath: /var/log
-        - name: fluentd-config-volume
+        - name: fluentd-config
           mountPath: /fluentd/etc
         resources:
           limits:
