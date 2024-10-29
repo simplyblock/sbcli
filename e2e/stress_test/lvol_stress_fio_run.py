@@ -79,10 +79,9 @@ class TestStressLvolClusterFioRun(TestClusterBase):
                 self.lvols_disks_mount[lvol_name]["mount_path"] = mount_point
 
         fio_threads = []
-        for i in range(1, self.num_iterations + 1):
+        for lvol_name in list(self.lvols_disks_mount.keys()):
             block_sizes_kb = [4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096]
             
-            lvol_name = f"{self.lvol_name}_{fs_type}_{i}_ll"
             mount = self.lvols_disks_mount[lvol_name]["mount_path"]
             device = self.lvols_disks_mount[lvol_name]["device"]
             log_file = self.lvols_disks_mount[lvol_name]["log"]
@@ -119,8 +118,7 @@ class TestStressLvolClusterFioRun(TestClusterBase):
         self.common_utils.manage_fio_threads(node=self.mgmt_nodes[0],
                                              threads=[fio_thread],
                                              timeout=20000)
-        for i in range(1, self.num_iterations + 1):            
-            lvol_name = f"{self.lvol_name}_{fs_type}_{i}_ll"
+        for lvol_name in list(self.lvols_disks_mount.keys()):
             log_file = self.lvols_disks_mount[lvol_name]["log"]
             self.common_utils.validate_fio_test(
                 node=self.mgmt_nodes[0],
