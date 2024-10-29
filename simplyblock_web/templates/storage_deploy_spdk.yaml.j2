@@ -157,7 +157,7 @@ data:
     <match kubernetes.**>
       @type gelf
       host {{ GRAYLOG_SERVER_IP }}
-      port {{ GRAYLOG_PORT }}
+      port 12201
       flush_interval 5s
       <buffer>
         @type memory
