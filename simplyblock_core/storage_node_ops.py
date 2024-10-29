@@ -24,7 +24,6 @@ from simplyblock_core.models.nvme_device import NVMeDevice, JMDevice
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.pci_utils import get_nvme_devices, bind_spdk_driver
 from simplyblock_core.rpc_client import RPCClient
-from simplyblock_core.services.health_check_service import db_controller
 from simplyblock_core.snode_client import SNodeClient
 
 logger = log.getLogger()
@@ -2629,6 +2628,7 @@ def get_next_ha_jms(current_node):
 
 
 def get_node_jm_names(current_node):
+    db_controller = DBController(KVStore())
     jm_list = []
     if current_node.jm_device:
         jm_list.append(current_node.jm_device.jm_bdev)
@@ -2661,6 +2661,7 @@ def get_secondary_nodes(current_node):
 
 
 def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blocks, max_size, nodes):
+    db_controller = DBController(KVStore())
     lvstore_stack = []
     distrib_list = []
     size = max_size // snode.number_of_distribs
