@@ -103,7 +103,7 @@ def list_tasks(cluster_id, is_json=False):
         return False
 
     data = []
-    tasks = db_controller.get_job_tasks(cluster_id)
+    tasks = db_controller.get_job_tasks(cluster_id, reverse=False)
     if tasks and is_json is True:
         for t in tasks:
             data.append(t.get_clean_dict())
@@ -122,7 +122,7 @@ def list_tasks(cluster_id, is_json=False):
             "Retry": retry,
             "Status": task.status,
             "Result": task.function_result,
-            "Date": time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(task.date)),
+            "Updated at": time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(task.updated_at)),
         })
     return utils.print_table(data)
 
