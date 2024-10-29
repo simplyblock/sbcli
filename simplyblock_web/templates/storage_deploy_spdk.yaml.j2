@@ -110,3 +110,59 @@ spec:
           value: "{{ RPC_USERNAME }}"
         - name: RPC_PASSWORD
           value: "{{ RPC_PASSWORD }}"
+
+      - name: fluentd-sidecar
+        image: fluent/fluentd
+        env:
+          - name: FLUENTD_CONF
+            value: "fluentd.conf"
+        volumeMounts:
+          - name: log-volume
+            mountPath: /var/log
+          - name: fluentd-config-volume
+            mountPath: /fluentd/etc
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: fluentd-config-{{ HOSTNAME }}
+  namespace: {{ NAMESPACE }}
+data:
+  fluent.conf: |
+    <source>
+      @type tail
+      path /var/log/containers/*.log
+      pos_file /var/log/fluentd-containers.log.pos
+      tag kubernetes.*
+      format json
+      time_format %Y-%m-%dT%H:%M:%S.%N
+      read_from_head true
+    </source>
+
+    <filter kubernetes.**>
+      @type kubernetes_metadata
+      @id kubernetes_metadata
+      @log_level info
+    </filter>
+
+    <filter kubernetes.**>
+      @type grep
+      <exclude>
+        key $.kubernetes.container_name
+        pattern ^(?!snode-spdk-deployment).*
+      </exclude>
+    </filter>
+
+    <match kubernetes.**>
+      @type gelf
+      host {{ GRAYLOG_SERVER_IP }}
+      port {{ GRAYLOG_PORT }}
+      flush_interval 5s
+      <buffer>
+        @type memory
+        flush_interval 10s
+        chunk_limit_size 1m
+        total_limit_size 5m
+      </buffer>
+    </match>
