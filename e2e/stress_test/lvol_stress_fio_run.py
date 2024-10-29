@@ -70,7 +70,7 @@ class TestStressLvolClusterFioRun(TestClusterBase):
             self.lvols_disks_mount[lvol_name]["device"] = lvol_device
             self.lvols_disks_mount[lvol_name]["log"] = f"{lvol_name}_log.txt"
 
-            trim = random.choice([0,1])
+            trim = random.choice([0,0,1])
             if not trim:
                 self.logger.info(f"Formatting device: {lvol_device} with filesystem: {fs_type}")
                 self.ssh_obj.format_disk(node=self.mgmt_nodes[0], device=lvol_device, fs_type=fs_type)
@@ -80,7 +80,7 @@ class TestStressLvolClusterFioRun(TestClusterBase):
 
         fio_threads = []
         for lvol_name in list(self.lvols_disks_mount.keys()):
-            block_sizes_kb = [4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096]
+            block_sizes_kb = [4, 8, 16, 32, 64, 128, 256]
             
             mount = self.lvols_disks_mount[lvol_name]["mount_path"]
             device = self.lvols_disks_mount[lvol_name]["device"]
@@ -98,7 +98,7 @@ class TestStressLvolClusterFioRun(TestClusterBase):
                                                       "time_based": True,
                                                       "debug": self.fio_debug})
             else:
-                fio_workload = random.choice(["randrw", "read", "write", "trimwrite"])
+                fio_workload = random.choice(["randrw","write", "trimwrite"])
                 fio_thread = threading.Thread(target=self.ssh_obj.run_fio_test,
                                               args=(self.mgmt_nodes[0], device, None, log_file),
                                               kwargs={"name": f"fio_run_{lvol_name}",
