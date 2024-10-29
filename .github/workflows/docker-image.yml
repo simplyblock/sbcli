@@ -38,7 +38,7 @@ jobs:
       run: |
         SHORT_SHA=$(echo ${{ env.SHA }} | head -c 8)
 
-        # sudo apt-get update -y
+        sudo apt-get update -y
         sudo apt-get install -y qemu-system qemu-user-static
         docker buildx ls
         docker buildx create --name mybuilder --bootstrap --use

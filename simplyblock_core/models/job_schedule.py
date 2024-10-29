@@ -1,4 +1,6 @@
 # coding=utf-8
+import datetime
+
 from simplyblock_core.models.base_model import BaseModel
 
 
@@ -30,8 +32,9 @@ class JobSchedule(BaseModel):
         "function_result": {"type": str, 'default': ""},
 
         "retry": {"type": int, 'default': 0},
-        "max_retry": {"type": int, 'default': 0},
+        "max_retry": {"type": int, 'default': -1},
         "status": {"type": str, 'default': ""},
+        "updated_at": {"type": str, 'default': ""},
 
     }
 
@@ -42,3 +45,7 @@ class JobSchedule(BaseModel):
 
     def get_id(self):
         return "%s/%s/%s" % (self.cluster_id, self.date, self.uuid)
+
+    def write_to_db(self, kv_store=None):
+        self.updated_at = str(datetime.datetime.now())
+        super().write_to_db(kv_store)

@@ -33,7 +33,7 @@ on:
       ndcs:
         description: 'Value for NDCS'
         required: false
-        default: 1
+        default: 2
       npcs:
         description: 'Value for NPCS'
         required: false
@@ -126,7 +126,7 @@ jobs:
             echo "Setting SBCLI_CMD to input or default to sbcli-dev."
             echo "SBCLI_CMD=${{ github.event.inputs.sbcli_cmd || 'sbcli-dev' }}" >> $GITHUB_ENV
           fi
-          echo "NDCS=${{ github.event.inputs.ndcs || 1 }}" >> $GITHUB_ENV
+          echo "NDCS=${{ github.event.inputs.ndcs || 2 }}" >> $GITHUB_ENV
           echo "NPCS=${{ github.event.inputs.npcs || 1 }}" >> $GITHUB_ENV
           echo "BS=${{ github.event.inputs.bs || 4096 }}" >> $GITHUB_ENV
           echo "CHUNK_BS=${{ github.event.inputs.chunk_bs || 4096 }}" >> $GITHUB_ENV
@@ -167,7 +167,7 @@ jobs:
             --distr-npcs $NPCS \
             --distr-bs $BS \
             --distr-chunk-bs $CHUNK_BS \
-            --partitions 3 --disable-ha-jm
+            --partitions 3
         id: bootstrap_cluster
         env:
           SBCLI_CMD: ${{ env.SBCLI_CMD }}

@@ -141,6 +141,20 @@ def task_runner_node(task):
         task.write_to_db(db_controller.kv_store)
         return True
 
+    if node.status == StorageNode.STATUS_RESTARTING:
+        logger.info(f"Node is restarting, stopping task")
+        task.function_result = f"Node is restarting"
+        task.status = JobSchedule.STATUS_DONE
+        task.write_to_db(db_controller.kv_store)
+        return True
+
+    if node.status == StorageNode.STATUS_SCHEDULABLE:
+        logger.info(f"Node is schedulable, stopping task")
+        task.function_result = f"Node is schedulable"
+        task.status = JobSchedule.STATUS_DONE
+        task.write_to_db(db_controller.kv_store)
+        return True
+
     if _get_node_unavailable_devices_count(node.get_id()) == 0 and node.status == StorageNode.STATUS_ONLINE:
         logger.info(f"Node is online: {node.get_id()}")
         task.function_result = "Node is online"
@@ -201,7 +215,6 @@ def task_runner_node(task):
 
 logger.info("Starting Tasks runner...")
 while True:
-    time.sleep(3)
     clusters = db_controller.get_clusters()
     if not clusters:
         logger.error("No clusters found!")
@@ -223,3 +236,4 @@ while True:
                                 delay_seconds *= 1
                             else:
                                 delay_seconds *= 2
+    time.sleep(constants.TASK_EXEC_INTERVAL_SEC)

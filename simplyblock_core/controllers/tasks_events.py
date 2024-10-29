@@ -25,16 +25,13 @@ def task_create(task, caused_by=ec.CAUSED_BY_CLI):
 
 
 def task_updated(task, caused_by=ec.CAUSED_BY_CLI):
-    return
-    # _task_event(task, f"Task updated: {task.uuid}", caused_by, ec.EVENT_STATUS_CHANGE)
+    _task_event(task, f"Task updated: {task.uuid}", caused_by, ec.EVENT_STATUS_CHANGE)
 
 
 def task_status_change(task, new_state, old_status, caused_by=ec.CAUSED_BY_CLI):
-    return
-    # _task_event(task, f"task status changed from: {old_status} to: {new_state}", caused_by, ec.EVENT_STATUS_CHANGE)
+    _task_event(task, f"task status changed from: {old_status} to: {new_state}", caused_by, ec.EVENT_STATUS_CHANGE)
 
 
 def task_canceled(task, caused_by=ec.CAUSED_BY_CLI):
-    return
-    # _task_event(task, f"Task canceled: {task.uuid}", caused_by, ec.EVENT_STATUS_CHANGE)
+    _task_event(task, f"Task canceled: {task.uuid}", caused_by, ec.EVENT_STATUS_CHANGE)
 

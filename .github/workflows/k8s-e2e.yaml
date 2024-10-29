@@ -13,8 +13,8 @@ on:
         description: 'Branch for simplyBlockDeploy'
         required: true
         default: 'main'
-      spdk_csi_branch:
-        description: 'Branch for spdk-csi'
+      simplyblock_csi_branch:
+        description: 'Branch for simplyblock-csi'
         required: true
         default: 'master'
       sbcli_cmd:
@@ -33,7 +33,7 @@ on:
       ndcs:
         description: 'Number of data chunks'
         required: false
-        default: 1
+        default: 2
       npcs:
         description: 'Number of parity chunks'
         required: false
@@ -100,11 +100,11 @@ jobs:
           token: ${{ secrets.GH_ACCESS_KEY_ID_HAMDI }}
 
       - uses: actions/checkout@master
-        name: Checkout code spdk-csi
+        name: Checkout code simplyblock_csi_branch
         with:
-          repository: simplyblock-io/spdk-csi
-          ref: refs/heads/${{ github.event.inputs.spdk_csi_branch || 'master'}}
-          path: 'spdk-csi'
+          repository: simplyblock-io/simplyblock-csi
+          ref: refs/heads/${{ github.event.inputs.simplyblock_csi_branch || 'master'}}
+          path: 'simplyblock-csi'
           token: ${{ secrets.GH_ACCESS_KEY_ID_HAMDI }}
 
       - name: Setup Terraform
@@ -149,7 +149,7 @@ jobs:
             echo "Setting SBCLI_CMD to input or default to sbcli-dev."
             echo "SBCLI_CMD=${{ github.event.inputs.sbcli_cmd || 'sbcli-dev' }}" >> $GITHUB_ENV
           fi
-          echo "NDCS=${{ github.event.inputs.ndcs || 1 }}" >> $GITHUB_ENV
+          echo "NDCS=${{ github.event.inputs.ndcs || 2 }}" >> $GITHUB_ENV
           echo "NPCS=${{ github.event.inputs.npcs || 1 }}" >> $GITHUB_ENV
           echo "BS=${{ github.event.inputs.bs || 4096 }}" >> $GITHUB_ENV
           echo "CHUNK_BS=${{ github.event.inputs.chunk_bs || 4096 }}" >> $GITHUB_ENV
@@ -159,7 +159,7 @@ jobs:
         run: |
           cd $GITHUB_WORKSPACE/simplyBlockDeploy
           terraform plan \
-            -var "mgmt_nodes=1" -var "storage_nodes=3" -var "volumes_per_storage_nodes=3" \
+            -var "mgmt_nodes=1" -var "storage_nodes=5" -var "volumes_per_storage_nodes=1" \
             -var storage_nodes_instance_type="m6g.2xlarge" \
             -var "storage_nodes_arch=arm64" -var "snode_deploy_on_k8s=true" \
             -var "extra_nodes=1" -var "extra_nodes_instance_type=m6gd.xlarge" \
@@ -191,8 +191,7 @@ jobs:
         run: |
           cd $GITHUB_WORKSPACE/simplyBlockDeploy
           ./bootstrap-cluster.sh --sbcli-cmd "$SBCLI_CMD" \
-            --max-lvol 10 --max-snap 10 --max-prov 900G --number-of-devices 3 \
-            --max-lvol 10 --max-snap 10 --max-prov 900G --number-of-devices 3 \
+            --max-lvol 10 --max-snap 10 --max-prov 400G --number-of-devices 1 \
             --distr-ndcs $NDCS \
             --distr-npcs $NPCS \
             --distr-bs $BS \
@@ -220,9 +219,9 @@ jobs:
           scp -i "$HOME/.ssh/${{ steps.terraform_outputs.outputs.key_name }}" ec2-user@${{ steps.terraform_outputs.outputs.extra_node_public_ip }}:/etc/rancher/k3s/k3s.yaml $HOME/.kube/config
           sed -i "s/server: https:\/\/\(localhost\|127.0.0.1\)\(:[0-9]*\)/server: https:\/\/${{ steps.terraform_outputs.outputs.extra_node_public_ip }}\2/" $HOME/.kube/config
 
-      - name: Install Helm Chart for spdk-csi
+      - name: Install Helm Chart for simplyblock-csi
         run: |
-          cd $GITHUB_WORKSPACE/spdk-csi/charts/latest/spdk-csi/
+          cd $GITHUB_WORKSPACE/simplyblock-csi/charts/latest/spdk-csi/
           echo "Sleeping for 30 seconds before helm install"
           sleep 30
           helm install spdk-csi ./ \
@@ -235,7 +234,12 @@ jobs:
             --set logicalVolume.snapshot="True" \
             --set image.spdkcsi.tag=master-arm64 \
             --set image.simplyblock.tag=main \
-            --set storagenode.spdkImage=simplyblock/spdk:feature-journal-ha-latest
+            --set storagenode.spdkImage=simplyblock/spdk:main-latest \
+            --set logicalVolume.distr_ndcs="${NDCS}" \
+            --set logicalVolume.distr_npcs="${NPCS}"
+        env:
+          NDCS: ${{ env.NDCS }}
+          NPCS: ${{ env.NPCS }}
 
       # - name: Wait for Storage Nodes to Become Online
       #   run: |
@@ -277,17 +281,27 @@ jobs:
       #   shell: /usr/bin/bash -e {0}
       
       - name: Sleep after Helm Installation
-        run: sleep 300
+        run: sleep 400
 
-      # - name: Activate Cluster
-      #   run: |
-      #     ssh -i "$HOME/.ssh/${{ steps.terraform_outputs.outputs.key_name }}" -o StrictHostKeyChecking=no \
-      #       -o ProxyCommand="ssh -o StrictHostKeyChecking=no -i \"$HOME/.ssh/${{ steps.terraform_outputs.outputs.key_name }}\" -W %h:%p ec2-user@${{ steps.terraform_outputs.outputs.bastion_public_ip }}" \
-      #       ec2-user@${{ steps.terraform_outputs.outputs.mgmt_private_ip }} "
-      #       $SBCLI_CMD cluster activate ${{ steps.bootstrap_cluster.outputs.cluster_id }}
-      #     "
-      #   env:
-      #     SBCLI_CMD: ${{ env.SBCLI_CMD }}
+      - name: Check Cluster Status
+        run: |
+          CLUSTER_API_GATEWAY_ENDPOINT=${{ steps.bootstrap_cluster.outputs.cluster_api_gateway_endpoint }}
+          CLUSTER_UUID=${{ steps.bootstrap_cluster.outputs.cluster_id }}
+          CLUSTER_SECRET=${{ steps.bootstrap_cluster.outputs.cluster_secret }}
+   
+          response=$(curl -s -X GET "$CLUSTER_API_GATEWAY_ENDPOINT/cluster/$CLUSTER_UUID" \
+            -H "Content-Type: application/json" \
+            -H "Authorization: $CLUSTER_UUID $CLUSTER_SECRET")
+     
+          status=$(echo $response | jq -r '.results[0].status')
+       
+          if [ "$status" != "active" ]; then
+              echo "Cluster status is not active, current status: $status"
+              exit 1
+          else
+              echo "Cluster status is active"
+              exit 0
+          fi
 
       - name: Record Test Start Time
         run: echo "TEST_START_TIME=$(date +%s)" >> $GITHUB_ENV
@@ -347,7 +361,7 @@ jobs:
           cd $GITHUB_WORKSPACE/e2e/logs
           ./upload_logs.sh
           cd $GITHUB_WORKSPACE/simplyBlockDeploy
-          ./upload_docker_logs_to_s3.sh
+          ./upload_docker_logs_to_s3.sh --k8s --namespace "spdk-csi"
         if: always()
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}

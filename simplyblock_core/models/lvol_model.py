@@ -45,6 +45,8 @@ class LVol(BaseModel):
         "bdev_stack": {"type": List, 'default': []},
 
         "crypto_key_name": {"type": str, 'default': ""},
+        "crypto_key1": {"type": str, 'default': ""},
+        "crypto_key2": {"type": str, 'default': ""},
 
         "rw_ios_per_sec": {"type": int, 'default': 0},
         "rw_mbytes_per_sec": {"type": int, 'default': 0},
