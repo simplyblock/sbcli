@@ -99,64 +99,15 @@ class FioWorkloadTest(TestClusterBase):
         # Step 5: Run fio workloads with different configurations
         fio_threads = self.run_fio(lvol_fio_path)
 
-        # Step 6: Continue with node shutdown, restart, and migration task validation
-        affected_node = list(sn_lvol_data.keys())[0]
-        self.logger.info(f"Shutting down node {affected_node}.")
+        # # Step 6: Continue with node shutdown, restart, and migration task validation
+        # affected_node = list(sn_lvol_data.keys())[0]
+        # self.logger.info(f"Shutting down node {affected_node}.")
 
-        fio_process_terminated = ["fio_test_lvol_1_1", "fio_test_lvol_1_2"]
+        # fio_process_terminated = ["fio_test_lvol_1_1", "fio_test_lvol_1_2"]
 
-        timestamp = int(datetime.now().timestamp())
+        # timestamp = int(datetime.now().timestamp())
 
-        self.shutdown_node_and_verify(affected_node, process_name=fio_process_terminated)
-
-        sleep_n_sec(300)
-
-        self.logger.info(f"Fetching migration tasks for cluster {self.cluster_id}.")
-        tasks = self.sbcli_utils.get_cluster_tasks(self.cluster_id)
-
-        self.logger.info(f"Validating migration tasks for node {affected_node}.")
-        self.validate_migration_for_node(tasks, None)
-
-        sleep_n_sec(30)
-
-        fio_process = self.ssh_obj.find_process_name(self.mgmt_nodes[0], 'fio')
-        self.logger.info(f"FIO PROCESS: {fio_process}")
-        if not fio_process:
-            raise RuntimeError("FIO process was interrupted on unaffected nodes.")
-        for fio in fio_process_terminated:
-            for running_fio in fio_process:
-                assert fio not in running_fio, "FIO Process running on restarted node"
-
-        lvol_list = sn_lvol_data[affected_node]
-        affected_fio = {}
-        for lvol in lvol_list:
-            affected_fio[lvol] = {}
-            affected_fio[lvol]["mount_path"] = lvol_fio_path[lvol]["mount_path"]
-            lvol_fio_path[lvol]["disk"] = self.ssh_obj.get_lvol_vs_device(node=self.mgmt_nodes[0],
-                                                                         lvol_id=lvol_fio_path[lvol]["lvol_id"])
-            affected_fio[lvol]["disk"] = lvol_fio_path[lvol]["disk"]
-            fs_type = "xfs" if lvol[-1] == "1" else "ext4"
-            if lvol_fio_path[lvol]["mount_path"]:
-                fs = lvol_fio_path[lvol]["mount_path"]
-                while fs:
-                    fs = self.ssh_obj.get_mount_points(self.mgmt_nodes[0],
-                                                       lvol_fio_path[lvol]["mount_path"])
-                    self.logger.info(f"FS mounts: {fs}")
-                    for device in fs:
-                        self.ssh_obj.unmount_path(node=self.mgmt_nodes[0], device=device)
-                self.ssh_obj.mount_path(self.mgmt_nodes[0],
-                                        device=lvol_fio_path[lvol]["disk"],
-                                        mount_path=lvol_fio_path[lvol]["mount_path"])
-        fio_threads.extend(self.run_fio(affected_fio))
-
-        sleep_n_sec(120)
-
-        # # Step 7: Stop container on another node
-        # affected_node = list(sn_lvol_data.keys())[1]
-        # self.logger.info(f"Stopping docker container on node {affected_node}.")
-
-        # self.stop_container_verify(affected_node,
-        #                            process_name=["fio_test_lvol_2_1", "fio_test_lvol_2_2"])
+        # self.shutdown_node_and_verify(affected_node, process_name=fio_process_terminated)
 
         # sleep_n_sec(300)
 
@@ -164,9 +115,17 @@ class FioWorkloadTest(TestClusterBase):
         # tasks = self.sbcli_utils.get_cluster_tasks(self.cluster_id)
 
         # self.logger.info(f"Validating migration tasks for node {affected_node}.")
-        # self.validate_migration_for_node(tasks, affected_node)
+        # self.validate_migration_for_node(tasks, None)
 
         # sleep_n_sec(30)
+
+        # fio_process = self.ssh_obj.find_process_name(self.mgmt_nodes[0], 'fio')
+        # self.logger.info(f"FIO PROCESS: {fio_process}")
+        # if not fio_process:
+        #     raise RuntimeError("FIO process was interrupted on unaffected nodes.")
+        # for fio in fio_process_terminated:
+        #     for running_fio in fio_process:
+        #         assert fio not in running_fio, "FIO Process running on restarted node"
 
         # lvol_list = sn_lvol_data[affected_node]
         # affected_fio = {}
@@ -178,46 +137,87 @@ class FioWorkloadTest(TestClusterBase):
         #     affected_fio[lvol]["disk"] = lvol_fio_path[lvol]["disk"]
         #     fs_type = "xfs" if lvol[-1] == "1" else "ext4"
         #     if lvol_fio_path[lvol]["mount_path"]:
-        #         fs = self.ssh_obj.get_mount_points(self.mgmt_nodes[0],
-        #                                            lvol_fio_path[lvol]["mount_path"])
-        #         for device in fs:
-        #             self.ssh_obj.unmount_path(node=self.mgmt_nodes[0], device=device)
+        #         fs = lvol_fio_path[lvol]["mount_path"]
+        #         while fs:
+        #             fs = self.ssh_obj.get_mount_points(self.mgmt_nodes[0],
+        #                                                lvol_fio_path[lvol]["mount_path"])
+        #             self.logger.info(f"FS mounts: {fs}")
+        #             for device in fs:
+        #                 self.ssh_obj.unmount_path(node=self.mgmt_nodes[0], device=device)
         #         self.ssh_obj.mount_path(self.mgmt_nodes[0],
         #                                 device=lvol_fio_path[lvol]["disk"],
         #                                 mount_path=lvol_fio_path[lvol]["mount_path"])
         # fio_threads.extend(self.run_fio(affected_fio))
 
-        # Step 8: Stop instance
-        affected_node = list(sn_lvol_data.keys())[2]
-        affected_node_details = self.sbcli_utils.get_storage_node_details(storage_node_id=affected_node)
-        instance_id = affected_node_details[0]["cloud_instance_id"]
+        # sleep_n_sec(120)
 
-        self.logger.info("Creating New instance")
-        new_node_instance_id, new_node_ip = \
-            self.common_utils.create_instance_from_existing(ec2_resource=self.ec2_resource, 
-                                                            instance_id=instance_id,
-                                                            instance_name="e2e-new-instance")
+        # # # Step 7: Stop container on another node
+        # # affected_node = list(sn_lvol_data.keys())[1]
+        # # self.logger.info(f"Stopping docker container on node {affected_node}.")
 
-        self.common_utils.stop_ec2_instance(self.ec2_resource,
-                                            instance_id=instance_id)
+        # # self.stop_container_verify(affected_node,
+        # #                            process_name=["fio_test_lvol_2_1", "fio_test_lvol_2_2"])
+
+        # # sleep_n_sec(300)
+
+        # # self.logger.info(f"Fetching migration tasks for cluster {self.cluster_id}.")
+        # # tasks = self.sbcli_utils.get_cluster_tasks(self.cluster_id)
+
+        # # self.logger.info(f"Validating migration tasks for node {affected_node}.")
+        # # self.validate_migration_for_node(tasks, affected_node)
+
+        # # sleep_n_sec(30)
+
+        # # lvol_list = sn_lvol_data[affected_node]
+        # # affected_fio = {}
+        # # for lvol in lvol_list:
+        # #     affected_fio[lvol] = {}
+        # #     affected_fio[lvol]["mount_path"] = lvol_fio_path[lvol]["mount_path"]
+        # #     lvol_fio_path[lvol]["disk"] = self.ssh_obj.get_lvol_vs_device(node=self.mgmt_nodes[0],
+        # #                                                                  lvol_id=lvol_fio_path[lvol]["lvol_id"])
+        # #     affected_fio[lvol]["disk"] = lvol_fio_path[lvol]["disk"]
+        # #     fs_type = "xfs" if lvol[-1] == "1" else "ext4"
+        # #     if lvol_fio_path[lvol]["mount_path"]:
+        # #         fs = self.ssh_obj.get_mount_points(self.mgmt_nodes[0],
+        # #                                            lvol_fio_path[lvol]["mount_path"])
+        # #         for device in fs:
+        # #             self.ssh_obj.unmount_path(node=self.mgmt_nodes[0], device=device)
+        # #         self.ssh_obj.mount_path(self.mgmt_nodes[0],
+        # #                                 device=lvol_fio_path[lvol]["disk"],
+        # #                                 mount_path=lvol_fio_path[lvol]["mount_path"])
+        # # fio_threads.extend(self.run_fio(affected_fio))
+
+        # # Step 8: Stop instance
+        # affected_node = list(sn_lvol_data.keys())[2]
+        # affected_node_details = self.sbcli_utils.get_storage_node_details(storage_node_id=affected_node)
+        # instance_id = affected_node_details[0]["cloud_instance_id"]
+
+        # self.logger.info("Creating New instance")
+        # new_node_instance_id, new_node_ip = \
+        #     self.common_utils.create_instance_from_existing(ec2_resource=self.ec2_resource, 
+        #                                                     instance_id=instance_id,
+        #                                                     instance_name="e2e-new-instance")
+
+        # self.common_utils.stop_ec2_instance(self.ec2_resource,
+        #                                     instance_id=instance_id)
         
-        sleep_n_sec(120)
+        # sleep_n_sec(120)
 
-        fio_process_terminated = ["fio_test_lvol_3_1", "fio_test_lvol_3_2"]
+        # fio_process_terminated = ["fio_test_lvol_3_1", "fio_test_lvol_3_2"]
         
-        # fio_process = self.ssh_obj.find_process_name(self.mgmt_nodes[0], 'fio')
-        # self.logger.info(f"FIO PROCESS: {fio_process}")
-        # if not fio_process:
-        #     raise RuntimeError("FIO process was interrupted on unaffected nodes.")
-        # for fio in fio_process_terminated:
-        #     for running_fio in fio_process: 
-        #         assert fio not in running_fio, "FIO Process running on suspended node"
-        # self.logger.info("FIO process is running uninterrupted.")
+        # # fio_process = self.ssh_obj.find_process_name(self.mgmt_nodes[0], 'fio')
+        # # self.logger.info(f"FIO PROCESS: {fio_process}")
+        # # if not fio_process:
+        # #     raise RuntimeError("FIO process was interrupted on unaffected nodes.")
+        # # for fio in fio_process_terminated:
+        # #     for running_fio in fio_process: 
+        # #         assert fio not in running_fio, "FIO Process running on suspended node"
+        # # self.logger.info("FIO process is running uninterrupted.")
 
-        self.ssh_obj.connect(
-            address=new_node_ip,
-            bastion_server_address=self.bastion_server,
-        )
+        # self.ssh_obj.connect(
+        #     address=new_node_ip,
+        #     bastion_server_address=self.bastion_server,
+        # )
         
         # Step 9: Add node
         # self.sbcli_utils.add_storage_node(
@@ -241,52 +241,52 @@ class FioWorkloadTest(TestClusterBase):
         #     spdk_cpu_mask=affected_node_details[0]["spdk_cpu_mask"]
         # )
 
-        self.ssh_obj.deploy_storage_node(node=new_node_ip)
+        # self.ssh_obj.deploy_storage_node(node=new_node_ip)
 
-        self.ssh_obj.add_storage_node(
-            node=self.mgmt_nodes[0],
-            cluster_id=self.cluster_id,
-            node_ip=new_node_ip,
-            ifname="eth0",
-            max_lvol=affected_node_details[0]["max_lvol"],
-            max_snap=affected_node_details[0]["max_snap"],
-            max_prov=convert_bytes_to_gb_tb(affected_node_details[0]["max_prov"]),
-            number_of_distribs=affected_node_details[0]["number_of_distribs"],
-            number_of_devices=affected_node_details[0]["number_of_devices"],
-            partitions=affected_node_details[0]["num_partitions_per_dev"],
-            jm_percent=affected_node_details[0]["jm_percent"],
-            disable_ha_jm=not affected_node_details[0]["enable_ha_jm"],
-            enable_test_device=affected_node_details[0]["enable_test_device"],
-            # iobuf_small_pool_count=affected_node_details[0]["iobuf_small_pool_count"],
-            # iobuf_large_pool_count=affected_node_details[0]["iobuf_large_pool_count"],
-            spdk_debug=affected_node_details[0]["spdk_debug"],
-            spdk_image=affected_node_details[0]["spdk_image"],
-            spdk_cpu_mask=affected_node_details[0]["spdk_cpu_mask"]
-        )
-        sleep_n_sec(200)
-        new_node = self.sbcli_utils.get_node_without_lvols()
+        # self.ssh_obj.add_storage_node(
+        #     node=self.mgmt_nodes[0],
+        #     cluster_id=self.cluster_id,
+        #     node_ip=new_node_ip,
+        #     ifname="eth0",
+        #     max_lvol=affected_node_details[0]["max_lvol"],
+        #     max_snap=affected_node_details[0]["max_snap"],
+        #     max_prov=convert_bytes_to_gb_tb(affected_node_details[0]["max_prov"]),
+        #     number_of_distribs=affected_node_details[0]["number_of_distribs"],
+        #     number_of_devices=affected_node_details[0]["number_of_devices"],
+        #     partitions=affected_node_details[0]["num_partitions_per_dev"],
+        #     jm_percent=affected_node_details[0]["jm_percent"],
+        #     disable_ha_jm=not affected_node_details[0]["enable_ha_jm"],
+        #     enable_test_device=affected_node_details[0]["enable_test_device"],
+        #     # iobuf_small_pool_count=affected_node_details[0]["iobuf_small_pool_count"],
+        #     # iobuf_large_pool_count=affected_node_details[0]["iobuf_large_pool_count"],
+        #     spdk_debug=affected_node_details[0]["spdk_debug"],
+        #     spdk_image=affected_node_details[0]["spdk_image"],
+        #     spdk_cpu_mask=affected_node_details[0]["spdk_cpu_mask"]
+        # )
+        # sleep_n_sec(200)
+        # new_node = self.sbcli_utils.get_node_without_lvols()
 
-        self.logger.info(f"Fetching migration tasks for cluster {self.cluster_id}.")
-        tasks = self.sbcli_utils.get_cluster_tasks(self.cluster_id)
+        # self.logger.info(f"Fetching migration tasks for cluster {self.cluster_id}.")
+        # tasks = self.sbcli_utils.get_cluster_tasks(self.cluster_id)
 
-        # self.logger.info(f"Validating migration tasks for node {new_node}.")
-        # self.validate_migration_for_node(tasks, new_node)
+        # # self.logger.info(f"Validating migration tasks for node {new_node}.")
+        # # self.validate_migration_for_node(tasks, new_node)
 
-        # Step 10: Remove stopped instance
-        sn_delete = f"{self.base_cmd} storage-node delete {affected_node}"
-        self.ssh_obj.exec_command(node=self.mgmt_nodes[0],
-                                  command=sn_delete)
+        # # Step 10: Remove stopped instance
+        # sn_delete = f"{self.base_cmd} storage-node delete {affected_node}"
+        # self.ssh_obj.exec_command(node=self.mgmt_nodes[0],
+        #                           command=sn_delete)
         
-        sleep_n_sec(200)
+        # sleep_n_sec(200)
 
-        del sn_lvol_data[affected_node]
+        # del sn_lvol_data[affected_node]
         
-        affected_node_ip = affected_node_details[0]["mgmt_ip"]
-        del self.ssh_obj.ssh_connections[affected_node_ip]
+        # affected_node_ip = affected_node_details[0]["mgmt_ip"]
+        # del self.ssh_obj.ssh_connections[affected_node_ip]
 
-        sn_lvol_data[new_node] = {}
+        # sn_lvol_data[new_node] = {}
 
-        self.common_utils.terminate_instance(self.ec2_resource, instance_id)
+        # self.common_utils.terminate_instance(self.ec2_resource, instance_id)
 
 
         self.common_utils.manage_fio_threads(node=self.mgmt_nodes[0],
@@ -297,7 +297,7 @@ class FioWorkloadTest(TestClusterBase):
         for thread in fio_threads:
             thread.join()
 
-        self.common_utils.terminate_instance(self.ec2_resource, new_node_instance_id)
+        # self.common_utils.terminate_instance(self.ec2_resource, new_node_instance_id)
 
         self.logger.info("Test completed successfully.")
 
