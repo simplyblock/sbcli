@@ -2675,16 +2675,16 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
     strip_size_kb = utils.nearest_upper_power_of_2(strip_size_kb)
     jm_vuid = 0
     # online_jms = get_next_ha_jms(snode)
-    secondary_nodes = get_secondary_nodes(snode)
+    # secondary_nodes = get_secondary_nodes(snode)
     if snode.enable_ha_jm:
         jm_vuid = utils.get_random_vuid()
         jm_names = []
-        for node_id in secondary_nodes:
+        for node_id in [snode.secondary_node_id_1, snode.secondary_node_id_2]:
             jm_names.append(db_controller.get_storage_node_by_id(node_id).jm_device.get_id())
         logger.debug(f"online_jms: {str(jm_names)}")
         snode.remote_jm_devices = _connect_to_remote_jm_devs(snode, jm_names)
-        snode.secondary_node_id_1 = secondary_nodes[0]
-        snode.secondary_node_id_2 = secondary_nodes[1]
+        # snode.secondary_node_id_1 = secondary_nodes[0]
+        # snode.secondary_node_id_2 = secondary_nodes[1]
         snode.write_to_db()
 
     for _ in range(snode.number_of_distribs):
@@ -2749,14 +2749,14 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
     snode.lvstore = lvs_name
     snode.lvstore_stack = lvstore_stack
     snode.raid = raid_device
-    snode.secondary_node_id_1 = secondary_nodes[0]
-    snode.secondary_node_id_2 = secondary_nodes[1]
+    # snode.secondary_node_id_1 = secondary_nodes[0]
+    # snode.secondary_node_id_2 = secondary_nodes[1]
     snode.write_to_db()
 
     # creating lvstore on secondary
-    for node_id in secondary_nodes:
+    for node_id in [snode.secondary_node_id_1, snode.secondary_node_id_2]:
         sec_node_1 = db_controller.get_storage_node_by_id(node_id)
-        ret, err = _create_bdev_stack(sec_node_1, lvstore_stack, snode)
+        ret, err = _create_bdev_stack(sec_node_1, lvstore_stack)
         if err:
             logger.error(f"Failed to create lvstore on node {sec_node_1.get_id()}")
             logger.error(err)
@@ -2765,7 +2765,7 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
     return True
 
 
-def _create_bdev_stack(snode, lvstore_stack=None, master_node=None):
+def _create_bdev_stack(snode, lvstore_stack=None):
     rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
 
     created_bdevs = []
@@ -2781,10 +2781,7 @@ def _create_bdev_stack(snode, lvstore_stack=None, master_node=None):
         params = bdev['params']
 
         if type == "bdev_distr":
-            if master_node:
-                params['jm_names'] = get_node_jm_names(master_node)
-            else:
-                params['jm_names'] = get_node_jm_names(snode)
+            params['jm_names'] = get_node_jm_names(snode)
             if snode.distrib_cpu_cores:
                 distrib_cpu_mask = utils.decimal_to_hex_power_of_2(snode.distrib_cpu_cores[snode.distrib_cpu_index])
                 params['distrib_cpu_mask'] = distrib_cpu_mask
