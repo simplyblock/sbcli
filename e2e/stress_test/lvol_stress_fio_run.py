@@ -94,7 +94,7 @@ class TestStressLvolClusterFioRun(TestClusterBase):
                                                       "size": self.fio_size,
                                                       "runtime": 7200,
                                                       "nrfiles": 5,
-                                                      "bs": f"{random.choice(block_sizes_kb)}k",
+                                                      "bs": f"{random.choice(block_sizes_kb)}K",
                                                       "time_based": True,
                                                       "debug": self.fio_debug})
             else:
@@ -106,15 +106,14 @@ class TestStressLvolClusterFioRun(TestClusterBase):
                                                       "size": self.fio_size,
                                                       "runtime": 7200,
                                                       "nrfiles": 5,
-                                                      "bs": f"{random.choice(block_sizes_kb)}k",
+                                                      "bs": f"{random.choice(block_sizes_kb)}K",
                                                       "time_based": True,
                                                       "debug": self.fio_debug})
 
-
-
             fio_thread.start()
             fio_threads.append(fio_thread)
-        sleep_n_sec(8)
+            sleep_n_sec(10)
+        sleep_n_sec(10)
         self.common_utils.manage_fio_threads(node=self.mgmt_nodes[0],
                                              threads=[fio_thread],
                                              timeout=20000)
