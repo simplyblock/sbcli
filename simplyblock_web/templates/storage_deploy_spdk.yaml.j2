@@ -43,6 +43,12 @@ spec:
             medium: HugePages
         - name: script-volume
           emptyDir: {}
+        - name: var-log
+          hostPath:
+            path: /var/log
+        - name: fluentd-config
+          configMap:
+            name: fluentd-config-{{ HOSTNAME }}
       tolerations:
         - effect: NoSchedule
           key: dedicated
@@ -121,6 +127,13 @@ spec:
             mountPath: /var/log
           - name: fluentd-config-volume
             mountPath: /fluentd/etc
+          resources:
+            limits:
+              memory: 200Mi
+              cpu: 200m
+            requests:
+              memory: 100Mi
+              cpu: 100m
 
 ---
 apiVersion: v1
