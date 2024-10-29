@@ -2756,7 +2756,7 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
     # creating lvstore on secondary
     for node_id in secondary_nodes:
         sec_node_1 = db_controller.get_storage_node_by_id(node_id)
-        ret, err = _create_bdev_stack(sec_node_1, lvstore_stack, jm_names)
+        ret, err = _create_bdev_stack(sec_node_1, lvstore_stack, snode)
         if err:
             logger.error(f"Failed to create lvstore on node {sec_node_1.get_id()}")
             logger.error(err)
@@ -2765,7 +2765,7 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
     return True
 
 
-def _create_bdev_stack(snode, lvstore_stack=None, jm_names=None):
+def _create_bdev_stack(snode, lvstore_stack=None, master_node=None):
     rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
 
     created_bdevs = []
@@ -2781,8 +2781,8 @@ def _create_bdev_stack(snode, lvstore_stack=None, jm_names=None):
         params = bdev['params']
 
         if type == "bdev_distr":
-            if jm_names:
-                params['jm_names'] = jm_names
+            if master_node:
+                params['jm_names'] = get_node_jm_names(master_node)
             else:
                 params['jm_names'] = get_node_jm_names(snode)
             if snode.distrib_cpu_cores:
