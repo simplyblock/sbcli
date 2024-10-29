@@ -120,17 +120,17 @@ spec:
       - name: fluentd-sidecar
         image: fluent/fluentd
         env:
-          - name: FLUENTD_CONF
-            value: "fluentd.conf"
+        - name: FLUENTD_CONF
+          value: "fluentd.conf"
         volumeMounts:
-          - name: log-volume
-            mountPath: /var/log
-          - name: fluentd-config-volume
-            mountPath: /fluentd/etc
-          resources:
-            limits:
-              memory: 200Mi
-              cpu: 200m
-            requests:
-              memory: 100Mi
-              cpu: 100m
+        - name: log-volume
+          mountPath: /var/log
+        - name: fluentd-config-volume
+          mountPath: /fluentd/etc
+        resources:
+          limits:
+            memory: 200Mi
+            cpu: 200m
+          requests:
+            memory: 100Mi
+            cpu: 100m
