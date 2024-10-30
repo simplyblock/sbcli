@@ -179,6 +179,7 @@ def check_node(node_id, with_devices=True):
             node_remote_devices_check &= bool(ret)
 
         if snode.jm_device:
+            print("*" * 100)
             jm_device = snode.jm_device
             logger.info(f"Node JM: {jm_device.get_id()}")
             ret = check_jm_device(jm_device.get_id())
@@ -189,6 +190,7 @@ def check_node(node_id, with_devices=True):
             node_devices_check &= ret
 
         if snode.enable_ha_jm:
+            print("*" * 100)
             logger.info(f"Node remote JMs: {len(snode.remote_jm_devices)}")
             for remote_device in snode.remote_jm_devices:
                 ret = rpc_client.get_bdevs(remote_device.remote_bdev)
@@ -198,46 +200,53 @@ def check_node(node_id, with_devices=True):
                     logger.info(f"Checking bdev: {remote_device.remote_bdev} ... not found")
                 node_remote_devices_check &= bool(ret)
 
+        print("*" * 100)
         lvstore_check = True
         if snode.lvstore and snode.lvstore_stack:
-            distribs_list = []
-            for bdev in snode.lvstore_stack:
-                type = bdev['type']
-                if type == "bdev_raid":
-                    distribs_list = bdev["distribs_list"]
+            second_node_1 = db_controller.get_storage_node_by_id(snode.secondary_node_id_1)
+            second_node_2 = db_controller.get_storage_node_by_id(snode.secondary_node_id_2)
+            for node in [snode, second_node_1, second_node_2]:
+                logger.info(f"Checking distr stack on node : {node.get_id()}")
+                rpc_client = RPCClient(
+                    node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password,timeout=3, retry=1)
+                distribs_list = []
+                for bdev in snode.lvstore_stack:
+                    type = bdev['type']
+                    if type == "bdev_raid":
+                        distribs_list = bdev["distribs_list"]
 
-            for distr in distribs_list:
-                ret = rpc_client.get_bdevs(distr)
-                if ret:
-                    logger.info(f"Checking distr bdev : {distr} ... ok")
-                    logger.info("Checking Distr map ...")
-                    ret = rpc_client.distr_get_cluster_map(distr)
-                    if not ret:
-                        logger.error("Failed to get cluster map")
-                        lvstore_check = False
-                    else:
-                        results, is_passed = distr_controller.parse_distr_cluster_map(ret)
-                        if results:
-                            logger.info(utils.print_table(results))
-                            logger.info(f"Checking Distr map ... {is_passed}")
+                for distr in distribs_list:
+                    ret = rpc_client.get_bdevs(distr)
+                    if ret:
+                        logger.info(f"Checking distr bdev : {distr} ... ok")
+                        logger.info("Checking Distr map ...")
+                        ret = rpc_client.distr_get_cluster_map(distr)
+                        if not ret:
+                            logger.error("Failed to get cluster map")
+                            lvstore_check = False
                         else:
-                            logger.error("Failed to parse distr cluster map")
-                        lvstore_check &= is_passed
+                            results, is_passed = distr_controller.parse_distr_cluster_map(ret)
+                            if results:
+                                logger.info(utils.print_table(results))
+                                logger.info(f"Checking Distr map ... {is_passed}")
+                            else:
+                                logger.error("Failed to parse distr cluster map")
+                            lvstore_check &= is_passed
+                    else:
+                        logger.info(f"Checking distr bdev : {distr} ... not found")
+                        lvstore_check = False
+                ret = rpc_client.get_bdevs(snode.raid)
+                if ret:
+                    logger.info(f"Checking raid bdev: {snode.raid} ... ok")
                 else:
-                    logger.info(f"Checking distr bdev : {distr} ... not found")
+                    logger.info(f"Checking raid bdev: {snode.raid} ... not found")
                     lvstore_check = False
-            ret = rpc_client.get_bdevs(snode.raid)
-            if ret:
-                logger.info(f"Checking raid bdev: {snode.raid} ... ok")
-            else:
-                logger.info(f"Checking raid bdev: {snode.raid} ... not found")
-                lvstore_check = False
-            ret = rpc_client.bdev_lvol_get_lvstores(snode.lvstore)
-            if ret:
-                logger.info(f"Checking lvstore: {snode.lvstore} ... ok")
-            else:
-                logger.info(f"Checking lvstore: {snode.lvstore} ... not found")
-                lvstore_check = False
+                ret = rpc_client.bdev_lvol_get_lvstores(snode.lvstore)
+                if ret:
+                    logger.info(f"Checking lvstore: {snode.lvstore} ... ok")
+                else:
+                    logger.info(f"Checking lvstore: {snode.lvstore} ... not found")
+                    lvstore_check = False
 
     return is_node_online and node_devices_check and node_remote_devices_check and lvstore_check
 
