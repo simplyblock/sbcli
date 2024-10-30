@@ -118,7 +118,7 @@ spec:
           value: "{{ RPC_PASSWORD }}"
 
       - name: fluentd
-        image: fluent/fluentd-kubernetes-daemonset:v1-debian-graylog
+        image: fluent/fluentd-kubernetes-daemonset:v1.17.1-debian-graylog-1.2
         imagePullPolicy: "Always"
         env:
         - name: K8S_NODE_NAME
