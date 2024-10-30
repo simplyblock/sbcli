@@ -11,7 +11,7 @@ import requests
 from flask import Blueprint
 from flask import request
 from kubernetes import client, config
-from kubernetes.client import ApiException
+from kubernetes.client import ApiException, V1Deployment, V1ConfigMap
 from jinja2 import Environment, FileSystemLoader
 import yaml
 
@@ -389,15 +389,24 @@ def spdk_process_start():
             'SIMPLYBLOCK_DOCKER_IMAGE': constants.SIMPLY_BLOCK_DOCKER_IMAGE,
             'GRAYLOG_SERVER_IP': data['cluster_ip'],
         }
-        dep = yaml.safe_load_all(template.render(values))
-        logger.debug(dep)
-        resp = k8s_apps_v1.create_namespaced_deployment(body=dep, namespace=namespace)
-        msg = f"Deployment created: '{resp.metadata.name}' in namespace '{namespace}"
-        logger.info(msg)
+        rendered_template = template.render(values)
+        yaml_docs = yaml.safe_load_all(rendered_template)
+
+        for doc in yaml_docs:
+            if doc["kind"] == "Deployment":
+                dep = V1Deployment(**doc)
+                resp = k8s_apps_v1.create_namespaced_deployment(body=dep, namespace=namespace)
+                logger.info(f"Deployment created: '{resp.metadata.name}' in namespace '{namespace}'")
+
+            elif doc["kind"] == "ConfigMap":
+                config_map = V1ConfigMap(**doc)
+                resp = k8s_core_v1.create_namespaced_config_map(body=config_map, namespace=namespace)
+                logger.info(f"ConfigMap created: '{resp.metadata.name}' in namespace '{namespace}'")
+
     except:
         return utils.get_response(False, f"Deployment failed:\n{traceback.format_exc()}")
 
-    return utils.get_response(msg)
+    return utils.get_response("Resources created successfully.")
 
 
 @bp.route('/spdk_process_kill', methods=['GET'])
