@@ -2590,21 +2590,24 @@ def set_node_status(node_id, status):
 
 
 def recreate_lvstore(snode):
+    db_controller = DBController(KVStore())
+    second_node_1 = db_controller.get_storage_node_by_id(snode.secondary_node_id_1)
+    second_node_2 = db_controller.get_storage_node_by_id(snode.secondary_node_id_2)
+    for node in [snode, second_node_1, second_node_2]:
+        ret, err = _create_bdev_stack(node)
+        if err:
+            logger.error(f"Failed to recreate lvstore on node {node.get_id()}")
+            logger.error(err)
+            return False
 
-    ret, err = _create_bdev_stack(snode)
-    if err:
-        logger.error(f"Failed to recreate lvstore on node {snode.get_id()}")
-        logger.error(err)
-        return False
-
-    temp_rpc_client = RPCClient(
-            snode.mgmt_ip, snode.rpc_port,
-            snode.rpc_username, snode.rpc_password)
-    time.sleep(5)
-    ret = temp_rpc_client.bdev_examine(snode.raid)
-    time.sleep(5)
-    ret = temp_rpc_client.bdev_wait_for_examine()
-    time.sleep(1)
+        temp_rpc_client = RPCClient(
+                node.mgmt_ip, node.rpc_port,
+                node.rpc_username, node.rpc_password)
+        time.sleep(5)
+        ret = temp_rpc_client.bdev_examine(node.raid)
+        time.sleep(5)
+        ret = temp_rpc_client.bdev_wait_for_examine()
+        time.sleep(1)
 
     if snode.lvols:
         db_controller = DBController()
@@ -2711,9 +2714,13 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
             ]
         )
         distrib_list.append(distrib_name)
-    raid_device = f"raid0_{utils.get_random_vuid()}"
-    lvstore_stack.extend(
-        [
+
+
+    if len(distrib_list) == 1:
+        raid_device = distrib_list[0]
+    else:
+        raid_device = f"raid0_{utils.get_random_vuid()}"
+        lvstore_stack.append(
             {
                 "type": "bdev_raid",
                 "name": raid_device,
@@ -2724,20 +2731,21 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
                     "strip_size_kb": strip_size_kb
                 },
                 "distribs_list": distrib_list
-            },
-            {
-                "type": "bdev_lvstore",
-                "name": lvs_name,
-                "params": {
-                    "name": lvs_name,
-                    "bdev_name": raid_device,
-                    "cluster_sz": cluster_sz,
-                    "clear_method": "unmap",
-                    "num_md_pages_per_cluster_ratio": 1,
-                }
             }
+        )
 
-        ]
+    lvstore_stack.append(
+        {
+            "type": "bdev_lvstore",
+            "name": lvs_name,
+            "params": {
+                "name": lvs_name,
+                "bdev_name": raid_device,
+                "cluster_sz": cluster_sz,
+                "clear_method": "unmap",
+                "num_md_pages_per_cluster_ratio": 1,
+            }
+        }
     )
 
     ret, err = _create_bdev_stack(snode, lvstore_stack)
@@ -2749,8 +2757,6 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
     snode.lvstore = lvs_name
     snode.lvstore_stack = lvstore_stack
     snode.raid = raid_device
-    # snode.secondary_node_id_1 = secondary_nodes[0]
-    # snode.secondary_node_id_2 = secondary_nodes[1]
     snode.write_to_db()
 
     # creating lvstore on secondary
