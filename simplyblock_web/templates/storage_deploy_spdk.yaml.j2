@@ -119,20 +119,20 @@ spec:
 
       - name: fluentd
         image: fluent/fluentd-kubernetes-daemonset:v1-debian-graylog
-        imagePullPolicy: IfNotPresent
+        imagePullPolicy: "Always"
         env:
-          - name: K8S_NODE_NAME
-            valueFrom:
-              fieldRef:
-                fieldPath: spec.nodeName
-          - name:  FLUENT_GRAYLOG_HOST
-            value: "{{ GRAYLOG_SERVER_IP }}"
-          - name:  FLUENT_GRAYLOG_PORT
-            value: "12201"
-          - name:  FLUENT_GRAYLOG_PROTOCOL
-            value: "udp"
-          - name:  FLUENTD_SYSTEMD_CONF
-            value: "disable"
+        - name: K8S_NODE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
+        - name:  FLUENT_GRAYLOG_HOST
+          value: "{{ GRAYLOG_SERVER_IP }}"
+        - name:  FLUENT_GRAYLOG_PORT
+          value: "12201"
+        - name:  FLUENT_GRAYLOG_PROTOCOL
+          value: "udp"
+        - name:  FLUENTD_SYSTEMD_CONF
+          value: "disable"
         resources:
           requests:
             cpu: 200m
