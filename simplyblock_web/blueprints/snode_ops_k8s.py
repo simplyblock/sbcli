@@ -394,11 +394,15 @@ def spdk_process_start():
 
         for doc in yaml_docs:
             if doc["kind"] == "Deployment":
+                doc.pop("apiVersion", None)
+                doc.pop("kind", None)
                 dep = V1Deployment(**doc)
                 resp = k8s_apps_v1.create_namespaced_deployment(body=dep, namespace=namespace)
                 logger.info(f"Deployment created: '{resp.metadata.name}' in namespace '{namespace}'")
 
             elif doc["kind"] == "ConfigMap":
+                doc.pop("apiVersion", None)
+                doc.pop("kind", None)
                 config_map = V1ConfigMap(**doc)
                 resp = k8s_core_v1.create_namespaced_config_map(body=config_map, namespace=namespace)
                 logger.info(f"ConfigMap created: '{resp.metadata.name}' in namespace '{namespace}'")
