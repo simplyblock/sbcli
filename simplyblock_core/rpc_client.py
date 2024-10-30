@@ -815,3 +815,9 @@ class RPCClient:
             "level": level
         }
         return self._request("log_set_print_level", params)
+
+    def jc_explicit_synchronization(self, jm_vuid):
+        params = {
+            "jm_vuid": jm_vuid
+        }
+        return self._request("jc_explicit_synchronization", params)

@@ -1748,6 +1748,11 @@ def restart_storage_node(
 
     time.sleep(5)
 
+    # sync jm
+    if snode.jm_vuid:
+        ret = rpc_client.jc_explicit_synchronization(snode.jm_vuid)
+        logger.info(f"JM Sync res: {ret}")
+
     if cluster.status != cluster.STATUS_ACTIVE:
         logger.warning(f"The cluster status is not active ({cluster.status}), adding the node without distribs and lvstore")
         logger.info("Done")
@@ -2688,6 +2693,7 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
         snode.remote_jm_devices = _connect_to_remote_jm_devs(snode, jm_names)
         # snode.secondary_node_id_1 = secondary_nodes[0]
         # snode.secondary_node_id_2 = secondary_nodes[1]
+        snode.jm_vuid = jm_vuid
         snode.write_to_db()
 
     for _ in range(snode.number_of_distribs):
