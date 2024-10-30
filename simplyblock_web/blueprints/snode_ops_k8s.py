@@ -389,7 +389,7 @@ def spdk_process_start():
             'SIMPLYBLOCK_DOCKER_IMAGE': constants.SIMPLY_BLOCK_DOCKER_IMAGE,
             'GRAYLOG_SERVER_IP': data['cluster_ip'],
         }
-        dep = yaml.safe_load(template.render(values))
+        dep = yaml.safe_load_all(template.render(values))
         logger.debug(dep)
         resp = k8s_apps_v1.create_namespaced_deployment(body=dep, namespace=namespace)
         msg = f"Deployment created: '{resp.metadata.name}' in namespace '{namespace}"
