@@ -387,7 +387,7 @@ def spdk_process_start():
             'NAMESPACE': namespace,
             'FDB_CONNECTION': fdb_connection,
             'SIMPLYBLOCK_DOCKER_IMAGE': constants.SIMPLY_BLOCK_DOCKER_IMAGE,
-            'GRAYLOG_SERVER_IP': {data['cluster_ip']}
+            'GRAYLOG_SERVER_IP': data['cluster_ip']
         }
         dep = yaml.safe_load(template.render(values))
         logger.debug(dep)
