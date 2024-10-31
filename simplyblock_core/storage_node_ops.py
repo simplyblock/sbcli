@@ -1217,8 +1217,6 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
         logger.info("Connecting to remote JMs")
         snode.remote_jm_devices = _connect_to_remote_jm_devs(snode)
 
-    logger.info("Setting node status to Active")
-    snode.status = StorageNode.STATUS_ONLINE
     snode.write_to_db(kv_store)
 
     # make other nodes connect to the new devices
@@ -1236,8 +1234,8 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
             name = f"remote_{dev.alceml_bdev}"
             ret = rpc_client.bdev_nvme_attach_controller_tcp(name, dev.nvmf_nqn, dev.nvmf_ip, dev.nvmf_port)
             if not ret:
-                logger.error(f"Failed to connect to device: {name}")
-                return False
+                logger.warning(f"Failed to connect to device: {name}")
+                continue
 
             dev.remote_bdev = f"{name}n1"
             idx = -1
@@ -1256,6 +1254,10 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
         node.write_to_db(kv_store)
         logger.info(f"connected to devices count: {len(node.remote_devices)}")
         time.sleep(3)
+
+    logger.info("Setting node status to Active")
+    snode.status = StorageNode.STATUS_ONLINE
+    snode.write_to_db(kv_store)
 
     if cluster.status != cluster.STATUS_ACTIVE:
         logger.warning(f"The cluster status is not active ({cluster.status}), adding the node without distribs and lvstore")
