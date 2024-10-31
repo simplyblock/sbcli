@@ -136,10 +136,18 @@ class RPCClient:
             "trtype": trtype,
             "max_io_qpairs_per_ctrlr": 256,
             "max_queue_depth": 512,
-            "max_io_qpairs_per_ctrlr": 4,
             "abort_timeout_sec": 5,
             "ack_timeout": 512,
-            "zcopy": True
+            "zcopy": True,
+            "in_capsule_data_size": 4096,
+            "max_io_size": 131072,
+            "io_unit_size": 131072,
+            "max_aq_depth": 128,
+            "num_shared_buffers": 8192,
+            "buf_cache_size": 32,
+            "dif_insert_or_strip": False,
+            "c2h_success": True,
+            "sock_priority": 0
 
         }
         return self._request("nvmf_create_transport", params)
