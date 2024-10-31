@@ -123,7 +123,6 @@ services:
         constraints: [node.role == manager]
     ports:
       - 80:80
-      - 8404:8404
       - 12202:12202
     networks:
       - localnet
