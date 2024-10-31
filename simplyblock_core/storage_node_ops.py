@@ -975,7 +975,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
     # for jm
     number_of_alceml_devices += 1
     small_pool_count, large_pool_count = utils.calculate_pool_count(
-        number_of_alceml_devices, number_of_distribs, cpu_count, len(poller_cpu_cores) or cpu_count)
+        number_of_alceml_devices, number_of_distribs*3, cpu_count, len(poller_cpu_cores) or cpu_count)
 
     # Calculate minimum huge page memory
     minimum_hp_memory = utils.calculate_minimum_hp_memory(small_pool_count, large_pool_count, max_lvol, max_prov,
