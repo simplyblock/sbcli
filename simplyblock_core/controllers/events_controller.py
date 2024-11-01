@@ -7,11 +7,11 @@ from simplyblock_core.models.events import EventObj
 from simplyblock_core.kv_store import DBController
 from simplyblock_core import constants
 
-from graypy import GELFUDPHandler
+from graypy import GELFTCPHandler
 
 # configure logging
 logging.captureWarnings(True)
-gelf_handler = GELFUDPHandler('0.0.0.0', constants.GELF_PORT)
+gelf_handler = GELFTCPHandler('0.0.0.0', constants.GELF_PORT)
 logger = logging.getLogger()
 logger.setLevel(logging.DEBUG)
 logger.addHandler(gelf_handler)
