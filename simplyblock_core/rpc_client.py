@@ -152,6 +152,12 @@ class RPCClient:
         }
         return self._request("nvmf_create_transport", params)
 
+    def transport_create_caching(self, trtype):
+        params = {
+            "trtype": trtype,
+        }
+        return self._request("nvmf_create_transport", params)
+
     def listeners_list(self, nqn):
         params = {"nqn": nqn}
         return self._request("nvmf_subsystem_get_listeners", params)
