@@ -369,7 +369,8 @@ class RPCClient:
             "uuid": uuid,
             # "use_scheduling": True,
             "use_optimized": True,
-            "pba_nbalign": 4096
+            "pba_nbalign": 4096,
+            "use_map_whole_page_on_1st_write": True
         }
         if alceml_cpu_mask:
             params["bdb_lcpu_mask"] = int(alceml_cpu_mask, 16)
