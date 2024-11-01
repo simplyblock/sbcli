@@ -77,7 +77,7 @@ def _add_graylog_input(cluster_ip, password):
     url = f"http://{cluster_ip}/graylog/api/system/inputs"
     payload = json.dumps({
         "title": "spdk log input",
-        "type": "org.graylog2.inputs.gelf.udp.GELFUDPInput",
+        "type": "org.graylog2.inputs.gelf.tcp.GELFTCPInput",
         "configuration": {
             "bind_address": "0.0.0.0",
             "port": 12201,

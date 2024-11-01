@@ -141,13 +141,6 @@ def task_runner_node(task):
         task.write_to_db(db_controller.kv_store)
         return True
 
-    if node.status == StorageNode.STATUS_RESTARTING:
-        logger.info(f"Node is restarting, stopping task")
-        task.function_result = f"Node is restarting"
-        task.status = JobSchedule.STATUS_DONE
-        task.write_to_db(db_controller.kv_store)
-        return True
-
     if node.status == StorageNode.STATUS_SCHEDULABLE:
         logger.info(f"Node is schedulable, stopping task")
         task.function_result = f"Node is schedulable"
@@ -169,6 +162,12 @@ def task_runner_node(task):
         return True
 
     if task.status != JobSchedule.STATUS_RUNNING:
+        if node.status == StorageNode.STATUS_RESTARTING:
+            logger.info(f"Node is restarting, stopping task")
+            task.function_result = f"Node is restarting"
+            task.status = JobSchedule.STATUS_DONE
+            task.write_to_db(db_controller.kv_store)
+            return True
         task.status = JobSchedule.STATUS_RUNNING
         task.write_to_db(db_controller.kv_store)
         tasks_events.task_updated(task)

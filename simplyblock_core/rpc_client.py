@@ -138,8 +138,23 @@ class RPCClient:
             "max_queue_depth": 512,
             "abort_timeout_sec": 5,
             "ack_timeout": 512,
-            "zcopy": True
+            "zcopy": True,
+            "in_capsule_data_size": 4096,
+            "max_io_size": 131072,
+            "io_unit_size": 131072,
+            "max_aq_depth": 128,
+            "num_shared_buffers": 8192,
+            "buf_cache_size": 32,
+            "dif_insert_or_strip": False,
+            "c2h_success": True,
+            "sock_priority": 0
 
+        }
+        return self._request("nvmf_create_transport", params)
+
+    def transport_create_caching(self, trtype):
+        params = {
+            "trtype": trtype,
         }
         return self._request("nvmf_create_transport", params)
 
@@ -360,7 +375,8 @@ class RPCClient:
             "uuid": uuid,
             # "use_scheduling": True,
             "use_optimized": True,
-            "pba_nbalign": 4096
+            "pba_nbalign": 4096,
+            "use_map_whole_page_on_1st_write": True
         }
         if alceml_cpu_mask:
             params["bdb_lcpu_mask"] = int(alceml_cpu_mask, 16)

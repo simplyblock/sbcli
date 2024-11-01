@@ -155,7 +155,7 @@ def spdk_process_start():
 
     if "cluster_ip" in data and data['cluster_ip']:
         cluster_ip = data['cluster_ip']
-        log_config = LogConfig(type=LogConfig.types.GELF, config={"gelf-address": f"udp://{cluster_ip}:12201"})
+        log_config = LogConfig(type=LogConfig.types.GELF, config={"gelf-address": f"tcp://{cluster_ip}:12202"})
     else:
         log_config = LogConfig(type=LogConfig.types.JOURNALD)
 
@@ -182,7 +182,7 @@ def spdk_process_start():
         name="spdk_proxy",
         detach=True,
         network_mode="host",
-        log_config=LogConfig(type=LogConfig.types.JOURNALD),
+        log_config=log_config,
         volumes=[
             '/var/tmp:/var/tmp'
         ],
