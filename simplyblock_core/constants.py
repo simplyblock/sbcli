@@ -52,8 +52,8 @@ GRAYLOG_CHECK_INTERVAL_SEC = 60
 
 FDB_CHECK_INTERVAL_SEC = 60
 
-SIMPLY_BLOCK_DOCKER_IMAGE = "simplyblock/simplyblock:fluentd-logs"  
-SIMPLY_BLOCK_CLI_NAME = "sbcli-mig"
+SIMPLY_BLOCK_DOCKER_IMAGE = "simplyblock/simplyblock:main"
+SIMPLY_BLOCK_CLI_NAME = "sbcli-dev"
 TASK_EXEC_INTERVAL_SEC = 30
 TASK_EXEC_RETRY_COUNT = 8
 
