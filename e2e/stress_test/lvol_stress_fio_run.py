@@ -22,6 +22,7 @@ class TestStressLvolClusterFioRun(TestClusterBase):
         self.fio_size = "40G"
         self.mount_path = "/mnt"
         self.num_iterations = 80
+        self.lvol_name = "test_lvl"
         self.lvols_disks_mount = {}
 
     def run(self):
