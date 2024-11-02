@@ -2401,6 +2401,7 @@ def deploy(ifname):
         name="SNodeAPI",
         network_mode="host",
         volumes=[
+            '/etc/simplyblock:/etc/simplyblock',
             '/etc/foundationdb:/etc/foundationdb',
             '/var/tmp:/var/tmp',
             '/var/run:/var/run',

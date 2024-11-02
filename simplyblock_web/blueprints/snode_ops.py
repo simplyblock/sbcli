@@ -248,10 +248,10 @@ def get_cluster_id():
 def get_file_content(file_name):
     out, err, _ = node_utils.run_command(f"cat /etc/simplyblock/{file_name}")
     if out:
-        print(out)
         return utils.get_response(out)
     elif err:
-        print(err)
+        err = err.decode("utf-8")
+        logger.debug(err)
         return utils.get_response(None, err)
 
 
