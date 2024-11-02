@@ -1763,9 +1763,9 @@ def restart_storage_node(
         if not ret:
             return False, "Failed to recreate lvstore on node"
 
-    logger.info("Dumping lvstore data")
-    ret = dump_lvstore(node_id)
-    print(ret)
+        logger.info("Dumping lvstore data")
+        ret = dump_lvstore(node_id)
+        print(ret)
 
     logger.info("Starting migration tasks")
     for dev in snode.nvme_devices:
@@ -2892,6 +2892,10 @@ def dump_lvstore(node_id):
     snode = db_controller.get_storage_node_by_id(node_id)
     if not snode:
         logger.error(f"Can not find storage node: {node_id}")
+        return False
+
+    if not snode.lvstore:
+        logger.error("Storage node does not have lvstore")
         return False
 
     rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password, timeout=180)
