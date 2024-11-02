@@ -830,3 +830,10 @@ class RPCClient:
             "level": level
         }
         return self._request("log_set_print_level", params)
+
+    def bdev_lvs_dump(self, lvs_name, file):
+        params = {
+            "lvs_name": lvs_name,
+            "file": file,
+        }
+        return self._request("bdev_lvs_dump", params)

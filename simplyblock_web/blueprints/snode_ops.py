@@ -244,6 +244,11 @@ def get_cluster_id():
     out, _, _ = node_utils.run_command(f"cat {cluster_id_file}")
     return out
 
+@bp.route('/get_file_content/<string:file_name>', methods=['GET'])
+def get_file_content(file_name):
+    out, err, _ = node_utils.run_command(f"cat /etc/simplyblock/{file_name}")
+    return utils.get_response(out, err)
+
 
 def set_cluster_id(cluster_id):
     out, _, _ = node_utils.run_command(f"echo {cluster_id} > {cluster_id_file}")
