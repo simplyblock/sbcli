@@ -2907,4 +2907,4 @@ def dump_lvstore(node_id):
     snode_api = SNodeClient(f"{snode.mgmt_ip}:5000")
     file_content, _ = snode_api.get_file_content(file_name)
 
-    return json.dumps(file_content, indent=2)
+    return file_content
