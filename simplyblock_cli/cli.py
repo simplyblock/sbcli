@@ -248,6 +248,9 @@ class CLIWrapper:
                                            'In case of HA SNode, make the current node as primary')
         sub_command.add_argument("id", help='id')
 
+        sub_command = self.add_sub_command(subparser, 'dump-lvstore','Dump lvstore data')
+        sub_command.add_argument("id", help='id')
+
         # check lvol
         #
         # ----------------- cluster -----------------
@@ -904,6 +907,9 @@ class CLIWrapper:
             elif sub_command == "make-primary":
                 id = args.id
                 ret = storage_ops.make_sec_new_primary(id)
+            elif sub_command == "dump-lvstore":
+                node_id = args.id
+                ret = storage_ops.dump_lvstore(node_id)
             else:
                 self.parser.print_help()
 

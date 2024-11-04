@@ -130,3 +130,6 @@ class SNodeClient:
 
     def spdk_process_is_up(self):
         return self._request("GET", "spdk_process_is_up")
+
+    def get_file_content(self, file_name):
+        return self._request("GET", f"get_file_content/{file_name}")

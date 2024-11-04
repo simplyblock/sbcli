@@ -831,6 +831,13 @@ class RPCClient:
         }
         return self._request("log_set_print_level", params)
 
+    def bdev_lvs_dump(self, lvs_name, file):
+        params = {
+            "lvs_name": lvs_name,
+            "file": file,
+        }
+        return self._request("bdev_lvs_dump", params)
+
     def jc_explicit_synchronization(self, jm_vuid):
         params = {
             "jm_vuid": jm_vuid
