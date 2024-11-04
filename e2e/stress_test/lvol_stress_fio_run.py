@@ -80,8 +80,10 @@ class TestStressLvolClusterFioRun(TestClusterBase):
                 self.lvols_disks_mount[lvol_name]["mount_path"] = mount_point
 
         fio_threads = []
+        fio_started = 0
         for lvol_name in list(self.lvols_disks_mount.keys()):
             block_sizes_kb = [4, 8, 16, 32, 64, 128, 256]
+            fio_started += 1
             
             mount = self.lvols_disks_mount[lvol_name]["mount_path"]
             device = self.lvols_disks_mount[lvol_name]["device"]
@@ -94,7 +96,7 @@ class TestStressLvolClusterFioRun(TestClusterBase):
                                                       "rw": fio_workload,
                                                       "size": self.fio_size,
                                                       "runtime": 7200,
-                                                      "nrfiles": 5,
+                                                      "nrfiles": 3,
                                                       "bs": f"{random.choice(block_sizes_kb)}K",
                                                       "time_based": True,
                                                       "debug": self.fio_debug})
@@ -106,7 +108,7 @@ class TestStressLvolClusterFioRun(TestClusterBase):
                                                       "rw": fio_workload,
                                                       "size": self.fio_size,
                                                       "runtime": 7200,
-                                                      "nrfiles": 5,
+                                                      "nrfiles": 3,
                                                       "bs": f"{random.choice(block_sizes_kb)}K",
                                                       "time_based": True,
                                                       "debug": self.fio_debug})
@@ -115,6 +117,8 @@ class TestStressLvolClusterFioRun(TestClusterBase):
             fio_threads.append(fio_thread)
             sleep_n_sec(10)
         sleep_n_sec(10)
+        self.logger.info(f"Total fio started: {fio_started}")
+        
         self.common_utils.manage_fio_threads(node=self.mgmt_nodes[0],
                                              threads=[fio_thread],
                                              timeout=20000)
@@ -124,5 +128,7 @@ class TestStressLvolClusterFioRun(TestClusterBase):
                 node=self.mgmt_nodes[0],
                 log_file=log_file
             )
+
+        self.logger.info(f"Total fio started: {fio_started}")
 
         self.logger.info("Stress test execution completed")
