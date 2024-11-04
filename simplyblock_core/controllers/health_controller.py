@@ -240,12 +240,13 @@ def check_node(node_id, with_devices=True):
                 else:
                     logger.info(f"Checking raid bdev: {snode.raid} ... not found")
                     lvstore_check = False
-                ret = rpc_client.bdev_lvol_get_lvstores(snode.lvstore)
-                if ret:
-                    logger.info(f"Checking lvstore: {snode.lvstore} ... ok")
-                else:
-                    logger.info(f"Checking lvstore: {snode.lvstore} ... not found")
-                    lvstore_check = False
+                if snode.lvstore:
+                    ret = rpc_client.bdev_lvol_get_lvstores(snode.lvstore)
+                    if ret:
+                        logger.info(f"Checking lvstore: {snode.lvstore} ... ok")
+                    else:
+                        logger.info(f"Checking lvstore: {snode.lvstore} ... not found")
+                        lvstore_check = False
 
     return is_node_online and node_devices_check and node_remote_devices_check and lvstore_check
 

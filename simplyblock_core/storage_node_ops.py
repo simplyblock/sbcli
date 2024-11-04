@@ -2665,7 +2665,7 @@ def get_next_ha_jms(current_node):
 def get_node_jm_names(current_node):
     db_controller = DBController(KVStore())
     jm_list = []
-    if current_node.jm_device:
+    if current_node.jm_device and current_node.jm_device.status == JMDevice.STATUS_ONLINE:
         jm_list.append(current_node.jm_device.jm_bdev)
     else:
         jm_list.append("JM_LOCAL")
@@ -2768,7 +2768,6 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
         return False
 
     # snode.lvstore = lvs_name
-    snode.lvstore = raid_device
     snode.lvstore_stack = lvstore_stack
     snode.raid = raid_device
     snode.write_to_db()
