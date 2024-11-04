@@ -3,7 +3,7 @@ import json
 from e2e_tests.cluster_test_base import TestClusterBase
 from utils.common_utils import sleep_n_sec, convert_bytes_to_gb_tb
 from logger_config import setup_logger
-from datetime import datetime
+from datetime import datetime, timedelta
 import traceback
 from requests.exceptions import HTTPError
 import random
@@ -471,51 +471,52 @@ class FioWorkloadTest(TestClusterBase):
                 assert fio not in running_fio, "FIO Process running on crashed node"
         self.logger.info("FIO process is running uninterrupted.")
 
-    def filter_migration_tasks(self, tasks, node_id):
+    def filter_migration_tasks(self, tasks, node_id, timestamp):
         """
-        Filters `device_migration` tasks for a specific node.
+        Filters `device_migration` tasks for a specific node and timestamp.
 
         Args:
             tasks (list): List of task dictionaries from the API response.
             node_id (str): The UUID of the node to check for migration tasks.
+            timestamp (int): The timestamp to filter tasks created after this time.
 
         Returns:
-            list: List of `device_migration` tasks for the specific node.
+            list: List of `device_migration` tasks for the specific node created after the given timestamp.
         """
-        if node_id:
-            return [task for task in tasks if task['function_name'] == 'device_migration' and task['node_id'] == node_id]
-        return [task for task in tasks if task['function_name'] == 'device_migration']
+        filtered_tasks = [
+            task for task in tasks 
+            if task['function_name'] == 'device_migration' and task['date'] > timestamp
+            and (node_id is None or task['node_id'] == node_id)
+        ]
+        return filtered_tasks
 
-    def validate_migration_for_node(self, tasks, node_id=None):
+    def validate_migration_for_node(self, tasks, timestamp, node_id=None):
         """
-        Validate that all `device_migration` tasks for a specific node have completed successfully.
+        Validate that all `device_migration` tasks for a specific node have completed successfully and check for stuck tasks.
 
         Args:
             tasks (list): List of task dictionaries from the API response.
-            node_id (str): The UUID of the node to check for migration tasks.
+            timestamp (int): The timestamp to filter tasks created after this time.
+            node_id (str): The UUID of the node to check for migration tasks (or None for all nodes).
 
         Raises:
-            RuntimeError: If any migration task failed or did not run.
+            RuntimeError: If any migration task failed, is incomplete, or is stuck.
         """
         self.logger.info(f"Migration tasks: {tasks}")
-        tasks = self.filter_migration_tasks(tasks, node_id)
-        if node_id:
-            if not tasks:
-                raise RuntimeError(f"No migration tasks found for node {node_id}.")
-            self.logger.info(f"node tasks: {tasks}")
-            for task in tasks:
-                if task['status'] != 'done' or task['function_result'] != 'Done':
-                    raise RuntimeError(f"Migration task {task['id']} on node {node_id} failed or is incomplete. Status: {task['status']} "
-                                    f" Result: {task['function_result']}")
+        tasks = self.filter_migration_tasks(tasks, node_id, timestamp)
+        
+        if not tasks:
+            raise RuntimeError(f"No migration tasks found for {'node ' + node_id if node_id else 'the cluster'} after the specified timestamp.")
+
+        self.logger.info(f"Filtered tasks: {tasks}")
+        
+        for task in tasks:
+            if task['status'] != 'done' or task['function_result'] != 'Done':
+                raise RuntimeError(f"Migration task {task['id']} failed or is incomplete. Status: {task['status']} Result: {task['function_result']}")
             
-            self.logger.info(f"All migration tasks for node {node_id} completed successfully.")
-        else:
-            if not tasks:
-                raise RuntimeError("No migration tasks found on the cluster")
-            self.logger.info(f"node tasks: {tasks}")
-            for task in tasks:
-                if task['status'] != 'done' or task['function_result'] != 'Done':
-                    raise RuntimeError(f"Migration task {task['id']} on node {node_id} failed or is incomplete. Status: {task['status']} "
-                                    f" Result: {task['function_result']}")
-            
-            self.logger.info(f"All migration tasks for node {node_id} completed successfully.")
+            # Check if the task is stuck (updated_at is more than 15 minutes from now)
+            updated_at = datetime.fromtimestamp(task['updated_at'])
+            if datetime.now() - updated_at > timedelta(minutes=15):
+                raise RuntimeError(f"Migration task {task['id']} is stuck (last updated at {updated_at}).")
+        
+        self.logger.info(f"All migration tasks for {'node ' + node_id if node_id else 'the cluster'} completed successfully without any stuck tasks.")
