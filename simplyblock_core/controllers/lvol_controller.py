@@ -630,7 +630,7 @@ def add_lvol_on_node(lvol, snode, ha_comm_addrs=None, ha_inode_self=None):
     # if not ret:
     #     return False, msg
 
-    ret = rpc_client.get_bdevs(snode.raid)
+    ret = rpc_client.get_bdevs(lvol.top_bdev)
     lvol.size = ret[0]["block_size"] * ret[0]["num_blocks"]
 
     logger.info("creating subsystem %s", lvol.nqn)
@@ -660,7 +660,7 @@ def add_lvol_on_node(lvol, snode, ha_comm_addrs=None, ha_inode_self=None):
                 lvol.nqn, iface.ip4_address, "4420", is_optimized)
 
     logger.info("Add BDev to subsystem")
-    ret = rpc_client.nvmf_subsystem_add_ns(lvol.nqn, snode.raid, lvol.uuid, lvol.guid)
+    ret = rpc_client.nvmf_subsystem_add_ns(lvol.nqn, lvol.top_bdev, lvol.uuid, lvol.guid)
     if not ret:
         return False, "Failed to add bdev to subsystem"
 
@@ -721,7 +721,7 @@ def recreate_lvol_on_node(lvol, snode, ha_comm_addrs=None, ha_inode_self=None):
 
 
     logger.info("Add BDev to subsystem")
-    ret = rpc_client.nvmf_subsystem_add_ns(lvol.nqn, snode.raid, lvol.uuid, lvol.guid)
+    ret = rpc_client.nvmf_subsystem_add_ns(lvol.nqn, lvol.top_bdev, lvol.uuid, lvol.guid)
     if not ret:
         return False, "Failed to add bdev to subsystem"
 
