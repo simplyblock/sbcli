@@ -115,7 +115,7 @@ class FioWorkloadTest(TestClusterBase):
         tasks = self.sbcli_utils.get_cluster_tasks(self.cluster_id)
 
         self.logger.info(f"Validating migration tasks for node {affected_node}.")
-        self.validate_migration_for_node(tasks, timestamp, None)
+        self.validate_migration_for_node(tasks, timestamp, 1000, None)
 
         # sleep_n_sec(30)
 
@@ -165,7 +165,7 @@ class FioWorkloadTest(TestClusterBase):
         # # tasks = self.sbcli_utils.get_cluster_tasks(self.cluster_id)
 
         # # self.logger.info(f"Validating migration tasks for node {affected_node}.")
-        # # self.validate_migration_for_node(tasks, timestamp, None)
+        # # self.validate_migration_for_node(tasks, timestamp, 1000, None)
 
         # # sleep_n_sec(30)
 
@@ -272,7 +272,7 @@ class FioWorkloadTest(TestClusterBase):
         # tasks = self.sbcli_utils.get_cluster_tasks(self.cluster_id)
 
         # # self.logger.info(f"Validating migration tasks for node {new_node}.")
-        # # self.validate_migration_for_node(tasks, timestamp, None)
+        # # self.validate_migration_for_node(tasks, timestamp, 1000, None)
 
         # # Step 10: Remove stopped instance
         # sn_delete = f"{self.base_cmd} storage-node delete {affected_node}"
@@ -492,33 +492,54 @@ class FioWorkloadTest(TestClusterBase):
         ]
         return filtered_tasks
 
-    def validate_migration_for_node(self, tasks, timestamp, node_id=None):
+    def validate_migration_for_node(self, tasks, timestamp, timeout, node_id=None, check_interval=30):
         """
-        Validate that all `device_migration` tasks for a specific node have completed successfully and check for stuck tasks.
+        Validate that all `device_migration` tasks for a specific node have completed successfully 
+        and check for stuck tasks until the timeout is reached.
 
         Args:
             tasks (list): List of task dictionaries from the API response.
             timestamp (int): The timestamp to filter tasks created after this time.
+            timeout (int): Maximum time in seconds to keep checking for task completion.
             node_id (str): The UUID of the node to check for migration tasks (or None for all nodes).
+            check_interval (int): Time interval in seconds to wait between checks.
 
         Raises:
-            RuntimeError: If any migration task failed, is incomplete, or is stuck.
+            RuntimeError: If any migration task failed, is incomplete, is stuck, or if the timeout is reached.
         """
-        self.logger.info(f"Migration tasks: {tasks}")
-        tasks = self.filter_migration_tasks(tasks, node_id, timestamp)
-        
-        if not tasks:
-            raise RuntimeError(f"No migration tasks found for {'node ' + node_id if node_id else 'the cluster'} after the specified timestamp.")
+        start_time = datetime.now()
+        end_time = start_time + timedelta(seconds=timeout)
 
-        self.logger.info(f"Filtered tasks: {tasks}")
-        
-        for task in tasks:
-            if task['status'] != 'done' or task['function_result'] != 'Done':
-                raise RuntimeError(f"Migration task {task['id']} failed or is incomplete. Status: {task['status']} Result: {task['function_result']}")
+        while datetime.now() < end_time:
+            filtered_tasks = self.filter_migration_tasks(tasks, node_id, timestamp)
             
-            # Check if the task is stuck (updated_at is more than 15 minutes from now)
-            updated_at = datetime.fromtimestamp(task['updated_at'])
-            if datetime.now() - updated_at > timedelta(minutes=15):
-                raise RuntimeError(f"Migration task {task['id']} is stuck (last updated at {updated_at}).")
-        
-        self.logger.info(f"All migration tasks for {'node ' + node_id if node_id else 'the cluster'} completed successfully without any stuck tasks.")
+            if not filtered_tasks:
+                raise RuntimeError(f"No migration tasks found for {'node ' + node_id if node_id else 'the cluster'} after the specified timestamp.")
+
+            self.logger.info(f"Checking migration tasks: {filtered_tasks}")
+            all_done = True
+
+            for task in filtered_tasks:
+                # Check if task is incomplete or failed
+                if task['status'] != 'done' or task['function_result'] != 'Done':
+                    raise RuntimeError(f"Migration task {task['id']} failed or is incomplete. Status: {task['status']} Result: {task['function_result']}")
+                
+                # Check if the task is stuck (updated_at is more than 15 minutes old)
+                updated_at = datetime.fromtimestamp(task['updated_at'])
+                if datetime.now() - updated_at > timedelta(minutes=15):
+                    raise RuntimeError(f"Migration task {task['id']} is stuck (last updated at {updated_at}).")
+
+                # If any task is not done, mark `all_done` as False
+                if task['status'] != 'done':
+                    all_done = False
+
+            # If all tasks are done, break out of the loop
+            if all_done:
+                self.logger.info(f"All migration tasks for {'node ' + node_id if node_id else 'the cluster'} completed successfully without any stuck tasks.")
+                return
+
+            # Wait for the next check
+            sleep_n_sec(check_interval)
+
+        # If the loop exits without completing all tasks, raise a timeout error
+        raise RuntimeError(f"Timeout reached: Not all migration tasks completed within the specified timeout of {timeout} seconds.")
