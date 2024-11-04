@@ -600,7 +600,8 @@ def _prepare_cluster_devices_partitions(snode, devices):
 
 def _prepare_cluster_devices_jm_on_dev(snode, devices):
     db_controller = DBController()
-
+    if not devices:
+        return True
     jm_device = devices[0]
     # Set device cluster order
     dev_order = get_next_cluster_device_order(db_controller, snode.cluster_id)

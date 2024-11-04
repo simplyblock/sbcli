@@ -367,11 +367,15 @@ def cluster_activate(cl_id, force=False):
     max_size = records[0]['size_total']
 
     for snode in snodes:
+        if snode.is_secondary_node:
+            continue
         secondary_nodes = storage_node_ops.get_secondary_nodes(snode)
         snode.secondary_node_id = secondary_nodes[0]
         snode.write_to_db()
 
     for snode in snodes:
+        if snode.is_secondary_node:
+            continue
         if snode.lvstore:
             logger.warning(f"Node {snode.get_id()} already has lvstore {snode.lvstore}")
             ret = storage_node_ops.recreate_lvstore(snode)
