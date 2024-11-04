@@ -112,10 +112,9 @@ class FioWorkloadTest(TestClusterBase):
         sleep_n_sec(300)
 
         self.logger.info(f"Fetching migration tasks for cluster {self.cluster_id}.")
-        tasks = self.sbcli_utils.get_cluster_tasks(self.cluster_id)
 
         self.logger.info(f"Validating migration tasks for node {affected_node}.")
-        self.validate_migration_for_node(tasks, timestamp, 5000, None)
+        self.validate_migration_for_node(timestamp, 5000, None)
 
         # sleep_n_sec(30)
 
@@ -492,13 +491,12 @@ class FioWorkloadTest(TestClusterBase):
         ]
         return filtered_tasks
 
-    def validate_migration_for_node(self, tasks, timestamp, timeout, node_id=None, check_interval=30):
+    def validate_migration_for_node(self, timestamp, timeout, node_id=None, check_interval=30):
         """
         Validate that all `device_migration` tasks for a specific node have completed successfully 
         and check for stuck tasks until the timeout is reached.
 
         Args:
-            tasks (list): List of task dictionaries from the API response.
             timestamp (int): The timestamp to filter tasks created after this time.
             timeout (int): Maximum time in seconds to keep checking for task completion.
             node_id (str): The UUID of the node to check for migration tasks (or None for all nodes).
@@ -511,6 +509,7 @@ class FioWorkloadTest(TestClusterBase):
         end_time = start_time + timedelta(seconds=timeout)
 
         while datetime.now() < end_time:
+            tasks = self.sbcli_utils.get_cluster_tasks(self.cluster_id)
             filtered_tasks = self.filter_migration_tasks(tasks, node_id, timestamp)
             
             if not filtered_tasks:
@@ -518,6 +517,7 @@ class FioWorkloadTest(TestClusterBase):
 
             self.logger.info(f"Checking migration tasks: {filtered_tasks}")
             all_done = True
+            completed_count = 0
 
             for task in filtered_tasks:
                 # Check if the task is stuck (updated_at is more than 15 minutes old)
@@ -525,9 +525,16 @@ class FioWorkloadTest(TestClusterBase):
                 if datetime.now() - updated_at > timedelta(minutes=15):
                     raise RuntimeError(f"Migration task {task['id']} is stuck (last updated at {updated_at}).")
 
-                # If any task is not done or failed, mark `all_done` as False to wait further
-                if task['status'] != 'done' or task['function_result'] != 'Done':
+                # Check if task is completed
+                if task['status'] == 'done' and task['function_result'] == 'Done':
+                    completed_count += 1
+                else:
                     all_done = False
+
+            # Logging the counts after each check
+            total_tasks = len(filtered_tasks)
+            remaining_tasks = total_tasks - completed_count
+            self.logger.info(f"Total migration tasks: {total_tasks}, Completed: {completed_count}, Remaining: {remaining_tasks}")
 
             # If all tasks are done, break out of the loop
             if all_done:
