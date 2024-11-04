@@ -99,23 +99,23 @@ class FioWorkloadTest(TestClusterBase):
         # Step 5: Run fio workloads with different configurations
         fio_threads = self.run_fio(lvol_fio_path)
 
-        # # Step 6: Continue with node shutdown, restart, and migration task validation
-        # affected_node = list(sn_lvol_data.keys())[0]
-        # self.logger.info(f"Shutting down node {affected_node}.")
+        # Step 6: Continue with node shutdown, restart, and migration task validation
+        affected_node = list(sn_lvol_data.keys())[0]
+        self.logger.info(f"Shutting down node {affected_node}.")
 
-        # fio_process_terminated = ["fio_test_lvol_1_1", "fio_test_lvol_1_2"]
+        fio_process_terminated = ["fio_test_lvol_1_1", "fio_test_lvol_1_2"]
 
-        # timestamp = int(datetime.now().timestamp())
+        timestamp = int(datetime.now().timestamp())
 
-        # self.shutdown_node_and_verify(affected_node, process_name=fio_process_terminated)
+        self.shutdown_node_and_verify(affected_node, process_name=fio_process_terminated)
 
-        # sleep_n_sec(300)
+        sleep_n_sec(300)
 
-        # self.logger.info(f"Fetching migration tasks for cluster {self.cluster_id}.")
-        # tasks = self.sbcli_utils.get_cluster_tasks(self.cluster_id)
+        self.logger.info(f"Fetching migration tasks for cluster {self.cluster_id}.")
+        tasks = self.sbcli_utils.get_cluster_tasks(self.cluster_id)
 
-        # self.logger.info(f"Validating migration tasks for node {affected_node}.")
-        # self.validate_migration_for_node(tasks, None)
+        self.logger.info(f"Validating migration tasks for node {affected_node}.")
+        self.validate_migration_for_node(tasks, None)
 
         # sleep_n_sec(30)
 
