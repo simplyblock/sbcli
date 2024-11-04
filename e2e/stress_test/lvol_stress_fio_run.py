@@ -115,10 +115,11 @@ class TestStressLvolClusterFioRun(TestClusterBase):
 
             fio_thread.start()
             fio_threads.append(fio_thread)
+            self.logger.info(f"Total fio started till now: {fio_started}")
             sleep_n_sec(10)
         sleep_n_sec(10)
         self.logger.info(f"Total fio started: {fio_started}")
-        
+
         self.common_utils.manage_fio_threads(node=self.mgmt_nodes[0],
                                              threads=[fio_thread],
                                              timeout=20000)
