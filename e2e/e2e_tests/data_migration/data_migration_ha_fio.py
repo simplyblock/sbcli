@@ -115,7 +115,7 @@ class FioWorkloadTest(TestClusterBase):
         tasks = self.sbcli_utils.get_cluster_tasks(self.cluster_id)
 
         self.logger.info(f"Validating migration tasks for node {affected_node}.")
-        self.validate_migration_for_node(tasks, None)
+        self.validate_migration_for_node(tasks, timestamp, None)
 
         # sleep_n_sec(30)
 
@@ -153,6 +153,7 @@ class FioWorkloadTest(TestClusterBase):
 
         # # # Step 7: Stop container on another node
         # # affected_node = list(sn_lvol_data.keys())[1]
+        # # timestamp = int(datetime.now().timestamp())
         # # self.logger.info(f"Stopping docker container on node {affected_node}.")
 
         # # self.stop_container_verify(affected_node,
@@ -164,7 +165,7 @@ class FioWorkloadTest(TestClusterBase):
         # # tasks = self.sbcli_utils.get_cluster_tasks(self.cluster_id)
 
         # # self.logger.info(f"Validating migration tasks for node {affected_node}.")
-        # # self.validate_migration_for_node(tasks, affected_node)
+        # # self.validate_migration_for_node(tasks, timestamp, None)
 
         # # sleep_n_sec(30)
 
@@ -188,6 +189,7 @@ class FioWorkloadTest(TestClusterBase):
         # # fio_threads.extend(self.run_fio(affected_fio))
 
         # # Step 8: Stop instance
+        # # timestamp = int(datetime.now().timestamp())
         # affected_node = list(sn_lvol_data.keys())[2]
         # affected_node_details = self.sbcli_utils.get_storage_node_details(storage_node_id=affected_node)
         # instance_id = affected_node_details[0]["cloud_instance_id"]
@@ -270,7 +272,7 @@ class FioWorkloadTest(TestClusterBase):
         # tasks = self.sbcli_utils.get_cluster_tasks(self.cluster_id)
 
         # # self.logger.info(f"Validating migration tasks for node {new_node}.")
-        # # self.validate_migration_for_node(tasks, new_node)
+        # # self.validate_migration_for_node(tasks, timestamp, None)
 
         # # Step 10: Remove stopped instance
         # sn_delete = f"{self.base_cmd} storage-node delete {affected_node}"
