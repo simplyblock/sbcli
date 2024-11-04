@@ -41,7 +41,7 @@ class FioWorkloadTest(TestClusterBase):
             self.logger.info(f"Creating 2 lvols on node {node_uuid}.")
             for j in range(2):
                 lvol_name = f"test_lvol_{i+1}_{j+1}"
-                self.sbcli_utils.add_lvol(lvol_name=lvol_name, pool_name=self.pool_name, size="2G", host_id=node_uuid)
+                self.sbcli_utils.add_lvol(lvol_name=lvol_name, pool_name=self.pool_name, size="5G", host_id=node_uuid)
                 sn_lvol_data[node_uuid].append(lvol_name)
                 lvol_fio_path[lvol_name] = {"lvol_id": self.sbcli_utils.get_lvol_id(lvol_name=lvol_name),
                                             "mount_path": None,
