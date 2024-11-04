@@ -413,7 +413,8 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
     lvol.node_id = host_node.get_id()
     lvol.lvs_name = host_node.lvstore
     lvol.base_bdev = f"distr_{lvol.vuid}_{name}"
-    lvol.top_bdev = f"{lvol.lvs_name}/{lvol.lvol_bdev}"
+    # lvol.top_bdev = f"{lvol.lvs_name}/{lvol.lvol_bdev}"
+    lvol.top_bdev = host_node.raid
 
     # if with_snapshot:
     #     lvol.bdev_stack.append({
@@ -523,7 +524,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
 
     elif ha_type == "ha":
         # three_nodes = nodes[:3]
-        nodes_ids = [host_node.get_id(), host_node.secondary_node_id_1, host_node.secondary_node_id_2]
+        nodes_ids = [host_node.get_id(), host_node.secondary_node_id]
         nodes_ips = []
         for node_id in nodes_ids:
             node = db_controller.get_storage_node_by_id(node_id)
@@ -625,9 +626,12 @@ def add_lvol_on_node(lvol, snode, ha_comm_addrs=None, ha_inode_self=None):
         logger.error(error)
         return False, f"Failed to add lvol on node {snode.get_id()}"
 
-    ret, msg = _create_bdev_stack(lvol, snode, ha_comm_addrs, ha_inode_self)
-    if not ret:
-        return False, msg
+    # ret, msg = _create_bdev_stack(lvol, snode, ha_comm_addrs, ha_inode_self)
+    # if not ret:
+    #     return False, msg
+
+    ret = rpc_client.get_bdevs(snode.raid)
+    lvol.size = ret[0]["block_size"] * ret[0]["num_blocks"]
 
     logger.info("creating subsystem %s", lvol.nqn)
     ret = rpc_client.subsystem_create(lvol.nqn, 'sbcli-cn', lvol.uuid)
@@ -649,14 +653,14 @@ def add_lvol_on_node(lvol, snode, ha_comm_addrs=None, ha_inode_self=None):
             logger.info("adding listener for %s on IP %s" % (lvol.nqn, iface.ip4_address))
             ret = rpc_client.listeners_create(lvol.nqn, tr_type, iface.ip4_address, "4420")
             is_optimized = False
-            # if lvol.node_id == snode.get_id():
-            #     is_optimized = True
+            if lvol.node_id == snode.get_id():
+                is_optimized = True
             logger.info(f"Setting ANA state: {is_optimized}")
             ret = rpc_client.nvmf_subsystem_listener_set_ana_state(
                 lvol.nqn, iface.ip4_address, "4420", is_optimized)
 
     logger.info("Add BDev to subsystem")
-    ret = rpc_client.nvmf_subsystem_add_ns(lvol.nqn, lvol.top_bdev, lvol.uuid, lvol.guid)
+    ret = rpc_client.nvmf_subsystem_add_ns(lvol.nqn, snode.raid, lvol.uuid, lvol.guid)
     if not ret:
         return False, "Failed to add bdev to subsystem"
 
@@ -717,7 +721,7 @@ def recreate_lvol_on_node(lvol, snode, ha_comm_addrs=None, ha_inode_self=None):
 
 
     logger.info("Add BDev to subsystem")
-    ret = rpc_client.nvmf_subsystem_add_ns(lvol.nqn, lvol.top_bdev, lvol.uuid, lvol.guid)
+    ret = rpc_client.nvmf_subsystem_add_ns(lvol.nqn, snode.raid, lvol.uuid, lvol.guid)
     if not ret:
         return False, "Failed to add bdev to subsystem"
 

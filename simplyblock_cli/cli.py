@@ -57,6 +57,7 @@ class CLIWrapper:
         sub_command.add_argument("--iobuf_large_bufsize", help='bdev_set_options param', dest='large_bufsize',  type=int, default=0)
         sub_command.add_argument("--enable-test-device", help='Enable creation of test device', action='store_true')
         sub_command.add_argument("--disable-ha-jm", help='Disable HA JM for distrib creation', action='store_false', dest='enable_ha_jm', default=True)
+        sub_command.add_argument("--is-secondary-node", help='add as secondary node', action='store_true', dest='is_secondary_node', default=False)
 
 
         # delete storage node
@@ -758,7 +759,8 @@ class CLIWrapper:
                     enable_test_device=enable_test_device,
                     namespace=None,
                     number_of_distribs=number_of_distribs,
-                    enable_ha_jm=enable_ha_jm
+                    enable_ha_jm=enable_ha_jm,
+                    is_secondary_node=args.is_secondary_node,
                 )
 
                 return out

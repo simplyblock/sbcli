@@ -368,8 +368,7 @@ def cluster_activate(cl_id, force=False):
 
     for snode in snodes:
         secondary_nodes = storage_node_ops.get_secondary_nodes(snode)
-        snode.secondary_node_id_1 = secondary_nodes[0]
-        snode.secondary_node_id_2 = secondary_nodes[1]
+        snode.secondary_node_id = secondary_nodes[0]
         snode.write_to_db()
 
     for snode in snodes:

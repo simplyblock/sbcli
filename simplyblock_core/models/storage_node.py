@@ -81,8 +81,7 @@ class StorageNode(BaseModel):
         "lvstore_stack": {"type": List[dict], 'default': []},
         "lvstore_stack_secondary_1": {"type": List[dict], 'default': []},
         "lvstore_stack_secondary_2": {"type": List[dict], 'default': []},
-        "secondary_node_id_1": {"type": List[dict], 'default': []},
-        "secondary_node_id_2": {"type": List[dict], 'default': []},
+        "secondary_node_id": {"type": str, 'default': ""},
         "jm_vuid": {"type": int, "default": 0},
 
         # spdk params
@@ -123,6 +122,8 @@ class StorageNode(BaseModel):
         "enable_ha_jm": {"type": bool, "default": False},
 
         "namespace": {"type": str, "default": ""},
+
+        "is_secondary_node": {"type": bool, "default": False},
 
     }
 

@@ -853,7 +853,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
              max_lvol, max_snap, max_prov, spdk_image=None, spdk_debug=False,
              small_bufsize=0, large_bufsize=0, spdk_cpu_mask=None,
              num_partitions_per_dev=0, jm_percent=0, number_of_devices=0, enable_test_device=False,
-             namespace=None, number_of_distribs=2, enable_ha_jm=False):
+             namespace=None, number_of_distribs=2, enable_ha_jm=False, is_secondary_node=False):
 
     db_controller = DBController()
     kv_store = db_controller.kv_store
@@ -1083,6 +1083,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
     snode.ctrl_secret = utils.generate_string(20)
     snode.number_of_distribs = number_of_distribs
     snode.enable_ha_jm = enable_ha_jm
+    snode.is_secondary_node = is_secondary_node
 
     if 'cpu_count' in node_info:
         snode.cpu = node_info['cpu_count']
@@ -1198,7 +1199,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
     nvme_devs = addNvmeDevices(snode, node_info['spdk_pcie_list'])
     if not nvme_devs:
         logger.error("No NVMe devices was found!")
-        return False
+        # return False
 
     # prepare devices
     if snode.num_partitions_per_dev == 0 or snode.jm_percent == 0:
@@ -2607,23 +2608,22 @@ def set_node_status(node_id, status):
 
 def recreate_lvstore(snode):
     db_controller = DBController(KVStore())
-    second_node_1 = db_controller.get_storage_node_by_id(snode.secondary_node_id_1)
-    second_node_2 = db_controller.get_storage_node_by_id(snode.secondary_node_id_2)
-    for node in [snode, second_node_1, second_node_2]:
+    secondary_node_id = db_controller.get_storage_node_by_id(snode.secondary_node_id)
+    for node in [snode, secondary_node_id]:
         ret, err = _create_bdev_stack(node)
         if err:
             logger.error(f"Failed to recreate lvstore on node {node.get_id()}")
             logger.error(err)
             return False
 
-        temp_rpc_client = RPCClient(
-                node.mgmt_ip, node.rpc_port,
-                node.rpc_username, node.rpc_password)
-        time.sleep(5)
-        ret = temp_rpc_client.bdev_examine(node.raid)
-        time.sleep(5)
-        ret = temp_rpc_client.bdev_wait_for_examine()
-        time.sleep(1)
+        # temp_rpc_client = RPCClient(
+        #         node.mgmt_ip, node.rpc_port,
+        #         node.rpc_username, node.rpc_password)
+        # time.sleep(5)
+        # ret = temp_rpc_client.bdev_examine(node.raid)
+        # time.sleep(5)
+        # ret = temp_rpc_client.bdev_wait_for_examine()
+        # time.sleep(1)
 
     if snode.lvols:
         db_controller = DBController()
@@ -2642,12 +2642,22 @@ def recreate_lvstore(snode):
 
 def get_next_ha_jms(current_node):
     db_controller = DBController(KVStore())
-    jm_ids = []
-    nodes = get_secondary_nodes(current_node)
-    for node_id in nodes:
-        node = db_controller.get_storage_node_by_id(node_id)
-        jm_ids.append(node.jm_device.get_id())
-    return jm_ids
+    jm_count = {}
+    for node in db_controller.get_storage_nodes_by_cluster_id(current_node.cluster_id):
+        if node.get_id() == current_node.get_id() or node.status != StorageNode.STATUS_ONLINE:
+            continue
+        if node.jm_device and node.jm_device.status == JMDevice.STATUS_ONLINE:
+            jm_count[node.jm_device.get_id()] = 1 + jm_count.get(node.jm_device.get_id(), 0)
+        for rem_jm_device in node.remote_jm_devices:
+            if rem_jm_device.get_id() != current_node.jm_device.get_id():
+                try:
+                    if db_controller.get_jm_device_by_id(rem_jm_device.get_id()).status == JMDevice.STATUS_ONLINE:
+                        jm_count[rem_jm_device.get_id()] = 1 + jm_count.get(rem_jm_device.get_id(), 0)
+                except :
+                    pass
+    jm_count = dict(sorted(jm_count.items(), key=lambda x: x[1]))
+    return list(jm_count.keys())[:2]
+
 
 
 def get_node_jm_names(current_node):
@@ -2659,28 +2669,18 @@ def get_node_jm_names(current_node):
         jm_list.append("JM_LOCAL")
 
     if current_node.enable_ha_jm:
-        sn = db_controller.get_storage_node_by_id(current_node.secondary_node_id_1)
-        jm_list.append(f"remote_{sn.jm_device.jm_bdev}n1")
-        sn = db_controller.get_storage_node_by_id(current_node.secondary_node_id_2)
-        jm_list.append(f"remote_{sn.jm_device.jm_bdev}n1")
+        for jm_dev in current_node.remote_jm_devices[:2]:
+            jm_list.append(jm_dev.remote_bdev)
     return jm_list
 
 
 def get_secondary_nodes(current_node):
     db_controller = DBController(KVStore())
-    node_count = {}
+    nodes = []
     for node in db_controller.get_storage_nodes_by_cluster_id(current_node.cluster_id):
-        if node.get_id() == current_node.get_id() or node.status != StorageNode.STATUS_ONLINE:
-            continue
-
-        node_count[node.get_id()] = 1 + node_count.get(node.get_id(), 0)
-        if node.secondary_node_id_1 and node.secondary_node_id_1  != current_node.get_id():
-            node_count[node.secondary_node_id_1] = 1 + node_count.get(node.secondary_node_id_1, 0)
-        if node.secondary_node_id_2 and node.secondary_node_id_1  != current_node.get_id():
-            node_count[node.secondary_node_id_2] = 1 + node_count.get(node.secondary_node_id_2, 0)
-
-    node_count = dict(sorted(node_count.items(), key=lambda x: x[1]))
-    return list(node_count.keys())[:2]
+        if node.get_id() != current_node.get_id() and node.is_secondary_node:
+            nodes.append(node.get_id())
+    return nodes
 
 
 def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blocks, max_size, nodes):
@@ -2693,17 +2693,11 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
     strip_size_kb = int((ndcs + npcs) * 2048)
     strip_size_kb = utils.nearest_upper_power_of_2(strip_size_kb)
     jm_vuid = 0
-    # online_jms = get_next_ha_jms(snode)
-    # secondary_nodes = get_secondary_nodes(snode)
     if snode.enable_ha_jm:
         jm_vuid = utils.get_random_vuid()
-        jm_names = []
-        for node_id in [snode.secondary_node_id_1, snode.secondary_node_id_2]:
-            jm_names.append(db_controller.get_storage_node_by_id(node_id).jm_device.get_id())
-        logger.debug(f"online_jms: {str(jm_names)}")
-        snode.remote_jm_devices = _connect_to_remote_jm_devs(snode, jm_names)
-        # snode.secondary_node_id_1 = secondary_nodes[0]
-        # snode.secondary_node_id_2 = secondary_nodes[1]
+        jm_ids = get_next_ha_jms(snode)
+        logger.debug(f"online_jms: {str(jm_ids)}")
+        snode.remote_jm_devices = _connect_to_remote_jm_devs(snode, jm_ids)
         snode.jm_vuid = jm_vuid
         snode.write_to_db()
 
@@ -2751,19 +2745,19 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
             }
         )
 
-    lvstore_stack.append(
-        {
-            "type": "bdev_lvstore",
-            "name": lvs_name,
-            "params": {
-                "name": lvs_name,
-                "bdev_name": raid_device,
-                "cluster_sz": cluster_sz,
-                "clear_method": "unmap",
-                "num_md_pages_per_cluster_ratio": 1,
-            }
-        }
-    )
+    # lvstore_stack.append(
+    #     {
+    #         "type": "bdev_lvstore",
+    #         "name": lvs_name,
+    #         "params": {
+    #             "name": lvs_name,
+    #             "bdev_name": raid_device,
+    #             "cluster_sz": cluster_sz,
+    #             "clear_method": "unmap",
+    #             "num_md_pages_per_cluster_ratio": 1,
+    #         }
+    #     }
+    # )
 
     ret, err = _create_bdev_stack(snode, lvstore_stack)
     if err:
@@ -2771,19 +2765,19 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
         logger.error(err)
         return False
 
-    snode.lvstore = lvs_name
+    # snode.lvstore = lvs_name
+    snode.lvstore = raid_device
     snode.lvstore_stack = lvstore_stack
     snode.raid = raid_device
     snode.write_to_db()
 
     # creating lvstore on secondary
-    for node_id in [snode.secondary_node_id_1, snode.secondary_node_id_2]:
-        sec_node_1 = db_controller.get_storage_node_by_id(node_id)
-        ret, err = _create_bdev_stack(sec_node_1, lvstore_stack)
-        if err:
-            logger.error(f"Failed to create lvstore on node {sec_node_1.get_id()}")
-            logger.error(err)
-            return False
+    sec_node_1 = db_controller.get_storage_node_by_id(snode.secondary_node_id)
+    ret, err = _create_bdev_stack(sec_node_1, lvstore_stack)
+    if err:
+        logger.error(f"Failed to create lvstore on node {sec_node_1.get_id()}")
+        logger.error(err)
+        return False
 
     return True
 
