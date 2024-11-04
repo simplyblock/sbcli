@@ -14,7 +14,8 @@ import requests
 from jinja2 import Environment, FileSystemLoader
 
 from simplyblock_core import utils, scripts, constants, mgmt_node_ops, storage_node_ops, distr_controller
-from simplyblock_core.controllers import cluster_events, device_controller, storage_events
+from simplyblock_core.controllers import cluster_events, device_controller, storage_events, pool_controller, \
+    lvol_controller
 from simplyblock_core.kv_store import DBController, KVStore
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.rpc_client import RPCClient
@@ -373,6 +374,18 @@ def cluster_activate(cl_id, force=False):
         snode.secondary_node_id = secondary_nodes[0]
         snode.write_to_db()
 
+    pool_name = "pool1"
+    pool_controller.add_pool(
+        pool_name,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        cl_id)
+
     for snode in snodes:
         if snode.is_secondary_node:
             continue
@@ -386,11 +399,19 @@ def cluster_activate(cl_id, force=False):
             logger.error("Failed to activate cluster")
             set_cluster_status(cl_id, Cluster.STATUS_UNREADY)
             return False
+
     if not cluster.cluster_max_size:
         cluster.cluster_max_size = max_size
     cluster.write_to_db(db_controller.kv_store)
     set_cluster_status(cl_id, Cluster.STATUS_ACTIVE)
     logger.info("Cluster activated successfully")
+
+    for snode in snodes:
+        lvol_controller.add_lvol_ha("lvol_"+snode.get_id(), "10g", snode.get_id(), "ha", pool_name,
+                                    False, False,
+                11, 0, 0, 0, 0,
+                with_snapshot=False, max_size=0, crypto_key1=None, crypto_key2=None)
+
     return True
 
 
