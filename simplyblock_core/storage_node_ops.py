@@ -1197,19 +1197,20 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
     node_info, _ = snode_api.info()
 
     # discover devices
-    nvme_devs = addNvmeDevices(snode, node_info['spdk_pcie_list'])
-    if not nvme_devs:
-        logger.error("No NVMe devices was found!")
-        # return False
+    if not is_secondary_node:
+        nvme_devs = addNvmeDevices(snode, node_info['spdk_pcie_list'])
+        if not nvme_devs:
+            logger.error("No NVMe devices was found!")
+            return False
 
-    # prepare devices
-    if snode.num_partitions_per_dev == 0 or snode.jm_percent == 0:
-        ret = _prepare_cluster_devices_jm_on_dev(snode, nvme_devs)
-    else:
-        ret = _prepare_cluster_devices_partitions(snode, nvme_devs)
-    if not ret:
-        logger.error("Failed to prepare cluster devices")
-        return False
+        # prepare devices
+        if snode.num_partitions_per_dev == 0 or snode.jm_percent == 0:
+            ret = _prepare_cluster_devices_jm_on_dev(snode, nvme_devs)
+        else:
+            ret = _prepare_cluster_devices_partitions(snode, nvme_devs)
+        if not ret:
+            logger.error("Failed to prepare cluster devices")
+            return False
 
     logger.info("Connecting to remote devices")
     remote_devices = _connect_to_remote_devs(snode)
