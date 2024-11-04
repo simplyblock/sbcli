@@ -323,7 +323,7 @@ class FioWorkloadTest(TestClusterBase):
                                     "bs": fio_run[1],
                                     "size": "1G",
                                     "time_based": True,
-                                    "runtime": 1000,
+                                    "runtime": 2000,
                                     "output_file": f"/home/ec2-user/{lvol}.log",
                                     "numjobs": 2,
                                     "debug": self.fio_debug
@@ -341,7 +341,7 @@ class FioWorkloadTest(TestClusterBase):
                                     "bs": "16K",
                                     "size": "1G",
                                     "time_based": True,
-                                    "runtime": 1000,
+                                    "runtime": 2000,
                                     "output_file": f"/home/ec2-user/{lvol}.log",
                                     "nrfiles": 2,
                                     "debug": self.fio_debug
