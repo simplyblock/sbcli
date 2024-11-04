@@ -291,7 +291,7 @@ class FioWorkloadTest(TestClusterBase):
 
         self.common_utils.manage_fio_threads(node=self.mgmt_nodes[0],
                                              threads=fio_threads,
-                                             timeout=5000)
+                                             timeout=2000)
 
         # Wait for all fio threads to finish
         for thread in fio_threads:
@@ -322,7 +322,7 @@ class FioWorkloadTest(TestClusterBase):
                                     "bs": fio_run[1],
                                     "size": "1G",
                                     "time_based": True,
-                                    "runtime": 3600,
+                                    "runtime": 1000,
                                     "output_file": f"/home/ec2-user/{lvol}.log",
                                     "numjobs": 2,
                                     "debug": self.fio_debug
@@ -340,7 +340,7 @@ class FioWorkloadTest(TestClusterBase):
                                     "bs": "16K",
                                     "size": "1G",
                                     "time_based": True,
-                                    "runtime": 3600,
+                                    "runtime": 1000,
                                     "output_file": f"/home/ec2-user/{lvol}.log",
                                     "nrfiles": 2,
                                     "debug": self.fio_debug
