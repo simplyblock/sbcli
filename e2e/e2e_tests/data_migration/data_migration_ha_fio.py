@@ -520,17 +520,13 @@ class FioWorkloadTest(TestClusterBase):
             all_done = True
 
             for task in filtered_tasks:
-                # Check if task is incomplete or failed
-                if task['status'] != 'done' or task['function_result'] != 'Done':
-                    raise RuntimeError(f"Migration task {task['id']} failed or is incomplete. Status: {task['status']} Result: {task['function_result']}")
-                
                 # Check if the task is stuck (updated_at is more than 15 minutes old)
                 updated_at = datetime.fromtimestamp(task['updated_at'])
                 if datetime.now() - updated_at > timedelta(minutes=15):
                     raise RuntimeError(f"Migration task {task['id']} is stuck (last updated at {updated_at}).")
 
-                # If any task is not done, mark `all_done` as False
-                if task['status'] != 'done':
+                # If any task is not done or failed, mark `all_done` as False to wait further
+                if task['status'] != 'done' or task['function_result'] != 'Done':
                     all_done = False
 
             # If all tasks are done, break out of the loop
