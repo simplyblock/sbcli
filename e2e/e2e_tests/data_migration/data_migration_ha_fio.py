@@ -116,76 +116,76 @@ class FioWorkloadTest(TestClusterBase):
         self.logger.info(f"Validating migration tasks for node {affected_node}.")
         self.validate_migration_for_node(timestamp, 5000, None)
 
-        # sleep_n_sec(30)
+        sleep_n_sec(30)
 
-        # fio_process = self.ssh_obj.find_process_name(self.mgmt_nodes[0], 'fio')
-        # self.logger.info(f"FIO PROCESS: {fio_process}")
-        # if not fio_process:
-        #     raise RuntimeError("FIO process was interrupted on unaffected nodes.")
-        # for fio in fio_process_terminated:
-        #     for running_fio in fio_process:
-        #         assert fio not in running_fio, "FIO Process running on restarted node"
+        fio_process = self.ssh_obj.find_process_name(self.mgmt_nodes[0], 'fio')
+        self.logger.info(f"FIO PROCESS: {fio_process}")
+        if not fio_process:
+            raise RuntimeError("FIO process was interrupted on unaffected nodes.")
+        for fio in fio_process_terminated:
+            for running_fio in fio_process:
+                assert fio not in running_fio, "FIO Process running on restarted node"
 
-        # lvol_list = sn_lvol_data[affected_node]
-        # affected_fio = {}
-        # for lvol in lvol_list:
-        #     affected_fio[lvol] = {}
-        #     affected_fio[lvol]["mount_path"] = lvol_fio_path[lvol]["mount_path"]
-        #     lvol_fio_path[lvol]["disk"] = self.ssh_obj.get_lvol_vs_device(node=self.mgmt_nodes[0],
-        #                                                                  lvol_id=lvol_fio_path[lvol]["lvol_id"])
-        #     affected_fio[lvol]["disk"] = lvol_fio_path[lvol]["disk"]
-        #     fs_type = "xfs" if lvol[-1] == "1" else "ext4"
-        #     if lvol_fio_path[lvol]["mount_path"]:
-        #         fs = lvol_fio_path[lvol]["mount_path"]
-        #         while fs:
-        #             fs = self.ssh_obj.get_mount_points(self.mgmt_nodes[0],
-        #                                                lvol_fio_path[lvol]["mount_path"])
-        #             self.logger.info(f"FS mounts: {fs}")
-        #             for device in fs:
-        #                 self.ssh_obj.unmount_path(node=self.mgmt_nodes[0], device=device)
-        #         self.ssh_obj.mount_path(self.mgmt_nodes[0],
-        #                                 device=lvol_fio_path[lvol]["disk"],
-        #                                 mount_path=lvol_fio_path[lvol]["mount_path"])
-        # fio_threads.extend(self.run_fio(affected_fio))
+        lvol_list = sn_lvol_data[affected_node]
+        affected_fio = {}
+        for lvol in lvol_list:
+            affected_fio[lvol] = {}
+            affected_fio[lvol]["mount_path"] = lvol_fio_path[lvol]["mount_path"]
+            lvol_fio_path[lvol]["disk"] = self.ssh_obj.get_lvol_vs_device(node=self.mgmt_nodes[0],
+                                                                         lvol_id=lvol_fio_path[lvol]["lvol_id"])
+            affected_fio[lvol]["disk"] = lvol_fio_path[lvol]["disk"]
+            fs_type = "xfs" if lvol[-1] == "1" else "ext4"
+            if lvol_fio_path[lvol]["mount_path"]:
+                fs = lvol_fio_path[lvol]["mount_path"]
+                while fs:
+                    fs = self.ssh_obj.get_mount_points(self.mgmt_nodes[0],
+                                                       lvol_fio_path[lvol]["mount_path"])
+                    self.logger.info(f"FS mounts: {fs}")
+                    for device in fs:
+                        self.ssh_obj.unmount_path(node=self.mgmt_nodes[0], device=device)
+                self.ssh_obj.mount_path(self.mgmt_nodes[0],
+                                        device=lvol_fio_path[lvol]["disk"],
+                                        mount_path=lvol_fio_path[lvol]["mount_path"])
+        fio_threads.extend(self.run_fio(affected_fio))
 
-        # sleep_n_sec(120)
+        sleep_n_sec(120)
 
-        # # # Step 7: Stop container on another node
-        # # affected_node = list(sn_lvol_data.keys())[1]
-        # # timestamp = int(datetime.now().timestamp())
-        # # self.logger.info(f"Stopping docker container on node {affected_node}.")
+        # # Step 7: Stop container on another node
+        affected_node = list(sn_lvol_data.keys())[1]
+        timestamp = int(datetime.now().timestamp())
+        self.logger.info(f"Stopping docker container on node {affected_node}.")
 
-        # # self.stop_container_verify(affected_node,
-        # #                            process_name=["fio_test_lvol_2_1", "fio_test_lvol_2_2"])
+        self.stop_container_verify(affected_node,
+                                   process_name=["fio_test_lvol_2_1", "fio_test_lvol_2_2"])
 
-        # # sleep_n_sec(300)
+        sleep_n_sec(300)
 
-        # # self.logger.info(f"Fetching migration tasks for cluster {self.cluster_id}.")
-        # # tasks = self.sbcli_utils.get_cluster_tasks(self.cluster_id)
+        self.logger.info(f"Fetching migration tasks for cluster {self.cluster_id}.")
+        tasks = self.sbcli_utils.get_cluster_tasks(self.cluster_id)
 
-        # # self.logger.info(f"Validating migration tasks for node {affected_node}.")
-        # # self.validate_migration_for_node(tasks, timestamp, 5000, None)
+        self.logger.info(f"Validating migration tasks for node {affected_node}.")
+        self.validate_migration_for_node(tasks, timestamp, 5000, None)
 
-        # # sleep_n_sec(30)
+        sleep_n_sec(30)
 
-        # # lvol_list = sn_lvol_data[affected_node]
-        # # affected_fio = {}
-        # # for lvol in lvol_list:
-        # #     affected_fio[lvol] = {}
-        # #     affected_fio[lvol]["mount_path"] = lvol_fio_path[lvol]["mount_path"]
-        # #     lvol_fio_path[lvol]["disk"] = self.ssh_obj.get_lvol_vs_device(node=self.mgmt_nodes[0],
-        # #                                                                  lvol_id=lvol_fio_path[lvol]["lvol_id"])
-        # #     affected_fio[lvol]["disk"] = lvol_fio_path[lvol]["disk"]
-        # #     fs_type = "xfs" if lvol[-1] == "1" else "ext4"
-        # #     if lvol_fio_path[lvol]["mount_path"]:
-        # #         fs = self.ssh_obj.get_mount_points(self.mgmt_nodes[0],
-        # #                                            lvol_fio_path[lvol]["mount_path"])
-        # #         for device in fs:
-        # #             self.ssh_obj.unmount_path(node=self.mgmt_nodes[0], device=device)
-        # #         self.ssh_obj.mount_path(self.mgmt_nodes[0],
-        # #                                 device=lvol_fio_path[lvol]["disk"],
-        # #                                 mount_path=lvol_fio_path[lvol]["mount_path"])
-        # # fio_threads.extend(self.run_fio(affected_fio))
+        lvol_list = sn_lvol_data[affected_node]
+        affected_fio = {}
+        for lvol in lvol_list:
+            affected_fio[lvol] = {}
+            affected_fio[lvol]["mount_path"] = lvol_fio_path[lvol]["mount_path"]
+            lvol_fio_path[lvol]["disk"] = self.ssh_obj.get_lvol_vs_device(node=self.mgmt_nodes[0],
+                                                                         lvol_id=lvol_fio_path[lvol]["lvol_id"])
+            affected_fio[lvol]["disk"] = lvol_fio_path[lvol]["disk"]
+            fs_type = "xfs" if lvol[-1] == "1" else "ext4"
+            if lvol_fio_path[lvol]["mount_path"]:
+                fs = self.ssh_obj.get_mount_points(self.mgmt_nodes[0],
+                                                   lvol_fio_path[lvol]["mount_path"])
+                for device in fs:
+                    self.ssh_obj.unmount_path(node=self.mgmt_nodes[0], device=device)
+                self.ssh_obj.mount_path(self.mgmt_nodes[0],
+                                        device=lvol_fio_path[lvol]["disk"],
+                                        mount_path=lvol_fio_path[lvol]["mount_path"])
+        fio_threads.extend(self.run_fio(affected_fio))
 
         # # Step 8: Stop instance
         # # timestamp = int(datetime.now().timestamp())
