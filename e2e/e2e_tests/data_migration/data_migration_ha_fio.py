@@ -160,11 +160,8 @@ class FioWorkloadTest(TestClusterBase):
 
         sleep_n_sec(300)
 
-        self.logger.info(f"Fetching migration tasks for cluster {self.cluster_id}.")
-        tasks = self.sbcli_utils.get_cluster_tasks(self.cluster_id)
-
         self.logger.info(f"Validating migration tasks for node {affected_node}.")
-        self.validate_migration_for_node(tasks, timestamp, 5000, None)
+        self.validate_migration_for_node(timestamp, 5000, None)
 
         sleep_n_sec(30)
 
@@ -267,11 +264,8 @@ class FioWorkloadTest(TestClusterBase):
         # sleep_n_sec(200)
         # new_node = self.sbcli_utils.get_node_without_lvols()
 
-        # self.logger.info(f"Fetching migration tasks for cluster {self.cluster_id}.")
-        # tasks = self.sbcli_utils.get_cluster_tasks(self.cluster_id)
-
         # # self.logger.info(f"Validating migration tasks for node {new_node}.")
-        # # self.validate_migration_for_node(tasks, timestamp, 5000, None)
+        # # self.validate_migration_for_node(timestamp, 5000, None)
 
         # # Step 10: Remove stopped instance
         # sn_delete = f"{self.base_cmd} storage-node delete {affected_node}"
