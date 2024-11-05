@@ -6,8 +6,8 @@ KVD_DB_FILE_PATH = '/etc/foundationdb/fdb.cluster'
 KVD_DB_TIMEOUT_MS = 10000
 SPK_DIR = '/home/ec2-user/spdk'
 RPC_HTTP_PROXY_PORT = 8080
-LOG_LEVEL = logging.INFO
-LOG_WEB_DEBUG = False
+LOG_LEVEL = logging.DEBUG
+LOG_WEB_DEBUG = True
 
 INSTALL_DIR = os.path.dirname(os.path.realpath(__file__))
 
@@ -52,8 +52,8 @@ GRAYLOG_CHECK_INTERVAL_SEC = 60
 
 FDB_CHECK_INTERVAL_SEC = 60
 
-SIMPLY_BLOCK_DOCKER_IMAGE = "simplyblock/simplyblock:main"
-SIMPLY_BLOCK_CLI_NAME = "sbcli-dev"
+SIMPLY_BLOCK_DOCKER_IMAGE = "simplyblock/simplyblock:debug"
+SIMPLY_BLOCK_CLI_NAME = "sbcli-debug"
 TASK_EXEC_INTERVAL_SEC = 30
 TASK_EXEC_RETRY_COUNT = 8
 
