@@ -2620,6 +2620,7 @@ def recreate_lvstore(snode):
     if snode.lvols:
         db_controller = DBController()
         for lvol_id in snode.lvols:
+            time.sleep(5)
             lvol = lvol_controller.recreate_lvol(lvol_id, snode)
             if not lvol:
                 logger.error(f"Failed to recreate LVol: {lvol_id}")
@@ -2887,28 +2888,29 @@ def make_sec_new_primary(node_id):
 
 
 def dump_lvstore(node_id):
-    db_controller = DBController()
-
-    snode = db_controller.get_storage_node_by_id(node_id)
-    if not snode:
-        logger.error(f"Can not find storage node: {node_id}")
-        return False
-
-    if not snode.lvstore:
-        logger.error("Storage node does not have lvstore")
-        return False
-
-    rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password, timeout=180)
-    logger.info(f"Dumping lvstore data on node: {snode.get_id()}")
-    file_name = f"LVS_dump_{snode.hostname}_{snode.lvstore}_{str(datetime.datetime.now().isoformat())}.txt"
-    file_path = f"/etc/simplyblock/{file_name}"
-    ret = rpc_client.bdev_lvs_dump(snode.lvstore, file_path)
-    if not ret:
-        logger.error("faild to dump lvstore data")
-        return False
-
-    logger.info(f"LVS dump file path: {file_name}")
-    snode_api = SNodeClient(f"{snode.mgmt_ip}:5000")
-    file_content, _ = snode_api.get_file_content(file_name)
-
-    return file_content
+    return False
+    # db_controller = DBController()
+    #
+    # snode = db_controller.get_storage_node_by_id(node_id)
+    # if not snode:
+    #     logger.error(f"Can not find storage node: {node_id}")
+    #     return False
+    #
+    # if not snode.lvstore:
+    #     logger.error("Storage node does not have lvstore")
+    #     return False
+    #
+    # rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password, timeout=180)
+    # logger.info(f"Dumping lvstore data on node: {snode.get_id()}")
+    # file_name = f"LVS_dump_{snode.hostname}_{snode.lvstore}_{str(datetime.datetime.now().isoformat())}.txt"
+    # file_path = f"/etc/simplyblock/{file_name}"
+    # ret = rpc_client.bdev_lvs_dump(snode.lvstore, file_path)
+    # if not ret:
+    #     logger.error("faild to dump lvstore data")
+    #     return False
+    #
+    # logger.info(f"LVS dump file path: {file_name}")
+    # snode_api = SNodeClient(f"{snode.mgmt_ip}:5000")
+    # file_content, _ = snode_api.get_file_content(file_name)
+    #
+    # return file_content
