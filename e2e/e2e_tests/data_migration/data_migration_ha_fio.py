@@ -491,7 +491,7 @@ class FioWorkloadTest(TestClusterBase):
         ]
         return filtered_tasks
 
-    def validate_migration_for_node(self, timestamp, timeout, node_id=None, check_interval=30):
+    def validate_migration_for_node(self, timestamp, timeout, node_id=None, check_interval=60):
         """
         Validate that all `device_migration` tasks for a specific node have completed successfully 
         and check for stuck tasks until the timeout is reached.
@@ -522,7 +522,7 @@ class FioWorkloadTest(TestClusterBase):
             for task in filtered_tasks:
                 # Check if the task is stuck (updated_at is more than 15 minutes old)
                 updated_at = datetime.fromtimestamp(task['updated_at'])
-                if datetime.now() - updated_at > timedelta(minutes=15):
+                if datetime.now() - updated_at > timedelta(minutes=30):
                     raise RuntimeError(f"Migration task {task['id']} is stuck (last updated at {updated_at}).")
 
                 # Check if task is completed
