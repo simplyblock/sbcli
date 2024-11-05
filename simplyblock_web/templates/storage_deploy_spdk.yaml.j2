@@ -33,6 +33,9 @@ spec:
         - name: foundationdb
           hostPath:
             path: /etc/foundationdb
+        - name: etc_simplyblock
+          hostPath:
+            path: /etc/simplyblock
         - name: host-modules
           hostPath:
             path: /lib/modules
@@ -94,6 +97,8 @@ spec:
           mountPath: /dev
         - name: script-volume
           mountPath: /script
+        - name: etc_simplyblock
+          mountPath: /etc/simplyblock
         resources:
           limits:
             hugepages-2Mi: {{ MEM_GEGA }}Gi
