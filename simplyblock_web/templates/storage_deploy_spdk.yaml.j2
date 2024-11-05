@@ -94,6 +94,8 @@ spec:
           mountPath: /dev
         - name: script-volume
           mountPath: /script
+        - name: varlog
+          mountPath: /var/log
         resources:
           limits:
             hugepages-2Mi: {{ MEM_GEGA }}Gi
