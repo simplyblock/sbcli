@@ -121,12 +121,12 @@ def status():
 
 
 def get_io_stats(rand):
-    bdev_io_stats['bdevs'][0]["bytes_read"] *= rand
-    bdev_io_stats['bdevs'][0]["num_read_ops"] *= rand
-    bdev_io_stats['bdevs'][0]["bytes_written"] *= rand
-    bdev_io_stats['bdevs'][0]["num_write_ops"] *= rand
-    bdev_io_stats['bdevs'][0]["read_latency_ticks"] *= rand
-    bdev_io_stats['bdevs'][0]["write_latency_ticks"] *= rand
+    bdev_io_stats['bdevs'][0]["bytes_read"] += rand
+    bdev_io_stats['bdevs'][0]["num_read_ops"] += rand
+    bdev_io_stats['bdevs'][0]["bytes_written"] += rand
+    bdev_io_stats['bdevs'][0]["num_write_ops"] += rand
+    bdev_io_stats['bdevs'][0]["read_latency_ticks"] += rand
+    bdev_io_stats['bdevs'][0]["write_latency_ticks"] += rand
     return bdev_io_stats
 
 
@@ -139,7 +139,7 @@ def rpc_method():
         result = {"version": "mock"}
 
     elif method == "bdev_get_iostat":
-        rand_int = random.randint(1,10)
+        rand_int = random.randint(1,100)
         result = get_io_stats(rand_int)
 
     elif method == "alceml_get_pages_usage":
