@@ -155,8 +155,7 @@ class FioWorkloadTest(TestClusterBase):
         timestamp = int(datetime.now().timestamp())
         self.logger.info(f"Stopping docker container on node {affected_node}.")
 
-        self.stop_container_verify(affected_node,
-                                   process_name=["fio_test_lvol_2_1", "fio_test_lvol_2_2"])
+        self.stop_container_verify(affected_node)
 
         sleep_n_sec(300)
 
@@ -422,7 +421,7 @@ class FioWorkloadTest(TestClusterBase):
                 assert fio not in running_fio, "FIO Process running on restarted node"
         self.logger.info("FIO process is running uninterrupted.")
 
-    def stop_container_verify(self, node_id, process_name):
+    def stop_container_verify(self, node_id):
         """Shutdown the node and ensure fio is uninterrupted."""
         output = self.ssh_obj.exec_command(node=self.mgmt_nodes[0], command="sudo df -h")
         output = output[0].strip().split('\n')
@@ -461,9 +460,10 @@ class FioWorkloadTest(TestClusterBase):
         fio_process = self.ssh_obj.find_process_name(self.mgmt_nodes[0], 'fio')
         if not fio_process:
             raise RuntimeError("FIO process was interrupted on unaffected nodes.")
-        for fio in process_name:
-            for running_fio in fio_process: 
-                assert fio not in running_fio, "FIO Process running on crashed node"
+        # NOTE: FIO Process can exit or hang when node is crashed. Hence commenting this validation
+        # for fio in process_name:
+        #     for running_fio in fio_process: 
+        #         assert fio not in running_fio, "FIO Process running on crashed node"
         self.logger.info("FIO process is running uninterrupted.")
 
     def filter_migration_tasks(self, tasks, node_id, timestamp):
@@ -479,7 +479,7 @@ class FioWorkloadTest(TestClusterBase):
             list: List of `device_migration` tasks for the specific node created after the given timestamp.
         """
         filtered_tasks = [
-            task for task in tasks 
+            task for task in tasks
             if task['function_name'] == 'device_migration' and task['date'] > timestamp
             and (node_id is None or task['node_id'] == node_id)
         ]
