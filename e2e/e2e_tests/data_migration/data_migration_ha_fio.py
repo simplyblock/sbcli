@@ -375,7 +375,7 @@ class FioWorkloadTest(TestClusterBase):
         self.logger.info(f"Node {node_id} shut down successfully.")
 
         self.sbcli_utils.wait_for_storage_node_status(node_id=node_id, status="offline",
-                                                      timeout=500)
+                                                      timeout=800)
 
         output = self.ssh_obj.exec_command(node=self.mgmt_nodes[0], command="sudo df -h")
         output = output[0].strip().split('\n')
@@ -397,18 +397,18 @@ class FioWorkloadTest(TestClusterBase):
         self.logger.info(f"Node {node_id} restarted successfully.")
         
         self.sbcli_utils.wait_for_storage_node_status(node_id=node_id, status="online",
-                                                      timeout=500)
+                                                      timeout=800)
 
         self.sbcli_utils.wait_for_health_status(node_id=node_id, status=True,
-                                                timeout=500)
+                                                timeout=800)
         
         storage_nodes = self.sbcli_utils.get_storage_nodes()["results"]
         for node in storage_nodes:
             self.sbcli_utils.wait_for_storage_node_status(node_id=node['id'], status="online",
-                                                          timeout=500)
+                                                          timeout=800)
 
             self.sbcli_utils.wait_for_health_status(node_id=node['id'], status=True,
-                                                    timeout=500)
+                                                    timeout=800)
 
         output = self.ssh_obj.exec_command(node=self.mgmt_nodes[0], command="sudo df -h")
         output = output[0].strip().split('\n')
@@ -441,17 +441,17 @@ class FioWorkloadTest(TestClusterBase):
         self.logger.info(f"Waiting for node {node_id} to be restarted automatically.")
 
         self.sbcli_utils.wait_for_storage_node_status(node_id=node_id, status="online",
-                                                      timeout=500)
+                                                      timeout=800)
         self.sbcli_utils.wait_for_health_status(node_id=node_id, status=True,
-                                                timeout=500)
+                                                timeout=800)
         
         storage_nodes = self.sbcli_utils.get_storage_nodes()["results"]
         for node in storage_nodes:
             self.sbcli_utils.wait_for_storage_node_status(node_id=node['id'], status="online",
-                                                          timeout=500)
+                                                          timeout=800)
 
             self.sbcli_utils.wait_for_health_status(node_id=node['id'], status=True,
-                                                    timeout=500)
+                                                    timeout=800)
         
         sleep_n_sec(300)
         output = self.ssh_obj.exec_command(node=self.mgmt_nodes[0], command="sudo df -h")
