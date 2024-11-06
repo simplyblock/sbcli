@@ -407,7 +407,7 @@ def cluster_activate(cl_id, force=False):
     logger.info("Cluster activated successfully")
 
     for snode in snodes:
-        lvol_controller.add_lvol_ha("lvol_"+snode.get_id(), "10g", snode.get_id(), "ha", pool_name,
+        lvol_controller.add_lvol_ha("lvol_"+snode.get_id(), utils.parse_size("10g"), snode.get_id(), "ha", pool_name,
                                     False, False,
                 11, 0, 0, 0, 0,
                 with_snapshot=False, max_size=0, crypto_key1=None, crypto_key2=None)
