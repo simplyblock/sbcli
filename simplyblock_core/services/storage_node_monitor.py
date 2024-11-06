@@ -154,12 +154,12 @@ while True:
                 logger.info(f"Check 2: ping mgmt ip {snode.mgmt_ip} ... {ping_check}")
 
             # 2- check node API
-            node_api_check = health_controller._check_node_api(snode.mgmt_ip)
-            logger.info(f"Check: node API {snode.mgmt_ip}:5000 ... {node_api_check}")
+            node_api_check = health_controller._check_node_api(snode.api_endpoint)
+            logger.info(f"Check: node API {snode.api_endpoint} ... {node_api_check}")
 
             # 3- check spdk_process
-            spdk_process = health_controller._check_spdk_process_up(snode.mgmt_ip)
-            logger.info(f"Check: spdk process {snode.mgmt_ip}:5000 ... {spdk_process}")
+            spdk_process = health_controller._check_spdk_process_up(snode.api_endpoint)
+            logger.info(f"Check: spdk process {snode.api_endpoint} ... {spdk_process}")
 
             # 4- check rpc
             node_rpc_check = health_controller._check_node_rpc(
