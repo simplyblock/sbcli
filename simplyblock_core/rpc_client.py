@@ -89,14 +89,15 @@ class RPCClient:
         return self._request("spdk_get_version")
 
     def subsystem_list(self, nqn_name=None):
-        data = self._request("nvmf_get_subsystems")
-        if data and nqn_name:
-            for d in data:
-                if 'nqn' in d and d['nqn'] == nqn_name:
-                    return [d]
-            return []
-        else:
-            return data
+        return True
+        # data = self._request("nvmf_get_subsystems")
+        # if data and nqn_name:
+        #     for d in data:
+        #         if 'nqn' in d and d['nqn'] == nqn_name:
+        #             return [d]
+        #     return []
+        # else:
+        #     return data
 
     def subsystem_delete(self, nqn):
         return self._request("nvmf_delete_subsystem", params={'nqn': nqn})

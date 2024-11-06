@@ -3,6 +3,7 @@
 import argparse
 import logging
 import os
+import random
 
 from flask import Flask, request, jsonify
 
@@ -119,6 +120,16 @@ def status():
     return utils.get_response("Live")
 
 
+def get_io_stats(rand):
+    bdev_io_stats['bdevs'][0]["bytes_read"] *= rand
+    bdev_io_stats['bdevs'][0]["num_read_ops"] *= rand
+    bdev_io_stats['bdevs'][0]["bytes_written"] *= rand
+    bdev_io_stats['bdevs'][0]["num_write_ops"] *= rand
+    bdev_io_stats['bdevs'][0]["read_latency_ticks"] *= rand
+    bdev_io_stats['bdevs'][0]["write_latency_ticks"] *= rand
+    return bdev_io_stats
+
+
 @app.route('/', methods=['POST'])
 def rpc_method():
     data = request.get_json()
@@ -128,7 +139,8 @@ def rpc_method():
         result = {"version": "mock"}
 
     elif method == "bdev_get_iostat":
-        result = bdev_io_stats
+        rand_int = random.randint(1,10)
+        result = get_io_stats(rand_int)
 
     elif method == "alceml_get_pages_usage":
         result = {"res":1,"npages_allocated":400,"npages_used":354,"npages_nmax":51100,"pba_page_size":2097152,"nvols":9}
@@ -182,5 +194,6 @@ if __name__ == '__main__':
         os.environ["MOCK_PORT"] = str(port)
         from blueprints import snode_ops_mock
         app.register_blueprint(snode_ops_mock.bp)
+        # app.add_url_rule("/", view_func=rpc_method, methods=['POST'])
 
     app.run(host='0.0.0.0', debug=constants.LOG_WEB_DEBUG, port=port)
