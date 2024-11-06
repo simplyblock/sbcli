@@ -167,7 +167,7 @@ def validate_add_lvol_func(name, size, host_id_or_name, pool_id_or_name,
 
 def _get_next_3_nodes(cluster_id, lvol_size=0):
     snodes = db_controller.get_storage_nodes_by_cluster_id(cluster_id)
-    # online_nodes = []
+    online_nodes = []
     node_stats = {}
     for node in snodes:
         if node.status == node.STATUS_ONLINE:
@@ -182,7 +182,7 @@ def _get_next_3_nodes(cluster_id, lvol_size=0):
             #     logger.warning(error)
             #     continue
             #
-            # online_nodes.append(node)
+            online_nodes.append(node)
             # node_stat_list = db_controller.get_node_stats(node, limit=1000)
             # combined_record = utils.sum_records(node_stat_list)
             node_st = {
@@ -196,8 +196,8 @@ def _get_next_3_nodes(cluster_id, lvol_size=0):
 
             node_stats[node.get_id()] = node_st
 
-    # if len(online_nodes) < 3:
-    #     return online_nodes
+    if len(online_nodes) < 3:
+        return online_nodes
     cluster_stats = utils.dict_agg([node_stats[k] for k in node_stats])
 
     nodes_weight = utils.get_weights(node_stats, cluster_stats)
@@ -516,7 +516,8 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
         })
         lvol.lvol_type += ',crypto'
         lvol.top_bdev = lvol.crypto_bdev
-
+        lvol.crypto_key1 = crypto_key1
+        lvol.crypto_key2 = crypto_key2
 
     if ha_type == 'single':
         ret, error = add_lvol_on_node(lvol, host_node)
@@ -539,9 +540,11 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
                 return ret, error
         lvol.nodes = nodes_ids
 
+    host_node = db_controller.get_storage_node_by_id(host_node.get_id())
     host_node.lvols.append(lvol.uuid)
     host_node.write_to_db(db_controller.kv_store)
 
+    pool = db_controller.get_pool_by_id(pool.get_id())
     lvol.pool_uuid = pool.id
     pool.lvols.append(lvol.uuid)
     pool.write_to_db(db_controller.kv_store)
@@ -575,7 +578,7 @@ def _create_bdev_stack(lvol, snode, ha_comm_addrs, ha_inode_self):
                 ret = distr_controller.send_cluster_map_to_node(snode)
                 if not ret:
                     return False, "Failed to send cluster map"
-                time.sleep(3)
+                # time.sleep(3)
 
         elif type == "bmap_init":
             ret = rpc_client.ultra21_lvol_bmap_init(**params)
@@ -681,6 +684,12 @@ def add_lvol_on_node(lvol, snode, ha_comm_addrs=None, ha_inode_self=None):
 
 def recreate_lvol_on_node(lvol, snode, ha_comm_addrs=None, ha_inode_self=None):
     rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
+
+    if "crypto" in lvol.lvol_type:
+        ret = _create_crypto_lvol(
+            rpc_client, lvol.crypto_bdev, f"{lvol.lvs_name}/{lvol.lvol_bdev}", lvol.crypto_key1, lvol.crypto_key2)
+        if not ret:
+            return False, "Failed to create crypto bdev"
 
     logger.info("creating subsystem %s", lvol.nqn)
     ret = rpc_client.subsystem_create(lvol.nqn, 'sbcli-cn', lvol.uuid)
@@ -852,11 +861,15 @@ def delete_lvol(id_or_name, force_delete=False):
                 return False
 
     # remove from storage node
+    snode = db_controller.get_storage_node_by_id(lvol.node_id)
+    logger.debug(snode)
+    logger.debug(f"removing lvol: {lvol.get_id()} from node lvol list: {str(snode.lvols)}")
     if lvol.get_id() in snode.lvols:
         snode.lvols.remove(lvol.get_id())
         snode.write_to_db(db_controller.kv_store)
 
     # remove from pool
+    pool = db_controller.get_pool_by_id(lvol.pool_uuid)
     if lvol.get_id() in pool.lvols:
         pool.lvols.remove(lvol.get_id())
         pool.write_to_db(db_controller.kv_store)
@@ -1061,6 +1074,10 @@ def resize_lvol(id, new_size):
 
     if lvol.max_size < new_size:
         logger.error(f"New size {new_size} must be smaller than the max size {lvol.max_size}")
+        return False
+
+    if lvol.cloned_from_snap:
+        logger.error(f"Can not resize clone!")
         return False
 
     logger.info(f"Resizing LVol: {lvol.id}, new size: {new_size}")

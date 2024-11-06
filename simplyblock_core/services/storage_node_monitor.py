@@ -100,21 +100,32 @@ def update_cluster_status(cluster_id):
 
 def set_node_online(node):
     if node.status != StorageNode.STATUS_ONLINE:
+        # set devices online
+        for dev in node.nvme_devices:
+            if dev.status == NVMeDevice.STATUS_UNAVAILABLE:
+                device_controller.device_set_online(dev.get_id())
+
+        # set jm dev online
+        if node.jm_device.status == JMDevice.STATUS_UNAVAILABLE:
+            device_controller.set_jm_device_state(node.jm_device.get_id(), JMDevice.STATUS_ONLINE)
+
+        # set node online
         storage_node_ops.set_node_status(node.get_id(), StorageNode.STATUS_ONLINE)
 
 
 def set_node_offline(node):
     if node.status != StorageNode.STATUS_UNREACHABLE:
         # set node unavailable
-        storage_node_ops.set_node_status(snode.get_id(), StorageNode.STATUS_UNREACHABLE)
+        storage_node_ops.set_node_status(node.get_id(), StorageNode.STATUS_UNREACHABLE)
 
         # set devices unavailable
         for dev in node.nvme_devices:
-            device_controller.device_set_unavailable(dev.get_id())
+            if dev.status == NVMeDevice.STATUS_ONLINE:
+                device_controller.device_set_unavailable(dev.get_id())
 
         # set jm dev offline
-        if snode.jm_device.status != JMDevice.STATUS_UNAVAILABLE:
-            device_controller.set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_UNAVAILABLE)
+        if node.jm_device.status != JMDevice.STATUS_UNAVAILABLE:
+            device_controller.set_jm_device_state(node.jm_device.get_id(), JMDevice.STATUS_UNAVAILABLE)
 
 
 logger.info("Starting node monitor")
@@ -143,15 +154,19 @@ while True:
                 logger.info(f"Check 2: ping mgmt ip {snode.mgmt_ip} ... {ping_check}")
 
             # 2- check node API
-
-            node_api_check = health_controller._check_node_api(snode.api_endpoint)
-            logger.info(f"Check: node API {snode.api_endpoint} ... {node_api_check}")
+            node_api_check = health_controller._check_node_api(snode.mgmt_ip)
+            logger.info(f"Check: node API {snode.mgmt_ip}:5000 ... {node_api_check}")
 
             # 3- check spdk_process
-            spdk_process = health_controller._check_spdk_process_up(snode.api_endpoint)
-            logger.info(f"Check: spdk process {snode.api_endpoint} ... {spdk_process}")
+            spdk_process = health_controller._check_spdk_process_up(snode.mgmt_ip)
+            logger.info(f"Check: spdk process {snode.mgmt_ip}:5000 ... {spdk_process}")
 
-            is_node_online = ping_check and node_api_check and spdk_process
+            # 4- check rpc
+            node_rpc_check = health_controller._check_node_rpc(
+                snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
+            logger.info(f"Check: node RPC {snode.mgmt_ip}:{snode.rpc_port} ... {node_rpc_check}")
+
+            is_node_online = ping_check and node_api_check and spdk_process and node_rpc_check
             if is_node_online:
                 set_node_online(snode)
 

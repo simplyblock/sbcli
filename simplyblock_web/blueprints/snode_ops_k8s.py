@@ -74,6 +74,29 @@ def get_google_cloud_info():
         pass
 
 
+def get_equinix_cloud_info():
+    try:
+        response = requests.get("https://metadata.platformequinix.com/metadata")
+        data = response.json()
+        public_ip = ""
+        ip = ""
+        for interface in data["network"]["addresses"]:
+            if interface["address_family"] == 4:
+                if interface["enabled"] and interface["public"]:
+                    public_ip = interface["address"]
+                elif interface["enabled"] and not interface["public"]:
+                    public_ip = interface["address"]
+        return {
+            "id": str(data["id"]),
+            "type": data["class"],
+            "cloud": "equinix",
+            "ip": public_ip,
+            "public_ip": ip
+        }
+    except:
+        pass
+
+
 def get_amazon_cloud_info():
     try:
         from ec2_metadata import ec2_metadata
@@ -280,6 +303,9 @@ CLOUD_INFO = get_amazon_cloud_info()
 if not CLOUD_INFO:
     CLOUD_INFO = get_google_cloud_info()
 
+if not CLOUD_INFO:
+    CLOUD_INFO = get_equinix_cloud_info()
+
 if CLOUD_INFO:
     SYSTEM_ID = CLOUD_INFO["id"]
 else:
@@ -361,6 +387,7 @@ def spdk_process_start():
             'NAMESPACE': namespace,
             'FDB_CONNECTION': fdb_connection,
             'SIMPLYBLOCK_DOCKER_IMAGE': constants.SIMPLY_BLOCK_DOCKER_IMAGE,
+            'GRAYLOG_SERVER_IP': data['cluster_ip']
         }
         dep = yaml.safe_load(template.render(values))
         logger.debug(dep)

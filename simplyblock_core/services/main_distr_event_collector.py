@@ -33,17 +33,8 @@ def process_device_event(event):
                     if dev.status not in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_READONLY]:
                         logger.info(f"The storage device is not online, skipping. status: {dev.status}")
                         event.status = 'skipped'
-                        node_status_event = {
-                            "timestamp": datetime.datetime.now().isoformat("T", "seconds") + 'Z',
-                            "event_type": "device_status",
-                            "storage_ID": storage_id,
-                            "status": dev.status}
-                        events = {"events": [node_status_event]}
-                        snode = db_controller.get_storage_node_by_id(node_id)
-                        rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
-                        ret = rpc_client.distr_status_events_update(events)
-                        if not ret:
-                            logger.warning("Failed to send event update")
+                        n = db_controller.get_storage_node_by_id(node_id)
+                        distr_controller.send_dev_status_event(dev, NVMeDevice.STATUS_UNAVAILABLE, n)
                         return
 
                     device = dev
@@ -57,32 +48,12 @@ def process_device_event(event):
         device_id = device.get_id()
         node = db_controller.get_storage_node_by_id(node_id)
         if device.node_id != node_id:
-            logger.info(f"Removing remote storage id: {storage_id} from node: {node_id}")
-            new_remote_devices = []
-            rpc_client = RPCClient(node.mgmt_ip, node.rpc_port,
-                                   node.rpc_username, node.rpc_password)
-            for rem_dev in node.remote_devices:
-                if rem_dev.get_id() == device.get_id():
-                    ctrl_name = rem_dev.remote_bdev[:-2]
-                    rpc_client.bdev_nvme_detach_controller(ctrl_name)
-                else:
-                    new_remote_devices.append(rem_dev)
-            node.remote_devices = new_remote_devices
-            node.write_to_db(db_controller.kv_store)
-            node_status_event = {
-                "timestamp": datetime.datetime.now().isoformat("T", "seconds") + 'Z',
-                "event_type": "device_status",
-                "storage_ID": storage_id,
-                "status": NVMeDevice.STATUS_UNAVAILABLE}
-            events = {"events": [node_status_event]}
-            ret = rpc_client.distr_status_events_update(events)
-            if not ret:
-                logger.warning("Failed to send event update")
-
-            dev_node = db_controller.get_storage_node_by_id(device.node_id)
-            if dev_node.status == StorageNode.STATUS_ONLINE:
-                device_controller.device_set_io_error(device_id, True)
-                device_controller.device_set_unavailable(device_id)
+            if event.message != 'SPDK_BDEV_EVENT_REMOVE':
+                logger.info(f"Setting storage id: {storage_id} unavailable")
+                distr_controller.send_dev_status_event(device, NVMeDevice.STATUS_UNAVAILABLE, node)
+            # if device.status == NVMeDevice.STATUS_ONLINE:
+            #     device_controller.device_set_io_error(device_id, True)
+            #     device_controller.device_set_unavailable(device_id)
 
         else:
             if node.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED]:
@@ -156,7 +127,7 @@ def start_event_collector_on_node(node_id):
         snode.rpc_port,
         snode.rpc_username,
         snode.rpc_password,
-        timeout=10, retry=2)
+        timeout=5, retry=2)
 
     while True:
         page = 1

@@ -13,7 +13,6 @@ from http.server import ThreadingHTTPServer
 from http.server import BaseHTTPRequestHandler
 
 
-TIMEOUT = 5*60  # 5 min
 rpc_sock = '/var/tmp/spdk.sock'
 logger_handler = logging.StreamHandler(stream=sys.stdout)
 logger_handler.setFormatter(logging.Formatter('%(asctime)s: %(levelname)s: %(message)s'))
@@ -34,7 +33,7 @@ def get_env_var(name, default=None, is_required=False):
 
 def rpc_call(req):
     req_data = json.loads(req.decode('ascii'))
-    print(req_data)
+    logger.debug(f"Request data: {str(req_data)}")
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     sock.settimeout(TIMEOUT)
     sock.connect(rpc_sock)
@@ -64,7 +63,7 @@ def rpc_call(req):
     if not response and len(buf) > 0:
         raise
 
-    print(buf)
+    logger.debug(f"Response data: {buf}")
 
     return buf
 
@@ -135,13 +134,14 @@ def run_server(host, port, user, password, cert=None, is_threading_enabled=False
         httpd.timeout = TIMEOUT
         if cert is not None:
             httpd.socket = ssl.wrap_socket(httpd.socket, certfile=cert, server_side=True)
-        print('Started RPC http proxy server')
+        logger.info('Started RPC http proxy server')
         httpd.serve_forever()
     except KeyboardInterrupt:
-        print('Shutting down server')
+        logger.info('Shutting down server')
         httpd.socket.close()
 
 
+TIMEOUT = int(get_env_var("TIMEOUT", is_required=False, default=60*5))
 is_threading_enabled = get_env_var("MULTI_THREADING_ENABLED", is_required=False, default=False)
 server_ip = get_env_var("SERVER_IP", is_required=True)
 rpc_port = get_env_var("RPC_PORT", is_required=True)

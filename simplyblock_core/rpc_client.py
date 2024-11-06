@@ -135,7 +135,27 @@ class RPCClient:
         """
         params = {
             "trtype": trtype,
-            "max_io_qpairs_per_ctrlr": 256
+            "max_io_qpairs_per_ctrlr": 256,
+            "max_queue_depth": 512,
+            "abort_timeout_sec": 5,
+            "ack_timeout": 512,
+            "zcopy": True,
+            "in_capsule_data_size": 4096,
+            "max_io_size": 131072,
+            "io_unit_size": 131072,
+            "max_aq_depth": 128,
+            "num_shared_buffers": 8192,
+            "buf_cache_size": 32,
+            "dif_insert_or_strip": False,
+            "c2h_success": True,
+            "sock_priority": 0
+
+        }
+        return self._request("nvmf_create_transport", params)
+
+    def transport_create_caching(self, trtype):
+        params = {
+            "trtype": trtype,
         }
         return self._request("nvmf_create_transport", params)
 
@@ -356,7 +376,8 @@ class RPCClient:
             "uuid": uuid,
             # "use_scheduling": True,
             "use_optimized": True,
-            "pba_nbalign": 4096
+            "pba_nbalign": 4096,
+            "use_map_whole_page_on_1st_write": True
         }
         if alceml_cpu_mask:
             params["bdb_lcpu_mask"] = int(alceml_cpu_mask, 16)
@@ -378,6 +399,12 @@ class RPCClient:
             //  This node (device) number, in the group, defined by ha_comm_addrs.
           "ha_inode_self": 1
         """
+        try:
+            ret = self.get_bdevs(name)
+            if ret:
+                return ret
+        except:
+            pass
         params = {
             "name": name,
             "jm_names": ",".join(jm_names),
@@ -418,6 +445,12 @@ class RPCClient:
         return self._request("bdev_get_iostat", params)
 
     def bdev_raid_create(self, name, bdevs_list, raid_level="0", strip_size_kb=4):
+        try:
+            ret = self.get_bdevs(name)
+            if ret:
+                return ret
+        except:
+            pass
         params = {
             "name": name,
             "raid_level": raid_level,
@@ -471,23 +504,11 @@ class RPCClient:
             "trsvcid": str(port),
             "subnqn": nqn,
             "fabrics_connect_timeout_us": 100000,
-            "fast_io_fail_timeout_sec": 1,
+            # "fast_io_fail_timeout_sec": 1,
             "num_io_queues": 16384,
-            "ctrlr_loss_timeout_sec": 2,
-        }
-        return self._request("bdev_nvme_attach_controller", params)
-
-    def bdev_nvme_attach_controller_tcp_jm(self, name, nqn, ip, port):
-        params = {
-            "name": name,
-            "trtype": "tcp",
-            "traddr": ip,
-            "adrfam": "ipv4",
-            "trsvcid": str(port),
-            "subnqn": nqn,
-            "fast_io_fail_timeout_sec": 1,
-            "ctrlr_loss_timeout_sec": 1,
-            "reconnect_delay_sec": 1,
+            # "ctrlr_loss_timeout_sec": 1,
+            "multipath":"disable",
+            # "reconnect_delay_sec":1
         }
         return self._request("bdev_nvme_attach_controller", params)
 
@@ -544,14 +565,15 @@ class RPCClient:
 
     def bdev_nvme_set_options(self):
         params = {
+            # "action_on_timeout": "abort",
             "bdev_retry_count": 0,
             "transport_retry_count": 0,
-            "ctrlr_loss_timeout_sec": 2,
-            "fast_io_fail_timeout_sec": 1,
+            "ctrlr_loss_timeout_sec": 1,
+            "fast_io_fail_timeout_sec": 0,
             "reconnect_delay_sec": 1,
-            "keep_alive_timeout_ms": 200,
-            "transport_ack_timeout": 7,
-            "timeout_us": 500000
+            "keep_alive_timeout_ms": 10000,
+            "transport_ack_timeout": 9,
+            "timeout_us": 0
         }
         return self._request("bdev_nvme_set_options", params)
 
@@ -803,3 +825,16 @@ class RPCClient:
             "cluster_full": cluster_full,
         }
         return self._request("bdev_distrib_toggle_cluster_full", params)
+
+    def log_set_print_level(self, level):
+        params = {
+            "level": level
+        }
+        return self._request("log_set_print_level", params)
+
+    def bdev_lvs_dump(self, lvs_name, file):
+        params = {
+            "lvs_name": lvs_name,
+            "file": file,
+        }
+        return self._request("bdev_lvs_dump", params)

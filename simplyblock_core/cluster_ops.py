@@ -26,12 +26,6 @@ TOP_DIR = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 
 
 def _create_update_user(cluster_id, grafana_url, grafana_secret, user_secret, update_secret=False):
-    if not grafana_url.startswith("https://"):
-        if grafana_url.startswith("http://"):
-            grafana_url = grafana_url.replace("http://", "https://", 1)
-        else:
-            grafana_url = "https://" + grafana_url
-
     session = requests.session()
     session.auth = ("admin", grafana_secret)
     headers = {
@@ -83,7 +77,7 @@ def _add_graylog_input(cluster_ip, password):
     url = f"http://{cluster_ip}/graylog/api/system/inputs"
     payload = json.dumps({
         "title": "spdk log input",
-        "type": "org.graylog2.inputs.gelf.udp.GELFUDPInput",
+        "type": "org.graylog2.inputs.gelf.tcp.GELFTCPInput",
         "configuration": {
             "bind_address": "0.0.0.0",
             "port": 12201,
@@ -135,7 +129,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
             c.swarm.leave(force=True)
             time.sleep(3)
 
-        c.swarm.init()
+        c.swarm.init(DEV_IP)
         logger.info("Configuring docker swarm > Done")
     except Exception as e:
         print(e)
@@ -348,9 +342,10 @@ def cluster_activate(cl_id, force=False):
     if not cluster:
         logger.error(f"Cluster not found {cl_id}")
         return False
-    if cluster.status != Cluster.STATUS_UNREADY:
-        logger.error(f"Failed to activate cluster, Cluster is not in an UNREADY state")
+    if cluster.status == Cluster.STATUS_ACTIVE:
+        logger.warning("Cluster is not in an ACTIVE state")
         if not force:
+            logger.warning(f"Failed to activate cluster, Cluster is in an ACTIVE state, use --force to reactivate")
             return False
     set_cluster_status(cl_id, Cluster.STATUS_IN_ACTIVATION)
     snodes = db_controller.get_storage_nodes_by_cluster_id(cl_id)
@@ -373,17 +368,17 @@ def cluster_activate(cl_id, force=False):
 
     for snode in snodes:
         if snode.lvstore:
-            logger.info(f"Node {snode.get_id()} already has lvstore {snode.lvstore}... skipping")
-            if not force:
-                continue
-        ret = storage_node_ops.create_lvstore(snode, cluster.distr_ndcs, cluster.distr_npcs, cluster.distr_bs,
+            logger.warning(f"Node {snode.get_id()} already has lvstore {snode.lvstore}")
+            ret = storage_node_ops.recreate_lvstore(snode)
+        else:
+            ret = storage_node_ops.create_lvstore(snode, cluster.distr_ndcs, cluster.distr_npcs, cluster.distr_bs,
                                               cluster.distr_chunk_bs, cluster.page_size_in_blocks, max_size, snodes)
         if not ret:
             logger.error("Failed to activate cluster")
             set_cluster_status(cl_id, Cluster.STATUS_UNREADY)
             return False
-
-    cluster.cluster_max_size = max_size
+    if not cluster.cluster_max_size:
+        cluster.cluster_max_size = max_size
     cluster.write_to_db(db_controller.kv_store)
     set_cluster_status(cl_id, Cluster.STATUS_ACTIVE)
     logger.info("Cluster activated successfully")

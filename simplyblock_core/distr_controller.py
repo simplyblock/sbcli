@@ -11,7 +11,7 @@ from simplyblock_core.kv_store import DBController
 logger = logging.getLogger()
 
 
-def send_node_status_event(node, node_status):
+def send_node_status_event(node, node_status, target_node=None):
     db_controller = DBController()
     node_id = node.get_id()
     logging.info(f"Sending event updates, node: {node_id}, status: {node_status}")
@@ -22,7 +22,10 @@ def send_node_status_event(node, node_status):
         "status": node_status}
     events = {"events": [node_status_event]}
     logger.debug(node_status_event)
-    snodes = db_controller.get_storage_nodes_by_cluster_id(node.cluster_id)
+    if target_node:
+        snodes = [target_node]
+    else:
+        snodes = db_controller.get_storage_nodes_by_cluster_id(node.cluster_id)
     for node in snodes:
         if node.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED]:
             continue
@@ -31,7 +34,7 @@ def send_node_status_event(node, node_status):
         ret = rpc_client.distr_status_events_update(events)
 
 
-def send_dev_status_event(device, dev_status):
+def send_dev_status_event(device, dev_status, target_node=None):
     db_controller = DBController()
     storage_ID = device.cluster_device_order
     node_status_event = {
@@ -41,7 +44,10 @@ def send_dev_status_event(device, dev_status):
         "status": dev_status}
     events = {"events": [node_status_event]}
     logger.debug(node_status_event)
-    snodes = db_controller.get_storage_nodes_by_cluster_id(device.cluster_id)
+    if target_node:
+        snodes = [target_node]
+    else:
+        snodes = db_controller.get_storage_nodes_by_cluster_id(device.cluster_id)
     for node in snodes:
         if node.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED]:
             continue
@@ -105,7 +111,7 @@ def get_distr_cluster_map(snodes, target_node):
                 "UUID": dev.get_id(),
                 "bdev_name": name,
                 "status": dev_status,
-                "physical_label": dev.physical_label
+                # "physical_label": dev.physical_label
             }
             dev_w_map.append({
                 "weight": dev_w,

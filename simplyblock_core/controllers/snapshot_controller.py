@@ -74,7 +74,7 @@ def add(lvol_id, snapshot_name):
     spdk_mem_info_before = rpc_client.ultra21_util_get_malloc_stats()
 
     logger.info("Creating Snapshot bdev")
-    ret = rpc_client.lvol_create_snapshot(lvol.top_bdev, snapshot_name)
+    ret = rpc_client.lvol_create_snapshot(f"{lvol.lvs_name}/{lvol.lvol_bdev}", snapshot_name)
     if not ret:
         return False, "Failed to create snapshot bdev"
 
@@ -252,7 +252,7 @@ def clone(snapshot_id, clone_name, new_size=0):
     lvol.nqn = snode.subsystem + ":lvol:" + lvol.uuid
     lvol.pool_uuid = pool.id
     lvol.ha_type = snap.lvol.ha_type
-
+    lvol.lvol_type = 'lvol'
     lvol.ndcs = snap.lvol.ndcs
     lvol.npcs = snap.lvol.npcs
     lvol.distr_bs = snap.lvol.distr_bs
@@ -262,7 +262,7 @@ def clone(snapshot_id, clone_name, new_size=0):
     lvol.vuid = snap.lvol.vuid
 
     lvol.status = LVol.STATUS_ONLINE
-    lvol.bdev_stack = snap.lvol.bdev_stack
+    # lvol.bdev_stack = snap.lvol.bdev_stack
     lvol.bdev_stack = [
         {
             "type": "bdev_lvol_clone",
@@ -270,17 +270,17 @@ def clone(snapshot_id, clone_name, new_size=0):
         }
     ]
 
-    if new_size:
-        if snap.lvol.size >= new_size:
-            msg = f"New size {new_size} must be higher than the original size {snap.lvol.size}"
-            logger.error(msg)
-            return False, msg
-
-        if snap.lvol.max_size < new_size:
-            msg = f"New size {new_size} must be smaller than the max size {snap.lvol.max_size}"
-            logger.error(msg)
-            return False, msg
-        lvol.size = new_size
+    # if new_size:
+    #     if snap.lvol.size >= new_size:
+    #         msg = f"New size {new_size} must be higher than the original size {snap.lvol.size}"
+    #         logger.error(msg)
+    #         return False, msg
+    #
+    #     if snap.lvol.max_size < new_size:
+    #         msg = f"New size {new_size} must be smaller than the max size {snap.lvol.max_size}"
+    #         logger.error(msg)
+    #         return False, msg
+    #     lvol.size = new_size
 
     rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
     spdk_mem_info_before = rpc_client.ultra21_util_get_malloc_stats()
@@ -289,6 +289,19 @@ def clone(snapshot_id, clone_name, new_size=0):
     ret = rpc_client.lvol_clone(snap.snap_bdev, lvol.lvol_bdev)
     if not ret:
         return False, "Failed to create clone lvol bdev"
+
+    if "crypto" in snap.lvol.lvol_type:
+        lvol.crypto_bdev = f"crypto_{lvol.lvol_name}"
+        lvol.crypto_key1 = snap.lvol.crypto_key1
+        lvol.crypto_key2 = snap.lvol.crypto_key2
+
+        ret = lvol_controller._create_crypto_lvol(
+            rpc_client, lvol.crypto_bdev, lvol.top_bdev, lvol.crypto_key1, lvol.crypto_key2)
+        if not ret:
+            return False, "Failed to create clone lvol bdev"
+
+        lvol.lvol_type += ',crypto'
+        lvol.top_bdev = lvol.crypto_bdev
 
     subsystem_nqn = lvol.nqn
     logger.info("creating subsystem %s", subsystem_nqn)
@@ -333,6 +346,6 @@ def clone(snapshot_id, clone_name, new_size=0):
 
     logger.info("Done")
     snapshot_events.snapshot_clone(snap, lvol)
-    if new_size:
-        lvol_controller.resize_lvol(lvol.get_id(), new_size)
+    # if new_size:
+    #     lvol_controller.resize_lvol(lvol.get_id(), new_size)
     return True, lvol.uuid

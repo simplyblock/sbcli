@@ -340,18 +340,14 @@ class SshUtils:
         output, error = self.exec_command(node=node, command=cmd)
         return output
     
-    def stop_docker_containers(self, node, container_name=None):
-        """Stops given docker container. Stops all if no name is given
+    def stop_spdk_process(self, node):
+        """Stops spdk process
 
         Args:
             node (str): Node IP
-            container_name (str): Name of container to stop
         """
-        if container_name:
-            cmd = f"sudo docker stop {container_name}"
-        else:
-            cmd = "sudo docker stop $(sudo docker ps -a -q)"
-        
+
+        cmd = "curl 0.0.0.0:5000/snode/spdk_process_kill"
         output, error = self.exec_command(node=node, command=cmd)
         return output
 

@@ -432,7 +432,7 @@ def connect(caching_node_id, lvol_id):
     ret = rpc_client.subsystem_create(subsystem_nqn, 'sbcli-cn', lvol.get_id())
     ret = rpc_client.transport_list("TCP")
     if not ret:
-        ret = rpc_client.transport_create("TCP")
+        ret = rpc_client.transport_create_caching("TCP")
     ret = rpc_client.listeners_create(subsystem_nqn, "TCP", '127.0.0.1', "4420")
     ret = rpc_client.nvmf_subsystem_listener_set_ana_state(subsystem_nqn, '127.0.0.1', "4420", is_optimized=True)
 

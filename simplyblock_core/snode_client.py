@@ -72,7 +72,7 @@ class SNodeClient:
 
     def spdk_process_start(self, spdk_cpu_mask, spdk_mem, spdk_image=None, spdk_debug=None, cluster_ip=None,
                            fdb_connection=None, namespace=None, server_ip=None, rpc_port=None,
-                           rpc_username=None, rpc_password=None):
+                           rpc_username=None, rpc_password=None, multi_threading_enabled=False, timeout=0):
         params = {
             "cluster_ip": cluster_ip,
             "server_ip": server_ip,
@@ -92,6 +92,10 @@ class SNodeClient:
             params['fdb_connection'] = fdb_connection
         if namespace:
             params["namespace"] = namespace
+        if multi_threading_enabled:
+            params["multi_threading_enabled"] = multi_threading_enabled
+        if timeout:
+            params["timeout"] = timeout
         return self._request("POST", "spdk_process_start", params)
 
     def join_swarm(self, cluster_ip, join_token, db_connection, cluster_id):
@@ -126,3 +130,6 @@ class SNodeClient:
 
     def spdk_process_is_up(self):
         return self._request("GET", "spdk_process_is_up")
+
+    def get_file_content(self, file_name):
+        return self._request("GET", f"get_file_content/{file_name}")

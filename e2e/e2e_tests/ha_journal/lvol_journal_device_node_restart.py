@@ -262,7 +262,7 @@ class TestDeviceNodeRestart(TestClusterBase):
         # Step 13: Ungracefully stop node 1 (container shutdown)
         self.logger.info("Stopping container on node 1 (ungraceful shutdown).")
         node_ip = self.journal_manager.sn_journal_map[self.lvol_sn_node]['primary_journal'][1]
-        self.ssh_obj.stop_docker_containers(node_ip, "spdk")
+        self.ssh_obj.stop_spdk_process(node_ip)
         self.sbcli_utils.wait_for_storage_node_status(self.lvol_sn_node,
                                                       "unreachable",
                                                       timeout=300)
@@ -377,7 +377,7 @@ class TestDeviceNodeRestart(TestClusterBase):
             # Step 5: Force stop the node with secondary journal 2
             secondary_node_2 = self.extract_node_from_journal(secondary_journal_2[0])
             self.logger.info(f"Forcefully stopping node: {secondary_node_2} (secondary journal 2)")
-            self.ssh_obj.stop_docker_containers(node=secondary_journal_2[1], container_name="spdk")
+            self.ssh_obj.stop_spdk_process(node=secondary_journal_2[1])
             sleep_n_sec(420)
 
             self.sbcli_utils.restart_node(node_uuid=secondary_node_2)

@@ -33,7 +33,7 @@ on:
       ndcs:
         description: 'Value for NDCS'
         required: false
-        default: 1
+        default: 2
       npcs:
         description: 'Value for NPCS'
         required: false
@@ -85,7 +85,7 @@ jobs:
           token: ${{ secrets.GH_ACCESS_KEY_ID_HAMDI }}
 
       - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v2
+        uses: hashicorp/setup-terraform@v3
         with:
           terraform_wrapper: false
 
@@ -126,7 +126,7 @@ jobs:
             echo "Setting SBCLI_CMD to input or default to sbcli-dev."
             echo "SBCLI_CMD=${{ github.event.inputs.sbcli_cmd || 'sbcli-dev' }}" >> $GITHUB_ENV
           fi
-          echo "NDCS=${{ github.event.inputs.ndcs || 1 }}" >> $GITHUB_ENV
+          echo "NDCS=${{ github.event.inputs.ndcs || 2 }}" >> $GITHUB_ENV
           echo "NPCS=${{ github.event.inputs.npcs || 1 }}" >> $GITHUB_ENV
           echo "BS=${{ github.event.inputs.bs || 4096 }}" >> $GITHUB_ENV
           echo "CHUNK_BS=${{ github.event.inputs.chunk_bs || 4096 }}" >> $GITHUB_ENV
@@ -136,8 +136,8 @@ jobs:
         run: |
           cd $GITHUB_WORKSPACE/simplyBlockDeploy
           terraform plan \
-            -var "mgmt_nodes=1" -var "storage_nodes=3" -var "volumes_per_storage_nodes=3" \
-            -var mgmt_nodes_instance_type="m6id.xlarge" -var storage_nodes_instance_type="m6i.xlarge" \
+            -var "mgmt_nodes=1" -var "storage_nodes=3" -var "volumes_per_storage_nodes=0" \
+            -var mgmt_nodes_instance_type="m6i.2xlarge" -var storage_nodes_instance_type="m6id.2xlarge" \
             -var "extra_nodes=1" -var "extra_nodes_instance_type=m6id.xlarge" \
             -var storage_nodes_ebs_size2=100 -var "region=us-east-2" \
             -var "sbcli_cmd=$SBCLI_CMD" -out=tfplan
@@ -167,7 +167,7 @@ jobs:
             --distr-npcs $NPCS \
             --distr-bs $BS \
             --distr-chunk-bs $CHUNK_BS \
-            --partitions 0
+            --partitions 3
         id: bootstrap_cluster
         env:
           SBCLI_CMD: ${{ env.SBCLI_CMD }}

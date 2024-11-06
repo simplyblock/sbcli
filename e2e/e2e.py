@@ -19,7 +19,7 @@ def main():
     parser.add_argument('--fio_debug', type=bool, help="Add debug flag to fio", default=False)
     
     # New arguments for ndcs, npcs, bs, chunk_bs with default values
-    parser.add_argument('--ndcs', type=int, help="Number of data chunks (ndcs)", default=1)
+    parser.add_argument('--ndcs', type=int, help="Number of data chunks (ndcs)", default=2)
     parser.add_argument('--npcs', type=int, help="Number of parity chunks (npcs)", default=1)
     parser.add_argument('--bs', type=int, help="Block size (bs)", default=4096)
     parser.add_argument('--chunk_bs', type=int, help="Chunk block size (chunk_bs)", default=4096)

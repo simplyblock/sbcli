@@ -13,6 +13,7 @@ spec:
       labels:
         app: spdk-app-{{ HOSTNAME }}
     spec:
+      serviceAccountName: storage-node-sa
       nodeSelector:
         kubernetes.io/hostname: {{ HOSTNAME }}
       hostNetwork: true
@@ -43,6 +44,12 @@ spec:
             medium: HugePages
         - name: script-volume
           emptyDir: {}
+        - name: varlog
+          hostPath:
+            path: /var/log
+        - name: dockercontainerlogdirectory
+          hostPath:
+            path: /var/log/pods
       tolerations:
         - effect: NoSchedule
           key: dedicated
@@ -110,3 +117,37 @@ spec:
           value: "{{ RPC_USERNAME }}"
         - name: RPC_PASSWORD
           value: "{{ RPC_PASSWORD }}"
+
+      - name: fluentd
+        image: fluent/fluentd-kubernetes-daemonset:v1.17.1-debian-graylog-1.2
+        imagePullPolicy: "Always"
+        env:
+        - name: K8S_NODE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
+        - name:  FLUENT_GRAYLOG_HOST
+          value: "{{ GRAYLOG_SERVER_IP }}"
+        - name:  FLUENT_GRAYLOG_PORT
+          value: "12202"
+        - name:  FLUENT_GRAYLOG_PROTOCOL
+          value: "tcp"
+        - name:  FLUENTD_SYSTEMD_CONF
+          value: "disable"
+        - name: FLUENT_CONTAINER_TAIL_EXCLUDE_PATH
+          value: /var/log/pods/fluent*
+        - name: FLUENT_CONTAINER_TAIL_PARSER_TYPE
+          value: /^(?<time>.+) (?<stream>stdout|stderr)( (?<logtag>.))? (?<log>.*)$/
+        resources:
+          requests:
+            cpu: 200m
+            memory: 0.5Gi
+          limits:
+            cpu: 1000m
+            memory: 1Gi
+        volumeMounts:
+        - name: varlog
+          mountPath: /var/log
+        - name: dockercontainerlogdirectory
+          mountPath: /var/log/pods
+          readOnly: true

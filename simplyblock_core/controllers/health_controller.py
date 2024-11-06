@@ -446,7 +446,7 @@ def check_jm_device(device_id):
     try:
         rpc_client = RPCClient(
             snode.mgmt_ip, snode.rpc_port,
-            snode.rpc_username, snode.rpc_password)
+            snode.rpc_username, snode.rpc_password, timeout=3, retry=2)
 
         ret = rpc_client.get_bdevs(jm_device.jm_bdev)
         if ret:
