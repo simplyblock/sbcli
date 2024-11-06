@@ -292,7 +292,7 @@ class CLIWrapper:
         sub_command.add_argument("--distr-chunk-bs", help='(Dev) distrb bdev chunk block size, default: 4096', type=int,
                                  default=4096)
         sub_command.add_argument("--ha-type", help='LVol HA type (single, ha), default is cluster HA type',
-                                 dest='ha_type', choices=["single", "ha", "default"], default='single')
+                                 dest='ha_type', choices=["single", "ha", "default"], default='ha')
         sub_command.add_argument("--enable-node-affinity", help='Enable node affinity for storage nodes', action='store_true')
 
         # add cluster

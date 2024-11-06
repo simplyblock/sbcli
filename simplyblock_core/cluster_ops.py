@@ -367,28 +367,29 @@ def cluster_activate(cl_id, force=False):
     records = db_controller.get_cluster_capacity(cluster)
     max_size = records[0]['size_total']
 
-    for snode in snodes:
-        if snode.is_secondary_node:
-            continue
-        secondary_nodes = storage_node_ops.get_secondary_nodes(snode)
-        if not secondary_nodes:
-            logger.error(f"Failed to activate cluster, No enough secondary nodes")
-            set_cluster_status(cl_id, Cluster.STATUS_UNREADY)
-            return False
-        snode.secondary_node_id = secondary_nodes[0]
-        snode.write_to_db()
+    if cluster.ha_type == "ha":
+        for snode in snodes:
+            if snode.is_secondary_node:
+                continue
+            secondary_nodes = storage_node_ops.get_secondary_nodes(snode)
+            if not secondary_nodes:
+                logger.error(f"Failed to activate cluster, No enough secondary nodes")
+                set_cluster_status(cl_id, Cluster.STATUS_UNREADY)
+                return False
+            snode.secondary_node_id = secondary_nodes[0]
+            snode.write_to_db()
 
-    pool_name = "pool1"
-    pool_controller.add_pool(
-        pool_name,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        cl_id)
+        pool_name = "pool1"
+        pool_controller.add_pool(
+            pool_name,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            cl_id)
 
     for snode in snodes:
         if snode.is_secondary_node:
@@ -410,11 +411,12 @@ def cluster_activate(cl_id, force=False):
     set_cluster_status(cl_id, Cluster.STATUS_ACTIVE)
     logger.info("Cluster activated successfully")
 
-    for snode in snodes:
-        lvol_controller.add_lvol_ha("lvol_"+snode.get_id(), utils.parse_size("10g"), snode.get_id(), "ha", pool_name,
-                                    False, False,
-                11, 0, 0, 0, 0,
-                with_snapshot=False, max_size=0, crypto_key1=None, crypto_key2=None)
+    if cluster.ha_type == "ha":
+        for snode in snodes:
+            lvol_controller.add_lvol_ha("lvol_"+snode.get_id(), utils.parse_size("10g"), snode.get_id(), "ha", pool_name,
+                                        False, False,
+                    11, 0, 0, 0, 0,
+                    with_snapshot=False, max_size=0, crypto_key1=None, crypto_key2=None)
 
     return True
 

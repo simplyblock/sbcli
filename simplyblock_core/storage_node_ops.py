@@ -864,6 +864,10 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
         logger.error("Cluster not found: %s", cluster_id)
         return False
 
+    if is_secondary_node is True and cluster.ha_type != "ha":
+        logger.error("Secondary nodes are allowed to be added to HA cluster only")
+        return False
+
     logger.info(f"Adding Storage node: {node_ip}")
     timeout = 60
     if spdk_image:
