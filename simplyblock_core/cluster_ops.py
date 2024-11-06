@@ -371,6 +371,10 @@ def cluster_activate(cl_id, force=False):
         if snode.is_secondary_node:
             continue
         secondary_nodes = storage_node_ops.get_secondary_nodes(snode)
+        if not secondary_nodes:
+            logger.error(f"Failed to activate cluster, No enough secondary nodes")
+            set_cluster_status(cl_id, Cluster.STATUS_UNREADY)
+            return False
         snode.secondary_node_id = secondary_nodes[0]
         snode.write_to_db()
 
