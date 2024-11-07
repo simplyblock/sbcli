@@ -624,6 +624,7 @@ def _prepare_cluster_devices_jm_on_dev(snode, devices):
             if not jm_device:
                 logger.error(f"Failed to create JM device")
                 return False
+            jm_device.status = NVMeDevice.STATUS_UNAVAILABLE
             snode.jm_device = jm_device
         else:
             new_device = _create_storage_device_stack(rpc_client, nvme, snode, after_restart=False)
@@ -664,6 +665,9 @@ def _prepare_cluster_devices_on_restart(snode):
 
     # prepare JM device
     jm_device = snode.jm_device
+    if jm_device.status == JMDevice.STATUS_REMOVED:
+        return True
+
     if jm_device.jm_nvme_bdev_list:
         all_bdevs_found = True
         for bdev_name in jm_device.jm_nvme_bdev_list:
@@ -1751,11 +1755,11 @@ def restart_storage_node(
 
     time.sleep(5)
 
-    # sync jm
-    if snode.jm_vuid:
-        ret = rpc_client.jc_explicit_synchronization(snode.jm_vuid)
-        logger.info(f"JM Sync res: {ret}")
-        time.sleep(10)
+    # # sync jm
+    # if snode.jm_vuid:
+    #     ret = rpc_client.jc_explicit_synchronization(snode.jm_vuid)
+    #     logger.info(f"JM Sync res: {ret}")
+    #     time.sleep(10)
 
     if cluster.status != cluster.STATUS_ACTIVE:
         logger.warning(f"The cluster status is not active ({cluster.status}), adding the node without distribs and lvstore")
