@@ -588,12 +588,14 @@ def _prepare_cluster_devices_partitions(snode, devices, without_jm=False):
 
     snode.nvme_devices = new_devices
 
-    if jm_devices and not without_jm:
+    if jm_devices:
         jm_nvme_bdevs = [dev.nvme_bdev for dev in jm_devices]
         jm_device = _create_jm_stack_on_raid(rpc_client, jm_nvme_bdevs, snode, after_restart=False)
         if not jm_device:
             logger.error(f"Failed to create JM device")
             return False
+        if without_jm:
+            jm_device.status = JMDevice.STATUS_REMOVED
         snode.jm_device = jm_device
 
     return True
@@ -605,12 +607,11 @@ def _prepare_cluster_devices_jm_on_dev(snode, devices, without_jm=False):
     # Set device cluster order
     dev_order = get_next_cluster_device_order(db_controller, snode.cluster_id)
 
-    if not without_jm:
-        jm_device = devices[0]
-        for index, nvme in enumerate(devices):
-            if nvme.size < jm_device.size:
-                jm_device = nvme
-        jm_device.status = NVMeDevice.STATUS_JM
+    jm_device = devices[0]
+    for index, nvme in enumerate(devices):
+        if nvme.size < jm_device.size:
+            jm_device = nvme
+    jm_device.status = NVMeDevice.STATUS_JM
 
     rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
 
@@ -626,6 +627,8 @@ def _prepare_cluster_devices_jm_on_dev(snode, devices, without_jm=False):
             if not jm_device:
                 logger.error(f"Failed to create JM device")
                 return False
+            if without_jm:
+                jm_device.status = JMDevice.STATUS_REMOVED
             snode.jm_device = jm_device
         else:
             new_device = _create_storage_device_stack(rpc_client, nvme, snode, after_restart=False)
