@@ -2686,6 +2686,7 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
         online_jms = get_next_ha_jms(snode)
         logger.debug(f"online_jms: {str(online_jms)}")
         snode.remote_jm_devices = _connect_to_remote_jm_devs(snode, online_jms)
+        snode.jm_vuid = jm_vuid
         snode.write_to_db()
 
     for _ in range(snode.number_of_distribs):
