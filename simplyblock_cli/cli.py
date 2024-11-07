@@ -533,6 +533,7 @@ class CLIWrapper:
         sub_command = self.add_sub_command(subparser, 'add', 'Add Management node to the cluster (local run)')
         sub_command.add_argument("cluster_ip", help='the cluster IP address')
         sub_command.add_argument("cluster_id", help='the cluster UUID')
+        sub_command.add_argument("cluster_secret", help='the cluster secret')
         sub_command.add_argument("ifname", help='Management interface name')
 
         sub_command = self.add_sub_command(subparser, "list", 'List Management nodes')
@@ -1077,8 +1078,9 @@ class CLIWrapper:
             if sub_command == "add":
                 cluster_id = args.cluster_id
                 cluster_ip = args.cluster_ip
+                cluster_secret = args.cluster_secret
                 ifname = args.ifname
-                ret = mgmt_ops.deploy_mgmt_node(cluster_ip, cluster_id, ifname)
+                ret = mgmt_ops.deploy_mgmt_node(cluster_ip, cluster_id, ifname, cluster_secret)
             elif sub_command == "list":
                 ret = mgmt_ops.list_mgmt_nodes(args.json)
             elif sub_command == "remove":

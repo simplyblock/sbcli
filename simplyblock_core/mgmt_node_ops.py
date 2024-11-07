@@ -16,13 +16,14 @@ from simplyblock_core.models.mgmt_node import MgmtNode
 logger = logging.getLogger()
 
 
-def deploy_mgmt_node(cluster_ip, cluster_id, ifname):
+def deploy_mgmt_node(cluster_ip, cluster_id, ifname, cluster_secret):
 
     try:
-        resp = requests.get(f"http://{cluster_ip}/cluster/{cluster_id}")
+        headers = {'Authorization': f'{cluster_id} {cluster_secret}'}
+        resp = requests.get(f"http://{cluster_ip}/cluster/{cluster_id}", headers=headers)
         resp_json = resp.json()
         cluster_data = resp_json['results'][0]
-        logger.info(f"Cluster found! NQN:{cluster_data['nqn']}")
+        logger.info(f"Cluster found, NQN:{cluster_data['nqn']}")
         logger.debug(cluster_data)
     except Exception as e:
         logger.error("Error getting cluster data!")

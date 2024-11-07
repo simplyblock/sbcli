@@ -510,7 +510,8 @@ def _create_storage_device_stack(rpc_client, nvme, snode, after_restart):
     nvme.nvmf_ip = IP
     nvme.nvmf_port = 4420
     nvme.io_error = False
-    nvme.status = NVMeDevice.STATUS_ONLINE
+    if nvme.status != NVMeDevice.STATUS_NEW:
+        nvme.status = NVMeDevice.STATUS_ONLINE
     return nvme
 
 
