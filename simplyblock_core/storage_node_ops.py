@@ -608,7 +608,7 @@ def _prepare_cluster_devices_jm_on_dev(snode, devices):
     for index, nvme in enumerate(devices):
         if nvme.size < jm_device.size:
             jm_device = nvme
-    jm_device.status = NVMeDevice.STATUS_JM
+    # jm_device.status = NVMeDevice.STATUS_JM
 
     rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
 
