@@ -181,6 +181,11 @@ class FioWorkloadTest(TestClusterBase):
                 self.ssh_obj.mount_path(self.mgmt_nodes[0],
                                         device=lvol_fio_path[lvol]["disk"],
                                         mount_path=lvol_fio_path[lvol]["mount_path"])
+        for lvol in list(affected_fio.keys()):
+            self.ssh_obj.kill_processes(node=self.mgmt_nodes[0],
+                                        process_name=lvol)
+        sleep_n_sec(100)
+
         fio_threads.extend(self.run_fio(affected_fio))
 
         # # Step 8: Stop instance
