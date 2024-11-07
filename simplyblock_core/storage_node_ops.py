@@ -539,7 +539,7 @@ def _create_device_partitions(rpc_client, nvme, snode, num_partitions_per_dev, j
     return True
 
 
-def _prepare_cluster_devices_partitions(snode, devices):
+def _prepare_cluster_devices_partitions(snode, devices, without_jm=False):
     db_controller = DBController()
     rpc_client = RPCClient(
         snode.mgmt_ip, snode.rpc_port,
@@ -588,7 +588,7 @@ def _prepare_cluster_devices_partitions(snode, devices):
 
     snode.nvme_devices = new_devices
 
-    if jm_devices:
+    if jm_devices and not without_jm:
         jm_nvme_bdevs = [dev.nvme_bdev for dev in jm_devices]
         jm_device = _create_jm_stack_on_raid(rpc_client, jm_nvme_bdevs, snode, after_restart=False)
         if not jm_device:
@@ -599,16 +599,18 @@ def _prepare_cluster_devices_partitions(snode, devices):
     return True
 
 
-def _prepare_cluster_devices_jm_on_dev(snode, devices):
+def _prepare_cluster_devices_jm_on_dev(snode, devices, without_jm=False):
     db_controller = DBController()
 
-    jm_device = devices[0]
     # Set device cluster order
     dev_order = get_next_cluster_device_order(db_controller, snode.cluster_id)
-    for index, nvme in enumerate(devices):
-        if nvme.size < jm_device.size:
-            jm_device = nvme
-    jm_device.status = NVMeDevice.STATUS_JM
+
+    if not without_jm:
+        jm_device = devices[0]
+        for index, nvme in enumerate(devices):
+            if nvme.size < jm_device.size:
+                jm_device = nvme
+        jm_device.status = NVMeDevice.STATUS_JM
 
     rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
 
@@ -624,7 +626,6 @@ def _prepare_cluster_devices_jm_on_dev(snode, devices):
             if not jm_device:
                 logger.error(f"Failed to create JM device")
                 return False
-            jm_device.status = NVMeDevice.STATUS_UNAVAILABLE
             snode.jm_device = jm_device
         else:
             new_device = _create_storage_device_stack(rpc_client, nvme, snode, after_restart=False)
@@ -1707,9 +1708,9 @@ def restart_storage_node(
     if node_ip:
         # prepare devices on new node
         if snode.num_partitions_per_dev == 0 or snode.jm_percent == 0:
-            ret = _prepare_cluster_devices_jm_on_dev(snode, nvme_devs)
+            ret = _prepare_cluster_devices_jm_on_dev(snode, nvme_devs, without_jm=True)
         else:
-            ret = _prepare_cluster_devices_partitions(snode, nvme_devs)
+            ret = _prepare_cluster_devices_partitions(snode, nvme_devs, without_jm=True)
         if not ret:
             logger.error("Failed to prepare cluster devices")
             # return False
