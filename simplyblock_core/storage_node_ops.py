@@ -1732,7 +1732,6 @@ def restart_storage_node(
 
     if snode.enable_ha_jm:
         logger.info("Connecting to remote JMs")
-        snode.remote_jm_devices = []
         snode.remote_jm_devices = _connect_to_remote_jm_devs(snode)
 
     snode.write_to_db(db_controller.kv_store)
