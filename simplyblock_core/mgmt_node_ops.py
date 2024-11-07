@@ -22,7 +22,7 @@ def deploy_mgmt_node(cluster_ip, cluster_id, ifname, cluster_secret):
         headers = {'Authorization': f'{cluster_id} {cluster_secret}'}
         resp = requests.get(f"http://{cluster_ip}/cluster/{cluster_id}", headers=headers)
         resp_json = resp.json()
-        cluster_data = resp_json['results'][0]
+        cluster_data = resp_json[0]
         logger.info(f"Cluster found, NQN:{cluster_data['nqn']}")
         logger.debug(cluster_data)
     except Exception as e:
