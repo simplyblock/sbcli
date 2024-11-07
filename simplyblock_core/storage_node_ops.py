@@ -608,7 +608,7 @@ def _prepare_cluster_devices_jm_on_dev(snode, devices):
     for index, nvme in enumerate(devices):
         if nvme.size < jm_device.size:
             jm_device = nvme
-    # jm_device.status = NVMeDevice.STATUS_JM
+    jm_device.status = NVMeDevice.STATUS_JM
 
     rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
 
@@ -1751,6 +1751,12 @@ def restart_storage_node(
 
     time.sleep(5)
 
+    # sync jm
+    if snode.jm_vuid:
+        ret = rpc_client.jc_explicit_synchronization(snode.jm_vuid)
+        logger.info(f"JM Sync res: {ret}")
+        time.sleep(10)
+
     if cluster.status != cluster.STATUS_ACTIVE:
         logger.warning(f"The cluster status is not active ({cluster.status}), adding the node without distribs and lvstore")
         logger.info("Done")
@@ -2655,7 +2661,7 @@ def get_next_ha_jms(current_node):
 
 def get_node_jm_names(current_node):
     jm_list = []
-    if current_node.jm_device:
+    if current_node.jm_device and current_node.jm_device.status == JMDevice.STATUS_ONLINE:
         jm_list.append(current_node.jm_device.jm_bdev)
     else:
         jm_list.append("JM_LOCAL")
