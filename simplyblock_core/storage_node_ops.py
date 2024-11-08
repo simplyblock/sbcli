@@ -2067,6 +2067,9 @@ def resume_storage_node(node_id):
     logger.info("Connecting to remote devices")
     snode = db_controller.get_storage_node_by_id(node_id)
     snode.remote_devices = _connect_to_remote_devs(snode)
+    if snode.enable_ha_jm:
+        snode.remote_jm_devices = _connect_to_remote_jm_devs(snode)
+
     snode.write_to_db(db_controller.kv_store)
 
     rpc_client = RPCClient(
