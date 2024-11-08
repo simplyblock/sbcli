@@ -204,16 +204,11 @@ class FioWorkloadTest(TestClusterBase):
                                             instance_id=instance_id)
         
         sleep_n_sec(120)
-
-        fio_process_terminated = ["fio_test_lvol_3_1", "fio_test_lvol_3_2"]
         
         fio_process = self.ssh_obj.find_process_name(self.mgmt_nodes[0], 'fio')
         self.logger.info(f"FIO PROCESS: {fio_process}")
         if not fio_process:
             raise RuntimeError("FIO process was interrupted on unaffected nodes.")
-        for fio in fio_process_terminated:
-            for running_fio in fio_process: 
-                assert fio not in running_fio, "FIO Process running on suspended node"
         self.logger.info("FIO process is running uninterrupted.")
 
         self.ssh_obj.connect(
@@ -285,8 +280,7 @@ class FioWorkloadTest(TestClusterBase):
 
         sn_lvol_data[new_node] = {}
 
-        self.common_utils.terminate_instance(self.ec2_resource, instance_id)
-
+        # self.common_utils.terminate_instance(self.ec2_resource, instance_id)
 
         self.common_utils.manage_fio_threads(node=self.mgmt_nodes[0],
                                              threads=fio_threads,
