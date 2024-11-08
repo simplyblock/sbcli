@@ -1711,9 +1711,9 @@ def restart_storage_node(
     if node_ip:
         # prepare devices on new node
         if snode.num_partitions_per_dev == 0 or snode.jm_percent == 0:
-            ret = _prepare_cluster_devices_jm_on_dev(snode, nvme_devs, without_jm=True)
+            ret = _prepare_cluster_devices_jm_on_dev(snode, nvme_devs, without_jm=False)
         else:
-            ret = _prepare_cluster_devices_partitions(snode, nvme_devs, without_jm=True)
+            ret = _prepare_cluster_devices_partitions(snode, nvme_devs, without_jm=False)
         if not ret:
             logger.error("Failed to prepare cluster devices")
             # return False
@@ -1758,12 +1758,6 @@ def restart_storage_node(
         distr_controller.send_dev_status_event(dev, dev.status)
 
     time.sleep(5)
-
-    # # sync jm
-    # if snode.jm_vuid:
-    #     ret = rpc_client.jc_explicit_synchronization(snode.jm_vuid)
-    #     logger.info(f"JM Sync res: {ret}")
-    #     time.sleep(10)
 
     if cluster.status != cluster.STATUS_ACTIVE:
         logger.warning(f"The cluster status is not active ({cluster.status}), adding the node without distribs and lvstore")
@@ -2799,6 +2793,11 @@ def _create_bdev_stack(snode, lvstore_stack=None):
             ret = rpc_client.bdev_PT_NoExcl_create(**params)
 
         elif type == "bdev_raid":
+            # sync jm
+            if snode.jm_vuid:
+                ret = rpc_client.jc_explicit_synchronization(snode.jm_vuid)
+                logger.info(f"JM Sync res: {ret}")
+                time.sleep(10)
             distribs_list = bdev["distribs_list"]
             strip_size_kb = params["strip_size_kb"]
             ret = rpc_client.bdev_raid_create(name, distribs_list, strip_size_kb=strip_size_kb)
