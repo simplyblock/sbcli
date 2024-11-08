@@ -206,7 +206,6 @@ class CommonUtils:
         
         # Get block device mappings (volumes) from the source instance
         block_device_mappings = instance.block_device_mappings
-        breakpoint()
         
         # Prepare the block device mappings for the new instance
         new_block_device_mappings = []

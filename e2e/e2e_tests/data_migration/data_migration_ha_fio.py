@@ -267,6 +267,10 @@ class FioWorkloadTest(TestClusterBase):
         self.validate_migration_for_node(timestamp, 5000, None)
 
         # Step 10: Remove stopped instance
+        sn_remove = f"{self.base_cmd} storage-node remove {affected_node} --force-remove"
+        self.ssh_obj.exec_command(node=self.mgmt_nodes[0],
+                                  command=sn_remove)
+        sleep_n_sec(10)
         sn_delete = f"{self.base_cmd} storage-node delete {affected_node}"
         self.ssh_obj.exec_command(node=self.mgmt_nodes[0],
                                   command=sn_delete)
