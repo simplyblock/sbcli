@@ -926,23 +926,23 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
         spdk_cpu_mask = hex(int(math.pow(2, cpu_count))-2)
 
     spdk_cores = utils.hexa_to_cpu_list(spdk_cpu_mask)
-    if cpu_count < spdk_cores[-1]:
-        print(f"ERROR: The cpu mask {spdk_cpu_mask} is greater than the total cpus on the system {cpu_count}")
-        return False
-    if spdk_cores[-1] >= 64:
-        print(f"ERROR: The provided cpu mask {spdk_cpu_mask} has values greater than 63, which is not allowed")
-        return False
-    if len(spdk_cores) >= 4:
-        app_thread_core, jm_cpu_core, poller_cpu_cores, alceml_cpu_cores, alceml_worker_cpu_cores, distrib_cpu_cores, jc_singleton_core = utils.calculate_core_allocation(
-            spdk_cores)
-
-        pollers_mask = utils.generate_mask(poller_cpu_cores)
-        app_thread_mask = utils.generate_mask(app_thread_core)
-        if jc_singleton_core:
-            jc_singleton_mask = utils.decimal_to_hex_power_of_2(jc_singleton_core[0])
-        #spdk_cpu_mask = utils.generate_mask(spdk_cores)
-        jm_cpu_mask = utils.generate_mask(jm_cpu_core)
-        #distrib_cpu_mask = utils.generate_mask(distrib_cpu_cores)
+    # if cpu_count < spdk_cores[-1]:
+    #     print(f"ERROR: The cpu mask {spdk_cpu_mask} is greater than the total cpus on the system {cpu_count}")
+    #     return False
+    # if spdk_cores[-1] >= 64:
+    #     print(f"ERROR: The provided cpu mask {spdk_cpu_mask} has values greater than 63, which is not allowed")
+    #     return False
+    # if len(spdk_cores) >= 4:
+    #     app_thread_core, jm_cpu_core, poller_cpu_cores, alceml_cpu_cores, alceml_worker_cpu_cores, distrib_cpu_cores, jc_singleton_core = utils.calculate_core_allocation(
+    #         spdk_cores)
+    #
+    #     pollers_mask = utils.generate_mask(poller_cpu_cores)
+    #     app_thread_mask = utils.generate_mask(app_thread_core)
+    #     if jc_singleton_core:
+    #         jc_singleton_mask = utils.decimal_to_hex_power_of_2(jc_singleton_core[0])
+    #     #spdk_cpu_mask = utils.generate_mask(spdk_cores)
+    #     jm_cpu_mask = utils.generate_mask(jm_cpu_core)
+    #     #distrib_cpu_mask = utils.generate_mask(distrib_cpu_cores)
 
     # Calculate pool count
     if cloud_instance['type']:
