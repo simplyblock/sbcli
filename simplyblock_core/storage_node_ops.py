@@ -2891,13 +2891,17 @@ def make_sec_new_primary(node_id):
         logger.error(f"snode not found: {node_id}")
         return False
 
+    dev_order = get_next_cluster_device_order(db_controller, snode.cluster_id)
+    for dev in snode.nvme_devices:
+        if dev.status == NVMeDevice.STATUS_NEW:
+            dev.cluster_device_order = dev_order
+            snode.write_to_db()
+            dev_order += 1
+            device_controller.device_set_online(dev.get_id())
+
     for dev in snode.nvme_devices:
         if dev.status == NVMeDevice.STATUS_REMOVED:
             device_controller.device_set_failed(dev.get_id())
-
-    for dev in snode.nvme_devices:
-        if dev.status == NVMeDevice.STATUS_NEW:
-            device_controller.add_device(dev.get_id())
 
     snode = db_controller.get_storage_node_by_id(node_id)
     snode.primary_ip = snode.mgmt_ip
