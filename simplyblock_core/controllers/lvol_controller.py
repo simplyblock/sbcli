@@ -625,7 +625,7 @@ def add_lvol_on_node(lvol, snode, ha_comm_addrs=None, ha_inode_self=None):
     error = utils.validate_add_lvol_or_snap_on_node(memory_free, huge_free, snode.max_lvol, lvol.size,  total_node_capacity, len(snode.lvols))
     if error:
         logger.error(error)
-        return False, f"Failed to add lvol on node {snode.get_id()}"
+        # return False, f"Failed to add lvol on node {snode.get_id()}"
 
     ret, msg = _create_bdev_stack(lvol, snode, ha_comm_addrs, ha_inode_self)
     if not ret:

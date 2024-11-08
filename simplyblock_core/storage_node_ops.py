@@ -1002,7 +1002,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
     if not satisfied:
         logger.error(
             f"Not enough memory for the provided max_lvo: {max_lvol}, max_snap: {max_snap}, max_prov: {max_prov}.. Exiting")
-        return False
+        # return False
 
     logger.info("Joining docker swarm...")
     cluster_docker = utils.get_docker_client(cluster_id)
