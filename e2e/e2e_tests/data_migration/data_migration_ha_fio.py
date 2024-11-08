@@ -189,37 +189,37 @@ class FioWorkloadTest(TestClusterBase):
         fio_threads.extend(self.run_fio(affected_fio))
 
         # # Step 8: Stop instance
-        # # timestamp = int(datetime.now().timestamp())
-        # affected_node = list(sn_lvol_data.keys())[2]
-        # affected_node_details = self.sbcli_utils.get_storage_node_details(storage_node_id=affected_node)
-        # instance_id = affected_node_details[0]["cloud_instance_id"]
+        # timestamp = int(datetime.now().timestamp())
+        affected_node = list(sn_lvol_data.keys())[2]
+        affected_node_details = self.sbcli_utils.get_storage_node_details(storage_node_id=affected_node)
+        instance_id = affected_node_details[0]["cloud_instance_id"]
 
-        # self.logger.info("Creating New instance")
-        # new_node_instance_id, new_node_ip = \
-        #     self.common_utils.create_instance_from_existing(ec2_resource=self.ec2_resource, 
-        #                                                     instance_id=instance_id,
-        #                                                     instance_name="e2e-new-instance")
+        self.logger.info("Creating New instance")
+        new_node_instance_id, new_node_ip = \
+            self.common_utils.create_instance_from_existing(ec2_resource=self.ec2_resource, 
+                                                            instance_id=instance_id,
+                                                            instance_name="e2e-new-instance")
 
-        # self.common_utils.stop_ec2_instance(self.ec2_resource,
-        #                                     instance_id=instance_id)
+        self.common_utils.stop_ec2_instance(self.ec2_resource,
+                                            instance_id=instance_id)
         
-        # sleep_n_sec(120)
+        sleep_n_sec(120)
 
-        # fio_process_terminated = ["fio_test_lvol_3_1", "fio_test_lvol_3_2"]
+        fio_process_terminated = ["fio_test_lvol_3_1", "fio_test_lvol_3_2"]
         
-        # # fio_process = self.ssh_obj.find_process_name(self.mgmt_nodes[0], 'fio')
-        # # self.logger.info(f"FIO PROCESS: {fio_process}")
-        # # if not fio_process:
-        # #     raise RuntimeError("FIO process was interrupted on unaffected nodes.")
-        # # for fio in fio_process_terminated:
-        # #     for running_fio in fio_process: 
-        # #         assert fio not in running_fio, "FIO Process running on suspended node"
-        # # self.logger.info("FIO process is running uninterrupted.")
+        fio_process = self.ssh_obj.find_process_name(self.mgmt_nodes[0], 'fio')
+        self.logger.info(f"FIO PROCESS: {fio_process}")
+        if not fio_process:
+            raise RuntimeError("FIO process was interrupted on unaffected nodes.")
+        for fio in fio_process_terminated:
+            for running_fio in fio_process: 
+                assert fio not in running_fio, "FIO Process running on suspended node"
+        self.logger.info("FIO process is running uninterrupted.")
 
-        # self.ssh_obj.connect(
-        #     address=new_node_ip,
-        #     bastion_server_address=self.bastion_server,
-        # )
+        self.ssh_obj.connect(
+            address=new_node_ip,
+            bastion_server_address=self.bastion_server,
+        )
         
         # Step 9: Add node
         # self.sbcli_utils.add_storage_node(
@@ -243,49 +243,49 @@ class FioWorkloadTest(TestClusterBase):
         #     spdk_cpu_mask=affected_node_details[0]["spdk_cpu_mask"]
         # )
 
-        # self.ssh_obj.deploy_storage_node(node=new_node_ip)
+        self.ssh_obj.deploy_storage_node(node=new_node_ip)
 
-        # self.ssh_obj.add_storage_node(
-        #     node=self.mgmt_nodes[0],
-        #     cluster_id=self.cluster_id,
-        #     node_ip=new_node_ip,
-        #     ifname="eth0",
-        #     max_lvol=affected_node_details[0]["max_lvol"],
-        #     max_snap=affected_node_details[0]["max_snap"],
-        #     max_prov=convert_bytes_to_gb_tb(affected_node_details[0]["max_prov"]),
-        #     number_of_distribs=affected_node_details[0]["number_of_distribs"],
-        #     number_of_devices=affected_node_details[0]["number_of_devices"],
-        #     partitions=affected_node_details[0]["num_partitions_per_dev"],
-        #     jm_percent=affected_node_details[0]["jm_percent"],
-        #     disable_ha_jm=not affected_node_details[0]["enable_ha_jm"],
-        #     enable_test_device=affected_node_details[0]["enable_test_device"],
-        #     # iobuf_small_pool_count=affected_node_details[0]["iobuf_small_pool_count"],
-        #     # iobuf_large_pool_count=affected_node_details[0]["iobuf_large_pool_count"],
-        #     spdk_debug=affected_node_details[0]["spdk_debug"],
-        #     spdk_image=affected_node_details[0]["spdk_image"],
-        #     spdk_cpu_mask=affected_node_details[0]["spdk_cpu_mask"]
-        # )
-        # sleep_n_sec(200)
-        # new_node = self.sbcli_utils.get_node_without_lvols()
+        self.ssh_obj.add_storage_node(
+            node=self.mgmt_nodes[0],
+            cluster_id=self.cluster_id,
+            node_ip=new_node_ip,
+            ifname="eth0",
+            max_lvol=affected_node_details[0]["max_lvol"],
+            max_snap=affected_node_details[0]["max_snap"],
+            max_prov=convert_bytes_to_gb_tb(affected_node_details[0]["max_prov"]),
+            number_of_distribs=affected_node_details[0]["number_of_distribs"],
+            number_of_devices=affected_node_details[0]["number_of_devices"],
+            partitions=affected_node_details[0]["num_partitions_per_dev"],
+            jm_percent=affected_node_details[0]["jm_percent"],
+            disable_ha_jm=not affected_node_details[0]["enable_ha_jm"],
+            enable_test_device=affected_node_details[0]["enable_test_device"],
+            # iobuf_small_pool_count=affected_node_details[0]["iobuf_small_pool_count"],
+            # iobuf_large_pool_count=affected_node_details[0]["iobuf_large_pool_count"],
+            spdk_debug=affected_node_details[0]["spdk_debug"],
+            spdk_image=affected_node_details[0]["spdk_image"],
+            spdk_cpu_mask=affected_node_details[0]["spdk_cpu_mask"]
+        )
+        sleep_n_sec(200)
+        new_node = self.sbcli_utils.get_node_without_lvols()
 
-        # # self.logger.info(f"Validating migration tasks for node {new_node}.")
-        # # self.validate_migration_for_node(timestamp, 5000, None)
+        # self.logger.info(f"Validating migration tasks for node {new_node}.")
+        self.validate_migration_for_node(timestamp, 5000, None)
 
-        # # Step 10: Remove stopped instance
-        # sn_delete = f"{self.base_cmd} storage-node delete {affected_node}"
-        # self.ssh_obj.exec_command(node=self.mgmt_nodes[0],
-        #                           command=sn_delete)
+        # Step 10: Remove stopped instance
+        sn_delete = f"{self.base_cmd} storage-node delete {affected_node}"
+        self.ssh_obj.exec_command(node=self.mgmt_nodes[0],
+                                  command=sn_delete)
         
-        # sleep_n_sec(200)
+        sleep_n_sec(200)
 
-        # del sn_lvol_data[affected_node]
+        del sn_lvol_data[affected_node]
         
-        # affected_node_ip = affected_node_details[0]["mgmt_ip"]
-        # del self.ssh_obj.ssh_connections[affected_node_ip]
+        affected_node_ip = affected_node_details[0]["mgmt_ip"]
+        del self.ssh_obj.ssh_connections[affected_node_ip]
 
-        # sn_lvol_data[new_node] = {}
+        sn_lvol_data[new_node] = {}
 
-        # self.common_utils.terminate_instance(self.ec2_resource, instance_id)
+        self.common_utils.terminate_instance(self.ec2_resource, instance_id)
 
 
         self.common_utils.manage_fio_threads(node=self.mgmt_nodes[0],
@@ -296,7 +296,7 @@ class FioWorkloadTest(TestClusterBase):
         for thread in fio_threads:
             thread.join()
 
-        # self.common_utils.terminate_instance(self.ec2_resource, new_node_instance_id)
+        self.common_utils.terminate_instance(self.ec2_resource, new_node_instance_id)
 
         self.logger.info("Test completed successfully.")
 
