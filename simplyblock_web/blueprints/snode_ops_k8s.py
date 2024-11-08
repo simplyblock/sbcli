@@ -446,3 +446,13 @@ def spdk_process_is_up():
     else:
         return utils.get_response(False, f"SPDK container is not running")
 
+
+@bp.route('/get_file_content/<string:file_name>', methods=['GET'])
+def get_file_content(file_name):
+    out, err, _ = node_utils.run_command(f"cat /etc/simplyblock/{file_name}")
+    if out:
+        return utils.get_response(out)
+    elif err:
+        err = err.decode("utf-8")
+        logger.debug(err)
+        return utils.get_response(None, err)
