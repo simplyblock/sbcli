@@ -189,7 +189,7 @@ class FioWorkloadTest(TestClusterBase):
         fio_threads.extend(self.run_fio(affected_fio))
 
         # # Step 8: Stop instance
-        # timestamp = int(datetime.now().timestamp())
+        timestamp = int(datetime.now().timestamp())
         affected_node = list(sn_lvol_data.keys())[2]
         affected_node_details = self.sbcli_utils.get_storage_node_details(storage_node_id=affected_node)
         instance_id = affected_node_details[0]["cloud_instance_id"]
@@ -199,9 +199,6 @@ class FioWorkloadTest(TestClusterBase):
             self.common_utils.create_instance_from_existing(ec2_resource=self.ec2_resource, 
                                                             instance_id=instance_id,
                                                             instance_name="e2e-new-instance")
-
-        self.common_utils.stop_ec2_instance(self.ec2_resource,
-                                            instance_id=instance_id)
         
         sleep_n_sec(120)
         
@@ -264,6 +261,15 @@ class FioWorkloadTest(TestClusterBase):
         new_node = self.sbcli_utils.get_node_without_lvols()
 
         # self.logger.info(f"Validating migration tasks for node {new_node}.")
+        self.validate_migration_for_node(timestamp, 5000, None)
+
+        timestamp = int(datetime.now().timestamp())
+
+        self.common_utils.stop_ec2_instance(self.ec2_resource,
+                                            instance_id=instance_id)
+        
+        sleep_n_sec(100)
+
         self.validate_migration_for_node(timestamp, 5000, None)
 
         # Step 10: Remove stopped instance
@@ -504,6 +510,10 @@ class FioWorkloadTest(TestClusterBase):
         """
         start_time = datetime.now()
         end_time = start_time + timedelta(seconds=timeout)
+
+        output, _ = self.ssh_obj.exec_command(node=self.mgmt_nodes[0], 
+                                              command=f"{self.base_cmd} cluster list-tasks {self.cluster_id}")
+        self.logger.info(f"Data migration output: {output}")
 
         while datetime.now() < end_time:
             tasks = self.sbcli_utils.get_cluster_tasks(self.cluster_id)
