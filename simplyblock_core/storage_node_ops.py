@@ -1683,7 +1683,8 @@ def restart_storage_node(
     known_devices_sn = []
     devices_sn = [d.serial_number for d in nvme_devs]
     for db_dev in snode.nvme_devices:
-        known_devices_sn.append(db_dev.serial_number)
+        if db_dev.status != NVMeDevice.STATUS_NEW:
+            known_devices_sn.append(db_dev.serial_number)
         if db_dev.status == NVMeDevice.STATUS_FAILED_AND_MIGRATED:
             continue
         if db_dev.serial_number in devices_sn:
@@ -1708,7 +1709,7 @@ def restart_storage_node(
             snode.nvme_devices.append(dev)
 
     snode.write_to_db(db_controller.kv_store)
-    if node_ip:
+    if node_ip and node_ip != snode.api_endpoint:
         # prepare devices on new node
         if snode.num_partitions_per_dev == 0 or snode.jm_percent == 0:
             ret = _prepare_cluster_devices_jm_on_dev(snode, nvme_devs, without_jm=False)
@@ -2895,8 +2896,11 @@ def make_sec_new_primary(node_id):
     for dev in snode.nvme_devices:
         if dev.status == NVMeDevice.STATUS_NEW:
             dev.cluster_device_order = dev_order
-            snode.write_to_db()
             dev_order += 1
+    snode.write_to_db()
+
+    for dev in snode.nvme_devices:
+        if dev.status == NVMeDevice.STATUS_NEW:
             device_controller.device_set_online(dev.get_id())
 
     for dev in snode.nvme_devices:
