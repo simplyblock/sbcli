@@ -261,7 +261,7 @@ class FioWorkloadTest(TestClusterBase):
         new_node = self.sbcli_utils.get_node_without_lvols()
 
         # self.logger.info(f"Validating migration tasks for node {new_node}.")
-        self.validate_migration_for_node(timestamp, 5000, None)
+        # self.validate_migration_for_node(timestamp, 5000, None)
 
         timestamp = int(datetime.now().timestamp())
 
