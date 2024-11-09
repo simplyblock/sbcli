@@ -1756,11 +1756,6 @@ def restart_storage_node(
 
     time.sleep(5)
 
-    # sync jm
-    if snode.jm_vuid:
-        ret = rpc_client.jc_explicit_synchronization(snode.jm_vuid)
-        logger.info(f"JM Sync res: {ret}")
-
     if cluster.status != cluster.STATUS_ACTIVE:
         logger.warning(f"The cluster status is not active ({cluster.status}), adding the node without distribs and lvstore")
         logger.info("Done")
@@ -2777,7 +2772,7 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
 
     # creating lvstore on secondary
     sec_node_1 = db_controller.get_storage_node_by_id(snode.secondary_node_id)
-    ret, err = _create_bdev_stack(sec_node_1, lvstore_stack)
+    ret, err = _create_bdev_stack(sec_node_1, lvstore_stack, primary_node=snode)
     if err:
         logger.error(f"Failed to create lvstore on node {sec_node_1.get_id()}")
         logger.error(err)
@@ -2786,7 +2781,7 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
     return True
 
 
-def _create_bdev_stack(snode, lvstore_stack=None):
+def _create_bdev_stack(snode, lvstore_stack=None, primary_node=False):
     rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
 
     created_bdevs = []
@@ -2802,7 +2797,18 @@ def _create_bdev_stack(snode, lvstore_stack=None):
         params = bdev['params']
 
         if type == "bdev_distr":
-            params['jm_names'] = get_node_jm_names(snode)
+            if snode.is_secondary_node and primary_node:
+                jm_list = []
+                if snode.jm_device and snode.jm_device.status == JMDevice.STATUS_ONLINE:
+                    jm_list.append(snode.jm_device.jm_bdev)
+                else:
+                    jm_list.append("JM_LOCAL")
+                for jm_dev in primary_node.remote_jm_devices[:2]:
+                    jm_list.append(jm_dev.remote_bdev)
+                params['jm_names'] = jm_list
+            else:
+                params['jm_names'] = get_node_jm_names(snode)
+
             if snode.distrib_cpu_cores:
                 distrib_cpu_mask = utils.decimal_to_hex_power_of_2(snode.distrib_cpu_cores[snode.distrib_cpu_index])
                 params['distrib_cpu_mask'] = distrib_cpu_mask
@@ -2821,6 +2827,12 @@ def _create_bdev_stack(snode, lvstore_stack=None):
             ret = rpc_client.bdev_PT_NoExcl_create(**params)
 
         elif type == "bdev_raid":
+            # sync jm
+            if snode.jm_vuid:
+                ret = rpc_client.jc_explicit_synchronization(snode.jm_vuid)
+                logger.info(f"JM Sync res: {ret}")
+                time.sleep(5)
+
             distribs_list = bdev["distribs_list"]
             strip_size_kb = params["strip_size_kb"]
             ret = rpc_client.bdev_raid_create(name, distribs_list, strip_size_kb=strip_size_kb)
