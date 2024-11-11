@@ -259,6 +259,7 @@ class FioWorkloadTest(TestClusterBase):
         )
         sleep_n_sec(200)
         new_node = self.sbcli_utils.get_node_without_lvols()
+        self.sbcli_utils.wait_for_storage_node_status(node_id=new_node, status="online", timeout=500)
 
         # self.logger.info(f"Validating migration tasks for node {new_node}.")
         # self.validate_migration_for_node(timestamp, 5000, None)
