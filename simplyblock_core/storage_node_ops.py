@@ -440,6 +440,7 @@ def _create_jm_stack_on_device(rpc_client, nvme, snode, after_restart):
 
 
 def _create_storage_device_stack(rpc_client, nvme, snode, after_restart):
+    db_controller = DBController()
     nvme_bdev = nvme.nvme_bdev
     if snode.enable_test_device:
         test_name = f"{nvme.nvme_bdev}_test"
@@ -478,6 +479,7 @@ def _create_storage_device_stack(rpc_client, nvme, snode, after_restart):
         logger.error(f"Failed to create pt noexcl bdev: {pt_name}")
         return False
 
+    cluster = db_controller.get_cluster_by_id(snode.cluster_id)
     subsystem_nqn = snode.subsystem + ":dev:" + alceml_id
     logger.info("creating subsystem %s", subsystem_nqn)
     ret = rpc_client.subsystem_create(subsystem_nqn, 'sbcli-cn', alceml_id)
@@ -492,7 +494,7 @@ def _create_storage_device_stack(rpc_client, nvme, snode, after_restart):
                     if ty['trtype'] == tr_type:
                         found = True
             if found is False:
-                ret = rpc_client.transport_create(tr_type)
+                ret = rpc_client.transport_create(tr_type, cluster.qpair_count)
             logger.info("adding listener for %s on IP %s" % (subsystem_nqn, iface.ip4_address))
             ret = rpc_client.listeners_create(subsystem_nqn, tr_type, iface.ip4_address, "4420")
             IP = iface.ip4_address
@@ -720,6 +722,7 @@ def _prepare_cluster_devices_on_restart(snode):
                 logger.error(f"Failed to create pt noexcl bdev: {pt_name}")
                 return False
 
+            cluster = db_controller.get_cluster_by_id(snode.cluster_id)
             subsystem_nqn = snode.subsystem + ":dev:" + jm_bdev
             logger.info("creating subsystem %s", subsystem_nqn)
             ret = rpc_client.subsystem_create(subsystem_nqn, 'sbcli-cn', jm_bdev)
@@ -734,7 +737,7 @@ def _prepare_cluster_devices_on_restart(snode):
                             if ty['trtype'] == tr_type:
                                 found = True
                     if found is False:
-                        ret = rpc_client.transport_create(tr_type)
+                        ret = rpc_client.transport_create(tr_type, cluster.qpair_count)
                     logger.info("adding listener for %s on IP %s" % (subsystem_nqn, iface.ip4_address))
                     ret = rpc_client.listeners_create(subsystem_nqn, tr_type, iface.ip4_address, "4420")
                     IP = iface.ip4_address
