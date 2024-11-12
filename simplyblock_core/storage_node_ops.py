@@ -2908,7 +2908,7 @@ def make_sec_new_primary(node_id):
             tasks_controller.add_new_device_mig_task(dev.get_id())
 
     for node in db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id):
-        if node == StorageNode.STATUS_ONLINE:
+        if node.status == StorageNode.STATUS_ONLINE:
             send_cluster_map(node.get_id())
 
     for dev in snode.nvme_devices:
