@@ -2904,7 +2904,12 @@ def make_sec_new_primary(node_id):
 
     for dev in snode.nvme_devices:
         if dev.status == NVMeDevice.STATUS_NEW:
-            device_controller.device_set_online(dev.get_id())
+            device_controller.device_set_state(dev.get_id(), NVMeDevice.STATUS_ONLINE)
+            tasks_controller.add_new_device_mig_task(dev.get_id())
+
+    for node in db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id):
+        if node == StorageNode.STATUS_ONLINE:
+            send_cluster_map(node.get_id())
 
     for dev in snode.nvme_devices:
         if dev.status == NVMeDevice.STATUS_REMOVED:
