@@ -1488,6 +1488,8 @@ def restart_storage_node(
                         'net_type': device['net_type']}))
             snode.data_nics = data_nics
             snode.hostname = node_info['hostname']
+        else:
+            node_ip = None
 
     logger.info(f"Restarting Storage node: {snode.mgmt_ip}")
     snode_api = SNodeClient(snode.api_endpoint, timeout=5*60, retry=3)
@@ -1683,8 +1685,8 @@ def restart_storage_node(
     known_devices_sn = []
     devices_sn = [d.serial_number for d in nvme_devs]
     for db_dev in snode.nvme_devices:
-        if db_dev.status != NVMeDevice.STATUS_NEW:
-            known_devices_sn.append(db_dev.serial_number)
+        # if db_dev.status != NVMeDevice.STATUS_NEW:
+        known_devices_sn.append(db_dev.serial_number)
         if db_dev.status == NVMeDevice.STATUS_FAILED_AND_MIGRATED:
             continue
         if db_dev.serial_number in devices_sn:
@@ -1709,7 +1711,7 @@ def restart_storage_node(
             snode.nvme_devices.append(dev)
 
     snode.write_to_db(db_controller.kv_store)
-    if node_ip and node_ip != snode.api_endpoint:
+    if node_ip:
         # prepare devices on new node
         if snode.num_partitions_per_dev == 0 or snode.jm_percent == 0:
             ret = _prepare_cluster_devices_jm_on_dev(snode, nvme_devs, without_jm=False)
