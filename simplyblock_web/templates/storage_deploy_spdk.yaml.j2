@@ -122,7 +122,10 @@ spec:
           value: "{{ RPC_USERNAME }}"
         - name: RPC_PASSWORD
           value: "{{ RPC_PASSWORD }}"
-
+        - name: MULTI_THREADING_ENABLED
+          value: "True"
+        - name: TIMEOUT
+          value: "300"
       - name: fluentd
         image: fluent/fluentd-kubernetes-daemonset:v1.17.1-debian-graylog-1.2
         imagePullPolicy: "Always"
