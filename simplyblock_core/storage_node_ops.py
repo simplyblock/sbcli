@@ -656,7 +656,8 @@ def _prepare_cluster_devices_on_restart(snode):
 
     for index, nvme in enumerate(snode.nvme_devices):
 
-        if nvme.status not in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_UNAVAILABLE, NVMeDevice.STATUS_READONLY]:
+        if nvme.status not in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_UNAVAILABLE,
+                               NVMeDevice.STATUS_READONLY, NVMeDevice.STATUS_NEW]:
             logger.debug(f"Device is skipped: {nvme.get_id()}, status: {nvme.status}")
             continue
 
@@ -664,12 +665,12 @@ def _prepare_cluster_devices_on_restart(snode):
         if not dev:
             logger.error(f"Failed to create dev stack {nvme.get_id()}")
             return False
-        nvme.status = NVMeDevice.STATUS_ONLINE
-        device_events.device_restarted(dev)
+        if nvme.status == NVMeDevice.STATUS_ONLINE:
+            device_events.device_restarted(dev)
 
     # prepare JM device
     jm_device = snode.jm_device
-    if jm_device.status == JMDevice.STATUS_REMOVED:
+    if jm_device is None or jm_device.status == JMDevice.STATUS_REMOVED:
         return True
 
     if jm_device.jm_nvme_bdev_list:
