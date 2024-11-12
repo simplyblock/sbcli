@@ -1,7 +1,7 @@
-SIMPLY_BLOCK_COMMAND_NAME=sbcli-debug
-SIMPLY_BLOCK_VERSION=2.1.9
+SIMPLY_BLOCK_COMMAND_NAME=sbcli-dev
+SIMPLY_BLOCK_VERSION=4.0.65
 
 
-SIMPLY_BLOCK_DOCKER_IMAGE=simplyblock/simplyblock:debug
+SIMPLY_BLOCK_DOCKER_IMAGE=simplyblock/simplyblock:main
 
 DOCKER_USER=hamdysimplyblock

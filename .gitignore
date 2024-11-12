@@ -1,4 +1,4 @@
 /.idea/
 *.pyc
 env_var
-e2e/logs/*.log
+e2e/logs/*.log!/env_var
