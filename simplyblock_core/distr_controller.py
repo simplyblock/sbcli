@@ -35,6 +35,8 @@ def send_node_status_event(node, node_status, target_node=None):
 
 
 def send_dev_status_event(device, dev_status, target_node=None):
+    if dev_status == NVMeDevice.STATUS_NEW:
+        return
     db_controller = DBController()
     storage_ID = device.cluster_device_order
     node_status_event = {

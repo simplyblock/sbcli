@@ -837,3 +837,9 @@ class RPCClient:
             "file": file,
         }
         return self._request("bdev_lvs_dump", params)
+
+    def jc_explicit_synchronization(self, jm_vuid):
+        params = {
+            "jm_vuid": jm_vuid
+        }
+        return self._request("jc_explicit_synchronization", params)

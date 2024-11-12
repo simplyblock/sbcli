@@ -818,7 +818,7 @@ def restart_jm_device(device_id, force=False, format_alceml=False):
             bdevs_names = [d['name'] for d in rpc_client.get_bdevs()]
             jm_nvme_bdevs = []
             for dev in snode.nvme_devices:
-                if dev.status != NVMeDevice.STATUS_ONLINE:
+                if dev.status not in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_NEW]:
                     continue
                 dev_part = f"{dev.nvme_bdev[:-2]}p1"
                 if dev_part in bdevs_names:

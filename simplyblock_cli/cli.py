@@ -57,6 +57,7 @@ class CLIWrapper:
         sub_command.add_argument("--iobuf_large_bufsize", help='bdev_set_options param', dest='large_bufsize',  type=int, default=0)
         sub_command.add_argument("--enable-test-device", help='Enable creation of test device', action='store_true')
         sub_command.add_argument("--disable-ha-jm", help='Disable HA JM for distrib creation', action='store_false', dest='enable_ha_jm', default=True)
+        sub_command.add_argument("--namespace", help='k8s namespace to deploy on',)
 
 
         # delete storage node
@@ -696,7 +697,7 @@ class CLIWrapper:
         if args.debug:
             self.logger.setLevel(logging.DEBUG)
         else:
-            self.logger.setLevel(constants.LOG_LEVEL)
+            self.logger.setLevel(logging.INFO)
         logging.getLogger("urllib3.connectionpool").setLevel(logging.WARNING)
 
         args_dict = args.__dict__
@@ -742,6 +743,7 @@ class CLIWrapper:
                 enable_test_device = args.enable_test_device
                 enable_ha_jm = args.enable_ha_jm
                 number_of_distribs = args.number_of_distribs
+                namespace = args.namespace
 
                 out = storage_ops.add_node(
                     cluster_id=cluster_id,
@@ -760,7 +762,7 @@ class CLIWrapper:
                     jm_percent=jm_percent,
                     number_of_devices=number_of_devices,
                     enable_test_device=enable_test_device,
-                    namespace=None,
+                    namespace=namespace,
                     number_of_distribs=number_of_distribs,
                     enable_ha_jm=enable_ha_jm
                 )

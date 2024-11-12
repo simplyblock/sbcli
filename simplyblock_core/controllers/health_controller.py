@@ -40,15 +40,15 @@ def check_cluster(cluster_id):
                 "Status": "ok" if ret else "failed"
             })
 
-        for lvol in db_controller.get_lvols(cluster_id):
-            ret = check_lvol(lvol.get_id())
-            result &= ret
-            print("*" * 100)
-            data.append({
-                "Kind": "LVol",
-                "UUID": lvol.get_id(),
-                "Status": "ok" if ret else "failed"
-            })
+    for lvol in db_controller.get_lvols(cluster_id):
+        ret = check_lvol(lvol.get_id())
+        result &= ret
+        print("*" * 100)
+        data.append({
+            "Kind": "LVol",
+            "UUID": lvol.get_id(),
+            "Status": "ok" if ret else "failed"
+        })
     print(utils.print_table(data))
     return result
 
@@ -163,6 +163,8 @@ def check_node(node_id, with_devices=True):
             if dev.status in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_UNAVAILABLE]:
                 ret = check_device(dev.get_id())
                 node_devices_check &= ret
+            else:
+                logger.info(f"Device skipped: {dev.get_id()} status: {dev.status}")
             print("*" * 100)
 
         logger.info(f"Node remote device: {len(snode.remote_devices)}")
