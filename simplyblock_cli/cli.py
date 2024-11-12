@@ -293,7 +293,8 @@ class CLIWrapper:
         sub_command.add_argument("--ha-type", help='LVol HA type (single, ha), default is cluster HA type',
                                  dest='ha_type', choices=["single", "ha", "default"], default='single')
         sub_command.add_argument("--enable-node-affinity", help='Enable node affinity for storage nodes', action='store_true')
-        sub_command.add_argument("--qpair-count", help='tcp transport qpair count', type=int, dest='qpair_count', default=256)
+        sub_command.add_argument("--qpair-count", help='tcp transport qpair count', type=int, dest='qpair_count',
+                                 default=6, choices=range(128))
         # add cluster
         sub_command = self.add_sub_command(subparser, 'add', 'Add new cluster')
         sub_command.add_argument("--blk_size", help='The block size in bytes', type=int, choices=[512, 4096], default=512)
@@ -315,7 +316,8 @@ class CLIWrapper:
         sub_command.add_argument("--ha-type", help='LVol HA type (single, ha), default is cluster HA type',
                                  dest='ha_type', choices=["single", "ha", "default"], default='default')
         sub_command.add_argument("--enable-node-affinity", help='Enable node affinity for storage nodes', action='store_true')
-        sub_command.add_argument("--qpair-count", help='tcp transport qpair count', type=int, dest='qpair_count', default=256)
+        sub_command.add_argument("--qpair-count", help='tcp transport qpair count', type=int, dest='qpair_count',
+                                 default=6, choices=range(128))
 
         # Activate cluster
         sub_command = self.add_sub_command(subparser, 'activate', 'Create distribs and raid0 bdevs on all the storage node and move the cluster to active state')

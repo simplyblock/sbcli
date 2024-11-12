@@ -50,7 +50,7 @@ class Cluster(BaseModel):
         "prov_cap_warn": {"type": int, "default": 180},
         "prov_cap_crit": {"type": int, "default": 190},
 
-        "qpair_count": {"type": int, "default": 256},
+        "qpair_count": {"type": int, "default": 6},
 
         "secret": {"type": str, "default": ""},
         "status": {"type": str, "default": ""},
