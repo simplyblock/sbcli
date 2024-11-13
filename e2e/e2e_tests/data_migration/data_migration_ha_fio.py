@@ -296,6 +296,8 @@ class FioWorkloadTest(TestClusterBase):
             self.mgmt_nodes[0], command=f"{self.base_cmd} sn list"
         )
 
+        # self.common_utils.terminate_instance(self.ec2_resource, instance_id)
+
         self.logger.info(f"Output for sn list: {output}")
 
         storage_nodes = self.sbcli_utils.get_storage_nodes()["results"]
@@ -311,7 +313,7 @@ class FioWorkloadTest(TestClusterBase):
         for thread in fio_threads:
             thread.join()
 
-        self.common_utils.terminate_instance(self.ec2_resource, instance_id)
+        # self.common_utils.terminate_instance(self.ec2_resource, new_node_instance_id)
 
         self.logger.info("Test completed successfully.")
 
