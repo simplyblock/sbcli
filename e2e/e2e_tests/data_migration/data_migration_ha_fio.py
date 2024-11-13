@@ -164,8 +164,14 @@ class FioWorkloadTest(TestClusterBase):
 
         sleep_n_sec(30)
 
+        output, _ = self.ssh_obj.exec_command(
+            self.mgmt_nodes[0], command=f"{self.base_cmd} sn list"
+        )
+        self.logger.info(f"Output for sn list: {output}")
+
         lvol_list = sn_lvol_data[affected_node]
         affected_fio = {}
+        
         for lvol in lvol_list:
             affected_fio[lvol] = {}
             affected_fio[lvol]["mount_path"] = lvol_fio_path[lvol]["mount_path"]
@@ -187,6 +193,11 @@ class FioWorkloadTest(TestClusterBase):
         sleep_n_sec(100)
 
         fio_threads.extend(self.run_fio(affected_fio))
+
+        output, _ = self.ssh_obj.exec_command(
+            self.mgmt_nodes[0], command=f"{self.base_cmd} sn list"
+        )
+        self.logger.info(f"Output for sn list: {output}")
 
         # # Step 8: Stop instance
         timestamp = int(datetime.now().timestamp())
@@ -295,10 +306,9 @@ class FioWorkloadTest(TestClusterBase):
         output, _ = self.ssh_obj.exec_command(
             self.mgmt_nodes[0], command=f"{self.base_cmd} sn list"
         )
+        self.logger.info(f"Output for sn list: {output}")
 
         # self.common_utils.terminate_instance(self.ec2_resource, instance_id)
-
-        self.logger.info(f"Output for sn list: {output}")
 
         storage_nodes = self.sbcli_utils.get_storage_nodes()["results"]
         
@@ -312,6 +322,11 @@ class FioWorkloadTest(TestClusterBase):
         # Wait for all fio threads to finish
         for thread in fio_threads:
             thread.join()
+
+        output, _ = self.ssh_obj.exec_command(
+            self.mgmt_nodes[0], command=f"{self.base_cmd} sn list"
+        )
+        self.logger.info(f"Output for sn list: {output}")
 
         # self.common_utils.terminate_instance(self.ec2_resource, new_node_instance_id)
 
