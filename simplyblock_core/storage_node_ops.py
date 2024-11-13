@@ -1726,10 +1726,9 @@ def restart_storage_node(
             # return False
         snode.nvme_devices.extend(removed_devices)
 
-        if new_devices:
-            for node in db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id):
-                if node.status == StorageNode.STATUS_ONLINE:
-                    send_cluster_map(node.get_id())
+        for node in db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id):
+            if node.status == StorageNode.STATUS_ONLINE:
+                send_cluster_map(node.get_id())
 
     else:
         ret = _prepare_cluster_devices_on_restart(snode)
