@@ -287,11 +287,23 @@ class FioWorkloadTest(TestClusterBase):
         del sn_lvol_data[affected_node]
         
         affected_node_ip = affected_node_details[0]["mgmt_ip"]
+        self.logger.info(f"Affected node ip: {affected_node_ip}")
         del self.ssh_obj.ssh_connections[affected_node_ip]
 
         sn_lvol_data[new_node] = {}
 
+        output, _ = self.ssh_obj.exec_command(
+            self.mgmt_nodes[0], command=f"{self.base_cmd} sn list"
+        )
+
+        self.logger.info(f"Output for sn list: {output}")
+
         # self.common_utils.terminate_instance(self.ec2_resource, instance_id)
+
+        storage_nodes = self.sbcli_utils.get_storage_nodes()["results"]
+        
+        for node in storage_nodes:
+            assert node["id"] != affected_node, "Deleted node still present in storage node list"
 
         self.common_utils.manage_fio_threads(node=self.mgmt_nodes[0],
                                              threads=fio_threads,
