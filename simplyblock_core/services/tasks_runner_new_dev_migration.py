@@ -60,6 +60,16 @@ def task_runner(task):
             task.write_to_db(db_controller.kv_store)
             return False
 
+        active_f_task = tasks_controller.get_failed_device_mig_task(task.cluster_id, task.device_id)
+        if active_f_task:
+            msg = "failure task found, retry"
+            logger.info(msg)
+            task.function_result = msg
+            task.retry += 1
+            task.status = JobSchedule.STATUS_SUSPENDED
+            task.write_to_db(db_controller.kv_store)
+            return False
+
         device = db_controller.get_storage_devices(task.device_id)
         distr_name = task.function_params["distr_name"]
 

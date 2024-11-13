@@ -79,7 +79,6 @@ def task_runner(task):
             migration_status = res_data["status"]
             if migration_status == "completed":
                 if res_data['error'] == 0:
-                    device_controller.device_set_failed_and_migrated(task.device_id)
                     task.function_result = "Done"
                     task.status = JobSchedule.STATUS_DONE
                 else:
@@ -88,6 +87,11 @@ def task_runner(task):
                     task.retry += 1
                     del task.function_params["migration"]
                 task.write_to_db(db_controller.kv_store)
+
+                dev_failed_task = tasks_controller.get_failed_device_mig_task( task.cluster_id, task.device_id)
+                if not dev_failed_task:
+                    device_controller.device_set_failed_and_migrated(task.device_id)
+
                 return True
 
             elif migration_status == "failed":

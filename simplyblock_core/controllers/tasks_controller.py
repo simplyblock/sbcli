@@ -225,3 +225,13 @@ def get_device_mig_task(cluster_id, node_id, distr_name):
                     and "distr_name" in task.function_params and task.function_params["distr_name"] == distr_name:
                 return task.uuid
     return False
+
+
+def get_failed_device_mig_task(cluster_id, device_id):
+    tasks = db_controller.get_job_tasks(cluster_id)
+    for task in tasks:
+        if task.function_name == JobSchedule.FN_FAILED_DEV_MIG and  task.device_id == device_id:
+            if task.status != JobSchedule.STATUS_DONE and task.canceled is False:
+                return task.uuid
+    return False
+

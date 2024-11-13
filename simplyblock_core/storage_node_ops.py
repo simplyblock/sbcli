@@ -2914,6 +2914,7 @@ def make_sec_new_primary(node_id):
         if node.status == StorageNode.STATUS_ONLINE:
             send_cluster_map(node.get_id())
 
+    time.sleep(5)
     for dev in snode.nvme_devices:
         if dev.status == NVMeDevice.STATUS_REMOVED:
             device_controller.device_set_failed(dev.get_id())
