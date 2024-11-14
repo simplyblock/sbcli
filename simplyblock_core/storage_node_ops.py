@@ -1691,7 +1691,7 @@ def restart_storage_node(
     for db_dev in snode.nvme_devices:
         # if db_dev.status != NVMeDevice.STATUS_NEW:
         known_devices_sn.append(db_dev.serial_number)
-        if db_dev.status == NVMeDevice.STATUS_FAILED_AND_MIGRATED:
+        if db_dev.status in [NVMeDevice.STATUS_FAILED_AND_MIGRATED, NVMeDevice.STATUS_REMOVED]:
             continue
         if db_dev.serial_number in devices_sn:
             logger.info(f"Device found: {db_dev.get_id()}, status {db_dev.status}")
