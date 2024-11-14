@@ -44,6 +44,16 @@ def task_runner(task):
         task.write_to_db(db_controller.kv_store)
         return False
 
+    active_f_task = tasks_controller.get_new_device_mig_task_for_device(task.cluster_id)
+    if active_f_task:
+        msg = "dev expansion task found, retry"
+        logger.info(msg)
+        task.function_result = msg
+        task.retry += 1
+        task.status = JobSchedule.STATUS_SUSPENDED
+        task.write_to_db(db_controller.kv_store)
+        return False
+
     rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password,
                            timeout=5, retry=2)
     if "migration" not in task.function_params:
