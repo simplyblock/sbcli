@@ -1725,6 +1725,7 @@ def restart_storage_node(
             logger.error("Failed to prepare cluster devices")
             # return False
         snode.nvme_devices.extend(removed_devices)
+        snode.write_to_db(kv_store)
 
         for node in db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id):
             if node.status == StorageNode.STATUS_ONLINE:
@@ -1735,8 +1736,7 @@ def restart_storage_node(
         if not ret:
             logger.error("Failed to prepare cluster devices")
             # return False
-
-    snode.write_to_db(kv_store)
+        snode.write_to_db(kv_store)
 
     logger.info("Connecting to remote devices")
     remote_devices = _connect_to_remote_devs(snode)
