@@ -35,6 +35,9 @@ def device_set_state(device_id, state):
     if state == NVMeDevice.STATUS_ONLINE:
         device.retries_exhausted = False
 
+    if state == NVMeDevice.STATUS_REMOVED:
+        device.deleted = True
+
     old_status = dev.status
     device.status = state
     snode.write_to_db(db_controller.kv_store)

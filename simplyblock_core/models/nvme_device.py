@@ -64,6 +64,7 @@ class NVMeDevice(BaseModel):
         "partition_jm_size": {"type": int, 'default': 0},
 
         "physical_label": {"type": int, 'default': 0},
+        "is_partition": {"type": bool, 'default': False},
 
     }
 
