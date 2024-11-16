@@ -542,7 +542,7 @@ def _create_device_partitions(rpc_client, nvme, snode, num_partitions_per_dev, j
     return True
 
 
-def _prepare_cluster_devices_partitions(snode, devices, without_jm=False):
+def _prepare_cluster_devices_partitions(snode, devices):
     db_controller = DBController()
     rpc_client = RPCClient(
         snode.mgmt_ip, snode.rpc_port,
@@ -551,6 +551,7 @@ def _prepare_cluster_devices_partitions(snode, devices, without_jm=False):
     new_devices = []
     jm_devices = []
     dev_order = get_next_cluster_device_order(db_controller, snode.cluster_id)
+    bdevs_names = [d['name'] for d in rpc_client.get_bdevs()]
     for index, nvme in enumerate(devices):
         if nvme.status == "not_found":
             continue
@@ -562,6 +563,12 @@ def _prepare_cluster_devices_partitions(snode, devices, without_jm=False):
 
         if nvme.is_partition:
             partitioned_devices = [nvme]
+
+            dev_part = f"{nvme.nvme_bdev[:-2]}p1"
+            if dev_part in bdevs_names:
+                if dev_part not in jm_devices:
+                    jm_devices.append(dev_part)
+
         else:
             # look for partitions
             partitioned_devices = _search_for_partitions(rpc_client, nvme)
@@ -579,10 +586,10 @@ def _prepare_cluster_devices_partitions(snode, devices, without_jm=False):
                     logger.error("Failed to create partitions")
                     return False
 
-            jm_devices.append(partitioned_devices.pop(0))
+            jm_devices.append(partitioned_devices.pop(0).nvme_bdev)
 
         for dev in partitioned_devices:
-            new_device = _create_storage_device_stack(rpc_client, dev, snode, after_restart=False)
+            new_device = _create_storage_device_stack(rpc_client, dev, snode, after_restart=nvme.status==NVMeDevice.STATUS_ONLINE)
             if not new_device:
                 logger.error("failed to create dev stack")
                 return False
@@ -598,13 +605,11 @@ def _prepare_cluster_devices_partitions(snode, devices, without_jm=False):
     snode.nvme_devices = new_devices
 
     if jm_devices:
-        jm_nvme_bdevs = [dev.nvme_bdev for dev in jm_devices]
-        jm_device = _create_jm_stack_on_raid(rpc_client, jm_nvme_bdevs, snode, after_restart=False)
+        jm_device = _create_jm_stack_on_raid(rpc_client, jm_devices, snode, after_restart=False)
         if not jm_device:
             logger.error(f"Failed to create JM device")
             return False
-        if without_jm:
-            jm_device.status = JMDevice.STATUS_REMOVED
+
         snode.jm_device = jm_device
 
     return True
@@ -1209,14 +1214,13 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
         logger.error("No NVMe devices was found!")
         return False
 
-    jm_device = nvme_devs[0]
-    for nvme in nvme_devs[1:]:
-        if nvme.size < jm_device.size:
-            jm_device = nvme
-    jm_device.status = NVMeDevice.STATUS_JM
-
     # prepare devices
     if snode.num_partitions_per_dev == 0 or snode.jm_percent == 0:
+        jm_device = nvme_devs[0]
+        for nvme in nvme_devs[1:]:
+            if nvme.size < jm_device.size:
+                jm_device = nvme
+        jm_device.status = NVMeDevice.STATUS_JM
         ret = _prepare_cluster_devices_jm_on_dev(snode, nvme_devs)
     else:
         ret = _prepare_cluster_devices_partitions(snode, nvme_devs)
