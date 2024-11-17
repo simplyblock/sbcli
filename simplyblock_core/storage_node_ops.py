@@ -589,7 +589,7 @@ def _prepare_cluster_devices_partitions(snode, devices):
             jm_devices.append(partitioned_devices.pop(0).nvme_bdev)
 
         for dev in partitioned_devices:
-            new_device = _create_storage_device_stack(rpc_client, dev, snode, after_restart=nvme.status==NVMeDevice.STATUS_ONLINE)
+            new_device = _create_storage_device_stack(rpc_client, dev, snode, after_restart=False)
             if not new_device:
                 logger.error("failed to create dev stack")
                 return False
