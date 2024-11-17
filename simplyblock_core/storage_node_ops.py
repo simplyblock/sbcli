@@ -562,12 +562,16 @@ def _prepare_cluster_devices_partitions(snode, devices):
             continue
 
         if nvme.is_partition:
-            partitioned_devices = [nvme]
-
             dev_part = f"{nvme.nvme_bdev[:-2]}p1"
             if dev_part in bdevs_names:
                 if dev_part not in jm_devices:
                     jm_devices.append(dev_part)
+
+            new_device = _create_storage_device_stack(rpc_client, nvme, snode, after_restart=True)
+            if not new_device:
+                logger.error("failed to create dev stack")
+                return False
+            new_devices.append(new_device)
 
         else:
             # look for partitions
@@ -588,19 +592,19 @@ def _prepare_cluster_devices_partitions(snode, devices):
 
             jm_devices.append(partitioned_devices.pop(0).nvme_bdev)
 
-        for dev in partitioned_devices:
-            new_device = _create_storage_device_stack(rpc_client, dev, snode, after_restart=False)
-            if not new_device:
-                logger.error("failed to create dev stack")
-                return False
-            if nvme.status == NVMeDevice.STATUS_NEW:
-                new_device.status = NVMeDevice.STATUS_NEW
-            else:
-                new_device.status = NVMeDevice.STATUS_ONLINE
-                new_device.cluster_device_order = dev_order
-                dev_order += 1
-                device_events.device_create(new_device)
-            new_devices.append(new_device)
+            for dev in partitioned_devices:
+                new_device = _create_storage_device_stack(rpc_client, dev, snode, after_restart=False)
+                if not new_device:
+                    logger.error("failed to create dev stack")
+                    return False
+                if nvme.status == NVMeDevice.STATUS_NEW:
+                    new_device.status = NVMeDevice.STATUS_NEW
+                else:
+                    new_device.status = NVMeDevice.STATUS_ONLINE
+                    new_device.cluster_device_order = dev_order
+                    dev_order += 1
+                    device_events.device_create(new_device)
+                new_devices.append(new_device)
 
     snode.nvme_devices = new_devices
 
@@ -1976,8 +1980,8 @@ def shutdown_storage_node(node_id, force=False):
         _remove_bdev_stack(snode.lvstore_stack, rpc_client, remove_distr_only=True)
 
         if snode.jm_device:
-            logger.info("Removing JM")
-            device_controller.remove_jm_device(snode.jm_device.get_id(), force=True)
+            logger.info("Setting JM unavailable")
+            device_controller.set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_UNAVAILABLE)
 
     for dev in snode.nvme_devices:
         if dev.status in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_READONLY]:
