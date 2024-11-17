@@ -657,11 +657,17 @@ def _prepare_cluster_devices_jm_on_dev(snode, devices):
 def _prepare_cluster_devices_on_restart(snode):
     db_controller = DBController()
 
+    new_devices = []
+
     rpc_client = RPCClient(
         snode.mgmt_ip, snode.rpc_port,
         snode.rpc_username, snode.rpc_password)
 
     for index, nvme in enumerate(snode.nvme_devices):
+        if nvme.status == NVMeDevice.STATUS_JM:
+            continue
+
+        new_devices.append(nvme)
 
         if nvme.status not in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_UNAVAILABLE,
                                NVMeDevice.STATUS_READONLY, NVMeDevice.STATUS_NEW]:
@@ -674,6 +680,9 @@ def _prepare_cluster_devices_on_restart(snode):
             return False
         if nvme.status == NVMeDevice.STATUS_ONLINE:
             device_events.device_restarted(dev)
+
+    snode.nvme_devices = new_devices
+    snode.write_to_db()
 
     # prepare JM device
     jm_device = snode.jm_device

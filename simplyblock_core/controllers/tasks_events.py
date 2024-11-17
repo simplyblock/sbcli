@@ -16,7 +16,7 @@ def _task_event(task, message, caused_by, event):
         db_object=task,
         caused_by=caused_by,
         message=message,
-        node_id=task.node_id,
+        node_id=task.uuid,
         status=task.status)
 
 
