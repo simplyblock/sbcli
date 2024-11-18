@@ -725,8 +725,13 @@ def disconnect(caching_node_id, lvol_id):
 
     if cnode.is_iscsi:
         try:
+            iscsi_port = 3260
+            cont_info, _ = CNodeClient(cnode.api_endpoint).spdk_process_is_up(cnode.rpc_port)
+            iscsi_ip = cont_info['NetworkSettings']['IPAddress']
+
             subsystem_nqn = "iqn.2016-06.io.spdk:" + lvol.get_id()
-            ret, _ = cnode_client.disconnect_iscsi(subsystem_nqn)
+            cmd = f"{subsystem_nqn} -p {iscsi_ip}:{iscsi_port}"
+            ret, _ = cnode_client.disconnect_iscsi(cmd)
             ret = rpc_client.iscsi_delete_target_node(subsystem_nqn)
 
         except:
