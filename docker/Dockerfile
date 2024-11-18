@@ -7,9 +7,9 @@ RUN apt-get update -y; apt-get install -y multipath-tools\
     rm -rf /var/lib/apt/lists/*
 
 # install fdb client library (libfdb_c.dylib) for the Python bindings to interact with the database.
-RUN wget https://github.com/apple/foundationdb/releases/download/7.3.3/foundationdb-clients_7.3.3-1_amd64.deb
-RUN dpkg -i --force-architecture --force-depends foundationdb-clients_7.3.3-1_amd64.deb
-RUN rm -f foundationdb-clients_7.3.3-1_amd64.deb
+RUN wget https://github.com/apple/foundationdb/releases/download/7.3.55/foundationdb-clients_7.3.55-1_amd64.deb
+RUN dpkg -i --force-architecture --force-depends foundationdb-clients_7.3.55-1_amd64.deb
+RUN rm -f foundationdb-clients_7.3.55-1_amd64.deb
 
 WORKDIR /app
 
