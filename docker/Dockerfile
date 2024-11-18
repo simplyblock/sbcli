@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 FROM python:3.8
 
-RUN apt-get update -y; apt-get install -y \
+RUN apt-get update -y; apt-get install -y multipath-tools\
     wget libc6 inetutils-ping vim dmidecode nvme-cli open-iscsi \
     iproute2 pciutils sudo nano parted gdisk && \
     rm -rf /var/lib/apt/lists/*
