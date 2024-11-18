@@ -398,11 +398,15 @@ def disconnect_iscsi():
 def get_iscsi_dev_path():
     data = request.get_json()
     iqn = data['iqn']
-    st = f"sid=$(iscsiadm -m session | grep  {iqn} | grep -o -E \[[[:digit:]]*\]  | grep -o [[:digit:]]*) ; blk_name=$(iscsiadm -m session -P 3 -r $sid | grep \"Attached scsi disk\" | awk "'{print $4}'") ; echo /dev/$blk_name"
-    out, err, ret_code = run_command(st)
-    logger.debug(ret_code)
+    st = f"sid=$(iscsiadm -m session | grep  {iqn} | grep -o -E \[[[:digit:]]*\]  | grep -o [[:digit:]]*) ; blk_name=$(iscsiadm -m session -P 3 -r $sid | grep \"Attached scsi disk\" | awk '"+"{"+"print $4}') ; echo /dev/$blk_name"
+    logger.debug(st)
+    out = os.popen(st).read().strip()
+    # logger.debug(out)
+
+    # out, err, ret_code = run_command(st)
+    # logger.debug(ret_code)
     logger.debug(out)
-    logger.debug(err)
+    # logger.debug(err)
     return utils.get_response(out)
 
 

@@ -611,7 +611,7 @@ def connect_iscsi(caching_node_id, lvol_id):
 
     time.sleep(5)
     # cnode_info, _ = cnode_client.info()
-    dev_path  = cnode_client.get_iscsi_dev_path(lvol.get_id())
+    dev_path, err  = cnode_client.get_iscsi_dev_path(lvol.get_id())
     # dev_path = None
     # for dev in nvme_devs:
     #     if dev['model_id'] == lvol.get_id():
