@@ -254,6 +254,18 @@ def _create_jm_stack_on_raid(rpc_client, jm_nvme_bdevs, snode, after_restart):
     else:
         raid_bdev = jm_nvme_bdevs[0]
 
+
+    # Add qos bdev device
+    #db_controller = DBController()
+    #cluster = db_controller.get_cluster_by_id(snode.cluster_id)
+    #max_queue_size = 0
+    #inflight_io_threshold = cluster.inflight_io_threshold
+    #ret = rpc_client.qos_vbdev_create(qos_bdev, raid_bdev, raid_bdev, max_queue_size, inflight_io_threshold)
+    #if not ret:
+    #    logger.error(f"Failed to create qos bdev: {qos_bdev}")
+    #    return False
+
+
     alceml_name = f"alceml_jm_{snode.get_id()}"
 
     nvme_bdev = raid_bdev
@@ -336,9 +348,9 @@ def _create_jm_stack_on_raid(rpc_client, jm_nvme_bdevs, snode, after_restart):
         'jm_nvme_bdev_list': jm_nvme_bdevs,
         'raid_bdev': raid_bdev,
         'alceml_bdev': alceml_name,
+        'alceml_name': alceml_name,
         'testing_bdev': test_name,
         'jm_bdev': jm_bdev,
-
         'pt_bdev': pt_name,
         'nvmf_nqn': subsystem_nqn,
         'nvmf_ip': IP,
@@ -347,6 +359,18 @@ def _create_jm_stack_on_raid(rpc_client, jm_nvme_bdevs, snode, after_restart):
 
 
 def _create_jm_stack_on_device(rpc_client, nvme, snode, after_restart):
+
+    # Add qos bdev device
+    #db_controller = DBController()
+    #cluster = db_controller.get_cluster_by_id(snode.cluster_id)
+    #max_queue_size = 0
+    #inflight_io_threshold = cluster.inflight_io_threshold
+    #qos_bdev = f"{nvme.nvme_bdev}_qos"
+    #ret = rpc_client.qos_vbdev_create(qos_bdev, nvme.nvme_bdev, nvme.nvme_bdev, max_queue_size, inflight_io_threshold)
+    #if not ret:
+    #    logger.error(f"Failed to create qos bdev: {qos_bdev}")
+    #    return False
+
     alceml_id = nvme.get_id()
     alceml_name = device_controller.get_alceml_name(alceml_id)
     logger.info(f"adding {alceml_name}")
@@ -427,12 +451,12 @@ def _create_jm_stack_on_device(rpc_client, nvme, snode, after_restart):
         'size': nvme.size,
         'status': JMDevice.STATUS_ONLINE,
         'alceml_bdev': alceml_name,
+        'alceml_name': alceml_name,
         'nvme_bdev': nvme.nvme_bdev,
         "serial_number": nvme.serial_number,
         "device_data_dict": nvme.to_dict(),
         'jm_bdev': jm_bdev,
         'testing_bdev': test_name,
-
         'pt_bdev': pt_name,
         'nvmf_nqn': subsystem_nqn,
         'nvmf_ip': IP,
@@ -467,15 +491,28 @@ def _create_storage_device_stack(rpc_client, nvme, snode, after_restart):
         snode.alceml_worker_cpu_index = (snode.alceml_worker_cpu_index + 1) % len(snode.alceml_worker_cpu_cores)
 
     ret = rpc_client.bdev_alceml_create(alceml_name, nvme_bdev, alceml_id, pba_init_mode=pba_init_mode,
-                                            alceml_cpu_mask=alceml_cpu_mask, alceml_worker_cpu_mask=alceml_worker_cpu_mask)
-
+                                        alceml_cpu_mask=alceml_cpu_mask, alceml_worker_cpu_mask=alceml_worker_cpu_mask)
     if not ret:
         logger.error(f"Failed to create alceml bdev: {alceml_name}")
         return False
+    alceml_bdev = alceml_name
+    db_controller = DBController()
+    cluster = db_controller.get_cluster_by_id(snode.cluster_id)
+    qos_bdev = ""
+    # Add qos bdev device
+    if cluster.enable_qos:
+        max_queue_size = cluster.max_queue_size
+        inflight_io_threshold = cluster.inflight_io_threshold
+        qos_bdev = f"{alceml_name}_qos"
+        ret = rpc_client.qos_vbdev_create(qos_bdev, alceml_name, nvme.nvme_controller, max_queue_size, inflight_io_threshold)
+        if not ret:
+            logger.error(f"Failed to create qos bdev: {qos_bdev}")
+            return False
+        alceml_bdev = qos_bdev
 
     # add pass through
     pt_name = f"{alceml_name}_PT"
-    ret = rpc_client.bdev_PT_NoExcl_create(pt_name, alceml_name)
+    ret = rpc_client.bdev_PT_NoExcl_create(pt_name, alceml_bdev)
     if not ret:
         logger.error(f"Failed to create pt noexcl bdev: {pt_name}")
         return False
@@ -507,8 +544,10 @@ def _create_storage_device_stack(rpc_client, nvme, snode, after_restart):
         return False
     if snode.enable_test_device:
         nvme.testing_bdev = test_name
-    nvme.alceml_bdev = alceml_name
+    nvme.alceml_bdev = alceml_bdev
     nvme.pt_bdev = pt_name
+    nvme.qos_bdev = qos_bdev
+    nvme.alceml_name = alceml_name
     nvme.nvmf_nqn = subsystem_nqn
     nvme.nvmf_ip = IP
     nvme.nvmf_port = 4420
@@ -713,9 +752,19 @@ def _prepare_cluster_devices_on_restart(snode):
                 logger.error(f"Failed to create passtest bdev {jm_device.testing_bdev}")
                 return False
             nvme_bdev = jm_device.testing_bdev
+
+
+        # Add qos bdev device
+        #cluster = db_controller.get_cluster_by_id(snode.cluster_id)
+        #max_queue_size = 0
+        #inflight_io_threshold = cluster.inflight_io_threshold
+        #ret = rpc_client.qos_vbdev_create(jm_device.qos_bdev, jm_device.nvme_bdev, jm_device.nvme_bdev, max_queue_size, inflight_io_threshold)
+        #if not ret:
+        #    logger.error(f"Failed to create qos bdev: {jm_device.qos_bdev}")
+        #    return False
+
         alceml_cpu_mask = ""
         alceml_worker_cpu_mask = ""
-
         if snode.alceml_cpu_cores:
             alceml_cpu_mask = utils.decimal_to_hex_power_of_2(snode.alceml_cpu_cores[snode.alceml_cpu_index])
             snode.alceml_cpu_index = (snode.alceml_cpu_index + 1) % len(snode.alceml_cpu_cores)

@@ -296,6 +296,11 @@ class CLIWrapper:
         sub_command.add_argument("--enable-node-affinity", help='Enable node affinity for storage nodes', action='store_true')
         sub_command.add_argument("--qpair-count", help='tcp transport qpair count', type=int, dest='qpair_count',
                                  default=6, choices=range(128))
+        sub_command.add_argument("--max-queue-size", help='The max size the queue will grow', type=int, default=128)
+        sub_command.add_argument("--inflight-io-threshold", help='The number of inflight IOs allowed before the IO queuing starts', type=int, default=4)
+        sub_command.add_argument("--enable-qos", help='Enable qos bdev for storage nodes', action='store_true', dest='enable_qos')
+
+
         # add cluster
         sub_command = self.add_sub_command(subparser, 'add', 'Add new cluster')
         sub_command.add_argument("--blk_size", help='The block size in bytes', type=int, choices=[512, 4096], default=512)
@@ -319,6 +324,9 @@ class CLIWrapper:
         sub_command.add_argument("--enable-node-affinity", help='Enable node affinity for storage nodes', action='store_true')
         sub_command.add_argument("--qpair-count", help='tcp transport qpair count', type=int, dest='qpair_count',
                                  default=6, choices=range(128))
+        sub_command.add_argument("--max-queue-size", help='The max size the queue will grow', type=int, default=128)
+        sub_command.add_argument("--inflight-io-threshold", help='The number of inflight IOs allowed before the IO queuing starts', type=int, default=4)
+        sub_command.add_argument("--enable-qos", help='Enable qos bdev for storage nodes', action='store_true', dest='enable_qos')
 
         # Activate cluster
         sub_command = self.add_sub_command(subparser, 'activate', 'Create distribs and raid0 bdevs on all the storage node and move the cluster to active state')
@@ -440,6 +448,7 @@ class CLIWrapper:
                                  default=0)
         sub_command.add_argument("--ha-type", help='LVol HA type (single, ha), default is cluster HA type',
                                  dest='ha_type', choices=["single", "ha", "default"], default='default')
+        sub_command.add_argument("--lvol-priority-class", help='Lvol priority class', type=int, choices=[0, 1], default=0)
 
 
         # set lvol params
@@ -1007,6 +1016,7 @@ class CLIWrapper:
                 crypto = args.encrypt
                 distr_vuid = args.distr_vuid
                 with_snapshot = args.snapshot
+                lvol_priority_class = args.lvol_priority_class
                 results, error = lvol_controller.add_lvol_ha(
                     name, size, host_id, ha_type, pool, comp, crypto,
                     distr_vuid,
@@ -1017,7 +1027,8 @@ class CLIWrapper:
                     with_snapshot=with_snapshot,
                     max_size=max_size,
                     crypto_key1=args.crypto_key1,
-                    crypto_key2=args.crypto_key2)
+                    crypto_key2=args.crypto_key2,
+                    lvol_priority_class=lvol_priority_class)
                 if results:
                     ret = results
                 else:
@@ -1252,12 +1263,18 @@ class CLIWrapper:
         distr_bs = args.distr_bs
         distr_chunk_bs = args.distr_chunk_bs
         ha_type = args.ha_type
+
         enable_node_affinity = args.enable_node_affinity
         qpair_count = args.qpair_count
+        max_queue_size = args.max_queue_size
+        inflight_io_threshold = args.inflight_io_threshold
+        enable_qos = args.enable_qos
 
         return cluster_ops.add_cluster(
             blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
-            distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, enable_node_affinity, qpair_count)
+            distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, enable_node_affinity,
+            qpair_count, max_queue_size, inflight_io_threshold, enable_qos)
+
 
     def cluster_create(self, args):
         page_size_in_blocks = args.page_size
@@ -1279,12 +1296,18 @@ class CLIWrapper:
         grafana_endpoint = args.grafana_endpoint
         enable_node_affinity = args.enable_node_affinity
         qpair_count = args.qpair_count
+        max_queue_size = args.max_queue_size
+        inflight_io_threshold = args.inflight_io_threshold
+        enable_qos = args.enable_qos
+
 
         return cluster_ops.create_cluster(
             blk_size, page_size_in_blocks,
             CLI_PASS, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
             ifname, log_del_interval, metrics_retention_period, contact_point, grafana_endpoint,
-            distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, enable_node_affinity, qpair_count)
+            distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, enable_node_affinity,
+            qpair_count, max_queue_size, inflight_io_threshold, enable_qos)
+
 
     def query_yes_no(self, question, default="yes"):
         """Ask a yes/no question via raw_input() and return their answer.
