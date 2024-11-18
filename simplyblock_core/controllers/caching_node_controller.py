@@ -597,10 +597,13 @@ def connect_iscsi(caching_node_id, lvol_id):
     logger.info("Connecting to local subsystem")
     # make nvme connect to nqn
     cnode_client = CNodeClient(cnode.api_endpoint)
-    ret, _ = cnode_client.iscsi_connect('127.0.0.1', "3260", subsystem_nqn)
-    if not ret:
-        logger.error("Failed to connect to local subsystem")
-        return False
+    try:
+        ret, _ = cnode_client.iscsi_connect('127.0.0.1', "3260", subsystem_nqn)
+        if not ret:
+            logger.error("Failed to connect to local subsystem")
+            # return False
+    except Exception as e:
+        logger.error(e)
 
     # if cnode.multipathing:
     #     snode = db_controller.get_storage_node_by_id(lvol.node_id)
@@ -611,7 +614,11 @@ def connect_iscsi(caching_node_id, lvol_id):
 
     time.sleep(5)
     # cnode_info, _ = cnode_client.info()
-    dev_path, err  = cnode_client.get_iscsi_dev_path(lvol.get_id())
+    dev_path = None
+    try:
+        dev_path, err  = cnode_client.get_iscsi_dev_path(lvol.get_id())
+    except Exception as e:
+        logger.error(e)
     # dev_path = None
     # for dev in nvme_devs:
     #     if dev['model_id'] == lvol.get_id():

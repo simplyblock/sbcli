@@ -372,14 +372,17 @@ def connect_to_iscsi():
     time.sleep(3)
     st = f"iscsiadm -m node -T {nqn} -p {ip}:{port} --login"
     logger.debug(st)
-    out, err, ret_code = run_command(st)
-    logger.debug(ret_code)
-    logger.debug(out)
-    logger.debug(err)
-    if ret_code == 0:
-        return utils.get_response(True)
-    else:
-        return utils.get_response(ret_code, error=err)
+    try:
+        out, err, ret_code = run_command(st)
+        logger.debug(ret_code)
+        logger.debug(out)
+        logger.debug(err)
+        if ret_code == 0:
+            return utils.get_response(True)
+        else:
+            return utils.get_response(ret_code, error=err)
+    except Exception as e:
+        return utils.get_response(False, error=str(e))
 
 
 @bp.route('/disconnect_iscsi', methods=['POST'])
