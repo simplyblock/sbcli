@@ -40,3 +40,11 @@ sudo mkdir -p /etc/simplyblock
 sudo chmod 777 /etc/simplyblock
 
 sudo sh -c 'echo 1 >  /proc/sys/vm/drop_caches'
+
+sudo systemctl enable multipathd
+sudo systemctl start multipathd
+sudo systemctl status multipathd
+
+sudo systemctl enable iscsid
+sudo systemctl start iscsid
+sudo systemctl status iscsid
