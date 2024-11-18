@@ -6,7 +6,7 @@ import docker
 
 from simplyblock_core import utils, distr_controller
 from simplyblock_core.kv_store import DBController
-from simplyblock_core.models.nvme_device import NVMeDevice
+from simplyblock_core.models.nvme_device import NVMeDevice, JMDevice
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.rpc_client import RPCClient
 from simplyblock_core.snode_client import SNodeClient
@@ -442,6 +442,9 @@ def check_jm_device(device_id):
 
     if jm_device.status in [NVMeDevice.STATUS_REMOVED, NVMeDevice.STATUS_FAILED]:
         logger.info(f"Skipping ,device status is {jm_device.status}")
+        return True
+
+    if snode.primary_ip != snode.mgmt_ip and jm_device.status == JMDevice.STATUS_UNAVAILABLE:
         return True
 
     passed = True
