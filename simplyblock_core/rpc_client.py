@@ -876,3 +876,10 @@ class RPCClient:
             "queue_depth": 24
         }
         return self._request("iscsi_create_target_node", params)
+
+
+    def iscsi_delete_target_node(self, name):
+        params = {
+            "name": name
+        }
+        return self._request("iscsi_delete_target_node", params)
