@@ -599,10 +599,12 @@ def connect_iscsi(caching_node_id, lvol_id):
     # logger.info("Creating local subsystem")
     # create subsystem (local)
     subsystem_nqn = "iqn.2016-06.io.spdk:"+ lvol.get_id()
-    iscsi_port = cnode.iscsi_port
+    iscsi_port = 3260
+    cont_info, _ = CNodeClient(cnode.api_endpoint).spdk_process_is_up(cnode.rpc_port)
+    iscsi_ip =cont_info['NetworkSettings']['IPAddress']
 
     # logger.info("Creating subsystem %s", subsystem_nqn)
-    ret = rpc_client.iscsi_create_portal_group(1, '127.0.0.1', str(iscsi_port))
+    ret = rpc_client.iscsi_create_portal_group(1, iscsi_ip, str(iscsi_port))
     ret = rpc_client.iscsi_create_initiator_group(2, ["ANY"], ["ANY"])
     ret = rpc_client.iscsi_create_target_node(lvol.get_id(), 2, 1, cach_bdev)
 
@@ -625,7 +627,7 @@ def connect_iscsi(caching_node_id, lvol_id):
     # make nvme connect to nqn
     cnode_client = CNodeClient(cnode.api_endpoint)
     try:
-        ret, _ = cnode_client.iscsi_connect('127.0.0.1', str(iscsi_port), subsystem_nqn)
+        ret, _ = cnode_client.iscsi_connect(iscsi_ip, str(iscsi_port), subsystem_nqn)
         if not ret:
             logger.error("Failed to connect to local subsystem")
             # return False
