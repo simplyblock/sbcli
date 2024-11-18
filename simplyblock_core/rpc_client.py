@@ -864,6 +864,7 @@ class RPCClient:
     def iscsi_create_target_node(self, name, ig_tag, pg_tag, bdev_name):
         params = {
             "name": name,
+            "alias_name": name,
             "pg_ig_maps" : [{
                 "ig_tag": ig_tag,
                 "pg_tag": pg_tag }],

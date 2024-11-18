@@ -366,6 +366,10 @@ def connect_to_iscsi():
     ip = data['ip']
     port = data['port']
     nqn = data['iqn']
+    st = f"iscsiadm -m discovery -t sendtargets -p {ip}"
+    logger.debug(st)
+    run_command(st)
+    time.sleep(3)
     st = f"iscsiadm -m node -T {nqn} -p {ip}:{port} --login"
     logger.debug(st)
     out, err, ret_code = run_command(st)
