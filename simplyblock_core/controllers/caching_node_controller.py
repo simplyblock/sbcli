@@ -138,6 +138,8 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spd
     snode.multipathing = multipathing
     snode.is_iscsi = is_iscsi
     snode.no_cache = no_cache
+    snode.iscsi_port = 3260 + int(random.random() * 1000)
+
 
     # check for memory
     if "memory_details" in node_info and node_info['memory_details']:
@@ -597,7 +599,7 @@ def connect_iscsi(caching_node_id, lvol_id):
     # logger.info("Creating local subsystem")
     # create subsystem (local)
     subsystem_nqn = "iqn.2016-06.io.spdk:"+ lvol.get_id()
-    iscsi_port =  3260 + int(random.random() * 1000)
+    iscsi_port = cnode.iscsi_port
 
     # logger.info("Creating subsystem %s", subsystem_nqn)
     ret = rpc_client.iscsi_create_portal_group(1, '127.0.0.1', str(iscsi_port))
