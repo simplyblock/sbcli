@@ -883,3 +883,10 @@ class RPCClient:
             "name": name
         }
         return self._request("iscsi_delete_target_node", params)
+
+    def bdev_passthru_create(self, name, base_bdev_name):
+        params = {
+            "name": name,
+            "base_bdev_name": base_bdev_name,
+        }
+        return self._request("bdev_passthru_create", params)

@@ -603,10 +603,12 @@ def connect_iscsi(caching_node_id, lvol_id):
     cont_info, _ = CNodeClient(cnode.api_endpoint).spdk_process_is_up(cnode.rpc_port)
     iscsi_ip =cont_info['NetworkSettings']['IPAddress']
 
+    pass_bdev = f"pass_{mini_id}"
+    rpc_client.bdev_passthru_create(pass_bdev, cach_bdev)
     # logger.info("Creating subsystem %s", subsystem_nqn)
     ret = rpc_client.iscsi_create_portal_group(1, iscsi_ip, str(iscsi_port))
     ret = rpc_client.iscsi_create_initiator_group(2, ["ANY"], ["ANY"])
-    ret = rpc_client.iscsi_create_target_node(lvol.get_id(), 2, 1, cach_bdev)
+    ret = rpc_client.iscsi_create_target_node(lvol.get_id(), 2, 1, pass_bdev)
 
     # ret = rpc_client.transport_list("TCP")
     # if not ret:
