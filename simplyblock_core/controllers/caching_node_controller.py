@@ -401,19 +401,20 @@ def connect(caching_node_id, lvol_id):
                 logger.error("Caching node not found")
                 return False
 
+    path = ""
     if cnode.ha_enabled:
         for node in db_controller.get_caching_nodes():
             if node.api_endpoint == cnode.api_endpoint:
                 if node.is_iscsi:
-                    connect_iscsi(node.get_id(), lvol_id)
+                    path = connect_iscsi(node.get_id(), lvol_id)
                 else:
-                    connect_nvme(node.get_id(), lvol_id)
+                    path = connect_nvme(node.get_id(), lvol_id)
     else:
         if cnode.is_iscsi:
-            connect_iscsi(cnode.get_id(), lvol_id)
+            path = connect_iscsi(cnode.get_id(), lvol_id)
         else:
-            connect_nvme(cnode.get_id(), lvol_id)
-    return True
+            path = connect_nvme(cnode.get_id(), lvol_id)
+    return path
 
 
 def connect_nvme(caching_node_id, lvol_id):
@@ -566,7 +567,7 @@ def connect_nvme(caching_node_id, lvol_id):
     cnode.lvols = tmp
     cnode.write_to_db(db_controller.kv_store)
 
-    return True
+    return dev_path
 
 
 def connect_iscsi(caching_node_id, lvol_id):
@@ -729,6 +730,12 @@ def connect_iscsi(caching_node_id, lvol_id):
     tmp.append(cached_lvol)
     cnode.lvols = tmp
     cnode.write_to_db(db_controller.kv_store)
+
+    if cnode.ha_enabled:
+        try:
+            dev_path, err = cnode_client.get_iscsi_dev_path_ha(lvol.get_id())
+        except Exception as e:
+            logger.error(e)
 
     return dev_path
 

@@ -146,6 +146,11 @@ class CNodeClient:
             "iqn": nqn}
         return self._request("POST", "cnode/get_iscsi_dev_path", params)
 
+    def get_iscsi_dev_path_ha(self, nqn):
+        params = {
+            "iqn": nqn}
+        return self._request("POST", "cnode/get_iscsi_dev_path_ha", params)
+
     def disconnect_iscsi(self, nqn):
         params = {
             "iqn": nqn}

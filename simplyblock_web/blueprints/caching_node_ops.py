@@ -419,6 +419,24 @@ def get_iscsi_dev_path():
     return utils.get_response(out)
 
 
+@bp.route('/get_iscsi_dev_path_ha', methods=['POST'])
+def get_iscsi_dev_path_ha():
+    data = request.get_json()
+    iqn = data['iqn']
+    st = f"sid=$(iscsiadm -m session | grep  {iqn} | grep -o -E \[[[:digit:]]*\]  | grep -o [[:digit:]]*) ; blk_name=$(iscsiadm -m session -P 3 -r $sid | grep \"Attached scsi disk\" | awk '"+"{"+"print $4}') ; echo /dev/$blk_name"
+    logger.debug(st)
+    out = os.popen(st).read().strip()
+    st = f"multipath -ll | grep $(/lib/udev/scsi_id -g -u -d /dev/{out}) | awk "+"\'{print $1}\'"
+    logger.debug(st)
+    out = os.popen(st).read().strip()
+    out = f"/dev/mapper/{out}"
+    # out, err, ret_code = run_command(st)
+    # logger.debug(ret_code)
+    logger.debug(out)
+    # logger.debug(err)
+    return utils.get_response(out)
+
+
 @bp.route('/disconnect_device', methods=['POST'])
 def disconnect_device():
     data = request.get_json()
