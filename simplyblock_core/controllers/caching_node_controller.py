@@ -74,7 +74,7 @@ def addNvmeDevices(rpc_client, devs, snode):
 
 
 def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spdk_mem,
-             spdk_image=None, namespace=None, multipathing=True, is_iscsi=False, no_cache=False):
+             spdk_image=None, namespace=None, multipathing=True, is_iscsi=False, no_cache=False, ssd_pcie=None):
     db_controller = DBController()
     kv_store = db_controller.kv_store
 
@@ -199,11 +199,21 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spd
         nvme_devs = addNvmeDevices(rpc_client, node_info['spdk_pcie_list'], snode)
         if not nvme_devs:
             logger.error("No NVMe devices was found!")
-            # return False
-
-        snode.nvme_devices = nvme_devs
-        snode.write_to_db(db_controller.kv_store)
-        ssd_dev = nvme_devs[0]
+            return False
+        else:
+            ssd_dev = None
+            if ssd_pcie:
+                for dev in nvme_devs:
+                    if dev.pcie_address == ssd_pcie:
+                        ssd_dev = dev
+                        break
+                if not ssd_dev:
+                    logger.warning(f"Device was not found! {ssd_pcie}")
+                    ssd_dev = nvme_devs[0]
+            else:
+                ssd_dev = nvme_devs[0]
+            snode.nvme_devices = [ssd_dev]
+            snode.write_to_db(db_controller.kv_store)
 
         if spdk_mem < 1024*1024:
             logger.error("Hugepages must be larger than 1G")
@@ -824,9 +834,9 @@ def list_nodes(is_json=False):
             "UUID": node.uuid,
             "Hostname": node.hostname,
             "Management IP": node.mgmt_ip,
+            "PORT": str(node.rpc_port),
             "LVOLs": f"{len(node.lvols)}",
             "Cache": utils.humanbytes(node.cache_size),
-            "Ram": utils.humanbytes(node.memory),
             "HugeP": utils.humanbytes(node.hugepages),
             "Status": node.status,
             # "Updated At": datetime.datetime.strptime(node.updated_at, "%Y-%m-%d %H:%M:%S.%f").strftime(

@@ -654,6 +654,7 @@ class CLIWrapper:
         sub_command.add_argument("--iscsi", help='Use iscsi connection instead of nvme', required=False, action='store_true')
         sub_command.add_argument("--no-cache", help='Use passthrough instead of caching bdev',
                                  required=False, action='store_true', dest='no_cache')
+        sub_command.add_argument("--ssd-pcie", help='Nvme PCIe address to use for caching', dest='ssd_pcie')
 
         self.add_sub_command(subparser, 'list', 'List Caching nodes')
 
@@ -1186,6 +1187,7 @@ class CLIWrapper:
                 multipathing = args.multipathing == "on"
                 no_cache = args.no_cache
                 is_iscsi = args.iscsi
+                ssd_pcie = args.ssd_pcie
 
                 spdk_cpu_mask = None
                 if args.spdk_cpu_mask:
@@ -1202,7 +1204,7 @@ class CLIWrapper:
 
                 ret = caching_node_controller.add_node(
                     cluster_id, node_ip, ifname, data_nics, spdk_cpu_mask, spdk_mem, spdk_image, namespace,
-                    multipathing, is_iscsi, no_cache)
+                    multipathing, is_iscsi, no_cache, ssd_pcie)
 
             if sub_command == "list":
                 #cluster_id

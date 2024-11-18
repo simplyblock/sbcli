@@ -27,13 +27,19 @@ class CNodeClient:
         retries = Retry(total=30, backoff_factor=1, connect=30, read=30)
         self.session.mount("http://", HTTPAdapter(max_retries=retries))
 
-    def _request(self, method, path, params=None):
+    def _request(self, method, path, payload=None):
         try:
-            logger.debug("Requesting path: %s, params: %s", path, params)
-            dt = None
-            if params:
-                dt = json.dumps(params)
-            response = self.session.request(method, self.url+path, data=dt, timeout=self.timeout)
+            logger.debug("Requesting path: %s, params: %s", path, payload)
+            data = None
+            params = None
+            if payload:
+                if method == "GET" :
+                    params = payload
+                else:
+                    data = json.dumps(payload)
+
+            response = self.session.request(method, self.url+path, data=data,
+                                            timeout=self.timeout, params=params)
         except Exception as e:
             raise e
 

@@ -39,6 +39,7 @@ def add_node_to_cluster():
     multipathing = True
     no_cache = False
     iscsi = False
+    ssd_pcie = None
 
     if 'spdk_cpu_mask' in cl_data:
         spdk_cpu_mask = cl_data['spdk_cpu_mask']
@@ -64,9 +65,13 @@ def add_node_to_cluster():
     if 'no_cache' in cl_data:
         no_cache = bool(cl_data['no_cache'])
 
+    if 'ssd_pcie' in cl_data:
+        ssd_pcie = cl_data['ssd_pcie']
+
     t = threading.Thread(
         target=caching_node_controller.add_node,
-        args=(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spdk_mem, spdk_image, namespace, multipathing, iscsi, no_cache))
+        args=(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spdk_mem,
+              spdk_image, namespace, multipathing, iscsi, no_cache, ssd_pcie))
     t.start()
 
     return utils.get_response(True)
