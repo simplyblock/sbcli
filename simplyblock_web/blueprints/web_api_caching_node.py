@@ -37,6 +37,8 @@ def add_node_to_cluster():
     spdk_image = None
     namespace = None
     multipathing = True
+    no_cache = False
+    iscsi = False
 
     if 'spdk_cpu_mask' in cl_data:
         spdk_cpu_mask = cl_data['spdk_cpu_mask']
@@ -56,9 +58,15 @@ def add_node_to_cluster():
     if 'multipathing' in cl_data:
         multipathing = bool(cl_data['multipathing'])
 
+    if 'iscsi' in cl_data:
+        iscsi = bool(cl_data['iscsi'])
+
+    if 'no_cache' in cl_data:
+        no_cache = bool(cl_data['no_cache'])
+
     t = threading.Thread(
         target=caching_node_controller.add_node,
-        args=(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spdk_mem, spdk_image, namespace, multipathing))
+        args=(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spdk_mem, spdk_image, namespace, multipathing, iscsi, no_cache))
     t.start()
 
     return utils.get_response(True)

@@ -651,6 +651,9 @@ class CLIWrapper:
         sub_command.add_argument("--namespace", help='k8s namespace to deploy on',)
         sub_command.add_argument("--multipathing", help='Enable multipathing for lvol connection, default: on',
                                  default="on", choices=["on", "off"])
+        sub_command.add_argument("--iscsi", help='Use iscsi connection instead of nvme', required=False, action='store_true')
+        sub_command.add_argument("--no-cache", help='Use passthrough instead of caching bdev',
+                                 required=False, action='store_true', dest='no_cache')
 
         self.add_sub_command(subparser, 'list', 'List Caching nodes')
 
@@ -1181,6 +1184,8 @@ class CLIWrapper:
                 spdk_image = args.spdk_image
                 namespace = args.namespace
                 multipathing = args.multipathing == "on"
+                no_cache = args.no_cache
+                is_iscsi = args.iscsi
 
                 spdk_cpu_mask = None
                 if args.spdk_cpu_mask:
@@ -1196,7 +1201,8 @@ class CLIWrapper:
                         return f"SPDK memory:{args.spdk_mem} must be larger than 1G"
 
                 ret = caching_node_controller.add_node(
-                    cluster_id, node_ip, ifname, data_nics, spdk_cpu_mask, spdk_mem, spdk_image, namespace, multipathing)
+                    cluster_id, node_ip, ifname, data_nics, spdk_cpu_mask, spdk_mem, spdk_image, namespace,
+                    multipathing, is_iscsi, no_cache)
 
             if sub_command == "list":
                 #cluster_id
@@ -1207,7 +1213,7 @@ class CLIWrapper:
                 ret = caching_node_controller.remove_node(args.id, args.force)
 
             if sub_command == "connect":
-                ret = caching_node_controller.connect_iscsi(args.node_id, args.lvol_id)
+                ret = caching_node_controller.connect(args.node_id, args.lvol_id)
 
             if sub_command == "disconnect":
                 ret = caching_node_controller.disconnect(args.node_id, args.lvol_id)

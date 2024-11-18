@@ -72,7 +72,8 @@ def addNvmeDevices(rpc_client, devs, snode):
     return devices
 
 
-def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spdk_mem, spdk_image=None, namespace=None, multipathing=True):
+def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spdk_mem,
+             spdk_image=None, namespace=None, multipathing=True, is_iscsi=False, no_cache=False):
     db_controller = DBController()
     kv_store = db_controller.kv_store
 
@@ -133,6 +134,8 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spd
     snode.cpu_hz = node_info['cpu_hz']
     snode.memory = node_info['memory']
     snode.multipathing = multipathing
+    snode.is_iscsi = is_iscsi
+    snode.no_cache = no_cache
 
     # check for memory
     if "memory_details" in node_info and node_info['memory_details']:
@@ -199,83 +202,84 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spd
     snode.write_to_db(db_controller.kv_store)
     ssd_dev = nvme_devs[0]
 
-    if spdk_mem < 1024*1024:
-        logger.error("Hugepages must be larger than 1G")
-        return False
+    if snode.no_cache is False:
+        if spdk_mem < 1024*1024:
+            logger.error("Hugepages must be larger than 1G")
+            return False
 
-    mem = spdk_mem - 1024*1024*1024
-    snode.hugepages = mem
-    logger.info(f"Hugepages to be used: {utils.humanbytes(mem)}")
+        mem = spdk_mem - 1024*1024*1024
+        snode.hugepages = mem
+        logger.info(f"Hugepages to be used: {utils.humanbytes(mem)}")
 
-    ssd_size = ssd_dev.size
-    supported_ssd_size = mem * 100 / 2.25
-    split_factor = math.ceil(ssd_size/supported_ssd_size)
+        ssd_size = ssd_dev.size
+        supported_ssd_size = mem * 100 / 2.25
+        split_factor = math.ceil(ssd_size/supported_ssd_size)
 
-    logger.info(f"Supported SSD size: {utils.humanbytes(supported_ssd_size)}")
-    logger.info(f"SSD size: {utils.humanbytes(ssd_size)}")
+        logger.info(f"Supported SSD size: {utils.humanbytes(supported_ssd_size)}")
+        logger.info(f"SSD size: {utils.humanbytes(ssd_size)}")
 
-    cache_size = 0
-    cache_bdev = None
-    if supported_ssd_size < ssd_size:
-        logger.info(f"SSD size is bigger than the supported size, will use split bdev: {split_factor}")
-        ret = rpc_client.bdev_split(ssd_dev.nvme_bdev, split_factor)
-        cache_bdev = ret[0]
-        cache_size = int(ssd_dev.size/split_factor)
-        snode.cache_split_factor = split_factor
-    else:
-        snode.cache_split_factor = 0
-        cache_bdev = ssd_dev.nvme_bdev
-        cache_size = ssd_dev.size
+        cache_size = 0
+        cache_bdev = None
+        if supported_ssd_size < ssd_size:
+            logger.info(f"SSD size is bigger than the supported size, will use split bdev: {split_factor}")
+            ret = rpc_client.bdev_split(ssd_dev.nvme_bdev, split_factor)
+            cache_bdev = ret[0]
+            cache_size = int(ssd_dev.size/split_factor)
+            snode.cache_split_factor = split_factor
+        else:
+            snode.cache_split_factor = 0
+            cache_bdev = ssd_dev.nvme_bdev
+            cache_size = ssd_dev.size
 
-    # if supported_ssd_size < ssd_size:
-    #     logger.info(f"SSD size is bigger than the supported size, creating partition")
-    #
-    #     nbd_device = rpc_client.nbd_start_disk(ssd_dev.nvme_bdev)
-    #     time.sleep(3)
-    #     if not nbd_device:
-    #         logger.error(f"Failed to start nbd dev")
-    #         return False
-    #
-    #     jm_percent = int((supported_ssd_size/ssd_size) * 100)
-    #     result, error = cnode_api.make_gpt_partitions(nbd_device, jm_percent)
-    #     if error:
-    #         logger.error(f"Failed to make partitions")
-    #         logger.error(error)
-    #         return False
-    #     time.sleep(3)
-    #     rpc_client.nbd_stop_disk(nbd_device)
-    #     time.sleep(1)
-    #     rpc_client.bdev_nvme_detach_controller(ssd_dev.nvme_controller)
-    #     time.sleep(1)
-    #     rpc_client.bdev_nvme_controller_attach(ssd_dev.nvme_controller, ssd_dev.pcie_address)
-    #     time.sleep(1)
-    #     rpc_client.bdev_examine(ssd_dev.nvme_bdev)
-    #     time.sleep(1)
-    #
-    #     cache_bdev = f"{ssd_dev.nvme_bdev}p1"
-    #     cache_size = int(supported_ssd_size)
-    #
-    # else:
-    #
-    #     cache_bdev = ssd_dev.nvme_bdev
-    #     cache_size = ssd_dev.size
+        # if supported_ssd_size < ssd_size:
+        #     logger.info(f"SSD size is bigger than the supported size, creating partition")
+        #
+        #     nbd_device = rpc_client.nbd_start_disk(ssd_dev.nvme_bdev)
+        #     time.sleep(3)
+        #     if not nbd_device:
+        #         logger.error(f"Failed to start nbd dev")
+        #         return False
+        #
+        #     jm_percent = int((supported_ssd_size/ssd_size) * 100)
+        #     result, error = cnode_api.make_gpt_partitions(nbd_device, jm_percent)
+        #     if error:
+        #         logger.error(f"Failed to make partitions")
+        #         logger.error(error)
+        #         return False
+        #     time.sleep(3)
+        #     rpc_client.nbd_stop_disk(nbd_device)
+        #     time.sleep(1)
+        #     rpc_client.bdev_nvme_detach_controller(ssd_dev.nvme_controller)
+        #     time.sleep(1)
+        #     rpc_client.bdev_nvme_controller_attach(ssd_dev.nvme_controller, ssd_dev.pcie_address)
+        #     time.sleep(1)
+        #     rpc_client.bdev_examine(ssd_dev.nvme_bdev)
+        #     time.sleep(1)
+        #
+        #     cache_bdev = f"{ssd_dev.nvme_bdev}p1"
+        #     cache_size = int(supported_ssd_size)
+        #
+        # else:
+        #
+        #     cache_bdev = ssd_dev.nvme_bdev
+        #     cache_size = ssd_dev.size
 
-    logger.info(f"Cache size: {utils.humanbytes(cache_size)}")
+        logger.info(f"Cache size: {utils.humanbytes(cache_size)}")
 
-    snode.cache_bdev = cache_bdev
-    snode.cache_size = cache_size
+        snode.cache_bdev = cache_bdev
+        snode.cache_size = cache_size
 
-    # create tmp ocf
-    logger.info(f"Creating first ocf bdev...")
+        # create tmp ocf
+        logger.info(f"Creating first ocf bdev...")
 
-    ret = rpc_client.bdev_malloc_create("malloc_tmp", 512, int((100*1024*1024)/512))
-    if not ret:
-        logger.error("Failed ot create tmp malloc")
-        return False
-    ret = rpc_client.bdev_ocf_create("ocf_tmp", 'wt', cache_bdev, "malloc_tmp")
-    if not ret:
-        logger.error("Failed ot create tmp OCF BDev")
-        return False
+        ret = rpc_client.bdev_malloc_create("malloc_tmp", 512, int((100*1024*1024)/512))
+        if not ret:
+            logger.error("Failed ot create tmp malloc")
+            return False
+        ret = rpc_client.bdev_ocf_create("ocf_tmp", 'wt', cache_bdev, "malloc_tmp")
+        if not ret:
+            logger.error("Failed ot create tmp OCF BDev")
+            return False
     logger.info("Setting node status to Active")
     snode.status = CachingNode.STATUS_ONLINE
     snode.write_to_db(kv_store)
@@ -299,49 +303,50 @@ def recreate(node_id):
     logger.info(f"Recreating caching node: {node_id}, status: {snode.status}")
     snode_api = CNodeClient(f"{snode.mgmt_ip}:5000")
 
-    # creating RPCClient instance
-    rpc_client = RPCClient(
-        snode.mgmt_ip, snode.rpc_port,
-        snode.rpc_username, snode.rpc_password,
-        timeout=60*5, retry=5)
+    if snode.no_cache is False:
+        # creating RPCClient instance
+        rpc_client = RPCClient(
+            snode.mgmt_ip, snode.rpc_port,
+            snode.rpc_username, snode.rpc_password,
+            timeout=60*5, retry=5)
 
-    # get new node info after starting spdk
-    node_info, _ = snode_api.info()
-    # adding devices
-    nvme_devs = addNvmeDevices(rpc_client, node_info['spdk_pcie_list'], snode)
-    if not nvme_devs:
-        logger.error("No NVMe devices was found!")
-        return False
+        # get new node info after starting spdk
+        node_info, _ = snode_api.info()
+        # adding devices
+        nvme_devs = addNvmeDevices(rpc_client, node_info['spdk_pcie_list'], snode)
+        if not nvme_devs:
+            logger.error("No NVMe devices was found!")
+            return False
 
-    # snode.nvme_devices = nvme_devs
-    # snode.write_to_db(db_controller.kv_store)
+        # snode.nvme_devices = nvme_devs
+        # snode.write_to_db(db_controller.kv_store)
 
-    # ssd_dev = nvme_devs[0]
+        # ssd_dev = nvme_devs[0]
 
-    # if snode.cache_split_factor > 1:
-    #     ret = rpc_client.bdev_split(ssd_dev.nvme_bdev, snode.cache_split_factor)
+        # if snode.cache_split_factor > 1:
+        #     ret = rpc_client.bdev_split(ssd_dev.nvme_bdev, snode.cache_split_factor)
 
-    logger.info(f"Cache size: {utils.humanbytes(snode.cache_size)}")
+        logger.info(f"Cache size: {utils.humanbytes(snode.cache_size)}")
 
-    # create tmp ocf
-    logger.info(f"Creating first ocf bdev...")
+        # create tmp ocf
+        logger.info(f"Creating first ocf bdev...")
 
-    ret = rpc_client.bdev_malloc_create("malloc_tmp", 512, int((100 * 1024 * 1024) / 512))
-    if not ret:
-        logger.error("Failed ot create tmp malloc")
-        return False
-    ret = rpc_client.bdev_ocf_create("ocf_tmp", 'wt', snode.cache_bdev, "malloc_tmp")
-    if not ret:
-        logger.error("Failed ot create tmp OCF BDev")
-        return False
+        ret = rpc_client.bdev_malloc_create("malloc_tmp", 512, int((100 * 1024 * 1024) / 512))
+        if not ret:
+            logger.error("Failed ot create tmp malloc")
+            return False
+        ret = rpc_client.bdev_ocf_create("ocf_tmp", 'wt', snode.cache_bdev, "malloc_tmp")
+        if not ret:
+            logger.error("Failed ot create tmp OCF BDev")
+            return False
 
-    if snode.lvols:
-        for lvol in snode.lvols:
-            ret = connect(snode.get_id(), lvol.lvol_id)
-            if ret:
-                logger.info(f"connecting lvol {lvol.lvol_id} ... ok")
-            else:
-                logger.error(f"connecting lvol {lvol.lvol_id} .. error")
+        if snode.lvols:
+            for lvol in snode.lvols:
+                ret = connect(snode.get_id(), lvol.lvol_id)
+                if ret:
+                    logger.info(f"connecting lvol {lvol.lvol_id} ... ok")
+                else:
+                    logger.error(f"connecting lvol {lvol.lvol_id} .. error")
 
     logger.info("Setting node status to Active")
     snode.status = CachingNode.STATUS_ONLINE
@@ -388,6 +393,10 @@ def connect(caching_node_id, lvol_id):
     if cnode.cluster_id != pool.cluster_id:
         logger.error("Caching node and LVol are in different clusters")
         return False
+
+    if cnode.is_iscsi:
+        return connect_iscsi(caching_node_id, lvol_id)
+
 
     logger.info("Connecting to remote LVOL")
     mini_id = lvol.get_id().split("-")[0]
@@ -561,16 +570,18 @@ def connect_iscsi(caching_node_id, lvol_id):
                 #     logger.error("Failed to connect to LVol")
                 #     return False
 
-    logger.info("Creating OCF BDev")
-    # create ocf device
     cach_bdev = f"ocf_{mini_id}"
-    dev = cnode.cache_bdev
-    ret = rpc_client.bdev_ocf_create(cach_bdev, 'wt', dev, f"{rem_name}n1")
-    logger.debug(ret)
-    if not ret:
-        logger.error("Failed to create OCF bdev")
-        return False
-
+    if cnode.no_cache is False:
+        logger.info("Creating OCF BDev")
+        # create ocf device
+        dev = cnode.cache_bdev
+        ret = rpc_client.bdev_ocf_create(cach_bdev, 'wt', dev, f"{rem_name}n1")
+        logger.debug(ret)
+        if not ret:
+            logger.error("Failed to create OCF bdev")
+            return False
+    else:
+        cach_bdev = f"{rem_name}n1"
     # logger.info("Creating local subsystem")
     # create subsystem (local)
     subsystem_nqn = "iqn.2016-06.io.spdk:"+ lvol.get_id()
@@ -612,7 +623,7 @@ def connect_iscsi(caching_node_id, lvol_id):
     #         ret, _ = cnode_client.connect_nvme(ip, "4420", subsystem_nqn)
     #         break
 
-    time.sleep(5)
+    time.sleep(3)
     # cnode_info, _ = cnode_client.info()
     dev_path = None
     try:
@@ -685,31 +696,43 @@ def disconnect(caching_node_id, lvol_id):
     # logger.info("Disconnecting LVol")
     # disconnect local nvme
     cnode_client = CNodeClient(cnode.api_endpoint)
-    subsystem_nqn = "iqn.2016-06.io.spdk:" + lvol.get_id()
+    rpc_client = RPCClient(
+        cnode.mgmt_ip, cnode.rpc_port, cnode.rpc_username, cnode.rpc_password, timeout=120)
 
-    try:
-        ret, _ = cnode_client.disconnect_iscsi(subsystem_nqn)
-    except:
-        pass
+    if cnode.is_iscsi:
+        try:
+            subsystem_nqn = "iqn.2016-06.io.spdk:" + lvol.get_id()
+            ret, _ = cnode_client.disconnect_iscsi(subsystem_nqn)
+            ret = rpc_client.iscsi_delete_target_node(subsystem_nqn)
+
+        except:
+            pass
+    else:
+        try:
+            subsystem_nqn = lvol.nqn
+            ret, _ = cnode_client.disconnect_nqn(subsystem_nqn)
+            ret = rpc_client.subsystem_delete(subsystem_nqn)
+
+        except:
+            pass
     # if not ret:
     #     logger.error("failed to disconnect local connecting")
     #     return False
 
     # remove subsystem
-    rpc_client = RPCClient(
-        cnode.mgmt_ip, cnode.rpc_port, cnode.rpc_username, cnode.rpc_password, timeout=120)
 
-    ret = rpc_client.iscsi_delete_target_node(subsystem_nqn)
+
 
     # remove ocf bdev
     mini_id = lvol.get_id().split("-")[0]
     rem_name = f"rem_{mini_id}"
     cach_bdev = f"ocf_{mini_id}"
 
-    ret = rpc_client.bdev_ocf_delete(cach_bdev)
-    if not ret:
-        logger.error("failed to delete ocf bdev")
-        return False
+    if cnode.no_cache is False:
+        ret = rpc_client.bdev_ocf_delete(cach_bdev)
+        if not ret:
+            logger.error("failed to delete ocf bdev")
+            return False
 
     # disconnect lvol controller/s
     ret = rpc_client.bdev_nvme_detach_controller(rem_name)

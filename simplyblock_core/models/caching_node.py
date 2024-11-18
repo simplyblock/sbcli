@@ -91,6 +91,8 @@ class CachingNode(BaseModel):
         "memory": {"type": int, "default": 0},
         "hugepages": {"type": int, "default": 0},
         "multipathing": {"type": bool, "default": True},
+        "is_iscsi": {"type": bool, "default": False},
+        "no_cache": {"type": bool, "default": False},
 
     }
 
