@@ -787,7 +787,7 @@ def deploy(ifname):
         ifname = "eth0"
 
     logger.info("Installing dependencies...")
-    ret = scripts.install_deps()
+    ret = scripts.install_deps_cnode()
 
     dev_ip = utils.get_iface_ip(ifname)
     if not dev_ip:
@@ -829,7 +829,7 @@ def deploy(ifname):
         ]
     )
     logger.info("Pulling SPDK images")
-    node_docker.images.pull(constants.SIMPLY_BLOCK_DOCKER_IMAGE)
+    node_docker.images.pull(constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE)
     return f"{dev_ip}:5000"
 
 
