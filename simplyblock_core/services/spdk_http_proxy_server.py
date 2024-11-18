@@ -13,7 +13,6 @@ from http.server import ThreadingHTTPServer
 from http.server import BaseHTTPRequestHandler
 
 
-rpc_sock = '/var/tmp/spdk.sock'
 logger_handler = logging.StreamHandler(stream=sys.stdout)
 logger_handler.setFormatter(logging.Formatter('%(asctime)s: %(levelname)s: %(message)s'))
 logger = logging.getLogger()
@@ -147,6 +146,7 @@ server_ip = get_env_var("SERVER_IP", is_required=True)
 rpc_port = get_env_var("RPC_PORT", is_required=True)
 rpc_username = get_env_var("RPC_USERNAME", is_required=True)
 rpc_password = get_env_var("RPC_PASSWORD", is_required=True)
+rpc_sock =  get_env_var("RPC_SOCK", is_required=False, default='/var/tmp/spdk.sock')
 
 try:
     rpc_port = int(rpc_port)

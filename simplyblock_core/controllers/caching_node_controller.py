@@ -3,6 +3,7 @@ import datetime
 import json
 import logging as lg
 import math
+import random
 import time
 import uuid
 
@@ -89,13 +90,14 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spd
     system_id = node_info['system_id']
     hostname = node_info['hostname']
     logger.info(f"Node found: {node_info['hostname']}")
-    snode = db_controller.get_caching_node_by_system_id(system_id)
-    if snode:
-        logger.error("Node already exists, try remove it first.")
-        return False
+    # snode = db_controller.get_caching_node_by_system_id(system_id)
+    # if snode:
+        # logger.error("Node already exists, try remove it first.")
+        # return False
 
+    rpc_port = constants.RPC_HTTP_PROXY_PORT + int(random.random() * 1000)
     node_info, _ = cnode_api.info()
-    results, err = cnode_api.join_db(db_connection=cluster.db_connection)
+    results, err = cnode_api.join_db(db_connection=cluster.db_connection, rpc_port=rpc_port)
 
     data_nics = []
     names = data_nics_list or [iface_name]
@@ -122,7 +124,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spd
     snode.subsystem = subsystem_nqn
     snode.data_nics = data_nics
     snode.mgmt_ip = node_info['network_interface'][iface_name]['ip']
-    snode.rpc_port = constants.RPC_HTTP_PROXY_PORT
+    snode.rpc_port = rpc_port
     snode.rpc_username = rpc_user
     snode.rpc_password = rpc_pass
     snode.cluster_id = cluster_id
@@ -166,7 +168,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spd
 
     retries = 20
     while retries > 0:
-        resp, _ = cnode_api.spdk_process_is_up()
+        resp, _ = cnode_api.spdk_process_is_up(snode.rpc_port)
         if resp:
             logger.info(f"Pod is up")
             break
@@ -179,7 +181,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spd
         logger.error("Pod is not running, exiting")
         return False
 
-    time.sleep(20)
+    time.sleep(5)
 
     # creating RPCClient instance
     rpc_client = RPCClient(
@@ -192,17 +194,17 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spd
     # mem = node_info['memory_details']['huge_free']
     # logger.info(f"Free Hugepages detected: {utils.humanbytes(mem)}")
 
-    # adding devices
-    nvme_devs = addNvmeDevices(rpc_client, node_info['spdk_pcie_list'], snode)
-    if not nvme_devs:
-        logger.error("No NVMe devices was found!")
-        return False
-
-    snode.nvme_devices = nvme_devs
-    snode.write_to_db(db_controller.kv_store)
-    ssd_dev = nvme_devs[0]
-
     if snode.no_cache is False:
+        # adding devices
+        nvme_devs = addNvmeDevices(rpc_client, node_info['spdk_pcie_list'], snode)
+        if not nvme_devs:
+            logger.error("No NVMe devices was found!")
+            # return False
+
+        snode.nvme_devices = nvme_devs
+        snode.write_to_db(db_controller.kv_store)
+        ssd_dev = nvme_devs[0]
+
         if spdk_mem < 1024*1024:
             logger.error("Hugepages must be larger than 1G")
             return False
@@ -897,7 +899,7 @@ def remove_node(node_id, force=False):
 
     try:
         snode_api = CNodeClient(snode.api_endpoint)
-        results, err = snode_api.spdk_process_kill()
+        results, err = snode_api.spdk_process_kill(snode.rpc_port)
         ret = snode_api.delete_dev_gpt_partitions(snode.nvme_devices[0].pcie_address)
 
     except:

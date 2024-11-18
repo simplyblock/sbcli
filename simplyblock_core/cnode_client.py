@@ -70,7 +70,8 @@ class CNodeClient:
         return self._request("GET", "cnode/info")
 
     def spdk_process_start(
-            self, spdk_cpu_mask, spdk_mem, spdk_image, server_ip, rpc_port, rpc_username, rpc_password, namespace=None):
+            self, spdk_cpu_mask, spdk_mem, spdk_image, server_ip, rpc_port, rpc_username, rpc_password,
+            namespace=None, rpc_sock=None):
         params = {
             "spdk_cpu_mask": spdk_cpu_mask,
             "spdk_mem": spdk_mem,
@@ -82,17 +83,21 @@ class CNodeClient:
         }
         if namespace:
             params["namespace"] = namespace
+        if rpc_sock:
+            params["rpc_sock"] = rpc_sock
         return self._request("POST", "cnode/spdk_process_start", params)
 
-    def join_db(self, db_connection):
-        params = {"db_connection": db_connection}
+    def join_db(self, db_connection, rpc_port):
+        params = {"db_connection": db_connection, "rpc_port": rpc_port}
         return self._request("POST", "cnode/join_db", params)
 
-    def spdk_process_kill(self):
-        return self._request("GET", "cnode/spdk_process_kill")
+    def spdk_process_kill(self, rpc_port):
+        params = {"rpc_port": rpc_port}
+        return self._request("GET", "cnode/spdk_process_kill", params)
 
-    def spdk_process_is_up(self):
-        return self._request("GET", "cnode/spdk_process_is_up")
+    def spdk_process_is_up(self, rpc_port):
+        params = {"rpc_port": rpc_port}
+        return self._request("GET", "cnode/spdk_process_is_up", params)
 
     def connect_nvme(self, ip, port, nqn):
         params = {
