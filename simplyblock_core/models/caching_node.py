@@ -93,7 +93,7 @@ class CachingNode(BaseModel):
         "multipathing": {"type": bool, "default": True},
         "is_iscsi": {"type": bool, "default": False},
         "no_cache": {"type": bool, "default": False},
-        "iscsi_port": {"type": int, "default": 3260},
+        "ha_enabled": {"type": bool, "default": False},
 
     }
 

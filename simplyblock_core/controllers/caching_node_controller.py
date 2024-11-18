@@ -74,7 +74,8 @@ def addNvmeDevices(rpc_client, devs, snode):
 
 
 def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spdk_mem,
-             spdk_image=None, namespace=None, multipathing=True, is_iscsi=False, no_cache=False, ssd_pcie=None):
+             spdk_image=None, namespace=None, multipathing=True, is_iscsi=False, no_cache=False, ssd_pcie=None,
+             ha_enabled=False):
     db_controller = DBController()
     kv_store = db_controller.kv_store
 
@@ -138,7 +139,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spd
     snode.multipathing = multipathing
     snode.is_iscsi = is_iscsi
     snode.no_cache = no_cache
-    snode.iscsi_port = 3260 + int(random.random() * 1000)
+    snode.ha_enabled = bool(ha_enabled)
 
 
     # check for memory
@@ -400,6 +401,45 @@ def connect(caching_node_id, lvol_id):
                 logger.error("Caching node not found")
                 return False
 
+    if cnode.ha_enabled:
+        for node in db_controller.get_caching_nodes():
+            if node.api_endpoint == cnode.api_endpoint:
+                if node.is_iscsi:
+                    connect_iscsi(node.get_id(), lvol_id)
+                else:
+                    connect_nvme(node.get_id(), lvol_id)
+    return True
+
+
+def connect_nvme(caching_node_id, lvol_id):
+    lvol = db_controller.get_lvol_by_id(lvol_id)
+    if not lvol:
+        logger.error(f"LVol not found: {lvol_id}")
+        return False
+
+    if lvol.status != lvol.STATUS_ONLINE:
+        logger.error(f"LVol must be online, lvol status: {lvol.status}")
+        return False
+
+    pool = db_controller.get_pool_by_id(lvol.pool_uuid)
+    if pool.status == Pool.STATUS_INACTIVE:
+        logger.error(f"Pool is disabled")
+        return False
+
+    cnode = None
+    if caching_node_id == 'this':
+        hostn = utils.get_hostname()
+        logger.info(f"Trying to get node by hostname: {hostn}")
+        cnode = db_controller.get_caching_node_by_hostname(hostn)
+    else:
+        cnode = db_controller.get_caching_node_by_id(caching_node_id)
+        if not cnode:
+            logger.info(f"Caching node uuid not found: {caching_node_id}")
+            cnode = db_controller.get_caching_node_by_hostname(caching_node_id)
+            if not cnode:
+                logger.error("Caching node not found")
+                return False
+
     for clvol in cnode.lvols:
         if clvol.lvol_id == lvol_id:
             logger.info(f"Already connected, dev path: {clvol.device_path}")
@@ -408,9 +448,6 @@ def connect(caching_node_id, lvol_id):
     if cnode.cluster_id != pool.cluster_id:
         logger.error("Caching node and LVol are in different clusters")
         return False
-
-    if cnode.is_iscsi:
-        return connect_iscsi(caching_node_id, lvol_id)
 
 
     logger.info("Connecting to remote LVOL")
@@ -524,7 +561,7 @@ def connect(caching_node_id, lvol_id):
     cnode.lvols = tmp
     cnode.write_to_db(db_controller.kv_store)
 
-    return dev_path
+    return True
 
 
 def connect_iscsi(caching_node_id, lvol_id):
