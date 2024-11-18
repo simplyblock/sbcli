@@ -685,10 +685,9 @@ def disconnect(caching_node_id, lvol_id):
     # logger.info("Disconnecting LVol")
     # disconnect local nvme
     cnode_client = CNodeClient(cnode.api_endpoint)
-    subsystem_nqn = lvol.nqn
+    subsystem_nqn = "iqn.2016-06.io.spdk:" + lvol.get_id()
 
     try:
-        subsystem_nqn = "iqn.2016-06.io.spdk:" + lvol.get_id()
         ret, _ = cnode_client.disconnect_iscsi(subsystem_nqn)
     except:
         pass
@@ -700,7 +699,7 @@ def disconnect(caching_node_id, lvol_id):
     rpc_client = RPCClient(
         cnode.mgmt_ip, cnode.rpc_port, cnode.rpc_username, cnode.rpc_password, timeout=120)
 
-    ret = rpc_client.iscsi_delete_target_node(lvol.get_id())
+    ret = rpc_client.iscsi_delete_target_node(subsystem_nqn)
 
     # remove ocf bdev
     mini_id = lvol.get_id().split("-")[0]
