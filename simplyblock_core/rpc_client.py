@@ -843,3 +843,35 @@ class RPCClient:
             "jm_vuid": jm_vuid
         }
         return self._request("jc_explicit_synchronization", params)
+
+    def iscsi_create_portal_group(self, tag, host, port):
+        params = {
+            "tag": tag,
+            "portals" : [{
+                "host": host,
+                "port": port}]
+        }
+        return self._request("iscsi_create_portal_group", params)
+
+    def iscsi_create_initiator_group(self, tag, initiators, netmasks):
+        params = {
+            "tag": tag,
+            "initiators" : initiators,
+            "netmasks" : netmasks,
+        }
+        return self._request("iscsi_create_initiator_group", params)
+
+    def iscsi_create_target_node(self, name, ig_tag, pg_tag, bdev_name):
+        params = {
+            "name": name,
+            "pg_ig_maps" : [{
+                "ig_tag": ig_tag,
+                "pg_tag": pg_tag }],
+            "luns" : [{
+                "lun_id": 0,
+                "bdev_name": bdev_name}],
+
+            "disable_chap": True,
+            "queue_depth": 24
+        }
+        return self._request("iscsi_create_target_node", params)

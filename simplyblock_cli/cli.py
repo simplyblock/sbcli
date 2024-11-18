@@ -1207,7 +1207,7 @@ class CLIWrapper:
                 ret = caching_node_controller.remove_node(args.id, args.force)
 
             if sub_command == "connect":
-                ret = caching_node_controller.connect(args.node_id, args.lvol_id)
+                ret = caching_node_controller.connect_iscsi(args.node_id, args.lvol_id)
 
             if sub_command == "disconnect":
                 ret = caching_node_controller.disconnect(args.node_id, args.lvol_id)

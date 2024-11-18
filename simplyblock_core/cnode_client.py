@@ -122,3 +122,15 @@ class CNodeClient:
     def delete_dev_gpt_partitions(self, device_pci):
         params = {"device_pci": device_pci}
         return self._request("POST", "cnode/delete_dev_gpt_partitions", params)
+
+    def iscsi_connect(self, ip, port, nqn):
+        params = {
+            "ip": ip,
+            "port": port,
+            "iqn": nqn}
+        return self._request("POST", "cnode/iscsi_connect", params)
+
+    def get_iscsi_dev_path(self, nqn):
+        params = {
+            "iqn": nqn}
+        return self._request("POST", "cnode/get_iscsi_dev_path", params)

@@ -360,6 +360,48 @@ def connect_to_nvme():
         return utils.get_response(ret_code, error=err)
 
 
+@bp.route('/iscsi_connect', methods=['POST'])
+def connect_to_iscsi():
+    data = request.get_json()
+    ip = data['ip']
+    port = data['port']
+    nqn = data['iqn']
+    st = f"iscsiadm -m node -T {nqn} -p {ip}:{port} --login"
+    logger.debug(st)
+    out, err, ret_code = run_command(st)
+    logger.debug(ret_code)
+    logger.debug(out)
+    logger.debug(err)
+    if ret_code == 0:
+        return utils.get_response(True)
+    else:
+        return utils.get_response(ret_code, error=err)
+
+
+@bp.route('/disconnect_iscsi', methods=['POST'])
+def disconnect_iscsi():
+    data = request.get_json()
+    iqn = data['iqn']
+    st = f"iscsiadm -m node -T {iqn} --logout"
+    out, err, ret_code = run_command(st)
+    logger.debug(ret_code)
+    logger.debug(out)
+    logger.debug(err)
+    return utils.get_response(ret_code)
+
+
+@bp.route('/get_iscsi_dev_path', methods=['POST'])
+def get_iscsi_dev_path():
+    data = request.get_json()
+    iqn = data['iqn']
+    st = f"sid=$(iscsiadm -m session | grep  {iqn} | grep -o -E \[[[:digit:]]*\]  | grep -o [[:digit:]]*) ; blk_name=$(iscsiadm -m session -P 3 -r $sid | grep \"Attached scsi disk\" | awk "'{print $4}'") ; echo /dev/$blk_name"
+    out, err, ret_code = run_command(st)
+    logger.debug(ret_code)
+    logger.debug(out)
+    logger.debug(err)
+    return utils.get_response(out)
+
+
 @bp.route('/disconnect_device', methods=['POST'])
 def disconnect_device():
     data = request.get_json()
