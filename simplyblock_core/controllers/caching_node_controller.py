@@ -408,6 +408,11 @@ def connect(caching_node_id, lvol_id):
                     connect_iscsi(node.get_id(), lvol_id)
                 else:
                     connect_nvme(node.get_id(), lvol_id)
+    else:
+        if cnode.is_iscsi:
+            connect_iscsi(cnode.get_id(), lvol_id)
+        else:
+            connect_nvme(cnode.get_id(), lvol_id)
     return True
 
 
@@ -729,6 +734,35 @@ def connect_iscsi(caching_node_id, lvol_id):
 
 
 def disconnect(caching_node_id, lvol_id):
+    lvol = db_controller.get_lvol_by_id(lvol_id)
+    if not lvol:
+        logger.error(f"LVol not found: {lvol_id}")
+        return False
+
+    cnode = None
+    if caching_node_id == 'this':
+        hostn = utils.get_hostname()
+        logger.info(f"Trying to get node by hostname: {hostn}")
+        cnode = db_controller.get_caching_node_by_hostname(hostn)
+    else:
+        cnode = db_controller.get_caching_node_by_id(caching_node_id)
+        if not cnode:
+            logger.info(f"Caching node uuid not found: {caching_node_id}")
+            cnode = db_controller.get_caching_node_by_hostname(caching_node_id)
+            if not cnode:
+                logger.error("Caching node not found")
+                return False
+
+    if cnode.ha_enabled:
+        for node in db_controller.get_caching_nodes():
+            if node.api_endpoint == cnode.api_endpoint:
+                disconnect_int(node.get_id(), lvol_id)
+    else:
+        disconnect_int(cnode.get_id(), lvol_id)
+
+    return True
+
+def disconnect_int(caching_node_id, lvol_id):
     lvol = db_controller.get_lvol_by_id(lvol_id)
     if not lvol:
         logger.error(f"LVol not found: {lvol_id}")
