@@ -198,7 +198,8 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spd
 
     if snode.no_cache is False:
         # adding devices
-        nvme_devs = addNvmeDevices(rpc_client, node_info['spdk_pcie_list'], snode)
+        # nvme_devs = addNvmeDevices(rpc_client, node_info['spdk_pcie_list'], snode)
+        nvme_devs = addNvmeDevices(rpc_client, [ssd_pcie], snode)
         if not nvme_devs:
             logger.error("No NVMe devices was found!")
             return False
@@ -448,6 +449,9 @@ def connect(caching_node_id, lvol_id):
         logger.error("Failed to create OCF bdev")
         return False
 
+    cont_info, _ = CNodeClient(cnode.api_endpoint).spdk_process_is_up(cnode.rpc_port)
+    nvme_ip =cont_info['NetworkSettings']['IPAddress']
+
     # logger.info("Creating local subsystem")
     # create subsystem (local)
     subsystem_nqn = lvol.nqn
@@ -456,8 +460,8 @@ def connect(caching_node_id, lvol_id):
     ret = rpc_client.transport_list("TCP")
     if not ret:
         ret = rpc_client.transport_create_caching("TCP")
-    ret = rpc_client.listeners_create(subsystem_nqn, "TCP", '127.0.0.1', "4420")
-    ret = rpc_client.nvmf_subsystem_listener_set_ana_state(subsystem_nqn, '127.0.0.1', "4420", is_optimized=True)
+    ret = rpc_client.listeners_create(subsystem_nqn, "TCP", nvme_ip, "4420")
+    ret = rpc_client.nvmf_subsystem_listener_set_ana_state(subsystem_nqn, nvme_ip, "4420", is_optimized=True)
 
     # add cached device to subsystem
     # logger.info(f"Add {cach_bdev} to subsystem {subsystem_nqn}")
@@ -471,7 +475,7 @@ def connect(caching_node_id, lvol_id):
     logger.info("Connecting to local subsystem")
     # make nvme connect to nqn
     cnode_client = CNodeClient(cnode.api_endpoint)
-    ret, _ = cnode_client.connect_nvme('127.0.0.1', "4420", subsystem_nqn)
+    ret, _ = cnode_client.connect_nvme(nvme_ip, "4420", subsystem_nqn)
     if not ret:
         logger.error("Failed to connect to local subsystem")
         return False
