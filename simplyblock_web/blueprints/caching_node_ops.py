@@ -380,7 +380,7 @@ def connect_to_iscsi():
         if ret_code == 0:
             return utils.get_response(True)
         else:
-            return utils.get_response(ret_code, error=err)
+            return utils.get_response(ret_code, error=err.decode("utf-8"))
     except Exception as e:
         return utils.get_response(False, error=str(e))
 
