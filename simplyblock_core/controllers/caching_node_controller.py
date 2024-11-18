@@ -439,16 +439,19 @@ def connect(caching_node_id, lvol_id):
                 #     logger.error("Failed to connect to LVol")
                 #     return False
 
-    logger.info("Creating OCF BDev")
-    # create ocf device
-    cach_bdev = f"ocf_{mini_id}"
-    dev = cnode.cache_bdev
-    ret = rpc_client.bdev_ocf_create(cach_bdev, 'wt', dev, f"{rem_name}n1")
-    logger.debug(ret)
-    if not ret:
-        logger.error("Failed to create OCF bdev")
-        return False
 
+    if cnode.no_cache is False:
+        logger.info("Creating OCF BDev")
+        # create ocf device
+        cach_bdev = f"ocf_{mini_id}"
+        dev = cnode.cache_bdev
+        ret = rpc_client.bdev_ocf_create(cach_bdev, 'wt', dev, f"{rem_name}n1")
+        logger.debug(ret)
+        if not ret:
+            logger.error("Failed to create OCF bdev")
+            return False
+    else:
+        cach_bdev = f"{rem_name}n1"
     cont_info, _ = CNodeClient(cnode.api_endpoint).spdk_process_is_up(cnode.rpc_port)
     nvme_ip =cont_info['NetworkSettings']['IPAddress']
 
