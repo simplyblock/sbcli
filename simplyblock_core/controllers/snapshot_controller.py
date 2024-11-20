@@ -236,6 +236,8 @@ def clone(snapshot_id, clone_name, new_size=0):
         logger.error(error)
         return False, f"Failed to add lvol on node {snode.get_id()}"
 
+    cluster = db_controller.get_cluster_by_id(snode.cluster_id)
+
     lvol = LVol()
     lvol.uuid = str(uuid.uuid4())
     lvol.lvol_name = clone_name
@@ -249,7 +251,7 @@ def clone(snapshot_id, clone_name, new_size=0):
     lvol.node_id = snode.get_id()
     lvol.mode = 'read-write'
     lvol.cloned_from_snap = snapshot_id
-    lvol.nqn = snode.subsystem + ":lvol:" + lvol.uuid
+    lvol.nqn = cluster.nqn + ":lvol:" + lvol.uuid
     lvol.pool_uuid = pool.id
     lvol.ha_type = snap.lvol.ha_type
     lvol.lvol_type = 'lvol'
@@ -258,7 +260,7 @@ def clone(snapshot_id, clone_name, new_size=0):
     lvol.distr_bs = snap.lvol.distr_bs
     lvol.distr_chunk_bs = snap.lvol.distr_chunk_bs
     lvol.distr_page_size = snap.lvol.distr_page_size
-    lvol.guid = snap.lvol.guid
+    lvol.guid = lvol_controller._generate_hex_string(16)
     lvol.vuid = snap.lvol.vuid
 
     lvol.status = LVol.STATUS_ONLINE
@@ -307,7 +309,6 @@ def clone(snapshot_id, clone_name, new_size=0):
     logger.info("creating subsystem %s", subsystem_nqn)
     ret = rpc_client.subsystem_create(subsystem_nqn, 'sbcli-cn', lvol.uuid)
 
-    cluster = db_controller.get_cluster_by_id(snode.cluster_id)
     # add listeners
     logger.info("adding listeners")
     for iface in snode.data_nics:
