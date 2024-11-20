@@ -610,7 +610,7 @@ def _create_bdev_stack(lvol, snode, ha_comm_addrs, ha_inode_self):
     return True, None
 
 
-def add_lvol_on_node(lvol, snode, ha_comm_addrs=None, ha_inode_self=None):
+def add_lvol_on_node(lvol, snode, ha_comm_addrs=None, ha_inode_self=0):
     rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
     spdk_mem_info_before = rpc_client.ultra21_util_get_malloc_stats()
 
@@ -633,8 +633,9 @@ def add_lvol_on_node(lvol, snode, ha_comm_addrs=None, ha_inode_self=None):
     ret = rpc_client.get_bdevs(lvol.top_bdev)
     lvol.size = ret[0]["block_size"] * ret[0]["num_blocks"]
 
+    min_cntlid = 1 + 1000*ha_inode_self
     logger.info("creating subsystem %s", lvol.nqn)
-    ret = rpc_client.subsystem_create(lvol.nqn, 'sbcli-cn', lvol.uuid)
+    ret = rpc_client.subsystem_create(lvol.nqn, 'sbcli-cn', lvol.uuid, min_cntlid)
     logger.debug(ret)
 
     # add listeners
