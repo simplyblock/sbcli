@@ -1664,7 +1664,7 @@ def restart_storage_node(
     if not results:
         logger.error(f"Failed to start spdk: {err}")
         return False
-    time.sleep(3)
+    time.sleep(10)
 
     if small_bufsize:
         snode.iobuf_small_bufsize = small_bufsize
@@ -1677,7 +1677,7 @@ def restart_storage_node(
     rpc_client = RPCClient(
         snode.mgmt_ip, snode.rpc_port,
         snode.rpc_username, snode.rpc_password,
-        timeout=10 * 60, retry=5)
+        timeout=10 * 60, retry=10)
 
     # 1- set iobuf options
     if (snode.iobuf_small_pool_count or snode.iobuf_large_pool_count or
