@@ -181,9 +181,9 @@ def get_weights(node_stats, cluster_stats):
     def _get_key_w(node_id, key):
         w = 0
         if cluster_stats[key] > 0:
-            w = (node_stats[node_id][key] / cluster_stats[key]) * 100
-            if key in ["lvol", "r_io", "w_io", "r_b", "w_b"]:  # get reverse value
-                w = ((cluster_stats[key]-node_stats[node_id][key]) / cluster_stats[key]) * 100
+            w = (cluster_stats[key]/node_stats[node_id][key])*10
+            # if key in ["lvol", "r_io", "w_io", "r_b", "w_b"]:  # get reverse value
+            #     w = (cluster_stats[key]/node_stats[node_id][key]) * 100
         return w
 
     out = {}

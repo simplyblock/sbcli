@@ -219,7 +219,7 @@ def _get_next_3_nodes(cluster_id, lvol_size=0):
     print("Node stats")
     utils.print_table_dict({**node_stats, "Cluster": cluster_stats})
     print("Node weights")
-    utils.print_table_dict({**nodes_weight, "weights": {**constants.weights, "total": sum(constants.weights.values())}})
+    utils.print_table_dict({**nodes_weight, "weights": {"lvol": n_start, "total": n_start}})
     print("Node selection range")
     utils.print_table_dict(node_start_end)
     #############
@@ -232,6 +232,19 @@ def _get_next_3_nodes(cluster_id, lvol_size=0):
             if node_start_end[node_id]['start'] <= r_index <= node_start_end[node_id]['end']:
                 if node_id not in selected_node_ids:
                     selected_node_ids.append(node_id)
+
+                    node_start_end = {}
+                    n_start = 0
+                    for node in nodes_weight:
+                        if node in selected_node_ids:
+                            continue
+                        node_start_end[node] = {
+                            "weight": nodes_weight[node]['total'],
+                            "start": n_start,
+                            "end": n_start + nodes_weight[node]['total'],
+                        }
+                        n_start = node_start_end[node]['end']
+
                     break
 
     ret = []
