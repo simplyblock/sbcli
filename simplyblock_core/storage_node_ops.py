@@ -12,6 +12,7 @@ import uuid
 
 import docker
 
+from models.cluster import Cluster
 from simplyblock_core import constants, scripts, distr_controller
 from simplyblock_core import utils
 from simplyblock_core.controllers import lvol_controller, storage_events, snapshot_controller, device_events, \
@@ -1756,15 +1757,12 @@ def restart_storage_node(
 
     time.sleep(5)
 
-    if cluster.status != cluster.STATUS_ACTIVE:
+    if cluster.status not in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED]:
         logger.warning(f"The cluster status is not active ({cluster.status}), adding the node without distribs and lvstore")
         logger.info("Done")
         return "Success"
     # Create distribs, raid0, and lvstore and expose lvols to the fabrics
     if snode.lvstore_stack:
-        temp_rpc_client = RPCClient(
-                snode.mgmt_ip, snode.rpc_port,
-                snode.rpc_username, snode.rpc_password)
         ret = recreate_lvstore(snode)
         if not ret:
             return False, "Failed to recreate lvstore on node"
