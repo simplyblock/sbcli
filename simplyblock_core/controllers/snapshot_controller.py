@@ -319,7 +319,7 @@ def clone(snapshot_id, clone_name, new_size=0):
             ret = rpc_client.listeners_create(subsystem_nqn, tr_type, iface.ip4_address, "4420")
 
     logger.info(f"add lvol {clone_name} to subsystem")
-    ret = rpc_client.nvmf_subsystem_add_ns(subsystem_nqn, lvol.top_bdev)
+    ret = rpc_client.nvmf_subsystem_add_ns(subsystem_nqn, lvol.top_bdev, lvol.uuid, lvol.guid)
     if not ret:
         return False, "Failed to add bdev to subsystem"
 
