@@ -29,4 +29,4 @@ app.register_blueprint(snode_ops_k8s.bp)
 app.config['JSONIFY_PRETTYPRINT_REGULAR'] = True
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', debug=constants.LOG_WEB_DEBUG)
+    app.run(host='0.0.0.0')
