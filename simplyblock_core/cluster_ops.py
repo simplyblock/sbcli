@@ -77,7 +77,7 @@ def _add_graylog_input(cluster_ip, password):
     url = f"http://{cluster_ip}/graylog/api/system/inputs"
     payload = json.dumps({
         "title": "spdk log input",
-        "type": "org.graylog2.inputs.gelf.udp.GELFUDPInput",
+        "type": "org.graylog2.inputs.gelf.tcp.GELFTCPInput",
         "configuration": {
             "bind_address": "0.0.0.0",
             "port": 12201,
@@ -102,7 +102,9 @@ def _add_graylog_input(cluster_ip, password):
 
 def create_cluster(blk_size, page_size_in_blocks, cli_pass,
                    cap_warn, cap_crit, prov_cap_warn, prov_cap_crit, ifname, log_del_interval, metrics_retention_period,
-                   contact_point, grafana_endpoint, distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, enable_node_affinity):
+                   contact_point, grafana_endpoint, distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type,
+                   enable_node_affinity, qpair_count, max_queue_size, inflight_io_threshold, enable_qos):
+
     logger.info("Installing dependencies...")
     ret = scripts.install_deps()
     logger.info("Installing dependencies > Done")
@@ -169,7 +171,12 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     else:
         c.grafana_endpoint = f"http://{DEV_IP}/grafana"
     c.enable_node_affinity = enable_node_affinity
-    
+    c.qpair_count = qpair_count or 256
+
+    c.max_queue_size = max_queue_size
+    c.inflight_io_threshold = inflight_io_threshold
+    c.enable_qos = enable_qos
+
     alerts_template_folder = os.path.join(TOP_DIR, "simplyblock_core/scripts/alerting/")
     alert_resources_file = "alert_resources.yaml"
 
@@ -287,7 +294,8 @@ def deploy_spdk(node_docker, spdk_cpu_mask, spdk_mem):
 
 
 def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
-                distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, enable_node_affinity):
+                distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, enable_node_affinity, qpair_count,
+                enable_qos):
     db_controller = DBController()
     clusters = db_controller.get_clusters()
     if not clusters:
@@ -319,6 +327,8 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
     cluster.distr_chunk_bs = distr_chunk_bs
     cluster.ha_type = ha_type
     cluster.enable_node_affinity = enable_node_affinity
+    cluster.qpair_count = qpair_count or 256
+    cluster.enable_qos = enable_qos
     if cap_warn and cap_warn > 0:
         cluster.cap_warn = cap_warn
     if cap_crit and cap_crit > 0:

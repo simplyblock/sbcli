@@ -1,4 +1,3 @@
-
 import json
 
 import requests
@@ -119,7 +118,7 @@ class RPCClient:
             params = {"trtype": trtype}
         return self._request("nvmf_get_transports", params)
 
-    def transport_create(self, trtype):
+    def transport_create(self, trtype, qpair_count=256):
         """
             [{'trtype': 'TCP', 'max_queue_depth': 128,
                'max_io_qpairs_per_ctrlr': 127, 'in_capsule_data_size': 4096,
@@ -134,7 +133,27 @@ class RPCClient:
         """
         params = {
             "trtype": trtype,
-            "max_io_qpairs_per_ctrlr": 256
+            "max_io_qpairs_per_ctrlr": qpair_count,
+            "max_queue_depth": 512,
+            "abort_timeout_sec": 5,
+            "ack_timeout": 512,
+            "zcopy": True,
+            "in_capsule_data_size": 4096,
+            "max_io_size": 131072,
+            "io_unit_size": 131072,
+            "max_aq_depth": 128,
+            "num_shared_buffers": 8192,
+            "buf_cache_size": 32,
+            "dif_insert_or_strip": False,
+            "c2h_success": True,
+            "sock_priority": 0
+
+        }
+        return self._request("nvmf_create_transport", params)
+
+    def transport_create_caching(self, trtype):
+        params = {
+            "trtype": trtype,
         }
         return self._request("nvmf_create_transport", params)
 
@@ -245,7 +264,7 @@ class RPCClient:
         }
         return self._request("bdev_lvol_create_lvstore", params)
 
-    def create_lvol(self, name, size_in_mib, lvs_name):
+    def create_lvol(self, name, size_in_mib, lvs_name, lvol_priority_class=0):
         params = {
             "lvol_name": name,
             "size_in_mib": size_in_mib,
@@ -253,6 +272,8 @@ class RPCClient:
             "thin_provision": True,
             "clear_method": "unmap",
         }
+        if lvol_priority_class:
+            params["lvol_priority_class"] = lvol_priority_class
         return self._request("bdev_lvol_create", params)
 
     def delete_lvol(self, name):
@@ -340,6 +361,22 @@ class RPCClient:
         params = {"name": name}
         return self._request2("ultra21_bdev_pass_delete", params)
 
+    def qos_vbdev_create(self, qos_bdev, base_bdev_name, base_nvme_hw_name, max_queue_size,
+                         inflight_io_threshold):
+        params = {
+            "base_bdev_name": base_bdev_name,
+            "name": qos_bdev,
+            "base_nvme_hw_name": base_nvme_hw_name,
+            "max_queue_size": max_queue_size,
+            "inflight_io_threshold": inflight_io_threshold
+        }
+
+        return self._request("qos_vbdev_create", params)
+
+    def qos_vbdev_delete(self, name):
+        params = {"name": name}
+        return self._request2("qos_vbdev_delete", params)
+
     def bdev_alceml_create(self, alceml_name, nvme_name, uuid, pba_init_mode=3,
                            alceml_cpu_mask="", alceml_worker_cpu_mask=""):
         params = {
@@ -355,12 +392,13 @@ class RPCClient:
             "uuid": uuid,
             # "use_scheduling": True,
             "use_optimized": True,
-            "pba_nbalign": 4096
+            "pba_nbalign": 4096,
+            "use_map_whole_page_on_1st_write": True
         }
         if alceml_cpu_mask:
             params["bdb_lcpu_mask"] = int(alceml_cpu_mask, 16)
         if alceml_worker_cpu_mask:
-            params["bdb_lcpu_mask_alt_workers"] = int(alceml_worker_cpu_mask,16)
+            params["bdb_lcpu_mask_alt_workers"] = int(alceml_worker_cpu_mask, 16)
         return self._request("bdev_alceml_create", params)
 
     def bdev_distrib_create(self, name, vuid, ndcs, npcs, num_blocks, block_size, jm_names,
@@ -546,12 +584,12 @@ class RPCClient:
             # "action_on_timeout": "abort",
             "bdev_retry_count": 0,
             "transport_retry_count": 0,
-            "ctrlr_loss_timeout_sec": 2,
-            "fast_io_fail_timeout_sec": 1,
+            "ctrlr_loss_timeout_sec": 1,
+            "fast_io_fail_timeout_sec": 0,
             "reconnect_delay_sec": 1,
-            "keep_alive_timeout_ms": 200,
-            "transport_ack_timeout": 7,
-            "timeout_us": 500000
+            "keep_alive_timeout_ms": 10000,
+            "transport_ack_timeout": 9,
+            "timeout_us": 0
         }
         return self._request("bdev_nvme_set_options", params)
 
@@ -713,7 +751,6 @@ class RPCClient:
         }
         return self._request("nbd_stop_disk", params)
 
-
     def bdev_jm_unmap_vuid(self, name, vuid):
         params = {"name": name, "vuid": vuid}
         return self._request("bdev_jm_unmap_vuid", params)
@@ -809,3 +846,16 @@ class RPCClient:
             "level": level
         }
         return self._request("log_set_print_level", params)
+
+    def bdev_lvs_dump(self, lvs_name, file):
+        params = {
+            "lvs_name": lvs_name,
+            "file": file,
+        }
+        return self._request("bdev_lvs_dump", params)
+
+    def jc_explicit_synchronization(self, jm_vuid):
+        params = {
+            "jm_vuid": jm_vuid
+        }
+        return self._request("jc_explicit_synchronization", params)

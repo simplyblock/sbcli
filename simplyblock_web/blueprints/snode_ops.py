@@ -155,7 +155,7 @@ def spdk_process_start():
 
     if "cluster_ip" in data and data['cluster_ip']:
         cluster_ip = data['cluster_ip']
-        log_config = LogConfig(type=LogConfig.types.GELF, config={"gelf-address": f"udp://{cluster_ip}:12201"})
+        log_config = LogConfig(type=LogConfig.types.GELF, config={"gelf-address": f"tcp://{cluster_ip}:12202"})
     else:
         log_config = LogConfig(type=LogConfig.types.JOURNALD)
 
@@ -182,7 +182,7 @@ def spdk_process_start():
         name="spdk_proxy",
         detach=True,
         network_mode="host",
-        log_config=LogConfig(type=LogConfig.types.JOURNALD),
+        log_config=log_config,
         volumes=[
             '/var/tmp:/var/tmp'
         ],
@@ -243,6 +243,16 @@ def spdk_process_is_up():
 def get_cluster_id():
     out, _, _ = node_utils.run_command(f"cat {cluster_id_file}")
     return out
+
+@bp.route('/get_file_content/<string:file_name>', methods=['GET'])
+def get_file_content(file_name):
+    out, err, _ = node_utils.run_command(f"cat /etc/simplyblock/{file_name}")
+    if out:
+        return utils.get_response(out)
+    elif err:
+        err = err.decode("utf-8")
+        logger.debug(err)
+        return utils.get_response(None, err)
 
 
 def set_cluster_id(cluster_id):

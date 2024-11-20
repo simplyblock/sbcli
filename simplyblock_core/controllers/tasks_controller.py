@@ -103,7 +103,7 @@ def list_tasks(cluster_id, is_json=False):
         return False
 
     data = []
-    tasks = db_controller.get_job_tasks(cluster_id)
+    tasks = db_controller.get_job_tasks(cluster_id, reverse=False)
     if tasks and is_json is True:
         for t in tasks:
             data.append(t.get_clean_dict())
@@ -122,7 +122,7 @@ def list_tasks(cluster_id, is_json=False):
             "Retry": retry,
             "Status": task.status,
             "Result": task.function_result,
-            "Date": time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(task.date)),
+            "Updated at": time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(task.updated_at)),
         })
     return utils.print_table(data)
 
@@ -223,5 +223,23 @@ def get_device_mig_task(cluster_id, node_id, distr_name):
         if task.function_name == JobSchedule.FN_DEV_MIG and task.node_id == node_id:
             if task.status != JobSchedule.STATUS_DONE and task.canceled is False \
                     and "distr_name" in task.function_params and task.function_params["distr_name"] == distr_name:
+                return task.uuid
+    return False
+
+
+def get_new_device_mig_task_for_device(cluster_id):
+    tasks = db_controller.get_job_tasks(cluster_id)
+    for task in tasks:
+        if task.function_name == JobSchedule.FN_NEW_DEV_MIG:
+            if task.status != JobSchedule.STATUS_DONE and task.canceled is False:
+                return task.uuid
+    return False
+
+
+def get_failed_device_mig_task(cluster_id, device_id):
+    tasks = db_controller.get_job_tasks(cluster_id)
+    for task in tasks:
+        if task.function_name == JobSchedule.FN_FAILED_DEV_MIG and task.device_id == device_id:
+            if task.status != JobSchedule.STATUS_DONE and task.canceled is False:
                 return task.uuid
     return False

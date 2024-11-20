@@ -236,6 +236,8 @@ def clone(snapshot_id, clone_name, new_size=0):
         logger.error(error)
         return False, f"Failed to add lvol on node {snode.get_id()}"
 
+    cluster = db_controller.get_cluster_by_id(snode.cluster_id)
+
     lvol = LVol()
     lvol.uuid = str(uuid.uuid4())
     lvol.lvol_name = clone_name
@@ -249,7 +251,7 @@ def clone(snapshot_id, clone_name, new_size=0):
     lvol.node_id = snode.get_id()
     lvol.mode = 'read-write'
     lvol.cloned_from_snap = snapshot_id
-    lvol.nqn = snode.subsystem + ":lvol:" + lvol.uuid
+    lvol.nqn = cluster.nqn + ":lvol:" + lvol.uuid
     lvol.pool_uuid = pool.id
     lvol.ha_type = snap.lvol.ha_type
     lvol.lvol_type = 'lvol'
@@ -258,7 +260,7 @@ def clone(snapshot_id, clone_name, new_size=0):
     lvol.distr_bs = snap.lvol.distr_bs
     lvol.distr_chunk_bs = snap.lvol.distr_chunk_bs
     lvol.distr_page_size = snap.lvol.distr_page_size
-    lvol.guid = snap.lvol.guid
+    lvol.guid = lvol_controller._generate_hex_string(16)
     lvol.vuid = snap.lvol.vuid
 
     lvol.status = LVol.STATUS_ONLINE
@@ -312,12 +314,12 @@ def clone(snapshot_id, clone_name, new_size=0):
     for iface in snode.data_nics:
         if iface.ip4_address:
             tr_type = iface.get_transport_type()
-            ret = rpc_client.transport_create(tr_type)
+            ret = rpc_client.transport_create(tr_type, cluster.qpair_count)
             logger.info("adding listener for %s on IP %s" % (subsystem_nqn, iface.ip4_address))
             ret = rpc_client.listeners_create(subsystem_nqn, tr_type, iface.ip4_address, "4420")
 
     logger.info(f"add lvol {clone_name} to subsystem")
-    ret = rpc_client.nvmf_subsystem_add_ns(subsystem_nqn, lvol.top_bdev)
+    ret = rpc_client.nvmf_subsystem_add_ns(subsystem_nqn, lvol.top_bdev, lvol.uuid, lvol.guid)
     if not ret:
         return False, "Failed to add bdev to subsystem"
 

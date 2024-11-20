@@ -236,7 +236,9 @@ jobs:
             --set image.simplyblock.tag=main \
             --set storagenode.spdkImage=simplyblock/spdk:main-latest \
             --set logicalVolume.distr_ndcs="${NDCS}" \
-            --set logicalVolume.distr_npcs="${NPCS}"
+            --set logicalVolume.distr_npcs="${NPCS}" \
+            --set storagenode.create=true \
+            --set cachingnode.create=false
         env:
           NDCS: ${{ env.NDCS }}
           NPCS: ${{ env.NPCS }}
@@ -281,7 +283,7 @@ jobs:
       #   shell: /usr/bin/bash -e {0}
       
       - name: Sleep after Helm Installation
-        run: sleep 400
+        run: sleep 500
 
       - name: Check Cluster Status
         run: |

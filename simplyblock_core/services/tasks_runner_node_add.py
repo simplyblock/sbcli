@@ -34,6 +34,7 @@ while True:
                             task.function_result = "canceled"
                             task.status = JobSchedule.STATUS_DONE
                             task.write_to_db(db_controller.kv_store)
+                            tasks_events.task_updated(task)
                             continue
 
                         if task.status != JobSchedule.STATUS_RUNNING:
@@ -46,5 +47,6 @@ while True:
                         task.function_result = str(res)
                         task.status = JobSchedule.STATUS_DONE
                         task.write_to_db(db_controller.kv_store)
+                        tasks_events.task_updated(task)
 
     time.sleep(3)

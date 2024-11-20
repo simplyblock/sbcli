@@ -154,6 +154,7 @@ def storage_node_restart():
     req_data = request.get_json()
     uuid = req_data.get("uuid", "")
     node_ip = req_data.get("node_ip", "")
+    force = bool(req_data.get("force", ""))
 
     node = db_controller.get_storage_node_by_id(uuid)
     if not node:
@@ -164,6 +165,7 @@ def storage_node_restart():
         kwargs={
             "node_id": uuid,
             "node_ip": node_ip,
+            "force": force,
         }
     ).start()
 
@@ -196,7 +198,10 @@ def storage_node_add():
     max_snap = int(req_data.get('max_snap', 500))
     max_prov = req_data['max_prov']
     number_of_distribs = int(req_data.get('number_of_distribs', 4))
-    disable_ha_jm = bool(req_data.get('disable_ha_jm', False))
+    if req_data.get('disable_ha_jm', "") == "true":
+        disable_ha_jm = True
+    else:
+        disable_ha_jm = False
     enable_test_device = bool(req_data.get('enable_test_device', False))
 
     spdk_image = None

@@ -35,6 +35,9 @@ def device_set_state(device_id, state):
     if state == NVMeDevice.STATUS_ONLINE:
         device.retries_exhausted = False
 
+    if state == NVMeDevice.STATUS_REMOVED:
+        device.deleted = True
+
     old_status = dev.status
     device.status = state
     snode.write_to_db(db_controller.kv_store)
@@ -375,6 +378,11 @@ def device_remove(device_id, force=True):
     ret = rpc_client.bdev_alceml_delete(device.alceml_bdev)
     if not ret:
         logger.error(f"Failed to remove bdev: {device.alceml_bdev}")
+        if not force:
+            return False
+    ret = rpc_client.qos_vbdev_delete(device.qos_bdev)
+    if not ret:
+        logger.error(f"Failed to remove bdev: {device.qos_bdev}")
         if not force:
             return False
     if snode.enable_test_device:
@@ -818,7 +826,7 @@ def restart_jm_device(device_id, force=False, format_alceml=False):
             bdevs_names = [d['name'] for d in rpc_client.get_bdevs()]
             jm_nvme_bdevs = []
             for dev in snode.nvme_devices:
-                if dev.status != NVMeDevice.STATUS_ONLINE:
+                if dev.status not in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_NEW]:
                     continue
                 dev_part = f"{dev.nvme_bdev[:-2]}p1"
                 if dev_part in bdevs_names:

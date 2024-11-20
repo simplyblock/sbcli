@@ -2,7 +2,7 @@
 FROM python:3.8
 
 RUN apt-get update -y; apt-get install -y \
-    wget libc6 inetutils-ping vim dmidecode nvme-cli  \
+    wget libc6 inetutils-ping vim dmidecode nvme-cli open-iscsi \
     iproute2 pciutils sudo nano parted gdisk && \
     rm -rf /var/lib/apt/lists/*
 
