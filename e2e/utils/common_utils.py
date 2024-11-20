@@ -104,6 +104,7 @@ class CommonUtils:
         process_fio = [element for element in process_list_after if "grep" not in element]
 
         assert len(process_fio) == 0, f"FIO process list not empty: {process_list_after}"
+        self.logger.info(f"FIO Running: {process_fio}")
 
         return end_time
             
