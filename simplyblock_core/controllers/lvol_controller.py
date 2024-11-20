@@ -685,7 +685,7 @@ def add_lvol_on_node(lvol, snode, ha_comm_addrs=None, ha_inode_self=0):
     return True, None
 
 
-def recreate_lvol_on_node(lvol, snode, ha_comm_addrs=None, ha_inode_self=None):
+def recreate_lvol_on_node(lvol, snode, ha_comm_addrs=None, ha_inode_self=0):
     rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
 
     if "crypto" in lvol.lvol_type:
@@ -694,8 +694,9 @@ def recreate_lvol_on_node(lvol, snode, ha_comm_addrs=None, ha_inode_self=None):
         if not ret:
             return False, "Failed to create crypto bdev"
 
+    min_cntlid = 1 + 1000*ha_inode_self
     logger.info("creating subsystem %s", lvol.nqn)
-    ret = rpc_client.subsystem_create(lvol.nqn, 'sbcli-cn', lvol.uuid)
+    ret = rpc_client.subsystem_create(lvol.nqn, 'sbcli-cn', lvol.uuid, min_cntlid)
     logger.debug(ret)
 
     # add listeners
@@ -714,8 +715,8 @@ def recreate_lvol_on_node(lvol, snode, ha_comm_addrs=None, ha_inode_self=None):
             logger.info("adding listener for %s on IP %s" % (lvol.nqn, iface.ip4_address))
             ret = rpc_client.listeners_create(lvol.nqn, tr_type, iface.ip4_address, "4420")
             is_optimized = False
-            # if lvol.node_id == snode.get_id():
-            #     is_optimized = True
+            if lvol.node_id == snode.get_id():
+                is_optimized = True
             logger.info(f"Setting ANA state: {is_optimized}")
             ret = rpc_client.nvmf_subsystem_listener_set_ana_state(
                 lvol.nqn, iface.ip4_address, "4420", is_optimized)
