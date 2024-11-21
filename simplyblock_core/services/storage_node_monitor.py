@@ -139,7 +139,8 @@ while True:
 
         nodes = db_controller.get_storage_nodes_by_cluster_id(cluster_id)
         for snode in nodes:
-            if snode.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_UNREACHABLE]:
+            if snode.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_UNREACHABLE,
+                                    StorageNode.STATUS_SCHEDULABLE]:
                 logger.info(f"Node status is: {snode.status}, skipping")
                 continue
 
@@ -156,6 +157,9 @@ while True:
             # 2- check node API
             node_api_check = health_controller._check_node_api(snode.mgmt_ip)
             logger.info(f"Check: node API {snode.mgmt_ip}:5000 ... {node_api_check}")
+
+            if snode.status == StorageNode.STATUS_SCHEDULABLE and not ping_check and not node_api_check:
+                continue
 
             # 3- check spdk_process
             spdk_process = health_controller._check_spdk_process_up(snode.mgmt_ip)
