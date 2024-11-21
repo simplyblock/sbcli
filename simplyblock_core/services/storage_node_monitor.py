@@ -200,7 +200,7 @@ while True:
                     if cluster.status == Cluster.STATUS_ACTIVE:
                         tasks_controller.add_node_to_auto_restart(snode)
 
-        update_cluster_status(cluster_id)
+        # update_cluster_status(cluster_id)
 
     logger.info(f"Sleeping for {constants.NODE_MONITOR_INTERVAL_SEC} seconds")
     time.sleep(constants.NODE_MONITOR_INTERVAL_SEC)
