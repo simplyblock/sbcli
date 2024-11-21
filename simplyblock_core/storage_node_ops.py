@@ -835,6 +835,7 @@ def _connect_to_remote_jm_devs(this_node, jm_ids=[]):
                     if not found:
                         remote_devices.append(jm_dev)
 
+    new_devs = []
     for jm_dev in remote_devices:
         name = f"remote_{jm_dev.jm_bdev}"
         bdev_name = f"{name}n1"
@@ -842,6 +843,7 @@ def _connect_to_remote_jm_devs(this_node, jm_ids=[]):
         if bdev_name in node_bdev_names:
             logger.debug(f"bdev found {bdev_name}")
             jm_dev.status = JMDevice.STATUS_ONLINE
+            new_devs.append(jm_dev)
         else:
 
             logger.info(f"Connecting {name} to {this_node.get_id()}")
@@ -851,11 +853,12 @@ def _connect_to_remote_jm_devs(this_node, jm_ids=[]):
                 name, jm_dev.nvmf_nqn, jm_dev.nvmf_ip, jm_dev.nvmf_port)
             if ret:
                 jm_dev.status = JMDevice.STATUS_ONLINE
+                new_devs.append(jm_dev)
             else:
                 logger.error(f"failed to connect to remote JM {name}")
                 jm_dev.status = JMDevice.STATUS_UNAVAILABLE
 
-    return remote_devices
+    return new_devs
 
 
 def add_node(cluster_id, node_ip, iface_name, data_nics_list,
@@ -1795,10 +1798,21 @@ def restart_storage_node(
                 ret, err = _create_bdev_stack(snode, node.lvstore_stack, primary_node=node)
                 if err:
                     logger.error(f"Failed to create lvstore from node {node.get_id()}")
-                #     logger.error(err)
-                #     return False
-    # create stacks from other nodes
+                    continue
 
+                for lvol_id in node.lvols:
+                    lvol = db_controller.get_lvol_by_id(lvol_id)
+                    for index, node_id in enumerate(lvol.nodes):
+                        if node_id == snode.get_id():
+                            is_created, error = lvol_controller.recreate_lvol_on_node(lvol, snode, "", index)
+                            if error:
+                                logger.error(f"Failed to recreate LVol: {lvol_id} on node: {node_id}")
+                                continue
+                            lvol.status = lvol.STATUS_ONLINE
+                            lvol.io_error = False
+                            lvol.health_check = True
+                            lvol.write_to_db(db_controller.kv_store)
+                            break
 
     logger.info("Done")
     return "Success"
