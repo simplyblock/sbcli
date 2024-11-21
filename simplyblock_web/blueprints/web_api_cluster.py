@@ -45,9 +45,14 @@ def add_cluster():
     distr_chunk_bs = cl_data.get('distr_chunk_bs', 4096)
     ha_type = cl_data.get('ha_type', 'single')
     enable_node_affinity = cl_data.get('enable_node_affinity', False)
+    qpair_count = cl_data.get('qpair_count', 256)
+
+    max_queue_size = cl_data.get('max_queue_size', 128)
+    inflight_io_threshold = cl_data.get('inflight_io_threshold', 4)
 
     ret = cluster_ops.add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
-                                  distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, enable_node_affinity)
+                                  distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, enable_node_affinity,
+                                  qpair_count, max_queue_size, inflight_io_threshold)
 
     return utils.get_response(ret)
 
@@ -55,24 +60,14 @@ def add_cluster():
 @bp.route('/cluster', methods=['GET'], defaults={'uuid': None})
 @bp.route('/cluster/<string:uuid>', methods=['GET'])
 def list_clusters(uuid):
-    clusters_list = []
-    if uuid:
-        cl = db_controller.get_cluster_by_id(uuid)
-        if cl:
-            clusters_list.append(cl)
-        else:
-            return utils.get_response_error(f"Cluster not found: {uuid}", 404)
-    else:
-        cls = db_controller.get_clusters()
-        if cls:
-            clusters_list.extend(cls)
+    cluster_id = utils.get_cluster_id(request)
+    cluster = db_controller.get_cluster_by_id(cluster_id)
+    if not cluster:
+        return utils.get_response_error(f"Cluster not found: {cluster_id}", 404)
 
-    data = []
-    for cluster in clusters_list:
-        d = cluster.get_clean_dict()
-        d['status_code'] = cluster.get_status_code()
-        data.append(d)
-    return utils.get_response(data)
+    d = cluster.get_clean_dict()
+    d['status_code'] = cluster.get_status_code()
+    return utils.get_response([d])
 
 
 @bp.route('/cluster/capacity/<string:uuid>/history/<string:history>', methods=['GET'])

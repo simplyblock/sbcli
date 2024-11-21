@@ -6,7 +6,7 @@ import docker
 
 from simplyblock_core import utils, distr_controller
 from simplyblock_core.kv_store import DBController
-from simplyblock_core.models.nvme_device import NVMeDevice
+from simplyblock_core.models.nvme_device import NVMeDevice, JMDevice
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.rpc_client import RPCClient
 from simplyblock_core.snode_client import SNodeClient
@@ -40,15 +40,15 @@ def check_cluster(cluster_id):
                 "Status": "ok" if ret else "failed"
             })
 
-        for lvol in db_controller.get_lvols(cluster_id):
-            ret = check_lvol(lvol.get_id())
-            result &= ret
-            print("*" * 100)
-            data.append({
-                "Kind": "LVol",
-                "UUID": lvol.get_id(),
-                "Status": "ok" if ret else "failed"
-            })
+    for lvol in db_controller.get_lvols(cluster_id):
+        ret = check_lvol(lvol.get_id())
+        result &= ret
+        print("*" * 100)
+        data.append({
+            "Kind": "LVol",
+            "UUID": lvol.get_id(),
+            "Status": "ok" if ret else "failed"
+        })
     print(utils.print_table(data))
     return result
 
@@ -66,7 +66,7 @@ def _check_node_docker_api(ip):
     # return False
 
 
-def _check_node_rpc(rpc_ip, rpc_port, rpc_username, rpc_password, timeout=5, retry=2):
+def _check_node_rpc(rpc_ip, rpc_port, rpc_username, rpc_password, timeout=3, retry=2):
     try:
         rpc_client = RPCClient(
             rpc_ip, rpc_port, rpc_username, rpc_password,
@@ -82,7 +82,7 @@ def _check_node_rpc(rpc_ip, rpc_port, rpc_username, rpc_password, timeout=5, ret
 
 def _check_node_api(ip):
     try:
-        snode_api = SNodeClient(f"{ip}:5000", timeout=5, retry=2)
+        snode_api = SNodeClient(f"{ip}:5000", timeout=3, retry=2)
         logger.debug(f"Node API={ip}:5000")
         info, _ = snode_api.info()
         if info:
@@ -95,7 +95,7 @@ def _check_node_api(ip):
 
 def _check_spdk_process_up(ip):
     try:
-        snode_api = SNodeClient(f"{ip}:5000", timeout=5, retry=2)
+        snode_api = SNodeClient(f"{ip}:5000", timeout=3, retry=2)
         logger.debug(f"Node API={ip}:5000")
         is_up, _ = snode_api.spdk_process_is_up()
         logger.debug(f"SPDK is {is_up}")
@@ -163,6 +163,8 @@ def check_node(node_id, with_devices=True):
             if dev.status in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_UNAVAILABLE]:
                 ret = check_device(dev.get_id())
                 node_devices_check &= ret
+            else:
+                logger.info(f"Device skipped: {dev.get_id()} status: {dev.status}")
             print("*" * 100)
 
         logger.info(f"Node remote device: {len(snode.remote_devices)}")
@@ -263,7 +265,7 @@ def check_device(device_id):
         logger.info(f"Skipping ,node status is {snode.status}")
         return True
 
-    if device.status in [NVMeDevice.STATUS_REMOVED, NVMeDevice.STATUS_FAILED]:
+    if device.status in [NVMeDevice.STATUS_REMOVED, NVMeDevice.STATUS_FAILED, NVMeDevice.STATUS_FAILED_AND_MIGRATED]:
         logger.info(f"Skipping ,device status is {device.status}")
         return True
 
@@ -442,11 +444,14 @@ def check_jm_device(device_id):
         logger.info(f"Skipping ,device status is {jm_device.status}")
         return True
 
+    if snode.primary_ip != snode.mgmt_ip and jm_device.status == JMDevice.STATUS_UNAVAILABLE:
+        return True
+
     passed = True
     try:
         rpc_client = RPCClient(
             snode.mgmt_ip, snode.rpc_port,
-            snode.rpc_username, snode.rpc_password)
+            snode.rpc_username, snode.rpc_password, timeout=3, retry=2)
 
         ret = rpc_client.get_bdevs(jm_device.jm_bdev)
         if ret:

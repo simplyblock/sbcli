@@ -23,6 +23,9 @@ def run_command(cmd):
 def _get_spdk_pcie_list():  # return: ['0000:00:1e.0', '0000:00:1f.0']
     out, err, _ = run_command("ls /sys/bus/pci/drivers/uio_pci_generic")
     spdk_pcie_list = [line for line in out.split() if line.startswith("0000")]
+    if not spdk_pcie_list:
+        out, err, _ = run_command("ls /sys/bus/pci/drivers/vfio-pci")
+        spdk_pcie_list = [line for line in out.split() if line.startswith("0000")]
     logger.debug(spdk_pcie_list)
     return spdk_pcie_list
 

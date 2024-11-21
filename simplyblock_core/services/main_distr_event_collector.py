@@ -48,11 +48,12 @@ def process_device_event(event):
         device_id = device.get_id()
         node = db_controller.get_storage_node_by_id(node_id)
         if device.node_id != node_id:
-            logger.info(f"Setting storage id: {storage_id} unavailable")
-            distr_controller.send_dev_status_event(device, NVMeDevice.STATUS_UNAVAILABLE, node)
-            if device.status == NVMeDevice.STATUS_ONLINE:
-                device_controller.device_set_io_error(device_id, True)
-                device_controller.device_set_unavailable(device_id)
+            if event.message != 'SPDK_BDEV_EVENT_REMOVE':
+                logger.info(f"Setting storage id: {storage_id} unavailable")
+                distr_controller.send_dev_status_event(device, NVMeDevice.STATUS_UNAVAILABLE, node)
+            # if device.status == NVMeDevice.STATUS_ONLINE:
+            #     device_controller.device_set_io_error(device_id, True)
+            #     device_controller.device_set_unavailable(device_id)
 
         else:
             if node.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED]:

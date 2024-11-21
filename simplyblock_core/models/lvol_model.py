@@ -45,6 +45,8 @@ class LVol(BaseModel):
         "bdev_stack": {"type": List, 'default': []},
 
         "crypto_key_name": {"type": str, 'default': ""},
+        "crypto_key1": {"type": str, 'default': ""},
+        "crypto_key2": {"type": str, 'default': ""},
 
         "rw_ios_per_sec": {"type": int, 'default': 0},
         "rw_mbytes_per_sec": {"type": int, 'default': 0},
@@ -68,6 +70,7 @@ class LVol(BaseModel):
         "io_error": {"type": bool, 'default': False},
 
         "deletion_status": {"type": str, 'default': ""},
+        "lvol_priority_class": {"type": int, 'default': 0},
 
     }
 

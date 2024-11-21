@@ -16,7 +16,7 @@ class SNodeClientException(Exception):
 
 class SNodeClient:
 
-    def __init__(self, ip_address, timeout=60, retry=5):
+    def __init__(self, ip_address, timeout=120, retry=5):
         self.ip_address = ip_address
         self.url = 'http://%s/snode/' % self.ip_address
         self.timeout = timeout
@@ -130,3 +130,6 @@ class SNodeClient:
 
     def spdk_process_is_up(self):
         return self._request("GET", "spdk_process_is_up")
+
+    def get_file_content(self, file_name):
+        return self._request("GET", f"get_file_content/{file_name}")

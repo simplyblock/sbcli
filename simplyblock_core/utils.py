@@ -11,7 +11,7 @@ import sys
 
 import docker
 from prettytable import PrettyTable
-from graypy import GELFUDPHandler
+from graypy import GELFTCPHandler
 
 from simplyblock_core import constants
 from simplyblock_core import shell_utils
@@ -181,9 +181,9 @@ def get_weights(node_stats, cluster_stats):
     def _get_key_w(node_id, key):
         w = 0
         if cluster_stats[key] > 0:
-            w = (node_stats[node_id][key] / cluster_stats[key]) * 100
-            if key in ["lvol", "r_io", "w_io", "r_b", "w_b"]:  # get reverse value
-                w = ((cluster_stats[key]-node_stats[node_id][key]) / cluster_stats[key]) * 100
+            w = (cluster_stats[key]/node_stats[node_id][key])*10
+            # if key in ["lvol", "r_io", "w_io", "r_b", "w_b"]:  # get reverse value
+            #     w = (cluster_stats[key]/node_stats[node_id][key]) * 100
         return w
 
     out = {}
@@ -562,7 +562,7 @@ def get_logger(name):
     logger_handler.setFormatter(logging.Formatter('%(asctime)s: %(levelname)s: %(message)s'))
     logger.addHandler(logger_handler)
 
-    gelf_handler = GELFUDPHandler('0.0.0.0', constants.GELF_PORT)
+    gelf_handler = GELFTCPHandler('0.0.0.0', constants.GELF_PORT)
     logger.addHandler(gelf_handler)
     return logging.getLogger(name)
 

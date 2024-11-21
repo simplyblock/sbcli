@@ -139,6 +139,7 @@ def add_lvol():
     crypto_key1 = utils.get_value_or_default(cl_data, "crypto_key1", None)
     crypto_key2 = utils.get_value_or_default(cl_data, "crypto_key2", None)
     host_id = utils.get_value_or_default(cl_data, "host_id", None)
+    lvol_priority_class = utils.get_value_or_default(cl_data, "lvol_priority_class", 0)
 
     ret, error = lvol_controller.add_lvol_ha(
         name=name,
@@ -159,7 +160,8 @@ def add_lvol():
         crypto_key2=crypto_key2,
 
         use_comp=False,
-        distr_vuid=0
+        distr_vuid=0,
+        lvol_priority_class=lvol_priority_class
     )
 
     return utils.get_response(ret, error, http_code=400)

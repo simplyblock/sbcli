@@ -1,7 +1,7 @@
 ### simplyblock e2e tests
 import argparse
 import traceback
-from __init__ import get_all_tests
+from __init__ import get_stress_tests
 from logger_config import setup_logger
 from exceptions.custom_exception import (
     TestNotFoundException,
@@ -28,10 +28,8 @@ def main():
 
     args = parser.parse_args()
 
-    if args.ndcs == 0 and args.npcs == 0:
-        tests = get_all_tests(custom=False, k8s_test=args.run_k8s)
-    else:
-        tests = get_all_tests(custom=True, k8s_test=args.run_k8s)
+    tests = get_stress_tests()
+
 
     test_class_run = []
     if args.testname is None or len(args.testname.strip()) == 0:

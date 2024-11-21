@@ -19,7 +19,7 @@ from simplyblock_web import utils, node_utils
 from simplyblock_core import scripts, constants, shell_utils
 
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG)
+logger.setLevel(logging.INFO)
 bp = Blueprint("snode", __name__, url_prefix="/snode")
 
 cluster_id_file = "/etc/foundationdb/sbcli_cluster_id"
@@ -69,6 +69,29 @@ def get_google_cloud_info():
             "cloud": "google",
             "ip": data["networkInterfaces"][0]["ip"],
             "public_ip": data["networkInterfaces"][0]["accessConfigs"][0]["externalIp"],
+        }
+    except:
+        pass
+
+
+def get_equinix_cloud_info():
+    try:
+        response = requests.get("https://metadata.platformequinix.com/metadata")
+        data = response.json()
+        public_ip = ""
+        ip = ""
+        for interface in data["network"]["addresses"]:
+            if interface["address_family"] == 4:
+                if interface["enabled"] and interface["public"]:
+                    public_ip = interface["address"]
+                elif interface["enabled"] and not interface["public"]:
+                    public_ip = interface["address"]
+        return {
+            "id": str(data["id"]),
+            "type": data["class"],
+            "cloud": "equinix",
+            "ip": public_ip,
+            "public_ip": ip
         }
     except:
         pass
@@ -280,6 +303,9 @@ CLOUD_INFO = get_amazon_cloud_info()
 if not CLOUD_INFO:
     CLOUD_INFO = get_google_cloud_info()
 
+if not CLOUD_INFO:
+    CLOUD_INFO = get_equinix_cloud_info()
+
 if CLOUD_INFO:
     SYSTEM_ID = CLOUD_INFO["id"]
 else:
@@ -361,6 +387,7 @@ def spdk_process_start():
             'NAMESPACE': namespace,
             'FDB_CONNECTION': fdb_connection,
             'SIMPLYBLOCK_DOCKER_IMAGE': constants.SIMPLY_BLOCK_DOCKER_IMAGE,
+            'GRAYLOG_SERVER_IP': data['cluster_ip']
         }
         dep = yaml.safe_load(template.render(values))
         logger.debug(dep)
@@ -419,3 +446,13 @@ def spdk_process_is_up():
     else:
         return utils.get_response(False, f"SPDK container is not running")
 
+
+@bp.route('/get_file_content/<string:file_name>', methods=['GET'])
+def get_file_content(file_name):
+    out, err, _ = node_utils.run_command(f"cat /etc/simplyblock/{file_name}")
+    if out:
+        return utils.get_response(out)
+    elif err:
+        err = err.decode("utf-8")
+        logger.debug(err)
+        return utils.get_response(None, err)

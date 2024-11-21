@@ -12,7 +12,7 @@ logger_handler = logging.StreamHandler()
 logger_handler.setFormatter(logging.Formatter('%(asctime)s: %(levelname)s: %(message)s'))
 logger = logging.getLogger()
 logger.addHandler(logger_handler)
-logger.setLevel(logging.DEBUG)
+logger.setLevel(logging.INFO)
 
 
 app = Flask(__name__)
@@ -29,4 +29,4 @@ app.register_blueprint(snode_ops_k8s.bp)
 app.config['JSONIFY_PRETTYPRINT_REGULAR'] = True
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', debug=constants.LOG_WEB_DEBUG)
+    app.run(host='0.0.0.0')
