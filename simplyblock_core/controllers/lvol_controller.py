@@ -196,7 +196,7 @@ def _get_next_3_nodes(cluster_id, lvol_size=0):
 
             node_stats[node.get_id()] = node_st
 
-    if len(online_nodes) < 3:
+    if len(online_nodes) <= 1:
         return online_nodes
     cluster_stats = utils.dict_agg([node_stats[k] for k in node_stats])
 
