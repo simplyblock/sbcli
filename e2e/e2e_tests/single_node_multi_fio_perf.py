@@ -341,7 +341,6 @@ class TestLvolFioNpcs2(TestLvolFioBase):
                  "ndcs": scenario['ndcs'], "npcs": scenario['npcs'],
                  "size": "4G", "mount": False}
             ]
-            breakpoint()
             # Create LVOLs
             self.create_lvols(lvol_configs)
 
