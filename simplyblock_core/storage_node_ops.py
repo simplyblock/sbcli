@@ -801,32 +801,39 @@ def _connect_to_remote_jm_devs(this_node, jm_ids=[]):
     else:
         node_bdev_names = []
     remote_devices = []
-    if jm_ids:
-        for jm_id in jm_ids:
-            jm_dev = db_controller.get_jm_device_by_id(jm_id)
-            if jm_dev:
-                remote_devices.append(jm_dev)
-    elif len(this_node.remote_jm_devices) > 0:
-        remote_devices = this_node.remote_jm_devices
-    else:
+    if this_node.is_secondary_node:
         for node in db_controller.get_storage_nodes_by_cluster_id(this_node.cluster_id):
             if node.get_id() == this_node.get_id() or node.status != StorageNode.STATUS_ONLINE:
                 continue
             if node.jm_device and node.jm_device.status == JMDevice.STATUS_ONLINE:
                 remote_devices.append(node.jm_device)
-
-    if len(remote_devices) < 2:
-        online_jms = get_next_ha_jms(this_node)
-        for jm_id in online_jms:
-            jm_dev = db_controller.get_jm_device_by_id(jm_id)
-            if jm_dev:
-                found = False
-                for jm in remote_devices:
-                    if jm.get_id() == jm_dev.get_id():
-                        found = True
-                        break
-                if not found:
+    else:
+        if jm_ids:
+            for jm_id in jm_ids:
+                jm_dev = db_controller.get_jm_device_by_id(jm_id)
+                if jm_dev:
                     remote_devices.append(jm_dev)
+        elif len(this_node.remote_jm_devices) > 0:
+            remote_devices = this_node.remote_jm_devices
+        else:
+            for node in db_controller.get_storage_nodes_by_cluster_id(this_node.cluster_id):
+                if node.get_id() == this_node.get_id() or node.status != StorageNode.STATUS_ONLINE:
+                    continue
+                if node.jm_device and node.jm_device.status == JMDevice.STATUS_ONLINE:
+                    remote_devices.append(node.jm_device)
+
+        if len(remote_devices) < 2:
+            online_jms = get_next_ha_jms(this_node)
+            for jm_id in online_jms:
+                jm_dev = db_controller.get_jm_device_by_id(jm_id)
+                if jm_dev:
+                    found = False
+                    for jm in remote_devices:
+                        if jm.get_id() == jm_dev.get_id():
+                            found = True
+                            break
+                    if not found:
+                        remote_devices.append(jm_dev)
 
     for jm_dev in remote_devices:
         name = f"remote_{jm_dev.jm_bdev}"
@@ -1665,65 +1672,67 @@ def restart_storage_node(
             return False
 
     node_info, _ = snode_api.info()
-    nvme_devs = addNvmeDevices(snode, node_info['spdk_pcie_list'])
-    if not nvme_devs:
-        logger.error("No NVMe devices was found!")
-        return False
 
-    logger.info(f"Devices found: {len(nvme_devs)}")
-    logger.debug(nvme_devs)
+    if not snode.is_secondary_node:
+        nvme_devs = addNvmeDevices(snode, node_info['spdk_pcie_list'])
+        if not nvme_devs:
+            logger.error("No NVMe devices was found!")
+            return False
 
-    logger.info(f"Devices in db: {len(snode.nvme_devices)}")
-    logger.debug(snode.nvme_devices)
+        logger.info(f"Devices found: {len(nvme_devs)}")
+        logger.debug(nvme_devs)
 
-    new_devices = []
-    active_devices = []
-    removed_devices = []
-    known_devices_sn = []
-    devices_sn = [d.serial_number for d in nvme_devs]
-    for db_dev in snode.nvme_devices:
-        known_devices_sn.append(db_dev.serial_number)
-        if db_dev.status == NVMeDevice.STATUS_FAILED_AND_MIGRATED:
-            continue
-        if db_dev.serial_number in devices_sn:
-            logger.info(f"Device found: {db_dev.get_id()}, status {db_dev.status}")
-            if db_dev.status not in [NVMeDevice.STATUS_JM, NVMeDevice.STATUS_FAILED, NVMeDevice.STATUS_NEW]:
-                db_dev.status = NVMeDevice.STATUS_ONLINE
-            active_devices.append(db_dev)
+        logger.info(f"Devices in db: {len(snode.nvme_devices)}")
+        logger.debug(snode.nvme_devices)
+
+        new_devices = []
+        active_devices = []
+        removed_devices = []
+        known_devices_sn = []
+        devices_sn = [d.serial_number for d in nvme_devs]
+        for db_dev in snode.nvme_devices:
+            known_devices_sn.append(db_dev.serial_number)
+            if db_dev.status == NVMeDevice.STATUS_FAILED_AND_MIGRATED:
+                continue
+            if db_dev.serial_number in devices_sn:
+                logger.info(f"Device found: {db_dev.get_id()}, status {db_dev.status}")
+                if db_dev.status not in [NVMeDevice.STATUS_JM, NVMeDevice.STATUS_FAILED, NVMeDevice.STATUS_NEW]:
+                    db_dev.status = NVMeDevice.STATUS_ONLINE
+                active_devices.append(db_dev)
+            else:
+                logger.info(f"Device not found: {db_dev.get_id()}")
+                db_dev.status = NVMeDevice.STATUS_REMOVED
+                removed_devices.append(db_dev)
+                distr_controller.send_dev_status_event(db_dev, db_dev.status)
+
+        if snode.jm_device and "serial_number" in snode.jm_device.device_data_dict:
+            known_devices_sn.append(snode.jm_device.device_data_dict['serial_number'])
+
+        for dev in nvme_devs:
+            if dev.serial_number not in known_devices_sn:
+                logger.info(f"New device found: {dev.get_id()}")
+                dev.status = NVMeDevice.STATUS_NEW
+                new_devices.append(dev)
+                snode.nvme_devices.append(dev)
+
+        snode.write_to_db(db_controller.kv_store)
+        if node_ip:
+            # prepare devices on new node
+            if snode.num_partitions_per_dev == 0 or snode.jm_percent == 0:
+                ret = _prepare_cluster_devices_jm_on_dev(snode, nvme_devs)
+            else:
+                ret = _prepare_cluster_devices_partitions(snode, nvme_devs)
+            if not ret:
+                logger.error("Failed to prepare cluster devices")
+                # return False
+            snode.nvme_devices.extend(removed_devices)
         else:
-            logger.info(f"Device not found: {db_dev.get_id()}")
-            db_dev.status = NVMeDevice.STATUS_REMOVED
-            removed_devices.append(db_dev)
-            distr_controller.send_dev_status_event(db_dev, db_dev.status)
+            ret = _prepare_cluster_devices_on_restart(snode)
+            if not ret:
+                logger.error("Failed to prepare cluster devices")
+                # return False
 
-    if snode.jm_device and "serial_number" in snode.jm_device.device_data_dict:
-        known_devices_sn.append(snode.jm_device.device_data_dict['serial_number'])
-
-    for dev in nvme_devs:
-        if dev.serial_number not in known_devices_sn:
-            logger.info(f"New device found: {dev.get_id()}")
-            dev.status = NVMeDevice.STATUS_NEW
-            new_devices.append(dev)
-            snode.nvme_devices.append(dev)
-
-    snode.write_to_db(db_controller.kv_store)
-    if node_ip:
-        # prepare devices on new node
-        if snode.num_partitions_per_dev == 0 or snode.jm_percent == 0:
-            ret = _prepare_cluster_devices_jm_on_dev(snode, nvme_devs)
-        else:
-            ret = _prepare_cluster_devices_partitions(snode, nvme_devs)
-        if not ret:
-            logger.error("Failed to prepare cluster devices")
-            # return False
-        snode.nvme_devices.extend(removed_devices)
-    else:
-        ret = _prepare_cluster_devices_on_restart(snode)
-        if not ret:
-            logger.error("Failed to prepare cluster devices")
-            # return False
-
-    snode.write_to_db(kv_store)
+        snode.write_to_db(kv_store)
 
     logger.info("Connecting to remote devices")
     remote_devices = _connect_to_remote_devs(snode)
@@ -1777,6 +1786,19 @@ def restart_storage_node(
             logger.debug(f"Device is not online: {dev.get_id()}, status: {dev.status}")
             continue
         tasks_controller.add_device_mig_task(dev.get_id())
+
+    if snode.is_secondary_node:
+        for node in db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id):
+            if node.get_id() == snode.get_id() or node.status != StorageNode.STATUS_ONLINE:
+                continue
+            if node.secondary_node_id == snode.get_id():
+                ret, err = _create_bdev_stack(snode, node.lvstore_stack, primary_node=node)
+                if err:
+                    logger.error(f"Failed to create lvstore from node {node.get_id()}")
+                #     logger.error(err)
+                #     return False
+    # create stacks from other nodes
+
 
     logger.info("Done")
     return "Success"
