@@ -696,8 +696,7 @@ def recreate_lvol_on_node(lvol, snode, ha_comm_addrs=None, ha_inode_self=0):
 
     min_cntlid = 1 + 1000*ha_inode_self
     logger.info("creating subsystem %s", lvol.nqn)
-    ret = rpc_client.subsystem_create(lvol.nqn, 'sbcli-cn', lvol.uuid, min_cntlid)
-    logger.debug(ret)
+    rpc_client.subsystem_create(lvol.nqn, 'sbcli-cn', lvol.uuid, min_cntlid)
 
     # add listeners
     logger.info("adding listeners")
@@ -721,11 +720,19 @@ def recreate_lvol_on_node(lvol, snode, ha_comm_addrs=None, ha_inode_self=0):
             ret = rpc_client.nvmf_subsystem_listener_set_ana_state(
                 lvol.nqn, iface.ip4_address, "4420", is_optimized)
 
+    ns_found = False
+    ret = rpc_client.subsystem_list(lvol.nqn)
+    if ret and ret[0]["namespaces"]:
+        for ns in ret[0]["namespaces"]:
+            if ns['name'] == lvol.top_bdev:
+                ns_found = True
+                break
 
-    logger.info("Add BDev to subsystem")
-    ret = rpc_client.nvmf_subsystem_add_ns(lvol.nqn, lvol.top_bdev, lvol.uuid, lvol.guid)
-    if not ret:
-        return False, "Failed to add bdev to subsystem"
+    if not ns_found:
+        logger.info("Add BDev to subsystem")
+        ret = rpc_client.nvmf_subsystem_add_ns(lvol.nqn, lvol.top_bdev, lvol.uuid, lvol.guid)
+        if not ret:
+            return False, "Failed to add bdev to subsystem"
 
     return True, None
 

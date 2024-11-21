@@ -2608,11 +2608,12 @@ def recreate_lvstore(snode):
     db_controller = DBController(KVStore())
     secondary_node_id = db_controller.get_storage_node_by_id(snode.secondary_node_id)
     for node in [snode, secondary_node_id]:
-        ret, err = _create_bdev_stack(node)
+        ret, err = _create_bdev_stack(node, snode.lvstore_stack, primary_node=snode)
+
         if err:
             logger.error(f"Failed to recreate lvstore on node {node.get_id()}")
             logger.error(err)
-            return False
+            # return False
 
         # temp_rpc_client = RPCClient(
         #         node.mgmt_ip, node.rpc_port,
