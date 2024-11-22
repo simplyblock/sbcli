@@ -124,7 +124,14 @@ class TestLvolFioBase(TestClusterBase):
 
         log_file = f"/home/ec2-user/{lvol_name}_log.json"
         output = self.ssh_obj.read_file(node=self.mgmt_nodes[0], file_name=log_file)
-        fio_result = json.loads(output)
+        fio_result = ""
+        for line in output.splitlines():
+            if line.strip().startswith('{'):  # Detect the start of JSON
+                try:
+                    fio_result = json.loads(line.strip())
+                except json.JSONDecodeError as e:
+                    raise e
+        # fio_result = json.loads(output)
         self.logger.info(f"FIO output for {lvol_name}: {fio_result}")
 
         job = fio_result['jobs'][0]
