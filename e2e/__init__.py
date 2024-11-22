@@ -16,11 +16,11 @@ from stress_test.lvol_stress_fio_run import TestStressLvolClusterFioRun
 
 def get_all_tests(custom=True, k8s_test=False):
     tests = [
-        TestSingleNodeOutage,
         TestLvolFioNpcsCustom,
         TestLvolFioNpcs0,
         TestLvolFioNpcs1,
         TestLvolFioNpcs2,
+        TestSingleNodeOutage,
         TestSingleNodeFailure,
         # FioWorkloadTest,
         # TestMultiFioSnapshotDowntime,
