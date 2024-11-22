@@ -125,12 +125,21 @@ class TestLvolFioBase(TestClusterBase):
         log_file = f"/home/ec2-user/{lvol_name}_log.json"
         output = self.ssh_obj.read_file(node=self.mgmt_nodes[0], file_name=log_file)
         fio_result = ""
-        for line in output.splitlines():
-            if line.strip().startswith('{'):  # Detect the start of JSON
-                try:
-                    fio_result = json.loads(line.strip())
-                except json.JSONDecodeError as e:
-                    raise e
+        self.logger.info(f"FIO output for {lvol_name}: {output}")
+
+        start_index = output.find('{')  # Find the first opening brace
+        if start_index != -1:
+            json_content = output[start_index:]  # Extract everything starting from the JSON
+            try:
+                self.logger.info(f"Removed str FIO output for {lvol_name}: {fio_result}")
+                # Parse the extracted JSON
+                fio_result = json.loads(json_content)
+            except json.JSONDecodeError as e:
+                print(f"Error decoding JSON: {e}")
+                return None
+        else:
+            print("No JSON content found in the file.")
+            return None
         # fio_result = json.loads(output)
         self.logger.info(f"FIO output for {lvol_name}: {fio_result}")
 
