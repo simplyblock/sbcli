@@ -231,7 +231,7 @@ class RPCClient:
             "nsid": nsid}
         return self._request("nvmf_subsystem_remove_ns", params)
 
-    def nvmf_subsystem_listener_set_ana_state(self, nqn, ip, port, is_optimized=True):
+    def nvmf_subsystem_listener_set_ana_state(self, nqn, ip, port, is_optimized=True, ana=None):
         params = {
             "nqn": nqn,
             "listen_address": {
@@ -245,6 +245,9 @@ class RPCClient:
             params['ana_state'] = "optimized"
         else:
             params['ana_state'] = "non_optimized"
+
+        if ana:
+            params['ana_state'] = ana
 
         return self._request("nvmf_subsystem_listener_set_ana_state", params)
 

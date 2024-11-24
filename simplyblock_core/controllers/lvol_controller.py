@@ -718,7 +718,7 @@ def recreate_lvol_on_node(lvol, snode, ha_comm_addrs=None, ha_inode_self=0):
                 is_optimized = True
             logger.info(f"Setting ANA state: {is_optimized}")
             ret = rpc_client.nvmf_subsystem_listener_set_ana_state(
-                lvol.nqn, iface.ip4_address, "4420", is_optimized)
+                lvol.nqn, iface.ip4_address, "4420", is_optimized, "inaccessible")
 
     ns_found = False
     ret = rpc_client.subsystem_list(lvol.nqn)
@@ -754,6 +754,12 @@ def recreate_lvol(lvol_id, snode):
             sn = db_controller.get_storage_node_by_id(node_id)
             port = 10000 + int(random.random() * 60000)
             nodes_ips.append(f"{sn.mgmt_ip}:{port}")
+            if node_id != lvol.node_id:
+                rpc_client = RPCClient(sn.mgmt_ip, sn.rpc_port, sn.rpc_username, sn.rpc_password)
+                for iface in sn.data_nics:
+                    if iface.ip4_address:
+                        ret = rpc_client.nvmf_subsystem_listener_set_ana_state(
+                            lvol.nqn, iface.ip4_address, "4420", False, "inaccessible")
 
         ha_address = ",".join(nodes_ips)
         for index, node_id in enumerate(lvol.nodes):

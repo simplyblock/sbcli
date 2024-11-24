@@ -191,11 +191,10 @@ class DBController:
         lvols = []
         if cluster_id:
             for pool in self.get_pools(cluster_id):
-                if pool.cluster_id == cluster_id:
-                    for lv_id in pool.lvols:
-                        lv = self.get_lvol_by_id(lv_id)
-                        if lv:
-                            lvols.append(lv)
+                for lv_id in pool.lvols:
+                    lv = self.get_lvol_by_id(lv_id)
+                    if lv:
+                        lvols.append(lv)
         else:
             lvols = LVol().read_from_db(self.kv_store)
         return lvols
