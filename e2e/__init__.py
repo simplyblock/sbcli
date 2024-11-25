@@ -11,6 +11,7 @@ from e2e_tests.data_migration.data_migration_ha_fio import FioWorkloadTest
 from e2e_tests.multi_node_crash_fio_clone import TestMultiFioSnapshotDowntime
 
 from stress_test.lvol_stress_fio_run import TestStressLvolClusterFioRun
+from stress_test.lvol_ha_stress_fio import TestLvolHACluster
 
 
 
@@ -44,6 +45,7 @@ def get_all_tests(custom=True, k8s_test=False):
 
 def get_stress_tests():
     tests = [
-        TestStressLvolClusterFioRun
+        TestStressLvolClusterFioRun,
+
     ]
     return tests
