@@ -21,7 +21,7 @@ class TestLvolHACluster(FioWorkloadTest):
         super().__init__(**kwargs)
         self.logger = setup_logger(__name__)
         self.lvol_size = "25G"
-        self.fio_size = "18G"
+        self.fio_size = "18GiB"
         self.total_lvols = 10
         self.total_snapshots = 30
         self.lvol_name = "lvol"
@@ -55,7 +55,7 @@ class TestLvolHACluster(FioWorkloadTest):
                    "Device": None,
                    "MD5": None,
                    "FS": fs_type,
-                   "Log": f"{self.log_path}/{lvol_name}"
+                   "Log": f"{self.log_path}/{lvol_name}.log"
             }
             self.lvol_mount_details[lvol_id]["Command"] = self.sbcli_utils.get_lvol_connect_str(lvol_name=lvol_name)
             initial_devices = self.ssh_obj.get_devices(node=self.node)
@@ -95,9 +95,14 @@ class TestLvolHACluster(FioWorkloadTest):
         fio_threads = []
         for _, lvol in self.lvol_mount_details.items():
             fio_thread = threading.Thread(target=self.ssh_obj.run_fio_test, args=(self.node, None, lvol["Mount"], lvol["Log"]),
-                                          kwargs={"size": self.fio_size, "rw": "write"})
+                                          kwargs={"size": self.fio_size,
+                                                  "rw": "write",
+                                                  "bs": "4K-128K",})
             fio_thread.start()
             fio_threads.append(fio_thread)
+        self.common_utils.manage_fio_threads(node=self.node,
+                                             threads=fio_threads,
+                                             timeout=10000)
         for thread in fio_threads:
             thread.join()
         self.logger.info("Data filling completed.")
