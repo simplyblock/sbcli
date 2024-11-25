@@ -46,6 +46,6 @@ def get_all_tests(custom=True, k8s_test=False):
 def get_stress_tests():
     tests = [
         TestStressLvolClusterFioRun,
-
+        TestLvolHACluster
     ]
     return tests
