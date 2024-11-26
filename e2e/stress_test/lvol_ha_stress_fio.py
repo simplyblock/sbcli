@@ -94,8 +94,10 @@ class TestLvolHACluster(FioWorkloadTest):
         self.logger.info("Filling volumes with data.")
         fio_threads = []
         for _, lvol in self.lvol_mount_details.items():
+            breakpoint()
             fio_thread = threading.Thread(target=self.ssh_obj.run_fio_test, args=(self.node, None, lvol["Mount"], lvol["Log"]),
                                           kwargs={"size": self.fio_size,
+                                                  "name": f"{lvol['Name']}_fio",
                                                   "rw": "write",
                                                   "bs": "4K-128K",})
             fio_thread.start()

@@ -114,9 +114,10 @@ def check_for_dumps():
     for node in storage_nodes:
         files = ssh_obj.list_files(node, "/etc/simplyblock/")
         logger.info(f"Files in /etc/simplyblock: {files}")
-        if "core" in files:
+        if "core" in files or "dump" in files:
             core_exist = True
             break
+
 
     for node, ssh in ssh_obj.ssh_connections.items():
         logger.info(f"Closing node ssh connection for {node}")
