@@ -277,8 +277,8 @@ class CLIWrapper:
         sub_command.add_argument("--prov-cap-crit", help='Capacity critical level in percent, default=190',
                                  type=int, required=False, dest="prov_cap_crit")
         sub_command.add_argument("--ifname", help='Management interface name, default: eth0')
-        sub_command.add_argument("--log-del-interval", help='graylog deletion interval, default: 7d',
-                                 dest='log_del_interval', default='7d')
+        sub_command.add_argument("--log-del-interval", help='graylog deletion interval, default: 2d',
+                                 dest='log_del_interval', default='2d')
         sub_command.add_argument("--metrics-retention-period", help='retention period for prometheus metrics, default: 7d',
                                  dest='metrics_retention_period', default='7d')
         sub_command.add_argument("--contact-point", help='the email or slack webhook url to be used for alerting',
