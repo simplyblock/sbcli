@@ -803,7 +803,7 @@ def _connect_to_remote_jm_devs(this_node, jm_ids=[]):
     remote_devices = []
     if this_node.is_secondary_node:
         for node in db_controller.get_storage_nodes_by_cluster_id(this_node.cluster_id):
-            if node.get_id() == this_node.get_id() or node.status != StorageNode.STATUS_ONLINE:
+            if node.get_id() == this_node.get_id():
                 continue
             if node.jm_device and node.jm_device.status == JMDevice.STATUS_ONLINE:
                 remote_devices.append(node.jm_device)
@@ -2114,7 +2114,7 @@ def resume_storage_node(node_id):
             lvol.write_to_db(db_controller.kv_store)
 
     logger.info("Setting node status to online")
-    set_node_status(node_id, StorageNode.STATUS_ONLINE)
+    set_node_status(snode.get_id(), StorageNode.STATUS_ONLINE)
     logger.info("Done")
     return True
 
