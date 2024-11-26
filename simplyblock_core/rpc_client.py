@@ -847,3 +847,21 @@ class RPCClient:
             "jm_vuid": jm_vuid
         }
         return self._request("jc_explicit_synchronization", params)
+
+    def listeners_del(self, nqn, trtype, traddr, trsvcid):
+        """"
+            nqn: Subsystem NQN.
+            trtype: Transport type ("RDMA").
+            traddr: Transport address.
+            trsvcid: Transport service ID (required for RDMA or TCP).
+        """
+        params = {
+            "nqn": nqn,
+            "listen_address": {
+                "trtype": trtype,
+                "adrfam": "IPv4",
+                "traddr": traddr,
+                "trsvcid": trsvcid
+            }
+        }
+        return self._request("nvmf_subsystem_remove_listener", params)

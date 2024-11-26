@@ -2615,7 +2615,7 @@ def get(node_id):
         return False
 
     data = snode.get_clean_dict()
-    return json.dumps(data, indent=2)
+    return json.dumps(data, indent=2, sort_keys=True)
 
 
 def set_node_status(node_id, status):
@@ -2957,7 +2957,6 @@ def get_cluster_map(node_id):
         logger.error(f"snode not found: {node_id}")
         return False
 
-    rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
     distribs_list = []
     for bdev in snode.lvstore_stack:
         type = bdev['type']
@@ -2965,15 +2964,18 @@ def get_cluster_map(node_id):
             distribs_list = bdev["distribs_list"]
             if not distribs_list:
                 logger.error(f"Failed to get cluster map: {node_id}")
-    for distr in distribs_list:
-        ret = rpc_client.distr_get_cluster_map(distr)
-        if not ret:
-            logger.error(f"Failed to get distr cluster map: {distr}")
-            return False
-        logger.debug(ret)
-        print("*"*100)
-        results, is_passed = distr_controller.parse_distr_cluster_map(ret)
-        print(utils.print_table(results))
+    for node in [snode, db_controller.get_storage_node_by_id(snode.secondary_node_id)]:
+        logger.info(f"getting cluster map from node: {node.get_id()}")
+        rpc_client = RPCClient(node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password)
+        for distr in distribs_list:
+            ret = rpc_client.distr_get_cluster_map(distr)
+            if not ret:
+                logger.error(f"Failed to get distr cluster map: {distr}")
+                return False
+            logger.debug(ret)
+            print("*"*100)
+            results, is_passed = distr_controller.parse_distr_cluster_map(ret)
+            print(utils.print_table(results))
     return True
 
 
