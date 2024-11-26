@@ -11,3 +11,11 @@ RUN wget https://github.com/apple/foundationdb/releases/download/7.3.3/foundatio
 RUN dpkg -i --force-architecture --force-depends foundationdb-clients_7.3.3-1_amd64.deb
 RUN rm -f foundationdb-clients_7.3.3-1_amd64.deb
 
+WORKDIR /app
+
+# pip install
+COPY requirements.txt requirements.txt
+COPY simplyblock_web/requirements.txt simplyblock_web/requirements.txt
+
+RUN pip3 install -r requirements.txt
+RUN pip3 install -r simplyblock_web/requirements.txt
