@@ -2754,6 +2754,7 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
     strip_size_kb = int((ndcs + npcs) * 2048)
     strip_size_kb = utils.nearest_upper_power_of_2(strip_size_kb)
     jm_vuid = 0
+    jm_ids = []
     if snode.enable_ha_jm:
         jm_vuid = utils.get_random_vuid()
         jm_ids = get_next_ha_jms(snode)
@@ -2802,7 +2803,9 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
                     "base_bdevs": distrib_list,
                     "strip_size_kb": strip_size_kb
                 },
-                "distribs_list": distrib_list
+                "distribs_list": distrib_list,
+                "jm_ids": jm_ids,
+                "jm_vuid": jm_vuid
             }
         )
 

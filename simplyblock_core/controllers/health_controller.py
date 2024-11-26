@@ -202,7 +202,7 @@ def check_node(node_id, with_devices=True):
 
         print("*" * 100)
         lvstore_check = True
-        if snode.lvstore and snode.lvstore_stack:
+        if snode.lvstore_stack:
             second_node_1 = db_controller.get_storage_node_by_id(snode.secondary_node_id)
             for node in [snode, second_node_1]:
                 logger.info(f"Checking distr stack on node : {node.get_id()}")
