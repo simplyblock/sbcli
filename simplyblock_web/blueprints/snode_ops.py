@@ -320,7 +320,7 @@ def join_swarm():
 
     logger.info("Joining Swarm")
     node_docker = get_docker_client()
-    if node_docker.info()["Swarm"]["LocalNodeState"] == "active":
+    if node_docker.info()["Swarm"]["LocalNodeState"] in ["active", "pending"]:
         logger.info("Node is part of another swarm, leaving swarm")
         node_docker.swarm.leave(force=True)
         time.sleep(2)
