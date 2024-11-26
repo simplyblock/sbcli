@@ -163,7 +163,7 @@ class RPCClient:
         params = {"nqn": nqn}
         return self._request("nvmf_subsystem_get_listeners", params)
 
-    def listeners_create(self, nqn, trtype, traddr, trsvcid):
+    def listeners_create(self, nqn, trtype, traddr, trsvcid, ana_state=None):
         """"
             nqn: Subsystem NQN.
             trtype: Transport type ("RDMA").
@@ -179,6 +179,8 @@ class RPCClient:
                 "trsvcid": trsvcid
             }
         }
+        if ana_state:
+            params["ana_state"] = ana_state
         return self._request("nvmf_subsystem_add_listener", params)
 
     def bdev_nvme_controller_list(self, name=None):

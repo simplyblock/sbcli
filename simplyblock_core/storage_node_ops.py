@@ -2048,22 +2048,22 @@ def suspend_storage_node(node_id, force=False):
         snode.rpc_username, snode.rpc_password)
 
     for lvol_id in snode.lvols:
-        logger.debug(lvol_id)
         lvol = db_controller.get_lvol_by_id(lvol_id)
         if lvol:
             for iface in snode.data_nics:
                 if iface.ip4_address:
-                    ret = rpc_client.listeners_del(lvol.nqn, "TCP", iface.ip4_address, "4420")
+                    ret = rpc_client.nvmf_subsystem_listener_set_ana_state(
+                        lvol.nqn, iface.ip4_address, "4420", False, ana="inaccessible")
 
     time.sleep(2)
 
-    for dev in snode.nvme_devices:
-        if dev.status == NVMeDevice.STATUS_ONLINE:
-            device_controller.device_set_unavailable(dev.get_id())
-
-    logger.info("Set JM Unavailable")
-    if snode.jm_device and snode.jm_device.status != JMDevice.STATUS_UNAVAILABLE:
-        device_controller.set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_UNAVAILABLE)
+    # for dev in snode.nvme_devices:
+    #     if dev.status == NVMeDevice.STATUS_ONLINE:
+    #         device_controller.device_set_unavailable(dev.get_id())
+    #
+    # logger.info("Set JM Unavailable")
+    # if snode.jm_device and snode.jm_device.status != JMDevice.STATUS_UNAVAILABLE:
+    #     device_controller.set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_UNAVAILABLE)
 
     logger.info("Setting node status to suspended")
     set_node_status(node_id, StorageNode.STATUS_SUSPENDED)
@@ -2089,37 +2089,22 @@ def resume_storage_node(node_id):
         return False
 
     logger.info("Resuming node")
-    for dev in snode.nvme_devices:
-        if dev.status == NVMeDevice.STATUS_UNAVAILABLE:
-            device_controller.device_set_online(dev.get_id())
-
-    logger.info("Set JM Online")
-    if snode.jm_device and snode.jm_device.status == JMDevice.STATUS_UNAVAILABLE:
-        device_controller.set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_ONLINE)
-
-    logger.info("Connecting to remote devices")
-    snode = db_controller.get_storage_node_by_id(node_id)
-    snode.remote_devices = _connect_to_remote_devs(snode)
-    snode.write_to_db(db_controller.kv_store)
+    # for dev in snode.nvme_devices:
+    #     if dev.status == NVMeDevice.STATUS_UNAVAILABLE:
+    #         device_controller.device_set_online(dev.get_id())
+    #
+    # logger.info("Set JM Online")
+    # if snode.jm_device and snode.jm_device.status == JMDevice.STATUS_UNAVAILABLE:
+    #     device_controller.set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_ONLINE)
+    #
+    # logger.info("Connecting to remote devices")
+    # snode = db_controller.get_storage_node_by_id(node_id)
+    # snode.remote_devices = _connect_to_remote_devs(snode)
+    # snode.write_to_db(db_controller.kv_store)
 
     logger.debug("Setting LVols to online")
 
-
     for lvol_id in snode.lvols:
-        lvol = db_controller.get_lvol_by_id(lvol_id)
-        for node_id in lvol.nodes:
-            sn = db_controller.get_storage_node_by_id(node_id)
-            if node_id != lvol.node_id:
-                rpc_client = RPCClient(sn.mgmt_ip, sn.rpc_port, sn.rpc_username, sn.rpc_password)
-                for iface in sn.data_nics:
-                    if iface.ip4_address:
-                        ret = rpc_client.nvmf_subsystem_listener_set_ana_state(
-                            lvol.nqn, iface.ip4_address, "4420", False, "inaccessible")
-
-    time.sleep(3)
-
-    for lvol_id in snode.lvols:
-        logger.debug(lvol_id)
         lvol = db_controller.get_lvol_by_id(lvol_id)
         if lvol:
             rpc_client = RPCClient(
@@ -2128,23 +2113,8 @@ def resume_storage_node(node_id):
 
             for iface in snode.data_nics:
                 if iface.ip4_address:
-                    ret = rpc_client.listeners_create(lvol.nqn, "TCP", iface.ip4_address, "4420")
                     ret = rpc_client.nvmf_subsystem_listener_set_ana_state(
                         lvol.nqn, iface.ip4_address, "4420", True)
-
-    time.sleep(3)
-
-    for lvol_id in snode.lvols:
-        lvol = db_controller.get_lvol_by_id(lvol_id)
-        if lvol.ha_type == "ha":
-            for node_id in lvol.nodes:
-                if node_id != lvol.node_id:
-                    sn = db_controller.get_storage_node_by_id(node_id)
-                    rpc_client = RPCClient(sn.mgmt_ip, sn.rpc_port, sn.rpc_username, sn.rpc_password)
-                    for iface in sn.data_nics:
-                        if iface.ip4_address:
-                            ret = rpc_client.nvmf_subsystem_listener_set_ana_state(
-                                lvol.nqn, iface.ip4_address, "4420", False)
 
     logger.info("Setting node status to online")
     set_node_status(snode.get_id(), StorageNode.STATUS_ONLINE)
@@ -2695,28 +2665,27 @@ def recreate_lvstore(snode):
 
     if snode.lvols:
         db_controller = DBController()
+        # for lvol_id in snode.lvols:
+        #     # lvol = lvol_controller.recreate_lvol(lvol_id, snode)
+        #     lvol = db_controller.get_lvol_by_id(lvol_id)
+        #
+        #     if lvol.ha_type == "ha":
+        #         nodes_ips = []
+        #         for node_id in lvol.nodes:
+        #             sn = db_controller.get_storage_node_by_id(node_id)
+        #             nodes_ips.append(f"{sn.mgmt_ip}:")
+        #             if node_id != lvol.node_id:
+        #                 rpc_client = RPCClient(sn.mgmt_ip, sn.rpc_port, sn.rpc_username, sn.rpc_password)
+        #                 for iface in sn.data_nics:
+        #                     if iface.ip4_address:
+        #                         ret = rpc_client.nvmf_subsystem_listener_set_ana_state(
+        #                             lvol.nqn, iface.ip4_address, "4420", False, "inaccessible")
+        # time.sleep(5)
+
         for lvol_id in snode.lvols:
-            # lvol = lvol_controller.recreate_lvol(lvol_id, snode)
-            lvol = db_controller.get_lvol_by_id(lvol_id)
-
-            if lvol.ha_type == "ha":
-                nodes_ips = []
-                for node_id in lvol.nodes:
-                    sn = db_controller.get_storage_node_by_id(node_id)
-                    nodes_ips.append(f"{sn.mgmt_ip}:")
-                    if node_id != lvol.node_id:
-                        rpc_client = RPCClient(sn.mgmt_ip, sn.rpc_port, sn.rpc_username, sn.rpc_password)
-                        for iface in sn.data_nics:
-                            if iface.ip4_address:
-                                ret = rpc_client.nvmf_subsystem_listener_set_ana_state(
-                                    lvol.nqn, iface.ip4_address, "4420", False, "inaccessible")
-
-        time.sleep(5)
-
-        for lvol_id in snode.lvols:
             lvol = db_controller.get_lvol_by_id(lvol_id)
             if lvol.ha_type == "ha":
-                is_created, error = lvol_controller.recreate_lvol_on_node(lvol, snode, "", 0)
+                is_created, error = lvol_controller.recreate_lvol_on_node(lvol, snode, "", 0, ana_state="inaccessible")
                 if error:
                     return False
 
@@ -2728,31 +2697,17 @@ def recreate_lvstore(snode):
             lvol.health_check = True
             lvol.write_to_db(db_controller.kv_store)
 
-        # time.sleep(5)
-        #
-        # for lvol_id in snode.lvols:
-        #     lvol = db_controller.get_lvol_by_id(lvol_id)
-        #     if lvol.ha_type == "ha":
-        #         sn = db_controller.get_storage_node_by_id(lvol.node_id)
-        #         rpc_client = RPCClient(sn.mgmt_ip, sn.rpc_port, sn.rpc_username, sn.rpc_password)
-        #         for iface in sn.data_nics:
-        #             if iface.ip4_address:
-        #                 ret = rpc_client.nvmf_subsystem_listener_set_ana_state(
-        #                     lvol.nqn, iface.ip4_address, "4420", True)
-
-        time.sleep(5)
+        time.sleep(2)
 
         for lvol_id in snode.lvols:
             lvol = db_controller.get_lvol_by_id(lvol_id)
             if lvol.ha_type == "ha":
-                for node_id in lvol.nodes:
-                    if node_id != lvol.node_id:
-                        sn = db_controller.get_storage_node_by_id(node_id)
-                        rpc_client = RPCClient(sn.mgmt_ip, sn.rpc_port, sn.rpc_username, sn.rpc_password)
-                        for iface in sn.data_nics:
-                            if iface.ip4_address:
-                                ret = rpc_client.nvmf_subsystem_listener_set_ana_state(
-                                    lvol.nqn, iface.ip4_address, "4420", False)
+                sn = db_controller.get_storage_node_by_id(lvol.node_id)
+                rpc_client = RPCClient(sn.mgmt_ip, sn.rpc_port, sn.rpc_username, sn.rpc_password)
+                for iface in sn.data_nics:
+                    if iface.ip4_address:
+                        ret = rpc_client.nvmf_subsystem_listener_set_ana_state(
+                            lvol.nqn, iface.ip4_address, "4420", True)
 
     return True
 

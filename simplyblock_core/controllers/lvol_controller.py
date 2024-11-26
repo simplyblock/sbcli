@@ -685,7 +685,7 @@ def add_lvol_on_node(lvol, snode, ha_comm_addrs=None, ha_inode_self=0):
     return True, None
 
 
-def recreate_lvol_on_node(lvol, snode, ha_comm_addrs=None, ha_inode_self=0):
+def recreate_lvol_on_node(lvol, snode, ha_comm_addrs=None, ha_inode_self=0, ana_state=None):
     rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
 
     if "crypto" in lvol.lvol_type:
@@ -711,14 +711,13 @@ def recreate_lvol_on_node(lvol, snode, ha_comm_addrs=None, ha_inode_self=0):
                         found = True
             if found is False:
                 ret = rpc_client.transport_create(tr_type)
+            if not ana_state:
+                ana_state = "non_optimized"
+                if lvol.node_id == snode.get_id():
+                    ana_state = "optimized"
             logger.info("adding listener for %s on IP %s" % (lvol.nqn, iface.ip4_address))
-            ret = rpc_client.listeners_create(lvol.nqn, tr_type, iface.ip4_address, "4420")
-            is_optimized = False
-            if lvol.node_id == snode.get_id():
-                is_optimized = True
-            logger.info(f"Setting ANA state: {is_optimized}")
-            ret = rpc_client.nvmf_subsystem_listener_set_ana_state(
-                lvol.nqn, iface.ip4_address, "4420", is_optimized)
+            logger.info(f"Setting ANA state: {ana_state}")
+            ret = rpc_client.listeners_create(lvol.nqn, tr_type, iface.ip4_address, "4420", ana_state)
 
     ns_found = False
     ret = rpc_client.subsystem_list(lvol.nqn)
