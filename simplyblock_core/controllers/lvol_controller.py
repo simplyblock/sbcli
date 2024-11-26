@@ -718,7 +718,7 @@ def recreate_lvol_on_node(lvol, snode, ha_comm_addrs=None, ha_inode_self=0):
                 is_optimized = True
             logger.info(f"Setting ANA state: {is_optimized}")
             ret = rpc_client.nvmf_subsystem_listener_set_ana_state(
-                lvol.nqn, iface.ip4_address, "4420", is_optimized, "inaccessible")
+                lvol.nqn, iface.ip4_address, "4420", is_optimized)
 
     ns_found = False
     ret = rpc_client.subsystem_list(lvol.nqn)
@@ -1069,7 +1069,7 @@ def connect_lvol(uuid):
                 "ip": ip,
                 "port": port,
                 "nqn": lvol.nqn,
-                "connect": f"sudo nvme connect --reconnect-delay=1 --ctrl-loss-tmo=600 --keep-alive-tmo=1 --transport={transport} --traddr={ip} --trsvcid={port} --nqn={lvol.nqn}",
+                "connect": f"sudo nvme connect --reconnect-delay=1 --ctrl-loss-tmo=600 --transport={transport} --traddr={ip} --trsvcid={port} --nqn={lvol.nqn}",
             })
     return out
 

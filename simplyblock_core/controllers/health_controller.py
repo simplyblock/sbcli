@@ -113,7 +113,8 @@ def _check_node_ping(ip):
         return False
 
 
-def _check_node_lvstore(lvstore_stack, node):
+def _check_node_lvstore(lvstore_stack, node, auto_fix=False):
+    db_controller = DBController()
     lvstore_check = True
     logger.info(f"Checking distr stack on node : {node.get_id()}")
     rpc_client = RPCClient(
@@ -143,6 +144,19 @@ def _check_node_lvstore(lvstore_stack, node):
                 if results:
                     logger.info(utils.print_table(results))
                     logger.info(f"Checking Distr map ... {is_passed}")
+                    if not is_passed and auto_fix:
+                        for result in results:
+                            if result['Results'] == 'failed':
+                                if result['Kind'] == "Device":
+                                    dev = db_controller.get_storage_device_by_id(result['UUID'])
+                                    distr_controller.send_dev_status_event(dev, dev.status, node)
+                                if result['Kind'] == "Node":
+                                    n = db_controller.get_storage_node_by_id(result['UUID'])
+                                    distr_controller.send_node_status_event(n, n.status, node)
+                        ret = rpc_client.distr_get_cluster_map(distr)
+                        results, is_passed = distr_controller.parse_distr_cluster_map(ret)
+                        logger.info(f"Checking Distr map ... {is_passed}")
+
                 else:
                     logger.error("Failed to parse distr cluster map")
                 lvstore_check &= is_passed
