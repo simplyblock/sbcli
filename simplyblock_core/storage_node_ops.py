@@ -2042,6 +2042,21 @@ def suspend_storage_node(node_id, force=False):
             return False
 
     logger.info("Suspending node")
+
+    rpc_client = RPCClient(
+        snode.mgmt_ip, snode.rpc_port,
+        snode.rpc_username, snode.rpc_password)
+
+    for lvol_id in snode.lvols:
+        logger.debug(lvol_id)
+        lvol = db_controller.get_lvol_by_id(lvol_id)
+        if lvol:
+            for iface in snode.data_nics:
+                if iface.ip4_address:
+                    ret = rpc_client.listeners_del(lvol.nqn, "TCP", iface.ip4_address, "4420")
+
+    time.sleep(2)
+
     for dev in snode.nvme_devices:
         if dev.status == NVMeDevice.STATUS_ONLINE:
             device_controller.device_set_unavailable(dev.get_id())
@@ -2049,19 +2064,6 @@ def suspend_storage_node(node_id, force=False):
     logger.info("Set JM Unavailable")
     if snode.jm_device and snode.jm_device.status != JMDevice.STATUS_UNAVAILABLE:
         device_controller.set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_UNAVAILABLE)
-
-    rpc_client = RPCClient(
-        snode.mgmt_ip, snode.rpc_port,
-        snode.rpc_username, snode.rpc_password)
-
-    logger.debug("Setting LVols to offline")
-    for lvol_id in snode.lvols:
-        logger.debug(lvol_id)
-        lvol = db_controller.get_lvol_by_id(lvol_id)
-        if lvol:
-            ret = rpc_client.nvmf_subsystem_remove_ns(lvol.nqn, 1)
-            lvol.status = lvol.STATUS_OFFLINE
-            lvol.write_to_db(db_controller.kv_store)
 
     logger.info("Setting node status to suspended")
     set_node_status(node_id, StorageNode.STATUS_SUSPENDED)
@@ -2100,18 +2102,49 @@ def resume_storage_node(node_id):
     snode.remote_devices = _connect_to_remote_devs(snode)
     snode.write_to_db(db_controller.kv_store)
 
-    rpc_client = RPCClient(
-        snode.mgmt_ip, snode.rpc_port,
-        snode.rpc_username, snode.rpc_password)
-
     logger.debug("Setting LVols to online")
+
+
+    for lvol_id in snode.lvols:
+        lvol = db_controller.get_lvol_by_id(lvol_id)
+        for node_id in lvol.nodes:
+            sn = db_controller.get_storage_node_by_id(node_id)
+            if node_id != lvol.node_id:
+                rpc_client = RPCClient(sn.mgmt_ip, sn.rpc_port, sn.rpc_username, sn.rpc_password)
+                for iface in sn.data_nics:
+                    if iface.ip4_address:
+                        ret = rpc_client.nvmf_subsystem_listener_set_ana_state(
+                            lvol.nqn, iface.ip4_address, "4420", False, "inaccessible")
+
+    time.sleep(3)
+
     for lvol_id in snode.lvols:
         logger.debug(lvol_id)
         lvol = db_controller.get_lvol_by_id(lvol_id)
         if lvol:
-            ret = rpc_client.nvmf_subsystem_add_ns(lvol.nqn, lvol.top_bdev, lvol.uuid, lvol.guid)
-            lvol.status = lvol.STATUS_ONLINE
-            lvol.write_to_db(db_controller.kv_store)
+            rpc_client = RPCClient(
+                snode.mgmt_ip, snode.rpc_port,
+                snode.rpc_username, snode.rpc_password)
+
+            for iface in snode.data_nics:
+                if iface.ip4_address:
+                    ret = rpc_client.listeners_create(lvol.nqn, "TCP", iface.ip4_address, "4420")
+                    ret = rpc_client.nvmf_subsystem_listener_set_ana_state(
+                        lvol.nqn, iface.ip4_address, "4420", True)
+
+    time.sleep(3)
+
+    for lvol_id in snode.lvols:
+        lvol = db_controller.get_lvol_by_id(lvol_id)
+        if lvol.ha_type == "ha":
+            for node_id in lvol.nodes:
+                if node_id != lvol.node_id:
+                    sn = db_controller.get_storage_node_by_id(node_id)
+                    rpc_client = RPCClient(sn.mgmt_ip, sn.rpc_port, sn.rpc_username, sn.rpc_password)
+                    for iface in sn.data_nics:
+                        if iface.ip4_address:
+                            ret = rpc_client.nvmf_subsystem_listener_set_ana_state(
+                                lvol.nqn, iface.ip4_address, "4420", False)
 
     logger.info("Setting node status to online")
     set_node_status(snode.get_id(), StorageNode.STATUS_ONLINE)
