@@ -2973,10 +2973,10 @@ def _create_bdev_stack(snode, lvstore_stack=None, primary_node=False):
 
         elif type == "bdev_raid":
             # sync jm
-            if snode.jm_vuid:
-                ret = rpc_client.jc_explicit_synchronization(snode.jm_vuid)
-                logger.info(f"JM Sync res: {ret}")
-                time.sleep(5)
+            # if snode.jm_vuid:
+            #     ret = rpc_client.jc_explicit_synchronization(snode.jm_vuid)
+            #     logger.info(f"JM Sync res: {ret}")
+            #     time.sleep(5)
 
             distribs_list = bdev["distribs_list"]
             strip_size_kb = params["strip_size_kb"]
