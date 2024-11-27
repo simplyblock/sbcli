@@ -1,5 +1,6 @@
-SIMPLY_BLOCK_COMMAND_NAME=sbcli-dev
-SIMPLY_BLOCK_VERSION=5.2.6
 
-SIMPLY_BLOCK_DOCKER_IMAGE=simplyblock/simplyblock:main
+SIMPLY_BLOCK_COMMAND_NAME=sbcli-dev-activate
+SIMPLY_BLOCK_VERSION=10.0.1
+
+SIMPLY_BLOCK_DOCKER_IMAGE=simplyblock/simplyblock:reactivate
 DOCKER_USER=hamdysimplyblock

@@ -299,6 +299,8 @@ class CLIWrapper:
         sub_command.add_argument("--max-queue-size", help='The max size the queue will grow', type=int, default=128)
         sub_command.add_argument("--inflight-io-threshold", help='The number of inflight IOs allowed before the IO queuing starts', type=int, default=4)
         sub_command.add_argument("--enable-qos", help='Enable qos bdev for storage nodes', action='store_true', dest='enable_qos')
+        sub_command.add_argument("--strict-node-anti-affinity", help='Enable strict node anti affinity for storage nodes', action='store_true')
+
 
 
         # add cluster
@@ -327,6 +329,7 @@ class CLIWrapper:
         sub_command.add_argument("--max-queue-size", help='The max size the queue will grow', type=int, default=128)
         sub_command.add_argument("--inflight-io-threshold", help='The number of inflight IOs allowed before the IO queuing starts', type=int, default=4)
         sub_command.add_argument("--enable-qos", help='Enable qos bdev for storage nodes', action='store_true', dest='enable_qos')
+        sub_command.add_argument("--strict-node-anti-affinity", help='Enable strict node anti affinity for storage nodes', action='store_true')
 
         # Activate cluster
         sub_command = self.add_sub_command(subparser, 'activate', 'Create distribs and raid0 bdevs on all the storage node and move the cluster to active state')
@@ -1269,11 +1272,13 @@ class CLIWrapper:
         max_queue_size = args.max_queue_size
         inflight_io_threshold = args.inflight_io_threshold
         enable_qos = args.enable_qos
+        strict_node_anti_affinity = args.strict_node_anti_affinity
+
 
         return cluster_ops.add_cluster(
             blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
             distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, enable_node_affinity,
-            qpair_count, max_queue_size, inflight_io_threshold, enable_qos)
+            qpair_count, max_queue_size, inflight_io_threshold, enable_qos, strict_node_anti_affinity)
 
 
     def cluster_create(self, args):
@@ -1299,6 +1304,7 @@ class CLIWrapper:
         max_queue_size = args.max_queue_size
         inflight_io_threshold = args.inflight_io_threshold
         enable_qos = args.enable_qos
+        strict_node_anti_affinity = args.strict_node_anti_affinity
 
 
         return cluster_ops.create_cluster(
@@ -1306,7 +1312,7 @@ class CLIWrapper:
             CLI_PASS, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
             ifname, log_del_interval, metrics_retention_period, contact_point, grafana_endpoint,
             distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, enable_node_affinity,
-            qpair_count, max_queue_size, inflight_io_threshold, enable_qos)
+            qpair_count, max_queue_size, inflight_io_threshold, enable_qos, strict_node_anti_affinity)
 
 
     def query_yes_no(self, question, default="yes"):

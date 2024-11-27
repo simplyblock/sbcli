@@ -103,7 +103,7 @@ def _add_graylog_input(cluster_ip, password):
 def create_cluster(blk_size, page_size_in_blocks, cli_pass,
                    cap_warn, cap_crit, prov_cap_warn, prov_cap_crit, ifname, log_del_interval, metrics_retention_period,
                    contact_point, grafana_endpoint, distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type,
-                   enable_node_affinity, qpair_count, max_queue_size, inflight_io_threshold, enable_qos):
+                   enable_node_affinity, qpair_count, max_queue_size, inflight_io_threshold, enable_qos, strict_node_anti_affinity):
 
     logger.info("Installing dependencies...")
     ret = scripts.install_deps()
@@ -176,6 +176,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     c.max_queue_size = max_queue_size
     c.inflight_io_threshold = inflight_io_threshold
     c.enable_qos = enable_qos
+    c.strict_node_anti_affinity = strict_node_anti_affinity
 
     alerts_template_folder = os.path.join(TOP_DIR, "simplyblock_core/scripts/alerting/")
     alert_resources_file = "alert_resources.yaml"
@@ -295,7 +296,7 @@ def deploy_spdk(node_docker, spdk_cpu_mask, spdk_mem):
 
 def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
                 distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, enable_node_affinity, qpair_count,
-                max_queue_size, inflight_io_threshold, enable_qos):
+                max_queue_size, inflight_io_threshold, enable_qos, strict_node_anti_affinity):
     db_controller = DBController()
     clusters = db_controller.get_clusters()
     if not clusters:
@@ -314,6 +315,7 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
     cluster.secret = utils.generate_string(20)
     cluster.db_connection = default_cluster.db_connection
     cluster.grafana_endpoint = default_cluster.grafana_endpoint
+    cluster.strict_node_anti_affinity = strict_node_anti_affinity
 
     _create_update_user(cluster.uuid, cluster.grafana_endpoint, default_cluster.secret, cluster.secret)
 
@@ -378,7 +380,7 @@ def cluster_activate(cl_id, force=False):
     records = db_controller.get_cluster_capacity(cluster)
     max_size = records[0]['size_total']
 
-    for snode in snodes:
+    for snode in online_nodes:
         if snode.lvstore:
             logger.warning(f"Node {snode.get_id()} already has lvstore {snode.lvstore}")
             ret = storage_node_ops.recreate_lvstore(snode)
@@ -391,6 +393,8 @@ def cluster_activate(cl_id, force=False):
             return False
     if not cluster.cluster_max_size:
         cluster.cluster_max_size = max_size
+        cluster.cluster_max_devices = dev_count
+        cluster.cluster_max_nodes = len(online_nodes)
     cluster.write_to_db(db_controller.kv_store)
     set_cluster_status(cl_id, Cluster.STATUS_ACTIVE)
     logger.info("Cluster activated successfully")
