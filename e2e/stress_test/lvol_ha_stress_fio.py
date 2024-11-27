@@ -30,6 +30,7 @@ class TestLvolHACluster(FioWorkloadTest):
         self.lvol_node = None
         self.mount_path = "/mnt"
         self.lvol_mount_details = {}
+        self.log_path = "/logs"
     
     def create_lvols(self):
         """Create 500 lvols with mixed crypto and non-crypto."""
@@ -94,7 +95,6 @@ class TestLvolHACluster(FioWorkloadTest):
         self.logger.info("Filling volumes with data.")
         fio_threads = []
         for _, lvol in self.lvol_mount_details.items():
-            breakpoint()
             fio_thread = threading.Thread(target=self.ssh_obj.run_fio_test, args=(self.node, None, lvol["Mount"], lvol["Log"]),
                                           kwargs={"size": self.fio_size,
                                                   "name": f"{lvol['Name']}_fio",
@@ -214,7 +214,7 @@ class TestLvolHACluster(FioWorkloadTest):
         """Main execution."""
         self.logger.info("Starting high-volume stress test.")
         self.node = self.mgmt_nodes[0]
-        self.ssh_obj.make_directory(node=self.node, dir_name="/logs")
+        self.ssh_obj.make_directory(node=self.node, dir_name=self.log_path)
         self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
         self.lvol_node = self.sbcli_utils.get_node_without_lvols()
 
