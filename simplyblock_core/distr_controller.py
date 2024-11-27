@@ -76,7 +76,7 @@ def disconnect_device(device):
         node.write_to_db(db_controller.kv_store)
 
 
-def get_distr_cluster_map(snodes, target_node):
+def get_distr_cluster_map(snodes, target_node, distr_name=""):
     map_cluster = {}
     map_prob = []
     local_node_index = 0
@@ -127,8 +127,8 @@ def get_distr_cluster_map(snodes, target_node):
             "items": dev_w_map
         })
     cl_map = {
-        "name": "",
-        "UUID_node_target": "",
+        "name": distr_name,
+        "UUID_node_target": target_node.get_id(),
         "timestamp": datetime.datetime.now().isoformat("T", "seconds")+'Z',
         "map_cluster": map_cluster,
         "map_prob": map_prob
@@ -204,6 +204,19 @@ def send_cluster_map_to_node(node):
     rpc_client = RPCClient(node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password, timeout=10)
     cluster_map_data = get_distr_cluster_map(snodes, node)
     cluster_map_data['UUID_node_target'] = node.get_id()
+    ret = rpc_client.distr_send_cluster_map(cluster_map_data)
+    if not ret:
+        logger.error("Failed to send cluster map")
+        logger.info(cluster_map_data)
+        return False
+    return True
+
+
+def send_cluster_map_to_distr(node, distr_name):
+    db_controller = DBController()
+    snodes = db_controller.get_storage_nodes_by_cluster_id(node.cluster_id)
+    rpc_client = RPCClient(node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password, timeout=10)
+    cluster_map_data = get_distr_cluster_map(snodes, node, distr_name)
     ret = rpc_client.distr_send_cluster_map(cluster_map_data)
     if not ret:
         logger.error("Failed to send cluster map")

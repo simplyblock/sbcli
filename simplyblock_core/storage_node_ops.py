@@ -2697,6 +2697,27 @@ def set_node_status(node_id, status):
 
 def recreate_lvstore(snode):
     db_controller = DBController(KVStore())
+
+    if snode.lvols:
+        db_controller = DBController()
+        for lvol_id in snode.lvols:
+            # lvol = lvol_controller.recreate_lvol(lvol_id, snode)
+            lvol = db_controller.get_lvol_by_id(lvol_id)
+
+            if lvol.ha_type == "ha":
+                nodes_ips = []
+                for node_id in lvol.nodes:
+                    sn = db_controller.get_storage_node_by_id(node_id)
+                    nodes_ips.append(f"{sn.mgmt_ip}:")
+                    if node_id != lvol.node_id:
+                        rpc_client = RPCClient(sn.mgmt_ip, sn.rpc_port, sn.rpc_username, sn.rpc_password)
+                        for iface in sn.data_nics:
+                            if iface.ip4_address:
+                                ret = rpc_client.nvmf_subsystem_listener_set_ana_state(
+                                    lvol.nqn, iface.ip4_address, "4420", False, "inaccessible")
+
+    time.sleep(1)
+
     secondary_node_id = db_controller.get_storage_node_by_id(snode.secondary_node_id)
     for node in [snode]:
         ret, err = _create_bdev_stack(node, snode.lvstore_stack, primary_node=snode)
@@ -2715,10 +2736,28 @@ def recreate_lvstore(snode):
         # ret = temp_rpc_client.bdev_wait_for_examine()
         # time.sleep(1)
 
+        # for lvol_id in snode.lvols:
+        #     lvol = db_controller.get_lvol_by_id(lvol_id)
+        #     if lvol.ha_type == "ha":
+        #         is_created, error = lvol_controller.recreate_lvol_on_node(lvol, snode, "", 0, ana_state="inaccessible")
+        #         if error:
+        #             return False
+        #
+        #     # if not lvol:
+        #     #     logger.error(f"Failed to recreate LVol: {lvol_id}")
+        #     #     continue
+        #     lvol.status = lvol.STATUS_ONLINE
+        #     lvol.io_error = False
+        #     lvol.health_check = True
+        #     lvol.write_to_db(db_controller.kv_store)
+        #
+        # time.sleep(15)
+
+
         for lvol_id in snode.lvols:
             lvol = db_controller.get_lvol_by_id(lvol_id)
             if lvol.ha_type == "ha":
-                is_created, error = lvol_controller.recreate_lvol_on_node(lvol, snode, "", 0, ana_state="inaccessible")
+                is_created, error = lvol_controller.recreate_lvol_on_node(lvol, snode, "", 0)
                 if error:
                     return False
 
@@ -2730,38 +2769,18 @@ def recreate_lvstore(snode):
             lvol.health_check = True
             lvol.write_to_db(db_controller.kv_store)
 
-        time.sleep(15)
 
-        if snode.lvols:
-            db_controller = DBController()
-            for lvol_id in snode.lvols:
-                # lvol = lvol_controller.recreate_lvol(lvol_id, snode)
-                lvol = db_controller.get_lvol_by_id(lvol_id)
+        # for lvol_id in snode.lvols:
+        #     lvol = db_controller.get_lvol_by_id(lvol_id)
+        #     if lvol.ha_type == "ha":
+        #         sn = db_controller.get_storage_node_by_id(lvol.node_id)
+        #         rpc_client = RPCClient(sn.mgmt_ip, sn.rpc_port, sn.rpc_username, sn.rpc_password)
+        #         for iface in sn.data_nics:
+        #             if iface.ip4_address:
+        #                 ret = rpc_client.nvmf_subsystem_listener_set_ana_state(
+        #                     lvol.nqn, iface.ip4_address, "4420", True)
 
-                if lvol.ha_type == "ha":
-                    nodes_ips = []
-                    for node_id in lvol.nodes:
-                        sn = db_controller.get_storage_node_by_id(node_id)
-                        nodes_ips.append(f"{sn.mgmt_ip}:")
-                        if node_id != lvol.node_id:
-                            rpc_client = RPCClient(sn.mgmt_ip, sn.rpc_port, sn.rpc_username, sn.rpc_password)
-                            for iface in sn.data_nics:
-                                if iface.ip4_address:
-                                    ret = rpc_client.nvmf_subsystem_listener_set_ana_state(
-                                        lvol.nqn, iface.ip4_address, "4420", False, "inaccessible")
-        time.sleep(7)
-
-        for lvol_id in snode.lvols:
-            lvol = db_controller.get_lvol_by_id(lvol_id)
-            if lvol.ha_type == "ha":
-                sn = db_controller.get_storage_node_by_id(lvol.node_id)
-                rpc_client = RPCClient(sn.mgmt_ip, sn.rpc_port, sn.rpc_username, sn.rpc_password)
-                for iface in sn.data_nics:
-                    if iface.ip4_address:
-                        ret = rpc_client.nvmf_subsystem_listener_set_ana_state(
-                            lvol.nqn, iface.ip4_address, "4420", True)
-
-        time.sleep(20)
+        time.sleep(2)
 
         if snode.lvols:
             db_controller = DBController()
@@ -2961,10 +2980,10 @@ def _create_bdev_stack(snode, lvstore_stack=None, primary_node=False):
                 snode.distrib_cpu_index = (snode.distrib_cpu_index + 1) % len(snode.distrib_cpu_cores)
             ret = rpc_client.bdev_distrib_create(**params)
             if ret:
-                ret = distr_controller.send_cluster_map_to_node(snode)
+                ret = distr_controller.send_cluster_map_to_distr(snode, name)
                 if not ret:
                     return False, "Failed to send cluster map"
-                time.sleep(3)
+                # time.sleep(1)
 
         elif type == "bdev_lvstore" and lvstore_stack:
             ret = rpc_client.create_lvstore(**params)
@@ -2977,12 +2996,12 @@ def _create_bdev_stack(snode, lvstore_stack=None, primary_node=False):
             # if snode.jm_vuid:
             #     ret = rpc_client.jc_explicit_synchronization(snode.jm_vuid)
             #     logger.info(f"JM Sync res: {ret}")
-            #     time.sleep(5)
+            #     time.sleep(1)
 
             distribs_list = bdev["distribs_list"]
             strip_size_kb = params["strip_size_kb"]
             ret = rpc_client.bdev_raid_create(name, distribs_list, strip_size_kb=strip_size_kb)
-            time.sleep(5)
+            # time.sleep(2)
 
         else:
             logger.debug(f"Unknown BDev type: {type}")
