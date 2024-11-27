@@ -2729,7 +2729,7 @@ def recreate_lvstore(snode):
             lvol.health_check = True
             lvol.write_to_db(db_controller.kv_store)
 
-        time.sleep(10)
+        time.sleep(15)
 
         if snode.lvols:
             db_controller = DBController()
