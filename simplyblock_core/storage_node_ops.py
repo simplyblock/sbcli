@@ -758,6 +758,12 @@ def _connect_to_remote_devs(this_node):
         this_node.mgmt_ip, this_node.rpc_port,
         this_node.rpc_username, this_node.rpc_password, timeout=5, retry=2)
 
+    node_bdevs = rpc_client.get_bdevs()
+    if node_bdevs:
+        node_bdev_names = [b['name'] for b in node_bdevs]
+    else:
+        node_bdev_names = []
+
     remote_devices = []
     # connect to remote devs
     snodes = db_controller.get_storage_nodes_by_cluster_id(this_node.cluster_id)
@@ -772,19 +778,17 @@ def _connect_to_remote_devs(this_node):
 
             name = f"remote_{dev.alceml_bdev}"
             bdev_name = f"{name}n1"
-            ret = rpc_client.get_bdevs(bdev_name)
-            if ret:
+            if bdev_name in node_bdev_names:
                 logger.info(f"bdev found {bdev_name}")
             else:
-                ret = rpc_client.bdev_nvme_detach_controller(name)
-                time.sleep(1)
+                rpc_client.bdev_nvme_detach_controller(name)
                 ret = rpc_client.bdev_nvme_attach_controller_tcp(name, dev.nvmf_nqn, dev.nvmf_ip, dev.nvmf_port)
                 if not ret:
                     logger.error(f"Failed to connect to device: {dev.get_id()}")
                     continue
             dev.remote_bdev = bdev_name
             remote_devices.append(dev)
-            distr_controller.send_dev_status_event(dev, dev.status, node)
+            distr_controller.send_dev_status_event(dev, dev.status, this_node)
     return remote_devices
 
 
@@ -817,7 +821,7 @@ def _connect_to_remote_jm_devs(this_node, jm_ids=[]):
             remote_devices = this_node.remote_jm_devices
         else:
             for node in db_controller.get_storage_nodes_by_cluster_id(this_node.cluster_id):
-                if node.get_id() == this_node.get_id() or node.status != StorageNode.STATUS_ONLINE:
+                if node.get_id() == this_node.get_id():
                     continue
                 if node.jm_device and node.jm_device.status == JMDevice.STATUS_ONLINE:
                     remote_devices.append(node.jm_device)
@@ -845,10 +849,8 @@ def _connect_to_remote_jm_devs(this_node, jm_ids=[]):
             jm_dev.status = JMDevice.STATUS_ONLINE
             new_devs.append(jm_dev)
         else:
-
             logger.info(f"Connecting {name} to {this_node.get_id()}")
-            ret = rpc_client.bdev_nvme_detach_controller(name)
-            time.sleep(1)
+            rpc_client.bdev_nvme_detach_controller(name)
             ret = rpc_client.bdev_nvme_attach_controller_tcp(
                 name, jm_dev.nvmf_nqn, jm_dev.nvmf_ip, jm_dev.nvmf_port)
             if ret:
