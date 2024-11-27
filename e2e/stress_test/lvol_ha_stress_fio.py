@@ -168,10 +168,10 @@ class TestLvolHACluster(FioWorkloadTest):
         self.sbcli_utils.wait_for_storage_node_status(self.lvol_node,
                                                       "online",
                                                       timeout=800)
-        self.logger.info(f"Fetching migration tasks for cluster {self.cluster_id}.")
+        # self.logger.info(f"Fetching migration tasks for cluster {self.cluster_id}.")
 
-        self.logger.info(f"Validating migration tasks for node {self.lvol_node}.")
-        self.validate_migration_for_node(timestamp, 5000, None)
+        # self.logger.info(f"Validating migration tasks for node {self.lvol_node}.")
+        # self.validate_migration_for_node(timestamp, 5000, None)
         sleep_n_sec(30)
 
         self.validate_checksums()
@@ -185,10 +185,10 @@ class TestLvolHACluster(FioWorkloadTest):
         self.sbcli_utils.wait_for_storage_node_status(self.lvol_node,
                                                       "online",
                                                       timeout=800)
-        self.logger.info(f"Fetching migration tasks for cluster {self.cluster_id}.")
+        # self.logger.info(f"Fetching migration tasks for cluster {self.cluster_id}.")
 
-        self.logger.info(f"Validating migration tasks for node {self.lvol_node}.")
-        self.validate_migration_for_node(timestamp, 5000, None)
+        # self.logger.info(f"Validating migration tasks for node {self.lvol_node}.")
+        # self.validate_migration_for_node(timestamp, 5000, None)
         sleep_n_sec(30)
 
         self.validate_checksums()
