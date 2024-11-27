@@ -25,7 +25,7 @@ class TestLvolHACluster(FioWorkloadTest):
         self.total_lvols = 10
         self.total_snapshots = 30
         self.lvol_name = "lvol"
-        self.snapshot_name = "snap"
+        self.snapshot_name = "snapshot"
         self.node = None
         self.lvol_node = None
         self.mount_path = "/mnt"
