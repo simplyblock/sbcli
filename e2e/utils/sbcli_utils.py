@@ -34,6 +34,7 @@ class SbcliUtils:
         headers = headers if headers else self.headers
         self.logger.info(f"Calling GET for {api_url} with headers: {headers}")
         retry = 10
+        data = None
         while retry > 0:
             try:
                 resp = requests.get(request_url, headers=headers)

@@ -28,9 +28,9 @@ class TestLvolHACluster(FioWorkloadTest):
         self.snapshot_name = "snapshot"
         self.node = None
         self.lvol_node = None
-        self.mount_path = "/mnt"
+        self.mount_path = "/mnt/"
         self.lvol_mount_details = {}
-        self.log_path = "/logs"
+        self.log_path = "/home/ec2-user/"
     
     def create_lvols(self):
         """Create 500 lvols with mixed crypto and non-crypto."""
@@ -156,7 +156,9 @@ class TestLvolHACluster(FioWorkloadTest):
         # Graceful shutdown and restart
         self.logger.info("Graceful shutdown and restart.")
         timestamp = int(datetime.now().timestamp())
-        
+
+        self.sbcli_utils.suspend_node(node_uuid=self.lvol_node)
+        sleep_n_sec(10)
         self.sbcli_utils.shutdown_node(node_uuid=self.lvol_node)
         self.sbcli_utils.wait_for_storage_node_status(self.lvol_node,
                                                       ["unreachable", "offline"],
