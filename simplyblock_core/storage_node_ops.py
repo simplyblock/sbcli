@@ -2068,7 +2068,7 @@ def suspend_storage_node(node_id, force=False):
                     ret = rpc_client.nvmf_subsystem_listener_set_ana_state(
                         lvol.nqn, iface.ip4_address, "4420", False, ana="inaccessible")
 
-    time.sleep(1)
+    time.sleep(5)
 
     for lvol_id in snode.lvols:
         lvol = db_controller.get_lvol_by_id(lvol_id)
@@ -2140,7 +2140,7 @@ def resume_storage_node(node_id):
                         ret = rpc_client.nvmf_subsystem_listener_set_ana_state(
                             lvol.nqn, iface.ip4_address, "4420", False, "inaccessible")
 
-    time.sleep(1)
+    time.sleep(5)
 
     for lvol_id in snode.lvols:
         lvol = db_controller.get_lvol_by_id(lvol_id)
@@ -2154,7 +2154,7 @@ def resume_storage_node(node_id):
                     ret = rpc_client.nvmf_subsystem_listener_set_ana_state(
                         lvol.nqn, iface.ip4_address, "4420", True)
 
-    time.sleep(1)
+    time.sleep(20)
 
     for lvol_id in snode.lvols:
         lvol = db_controller.get_lvol_by_id(lvol_id)
@@ -2729,7 +2729,7 @@ def recreate_lvstore(snode):
             lvol.health_check = True
             lvol.write_to_db(db_controller.kv_store)
 
-        time.sleep(2)
+        time.sleep(10)
 
         if snode.lvols:
             db_controller = DBController()
@@ -2748,7 +2748,7 @@ def recreate_lvstore(snode):
                                 if iface.ip4_address:
                                     ret = rpc_client.nvmf_subsystem_listener_set_ana_state(
                                         lvol.nqn, iface.ip4_address, "4420", False, "inaccessible")
-        time.sleep(1)
+        time.sleep(5)
 
         for lvol_id in snode.lvols:
             lvol = db_controller.get_lvol_by_id(lvol_id)
@@ -2760,7 +2760,7 @@ def recreate_lvstore(snode):
                         ret = rpc_client.nvmf_subsystem_listener_set_ana_state(
                             lvol.nqn, iface.ip4_address, "4420", True)
 
-        time.sleep(2)
+        time.sleep(20)
 
         if snode.lvols:
             db_controller = DBController()
