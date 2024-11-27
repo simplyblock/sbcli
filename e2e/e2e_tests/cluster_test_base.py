@@ -148,7 +148,7 @@ class TestClusterBase:
                 sleep_n_sec(2)
             self.sbcli_utils.delete_all_storage_pools()
             sleep_n_sec(2)
-            self.ssh_obj.remove_dir(self.mgmt_nodes[0], "/mnt/de*")
+            self.ssh_obj.remove_dir(self.mgmt_nodes[0], "/mnt/*")
             for node, ssh in self.ssh_obj.ssh_connections.items():
                 self.logger.info(f"Closing node ssh connection for {node}")
                 ssh.close()
