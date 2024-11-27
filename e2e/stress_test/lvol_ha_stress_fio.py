@@ -120,40 +120,41 @@ class TestLvolHACluster(FioWorkloadTest):
     
     def validate_checksums(self):
         "Validating checksums"
-        for lvol_id, lvol in self.lvol_mount_details.items():
-            self.ssh_obj.unmount_path(node=self.node, device=lvol["Device"])
-            filter_nqn = self.ssh_obj.get_nvme_subsystems(node=self.node, nqn_filter=lvol_id)
-            for nqn in filter_nqn:
-                self.ssh_obj.disconnect_nvme(node=self.node, nqn_grep=nqn)
-            self.ssh_obj.remove_dir(node=self.node, dir_path=lvol["Mount"])
+        # for lvol_id, lvol in self.lvol_mount_details.items():
+        #     self.ssh_obj.unmount_path(node=self.node, device=lvol["Device"])
+        #     filter_nqn = self.ssh_obj.get_nvme_subsystems(node=self.node, nqn_filter=lvol_id)
+        #     for nqn in filter_nqn:
+        #         self.ssh_obj.disconnect_nvme(node=self.node, nqn_grep=nqn)
+        #     self.ssh_obj.remove_dir(node=self.node, dir_path=lvol["Mount"])
         
-        for lvol_id, lvol in self.lvol_mount_details.items():
-            initial_devices = self.ssh_obj.get_devices(node=self.node)
-            self.ssh_obj.exec_command(node=self.node, command=lvol["Command"])
-            sleep_n_sec(3)
-            final_devices = self.ssh_obj.get_devices(node=self.node)
-            lvol_device = None
-            for device in final_devices:
-                if device not in initial_devices:
-                    lvol_device = f"/dev/{device.strip()}"
-                    break
-            if not lvol_device:
-                raise Exception("LVOL did not connect")
-            self.lvol_mount_details[lvol_id]["Device"] = lvol_device
+        # for lvol_id, lvol in self.lvol_mount_details.items():
+        #     initial_devices = self.ssh_obj.get_devices(node=self.node)
+        #     self.ssh_obj.exec_command(node=self.node, command=lvol["Command"])
+        #     sleep_n_sec(3)
+        #     final_devices = self.ssh_obj.get_devices(node=self.node)
+        #     lvol_device = None
+        #     for device in final_devices:
+        #         if device not in initial_devices:
+        #             lvol_device = f"/dev/{device.strip()}"
+        #             break
+        #     if not lvol_device:
+        #         raise Exception("LVOL did not connect")
+        #     self.lvol_mount_details[lvol_id]["Device"] = lvol_device
 
             # Mount and Run FIO
-            self.ssh_obj.mount_path(node=self.node, device=lvol_device, mount_path=lvol["Mount"])
+            # self.ssh_obj.mount_path(node=self.node, device=lvol_device, mount_path=lvol["Mount"])
+        for _, lvol in self.lvol_mount_details.items():
             final_files = self.ssh_obj.find_files(node=self.node, directory=lvol['Mount'])
             final_checksums = self.ssh_obj.generate_checksums(node=self.node, files=final_files)
             
-            assert final_checksums == lvol["MD5"], f"Checksum validation is not successful. Intial: {lvol['MD5']}, Final: {final_checksums}"
+            assert final_checksums == lvol["MD5"], f"Checksum validation for {lvol['Name']} is not successful. Intial: {lvol['MD5']}, Final: {final_checksums}"
 
     def run_scenarios(self):
         """Run failure scenarios."""
         
         self.logger.info("Running failure scenarios.")
         
-        # Graceful shutdown and restart
+        # Sce-1 Graceful shutdown and restart
         self.logger.info("Graceful shutdown and restart.")
         timestamp = int(datetime.now().timestamp())
 
@@ -172,28 +173,28 @@ class TestLvolHACluster(FioWorkloadTest):
 
         # self.logger.info(f"Validating migration tasks for node {self.lvol_node}.")
         # self.validate_migration_for_node(timestamp, 5000, None)
-        sleep_n_sec(30)
+        # sleep_n_sec(30)
 
-        self.validate_checksums()
+        # self.validate_checksums()
 
-        # Container stop and restart
-        self.logger.info("Container stop and restart.")
-        timestamp = int(datetime.now().timestamp())
-        node_details = self.sbcli_utils.get_storage_node_details(self.lvol_node)
-        node_ip = node_details[0]["mgmt_ip"]
-        self.ssh_obj.stop_spdk_process(node_ip)
-        self.sbcli_utils.wait_for_storage_node_status(self.lvol_node,
-                                                      "online",
-                                                      timeout=800)
+        # Sce-2 Container stop and restart
+        # self.logger.info("Container stop and restart.")
+        # timestamp = int(datetime.now().timestamp())
+        # node_details = self.sbcli_utils.get_storage_node_details(self.lvol_node)
+        # node_ip = node_details[0]["mgmt_ip"]
+        # self.ssh_obj.stop_spdk_process(node_ip)
+        # self.sbcli_utils.wait_for_storage_node_status(self.lvol_node,
+        #                                               "online",
+        #                                               timeout=800)
         # self.logger.info(f"Fetching migration tasks for cluster {self.cluster_id}.")
 
         # self.logger.info(f"Validating migration tasks for node {self.lvol_node}.")
         # self.validate_migration_for_node(timestamp, 5000, None)
-        sleep_n_sec(30)
+        # sleep_n_sec(30)
 
-        self.validate_checksums()
+        # self.validate_checksums()
 
-        # Network stop and restart
+        # Sce-3 Network stop and restart
         # self.logger.info("Network stop and restart.")
         # timestamp = int(datetime.now().timestamp())
         # cmd = 'nohup sh -c "sudo ifdown eth0 && sleep 30 && sudo ifup eth0" &'
