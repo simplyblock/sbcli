@@ -701,7 +701,7 @@ def _prepare_cluster_devices_on_restart(snode):
             snode.alceml_worker_cpu_index = (snode.alceml_worker_cpu_index + 1) % len(snode.alceml_worker_cpu_cores)
 
         ret = rpc_client.bdev_alceml_create(jm_device.alceml_bdev, nvme_bdev, jm_device.get_id(),
-                                                pba_init_mode=1, alceml_cpu_mask=alceml_cpu_mask, alceml_worker_cpu_mask=alceml_worker_cpu_mask)
+                                                pba_init_mode=3, alceml_cpu_mask=alceml_cpu_mask, alceml_worker_cpu_mask=alceml_worker_cpu_mask)
 
         if not ret:
             logger.error(f"Failed to create alceml bdev: {jm_device.alceml_bdev}")
