@@ -61,7 +61,7 @@ class TestSingleNodeFailure(TestClusterBase):
         self.sbcli_utils.add_lvol(
             lvol_name=self.lvol_name,
             pool_name=self.pool_name,
-            size="800M",
+            size="10G",
             # distr_ndcs=2,
             # distr_npcs=1
         )
@@ -96,7 +96,8 @@ class TestSingleNodeFailure(TestClusterBase):
                                        kwargs={"name": "fio_run_1",
                                                "runtime": 500,
                                                "debug": self.fio_debug,
-                                               "rw": "randwrite",})
+                                               "time_based": False,
+                                               "size": "8GiB"})
         fio_thread1.start()
 
         no_lvol_node_uuid = self.sbcli_utils.get_node_without_lvols()
@@ -132,7 +133,7 @@ class TestSingleNodeFailure(TestClusterBase):
                 self.sbcli_utils.add_lvol(
                     lvol_name=f"{self.lvol_name}_fail",
                     pool_name=self.pool_name,
-                    size="800M",
+                    size="10G",
                     # distr_ndcs=2,
                     # distr_npcs=1,
                     host_id=no_lvol_node_uuid,
@@ -151,7 +152,7 @@ class TestSingleNodeFailure(TestClusterBase):
             self.sbcli_utils.add_lvol(
                     lvol_name=f"{self.lvol_name}_2",
                     pool_name=self.pool_name,
-                    size="800M",
+                    size="10G",
                     # distr_ndcs=2,
                     # distr_npcs=1,
                 )
