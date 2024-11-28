@@ -283,7 +283,25 @@ def sum_records(records):
 
 
 def get_random_vuid():
-    return 1 + int(random.random() * 10000)
+    from simplyblock_core.kv_store import DBController
+    db_controller = DBController()
+    used_vuids = []
+    nodes = db_controller.get_storage_nodes()
+    for node in nodes:
+        for bdev in node.lvstore_stack:
+            type = bdev['type']
+            if type == "bdev_distr":
+                vuid = bdev['params']['vuid']
+            elif type == "bdev_raid":
+                vuid = bdev['jm_vuid']
+            else:
+                continue
+            used_vuids.append(vuid)
+
+    r = 1 + int(random.random() * 10000)
+    while r in used_vuids:
+        r = 1 + int(random.random() * 10000)
+    return r
 
 
 def calculate_core_allocation(cpu_count):
