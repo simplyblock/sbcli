@@ -99,7 +99,8 @@ class TestLvolHACluster(FioWorkloadTest):
                                           kwargs={"size": self.fio_size,
                                                   "name": f"{lvol['Name']}_fio",
                                                   "rw": "write",
-                                                  "bs": "4K-128K",})
+                                                  "bs": "4K-128K",
+                                                  "time_based": False,})
             fio_thread.start()
             fio_threads.append(fio_thread)
         self.common_utils.manage_fio_threads(node=self.node,
@@ -117,42 +118,42 @@ class TestLvolHACluster(FioWorkloadTest):
             base_checksums = self.ssh_obj.generate_checksums(node=self.node, files=base_files)
             self.logger.info(f"Base Checksum for lvol {lvol['Name']}: {base_checksums}")
             self.lvol_mount_details[lvol_id]["MD5"] = base_checksums
+
+    def wait_for_all_devices(self, existing_devices):
+        "Waiting for devices to reconnect"
+        for device in existing_devices:
+            retry = 10
+            while retry > 0:
+                devices = self.ssh_obj.get_devices(node=self.node)
+                devices = [dev[0:-1] for dev in devices]
+                if device in devices:
+                    break
+                retry -= 1
+                sleep_n_sec(10)
     
     def validate_checksums(self):
         "Validating checksums"
+        existing_devices = []
         for lvol_id, lvol in self.lvol_mount_details.items():
             self.ssh_obj.unmount_path(node=self.node, device=lvol["Mount"])
+            existing_devices.append(lvol["Device"][5:-1])
             # filter_nqn = self.ssh_obj.get_nvme_subsystems(node=self.node, nqn_filter=lvol_id)
             # for nqn in filter_nqn:
             #     self.ssh_obj.disconnect_nvme(node=self.node, nqn_grep=nqn)
             # self.ssh_obj.remove_dir(node=self.node, dir_path=lvol["Mount"])
+
+        self.wait_for_all_devices(existing_devices)
         
         for lvol_id, lvol in self.lvol_mount_details.items():
-            # initial_devices = self.ssh_obj.get_devices(node=self.node)
-            # self.ssh_obj.exec_command(node=self.node, command=lvol["Command"])
-            # sleep_n_sec(3)
-            # final_devices = self.ssh_obj.get_devices(node=self.node)
-            # lvol_device = None
-            # for device in final_devices:
-            #     if device not in initial_devices:
-            #         lvol_device = f"/dev/{device.strip()}"
-            #         break
-            # if not lvol_device:
-            #     raise Exception("LVOL did not connect")
-            # self.lvol_mount_details[lvol_id]["Device"] = lvol_device
-
-            # Mount and Run FIO
-            device = lvol["Device"][0:-1] + str(int(lvol["Device"][-1]) + 1)
+            device = lvol["Device"][5:-1]
             final_devices = self.ssh_obj.get_devices(node=self.node)
             lvol_device = None
-            found_device = False
             for cur_device in final_devices:
-                lvol_device = f"/dev/{cur_device.strip()}"
-                if lvol_device == device:
-                    found_device = True
+                if device in cur_device:
+                    lvol_device = cur_device
                     break
-            if found_device:
-                self.lvol_mount_details[lvol_id]["Device"] = device
+            if lvol_device:
+                self.lvol_mount_details[lvol_id]["Device"] = f"/dev/{lvol_device}"
             self.ssh_obj.mount_path(node=self.node, 
                                     device=self.lvol_mount_details[lvol_id]["Device"],
                                     mount_path=lvol["Mount"])
