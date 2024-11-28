@@ -184,30 +184,37 @@ class TestLvolHACluster(FioWorkloadTest):
         self.sbcli_utils.wait_for_storage_node_status(self.lvol_node,
                                                       "online",
                                                       timeout=800)
-        # self.logger.info(f"Fetching migration tasks for cluster {self.cluster_id}.")
-
-        # self.logger.info(f"Validating migration tasks for node {self.lvol_node}.")
-        # self.validate_migration_for_node(timestamp, 5000, None)
-        # sleep_n_sec(30)
-
+        
         self.validate_checksums()
 
+        sleep_n_sec(30)
+
+        self.logger.info(f"Fetching migration tasks for cluster {self.cluster_id}.")
+
+        self.logger.info(f"Validating migration tasks for node {self.lvol_node}.")
+        self.validate_migration_for_node(timestamp, 5000, None)
+        sleep_n_sec(30)
+
         # Sce-2 Container stop and restart
-        # self.logger.info("Container stop and restart.")
-        # timestamp = int(datetime.now().timestamp())
-        # node_details = self.sbcli_utils.get_storage_node_details(self.lvol_node)
-        # node_ip = node_details[0]["mgmt_ip"]
-        # self.ssh_obj.stop_spdk_process(node_ip)
-        # self.sbcli_utils.wait_for_storage_node_status(self.lvol_node,
-        #                                               "online",
-        #                                               timeout=800)
-        # self.logger.info(f"Fetching migration tasks for cluster {self.cluster_id}.")
+        self.logger.info("Container stop and restart.")
+        timestamp = int(datetime.now().timestamp())
+        node_details = self.sbcli_utils.get_storage_node_details(self.lvol_node)
+        node_ip = node_details[0]["mgmt_ip"]
+        self.ssh_obj.stop_spdk_process(node_ip)
+        self.sbcli_utils.wait_for_storage_node_status(self.lvol_node,
+                                                      "online",
+                                                      timeout=800)
+        
+        self.validate_checksums()
+        
+        sleep_n_sec(30)
 
-        # self.logger.info(f"Validating migration tasks for node {self.lvol_node}.")
-        # self.validate_migration_for_node(timestamp, 5000, None)
-        # sleep_n_sec(30)
+        self.logger.info(f"Fetching migration tasks for cluster {self.cluster_id}.")
 
-        # self.validate_checksums()
+        self.logger.info(f"Validating migration tasks for node {self.lvol_node}.")
+        self.validate_migration_for_node(timestamp, 5000, None)
+        sleep_n_sec(30)
+
 
         # Sce-3 Network stop and restart
         # self.logger.info("Network stop and restart.")
