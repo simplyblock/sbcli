@@ -832,6 +832,9 @@ def _connect_to_remote_jm_devs(this_node, jm_ids=[]):
             continue
 
         org_dev = db_controller.get_jm_device_by_id(jm_dev.get_id())
+        if not org_dev:
+            continue
+
         name = f"remote_{jm_dev.jm_bdev}"
         bdev_name = f"{name}n1"
         jm_dev.remote_bdev = bdev_name
