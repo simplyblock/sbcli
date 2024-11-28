@@ -160,7 +160,7 @@ while True:
                         logger.info(f"Checking jm bdev: {jm_device.jm_bdev} ... ok")
                     else:
                         logger.info(f"Checking jm bdev: {jm_device.jm_bdev} ... not found")
-                        # todo: try add
+
                     node_devices_check &= ret
 
                 if snode.enable_ha_jm:
@@ -171,7 +171,7 @@ while True:
                             logger.info(f"Checking bdev: {remote_device.remote_bdev} ... ok")
                         else:
                             logger.info(f"Checking bdev: {remote_device.remote_bdev} ... not found")
-                            name = f"remote_{remote_device.alceml_bdev}"
+                            name = f"remote_{remote_device.jm_bdev}"
                             ret = rpc_client.bdev_nvme_attach_controller_tcp(
                                 name, remote_device.nvmf_nqn, remote_device.nvmf_ip,
                                 remote_device.nvmf_port)
@@ -180,7 +180,7 @@ while True:
                             else:
                                 logger.error(f"Failed to connect to device: {remote_device.get_id()}")
 
-                        # node_remote_devices_check &= bool(ret)
+                        node_remote_devices_check &= bool(ret)
 
                 lvstore_check = True
                 if snode.lvstore_stack:

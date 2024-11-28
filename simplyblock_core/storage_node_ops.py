@@ -1219,20 +1219,30 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
     node_info, _ = snode_api.info()
 
     # discover devices
-    if not is_secondary_node:
-        nvme_devs = addNvmeDevices(snode, node_info['spdk_pcie_list'])
-        if not nvme_devs:
-            logger.error("No NVMe devices was found!")
-            return False
+    nvme_devs = addNvmeDevices(snode, node_info['spdk_pcie_list'])
+    if nvme_devs:
 
-        # prepare devices
-        if snode.num_partitions_per_dev == 0 or snode.jm_percent == 0:
-            ret = _prepare_cluster_devices_jm_on_dev(snode, nvme_devs)
+        if not is_secondary_node:
+            # prepare devices
+            if snode.num_partitions_per_dev == 0 or snode.jm_percent == 0:
+                ret = _prepare_cluster_devices_jm_on_dev(snode, nvme_devs)
+            else:
+                ret = _prepare_cluster_devices_partitions(snode, nvme_devs)
+            if not ret:
+                logger.error("Failed to prepare cluster devices")
+                return False
         else:
-            ret = _prepare_cluster_devices_partitions(snode, nvme_devs)
-        if not ret:
-            logger.error("Failed to prepare cluster devices")
-            return False
+
+            jm_device = nvme_devs[0]
+            for index, nvme in enumerate(nvme_devs):
+                if nvme.size < jm_device.size:
+                    jm_device = nvme
+            jm_device.status = NVMeDevice.STATUS_JM
+
+            ret = _prepare_cluster_devices_jm_on_dev(snode, [jm_device])
+            if not ret:
+                logger.error("Failed to prepare cluster devices")
+                return False
 
     logger.info("Connecting to remote devices")
     remote_devices = _connect_to_remote_devs(snode)
@@ -1683,7 +1693,14 @@ def restart_storage_node(
 
     node_info, _ = snode_api.info()
 
-    if not snode.is_secondary_node:
+    if snode.is_secondary_node:
+        ret = _prepare_cluster_devices_on_restart(snode)
+        if not ret:
+            logger.error("Failed to prepare cluster devices")
+            return False
+
+    else:
+
         nvme_devs = addNvmeDevices(snode, node_info['spdk_pcie_list'])
         if not nvme_devs:
             logger.error("No NVMe devices was found!")
@@ -1740,32 +1757,31 @@ def restart_storage_node(
             ret = _prepare_cluster_devices_on_restart(snode)
             if not ret:
                 logger.error("Failed to prepare cluster devices")
-                # return False
+                return False
 
-        snode.write_to_db(kv_store)
+    snode.write_to_db(kv_store)
 
     logger.info("Connecting to remote devices")
+    # snode = db_controller.get_storage_node_by_id(node_id)
     remote_devices = _connect_to_remote_devs(snode)
-    snode = db_controller.get_storage_node_by_id(node_id)
     snode.remote_devices = remote_devices
-    snode.write_to_db(db_controller.kv_store)
 
     if snode.enable_ha_jm:
         logger.info("Connecting to remote JMs")
-        jm_ids = []
-        remote_jm_devices = snode.remote_jm_devices
-        for dev in remote_jm_devices:
-            jm_dev = db_controller.get_jm_device_by_id(dev.get_id())
-            if jm_dev and jm_dev.status == NVMeDevice.STATUS_ONLINE:
-                jm_ids.append(dev.get_id())
+        # jm_ids = []
+        # remote_jm_devices = snode.remote_jm_devices
+        # for dev in remote_jm_devices:
+        #     jm_dev = db_controller.get_jm_device_by_id(dev.get_id())
+        #     if jm_dev and jm_dev.status == NVMeDevice.STATUS_ONLINE:
+        #         jm_ids.append(dev.get_id())
 
-        if len(jm_ids) < 2:
-            online_jms = get_next_ha_jms(snode)
-            for jm_id in online_jms:
-                if jm_id not in jm_ids:
-                    jm_ids.append(jm_id)
+        # if len(jm_ids) < 2:
+        #     online_jms = get_next_ha_jms(snode)
+        #     for jm_id in online_jms:
+        #         if jm_id not in jm_ids:
+        #             jm_ids.append(jm_id)
 
-        snode.remote_jm_devices = _connect_to_remote_jm_devs(snode, jm_ids)
+        snode.remote_jm_devices = _connect_to_remote_jm_devs(snode)
 
     snode.write_to_db(db_controller.kv_store)
 
