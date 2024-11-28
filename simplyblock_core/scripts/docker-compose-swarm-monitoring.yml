@@ -205,7 +205,7 @@ services:
       GF_ALERTING_ENABLED: "true"
       GF_PATHS_PROVISIONING: "/etc/grafana/provisioning"
       GF_INSTALL_PLUGINS: "grafana-opensearch-datasource"
-      GF_SERVER_ROOT_URL: "http://localhost/grafana/"
+      GF_SERVER_ROOT_URL: "http://${CLUSTER_IP}/grafana/"
     volumes:
       - ./datasource.yml:/etc/grafana/provisioning/datasources/datasource.yaml
       - grafana_data:/var/lib/grafana
