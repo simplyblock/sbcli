@@ -120,29 +120,43 @@ class TestLvolHACluster(FioWorkloadTest):
     
     def validate_checksums(self):
         "Validating checksums"
-        # for lvol_id, lvol in self.lvol_mount_details.items():
-        #     self.ssh_obj.unmount_path(node=self.node, device=lvol["Device"])
-        #     filter_nqn = self.ssh_obj.get_nvme_subsystems(node=self.node, nqn_filter=lvol_id)
-        #     for nqn in filter_nqn:
-        #         self.ssh_obj.disconnect_nvme(node=self.node, nqn_grep=nqn)
-        #     self.ssh_obj.remove_dir(node=self.node, dir_path=lvol["Mount"])
+        for lvol_id, lvol in self.lvol_mount_details.items():
+            self.ssh_obj.unmount_path(node=self.node, device=lvol["Mount"])
+            # filter_nqn = self.ssh_obj.get_nvme_subsystems(node=self.node, nqn_filter=lvol_id)
+            # for nqn in filter_nqn:
+            #     self.ssh_obj.disconnect_nvme(node=self.node, nqn_grep=nqn)
+            # self.ssh_obj.remove_dir(node=self.node, dir_path=lvol["Mount"])
         
-        # for lvol_id, lvol in self.lvol_mount_details.items():
-        #     initial_devices = self.ssh_obj.get_devices(node=self.node)
-        #     self.ssh_obj.exec_command(node=self.node, command=lvol["Command"])
-        #     sleep_n_sec(3)
-        #     final_devices = self.ssh_obj.get_devices(node=self.node)
-        #     lvol_device = None
-        #     for device in final_devices:
-        #         if device not in initial_devices:
-        #             lvol_device = f"/dev/{device.strip()}"
-        #             break
-        #     if not lvol_device:
-        #         raise Exception("LVOL did not connect")
-        #     self.lvol_mount_details[lvol_id]["Device"] = lvol_device
+        for lvol_id, lvol in self.lvol_mount_details.items():
+            # initial_devices = self.ssh_obj.get_devices(node=self.node)
+            # self.ssh_obj.exec_command(node=self.node, command=lvol["Command"])
+            # sleep_n_sec(3)
+            # final_devices = self.ssh_obj.get_devices(node=self.node)
+            # lvol_device = None
+            # for device in final_devices:
+            #     if device not in initial_devices:
+            #         lvol_device = f"/dev/{device.strip()}"
+            #         break
+            # if not lvol_device:
+            #     raise Exception("LVOL did not connect")
+            # self.lvol_mount_details[lvol_id]["Device"] = lvol_device
 
             # Mount and Run FIO
-            # self.ssh_obj.mount_path(node=self.node, device=lvol_device, mount_path=lvol["Mount"])
+            device = lvol["Device"][0:-1] + str(int(lvol["Device"][-1]) + 1)
+            final_devices = self.ssh_obj.get_devices(node=self.node)
+            lvol_device = None
+            found_device = False
+            for cur_device in final_devices:
+                lvol_device = f"/dev/{cur_device.strip()}"
+                if lvol_device == device:
+                    found_device = True
+                    break
+            if found_device:
+                self.lvol_mount_details[lvol_id]["Device"] = device
+            self.ssh_obj.mount_path(node=self.node, 
+                                    device=self.lvol_mount_details[lvol_id]["Device"],
+                                    mount_path=lvol["Mount"])
+                
         for _, lvol in self.lvol_mount_details.items():
             final_files = self.ssh_obj.find_files(node=self.node, directory=lvol['Mount'])
             final_checksums = self.ssh_obj.generate_checksums(node=self.node, files=final_files)
@@ -175,7 +189,7 @@ class TestLvolHACluster(FioWorkloadTest):
         # self.validate_migration_for_node(timestamp, 5000, None)
         # sleep_n_sec(30)
 
-        # self.validate_checksums()
+        self.validate_checksums()
 
         # Sce-2 Container stop and restart
         # self.logger.info("Container stop and restart.")
