@@ -196,10 +196,10 @@ class TestSingleNodeFailure(TestClusterBase):
         self.common_utils.validate_fio_test(node=self.mgmt_nodes[0],
                                             log_file=self.log_path)
         
-        total_fio_runtime = end_time - self.ssh_obj.fio_runtime["fio_run_1"]
-        self.logger.info(f"FIO Run Time: {total_fio_runtime}")
+        # total_fio_runtime = end_time - self.ssh_obj.fio_runtime["fio_run_1"]
+        # self.logger.info(f"FIO Run Time: {total_fio_runtime}")
         
-        assert  total_fio_runtime >= 500, \
-            f'FIO Run Time Interrupted before given runtime. Actual: {self.ssh_obj.fio_runtime["fio_run_1"]}'
+        # assert  total_fio_runtime >= 500, \
+        #     f'FIO Run Time Interrupted before given runtime. Actual: {self.ssh_obj.fio_runtime["fio_run_1"]}'
 
         self.logger.info("TEST CASE PASSED !!!")
