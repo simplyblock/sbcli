@@ -2849,7 +2849,7 @@ def recreate_lvstore(snode):
                     sn = db_controller.get_storage_node_by_id(node_id)
                     if node_id != lvol.node_id:
                         rpc_client = RPCClient(sn.mgmt_ip, sn.rpc_port, sn.rpc_username, sn.rpc_password)
-                        for iface in snode.data_nics:
+                        for iface in sn.data_nics:
                             if iface.ip4_address:
                                 ret = rpc_client.nvmf_subsystem_listener_set_ana_state(
                                     lvol.nqn, iface.ip4_address, "4420", False)
