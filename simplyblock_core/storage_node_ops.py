@@ -791,7 +791,7 @@ def _connect_to_remote_devs(this_node):
                     continue
             dev.remote_bdev = bdev_name
             remote_devices.append(dev)
-            distr_controller.send_dev_status_event(dev, dev.status, this_node)
+            # distr_controller.send_dev_status_event(dev, dev.status, this_node)
     return remote_devices
 
 
