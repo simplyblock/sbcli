@@ -1245,10 +1245,10 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
                     jm_device = nvme
             jm_device.status = NVMeDevice.STATUS_JM
 
-            ret = _prepare_cluster_devices_jm_on_dev(snode, [jm_device])
-            if not ret:
-                logger.error("Failed to prepare cluster devices")
-                return False
+            # ret = _prepare_cluster_devices_jm_on_dev(snode, [jm_device])
+            # if not ret:
+            #     logger.error("Failed to prepare cluster devices")
+            #     return False
 
     logger.info("Connecting to remote devices")
     remote_devices = _connect_to_remote_devs(snode)
@@ -1700,10 +1700,11 @@ def restart_storage_node(
     node_info, _ = snode_api.info()
 
     if snode.is_secondary_node:
-        ret = _prepare_cluster_devices_on_restart(snode)
-        if not ret:
-            logger.error("Failed to prepare cluster devices")
-            return False
+        pass
+        # ret = _prepare_cluster_devices_on_restart(snode)
+        # if not ret:
+        #     logger.error("Failed to prepare cluster devices")
+        #     return False
 
     else:
 
