@@ -1065,7 +1065,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
         logger.error(e)
         return False
 
-    time.sleep(10)
+    # time.sleep(10)
     if not results:
         logger.error(f"Failed to start spdk: {err}")
         return False
@@ -1159,7 +1159,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
     # creating RPCClient instance
     rpc_client = RPCClient(
         snode.mgmt_ip, snode.rpc_port,
-        snode.rpc_username, snode.rpc_password, timeout=60, retry=10)
+        snode.rpc_username, snode.rpc_password, timeout=10, retry=100)
 
     # 1- set iobuf options
     if (snode.iobuf_small_pool_count or snode.iobuf_large_pool_count or
@@ -3026,8 +3026,9 @@ def _create_bdev_stack(snode, lvstore_stack=None, primary_node=False):
         if type == "bdev_distr":
             if snode.is_secondary_node and primary_node:
                 jm_list = []
-                if snode.jm_device and snode.jm_device.status == JMDevice.STATUS_ONLINE:
-                    jm_list.append(snode.jm_device.jm_bdev)
+                if primary_node.jm_device and primary_node.jm_device.status == JMDevice.STATUS_ONLINE:
+                    bdev_name = f"remote_{primary_node.jm_device.jm_bdev}n1"
+                    jm_list.append(bdev_name)
                 else:
                     jm_list.append("JM_LOCAL")
                 for jm_dev in primary_node.remote_jm_devices[:2]:
