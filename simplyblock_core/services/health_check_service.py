@@ -154,7 +154,7 @@ while True:
 
                 if snode.jm_device:
                     jm_device = snode.jm_device
-                    logger.info(f"Node JM: {jm_device}")
+                    logger.info(f"Node JM: {jm_device.get_id()}")
                     ret = health_controller.check_jm_device(jm_device.get_id())
                     if ret:
                         logger.info(f"Checking jm bdev: {jm_device.jm_bdev} ... ok")
