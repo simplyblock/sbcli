@@ -2179,6 +2179,7 @@ def resume_storage_node(node_id):
                     if iface.ip4_address:
                         ret = rpc_client.nvmf_subsystem_listener_set_ana_state(
                             lvol.nqn, iface.ip4_address, "4420", False, "inaccessible")
+                rpc_client.bdev_distrib_force_to_non_leader()
 
     time.sleep(1)
 
@@ -2763,6 +2764,7 @@ def recreate_lvstore(snode):
                             if iface.ip4_address:
                                 ret = rpc_client.nvmf_subsystem_listener_set_ana_state(
                                     lvol.nqn, iface.ip4_address, "4420", False, "inaccessible")
+                        rpc_client.bdev_distrib_force_to_non_leader()
 
     time.sleep(1)
 

@@ -867,3 +867,7 @@ class RPCClient:
             }
         }
         return self._request("nvmf_subsystem_remove_listener", params)
+
+
+    def bdev_distrib_force_to_non_leader(self):
+        return self._request("bdev_distrib_force_to_non_leader")
