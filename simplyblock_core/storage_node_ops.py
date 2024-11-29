@@ -665,6 +665,9 @@ def _prepare_cluster_devices_on_restart(snode):
 
     # prepare JM device
     jm_device = snode.jm_device
+    if not jm_device or jm_device.status not in [JMDevice.STATUS_ONLINE, JMDevice.STATUS_UNAVAILABLE, JMDevice.STATUS_REMOVED]:
+        return True
+
     if jm_device.jm_nvme_bdev_list:
         all_bdevs_found = True
         for bdev_name in jm_device.jm_nvme_bdev_list:
