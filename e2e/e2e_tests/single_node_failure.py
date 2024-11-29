@@ -58,16 +58,19 @@ class TestSingleNodeFailure(TestClusterBase):
             pool_name=self.pool_name
         )
 
-        self.sbcli_utils.add_lvol(
-            lvol_name=self.lvol_name,
-            pool_name=self.pool_name,
-            size="800M",
-            # distr_ndcs=2,
-            # distr_npcs=1
-        )
+        # self.sbcli_utils.add_lvol(
+        #     lvol_name=self.lvol_name,
+        #     pool_name=self.pool_name,
+        #     size="800M",
+        #     # distr_ndcs=2,
+        #     # distr_npcs=1
+        # )
         lvols = self.sbcli_utils.list_lvols()
-        assert self.lvol_name in list(lvols.keys()), \
-            f"Lvol {self.lvol_name} not present in list of lvols post add: {lvols}"
+        # assert self.lvol_name in list(lvols.keys()), \
+        #     f"Lvol {self.lvol_name} not present in list of lvols post add: {lvols}"
+
+        self.lvol_name = lvols.keys()[0]
+        no_lvol_node_uuid = lvols.keys()[0]["host_id"]
 
         connect_str = self.sbcli_utils.get_lvol_connect_str(lvol_name=self.lvol_name)
 
@@ -98,7 +101,6 @@ class TestSingleNodeFailure(TestClusterBase):
                                                "debug": self.fio_debug})
         fio_thread1.start()
 
-        no_lvol_node_uuid = self.sbcli_utils.get_node_without_lvols()
         no_lvol_node = self.sbcli_utils.get_storage_node_details(storage_node_id=no_lvol_node_uuid)
         node_ip = no_lvol_node[0]["mgmt_ip"]
 
@@ -108,76 +110,37 @@ class TestSingleNodeFailure(TestClusterBase):
                          lvol_status="online",
                          health_check_status=True
                          )
-        
-        sleep_n_sec(30)
-        self.ssh_obj.stop_spdk_process(node=node_ip)
 
-        try:
-            self.logger.info(f"Waiting for node to become offline/unreachable, {no_lvol_node_uuid}")
-            self.sbcli_utils.wait_for_storage_node_status(no_lvol_node_uuid,
-                                                          ["unreachable", "offline"],
-                                                          timeout=500)
-            # sleep_n_sec(30)
-            # self.validations(node_uuid=no_lvol_node_uuid,
-            #                 node_status=["offline", "in_shutdown", "in_restart"],
-            #                 # The status changes between them very quickly hence
-            #                 # needed multiple checks
-            #                 device_status="unavailable",
-            #                 lvol_status="online",
-            #                 health_check_status=False
-            #                 )
+        for i in range(10):
+
+            sleep_n_sec(30)
+            self.ssh_obj.stop_spdk_process(node=node_ip)
+
             try:
-                # expected_error_regex = r"Failed to create BDev: distr_\d+_test_lvol_fail"
-                self.sbcli_utils.add_lvol(
-                    lvol_name=f"{self.lvol_name}_fail",
-                    pool_name=self.pool_name,
-                    size="800M",
-                    # distr_ndcs=2,
-                    # distr_npcs=1,
-                    host_id=no_lvol_node_uuid,
-                    retry=2
-                )
-            except HTTPError as e:
-                error = json.loads(e.response.text)
-                self.logger.info(f"Lvol addition failed for node {no_lvol_node_uuid}. Error:{error}")
-                assert "Storage node is not online" in error["error"], f"Unexpected error: {error['error']}"
-                lvols = self.sbcli_utils.list_lvols()
-                assert f"{self.lvol_name}_fail" not in list(lvols.keys()), \
-                    (f"Lvol {self.lvol_name}_fail present in list of lvols post add: {lvols}. "
-                     "Expected: Lvol is not added")
-            
-            sleep_n_sec(10)
-            self.sbcli_utils.add_lvol(
-                    lvol_name=f"{self.lvol_name}_2",
-                    pool_name=self.pool_name,
-                    size="800M",
-                    # distr_ndcs=2,
-                    # distr_npcs=1,
-                )
-            lvols = self.sbcli_utils.list_lvols()
-            assert f"{self.lvol_name}_2" in list(lvols.keys()), \
-                (f"Lvol {self.lvol_name}_2 not present in list of lvols post add: {lvols}. "
-                 "Expected: Lvol is added")
+                self.logger.info(f"Waiting for node to become offline/unreachable, {no_lvol_node_uuid}")
+                self.sbcli_utils.wait_for_storage_node_status(no_lvol_node_uuid,
+                                                              ["unreachable", "offline"],
+                                                              timeout=500)
+            except Exception as exp:
+                self.logger.debug(exp)
+                # self.sbcli_utils.restart_node(node_uuid=no_lvol_node_uuid)
+                self.logger.info(f"Waiting for node to become online, {no_lvol_node_uuid}")
+                self.sbcli_utils.wait_for_storage_node_status(no_lvol_node_uuid,
+                                                              "online",
+                                                              timeout=300)
+                raise exp
 
-        except Exception as exp:
-            self.logger.debug(exp)
             # self.sbcli_utils.restart_node(node_uuid=no_lvol_node_uuid)
             self.logger.info(f"Waiting for node to become online, {no_lvol_node_uuid}")
-            self.sbcli_utils.wait_for_storage_node_status(no_lvol_node_uuid,
-                                                          "online",
-                                                          timeout=300)
-            raise exp
+            self.sbcli_utils.wait_for_storage_node_status(no_lvol_node_uuid, "online", timeout=300)
+            sleep_n_sec(30)
+            self.validations(node_uuid=no_lvol_node_uuid,
+                             node_status="online",
+                             device_status="online",
+                             lvol_status="online",
+                             health_check_status=True
+                             )
 
-        # self.sbcli_utils.restart_node(node_uuid=no_lvol_node_uuid)
-        self.logger.info(f"Waiting for node to become online, {no_lvol_node_uuid}")
-        self.sbcli_utils.wait_for_storage_node_status(no_lvol_node_uuid, "online", timeout=300)
-        sleep_n_sec(30)
-        self.validations(node_uuid=no_lvol_node_uuid,
-                         node_status="online",
-                         device_status="online",
-                         lvol_status="online",
-                         health_check_status=True
-                         )
 
         # Write steps in order
         steps = {

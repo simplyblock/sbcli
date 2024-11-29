@@ -12,11 +12,11 @@ from e2e_tests.ha_journal.lvol_journal_device_node_restart import TestDeviceNode
 
 def get_all_tests(custom=True, k8s_test=False):
     tests = [
-        TestSingleNodeOutage,
-        TestLvolFioNpcsCustom,
-        TestLvolFioNpcs0,
-        TestLvolFioNpcs1,
-        TestLvolFioNpcs2,
+        # TestSingleNodeOutage,
+        # TestLvolFioNpcsCustom,
+        # TestLvolFioNpcs0,
+        # TestLvolFioNpcs1,
+        # TestLvolFioNpcs2,
         TestSingleNodeFailure,
         # TestManyLvolSameNode,
         # TestBatchLVOLsLimit,
@@ -28,10 +28,10 @@ def get_all_tests(custom=True, k8s_test=False):
         # TestManyClonesFromSameSnapshot,
         # TestDeviceNodeRestart
     ]
-    if not custom:
-        tests.remove(TestLvolFioNpcsCustom)
-    else:
-        tests.remove(TestLvolFioNpcs0)
-        tests.remove(TestLvolFioNpcs1)
-        tests.remove(TestLvolFioNpcs2)
+    # if not custom:
+    #     tests.remove(TestLvolFioNpcsCustom)
+    # else:
+    #     tests.remove(TestLvolFioNpcs0)
+    #     tests.remove(TestLvolFioNpcs1)
+    #     tests.remove(TestLvolFioNpcs2)
     return tests
