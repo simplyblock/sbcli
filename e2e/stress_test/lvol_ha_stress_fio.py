@@ -170,30 +170,30 @@ class TestLvolHACluster(FioWorkloadTest):
         self.logger.info("Running failure scenarios.")
         
         # Sce-1 Graceful shutdown and restart
-        # self.logger.info("Graceful shutdown and restart.")
-        # timestamp = int(datetime.now().timestamp())
+        self.logger.info("Graceful shutdown and restart.")
+        timestamp = int(datetime.now().timestamp())
 
-        # self.sbcli_utils.suspend_node(node_uuid=self.lvol_node)
-        # sleep_n_sec(10)
-        # self.sbcli_utils.shutdown_node(node_uuid=self.lvol_node)
-        # self.sbcli_utils.wait_for_storage_node_status(self.lvol_node,
-        #                                               ["unreachable", "offline"],
-        #                                               timeout=800)
-        # sleep_n_sec(30)
-        # self.sbcli_utils.restart_node(node_uuid=self.lvol_node)
-        # self.sbcli_utils.wait_for_storage_node_status(self.lvol_node,
-        #                                               "online",
-        #                                               timeout=800)
+        self.sbcli_utils.suspend_node(node_uuid=self.lvol_node)
+        sleep_n_sec(10)
+        self.sbcli_utils.shutdown_node(node_uuid=self.lvol_node)
+        self.sbcli_utils.wait_for_storage_node_status(self.lvol_node,
+                                                      ["unreachable", "offline"],
+                                                      timeout=800)
+        sleep_n_sec(30)
+        self.sbcli_utils.restart_node(node_uuid=self.lvol_node)
+        self.sbcli_utils.wait_for_storage_node_status(self.lvol_node,
+                                                      "online",
+                                                      timeout=800)
         
-        # self.validate_checksums()
+        self.validate_checksums()
 
-        # sleep_n_sec(30)
+        sleep_n_sec(30)
 
-        # self.logger.info(f"Fetching migration tasks for cluster {self.cluster_id}.")
+        self.logger.info(f"Fetching migration tasks for cluster {self.cluster_id}.")
 
-        # self.logger.info(f"Validating migration tasks for node {self.lvol_node}.")
-        # self.validate_migration_for_node(timestamp, 5000, None)
-        # sleep_n_sec(30)
+        self.logger.info(f"Validating migration tasks for node {self.lvol_node}.")
+        self.validate_migration_for_node(timestamp, 5000, None)
+        sleep_n_sec(30)
 
         # Sce-2 Container stop and restart
         # self.logger.info("Container stop and restart.")
@@ -220,7 +220,7 @@ class TestLvolHACluster(FioWorkloadTest):
         self.logger.info("Network stop and restart.")
         timestamp = int(datetime.now().timestamp())
         cmd = (
-            'nohup sh -c "sudo nmcli dev disconnect eth0 && sleep 30 && '
+            'nohup sh -c "sudo nmcli dev disconnect eth0 && sleep 120 && '
             'sudo nmcli dev connect eth0" &'
         )
 
