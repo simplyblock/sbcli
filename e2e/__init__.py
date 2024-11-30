@@ -17,11 +17,11 @@ from stress_test.lvol_ha_stress_fio import TestLvolHACluster
 
 def get_all_tests(custom=True, k8s_test=False):
     tests = [
-        TestSingleNodeOutage,
         TestLvolFioNpcsCustom,
         TestLvolFioNpcs0,
         TestLvolFioNpcs1,
         TestLvolFioNpcs2,
+        TestSingleNodeOutage,
         TestSingleNodeFailure,
         # FioWorkloadTest,
         # TestMultiFioSnapshotDowntime,

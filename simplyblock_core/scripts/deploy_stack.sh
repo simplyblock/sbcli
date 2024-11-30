@@ -12,6 +12,7 @@ export CLUSTER_ID=$6
 export LOG_DELETION_INTERVAL=$7
 export RETENTION_PERIOD=$8
 export LOG_LEVEL=$9
+export GRAFANA_ENDPOINT=${10}
 export DIR="$(dirname "$(realpath "$0")")"
 
 if [ -s "/etc/foundationdb/fdb.cluster" ]

@@ -196,7 +196,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
 
     values = {
         'CONTACT_POINT': contact_point,
-        'GRAFANA_ENDPOINT': grafana_endpoint,
+        'GRAFANA_ENDPOINT': c.grafana_endpoint,
         'ALERT_TYPE': ALERT_TYPE,
     }
 
@@ -218,7 +218,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     logger.info("Deploying swarm stack ...")
     log_level = "DEBUG" if constants.LOG_WEB_DEBUG else "INFO"
     ret = scripts.deploy_stack(cli_pass, DEV_IP, constants.SIMPLY_BLOCK_DOCKER_IMAGE, c.secret, c.uuid,
-                               log_del_interval, metrics_retention_period, log_level=log_level)
+                               log_del_interval, metrics_retention_period, log_level, c.grafana_endpoint)
     logger.info("Deploying swarm stack > Done")
 
     if ret == 0:
@@ -295,7 +295,7 @@ def deploy_spdk(node_docker, spdk_cpu_mask, spdk_mem):
 
 def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
                 distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, enable_node_affinity, qpair_count,
-                enable_qos):
+                max_queue_size, inflight_io_threshold, enable_qos):
     db_controller = DBController()
     clusters = db_controller.get_clusters()
     if not clusters:
@@ -328,6 +328,8 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
     cluster.ha_type = ha_type
     cluster.enable_node_affinity = enable_node_affinity
     cluster.qpair_count = qpair_count or 256
+    cluster.max_queue_size = max_queue_size
+    cluster.inflight_io_threshold = inflight_io_threshold
     cluster.enable_qos = enable_qos
     if cap_warn and cap_warn > 0:
         cluster.cap_warn = cap_warn
