@@ -69,8 +69,8 @@ class TestSingleNodeFailure(TestClusterBase):
         # assert self.lvol_name in list(lvols.keys()), \
         #     f"Lvol {self.lvol_name} not present in list of lvols post add: {lvols}"
 
-        self.lvol_name = lvols.keys()[0]
-        no_lvol_node_uuid = lvols.keys()[0]["host_id"]
+        self.lvol_name = list(lvols.keys())[0]
+        no_lvol_node_uuid = self.sbcli_utils.get_lvol_by_id(lvols[self.lvol_name])['results'][0]['node_id']
 
         connect_str = self.sbcli_utils.get_lvol_connect_str(lvol_name=self.lvol_name)
 
