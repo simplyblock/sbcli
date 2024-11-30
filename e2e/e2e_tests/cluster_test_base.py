@@ -80,9 +80,9 @@ class TestClusterBase:
         self.ssh_obj.unmount_path(node=self.mgmt_nodes[0],
                                   device=self.mount_path)
         self.ssh_obj.delete_all_snapshots(node=self.mgmt_nodes[0])
-        self.disconnect_lvols()
-        self.sbcli_utils.delete_all_lvols()
-        self.sbcli_utils.delete_all_storage_pools()
+        # self.disconnect_lvols()
+        # self.sbcli_utils.delete_all_lvols()
+        # self.sbcli_utils.delete_all_storage_pools()
         session = boto3.Session(
             aws_access_key_id=os.environ.get("AWS_ACCESS_KEY_ID"),
             aws_secret_access_key=os.environ.get("AWS_SECRET_ACCESS_KEY"),
@@ -96,7 +96,7 @@ class TestClusterBase:
         self.logger.info("Inside teardown function")
         self.ssh_obj.kill_processes(node=self.mgmt_nodes[0],
                                     process_name="fio")
-        self.ssh_obj.delete_all_snapshots(node=self.mgmt_nodes[0])
+        # self.ssh_obj.delete_all_snapshots(node=self.mgmt_nodes[0])
         lvols = self.sbcli_utils.list_lvols()
         self.unmount_all(base_path=self.mount_path)
         self.ssh_obj.unmount_path(node=self.mgmt_nodes[0],
@@ -110,8 +110,8 @@ class TestClusterBase:
                 self.ssh_obj.exec_command(node=self.mgmt_nodes[0],
                                           command=f"sudo nvme disconnect -n {nqn}")
             self.disconnect_lvols()
-            self.sbcli_utils.delete_all_lvols()
-        self.sbcli_utils.delete_all_storage_pools()
+            # self.sbcli_utils.delete_all_lvols()
+        # self.sbcli_utils.delete_all_storage_pools()
         self.ssh_obj.remove_dir(self.mgmt_nodes[0], "/mnt/de*")
         for node, ssh in self.ssh_obj.ssh_connections.items():
             self.logger.info(f"Closing node ssh connection for {node}")
