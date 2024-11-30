@@ -219,7 +219,11 @@ class TestLvolHACluster(FioWorkloadTest):
         # Sce-3 Network stop and restart
         self.logger.info("Network stop and restart.")
         timestamp = int(datetime.now().timestamp())
-        cmd = 'nohup sh -c "sudo ifdown eth0 && sleep 30 && sudo ifup eth0" &'
+        cmd = (
+            'nohup sh -c "sudo nmcli dev disconnect eth0 && sleep 30 && '
+            'sudo nmcli dev connect eth0" &'
+        )
+
         self.ssh_obj.exec_command(self.node, command=cmd)
         sleep_n_sec(100)
         self.sbcli_utils.wait_for_storage_node_status(self.lvol_node,
