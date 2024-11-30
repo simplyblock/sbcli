@@ -61,7 +61,7 @@ class TestSingleNodeFailure(TestClusterBase):
         self.sbcli_utils.add_lvol(
             lvol_name=self.lvol_name,
             pool_name=self.pool_name,
-            size="800M",
+            size="10G",
             # distr_ndcs=2,
             # distr_npcs=1
         )
@@ -95,7 +95,9 @@ class TestSingleNodeFailure(TestClusterBase):
         fio_thread1 = threading.Thread(target=self.ssh_obj.run_fio_test, args=(self.mgmt_nodes[0], None, self.mount_path, self.log_path,),
                                        kwargs={"name": "fio_run_1",
                                                "runtime": 500,
-                                               "debug": self.fio_debug})
+                                               "debug": self.fio_debug,
+                                               "time_based": False,
+                                               "size": "8GiB"})
         fio_thread1.start()
 
         no_lvol_node_uuid = self.sbcli_utils.get_node_without_lvols()
@@ -131,7 +133,7 @@ class TestSingleNodeFailure(TestClusterBase):
                 self.sbcli_utils.add_lvol(
                     lvol_name=f"{self.lvol_name}_fail",
                     pool_name=self.pool_name,
-                    size="800M",
+                    size="10G",
                     # distr_ndcs=2,
                     # distr_npcs=1,
                     host_id=no_lvol_node_uuid,
@@ -150,7 +152,7 @@ class TestSingleNodeFailure(TestClusterBase):
             self.sbcli_utils.add_lvol(
                     lvol_name=f"{self.lvol_name}_2",
                     pool_name=self.pool_name,
-                    size="800M",
+                    size="10G",
                     # distr_ndcs=2,
                     # distr_npcs=1,
                 )
@@ -194,10 +196,10 @@ class TestSingleNodeFailure(TestClusterBase):
         self.common_utils.validate_fio_test(node=self.mgmt_nodes[0],
                                             log_file=self.log_path)
         
-        total_fio_runtime = end_time - self.ssh_obj.fio_runtime["fio_run_1"]
-        self.logger.info(f"FIO Run Time: {total_fio_runtime}")
+        # total_fio_runtime = end_time - self.ssh_obj.fio_runtime["fio_run_1"]
+        # self.logger.info(f"FIO Run Time: {total_fio_runtime}")
         
-        assert  total_fio_runtime >= 500, \
-            f'FIO Run Time Interrupted before given runtime. Actual: {self.ssh_obj.fio_runtime["fio_run_1"]}'
+        # assert  total_fio_runtime >= 500, \
+        #     f'FIO Run Time Interrupted before given runtime. Actual: {self.ssh_obj.fio_runtime["fio_run_1"]}'
 
         self.logger.info("TEST CASE PASSED !!!")
