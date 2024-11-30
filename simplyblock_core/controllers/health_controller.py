@@ -442,9 +442,11 @@ def check_lvol(lvol_id):
     elif lvol.ha_type == "ha":
         passed = True
         for nodes_id in lvol.nodes:
-            ret = check_lvol_on_node(lvol_id, nodes_id)
-            if not ret:
-                passed = False
+            node = db_controller.get_storage_node_by_id(nodes_id)
+            if node.status == StorageNode.STATUS_ONLINE:
+                ret = check_lvol_on_node(lvol_id, nodes_id)
+                if not ret:
+                    passed = False
         return passed
 
 
