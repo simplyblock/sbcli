@@ -641,7 +641,7 @@ def _prepare_cluster_devices_jm_on_dev(snode, devices):
     db_controller = DBController()
     if not devices:
         return True
-    jm_device = devices[0]
+
     # Set device cluster order
     dev_order = get_next_cluster_device_order(db_controller, snode.cluster_id)
     rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
@@ -1280,24 +1280,19 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
         if not is_secondary_node:
             # prepare devices
             if snode.num_partitions_per_dev == 0 or snode.jm_percent == 0:
+
+                jm_device = nvme_devs[0]
+                for index, nvme in enumerate(nvme_devs):
+                    if nvme.size < jm_device.size:
+                        jm_device = nvme
+                jm_device.status = NVMeDevice.STATUS_JM
+
                 ret = _prepare_cluster_devices_jm_on_dev(snode, nvme_devs)
             else:
                 ret = _prepare_cluster_devices_partitions(snode, nvme_devs)
             if not ret:
                 logger.error("Failed to prepare cluster devices")
                 return False
-        else:
-
-            jm_device = nvme_devs[0]
-            for index, nvme in enumerate(nvme_devs):
-                if nvme.size < jm_device.size:
-                    jm_device = nvme
-            jm_device.status = NVMeDevice.STATUS_JM
-
-            # ret = _prepare_cluster_devices_jm_on_dev(snode, [jm_device])
-            # if not ret:
-            #     logger.error("Failed to prepare cluster devices")
-            #     return False
 
     logger.info("Connecting to remote devices")
     remote_devices = _connect_to_remote_devs(snode)
