@@ -32,15 +32,25 @@ def task_runner(task):
         task.write_to_db(db_controller.kv_store)
         return True
 
-    if task.status == JobSchedule.STATUS_NEW:
+    if task.status in [JobSchedule.STATUS_NEW ,JobSchedule.STATUS_SUSPENDED]:
         task.status = JobSchedule.STATUS_RUNNING
         task.write_to_db(db_controller.kv_store)
         tasks_events.task_updated(task)
 
     if snode.status != StorageNode.STATUS_ONLINE:
         task.function_result = "node is not online, retrying"
-        task.status = JobSchedule.STATUS_NEW
+        task.status = JobSchedule.STATUS_SUSPENDED
         task.retry += 1
+        task.write_to_db(db_controller.kv_store)
+        return False
+
+    active_f_task = tasks_controller.get_new_device_mig_task_for_device(task.cluster_id)
+    if active_f_task:
+        msg = "dev expansion task found, retry"
+        logger.info(msg)
+        task.function_result = msg
+        task.retry += 1
+        task.status = JobSchedule.STATUS_SUSPENDED
         task.write_to_db(db_controller.kv_store)
         return False
 
@@ -62,6 +72,7 @@ def task_runner(task):
             logger.error(f"Failed to start device migration task, storage_ID: {device.cluster_device_order}")
             task.function_result = "Failed to start device migration task"
             task.retry += 1
+            task.status = JobSchedule.STATUS_SUSPENDED
             task.write_to_db(db_controller.kv_store)
             return False
 
@@ -78,20 +89,24 @@ def task_runner(task):
             migration_status = res_data["status"]
             if migration_status == "completed":
                 if res_data['error'] == 0:
-                    device_controller.device_set_failed_and_migrated(task.device_id)
                     task.function_result = "Done"
                     task.status = JobSchedule.STATUS_DONE
                 else:
                     task.function_result = "Failed to complete migration, retrying"
-                    task.status = JobSchedule.STATUS_NEW
+                    task.status = JobSchedule.STATUS_SUSPENDED
                     task.retry += 1
                     del task.function_params["migration"]
                 task.write_to_db(db_controller.kv_store)
+
+                dev_failed_task = tasks_controller.get_failed_device_mig_task( task.cluster_id, task.device_id)
+                if not dev_failed_task:
+                    device_controller.device_set_failed_and_migrated(task.device_id)
+
                 return True
 
             elif migration_status == "failed":
                 task.function_result = "Failed to complete migration, retrying"
-                task.status = JobSchedule.STATUS_NEW
+                task.status = JobSchedule.STATUS_SUSPENDED
                 task.retry += 1
                 del task.function_params["migration"]
                 task.write_to_db(db_controller.kv_store)
@@ -131,7 +146,7 @@ while True:
             for task in tasks:
                 delay_seconds = 5
                 if task.function_name == JobSchedule.FN_FAILED_DEV_MIG:
-                    if task.status == JobSchedule.STATUS_NEW:
+                    if task.status in [JobSchedule.STATUS_NEW, JobSchedule.STATUS_SUSPENDED]:
                         active_task = tasks_controller.get_active_node_mig_task(task.cluster_id, task.node_id)
                         if active_task:
                             logger.info("task found on same node, retry")

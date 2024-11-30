@@ -5,6 +5,7 @@ from utils.ssh_utils import SshUtils
 from utils.common_utils import CommonUtils
 from logger_config import setup_logger
 from utils.common_utils import sleep_n_sec
+import traceback
 
 
 class TestClusterBase:
@@ -40,7 +41,9 @@ class TestClusterBase:
         self.log_path = f"{os.path.dirname(self.mount_path)}/log_file.log"
         self.base_cmd = os.environ.get("SBCLI_CMD", "sbcli-dev")
         self.fio_debug = kwargs.get("fio_debug", False)
-        self.ec2_client = None
+        self.ec2_resource = None
+        self.lvol_crypt_keys = ["7b3695268e2a6611a25ac4b1ee15f27f9bf6ea9783dada66a4a730ebf0492bfd",
+                                "78505636c8133d9be42e347f82785b81a879cd8133046f8fc0b36f17b078ad0c"]
 
     def setup(self):
         """Contains setup required to run the test case
@@ -76,19 +79,25 @@ class TestClusterBase:
         # self.ssh_obj.exec_command(
         #     self.mgmt_nodes[0], command=command
         # )
+        sleep_n_sec(2)
         self.unmount_all(base_path=self.mount_path)
+        sleep_n_sec(2)
         self.ssh_obj.unmount_path(node=self.mgmt_nodes[0],
                                   device=self.mount_path)
+        sleep_n_sec(2)
         self.ssh_obj.delete_all_snapshots(node=self.mgmt_nodes[0])
-        # self.disconnect_lvols()
-        # self.sbcli_utils.delete_all_lvols()
-        # self.sbcli_utils.delete_all_storage_pools()
+        sleep_n_sec(2)
+        self.disconnect_lvols()
+        sleep_n_sec(2)
+        self.sbcli_utils.delete_all_lvols()
+        sleep_n_sec(2)
+        self.sbcli_utils.delete_all_storage_pools()
         session = boto3.Session(
             aws_access_key_id=os.environ.get("AWS_ACCESS_KEY_ID"),
             aws_secret_access_key=os.environ.get("AWS_SECRET_ACCESS_KEY"),
             region_name=os.environ.get("AWS_REGION")
         )
-        self.ec2_client = session.client('ec2')
+        self.ec2_resource = session.resource('ec2')
 
     def teardown(self):
         """Contains teradown required post test case execution
@@ -96,26 +105,65 @@ class TestClusterBase:
         self.logger.info("Inside teardown function")
         self.ssh_obj.kill_processes(node=self.mgmt_nodes[0],
                                     process_name="fio")
-        # self.ssh_obj.delete_all_snapshots(node=self.mgmt_nodes[0])
-        lvols = self.sbcli_utils.list_lvols()
-        self.unmount_all(base_path=self.mount_path)
-        self.ssh_obj.unmount_path(node=self.mgmt_nodes[0],
-                                  device=self.mount_path)
-        if lvols is not None:
-            for _, lvol_id in lvols.items():
-                lvol_details = self.sbcli_utils.get_lvol_details(lvol_id=lvol_id)
-                nqn = lvol_details[0]["nqn"]
-                self.ssh_obj.unmount_path(node=self.mgmt_nodes[0],
-                                          device=self.mount_path)
-                self.ssh_obj.exec_command(node=self.mgmt_nodes[0],
-                                          command=f"sudo nvme disconnect -n {nqn}")
-            self.disconnect_lvols()
-            # self.sbcli_utils.delete_all_lvols()
-        # self.sbcli_utils.delete_all_storage_pools()
-        self.ssh_obj.remove_dir(self.mgmt_nodes[0], "/mnt/de*")
-        for node, ssh in self.ssh_obj.ssh_connections.items():
-            self.logger.info(f"Closing node ssh connection for {node}")
-            ssh.close()
+        retry_check = 100
+        while retry_check:
+            fio_process = self.ssh_obj.find_process_name(
+                node=self.mgmt_nodes[0],
+                process_name="fio"
+            )
+            if len(fio_process) <= 2:
+                break
+            self.logger.info(f"Fio process should exit after kill. Still waiting: {fio_process}")
+            retry_check -= 1
+            sleep_n_sec(10)
+
+        if retry_check <=0:
+            self.logger.info("FIO did not exit completely after kill and wait. "
+                             "Some hanging mount points could be present. "
+                             "Needs manual cleanup.")
+
+        try:
+            self.ssh_obj.delete_all_snapshots(node=self.mgmt_nodes[0])
+            sleep_n_sec(2)
+            lvols = self.sbcli_utils.list_lvols()
+            self.unmount_all(base_path=self.mount_path)
+            self.unmount_all(base_path="/mnt/")
+            sleep_n_sec(2)
+            self.ssh_obj.unmount_path(node=self.mgmt_nodes[0],
+                                    device=self.mount_path)
+            sleep_n_sec(2)
+            if lvols is not None:
+                for _, lvol_id in lvols.items():
+                    lvol_details = self.sbcli_utils.get_lvol_details(lvol_id=lvol_id)
+                    nqn = lvol_details[0]["nqn"]
+                    self.ssh_obj.unmount_path(node=self.mgmt_nodes[0],
+                                              device=self.mount_path)
+                    sleep_n_sec(2)
+                    self.ssh_obj.exec_command(node=self.mgmt_nodes[0],
+                                            command=f"sudo nvme disconnect -n {nqn}")
+                    sleep_n_sec(2)
+                self.disconnect_lvols()
+                sleep_n_sec(2)
+                self.sbcli_utils.delete_all_lvols()
+                sleep_n_sec(2)
+            self.sbcli_utils.delete_all_storage_pools()
+            sleep_n_sec(2)
+            self.ssh_obj.remove_dir(self.mgmt_nodes[0], "/mnt/de*")
+            for node, ssh in self.ssh_obj.ssh_connections.items():
+                self.logger.info(f"Closing node ssh connection for {node}")
+                ssh.close()
+        except Exception as _:
+            self.logger.info(traceback.format_exc())
+        try:
+            if self.ec2_resource:
+                instance_id = self.common_utils.get_instance_id_by_name(ec2_resource=self.ec2_resource,
+                                                                        instance_name="e2e-new-instance")
+                if instance_id:
+                    self.common_utils.terminate_instance(ec2_resource=self.ec2_resource,
+                                                         instance_id=instance_id)
+        except Exception as e:
+            self.logger.info(f"Error while deleting instance: {e}")
+            self.logger.info(traceback.format_exc())
 
     def validations(self, node_uuid, node_status, device_status, lvol_status,
                     health_check_status):

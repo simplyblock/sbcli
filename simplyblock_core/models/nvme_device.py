@@ -52,7 +52,8 @@ class NVMeDevice(BaseModel):
         "cluster_device_order": {"type": int, 'default': 0},
         "health_check": {"type": bool, "default": True},
         "cluster_id": {"type": str, 'default': ""},
-
+        "qos_name": {"type": str, 'default': ""},
+        "alceml_name": {"type": str, 'default': ""},
         "bdev_stack": {"type": List, 'default': []},
 
         "io_error": {"type": bool, 'default': False},
@@ -64,6 +65,7 @@ class NVMeDevice(BaseModel):
         "partition_jm_size": {"type": int, 'default': 0},
 
         "physical_label": {"type": int, 'default': 0},
+        "is_partition": {"type": bool, 'default': False},
 
     }
 
@@ -105,6 +107,7 @@ class JMDevice(BaseModel):
         "raid_bdev": {"type": str, 'default': ""},
         "nvme_bdev": {"type": str, 'default': ""},
         "alceml_bdev": {"type": str, 'default': ""},
+        "alceml_name": {"type": str, 'default': ""},
         "testing_bdev": {"type": str, 'default': ""},
         "jm_bdev": {"type": str, 'default': ""},
         "device_data_dict": {"type": dict, 'default': {}},

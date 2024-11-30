@@ -196,7 +196,7 @@ def _get_next_3_nodes(cluster_id, lvol_size=0):
 
             node_stats[node.get_id()] = node_st
 
-    if len(online_nodes) < 3:
+    if len(online_nodes) <= 1:
         return online_nodes
     cluster_stats = utils.dict_agg([node_stats[k] for k in node_stats])
 
@@ -219,7 +219,7 @@ def _get_next_3_nodes(cluster_id, lvol_size=0):
     print("Node stats")
     utils.print_table_dict({**node_stats, "Cluster": cluster_stats})
     print("Node weights")
-    utils.print_table_dict({**nodes_weight, "weights": {**constants.weights, "total": sum(constants.weights.values())}})
+    utils.print_table_dict({**nodes_weight, "weights": {"lvol": n_start, "total": n_start}})
     print("Node selection range")
     utils.print_table_dict(node_start_end)
     #############
@@ -232,6 +232,19 @@ def _get_next_3_nodes(cluster_id, lvol_size=0):
             if node_start_end[node_id]['start'] <= r_index <= node_start_end[node_id]['end']:
                 if node_id not in selected_node_ids:
                     selected_node_ids.append(node_id)
+
+                    node_start_end = {}
+                    n_start = 0
+                    for node in nodes_weight:
+                        if node in selected_node_ids:
+                            continue
+                        node_start_end[node] = {
+                            "weight": nodes_weight[node]['total'],
+                            "start": n_start,
+                            "end": n_start + nodes_weight[node]['total'],
+                        }
+                        n_start = node_start_end[node]['end']
+
                     break
 
     ret = []
@@ -277,7 +290,7 @@ def validate_aes_xts_keys(key1: str, key2: str) -> Tuple[bool, str]:
 
 def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp, use_crypto,
                 distr_vuid, max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes,
-                with_snapshot=False, max_size=0, crypto_key1=None, crypto_key2=None):
+                with_snapshot=False, max_size=0, crypto_key1=None, crypto_key2=None, lvol_priority_class=0):
 
     logger.info(f"Adding LVol: {name}")
     host_node = None
@@ -400,6 +413,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
     lvol.npcs = cl.distr_npcs
     lvol.distr_bs = cl.distr_bs
     lvol.distr_chunk_bs = cl.distr_chunk_bs
+    lvol.lvol_priority_class = lvol_priority_class
     #lvol.distr_page_size = (distr_npcs+distr_npcs)*cl.page_size_in_blocks
 
 
@@ -455,7 +469,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
     #     })
     # else:
     lvol.bdev_stack.extend(
-        [
+       [
             #{
             #    "type": "bdev_distr",
             #    "name": lvol.base_bdev,
@@ -492,6 +506,22 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
             # }
         ]
     )
+
+    #    ]
+    #)
+    lvol_dict = {
+        "type": "bdev_lvol",
+        "name": lvol.lvol_bdev,
+        "params": {
+            "name": lvol.lvol_bdev,
+            "size_in_mib": int(lvol.size / (1000 * 1000)),
+            "lvs_name": lvol.lvs_name
+        }
+    }
+
+    if lvol.lvol_priority_class:
+        lvol_dict["lvol_priority_class"] = lvol.lvol_priority_class
+    lvol.bdev_stack = [lvol_dict]
 
     if use_crypto:
         if crypto_key1 == None or crypto_key2 == None:
@@ -638,6 +668,7 @@ def add_lvol_on_node(lvol, snode, ha_comm_addrs=None, ha_inode_self=0):
     ret = rpc_client.subsystem_create(lvol.nqn, 'sbcli-cn', lvol.uuid, min_cntlid)
     logger.debug(ret)
 
+    cluster = db_controller.get_cluster_by_id(snode.cluster_id)
     # add listeners
     logger.info("adding listeners")
     for iface in snode.data_nics:
@@ -650,7 +681,7 @@ def add_lvol_on_node(lvol, snode, ha_comm_addrs=None, ha_inode_self=0):
                     if ty['trtype'] == tr_type:
                         found = True
             if found is False:
-                ret = rpc_client.transport_create(tr_type)
+                ret = rpc_client.transport_create(tr_type, cluster.qpair_count)
             logger.info("adding listener for %s on IP %s" % (lvol.nqn, iface.ip4_address))
             ret = rpc_client.listeners_create(lvol.nqn, tr_type, iface.ip4_address, "4420")
             is_optimized = False
@@ -698,6 +729,7 @@ def recreate_lvol_on_node(lvol, snode, ha_comm_addrs=None, ha_inode_self=0, ana_
     logger.info("creating subsystem %s", lvol.nqn)
     rpc_client.subsystem_create(lvol.nqn, 'sbcli-cn', lvol.uuid, min_cntlid)
 
+    cluster = db_controller.get_cluster_by_id(snode.cluster_id)
     # add listeners
     logger.info("adding listeners")
     for iface in snode.data_nics:
@@ -710,7 +742,7 @@ def recreate_lvol_on_node(lvol, snode, ha_comm_addrs=None, ha_inode_self=0, ana_
                     if ty['trtype'] == tr_type:
                         found = True
             if found is False:
-                ret = rpc_client.transport_create(tr_type)
+                ret = rpc_client.transport_create(tr_type, cluster.qpair_count)
             if not ana_state:
                 ana_state = "non_optimized"
                 if lvol.node_id == snode.get_id():
@@ -987,7 +1019,7 @@ def list_lvols(is_json, cluster_id, pool_id_or_name, all=False):
             "Size": utils.humanbytes(lvol.size),
             "Hostname": lvol.hostname,
             "HA": lvol.ha_type,
-            "VUID": lvol.vuid,
+            "Priority": lvol.lvol_priority_class,
             "Mod": f"{lvol.ndcs}x{lvol.npcs}",
             "Status": lvol.status,
             "IO Err": lvol.io_error,

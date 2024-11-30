@@ -124,7 +124,23 @@ class TestLvolFioBase(TestClusterBase):
 
         log_file = f"/home/ec2-user/{lvol_name}_log.json"
         output = self.ssh_obj.read_file(node=self.mgmt_nodes[0], file_name=log_file)
-        fio_result = json.loads(output)
+        fio_result = ""
+        self.logger.info(f"FIO output for {lvol_name}: {output}")
+
+        start_index = output.find('{')  # Find the first opening brace
+        if start_index != -1:
+            json_content = output[start_index:]  # Extract everything starting from the JSON
+            try:
+                self.logger.info(f"Removed str FIO output for {lvol_name}: {fio_result}")
+                # Parse the extracted JSON
+                fio_result = json.loads(json_content)
+            except json.JSONDecodeError as e:
+                print(f"Error decoding JSON: {e}")
+                return None
+        else:
+            print("No JSON content found in the file.")
+            return None
+        # fio_result = json.loads(output)
         self.logger.info(f"FIO output for {lvol_name}: {fio_result}")
 
         job = fio_result['jobs'][0]
@@ -341,7 +357,6 @@ class TestLvolFioNpcs2(TestLvolFioBase):
                  "ndcs": scenario['ndcs'], "npcs": scenario['npcs'],
                  "size": "4G", "mount": False}
             ]
-            breakpoint()
             # Create LVOLs
             self.create_lvols(lvol_configs)
 

@@ -33,6 +33,9 @@ spec:
         - name: foundationdb
           hostPath:
             path: /etc/foundationdb
+        - name: etc-simplyblock
+          hostPath:
+            path: /etc/simplyblock
         - name: host-modules
           hostPath:
             path: /lib/modules
@@ -94,6 +97,8 @@ spec:
           mountPath: /dev
         - name: script-volume
           mountPath: /script
+        - name: etc-simplyblock
+          mountPath: /etc/simplyblock
         resources:
           limits:
             hugepages-2Mi: {{ MEM_GEGA }}Gi
@@ -117,9 +122,12 @@ spec:
           value: "{{ RPC_USERNAME }}"
         - name: RPC_PASSWORD
           value: "{{ RPC_PASSWORD }}"
-
+        - name: MULTI_THREADING_ENABLED
+          value: "True"
+        - name: TIMEOUT
+          value: "300"
       - name: fluentd
-        image: fluent/fluentd-kubernetes-daemonset:v1.17.1-debian-graylog-1.2
+        image: public.ecr.aws/simply-block/fluentd-kubernetes-daemonset:v1.17.1-debian-graylog-1.2
         imagePullPolicy: "Always"
         env:
         - name: K8S_NODE_NAME
