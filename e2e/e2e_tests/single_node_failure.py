@@ -46,6 +46,7 @@ class TestSingleNodeFailure(TestClusterBase):
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
+        self.fio_runtime = 20*60
         self.logger = setup_logger(__name__)
 
     def run(self):
@@ -72,10 +73,10 @@ class TestSingleNodeFailure(TestClusterBase):
         self.lvol_name = list(lvols.keys())[0]
         no_lvol_node_uuid = self.sbcli_utils.get_lvol_by_id(lvols[self.lvol_name])['results'][0]['node_id']
 
-        connect_str = self.sbcli_utils.get_lvol_connect_str(lvol_name=self.lvol_name)
+        connect_ls = self.sbcli_utils.get_lvol_connect_str_list(lvol_name=self.lvol_name)
 
-        self.ssh_obj.exec_command(node=self.mgmt_nodes[0],
-                                  command=connect_str)
+        for connect_str in connect_ls:
+            self.ssh_obj.exec_command(node=self.mgmt_nodes[0], command=connect_str)
 
         final_devices = self.ssh_obj.get_devices(node=self.mgmt_nodes[0])
         disk_use = None
@@ -97,7 +98,7 @@ class TestSingleNodeFailure(TestClusterBase):
 
         fio_thread1 = threading.Thread(target=self.ssh_obj.run_fio_test, args=(self.mgmt_nodes[0], None, self.mount_path, self.log_path,),
                                        kwargs={"name": "fio_run_1",
-                                               "runtime": 500,
+                                               "runtime": self.fio_runtime,
                                                "debug": self.fio_debug})
         fio_thread1.start()
 
@@ -160,7 +161,7 @@ class TestSingleNodeFailure(TestClusterBase):
         total_fio_runtime = end_time - self.ssh_obj.fio_runtime["fio_run_1"]
         self.logger.info(f"FIO Run Time: {total_fio_runtime}")
         
-        assert  total_fio_runtime >= 500, \
+        assert  total_fio_runtime >= self.fio_runtime, \
             f'FIO Run Time Interrupted before given runtime. Actual: {self.ssh_obj.fio_runtime["fio_run_1"]}'
 
         self.logger.info("TEST CASE PASSED !!!")
