@@ -1,6 +1,6 @@
 # coding=utf-8
 import time
-
+from email.policy import default
 
 from simplyblock_core import constants, kv_store, utils
 from simplyblock_core.controllers import lvol_events
@@ -14,28 +14,29 @@ logger = utils.get_logger(__name__)
 last_object_record = {}
 
 
-def add_lvol_stats(pool, lvol, stats_dict):
+def add_lvol_stats(pool, lvol, stats_list):
     now = int(time.time())
     data = {
         "pool_id": pool.get_id(),
         "uuid": lvol.get_id(),
         "date": now}
 
-    if stats_dict and stats_dict['bdevs']:
-        stats = stats_dict['bdevs'][0]
-        data.update({
-            "read_bytes": stats['bytes_read'],
-            "read_io": stats['num_read_ops'],
-            "read_latency_ticks": stats['read_latency_ticks'],
 
-            "write_bytes": stats['bytes_written'],
-            "write_io": stats['num_write_ops'],
-            "write_latency_ticks": stats['write_latency_ticks'],
+    if stats_list:
+        for stats in stats_list:
+            data.update({
+                "read_bytes": stats['bytes_read'] + data.get("'bytes_read'", 0),
+                "read_io": stats['num_read_ops'] + data.get("'read_io'", 0),
+                "read_latency_ticks": stats['read_latency_ticks'] + data.get("'read_latency_ticks'", 0),
 
-            "unmap_bytes": stats['bytes_unmapped'],
-            "unmap_io": stats['num_unmap_ops'],
-            "unmap_latency_ticks": stats['unmap_latency_ticks'],
-        })
+                "write_bytes": stats['bytes_written'] + data.get("'bytes_written'", 0),
+                "write_io": stats['num_write_ops'] + data.get("'num_write_ops'", 0),
+                "write_latency_ticks": stats['write_latency_ticks'] + data.get("'write_latency_ticks'", 0),
+
+                "unmap_bytes": stats['bytes_unmapped'] + data.get("'bytes_unmapped'", 0),
+                "unmap_io": stats['num_unmap_ops'] + data.get("'num_unmap_ops'", 0) ,
+                "unmap_latency_ticks": stats['unmap_latency_ticks'] + data.get("'unmap_latency_ticks'", 0),
+            })
 
         if lvol.get_id() in last_object_record:
             last_record = last_object_record[lvol.get_id()]
@@ -118,16 +119,27 @@ while True:
             if lvol.status == lvol.STATUS_IN_DELETION:
                 logger.warning(f"LVol in deletion, id: {lvol.get_id()}, status: {lvol.status}.. skipping")
                 continue
-            snode = db_controller.get_storage_node_by_hostname(lvol.hostname)
-            rpc_client = RPCClient(
-                snode.mgmt_ip, snode.rpc_port,
-                snode.rpc_username, snode.rpc_password,
-                timeout=3, retry=2)
+            hosts = []
+            stats = []
+            if lvol.ha_type == "ha":
+                hosts = lvol.nodes
+            else:
+                hosts=[lvol.node_id]
+            for host in hosts:
+                snode = db_controller.get_storage_node_by_id(host)
+                rpc_client = RPCClient(
+                    snode.mgmt_ip, snode.rpc_port,
+                    snode.rpc_username, snode.rpc_password,
+                    timeout=3, retry=2)
 
-            logger.info("Getting lVol stats: %s", lvol.uuid)
-            stats_dict = rpc_client.get_lvol_stats(lvol.top_bdev)
-            record = add_lvol_stats(pool, lvol, stats_dict)
+                logger.info("Getting lVol stats: %s", lvol.uuid)
+                stats_dict = rpc_client.get_lvol_stats(lvol.top_bdev)
+                if stats_dict and stats_dict['bdevs']:
+                    stats.append( stats_dict['bdevs'][0])
+
+            record = add_lvol_stats(pool, lvol, stats)
             stat_records.append(record)
+
         if stat_records:
             add_pool_stats(pool, stat_records)
 
