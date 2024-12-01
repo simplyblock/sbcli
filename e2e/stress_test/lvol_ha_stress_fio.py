@@ -227,8 +227,14 @@ class TestLvolHACluster(FioWorkloadTest):
         node_details = self.sbcli_utils.get_storage_node_details(self.lvol_node)
         node_ip = node_details[0]["mgmt_ip"]
 
+        unavailable_thread = threading.Thread(
+            target=lambda: self.sbcli_utils.wait_for_storage_node_status(self.lvol_node, ["unavailable", "unreachable", "offline"], 300)
+        )
+
+        unavailable_thread.start()
+
         self.ssh_obj.exec_command(node_ip, command=cmd)
-        sleep_n_sec(100)
+        unavailable_thread.join()
         self.sbcli_utils.wait_for_storage_node_status(self.lvol_node,
                                                       "online",
                                                       timeout=800)
