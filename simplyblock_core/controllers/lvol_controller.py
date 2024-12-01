@@ -317,7 +317,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
         return False, f"Cluster is not active, status: {cl.status}"
 
     if ha_type == "default":
-        ha_type = "single"
+        ha_type = cl.ha_type
 
     max_rw_iops = max_rw_iops or 0
     max_rw_mbytes = max_rw_mbytes or 0
@@ -815,8 +815,8 @@ def recreate_lvol(lvol_id, snode):
 
 def _remove_bdev_stack(bdev_stack, rpc_client):
     for bdev in bdev_stack:
-        if 'status' in bdev and bdev['status'] == 'deleted':
-            continue
+        # if 'status' in bdev and bdev['status'] == 'deleted':
+        #     continue
 
         type = bdev['type']
         name = bdev['name']
@@ -929,7 +929,7 @@ def delete_lvol(id_or_name, force_delete=False):
 
     # remove from storage node
     snode = db_controller.get_storage_node_by_id(lvol.node_id)
-    logger.debug(snode)
+    # logger.debug(snode)
     logger.debug(f"removing lvol: {lvol.get_id()} from node lvol list: {str(snode.lvols)}")
     if lvol.get_id() in snode.lvols:
         snode.lvols.remove(lvol.get_id())

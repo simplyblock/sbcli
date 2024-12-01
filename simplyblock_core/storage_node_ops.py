@@ -1877,6 +1877,15 @@ def restart_storage_node(
                     logger.error(f"Failed to create lvstore from node {node.get_id()}")
                     continue
 
+                # temp_rpc_client = RPCClient(
+                #     node.mgmt_ip, node.rpc_port,
+                #     node.rpc_username, node.rpc_password)
+                time.sleep(5)
+                ret = rpc_client.bdev_examine(node.raid)
+                time.sleep(5)
+                ret = rpc_client.bdev_wait_for_examine()
+                time.sleep(1)
+
                 for lvol_id in node.lvols:
                     lvol = db_controller.get_lvol_by_id(lvol_id)
                     for index, node_id in enumerate(lvol.nodes):
@@ -2791,21 +2800,21 @@ def recreate_lvstore(snode):
 
     secondary_node_id = db_controller.get_storage_node_by_id(snode.secondary_node_id)
     for node in [snode]:
-        ret, err = _create_bdev_stack(node, snode.lvstore_stack, primary_node=snode)
+        ret, err = _create_bdev_stack(node, [], primary_node=snode)
 
         if err:
             logger.error(f"Failed to recreate lvstore on node {node.get_id()}")
             logger.error(err)
             # return False
 
-        # temp_rpc_client = RPCClient(
-        #         node.mgmt_ip, node.rpc_port,
-        #         node.rpc_username, node.rpc_password)
-        # time.sleep(5)
-        # ret = temp_rpc_client.bdev_examine(node.raid)
-        # time.sleep(5)
-        # ret = temp_rpc_client.bdev_wait_for_examine()
-        # time.sleep(1)
+        temp_rpc_client = RPCClient(
+                node.mgmt_ip, node.rpc_port,
+                node.rpc_username, node.rpc_password)
+        time.sleep(5)
+        ret = temp_rpc_client.bdev_examine(node.raid)
+        time.sleep(5)
+        ret = temp_rpc_client.bdev_wait_for_examine()
+        time.sleep(1)
 
         # for lvol_id in snode.lvols:
         #     lvol = db_controller.get_lvol_by_id(lvol_id)
