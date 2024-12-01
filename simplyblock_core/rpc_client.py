@@ -887,3 +887,22 @@ class RPCClient:
 
     def bdev_distrib_force_to_non_leader(self):
         return self._request("bdev_distrib_force_to_non_leader")
+
+    def bdev_lvol_set_leader(self, is_leader=False):
+        params = {
+            "leadership": is_leader
+        }
+        return self._request("bdev_lvol_set_leader_all", params)
+
+    def bdev_lvol_register(self, name, lvs_name, registered_uuid, blobid, priority_class=0):
+        params = {
+            "lvol_name": name,
+            "lvs_name": lvs_name,
+            "thin_provision": True,
+            "clear_method": "unmap",
+            "blobid": blobid,
+            "registered_uuid": registered_uuid,
+        }
+        if priority_class:
+            params["lvol_priority_class"] = priority_class
+        return self._request("bdev_lvol_register", params)
