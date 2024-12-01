@@ -71,6 +71,8 @@ class LVol(BaseModel):
 
         "deletion_status": {"type": str, 'default': ""},
         "lvol_priority_class": {"type": int, 'default': 0},
+        "blobid": {"type": int, 'default': 0},
+        "lvol_uuid": {"type": str, 'default': ""},
 
     }
 

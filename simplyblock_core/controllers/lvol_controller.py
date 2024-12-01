@@ -539,7 +539,6 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
         lvol.crypto_key2 = crypto_key2
 
     if ha_type == 'single':
-        lvol.uuid = str(uuid.uuid4())
         ret, error = add_lvol_on_node(lvol, host_node)
         if error:
             return ret, error
@@ -568,7 +567,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
     }
         """
 
-        lvol.uuid = lvol_bdev['uuid']
+        lvol.lvol_uuid = lvol_bdev['uuid']
         lvol.blobid = lvol_bdev['driver_specific']['lvol']['blobid']
 
         sec_node = db_controller.get_storage_node_by_id(host_node.secondary_node_id)
@@ -647,7 +646,7 @@ def add_lvol_on_node(lvol, snode, ha_comm_addrs=None, ha_inode_self=0):
     if snode.is_secondary_node:
         rpc_client.bdev_lvol_set_leader(False)
         ret = rpc_client.bdev_lvol_register(
-            lvol.lvol_bdev, lvol.lvs_name, lvol.uuid, lvol.blobid, lvol.lvol_priority_class)
+            lvol.lvol_bdev, lvol.lvs_name, lvol.lvol_uuid, lvol.blobid, lvol.lvol_priority_class)
         if not ret:
             return False
 
