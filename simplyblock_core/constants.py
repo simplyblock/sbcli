@@ -60,7 +60,7 @@ TASK_EXEC_INTERVAL_SEC = 5
 TASK_EXEC_RETRY_COUNT = 8
 
 
-SIMPLY_BLOCK_SPDK_ULTRA_IMAGE = "simplyblock/spdk:main-latest"
+SIMPLY_BLOCK_SPDK_ULTRA_IMAGE = "simplyblock/spdk:lvolstore-ha-latest"
 
 GELF_PORT = 12202
 

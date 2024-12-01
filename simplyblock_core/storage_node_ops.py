@@ -3008,19 +3008,20 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
             }
         )
 
-    # lvstore_stack.append(
-    #     {
-    #         "type": "bdev_lvstore",
-    #         "name": lvs_name,
-    #         "params": {
-    #             "name": lvs_name,
-    #             "bdev_name": raid_device,
-    #             "cluster_sz": cluster_sz,
-    #             "clear_method": "unmap",
-    #             "num_md_pages_per_cluster_ratio": 1,
-    #         }
-    #     }
-    # )
+    lvs_name = f"LVS_{jm_vuid}"
+    lvstore_stack.append(
+        {
+            "type": "bdev_lvstore",
+            "name": lvs_name,
+            "params": {
+                "name": lvs_name,
+                "bdev_name": raid_device,
+                "cluster_sz": cluster_sz,
+                "clear_method": "unmap",
+                "num_md_pages_per_cluster_ratio": 1,
+            }
+        }
+    )
 
     ret, err = _create_bdev_stack(snode, lvstore_stack)
     if err:
@@ -3028,10 +3029,12 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
         logger.error(err)
         return False
 
-    # snode.lvstore = lvs_name
+    snode.lvstore = lvs_name
     snode.lvstore_stack = lvstore_stack
     snode.raid = raid_device
     snode.write_to_db()
+
+    time.sleep(1)
 
     # creating lvstore on secondary
     sec_node_1 = db_controller.get_storage_node_by_id(snode.secondary_node_id)
@@ -3040,6 +3043,14 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
         logger.error(f"Failed to create lvstore on node {sec_node_1.get_id()}")
         logger.error(err)
         return False
+
+    temp_rpc_client = RPCClient(
+            sec_node_1.mgmt_ip, sec_node_1.rpc_port,
+            sec_node_1.rpc_username, sec_node_1.rpc_password)
+    time.sleep(5)
+    ret = temp_rpc_client.bdev_examine(snode.raid)
+    time.sleep(1)
+    ret = temp_rpc_client.bdev_wait_for_examine()
     sec_node_1.write_to_db()
 
     return True
@@ -3085,23 +3096,19 @@ def _create_bdev_stack(snode, lvstore_stack=None, primary_node=False):
                     return False, "Failed to send cluster map"
                 # time.sleep(1)
 
-        elif type == "bdev_lvstore" and lvstore_stack:
+        elif type == "bdev_lvstore" and lvstore_stack and not snode.is_secondary_node:
             ret = rpc_client.create_lvstore(**params)
 
         elif type == "bdev_ptnonexcl":
             ret = rpc_client.bdev_PT_NoExcl_create(**params)
 
         elif type == "bdev_raid":
-            # sync jm
-            # if snode.jm_vuid:
-            #     ret = rpc_client.jc_explicit_synchronization(snode.jm_vuid)
-            #     logger.info(f"JM Sync res: {ret}")
-            #     time.sleep(1)
 
             distribs_list = bdev["distribs_list"]
             strip_size_kb = params["strip_size_kb"]
             ret = rpc_client.bdev_raid_create(name, distribs_list, strip_size_kb=strip_size_kb)
-            # time.sleep(2)
+            time.sleep(1)
+            ret = rpc_client.bdev_distrib_force_to_non_leader()
 
         else:
             logger.debug(f"Unknown BDev type: {type}")

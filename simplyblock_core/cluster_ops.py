@@ -423,12 +423,12 @@ def cluster_activate(cl_id, force=False):
     set_cluster_status(cl_id, Cluster.STATUS_ACTIVE)
     logger.info("Cluster activated successfully")
 
-    if cluster.ha_type == "ha":
-        for snode in snodes:
-            lvol_controller.add_lvol_ha("lvol_"+snode.get_id(), utils.parse_size("10g"), snode.get_id(), "ha", pool_name,
-                                        False, False,
-                    11, 0, 0, 0, 0,
-                    with_snapshot=False, max_size=0, crypto_key1=None, crypto_key2=None)
+    # if cluster.ha_type == "ha":
+    #     for snode in snodes:
+    #         lvol_controller.add_lvol_ha("lvol_"+snode.get_id(), utils.parse_size("10g"), snode.get_id(), "ha", pool_name,
+    #                                     False, False,
+    #                 11, 0, 0, 0, 0,
+    #                 with_snapshot=False, max_size=0, crypto_key1=None, crypto_key2=None)
 
     return True
 
