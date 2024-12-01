@@ -170,6 +170,9 @@ def _get_next_3_nodes(cluster_id, lvol_size=0):
     online_nodes = []
     node_stats = {}
     for node in snodes:
+        if node.is_secondary_node:
+            continue
+
         if node.status == node.STATUS_ONLINE:
             # Validate Eligible nodes for adding lvol
             # snode_api = SNodeClient(node.api_endpoint)
