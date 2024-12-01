@@ -224,7 +224,10 @@ class TestLvolHACluster(FioWorkloadTest):
             'sudo nmcli dev connect eth0" &'
         )
 
-        self.ssh_obj.exec_command(self.node, command=cmd)
+        node_details = self.sbcli_utils.get_storage_node_details(self.lvol_node)
+        node_ip = node_details[0]["mgmt_ip"]
+
+        self.ssh_obj.exec_command(node_ip, command=cmd)
         sleep_n_sec(100)
         self.sbcli_utils.wait_for_storage_node_status(self.lvol_node,
                                                       "online",
