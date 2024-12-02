@@ -85,6 +85,8 @@ def get_distr_cluster_map(snodes, target_node, distr_name=""):
     db_controller = DBController()
     cluster = db_controller.get_cluster_by_id(target_node.cluster_id)
     for index, snode in enumerate(snodes):
+        if snode.is_secondary_node:
+            continue
         dev_map = {}
         dev_w_map = []
         node_w = 0

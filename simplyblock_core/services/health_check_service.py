@@ -172,7 +172,13 @@ while True:
                         else:
                             logger.info(f"Checking bdev: {remote_device.remote_bdev} ... not found")
 
-                            org_dev = db_controller.get_jm_device_by_id(remote_device.get_id())
+                            org_dev = None
+                            for node in db_controller.get_storage_nodes():
+                                if node.jm_device and node.jm_device.get_id() == remote_device.get_id():
+                                    if node.status == StorageNode.STATUS_ONLINE:
+                                        org_dev = node.jm_device
+                                    break
+
                             if org_dev and org_dev.status == NVMeDevice.STATUS_ONLINE:
                                 name = f"remote_{remote_device.jm_bdev}"
                                 ret = rpc_client.bdev_nvme_attach_controller_tcp(
