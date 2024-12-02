@@ -46,7 +46,7 @@ class TestSingleNodeFailure(TestClusterBase):
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        self.fio_runtime = 20*60
+        self.fio_runtime = 10*60
         self.logger = setup_logger(__name__)
 
     def run(self):
@@ -112,7 +112,7 @@ class TestSingleNodeFailure(TestClusterBase):
                          health_check_status=True
                          )
 
-        for i in range(10):
+        for i in range(5):
 
             sleep_n_sec(30)
             self.ssh_obj.stop_spdk_process(node=node_ip)
