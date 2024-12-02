@@ -57,9 +57,10 @@ class RPCClient:
             logger.error(e)
             return False, str(e)
 
-        logger.debug("Response: status_code: %s, content: %s",
-                     response.status_code, response.content)
         ret_code = response.status_code
+        ret_content = response.content
+
+        logger.debug("Response: status_code: %s, content: %s",ret_code, ret_content)
 
         result = None
         error = None
@@ -67,7 +68,7 @@ class RPCClient:
             try:
                 data = response.json()
             except Exception:
-                return response.content, None
+                return ret_content, None
 
             if 'result' in data:
                 result = data['result']
@@ -78,9 +79,9 @@ class RPCClient:
             else:
                 return data, None
 
-        if ret_code in [500, 400]:
-            raise RPCException("Invalid http status: %s" % ret_code)
-        logger.error("Unknown http status: %s", ret_code)
+        else:
+            logger.error("Invalid http status : %s", ret_code)
+
         return None, None
 
     def get_version(self):

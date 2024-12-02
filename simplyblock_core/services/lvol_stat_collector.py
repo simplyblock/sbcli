@@ -15,6 +15,11 @@ last_object_record = {}
 
 
 def sum_stats(stats_list):
+    if not stats_list or len(stats_list) == 0:
+        return None
+    if len(stats_list) == 1:
+        return stats_list[0]
+
     ret = {}
     for key in stats_list[0].keys():
         for stat_dict in stats_list:
@@ -22,7 +27,7 @@ def sum_stats(stats_list):
             try:
                 v_int = int(value)
                 if key in ret:
-                    ret[key] = ret[key] + v_int
+                    ret[key] += v_int
                 else:
                     ret[key] = v_int
             except:
@@ -37,13 +42,9 @@ def add_lvol_stats(pool, lvol, stats_list):
         "uuid": lvol.get_id(),
         "date": now}
 
-
     if stats_list:
 
-        if len (stats_list) > 1:
-            stats = sum_stats(stats_list)
-        else:
-            stats = stats_list[0]
+        stats = sum_stats(stats_list)
 
         data.update({
             "read_bytes": stats['bytes_read'],
@@ -68,17 +69,50 @@ def add_lvol_stats(pool, lvol, stats_list):
         if last_record:
             time_diff = (now - last_record.date)
             if time_diff > 0:
-                data['read_bytes_ps'] = int((data['read_bytes'] - last_record['read_bytes']) / time_diff)
-                data['read_io_ps'] = int((data['read_io'] - last_record['read_io']) / time_diff)
-                data['read_latency_ps'] = int((data['read_latency_ticks'] - last_record['read_latency_ticks']) / time_diff)
+                if data['read_bytes'] > last_record['read_bytes']:
+                    data['read_bytes_ps'] = int((data['read_bytes'] - last_record['read_bytes']) / time_diff)
+                else:
+                    data['read_bytes_ps'] = int(data['read_bytes'] / time_diff)
 
-                data['write_bytes_ps'] = int((data['write_bytes'] - last_record['write_bytes']) / time_diff)
-                data['write_io_ps'] = int((data['write_io'] - last_record['write_io']) / time_diff)
-                data['write_latency_ps'] = int((data['write_latency_ticks'] - last_record['write_latency_ticks']) / time_diff)
+                if data['read_io'] > last_record['read_io']:
+                    data['read_io_ps'] = int((data['read_io'] - last_record['read_io']) / time_diff)
+                else:
+                    data['read_io_ps'] = int(data['read_io'] / time_diff)
 
-                data['unmap_bytes_ps'] = int((data['unmap_bytes'] - last_record['unmap_bytes']) / time_diff)
-                data['unmap_io_ps'] = int((data['unmap_io'] - last_record['unmap_io']) / time_diff)
-                data['unmap_latency_ps'] = int((data['unmap_latency_ticks'] - last_record['unmap_latency_ticks']) / time_diff)
+                if data['read_latency_ticks'] > last_record['read_latency_ticks']:
+                    data['read_latency_ps'] = int((data['read_latency_ticks'] - last_record['read_latency_ticks']) / time_diff)
+                else:
+                    data['read_latency_ps'] = int(data['read_latency_ticks'] / time_diff)
+
+                if data['write_bytes'] > last_record['write_bytes']:
+                    data['write_bytes_ps'] = int((data['write_bytes'] - last_record['write_bytes']) / time_diff)
+                else:
+                    data['write_bytes_ps'] = int(data['write_bytes'] / time_diff)
+
+                if data['write_io'] > last_record['write_io']:
+                    data['write_io_ps'] = int((data['write_io'] - last_record['write_io']) / time_diff)
+                else:
+                    data['write_io_ps'] = int(data['write_io'] / time_diff)
+
+                if data['write_latency_ticks'] > last_record['write_latency_ticks']:
+                    data['write_latency_ps'] = int((data['write_latency_ticks'] - last_record['write_latency_ticks']) / time_diff)
+                else:
+                    data['write_latency_ps'] = int(data['write_latency_ticks'] / time_diff)
+
+                if data['unmap_bytes'] > last_record['unmap_bytes']:
+                    data['unmap_bytes_ps'] = int((data['unmap_bytes'] - last_record['unmap_bytes']) / time_diff)
+                else:
+                    data['unmap_bytes_ps'] = int(data['unmap_bytes'] / time_diff)
+
+                if data['unmap_io'] > last_record['unmap_io']:
+                    data['unmap_io_ps'] = int((data['unmap_io'] - last_record['unmap_io']) / time_diff)
+                else:
+                    data['unmap_io_ps'] = int(data['unmap_io'] / time_diff)
+
+                if data['unmap_latency_ticks'] > last_record['unmap_latency_ticks']:
+                    data['unmap_latency_ps'] = int((data['unmap_latency_ticks'] - last_record['unmap_latency_ticks']) / time_diff)
+                else:
+                    data['unmap_latency_ps'] = int(data['unmap_latency_ticks'] / time_diff)
 
                 if data['read_io_ps'] > 0 and data['write_io_ps'] > 0 and lvol.io_error:
                     # set lvol io error to false

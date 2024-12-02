@@ -108,7 +108,9 @@ while True:
                     timeout=10, retry=1)
                 connected_devices = []
                 for remote_device in snode.remote_devices:
-                    if db_controller.get_storage_device_by_id(remote_device.get_id()).status == NVMeDevice.STATUS_ONLINE:
+                    org_dev = db_controller.get_storage_device_by_id(remote_device.get_id())
+                    org_node =  db_controller.get_storage_node_by_id(remote_device.node_id)
+                    if org_dev.status == NVMeDevice.STATUS_ONLINE and org_node.status == StorageNode.STATUS_ONLINE:
                         ret = rpc_client.get_bdevs(remote_device.remote_bdev)
                         if ret:
                             logger.info(f"Checking bdev: {remote_device.remote_bdev} ... ok")
@@ -123,7 +125,7 @@ while True:
                             if ret:
                                 logger.info(f"Successfully connected to device: {remote_device.get_id()}")
                                 connected_devices.append(remote_device.get_id())
-                                distr_controller.send_dev_status_event(remote_device, NVMeDevice.STATUS_ONLINE, snode)
+                                # distr_controller.send_dev_status_event(remote_device, NVMeDevice.STATUS_ONLINE, snode)
                             else:
                                 logger.error(f"Failed to connect to device: {remote_device.get_id()}")
 
@@ -133,7 +135,7 @@ while True:
                     if node.status != StorageNode.STATUS_ONLINE or node.get_id() == snode.get_id():
                         continue
                     for dev in node.nvme_devices:
-                        if dev.status == StorageNode.STATUS_ONLINE:
+                        if dev.status == NVMeDevice.STATUS_ONLINE:
                             if dev.get_id() not in connected_devices:
                                 logger.info(f"connecting to online device: {dev.get_id()}")
                                 name = f"remote_{dev.alceml_bdev}"

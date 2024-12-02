@@ -796,12 +796,10 @@ def _prepare_cluster_devices_on_restart(snode):
                 logger.error(f"Failed to add: {pt_name} to the subsystem: {subsystem_nqn}")
                 return False
 
-    snode.jm_device.status = JMDevice.STATUS_ONLINE
-    device_controller.set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_ONLINE)
     return True
 
 
-def _connect_to_remote_devs(this_node):
+def _connect_to_remote_devs(this_node, force_conect_restarting_nodes=False):
     db_controller = DBController()
 
     rpc_client = RPCClient(
@@ -815,14 +813,24 @@ def _connect_to_remote_devs(this_node):
         node_bdev_names = []
 
     remote_devices = []
+
+    if force_conect_restarting_nodes:
+        allowed_node_statuses = [StorageNode.STATUS_ONLINE, StorageNode.STATUS_RESTARTING]
+        allowed_dev_statuses = [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_UNAVAILABLE]
+    else:
+        allowed_node_statuses = [StorageNode.STATUS_ONLINE]
+        allowed_dev_statuses = [NVMeDevice.STATUS_ONLINE]
+
+
+    nodes = db_controller.get_storage_nodes_by_cluster_id(this_node.cluster_id)
     # connect to remote devs
-    snodes = db_controller.get_storage_nodes_by_cluster_id(this_node.cluster_id)
-    for node_index, node in enumerate(snodes):
-        if node.get_id() == this_node.get_id() or node.status != StorageNode.STATUS_ONLINE:
+    for node_index, node in enumerate(nodes):
+        if node.get_id() == this_node.get_id() or node.status not in allowed_node_statuses:
             continue
         logger.info(f"Connecting to node {node.get_id()}")
         for index, dev in enumerate(node.nvme_devices):
-            if dev.status != NVMeDevice.STATUS_ONLINE:
+
+            if dev.status not in allowed_dev_statuses:
                 logger.debug(f"Device is not online: {dev.get_id()}, status: {dev.status}")
                 continue
 
@@ -869,12 +877,12 @@ def _connect_to_remote_jm_devs(this_node, jm_ids=[]):
                     remote_devices.append(jm_dev)
         elif len(this_node.remote_jm_devices) > 0:
             remote_devices = this_node.remote_jm_devices
-        else:
-            for node in db_controller.get_storage_nodes_by_cluster_id(this_node.cluster_id):
-                if node.get_id() == this_node.get_id() or node.is_secondary_node:
-                    continue
-                if node.jm_device and node.jm_device.status == JMDevice.STATUS_ONLINE:
-                    remote_devices.append(node.jm_device)
+        # else:
+        #     for node in db_controller.get_storage_nodes_by_cluster_id(this_node.cluster_id):
+        #         if node.get_id() == this_node.get_id() or node.is_secondary_node:
+        #             continue
+        #         if node.jm_device and node.jm_device.status == JMDevice.STATUS_ONLINE:
+        #             remote_devices.append(node.jm_device)
 
     new_devs = []
     for jm_dev in remote_devices:
@@ -1812,7 +1820,7 @@ def restart_storage_node(
                 logger.error("Failed to prepare cluster devices")
                 return False
 
-    snode.write_to_db(kv_store)
+    snode.write_to_db()
 
     logger.info("Connecting to remote devices")
     # snode = db_controller.get_storage_node_by_id(node_id)
@@ -1821,19 +1829,9 @@ def restart_storage_node(
 
     if snode.enable_ha_jm:
         logger.info("Connecting to remote JMs")
-        snode.remote_jm_devices = []
         snode.remote_jm_devices = _connect_to_remote_jm_devs(snode)
 
-    snode.write_to_db(db_controller.kv_store)
-
-    logger.info("Setting node status to Online")
-    set_node_status(node_id, StorageNode.STATUS_ONLINE)
-
-    snode = db_controller.get_storage_node_by_id(snode.get_id())
-    for db_dev in snode.nvme_devices:
-        if db_dev.status in [NVMeDevice.STATUS_UNAVAILABLE, NVMeDevice.STATUS_READONLY]:
-            db_dev.status = NVMeDevice.STATUS_ONLINE
-    snode.write_to_db(db_controller.kv_store)
+    snode.write_to_db()
 
     # make other nodes connect to the new devices
     logger.info("Make other nodes connect to the node devices")
@@ -1841,11 +1839,24 @@ def restart_storage_node(
     for node in snodes:
         if node.get_id() == snode.get_id() or node.status != StorageNode.STATUS_ONLINE:
             continue
-        node.remote_devices = _connect_to_remote_devs(node)
-        if node.enable_ha_jm:
-            node.remote_jm_devices = _connect_to_remote_jm_devs(node)
+        node.remote_devices = _connect_to_remote_devs(node, force_conect_restarting_nodes=True)
         node.write_to_db(kv_store)
 
+    if snode.jm_device and snode.jm_device.status == JMDevice.STATUS_UNAVAILABLE:
+        device_controller.set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_ONLINE)
+
+
+    snode = db_controller.get_storage_node_by_id(snode.get_id())
+    for db_dev in snode.nvme_devices:
+        if db_dev.status in [NVMeDevice.STATUS_UNAVAILABLE, NVMeDevice.STATUS_READONLY]:
+            db_dev.status = NVMeDevice.STATUS_ONLINE
+            device_events.device_restarted(db_dev)
+    snode.write_to_db(db_controller.kv_store)
+
+    logger.info("Setting node status to Online")
+    set_node_status(node_id, StorageNode.STATUS_ONLINE)
+
+    snode = db_controller.get_storage_node_by_id(snode.get_id())
     logger.info(f"Sending device status event")
     for dev in snode.nvme_devices:
         distr_controller.send_dev_status_event(dev, dev.status)
