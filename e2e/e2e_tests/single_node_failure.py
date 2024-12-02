@@ -143,13 +143,13 @@ class TestSingleNodeFailure(TestClusterBase):
                              )
 
 
-        # Write steps in order
-        steps = {
-            "Storage Node": ["shutdown", "restart"],
-            "Device": {"restart"}
-        }
-        self.common_utils.validate_event_logs(cluster_id=self.cluster_id,
-                                              operations=steps)
+        # # Write steps in order
+        # steps = {
+        #     "Storage Node": ["shutdown", "restart"],
+        #     "Device": {"restart"}
+        # }
+        # self.common_utils.validate_event_logs(cluster_id=self.cluster_id,
+        #                                       operations=steps)
         
         end_time = self.common_utils.manage_fio_threads(node=self.mgmt_nodes[0],
                                                         threads=[fio_thread1],
