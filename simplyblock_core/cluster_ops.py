@@ -172,7 +172,8 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     else:
         c.grafana_endpoint = f"http://{DEV_IP}/grafana"
     c.enable_node_affinity = enable_node_affinity
-    c.qpair_count = qpair_count or 256
+    # c.qpair_count = qpair_count or 256
+    c.qpair_count = 256
 
     c.max_queue_size = max_queue_size
     c.inflight_io_threshold = inflight_io_threshold
