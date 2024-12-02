@@ -1,9 +1,9 @@
 # syntax=docker/dockerfile:1
-FROM python:3.8
+FROM python:3.8-slim
 
-RUN apt-get update -y; apt-get install -y \
-    wget libc6 inetutils-ping vim dmidecode nvme-cli open-iscsi \
-    iproute2 pciutils sudo nano parted gdisk && \
+RUN apt-get update; apt-get install -y \
+    wget libc6 inetutils-ping dmidecode nvme-cli open-iscsi \
+    iproute2 pciutils sudo nano parted gdisk ; \
     rm -rf /var/lib/apt/lists/*
 
 # install fdb client library (libfdb_c.dylib) for the Python bindings to interact with the database.
