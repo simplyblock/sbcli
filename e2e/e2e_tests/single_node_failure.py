@@ -59,13 +59,13 @@ class TestSingleNodeFailure(TestClusterBase):
             pool_name=self.pool_name
         )
 
-        # self.sbcli_utils.add_lvol(
-        #     lvol_name=self.lvol_name,
-        #     pool_name=self.pool_name,
-        #     size="800M",
-        #     # distr_ndcs=2,
-        #     # distr_npcs=1
-        # )
+        self.sbcli_utils.add_lvol(
+            lvol_name=self.lvol_name,
+            pool_name=self.pool_name,
+            size="10G",
+            # distr_ndcs=2,
+            # distr_npcs=1
+        )
         lvols = self.sbcli_utils.list_lvols()
         # assert self.lvol_name in list(lvols.keys()), \
         #     f"Lvol {self.lvol_name} not present in list of lvols post add: {lvols}"
