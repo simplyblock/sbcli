@@ -8,8 +8,7 @@ from datetime import datetime
 import traceback
 from requests.exceptions import HTTPError
 
-
-class TestSingleNodeFailure(TestClusterBase):
+class TestSingleNodeFailureHA(TestClusterBase):
     """
     Steps:
     1. Create Storage Pool and Delete Storage pool
@@ -47,6 +46,7 @@ class TestSingleNodeFailure(TestClusterBase):
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
+        self.fio_runtime = 10*60
         self.logger = setup_logger(__name__)
 
     def run(self):
@@ -70,10 +70,12 @@ class TestSingleNodeFailure(TestClusterBase):
         assert self.lvol_name in list(lvols.keys()), \
             f"Lvol {self.lvol_name} not present in list of lvols post add: {lvols}"
 
-        connect_str = self.sbcli_utils.get_lvol_connect_str(lvol_name=self.lvol_name)
+        no_lvol_node_uuid = self.sbcli_utils.get_lvol_by_id(lvols[self.lvol_name])['results'][0]['node_id']
 
-        self.ssh_obj.exec_command(node=self.mgmt_nodes[0],
-                                  command=connect_str)
+        connect_ls = self.sbcli_utils.get_lvol_connect_str_list(lvol_name=self.lvol_name)
+
+        for connect_str in connect_ls:
+            self.ssh_obj.exec_command(node=self.mgmt_nodes[0], command=connect_str)
 
         final_devices = self.ssh_obj.get_devices(node=self.mgmt_nodes[0])
         disk_use = None
@@ -93,16 +95,14 @@ class TestSingleNodeFailure(TestClusterBase):
                                 device=disk_use,
                                 mount_path=self.mount_path)
 
-        fio_thread1 = threading.Thread(target=self.ssh_obj.run_fio_test,
-                                       args=(self.mgmt_nodes[0], None, self.mount_path, self.log_path,),
+        fio_thread1 = threading.Thread(target=self.ssh_obj.run_fio_test, args=(self.mgmt_nodes[0], None, self.mount_path, self.log_path,),
                                        kwargs={"name": "fio_run_1",
-                                               "runtime": 500,
+                                               "runtime": self.fio_runtime,
                                                "debug": self.fio_debug,
-                                               "time_based": False,
+                                               "time_based": True,
                                                "size": "8GiB"})
         fio_thread1.start()
 
-        no_lvol_node_uuid = self.sbcli_utils.get_node_without_lvols()
         no_lvol_node = self.sbcli_utils.get_storage_node_details(storage_node_id=no_lvol_node_uuid)
         node_ip = no_lvol_node[0]["mgmt_ip"]
 
@@ -113,95 +113,55 @@ class TestSingleNodeFailure(TestClusterBase):
                          health_check_status=True
                          )
 
-        sleep_n_sec(30)
-        self.ssh_obj.stop_spdk_process(node=node_ip)
+        for i in range(5):
 
-        try:
-            self.logger.info(f"Waiting for node to become offline/unreachable, {no_lvol_node_uuid}")
-            self.sbcli_utils.wait_for_storage_node_status(no_lvol_node_uuid,
-                                                          ["unreachable", "offline"],
-                                                          timeout=500)
-            # sleep_n_sec(30)
-            # self.validations(node_uuid=no_lvol_node_uuid,
-            #                 node_status=["offline", "in_shutdown", "in_restart"],
-            #                 # The status changes between them very quickly hence
-            #                 # needed multiple checks
-            #                 device_status="unavailable",
-            #                 lvol_status="online",
-            #                 health_check_status=False
-            #                 )
+            sleep_n_sec(30)
+            self.ssh_obj.stop_spdk_process(node=node_ip)
+
             try:
-                # expected_error_regex = r"Failed to create BDev: distr_\d+_test_lvol_fail"
-                self.sbcli_utils.add_lvol(
-                    lvol_name=f"{self.lvol_name}_fail",
-                    pool_name=self.pool_name,
-                    size="10G",
-                    # distr_ndcs=2,
-                    # distr_npcs=1,
-                    host_id=no_lvol_node_uuid,
-                    retry=2
-                )
-            except HTTPError as e:
-                error = json.loads(e.response.text)
-                self.logger.info(f"Lvol addition failed for node {no_lvol_node_uuid}. Error:{error}")
-                assert "Storage node is not online" in error["error"], f"Unexpected error: {error['error']}"
-                lvols = self.sbcli_utils.list_lvols()
-                assert f"{self.lvol_name}_fail" not in list(lvols.keys()), \
-                    (f"Lvol {self.lvol_name}_fail present in list of lvols post add: {lvols}. "
-                     "Expected: Lvol is not added")
+                self.logger.info(f"Waiting for node to become offline/unreachable, {no_lvol_node_uuid}")
+                self.sbcli_utils.wait_for_storage_node_status(no_lvol_node_uuid,
+                                                              ["unreachable", "offline"],
+                                                              timeout=500)
+            except Exception as exp:
+                self.logger.debug(exp)
+                # self.sbcli_utils.restart_node(node_uuid=no_lvol_node_uuid)
+                self.logger.info(f"Waiting for node to become online, {no_lvol_node_uuid}")
+                self.sbcli_utils.wait_for_storage_node_status(no_lvol_node_uuid,
+                                                              "online",
+                                                              timeout=300)
+                raise exp
 
-            sleep_n_sec(10)
-            self.sbcli_utils.add_lvol(
-                lvol_name=f"{self.lvol_name}_2",
-                pool_name=self.pool_name,
-                size="10G",
-                # distr_ndcs=2,
-                # distr_npcs=1,
-            )
-            lvols = self.sbcli_utils.list_lvols()
-            assert f"{self.lvol_name}_2" in list(lvols.keys()), \
-                (f"Lvol {self.lvol_name}_2 not present in list of lvols post add: {lvols}. "
-                 "Expected: Lvol is added")
-
-        except Exception as exp:
-            self.logger.debug(exp)
             # self.sbcli_utils.restart_node(node_uuid=no_lvol_node_uuid)
             self.logger.info(f"Waiting for node to become online, {no_lvol_node_uuid}")
-            self.sbcli_utils.wait_for_storage_node_status(no_lvol_node_uuid,
-                                                          "online",
-                                                          timeout=300)
-            raise exp
+            self.sbcli_utils.wait_for_storage_node_status(no_lvol_node_uuid, "online", timeout=300)
+            sleep_n_sec(30)
+            self.validations(node_uuid=no_lvol_node_uuid,
+                             node_status="online",
+                             device_status="online",
+                             lvol_status="online",
+                             health_check_status=True
+                             )
 
-        # self.sbcli_utils.restart_node(node_uuid=no_lvol_node_uuid)
-        self.logger.info(f"Waiting for node to become online, {no_lvol_node_uuid}")
-        self.sbcli_utils.wait_for_storage_node_status(no_lvol_node_uuid, "online", timeout=300)
-        sleep_n_sec(30)
-        self.validations(node_uuid=no_lvol_node_uuid,
-                         node_status="online",
-                         device_status="online",
-                         lvol_status="online",
-                         health_check_status=True
-                         )
 
         # Write steps in order
         steps = {
             "Storage Node": ["shutdown", "restart"],
-            "Device": {"restart"}
         }
         self.common_utils.validate_event_logs(cluster_id=self.cluster_id,
                                               operations=steps)
-
+        
         end_time = self.common_utils.manage_fio_threads(node=self.mgmt_nodes[0],
                                                         threads=[fio_thread1],
                                                         timeout=1000)
 
         self.common_utils.validate_fio_test(node=self.mgmt_nodes[0],
                                             log_file=self.log_path)
-
-        # total_fio_runtime = end_time - self.ssh_obj.fio_runtime["fio_run_1"]
-        # self.logger.info(f"FIO Run Time: {total_fio_runtime}")
-
-        # assert  total_fio_runtime >= 500, \
-        #     f'FIO Run Time Interrupted before given runtime. Actual: {self.ssh_obj.fio_runtime["fio_run_1"]}'
+        
+        total_fio_runtime = end_time - self.ssh_obj.fio_runtime["fio_run_1"]
+        self.logger.info(f"FIO Run Time: {total_fio_runtime}")
+        
+        assert  total_fio_runtime >= self.fio_runtime, \
+            f'FIO Run Time Interrupted before given runtime. Actual: {self.ssh_obj.fio_runtime["fio_run_1"]}'
 
         self.logger.info("TEST CASE PASSED !!!")
