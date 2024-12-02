@@ -532,8 +532,8 @@ def _create_storage_device_stack(rpc_client, nvme, snode, after_restart):
     nvme.nvmf_ip = IP
     nvme.nvmf_port = 4420
     nvme.io_error = False
-    if nvme.status != NVMeDevice.STATUS_NEW:
-        nvme.status = NVMeDevice.STATUS_ONLINE
+    # if nvme.status != NVMeDevice.STATUS_NEW:
+    #     nvme.status = NVMeDevice.STATUS_ONLINE
     return nvme
 
 def _create_device_partitions(rpc_client, nvme, snode, num_partitions_per_dev, jm_percent):
@@ -700,8 +700,8 @@ def _prepare_cluster_devices_on_restart(snode):
         if not dev:
             logger.error(f"Failed to create dev stack {nvme.get_id()}")
             return False
-        if nvme.status == NVMeDevice.STATUS_ONLINE:
-            device_events.device_restarted(dev)
+        # if nvme.status == NVMeDevice.STATUS_ONLINE:
+        #     device_events.device_restarted(dev)
 
     snode.nvme_devices = new_devices
     snode.write_to_db()
@@ -1776,8 +1776,8 @@ def restart_storage_node(
                 continue
             if db_dev.serial_number in devices_sn:
                 logger.info(f"Device found: {db_dev.get_id()}, status {db_dev.status}")
-                if db_dev.status not in [NVMeDevice.STATUS_JM, NVMeDevice.STATUS_FAILED, NVMeDevice.STATUS_NEW]:
-                    db_dev.status = NVMeDevice.STATUS_ONLINE
+                # if db_dev.status not in [NVMeDevice.STATUS_JM, NVMeDevice.STATUS_FAILED, NVMeDevice.STATUS_NEW]:
+                #     db_dev.status = NVMeDevice.STATUS_ONLINE
                 active_devices.append(db_dev)
             else:
                 logger.info(f"Device not found: {db_dev.get_id()}")
@@ -1828,6 +1828,12 @@ def restart_storage_node(
 
     logger.info("Setting node status to Online")
     set_node_status(node_id, StorageNode.STATUS_ONLINE)
+
+    snode = db_controller.get_storage_node_by_id(snode.get_id())
+    for db_dev in snode.nvme_devices:
+        if db_dev.status in [NVMeDevice.STATUS_UNAVAILABLE, NVMeDevice.STATUS_READONLY]:
+            db_dev.status = NVMeDevice.STATUS_ONLINE
+    snode.write_to_db(db_controller.kv_store)
 
     # make other nodes connect to the new devices
     logger.info("Make other nodes connect to the node devices")
