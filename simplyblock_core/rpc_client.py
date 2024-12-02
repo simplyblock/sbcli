@@ -885,8 +885,11 @@ class RPCClient:
         return self._request("nvmf_subsystem_remove_listener", params)
 
 
-    def bdev_distrib_force_to_non_leader(self):
-        return self._request("bdev_distrib_force_to_non_leader")
+    def bdev_distrib_force_to_non_leader(self, jm_vuid=0):
+        params = None
+        if jm_vuid:
+            params = {"jm_vuid": jm_vuid}
+        return self._request("bdev_distrib_force_to_non_leader", params)
 
     def bdev_lvol_set_leader(self, is_leader=False):
         params = {

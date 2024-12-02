@@ -2160,7 +2160,7 @@ def suspend_storage_node(node_id, force=False):
                     ret = rpc_client.nvmf_subsystem_listener_set_ana_state(
                         lvol.nqn, iface.ip4_address, "4420", False, ana="inaccessible")
 
-    rpc_client.bdev_distrib_force_to_non_leader()
+    rpc_client.bdev_distrib_force_to_non_leader(snode.jm_vuid)
 
     for lvol_id in snode.lvols:
         lvol = db_controller.get_lvol_by_id(lvol_id)
@@ -2235,7 +2235,7 @@ def resume_storage_node(node_id):
                     if iface.ip4_address:
                         ret = rpc_client.nvmf_subsystem_listener_set_ana_state(
                             lvol.nqn, iface.ip4_address, "4420", False, "inaccessible")
-                rpc_client.bdev_distrib_force_to_non_leader()
+                rpc_client.bdev_distrib_force_to_non_leader(snode.jm_vuid)
 
     # time.sleep(1)
 
@@ -2857,7 +2857,7 @@ def recreate_lvstore(snode):
             lvol.write_to_db(db_controller.kv_store)
 
         rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
-        rpc_client.bdev_distrib_force_to_non_leader()
+        rpc_client.bdev_distrib_force_to_non_leader(snode.jm_vuid)
 
         time.sleep(2)
 
@@ -2878,7 +2878,7 @@ def recreate_lvstore(snode):
                                 ret = rpc_client.nvmf_subsystem_listener_set_ana_state(
                                     lvol.nqn, iface.ip4_address, "4420", False, "inaccessible")
 
-                        rpc_client.bdev_distrib_force_to_non_leader()
+                        rpc_client.bdev_distrib_force_to_non_leader(snode.jm_vuid)
 
 
         rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
@@ -3122,8 +3122,6 @@ def _create_bdev_stack(snode, lvstore_stack=None, primary_node=False):
             distribs_list = bdev["distribs_list"]
             strip_size_kb = params["strip_size_kb"]
             ret = rpc_client.bdev_raid_create(name, distribs_list, strip_size_kb=strip_size_kb)
-            time.sleep(1)
-            ret = rpc_client.bdev_distrib_force_to_non_leader()
 
         else:
             logger.debug(f"Unknown BDev type: {type}")
