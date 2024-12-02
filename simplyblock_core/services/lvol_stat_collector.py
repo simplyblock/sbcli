@@ -14,6 +14,22 @@ logger = utils.get_logger(__name__)
 last_object_record = {}
 
 
+def sum_stats(stats_list):
+    ret = {}
+    for key in stats_list[0].keys():
+        for stat_dict in stats_list:
+            value = stat_dict[key]
+            try:
+                v_int = int(value)
+                if key in ret:
+                    ret[key] = ret[key] + v_int
+                else:
+                    ret[key] = v_int
+            except:
+                pass
+    return ret
+
+
 def add_lvol_stats(pool, lvol, stats_list):
     now = int(time.time())
     data = {
@@ -23,20 +39,25 @@ def add_lvol_stats(pool, lvol, stats_list):
 
 
     if stats_list:
-        for stats in stats_list:
-            data.update({
-                "read_bytes": stats['bytes_read'] + data.get("'bytes_read'", 0),
-                "read_io": stats['num_read_ops'] + data.get("'read_io'", 0),
-                "read_latency_ticks": stats['read_latency_ticks'] + data.get("'read_latency_ticks'", 0),
 
-                "write_bytes": stats['bytes_written'] + data.get("'bytes_written'", 0),
-                "write_io": stats['num_write_ops'] + data.get("'num_write_ops'", 0),
-                "write_latency_ticks": stats['write_latency_ticks'] + data.get("'write_latency_ticks'", 0),
+        if len (stats_list) > 1:
+            stats = sum_stats(stats_list)
+        else:
+            stats = stats_list[0]
 
-                "unmap_bytes": stats['bytes_unmapped'] + data.get("'bytes_unmapped'", 0),
-                "unmap_io": stats['num_unmap_ops'] + data.get("'num_unmap_ops'", 0) ,
-                "unmap_latency_ticks": stats['unmap_latency_ticks'] + data.get("'unmap_latency_ticks'", 0),
-            })
+        data.update({
+            "read_bytes": stats['bytes_read'],
+            "read_io": stats['num_read_ops'],
+            "read_latency_ticks": stats['read_latency_ticks'],
+
+            "write_bytes": stats['bytes_written'],
+            "write_io": stats['num_write_ops'],
+            "write_latency_ticks": stats['write_latency_ticks'],
+
+            "unmap_bytes": stats['bytes_unmapped'],
+            "unmap_io": stats['num_unmap_ops'],
+            "unmap_latency_ticks": stats['unmap_latency_ticks'],
+        })
 
         if lvol.get_id() in last_object_record:
             last_record = last_object_record[lvol.get_id()]
