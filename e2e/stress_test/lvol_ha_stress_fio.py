@@ -21,7 +21,7 @@ class TestLvolHACluster(FioWorkloadTest):
         super().__init__(**kwargs)
         self.logger = setup_logger(__name__)
         self.lvol_size = "25G"
-        self.fio_size = "3GiB"
+        self.fio_size = "18GiB"
         self.total_lvols = 10
         self.total_snapshots = 30
         self.lvol_name = "lvol"
@@ -196,59 +196,59 @@ class TestLvolHACluster(FioWorkloadTest):
         sleep_n_sec(30)
 
         # Sce-2 Container stop and restart
-        # self.logger.info("Container stop and restart.")
-        # timestamp = int(datetime.now().timestamp())
-        # node_details = self.sbcli_utils.get_storage_node_details(self.lvol_node)
-        # node_ip = node_details[0]["mgmt_ip"]
-        # self.ssh_obj.stop_spdk_process(node_ip)
-        # self.sbcli_utils.wait_for_storage_node_status(self.lvol_node,
-        #                                               "online",
-        #                                               timeout=800)
-        
-        # self.validate_checksums()
-        
-        # sleep_n_sec(30)
-
-        # self.logger.info(f"Fetching migration tasks for cluster {self.cluster_id}.")
-
-        # self.logger.info(f"Validating migration tasks for node {self.lvol_node}.")
-        # self.validate_migration_for_node(timestamp, 5000, None)
-        # sleep_n_sec(30)
-
-
-        # Sce-3 Network stop and restart
-        self.logger.info("Network stop and restart.")
+        self.logger.info("Container stop and restart.")
         timestamp = int(datetime.now().timestamp())
-        cmd = (
-            'nohup sh -c "sudo nmcli dev disconnect eth0 && sleep 120 && '
-            'sudo nmcli dev connect eth0" &'
-        )
-
         node_details = self.sbcli_utils.get_storage_node_details(self.lvol_node)
         node_ip = node_details[0]["mgmt_ip"]
-
-        unavailable_thread = threading.Thread(
-            target=lambda: self.sbcli_utils.wait_for_storage_node_status(self.lvol_node, ["unavailable", "unreachable", "offline"], 300)
-        )
-
-        unavailable_thread.start()
-
-        self.ssh_obj.exec_command(node_ip, command=cmd)
-        unavailable_thread.join()
+        self.ssh_obj.stop_spdk_process(node_ip)
         self.sbcli_utils.wait_for_storage_node_status(self.lvol_node,
                                                       "online",
                                                       timeout=800)
         
-        self.logger.info(f"Fetching migration tasks for cluster {self.cluster_id}.")
-        output, _ = self.ssh_obj.exec_command(node=self.mgmt_nodes[0], 
-                                              command=f"{self.base_cmd} cluster list-tasks {self.cluster_id}")
-        self.logger.info(f"Data migration output: {output}")
-
-        # self.logger.info(f"Validating migration tasks for node {self.lvol_node}.")
-        # self.validate_migration_for_node(timestamp, 5000, None)
+        self.validate_checksums()
+        
         sleep_n_sec(30)
 
-        self.validate_checksums()
+        self.logger.info(f"Fetching migration tasks for cluster {self.cluster_id}.")
+
+        self.logger.info(f"Validating migration tasks for node {self.lvol_node}.")
+        self.validate_migration_for_node(timestamp, 5000, None)
+        sleep_n_sec(30)
+
+
+        # Sce-3 Network stop and restart
+        # self.logger.info("Network stop and restart.")
+        # timestamp = int(datetime.now().timestamp())
+        # cmd = (
+        #     'nohup sh -c "sudo nmcli dev disconnect eth0 && sleep 120 && '
+        #     'sudo nmcli dev connect eth0" &'
+        # )
+
+        # node_details = self.sbcli_utils.get_storage_node_details(self.lvol_node)
+        # node_ip = node_details[0]["mgmt_ip"]
+
+        # unavailable_thread = threading.Thread(
+        #     target=lambda: self.sbcli_utils.wait_for_storage_node_status(self.lvol_node, ["unavailable", "unreachable", "offline"], 300)
+        # )
+
+        # unavailable_thread.start()
+
+        # self.ssh_obj.exec_command(node_ip, command=cmd)
+        # unavailable_thread.join()
+        # self.sbcli_utils.wait_for_storage_node_status(self.lvol_node,
+        #                                               "online",
+        #                                               timeout=800)
+        
+        # self.logger.info(f"Fetching migration tasks for cluster {self.cluster_id}.")
+        # output, _ = self.ssh_obj.exec_command(node=self.mgmt_nodes[0], 
+        #                                       command=f"{self.base_cmd} cluster list-tasks {self.cluster_id}")
+        # self.logger.info(f"Data migration output: {output}")
+
+        # # self.logger.info(f"Validating migration tasks for node {self.lvol_node}.")
+        # # self.validate_migration_for_node(timestamp, 5000, None)
+        # sleep_n_sec(30)
+
+        # self.validate_checksums()
         
         self.logger.info("Completed failure scenarios.")
 
