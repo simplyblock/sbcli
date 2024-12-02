@@ -2,8 +2,13 @@
 import json
 import requests
 from http import HTTPStatus
-from logger_config import setup_logger
-from utils.common_utils import sleep_n_sec
+
+try:
+    from logger_config import setup_logger
+    from utils.common_utils import sleep_n_sec
+except:
+    from e2e.logger_config import setup_logger
+    from e2e.utils.common_utils import sleep_n_sec
 
 
 class SbcliUtils:
@@ -39,11 +44,10 @@ class SbcliUtils:
                 resp = requests.get(request_url, headers=headers)
                 if resp.status_code == HTTPStatus.OK:
                     data = resp.json()
+                    return data
                 else:
-                    self.logger.error('request failed. status_code', resp.status_code)
-                    self.logger.error('request failed. text', resp.text)
+                    self.logger.error(f"request failed. status_code: {resp.status_code}, text: {resp.text}")
                     resp.raise_for_status()
-                return data
             except Exception as e:
                 self.logger.debug(f"API call {api_url} failed with error:{e}")
                 retry -= 1
@@ -51,6 +55,7 @@ class SbcliUtils:
                     self.logger.info(f"Retry attempt exhausted. API {api_url} failed with: {e}.")
                     raise e
                 self.logger.info(f"Retrying API {api_url}. Attempt: {10 - retry + 1}")
+                sleep_n_sec(1)
 
     def post_request(self, api_url, headers=None, body=None, retry=10):
         """Performs post request on the given API URL
