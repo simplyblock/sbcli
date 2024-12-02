@@ -249,6 +249,11 @@ def storage_node_add():
     if 'iobuf_large_pool_count' in req_data:
         iobuf_large_pool_count = int(req_data['iobuf_large_pool_count'])
 
+    is_secondary_node = False
+    if 'is_secondary_node' in req_data:
+        is_secondary_node = bool(req_data['is_secondary_node'])
+
+
     tasks_controller.add_node_add_task(cluster_id, {
         "cluster_id": cluster_id,
         "node_ip": node_ip,
@@ -268,7 +273,9 @@ def storage_node_add():
         "enable_test_device": enable_test_device,
         "number_of_distribs": number_of_distribs,
         "namespace": namespace,
-        "enable_ha_jm": not disable_ha_jm})
+        "enable_ha_jm": not disable_ha_jm,
+        "is_secondary_node": is_secondary_node,
+    })
 
     return utils.get_response(True)
 
