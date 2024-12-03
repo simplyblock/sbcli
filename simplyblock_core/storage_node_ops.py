@@ -867,7 +867,7 @@ def _connect_to_remote_jm_devs(this_node, jm_ids=[]):
         for node in db_controller.get_storage_nodes_by_cluster_id(this_node.cluster_id):
             if node.get_id() == this_node.get_id() or node.is_secondary_node:
                 continue
-            if node.jm_device and node.jm_device.status == JMDevice.STATUS_ONLINE:
+            if node.jm_device and node.jm_device.status in [JMDevice.STATUS_ONLINE, JMDevice.STATUS_UNAVAILABLE]:
                 remote_devices.append(node.jm_device)
     else:
         if jm_ids:
@@ -2881,7 +2881,7 @@ def recreate_lvstore(snode):
                 nodes_ips = []
                 for node_id in lvol.nodes:
                     sn = db_controller.get_storage_node_by_id(node_id)
-                    rpc_client = RPCClient(sn.mgmt_ip, sn.rpc_port, sn.rpc_username, sn.rpc_password)
+                    rpc_client = RPCClient(sn.mgmt_ip, sn.rpc_port, sn.rpc_username, sn.rpc_password, timeout=3, retry=2)
                     nodes_ips.append(f"{sn.mgmt_ip}:")
                     if node_id != lvol.node_id:
                         for iface in sn.data_nics:
@@ -2911,7 +2911,8 @@ def recreate_lvstore(snode):
                 for node_id in lvol.nodes:
                     sn = db_controller.get_storage_node_by_id(node_id)
                     if node_id != lvol.node_id:
-                        rpc_client = RPCClient(sn.mgmt_ip, sn.rpc_port, sn.rpc_username, sn.rpc_password)
+                        rpc_client = RPCClient(
+                            sn.mgmt_ip, sn.rpc_port, sn.rpc_username, sn.rpc_password, timeout=3, retry=2)
                         for iface in sn.data_nics:
                             if iface.ip4_address:
                                 ret = rpc_client.nvmf_subsystem_listener_set_ana_state(
