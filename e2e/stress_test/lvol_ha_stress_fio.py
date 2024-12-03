@@ -4,6 +4,7 @@ from utils.common_utils import sleep_n_sec
 from e2e_tests.data_migration.data_migration_ha_fio import FioWorkloadTest
 from logger_config import setup_logger
 from datetime import datetime
+from exceptions.custom_exception import LvolNotConnectException
 
 
 class TestLvolHACluster(FioWorkloadTest):
@@ -69,7 +70,7 @@ class TestLvolHACluster(FioWorkloadTest):
                     lvol_device = f"/dev/{device.strip()}"
                     break
             if not lvol_device:
-                raise Exception("LVOL did not connect")
+                raise LvolNotConnectException("LVOL did not connect")
             self.lvol_mount_details[lvol_id]["Device"] = lvol_device
             self.ssh_obj.format_disk(node=self.node, device=lvol_device, fs_type=fs_type)
 
@@ -137,10 +138,6 @@ class TestLvolHACluster(FioWorkloadTest):
         for lvol_id, lvol in self.lvol_mount_details.items():
             self.ssh_obj.unmount_path(node=self.node, device=lvol["Mount"])
             existing_devices.append(lvol["Device"][5:-1])
-            # filter_nqn = self.ssh_obj.get_nvme_subsystems(node=self.node, nqn_filter=lvol_id)
-            # for nqn in filter_nqn:
-            #     self.ssh_obj.disconnect_nvme(node=self.node, nqn_grep=nqn)
-            # self.ssh_obj.remove_dir(node=self.node, dir_path=lvol["Mount"])
 
         self.wait_for_all_devices(existing_devices)
         
@@ -164,12 +161,24 @@ class TestLvolHACluster(FioWorkloadTest):
             
             assert final_checksums == lvol["MD5"], f"Checksum validation for {lvol['Name']} is not successful. Intial: {lvol['MD5']}, Final: {final_checksums}"
 
-    def run_scenarios(self):
-        """Run failure scenarios."""
-        
-        self.logger.info("Running failure scenarios.")
-        
-        # Sce-1 Graceful shutdown and restart
+
+class TestLvolHAClusterGracefulShutdown(TestLvolHACluster):
+    """Tests Graceful shutdown for LVstore recover
+    """
+    
+    def run(self):
+        """Main execution."""
+        self.logger.info("SCE-1: Starting high-volume stress test.")
+        self.node = self.mgmt_nodes[0]
+        self.ssh_obj.make_directory(node=self.node, dir_name=self.log_path)
+        self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
+        self.lvol_node = self.sbcli_utils.get_node_without_lvols()
+
+        self.create_lvols()
+        self.create_snapshots()
+        self.fill_volumes()
+        self.calculate_md5()
+
         self.logger.info("Graceful shutdown and restart.")
         timestamp = int(datetime.now().timestamp())
 
@@ -194,8 +203,26 @@ class TestLvolHACluster(FioWorkloadTest):
         self.logger.info(f"Validating migration tasks for node {self.lvol_node}.")
         self.validate_migration_for_node(timestamp, 5000, None)
         sleep_n_sec(30)
+        
+        self.logger.info("Stress test completed.")
 
-        # Sce-2 Container stop and restart
+
+class TestLvolHAClusterStorageNodeCrash(TestLvolHACluster):
+    """Tests Ungraceful shutdown for LVstore recover
+    """
+    def run(self):
+        """Main execution."""
+        self.logger.info("SCE-2: Starting high-volume stress test.")
+        self.node = self.mgmt_nodes[0]
+        self.ssh_obj.make_directory(node=self.node, dir_name=self.log_path)
+        self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
+        self.lvol_node = self.sbcli_utils.get_node_without_lvols()
+
+        self.create_lvols()
+        self.create_snapshots()
+        self.fill_volumes()
+        self.calculate_md5()
+
         self.logger.info("Container stop and restart.")
         timestamp = int(datetime.now().timestamp())
         node_details = self.sbcli_utils.get_storage_node_details(self.lvol_node)
@@ -214,47 +241,17 @@ class TestLvolHACluster(FioWorkloadTest):
         self.logger.info(f"Validating migration tasks for node {self.lvol_node}.")
         self.validate_migration_for_node(timestamp, 5000, None)
         sleep_n_sec(30)
-
-
-        # Sce-3 Network stop and restart
-        # self.logger.info("Network stop and restart.")
-        # timestamp = int(datetime.now().timestamp())
-        # cmd = (
-        #     'nohup sh -c "sudo nmcli dev disconnect eth0 && sleep 120 && '
-        #     'sudo nmcli dev connect eth0" &'
-        # )
-
-        # node_details = self.sbcli_utils.get_storage_node_details(self.lvol_node)
-        # node_ip = node_details[0]["mgmt_ip"]
-
-        # unavailable_thread = threading.Thread(
-        #     target=lambda: self.sbcli_utils.wait_for_storage_node_status(self.lvol_node, ["unavailable", "unreachable", "offline"], 300)
-        # )
-
-        # unavailable_thread.start()
-
-        # self.ssh_obj.exec_command(node_ip, command=cmd)
-        # unavailable_thread.join()
-        # self.sbcli_utils.wait_for_storage_node_status(self.lvol_node,
-        #                                               "online",
-        #                                               timeout=800)
         
-        # self.logger.info(f"Fetching migration tasks for cluster {self.cluster_id}.")
-        # output, _ = self.ssh_obj.exec_command(node=self.mgmt_nodes[0], 
-        #                                       command=f"{self.base_cmd} cluster list-tasks {self.cluster_id}")
-        # self.logger.info(f"Data migration output: {output}")
+        self.logger.info("Stress test completed.")
 
-        # # self.logger.info(f"Validating migration tasks for node {self.lvol_node}.")
-        # # self.validate_migration_for_node(timestamp, 5000, None)
-        # sleep_n_sec(30)
 
-        # self.validate_checksums()
-        
-        self.logger.info("Completed failure scenarios.")
-
+class TestLvolHAClusterNetworkInterrupt(TestLvolHACluster):
+    """Tests Graceful shutdown for LVstore recover
+    """
+    
     def run(self):
         """Main execution."""
-        self.logger.info("Starting high-volume stress test.")
+        self.logger.info("SCE-3: Starting high-volume stress test.")
         self.node = self.mgmt_nodes[0]
         self.ssh_obj.make_directory(node=self.node, dir_name=self.log_path)
         self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
@@ -264,5 +261,38 @@ class TestLvolHACluster(FioWorkloadTest):
         self.create_snapshots()
         self.fill_volumes()
         self.calculate_md5()
-        self.run_scenarios()
+
+        self.logger.info("Network stop and restart.")
+        timestamp = int(datetime.now().timestamp())
+        cmd = (
+            'nohup sh -c "sudo nmcli dev disconnect eth0 && sleep 120 && '
+            'sudo nmcli dev connect eth0" &'
+        )
+
+        node_details = self.sbcli_utils.get_storage_node_details(self.lvol_node)
+        node_ip = node_details[0]["mgmt_ip"]
+
+        unavailable_thread = threading.Thread(
+            target=lambda: self.sbcli_utils.wait_for_storage_node_status(self.lvol_node, ["unavailable", "unreachable", "offline"], 300)
+        )
+
+        unavailable_thread.start()
+
+        self.ssh_obj.exec_command(node_ip, command=cmd)
+        unavailable_thread.join()
+        self.sbcli_utils.wait_for_storage_node_status(self.lvol_node,
+                                                      "online",
+                                                      timeout=800)
+        
+        self.logger.info(f"Fetching migration tasks for cluster {self.cluster_id}.")
+        output, _ = self.ssh_obj.exec_command(node=self.mgmt_nodes[0], 
+                                              command=f"{self.base_cmd} cluster list-tasks {self.cluster_id}")
+        self.logger.info(f"Data migration output: {output}")
+
+        # self.logger.info(f"Validating migration tasks for node {self.lvol_node}.")
+        # self.validate_migration_for_node(timestamp, 5000, None)
+        sleep_n_sec(30)
+
+        self.validate_checksums()
+        
         self.logger.info("Stress test completed.")

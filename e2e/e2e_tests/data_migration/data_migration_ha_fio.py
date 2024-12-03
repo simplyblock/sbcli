@@ -99,6 +99,8 @@ class FioWorkloadTest(TestClusterBase):
         # Step 5: Run fio workloads with different configurations
         fio_threads = self.run_fio(lvol_fio_path)
 
+        # SCE-1: Graceful Shutdown
+
         # Step 6: Continue with node shutdown, restart, and migration task validation
         affected_node = list(sn_lvol_data.keys())[0]
         self.logger.info(f"Shutting down node {affected_node}.")
@@ -150,6 +152,7 @@ class FioWorkloadTest(TestClusterBase):
 
         sleep_n_sec(120)
 
+        # SCE-2: Node crash
         # # Step 7: Stop container on another node
         affected_node = list(sn_lvol_data.keys())[1]
         timestamp = int(datetime.now().timestamp())
@@ -199,6 +202,8 @@ class FioWorkloadTest(TestClusterBase):
         )
         self.logger.info(f"Output for sn list: {output}")
 
+        
+        # SCE-3: Instance terminate and new add
         # # Step 8: Stop instance
         timestamp = int(datetime.now().timestamp())
         affected_node = list(sn_lvol_data.keys())[2]
