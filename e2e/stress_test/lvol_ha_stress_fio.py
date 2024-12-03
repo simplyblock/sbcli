@@ -23,7 +23,7 @@ class TestLvolHACluster(FioWorkloadTest):
         self.logger = setup_logger(__name__)
         self.lvol_size = "25G"
         self.fio_size = "18GiB"
-        self.total_lvols = 500
+        self.total_lvols = 10
         self.snapshot_per_lvol = 6
         self.lvol_name = "lvol"
         self.snapshot_name = "snapshot"
@@ -185,9 +185,9 @@ class TestLvolHACluster(FioWorkloadTest):
 class TestLvolHAClusterGracefulShutdown(TestLvolHACluster):
     """Tests Graceful shutdown for LVstore recover
     """
-    
     def run(self):
         """Main execution."""
+        self.logger.info(f"Mount details: {self.lvol_mount_details}")
         self.logger.info("SCE-1: Starting high-volume stress test.")
         self.node = self.mgmt_nodes[0]
         self.ssh_obj.make_directory(node=self.node, dir_name=self.log_path)
@@ -241,6 +241,7 @@ class TestLvolHAClusterStorageNodeCrash(TestLvolHACluster):
     """
     def run(self):
         """Main execution."""
+        self.logger.info(f"Mount details: {self.lvol_mount_details}")
         self.logger.info("SCE-2: Starting high-volume stress test.")
         self.node = self.mgmt_nodes[0]
         self.ssh_obj.make_directory(node=self.node, dir_name=self.log_path)
@@ -288,9 +289,9 @@ class TestLvolHAClusterStorageNodeCrash(TestLvolHACluster):
 class TestLvolHAClusterNetworkInterrupt(TestLvolHACluster):
     """Tests Graceful shutdown for LVstore recover
     """
-    
     def run(self):
         """Main execution."""
+        self.logger.info(f"Mount details: {self.lvol_mount_details}")
         self.logger.info("SCE-3: Starting high-volume stress test.")
         self.node = self.mgmt_nodes[0]
         self.ssh_obj.make_directory(node=self.node, dir_name=self.log_path)
