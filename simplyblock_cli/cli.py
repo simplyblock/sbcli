@@ -125,6 +125,7 @@ class CLIWrapper:
         sub_command.add_argument("node_id", help='Node ID')
         sub_command.add_argument("--history", help='list history records -one for every 15 minutes- '
                                                    'for XX days and YY hours -up to 10 days in total-, format: XXdYYh')
+        sub_command.add_argument("--records", help='Number of records, default: 20', type=int, default=20)
 
         sub_command = self.add_sub_command(
             subparser, 'get-capacity', 'Get node capacity statistics')
@@ -207,6 +208,7 @@ class CLIWrapper:
         sub_command.add_argument("device_id", help='Storage device ID')
         sub_command.add_argument("--history", help='list history records -one for every 15 minutes- '
                                                    'for XX days and YY hours -up to 10 days in total-, format: XXdYYh')
+        sub_command.add_argument("--records", help='Number of records, default: 20', type=int, default=20)
 
         sub_command = self.add_sub_command(subparser, 'port-list', 'Get Data interfaces list for a node')
         sub_command.add_argument("node_id", help='Storage node ID')
@@ -531,6 +533,7 @@ class CLIWrapper:
         sub_command.add_argument("id", help='LVol id')
         sub_command.add_argument("--history", help='(XXdYYh), list history records (one for every 15 minutes) '
                                                    'for XX days and YY hours (up to 10 days in total).')
+        sub_command.add_argument("--records", help='Number of records, default: 20', type=int, default=20)
 
         sub_command = self.add_sub_command(subparser, "check", 'Health check LVol')
         sub_command.add_argument("id", help='UUID of LVol')
@@ -625,6 +628,7 @@ class CLIWrapper:
         sub_command.add_argument("id", help='Pool id')
         sub_command.add_argument("--history", help='(XXdYYh), list history records (one for every 15 minutes) '
                                                    'for XX days and YY hours (up to 10 days in total).')
+        sub_command.add_argument("--records", help='Number of records, default: 20', type=int, default=20)
 
         subparser = self.add_command('snapshot', 'Snapshot commands')
 
@@ -856,7 +860,8 @@ class CLIWrapper:
             elif sub_command == "get-io-stats-device":
                 device_id = args.device_id
                 history = args.history
-                data = device_controller.get_device_iostats(device_id, history)
+                records = args.records
+                data = device_controller.get_device_iostats(device_id, history, records_count=records)
                 if data:
                     ret = utils.print_table(data)
                 else:
@@ -874,7 +879,8 @@ class CLIWrapper:
             elif sub_command == "get-io-stats":
                 node_id = args.node_id
                 history = args.history
-                data = storage_ops.get_node_iostats_history(node_id, history)
+                records = args.records
+                data = storage_ops.get_node_iostats_history(node_id, history, records_count=records)
 
                 if data:
                     ret = utils.print_table(data)
@@ -1072,7 +1078,8 @@ class CLIWrapper:
             elif sub_command == "get-io-stats":
                 id = args.id
                 history = args.history
-                data = lvol_controller.get_io_stats(id, history)
+                records = args.records
+                data = lvol_controller.get_io_stats(id, history, records_count=records)
                 if data:
                     ret = utils.print_table(data)
                 else:
@@ -1162,7 +1169,7 @@ class CLIWrapper:
                 ret = pool_controller.get_capacity(args.pool_id)
 
             elif sub_command == "get-io-stats":
-                ret = pool_controller.get_io_stats(args.id, args.history)
+                ret = pool_controller.get_io_stats(args.id, args.history, args.records)
 
             else:
                 self.parser.print_help()
