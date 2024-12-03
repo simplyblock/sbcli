@@ -195,7 +195,7 @@ while True:
                     # restart on new node
                     storage_node_ops.set_node_status(snode.get_id(), StorageNode.STATUS_SCHEDULABLE)
 
-                elif ping_check and node_api_check and not spdk_process:
+                elif ping_check and node_api_check and (not spdk_process or not node_rpc_check):
                     # add node to auto restart
                     if cluster.status == Cluster.STATUS_ACTIVE:
                         tasks_controller.add_node_to_auto_restart(snode)
