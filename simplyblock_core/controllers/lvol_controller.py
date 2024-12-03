@@ -653,6 +653,17 @@ def add_lvol_on_node(lvol, snode, ha_comm_addrs=None, ha_inode_self=0):
         if not ret:
             return False
 
+        time.sleep(1)
+
+        for bdev in lvol.bdev_stack:
+            type = bdev['type']
+            params = bdev['params']
+            if type == "crypto":
+                ret = _create_crypto_lvol(rpc_client, **params)
+                if not ret:
+                    return False
+                break
+
     else:
         # Validate adding lvol on storage node
         snode_api = SNodeClient(snode.api_endpoint)
