@@ -98,8 +98,7 @@ class TestSingleNodeFailureHA(TestClusterBase):
         fio_thread1 = threading.Thread(target=self.ssh_obj.run_fio_test, args=(self.mgmt_nodes[0], None, self.mount_path, self.log_path,),
                                        kwargs={"name": "fio_run_1",
                                                "runtime": self.fio_runtime,
-                                               "debug": self.fio_debug,
-                                               "size": "2GiB"})
+                                               "debug": self.fio_debug})
         fio_thread1.start()
 
         no_lvol_node = self.sbcli_utils.get_storage_node_details(storage_node_id=no_lvol_node_uuid)

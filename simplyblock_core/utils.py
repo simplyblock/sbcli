@@ -247,6 +247,11 @@ def parse_history_param(history_string):
 
 def process_records(records, records_count):
     # combine records
+    if not records:
+        return []
+
+    records_count = min(records_count, len(records))
+
     data_per_record = int(len(records) / records_count)
     new_records = []
     for i in range(records_count):
