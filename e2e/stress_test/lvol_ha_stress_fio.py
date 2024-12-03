@@ -23,8 +23,8 @@ class TestLvolHACluster(FioWorkloadTest):
         self.logger = setup_logger(__name__)
         self.lvol_size = "25G"
         self.fio_size = "18GiB"
-        self.total_lvols = 10
-        self.total_snapshots = 30
+        self.total_lvols = 500
+        self.snapshot_per_lvol = 6
         self.lvol_name = "lvol"
         self.snapshot_name = "snapshot"
         self.node = None
@@ -85,31 +85,51 @@ class TestLvolHACluster(FioWorkloadTest):
         """Create 3000 snapshots for existing lvols."""
         self.logger.info("Creating 3000 snapshots.")
         for idx, lvol_id in enumerate(list(self.lvol_mount_details.keys())):
-            if idx >= self.total_snapshots:
-                break
-            snapshot_name = f"{self.snapshot_name}_{idx + 1}"
-            self.ssh_obj.add_snapshot(node=self.node, lvol_id=lvol_id, snapshot_name=snapshot_name)
+            for snap_idx in range(1, self.snapshot_per_lvol + 1):
+                snapshot_name = f"{self.snapshot_name}_{idx + 1}_{snap_idx}"
+                self.ssh_obj.add_snapshot(node=self.node, lvol_id=lvol_id, snapshot_name=snapshot_name)
         self.logger.info("Snapshots created.")
 
     def fill_volumes(self):
-        """Fill lvols with data."""
-        self.logger.info("Filling volumes with data.")
+        """Fill lvols with data in batches of 10."""
+        self.logger.info("Filling volumes with data in batches of 10.")
         fio_threads = []
-        for _, lvol in self.lvol_mount_details.items():
-            fio_thread = threading.Thread(target=self.ssh_obj.run_fio_test, args=(self.node, None, lvol["Mount"], lvol["Log"]),
-                                          kwargs={"size": self.fio_size,
-                                                  "name": f"{lvol['Name']}_fio",
-                                                  "rw": "write",
-                                                  "bs": "4K-128K",
-                                                  "time_based": False,})
-            fio_thread.start()
-            fio_threads.append(fio_thread)
-        self.common_utils.manage_fio_threads(node=self.node,
-                                             threads=fio_threads,
-                                             timeout=10000)
-        for thread in fio_threads:
-            thread.join()
-        self.logger.info("Data filling completed.")
+        lvol_items = list(self.lvol_mount_details.items())
+        batch_size = 10
+
+        # Process lvols in batches
+        for batch_start in range(0, len(lvol_items), batch_size):
+            self.logger.info(f"Processing batch {batch_start // batch_size + 1}.")
+            batch = lvol_items[batch_start:batch_start + batch_size]
+
+            # Run FIO in parallel for the current batch
+            for _, lvol in batch:
+                fio_thread = threading.Thread(
+                    target=self.ssh_obj.run_fio_test,
+                    args=(self.node, None, lvol["Mount"], lvol["Log"]),
+                    kwargs={
+                        "size": self.fio_size,
+                        "name": f"{lvol['Name']}_fio",
+                        "rw": "write",
+                        "bs": "4K-128K",
+                        "time_based": False,
+                    },
+                )
+                fio_thread.start()
+                fio_threads.append(fio_thread)
+
+            # Manage and join threads for the current batch
+            self.common_utils.manage_fio_threads(
+                node=self.node,
+                threads=fio_threads,
+                timeout=10000
+            )
+            for thread in fio_threads:
+                thread.join()
+            fio_threads = []  # Clear threads for the next batch
+
+        self.logger.info("Data filling for all batches completed.")
+
     
     def calculate_md5(self):
         "Calculate Checksums"
