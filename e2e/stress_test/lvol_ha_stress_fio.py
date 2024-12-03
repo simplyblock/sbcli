@@ -25,7 +25,7 @@ class TestLvolHACluster(FioWorkloadTest):
         self.fio_size = "18GiB"
         self.total_lvols = 10
         self.snapshot_per_lvol = 6
-        self.lvol_name = "lvol"
+        self.lvol_name = "lvl"
         self.snapshot_name = "snapshot"
         self.node = None
         self.lvol_node = None
@@ -40,6 +40,7 @@ class TestLvolHACluster(FioWorkloadTest):
             fs_type = random.choice(["xfs", "ext4"])
             is_crypto = random.choice([False, False])
             lvol_name = f"{self.lvol_name}_{i}"
+            self.logger.info(f"Creating lvol with Name: {lvol_name}, fs type: {fs_type}, crypto: {is_crypto}")
             self.sbcli_utils.add_lvol(
                 lvol_name=lvol_name,
                 pool_name=self.pool_name,
@@ -217,6 +218,11 @@ class TestLvolHAClusterGracefulShutdown(TestLvolHACluster):
         self.sbcli_utils.wait_for_health_status(self.lvol_node,
                                                 True,
                                                 timeout=800)
+        
+        node_details = self.sbcli_utils.get_storage_node_details(storage_node_id=self.lvol_node)
+        actual_status = node_details[0]["health_check"]
+        self.logger.info(f"Node health check is: {actual_status}")
+        
         node_up_time = datetime.now()
         
         self.validate_checksums()
@@ -266,6 +272,9 @@ class TestLvolHAClusterStorageNodeCrash(TestLvolHACluster):
         self.sbcli_utils.wait_for_health_status(self.lvol_node,
                                                 True,
                                                 timeout=800)
+        node_details = self.sbcli_utils.get_storage_node_details(storage_node_id=self.lvol_node)
+        actual_status = node_details[0]["health_check"]
+        self.logger.info(f"Node health check is: {actual_status}")
         
         node_up_time = datetime.now()
         
@@ -330,6 +339,10 @@ class TestLvolHAClusterNetworkInterrupt(TestLvolHACluster):
         self.sbcli_utils.wait_for_health_status(self.lvol_node,
                                                 True,
                                                 timeout=800)
+        
+        node_details = self.sbcli_utils.get_storage_node_details(storage_node_id=self.lvol_node)
+        actual_status = node_details[0]["health_check"]
+        self.logger.info(f"Node health check is: {actual_status}")
         
         node_up_time = datetime.now()
         
