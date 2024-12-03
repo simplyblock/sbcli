@@ -185,7 +185,7 @@ while True:
                 rpc_client = RPCClient(
                     snode.mgmt_ip, snode.rpc_port,
                     snode.rpc_username, snode.rpc_password,
-                    timeout=3, retry=2)
+                    timeout=1, retry=2)
 
                 logger.info("Getting lVol stats: %s", lvol.uuid)
                 stats_dict = rpc_client.get_lvol_stats(lvol.top_bdev)

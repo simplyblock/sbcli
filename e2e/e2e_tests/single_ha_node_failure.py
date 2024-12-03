@@ -99,8 +99,7 @@ class TestSingleNodeFailureHA(TestClusterBase):
                                        kwargs={"name": "fio_run_1",
                                                "runtime": self.fio_runtime,
                                                "debug": self.fio_debug,
-                                               "time_based": True,
-                                               "size": "8GiB"})
+                                               "size": "2GiB"})
         fio_thread1.start()
 
         no_lvol_node = self.sbcli_utils.get_storage_node_details(storage_node_id=no_lvol_node_uuid)

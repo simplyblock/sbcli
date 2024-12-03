@@ -174,7 +174,7 @@ while True:
             rpc_client = RPCClient(
                 node.mgmt_ip, node.rpc_port,
                 node.rpc_username, node.rpc_password,
-                timeout=3, retry=2)
+                timeout=1, retry=2)
 
             devices_records = []
             for device in node.nvme_devices:
