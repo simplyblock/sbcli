@@ -189,10 +189,15 @@ class TestLvolHAClusterGracefulShutdown(TestLvolHACluster):
                                                       ["unreachable", "offline"],
                                                       timeout=800)
         sleep_n_sec(30)
+        restart_start_time = datetime.now()
         self.sbcli_utils.restart_node(node_uuid=self.lvol_node)
         self.sbcli_utils.wait_for_storage_node_status(self.lvol_node,
                                                       "online",
                                                       timeout=800)
+        self.sbcli_utils.wait_for_health_status(self.lvol_node,
+                                                True,
+                                                timeout=800)
+        node_up_time = datetime.now()
         
         self.validate_checksums()
 
@@ -203,6 +208,10 @@ class TestLvolHAClusterGracefulShutdown(TestLvolHACluster):
         self.logger.info(f"Validating migration tasks for node {self.lvol_node}.")
         self.validate_migration_for_node(timestamp, 5000, None)
         sleep_n_sec(30)
+
+        time_secs = node_up_time - restart_start_time
+        time_mins = time_secs.seconds / 60
+        self.logger.info(f"Graceful shutdown and start total time: {time_mins}")
         
         self.logger.info("Stress test completed.")
 
@@ -227,10 +236,17 @@ class TestLvolHAClusterStorageNodeCrash(TestLvolHACluster):
         timestamp = int(datetime.now().timestamp())
         node_details = self.sbcli_utils.get_storage_node_details(self.lvol_node)
         node_ip = node_details[0]["mgmt_ip"]
+        
         self.ssh_obj.stop_spdk_process(node_ip)
+        restart_start_time = datetime.now()
         self.sbcli_utils.wait_for_storage_node_status(self.lvol_node,
                                                       "online",
                                                       timeout=800)
+        self.sbcli_utils.wait_for_health_status(self.lvol_node,
+                                                True,
+                                                timeout=800)
+        
+        node_up_time = datetime.now()
         
         self.validate_checksums()
         
@@ -241,6 +257,10 @@ class TestLvolHAClusterStorageNodeCrash(TestLvolHACluster):
         self.logger.info(f"Validating migration tasks for node {self.lvol_node}.")
         self.validate_migration_for_node(timestamp, 5000, None)
         sleep_n_sec(30)
+
+        time_secs = node_up_time - restart_start_time
+        time_mins = time_secs.seconds / 60
+        self.logger.info(f"Crash and start total time: {time_mins}")
         
         self.logger.info("Stress test completed.")
 
@@ -273,26 +293,38 @@ class TestLvolHAClusterNetworkInterrupt(TestLvolHACluster):
         node_ip = node_details[0]["mgmt_ip"]
 
         unavailable_thread = threading.Thread(
-            target=lambda: self.sbcli_utils.wait_for_storage_node_status(self.lvol_node, ["unavailable", "unreachable", "offline"], 300)
+            target=lambda: self.sbcli_utils.wait_for_storage_node_status(self.lvol_node, "schedulable", 300)
         )
 
         unavailable_thread.start()
 
+        disconnect_start_time = datetime.now()
+        
         self.ssh_obj.exec_command(node_ip, command=cmd)
+        
         unavailable_thread.join()
         self.sbcli_utils.wait_for_storage_node_status(self.lvol_node,
                                                       "online",
                                                       timeout=800)
+        self.sbcli_utils.wait_for_health_status(self.lvol_node,
+                                                True,
+                                                timeout=800)
+        
+        node_up_time = datetime.now()
         
         self.logger.info(f"Fetching migration tasks for cluster {self.cluster_id}.")
         output, _ = self.ssh_obj.exec_command(node=self.mgmt_nodes[0], 
                                               command=f"{self.base_cmd} cluster list-tasks {self.cluster_id}")
         self.logger.info(f"Data migration output: {output}")
 
-        # self.logger.info(f"Validating migration tasks for node {self.lvol_node}.")
-        # self.validate_migration_for_node(timestamp, 5000, None)
+        self.logger.info(f"Validating migration tasks for node {self.lvol_node}.")
+        self.validate_migration_for_node(timestamp, 5000, None)
         sleep_n_sec(30)
 
         self.validate_checksums()
+
+        time_secs = node_up_time - disconnect_start_time
+        time_mins = (time_secs.seconds - 120) / 60
+        self.logger.info(f"Network reconnect and node online total time: {time_mins}")
         
         self.logger.info("Stress test completed.")
