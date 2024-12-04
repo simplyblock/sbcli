@@ -1290,6 +1290,7 @@ def get_io_stats(lvol_uuid, history, records_count=20, parse_sizes=True):
             "Write speed": utils.humanbytes(record['write_bytes_ps']),
             "Write IOPS": record['write_io_ps'],
             "Write lat": record['write_latency_ps'],
+            "Con": record['connected_clients'],
         })
     return out
 

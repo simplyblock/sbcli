@@ -2151,10 +2151,10 @@ def suspend_storage_node(node_id, force=False):
         for node_id in lvol.nodes:
             sn = db_controller.get_storage_node_by_id(node_id)
             if node_id != lvol.node_id:
-                rpc_client = RPCClient(sn.mgmt_ip, sn.rpc_port, sn.rpc_username, sn.rpc_password)
+                sec_rpc_client = RPCClient(sn.mgmt_ip, sn.rpc_port, sn.rpc_username, sn.rpc_password)
                 for iface in sn.data_nics:
                     if iface.ip4_address:
-                        ret = rpc_client.nvmf_subsystem_listener_set_ana_state(
+                        ret = sec_rpc_client.nvmf_subsystem_listener_set_ana_state(
                             lvol.nqn, iface.ip4_address, "4420", False, "inaccessible")
 
     time.sleep(1)
@@ -2162,6 +2162,7 @@ def suspend_storage_node(node_id, force=False):
     rpc_client = RPCClient(
         snode.mgmt_ip, snode.rpc_port,
         snode.rpc_username, snode.rpc_password)
+
 
     for lvol_id in snode.lvols:
         lvol = db_controller.get_lvol_by_id(lvol_id)
@@ -2171,7 +2172,17 @@ def suspend_storage_node(node_id, force=False):
                     ret = rpc_client.nvmf_subsystem_listener_set_ana_state(
                         lvol.nqn, iface.ip4_address, "4420", False, ana="inaccessible")
 
+    time.sleep(1)
+    rpc_client.bdev_lvol_set_leader(False, lvs_name=lvol.lvs_name)
+    time.sleep(1)
     rpc_client.bdev_distrib_force_to_non_leader(snode.jm_vuid)
+    time.sleep(1)
+
+
+    time.sleep(1)
+    sec_rpc_client.bdev_lvol_set_leader(True, lvs_name=lvol.lvs_name)
+    time.sleep(1)
+
 
     for lvol_id in snode.lvols:
         lvol = db_controller.get_lvol_by_id(lvol_id)
@@ -2246,26 +2257,32 @@ def resume_storage_node(node_id):
                     if iface.ip4_address:
                         ret = rpc_client.nvmf_subsystem_listener_set_ana_state(
                             lvol.nqn, iface.ip4_address, "4420", False, "inaccessible")
+
+
+                time.sleep(1)
+                rpc_client.bdev_lvol_set_leader(False, lvs_name=lvol.lvs_name)
+                time.sleep(1)
                 rpc_client.bdev_distrib_force_to_non_leader(snode.jm_vuid)
 
     # time.sleep(1)
+    rpc_client = RPCClient(
+        snode.mgmt_ip, snode.rpc_port,
+        snode.rpc_username, snode.rpc_password)
 
     if snode.jm_vuid:
-        rpc_client = RPCClient(
-            snode.mgmt_ip, snode.rpc_port,
-            snode.rpc_username, snode.rpc_password)
 
         ret = rpc_client.jc_explicit_synchronization(snode.jm_vuid)
         logger.info(f"JM Sync res: {ret}")
         time.sleep(2)
 
+
+    time.sleep(1)
+    rpc_client.bdev_lvol_set_leader(True, lvs_name=lvol.lvs_name)
+    time.sleep(1)
+
     for lvol_id in snode.lvols:
         lvol = db_controller.get_lvol_by_id(lvol_id)
         if lvol:
-            rpc_client = RPCClient(
-                snode.mgmt_ip, snode.rpc_port,
-                snode.rpc_username, snode.rpc_password)
-
             for iface in snode.data_nics:
                 if iface.ip4_address:
                     ret = rpc_client.nvmf_subsystem_listener_set_ana_state(
@@ -2814,7 +2831,51 @@ def set_node_status(node_id, status):
 def recreate_lvstore(snode):
     db_controller = DBController(KVStore())
 
+    for lvol_id in snode.lvols:
+        lvol = db_controller.get_lvol_by_id(lvol_id)
+
+        if lvol.ha_type == "ha":
+            nodes_ips = []
+            for node_id in lvol.nodes:
+                sn = db_controller.get_storage_node_by_id(node_id)
+                rpc_client = RPCClient(sn.mgmt_ip, sn.rpc_port, sn.rpc_username, sn.rpc_password, timeout=3, retry=2)
+                nodes_ips.append(f"{sn.mgmt_ip}:")
+                if node_id != lvol.node_id:
+                    for iface in sn.data_nics:
+                        if iface.ip4_address:
+                            ret = rpc_client.nvmf_subsystem_listener_set_ana_state(
+                                lvol.nqn, iface.ip4_address, "4420", False, "inaccessible")
+
+                    time.sleep(1)
+                    rpc_client.bdev_lvol_set_leader(False, lvs_name=lvol.lvs_name)
+                    time.sleep(1)
+                    rpc_client.bdev_distrib_force_to_non_leader(snode.jm_vuid)
+
+
     for node in [snode]:
+        #
+        # for lvol_id in snode.lvols:
+        #     lvol = db_controller.get_lvol_by_id(lvol_id)
+        #     if lvol.ha_type == "ha":
+        #         is_created, error = lvol_controller.recreate_lvol_on_node(
+        #             lvol, snode, "", 0, ana_state="inaccessible")
+        #         if error:
+        #             return False
+
+            # if not lvol:
+            #     logger.error(f"Failed to recreate LVol: {lvol_id}")
+            #     continue
+            # lvol.status = lvol.STATUS_ONLINE
+            # lvol.io_error = False
+            # lvol.health_check = True
+            # lvol.write_to_db(db_controller.kv_store)
+
+    #     time.sleep(1)
+    #     rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
+    #     rpc_client.bdev_distrib_force_to_non_leader(snode.jm_vuid)
+    #     time.sleep(1)
+
+
         ret, err = _create_bdev_stack(node, [], primary_node=snode)
 
         if err:
@@ -2825,9 +2886,9 @@ def recreate_lvstore(snode):
         temp_rpc_client = RPCClient(
                 node.mgmt_ip, node.rpc_port,
                 node.rpc_username, node.rpc_password)
-        time.sleep(5)
+
         ret = temp_rpc_client.bdev_examine(node.raid)
-        time.sleep(5)
+        time.sleep(2)
         ret = temp_rpc_client.bdev_wait_for_examine()
         time.sleep(1)
 
@@ -2864,31 +2925,32 @@ def recreate_lvstore(snode):
             lvol.io_error = False
             lvol.health_check = True
             lvol.write_to_db(db_controller.kv_store)
+        #
+        # rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
+        # rpc_client.bdev_distrib_force_to_non_leader(snode.jm_vuid)
+        #
+        # time.sleep(2)
 
-        rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
-        rpc_client.bdev_distrib_force_to_non_leader(snode.jm_vuid)
+        # db_controller = DBController()
+        # for lvol_id in snode.lvols:
+        #     # lvol = lvol_controller.recreate_lvol(lvol_id, snode)
+        #     lvol = db_controller.get_lvol_by_id(lvol_id)
+        #
+        #     if lvol.ha_type == "ha":
+        #         nodes_ips = []
+        #         for node_id in lvol.nodes:
+        #             sn = db_controller.get_storage_node_by_id(node_id)
+        #             rpc_client = RPCClient(sn.mgmt_ip, sn.rpc_port, sn.rpc_username, sn.rpc_password, timeout=3, retry=2)
+        #             nodes_ips.append(f"{sn.mgmt_ip}:")
+        #             if node_id != lvol.node_id:
+        #                 for iface in sn.data_nics:
+        #                     if iface.ip4_address:
+        #                         ret = rpc_client.nvmf_subsystem_listener_set_ana_state(
+        #                             lvol.nqn, iface.ip4_address, "4420", False, "inaccessible")
+        #
+        #                 rpc_client.bdev_distrib_force_to_non_leader(snode.jm_vuid)
 
-        time.sleep(2)
-
-        db_controller = DBController()
-        for lvol_id in snode.lvols:
-            # lvol = lvol_controller.recreate_lvol(lvol_id, snode)
-            lvol = db_controller.get_lvol_by_id(lvol_id)
-
-            if lvol.ha_type == "ha":
-                nodes_ips = []
-                for node_id in lvol.nodes:
-                    sn = db_controller.get_storage_node_by_id(node_id)
-                    rpc_client = RPCClient(sn.mgmt_ip, sn.rpc_port, sn.rpc_username, sn.rpc_password, timeout=3, retry=2)
-                    nodes_ips.append(f"{sn.mgmt_ip}:")
-                    if node_id != lvol.node_id:
-                        for iface in sn.data_nics:
-                            if iface.ip4_address:
-                                ret = rpc_client.nvmf_subsystem_listener_set_ana_state(
-                                    lvol.nqn, iface.ip4_address, "4420", False, "inaccessible")
-
-                        rpc_client.bdev_distrib_force_to_non_leader(snode.jm_vuid)
-
+        time.sleep(1)
 
         rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
         for lvol_id in snode.lvols:

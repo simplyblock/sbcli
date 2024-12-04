@@ -59,15 +59,16 @@ class RPCClient:
 
         ret_code = response.status_code
         ret_content = response.content
-
-        logger.debug("Response: status_code: %s, content: %s",ret_code, ret_content)
+        logger.debug("Response: status_code: %s", ret_code)
 
         result = None
         error = None
         if ret_code == 200:
             try:
                 data = response.json()
+                logger.debug("Response json: %s", json.dumps(data, indent=2))
             except Exception:
+                logger.debug("Response ret_content: %s", ret_content)
                 return ret_content, None
 
             if 'result' in data:
@@ -915,3 +916,9 @@ class RPCClient:
         if priority_class:
             params["lvol_priority_class"] = priority_class
         return self._request("bdev_lvol_register", params)
+
+    def nvmf_subsystem_get_controllers(self, nqn):
+        params = {
+            "nqn": nqn
+        }
+        return self._request("nvmf_subsystem_get_controllers", params)

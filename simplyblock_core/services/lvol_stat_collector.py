@@ -35,13 +35,15 @@ def sum_stats(stats_list):
     return ret
 
 
-def add_lvol_stats(pool, lvol, stats_list, capacity_dict):
+def add_lvol_stats(pool, lvol, stats_list, capacity_dict=None, connected_clients=0):
     now = int(time.time())
     data = {
         "pool_id": pool.get_id(),
         "uuid": lvol.get_id(),
         "date": now}
 
+    if connected_clients:
+        data['connected_clients'] = connected_clients
 
     if capacity_dict:
         size_used = 0
@@ -201,6 +203,7 @@ while True:
             hosts = []
             stats = []
             capacity_dict = None
+            connected_clients = 0
             if lvol.ha_type == "ha":
                 hosts = lvol.nodes
             else:
@@ -220,7 +223,11 @@ while True:
                 if not capacity_dict:
                     capacity_dict = rpc_client.get_bdevs(lvol.base_bdev)
 
-            record = add_lvol_stats(pool, lvol, stats, capacity_dict)
+                ret = rpc_client.nvmf_subsystem_get_controllers(lvol.nqn)
+                if ret:
+                    connected_clients = max(len(ret), connected_clients)
+
+            record = add_lvol_stats(pool, lvol, stats, capacity_dict, connected_clients)
             stat_records.append(record)
 
         if stat_records:
