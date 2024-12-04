@@ -164,7 +164,7 @@ jobs:
             -var "storage_nodes_arch=arm64" -var "snode_deploy_on_k8s=true" \
             -var "extra_nodes=1" -var "extra_nodes_instance_type=m6gd.xlarge" \
             -var storage_nodes_ebs_size2=100 -var "region=us-east-2" \
-            -var "extra_nodes_arch=arm64" -var "sec_storage_nodes=1" \
+            -var "extra_nodes_arch=arm64" -var "sec_storage_nodes=1" -var "sec_storage_nodes_instance_type=m6g.2xlarge" \
             -var "sbcli_cmd=$SBCLI_CMD" -out=tfplan
         env:
           SBCLI_CMD: ${{ env.SBCLI_CMD }}
