@@ -1889,6 +1889,27 @@ def restart_storage_node(
             if node.get_id() == snode.get_id() or node.status != StorageNode.STATUS_ONLINE:
                 continue
             if node.secondary_node_id == snode.get_id():
+
+                for lvol_id in node.lvols:
+                    lvol = db_controller.get_lvol_by_id(lvol_id)
+
+                    if lvol.ha_type == "ha":
+                        for node_id in lvol.nodes:
+                            sn = db_controller.get_storage_node_by_id(node_id)
+                            rpc_client = RPCClient(sn.mgmt_ip, sn.rpc_port, sn.rpc_username, sn.rpc_password, timeout=3,
+                                                   retry=2)
+                            if node_id == lvol.node_id:
+                                for iface in sn.data_nics:
+                                    if iface.ip4_address:
+                                        ret = rpc_client.nvmf_subsystem_listener_set_ana_state(
+                                            lvol.nqn, iface.ip4_address, "4420", False, "inaccessible")
+
+                                time.sleep(2)
+                                rpc_client.bdev_lvol_set_leader(False, lvs_name=lvol.lvs_name)
+                                time.sleep(2)
+                                rpc_client.bdev_distrib_force_to_non_leader(snode.jm_vuid)
+
+
                 ret, err = _create_bdev_stack(snode, node.lvstore_stack, primary_node=node)
                 if err:
                     logger.error(f"Failed to create lvstore from node {node.get_id()}")
@@ -1907,7 +1928,8 @@ def restart_storage_node(
                     lvol = db_controller.get_lvol_by_id(lvol_id)
                     for index, node_id in enumerate(lvol.nodes):
                         if node_id == snode.get_id():
-                            is_created, error = lvol_controller.recreate_lvol_on_node(lvol, snode, "", index)
+                            is_created, error = lvol_controller.recreate_lvol_on_node(
+                                lvol, snode, "", index, ana_state="non_optimized")
                             if error:
                                 logger.error(f"Failed to recreate LVol: {lvol_id} on node: {node_id}")
                                 continue
@@ -1916,6 +1938,24 @@ def restart_storage_node(
                             lvol.health_check = True
                             lvol.write_to_db(db_controller.kv_store)
                             break
+
+
+                time.sleep(2)
+
+
+                for lvol_id in snode.lvols:
+                    lvol = db_controller.get_lvol_by_id(lvol_id)
+                    if lvol.ha_type == "ha":
+                        for node_id in lvol.nodes:
+                            sn = db_controller.get_storage_node_by_id(node_id)
+                            if node_id == lvol.node_id:
+                                rpc_client = RPCClient(
+                                    sn.mgmt_ip, sn.rpc_port, sn.rpc_username, sn.rpc_password, timeout=3, retry=2)
+                                for iface in sn.data_nics:
+                                    if iface.ip4_address:
+                                        ret = rpc_client.nvmf_subsystem_listener_set_ana_state(
+                                            lvol.nqn, iface.ip4_address, "4420", True)
+
 
     logger.info("Done")
     return "Success"
@@ -3162,7 +3202,7 @@ def _create_bdev_stack(snode, lvstore_stack=None, primary_node=False):
         if type == "bdev_distr":
             if snode.is_secondary_node and primary_node:
                 jm_list = []
-                if primary_node.jm_device and primary_node.jm_device.status == JMDevice.STATUS_ONLINE:
+                if primary_node.jm_device and primary_node.jm_device.status == JMDevice.STATUS_ONLINE and False:
                     bdev_name = f"remote_{primary_node.jm_device.jm_bdev}n1"
                     jm_list.append(bdev_name)
                 else:
