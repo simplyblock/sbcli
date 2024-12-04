@@ -12,7 +12,7 @@ on:
       simplyBlockDeploy_branch:
         description: 'Branch for simplyBlockDeploy'
         required: true
-        default: 'sec_storage_node'
+        default: 'sec_storage_node_hmdi'
       simplyblock_csi_branch:
         description: 'Branch for simplyblock-csi'
         required: true
