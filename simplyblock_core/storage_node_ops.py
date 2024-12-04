@@ -3202,7 +3202,7 @@ def _create_bdev_stack(snode, lvstore_stack=None, primary_node=False):
         if type == "bdev_distr":
             if snode.is_secondary_node and primary_node:
                 jm_list = []
-                if primary_node.jm_device and primary_node.jm_device.status == JMDevice.STATUS_ONLINE and False:
+                if primary_node.jm_device and primary_node.jm_device.status == JMDevice.STATUS_ONLINE:
                     bdev_name = f"remote_{primary_node.jm_device.jm_bdev}n1"
                     jm_list.append(bdev_name)
                 else:
