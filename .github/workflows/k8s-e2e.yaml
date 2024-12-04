@@ -162,6 +162,7 @@ jobs:
             -var "mgmt_nodes=1" -var "storage_nodes=5" -var "volumes_per_storage_nodes=1" \
             -var storage_nodes_instance_type="m6g.2xlarge" \
             -var "storage_nodes_arch=arm64" -var "snode_deploy_on_k8s=true" \
+            -var "sec_storage_nodes_instance_type=m6g.2xlarge" \
             -var "extra_nodes=1" -var "extra_nodes_instance_type=m6gd.xlarge" \
             -var storage_nodes_ebs_size2=100 -var "region=us-east-2" \
             -var "extra_nodes_arch=arm64" \
@@ -238,7 +239,8 @@ jobs:
             --set logicalVolume.distr_ndcs="${NDCS}" \
             --set logicalVolume.distr_npcs="${NPCS}" \
             --set storagenode.create=true \
-            --set cachingnode.create=false
+            --set cachingnode.create=false \
+            --set logicalVolume.encryption=true
         env:
           NDCS: ${{ env.NDCS }}
           NPCS: ${{ env.NPCS }}
@@ -283,7 +285,7 @@ jobs:
       #   shell: /usr/bin/bash -e {0}
       
       - name: Sleep after Helm Installation
-        run: sleep 500
+        run: sleep 600
 
       - name: Check Cluster Status
         run: |
