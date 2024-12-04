@@ -353,7 +353,7 @@ class TestLvolHAClusterNetworkInterrupt(TestLvolHACluster):
 
         self.logger.info(f"Validating migration tasks for node {self.lvol_node}.")
         self.validate_migration_for_node(timestamp, 5000, None)
-        sleep_n_sec(30)
+        sleep_n_sec(120)
 
         self.validate_checksums()
 
