@@ -892,10 +892,15 @@ class RPCClient:
             params = {"jm_vuid": jm_vuid}
         return self._request("bdev_distrib_force_to_non_leader", params)
 
-    def bdev_lvol_set_leader(self, is_leader=False):
+    def bdev_lvol_set_leader(self, is_leader=False, uuid=None, lvs_name=None):
         params = {
-            "leadership": is_leader
+            "leadership": is_leader,
         }
+        if uuid:
+            params["uuid"] = uuid
+        elif lvs_name:
+            params["lvs_name"] = lvs_name
+
         return self._request("bdev_lvol_set_leader_all", params)
 
     def bdev_lvol_register(self, name, lvs_name, registered_uuid, blobid, priority_class=0):

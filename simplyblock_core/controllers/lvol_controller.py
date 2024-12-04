@@ -647,7 +647,7 @@ def add_lvol_on_node(lvol, snode, ha_comm_addrs=None, ha_inode_self=0):
     spdk_mem_info_before = rpc_client.ultra21_util_get_malloc_stats()
 
     if snode.is_secondary_node:
-        rpc_client.bdev_lvol_set_leader(False)
+        rpc_client.bdev_lvol_set_leader(False, lvs_name=lvol.lvs_name)
         ret = rpc_client.bdev_lvol_register(
             lvol.lvol_bdev, lvol.lvs_name, lvol.lvol_uuid, lvol.blobid, lvol.lvol_priority_class)
         if not ret:
@@ -677,7 +677,7 @@ def add_lvol_on_node(lvol, snode, ha_comm_addrs=None, ha_inode_self=0):
             logger.error(error)
             return False, f"Failed to add lvol on node {snode.get_id()}"
 
-        rpc_client.bdev_lvol_set_leader(True)
+        rpc_client.bdev_lvol_set_leader(True, lvs_name=lvol.lvs_name)
         ret, msg = _create_bdev_stack(lvol, snode)
         if not ret:
             return False, msg
@@ -872,9 +872,9 @@ def delete_lvol_from_node(lvol_id, node_id, clear_data=True):
     ret = rpc_client.subsystem_delete(lvol.nqn)
 
     if snode.is_secondary_node:
-        rpc_client.bdev_lvol_set_leader(False)
+        rpc_client.bdev_lvol_set_leader(False, lvs_name=lvol.lvs_name)
     else:
-        rpc_client.bdev_lvol_set_leader(True)
+        rpc_client.bdev_lvol_set_leader(True, lvs_name=lvol.lvs_name)
 
     # 2- remove bdevs
     logger.info(f"Removing bdev stack")
