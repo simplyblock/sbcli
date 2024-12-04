@@ -22,8 +22,7 @@ class TestLvolHACluster(FioWorkloadTest):
         super().__init__(**kwargs)
         self.logger = setup_logger(__name__)
         self.lvol_size = "25G"
-        self.file_size = "4G"
-        self.num_files = 5
+        self.fio_size = "18GiB"
         self.total_lvols = 10
         self.snapshot_per_lvol = 6
         self.lvol_name = "lvl"
@@ -93,9 +92,9 @@ class TestLvolHACluster(FioWorkloadTest):
         self.logger.info("Snapshots created.")
 
     def fill_volumes(self):
-        """Fill lvols with pseudo-random data in batches of 10."""
-        self.logger.info("Filling volumes with pseudo-random data in batches of 10.")
-        dd_threads = []
+        """Fill lvols with data in batches of 10."""
+        self.logger.info("Filling volumes with data in batches of 10.")
+        fio_threads = []
         lvol_items = list(self.lvol_mount_details.items())
         batch_size = 10
 
@@ -104,22 +103,34 @@ class TestLvolHACluster(FioWorkloadTest):
             self.logger.info(f"Processing batch {batch_start // batch_size + 1}.")
             batch = lvol_items[batch_start:batch_start + batch_size]
 
-            # Run `dd` in parallel for the current batch
+            # Run FIO in parallel for the current batch
             for _, lvol in batch:
-                dd_thread = threading.Thread(
-                    target=self.ssh_obj.create_random_files,
-                    args=(self.node, lvol["Mount"]),
-                    kwargs={"file_prefix": lvol["Name"], "file_count": self.num_files, "file_size": self.file_size},
+                fio_thread = threading.Thread(
+                    target=self.ssh_obj.run_fio_test,
+                    args=(self.node, None, lvol["Mount"], lvol["Log"]),
+                    kwargs={
+                        "size": self.fio_size,
+                        "name": f"{lvol['Name']}_fio",
+                        "rw": "write",
+                        "bs": "4K-128K",
+                        "time_based": False,
+                    },
                 )
-                dd_thread.start()
-                dd_threads.append(dd_thread)
+                fio_thread.start()
+                fio_threads.append(fio_thread)
 
             # Manage and join threads for the current batch
-            for thread in dd_threads:
+            self.common_utils.manage_fio_threads(
+                node=self.node,
+                threads=fio_threads,
+                timeout=10000
+            )
+            for thread in fio_threads:
                 thread.join()
-            dd_threads = []  # Clear threads for the next batch
+            fio_threads = []  # Clear threads for the next batch
 
         self.logger.info("Data filling for all batches completed.")
+
     
     def calculate_md5(self):
         "Calculate Checksums"
