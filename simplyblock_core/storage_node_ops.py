@@ -1873,9 +1873,9 @@ def restart_storage_node(
         if not ret:
             return False, "Failed to recreate lvstore on node"
 
-        logger.info("Dumping lvstore data")
-        ret = dump_lvstore(node_id)
-        print(ret)
+        # logger.info("Dumping lvstore data")
+        # ret = dump_lvstore(node_id)
+        # print(ret)
 
     logger.info("Starting migration tasks")
     for dev in snode.nvme_devices:
@@ -2070,12 +2070,12 @@ def shutdown_storage_node(node_id, force=False):
         rpc_client = RPCClient(
             snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password, timeout=10, retry=1)
 
-        logger.info("Dumping lvstore data")
-        ret = dump_lvstore(node_id)
-        print(ret)
+        # logger.info("Dumping lvstore data")
+        # ret = dump_lvstore(node_id)
+        # print(ret)
 
-        logger.debug("Removing LVols")
-        _remove_bdev_stack(snode.lvstore_stack, rpc_client, remove_distr_only=True)
+        # logger.debug("Removing LVols")
+        # _remove_bdev_stack(snode.lvstore_stack, rpc_client, remove_distr_only=True)
 
         # if snode.jm_device:
         #     logger.info("Setting JM unavailable")
@@ -2085,10 +2085,10 @@ def shutdown_storage_node(node_id, force=False):
         if dev.status in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_READONLY]:
             device_controller.device_set_unavailable(dev.get_id())
 
-    # make other nodes disconnect from this node
-    logger.info("disconnect all other nodes connections to this node")
-    for dev in snode.nvme_devices:
-        distr_controller.disconnect_device(dev)
+    # # make other nodes disconnect from this node
+    # logger.info("disconnect all other nodes connections to this node")
+    # for dev in snode.nvme_devices:
+    #     distr_controller.disconnect_device(dev)
 
     logger.info("Stopping SPDK")
     if health_controller._check_node_api(snode.mgmt_ip):
@@ -2846,9 +2846,9 @@ def recreate_lvstore(snode):
                             ret = rpc_client.nvmf_subsystem_listener_set_ana_state(
                                 lvol.nqn, iface.ip4_address, "4420", False, "inaccessible")
 
-                    time.sleep(1)
+                    time.sleep(2)
                     rpc_client.bdev_lvol_set_leader(False, lvs_name=lvol.lvs_name)
-                    time.sleep(1)
+                    time.sleep(2)
                     rpc_client.bdev_distrib_force_to_non_leader(snode.jm_vuid)
 
 
@@ -2907,8 +2907,8 @@ def recreate_lvstore(snode):
         #     lvol.health_check = True
         #     lvol.write_to_db(db_controller.kv_store)
         #
-        # time.sleep(15)
 
+        time.sleep(2)
 
         for lvol_id in snode.lvols:
             lvol = db_controller.get_lvol_by_id(lvol_id)
@@ -2950,7 +2950,7 @@ def recreate_lvstore(snode):
         #
         #                 rpc_client.bdev_distrib_force_to_non_leader(snode.jm_vuid)
 
-        time.sleep(1)
+        time.sleep(2)
 
         rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
         for lvol_id in snode.lvols:
