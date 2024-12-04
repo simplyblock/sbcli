@@ -1088,6 +1088,10 @@ class CLIWrapper:
                 id = args.id
                 history = args.history
                 ret = lvol_controller.get_capacity(id, history)
+                if ret:
+                    ret = utils.print_table(ret)
+                else:
+                    return False
             elif sub_command == "check":
                 id = args.id
                 ret = health_controller.check_lvol(id)

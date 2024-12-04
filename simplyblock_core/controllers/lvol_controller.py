@@ -418,6 +418,8 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
     lvol.distr_chunk_bs = cl.distr_chunk_bs
     lvol.lvol_priority_class = lvol_priority_class
     #lvol.distr_page_size = (distr_npcs+distr_npcs)*cl.page_size_in_blocks
+    lvol.cluster_size = lvol.ndcs * cl.page_size_in_blocks
+
 
 
     nodes = []
@@ -432,8 +434,8 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
     lvol.hostname = host_node.hostname
     lvol.node_id = host_node.get_id()
     lvol.lvs_name = host_node.lvstore
-    lvol.base_bdev = f"distr_{lvol.vuid}_{name}"
     lvol.top_bdev = f"{lvol.lvs_name}/{lvol.lvol_bdev}"
+    lvol.base_bdev = lvol.top_bdev
 
     # if with_snapshot:
     #     lvol.bdev_stack.append({
@@ -1220,19 +1222,38 @@ def create_snapshot(lvol_id, snapshot_name):
     return snapshot_controller.add(lvol_id, snapshot_name)
 
 
-def get_capacity(id, history):
-    lvol = db_controller.get_lvol_by_id(id)
+def get_capacity(lvol_uuid, history, records_count=20, parse_sizes=True):
+    lvol = db_controller.get_lvol_by_id(lvol_uuid)
     if not lvol:
-        logger.error(f"lvol not found: {id}")
+        logger.error(f"LVol not found: {lvol_uuid}")
         return False
 
-    out = [{
-        "provisioned": lvol.size,
-        "util_percent": 0,
-        "util": 0,
-    }]
+    if history:
+        records_number = utils.parse_history_param(history)
+        if not records_number:
+            logger.error(f"Error parsing history string: {history}")
+            return False
+    else:
+        records_number = 20
 
-    return utils.print_table(out)
+    records_list = db_controller.get_lvol_stats(lvol, limit=records_number)
+    if not records_list:
+        return False
+    new_records = utils.process_records(records_list, min(records_count, len(records_list)))
+
+    if not parse_sizes:
+        return new_records
+
+    out = []
+    for record in new_records:
+        out.append({
+            "Date": time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(record['date'])),
+            "Total": utils.humanbytes(record['size_total']),
+            "Used": utils.humanbytes(record['size_used']),
+            "Free": utils.humanbytes(record['size_free']),
+            "Util %": f"{record['size_util']}%",
+        })
+    return out
 
 
 def get_io_stats(lvol_uuid, history, records_count=20, parse_sizes=True):

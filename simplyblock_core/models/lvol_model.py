@@ -73,6 +73,7 @@ class LVol(BaseModel):
         "lvol_priority_class": {"type": int, 'default': 0},
         "blobid": {"type": int, 'default': 0},
         "lvol_uuid": {"type": str, 'default': ""},
+        "cluster_size": {"type": int, 'default': 0},
 
     }
 

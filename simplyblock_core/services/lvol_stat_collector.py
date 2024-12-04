@@ -35,12 +35,36 @@ def sum_stats(stats_list):
     return ret
 
 
-def add_lvol_stats(pool, lvol, stats_list):
+def add_lvol_stats(pool, lvol, stats_list, capacity_dict):
     now = int(time.time())
     data = {
         "pool_id": pool.get_id(),
         "uuid": lvol.get_id(),
         "date": now}
+
+
+    if capacity_dict:
+        size_used = 0
+        lvol_dict = capacity_dict[0]
+        size_total = int(lvol_dict['num_blocks']*lvol_dict['block_size'])
+        if "driver_specific" in lvol_dict and "lvol" in lvol_dict["driver_specific"]:
+            num_allocated_clusters = lvol_dict["driver_specific"]["lvol"]["num_allocated_clusters"]
+            size_used = int(num_allocated_clusters*lvol.cluster_size)
+
+        size_free = size_total - size_used
+        size_util = 0
+        if size_total > 0:
+            size_util = int((size_used / size_total) * 100)
+
+        data.update({
+            "size_total": size_total,
+            "size_used": size_used,
+            "size_free": size_free,
+            "size_util": size_util,
+            # "capacity_dict": capacity_dict
+        })
+    else:
+        logger.error(f"Error getting Alceml capacity, response={capacity_dict}")
 
     if stats_list:
 
@@ -176,6 +200,7 @@ while True:
                 continue
             hosts = []
             stats = []
+            capacity_dict = None
             if lvol.ha_type == "ha":
                 hosts = lvol.nodes
             else:
@@ -192,7 +217,10 @@ while True:
                 if stats_dict and stats_dict['bdevs']:
                     stats.append( stats_dict['bdevs'][0])
 
-            record = add_lvol_stats(pool, lvol, stats)
+                if not capacity_dict:
+                    capacity_dict = rpc_client.get_bdevs(lvol.base_bdev)
+
+            record = add_lvol_stats(pool, lvol, stats, capacity_dict)
             stat_records.append(record)
 
         if stat_records:
