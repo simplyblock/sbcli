@@ -1943,7 +1943,7 @@ def restart_storage_node(
                 time.sleep(2)
 
 
-                for lvol_id in snode.lvols:
+                for lvol_id in node.lvols:
                     lvol = db_controller.get_lvol_by_id(lvol_id)
                     if lvol.ha_type == "ha":
                         for node_id in lvol.nodes:
