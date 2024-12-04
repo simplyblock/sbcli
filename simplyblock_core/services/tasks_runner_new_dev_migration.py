@@ -93,7 +93,7 @@ def task_runner(task):
             res_data = res[0]
             migration_status = res_data["status"]
             if migration_status == "completed":
-                if res_data['error'] == 1:
+                if res_data['error'] != 0:
                     task.function_result = "mig completed with errors, retrying"
                     task.retry += 1
                     task.status = JobSchedule.STATUS_SUSPENDED

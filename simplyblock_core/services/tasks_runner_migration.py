@@ -87,7 +87,7 @@ def task_runner(task):
         res = rpc_client.distr_migration_status(**mig_info)
         for st in res:
             if st['status'] == "completed":
-                if st['error'] == 1:
+                if st['error'] != 0:
                     task.function_result = "mig completed with errors, retrying"
                     task.retry += 1
                     task.status = JobSchedule.STATUS_SUSPENDED
