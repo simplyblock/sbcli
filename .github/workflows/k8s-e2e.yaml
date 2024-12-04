@@ -164,7 +164,7 @@ jobs:
             -var "storage_nodes_arch=arm64" -var "snode_deploy_on_k8s=true" \
             -var "extra_nodes=1" -var "extra_nodes_instance_type=m6gd.xlarge" \
             -var storage_nodes_ebs_size2=100 -var "region=us-east-2" \
-            -var "extra_nodes_arch=arm64" -var "sec_storage_nodes=1" -var "sec_storage_nodes_instance_type=m6g.4xlarge" \
+            -var "extra_nodes_arch=arm64" -var "sec_storage_nodes=1" \
             -var "sbcli_cmd=$SBCLI_CMD" -out=tfplan
         env:
           SBCLI_CMD: ${{ env.SBCLI_CMD }}
@@ -191,12 +191,12 @@ jobs:
         run: |
           cd $GITHUB_WORKSPACE/simplyBlockDeploy
           ./bootstrap-cluster.sh --sbcli-cmd "$SBCLI_CMD" \
-            --max-lvol 10 --max-snap 10 --max-prov 600G --number-of-devices 2 \
+            --max-lvol 10 --max-snap 10 --max-prov 900G --number-of-devices 3 \
             --distr-ndcs $NDCS \
             --distr-npcs $NPCS \
             --distr-bs $BS \
             --distr-chunk-bs $CHUNK_BS \
-            --k8s-snode --partitions 0
+            --k8s-snode --partitions 0 --number-of-distribs 4
         id: bootstrap_cluster
         env:
           SBCLI_CMD: ${{ env.SBCLI_CMD }}

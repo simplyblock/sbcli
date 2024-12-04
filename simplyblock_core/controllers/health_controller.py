@@ -272,9 +272,11 @@ def check_node(node_id, with_devices=True):
         print("*" * 100)
         if snode.lvstore_stack:
             lvstore_stack = snode.lvstore_stack
-            second_node_1 = db_controller.get_storage_node_by_id(snode.secondary_node_id)
-            for node in [snode, second_node_1]:
-                lvstore_check &= _check_node_lvstore(lvstore_stack, node)
+            lvstore_check &= _check_node_lvstore(lvstore_stack, snode)
+
+            if snode.secondary_node_id:
+                second_node_1 = db_controller.get_storage_node_by_id(snode.secondary_node_id)
+                lvstore_check &= _check_node_lvstore(lvstore_stack, second_node_1)
 
         if snode.is_secondary_node:
             for node in db_controller.get_storage_nodes():

@@ -545,7 +545,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
         ret, error = add_lvol_on_node(lvol, host_node)
         if error:
             return ret, error
-
+        lvol.nodes = [host_node.get_id()]
     elif ha_type == "ha":
 
         lvol_bdev, error = add_lvol_on_node(lvol, host_node)

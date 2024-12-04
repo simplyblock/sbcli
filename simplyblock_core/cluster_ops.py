@@ -392,18 +392,6 @@ def cluster_activate(cl_id, force=False):
             snode.secondary_node_id = secondary_nodes[0]
             snode.write_to_db()
 
-        pool_name = "pool1"
-        pool_controller.add_pool(
-            pool_name,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            cl_id)
-
     for snode in snodes:
         if snode.is_secondary_node:
             continue

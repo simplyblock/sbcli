@@ -2814,8 +2814,6 @@ def set_node_status(node_id, status):
 def recreate_lvstore(snode):
     db_controller = DBController(KVStore())
 
-
-    secondary_node_id = db_controller.get_storage_node_by_id(snode.secondary_node_id)
     for node in [snode]:
         ret, err = _create_bdev_stack(node, [], primary_node=snode)
 
@@ -3063,22 +3061,23 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
 
     time.sleep(1)
 
-    # creating lvstore on secondary
-    sec_node_1 = db_controller.get_storage_node_by_id(snode.secondary_node_id)
-    ret, err = _create_bdev_stack(sec_node_1, lvstore_stack, primary_node=snode)
-    if err:
-        logger.error(f"Failed to create lvstore on node {sec_node_1.get_id()}")
-        logger.error(err)
-        return False
+    if snode.secondary_node_id:
+        # creating lvstore on secondary
+        sec_node_1 = db_controller.get_storage_node_by_id(snode.secondary_node_id)
+        ret, err = _create_bdev_stack(sec_node_1, lvstore_stack, primary_node=snode)
+        if err:
+            logger.error(f"Failed to create lvstore on node {sec_node_1.get_id()}")
+            logger.error(err)
+            return False
 
-    temp_rpc_client = RPCClient(
-            sec_node_1.mgmt_ip, sec_node_1.rpc_port,
-            sec_node_1.rpc_username, sec_node_1.rpc_password)
-    time.sleep(5)
-    ret = temp_rpc_client.bdev_examine(snode.raid)
-    time.sleep(1)
-    ret = temp_rpc_client.bdev_wait_for_examine()
-    sec_node_1.write_to_db()
+        temp_rpc_client = RPCClient(
+                sec_node_1.mgmt_ip, sec_node_1.rpc_port,
+                sec_node_1.rpc_username, sec_node_1.rpc_password)
+        time.sleep(5)
+        ret = temp_rpc_client.bdev_examine(snode.raid)
+        time.sleep(1)
+        ret = temp_rpc_client.bdev_wait_for_examine()
+        sec_node_1.write_to_db()
 
     return True
 
