@@ -105,7 +105,7 @@ while True:
                 rpc_client = RPCClient(
                     snode.mgmt_ip, snode.rpc_port,
                     snode.rpc_username, snode.rpc_password,
-                    timeout=10, retry=1)
+                    timeout=3, retry=2)
                 connected_devices = []
                 for remote_device in snode.remote_devices:
                     org_dev = db_controller.get_storage_device_by_id(remote_device.get_id())

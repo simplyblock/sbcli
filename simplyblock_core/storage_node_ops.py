@@ -2077,9 +2077,9 @@ def shutdown_storage_node(node_id, force=False):
         logger.debug("Removing LVols")
         _remove_bdev_stack(snode.lvstore_stack, rpc_client, remove_distr_only=True)
 
-        if snode.jm_device:
-            logger.info("Setting JM unavailable")
-            device_controller.set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_UNAVAILABLE)
+        # if snode.jm_device:
+        #     logger.info("Setting JM unavailable")
+        #     device_controller.set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_UNAVAILABLE)
 
     for dev in snode.nvme_devices:
         if dev.status in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_READONLY]:
@@ -2188,9 +2188,9 @@ def suspend_storage_node(node_id, force=False):
         if dev.status == NVMeDevice.STATUS_ONLINE:
             device_controller.device_set_unavailable(dev.get_id())
 
-    logger.info("Set JM Unavailable")
-    if snode.jm_device and snode.jm_device.status != JMDevice.STATUS_UNAVAILABLE:
-        device_controller.set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_UNAVAILABLE)
+    # logger.info("Set JM Unavailable")
+    # if snode.jm_device and snode.jm_device.status != JMDevice.STATUS_UNAVAILABLE:
+    #     device_controller.set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_UNAVAILABLE)
 
     logger.info("Setting node status to suspended")
     set_node_status(snode.get_id(), StorageNode.STATUS_SUSPENDED)
