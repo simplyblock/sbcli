@@ -197,7 +197,7 @@ def storage_node_add():
     max_lvol = int(req_data['max_lvol'])
     max_snap = int(req_data.get('max_snap', 500))
     max_prov = req_data['max_prov']
-    number_of_distribs = int(req_data.get('number_of_distribs', 4))
+    number_of_distribs = int(req_data.get('number_of_distribs', 2))
     if req_data.get('disable_ha_jm', "") == "true":
         disable_ha_jm = True
     else:
