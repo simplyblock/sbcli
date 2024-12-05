@@ -25,7 +25,6 @@ def process_device_event(event):
     if event.message in ['SPDK_BDEV_EVENT_REMOVE', "error_open", 'error_read', "error_write", "error_unmap"]:
         node_id = event.node_id
         storage_id = event.storage_id
-        node = db_controller.get_storage_node_by_id(node_id)
 
         device = None
         for node in db_controller.get_storage_nodes():
@@ -45,6 +44,9 @@ def process_device_event(event):
             logger.info(f"Device not found!, storage id: {storage_id} from node: {node_id}")
             event.status = 'device_not_found'
             return
+
+
+        node = db_controller.get_storage_node_by_id(node_id)
 
         distr_controller.send_dev_status_event(device, NVMeDevice.STATUS_UNAVAILABLE, node)
 
