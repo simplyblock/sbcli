@@ -125,7 +125,7 @@ while True:
                             if ret:
                                 logger.info(f"Successfully connected to device: {remote_device.get_id()}")
                                 connected_devices.append(remote_device.get_id())
-                                # distr_controller.send_dev_status_event(remote_device, NVMeDevice.STATUS_ONLINE, snode)
+                                distr_controller.send_dev_status_event(remote_device, NVMeDevice.STATUS_ONLINE, snode)
                             else:
                                 logger.error(f"Failed to connect to device: {remote_device.get_id()}")
 
@@ -196,16 +196,16 @@ while True:
                 lvstore_check = True
                 if snode.lvstore_stack:
                     lvstore_stack = snode.lvstore_stack
-                    lvstore_check &= health_controller._check_node_lvstore(lvstore_stack, snode, auto_fix=True)
+                    lvstore_check &= health_controller._check_node_lvstore(lvstore_stack, snode, auto_fix=False)
                     if snode.secondary_node_id:
                         second_node_1 = db_controller.get_storage_node_by_id(snode.secondary_node_id)
-                        lvstore_check &= health_controller._check_node_lvstore(lvstore_stack, second_node_1, auto_fix=True)
+                        lvstore_check &= health_controller._check_node_lvstore(lvstore_stack, second_node_1, auto_fix=False)
 
                 if snode.is_secondary_node:
                     for node in db_controller.get_storage_nodes():
                         if node.secondary_node_id == snode.get_id():
                             logger.info(f"Checking stack from node : {node.get_id()}")
-                            lvstore_check &= health_controller._check_node_lvstore(node.lvstore_stack, snode, auto_fix=True)
+                            lvstore_check &= health_controller._check_node_lvstore(node.lvstore_stack, snode, auto_fix=False)
 
                 health_check_status = is_node_online and node_devices_check and node_remote_devices_check and lvstore_check
             set_node_health_check(snode, health_check_status)

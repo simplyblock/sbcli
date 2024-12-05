@@ -2187,6 +2187,12 @@ def suspend_storage_node(node_id, force=False):
 
     logger.info("Suspending node")
 
+    for dev in snode.nvme_devices:
+        if dev.status == NVMeDevice.STATUS_ONLINE:
+            device_controller.device_set_unavailable(dev.get_id())
+
+    time.sleep(2)
+
     for lvol_id in snode.lvols:
         lvol = db_controller.get_lvol_by_id(lvol_id)
         for node_id in lvol.nodes:
@@ -2220,7 +2226,7 @@ def suspend_storage_node(node_id, force=False):
     time.sleep(1)
 
 
-    time.sleep(1)
+    time.sleep(2)
     sec_rpc_client.bdev_lvol_set_leader(True, lvs_name=lvol.lvs_name)
     time.sleep(1)
 
@@ -2236,9 +2242,6 @@ def suspend_storage_node(node_id, force=False):
                         ret = rpc_client.nvmf_subsystem_listener_set_ana_state(
                             lvol.nqn, iface.ip4_address, "4420", False)
 
-    for dev in snode.nvme_devices:
-        if dev.status == NVMeDevice.STATUS_ONLINE:
-            device_controller.device_set_unavailable(dev.get_id())
 
     # logger.info("Set JM Unavailable")
     # if snode.jm_device and snode.jm_device.status != JMDevice.STATUS_UNAVAILABLE:
@@ -2309,6 +2312,8 @@ def resume_storage_node(node_id):
     rpc_client = RPCClient(
         snode.mgmt_ip, snode.rpc_port,
         snode.rpc_username, snode.rpc_password)
+
+    time.sleep(1)
 
     if snode.jm_vuid:
 

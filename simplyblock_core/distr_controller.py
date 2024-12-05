@@ -30,7 +30,7 @@ def send_node_status_event(node, node_status, target_node=None):
         if node.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED]:
             continue
         logger.info(f"Sending to: {node.get_id()}")
-        rpc_client = RPCClient(node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password, timeout=5, retry=2)
+        rpc_client = RPCClient(node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password, timeout=3, retry=2)
         ret = rpc_client.distr_status_events_update(events)
 
 
@@ -54,7 +54,7 @@ def send_dev_status_event(device, dev_status, target_node=None):
         if node.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED]:
             continue
         logging.debug(f"Sending event updates, device: {storage_ID}, status: {dev_status}, node: {node.get_id()}")
-        rpc_client = RPCClient(node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password, timeout=5, retry=2)
+        rpc_client = RPCClient(node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password, timeout=3, retry=2)
         ret = rpc_client.distr_status_events_update(events)
         if not ret:
             logger.warning("Failed to send event update")
