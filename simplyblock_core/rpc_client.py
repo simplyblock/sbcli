@@ -122,7 +122,6 @@ class RPCClient:
         return self._request("nvmf_get_transports", params)
 
     def transport_create(self, trtype, qpair_count=256):
-        return self.transport_create_caching(trtype)
         """
             [{'trtype': 'TCP', 'max_queue_depth': 128,
                'max_io_qpairs_per_ctrlr': 127, 'in_capsule_data_size': 4096,
@@ -139,10 +138,10 @@ class RPCClient:
             "trtype": trtype,
             "max_io_qpairs_per_ctrlr": qpair_count,
             "max_queue_depth": 512,
-            "abort_timeout_sec": 5,
-            "ack_timeout": 512,
-            "zcopy": True,
-            "in_capsule_data_size": 4096,
+            "abort_timeout_sec": 2,
+            # "ack_timeout": 512,
+            # "zcopy": True,
+            # "in_capsule_data_size": 4096,
             "max_io_size": 131072,
             "io_unit_size": 131072,
             "max_aq_depth": 128,
@@ -593,12 +592,12 @@ class RPCClient:
             # "action_on_timeout": "abort",
             "bdev_retry_count": 0,
             "transport_retry_count": 0,
-            "ctrlr_loss_timeout_sec": 1,
+            "ctrlr_loss_timeout_sec": 3,
             "fast_io_fail_timeout_sec": 0,
             "reconnect_delay_sec": 1,
-            "keep_alive_timeout_ms": 500,
+            "keep_alive_timeout_ms": 1000,
             "transport_ack_timeout": 3,
-            "timeout_us": 0
+            "timeout_us": 300000
         }
         return self._request("bdev_nvme_set_options", params)
 
