@@ -2901,7 +2901,7 @@ def recreate_lvstore(snode):
 
 
     time.sleep(2)
-    sec_rpc_client.bdev_lvol_set_leader(False, lvs_name=lvol.lvs_name)
+    sec_rpc_client.bdev_lvol_set_leader(False, lvs_name=snode.lvstore)
     time.sleep(2)
     sec_rpc_client.bdev_distrib_force_to_non_leader(snode.jm_vuid)
 
