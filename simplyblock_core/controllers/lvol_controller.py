@@ -873,10 +873,10 @@ def delete_lvol_from_node(lvol_id, node_id, clear_data=True):
     logger.info(f"Removing subsystem")
     ret = rpc_client.subsystem_delete(lvol.nqn)
 
-    if snode.is_secondary_node:
-        rpc_client.bdev_lvol_set_leader(False, lvs_name=lvol.lvs_name)
-    else:
-        rpc_client.bdev_lvol_set_leader(True, lvs_name=lvol.lvs_name)
+    # if snode.is_secondary_node:
+    #     rpc_client.bdev_lvol_set_leader(False, lvs_name=lvol.lvs_name)
+    # else:
+    #     rpc_client.bdev_lvol_set_leader(True, lvs_name=lvol.lvs_name)
 
     # 2- remove bdevs
     logger.info(f"Removing bdev stack")
@@ -935,10 +935,33 @@ def delete_lvol(id_or_name, force_delete=False):
         if not ret:
             return False
     elif lvol.ha_type == "ha":
-        for nodes_id in lvol.nodes:
-            ret = delete_lvol_from_node(lvol.get_id(), nodes_id)
-            if not ret:
-                return False
+
+        sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
+        sec_rpc_client = RPCClient(
+            sec_node.mgmt_ip,
+            sec_node.rpc_port,
+            sec_node.rpc_username,
+            sec_node.rpc_password)
+
+        sec_rpc_client.bdev_lvol_set_leader(False, lvs_name=lvol.lvs_name)
+        time.sleep(2)
+        rpc_client.bdev_lvol_set_leader(True, lvs_name=lvol.lvs_name)
+        time.sleep(2)
+
+        ret = delete_lvol_from_node(lvol.get_id(), lvol.node_id)
+        if not ret:
+            return False
+
+        time.sleep(2)
+        ret = delete_lvol_from_node(lvol.get_id(), snode.secondary_node_id)
+        if not ret:
+            return False
+
+        time.sleep(2)
+        sec_rpc_client.bdev_lvol_set_leader(False, lvs_name=lvol.lvs_name)
+        time.sleep(2)
+        rpc_client.bdev_lvol_set_leader(True, lvs_name=lvol.lvs_name)
+        time.sleep(2)
 
     # remove from storage node
     snode = db_controller.get_storage_node_by_id(lvol.node_id)
