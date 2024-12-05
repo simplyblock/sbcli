@@ -2191,7 +2191,6 @@ def suspend_storage_node(node_id, force=False):
             device_controller.device_set_unavailable(dev.get_id())
 
     time.sleep(2)
-    sec_rpc_client = None
     for lvol_id in snode.lvols:
         lvol = db_controller.get_lvol_by_id(lvol_id)
         for node_id in lvol.nodes:
@@ -2226,7 +2225,9 @@ def suspend_storage_node(node_id, force=False):
 
 
     time.sleep(2)
-    sec_rpc_client.bdev_lvol_set_leader(True, lvs_name=lvol.lvs_name)
+    sn = db_controller.get_storage_node_by_id(snode.secondary_node_id)
+    sec_rpc_client = RPCClient(sn.mgmt_ip, sn.rpc_port, sn.rpc_username, sn.rpc_password)
+    sec_rpc_client.bdev_lvol_set_leader(True, lvs_name=snode.lvstore)
     time.sleep(1)
 
 
