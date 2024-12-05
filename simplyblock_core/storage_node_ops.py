@@ -1910,6 +1910,7 @@ def restart_storage_node(
                                 rpc_client.bdev_distrib_force_to_non_leader(snode.jm_vuid)
 
 
+                time.sleep(2)
                 ret, err = _create_bdev_stack(snode, node.lvstore_stack, primary_node=node)
                 if err:
                     logger.error(f"Failed to create lvstore from node {node.get_id()}")
