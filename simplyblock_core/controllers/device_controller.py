@@ -42,6 +42,8 @@ def device_set_state(device_id, state):
     device.status = state
     snode.write_to_db(db_controller.kv_store)
 
+    distr_controller.send_cluster_map_to_node(snode)
+
     if state == NVMeDevice.STATUS_ONLINE:
         snode = db_controller.get_storage_node_by_id(dev.node_id)
         logger.info("Make other nodes connect to the node devices")
@@ -53,8 +55,8 @@ def device_set_state(device_id, state):
             if node.enable_ha_jm:
                 node.remote_jm_devices = storage_node_ops._connect_to_remote_jm_devs(node)
             node.write_to_db()
+            distr_controller.send_cluster_map_to_node(node)
 
-    distr_controller.send_dev_status_event(device, device.status)
     device_events.device_status_change(device, device.status, old_status)
     return True
 

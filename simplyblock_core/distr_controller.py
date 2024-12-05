@@ -115,9 +115,11 @@ def get_distr_cluster_map(snodes, target_node):
                 "status": dev_status,
                 # "physical_label": dev.physical_label
             }
-            dev_w_map.append({
-                "weight": dev_w,
-                "id": dev.cluster_device_order})
+            if dev.status in [NVMeDevice.STATUS_FAILED, NVMeDevice.STATUS_FAILED_AND_MIGRATED]:
+                dev_w_map.append({"weight": dev_w, "id": -1})
+            else:
+                dev_w_map.append({"weight": dev_w, "id": dev.cluster_device_order})
+
         node_status = snode.status
         if node_status == StorageNode.STATUS_SCHEDULABLE:
             node_status = StorageNode.STATUS_UNREACHABLE
