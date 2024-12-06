@@ -12,7 +12,7 @@ class TestLvolHACluster(FioWorkloadTest):
     High-volume stress test for a 3-node cluster.
     Operations:
     - Create 500 lvols (mix of crypto and non-crypto) on a single node.
-    - Create 40000 snapshots.
+    - Create 3000 snapshots.
     - Fill volumes to about 9 TiB.
     - Run FIO for storage.
     - Handle graceful shutdown, container stop, and network stop.
@@ -83,8 +83,8 @@ class TestLvolHACluster(FioWorkloadTest):
         self.logger.info("Completed lvol creation.")
 
     def create_snapshots(self):
-        """Create 40000 snapshots for existing lvols."""
-        self.logger.info("Creating 40000 snapshots.")
+        """Create 3000 snapshots for existing lvols."""
+        self.logger.info("Creating 3000 snapshots.")
         for idx, lvol_id in enumerate(list(self.lvol_mount_details.keys())):
             for snap_idx in range(1, self.snapshot_per_lvol + 1):
                 snapshot_name = f"{self.snapshot_name}_{idx + 1}_{snap_idx}"
