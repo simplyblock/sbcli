@@ -20,6 +20,17 @@ commands:
               and the storage node.
             dest: ifname
             type: str
+          - name: "--cpu-mask"
+            help: "SPDK app CPU mask, default is all cores found"
+            dest: "spdk_cpu_mask"
+            required: false
+            type: str
+          - name: "--isolate-cores"
+            help: "Isolate cores in kernel args for provided cpu mask"
+            dest: isolate_cores
+            type: bool
+            default: false
+            action: store_true
       - name: deploy-cleaner
         help: "Cleans a previous simplyblock deploy (local run)"
         description: >
