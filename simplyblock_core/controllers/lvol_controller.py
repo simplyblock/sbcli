@@ -858,6 +858,7 @@ def _remove_bdev_stack(bdev_stack, rpc_client):
 
         bdev['status'] = 'deleted'
         time.sleep(1)
+    return True
 
 
 def delete_lvol_from_node(lvol_id, node_id, clear_data=True):
@@ -873,14 +874,12 @@ def delete_lvol_from_node(lvol_id, node_id, clear_data=True):
     logger.info(f"Removing subsystem")
     ret = rpc_client.subsystem_delete(lvol.nqn)
 
-    # if snode.is_secondary_node:
-    #     rpc_client.bdev_lvol_set_leader(False, lvs_name=lvol.lvs_name)
-    # else:
-    #     rpc_client.bdev_lvol_set_leader(True, lvs_name=lvol.lvs_name)
-
     # 2- remove bdevs
     logger.info(f"Removing bdev stack")
-    _remove_bdev_stack(lvol.bdev_stack[::-1], rpc_client)
+    ret = _remove_bdev_stack(lvol.bdev_stack[::-1], rpc_client)
+    if not ret:
+        return False
+
     lvol.deletion_status = 'bdevs_deleted'
     lvol.write_to_db(db_controller.kv_store)
     return True
@@ -919,6 +918,11 @@ def delete_lvol(id_or_name, force_delete=False):
             lvol.write_to_db(db_controller.kv_store)
             return True
 
+    if snode.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_REMOVED]:
+        logger.error(f"Node status is not online or removed, node: {snode.get_id()}, status: {snode.status}")
+        if not force_delete:
+            return False
+
     # set status
     lvol.status = LVol.STATUS_IN_DELETION
     lvol.write_to_db(db_controller.kv_store)
@@ -937,33 +941,60 @@ def delete_lvol(id_or_name, force_delete=False):
     elif lvol.ha_type == "ha":
 
         sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
+
+        if sec_node.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_OFFLINE, StorageNode.STATUS_REMOVED]:
+            logger.error(f"Secondary node status is not online or offline, node: {sec_node.get_id()}, status: {sec_node.status}")
+            if not force_delete:
+                return False
+
         sec_rpc_client = RPCClient(
             sec_node.mgmt_ip,
             sec_node.rpc_port,
             sec_node.rpc_username,
             sec_node.rpc_password)
 
-        sec_rpc_client.bdev_lvol_set_leader(False, lvs_name=lvol.lvs_name)
+        ret = sec_rpc_client.bdev_lvol_set_leader(False, lvs_name=lvol.lvs_name)
+        if not ret:
+            logger.error(f"Failed to set leader for secondary node: {sec_node.get_id()}")
+            if not force_delete:
+                return False
+
         time.sleep(2)
         rpc_client.bdev_lvol_set_leader(True, lvs_name=lvol.lvs_name)
-        time.sleep(2)
+        if not ret:
+            logger.error(f"Failed to set leader for primary node: {snode.get_id()}")
+            if not force_delete:
+                return False
 
+        time.sleep(2)
         ret = delete_lvol_from_node(lvol.get_id(), lvol.node_id)
         if not ret:
-            return False
+            logger.error(f"Failed to delete lvol from node: {snode.get_id()}")
+            if not force_delete:
+                return False
 
         time.sleep(2)
         ret = delete_lvol_from_node(lvol.get_id(), snode.secondary_node_id)
         if not ret:
-            return False
+            logger.error(f"Failed to delete lvol from node: {sec_node.get_id()}")
+            if not force_delete:
+                return False
 
         time.sleep(2)
-        sec_rpc_client.bdev_lvol_set_leader(False, lvs_name=lvol.lvs_name)
-        time.sleep(2)
-        rpc_client.bdev_lvol_set_leader(True, lvs_name=lvol.lvs_name)
-        time.sleep(2)
+        ret = sec_rpc_client.bdev_lvol_set_leader(False, lvs_name=lvol.lvs_name)
+        if not ret:
+            logger.error(f"Failed to set leader for secondary node: {sec_node.get_id()}")
+            if not force_delete:
+                return False
 
-    # remove from storage node
+        time.sleep(2)
+        ret = rpc_client.bdev_lvol_set_leader(True, lvs_name=lvol.lvs_name)
+        if not ret:
+            logger.error(f"Failed to set leader for primary node: {snode.get_id()}")
+            if not force_delete:
+                return False
+
+    # remove from db
     snode = db_controller.get_storage_node_by_id(lvol.node_id)
     # logger.debug(snode)
     logger.debug(f"removing lvol: {lvol.get_id()} from node lvol list: {str(snode.lvols)}")
