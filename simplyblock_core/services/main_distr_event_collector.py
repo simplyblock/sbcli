@@ -43,11 +43,16 @@ def process_device_event(event):
 
         if device_obj.status not in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_READONLY]:
             logger.info(f"The device is not online, skipping. status: {device_obj.status}")
-            event.status = 'skipped'
+            event.status = 'skipped:dev_unav'
             distr_controller.send_dev_status_event(device_obj, device_obj.status, event_node_obj)
             return
 
         distr_controller.send_dev_status_event(device_obj, NVMeDevice.STATUS_UNAVAILABLE, event_node_obj)
+
+        if event_node_obj.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED]:
+            logger.info(f"Node is not online, skipping. status: {event_node_obj.status}")
+            event.status = 'skipped:node_offline'
+            return
 
         if device_node_obj.get_id() == event_node_obj.get_id():
             if event.message == 'SPDK_BDEV_EVENT_REMOVE':
@@ -55,11 +60,6 @@ def process_device_event(event):
                 device_controller.device_remove(device_obj.get_id())
                 event.status = 'processed'
                 return
-
-        if event_node_obj.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED]:
-            logger.info(f"Node is not online, skipping. status: {event_node_obj.status}")
-            event.status = 'skipped'
-            return
 
         if event.message in ['error_write', 'error_unmap']:
             logger.info(f"Setting device to read-only")
