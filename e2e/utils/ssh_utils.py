@@ -544,7 +544,7 @@ class SshUtils:
         add_node_cmd = f"{cmd} {cluster_id} {node_ip}:5000 {ifname}"
         self.exec_command(node=node, command=add_node_cmd)
 
-    def create_random_files(self, node, mount_path, file_prefix="random_file", file_count=5, file_size="4G"):
+    def create_random_files(self, node, mount_path, file_size, file_prefix="random_file", file_count=1):
         """
         Creates pseudo-random files using `dd` command.
 
@@ -559,3 +559,4 @@ class SshUtils:
             file_path = f"{mount_path}/{file_prefix}_{i}"
             command = f"sudo dd if=/dev/urandom of={file_path} bs=1M count={int(file_size[:-1]) * 1024} status=progress"
             self.exec_command(node, command)
+
