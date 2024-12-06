@@ -2322,7 +2322,7 @@ def resume_storage_node(node_id):
 
 
     time.sleep(1)
-    rpc_client.bdev_lvol_set_leader(True, lvs_name=lvol.lvs_name)
+    rpc_client.bdev_lvol_set_leader(True, lvs_name=snode.lvstore)
     time.sleep(1)
 
     for lvol_id in snode.lvols:
