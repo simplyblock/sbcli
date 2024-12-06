@@ -47,6 +47,7 @@ def process_device_event(event):
             distr_controller.send_dev_status_event(device_obj, device_obj.status, event_node_obj)
             return
 
+        distr_controller.send_dev_status_event(device_obj, NVMeDevice.STATUS_UNAVAILABLE, event_node_obj)
 
         if device_node_obj.get_id() == event_node_obj.get_id():
             if event.message == 'SPDK_BDEV_EVENT_REMOVE':
@@ -57,7 +58,6 @@ def process_device_event(event):
 
         if event_node_obj.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED]:
             logger.info(f"Node is not online, skipping. status: {event_node_obj.status}")
-            distr_controller.send_dev_status_event(device_obj, NVMeDevice.STATUS_UNAVAILABLE, event_node_obj)
             event.status = 'skipped'
             return
 
@@ -101,8 +101,7 @@ def process_lvol_event(event):
         event.status = "event_unknown"
 
 
-def process_event(event_id):
-    event = db_controller.get_events(event_id)[0]
+def process_event(event):
     if event.event == "device_status":
         if event.storage_id >= 0:
             process_device_event(event)
@@ -122,37 +121,37 @@ def start_event_collector_on_node(node_id):
         snode.rpc_port,
         snode.rpc_username,
         snode.rpc_password,
-        timeout=5, retry=2)
+        timeout=2, retry=2)
 
-    while True:
-        page = 1
+    try:
         while True:
-            try:
-                events = client.distr_status_events_discard_then_get(
-                    0, constants.DISTR_EVENT_COLLECTOR_NUM_OF_EVENTS * page)
-                if events:
-                    logger.info(f"Found events: {len(events)}")
-                    event_ids = []
-                    for ev in events:
-                        logger.debug(ev)
-                        ev_id = events_controller.log_distr_event(snode.cluster_id, snode.get_id(), ev)
-                        event_ids.append(ev_id)
+            page = 1
+            while True:
+                try:
+                    events = client.distr_status_events_discard_then_get(
+                        0, constants.DISTR_EVENT_COLLECTOR_NUM_OF_EVENTS * page)
+                    if events:
+                        logger.info(f"Found events: {len(events)}")
+                        for ev in events:
+                            event = events_controller.log_distr_event(snode.cluster_id, snode.get_id(), ev)
+                            logger.info(f"Processing event: {event.get_id()}")
+                            process_event(event)
 
-                    for eid in event_ids:
-                        logger.info(f"Processing event: {eid}")
-                        process_event(eid)
-
-                    logger.info(f"Discarding events: {len(events)}")
-                    client.distr_status_events_discard_then_get(len(events), 0)
-                    page *= 10
-                else:
-                    logger.info("no events found, sleeping")
+                        logger.info(f"Discarding events: {len(events)}")
+                        client.distr_status_events_discard_then_get(len(events), 0)
+                        page *= 10
+                    else:
+                        logger.info("no events found, sleeping")
+                        break
+                except Exception as e:
+                    logger.error("Failed to process distr events")
+                    logger.exception(e)
                     break
-            except Exception as e:
-                logger.error("Failed to process distr events")
-                logger.exception(e)
-                break
-        time.sleep(constants.DISTR_EVENT_COLLECTOR_INTERVAL_SEC)
+            time.sleep(constants.DISTR_EVENT_COLLECTOR_INTERVAL_SEC)
+    except Exception as e:
+        logger.error(e)
+
+    logger.info(f"Stopping Distr event collector on node: {node_id}")
 
 
 threads_maps = {}

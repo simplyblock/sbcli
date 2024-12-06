@@ -24,13 +24,15 @@ def device_set_state(device_id, state):
         logger.error("node not found")
         return False
 
+    device = None
     for dev in snode.nvme_devices:
         if dev.get_id() == device_id:
             device = dev
             break
 
-    if device.status == state:
-        return True
+    if not device:
+        logger.error("device not found")
+        return False
 
     if state == NVMeDevice.STATUS_ONLINE:
         device.retries_exhausted = False
@@ -38,24 +40,26 @@ def device_set_state(device_id, state):
     if state == NVMeDevice.STATUS_REMOVED:
         device.deleted = True
 
-    old_status = dev.status
-    device.status = state
-    snode.write_to_db(db_controller.kv_store)
+    if state == NVMeDevice.STATUS_READONLY and device.status == NVMeDevice.STATUS_UNAVAILABLE:
+        return False
+
+    if device.status != state:
+        old_status = dev.status
+        device.status = state
+        snode.write_to_db(db_controller.kv_store)
+        device_events.device_status_change(device, device.status, old_status)
+
+    distr_controller.send_dev_status_event(device, device.status)
 
     if state == NVMeDevice.STATUS_ONLINE:
-        snode = db_controller.get_storage_node_by_id(dev.node_id)
         logger.info("Make other nodes connect to the node devices")
         snodes = db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id)
         for node in snodes:
             if node.get_id() == snode.get_id() or node.status != StorageNode.STATUS_ONLINE:
                 continue
             node.remote_devices = storage_node_ops._connect_to_remote_devs(node)
-            if node.enable_ha_jm:
-                node.remote_jm_devices = storage_node_ops._connect_to_remote_jm_devs(node)
             node.write_to_db()
 
-    distr_controller.send_dev_status_event(device, device.status)
-    device_events.device_status_change(device, device.status, old_status)
     return True
 
 

@@ -189,7 +189,7 @@ def _get_next_3_nodes(cluster_id, lvol_size=0):
             # node_stat_list = db_controller.get_node_stats(node, limit=1000)
             # combined_record = utils.sum_records(node_stat_list)
             node_st = {
-                "lvol": len(node.lvols)+1,
+                "lvol": (len(node.lvols)+1)*10,
                 # "cpu": 1 + (node.cpu * node.cpu_hz),
                 # "r_io": combined_record.read_io_ps,
                 # "w_io": combined_record.write_io_ps,

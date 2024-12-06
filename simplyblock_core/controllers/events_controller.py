@@ -62,7 +62,7 @@ def log_distr_event(cluster_id, node_id, event_dict):
 
     db_controller = DBController()
     ds.write_to_db(db_controller.kv_store)
-    return ds.get_id()
+    return ds
 
 
 def log_event_cluster(cluster_id, domain, event, db_object, caused_by, message,
