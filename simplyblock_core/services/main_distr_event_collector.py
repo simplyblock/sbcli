@@ -25,59 +25,50 @@ def process_device_event(event):
     if event.message in ['SPDK_BDEV_EVENT_REMOVE', "error_open", 'error_read', "error_write", "error_unmap"]:
         node_id = event.node_id
         storage_id = event.storage_id
+        event_node_obj = db_controller.get_storage_node_by_id(node_id)
 
-        device = None
+        device_obj = None
+        device_node_obj = None
         for node in db_controller.get_storage_nodes():
             for dev in node.nvme_devices:
                 if dev.cluster_device_order == storage_id:
-                    if dev.status not in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_READONLY]:
-                        logger.info(f"The storage device is not online, skipping. status: {dev.status}")
-                        event.status = 'skipped'
-                        n = db_controller.get_storage_node_by_id(node_id)
-                        distr_controller.send_dev_status_event(dev, NVMeDevice.STATUS_UNAVAILABLE, n)
-                        return
-
-                    device = dev
+                    device_obj = dev
+                    device_node_obj = node
                     break
 
-        if not device:
+        if not device_obj:
             logger.info(f"Device not found!, storage id: {storage_id} from node: {node_id}")
             event.status = 'device_not_found'
             return
 
+        if device_obj.status not in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_READONLY]:
+            logger.info(f"The device is not online, skipping. status: {device_obj.status}")
+            event.status = 'skipped'
+            distr_controller.send_dev_status_event(device_obj, device_obj.status, event_node_obj)
+            return
 
-        node = db_controller.get_storage_node_by_id(node_id)
 
-        distr_controller.send_dev_status_event(device, NVMeDevice.STATUS_UNAVAILABLE, node)
+        if device_node_obj.get_id() == event_node_obj.get_id():
+            if event.message == 'SPDK_BDEV_EVENT_REMOVE':
+                logger.info(f"Removing storage id: {storage_id} from node: {node_id}")
+                device_controller.device_remove(device_obj.get_id())
+                event.status = 'processed'
+                return
 
-        device_id = device.get_id()
-        # if device.node_id != node_id:
-        #     # if event.message != 'SPDK_BDEV_EVENT_REMOVE':
-        #     logger.info(f"Setting storage id: {storage_id} unavailable")
-        #     distr_controller.send_dev_status_event(device, NVMeDevice.STATUS_UNAVAILABLE, node)
-        #     # if device.status == NVMeDevice.STATUS_ONLINE:
-        #     #     device_controller.device_set_io_error(device_id, True)
-        #     #     device_controller.device_set_unavailable(device_id)
-        #
-        # else:
-        if node.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED]:
-            logger.info(f"Node is not online, skipping. status: {node.status}")
+        if event_node_obj.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED]:
+            logger.info(f"Node is not online, skipping. status: {event_node_obj.status}")
+            distr_controller.send_dev_status_event(device_obj, NVMeDevice.STATUS_UNAVAILABLE, event_node_obj)
             event.status = 'skipped'
             return
 
-        if event.message == 'SPDK_BDEV_EVENT_REMOVE':
-            if device.node_id == node_id:
-                logger.info(f"Removing storage id: {storage_id} from node: {node_id}")
-                device_controller.device_remove(device_id)
-
-        elif event.message in ['error_write', 'error_unmap']:
+        if event.message in ['error_write', 'error_unmap']:
             logger.info(f"Setting device to read-only")
-            device_controller.device_set_read_only(device_id)
-            device_controller.device_set_io_error(device_id, True)
+            device_controller.device_set_read_only(device_obj.get_id())
+            device_controller.device_set_io_error(device_obj.get_id(), True)
         else:
             logger.info(f"Setting device to unavailable")
-            device_controller.device_set_unavailable(device_id)
-            device_controller.device_set_io_error(device_id, True)
+            device_controller.device_set_unavailable(device_obj.get_id())
+            device_controller.device_set_io_error(device_obj.get_id(), True)
 
         event.status = 'processed'
 

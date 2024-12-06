@@ -916,9 +916,9 @@ def _connect_to_remote_jm_devs(this_node, jm_ids=[]):
                 new_devs.append(jm_dev)
 
         else:
-            if bdev_name in node_bdev_names:
-                logger.debug(f"bdev found {bdev_name}")
-                rpc_client.bdev_nvme_detach_controller(name)
+            # if bdev_name in node_bdev_names:
+            #     logger.debug(f"bdev found {bdev_name}")
+            #     rpc_client.bdev_nvme_detach_controller(name)
 
             jm_dev.status = JMDevice.STATUS_UNAVAILABLE
             new_devs.append(jm_dev)
@@ -1842,10 +1842,6 @@ def restart_storage_node(
         node.remote_devices = _connect_to_remote_devs(node, force_conect_restarting_nodes=True)
         node.write_to_db(kv_store)
 
-    if snode.jm_device and snode.jm_device.status == JMDevice.STATUS_UNAVAILABLE:
-        device_controller.set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_ONLINE)
-
-
     snode = db_controller.get_storage_node_by_id(snode.get_id())
     for db_dev in snode.nvme_devices:
         if db_dev.status in [NVMeDevice.STATUS_UNAVAILABLE, NVMeDevice.STATUS_READONLY]:
@@ -1853,12 +1849,15 @@ def restart_storage_node(
             device_events.device_restarted(db_dev)
     snode.write_to_db(db_controller.kv_store)
 
+    logger.info("Setting node status to Online")
+    set_node_status(node_id, StorageNode.STATUS_ONLINE)
+
     logger.info(f"Sending device status event")
     for dev in snode.nvme_devices:
         distr_controller.send_dev_status_event(dev, dev.status)
 
-    logger.info("Setting node status to Online")
-    set_node_status(node_id, StorageNode.STATUS_ONLINE)
+    if snode.jm_device and snode.jm_device.get_id() and snode.jm_device.status != JMDevice.STATUS_REMOVED:
+        device_controller.set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_ONLINE)
 
     time.sleep(5)
 

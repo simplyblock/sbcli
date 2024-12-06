@@ -154,7 +154,7 @@ while True:
                                 else:
                                     logger.error(f"Failed to connect to device: {dev.get_id()}")
 
-                if snode.jm_device:
+                if snode.jm_device and snode.jm_device.get_id():
                     jm_device = snode.jm_device
                     logger.info(f"Node JM: {jm_device.get_id()}")
                     ret = health_controller.check_jm_device(jm_device.get_id())

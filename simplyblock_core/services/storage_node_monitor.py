@@ -120,7 +120,7 @@ def set_node_offline(node):
 
         # set devices unavailable
         for dev in node.nvme_devices:
-            if dev.status == NVMeDevice.STATUS_ONLINE:
+            if dev.status in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_READONLY]:
                 device_controller.device_set_unavailable(dev.get_id())
 
         # # set jm dev offline
