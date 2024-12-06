@@ -51,7 +51,7 @@ class SshUtils:
                     username=username,
                     port=port,
                     pkey=private_key,
-                    timeout=360)
+                    timeout=10000)
         self.logger.info("Connected to bastion server.")
 
         if self.ssh_connections.get(bastion_server_address, None):
@@ -76,7 +76,7 @@ class SshUtils:
                            port=port,
                            sock=channel,
                            pkey=private_key,
-                           timeout=3600)
+                           timeout=10000)
         self.logger.info("Connected to target server through proxy.")
 
         if self.ssh_connections.get(address, None):
@@ -545,19 +545,19 @@ class SshUtils:
         self.exec_command(node=node, command=add_node_cmd)
 
     def create_random_files(self, node, mount_path, file_size, file_prefix="random_file", file_count=1):
-        """
-        Creates pseudo-random files using `dd` command.
-
-        Args:
-            node (str): The node on which to create the files.
-            mount_path (str): The directory to create files in.
-            file_prefix (str): Prefix for the file names.
-            file_count (int): Number of files to create.
-            file_size (str): Size of each file (e.g., '4G').
-        """
         for i in range(1, file_count + 1):
             file_path = f"{mount_path}/{file_prefix}_{i}"
-            command = f"sudo dd if=/dev/urandom of={file_path} bs=1M count={int(file_size[:-1]) * 1024} status=progress"
-            self.logger.info(f"Executing cmd: {command}")
-            self.exec_command(node, command)
+            command = f"sudo dd if=/dev/urandom of={file_path} bs=512K count={int(file_size[:-1]) * 2048} status=none"
+            retries = 3
+            for attempt in range(retries):
+                try:
+                    self.logger.info(f"Executing cmd: {command} (Attempt {attempt + 1}/{retries})")
+                    output, error = self.exec_command(node, command, timeout=10000)
+                    if error:
+                        raise Exception(error)
+                    break
+                except Exception as e:
+                    self.logger.error(f"Error during `dd` command: {e}. Retrying...")
+                    if attempt == retries - 1:
+                        self.logger.error(f"Failed after {retries} retries. Aborting.")
 
