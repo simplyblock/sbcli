@@ -65,7 +65,12 @@ class TestSingleNodeFailureHA(TestClusterBase):
 
         # no_lvol_node_uuid = self.sbcli_utils.get_lvol_by_id(lvol_id)['results'][0]['node_id']
 
-        no_lvol_node = self.sbcli_utils.get_storage_nodes()['results'][0]
+        no_lvol_node = None
+        for node in self.sbcli_utils.get_storage_nodes()['results']:
+            if len(node['lvols']) > 0 and node['is_secondary_node'] is False:
+                no_lvol_node = node
+                break
+
         no_lvol_node_uuid = no_lvol_node['uuid']
         node_ip = no_lvol_node["mgmt_ip"]
 
@@ -138,12 +143,13 @@ class TestSingleNodeFailureHA(TestClusterBase):
         mount_path = self.mount_path+f"_{lvol_name}"
         log_path = self.log_path+f"_{lvol_name}"
 
+        host_id = self.sbcli_utils.get_node_without_lvols()
+
         self.sbcli_utils.add_lvol(
             lvol_name=self.lvol_name,
             pool_name=self.pool_name,
             size="10G",
-            # distr_ndcs=2,
-            # distr_npcs=1
+            host_id=host_id
         )
 
         initial_devices = self.ssh_obj.get_devices(node=self.mgmt_nodes[0])

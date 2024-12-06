@@ -12,7 +12,7 @@ on:
       simplyBlockDeploy_branch:
         description: 'Branch for simplyBlockDeploy'
         required: true
-        default: 'lvol-ha'
+        default: 'sec_storage_node_hmdi'
       spdk_csi_branch:
         description: 'Branch for spdk-csi'
         required: true
@@ -33,7 +33,7 @@ on:
       ndcs:
         description: 'Value for NDCS'
         required: false
-        default: 2
+        default: 1
       npcs:
         description: 'Value for NPCS'
         required: false
@@ -136,10 +136,11 @@ jobs:
         run: |
           cd $GITHUB_WORKSPACE/simplyBlockDeploy
           terraform plan \
-            -var "mgmt_nodes=1" -var "storage_nodes=4" -var "volumes_per_storage_nodes=2" \
-            -var mgmt_nodes_instance_type="m6i.2xlarge" -var storage_nodes_instance_type="m6i.2xlarge" \
+            -var "mgmt_nodes=1" -var "storage_nodes=3" -var "volumes_per_storage_nodes=2" \
+            -var "mgmt_nodes_instance_type=m6i.2xlarge" -var "storage_nodes_instance_type=m6i.2xlarge" \
             -var "extra_nodes=1" -var "extra_nodes_instance_type=m6id.xlarge" \
-            -var storage_nodes_ebs_size2=100 -var "region=us-east-2" \
+            -var "storage_nodes_ebs_size2=100" -var "region=us-east-2" \
+            -var "sec_storage_nodes=1" -var "sec_storage_nodes_instance_type=m6i.2xlarge" \ 
             -var "sbcli_cmd=$SBCLI_CMD" -out=tfplan
         env:
           SBCLI_CMD: ${{ env.SBCLI_CMD }}
