@@ -23,7 +23,7 @@ class TestLvolHACluster(FioWorkloadTest):
         self.logger = setup_logger(__name__)
         self.lvol_size = "25G"
         self.fio_size = "18G"
-        self.total_lvols = 20
+        self.total_lvols = 500
         self.snapshot_per_lvol = 6
         self.lvol_name = "lvl"
         self.snapshot_name = "snapshot"
@@ -237,7 +237,7 @@ class TestLvolHAClusterGracefulShutdown(TestLvolHACluster):
         sleep_n_sec(10)
         self.sbcli_utils.shutdown_node(node_uuid=self.lvol_node)
         self.sbcli_utils.wait_for_storage_node_status(self.lvol_node,
-                                                      ["unreachable", "offline"],
+                                                      "offline",
                                                       timeout=800)
         sleep_n_sec(30)
         restart_start_time = datetime.now()
@@ -392,3 +392,133 @@ class TestLvolHAClusterNetworkInterrupt(TestLvolHACluster):
         self.logger.info(f"Network reconnect and node online total time: {time_mins}")
         
         self.logger.info("Stress test completed.")
+
+class TestLvolHAClusterRunAllScenarios(TestLvolHACluster):
+    """
+    Runs all three scenarios (Graceful Shutdown, Storage Node Crash, Network Interrupt)
+    as part of a single test execution flow with setup performed only once.
+    """
+
+    def run(self):
+        """Main execution for all scenarios."""
+        self.logger.info("Starting high-volume stress test for all scenarios.")
+        
+        # Setup performed only once
+        self.logger.info("Performing initial setup.")
+        self.node = self.mgmt_nodes[0]
+        self.ssh_obj.make_directory(node=self.node, dir_name=self.log_path)
+        self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
+        self.lvol_node = self.sbcli_utils.get_node_without_lvols()
+
+        self.logger.info("Creating lvols.")
+        self.create_lvols()
+        
+        self.logger.info("Creating snapshots.")
+        self.create_snapshots()
+        
+        self.logger.info("Filling lvols with data.")
+        self.fill_volumes()
+        
+        self.logger.info("Calculating MD5 checksums for validation.")
+        self.calculate_md5()
+        
+        # Scenario 1: Graceful Shutdown
+        self.logger.info("Running Scenario 1: Graceful Shutdown.")
+        self.run_graceful_shutdown_scenario()
+        
+        # Scenario 2: Storage Node Crash
+        self.logger.info("Running Scenario 2: Storage Node Crash.")
+        self.run_storage_node_crash_scenario()
+        
+        # Scenario 3: Network Interrupt
+        self.logger.info("Running Scenario 3: Network Interrupt.")
+        self.run_network_interrupt_scenario()
+
+        self.logger.info("All scenarios completed successfully.")
+
+    def run_graceful_shutdown_scenario(self):
+        """Graceful shutdown and restart scenario."""
+        timestamp = int(datetime.now().timestamp())
+        self.logger.info("Graceful shutdown initiated.")
+        
+        self.sbcli_utils.suspend_node(node_uuid=self.lvol_node)
+        sleep_n_sec(10)
+        self.sbcli_utils.shutdown_node(node_uuid=self.lvol_node)
+        self.sbcli_utils.wait_for_storage_node_status(self.lvol_node, "offline", timeout=800)
+        sleep_n_sec(30)
+        
+        restart_start_time = datetime.now()
+        self.sbcli_utils.restart_node(node_uuid=self.lvol_node)
+        self.sbcli_utils.wait_for_storage_node_status(self.lvol_node, "online", timeout=800)
+        self.sbcli_utils.wait_for_health_status(self.lvol_node, True, timeout=800)
+        
+        node_details = self.sbcli_utils.get_storage_node_details(storage_node_id=self.lvol_node)
+        actual_status = node_details[0]["health_check"]
+        self.logger.info(f"Node health check after restart: {actual_status}")
+        
+        node_up_time = datetime.now()
+        self.validate_checksums()
+        
+        time_secs = node_up_time - restart_start_time
+        time_mins = time_secs.seconds / 60
+        self.logger.info(f"Graceful shutdown and start total time: {time_mins} minutes.")
+
+    def run_storage_node_crash_scenario(self):
+        """Storage node crash and recovery scenario."""
+        timestamp = int(datetime.now().timestamp())
+        self.logger.info("Simulating storage node crash.")
+        
+        node_details = self.sbcli_utils.get_storage_node_details(self.lvol_node)
+        node_ip = node_details[0]["mgmt_ip"]
+        
+        self.ssh_obj.stop_spdk_process(node_ip)
+        restart_start_time = datetime.now()
+        self.sbcli_utils.wait_for_storage_node_status(self.lvol_node, "online", timeout=800)
+        self.sbcli_utils.wait_for_health_status(self.lvol_node, True, timeout=800)
+        
+        node_details = self.sbcli_utils.get_storage_node_details(storage_node_id=self.lvol_node)
+        actual_status = node_details[0]["health_check"]
+        self.logger.info(f"Node health check after crash recovery: {actual_status}")
+        
+        node_up_time = datetime.now()
+        self.validate_checksums()
+        
+        time_secs = node_up_time - restart_start_time
+        time_mins = time_secs.seconds / 60
+        self.logger.info(f"Crash and recovery total time: {time_mins} minutes.")
+
+    def run_network_interrupt_scenario(self):
+        """Network interrupt and recovery scenario."""
+        timestamp = int(datetime.now().timestamp())
+        self.logger.info("Simulating network interruption.")
+        
+        cmd = (
+            'nohup sh -c "sudo nmcli dev disconnect eth0 && sleep 120 && '
+            'sudo nmcli dev connect eth0" &'
+        )
+        
+        node_details = self.sbcli_utils.get_storage_node_details(self.lvol_node)
+        node_ip = node_details[0]["mgmt_ip"]
+        
+        unavailable_thread = threading.Thread(
+            target=lambda: self.sbcli_utils.wait_for_storage_node_status(self.lvol_node, "schedulable", 300)
+        )
+        unavailable_thread.start()
+        
+        disconnect_start_time = datetime.now()
+        self.ssh_obj.exec_command(node_ip, command=cmd)
+        unavailable_thread.join()
+        
+        self.sbcli_utils.wait_for_storage_node_status(self.lvol_node, "online", timeout=800)
+        self.sbcli_utils.wait_for_health_status(self.lvol_node, True, timeout=800)
+        
+        node_details = self.sbcli_utils.get_storage_node_details(storage_node_id=self.lvol_node)
+        actual_status = node_details[0]["health_check"]
+        self.logger.info(f"Node health check after network recovery: {actual_status}")
+        
+        node_up_time = datetime.now()
+        self.validate_checksums()
+        
+        time_secs = node_up_time - disconnect_start_time
+        time_mins = (time_secs.seconds - 120) / 60
+        self.logger.info(f"Network reconnect and recovery total time: {time_mins} minutes.")
