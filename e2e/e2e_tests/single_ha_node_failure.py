@@ -46,63 +46,28 @@ class TestSingleNodeFailureHA(TestClusterBase):
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        self.fio_runtime = 10*60
+        self.fio_runtime = 5*60
         self.logger = setup_logger(__name__)
+        self.fio_threads = []
 
     def run(self):
         """ Performs each step of the testcase
         """
         self.logger.info(f"Inside run function. Base command: {self.base_cmd}")
-        initial_devices = self.ssh_obj.get_devices(node=self.mgmt_nodes[0])
 
         self.sbcli_utils.add_storage_pool(
             pool_name=self.pool_name
         )
 
-        self.sbcli_utils.add_lvol(
-            lvol_name=self.lvol_name,
-            pool_name=self.pool_name,
-            size="10G",
-            # distr_ndcs=2,
-            # distr_npcs=1
-        )
-        lvols = self.sbcli_utils.list_lvols()
-        assert self.lvol_name in list(lvols.keys()), \
-            f"Lvol {self.lvol_name} not present in list of lvols post add: {lvols}"
+        for i in range(3):
+            lvol_name = f"LVOL_{i}"
+            lvol_id = self.add_lvol_and_run_fio(lvol_name)
 
-        no_lvol_node_uuid = self.sbcli_utils.get_lvol_by_id(lvols[self.lvol_name])['results'][0]['node_id']
+        # no_lvol_node_uuid = self.sbcli_utils.get_lvol_by_id(lvol_id)['results'][0]['node_id']
 
-        connect_ls = self.sbcli_utils.get_lvol_connect_str_list(lvol_name=self.lvol_name)
-
-        for connect_str in connect_ls:
-            self.ssh_obj.exec_command(node=self.mgmt_nodes[0], command=connect_str)
-
-        final_devices = self.ssh_obj.get_devices(node=self.mgmt_nodes[0])
-        disk_use = None
-        self.logger.info("Initial vs final disk:")
-        self.logger.info(f"Initial: {initial_devices}")
-        self.logger.info(f"Final: {final_devices}")
-        for device in final_devices:
-            if device not in initial_devices:
-                self.logger.info(f"Using disk: /dev/{device.strip()}")
-                disk_use = f"/dev/{device.strip()}"
-                break
-        self.ssh_obj.unmount_path(node=self.mgmt_nodes[0],
-                                  device=disk_use)
-        self.ssh_obj.format_disk(node=self.mgmt_nodes[0],
-                                 device=disk_use)
-        self.ssh_obj.mount_path(node=self.mgmt_nodes[0],
-                                device=disk_use,
-                                mount_path=self.mount_path)
-
-        fio_thread1 = threading.Thread(target=self.ssh_obj.run_fio_test, args=(self.mgmt_nodes[0], None, self.mount_path, self.log_path,),
-                                       kwargs={"name": "fio_run_1",
-                                               "runtime": self.fio_runtime,
-                                               "debug": self.fio_debug})
-        fio_thread1.start()
-
-        no_lvol_node = self.sbcli_utils.get_storage_node_details(storage_node_id=no_lvol_node_uuid)
-        node_ip = no_lvol_node[0]["mgmt_ip"]
+        no_lvol_node = self.sbcli_utils.get_storage_nodes()['results'][0]
+        no_lvol_node_uuid = no_lvol_node['node_id']
+        node_ip = no_lvol_node["mgmt_ip"]
 
         self.validations(node_uuid=no_lvol_node_uuid,
                          node_status="online",
@@ -111,7 +76,7 @@ class TestSingleNodeFailureHA(TestClusterBase):
                          health_check_status=True
                          )
 
-        for i in range(5):
+        for i in range(2):
 
             sleep_n_sec(30)
             self.ssh_obj.stop_spdk_process(node=node_ip)
@@ -148,18 +113,73 @@ class TestSingleNodeFailureHA(TestClusterBase):
         }
         self.common_utils.validate_event_logs(cluster_id=self.cluster_id,
                                               operations=steps)
-        
+
         end_time = self.common_utils.manage_fio_threads(node=self.mgmt_nodes[0],
-                                                        threads=[fio_thread1],
+                                                        threads=self.fio_threads,
                                                         timeout=1000)
 
-        self.common_utils.validate_fio_test(node=self.mgmt_nodes[0],
-                                            log_file=self.log_path)
-        
-        total_fio_runtime = end_time - self.ssh_obj.fio_runtime["fio_run_1"]
-        self.logger.info(f"FIO Run Time: {total_fio_runtime}")
-        
-        assert  total_fio_runtime >= self.fio_runtime, \
-            f'FIO Run Time Interrupted before given runtime. Actual: {self.ssh_obj.fio_runtime["fio_run_1"]}'
+        for i in range(3):
+            lvol_name = f"LVOL_{i}"
+
+            self.common_utils.validate_fio_test(node=self.mgmt_nodes[0],
+                                                log_file=self.log_path+f"_{lvol_name}")
+
+            total_fio_runtime = end_time - self.ssh_obj.fio_runtime[f"fio_run_{lvol_name}"]
+            self.logger.info(f"FIO Run Time: {total_fio_runtime}")
+
+            assert  total_fio_runtime >= self.fio_runtime, \
+                f'FIO Run Time Interrupted before given runtime. Actual: {self.ssh_obj.fio_runtime[f"fio_run_{lvol_name}"]}'
 
         self.logger.info("TEST CASE PASSED !!!")
+
+
+    def add_lvol_and_run_fio(self, lvol_name):
+        self.lvol_name = lvol_name
+        mount_path = self.mount_path+f"_{lvol_name}"
+        log_path = self.log_path+f"_{lvol_name}"
+
+        self.sbcli_utils.add_lvol(
+            lvol_name=self.lvol_name,
+            pool_name=self.pool_name,
+            size="10G",
+            # distr_ndcs=2,
+            # distr_npcs=1
+        )
+
+        initial_devices = self.ssh_obj.get_devices(node=self.mgmt_nodes[0])
+
+        lvols = self.sbcli_utils.list_lvols()
+        assert self.lvol_name in list(lvols.keys()), \
+            f"Lvol {self.lvol_name} not present in list of lvols post add: {lvols}"
+
+        connect_ls = self.sbcli_utils.get_lvol_connect_str_list(lvol_name=self.lvol_name)
+
+        for connect_str in connect_ls:
+            self.ssh_obj.exec_command(node=self.mgmt_nodes[0], command=connect_str)
+
+        final_devices = self.ssh_obj.get_devices(node=self.mgmt_nodes[0])
+        disk_use = None
+        self.logger.info("Initial vs final disk:")
+        self.logger.info(f"Initial: {initial_devices}")
+        self.logger.info(f"Final: {final_devices}")
+        for device in final_devices:
+            if device not in initial_devices:
+                self.logger.info(f"Using disk: /dev/{device.strip()}")
+                disk_use = f"/dev/{device.strip()}"
+                break
+        self.ssh_obj.unmount_path(node=self.mgmt_nodes[0],
+                                  device=disk_use)
+        self.ssh_obj.format_disk(node=self.mgmt_nodes[0],
+                                 device=disk_use)
+        self.ssh_obj.mount_path(node=self.mgmt_nodes[0],
+                                device=disk_use,
+                                mount_path=mount_path)
+
+        fio_thread1 = threading.Thread(target=self.ssh_obj.run_fio_test,
+                                       args=(self.mgmt_nodes[0], None, mount_path, log_path,),
+                                       kwargs={"name": f"fio_run_{lvol_name}",
+                                               "runtime": self.fio_runtime,
+                                               "debug": self.fio_debug})
+        fio_thread1.start()
+        self.fio_threads.append(fio_thread1)
+        return lvols[self.lvol_name]
