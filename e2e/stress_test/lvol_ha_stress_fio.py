@@ -145,6 +145,7 @@ class TestLvolHACluster(FioWorkloadTest):
 
             # Run dd in parallel for the current batch
             for _, lvol in batch:
+                self.logger.info(f"Running dd for lvol: {lvol['Name']}")
                 mount_path = lvol["Mount"]
                 thread = threading.Thread(
                     target=self.ssh_obj.create_random_files,

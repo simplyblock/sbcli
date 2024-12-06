@@ -558,5 +558,6 @@ class SshUtils:
         for i in range(1, file_count + 1):
             file_path = f"{mount_path}/{file_prefix}_{i}"
             command = f"sudo dd if=/dev/urandom of={file_path} bs=1M count={int(file_size[:-1]) * 1024} status=progress"
+            self.logger.info(f"Executing cmd: {command}")
             self.exec_command(node, command)
 
