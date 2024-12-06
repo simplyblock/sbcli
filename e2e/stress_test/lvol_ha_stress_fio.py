@@ -12,7 +12,7 @@ class TestLvolHACluster(FioWorkloadTest):
     High-volume stress test for a 3-node cluster.
     Operations:
     - Create 500 lvols (mix of crypto and non-crypto) on a single node.
-    - Create 3000 snapshots.
+    - Create 40000 snapshots.
     - Fill volumes to about 9 TiB.
     - Run FIO for storage.
     - Handle graceful shutdown, container stop, and network stop.
@@ -83,8 +83,8 @@ class TestLvolHACluster(FioWorkloadTest):
         self.logger.info("Completed lvol creation.")
 
     def create_snapshots(self):
-        """Create 3000 snapshots for existing lvols."""
-        self.logger.info("Creating 3000 snapshots.")
+        """Create 40000 snapshots for existing lvols."""
+        self.logger.info("Creating 40000 snapshots.")
         for idx, lvol_id in enumerate(list(self.lvol_mount_details.keys())):
             for snap_idx in range(1, self.snapshot_per_lvol + 1):
                 snapshot_name = f"{self.snapshot_name}_{idx + 1}_{snap_idx}"
@@ -238,16 +238,16 @@ class TestLvolHAClusterGracefulShutdown(TestLvolHACluster):
         self.sbcli_utils.shutdown_node(node_uuid=self.lvol_node)
         self.sbcli_utils.wait_for_storage_node_status(self.lvol_node,
                                                       "offline",
-                                                      timeout=800)
+                                                      timeout=4000)
         sleep_n_sec(30)
         restart_start_time = datetime.now()
         self.sbcli_utils.restart_node(node_uuid=self.lvol_node)
         self.sbcli_utils.wait_for_storage_node_status(self.lvol_node,
                                                       "online",
-                                                      timeout=800)
+                                                      timeout=4000)
         self.sbcli_utils.wait_for_health_status(self.lvol_node,
                                                 True,
-                                                timeout=800)
+                                                timeout=4000)
         
         node_details = self.sbcli_utils.get_storage_node_details(storage_node_id=self.lvol_node)
         actual_status = node_details[0]["health_check"]
@@ -298,10 +298,10 @@ class TestLvolHAClusterStorageNodeCrash(TestLvolHACluster):
         restart_start_time = datetime.now()
         self.sbcli_utils.wait_for_storage_node_status(self.lvol_node,
                                                       "online",
-                                                      timeout=800)
+                                                      timeout=4000)
         self.sbcli_utils.wait_for_health_status(self.lvol_node,
                                                 True,
-                                                timeout=800)
+                                                timeout=4000)
         node_details = self.sbcli_utils.get_storage_node_details(storage_node_id=self.lvol_node)
         actual_status = node_details[0]["health_check"]
         self.logger.info(f"Node health check is: {actual_status}")
@@ -353,7 +353,7 @@ class TestLvolHAClusterNetworkInterrupt(TestLvolHACluster):
         node_ip = node_details[0]["mgmt_ip"]
 
         unavailable_thread = threading.Thread(
-            target=lambda: self.sbcli_utils.wait_for_storage_node_status(self.lvol_node, "schedulable", 300)
+            target=lambda: self.sbcli_utils.wait_for_storage_node_status(self.lvol_node, "schedulable", 4000)
         )
 
         unavailable_thread.start()
@@ -365,10 +365,10 @@ class TestLvolHAClusterNetworkInterrupt(TestLvolHACluster):
         unavailable_thread.join()
         self.sbcli_utils.wait_for_storage_node_status(self.lvol_node,
                                                       "online",
-                                                      timeout=800)
+                                                      timeout=4000)
         self.sbcli_utils.wait_for_health_status(self.lvol_node,
                                                 True,
-                                                timeout=800)
+                                                timeout=4000)
         
         node_details = self.sbcli_utils.get_storage_node_details(storage_node_id=self.lvol_node)
         actual_status = node_details[0]["health_check"]
@@ -444,13 +444,13 @@ class TestLvolHAClusterRunAllScenarios(TestLvolHACluster):
         self.sbcli_utils.suspend_node(node_uuid=self.lvol_node)
         sleep_n_sec(10)
         self.sbcli_utils.shutdown_node(node_uuid=self.lvol_node)
-        self.sbcli_utils.wait_for_storage_node_status(self.lvol_node, "offline", timeout=800)
+        self.sbcli_utils.wait_for_storage_node_status(self.lvol_node, "offline", timeout=4000)
         sleep_n_sec(30)
         
         restart_start_time = datetime.now()
         self.sbcli_utils.restart_node(node_uuid=self.lvol_node)
-        self.sbcli_utils.wait_for_storage_node_status(self.lvol_node, "online", timeout=800)
-        self.sbcli_utils.wait_for_health_status(self.lvol_node, True, timeout=800)
+        self.sbcli_utils.wait_for_storage_node_status(self.lvol_node, "online", timeout=4000)
+        self.sbcli_utils.wait_for_health_status(self.lvol_node, True, timeout=4000)
         
         node_details = self.sbcli_utils.get_storage_node_details(storage_node_id=self.lvol_node)
         actual_status = node_details[0]["health_check"]
@@ -473,8 +473,8 @@ class TestLvolHAClusterRunAllScenarios(TestLvolHACluster):
         
         self.ssh_obj.stop_spdk_process(node_ip)
         restart_start_time = datetime.now()
-        self.sbcli_utils.wait_for_storage_node_status(self.lvol_node, "online", timeout=800)
-        self.sbcli_utils.wait_for_health_status(self.lvol_node, True, timeout=800)
+        self.sbcli_utils.wait_for_storage_node_status(self.lvol_node, "online", timeout=4000)
+        self.sbcli_utils.wait_for_health_status(self.lvol_node, True, timeout=4000)
         
         node_details = self.sbcli_utils.get_storage_node_details(storage_node_id=self.lvol_node)
         actual_status = node_details[0]["health_check"]
@@ -501,7 +501,7 @@ class TestLvolHAClusterRunAllScenarios(TestLvolHACluster):
         node_ip = node_details[0]["mgmt_ip"]
         
         unavailable_thread = threading.Thread(
-            target=lambda: self.sbcli_utils.wait_for_storage_node_status(self.lvol_node, "schedulable", 300)
+            target=lambda: self.sbcli_utils.wait_for_storage_node_status(self.lvol_node, "schedulable", 4000)
         )
         unavailable_thread.start()
         
@@ -509,8 +509,8 @@ class TestLvolHAClusterRunAllScenarios(TestLvolHACluster):
         self.ssh_obj.exec_command(node_ip, command=cmd)
         unavailable_thread.join()
         
-        self.sbcli_utils.wait_for_storage_node_status(self.lvol_node, "online", timeout=800)
-        self.sbcli_utils.wait_for_health_status(self.lvol_node, True, timeout=800)
+        self.sbcli_utils.wait_for_storage_node_status(self.lvol_node, "online", timeout=4000)
+        self.sbcli_utils.wait_for_health_status(self.lvol_node, True, timeout=4000)
         
         node_details = self.sbcli_utils.get_storage_node_details(storage_node_id=self.lvol_node)
         actual_status = node_details[0]["health_check"]
