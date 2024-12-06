@@ -922,3 +922,9 @@ class RPCClient:
             "nqn": nqn
         }
         return self._request("nvmf_subsystem_get_controllers", params)
+
+    def lvol_crypto_key_delete(self, name):
+        params = {
+            "name": name
+        }
+        return self._request("accel_crypto_key_destroy", params)

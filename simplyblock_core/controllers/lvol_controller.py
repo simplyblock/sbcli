@@ -437,74 +437,6 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
     lvol.top_bdev = f"{lvol.lvs_name}/{lvol.lvol_bdev}"
     lvol.base_bdev = lvol.top_bdev
 
-    # if with_snapshot:
-    #     lvol.bdev_stack.append({
-    #         "type": "bdev_distr",
-    #         "name": lvol.base_bdev,
-    #         "params": {
-    #             "name": lvol.base_bdev,
-    #             "vuid": lvol.vuid,
-    #             "ndcs": lvol.ndcs,
-    #             "npcs": lvol.npcs,
-    #             "num_blocks": int(lvol.max_size / lvol.distr_bs),
-    #             "block_size": lvol.distr_bs,
-    #             "chunk_size": lvol.distr_chunk_bs,
-    #             "pba_page_size": lvol.distr_page_size,
-    #         }
-    #     })
-    #
-    #     lvol.bdev_stack.append({
-    #         "type": "bmap_init",
-    #         "name": lvol.base_bdev,
-    #         "params": {
-    #             "bdev_name": lvol.base_bdev,
-    #             "num_blocks": int(lvol.size / lvol.distr_bs),
-    #             "block_len": lvol.distr_bs,
-    #             "page_len": int(lvol.distr_page_size / lvol.distr_bs),
-    #             "max_num_blocks": int(lvol.max_size / lvol.distr_bs)
-    #         }
-    #     })
-    #     lvol.snapshot_name = f"snapshot_{lvol.vuid}_{name}"
-    #     lvol.top_bdev = f"lvol_{lvol.vuid}_{lvol.lvol_name}"
-    #     lvol.bdev_stack.append({
-    #         "type": "ultra_lvol",
-    #         "name": lvol.top_bdev,
-    #         "params": {
-    #             "lvol_name": lvol.top_bdev,
-    #             "base_bdev": lvol.base_bdev
-    #         }
-    #     })
-    # else:
-    #lvol.bdev_stack.extend(
-    #    [
-            #{
-            #    "type": "bdev_distr",
-            #    "name": lvol.base_bdev,
-            #    "params": {
-            #        "name": lvol.base_bdev,
-            #        "vuid": lvol.vuid,
-            #        "ndcs": lvol.ndcs,
-            #        "npcs": lvol.npcs,
-            #        "num_blocks": int(lvol.max_size / lvol.distr_bs),
-            #        "block_size": lvol.distr_bs,
-            #        "chunk_size": lvol.distr_chunk_bs,
-            #        "pba_page_size": lvol.distr_page_size,
-            #    }
-            #},
-            #{
-            #    "type": "bdev_lvstore",
-            #    "name": lvol.lvs_name,
-            #    "params": {
-            #        "name": lvol.lvs_name,
-            #        "bdev_name": lvol.base_bdev,
-            #        "cluster_sz": lvol.distr_page_size,
-            #        "clear_method": "none",
-            #        "num_md_pages_per_cluster_ratio": 1,
-            #    }
-            #},
-
-    #    ]
-    #)
     lvol_dict = {
         "type": "bdev_lvol",
         "name": lvol.lvol_bdev,
@@ -527,7 +459,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
             if not success:
                 return False, err
 
-        lvol.crypto_bdev = f"crypto_{lvol.lvol_name}"
+        lvol.crypto_bdev = f"crypto_{lvol.lvol_bdev}"
         lvol.bdev_stack.append({
             "type": "crypto",
             "name": lvol.crypto_bdev,
@@ -626,7 +558,11 @@ def _create_bdev_stack(lvol, snode):
             ret = rpc_client.create_lvstore(**params)
 
         elif type == "bdev_lvol":
-            ret = rpc_client.create_lvol(**params)
+            if snode.is_secondary_node:
+                ret = rpc_client.bdev_lvol_register(
+                    lvol.lvol_bdev, lvol.lvs_name, lvol.lvol_uuid, lvol.blobid, lvol.lvol_priority_class)
+            else:
+                ret = rpc_client.create_lvol(**params)
 
         else:
             logger.debug(f"Unknown BDev type: {type}")
@@ -638,7 +574,7 @@ def _create_bdev_stack(lvol, snode):
         else:
             if created_bdevs:
                 # rollback
-                _remove_bdev_stack(created_bdevs, rpc_client)
+                _remove_bdev_stack(created_bdevs[::-1], rpc_client)
             return False, f"Failed to create BDev: {name}"
 
     return True, None
@@ -650,21 +586,6 @@ def add_lvol_on_node(lvol, snode, ha_comm_addrs=None, ha_inode_self=0):
 
     if snode.is_secondary_node:
         rpc_client.bdev_lvol_set_leader(False, lvs_name=lvol.lvs_name)
-        ret = rpc_client.bdev_lvol_register(
-            lvol.lvol_bdev, lvol.lvs_name, lvol.lvol_uuid, lvol.blobid, lvol.lvol_priority_class)
-        if not ret:
-            return False
-
-        time.sleep(1)
-
-        for bdev in lvol.bdev_stack:
-            type = bdev['type']
-            params = bdev['params']
-            if type == "crypto":
-                ret = _create_crypto_lvol(rpc_client, **params)
-                if not ret:
-                    return False
-                break
 
     else:
         # Validate adding lvol on storage node
@@ -680,9 +601,11 @@ def add_lvol_on_node(lvol, snode, ha_comm_addrs=None, ha_inode_self=0):
             return False, f"Failed to add lvol on node {snode.get_id()}"
 
         rpc_client.bdev_lvol_set_leader(True, lvs_name=lvol.lvs_name)
-        ret, msg = _create_bdev_stack(lvol, snode)
-        if not ret:
-            return False, msg
+
+
+    ret, msg = _create_bdev_stack(lvol, snode)
+    if not ret:
+        return False, msg
 
     min_cntlid = 1 + 1000*ha_inode_self
     logger.info("creating subsystem %s", lvol.nqn)
@@ -842,6 +765,9 @@ def _remove_bdev_stack(bdev_stack, rpc_client):
             ret = rpc_client.ultra21_lvol_dismount(name)
         elif type == "crypto":
             ret = rpc_client.lvol_crypto_delete(name)
+            if ret:
+                ret = rpc_client.lvol_crypto_key_delete(f'key_{name}')
+
         elif type == "bdev_lvstore":
             ret = rpc_client.bdev_lvol_delete_lvstore(name)
         elif type == "bdev_lvol":
@@ -959,35 +885,35 @@ def delete_lvol(id_or_name, force_delete=False):
             if not force_delete:
                 return False
 
-        time.sleep(2)
+        time.sleep(1)
         rpc_client.bdev_lvol_set_leader(True, lvs_name=lvol.lvs_name)
         if not ret:
             logger.error(f"Failed to set leader for primary node: {snode.get_id()}")
             if not force_delete:
                 return False
 
-        time.sleep(2)
+        time.sleep(1)
         ret = delete_lvol_from_node(lvol.get_id(), lvol.node_id)
         if not ret:
             logger.error(f"Failed to delete lvol from node: {snode.get_id()}")
             if not force_delete:
                 return False
 
-        time.sleep(2)
+        time.sleep(1)
         ret = delete_lvol_from_node(lvol.get_id(), snode.secondary_node_id)
         if not ret:
             logger.error(f"Failed to delete lvol from node: {sec_node.get_id()}")
             if not force_delete:
                 return False
 
-        time.sleep(2)
+        time.sleep(1)
         ret = sec_rpc_client.bdev_lvol_set_leader(False, lvs_name=lvol.lvs_name)
         if not ret:
             logger.error(f"Failed to set leader for secondary node: {sec_node.get_id()}")
             if not force_delete:
                 return False
 
-        time.sleep(2)
+        time.sleep(1)
         ret = rpc_client.bdev_lvol_set_leader(True, lvs_name=lvol.lvs_name)
         if not ret:
             logger.error(f"Failed to set leader for primary node: {snode.get_id()}")
