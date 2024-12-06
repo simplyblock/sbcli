@@ -1,5 +1,6 @@
 #!/usr/bin/env python
 # encoding: utf-8
+import json
 import logging
 import math
 import os
@@ -142,6 +143,27 @@ def delete_cluster_id():
     return out
 
 
+def get_cores_distribution():
+    file_path = constants.TEMP_CORES_FILE
+    try:
+        # Open and read the JSON file
+        with open(file_path, "r") as file:
+            cores_config = json.load(file)
+
+        # Output the parsed data
+        logger.info("Parsed Core Configuration:")
+        for key, value in cores_config.items():
+            logger.info(f"{key}: {value}")
+        return cores_config
+
+    except FileNotFoundError:
+        logger.error(f"The file '{file_path}' does not exist.")
+        return {}
+    except json.JSONDecodeError as e:
+        logger.error(f"Error decoding JSON: {e}")
+        return {}
+
+
 @bp.route('/info', methods=['GET'])
 def get_info():
 
@@ -167,6 +189,7 @@ def get_info():
         "network_interface": node_utils.get_nics_data(),
 
         "cloud_instance": CLOUD_INFO,
+        "cores_config": get_cores_distribution(),
     }
     return utils.get_response(out)
 

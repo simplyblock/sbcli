@@ -993,43 +993,31 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
     pollers_mask = ""
     app_thread_mask = ""
     jm_cpu_mask = ""
-    alceml_cpu_cores = []
-    distrib_cpu_cores = []
-    alceml_worker_cpu_cores = []
-
     alceml_cpu_index = 0
     alceml_worker_cpu_index = 0
     distrib_cpu_index = 0
     jc_singleton_mask = ""
 
+    cores_config= node_info["cores_config"]
+    spdk_cpu_mask = cores_config["cpu_mask"]
+    app_thread_core = cores_config["cores_distribution"]["app_thread_core"]
+    jm_cpu_core = cores_config["cores_distribution"]["jm_cpu_core"]
+    poller_cpu_cores = cores_config["cores_distribution"]["poller_cpu_cores"]
+    alceml_cpu_cores = cores_config["cores_distribution"]["alceml_cpu_cores"]
+    alceml_worker_cpu_cores = cores_config["cores_distribution"]["alceml_worker_cpu_cores"]
+    distrib_cpu_cores = cores_config["cores_distribution"]["distrib_cpu_cores"]
+    jc_singleton_core = cores_config["cores_distribution"]["jc_singleton_core"]
+    if is_secondary_node:
+        distrib_cpu_cores = distrib_cpu_cores + alceml_cpu_cores
 
-    poller_cpu_cores = []
-
-    if not spdk_cpu_mask:
-        spdk_cpu_mask = hex(int(math.pow(2, cpu_count))-2)
-
-    spdk_cores = utils.hexa_to_cpu_list(spdk_cpu_mask)
-    if cpu_count < spdk_cores[-1]:
-        print(f"ERROR: The cpu mask {spdk_cpu_mask} is greater than the total cpus on the system {cpu_count}")
-        return False
-    if spdk_cores[-1] >= 64:
-        print(f"ERROR: The provided cpu mask {spdk_cpu_mask} has values greater than 63, which is not allowed")
-        return False
-    if len(spdk_cores) >= 4:
-        app_thread_core, jm_cpu_core, poller_cpu_cores, alceml_cpu_cores, alceml_worker_cpu_cores, distrib_cpu_cores, jc_singleton_core = utils.calculate_core_allocation(
-            spdk_cores)
-
-        if is_secondary_node:
-            distrib_cpu_cores = distrib_cpu_cores+alceml_cpu_cores
-
-        pollers_mask = utils.generate_mask(poller_cpu_cores)
+    if jc_singleton_core:
+        jc_singleton_mask = utils.decimal_to_hex_power_of_2(jc_singleton_core[0])
+    if app_thread_core:
         app_thread_mask = utils.generate_mask(app_thread_core)
-        if jc_singleton_core:
-            jc_singleton_mask = utils.decimal_to_hex_power_of_2(jc_singleton_core[0])
-        #spdk_cpu_mask = utils.generate_mask(spdk_cores)
+    if jm_cpu_core:
         jm_cpu_mask = utils.generate_mask(jm_cpu_core)
-        #distrib_cpu_mask = utils.generate_mask(distrib_cpu_cores)
-
+    if poller_cpu_cores:
+        pollers_mask = utils.generate_mask(poller_cpu_cores)
     # Calculate pool count
     if cloud_instance['type']:
         ins_type = cloud_instance['type']
@@ -2562,10 +2550,12 @@ def get_node_port_iostats(port_id, history=None, records_count=20):
     return utils.print_table(out)
 
 
-def deploy(ifname):
+def deploy(ifname, spdk_cpu_mask):
     if not ifname:
         ifname = "eth0"
-
+    cpu_count = os.cpu_count()
+    if not spdk_cpu_mask:
+        spdk_cpu_mask = hex(int(math.pow(2, cpu_count))-2)
     dev_ip = utils.get_iface_ip(ifname)
     if not dev_ip:
         logger.error(f"Error getting interface ip: {ifname}")
@@ -2583,6 +2573,10 @@ def deploy(ifname):
     ret = scripts.configure_docker(dev_ip)
 
     start_storage_node_api_container(dev_ip)
+    isolated_full = utils.prepare_cores(spdk_cpu_mask)
+    if isolated_full:
+        utils.generate_realtime_variables_file(isolated_full)
+        utils.run_tuned()
     return f"{dev_ip}:5000"
 
 def start_storage_node_api_container(node_ip):

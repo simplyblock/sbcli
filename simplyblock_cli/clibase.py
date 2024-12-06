@@ -37,8 +37,14 @@ class CLIWrapperBase:
         return parent_parser.add_parser(command, description=help, help=help, usage=usage)
 
     def storage_node__deploy(self, sub_command, args):
-        return storage_ops.deploy(args.ifname)
-    
+        spdk_cpu_mask = None
+        if args.spdk_cpu_mask:
+            if self.validate_cpu_mask(args.spdk_cpu_mask):
+                spdk_cpu_mask = args.spdk_cpu_mask
+            else:
+                return f"Invalid cpu mask value: {args.spdk_cpu_mask}"
+        return storage_ops.deploy(args.ifname, spdk_cpu_mask)
+
     def storage_node__deploy_cleaner(self, sub_command, args):
         return storage_ops.deploy_cleaner()
 
