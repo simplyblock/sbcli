@@ -66,7 +66,7 @@ class TestSingleNodeFailureHA(TestClusterBase):
         # no_lvol_node_uuid = self.sbcli_utils.get_lvol_by_id(lvol_id)['results'][0]['node_id']
 
         no_lvol_node = self.sbcli_utils.get_storage_nodes()['results'][0]
-        no_lvol_node_uuid = no_lvol_node['node_id']
+        no_lvol_node_uuid = no_lvol_node['uuid']
         node_ip = no_lvol_node["mgmt_ip"]
 
         self.validations(node_uuid=no_lvol_node_uuid,
