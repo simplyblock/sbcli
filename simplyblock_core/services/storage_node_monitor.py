@@ -94,36 +94,38 @@ def get_current_cluster_status(cluster_id):
     for node in snodes:
         if snode.is_secondary_node:
             continue
+
         node_online_devices = 0
         node_offline_devices = 0
+
+        # if node.status == StorageNode.STATUS_REMOVED:
+        #     removed_offline_devices = 0
+        #     for dev in node.nvme_devices:
+        #         if dev.status not in [NVMeDevice.STATUS_FAILED_AND_MIGRATED, NVMeDevice.STATUS_JM]:
+        #             removed_offline_devices += 1
+        #             offline_devices += 1
+        #     if removed_offline_devices > 0:
+        #         offline_devices += 1
+        #         affected_nodes += 1
+        #
+        # else:
         if node.status == StorageNode.STATUS_ONLINE:
             if is_new_migrated_node(cluster_id, node):
                 continue
             online_nodes += 1
-            for dev in node.nvme_devices:
-                if dev.status in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_JM, NVMeDevice.STATUS_READONLY]:
-                    node_online_devices += 1
-                else:
-                    node_offline_devices += 1
+        for dev in node.nvme_devices:
+            if dev.status in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_JM, NVMeDevice.STATUS_READONLY]:
+                node_online_devices += 1
+            elif dev.status == NVMeDevice.STATUS_FAILED_AND_MIGRATED:
+                pass
+            else:
+                node_offline_devices += 1
 
-            if node_offline_devices > 0 or node_online_devices == 0:
-                affected_nodes += 1
+        if node_offline_devices > 0 or node_online_devices == 0:
+            affected_nodes += 1
 
             online_devices += node_online_devices
             offline_devices += node_offline_devices
-
-        elif node.status == StorageNode.STATUS_REMOVED:
-            removed_offline_devices = 0
-            for dev in node.nvme_devices:
-                if dev.status not in [NVMeDevice.STATUS_FAILED_AND_MIGRATED, NVMeDevice.STATUS_JM]:
-                    removed_offline_devices += 1
-                    offline_devices += 1
-            if removed_offline_devices > 0:
-                offline_devices += 1
-                affected_nodes += 1
-        else:
-            offline_nodes += 1
-            affected_nodes += 1
 
 
     logger.debug(f"online_nodes: {online_nodes}")
