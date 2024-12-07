@@ -714,6 +714,8 @@ def _prepare_cluster_devices_on_restart(snode):
     if not jm_device or not jm_device.uuid:
         return True
 
+    jm_device.status = JMDevice.STATUS_UNAVAILABLE
+
     if jm_device.jm_nvme_bdev_list:
         all_bdevs_found = True
         for bdev_name in jm_device.jm_nvme_bdev_list:
@@ -1856,12 +1858,12 @@ def restart_storage_node(
     for dev in snode.nvme_devices:
         distr_controller.send_dev_status_event(dev, dev.status)
 
-    if snode.jm_device and snode.jm_device.get_id() and snode.jm_device.status != JMDevice.STATUS_REMOVED:
-        device_controller.set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_ONLINE)
 
-    time.sleep(5)
+    time.sleep(2)
 
     if cluster.status not in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED] and not force:
+        if snode.jm_device and snode.jm_device.get_id() and snode.jm_device.status == JMDevice.STATUS_UNAVAILABLE:
+            device_controller.set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_ONLINE)
         logger.warning(f"The cluster status is not active ({cluster.status}), adding the node without distribs and lvstore")
         logger.info("Done")
         return "Success"
@@ -1876,12 +1878,18 @@ def restart_storage_node(
         # ret = dump_lvstore(node_id)
         # print(ret)
 
+    time.sleep(4)
+
     for dev in snode.nvme_devices:
         if dev.status != NVMeDevice.STATUS_ONLINE:
             logger.debug(f"Device is not online: {dev.get_id()}, status: {dev.status}")
             continue
         logger.info(f"Starting migration task for device {dev.get_id()}")
         tasks_controller.add_device_mig_task(dev.get_id())
+
+    time.sleep(2)
+    if snode.jm_device and snode.jm_device.get_id() and snode.jm_device.status == JMDevice.STATUS_UNAVAILABLE:
+        device_controller.set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_ONLINE)
 
     logger.info("Done")
     return "Success"
@@ -2984,7 +2992,7 @@ def get_next_ha_jms(current_node):
 def get_node_jm_names(current_node):
     db_controller = DBController(KVStore())
     jm_list = []
-    if current_node.jm_device and current_node.jm_device.status == JMDevice.STATUS_ONLINE:
+    if current_node.jm_device:
         jm_list.append(current_node.jm_device.jm_bdev)
     else:
         jm_list.append("JM_LOCAL")
