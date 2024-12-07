@@ -49,6 +49,7 @@ def get_cluster_target_status(cluster_id):
         else:
             offline_nodes += 1
 
+
     logger.debug(f"online_nodes: {online_nodes}")
     logger.debug(f"offline_nodes: {offline_nodes}")
     logger.debug(f"affected_nodes: {affected_nodes}")
@@ -70,32 +71,109 @@ def get_cluster_target_status(cluster_id):
     return Cluster.STATUS_ACTIVE
 
 
+def is_new_migrated_node(cluster_id, node):
+    for item in node.lvstore_stack:
+        if item["type"] == "bdev_distr":
+            if tasks_controller.get_new_device_mig_task(cluster_id, node.uuid, item["name"]):
+                return True
+    return False
+
+
+def get_current_cluster_status(cluster_id):
+    cluster = db_controller.get_cluster_by_id(cluster_id)
+    if cluster.status == cluster.STATUS_UNREADY:
+        return Cluster.STATUS_UNREADY
+    snodes = db_controller.get_storage_nodes_by_cluster_id(cluster_id)
+
+    online_nodes = 0
+    offline_nodes = 0
+    affected_nodes = 0
+    online_devices = 0
+    offline_devices = 0
+
+    for node in snodes:
+        node_online_devices = 0
+        node_offline_devices = 0
+        if node.status == StorageNode.STATUS_ONLINE:
+            if is_new_migrated_node(cluster_id, node):
+                continue
+            online_nodes += 1
+            for dev in node.nvme_devices:
+                if dev.status in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_JM, NVMeDevice.STATUS_READONLY]:
+                    node_online_devices += 1
+                else:
+                    node_offline_devices += 1
+
+            if node_offline_devices > 0 or node_online_devices == 0:
+                affected_nodes += 1
+
+            online_devices += node_online_devices
+            offline_devices += node_offline_devices
+
+        elif node.status == StorageNode.STATUS_REMOVED:
+            removed_offline_devices = 0
+            for dev in node.nvme_devices:
+                if dev.status not in [NVMeDevice.STATUS_FAILED_AND_MIGRATED, NVMeDevice.STATUS_JM]:
+                    removed_offline_devices += 1
+                    offline_devices += 1
+            if removed_offline_devices > 0:
+                offline_devices += 1
+                affected_nodes += 1
+        else:
+            offline_nodes += 1
+            affected_nodes += 1
+
+
+    logger.debug(f"online_nodes: {online_nodes}")
+    logger.debug(f"offline_nodes: {offline_nodes}")
+    logger.debug(f"affected_nodes: {affected_nodes}")
+    logger.debug(f"online_devices: {online_devices}")
+    logger.debug(f"offline_devices: {offline_devices}")
+    # ndcs n = 2
+    # npcs k = 1
+    n = cluster.distr_ndcs
+    k = cluster.distr_npcs
+
+    # if number of devices in the cluster unavailable on DIFFERENT nodes > k --> I cannot read and in some cases cannot write (suspended)
+    if affected_nodes > k:
+        return Cluster.STATUS_SUSPENDED
+    # if number of devices in the cluster available < n + k --> I cannot write and I cannot read (suspended)
+    if online_devices < n + k:
+        return Cluster.STATUS_SUSPENDED
+    if cluster.strict_node_anti_affinity:
+        # if (number of online nodes < number of total nodes - k) --> suspended
+        if online_nodes < (len(snodes) - k):
+            return Cluster.STATUS_SUSPENDED
+        # if (number of online nodes < n+1) --> suspended
+        if online_nodes < (n + 1):
+            return Cluster.STATUS_SUSPENDED
+        # if (number of online nodes < n+2 and k=2) --> suspended
+        if online_nodes < (n + 2) and k == 2:
+            return Cluster.STATUS_SUSPENDED
+    else:
+        # if (number of online nodes < number of total nodes - k) --> degraded
+        if online_nodes < (len(snodes) - k):
+            return Cluster.STATUS_DEGRADED
+        # if (number of online nodes < n+1) --> degraded
+        if online_nodes < (n + 1):
+            return Cluster.STATUS_DEGRADED
+        # if (number of online nodes < n+2 and k=2) --> degraded
+        if online_nodes < (n + 2) and k == 2:
+            return Cluster.STATUS_DEGRADED
+
+    return Cluster.STATUS_ACTIVE
+
 def update_cluster_status(cluster_id):
     cluster = db_controller.get_cluster_by_id(cluster_id)
 
-    if cluster.ha_type == "ha":
+    if cluster.status == Cluster.STATUS_READONLY or cluster.status == Cluster.STATUS_UNREADY:
+        return
+    cluster_current_status = get_current_cluster_status(cluster_id)
+    if cluster.status not in [Cluster.STATUS_ACTIVE, Cluster.STATUS_UNREADY] and cluster_current_status == Cluster.STATUS_ACTIVE:
+        cluster_ops.cluster_activate(cluster_id, True)
+        return
+    cluster_ops.set_cluster_status(cluster_id, cluster_current_status)
 
-        if cluster.status == Cluster.STATUS_READONLY:
-            return
-        if cluster.status == Cluster.STATUS_UNREADY:
-            return
-
-        cluster_target_status = get_cluster_target_status(cluster_id)
-        logger.info(f"Target cluster status {cluster_target_status}, current status: {cluster.status}")
-        if cluster.status == cluster_target_status:
-            return
-
-        if cluster_target_status == Cluster.STATUS_ACTIVE:
-            logger.info(f"Resuming cluster: {cluster_id}")
-            cluster_ops.unsuspend_cluster(cluster_id)
-
-        elif cluster_target_status == Cluster.STATUS_SUSPENDED:
-            logger.warning(f"Suspending cluster: {cluster_id}")
-            cluster_ops.suspend_cluster(cluster_id)
-
-        elif cluster_target_status == Cluster.STATUS_DEGRADED:
-            logger.warning(f"Degrading cluster: {cluster_id}")
-            cluster_ops.degrade_cluster(cluster_id)
 
 
 def set_node_online(node):

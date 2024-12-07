@@ -104,7 +104,7 @@ def _add_graylog_input(cluster_ip, password):
 def create_cluster(blk_size, page_size_in_blocks, cli_pass,
                    cap_warn, cap_crit, prov_cap_warn, prov_cap_crit, ifname, log_del_interval, metrics_retention_period,
                    contact_point, grafana_endpoint, distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type,
-                   enable_node_affinity, qpair_count, max_queue_size, inflight_io_threshold, enable_qos):
+                   enable_node_affinity, qpair_count, max_queue_size, inflight_io_threshold, enable_qos, strict_node_anti_affinity):
 
     logger.info("Installing dependencies...")
     ret = scripts.install_deps()
@@ -172,12 +172,12 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     else:
         c.grafana_endpoint = f"http://{DEV_IP}/grafana"
     c.enable_node_affinity = enable_node_affinity
-    # c.qpair_count = qpair_count or 256
-    c.qpair_count = 256
+    c.qpair_count = qpair_count or 256
 
     c.max_queue_size = max_queue_size
     c.inflight_io_threshold = inflight_io_threshold
     c.enable_qos = enable_qos
+    c.strict_node_anti_affinity = strict_node_anti_affinity
 
     alerts_template_folder = os.path.join(TOP_DIR, "simplyblock_core/scripts/alerting/")
     alert_resources_file = "alert_resources.yaml"
@@ -297,7 +297,7 @@ def deploy_spdk(node_docker, spdk_cpu_mask, spdk_mem):
 
 def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
                 distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, enable_node_affinity, qpair_count,
-                max_queue_size, inflight_io_threshold, enable_qos):
+                max_queue_size, inflight_io_threshold, enable_qos, strict_node_anti_affinity):
     db_controller = DBController()
     clusters = db_controller.get_clusters()
     if not clusters:
@@ -316,6 +316,7 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
     cluster.secret = utils.generate_string(20)
     cluster.db_connection = default_cluster.db_connection
     cluster.grafana_endpoint = default_cluster.grafana_endpoint
+    cluster.strict_node_anti_affinity = strict_node_anti_affinity
 
     _create_update_user(cluster.uuid, cluster.grafana_endpoint, default_cluster.secret, cluster.secret)
 
@@ -405,20 +406,13 @@ def cluster_activate(cl_id, force=False):
             logger.error("Failed to activate cluster")
             set_cluster_status(cl_id, Cluster.STATUS_UNREADY)
             return False
-
     if not cluster.cluster_max_size:
         cluster.cluster_max_size = max_size
+        cluster.cluster_max_devices = dev_count
+        cluster.cluster_max_nodes = len(online_nodes)
     cluster.write_to_db(db_controller.kv_store)
     set_cluster_status(cl_id, Cluster.STATUS_ACTIVE)
     logger.info("Cluster activated successfully")
-
-    # if cluster.ha_type == "ha":
-    #     for snode in snodes:
-    #         lvol_controller.add_lvol_ha("lvol_"+snode.get_id(), utils.parse_size("10g"), snode.get_id(), "ha", pool_name,
-    #                                     False, False,
-    #                 11, 0, 0, 0, 0,
-    #                 with_snapshot=False, max_size=0, crypto_key1=None, crypto_key2=None)
-
     return True
 
 
