@@ -368,6 +368,8 @@ def cluster_activate(cl_id, force=False):
     dev_count = 0
 
     for node in snodes:
+        if node.is_secondary_node:
+            continue
         if node.status == node.STATUS_ONLINE:
             online_nodes.append(node)
             for dev in node.nvme_devices:
