@@ -908,7 +908,7 @@ def _connect_to_remote_jm_devs(this_node, jm_ids=[]):
                 logger.info(f"Connecting {name} to {this_node.get_id()}")
                 rpc_client.bdev_nvme_detach_controller(name)
                 time.sleep(1)
-                ret = rpc_client.bdev_nvme_attach_controller_tcp(
+                ret = rpc_client.bdev_nvme_attach_controller_tcp_JM(
                     name, jm_dev.nvmf_nqn, jm_dev.nvmf_ip, jm_dev.nvmf_port)
                 if ret:
                     jm_dev.status = JMDevice.STATUS_ONLINE

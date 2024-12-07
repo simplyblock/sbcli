@@ -183,7 +183,7 @@ while True:
 
                             if org_dev and org_dev.status == NVMeDevice.STATUS_ONLINE:
                                 name = f"remote_{remote_device.jm_bdev}"
-                                ret = rpc_client.bdev_nvme_attach_controller_tcp(
+                                ret = rpc_client.bdev_nvme_attach_controller_tcp_JM(
                                     name, remote_device.nvmf_nqn, remote_device.nvmf_ip,
                                     remote_device.nvmf_port)
                                 if ret:
