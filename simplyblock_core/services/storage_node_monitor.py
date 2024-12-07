@@ -172,7 +172,8 @@ def update_cluster_status(cluster_id):
         return
     cluster_current_status = get_current_cluster_status(cluster_id)
     if cluster.status not in [Cluster.STATUS_ACTIVE, Cluster.STATUS_UNREADY] and cluster_current_status == Cluster.STATUS_ACTIVE:
-        cluster_ops.cluster_activate(cluster_id, True)
+        # cluster_ops.cluster_activate(cluster_id, True)
+        cluster_ops.set_cluster_status(cluster_id, Cluster.STATUS_ACTIVE)
         return
     cluster_ops.set_cluster_status(cluster_id, cluster_current_status)
 
