@@ -83,7 +83,7 @@ def get_current_cluster_status(cluster_id):
     cluster = db_controller.get_cluster_by_id(cluster_id)
     if cluster.status == cluster.STATUS_UNREADY:
         return Cluster.STATUS_UNREADY
-    snodes = db_controller.get_storage_nodes_by_cluster_id(cluster_id)
+    snodes = db_controller.get_primary_storage_nodes_by_cluster_id(cluster_id)
 
     online_nodes = 0
     offline_nodes = 0
