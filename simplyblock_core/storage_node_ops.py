@@ -2940,9 +2940,17 @@ def recreate_lvstore(snode):
         lvol.health_check = True
         lvol.write_to_db(db_controller.kv_store)
 
-    if sec_node and sec_node.status == StorageNode.STATUS_ONLINE:
-        recreate_lvstore_on_sec(sec_node, primary_node=snode)
+    time.sleep(2)
 
+    if sec_node and sec_node.status == StorageNode.STATUS_ONLINE:
+        sec_rpc_client = RPCClient(sec_node.mgmt_ip, sec_node.rpc_port, sec_node.rpc_username, sec_node.rpc_password, timeout=3, retry=2)
+        for lvol_id in snode.lvols:
+            lvol = db_controller.get_lvol_by_id(lvol_id)
+            if lvol.ha_type == "ha":
+                for iface in sec_node.data_nics:
+                    if iface.ip4_address:
+                        ret = sec_rpc_client.nvmf_subsystem_listener_set_ana_state(
+                            lvol.nqn, iface.ip4_address, "4420", False)
     return True
 
 

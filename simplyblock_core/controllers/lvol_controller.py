@@ -675,9 +675,27 @@ def recreate_lvol_on_node(lvol, snode, ha_inode_self=0, ana_state=None):
         if not ret:
             return False, "Failed to create crypto bdev"
 
-    min_cntlid = 1 + 1000*ha_inode_self
-    logger.info("creating subsystem %s", lvol.nqn)
-    rpc_client.subsystem_create(lvol.nqn, 'sbcli-cn', lvol.uuid, min_cntlid)
+    namespace_found = False
+    subsys_found = False
+    ret = rpc_client.subsystem_list(lvol.nqn)
+    if ret :
+        subsys_found = True
+        if ret[0]["namespaces"]:
+            for ns in ret[0]["namespaces"]:
+                if ns['name'] == lvol.top_bdev:
+                    namespace_found = True
+                    break
+
+    if subsys_found is False:
+        min_cntlid = 1 + 1000 * ha_inode_self
+        logger.info("creating subsystem %s", lvol.nqn)
+        rpc_client.subsystem_create(lvol.nqn, 'sbcli-cn', lvol.uuid, min_cntlid)
+
+    if namespace_found is False:
+        logger.info("Add BDev to subsystem")
+        ret = rpc_client.nvmf_subsystem_add_ns(lvol.nqn, lvol.top_bdev, lvol.uuid, lvol.guid)
+        if not ret:
+            return False, "Failed to add bdev to subsystem"
 
     cluster = db_controller.get_cluster_by_id(snode.cluster_id)
     # add listeners
@@ -700,20 +718,6 @@ def recreate_lvol_on_node(lvol, snode, ha_inode_self=0, ana_state=None):
             logger.info("adding listener for %s on IP %s" % (lvol.nqn, iface.ip4_address))
             logger.info(f"Setting ANA state: {ana_state}")
             ret = rpc_client.listeners_create(lvol.nqn, tr_type, iface.ip4_address, "4420", ana_state)
-
-    ns_found = False
-    ret = rpc_client.subsystem_list(lvol.nqn)
-    if ret and ret[0]["namespaces"]:
-        for ns in ret[0]["namespaces"]:
-            if ns['name'] == lvol.top_bdev:
-                ns_found = True
-                break
-
-    if not ns_found:
-        logger.info("Add BDev to subsystem")
-        ret = rpc_client.nvmf_subsystem_add_ns(lvol.nqn, lvol.top_bdev, lvol.uuid, lvol.guid)
-        if not ret:
-            return False, "Failed to add bdev to subsystem"
 
     return True, None
 
