@@ -35,9 +35,6 @@ class StorageNode(BaseModel):
 
         STATUS_SCHEDULABLE: 30,
     }
-    updated_at = ""
-    create_dt = ""
-    remove_dt = ""
     attributes = {
         "uuid": {"type": str, 'default': ""},
         "baseboard_sn": {"type": str, 'default': ""},

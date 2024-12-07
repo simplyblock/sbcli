@@ -204,9 +204,9 @@ def storage_node_add():
         disable_ha_jm = False
     enable_test_device = bool(req_data.get('enable_test_device', False))
 
-    spdk_image = None
-    if 'spdk_image' in req_data:
-        spdk_image = req_data['spdk_image']
+    # spdk_image = None
+    # if 'spdk_image' in req_data:
+    #     spdk_image = req_data['spdk_image']
 
     spdk_debug = None
     if 'spdk_debug' in req_data:

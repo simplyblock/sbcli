@@ -1150,6 +1150,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
     snode.status = StorageNode.STATUS_IN_CREATION
     snode.baseboard_sn = node_info['system_id']
     snode.system_uuid = node_info['system_id']
+    snode.create_dt = str(datetime.datetime.now())
 
     snode.cloud_instance_id = cloud_instance['id']
     snode.cloud_instance_type = cloud_instance['type']
