@@ -3298,13 +3298,25 @@ def get_cluster_map(node_id):
         return False
 
     distribs_list = []
-    for bdev in snode.lvstore_stack:
-        type = bdev['type']
-        if type == "bdev_raid":
-            distribs_list = bdev["distribs_list"]
-            if not distribs_list:
-                logger.error(f"Failed to get cluster map: {node_id}")
-    for node in [snode, db_controller.get_storage_node_by_id(snode.secondary_node_id)]:
+    nodes = []
+
+    if snode.is_secondary_node:
+        nodes = [snode]
+        for node in db_controller.get_storage_nodes():
+            if node.secondary_node_id == snode.get_id():
+                for bdev in node.lvstore_stack:
+                    type = bdev['type']
+                    if type == "bdev_raid":
+                        distribs_list.extend(bdev["distribs_list"])
+
+    else:
+        nodes = [snode, db_controller.get_storage_node_by_id(snode.secondary_node_id)]
+        for bdev in snode.lvstore_stack:
+            type = bdev['type']
+            if type == "bdev_raid":
+                distribs_list.extend(bdev["distribs_list"])
+
+    for node in nodes:
         logger.info(f"getting cluster map from node: {node.get_id()}")
         rpc_client = RPCClient(node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password)
         for distr in distribs_list:
@@ -3314,6 +3326,7 @@ def get_cluster_map(node_id):
                 return False
             logger.debug(ret)
             print("*"*100)
+            print(distr)
             results, is_passed = distr_controller.parse_distr_cluster_map(ret)
             print(utils.print_table(results))
     return True
