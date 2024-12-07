@@ -113,6 +113,10 @@ def get_current_cluster_status(cluster_id):
             if is_new_migrated_node(cluster_id, node):
                 continue
             online_nodes += 1
+        elif node.status == StorageNode.STATUS_REMOVED:
+            pass
+        else:
+            offline_nodes += 1
         for dev in node.nvme_devices:
             if dev.status in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_JM, NVMeDevice.STATUS_READONLY]:
                 node_online_devices += 1
@@ -124,8 +128,8 @@ def get_current_cluster_status(cluster_id):
         if node_offline_devices > 0 or node_online_devices == 0:
             affected_nodes += 1
 
-            online_devices += node_online_devices
-            offline_devices += node_offline_devices
+        online_devices += node_online_devices
+        offline_devices += node_offline_devices
 
 
     logger.debug(f"online_nodes: {online_nodes}")
