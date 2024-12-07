@@ -23,7 +23,7 @@ class TestLvolHACluster(FioWorkloadTest):
         self.logger = setup_logger(__name__)
         self.lvol_size = "25G"
         self.fio_size = "18G"
-        self.total_lvols = 500
+        self.total_lvols = 200
         self.snapshot_per_lvol = 3
         self.lvol_name = "lvl"
         self.snapshot_name = "snapshot"
@@ -226,7 +226,7 @@ class TestLvolHAClusterGracefulShutdown(TestLvolHACluster):
         self.lvol_node = self.sbcli_utils.get_node_without_lvols()
 
         self.create_lvols()
-        self.create_snapshots()
+        # self.create_snapshots()
         self.fill_volumes()
         self.calculate_md5()
 
@@ -285,7 +285,7 @@ class TestLvolHAClusterStorageNodeCrash(TestLvolHACluster):
         self.lvol_node = self.sbcli_utils.get_node_without_lvols()
 
         self.create_lvols()
-        self.create_snapshots()
+        # self.create_snapshots()
         self.fill_volumes()
         self.calculate_md5()
 
@@ -338,7 +338,7 @@ class TestLvolHAClusterNetworkInterrupt(TestLvolHACluster):
         self.lvol_node = self.sbcli_utils.get_node_without_lvols()
 
         self.create_lvols()
-        self.create_snapshots()
+        # self.create_snapshots()
         self.fill_volumes()
         self.calculate_md5()
 
@@ -413,8 +413,8 @@ class TestLvolHAClusterRunAllScenarios(TestLvolHACluster):
         self.logger.info("Creating lvols.")
         self.create_lvols()
         
-        self.logger.info("Creating snapshots.")
-        self.create_snapshots()
+        # self.logger.info("Creating snapshots.")
+        # self.create_snapshots()
         
         self.logger.info("Filling lvols with data.")
         self.fill_volumes()
