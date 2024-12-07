@@ -6,6 +6,7 @@ import random
 import sys
 import time
 import uuid
+from datetime import datetime
 from typing import Tuple
 
 from simplyblock_core import utils, constants, distr_controller
@@ -189,7 +190,7 @@ def _get_next_3_nodes(cluster_id, lvol_size=0):
             # node_stat_list = db_controller.get_node_stats(node, limit=1000)
             # combined_record = utils.sum_records(node_stat_list)
             node_st = {
-                "lvol": (len(node.lvols)+1)*10,
+                "lvol": (len(node.lvols)+1),
                 # "cpu": 1 + (node.cpu * node.cpu_hz),
                 # "r_io": combined_record.read_io_ps,
                 # "w_io": combined_record.write_io_ps,
@@ -398,6 +399,8 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
     lvol.size = int(size)
     lvol.max_size = int(max_size)
     lvol.status = LVol.STATUS_ONLINE
+
+    lvol.create_dt = str(datetime.now())
     lvol.ha_type = ha_type
     lvol.bdev_stack = []
     lvol.uuid = str(uuid.uuid4())
@@ -663,7 +666,7 @@ def add_lvol_on_node(lvol, snode, ha_comm_addrs=None, ha_inode_self=0):
     return lvol_bdev, None
 
 
-def recreate_lvol_on_node(lvol, snode, ha_comm_addrs=None, ha_inode_self=0, ana_state=None):
+def recreate_lvol_on_node(lvol, snode, ha_inode_self=0, ana_state=None):
     rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
 
     if "crypto" in lvol.lvol_type:
@@ -715,34 +718,22 @@ def recreate_lvol_on_node(lvol, snode, ha_comm_addrs=None, ha_inode_self=0, ana_
     return True, None
 
 
-def recreate_lvol(lvol_id, snode):
+def recreate_lvol(lvol_id):
     lvol = db_controller.get_lvol_by_id(lvol_id)
     if not lvol:
         logger.error(f"lvol not found: {lvol_id}")
         return False
 
     if lvol.ha_type == 'single':
+        snode = db_controller.get_storage_node_by_id(lvol.node_id)
         is_created, error = recreate_lvol_on_node(lvol, snode)
         if error:
             return False
 
     elif lvol.ha_type == "ha":
-        nodes_ips = []
-        for node_id in lvol.nodes:
-            sn = db_controller.get_storage_node_by_id(node_id)
-            port = 10000 + int(random.random() * 60000)
-            nodes_ips.append(f"{sn.mgmt_ip}:{port}")
-            if node_id != lvol.node_id:
-                rpc_client = RPCClient(sn.mgmt_ip, sn.rpc_port, sn.rpc_username, sn.rpc_password)
-                for iface in sn.data_nics:
-                    if iface.ip4_address:
-                        ret = rpc_client.nvmf_subsystem_listener_set_ana_state(
-                            lvol.nqn, iface.ip4_address, "4420", False, "inaccessible")
-
-        ha_address = ",".join(nodes_ips)
         for index, node_id in enumerate(lvol.nodes):
             sn = db_controller.get_storage_node_by_id(node_id)
-            is_created, error = recreate_lvol_on_node(lvol, sn, ha_address, index)
+            is_created, error = recreate_lvol_on_node(lvol, sn, index)
             if error:
                 return False
 

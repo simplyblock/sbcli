@@ -35,7 +35,9 @@ class StorageNode(BaseModel):
 
         STATUS_SCHEDULABLE: 30,
     }
-
+    updated_at = ""
+    create_dt = ""
+    remove_dt = ""
     attributes = {
         "uuid": {"type": str, 'default': ""},
         "baseboard_sn": {"type": str, 'default': ""},
@@ -48,9 +50,9 @@ class StorageNode(BaseModel):
         "partitions_count": {"type": int, 'default': 0},
         "ib_devices": {"type": List[IFace], 'default': []},
         "status": {"type": str, 'default': "in_creation"},
-        "updated_at": {"type": str, 'default': str(datetime.now())},
-        "create_dt": {"type": str, 'default': str(datetime.now())},
-        "remove_dt": {"type": str, 'default': str(datetime.now())},
+        "updated_at": {"type": str, 'default': ""},
+        "create_dt": {"type": str, 'default': ""},
+        "remove_dt": {"type": str, 'default': ""},
         "mgmt_ip": {"type": str, 'default': ""},
         "primary_ip": {"type": str, 'default': ""},
         "rpc_port": {"type": int, 'default': -1},

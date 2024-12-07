@@ -92,6 +92,8 @@ def get_current_cluster_status(cluster_id):
     offline_devices = 0
 
     for node in snodes:
+        if snode.is_secondary_node:
+            continue
         node_online_devices = 0
         node_offline_devices = 0
         if node.status == StorageNode.STATUS_ONLINE:

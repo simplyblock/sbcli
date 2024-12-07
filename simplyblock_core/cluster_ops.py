@@ -363,7 +363,7 @@ def cluster_activate(cl_id, force=False):
             logger.warning(f"Failed to activate cluster, Cluster is in an ACTIVE state, use --force to reactivate")
             return False
     set_cluster_status(cl_id, Cluster.STATUS_IN_ACTIVATION)
-    snodes = db_controller.get_storage_nodes_by_cluster_id(cl_id)
+    snodes = db_controller.get_primary_storage_nodes_by_cluster_id(cl_id)
     online_nodes = []
     dev_count = 0
 
@@ -385,7 +385,7 @@ def cluster_activate(cl_id, force=False):
 
     if cluster.ha_type == "ha":
         for snode in snodes:
-            if snode.is_secondary_node:
+            if snode.is_secondary_node or snode.secondary_node_id:
                 continue
             secondary_nodes = storage_node_ops.get_secondary_nodes(snode)
             if not secondary_nodes:

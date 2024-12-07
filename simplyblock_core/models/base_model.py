@@ -11,7 +11,10 @@ class BaseModel(object):
             "id": {"type": str, "default": ""},
             "name": {"type": str, "default": self.__class__.__name__},
             "object_type": {"type": str, "default": ""},
-            "deleted": {"type": bool, 'default': False}
+            "deleted": {"type": bool, 'default': False},
+            "updated_at": {"type": str, 'default': ""},
+            "create_dt": {"type": str, 'default': ""},
+            "remove_dt": {"type": str, 'default': ""},
         }
         self.set_attrs({}, {})
 
