@@ -66,7 +66,7 @@ class RPCClient:
         if ret_code == 200:
             try:
                 data = response.json()
-                logger.debug("Response json: %s", json.dumps(data, indent=2))
+                logger.debug("Response json: %s", json.dumps(data))
             except Exception:
                 logger.debug("Response ret_content: %s", ret_content)
                 return ret_content, None
