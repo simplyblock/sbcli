@@ -335,7 +335,7 @@ class DBController:
         nodes = []
         for node in ret:
             if node.secondary_node_id == node_id \
-                    and node.statua == StorageNode.STATUS_ONLINE \
+                    and node.status == StorageNode.STATUS_ONLINE \
                     and node.lvstore and len(node.lvols) > 0:
                 nodes.append(node)
         return sorted(nodes, key=lambda x: x.create_dt)
