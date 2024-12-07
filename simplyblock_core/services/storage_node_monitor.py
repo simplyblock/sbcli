@@ -92,23 +92,10 @@ def get_current_cluster_status(cluster_id):
     offline_devices = 0
 
     for node in snodes:
-        if snode.is_secondary_node:
-            continue
 
         node_online_devices = 0
         node_offline_devices = 0
 
-        # if node.status == StorageNode.STATUS_REMOVED:
-        #     removed_offline_devices = 0
-        #     for dev in node.nvme_devices:
-        #         if dev.status not in [NVMeDevice.STATUS_FAILED_AND_MIGRATED, NVMeDevice.STATUS_JM]:
-        #             removed_offline_devices += 1
-        #             offline_devices += 1
-        #     if removed_offline_devices > 0:
-        #         offline_devices += 1
-        #         affected_nodes += 1
-        #
-        # else:
         if node.status == StorageNode.STATUS_ONLINE:
             if is_new_migrated_node(cluster_id, node):
                 continue
