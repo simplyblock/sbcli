@@ -2817,7 +2817,8 @@ def recreate_lvstore_on_sec(snode, primary_node=None):
                 node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password,
                 timeout=3, retry=2)
             if node.status == StorageNode.STATUS_ONLINE:
-                for lvol in node.lvols:
+                for lvol_id in node.lvols:
+                    lvol = db_controller.get_lvol_by_id(lvol_id)
                     for iface in node.data_nics:
                         if iface.ip4_address:
                             ret = remote_rpc_client.nvmf_subsystem_listener_set_ana_state(
@@ -2838,10 +2839,8 @@ def recreate_lvstore_on_sec(snode, primary_node=None):
             time.sleep(1)
 
             if node.lvols:
-
                 for lvol_id in node.lvols:
                     lvol = db_controller.get_lvol_by_id(lvol_id)
-
                     is_created, error = lvol_controller.recreate_lvol_on_node(
                         lvol, snode, 1, ana_state="inaccessible")
                     if error:
@@ -2858,7 +2857,8 @@ def recreate_lvstore_on_sec(snode, primary_node=None):
                 rpc_client.bdev_distrib_force_to_non_leader(node.jm_vuid)
 
                 if node.status == StorageNode.STATUS_ONLINE:
-                    for lvol in node.lvols:
+                    for lvol_id in node.lvols:
+                        lvol = db_controller.get_lvol_by_id(lvol_id)
                         for iface in node.data_nics:
                             if iface.ip4_address:
                                 ret = remote_rpc_client.nvmf_subsystem_listener_set_ana_state(
