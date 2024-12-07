@@ -215,13 +215,12 @@ def spdk_process_start():
 
 @bp.route('/spdk_process_kill', methods=['GET'])
 def spdk_process_kill():
-    force = request.args.get('force', default=False, type=bool)
     node_docker = get_docker_client()
     for cont in node_docker.containers.list(all=True):
         logger.debug(cont.attrs)
         if cont.attrs['Name'] == "/spdk" or cont.attrs['Name'] == "/spdk_proxy":
-            cont.stop()
-            cont.remove(force=force)
+            cont.stop(timeout=5)
+            cont.remove(force=True)
     return utils.get_response(True)
 
 

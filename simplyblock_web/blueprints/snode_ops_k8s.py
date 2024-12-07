@@ -406,7 +406,7 @@ def spdk_process_kill():
     try:
         namespace = get_namespace()
         resp = k8s_apps_v1.delete_namespaced_deployment(deployment_name, namespace)
-        retries = 20
+        retries = 10
         while retries > 0:
             resp = k8s_core_v1.list_namespaced_pod(namespace)
             found = False
