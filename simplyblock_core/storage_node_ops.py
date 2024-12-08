@@ -1853,7 +1853,8 @@ def restart_storage_node(
     logger.info("Setting node status to Online")
     set_node_status(node_id, StorageNode.STATUS_ONLINE)
 
-    if snode.jm_device and snode.jm_device.get_id() and snode.jm_device.status == JMDevice.STATUS_UNAVAILABLE:
+    if snode.jm_device and snode.jm_device.get_id() \
+            and snode.jm_device.status in [JMDevice.STATUS_UNAVAILABLE, JMDevice.STATUS_ONLINE]:
         device_controller.set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_ONLINE)
 
     snode = db_controller.get_storage_node_by_id(snode.get_id())
