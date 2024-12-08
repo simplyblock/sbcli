@@ -806,9 +806,16 @@ def delete_cluster(cl_id):
     cluster.remove(db_controller.kv_store)
     logger.info("Done")
 
-def open_db_from_zip(fip_path):
+def open_db_from_zip(fip_path, create=True):
     import boto3
     s3 = boto3.client('s3')
+
+
+    out = '/tmp/fdb.zip'
+    try:
+        os.remove(out)
+    except:
+        pass
 
     buket_name = 'simplyblock-e2e-test-logs'
     file_name = ""
@@ -818,8 +825,8 @@ def open_db_from_zip(fip_path):
         file_name = "/".join(fip_path.split("/")[3:])
 
 
-    elif len(fip_path.split('/'))<=2:
-        # 12220160320/mgmt/fdb.zip
+    elif len(fip_path.split('/'))<=3:
+        # /12220160320/mgmt/fdb.zip
         file_name = fip_path
 
     elif fip_path.startswith('https://'):
@@ -827,7 +834,16 @@ def open_db_from_zip(fip_path):
         buket_name = fip_path.split("/")[2]
         buket_name = buket_name.split(".")[0]
         file_name = "/".join(fip_path.split("/")[3:])
+    else:
+        file_name = fip_path
 
-    fip_path = '/tmp/fdb.zip'
-    ret = s3.download_file(buket_name, file_name, fip_path)
-    scripts.deploy_fdb_from_file_service(fip_path)
+    try:
+        ret = s3.download_file(buket_name, file_name, out)
+    except Exception as e:
+        logger.error(e)
+
+    if os.path.exists(out):
+        if create:
+            scripts.deploy_fdb_from_file_service(out)
+        else:
+            scripts.remove_deploy_fdb_from_file_service(out)
