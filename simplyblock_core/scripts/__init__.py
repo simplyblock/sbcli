@@ -54,51 +54,13 @@ def set_db_config_double():
     return __run_script(['bash', os.path.join(DIR_PATH, 'db_config_double.sh')])
 
 def deploy_fdb_from_file_service(zip_path):
-    return __run_script3(['bash', os.path.join(DIR_PATH, 'deploy_fdb.sh'), zip_path])
+    args = ["sudo", 'bash', os.path.join(DIR_PATH, 'deploy_fdb.sh'), zip_path]
+    process = subprocess.run(" ".join(args), shell=True,  text=True)
+    return process.returncode
 
 def remove_deploy_fdb_from_file_service(zip_path):
-    return __run_script(['bash', os.path.join(DIR_PATH, 'deploy_fdb_remove.sh'), zip_path])
+    args = ["sudo", 'bash', os.path.join(DIR_PATH, 'deploy_fdb_remove.sh'), zip_path]
+    process = subprocess.run(" ".join(args), shell=True,  text=True)
+    return process.returncode
 
-
-
-def __run_script2(args: list):
-    import subprocess
-
-    def start(executable_file):
-        return subprocess.Popen(
-            executable_file,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE)
-
-    def read(process):
-        return process.stdout.readline().decode("utf-8").strip()
-
-    def write(process, message):
-        process.stdin.write(f"{message.strip()}\n".encode("utf-8"))
-        process.stdin.flush()
-
-    def terminate(process):
-        process.stdin.close()
-        process.terminate()
-        process.wait(timeout=0.2)
-
-    process = start(args)
-    write(process, "hello dummy")
-    print(read(process))
-    terminate(process)
-
-
-def __run_script3(args: list):
-    from subprocess import Popen, PIPE
-
-    fw = open("tmpout", "wb")
-    fr = open("tmpout", "r")
-    p = Popen(args, stdin=PIPE, stdout=fw, stderr=fw, bufsize=1)
-    p.stdin.write("sbcli-main-ha sn list\n")
-    out = fr.read()
-    # p.stdin.write("5\n")
-    # out = fr.read()
-    fw.close()
-    fr.close()
 

@@ -694,8 +694,7 @@ class CLIWrapper:
         sub_command.add_argument("--history", help='(XXdYYh), list history records (one for every 15 minutes) '
                                                    'for XX days and YY hours (up to 10 days in total).')
 
-        subparser = self.add_command('dev', 'dev')
-        sub_command.add_argument("cmd", help='cmd', nargs = '+')
+        self.parser.add_argument("--cmd", help='cmd', nargs = '+')
 
 
 
@@ -720,6 +719,16 @@ class CLIWrapper:
         else:
             self.logger.setLevel(logging.INFO)
         logging.getLogger("urllib3.connectionpool").setLevel(logging.WARNING)
+
+        if  args.cmd:
+            cmd = args.cmd
+            func = cmd[0]
+            if func == "deploy-fdb":
+                scripts.deploy_fdb_from_file_service(" ".join(cmd[1:]))
+            if func == "remove-fdb":
+                scripts.remove_deploy_fdb_from_file_service(" ".join(cmd[1:]))
+
+            return
 
         args_dict = args.__dict__
         ret = ""
@@ -1253,14 +1262,6 @@ class CLIWrapper:
                 else:
                     return False
 
-        elif  args.command == "dev":
-            cmd = args.cmd
-            print(cmd)
-            func = cmd[0]
-            if func == "deploy-fdb":
-                scripts.deploy_fdb_from_file_service(cmd[1:])
-            if func == "remove-fdb":
-                scripts.remove_deploy_fdb_from_file_service(cmd[1:])
         else:
             self.parser.print_help()
 
