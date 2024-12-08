@@ -807,5 +807,27 @@ def delete_cluster(cl_id):
     logger.info("Done")
 
 def open_db_from_zip(fip_path):
+    import boto3
+    s3 = boto3.client('s3')
 
+    buket_name = 'simplyblock-e2e-test-logs'
+    file_name = ""
+    if fip_path.startswith('s3://'):
+        # s3://simplyblock-e2e-test-logs/12220160320/mgmt/fdb.zip
+        buket_name = fip_path.split("/")[2]
+        file_name = "/".join(fip_path.split("/")[3:])
+
+
+    elif len(fip_path.split('/'))<=2:
+        # 12220160320/mgmt/fdb.zip
+        file_name = fip_path
+
+    elif fip_path.startswith('https://'):
+        #https://simplyblock-e2e-test-logs.s3.us-east-2.amazonaws.com/12220160320/mgmt/fdb.zip
+        buket_name = fip_path.split("/")[2]
+        buket_name = buket_name.split(".")[0]
+        file_name = "/".join(fip_path.split("/")[3:])
+
+    fip_path = '/tmp/fdb.zip'
+    ret = s3.download_file(buket_name, file_name, fip_path)
     scripts.deploy_fdb_from_file_service(fip_path)
