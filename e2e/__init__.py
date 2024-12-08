@@ -16,8 +16,6 @@ from stress_test.lvol_stress_fio_run import TestStressLvolClusterFioRun
 
 
 def get_all_tests(custom=True, k8s_test=False):
-    return [TestSingleNodeFailureHA]
-
     tests = [
         TestLvolFioNpcsCustom,
         TestLvolFioNpcs0,

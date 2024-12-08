@@ -2,13 +2,8 @@
 import json
 import requests
 from http import HTTPStatus
-
-try:
-    from logger_config import setup_logger
-    from utils.common_utils import sleep_n_sec
-except:
-    from e2e.logger_config import setup_logger
-    from e2e.utils.common_utils import sleep_n_sec
+from logger_config import setup_logger
+from utils.common_utils import sleep_n_sec
 
 
 class SbcliUtils:
