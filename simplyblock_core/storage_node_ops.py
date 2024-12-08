@@ -1859,6 +1859,9 @@ def restart_storage_node(
         node.remote_devices = _connect_to_remote_devs(node, force_conect_restarting_nodes=True)
         node.write_to_db(kv_store)
 
+    if snode.jm_device and snode.jm_device.get_id() and snode.jm_device.status == JMDevice.STATUS_UNAVAILABLE:
+        device_controller.set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_ONLINE)
+
     snode = db_controller.get_storage_node_by_id(snode.get_id())
     for db_dev in snode.nvme_devices:
         if db_dev.status in [NVMeDevice.STATUS_UNAVAILABLE, NVMeDevice.STATUS_READONLY]:
@@ -1877,8 +1880,8 @@ def restart_storage_node(
     time.sleep(2)
 
     if cluster.status not in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED] and not force:
-        if snode.jm_device and snode.jm_device.get_id() and snode.jm_device.status == JMDevice.STATUS_UNAVAILABLE:
-            device_controller.set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_ONLINE)
+        # if snode.jm_device and snode.jm_device.get_id() and snode.jm_device.status == JMDevice.STATUS_UNAVAILABLE:
+        #     device_controller.set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_ONLINE)
         logger.warning(f"The cluster status is not active ({cluster.status}), adding the node without distribs and lvstore")
         logger.info("Done")
         return "Success"
@@ -1902,9 +1905,9 @@ def restart_storage_node(
         logger.info(f"Starting migration task for device {dev.get_id()}")
         tasks_controller.add_device_mig_task(dev.get_id())
 
-    time.sleep(5)
-    if snode.jm_device and snode.jm_device.get_id() and snode.jm_device.status == JMDevice.STATUS_UNAVAILABLE:
-        device_controller.set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_ONLINE)
+    # time.sleep(5)
+    # if snode.jm_device and snode.jm_device.get_id() and snode.jm_device.status == JMDevice.STATUS_UNAVAILABLE:
+    #     device_controller.set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_ONLINE)
 
     logger.info("Done")
     return "Success"
@@ -3200,6 +3203,12 @@ def _create_bdev_stack(snode, lvstore_stack=None, primary_node=False):
             ret = rpc_client.bdev_PT_NoExcl_create(**params)
 
         elif type == "bdev_raid":
+
+            # sync jm
+            if snode.jm_vuid:
+                ret = rpc_client.jc_explicit_synchronization(snode.jm_vuid)
+                logger.info(f"JM Sync res: {ret}")
+                time.sleep(3)
 
             distribs_list = bdev["distribs_list"]
             strip_size_kb = params["strip_size_kb"]

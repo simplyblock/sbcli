@@ -742,26 +742,10 @@ def set_jm_device_state(device_id, state):
     if snode.enable_ha_jm and state in [NVMeDevice.STATUS_ONLINE]:
         rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password, timeout=5)
         jm_bdev = f"jm_{snode.get_id()}"
-        pt_name = f"{jm_bdev}_PT"
-        cluster = db_controller.get_cluster_by_id(snode.cluster_id)
         subsystem_nqn = snode.subsystem + ":dev:" + jm_bdev
-        logger.info("creating subsystem %s", subsystem_nqn)
-        ret = rpc_client.subsystem_create(subsystem_nqn, 'sbcli-cn', jm_bdev)
-        logger.info(f"add {pt_name} to subsystem")
-        ret = rpc_client.nvmf_subsystem_add_ns(subsystem_nqn, pt_name)
+
         for iface in snode.data_nics:
             if iface.ip4_address:
-                tr_type = iface.get_transport_type()
-                ret = rpc_client.transport_list()
-                found = False
-                if ret:
-                    for ty in ret:
-                        if ty['trtype'] == tr_type:
-                            found = True
-                if found is False:
-                    ret = rpc_client.transport_create(tr_type, cluster.qpair_count)
-                logger.info("adding listener for %s on IP %s" % (subsystem_nqn, iface.ip4_address))
-                ret = rpc_client.listeners_create(subsystem_nqn, tr_type, iface.ip4_address, "4420")
                 ret = rpc_client.nvmf_subsystem_listener_set_ana_state(
                     subsystem_nqn, iface.ip4_address, "4420", True)
                 break
