@@ -805,3 +805,7 @@ def delete_cluster(cl_id):
     cluster_events.cluster_delete(cluster)
     cluster.remove(db_controller.kv_store)
     logger.info("Done")
+
+def open_db_from_zip(fip_path):
+
+    scripts.deploy_fdb_from_file_service(fip_path)

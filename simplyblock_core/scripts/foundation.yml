@@ -4,8 +4,6 @@ services:
 
   fdb-server:
     image: foundationdb/foundationdb:7.3.2
-    networks:
-      - hostnet
     environment:
       FDB_NETWORKING_MODE: 'container'
       FDB_CLUSTER_FILE: '/etc/foundationdb/fdb.cluster'
@@ -26,7 +24,9 @@ services:
       mode: global
     depends_on:
       - cli
-
+    ports:
+      - 4500:4500
+      -
   cli:
     image: "simplyblock/simplyblock:main-ha"
     command: "sleep 9999"
@@ -36,16 +36,8 @@ services:
     volumes:
       - db-data:/etc/foundationdb
       - app-data:/app
-    networks:
-      - hostnet
 
 
 volumes:
   db-data:
   app-data:
-
-networks:
-
-  hostnet:
-    external: true
-    name: host

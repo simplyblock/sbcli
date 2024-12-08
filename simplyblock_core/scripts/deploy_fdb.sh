@@ -1,8 +1,6 @@
 #!/usr/bin/env bash
 
-#sudo bash -x deploy.sh $PWD/fdb.zip
-
+export DIR="$(dirname "$(realpath "$0")")"
 export FDB_FILE=$1
-docker stack deploy --compose-file=foundation.yaml app
-docker service logs app_fdb-server -f
-
+docker compose -f $DIR/foundation.yml up -d
+docker compose -f foundation.yml exec -it cli bash

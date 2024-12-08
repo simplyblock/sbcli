@@ -4,7 +4,7 @@ import math
 import re
 import sys
 
-from simplyblock_core import cluster_ops, utils
+from simplyblock_core import cluster_ops, utils, scripts
 from simplyblock_core import kv_store
 from simplyblock_core import compute_node_ops as compute_ops
 from simplyblock_core import storage_node_ops as storage_ops
@@ -694,6 +694,10 @@ class CLIWrapper:
         sub_command.add_argument("--history", help='(XXdYYh), list history records (one for every 15 minutes) '
                                                    'for XX days and YY hours (up to 10 days in total).')
 
+        subparser = self.add_command('dev', 'dev')
+        sub_command.add_argument("cmd", help='cmd', nargs = '+')
+
+
 
     def init_parser(self):
         self.parser = argparse.ArgumentParser(prog=constants.SIMPLY_BLOCK_CLI_NAME, description='SimplyBlock management CLI')
@@ -1249,6 +1253,14 @@ class CLIWrapper:
                 else:
                     return False
 
+        elif  args.command == "dev":
+            cmd = args.cmd
+            print(cmd)
+            func = cmd[0]
+            if func == "deploy-fdb":
+                scripts.deploy_fdb_from_file_service(cmd[1:])
+            if func == "remove-fdb":
+                scripts.remove_deploy_fdb_from_file_service(cmd[1:])
         else:
             self.parser.print_help()
 
