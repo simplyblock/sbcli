@@ -1296,6 +1296,10 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
     if nvme_devs:
 
         if not is_secondary_node:
+
+            for nvme in nvme_devs:
+                nvme.status = NVMeDevice.STATUS_ONLINE
+
             # prepare devices
             if snode.num_partitions_per_dev == 0 or snode.jm_percent == 0:
 
@@ -1351,9 +1355,9 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
             else:
                 node.remote_devices.append(dev)
 
-        if snode.jm_device and node.enable_ha_jm:
-            node.remote_jm_devices.append(snode.jm_device)
-            node.remote_jm_devices = _connect_to_remote_jm_devs(node)
+        # if snode.jm_device and node.enable_ha_jm:
+        #     node.remote_jm_devices.append(snode.jm_device)
+        #     node.remote_jm_devices = _connect_to_remote_jm_devs(node)
         node.write_to_db(kv_store)
         logger.info(f"connected to devices count: {len(node.remote_devices)}")
         time.sleep(3)
@@ -1368,20 +1372,26 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
         return "Success"
 
     logger.info("Sending cluster map")
-    ret = distr_controller.send_cluster_map_to_node(snode)
-    if not ret:
-        return False, "Failed to send cluster map"
-    ret = distr_controller.send_cluster_map_add_node(snode)
-    if not ret:
-        return False, "Failed to send cluster map add node"
+    snodes = db_controller.get_storage_nodes_by_cluster_id(cluster_id)
+    for node_index, node in enumerate(snodes):
+        if  node.status != StorageNode.STATUS_ONLINE:
+            continue
+        ret = distr_controller.send_cluster_map_to_node(node)
+
+
+    # if not ret:
+    #     return False, "Failed to send cluster map"
+    # ret = distr_controller.send_cluster_map_add_node(snode)
+    # if not ret:
+    #     return False, "Failed to send cluster map add node"
     time.sleep(3)
 
-    logger.info("Sending cluster event updates")
-    distr_controller.send_node_status_event(snode, StorageNode.STATUS_ONLINE)
-
-    for dev in snode.nvme_devices:
-        distr_controller.send_dev_status_event(dev, NVMeDevice.STATUS_ONLINE)
-        tasks_controller.add_new_device_mig_task(dev.get_id())
+    # logger.info("Sending cluster event updates")
+    # distr_controller.send_node_status_event(snode, StorageNode.STATUS_ONLINE)
+    #
+    # for dev in snode.nvme_devices:
+    #     distr_controller.send_dev_status_event(dev, NVMeDevice.STATUS_ONLINE)
+    #     tasks_controller.add_new_device_mig_task(dev.get_id())
 
     nodes = db_controller.get_storage_nodes_by_cluster_id(cluster_id)
     # Create distribs
