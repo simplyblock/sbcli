@@ -174,17 +174,18 @@ def update_cluster_status(cluster_id):
 
 def set_node_online(node):
     if node.status != StorageNode.STATUS_ONLINE:
+
+        # set node online
+        storage_node_ops.set_node_status(node.get_id(), StorageNode.STATUS_ONLINE)
+
+        # set jm dev online
+        if node.jm_device.status in [JMDevice.STATUS_UNAVAILABLE, JMDevice.STATUS_ONLINE]:
+            device_controller.set_jm_device_state(node.jm_device.get_id(), JMDevice.STATUS_ONLINE)
+
         # set devices online
         for dev in node.nvme_devices:
             if dev.status == NVMeDevice.STATUS_UNAVAILABLE:
                 device_controller.device_set_online(dev.get_id())
-
-        # # set jm dev online
-        # if node.jm_device.status == JMDevice.STATUS_UNAVAILABLE:
-        #     device_controller.set_jm_device_state(node.jm_device.get_id(), JMDevice.STATUS_ONLINE)
-
-        # set node online
-        storage_node_ops.set_node_status(node.get_id(), StorageNode.STATUS_ONLINE)
 
 
 def set_node_offline(node):

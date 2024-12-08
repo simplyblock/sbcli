@@ -118,8 +118,12 @@ while True:
                         else:
                             logger.info(f"Checking bdev: {remote_device.remote_bdev} ... not found")
                             name = f"remote_{remote_device.alceml_bdev}"
-                            ret = rpc_client.bdev_nvme_detach_controller(name)
-                            time.sleep(1)
+                            if rpc_client.bdev_nvme_controller_list(name):
+                                logger.info(f"detaching {name} from {snode.get_id()}")
+                                rpc_client.bdev_nvme_detach_controller(name)
+                                time.sleep(1)
+
+                            logger.info(f"Connecting {name} to {snode.get_id()}")
                             ret = rpc_client.bdev_nvme_attach_controller_tcp(
                                 name, remote_device.nvmf_nqn, remote_device.nvmf_ip, remote_device.nvmf_port)
                             if ret:
@@ -140,8 +144,12 @@ while True:
                                 logger.info(f"connecting to online device: {dev.get_id()}")
                                 name = f"remote_{dev.alceml_bdev}"
                                 bdev_name = f"{name}n1"
-                                ret = rpc_client.bdev_nvme_detach_controller(name)
-                                time.sleep(1)
+                                if rpc_client.bdev_nvme_controller_list(name):
+                                    logger.info(f"detaching {name} from {snode.get_id()}")
+                                    rpc_client.bdev_nvme_detach_controller(name)
+                                    time.sleep(1)
+
+                                logger.info(f"Connecting {name} to {snode.get_id()}")
                                 ret = rpc_client.bdev_nvme_attach_controller_tcp(
                                     name, dev.nvmf_nqn, dev.nvmf_ip,
                                     dev.nvmf_port)
