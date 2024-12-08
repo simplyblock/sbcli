@@ -66,7 +66,7 @@ class TestSingleNodeFailureHA(TestClusterBase):
         # no_lvol_node_uuid = self.sbcli_utils.get_lvol_by_id(lvol_id)['results'][0]['node_id']
 
         no_lvol_node = None
-        for node in self.sbcli_utils.get_storage_nodes()['results']:
+        for node in self.sbcli_utils.get_storage_nodes()['results'][::-1]:
             if len(node['lvols']) > 0 and node['is_secondary_node'] is False:
                 no_lvol_node = node
                 break
@@ -176,7 +176,7 @@ class TestSingleNodeFailureHA(TestClusterBase):
         self.ssh_obj.unmount_path(node=self.mgmt_nodes[0],
                                   device=disk_use)
         self.ssh_obj.format_disk(node=self.mgmt_nodes[0],
-                                 device=disk_use)
+                                 device=disk_use, fs_type='xfs')
         self.ssh_obj.mount_path(node=self.mgmt_nodes[0],
                                 device=disk_use,
                                 mount_path=mount_path)
