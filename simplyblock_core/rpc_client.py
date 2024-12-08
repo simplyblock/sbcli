@@ -859,3 +859,9 @@ class RPCClient:
             "jm_vuid": jm_vuid
         }
         return self._request("jc_explicit_synchronization", params)
+
+    def lvol_crypto_key_delete(self, name):
+        params = {
+            "name": name
+        }
+        return self._request("accel_crypto_key_destroy", params)

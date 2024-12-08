@@ -522,7 +522,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
             if not success:
                 return False, err
 
-        lvol.crypto_bdev = f"crypto_{lvol.lvol_name}"
+        lvol.crypto_bdev = f"crypto_{lvol.lvol_bdev}"
         lvol.bdev_stack.append({
             "type": "crypto",
             "name": lvol.crypto_bdev,
@@ -624,7 +624,7 @@ def _create_bdev_stack(lvol, snode, ha_comm_addrs, ha_inode_self):
         else:
             if created_bdevs:
                 # rollback
-                _remove_bdev_stack(created_bdevs, rpc_client)
+                _remove_bdev_stack(created_bdevs[::-1], rpc_client)
             return False, f"Failed to create BDev: {name}"
 
     return True, None
@@ -791,6 +791,9 @@ def _remove_bdev_stack(bdev_stack, rpc_client):
             ret = rpc_client.ultra21_lvol_dismount(name)
         elif type == "crypto":
             ret = rpc_client.lvol_crypto_delete(name)
+            if ret:
+                ret = rpc_client.lvol_crypto_key_delete(f'key_{name}')
+
         elif type == "bdev_lvstore":
             ret = rpc_client.bdev_lvol_delete_lvstore(name)
         elif type == "bdev_lvol":
