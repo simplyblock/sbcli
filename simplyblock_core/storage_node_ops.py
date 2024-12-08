@@ -1462,7 +1462,8 @@ def remove_storage_node(node_id, force_remove=False, force_migrate=False):
     if snode.lvols:
         if force_migrate:
             for lvol_id in snode.lvols:
-                lvol_controller.migrate(lvol_id)
+                pass
+                # lvol_controller.migrate(lvol_id)
         elif force_remove:
             for lvol_id in snode.lvols:
                 lvol_controller.delete_lvol(lvol_id, True)
@@ -1492,7 +1493,7 @@ def remove_storage_node(node_id, force_remove=False, force_migrate=False):
             if dev.status == NVMeDevice.STATUS_ONLINE:
                 distr_controller.disconnect_device(dev)
 
-    if snode.jm_device:
+    if snode.jm_device and snode.jm_device.get_id() and snode.jm_device.status in [JMDevice.STATUS_ONLINE, JMDevice.STATUS_UNAVAILABLE]:
         logger.info("Removing JM")
         device_controller.remove_jm_device(snode.jm_device.get_id(), force=True)
 
