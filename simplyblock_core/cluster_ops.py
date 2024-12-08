@@ -681,12 +681,16 @@ def get_logs(cluster_id, is_json=False):
         if 'vuid' in record.object_dict:
             vuid = record.object_dict['vuid']
 
+        msg =  record.message
+        if record.event in ["device_status", "node_status"]:
+            msg = msg+f" ({record.count})"
+
         out.append({
             "Date": record.get_date_string(),
             "NodeId": record.node_id,
             "Event": record.event,
             "Level": record.event_level,
-            "Message": record.message,
+            "Message":msg,
             "Storage_ID": str(Storage_ID),
             "VUID": str(vuid),
             "Status": record.status,

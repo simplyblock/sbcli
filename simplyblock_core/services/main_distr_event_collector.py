@@ -127,16 +127,33 @@ def start_event_collector_on_node(node_id):
     try:
         while True:
             page = 1
+            events_groups = {}
             while True:
                 try:
                     events = client.distr_status_events_discard_then_get(
                         0, constants.DISTR_EVENT_COLLECTOR_NUM_OF_EVENTS * page)
                     if events:
                         logger.info(f"Found events: {len(events)}")
-                        for ev in events:
-                            event = events_controller.log_distr_event(snode.cluster_id, snode.get_id(), ev)
+                        for event_dict in events:
+                            sid = event_dict['storage_ID']
+                            et = event_dict['event_type']
+                            msg = event_dict['status']
+                            if sid not in events_groups:
+                                events_groups[sid] = {et:{msg: 1}}
+                            elif et not in events_groups[sid]:
+                                events_groups[sid][et]: {msg: 1}
+                            elif msg not in events_groups[sid][et]:
+                                events_groups[sid][et][msg]: 1
+                            else:
+                                events_groups[sid][et][msg].count += 1
+                                events_groups[sid][et][msg].write_to_db()
+                                logger.info(f"Event {msg} already processed")
+                                continue
+
+                            event = events_controller.log_distr_event(snode.cluster_id, snode.get_id(), event_dict)
                             logger.info(f"Processing event: {event.get_id()}")
                             process_event(event)
+                            events_groups[sid][et][msg] = event
 
                         logger.info(f"Discarding events: {len(events)}")
                         client.distr_status_events_discard_then_get(len(events), 0)
@@ -148,6 +165,7 @@ def start_event_collector_on_node(node_id):
                     logger.error("Failed to process distr events")
                     logger.exception(e)
                     break
+
             time.sleep(constants.DISTR_EVENT_COLLECTOR_INTERVAL_SEC)
     except Exception as e:
         logger.error(e)

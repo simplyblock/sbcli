@@ -41,6 +41,7 @@ class EventObj(BaseModel):
         "vuid": {"type": int, 'default': -1},
         "meta_data": {"type": str, 'default': ""},
         "status": {"type": str, 'default': ""},
+        "count": {"type": int, 'default': 1},
 
     }
 
