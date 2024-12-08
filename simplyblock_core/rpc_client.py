@@ -862,6 +862,6 @@ class RPCClient:
 
     def lvol_crypto_key_delete(self, name):
         params = {
-            "name": name
+            "key_name": name
         }
         return self._request("accel_crypto_key_destroy", params)
