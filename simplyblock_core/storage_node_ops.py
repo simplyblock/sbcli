@@ -1443,6 +1443,8 @@ def delete_storage_node(node_id):
     snode.remove(db_controller.kv_store)
 
     for node in db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id):
+        if node.status != StorageNode.STATUS_ONLINE:
+            continue
         logger.info(f"Sending cluster map to node: {node.get_id()}")
         send_cluster_map(node.get_id())
 

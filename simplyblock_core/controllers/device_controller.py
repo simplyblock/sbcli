@@ -555,6 +555,7 @@ def device_set_retries_exhausted(device_id, retries_exhausted):
     dev = db_controller.get_storage_devices(device_id)
     if not dev:
         logger.error("device not found")
+        return False
 
     snode = db_controller.get_storage_node_by_id(dev.node_id)
     if not snode:
