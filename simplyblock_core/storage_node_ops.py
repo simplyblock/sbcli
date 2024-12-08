@@ -1867,9 +1867,9 @@ def restart_storage_node(
         if not ret:
             return False, "Failed to recreate lvstore on node"
 
-        logger.info("Dumping lvstore data")
-        ret = dump_lvstore(node_id)
-        print(ret)
+        # logger.info("Dumping lvstore data")
+        # ret = dump_lvstore(node_id)
+        # print(ret)
 
     logger.info("Starting migration tasks")
     for dev in snode.nvme_devices:
@@ -2031,9 +2031,9 @@ def shutdown_storage_node(node_id, force=False):
         rpc_client = RPCClient(
             snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password, timeout=10, retry=1)
 
-        logger.info("Dumping lvstore data")
-        ret = dump_lvstore(node_id)
-        print(ret)
+        # logger.info("Dumping lvstore data")
+        # ret = dump_lvstore(node_id)
+        # print(ret)
 
         logger.debug("Removing LVols")
         _remove_bdev_stack(snode.lvstore_stack, rpc_client, remove_distr_only=True)
