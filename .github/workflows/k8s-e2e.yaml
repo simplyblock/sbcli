@@ -12,7 +12,7 @@ on:
       simplyBlockDeploy_branch:
         description: 'Branch for simplyBlockDeploy'
         required: true
-        default: 'sec_storage_node_hmdi'
+        default: 'main'
       simplyblock_csi_branch:
         description: 'Branch for simplyblock-csi'
         required: true
@@ -159,12 +159,12 @@ jobs:
         run: |
           cd $GITHUB_WORKSPACE/simplyBlockDeploy
           terraform plan \
-            -var "mgmt_nodes=1" -var "storage_nodes=3" -var "volumes_per_storage_nodes=2" \
-            -var storage_nodes_instance_type="m6g.2xlarge" \
-            -var "storage_nodes_arch=arm64" -var "snode_deploy_on_k8s=true" \
-            -var "extra_nodes=1" -var "extra_nodes_instance_type=m6gd.xlarge" \
-            -var storage_nodes_ebs_size2=100 -var "region=us-east-2" \
-            -var "extra_nodes_arch=arm64" -var "sec_storage_nodes=1" -var "sec_storage_nodes_instance_type=m6g.2xlarge" \
+            -var "mgmt_nodes=1" -var "storage_nodes=4" -var "volumes_per_storage_nodes=1" \
+            -var storage_nodes_instance_type="m6i.2xlarge" \
+            -var "storage_nodes_arch=amd64" -var "snode_deploy_on_k8s=true" \
+            -var "extra_nodes=1" -var "extra_nodes_instance_type=m6d.xlarge" \
+            -var storage_nodes_ebs_size2=200 -var "region=us-east-2" \
+            -var "extra_nodes_arch=amd64" -var "sec_storage_nodes=1" -var "sec_storage_nodes_instance_type=m6i.4xlarge" \
             -var "sbcli_cmd=$SBCLI_CMD" -out=tfplan
         env:
           SBCLI_CMD: ${{ env.SBCLI_CMD }}
@@ -191,12 +191,12 @@ jobs:
         run: |
           cd $GITHUB_WORKSPACE/simplyBlockDeploy
           ./bootstrap-cluster.sh --sbcli-cmd "$SBCLI_CMD" \
-            --max-lvol 10 --max-snap 10 --max-prov 900G --number-of-devices 3 \
+            --max-lvol 10 --max-snap 10 --max-prov 900G --number-of-devices 1 \
             --distr-ndcs $NDCS \
             --distr-npcs $NPCS \
             --distr-bs $BS \
             --distr-chunk-bs $CHUNK_BS \
-            --k8s-snode --partitions 0 --number-of-distribs 4
+            --k8s-snode --partitions 0
         id: bootstrap_cluster
         env:
           SBCLI_CMD: ${{ env.SBCLI_CMD }}
@@ -232,9 +232,9 @@ jobs:
             --set csiSecret.simplybk.secret="${{ steps.bootstrap_cluster.outputs.cluster_secret }}" \
             --set logicalVolume.pool_name="testing1" \
             --set logicalVolume.snapshot="True" \
-            --set image.spdkcsi.tag=master-arm64 \
+            --set image.spdkcsi.tag=latest \
             --set image.simplyblock.tag=lvol-ha \
-            --set storagenode.spdkImage=simplyblock/spdk:lvolstore-ha-latest \
+            --set storagenode.spdkImage=simplyblock/spdk:feature-journal-ha-latest \
             --set logicalVolume.distr_ndcs="${NDCS}" \
             --set logicalVolume.distr_npcs="${NPCS}" \
             --set storagenode.create=true \
