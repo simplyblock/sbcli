@@ -54,13 +54,10 @@ def set_db_config_double():
     return __run_script(['bash', os.path.join(DIR_PATH, 'db_config_double.sh')])
 
 def deploy_fdb_from_file_service(zip_path):
-    args = ["sudo", 'bash', os.path.join(DIR_PATH, 'deploy_fdb.sh'), zip_path]
+    args = ["sudo", 'bash']
+    if logger.level == logging.DEBUG:
+        args.append("-x")
+    args.append(os.path.join(DIR_PATH, 'deploy_fdb.sh'))
+    args.append(zip_path)
     process = subprocess.run(" ".join(args), shell=True,  text=True)
     return process.returncode
-
-def remove_deploy_fdb_from_file_service(zip_path):
-    args = ["sudo", 'bash', os.path.join(DIR_PATH, 'deploy_fdb_remove.sh'), zip_path]
-    process = subprocess.run(" ".join(args), shell=True,  text=True)
-    return process.returncode
-
-

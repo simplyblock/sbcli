@@ -23,8 +23,8 @@ services:
       mode: global
     depends_on:
       - cli
-    ports:
-      - 4500:4500
+#    ports:
+#      - 4500:4500
 
   cli:
     image: "simplyblock/simplyblock:main-ha"

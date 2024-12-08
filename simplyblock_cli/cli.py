@@ -724,10 +724,7 @@ class CLIWrapper:
             cmd = args.cmd
             func = cmd[0]
             if func == "deploy-fdb":
-                cluster_ops.open_db_from_zip(" ".join(cmd[1:]), create=True)
-            if func == "remove-fdb":
-                cluster_ops.open_db_from_zip(" ".join(cmd[1:]), create=False)
-
+                cluster_ops.open_db_from_zip(" ".join(cmd[1:]))
             return
 
         args_dict = args.__dict__

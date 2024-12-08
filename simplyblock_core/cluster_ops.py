@@ -806,7 +806,7 @@ def delete_cluster(cl_id):
     cluster.remove(db_controller.kv_store)
     logger.info("Done")
 
-def open_db_from_zip(fip_path, create=True):
+def open_db_from_zip(fip_path):
     import boto3
     s3 = boto3.client('s3')
 
@@ -843,7 +843,4 @@ def open_db_from_zip(fip_path, create=True):
         logger.error(e)
 
     if os.path.exists(out):
-        if create:
-            scripts.deploy_fdb_from_file_service(out)
-        else:
-            scripts.remove_deploy_fdb_from_file_service(out)
+        scripts.deploy_fdb_from_file_service(out)
