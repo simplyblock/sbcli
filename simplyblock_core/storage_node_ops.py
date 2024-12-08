@@ -700,7 +700,7 @@ def _prepare_cluster_devices_on_restart(snode):
 
     rpc_client = RPCClient(
         snode.mgmt_ip, snode.rpc_port,
-        snode.rpc_username, snode.rpc_password)
+        snode.rpc_username, snode.rpc_password, timeout=5*60)
 
     for index, nvme in enumerate(snode.nvme_devices):
         if nvme.status == NVMeDevice.STATUS_JM:
@@ -1817,7 +1817,8 @@ def restart_storage_node(
         ret = _prepare_cluster_devices_on_restart(snode)
         if not ret:
             logger.error("Failed to prepare cluster devices")
-            # return False
+            return False
+
         snode.write_to_db(kv_store)
 
     logger.info("Connecting to remote devices")
@@ -2721,12 +2722,12 @@ def recreate_lvstore(snode):
     ret = temp_rpc_client.bdev_examine(snode.raid)
     time.sleep(5)
     ret = temp_rpc_client.bdev_wait_for_examine()
-    time.sleep(1)
+    time.sleep(3)
 
     if snode.lvols:
         db_controller = DBController()
         for lvol_id in snode.lvols:
-            time.sleep(5)
+            # time.sleep(1)
             lvol = lvol_controller.recreate_lvol(lvol_id, snode)
             if not lvol:
                 logger.error(f"Failed to recreate LVol: {lvol_id}")
