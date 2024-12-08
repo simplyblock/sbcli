@@ -32,8 +32,8 @@ while True:
     for node in nodes:
         auto_restart_devices = []
         online_devices = []
-        if node.status != StorageNode.STATUS_ONLINE:
-            logger.warning(f"Node status is not online, id: {node.get_id()}, status: {node.status}")
+        if node.status != StorageNode.STATUS_ONLINE or node.is_secondary_node:
+            logger.warning(f"Skipping node, id: {node.get_id()}, status: {node.status}")
             continue
 
         known_pcie = [dev.pcie_address for dev in node.nvme_devices]

@@ -50,10 +50,11 @@ def add_cluster():
     max_queue_size = cl_data.get('max_queue_size', 128)
     inflight_io_threshold = cl_data.get('inflight_io_threshold', 4)
     enable_qos = cl_data.get('enable_qos', False)
+    strict_node_anti_affinity = cl_data.get('strict_node_anti_affinity', False)
 
     ret = cluster_ops.add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
                                   distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, enable_node_affinity,
-                                  qpair_count, max_queue_size, inflight_io_threshold, enable_qos)
+                                  qpair_count, max_queue_size, inflight_io_threshold, enable_qos, strict_node_anti_affinity)
 
     return utils.get_response(ret)
 

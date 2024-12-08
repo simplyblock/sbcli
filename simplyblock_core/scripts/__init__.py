@@ -43,7 +43,7 @@ def deploy_cleaner():
 
 
 def set_db_config(DEV_IP):
-    return __run_script(['bash', os.path.join(DIR_PATH, 'set_db_config.sh'), DEV_IP])
+    return __run_script(['sudo', 'bash', '-x', os.path.join(DIR_PATH, 'set_db_config.sh'), DEV_IP])
 
 
 def set_db_config_single():

@@ -35,7 +35,6 @@ class StorageNode(BaseModel):
 
         STATUS_SCHEDULABLE: 30,
     }
-
     attributes = {
         "uuid": {"type": str, 'default': ""},
         "baseboard_sn": {"type": str, 'default': ""},
@@ -48,9 +47,9 @@ class StorageNode(BaseModel):
         "partitions_count": {"type": int, 'default': 0},
         "ib_devices": {"type": List[IFace], 'default': []},
         "status": {"type": str, 'default': "in_creation"},
-        "updated_at": {"type": str, 'default': str(datetime.now())},
-        "create_dt": {"type": str, 'default': str(datetime.now())},
-        "remove_dt": {"type": str, 'default': str(datetime.now())},
+        "updated_at": {"type": str, 'default': ""},
+        "create_dt": {"type": str, 'default': ""},
+        "remove_dt": {"type": str, 'default': ""},
         "mgmt_ip": {"type": str, 'default': ""},
         "primary_ip": {"type": str, 'default': ""},
         "rpc_port": {"type": int, 'default': -1},
@@ -80,6 +79,9 @@ class StorageNode(BaseModel):
         "raid": {"type": str, 'default': ""},
         "lvstore_stack": {"type": List[dict], 'default': []},
         "jm_vuid": {"type": int, "default": 0},
+        "lvstore_stack_secondary_1": {"type": List[dict], 'default': []},
+        "lvstore_stack_secondary_2": {"type": List[dict], 'default': []},
+        "secondary_node_id": {"type": str, 'default': ""},
 
         # spdk params
         "spdk_cpu_mask": {"type": str, "default": ""},
@@ -119,6 +121,8 @@ class StorageNode(BaseModel):
         "enable_ha_jm": {"type": bool, "default": False},
 
         "namespace": {"type": str, "default": ""},
+
+        "is_secondary_node": {"type": bool, "default": False},
 
     }
 

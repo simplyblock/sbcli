@@ -191,14 +191,13 @@ class DBController:
         lvols = []
         if cluster_id:
             for pool in self.get_pools(cluster_id):
-                if pool.cluster_id == cluster_id:
-                    for lv_id in pool.lvols:
-                        lv = self.get_lvol_by_id(lv_id)
-                        if lv:
-                            lvols.append(lv)
+                for lv_id in pool.lvols:
+                    lv = self.get_lvol_by_id(lv_id)
+                    if lv:
+                        lvols.append(lv)
         else:
             lvols = LVol().read_from_db(self.kv_store)
-        return lvols
+        return sorted(lvols, key=lambda x: x.create_dt)
 
     def get_snapshots(self):
         ret = SnapShot().read_from_db(self.kv_store)
@@ -322,3 +321,21 @@ class DBController:
             if node.jm_device and node.jm_device.get_id() == jm_id:
                 return node.jm_device
         return None
+
+    def get_primary_storage_nodes_by_cluster_id(self, cluster_id):
+        ret = StorageNode().read_from_db(self.kv_store)
+        nodes = []
+        for n in ret:
+            if n.cluster_id == cluster_id and not n.is_secondary_node:
+                nodes.append(n)
+        return sorted(nodes, key=lambda x: x.create_dt)
+
+    def get_primary_storage_nodes_by_secondary_node_id(self, node_id):
+        ret = StorageNode().read_from_db(self.kv_store)
+        nodes = []
+        for node in ret:
+            if node.secondary_node_id == node_id \
+                    and node.status == StorageNode.STATUS_ONLINE \
+                    and node.lvstore and len(node.lvols) > 0:
+                nodes.append(node)
+        return sorted(nodes, key=lambda x: x.create_dt)

@@ -24,13 +24,15 @@ def device_set_state(device_id, state):
         logger.error("node not found")
         return False
 
+    device = None
     for dev in snode.nvme_devices:
         if dev.get_id() == device_id:
             device = dev
             break
 
-    if device.status == state:
-        return True
+    if not device:
+        logger.error("device not found")
+        return False
 
     if state == NVMeDevice.STATUS_ONLINE:
         device.retries_exhausted = False
@@ -38,26 +40,26 @@ def device_set_state(device_id, state):
     if state == NVMeDevice.STATUS_REMOVED:
         device.deleted = True
 
-    old_status = dev.status
-    device.status = state
-    snode.write_to_db(db_controller.kv_store)
+    if state == NVMeDevice.STATUS_READONLY and device.status == NVMeDevice.STATUS_UNAVAILABLE:
+        return False
 
-    distr_controller.send_cluster_map_to_node(snode)
+    if device.status != state:
+        old_status = dev.status
+        device.status = state
+        snode.write_to_db(db_controller.kv_store)
+        device_events.device_status_change(device, device.status, old_status)
+
+    distr_controller.send_dev_status_event(device, device.status)
 
     if state == NVMeDevice.STATUS_ONLINE:
-        snode = db_controller.get_storage_node_by_id(dev.node_id)
         logger.info("Make other nodes connect to the node devices")
         snodes = db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id)
         for node in snodes:
             if node.get_id() == snode.get_id() or node.status != StorageNode.STATUS_ONLINE:
                 continue
             node.remote_devices = storage_node_ops._connect_to_remote_devs(node)
-            if node.enable_ha_jm:
-                node.remote_jm_devices = storage_node_ops._connect_to_remote_jm_devs(node)
             node.write_to_db()
-            distr_controller.send_cluster_map_to_node(node)
 
-    device_events.device_status_change(device, device.status, old_status)
     return True
 
 
@@ -737,16 +739,49 @@ def set_jm_device_state(device_id, state):
         jm_device.status = state
         snode.write_to_db(db_controller.kv_store)
 
-    if snode.enable_ha_jm and state in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_UNAVAILABLE]:
+    if snode.enable_ha_jm and state in [NVMeDevice.STATUS_ONLINE]:
+        rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password, timeout=5)
+        jm_bdev = f"jm_{snode.get_id()}"
+        pt_name = f"{jm_bdev}_PT"
+        cluster = db_controller.get_cluster_by_id(snode.cluster_id)
+        subsystem_nqn = snode.subsystem + ":dev:" + jm_bdev
+        logger.info("creating subsystem %s", subsystem_nqn)
+        ret = rpc_client.subsystem_create(subsystem_nqn, 'sbcli-cn', jm_bdev)
+        logger.info(f"add {pt_name} to subsystem")
+        ret = rpc_client.nvmf_subsystem_add_ns(subsystem_nqn, pt_name)
+        for iface in snode.data_nics:
+            if iface.ip4_address:
+                tr_type = iface.get_transport_type()
+                ret = rpc_client.transport_list()
+                found = False
+                if ret:
+                    for ty in ret:
+                        if ty['trtype'] == tr_type:
+                            found = True
+                if found is False:
+                    ret = rpc_client.transport_create(tr_type, cluster.qpair_count)
+                logger.info("adding listener for %s on IP %s" % (subsystem_nqn, iface.ip4_address))
+                ret = rpc_client.listeners_create(subsystem_nqn, tr_type, iface.ip4_address, "4420")
+                ret = rpc_client.nvmf_subsystem_listener_set_ana_state(
+                    subsystem_nqn, iface.ip4_address, "4420", True)
+                break
+
         # make other nodes connect to the new devices
         snodes = db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id)
         for node_index, node in enumerate(snodes):
             if node.get_id() == snode.get_id() or node.status != StorageNode.STATUS_ONLINE:
                 continue
-            for jm_dev in node.remote_jm_devices:
-                if jm_dev.get_id() == device_id and jm_device.status != JMDevice.STATUS_ONLINE:
-                    node.remote_jm_devices.remove(jm_dev)
-                    break
+            # rpc_client = RPCClient(
+            #     node.mgmt_ip, node.rpc_port,
+            #     node.rpc_username, node.rpc_password, timeout=5, retry=2)
+            #
+            # for jm_dev in node.remote_jm_devices:
+            #     if jm_dev.get_id() == device_id and jm_device.status != JMDevice.STATUS_ONLINE:
+            #         name = f"remote_{jm_dev.alceml_bdev}"
+            #         rpc_client.bdev_nvme_detach_controller(name)
+            #         time.sleep(1)
+            #         node.remote_jm_devices.remove(jm_dev)
+            #         break
             logger.info(f"Connecting to node: {node.get_id()}")
             node.remote_jm_devices = storage_node_ops._connect_to_remote_jm_devs(node)
             node.write_to_db(db_controller.kv_store)
@@ -848,32 +883,32 @@ def restart_jm_device(device_id, force=False, format_alceml=False):
                     snode.write_to_db(db_controller.kv_store)
                     set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_ONLINE)
         else:
-            nvme_bdev = jm_device.nvme_bdev
-            if snode.enable_test_device:
-                ret = rpc_client.bdev_passtest_create(jm_device.testing_bdev, jm_device.nvme_bdev)
-                if not ret:
-                    logger.error(f"Failed to create passtest bdev {jm_device.testing_bdev}")
-                    return False
-                nvme_bdev = jm_device.testing_bdev
-            alceml_cpu_mask = ""
-            alceml_worker_cpu_mask = ""
-
-            if snode.alceml_cpu_cores:
-                alceml_cpu_mask = utils.decimal_to_hex_power_of_2(snode.alceml_cpu_cores[snode.alceml_cpu_index])
-                snode.alceml_cpu_index = (snode.alceml_cpu_index + 1) % len(snode.alceml_cpu_cores)
-
-            if snode.alceml_worker_cpu_cores:
-                alceml_worker_cpu_mask = utils.decimal_to_hex_power_of_2(
-                    snode.alceml_worker_cpu_cores[snode.alceml_worker_cpu_index])
-                snode.alceml_worker_cpu_index = (snode.alceml_worker_cpu_index + 1) % len(snode.alceml_worker_cpu_cores)
-
-            ret = rpc_client.bdev_alceml_create(jm_device.alceml_bdev, nvme_bdev, jm_device.get_id(),
-                                                pba_init_mode=1, alceml_cpu_mask=alceml_cpu_mask,
-                                                alceml_worker_cpu_mask=alceml_worker_cpu_mask)
-
-            if not ret:
-                logger.error(f"Failed to create alceml bdev: {jm_device.alceml_bdev}")
-                return False
+            # nvme_bdev = jm_device.nvme_bdev
+            # if snode.enable_test_device:
+            #     ret = rpc_client.bdev_passtest_create(jm_device.testing_bdev, jm_device.nvme_bdev)
+            #     if not ret:
+            #         logger.error(f"Failed to create passtest bdev {jm_device.testing_bdev}")
+            #         # return False
+            #     nvme_bdev = jm_device.testing_bdev
+            # alceml_cpu_mask = ""
+            # alceml_worker_cpu_mask = ""
+            #
+            # if snode.alceml_cpu_cores:
+            #     alceml_cpu_mask = utils.decimal_to_hex_power_of_2(snode.alceml_cpu_cores[snode.alceml_cpu_index])
+            #     snode.alceml_cpu_index = (snode.alceml_cpu_index + 1) % len(snode.alceml_cpu_cores)
+            #
+            # if snode.alceml_worker_cpu_cores:
+            #     alceml_worker_cpu_mask = utils.decimal_to_hex_power_of_2(
+            #         snode.alceml_worker_cpu_cores[snode.alceml_worker_cpu_index])
+            #     snode.alceml_worker_cpu_index = (snode.alceml_worker_cpu_index + 1) % len(snode.alceml_worker_cpu_cores)
+            #
+            # ret = rpc_client.bdev_alceml_create(jm_device.alceml_bdev, nvme_bdev, jm_device.get_id(),
+            #                                     pba_init_mode=1, alceml_cpu_mask=alceml_cpu_mask,
+            #                                     alceml_worker_cpu_mask=alceml_worker_cpu_mask)
+            #
+            # if not ret:
+            #     logger.error(f"Failed to create alceml bdev: {jm_device.alceml_bdev}")
+            #     return False
 
             jm_bdev = f"jm_{snode.get_id()}"
             ret = rpc_client.bdev_jm_create(jm_bdev, jm_device.alceml_bdev, jm_cpu_mask=snode.jm_cpu_mask)
