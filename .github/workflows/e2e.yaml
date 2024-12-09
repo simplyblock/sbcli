@@ -20,7 +20,7 @@ on:
       sbcli_cmd:
         description: 'Command for sbcli execution'
         required: true
-        default: 'sbcli-main-ha'
+        default: 'sbcli-dev'
       testname:
         description: 'Name of test to run. Empty to run all'
         required: false
@@ -28,7 +28,7 @@ on:
       send_slack_notification:
         description: 'Send Slack notification?'
         required: false
-        default: false
+        default: true
         type: boolean
       ndcs:
         description: 'Value for NDCS'
@@ -136,8 +136,8 @@ jobs:
         run: |
           cd $GITHUB_WORKSPACE/simplyBlockDeploy
           terraform plan \
-            -var "mgmt_nodes=1" -var "storage_nodes=3" -var "volumes_per_storage_nodes=2" \
-            -var mgmt_nodes_instance_type="m6i.2xlarge" -var storage_nodes_instance_type="m6i.2xlarge" \
+            -var "mgmt_nodes=1" -var "storage_nodes=3" -var "volumes_per_storage_nodes=0" \
+            -var mgmt_nodes_instance_type="m6i.2xlarge" -var storage_nodes_instance_type="m6id.2xlarge" \
             -var "extra_nodes=1" -var "extra_nodes_instance_type=m6id.xlarge" \
             -var storage_nodes_ebs_size2=100 -var "region=us-east-2" \
             -var "sbcli_cmd=$SBCLI_CMD" -out=tfplan
@@ -162,13 +162,12 @@ jobs:
         run: |
           cd $GITHUB_WORKSPACE/simplyBlockDeploy
           ./bootstrap-cluster.sh --sbcli-cmd "$SBCLI_CMD" \
-            --max-lvol 10 --max-snap 10 --max-prov 900G --number-of-devices 2 \
+            --max-lvol 10 --max-snap 10 --max-prov 900G --number-of-devices 3 \
             --distr-ndcs $NDCS \
             --distr-npcs $NPCS \
             --distr-bs $BS \
             --distr-chunk-bs $CHUNK_BS \
-            --partitions 0 \
-            --ha-type single
+            --partitions 3
         id: bootstrap_cluster
         env:
           SBCLI_CMD: ${{ env.SBCLI_CMD }}

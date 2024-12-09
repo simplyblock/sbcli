@@ -4,7 +4,7 @@ import math
 import re
 import sys
 
-from simplyblock_core import cluster_ops, utils, scripts
+from simplyblock_core import cluster_ops, utils
 from simplyblock_core import kv_store
 from simplyblock_core import compute_node_ops as compute_ops
 from simplyblock_core import storage_node_ops as storage_ops

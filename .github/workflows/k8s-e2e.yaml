@@ -20,7 +20,7 @@ on:
       sbcli_cmd:
         description: 'Command for sbcli execution'
         required: true
-        default: 'sbcli-main-ha'
+        default: 'sbcli-dev'
       testname:
         description: 'Name of test to run. Empty to run all'
         required: false
@@ -28,7 +28,7 @@ on:
       send_slack_notification:
         description: 'Send Slack notification?'
         required: false
-        default: false
+        default: true
         type: boolean
       ndcs:
         description: 'Number of data chunks'
@@ -159,12 +159,13 @@ jobs:
         run: |
           cd $GITHUB_WORKSPACE/simplyBlockDeploy
           terraform plan \
-            -var "mgmt_nodes=1" -var "storage_nodes=5" -var "volumes_per_storage_nodes=1" \
+            -var "mgmt_nodes=1" -var "storage_nodes=4" -var "volumes_per_storage_nodes=1" \
             -var storage_nodes_instance_type="m6g.2xlarge" \
             -var "storage_nodes_arch=arm64" -var "snode_deploy_on_k8s=true" \
+            -var "sec_storage_nodes_instance_type=m6g.2xlarge" \
             -var "extra_nodes=1" -var "extra_nodes_instance_type=m6gd.xlarge" \
             -var storage_nodes_ebs_size2=100 -var "region=us-east-2" \
-            -var "extra_nodes_arch=arm64" -var "sec_storage_nodes=1" -var "sec_storage_nodes_instance_type=m6g.4xlarge" \
+            -var "extra_nodes_arch=arm64" -var "sec_storage_nodes=1" \
             -var "sbcli_cmd=$SBCLI_CMD" -out=tfplan
         env:
           SBCLI_CMD: ${{ env.SBCLI_CMD }}
@@ -191,12 +192,12 @@ jobs:
         run: |
           cd $GITHUB_WORKSPACE/simplyBlockDeploy
           ./bootstrap-cluster.sh --sbcli-cmd "$SBCLI_CMD" \
-            --max-lvol 10 --max-snap 10 --max-prov 500G --number-of-devices 1 \
+            --max-lvol 10 --max-snap 10 --max-prov 400G --number-of-devices 1 \
             --distr-ndcs $NDCS \
             --distr-npcs $NPCS \
             --distr-bs $BS \
             --distr-chunk-bs $CHUNK_BS \
-            --k8s-snode --partitions 0
+            --k8s-snode --ha-type ha
         id: bootstrap_cluster
         env:
           SBCLI_CMD: ${{ env.SBCLI_CMD }}
@@ -233,8 +234,8 @@ jobs:
             --set logicalVolume.pool_name="testing1" \
             --set logicalVolume.snapshot="True" \
             --set image.spdkcsi.tag=latest \
-            --set image.simplyblock.tag=main-ha \
-            --set storagenode.spdkImage=simplyblock/spdk:feature-journal-ha-latest \
+            --set image.simplyblock.tag=main \
+            --set storagenode.spdkImage=simplyblock/spdk:main-latest \
             --set logicalVolume.distr_ndcs="${NDCS}" \
             --set logicalVolume.distr_npcs="${NPCS}" \
             --set storagenode.create=true \

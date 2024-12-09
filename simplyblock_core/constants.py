@@ -54,9 +54,9 @@ FDB_CHECK_INTERVAL_SEC = 60
 
 
 
-SIMPLY_BLOCK_DOCKER_IMAGE = "simplyblock/simplyblock:main-ha"
-SIMPLY_BLOCK_CLI_NAME = "sbcli-main-ha"
-TASK_EXEC_INTERVAL_SEC = 5
+SIMPLY_BLOCK_DOCKER_IMAGE = "simplyblock/simplyblock:main"
+SIMPLY_BLOCK_CLI_NAME = "sbcli-dev"
+TASK_EXEC_INTERVAL_SEC = 30
 TASK_EXEC_RETRY_COUNT = 8
 
 
