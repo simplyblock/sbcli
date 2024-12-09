@@ -14,6 +14,21 @@ from e2e_tests.single_ha_node_failure import TestSingleNodeFailureHA
 from stress_test.lvol_stress_fio_run import TestStressLvolClusterFioRun
 
 
+ALL_TESTS = [
+    TestLvolFioNpcsCustom,
+    TestLvolFioNpcs0,
+    TestLvolFioNpcs1,
+    TestLvolFioNpcs2,
+    TestSingleNodeOutage,
+    TestSingleNodeFailure,
+    FioWorkloadTest,
+    TestMultiFioSnapshotDowntime,
+    TestManyLvolSameNode,
+    TestBatchLVOLsLimit,
+    TestMultiLvolFio,
+    TestDeviceNodeRestart,
+    TestSingleNodeFailureHA
+]
 
 def get_all_tests(custom=True, k8s_test=False):
     tests = [

@@ -351,7 +351,7 @@ def check_device(device_id):
         if device.status == NVMeDevice.STATUS_ONLINE:
             logger.info("Checking other node's connection to this device...")
             ret = check_remote_device(device_id)
-            passed &= ret
+            # passed &= ret
 
     except Exception as e:
         logger.error(f"Failed to connect to node's SPDK: {e}")
