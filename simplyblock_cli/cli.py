@@ -295,10 +295,10 @@ class CLIWrapper:
         sub_command.add_argument("--distr-chunk-bs", help='(Dev) distrb bdev chunk block size, default: 4096', type=int,
                                  default=4096)
         sub_command.add_argument("--ha-type", help='LVol HA type (single, ha), default is cluster HA type',
-                                 dest='ha_type', choices=["single", "ha", "default"], default='ha')
+                                 dest='ha_type', choices=["single", "ha"], default='single')
         sub_command.add_argument("--enable-node-affinity", help='Enable node affinity for storage nodes', action='store_true')
         sub_command.add_argument("--qpair-count", help='tcp transport qpair count', type=int, dest='qpair_count',
-                                 default=60, choices=range(128))
+                                 default=20, choices=range(128))
         sub_command.add_argument("--max-queue-size", help='The max size the queue will grow', type=int, default=128)
         sub_command.add_argument("--inflight-io-threshold", help='The number of inflight IOs allowed before the IO queuing starts', type=int, default=4)
         sub_command.add_argument("--enable-qos", help='Enable qos bdev for storage nodes', action='store_true', dest='enable_qos')
@@ -325,7 +325,7 @@ class CLIWrapper:
         sub_command.add_argument("--distr-chunk-bs", help='(Dev) distrb bdev chunk block size, default: 4096', type=int,
                                  default=4096)
         sub_command.add_argument("--ha-type", help='LVol HA type (single, ha), default is cluster HA type',
-                                 dest='ha_type', choices=["single", "ha", "default"], default='default')
+                                 dest='ha_type', choices=["single", "ha"], default='single')
         sub_command.add_argument("--enable-node-affinity", help='Enable node affinity for storage nodes', action='store_true')
         sub_command.add_argument("--qpair-count", help='tcp transport qpair count', type=int, dest='qpair_count',
                                  default=6, choices=range(128))
