@@ -162,16 +162,18 @@ while True:
                                 else:
                                     logger.error(f"Failed to connect to device: {dev.get_id()}")
 
+                online_jms = 0
                 if snode.jm_device and snode.jm_device.get_id():
                     jm_device = snode.jm_device
                     logger.info(f"Node JM: {jm_device.get_id()}")
                     ret = health_controller.check_jm_device(jm_device.get_id())
                     if ret:
                         logger.info(f"Checking jm bdev: {jm_device.jm_bdev} ... ok")
+                        online_jms += 1
                     else:
                         logger.info(f"Checking jm bdev: {jm_device.jm_bdev} ... not found")
 
-                    node_devices_check &= ret
+                    # node_devices_check &= ret
 
                 if snode.enable_ha_jm:
                     logger.info(f"Node remote JMs: {len(snode.remote_jm_devices)}")
@@ -179,16 +181,11 @@ while True:
                         ret = rpc_client.get_bdevs(remote_device.remote_bdev)
                         if ret:
                             logger.info(f"Checking bdev: {remote_device.remote_bdev} ... ok")
+                            online_jms += 1
                         else:
                             logger.info(f"Checking bdev: {remote_device.remote_bdev} ... not found")
 
-                            org_dev = None
-                            for node in db_controller.get_storage_nodes():
-                                if node.jm_device and node.jm_device.get_id() == remote_device.get_id():
-                                    if node.status == StorageNode.STATUS_ONLINE:
-                                        org_dev = node.jm_device
-                                    break
-
+                            org_dev = db_controller.get_jm_device_by_id(remote_device.get_id())
                             if org_dev and org_dev.status == NVMeDevice.STATUS_ONLINE:
                                 name = f"remote_{remote_device.jm_bdev}"
                                 ret = rpc_client.bdev_nvme_attach_controller_tcp_JM(
@@ -196,10 +193,18 @@ while True:
                                     remote_device.nvmf_port)
                                 if ret:
                                     logger.info(f"Successfully connected to device: {remote_device.get_id()}")
+                                    online_jms += 1
                                 else:
                                     logger.error(f"Failed to connect to device: {remote_device.get_id()}")
+                            else:
+                                continue
 
-                        node_remote_devices_check &= bool(ret)
+                    if online_jms < 2:
+                        node_remote_devices_check = False
+                else:
+                    if online_jms == 0:
+                        node_remote_devices_check = False
+
 
                 lvstore_check = True
                 if snode.lvstore_stack:

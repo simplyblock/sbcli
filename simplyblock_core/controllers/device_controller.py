@@ -740,7 +740,7 @@ def set_jm_device_state(device_id, state):
         jm_device.status = state
         snode.write_to_db(db_controller.kv_store)
 
-    if snode.enable_ha_jm and state in [NVMeDevice.STATUS_ONLINE]:
+    if snode.enable_ha_jm and state == NVMeDevice.STATUS_ONLINE:
         rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password, timeout=5)
         jm_bdev = f"jm_{snode.get_id()}"
         subsystem_nqn = snode.subsystem + ":dev:" + jm_bdev
@@ -756,17 +756,6 @@ def set_jm_device_state(device_id, state):
         for node_index, node in enumerate(snodes):
             if node.get_id() == snode.get_id() or node.status != StorageNode.STATUS_ONLINE:
                 continue
-            # rpc_client = RPCClient(
-            #     node.mgmt_ip, node.rpc_port,
-            #     node.rpc_username, node.rpc_password, timeout=5, retry=2)
-            #
-            # for jm_dev in node.remote_jm_devices:
-            #     if jm_dev.get_id() == device_id and jm_device.status != JMDevice.STATUS_ONLINE:
-            #         name = f"remote_{jm_dev.alceml_bdev}"
-            #         rpc_client.bdev_nvme_detach_controller(name)
-            #         time.sleep(1)
-            #         node.remote_jm_devices.remove(jm_dev)
-            #         break
             logger.info(f"Connecting to node: {node.get_id()}")
             node.remote_jm_devices = storage_node_ops._connect_to_remote_jm_devs(node)
             node.write_to_db(db_controller.kv_store)

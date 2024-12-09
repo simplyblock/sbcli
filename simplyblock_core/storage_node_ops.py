@@ -888,12 +888,14 @@ def _connect_to_remote_jm_devs(this_node, jm_ids=[]):
                     remote_devices.append(jm_dev)
         elif len(this_node.remote_jm_devices) > 0:
             remote_devices = this_node.remote_jm_devices
-        # else:
-        #     for node in db_controller.get_storage_nodes_by_cluster_id(this_node.cluster_id):
-        #         if node.get_id() == this_node.get_id() or node.is_secondary_node:
-        #             continue
-        #         if node.jm_device and node.jm_device.status == JMDevice.STATUS_ONLINE:
-        #             remote_devices.append(node.jm_device)
+        else:
+            for node in db_controller.get_storage_nodes_by_cluster_id(this_node.cluster_id):
+                if node.get_id() == this_node.get_id() or node.is_secondary_node:
+                    continue
+                if node.jm_device and node.jm_device.status == JMDevice.STATUS_ONLINE:
+                    remote_devices.append(node.jm_device)
+                    if len(remote_devices) >= 2 :
+                        break
 
     new_devs = []
     for jm_dev in remote_devices:
@@ -2059,21 +2061,10 @@ def shutdown_storage_node(node_id, force=False):
     logger.info("Shutting down node")
     set_node_status(node_id, StorageNode.STATUS_IN_SHUTDOWN)
 
-    if health_controller._check_node_rpc(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password):
 
-        rpc_client = RPCClient(
-            snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password, timeout=10, retry=1)
-
-        # logger.info("Dumping lvstore data")
-        # ret = dump_lvstore(node_id)
-        # print(ret)
-
-        # logger.debug("Removing LVols")
-        # _remove_bdev_stack(snode.lvstore_stack, rpc_client, remove_distr_only=True)
-
-        # if snode.jm_device:
-        #     logger.info("Setting JM unavailable")
-        #     device_controller.set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_UNAVAILABLE)
+    if snode.jm_device and snode.jm_device.status != JMDevice.STATUS_REMOVED:
+        logger.info("Setting JM unavailable")
+        device_controller.set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_UNAVAILABLE)
 
     for dev in snode.nvme_devices:
         if dev.status in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_READONLY]:
@@ -2143,8 +2134,6 @@ def suspend_storage_node(node_id, force=False):
         if dev.status == NVMeDevice.STATUS_ONLINE:
             device_controller.device_set_unavailable(dev.get_id())
 
-    time.sleep(1)
-
     rpc_client = RPCClient(
         snode.mgmt_ip, snode.rpc_port,
         snode.rpc_username, snode.rpc_password, timeout=5, retry=1)
@@ -2176,6 +2165,11 @@ def suspend_storage_node(node_id, force=False):
         rpc_client.bdev_distrib_force_to_non_leader(node.jm_vuid)
         time.sleep(1)
 
+
+
+    if snode.jm_device and snode.jm_device.status != JMDevice.STATUS_REMOVED:
+        logger.info("Setting JM unavailable")
+        device_controller.set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_UNAVAILABLE)
 
     logger.info("Setting node status to suspended")
     set_node_status(snode.get_id(), StorageNode.STATUS_SUSPENDED)
