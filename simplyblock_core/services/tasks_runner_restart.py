@@ -199,7 +199,7 @@ def task_runner_node(task):
     if ret:
         logger.info(f"Node restart succeeded")
 
-    time.sleep(5)
+    time.sleep(3)
     if node.status == StorageNode.STATUS_ONLINE:
         logger.info(f"Node is online: {node.get_id()}")
         task.function_result = "done"
@@ -229,10 +229,13 @@ while True:
                         res = task_runner(task)
                         if res:
                             tasks_events.task_updated(task)
+                            if task.status == JobSchedule.STATUS_DONE:
+                                break
                         else:
-                            time.sleep(delay_seconds)
-                            if task.retry <= 3 and task.function_name == JobSchedule.FN_DEV_RESTART:
+                            if task.retry <= 3:
                                 delay_seconds *= 1
                             else:
                                 delay_seconds *= 2
-    time.sleep(constants.TASK_EXEC_INTERVAL_SEC)
+                        time.sleep(delay_seconds)
+
+    time.sleep(10)

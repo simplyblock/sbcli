@@ -40,11 +40,10 @@ class SbcliUtils:
                 resp = requests.get(request_url, headers=headers)
                 if resp.status_code == HTTPStatus.OK:
                     data = resp.json()
+                    return data
                 else:
-                    self.logger.error('request failed. status_code', resp.status_code)
-                    self.logger.error('request failed. text', resp.text)
+                    self.logger.error(f"request failed. status_code: {resp.status_code}, text: {resp.text}")
                     resp.raise_for_status()
-                return data
             except Exception as e:
                 self.logger.debug(f"API call {api_url} failed with error:{e}")
                 retry -= 1
@@ -52,6 +51,7 @@ class SbcliUtils:
                     self.logger.info(f"Retry attempt exhausted. API {api_url} failed with: {e}.")
                     raise e
                 self.logger.info(f"Retrying API {api_url}. Attempt: {10 - retry + 1}")
+                sleep_n_sec(1)
 
     def post_request(self, api_url, headers=None, body=None, retry=10):
         """Performs post request on the given API URL
@@ -191,7 +191,7 @@ class SbcliUtils:
         node_uuid = ""
         data = self.get_request(api_url="/storagenode")
         for result in data['results']:
-            if len(result['lvols']) == 0:
+            if len(result['lvols']) == 0 and result['is_secondary_node'] is False:
                 node_uuid = result['uuid']
                 break
         return node_uuid
@@ -558,3 +558,15 @@ class SbcliUtils:
     def list_migration_tasks(self, cluster_id):
         """List all migration tasks for a given cluster."""
         return self.get_request(f"/cluster/list-tasks/{cluster_id}")
+
+    def get_lvol_connect_str_list(self, lvol_name):
+        """Return connect string for the lvol
+        """
+        lvol_id = self.get_lvol_id(lvol_name=lvol_name)
+        if not lvol_id:
+            self.logger.info(f"Lvol {lvol_name} does not exist. Exiting")
+            return
+
+        data = self.get_request(api_url=f"/lvol/connect/{lvol_id}")
+        self.logger.info(f"Connect lvol resp: {data}")
+        return [d["connect"] for d in data["results"]]

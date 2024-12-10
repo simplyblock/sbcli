@@ -57,17 +57,19 @@ class RPCClient:
             logger.error(e)
             return False, str(e)
 
-        logger.debug("Response: status_code: %s, content: %s",
-                     response.status_code, response.content)
         ret_code = response.status_code
+        ret_content = response.content
+        logger.debug("Response: status_code: %s", ret_code)
 
         result = None
         error = None
         if ret_code == 200:
             try:
                 data = response.json()
+                logger.debug("Response json: %s", json.dumps(data))
             except Exception:
-                return response.content, None
+                logger.debug("Response ret_content: %s", ret_content)
+                return ret_content, None
 
             if 'result' in data:
                 result = data['result']
@@ -78,9 +80,9 @@ class RPCClient:
             else:
                 return data, None
 
-        if ret_code in [500, 400]:
-            raise RPCException("Invalid http status: %s" % ret_code)
-        logger.error("Unknown http status: %s", ret_code)
+        else:
+            logger.error("Invalid http status : %s", ret_code)
+
         return None, None
 
     def get_version(self):
@@ -99,11 +101,12 @@ class RPCClient:
     def subsystem_delete(self, nqn):
         return self._request("nvmf_delete_subsystem", params={'nqn': nqn})
 
-    def subsystem_create(self, nqn, serial_number, model_number):
+    def subsystem_create(self, nqn, serial_number, model_number, min_cntlid=1):
         params = {
             "nqn": nqn,
             "serial_number": serial_number,
             "allow_any_host": True,
+            "min_cntlid": min_cntlid,
             "ana_reporting": True,
             "model_number": model_number}
         return self._request("nvmf_create_subsystem", params)
@@ -161,7 +164,7 @@ class RPCClient:
         params = {"nqn": nqn}
         return self._request("nvmf_subsystem_get_listeners", params)
 
-    def listeners_create(self, nqn, trtype, traddr, trsvcid):
+    def listeners_create(self, nqn, trtype, traddr, trsvcid, ana_state=None):
         """"
             nqn: Subsystem NQN.
             trtype: Transport type ("RDMA").
@@ -177,6 +180,8 @@ class RPCClient:
                 "trsvcid": trsvcid
             }
         }
+        if ana_state:
+            params["ana_state"] = ana_state
         return self._request("nvmf_subsystem_add_listener", params)
 
     def bdev_nvme_controller_list(self, name=None):
@@ -229,7 +234,7 @@ class RPCClient:
             "nsid": nsid}
         return self._request("nvmf_subsystem_remove_ns", params)
 
-    def nvmf_subsystem_listener_set_ana_state(self, nqn, ip, port, is_optimized=True):
+    def nvmf_subsystem_listener_set_ana_state(self, nqn, ip, port, is_optimized=True, ana=None):
         params = {
             "nqn": nqn,
             "listen_address": {
@@ -243,6 +248,9 @@ class RPCClient:
             params['ana_state'] = "optimized"
         else:
             params['ana_state'] = "non_optimized"
+
+        if ana:
+            params['ana_state'] = ana
 
         return self._request("nvmf_subsystem_listener_set_ana_state", params)
 
@@ -527,6 +535,27 @@ class RPCClient:
             # "reconnect_delay_sec":1
         }
         return self._request("bdev_nvme_attach_controller", params)
+
+    def bdev_nvme_attach_controller_tcp_JM(self, name, nqn, ip, port):
+        return self.bdev_nvme_attach_controller_tcp(name, nqn, ip, port)
+        # params = {
+        #     "name": name,
+        #     "trtype": "tcp",
+        #     "traddr": ip,
+        #     "adrfam": "ipv4",
+        #     "trsvcid": str(port),
+        #     "subnqn": nqn,
+        #     "fabrics_connect_timeout_us": 100000,
+        #
+        #     "num_io_queues": 16384,
+        #     "ctrlr_loss_timeout_sec": 0,
+        #     "multipath": "disable",
+        #     "reconnect_delay_sec": 0,
+        #
+        #     "fast_io_fail_timeout_sec": 1,
+        #
+        # }
+        # return self._request("bdev_nvme_attach_controller", params)
 
     def bdev_nvme_attach_controller_tcp_caching(self, name, nqn, ip, port):
         params = {
@@ -859,3 +888,64 @@ class RPCClient:
             "jm_vuid": jm_vuid
         }
         return self._request("jc_explicit_synchronization", params)
+
+    def listeners_del(self, nqn, trtype, traddr, trsvcid):
+        """"
+            nqn: Subsystem NQN.
+            trtype: Transport type ("RDMA").
+            traddr: Transport address.
+            trsvcid: Transport service ID (required for RDMA or TCP).
+        """
+        params = {
+            "nqn": nqn,
+            "listen_address": {
+                "trtype": trtype,
+                "adrfam": "IPv4",
+                "traddr": traddr,
+                "trsvcid": trsvcid
+            }
+        }
+        return self._request("nvmf_subsystem_remove_listener", params)
+
+
+    def bdev_distrib_force_to_non_leader(self, jm_vuid=0):
+        params = None
+        if jm_vuid:
+            params = {"jm_vuid": jm_vuid}
+        return self._request("bdev_distrib_force_to_non_leader", params)
+
+    def bdev_lvol_set_leader(self, is_leader=False, uuid=None, lvs_name=None):
+        params = {
+            "leadership": is_leader,
+        }
+        if uuid:
+            params["uuid"] = uuid
+        elif lvs_name:
+            params["lvs_name"] = lvs_name
+
+        return self._request("bdev_lvol_set_leader_all", params)
+
+    def bdev_lvol_register(self, name, lvs_name, registered_uuid, blobid, priority_class=0):
+        params = {
+            "lvol_name": name,
+            "lvs_name": lvs_name,
+            "thin_provision": True,
+            "clear_method": "unmap",
+            "blobid": blobid,
+            "registered_uuid": registered_uuid,
+        }
+        if priority_class:
+            params["lvol_priority_class"] = priority_class
+        return self._request("bdev_lvol_register", params)
+
+    def nvmf_subsystem_get_controllers(self, nqn):
+        params = {
+            "nqn": nqn
+        }
+        return self._request("nvmf_subsystem_get_controllers", params)
+
+    def lvol_crypto_key_delete(self, name):
+        params = {
+            "key_name": name
+        }
+        return self._request("accel_crypto_key_destroy", params)

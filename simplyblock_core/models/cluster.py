@@ -43,6 +43,8 @@ class Cluster(BaseModel):
         "distr_bs": {"type": int, 'default': 0},
         "distr_chunk_bs": {"type": int, 'default': 0},
         "cluster_max_size": {"type": int, 'default': 0},
+        "cluster_max_devices": {"type": int, 'default': 0},
+        "cluster_max_nodes": {"type": int, 'default': 0},
 
         ## cluster-level: cap-warn ( % ), cap-crit ( % ), prov-cap-warn ( % ), prov-cap-crit. ( % )
         "cap_warn": {"type": int, "default": 80},
@@ -53,13 +55,15 @@ class Cluster(BaseModel):
         "qpair_count": {"type": int, "default": 6},
 
         "secret": {"type": str, "default": ""},
+        "grafana_secret": {"type": str, "default": ""},
         "status": {"type": str, "default": ""},
         "updated_at": {"type": str, "default": ""},
         "grafana_endpoint": {"type": str, "default": ""},
         "enable_node_affinity": {"type": bool, 'default': False},
         "max_queue_size": {"type": int, "default": 128},
         "inflight_io_threshold": {"type": int, "default": 4},
-        "enable_qos": {"type": bool, 'default': False}
+        "enable_qos": {"type": bool, 'default': False},
+        "strict_node_anti_affinity": {"type": bool, 'default': False},
     }
 
     def __init__(self, data=None):

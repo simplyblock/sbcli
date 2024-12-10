@@ -48,6 +48,8 @@ class StatsObject(BaseModel):
 
         "capacity_dict": {"type": dict, 'default': {}},
 
+        "connected_clients": {"type": int, 'default': 0},
+
     }
 
     def __init__(self, data=None):

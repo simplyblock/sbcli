@@ -1,6 +1,6 @@
 # coding=utf-8
 import time
-
+from datetime import datetime
 
 from simplyblock_core import constants, kv_store, utils
 from simplyblock_core.controllers import tasks_events, tasks_controller
@@ -41,6 +41,15 @@ def task_runner(task):
         task.retry += 1
         task.write_to_db(db_controller.kv_store)
         return False
+
+    if snode.online_since:
+        diff = datetime.now() - datetime.fromisoformat(snode.online_since)
+        if diff.total_seconds() < 60 * 5:
+            task.function_result = "node is online < 5 min, retrying"
+            task.status = JobSchedule.STATUS_SUSPENDED
+            task.retry += 1
+            task.write_to_db(db_controller.kv_store)
+            return False
 
     rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password,
                            timeout=5, retry=2)
@@ -87,7 +96,7 @@ def task_runner(task):
         res = rpc_client.distr_migration_status(**mig_info)
         for st in res:
             if st['status'] == "completed":
-                if st['error'] == 1:
+                if st['error'] != 0:
                     task.function_result = "mig completed with errors, retrying"
                     task.retry += 1
                     task.status = JobSchedule.STATUS_SUSPENDED
@@ -112,7 +121,7 @@ db_controller = kv_store.DBController()
 
 logger.info("Starting Tasks runner...")
 while True:
-    time.sleep(3)
+    time.sleep(30)
     clusters = db_controller.get_clusters()
     if not clusters:
         logger.error("No clusters found!")
@@ -120,7 +129,7 @@ while True:
         for cl in clusters:
             tasks = db_controller.get_job_tasks(cl.get_id(), reverse=False)
             for task in tasks:
-                delay_seconds = 5
+                delay_seconds = 10
                 if task.function_name == JobSchedule.FN_DEV_MIG:
                     if task.status in [JobSchedule.STATUS_NEW, JobSchedule.STATUS_SUSPENDED]:
                         active_task = tasks_controller.get_active_node_mig_task(task.cluster_id, task.node_id)
@@ -133,5 +142,5 @@ while True:
                         res = task_runner(task)
                         if res:
                             tasks_events.task_updated(task)
-                        else:
-                            time.sleep(delay_seconds)
+
+                        time.sleep(delay_seconds)

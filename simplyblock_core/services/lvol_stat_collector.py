@@ -1,6 +1,6 @@
 # coding=utf-8
 import time
-
+from email.policy import default
 
 from simplyblock_core import constants, kv_store, utils
 from simplyblock_core.controllers import lvol_events
@@ -14,15 +14,64 @@ logger = utils.get_logger(__name__)
 last_object_record = {}
 
 
-def add_lvol_stats(pool, lvol, stats_dict):
+def sum_stats(stats_list):
+    if not stats_list or len(stats_list) == 0:
+        return None
+    if len(stats_list) == 1:
+        return stats_list[0]
+
+    ret = {}
+    for key in stats_list[0].keys():
+        for stat_dict in stats_list:
+            value = stat_dict[key]
+            try:
+                v_int = int(value)
+                if key in ret:
+                    ret[key] += v_int
+                else:
+                    ret[key] = v_int
+            except:
+                pass
+    return ret
+
+
+def add_lvol_stats(pool, lvol, stats_list, capacity_dict=None, connected_clients=0):
     now = int(time.time())
     data = {
         "pool_id": pool.get_id(),
         "uuid": lvol.get_id(),
         "date": now}
 
-    if stats_dict and stats_dict['bdevs']:
-        stats = stats_dict['bdevs'][0]
+    if connected_clients:
+        data['connected_clients'] = connected_clients
+
+    if capacity_dict:
+        size_used = 0
+        lvol_dict = capacity_dict[0]
+        size_total = int(lvol_dict['num_blocks']*lvol_dict['block_size'])
+        if "driver_specific" in lvol_dict and "lvol" in lvol_dict["driver_specific"]:
+            num_allocated_clusters = lvol_dict["driver_specific"]["lvol"]["num_allocated_clusters"]
+            size_used = int(num_allocated_clusters*lvol.cluster_size)
+
+        size_free = size_total - size_used
+        size_util = 0
+        if size_total > 0:
+            size_util = int((size_used / size_total) * 100)
+
+        data.update({
+            "size_total": size_total,
+            "size_used": size_used,
+            "size_free": size_free,
+            "size_util": size_util,
+            # "capacity_dict": capacity_dict
+        })
+    else:
+        logger.error(f"Error getting Alceml capacity, response={capacity_dict}")
+
+    if stats_list:
+
+        stats = sum_stats(stats_list)
+
         data.update({
             "read_bytes": stats['bytes_read'],
             "read_io": stats['num_read_ops'],
@@ -46,17 +95,50 @@ def add_lvol_stats(pool, lvol, stats_dict):
         if last_record:
             time_diff = (now - last_record.date)
             if time_diff > 0:
-                data['read_bytes_ps'] = int((data['read_bytes'] - last_record['read_bytes']) / time_diff)
-                data['read_io_ps'] = int((data['read_io'] - last_record['read_io']) / time_diff)
-                data['read_latency_ps'] = int((data['read_latency_ticks'] - last_record['read_latency_ticks']) / time_diff)
+                if data['read_bytes'] >= last_record['read_bytes']:
+                    data['read_bytes_ps'] = int((data['read_bytes'] - last_record['read_bytes']) / time_diff)
+                else:
+                    data['read_bytes_ps'] = int(data['read_bytes'] / time_diff)
 
-                data['write_bytes_ps'] = int((data['write_bytes'] - last_record['write_bytes']) / time_diff)
-                data['write_io_ps'] = int((data['write_io'] - last_record['write_io']) / time_diff)
-                data['write_latency_ps'] = int((data['write_latency_ticks'] - last_record['write_latency_ticks']) / time_diff)
+                if data['read_io'] >= last_record['read_io']:
+                    data['read_io_ps'] = int((data['read_io'] - last_record['read_io']) / time_diff)
+                else:
+                    data['read_io_ps'] = int(data['read_io'] / time_diff)
 
-                data['unmap_bytes_ps'] = int((data['unmap_bytes'] - last_record['unmap_bytes']) / time_diff)
-                data['unmap_io_ps'] = int((data['unmap_io'] - last_record['unmap_io']) / time_diff)
-                data['unmap_latency_ps'] = int((data['unmap_latency_ticks'] - last_record['unmap_latency_ticks']) / time_diff)
+                if data['read_latency_ticks'] >= last_record['read_latency_ticks']:
+                    data['read_latency_ps'] = int((data['read_latency_ticks'] - last_record['read_latency_ticks']) / time_diff)
+                else:
+                    data['read_latency_ps'] = int(data['read_latency_ticks'] / time_diff)
+
+                if data['write_bytes'] >= last_record['write_bytes']:
+                    data['write_bytes_ps'] = int((data['write_bytes'] - last_record['write_bytes']) / time_diff)
+                else:
+                    data['write_bytes_ps'] = int(data['write_bytes'] / time_diff)
+
+                if data['write_io'] >= last_record['write_io']:
+                    data['write_io_ps'] = int((data['write_io'] - last_record['write_io']) / time_diff)
+                else:
+                    data['write_io_ps'] = int(data['write_io'] / time_diff)
+
+                if data['write_latency_ticks'] >= last_record['write_latency_ticks']:
+                    data['write_latency_ps'] = int((data['write_latency_ticks'] - last_record['write_latency_ticks']) / time_diff)
+                else:
+                    data['write_latency_ps'] = int(data['write_latency_ticks'] / time_diff)
+
+                if data['unmap_bytes'] >= last_record['unmap_bytes']:
+                    data['unmap_bytes_ps'] = int((data['unmap_bytes'] - last_record['unmap_bytes']) / time_diff)
+                else:
+                    data['unmap_bytes_ps'] = int(data['unmap_bytes'] / time_diff)
+
+                if data['unmap_io'] >= last_record['unmap_io']:
+                    data['unmap_io_ps'] = int((data['unmap_io'] - last_record['unmap_io']) / time_diff)
+                else:
+                    data['unmap_io_ps'] = int(data['unmap_io'] / time_diff)
+
+                if data['unmap_latency_ticks'] >= last_record['unmap_latency_ticks']:
+                    data['unmap_latency_ps'] = int((data['unmap_latency_ticks'] - last_record['unmap_latency_ticks']) / time_diff)
+                else:
+                    data['unmap_latency_ps'] = int(data['unmap_latency_ticks'] / time_diff)
 
                 if data['read_io_ps'] > 0 and data['write_io_ps'] > 0 and lvol.io_error:
                     # set lvol io error to false
@@ -118,16 +200,36 @@ while True:
             if lvol.status == lvol.STATUS_IN_DELETION:
                 logger.warning(f"LVol in deletion, id: {lvol.get_id()}, status: {lvol.status}.. skipping")
                 continue
-            snode = db_controller.get_storage_node_by_hostname(lvol.hostname)
-            rpc_client = RPCClient(
-                snode.mgmt_ip, snode.rpc_port,
-                snode.rpc_username, snode.rpc_password,
-                timeout=3, retry=2)
+            hosts = []
+            stats = []
+            capacity_dict = None
+            connected_clients = 0
+            if lvol.ha_type == "ha":
+                hosts = lvol.nodes
+            else:
+                hosts=[lvol.node_id]
+            for host in hosts:
+                snode = db_controller.get_storage_node_by_id(host)
+                rpc_client = RPCClient(
+                    snode.mgmt_ip, snode.rpc_port,
+                    snode.rpc_username, snode.rpc_password,
+                    timeout=1, retry=2)
 
-            logger.info("Getting lVol stats: %s", lvol.uuid)
-            stats_dict = rpc_client.get_lvol_stats(lvol.top_bdev)
-            record = add_lvol_stats(pool, lvol, stats_dict)
+                logger.info("Getting lVol stats: %s", lvol.uuid)
+                stats_dict = rpc_client.get_lvol_stats(lvol.top_bdev)
+                if stats_dict and stats_dict['bdevs']:
+                    stats.append( stats_dict['bdevs'][0])
+
+                if not capacity_dict:
+                    capacity_dict = rpc_client.get_bdevs(lvol.base_bdev)
+
+                ret = rpc_client.nvmf_subsystem_get_controllers(lvol.nqn)
+                if ret:
+                    connected_clients = max(len(ret), connected_clients)
+
+            record = add_lvol_stats(pool, lvol, stats, capacity_dict, connected_clients)
             stat_records.append(record)
+
         if stat_records:
             add_pool_stats(pool, stat_records)
 

@@ -105,10 +105,12 @@ while True:
                 rpc_client = RPCClient(
                     snode.mgmt_ip, snode.rpc_port,
                     snode.rpc_username, snode.rpc_password,
-                    timeout=10, retry=1)
+                    timeout=3, retry=2)
                 connected_devices = []
                 for remote_device in snode.remote_devices:
-                    if db_controller.get_storage_device_by_id(remote_device.get_id()).status == NVMeDevice.STATUS_ONLINE:
+                    org_dev = db_controller.get_storage_device_by_id(remote_device.get_id())
+                    org_node =  db_controller.get_storage_node_by_id(remote_device.node_id)
+                    if org_dev.status == NVMeDevice.STATUS_ONLINE and org_node.status == StorageNode.STATUS_ONLINE:
                         ret = rpc_client.get_bdevs(remote_device.remote_bdev)
                         if ret:
                             logger.info(f"Checking bdev: {remote_device.remote_bdev} ... ok")
@@ -116,8 +118,12 @@ while True:
                         else:
                             logger.info(f"Checking bdev: {remote_device.remote_bdev} ... not found")
                             name = f"remote_{remote_device.alceml_bdev}"
-                            ret = rpc_client.bdev_nvme_detach_controller(name)
-                            time.sleep(1)
+                            if rpc_client.bdev_nvme_controller_list(name):
+                                logger.info(f"detaching {name} from {snode.get_id()}")
+                                rpc_client.bdev_nvme_detach_controller(name)
+                                time.sleep(1)
+
+                            logger.info(f"Connecting {name} to {snode.get_id()}")
                             ret = rpc_client.bdev_nvme_attach_controller_tcp(
                                 name, remote_device.nvmf_nqn, remote_device.nvmf_ip, remote_device.nvmf_port)
                             if ret:
@@ -133,13 +139,17 @@ while True:
                     if node.status != StorageNode.STATUS_ONLINE or node.get_id() == snode.get_id():
                         continue
                     for dev in node.nvme_devices:
-                        if dev.status == StorageNode.STATUS_ONLINE:
+                        if dev.status == NVMeDevice.STATUS_ONLINE:
                             if dev.get_id() not in connected_devices:
                                 logger.info(f"connecting to online device: {dev.get_id()}")
                                 name = f"remote_{dev.alceml_bdev}"
                                 bdev_name = f"{name}n1"
-                                ret = rpc_client.bdev_nvme_detach_controller(name)
-                                time.sleep(1)
+                                if rpc_client.bdev_nvme_controller_list(name):
+                                    logger.info(f"detaching {name} from {snode.get_id()}")
+                                    rpc_client.bdev_nvme_detach_controller(name)
+                                    time.sleep(1)
+
+                                logger.info(f"Connecting {name} to {snode.get_id()}")
                                 ret = rpc_client.bdev_nvme_attach_controller_tcp(
                                     name, dev.nvmf_nqn, dev.nvmf_ip,
                                     dev.nvmf_port)
@@ -152,16 +162,18 @@ while True:
                                 else:
                                     logger.error(f"Failed to connect to device: {dev.get_id()}")
 
-                if snode.jm_device:
+                online_jms = 0
+                if snode.jm_device and snode.jm_device.get_id():
                     jm_device = snode.jm_device
-                    logger.info(f"Node JM: {jm_device}")
+                    logger.info(f"Node JM: {jm_device.get_id()}")
                     ret = health_controller.check_jm_device(jm_device.get_id())
                     if ret:
                         logger.info(f"Checking jm bdev: {jm_device.jm_bdev} ... ok")
+                        online_jms += 1
                     else:
                         logger.info(f"Checking jm bdev: {jm_device.jm_bdev} ... not found")
-                        # todo: try add
-                    node_devices_check &= ret
+
+                    # node_devices_check &= ret
 
                 if snode.enable_ha_jm:
                     logger.info(f"Node remote JMs: {len(snode.remote_jm_devices)}")
@@ -169,72 +181,44 @@ while True:
                         ret = rpc_client.get_bdevs(remote_device.remote_bdev)
                         if ret:
                             logger.info(f"Checking bdev: {remote_device.remote_bdev} ... ok")
+                            online_jms += 1
                         else:
                             logger.info(f"Checking bdev: {remote_device.remote_bdev} ... not found")
-                            name = f"remote_{remote_device.alceml_bdev}"
-                            ret = rpc_client.bdev_nvme_attach_controller_tcp(
-                                name, remote_device.nvmf_nqn, remote_device.nvmf_ip,
-                                remote_device.nvmf_port)
-                            if ret:
-                                logger.info(f"Successfully connected to device: {remote_device.get_id()}")
-                            else:
-                                logger.error(f"Failed to connect to device: {remote_device.get_id()}")
 
-                        # node_remote_devices_check &= bool(ret)
+                            org_dev = db_controller.get_jm_device_by_id(remote_device.get_id())
+                            if org_dev and org_dev.status == NVMeDevice.STATUS_ONLINE:
+                                name = f"remote_{remote_device.jm_bdev}"
+                                ret = rpc_client.bdev_nvme_attach_controller_tcp_JM(
+                                    name, remote_device.nvmf_nqn, remote_device.nvmf_ip,
+                                    remote_device.nvmf_port)
+                                if ret:
+                                    logger.info(f"Successfully connected to device: {remote_device.get_id()}")
+                                    online_jms += 1
+                                else:
+                                    logger.error(f"Failed to connect to device: {remote_device.get_id()}")
+                            else:
+                                continue
+
+                    if online_jms < 2:
+                        node_remote_devices_check = False
+                else:
+                    if online_jms == 0:
+                        node_remote_devices_check = False
+
 
                 lvstore_check = True
-                if snode.lvstore and snode.lvstore_stack:
-                    distribs_list = []
-                    for bdev in snode.lvstore_stack:
-                        type = bdev['type']
-                        if type == "bdev_raid":
-                            distribs_list = bdev["distribs_list"]
+                if snode.lvstore_stack:
+                    lvstore_stack = snode.lvstore_stack
+                    lvstore_check &= health_controller._check_node_lvstore(lvstore_stack, snode, auto_fix=True)
+                    if snode.secondary_node_id:
+                        second_node_1 = db_controller.get_storage_node_by_id(snode.secondary_node_id)
+                        lvstore_check &= health_controller._check_node_lvstore(lvstore_stack, second_node_1, auto_fix=True)
 
-                    for distr in distribs_list:
-                        ret = rpc_client.get_bdevs(distr)
-                        if ret:
-                            logger.info(f"Checking distr bdev : {distr} ... ok")
-                            logger.info("Checking Distr map ...")
-                            ret = rpc_client.distr_get_cluster_map(distr)
-                            if not ret:
-                                logger.error("Failed to get cluster map")
-                                lvstore_check = False
-                            else:
-                                results, is_passed = distr_controller.parse_distr_cluster_map(ret)
-                                if results:
-                                    logger.info(utils.print_table(results))
-                                    logger.info(f"Checking Distr map ... {is_passed}")
-                                    if not is_passed:
-                                        for result in results:
-                                            if result['Results'] == 'failed':
-                                                if result['Kind'] == "Device":
-                                                    dev = db_controller.get_storage_device_by_id(result['UUID'])
-                                                    distr_controller.send_dev_status_event(dev, dev.status, snode)
-                                                if result['Kind'] == "Node":
-                                                    node = db_controller.get_storage_node_by_id(result['UUID'])
-                                                    distr_controller.send_node_status_event(node, node.status, snode)
-                                        ret = rpc_client.distr_get_cluster_map(distr)
-                                        results, is_passed = distr_controller.parse_distr_cluster_map(ret)
-
-                                else:
-                                    logger.error("Failed to parse distr cluster map")
-
-                                lvstore_check &= is_passed
-                        else:
-                            logger.info(f"Checking distr bdev : {distr} ... not found")
-                            lvstore_check = False
-                    ret = rpc_client.get_bdevs(snode.raid)
-                    if ret:
-                        logger.info(f"Checking raid bdev: {snode.raid} ... ok")
-                    else:
-                        logger.info(f"Checking raid bdev: {snode.raid} ... not found")
-                        lvstore_check = False
-                    ret = rpc_client.bdev_lvol_get_lvstores(snode.lvstore)
-                    if ret:
-                        logger.info(f"Checking lvstore: {snode.lvstore} ... ok")
-                    else:
-                        logger.info(f"Checking lvstore: {snode.lvstore} ... not found")
-                        lvstore_check = False
+                if snode.is_secondary_node:
+                    for node in db_controller.get_storage_nodes():
+                        if node.secondary_node_id == snode.get_id():
+                            logger.info(f"Checking stack from node : {node.get_id()}")
+                            lvstore_check &= health_controller._check_node_lvstore(node.lvstore_stack, snode, auto_fix=True)
 
                 health_check_status = is_node_online and node_devices_check and node_remote_devices_check and lvstore_check
             set_node_health_check(snode, health_check_status)

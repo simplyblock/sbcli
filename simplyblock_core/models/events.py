@@ -41,6 +41,7 @@ class EventObj(BaseModel):
         "vuid": {"type": int, 'default': -1},
         "meta_data": {"type": str, 'default': ""},
         "status": {"type": str, 'default': ""},
+        "count": {"type": int, 'default': 1},
 
     }
 
@@ -54,6 +55,6 @@ class EventObj(BaseModel):
 
     def get_date_string(self):
         if self.date > 1e10:
-            return str(datetime.fromtimestamp(self.date/1000))
+            return str(datetime.fromtimestamp(self.date/1000))[:23]
         else:
-            return str(datetime.fromtimestamp(self.date))
+            return str(datetime.fromtimestamp(self.date))[:23]

@@ -43,7 +43,7 @@ def deploy_cleaner():
 
 
 def set_db_config(DEV_IP):
-    return __run_script(['bash', os.path.join(DIR_PATH, 'set_db_config.sh'), DEV_IP])
+    return __run_script(['sudo', 'bash', '-x', os.path.join(DIR_PATH, 'set_db_config.sh'), DEV_IP])
 
 
 def set_db_config_single():
@@ -52,3 +52,12 @@ def set_db_config_single():
 
 def set_db_config_double():
     return __run_script(['bash', os.path.join(DIR_PATH, 'db_config_double.sh')])
+
+def deploy_fdb_from_file_service(zip_path):
+    args = ["sudo", 'bash']
+    if logger.level == logging.DEBUG:
+        args.append("-x")
+    args.append(os.path.join(DIR_PATH, 'deploy_fdb.sh'))
+    args.append(zip_path)
+    process = subprocess.run(" ".join(args), shell=True,  text=True)
+    return process.returncode

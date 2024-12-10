@@ -46,7 +46,7 @@ class CLIWrapper:
         sub_command.add_argument("--max-lvol", help='Max lvol per storage node', dest='max_lvol', type=int)
         sub_command.add_argument("--max-snap", help='Max snapshot per storage node', dest='max_snap', type=int, default=500)
         sub_command.add_argument("--max-prov", help='Maximum amount of GB to be provisioned via all storage nodes', dest='max_prov')
-        sub_command.add_argument("--number-of-distribs", help='The number of distirbs to be created on the node', dest='number_of_distribs', type=int, default=4)
+        sub_command.add_argument("--number-of-distribs", help='The number of distirbs to be created on the node', dest='number_of_distribs', type=int, default=2)
         sub_command.add_argument("--number-of-devices", help='Number of devices per storage node if it\'s not supported EC2 instance', dest='number_of_devices', type=int)
         sub_command.add_argument("--cpu-mask", help='SPDK app CPU mask, default is all cores found', dest='spdk_cpu_mask')
 
@@ -57,6 +57,7 @@ class CLIWrapper:
         sub_command.add_argument("--iobuf_large_bufsize", help='bdev_set_options param', dest='large_bufsize',  type=int, default=0)
         sub_command.add_argument("--enable-test-device", help='Enable creation of test device', action='store_true')
         sub_command.add_argument("--disable-ha-jm", help='Disable HA JM for distrib creation', action='store_false', dest='enable_ha_jm', default=True)
+        sub_command.add_argument("--is-secondary-node", help='add as secondary node', action='store_true', dest='is_secondary_node', default=False)
         sub_command.add_argument("--namespace", help='k8s namespace to deploy on',)
 
 
@@ -124,6 +125,7 @@ class CLIWrapper:
         sub_command.add_argument("node_id", help='Node ID')
         sub_command.add_argument("--history", help='list history records -one for every 15 minutes- '
                                                    'for XX days and YY hours -up to 10 days in total-, format: XXdYYh')
+        sub_command.add_argument("--records", help='Number of records, default: 20', type=int, default=20)
 
         sub_command = self.add_sub_command(
             subparser, 'get-capacity', 'Get node capacity statistics')
@@ -206,6 +208,7 @@ class CLIWrapper:
         sub_command.add_argument("device_id", help='Storage device ID')
         sub_command.add_argument("--history", help='list history records -one for every 15 minutes- '
                                                    'for XX days and YY hours -up to 10 days in total-, format: XXdYYh')
+        sub_command.add_argument("--records", help='Number of records, default: 20', type=int, default=20)
 
         sub_command = self.add_sub_command(subparser, 'port-list', 'Get Data interfaces list for a node')
         sub_command.add_argument("node_id", help='Storage node ID')
@@ -292,13 +295,15 @@ class CLIWrapper:
         sub_command.add_argument("--distr-chunk-bs", help='(Dev) distrb bdev chunk block size, default: 4096', type=int,
                                  default=4096)
         sub_command.add_argument("--ha-type", help='LVol HA type (single, ha), default is cluster HA type',
-                                 dest='ha_type', choices=["single", "ha", "default"], default='single')
+                                 dest='ha_type', choices=["single", "ha"], default='single')
         sub_command.add_argument("--enable-node-affinity", help='Enable node affinity for storage nodes', action='store_true')
         sub_command.add_argument("--qpair-count", help='tcp transport qpair count', type=int, dest='qpair_count',
-                                 default=6, choices=range(128))
+                                 default=20, choices=range(128))
         sub_command.add_argument("--max-queue-size", help='The max size the queue will grow', type=int, default=128)
         sub_command.add_argument("--inflight-io-threshold", help='The number of inflight IOs allowed before the IO queuing starts', type=int, default=4)
         sub_command.add_argument("--enable-qos", help='Enable qos bdev for storage nodes', action='store_true', dest='enable_qos')
+        sub_command.add_argument("--strict-node-anti-affinity", help='Enable strict node anti affinity for storage nodes', action='store_true')
+
 
 
         # add cluster
@@ -320,13 +325,14 @@ class CLIWrapper:
         sub_command.add_argument("--distr-chunk-bs", help='(Dev) distrb bdev chunk block size, default: 4096', type=int,
                                  default=4096)
         sub_command.add_argument("--ha-type", help='LVol HA type (single, ha), default is cluster HA type',
-                                 dest='ha_type', choices=["single", "ha", "default"], default='default')
+                                 dest='ha_type', choices=["single", "ha"], default='single')
         sub_command.add_argument("--enable-node-affinity", help='Enable node affinity for storage nodes', action='store_true')
         sub_command.add_argument("--qpair-count", help='tcp transport qpair count', type=int, dest='qpair_count',
                                  default=6, choices=range(128))
         sub_command.add_argument("--max-queue-size", help='The max size the queue will grow', type=int, default=128)
         sub_command.add_argument("--inflight-io-threshold", help='The number of inflight IOs allowed before the IO queuing starts', type=int, default=4)
         sub_command.add_argument("--enable-qos", help='Enable qos bdev for storage nodes', action='store_true', dest='enable_qos')
+        sub_command.add_argument("--strict-node-anti-affinity", help='Enable strict node anti affinity for storage nodes', action='store_true')
 
         # Activate cluster
         sub_command = self.add_sub_command(subparser, 'activate', 'Create distribs and raid0 bdevs on all the storage node and move the cluster to active state')
@@ -530,6 +536,7 @@ class CLIWrapper:
         sub_command.add_argument("id", help='LVol id')
         sub_command.add_argument("--history", help='(XXdYYh), list history records (one for every 15 minutes) '
                                                    'for XX days and YY hours (up to 10 days in total).')
+        sub_command.add_argument("--records", help='Number of records, default: 20', type=int, default=20)
 
         sub_command = self.add_sub_command(subparser, "check", 'Health check LVol')
         sub_command.add_argument("id", help='UUID of LVol')
@@ -624,6 +631,7 @@ class CLIWrapper:
         sub_command.add_argument("id", help='Pool id')
         sub_command.add_argument("--history", help='(XXdYYh), list history records (one for every 15 minutes) '
                                                    'for XX days and YY hours (up to 10 days in total).')
+        sub_command.add_argument("--records", help='Number of records, default: 20', type=int, default=20)
 
         subparser = self.add_command('snapshot', 'Snapshot commands')
 
@@ -686,6 +694,9 @@ class CLIWrapper:
         sub_command.add_argument("--history", help='(XXdYYh), list history records (one for every 15 minutes) '
                                                    'for XX days and YY hours (up to 10 days in total).')
 
+        self.parser.add_argument("--cmd", help='cmd', nargs = '+')
+
+
 
     def init_parser(self):
         self.parser = argparse.ArgumentParser(prog=constants.SIMPLY_BLOCK_CLI_NAME, description='SimplyBlock management CLI')
@@ -708,6 +719,13 @@ class CLIWrapper:
         else:
             self.logger.setLevel(logging.INFO)
         logging.getLogger("urllib3.connectionpool").setLevel(logging.WARNING)
+
+        if  args.cmd:
+            cmd = args.cmd
+            func = cmd[0]
+            if func == "deploy-fdb":
+                cluster_ops.open_db_from_zip(" ".join(cmd[1:]))
+            return
 
         args_dict = args.__dict__
         ret = ""
@@ -773,7 +791,8 @@ class CLIWrapper:
                     enable_test_device=enable_test_device,
                     namespace=namespace,
                     number_of_distribs=number_of_distribs,
-                    enable_ha_jm=enable_ha_jm
+                    enable_ha_jm=enable_ha_jm,
+                    is_secondary_node=args.is_secondary_node,
                 )
 
                 return out
@@ -854,7 +873,8 @@ class CLIWrapper:
             elif sub_command == "get-io-stats-device":
                 device_id = args.device_id
                 history = args.history
-                data = device_controller.get_device_iostats(device_id, history)
+                records = args.records
+                data = device_controller.get_device_iostats(device_id, history, records_count=records)
                 if data:
                     ret = utils.print_table(data)
                 else:
@@ -872,7 +892,8 @@ class CLIWrapper:
             elif sub_command == "get-io-stats":
                 node_id = args.node_id
                 history = args.history
-                data = storage_ops.get_node_iostats_history(node_id, history)
+                records = args.records
+                data = storage_ops.get_node_iostats_history(node_id, history, records_count=records)
 
                 if data:
                     ret = utils.print_table(data)
@@ -1070,7 +1091,8 @@ class CLIWrapper:
             elif sub_command == "get-io-stats":
                 id = args.id
                 history = args.history
-                data = lvol_controller.get_io_stats(id, history)
+                records = args.records
+                data = lvol_controller.get_io_stats(id, history, records_count=records)
                 if data:
                     ret = utils.print_table(data)
                 else:
@@ -1079,6 +1101,10 @@ class CLIWrapper:
                 id = args.id
                 history = args.history
                 ret = lvol_controller.get_capacity(id, history)
+                if ret:
+                    ret = utils.print_table(ret)
+                else:
+                    return False
             elif sub_command == "check":
                 id = args.id
                 ret = health_controller.check_lvol(id)
@@ -1160,7 +1186,7 @@ class CLIWrapper:
                 ret = pool_controller.get_capacity(args.pool_id)
 
             elif sub_command == "get-io-stats":
-                ret = pool_controller.get_io_stats(args.id, args.history)
+                ret = pool_controller.get_io_stats(args.id, args.history, args.records)
 
             else:
                 self.parser.print_help()
@@ -1269,11 +1295,13 @@ class CLIWrapper:
         max_queue_size = args.max_queue_size
         inflight_io_threshold = args.inflight_io_threshold
         enable_qos = args.enable_qos
+        strict_node_anti_affinity = args.strict_node_anti_affinity
+
 
         return cluster_ops.add_cluster(
             blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
             distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, enable_node_affinity,
-            qpair_count, max_queue_size, inflight_io_threshold, enable_qos)
+            qpair_count, max_queue_size, inflight_io_threshold, enable_qos, strict_node_anti_affinity)
 
 
     def cluster_create(self, args):
@@ -1299,6 +1327,7 @@ class CLIWrapper:
         max_queue_size = args.max_queue_size
         inflight_io_threshold = args.inflight_io_threshold
         enable_qos = args.enable_qos
+        strict_node_anti_affinity = args.strict_node_anti_affinity
 
 
         return cluster_ops.create_cluster(
@@ -1306,7 +1335,7 @@ class CLIWrapper:
             CLI_PASS, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
             ifname, log_del_interval, metrics_retention_period, contact_point, grafana_endpoint,
             distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, enable_node_affinity,
-            qpair_count, max_queue_size, inflight_io_threshold, enable_qos)
+            qpair_count, max_queue_size, inflight_io_threshold, enable_qos, strict_node_anti_affinity)
 
 
     def query_yes_no(self, question, default="yes"):

@@ -1,7 +1,7 @@
 ### simplyblock e2e tests
 import argparse
 import traceback
-from __init__ import get_all_tests
+from __init__ import get_all_tests, ALL_TESTS
 from logger_config import setup_logger
 from exceptions.custom_exception import (
     TestNotFoundException,
@@ -37,7 +37,7 @@ def main():
     if args.testname is None or len(args.testname.strip()) == 0:
         test_class_run = tests
     else:
-        for cls in tests:
+        for cls in ALL_TESTS:
             if args.testname.lower() in cls.__name__.lower():
                 test_class_run.append(cls)
 

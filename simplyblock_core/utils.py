@@ -187,6 +187,8 @@ def get_weights(node_stats, cluster_stats):
         return w
 
     out = {}
+    heavy_node_w = 0
+    heavy_node_id = None
     for node_id in node_stats:
         out[node_id] = {}
         total = 0
@@ -196,6 +198,13 @@ def get_weights(node_stats, cluster_stats):
             out[node_id][key] = w
             total += w
         out[node_id]['total'] = int(total)
+        if total > heavy_node_w:
+            heavy_node_w = total
+            heavy_node_id = node_id
+
+    if heavy_node_id:
+        out[heavy_node_id]['total'] *= 5
+
     return out
 
 
@@ -247,6 +256,11 @@ def parse_history_param(history_string):
 
 def process_records(records, records_count):
     # combine records
+    if not records:
+        return []
+
+    records_count = min(records_count, len(records))
+
     data_per_record = int(len(records) / records_count)
     new_records = []
     for i in range(records_count):
@@ -283,7 +297,25 @@ def sum_records(records):
 
 
 def get_random_vuid():
-    return 1 + int(random.random() * 10000)
+    from simplyblock_core.kv_store import DBController
+    db_controller = DBController()
+    used_vuids = []
+    nodes = db_controller.get_storage_nodes()
+    for node in nodes:
+        for bdev in node.lvstore_stack:
+            type = bdev['type']
+            if type == "bdev_distr":
+                vuid = bdev['params']['vuid']
+            elif type == "bdev_raid":
+                vuid = bdev['jm_vuid']
+            else:
+                continue
+            used_vuids.append(vuid)
+
+    r = 1 + int(random.random() * 10000)
+    while r in used_vuids:
+        r = 1 + int(random.random() * 10000)
+    return r
 
 
 def calculate_core_allocation(cpu_count):
@@ -607,3 +639,18 @@ def nearest_upper_power_of_2(n):
         return n
     # Otherwise, return the nearest upper power of 2
     return 1 << n.bit_length()
+
+
+def strfdelta(tdelta):
+    remainder = int(tdelta.total_seconds())
+    possible_fields = ('W', 'D', 'H', 'M', 'S')
+    constants = {'W': 604800, 'D': 86400, 'H': 3600, 'M': 60, 'S': 1}
+    values = {}
+    out = ""
+    for field in possible_fields:
+        if field in constants:
+            values[field], remainder = divmod(remainder, constants[field])
+            if values[field] > 0:
+                out += f"{values[field]}{field.lower()} "
+
+    return out.strip()

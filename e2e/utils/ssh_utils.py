@@ -42,7 +42,10 @@ class SshUtils:
         # Load the private key
         if not os.path.exists(SSH_KEY_LOCATION):
             raise FileNotFoundError(f"SSH private key not found at {SSH_KEY_LOCATION}")
-        private_key = paramiko.Ed25519Key(filename=SSH_KEY_LOCATION)
+        try:
+            private_key = paramiko.Ed25519Key(filename=SSH_KEY_LOCATION)
+        except:
+            private_key = paramiko.RSAKey(filename=SSH_KEY_LOCATION)
 
         # Connect to the proxy server first
         if not bastion_server_address:

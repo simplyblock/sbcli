@@ -14,7 +14,8 @@ import requests
 from jinja2 import Environment, FileSystemLoader
 
 from simplyblock_core import utils, scripts, constants, mgmt_node_ops, storage_node_ops, distr_controller
-from simplyblock_core.controllers import cluster_events, device_controller, storage_events
+from simplyblock_core.controllers import cluster_events, device_controller, storage_events, pool_controller, \
+    lvol_controller
 from simplyblock_core.kv_store import DBController, KVStore
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.rpc_client import RPCClient
@@ -103,7 +104,7 @@ def _add_graylog_input(cluster_ip, password):
 def create_cluster(blk_size, page_size_in_blocks, cli_pass,
                    cap_warn, cap_crit, prov_cap_warn, prov_cap_crit, ifname, log_del_interval, metrics_retention_period,
                    contact_point, grafana_endpoint, distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type,
-                   enable_node_affinity, qpair_count, max_queue_size, inflight_io_threshold, enable_qos):
+                   enable_node_affinity, qpair_count, max_queue_size, inflight_io_threshold, enable_qos, strict_node_anti_affinity):
 
     logger.info("Installing dependencies...")
     ret = scripts.install_deps()
@@ -148,6 +149,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     c.nqn = f"{constants.CLUSTER_NQN}:{c.uuid}"
     c.cli_pass = cli_pass
     c.secret = utils.generate_string(20)
+    c.grafana_secret = c.secret
     c.db_connection = db_connection
     if cap_warn and cap_warn > 0:
         c.cap_warn = cap_warn
@@ -171,11 +173,12 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     else:
         c.grafana_endpoint = f"http://{DEV_IP}/grafana"
     c.enable_node_affinity = enable_node_affinity
-    c.qpair_count = qpair_count or 256
+    c.qpair_count = qpair_count or 6
 
     c.max_queue_size = max_queue_size
     c.inflight_io_threshold = inflight_io_threshold
     c.enable_qos = enable_qos
+    c.strict_node_anti_affinity = strict_node_anti_affinity
 
     alerts_template_folder = os.path.join(TOP_DIR, "simplyblock_core/scripts/alerting/")
     alert_resources_file = "alert_resources.yaml"
@@ -231,6 +234,8 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     logger.info("Configuring DB > Done")
 
     _add_graylog_input(DEV_IP, c.secret)
+
+    _create_update_user(c.uuid, c.grafana_endpoint, c.grafana_secret, c.secret)
 
     c.status = Cluster.STATUS_UNREADY
 
@@ -295,27 +300,28 @@ def deploy_spdk(node_docker, spdk_cpu_mask, spdk_mem):
 
 def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
                 distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, enable_node_affinity, qpair_count,
-                max_queue_size, inflight_io_threshold, enable_qos):
+                max_queue_size, inflight_io_threshold, enable_qos, strict_node_anti_affinity):
     db_controller = DBController()
     clusters = db_controller.get_clusters()
     if not clusters:
         logger.error("No previous clusters found!")
         return False
 
-    default_cluster = clusters[0]
     logger.info("Adding new cluster")
     cluster = Cluster()
     cluster.uuid = str(uuid.uuid4())
     cluster.blk_size = blk_size
     cluster.page_size_in_blocks = page_size_in_blocks
-    cluster.ha_type = default_cluster.ha_type
     cluster.nqn = f"{constants.CLUSTER_NQN}:{cluster.uuid}"
-    cluster.cli_pass = default_cluster.cli_pass
     cluster.secret = utils.generate_string(20)
+    cluster.strict_node_anti_affinity = strict_node_anti_affinity
+
+    default_cluster = clusters[0]
     cluster.db_connection = default_cluster.db_connection
+    cluster.grafana_secret = default_cluster.grafana_secret
     cluster.grafana_endpoint = default_cluster.grafana_endpoint
 
-    _create_update_user(cluster.uuid, cluster.grafana_endpoint, default_cluster.secret, cluster.secret)
+    _create_update_user(cluster.uuid, cluster.grafana_endpoint, cluster.grafana_secret, cluster.secret)
 
     if distr_ndcs == 0 and distr_npcs == 0:
         cluster.distr_ndcs = 4
@@ -327,7 +333,7 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
     cluster.distr_chunk_bs = distr_chunk_bs
     cluster.ha_type = ha_type
     cluster.enable_node_affinity = enable_node_affinity
-    cluster.qpair_count = qpair_count or 256
+    cluster.qpair_count = qpair_count or 6
     cluster.max_queue_size = max_queue_size
     cluster.inflight_io_threshold = inflight_io_threshold
     cluster.enable_qos = enable_qos
@@ -360,11 +366,13 @@ def cluster_activate(cl_id, force=False):
             logger.warning(f"Failed to activate cluster, Cluster is in an ACTIVE state, use --force to reactivate")
             return False
     set_cluster_status(cl_id, Cluster.STATUS_IN_ACTIVATION)
-    snodes = db_controller.get_storage_nodes_by_cluster_id(cl_id)
+    snodes = db_controller.get_primary_storage_nodes_by_cluster_id(cl_id)
     online_nodes = []
     dev_count = 0
 
     for node in snodes:
+        if node.is_secondary_node:
+            continue
         if node.status == node.STATUS_ONLINE:
             online_nodes.append(node)
             for dev in node.nvme_devices:
@@ -378,7 +386,21 @@ def cluster_activate(cl_id, force=False):
     records = db_controller.get_cluster_capacity(cluster)
     max_size = records[0]['size_total']
 
+    if cluster.ha_type == "ha":
+        for snode in snodes:
+            if snode.is_secondary_node or snode.secondary_node_id:
+                continue
+            secondary_nodes = storage_node_ops.get_secondary_nodes(snode)
+            if not secondary_nodes:
+                logger.error(f"Failed to activate cluster, No enough secondary nodes")
+                set_cluster_status(cl_id, Cluster.STATUS_UNREADY)
+                return False
+            snode.secondary_node_id = secondary_nodes[0]
+            snode.write_to_db()
+
     for snode in snodes:
+        if snode.is_secondary_node:
+            continue
         if snode.lvstore:
             logger.warning(f"Node {snode.get_id()} already has lvstore {snode.lvstore}")
             ret = storage_node_ops.recreate_lvstore(snode)
@@ -391,6 +413,8 @@ def cluster_activate(cl_id, force=False):
             return False
     if not cluster.cluster_max_size:
         cluster.cluster_max_size = max_size
+        cluster.cluster_max_devices = dev_count
+        cluster.cluster_max_nodes = len(online_nodes)
     cluster.write_to_db(db_controller.kv_store)
     set_cluster_status(cl_id, Cluster.STATUS_ACTIVE)
     logger.info("Cluster activated successfully")
@@ -622,8 +646,7 @@ def get_secret(cluster_id):
 def set_secret(cluster_id, secret):
     
     db_controller = DBController()
-    clusters = db_controller.get_clusters()
-    
+
     cluster = db_controller.get_cluster_by_id(cluster_id)
     if not cluster:
         logger.error(f"Cluster not found {cluster_id}")
@@ -633,7 +656,7 @@ def set_secret(cluster_id, secret):
     if len(secret) < 20:
         return "Secret must be at least 20 char"
     
-    _create_update_user(cluster_id, clusters[0].grafana_endpoint, clusters[0].secret, secret, update_secret=True)
+    _create_update_user(cluster_id, cluster.grafana_endpoint, cluster.grafana_secret, secret, update_secret=True)
     
     cluster.secret = secret
     cluster.write_to_db(db_controller.kv_store)
@@ -660,12 +683,16 @@ def get_logs(cluster_id, is_json=False):
         if 'vuid' in record.object_dict:
             vuid = record.object_dict['vuid']
 
+        msg =  record.message
+        if record.event in ["device_status", "node_status"]:
+            msg = msg+f" ({record.count})"
+
         out.append({
             "Date": record.get_date_string(),
             "NodeId": record.node_id,
             "Event": record.event,
             "Level": record.event_level,
-            "Message": record.message,
+            "Message":msg,
             "Storage_ID": str(Storage_ID),
             "VUID": str(vuid),
             "Status": record.status,
@@ -713,14 +740,11 @@ def update_cluster(cl_id):
     except Exception as e:
         print(e)
 
-    # for node in db_controller.get_storage_nodes_by_cluster_id(cl_id):
-    #     node_docker = docker.DockerClient(base_url=f"tcp://{node.mgmt_ip}:2375", version="auto")
-    #     logger.info(f"Pulling image {constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE}")
-    #     node_docker.images.pull(constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE)
-    #     if node.status == StorageNode.STATUS_ONLINE:
-    #         storage_node_ops.shutdown_storage_node(node.get_id(), force=True)
-    #         time.sleep(3)
-    #     storage_node_ops.restart_storage_node(node.get_id())
+    for node in db_controller.get_storage_nodes_by_cluster_id(cl_id):
+        try:
+            storage_node_ops.start_storage_node_api_container(node.mgmt_ip)
+        except:
+            pass
 
     logger.info("Done")
     return True
@@ -783,7 +807,50 @@ def delete_cluster(cl_id):
         logger.error("Can only remove Empty cluster, Pools found")
         return False
 
+    if len(db_controller.get_clusters()) == 1 :
+        logger.error("Can not remove the last cluster!")
+        return False
+
     logger.info(f"Deleting Cluster {cl_id}")
     cluster_events.cluster_delete(cluster)
     cluster.remove(db_controller.kv_store)
     logger.info("Done")
+
+def open_db_from_zip(fip_path):
+    import boto3
+    s3 = boto3.client('s3')
+
+
+    out = '/tmp/fdb.zip'
+    try:
+        os.remove(out)
+    except:
+        pass
+
+    buket_name = 'simplyblock-e2e-test-logs'
+    file_name = ""
+    if fip_path.startswith('s3://'):
+        # s3://simplyblock-e2e-test-logs/12220160320/mgmt/fdb.zip
+        buket_name = fip_path.split("/")[2]
+        file_name = "/".join(fip_path.split("/")[3:])
+
+
+    elif len(fip_path.split('/'))<=3:
+        # /12220160320/mgmt/fdb.zip
+        file_name = fip_path
+
+    elif fip_path.startswith('https://'):
+        #https://simplyblock-e2e-test-logs.s3.us-east-2.amazonaws.com/12220160320/mgmt/fdb.zip
+        buket_name = fip_path.split("/")[2]
+        buket_name = buket_name.split(".")[0]
+        file_name = "/".join(fip_path.split("/")[3:])
+    else:
+        file_name = fip_path
+
+    try:
+        ret = s3.download_file(buket_name, file_name, out)
+    except Exception as e:
+        logger.error(e)
+
+    if os.path.exists(out):
+        scripts.deploy_fdb_from_file_service(out)
