@@ -1362,9 +1362,8 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
             else:
                 node.remote_devices.append(dev)
 
-        # if snode.jm_device and node.enable_ha_jm:
-        #     node.remote_jm_devices.append(snode.jm_device)
-        #     node.remote_jm_devices = _connect_to_remote_jm_devs(node)
+        if node.enable_ha_jm:
+            node.remote_jm_devices = _connect_to_remote_jm_devs(node)
         node.write_to_db(kv_store)
         logger.info(f"connected to devices count: {len(node.remote_devices)}")
         time.sleep(3)
