@@ -55,6 +55,7 @@ class Cluster(BaseModel):
         "qpair_count": {"type": int, "default": 6},
 
         "secret": {"type": str, "default": ""},
+        "grafana_secret": {"type": str, "default": ""},
         "status": {"type": str, "default": ""},
         "updated_at": {"type": str, "default": ""},
         "grafana_endpoint": {"type": str, "default": ""},

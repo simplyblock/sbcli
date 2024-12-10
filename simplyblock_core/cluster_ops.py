@@ -149,6 +149,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     c.nqn = f"{constants.CLUSTER_NQN}:{c.uuid}"
     c.cli_pass = cli_pass
     c.secret = utils.generate_string(20)
+    c.grafana_secret = c.secret
     c.db_connection = db_connection
     if cap_warn and cap_warn > 0:
         c.cap_warn = cap_warn
@@ -234,6 +235,8 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
 
     _add_graylog_input(DEV_IP, c.secret)
 
+    _create_update_user(c.uuid, c.grafana_endpoint, c.grafana_secret, c.secret)
+
     c.status = Cluster.STATUS_UNREADY
 
     c.updated_at = int(time.time())
@@ -304,21 +307,21 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
         logger.error("No previous clusters found!")
         return False
 
-    default_cluster = clusters[0]
     logger.info("Adding new cluster")
     cluster = Cluster()
     cluster.uuid = str(uuid.uuid4())
     cluster.blk_size = blk_size
     cluster.page_size_in_blocks = page_size_in_blocks
-    cluster.ha_type = default_cluster.ha_type
     cluster.nqn = f"{constants.CLUSTER_NQN}:{cluster.uuid}"
-    cluster.cli_pass = default_cluster.cli_pass
     cluster.secret = utils.generate_string(20)
-    cluster.db_connection = default_cluster.db_connection
-    cluster.grafana_endpoint = default_cluster.grafana_endpoint
     cluster.strict_node_anti_affinity = strict_node_anti_affinity
 
-    _create_update_user(cluster.uuid, cluster.grafana_endpoint, default_cluster.secret, cluster.secret)
+    default_cluster = clusters[0]
+    cluster.db_connection = default_cluster.db_connection
+    cluster.grafana_secret = default_cluster.grafana_secret
+    cluster.grafana_endpoint = default_cluster.grafana_endpoint
+
+    _create_update_user(cluster.uuid, cluster.grafana_endpoint, cluster.grafana_secret, cluster.secret)
 
     if distr_ndcs == 0 and distr_npcs == 0:
         cluster.distr_ndcs = 4
@@ -643,8 +646,7 @@ def get_secret(cluster_id):
 def set_secret(cluster_id, secret):
     
     db_controller = DBController()
-    clusters = db_controller.get_clusters()
-    
+
     cluster = db_controller.get_cluster_by_id(cluster_id)
     if not cluster:
         logger.error(f"Cluster not found {cluster_id}")
@@ -654,7 +656,7 @@ def set_secret(cluster_id, secret):
     if len(secret) < 20:
         return "Secret must be at least 20 char"
     
-    _create_update_user(cluster_id, clusters[0].grafana_endpoint, clusters[0].secret, secret, update_secret=True)
+    _create_update_user(cluster_id, cluster.grafana_endpoint, cluster.grafana_secret, secret, update_secret=True)
     
     cluster.secret = secret
     cluster.write_to_db(db_controller.kv_store)
@@ -803,6 +805,10 @@ def delete_cluster(cl_id):
     pools = db_controller.get_pools(cl_id)
     if pools:
         logger.error("Can only remove Empty cluster, Pools found")
+        return False
+
+    if len(db_controller.get_clusters()) == 1 :
+        logger.error("Can not remove the last cluster!")
         return False
 
     logger.info(f"Deleting Cluster {cl_id}")
