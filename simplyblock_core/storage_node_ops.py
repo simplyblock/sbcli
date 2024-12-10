@@ -1371,6 +1371,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
 
     logger.info("Setting node status to Active")
     snode.status = StorageNode.STATUS_ONLINE
+    snode.online_since = str(datetime.datetime.now())
     snode.write_to_db(kv_store)
 
     if cluster.status != cluster.STATUS_ACTIVE:
@@ -2831,6 +2832,8 @@ def set_node_status(node_id, status):
         snode.updated_at = str(datetime.datetime.now())
         if status == StorageNode.STATUS_ONLINE:
             snode.online_since = str(datetime.datetime.now())
+        else:
+            snode.online_since = ""
         snode.write_to_db(db_controller.kv_store)
         storage_events.snode_status_change(snode, snode.status, old_status, caused_by="monitor")
         distr_controller.send_node_status_event(snode, status)
