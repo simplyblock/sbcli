@@ -1893,11 +1893,8 @@ def restart_storage_node(
     if snode.lvstore_stack or snode.is_secondary_node:
         ret = recreate_lvstore(snode)
         if not ret:
-            return False, "Failed to recreate lvstore on node"
-
-        # logger.info("Dumping lvstore data")
-        # ret = dump_lvstore(node_id)
-        # print(ret)
+            logger.error("Failed to recreate lvstore")
+            return False
 
     time.sleep(4)
 
@@ -1924,12 +1921,20 @@ def list_storage_nodes(is_json, cluster_id=None):
         nodes = db_controller.get_storage_nodes()
     data = []
     output = ""
+    now = datetime.datetime.now()
 
     for node in nodes:
         logger.debug(node)
         logger.debug("*" * 20)
         total_devices = len(node.nvme_devices)
         online_devices = 0
+        uptime = ""
+        if node.online_since:
+            try:
+                uptime = utils.strfdelta((now - datetime.datetime.fromisoformat(node.online_since)))
+            except:
+                pass
+
         for dev in node.nvme_devices:
             if dev.status == NVMeDevice.STATUS_ONLINE:
                 online_devices += 1
@@ -1941,7 +1946,7 @@ def list_storage_nodes(is_json, cluster_id=None):
             "LVols": f"{len(node.lvols)}",
             "Status": node.status,
             "Health": node.health_check,
-
+            "Up time": uptime,
             "Cloud ID": node.cloud_instance_id,
             "Cloud Type": node.cloud_instance_type,
             "Ext IP": node.cloud_instance_public_ip,
@@ -2823,6 +2828,8 @@ def set_node_status(node_id, status):
         old_status = snode.status
         snode.status = status
         snode.updated_at = str(datetime.datetime.now())
+        if status == StorageNode.STATUS_ONLINE:
+            snode.online_since = str(datetime.datetime.now())
         snode.write_to_db(db_controller.kv_store)
         storage_events.snode_status_change(snode, snode.status, old_status, caused_by="monitor")
         distr_controller.send_node_status_event(snode, status)
@@ -2910,6 +2917,8 @@ def recreate_lvstore_on_sec(snode, primary_node=None):
                         if iface.ip4_address:
                             ret = rpc_client.nvmf_subsystem_listener_set_ana_state(
                                 lvol.nqn, iface.ip4_address, "4420", False)
+
+    return True
 
 
 def recreate_lvstore(snode):

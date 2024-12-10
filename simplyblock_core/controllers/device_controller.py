@@ -754,7 +754,7 @@ def set_jm_device_state(device_id, state):
         # make other nodes connect to the new devices
         snodes = db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id)
         for node_index, node in enumerate(snodes):
-            if node.get_id() == snode.get_id() or node.status != StorageNode.STATUS_ONLINE:
+            if node.status != StorageNode.STATUS_ONLINE:
                 continue
             logger.info(f"Connecting to node: {node.get_id()}")
             node.remote_jm_devices = storage_node_ops._connect_to_remote_jm_devs(node)
