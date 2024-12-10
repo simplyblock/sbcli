@@ -1930,7 +1930,7 @@ def list_storage_nodes(is_json, cluster_id=None):
         total_devices = len(node.nvme_devices)
         online_devices = 0
         uptime = ""
-        if node.online_since:
+        if node.online_since and node.status == StorageNode.STATUS_ONLINE:
             try:
                 uptime = utils.strfdelta((now - datetime.datetime.fromisoformat(node.online_since)))
             except:
