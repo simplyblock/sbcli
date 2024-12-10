@@ -669,6 +669,10 @@ def add_lvol_on_node(lvol, snode, ha_comm_addrs=None, ha_inode_self=0):
 def recreate_lvol_on_node(lvol, snode, ha_inode_self=0, ana_state=None):
     rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
 
+    lv = rpc_client.get_bdevs(f"{lvol.lvs_name}/{lvol.lvol_bdev}")
+    if not lv:
+        return False, "LVol bdev not found!"
+
     if "crypto" in lvol.lvol_type:
         ret = _create_crypto_lvol(
             rpc_client, lvol.crypto_bdev, f"{lvol.lvs_name}/{lvol.lvol_bdev}", lvol.crypto_key1, lvol.crypto_key2)
@@ -732,6 +736,7 @@ def recreate_lvol(lvol_id):
         snode = db_controller.get_storage_node_by_id(lvol.node_id)
         is_created, error = recreate_lvol_on_node(lvol, snode)
         if error:
+            logger.error(error)
             return False
 
     elif lvol.ha_type == "ha":
@@ -739,6 +744,7 @@ def recreate_lvol(lvol_id):
             sn = db_controller.get_storage_node_by_id(node_id)
             is_created, error = recreate_lvol_on_node(lvol, sn, index)
             if error:
+                logger.error(error)
                 return False
 
     return lvol

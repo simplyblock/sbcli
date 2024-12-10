@@ -20,6 +20,7 @@ from simplyblock_core.kv_store import DBController, KVStore
 from simplyblock_core import shell_utils
 from simplyblock_core.models.iface import IFace
 from simplyblock_core.models.job_schedule import JobSchedule
+from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.nvme_device import NVMeDevice, JMDevice
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.models.cluster import Cluster
@@ -2890,10 +2891,11 @@ def recreate_lvstore_on_sec(snode, primary_node=None):
                         lvol, snode, 1, ana_state="inaccessible")
                     if error:
                         logger.error(f"Failed to recreate LVol: {lvol_id} on node: {snode.get_id()}")
-                        continue
-                    lvol.status = lvol.STATUS_ONLINE
-                    lvol.io_error = False
-                    lvol.health_check = True
+                        lvol.status = LVol.STATUS_OFFLINE
+                    else:
+                        lvol.status = LVol.STATUS_ONLINE
+                        lvol.io_error = False
+                        lvol.health_check = True
                     lvol.write_to_db(db_controller.kv_store)
 
                 time.sleep(2)
@@ -2969,10 +2971,11 @@ def recreate_lvstore(snode):
         is_created, error = lvol_controller.recreate_lvol_on_node(lvol, snode)
         if error:
             logger.error(f"Failed to recreate LVol: {lvol_id} on node: {snode.get_id()}")
-            continue
-        lvol.status = lvol.STATUS_ONLINE
-        lvol.io_error = False
-        lvol.health_check = True
+            lvol.status = LVol.STATUS_OFFLINE
+        else:
+            lvol.status = LVol.STATUS_ONLINE
+            lvol.io_error = False
+            lvol.health_check = True
         lvol.write_to_db(db_controller.kv_store)
 
     time.sleep(2)
