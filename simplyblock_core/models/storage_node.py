@@ -123,7 +123,7 @@ class StorageNode(BaseModel):
         "namespace": {"type": str, "default": ""},
 
         "is_secondary_node": {"type": bool, "default": False},
-        "online_since": {"type": bool, "default": False},
+        "online_since": {"type": str, "default": ""},
 
     }
 
