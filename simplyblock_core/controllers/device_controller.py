@@ -600,7 +600,11 @@ def device_set_failed(device_id):
 
     ret = device_set_state(device_id, NVMeDevice.STATUS_FAILED)
     if ret:
-        tasks_controller.add_device_failed_mig_task(device_id)
+        for node in db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id):
+            if node.status == StorageNode.STATUS_ONLINE:
+                distr_controller.send_cluster_map_to_node(node)
+
+    tasks_controller.add_device_failed_mig_task(device_id)
 
 
 def add_device(device_id):
