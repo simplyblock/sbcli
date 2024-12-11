@@ -2619,18 +2619,17 @@ def deploy(ifname):
     return f"{dev_ip}:5000"
 
 def start_storage_node_api_container(node_ip):
-
     node_docker = docker.DockerClient(base_url=f"tcp://{node_ip}:2375", version="auto", timeout=60 * 5)
+    node_docker.images.pull(constants.SIMPLY_BLOCK_DOCKER_IMAGE)
+
     # create the api container
     nodes = node_docker.containers.list(all=True)
     for node in nodes:
         if node.attrs["Name"] == "/SNodeAPI":
             logger.info("SNodeAPI container found, removing...")
-            node.stop()
+            node.stop(timeout=1)
             node.remove(force=True)
-            time.sleep(2)
-
-    node_docker.images.pull(constants.SIMPLY_BLOCK_DOCKER_IMAGE)
+            time.sleep(1)
 
     logger.info("Creating SNodeAPI container")
     container = node_docker.containers.run(
