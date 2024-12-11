@@ -1113,7 +1113,9 @@ def connect_lvol(uuid):
                 "ip": ip,
                 "port": port,
                 "nqn": lvol.nqn,
-                "connect": f"sudo nvme connect --reconnect-delay=1 --ctrl-loss-tmo=600 --transport={transport} --traddr={ip} --trsvcid={port} --nqn={lvol.nqn}",
+                "connect": f"sudo nvme connect --reconnect-delay={constants.LVOL_NVME_CONNECT_RECONNECT_DELAY} "
+                           f"--ctrl-loss-tmo={constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO} --transport={transport} "
+                           f"--traddr={ip} --trsvcid={port} --nqn={lvol.nqn}",
             })
     return out
 
