@@ -1475,6 +1475,12 @@ def remove_storage_node(node_id, force_remove=False, force_migrate=False):
         if force_remove is False:
             return False
 
+        tasks = db_controller.get_job_tasks(snode.cluster_id)
+        for task in tasks:
+            if task.node_id == node_id:
+                if task.status != JobSchedule.STATUS_DONE and task.canceled is False:
+                    tasks_controller.cancel_task(task.get_id())
+
     if snode.lvols:
         if force_migrate:
             for lvol_id in snode.lvols:
@@ -1538,7 +1544,7 @@ def remove_storage_node(node_id, force_remove=False, force_migrate=False):
     set_node_status(node_id, StorageNode.STATUS_REMOVED)
 
     for dev in snode.nvme_devices:
-        if dev.status == NVMeDevice.STATUS_JM:
+        if dev.status in [NVMeDevice.STATUS_JM, NVMeDevice.STATUS_FAILED_AND_MIGRATED]:
             continue
         device_controller.device_set_failed(dev.get_id())
 
