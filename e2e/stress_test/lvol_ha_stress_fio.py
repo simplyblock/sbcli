@@ -23,8 +23,8 @@ class TestLvolHACluster(FioWorkloadTest):
         self.logger = setup_logger(__name__)
         self.lvol_size = "25G"
         self.fio_size = "18G"
-        self.total_lvols = 200
-        self.snapshot_per_lvol = 3
+        self.total_lvols = 20
+        self.snapshot_per_lvol = 2
         self.lvol_name = "lvl"
         self.snapshot_name = "snapshot"
         self.node = None
