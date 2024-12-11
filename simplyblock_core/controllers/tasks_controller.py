@@ -207,10 +207,13 @@ def get_active_node_task(cluster_id, node_id):
     return False
 
 
-def get_new_device_mig_task(cluster_id, node_id, distr_name):
+def get_new_device_mig_task(cluster_id, node_id, distr_name, dev_id=None):
     tasks = db_controller.get_job_tasks(cluster_id)
     for task in tasks:
         if task.function_name == JobSchedule.FN_NEW_DEV_MIG and task.node_id == node_id:
+            if dev_id:
+                if task.device_id != dev_id:
+                    continue
             if task.status != JobSchedule.STATUS_DONE and task.canceled is False \
                     and "distr_name" in task.function_params and task.function_params["distr_name"] == distr_name:
                 return task.uuid

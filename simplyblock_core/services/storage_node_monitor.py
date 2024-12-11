@@ -72,10 +72,12 @@ def get_cluster_target_status(cluster_id):
 
 
 def is_new_migrated_node(cluster_id, node):
-    for item in node.lvstore_stack:
-        if item["type"] == "bdev_distr":
-            if tasks_controller.get_new_device_mig_task(cluster_id, node.uuid, item["name"]):
-                return True
+    for dev in node.nvme_devices:
+        if dev.status == NVMeDevice.STATUS_ONLINE:
+            for item in node.lvstore_stack:
+                if item["type"] == "bdev_distr":
+                    if tasks_controller.get_new_device_mig_task(cluster_id, node.uuid, item["name"],dev.get_id()):
+                        return True
     return False
 
 
@@ -95,6 +97,9 @@ def get_current_cluster_status(cluster_id):
 
         node_online_devices = 0
         node_offline_devices = 0
+
+        if node.status == StorageNode.STATUS_IN_CREATION:
+            continue
 
         if node.status == StorageNode.STATUS_ONLINE:
             if is_new_migrated_node(cluster_id, node):
@@ -161,7 +166,8 @@ def get_current_cluster_status(cluster_id):
 def update_cluster_status(cluster_id):
     cluster = db_controller.get_cluster_by_id(cluster_id)
 
-    if cluster.status == Cluster.STATUS_READONLY or cluster.status == Cluster.STATUS_UNREADY:
+    if cluster.status == Cluster.STATUS_READONLY or cluster.status == Cluster.STATUS_UNREADY \
+            or Cluster.STATUS_IN_ACTIVATION:
         return
     cluster_current_status = get_current_cluster_status(cluster_id)
     logger.info("cluster_status: %s", cluster.status)
