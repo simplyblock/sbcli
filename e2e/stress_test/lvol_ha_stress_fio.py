@@ -515,7 +515,7 @@ class TestLvolHAClusterRunAllScenarios(TestLvolHACluster):
         self.logger.info("Simulating network interruption.")
         
         cmd = (
-            'nohup sh -c "sudo nmcli dev disconnect eth0 && sleep 120 && '
+            'nohup sh -c "sudo nmcli dev disconnect eth0 && sleep 300 && '
             'sudo nmcli dev connect eth0" &'
         )
         
