@@ -38,7 +38,7 @@ class TestLvolHACluster(FioWorkloadTest):
         self.logger.info("Creating 500 lvols.")
         for i in range(1, self.total_lvols + 1):
             fs_type = random.choice(["xfs", "ext4"])
-            is_crypto = random.choice([False, False])
+            is_crypto = random.choice([True, False])
             lvol_name = f"{self.lvol_name}_{i}" if not is_crypto else f"c{self.lvol_name}_{i}"
             self.logger.info(f"Creating lvol with Name: {lvol_name}, fs type: {fs_type}, crypto: {is_crypto}")
             self.sbcli_utils.add_lvol(
@@ -60,9 +60,13 @@ class TestLvolHACluster(FioWorkloadTest):
                    "FS": fs_type,
                    "Log": f"{self.log_path}/{lvol_name}.log"
             }
-            self.lvol_mount_details[lvol_id]["Command"] = self.sbcli_utils.get_lvol_connect_str(lvol_name=lvol_name)
+            connect_ls = self.sbcli_utils.get_lvol_connect_str(lvol_name=self.lvol_name)
+
             initial_devices = self.ssh_obj.get_devices(node=self.node)
-            self.ssh_obj.exec_command(node=self.node, command=self.lvol_mount_details[lvol_id]["Command"])
+            for connect_str in connect_ls:
+                self.ssh_obj.exec_command(node=self.mgmt_nodes[0], command=connect_str)
+
+            self.lvol_mount_details[lvol_id]["Command"] = connect_ls
             sleep_n_sec(3)
             final_devices = self.ssh_obj.get_devices(node=self.node)
             lvol_device = None

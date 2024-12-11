@@ -427,7 +427,8 @@ class SbcliUtils:
 
         data = self.get_request(api_url=f"/lvol/connect/{lvol_id}")
         self.logger.info(f"Connect lvol resp: {data}")
-        return data["results"][0]["connect"]
+
+        return [d["connect"] for d in data["results"]]
 
     def get_cluster_status(self, cluster_id=None):
         """Return cluster status for given cluster id
@@ -558,15 +559,4 @@ class SbcliUtils:
     def list_migration_tasks(self, cluster_id):
         """List all migration tasks for a given cluster."""
         return self.get_request(f"/cluster/list-tasks/{cluster_id}")
-
-    def get_lvol_connect_str_list(self, lvol_name):
-        """Return connect string for the lvol
-        """
-        lvol_id = self.get_lvol_id(lvol_name=lvol_name)
-        if not lvol_id:
-            self.logger.info(f"Lvol {lvol_name} does not exist. Exiting")
-            return
-
-        data = self.get_request(api_url=f"/lvol/connect/{lvol_id}")
-        self.logger.info(f"Connect lvol resp: {data}")
-        return [d["connect"] for d in data["results"]]
+    

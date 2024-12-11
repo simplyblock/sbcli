@@ -63,8 +63,9 @@ class FioWorkloadTest(TestClusterBase):
             for lvol in lvol_list:
                 initial_devices = self.ssh_obj.get_devices(node=self.mgmt_nodes[0])
             
-                connect_str = self.sbcli_utils.get_lvol_connect_str(lvol_name=lvol)
-                self.ssh_obj.exec_command(self.mgmt_nodes[0], connect_str)
+                connect_ls = self.sbcli_utils.get_lvol_connect_str(lvol_name=lvol)
+                for connect_str in connect_ls:
+                    self.ssh_obj.exec_command(node=self.mgmt_nodes[0], command=connect_str)
                 sleep_n_sec(5)
 
                 # Step 3: Check for new device after connecting the lvol

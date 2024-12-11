@@ -80,10 +80,9 @@ class TestSingleNodeOutage(TestClusterBase):
         assert self.lvol_name in list(lvols.keys()), \
             f"Lvol {self.lvol_name} present in list of lvols post add: {lvols}"
 
-        connect_str = self.sbcli_utils.get_lvol_connect_str(lvol_name=self.lvol_name)
-
-        self.ssh_obj.exec_command(node=self.mgmt_nodes[0],
-                                  command=connect_str)
+        connect_ls = self.sbcli_utils.get_lvol_connect_str(lvol_name=self.lvol_name)
+        for connect_str in connect_ls:
+            self.ssh_obj.exec_command(node=self.mgmt_nodes[0], command=connect_str)
 
         final_devices = self.ssh_obj.get_devices(node=self.mgmt_nodes[0])
         disk_use = None
