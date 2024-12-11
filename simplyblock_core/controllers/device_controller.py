@@ -163,15 +163,6 @@ def _def_create_device_stack(device_obj, snode, force=False):
     for iface in snode.data_nics:
         if iface.ip4_address:
             tr_type = iface.get_transport_type()
-            ret = rpc_client.transport_list()
-            found = False
-            if ret:
-                for ty in ret:
-                    if ty['trtype'] == tr_type:
-                        found = True
-            if found is False:
-                ret = rpc_client.transport_create(tr_type)
-            # logger.info("adding listener for %s on IP %s" % (subsystem_nqn, iface.ip4_address))
             ret = rpc_client.listeners_create(subsystem_nqn, tr_type, iface.ip4_address, "4420")
             IP = iface.ip4_address
             break
@@ -910,14 +901,6 @@ def restart_jm_device(device_id, force=False, format_alceml=False):
                 for iface in snode.data_nics:
                     if iface.ip4_address:
                         tr_type = iface.get_transport_type()
-                        ret = rpc_client.transport_list()
-                        found = False
-                        if ret:
-                            for ty in ret:
-                                if ty['trtype'] == tr_type:
-                                    found = True
-                        if found is False:
-                            ret = rpc_client.transport_create(tr_type)
                         logger.info("adding listener for %s on IP %s" % (subsystem_nqn, iface.ip4_address))
                         ret = rpc_client.listeners_create(subsystem_nqn, tr_type, iface.ip4_address, "4420")
                         IP = iface.ip4_address

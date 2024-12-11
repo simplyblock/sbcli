@@ -310,14 +310,6 @@ def _create_jm_stack_on_raid(rpc_client, jm_nvme_bdevs, snode, after_restart):
         for iface in snode.data_nics:
             if iface.ip4_address:
                 tr_type = iface.get_transport_type()
-                ret = rpc_client.transport_list()
-                found = False
-                if ret:
-                    for ty in ret:
-                        if ty['trtype'] == tr_type:
-                            found = True
-                if found is False:
-                    ret = rpc_client.transport_create(tr_type)
                 logger.info("adding listener for %s on IP %s" % (subsystem_nqn, iface.ip4_address))
                 ana_state = "optimized"
                 if after_restart:
@@ -408,14 +400,6 @@ def _create_jm_stack_on_device(rpc_client, nvme, snode, after_restart):
         for iface in snode.data_nics:
             if iface.ip4_address:
                 tr_type = iface.get_transport_type()
-                ret = rpc_client.transport_list()
-                found = False
-                if ret:
-                    for ty in ret:
-                        if ty['trtype'] == tr_type:
-                            found = True
-                if found is False:
-                    ret = rpc_client.transport_create(tr_type)
                 logger.info("adding listener for %s on IP %s" % (subsystem_nqn, iface.ip4_address))
                 ana_state = "optimized"
                 if after_restart:
@@ -509,14 +493,6 @@ def _create_storage_device_stack(rpc_client, nvme, snode, after_restart):
     for iface in snode.data_nics:
         if iface.ip4_address:
             tr_type = iface.get_transport_type()
-            ret = rpc_client.transport_list()
-            found = False
-            if ret:
-                for ty in ret:
-                    if ty['trtype'] == tr_type:
-                        found = True
-            if found is False:
-                ret = rpc_client.transport_create(tr_type, cluster.qpair_count)
             logger.info("adding listener for %s on IP %s" % (subsystem_nqn, iface.ip4_address))
             ret = rpc_client.listeners_create(subsystem_nqn, tr_type, iface.ip4_address, "4420")
             IP = iface.ip4_address
@@ -789,14 +765,6 @@ def _prepare_cluster_devices_on_restart(snode):
             for iface in snode.data_nics:
                 if iface.ip4_address:
                     tr_type = iface.get_transport_type()
-                    ret = rpc_client.transport_list()
-                    found = False
-                    if ret:
-                        for ty in ret:
-                            if ty['trtype'] == tr_type:
-                                found = True
-                    if found is False:
-                        ret = rpc_client.transport_create(tr_type, cluster.qpair_count)
                     logger.info("adding listener for %s on IP %s" % (subsystem_nqn, iface.ip4_address))
                     ret = rpc_client.listeners_create(subsystem_nqn, tr_type, iface.ip4_address, "4420",
                                                       ana_state="inaccessible")
@@ -1121,9 +1089,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
         logger.error(f"Failed to Join docker swarm: {err}")
         return False
 
-    #rpc_user, rpc_pass = utils.generate_rpc_user_and_pass()
-    rpc_user = "rpc_username"
-    rpc_pass = "rpc_password"
+    rpc_user, rpc_pass = utils.generate_rpc_user_and_pass()
     mgmt_ip = node_info['network_interface'][iface_name]['ip']
     if not spdk_image:
         spdk_image = constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE
@@ -1288,6 +1254,16 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
     if not ret:
         logger.error("Failed to set nvme options")
         return False
+
+    if is_secondary_node:
+        qpair=max(len(db_controller.get_storage_nodes_by_cluster_id(cluster_id)), 5) * cluster.qpair_count
+    else:
+        qpair=cluster.qpair_count
+
+    ret = rpc_client.transport_create("TCP", qpair)
+    if not ret:
+        logger.error(f"Failed to create transport TCP with qpair: {qpair}")
+        # return False
 
     # 7- set jc singleton mask
     if snode.jc_singleton_mask:
@@ -1783,6 +1759,17 @@ def restart_storage_node(
     if not ret:
         logger.error("Failed to set nvme options")
         return False
+
+
+    if snode.is_secondary_node:
+        qpair=max(len(db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id)), 5) * cluster.qpair_count
+    else:
+        qpair=cluster.qpair_count
+
+    ret = rpc_client.transport_create("TCP", qpair)
+    if not ret:
+        logger.error(f"Failed to create transport TCP with qpair: {qpair}")
+        # return False
 
     # 7- set jc singleton mask
     if snode.jc_singleton_mask:

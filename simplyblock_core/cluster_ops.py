@@ -173,7 +173,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     else:
         c.grafana_endpoint = f"http://{DEV_IP}/grafana"
     c.enable_node_affinity = enable_node_affinity
-    c.qpair_count = qpair_count or 6
+    c.qpair_count = qpair_count or constants.QPAIR_COUNT
 
     c.max_queue_size = max_queue_size
     c.inflight_io_threshold = inflight_io_threshold
@@ -324,7 +324,7 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
     _create_update_user(cluster.uuid, cluster.grafana_endpoint, cluster.grafana_secret, cluster.secret)
 
     if distr_ndcs == 0 and distr_npcs == 0:
-        cluster.distr_ndcs = 4
+        cluster.distr_ndcs = 2
         cluster.distr_npcs = 1
     else:
         cluster.distr_ndcs = distr_ndcs
@@ -333,7 +333,7 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
     cluster.distr_chunk_bs = distr_chunk_bs
     cluster.ha_type = ha_type
     cluster.enable_node_affinity = enable_node_affinity
-    cluster.qpair_count = qpair_count or 6
+    cluster.qpair_count = qpair_count or constants.QPAIR_COUNT
     cluster.max_queue_size = max_queue_size
     cluster.inflight_io_threshold = inflight_io_threshold
     cluster.enable_qos = enable_qos
@@ -710,7 +710,7 @@ def get_cluster(cl_id):
         logger.error(f"Cluster not found {cl_id}")
         return False
 
-    return json.dumps(cluster.get_clean_dict(), indent=2)
+    return json.dumps(cluster.get_clean_dict(), indent=2, sort_keys=True)
 
 
 def update_cluster(cl_id):
