@@ -1372,6 +1372,8 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
     logger.info("Setting node status to Active")
     set_node_status(snode.get_id(), StorageNode.STATUS_ONLINE)
 
+    snode = db_controller.get_storage_node_by_id(snode.get_id())
+
     if cluster.ha_type == "ha":
         secondary_nodes = get_secondary_nodes(snode)
         if not secondary_nodes:
