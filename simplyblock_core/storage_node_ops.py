@@ -1370,11 +1370,9 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
         time.sleep(3)
 
     logger.info("Setting node status to Active")
-    snode.status = StorageNode.STATUS_ONLINE
-    snode.online_since = str(datetime.datetime.now())
-    snode.write_to_db(kv_store)
+    set_node_status(snode.get_id(), StorageNode.STATUS_ONLINE)
 
-    if cluster.status != cluster.STATUS_ACTIVE:
+    if cluster.status not in  [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED]:
         logger.warning(f"The cluster status is not active ({cluster.status}), adding the node without distribs and lvstore")
         logger.info("Done")
         return "Success"
@@ -1386,20 +1384,13 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
             continue
         ret = distr_controller.send_cluster_map_to_node(node)
 
-
-    # if not ret:
-    #     return False, "Failed to send cluster map"
-    # ret = distr_controller.send_cluster_map_add_node(snode)
-    # if not ret:
-    #     return False, "Failed to send cluster map add node"
     time.sleep(3)
 
-    # logger.info("Sending cluster event updates")
-    # distr_controller.send_node_status_event(snode, StorageNode.STATUS_ONLINE)
-    #
-    # for dev in snode.nvme_devices:
-    #     distr_controller.send_dev_status_event(dev, NVMeDevice.STATUS_ONLINE)
-    #     tasks_controller.add_new_device_mig_task(dev.get_id())
+    for dev in snode.nvme_devices:
+        distr_controller.send_dev_status_event(dev, NVMeDevice.STATUS_ONLINE)
+        tasks_controller.add_new_device_mig_task(dev.get_id())
+
+    time.sleep(3)
 
     nodes = db_controller.get_storage_nodes_by_cluster_id(cluster_id)
     # Create distribs
@@ -1407,7 +1398,8 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
     ret = create_lvstore(snode, cluster.distr_ndcs, cluster.distr_npcs, cluster.distr_bs,
                          cluster.distr_chunk_bs, cluster.page_size_in_blocks, max_size, nodes)
     if not ret:
-        return False, "Failed to create distribs on node"
+        logger.error("Failed to create lvstore")
+        return False
 
     storage_events.snode_add(snode)
     logger.info("Done")
