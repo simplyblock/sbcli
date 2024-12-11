@@ -181,6 +181,7 @@ def _def_create_device_stack(device_obj, snode, force=False):
     if snode.enable_test_device:
         device_obj.testing_bdev = test_name
     device_obj.alceml_bdev = alceml_name
+    device_obj.alceml_name = alceml_name
     device_obj.pt_bdev = pt_name
     device_obj.nvmf_nqn = subsystem_nqn
     device_obj.nvmf_ip = IP
