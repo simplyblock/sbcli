@@ -249,6 +249,7 @@ def clone(snapshot_id, clone_name, new_size=0):
     lvol.top_bdev = f"{lvol.lvs_name}/{lvol.lvol_bdev}"
     lvol.hostname = snode.hostname
     lvol.node_id = snode.get_id()
+    lvol.nodes = snap.lvol.nodes
     lvol.mode = 'read-write'
     lvol.cloned_from_snap = snapshot_id
     lvol.nqn = cluster.nqn + ":lvol:" + lvol.uuid
