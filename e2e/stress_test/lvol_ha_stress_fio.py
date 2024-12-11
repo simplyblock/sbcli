@@ -461,6 +461,13 @@ class TestLvolHAClusterRunAllScenarios(TestLvolHACluster):
         self.logger.info(f"Node health check after restart: {actual_status}")
         
         node_up_time = datetime.now()
+
+        self.logger.info(f"Fetching migration tasks for cluster {self.cluster_id}.")
+
+        self.logger.info(f"Validating migration tasks for node {self.lvol_node}.")
+        self.validate_migration_for_node(timestamp, 5000, None)
+        sleep_n_sec(30)
+
         self.validate_checksums()
         
         time_secs = node_up_time - restart_start_time
@@ -485,6 +492,14 @@ class TestLvolHAClusterRunAllScenarios(TestLvolHACluster):
         self.logger.info(f"Node health check after crash recovery: {actual_status}")
         
         node_up_time = datetime.now()
+
+        self.logger.info(f"Fetching migration tasks for cluster {self.cluster_id}.")
+
+        self.logger.info(f"Validating migration tasks for node {self.lvol_node}.")
+        self.validate_migration_for_node(timestamp, 5000, None)
+        sleep_n_sec(30)
+
+
         self.validate_checksums()
         
         time_secs = node_up_time - restart_start_time
@@ -521,6 +536,14 @@ class TestLvolHAClusterRunAllScenarios(TestLvolHACluster):
         self.logger.info(f"Node health check after network recovery: {actual_status}")
         
         node_up_time = datetime.now()
+
+        self.logger.info(f"Fetching migration tasks for cluster {self.cluster_id}.")
+
+        self.logger.info(f"Validating migration tasks for node {self.lvol_node}.")
+        self.validate_migration_for_node(timestamp, 5000, None)
+        sleep_n_sec(30)
+
+        
         self.validate_checksums()
         
         time_secs = node_up_time - disconnect_start_time
