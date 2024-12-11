@@ -60,7 +60,7 @@ class TestLvolHACluster(FioWorkloadTest):
                    "FS": fs_type,
                    "Log": f"{self.log_path}/{lvol_name}.log"
             }
-            connect_ls = self.sbcli_utils.get_lvol_connect_str(lvol_name=self.lvol_name)
+            connect_ls = self.sbcli_utils.get_lvol_connect_str(lvol_name=lvol_name)
 
             initial_devices = self.ssh_obj.get_devices(node=self.node)
             for connect_str in connect_ls:
