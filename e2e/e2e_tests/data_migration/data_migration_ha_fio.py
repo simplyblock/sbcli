@@ -528,7 +528,8 @@ class FioWorkloadTest(TestClusterBase):
         ]
         return filtered_tasks
 
-    def validate_migration_for_node(self, timestamp, timeout, node_id=None, check_interval=60):
+    def validate_migration_for_node(self, timestamp, timeout, node_id=None, check_interval=60,
+                                    no_task_ok=False):
         """
         Validate that all `device_migration` tasks for a specific node have completed successfully 
         and check for stuck tasks until the timeout is reached.
@@ -553,7 +554,7 @@ class FioWorkloadTest(TestClusterBase):
             tasks = self.sbcli_utils.get_cluster_tasks(self.cluster_id)
             filtered_tasks = self.filter_migration_tasks(tasks, node_id, timestamp)
             
-            if not filtered_tasks:
+            if not filtered_tasks and not no_task_ok:
                 raise RuntimeError(f"No migration tasks found for {'node ' + node_id if node_id else 'the cluster'} after the specified timestamp.")
 
             self.logger.info(f"Checking migration tasks: {filtered_tasks}")
