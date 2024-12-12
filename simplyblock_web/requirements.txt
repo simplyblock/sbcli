@@ -3,4 +3,3 @@ py-cpuinfo
 kubernetes
 graypy
 ec2-metadata
-prometheus-client

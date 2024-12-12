@@ -6,6 +6,7 @@ import time
 
 from simplyblock_core import constants
 from simplyblock_core.models.caching_node import CachingNode
+from simplyblock_core.models.cluster import ClusterMap
 
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.deployer import Deployer
@@ -79,6 +80,10 @@ class DBController:
 
     def clear_prefix(self, prefix):
         self.kv_store.db.clear_range_startswith(prefix)
+
+    def get_cluster_map(self):
+        cmap = ClusterMap().read_from_db(self.kv_store)
+        return cmap[0] if cmap else None
 
     def get_storage_nodes(self):
         ret = StorageNode().read_from_db(self.kv_store)

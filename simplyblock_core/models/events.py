@@ -23,20 +23,35 @@ class EventObj(BaseModel):
     meta_data:
     date:
     """
-    caused_by: str = ""
-    cluster_uuid: str = ""
-    count: int = 1
-    date: int = 0
-    domain: str = ""
-    event: str = ""
-    event_level: str = "Info"
-    message: str = ""
-    meta_data: str = ""
-    node_id: str = ""
-    object_dict: dict = {}
-    object_name: str = ""
-    storage_id: int = -1
-    vuid: int = -1
+    attributes = {
+        "uuid": {"type": str, 'default': ""},
+        "cluster_uuid": {"type": str, 'default': ""},
+        "node_id": {"type": str, 'default': ""},
+        "date": {"type": int, 'default': 0},  # in milliseconds
+
+        "event_level": {"type": str, 'default': LEVEL_INFO},
+
+        "event": {"type": str, 'default': ""},
+        "domain": {"type": str, 'default': ""},
+        "object_name": {"type": str, 'default': ""},
+        "object_dict": {"type": dict, 'default': {}},
+        "caused_by": {"type": str, 'default': ""},
+        "message": {"type": str, 'default': ""},
+        "storage_id": {"type": int, 'default': -1},
+        "vuid": {"type": int, 'default': -1},
+        "meta_data": {"type": str, 'default': ""},
+        "status": {"type": str, 'default': ""},
+        "count": {"type": int, 'default': 1},
+
+    }
+
+    def __init__(self, data=None):
+        super(EventObj, self).__init__()
+        self.set_attrs(self.attributes, data)
+        self.object_type = "object"
+
+    def get_id(self):
+        return "%s/%s/%s" % (self.cluster_uuid, self.date, self.uuid)
 
     def get_date_string(self):
         if self.date > 1e10:

@@ -16,19 +16,31 @@ class Pool(BaseModel):
         STATUS_INACTIVE: 2,
     }
 
-    cluster_id: str = ""
-    groups: List[str] = []
-    lvol_max_size: int = 0
-    lvols: List[str] = []
-    max_r_mbytes_per_sec: int = 0
-    max_rw_ios_per_sec: int = 0
-    max_rw_mbytes_per_sec: int = 0
-    max_w_mbytes_per_sec: int = 0
-    pool_max_size: int = 0
-    pool_name: str = ""
-    secret: str = ""
-    users: List[str] = []
+    attributes = {
+        "pool_name": {"type": str, 'default': ""},
+        "id": {"type": str, 'default': ""},
+        "cluster_id": {"type": str, 'default': ""},
+        "users": {"type": List[str], 'default': []},
+        "groups": {"type": List[str], 'default': []},
+        "pool_max_size": {"type": int, 'default': 0},
+        "lvol_max_size": {"type": int, 'default': 0},
+        "lvols": {"type": List[str], 'default': []},
+        "status": {"type": str, 'default': ""},
+        "secret": {"type": str, 'default': ""},
 
+        "max_rw_ios_per_sec": {"type": int, 'default': 0},
+        "max_rw_mbytes_per_sec": {"type": int, 'default': 0},
+        "max_r_mbytes_per_sec": {"type": int, 'default': 0},
+        "max_w_mbytes_per_sec": {"type": int, 'default': 0},
+    }
+
+    def __init__(self, data=None):
+        super(Pool, self).__init__()
+        self.set_attrs(self.attributes, data)
+        self.object_type = "object"
+
+    def get_id(self):
+        return self.id
 
     def get_clean_dict(self):
         data = super(Pool, self).get_clean_dict()

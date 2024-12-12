@@ -1,5 +1,4 @@
 # coding=utf-8
-import datetime
 import json
 import logging
 import time
@@ -123,8 +122,7 @@ def list_tasks(cluster_id, is_json=False):
             "Retry": retry,
             "Status": task.status,
             "Result": task.function_result,
-            "Updated At": datetime.datetime.strptime(task.updated_at, "%Y-%m-%d %H:%M:%S.%f").strftime(
-                "%H:%M:%S, %d/%m/%Y"),
+            "Updated at": time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(task.updated_at)),
         })
     return utils.print_table(data)
 
