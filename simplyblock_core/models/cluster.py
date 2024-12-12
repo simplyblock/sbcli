@@ -1,9 +1,8 @@
 # coding=utf-8
 
-from typing import Mapping, List
+from typing import List
 
 from simplyblock_core.models.base_model import BaseModel
-from simplyblock_core.models.storage_node import StorageNode
 
 
 class Cluster(BaseModel):
@@ -25,54 +24,44 @@ class Cluster(BaseModel):
         STATUS_DEGRADED: 11,
 
     }
-    attributes = {
-        "uuid": {"type": str, 'default': ""},
-        "blk_size": {"type": int, 'default': 0},
-        "page_size_in_blocks": {"type": int, 'default': 2097152},
-        "model_ids": {"type": List[str], "default": []},
-        "ha_type": {"type": str, 'default': "single"},
-        "tls": {"type": bool, 'default': False},
-        "auth_hosts_only": {"type": bool, 'default': False},
-        "nqn": {"type": str, 'default': ""},
-        "iscsi": {"type": str, 'default': ""},
-        "dhchap": {"type": str, "default": ""},
-        "cli_pass": {"type": str, "default": ""},
-        "db_connection": {"type": str, "default": ""},
-        "distr_ndcs": {"type": int, 'default': 0},
-        "distr_npcs": {"type": int, 'default': 0},
-        "distr_bs": {"type": int, 'default': 0},
-        "distr_chunk_bs": {"type": int, 'default': 0},
-        "cluster_max_size": {"type": int, 'default': 0},
-        "cluster_max_devices": {"type": int, 'default': 0},
-        "cluster_max_nodes": {"type": int, 'default': 0},
 
-        ## cluster-level: cap-warn ( % ), cap-crit ( % ), prov-cap-warn ( % ), prov-cap-crit. ( % )
-        "cap_warn": {"type": int, "default": 80},
-        "cap_crit": {"type": int, "default": 90},
-        "prov_cap_warn": {"type": int, "default": 180},
-        "prov_cap_crit": {"type": int, "default": 190},
-
-        "qpair_count": {"type": int, "default": 6},
-
-        "secret": {"type": str, "default": ""},
-        "grafana_secret": {"type": str, "default": ""},
-        "status": {"type": str, "default": ""},
-        "updated_at": {"type": str, "default": ""},
-        "grafana_endpoint": {"type": str, "default": ""},
-        "enable_node_affinity": {"type": bool, 'default': False},
-        "max_queue_size": {"type": int, "default": 128},
-        "inflight_io_threshold": {"type": int, "default": 4},
-        "enable_qos": {"type": bool, 'default': False},
-        "strict_node_anti_affinity": {"type": bool, 'default': False},
-    }
+    auth_hosts_only: bool = False
+    blk_size: int = 0
+    cap_crit: int = 90
+    cap_warn: int = 80
+    cli_pass: str = ""
+    cluster_max_devices: int = 0
+    cluster_max_nodes: int = 0
+    cluster_max_size: int = 0
+    db_connection: str = ""
+    dhchap: str = ""
+    distr_bs: int = 0
+    distr_chunk_bs: int = 0
+    distr_ndcs: int = 0
+    distr_npcs: int = 0
+    enable_node_affinity: bool = False
+    enable_qos: bool = False
+    grafana_endpoint: str = ""
+    grafana_secret: str = ""
+    ha_type: str = "single"
+    inflight_io_threshold: int = 4
+    iscsi: str = ""
+    max_queue_size: int = 128
+    model_ids: List[str] = []
+    nqn: str = ""
+    page_size_in_blocks: int = 2097152
+    prov_cap_crit: int = 190
+    prov_cap_warn: int = 180
+    qpair_count: int = 6
+    secret: str = ""
+    status: str = ""
+    strict_node_anti_affinity: bool = False
+    tls: bool = False
+    updated_at: str = ""
+    uuid: str = ""
 
     def __init__(self, data=None):
-        super(Cluster, self).__init__()
-        self.set_attrs(self.attributes, data)
-        self.object_type = "object"
-
-    def get_id(self):
-        return self.uuid
+        super(Cluster, self).__init__(data=data)
 
     def get_status_code(self):
         if self.status in self.STATUS_CODE_MAP:
@@ -86,22 +75,22 @@ class Cluster(BaseModel):
         return data
 
 
-class ClusterMap(BaseModel):
 
-    attributes = {
-        "partitions_count": {"type": int, 'default': 0},
-        "nodes": {"type": Mapping[str, StorageNode], 'default': {}},
-    }
 
-    def __init__(self, data=None):
-        super(ClusterMap, self).__init__()
-        self.set_attrs(self.attributes, data)
-        self.object_type = "object"
+lst = []
+for k, v in Cluster().attributes.items():
+    if hasattr(v['type'], "__origin__"):
+        if hasattr(v['type'], "__args__"):
+            lst.append(f"{k}: {v['type']._name}[{v['type'].__args__[0].__name__}] = {v['default']} ")
+        else:
+            lst.append(f"{k}: {v['type']._name} = {v['default']} ")
+        # print(v['type'].__dict__)
+    elif v['type'] == str:
+        lst.append(f"{k}: {v['type'].__name__} = \"{v['default']}\"")
 
-    def get_id(self):
-        return "0"
+    else:
+        lst.append(f"{k}: {v['type'].__name__} = {v['default']}")
 
-    def recalculate_partitions(self):
-        self.partitions_count = 0
-        for node_id in self.nodes:
-            self.partitions_count += self.nodes[node_id].partitions_count
+lst.sort()
+for l in lst:
+    print(l)

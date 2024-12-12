@@ -6,23 +6,30 @@ from typing import Mapping
 
 
 class BaseModel(object):
-    def __init__(self):
-        self._attribute_map = {
-            "id": {"type": str, "default": ""},
-            "name": {"type": str, "default": self.__class__.__name__},
-            "object_type": {"type": str, "default": ""},
-            "deleted": {"type": bool, 'default': False},
-            "updated_at": {"type": str, 'default': ""},
-            "create_dt": {"type": str, 'default': ""},
-            "remove_dt": {"type": str, 'default': ""},
-        }
-        self.set_attrs({}, {})
+
+    id: str = ""
+    uuid: str = ""
+    name: str = ""
+    status: str = ""
+    deleted: bool = False
+    updated_at: str = ""
+    create_dt: str= ""
+    remove_dt: str= ""
+
+    _attribute_map = {}
+
+    def __init__(self, data=None):
+        self.name = self.__class__.__name__
+        self.set_attrs(data)
 
     def get_id(self):
-        return self.id
+        return self.uuid
 
-    def set_attrs(self, attributes, data):
-        self._attribute_map.update(attributes)
+    def set_attrs(self, data):
+        self._attribute_map = {}
+        for s in self.__dir__():
+            if not s.startswith("_"):
+                self._attribute_map[s]= {"type": getattr(self, s).__class__, "default": getattr(self, s)}
         self.from_dict(data)
 
     def from_dict(self, data):
@@ -89,7 +96,7 @@ class BaseModel(object):
     def read_from_db(self, kv_store, id="", limit=0, reverse=False):
         try:
             objects = []
-            prefix = "%s/%s/%s" % (self.object_type, self.name, id)
+            prefix = "%s/%s/%s" % (self.create_dt.replace(" ", ""), self.name, id)
             for k, v in kv_store.db.get_range_startswith(prefix.encode('utf-8'),  limit=limit, reverse=reverse):
                 objects.append(self.__class__().from_dict(json.loads(v)))
             return objects
@@ -136,3 +143,43 @@ class BaseModel(object):
         if isinstance(item, str) and item in self._attribute_map:
             return getattr(self, item)
         return False
+
+
+class BaseNodeObject(BaseModel):
+
+    STATUS_ONLINE = 'online'
+    STATUS_OFFLINE = 'offline'
+    STATUS_SUSPENDED = 'suspended'
+    STATUS_IN_SHUTDOWN = 'in_shutdown'
+    STATUS_REMOVED = 'removed'
+    STATUS_RESTARTING = 'in_restart'
+
+    STATUS_IN_CREATION = 'in_creation'
+    STATUS_UNREACHABLE = 'unreachable'
+    STATUS_SCHEDULABLE = 'schedulable'
+
+    STATUS_CODE_MAP = {
+        STATUS_ONLINE: 0,
+        STATUS_OFFLINE: 1,
+        STATUS_SUSPENDED: 2,
+        STATUS_REMOVED: 3,
+
+        STATUS_IN_CREATION: 10,
+        STATUS_IN_SHUTDOWN: 11,
+        STATUS_RESTARTING: 12,
+
+        STATUS_UNREACHABLE: 20,
+
+        STATUS_SCHEDULABLE: 30,
+    }
+
+    def get_status_code(self):
+        if self.status in self.STATUS_CODE_MAP:
+            return self.STATUS_CODE_MAP[self.status]
+        else:
+            return -1
+
+    def get_clean_dict(self):
+        data = super(BaseNodeObject, self).get_clean_dict()
+        data['status_code'] = self.get_status_code()
+        return data
