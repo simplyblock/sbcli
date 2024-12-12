@@ -1,4 +1,5 @@
 # coding=utf-8
+import datetime
 import json
 import logging
 import os
@@ -238,8 +239,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     _create_update_user(c.uuid, c.grafana_endpoint, c.grafana_secret, c.secret)
 
     c.status = Cluster.STATUS_UNREADY
-
-    c.updated_at = int(time.time())
+    c.create_dt = str(datetime.datetime.now())
     db_controller = DBController(KVStore())
     c.write_to_db(db_controller.kv_store)
 
@@ -347,7 +347,7 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
         cluster.prov_cap_crit = prov_cap_crit
 
     cluster.status = Cluster.STATUS_UNREADY
-    cluster.updated_at = int(time.time())
+    cluster.create_dt = str(datetime.datetime.now())
     cluster.write_to_db(db_controller.kv_store)
     cluster_events.cluster_create(cluster)
 

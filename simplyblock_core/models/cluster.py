@@ -73,24 +73,3 @@ class Cluster(BaseModel):
         data = super(Cluster, self).get_clean_dict()
         data['status_code'] = self.get_status_code()
         return data
-
-
-
-
-lst = []
-for k, v in Cluster().attributes.items():
-    if hasattr(v['type'], "__origin__"):
-        if hasattr(v['type'], "__args__"):
-            lst.append(f"{k}: {v['type']._name}[{v['type'].__args__[0].__name__}] = {v['default']} ")
-        else:
-            lst.append(f"{k}: {v['type']._name} = {v['default']} ")
-        # print(v['type'].__dict__)
-    elif v['type'] == str:
-        lst.append(f"{k}: {v['type'].__name__} = \"{v['default']}\"")
-
-    else:
-        lst.append(f"{k}: {v['type'].__name__} = {v['default']}")
-
-lst.sort()
-for l in lst:
-    print(l)

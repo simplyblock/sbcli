@@ -1,4 +1,5 @@
 # coding=utf-8
+import datetime
 import json
 import logging
 import uuid
@@ -154,6 +155,8 @@ def add_mgmt_node(mgmt_ip, cluster_id=None):
     node.cluster_id = cluster_id
     node.mgmt_ip = mgmt_ip
     node.status = MgmtNode.STATUS_ONLINE
+    node.create_dt = str(datetime.datetime.now())
+
     node.write_to_db(db_controller.kv_store)
 
     mgmt_events.mgmt_add(node)

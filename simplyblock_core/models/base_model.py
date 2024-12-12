@@ -1,4 +1,5 @@
 # coding=utf-8
+import datetime
 import pprint
 
 import json
@@ -96,6 +97,8 @@ class BaseModel(object):
     def read_from_db(self, kv_store, id="", limit=0, reverse=False):
         try:
             objects = []
+            if not self.create_dt:
+                self.create_dt = str(datetime.datetime.now())
             prefix = "%s/%s/%s" % (self.create_dt.replace(" ", ""), self.name, id)
             for k, v in kv_store.db.get_range_startswith(prefix.encode('utf-8'),  limit=limit, reverse=reverse):
                 objects.append(self.__class__().from_dict(json.loads(v)))
@@ -116,7 +119,9 @@ class BaseModel(object):
             from simplyblock_core.kv_store import KVStore
             kv_store = KVStore()
         try:
-            prefix = "%s/%s/%s" % (self.object_type, self.name, self.get_id())
+            if not self.create_dt:
+                self.create_dt = str(datetime.datetime.now())
+            prefix = "%s/%s/%s" % (self.create_dt.replace(" ", ""), self.name, self.get_id())
             st = json.dumps(self.to_dict())
             kv_store.db.set(prefix.encode(), st.encode())
             return True
@@ -126,7 +131,7 @@ class BaseModel(object):
             exit(1)
 
     def remove(self, kv_store):
-        prefix = "%s/%s/%s" % (self.object_type, self.name, self.get_id())
+        prefix = "%s/%s/%s" % (self.create_dt.replace(" ", ""), self.name, self.get_id())
         return kv_store.db.clear(prefix.encode())
 
     def __repr__(self):
