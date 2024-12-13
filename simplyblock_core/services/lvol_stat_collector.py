@@ -1,10 +1,10 @@
 # coding=utf-8
 import time
-from email.policy import default
 
 from simplyblock_core import constants, kv_store, utils
 from simplyblock_core.controllers import lvol_events
 from simplyblock_core.models.stats import LVolStatObject, PoolStatObject
+from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.rpc_client import RPCClient
 
 
@@ -210,12 +210,13 @@ while True:
                 hosts=[lvol.node_id]
             for host in hosts:
                 snode = db_controller.get_storage_node_by_id(host)
+                if snode.status != StorageNode.STATUS_ONLINE:
+                    continue
                 rpc_client = RPCClient(
                     snode.mgmt_ip, snode.rpc_port,
                     snode.rpc_username, snode.rpc_password,
                     timeout=1, retry=2)
-
-                logger.info("Getting lVol stats: %s", lvol.uuid)
+                logger.info("Getting lVol stats: %s from node: %s", lvol.uuid, host)
                 stats_dict = rpc_client.get_lvol_stats(lvol.top_bdev)
                 if stats_dict and stats_dict['bdevs']:
                     stats.append( stats_dict['bdevs'][0])

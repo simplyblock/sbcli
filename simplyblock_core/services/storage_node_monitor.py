@@ -262,13 +262,17 @@ while True:
             if snode.status == StorageNode.STATUS_SCHEDULABLE and not ping_check and not node_api_check:
                 continue
 
-            # 3- check spdk_process
-            spdk_process = health_controller._check_spdk_process_up(snode.mgmt_ip)
+            spdk_process = False
+            if node_api_check:
+                # 3- check spdk_process
+                spdk_process = health_controller._check_spdk_process_up(snode.mgmt_ip)
             logger.info(f"Check: spdk process {snode.mgmt_ip}:5000 ... {spdk_process}")
 
-            # 4- check rpc
-            node_rpc_check = health_controller._check_node_rpc(
-                snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
+            node_rpc_check = False
+            if spdk_process:
+                # 4- check rpc
+                node_rpc_check = health_controller._check_node_rpc(
+                    snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
             logger.info(f"Check: node RPC {snode.mgmt_ip}:{snode.rpc_port} ... {node_rpc_check}")
 
             is_node_online = ping_check and node_api_check and spdk_process and node_rpc_check
