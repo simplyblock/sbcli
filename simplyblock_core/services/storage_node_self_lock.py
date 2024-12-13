@@ -1,5 +1,6 @@
 # coding=utf-8
 import time
+from importlib import reload
 
 import fdb
 
@@ -25,6 +26,7 @@ while True:
             retry = MAX_RETRY
         else:
             try:
+                reload(fdb)
                 fdb.api_version(constants.KVD_DB_VERSION)
                 db = fdb.open(constants.KVD_DB_FILE_PATH)
                 db.options.set_transaction_timeout(5)
