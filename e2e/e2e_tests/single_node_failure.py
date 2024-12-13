@@ -46,6 +46,7 @@ class TestSingleNodeFailure(TestClusterBase):
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
+        self.snapshot_name = "snapshot"
         self.logger = setup_logger(__name__)
 
     def run(self):
@@ -103,6 +104,13 @@ class TestSingleNodeFailure(TestClusterBase):
         no_lvol_node_uuid = self.sbcli_utils.get_node_without_lvols()
         no_lvol_node = self.sbcli_utils.get_storage_node_details(storage_node_id=no_lvol_node_uuid)
         node_ip = no_lvol_node[0]["mgmt_ip"]
+        
+        self.logger.info("Taking snapshot")
+        self.ssh_obj.add_snapshot(node=self.mgmt_nodes[0],
+                                  lvol_id=self.sbcli_utils.get_lvol_id(self.lvol_name),
+                                  snapshot_name=f"{self.snapshot_name}_1")
+        snapshot_id_1 = self.ssh_obj.get_snapshot_id(node=self.mgmt_nodes[0],
+                                                     snapshot_name=f"{self.snapshot_name}_1")
 
         self.validations(node_uuid=no_lvol_node_uuid,
                          node_status="online",
@@ -192,9 +200,83 @@ class TestSingleNodeFailure(TestClusterBase):
         end_time = self.common_utils.manage_fio_threads(node=self.mgmt_nodes[0],
                                                         threads=[fio_thread1],
                                                         timeout=1000)
+        
+        self.ssh_obj.add_snapshot(node=self.mgmt_nodes[0],
+                                  lvol_id=self.sbcli_utils.get_lvol_id(self.lvol_name),
+                                  snapshot_name=f"{self.snapshot_name}_2")
+        snapshot_id_2 = self.ssh_obj.get_snapshot_id(node=self.mgmt_nodes[0],
+                                                     snapshot_name=f"{self.snapshot_name}_2")
+        
+        lvol_files = self.ssh_obj.find_files(self.mgmt_nodes[0], directory=self.mount_path)
+        original_checksum = self.ssh_obj.generate_checksums(self.mgmt_nodes[0], lvol_files)
+
+        clone_mount_file = f"{self.mount_path}_cl"
+
+        self.ssh_obj.add_clone(node=self.mgmt_nodes[0],
+                               snapshot_id=snapshot_id_1,
+                               clone_name=f"{self.lvol_name}_cl_1")
+        
+        self.ssh_obj.add_clone(node=self.mgmt_nodes[0],
+                               snapshot_id=snapshot_id_2,
+                               clone_name=f"{self.lvol_name}_cl_2")
+        
+        initial_devices = self.ssh_obj.get_devices(node=self.mgmt_nodes[0])
+        connect_str = self.sbcli_utils.get_lvol_connect_str(lvol_name=f"{self.lvol_name}_cl_1")
+        self.ssh_obj.exec_command(node=self.mgmt_nodes[0],
+                                  command=connect_str)
+        
+        final_devices = self.ssh_obj.get_devices(node=self.mgmt_nodes[0])
+        disk_use = None
+        self.logger.info("Initial vs final disk:")
+        self.logger.info(f"Initial: {initial_devices}")
+        self.logger.info(f"Final: {final_devices}")
+        for device in final_devices:
+            if device not in initial_devices:
+                self.logger.info(f"Using disk: /dev/{device.strip()}")
+                disk_use = f"/dev/{device.strip()}"
+                break
+        self.ssh_obj.unmount_path(node=self.mgmt_nodes[0],
+                                  device=disk_use)
+        self.ssh_obj.mount_path(node=self.mgmt_nodes[0],
+                                device=disk_use,
+                                mount_path=f"{clone_mount_file}_1")
+        
+        initial_devices = final_devices
+        connect_str = self.sbcli_utils.get_lvol_connect_str(lvol_name=f"{self.lvol_name}_cl_2")
+        self.ssh_obj.exec_command(node=self.mgmt_nodes[0],
+                                  command=connect_str)
+        
+        final_devices = self.ssh_obj.get_devices(node=self.mgmt_nodes[0])
+        disk_use = None
+        self.logger.info("Initial vs final disk:")
+        self.logger.info(f"Initial: {initial_devices}")
+        self.logger.info(f"Final: {final_devices}")
+        for device in final_devices:
+            if device not in initial_devices:
+                self.logger.info(f"Using disk: /dev/{device.strip()}")
+                disk_use = f"/dev/{device.strip()}"
+                break
+        self.ssh_obj.unmount_path(node=self.mgmt_nodes[0],
+                                  device=disk_use)
+        self.ssh_obj.mount_path(node=self.mgmt_nodes[0],
+                                device=disk_use,
+                                mount_path=f"{clone_mount_file}_2")
 
         self.common_utils.validate_fio_test(node=self.mgmt_nodes[0],
                                             log_file=self.log_path)
+        
+        clone_files = self.ssh_obj.find_files(self.mgmt_nodes[0], directory=f"{clone_mount_file}_2")
+        final_checksum = self.ssh_obj.generate_checksums(self.mgmt_nodes[0], clone_files)
+
+        self.logger.info(f"Original checksum: {original_checksum}")
+        self.logger.info(f"Final checksum: {final_checksum}")
+        original_checksum = set(original_checksum.values())
+        final_checksum = set(final_checksum.values())
+
+        self.logger.info(f"Set Original checksum: {original_checksum}")
+        self.logger.info(f"Set Final checksum: {final_checksum}")
+
+        assert original_checksum == final_checksum, "Checksum mismatch for lvol and clone"
         
         # total_fio_runtime = end_time - self.ssh_obj.fio_runtime["fio_run_1"]
         # self.logger.info(f"FIO Run Time: {total_fio_runtime}")

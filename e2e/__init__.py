@@ -9,7 +9,7 @@ from e2e_tests.cloning_and_snapshot.multi_lvol_snapshot_fio import TestMultiLvol
 from e2e_tests.ha_journal.lvol_journal_device_node_restart import TestDeviceNodeRestart
 from e2e_tests.data_migration.data_migration_ha_fio import FioWorkloadTest
 from e2e_tests.multi_node_crash_fio_clone import TestMultiFioSnapshotDowntime
-from e2e_tests.single_ha_node_failure import TestSingleNodeFailureHA
+from e2e_tests.single_ha_node_failure import TestHASingleNodeFailure
 
 from stress_test.lvol_stress_fio_run import TestStressLvolClusterFioRun
 
@@ -27,7 +27,7 @@ ALL_TESTS = [
     TestBatchLVOLsLimit,
     TestMultiLvolFio,
     TestDeviceNodeRestart,
-    TestSingleNodeFailureHA
+    TestHASingleNodeFailure
 ]
 
 def get_all_tests(custom=True, k8s_test=False):
