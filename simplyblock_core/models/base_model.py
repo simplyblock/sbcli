@@ -2,6 +2,7 @@
 import pprint
 
 import json
+from inspect import ismethod
 from typing import Mapping
 
 
@@ -28,7 +29,7 @@ class BaseModel(object):
     def set_attrs(self, data):
         self._attribute_map = {}
         for s in self.__dir__():
-            if not s.startswith("_"):
+            if not s.startswith("_") and not ismethod(getattr(self, s)):
                 self._attribute_map[s]= {"type": getattr(self, s).__class__, "default": getattr(self, s)}
         self.from_dict(data)
 
