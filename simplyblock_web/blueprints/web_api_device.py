@@ -91,3 +91,13 @@ def device_remove(uuid):
 
     data = device_controller.device_remove(uuid)
     return utils.get_response(data)
+
+
+@bp.route('/device/<string:uuid>', methods=['POST'])
+def device_add(uuid):
+    devices = db_controller.get_storage_device_by_id(uuid)
+    if not devices:
+        return utils.get_response_error(f"devices not found: {uuid}", 404)
+
+    data = device_controller.add_device(uuid)
+    return utils.get_response(data)
