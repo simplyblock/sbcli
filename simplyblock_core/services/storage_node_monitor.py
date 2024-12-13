@@ -279,7 +279,7 @@ while True:
 
                 if ping_check and node_api_check and (not spdk_process or not node_rpc_check):
                     # add node to auto restart
-                    if cluster.status == Cluster.STATUS_ACTIVE:
+                    if cluster.status in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_SUSPENDED]:
                         tasks_controller.add_node_to_auto_restart(snode)
 
         update_cluster_status(cluster_id)
