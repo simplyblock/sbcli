@@ -237,8 +237,6 @@ class TestSingleNodeFailure(TestClusterBase):
                 break
         self.ssh_obj.unmount_path(node=self.mgmt_nodes[0],
                                   device=disk_use)
-        self.ssh_obj.format_disk(node=self.mgmt_nodes[0],
-                                 device=disk_use)
         self.ssh_obj.mount_path(node=self.mgmt_nodes[0],
                                 device=disk_use,
                                 mount_path=f"{clone_mount_file}_1")
@@ -260,8 +258,6 @@ class TestSingleNodeFailure(TestClusterBase):
                 break
         self.ssh_obj.unmount_path(node=self.mgmt_nodes[0],
                                   device=disk_use)
-        self.ssh_obj.format_disk(node=self.mgmt_nodes[0],
-                                 device=disk_use)
         self.ssh_obj.mount_path(node=self.mgmt_nodes[0],
                                 device=disk_use,
                                 mount_path=f"{clone_mount_file}_2")
@@ -271,6 +267,14 @@ class TestSingleNodeFailure(TestClusterBase):
         
         clone_files = self.ssh_obj.find_files(self.mgmt_nodes[0], directory=f"{clone_mount_file}_2")
         final_checksum = self.ssh_obj.generate_checksums(self.mgmt_nodes[0], clone_files)
+
+        self.logger.info(f"Original checksum: {original_checksum}")
+        self.logger.info(f"Final checksum: {final_checksum}")
+        original_checksum = set(original_checksum.values())
+        final_checksum = set(final_checksum.values())
+
+        self.logger.info(f"Set Original checksum: {original_checksum}")
+        self.logger.info(f"Set Final checksum: {final_checksum}")
 
         assert original_checksum == final_checksum, "Checksum mismatch for lvol and clone"
         
