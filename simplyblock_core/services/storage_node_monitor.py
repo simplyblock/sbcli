@@ -182,8 +182,8 @@ def update_cluster_status(cluster_id):
 def set_node_online(node):
     if node.status != StorageNode.STATUS_ONLINE:
 
-        if not node.is_secondary_node and node.status == StorageNode.STATUS_UNREACHABLE and node.lvol:
-            if cluster.status in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_SUSPENDED]:
+        if not node.is_secondary_node and node.status == StorageNode.STATUS_UNREACHABLE and node.lvols and \
+                cluster.status in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_SUSPENDED]:
                 tasks_controller.add_node_to_auto_restart(node)
                 return
 
