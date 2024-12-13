@@ -2971,7 +2971,7 @@ def recreate_lvstore(snode):
             lvol.health_check = True
         lvol.write_to_db(db_controller.kv_store)
 
-    time.sleep(2)
+    time.sleep(10)
 
     if sec_node and sec_node.status == StorageNode.STATUS_ONLINE:
         sec_rpc_client = RPCClient(sec_node.mgmt_ip, sec_node.rpc_port, sec_node.rpc_username, sec_node.rpc_password, timeout=3, retry=2)
