@@ -69,7 +69,7 @@ def add_pool(name, pool_max, lvol_max, max_rw_iops, max_rw_mbytes, max_r_mbytes,
 
     pool_events.pool_add(pool)
     logger.info("Done")
-    return pool.id
+    return pool.get_id()
 
 
 def set_pool_value_if_above(pool, key, value):
@@ -133,7 +133,7 @@ def delete_pool(uuid):
         logger.error(f"Pool is not empty {uuid}")
         return False
 
-    logger.info(f"Deleting pool {pool.id}")
+    logger.info(f"Deleting pool {pool.get_id()}")
     pool_events.pool_remove(pool)
     pool.remove(db_controller.kv_store)
     logger.info("Done")
@@ -145,7 +145,7 @@ def list_pools(is_json, cluster_id=None):
     data = []
     for pool in pools:
         data.append({
-            "UUID": pool.id,
+            "UUID": pool.get_id(),
             "Name": pool.pool_name,
             "Capacity": utils.humanbytes(get_pool_total_capacity(pool.get_id())),
             "Max size": utils.humanbytes(pool.pool_max_size),

@@ -30,7 +30,8 @@ class Singleton(type):
             cls._instances[cls] = super(Singleton, cls).__call__(*args, **kwargs)
         return cls._instances[cls]
 
-class DBController:
+
+class DBController(metaclass=Singleton):
     kv_store=None
     try:
         fdb.api_version(constants.KVD_DB_VERSION)
@@ -81,13 +82,13 @@ class DBController:
             if node.system_uuid == system_id:
                 return node
 
-    def get_caching_node_by_hostname(self, hostname)  -> List[CachingNode]:
+    def get_caching_node_by_hostname(self, hostname)  -> CachingNode:
         nodes = self.get_caching_nodes()
         for node in nodes:
             if node.hostname == hostname:
                 return node
 
-    def get_storage_node_by_hostname(self, hostname) -> List[StorageNode]:
+    def get_storage_node_by_hostname(self, hostname) -> StorageNode:
         nodes = self.get_storage_nodes()
         for node in nodes:
             if node.hostname == hostname:

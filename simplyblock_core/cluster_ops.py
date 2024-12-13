@@ -536,7 +536,7 @@ def list():
     for cl in cls:
         st = db_controller.get_storage_nodes_by_cluster_id(cl.get_id())
         data.append({
-            "UUID": cl.id,
+            "UUID": cl.get_id(),
             "NQN": cl.nqn,
             "ha_type": cl.ha_type,
             "tls": cl.tls,

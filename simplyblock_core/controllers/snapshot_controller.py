@@ -44,7 +44,7 @@ def add(lvol_id, snapshot_name):
             logger.error(msg)
             return False, msg
 
-    logger.info(f"Creating snapshot: {snapshot_name} from LVol: {lvol.id}")
+    logger.info(f"Creating snapshot: {snapshot_name} from LVol: {lvol.get_id()}")
     snode = db_controller.get_storage_node_by_id(lvol.node_id)
 
 ##############################################################################
@@ -253,7 +253,7 @@ def clone(snapshot_id, clone_name, new_size=0):
     lvol.mode = 'read-write'
     lvol.cloned_from_snap = snapshot_id
     lvol.nqn = cluster.nqn + ":lvol:" + lvol.uuid
-    lvol.pool_uuid = pool.id
+    lvol.pool_uuid = pool.get_id()
     lvol.ha_type = snap.lvol.ha_type
     lvol.lvol_type = 'lvol'
     lvol.ndcs = snap.lvol.ndcs
