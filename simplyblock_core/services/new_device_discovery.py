@@ -1,25 +1,13 @@
 # coding=utf-8
-import logging
 import time
-import sys
 
-from simplyblock_core import constants, kv_store, storage_node_ops
+from simplyblock_core import constants, kv_store, storage_node_ops, utils
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
 
-# Import the GELF logger
-from graypy import GELFTCPHandler
-
 from simplyblock_core.snode_client import SNodeClient
 
-# configure logging
-logger_handler = logging.StreamHandler(stream=sys.stdout)
-logger_handler.setFormatter(logging.Formatter('%(asctime)s: %(levelname)s: %(message)s'))
-gelf_handler = GELFTCPHandler('0.0.0.0', constants.GELF_PORT)
-logger = logging.getLogger()
-logger.addHandler(gelf_handler)
-logger.addHandler(logger_handler)
-logger.setLevel(logging.DEBUG)
+logger = utils.get_logger(__name__)
 
 # get DB controller
 db_store = kv_store.KVStore()

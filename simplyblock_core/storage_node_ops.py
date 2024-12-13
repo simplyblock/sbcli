@@ -1255,14 +1255,11 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
         logger.error("Failed to set nvme options")
         return False
 
-    qpair = min(max(len(db_controller.get_storage_nodes_by_cluster_id(cluster_id)), 5) * snode.number_of_distribs, constants.QPAIR_COUNT)
-    if is_secondary_node:
-        qpair *= 2
-
+    qpair = cluster.qpair_count
     ret = rpc_client.transport_create("TCP", qpair)
     if not ret:
         logger.error(f"Failed to create transport TCP with qpair: {qpair}")
-        # return False
+        return False
 
     # 7- set jc singleton mask
     if snode.jc_singleton_mask:
@@ -1756,15 +1753,11 @@ def restart_storage_node(
         logger.error("Failed to set nvme options")
         return False
 
-    qpair = max(max(len(db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id)), 5) * snode.number_of_distribs,
-                constants.QPAIR_COUNT)
-    if snode.is_secondary_node:
-        qpair *= 2
-
+    qpair = cluster.qpair_count
     ret = rpc_client.transport_create("TCP", qpair)
     if not ret:
         logger.error(f"Failed to create transport TCP with qpair: {qpair}")
-        # return False
+        return False
 
     # 7- set jc singleton mask
     if snode.jc_singleton_mask:

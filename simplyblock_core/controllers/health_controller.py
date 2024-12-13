@@ -276,7 +276,8 @@ def check_node(node_id, with_devices=True):
 
             if snode.secondary_node_id:
                 second_node_1 = db_controller.get_storage_node_by_id(snode.secondary_node_id)
-                lvstore_check &= _check_node_lvstore(lvstore_stack, second_node_1)
+                if second_node_1.status == StorageNode.STATUS_ONLINE:
+                    lvstore_check &= _check_node_lvstore(lvstore_stack, second_node_1)
 
         if snode.is_secondary_node:
             for node in db_controller.get_storage_nodes():
