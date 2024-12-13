@@ -30,18 +30,6 @@ def get_env_var(name, default=None, is_required=False):
     return os.environ.get(name, default)
 
 
-def get_from_env_var_file(name, default=None):
-    if not name:
-        return False
-
-    with open("../env_var", "r", encoding="utf-8") as fh:
-        for line in fh.readlines():
-            if line.startswith(name):
-                return line.split("=", 1)[1].strip()
-
-    return default
-
-
 def get_baseboard_sn():
     # out, _, _ = shell_utils.run_command("dmidecode -s baseboard-serial-number")
     return get_system_id()
