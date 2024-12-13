@@ -289,20 +289,6 @@ services:
     environment:
       SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
 
-  StorageNodeSelfLock:
-    image: $SIMPLYBLOCK_DOCKER_IMAGE
-    command: "python simplyblock_core/services/storage_node_self_lock.py"
-    deploy:
-      mode: global
-      placement:
-        constraints: [node.role == worker]
-    volumes:
-      - "/etc/foundationdb:/etc/foundationdb"
-    networks:
-      - hostnet
-    environment:
-      SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
-
 
 volumes:
   os_data:
