@@ -47,7 +47,7 @@ COMMAND_NAME = get_env_var("SIMPLY_BLOCK_COMMAND_NAME", "sbcli")
 VERSION = get_env_var("SIMPLY_BLOCK_VERSION", "1")
 
 data_files = gen_data_files("simplyblock_core","simplyblock_web")
-data_files.append(('', ['env_var']))
+data_files.append(('', ['env_var', "requirements.txt"]))
 
 
 setup(
