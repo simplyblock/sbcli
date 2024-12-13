@@ -14,6 +14,8 @@ logger = logging.getLogger()
 def send_node_status_event(node, node_status, target_node=None):
     db_controller = DBController()
     node_id = node.get_id()
+    if node_status == StorageNode.STATUS_SCHEDULABLE:
+        node_status = StorageNode.STATUS_UNREACHABLE
     logging.info(f"Sending event updates, node: {node_id}, status: {node_status}")
     node_status_event = {
         "timestamp": datetime.datetime.now().isoformat("T", "seconds") + 'Z',

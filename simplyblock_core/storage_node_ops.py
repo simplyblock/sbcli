@@ -1351,12 +1351,9 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
 
     if cluster.ha_type == "ha":
         secondary_nodes = get_secondary_nodes(snode)
-        if not secondary_nodes:
-            logger.error(f"Failed to activate cluster, No enough secondary nodes")
-            return False
-
-        snode.secondary_node_id = secondary_nodes[0]
-        snode.write_to_db()
+        if secondary_nodes:
+            snode.secondary_node_id = secondary_nodes[0]
+            snode.write_to_db()
 
     if cluster.status not in  [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED]:
         logger.warning(f"The cluster status is not active ({cluster.status}), adding the node without distribs and lvstore")

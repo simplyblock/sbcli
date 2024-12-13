@@ -165,12 +165,11 @@ def get_current_cluster_status(cluster_id):
 
 def update_cluster_status(cluster_id):
     cluster = db_controller.get_cluster_by_id(cluster_id)
-
-    if cluster.status == Cluster.STATUS_READONLY or cluster.status == Cluster.STATUS_UNREADY \
-            or Cluster.STATUS_IN_ACTIVATION:
-        return
-    cluster_current_status = get_current_cluster_status(cluster_id)
     logger.info("cluster_status: %s", cluster.status)
+    if cluster.status in [Cluster.STATUS_READONLY, Cluster.STATUS_UNREADY, Cluster.STATUS_IN_ACTIVATION]:
+        return
+
+    cluster_current_status = get_current_cluster_status(cluster_id)
     logger.info("cluster_new_status: %s", cluster_current_status)
     if cluster.status not in [Cluster.STATUS_ACTIVE, Cluster.STATUS_UNREADY] and cluster_current_status == Cluster.STATUS_ACTIVE:
         # cluster_ops.cluster_activate(cluster_id, True)
@@ -274,11 +273,11 @@ while True:
             else:
                 set_node_offline(snode)
 
-                if not ping_check and not node_api_check and not spdk_process:
-                    # restart on new node
-                    storage_node_ops.set_node_status(snode.get_id(), StorageNode.STATUS_SCHEDULABLE)
+                # if not ping_check and not node_api_check and not spdk_process:
+                #     # restart on new node
+                #     storage_node_ops.set_node_status(snode.get_id(), StorageNode.STATUS_SCHEDULABLE)
 
-                elif ping_check and node_api_check and (not spdk_process or not node_rpc_check):
+                if ping_check and node_api_check and (not spdk_process or not node_rpc_check):
                     # add node to auto restart
                     if cluster.status == Cluster.STATUS_ACTIVE:
                         tasks_controller.add_node_to_auto_restart(snode)
