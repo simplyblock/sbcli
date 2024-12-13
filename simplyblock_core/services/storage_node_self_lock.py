@@ -1,20 +1,19 @@
 # coding=utf-8
+import json
+import os
 import time
-from importlib import reload
 
-import fdb
-
-from simplyblock_core import constants, utils
+from simplyblock_core import utils
 from simplyblock_core.snode_client import SNodeClient
 
 logger = utils.get_logger(__name__)
 
 logger.info("Starting node monitor")
+
+snode_api = SNodeClient("0.0.0.0:5000")
 MAX_RETRY = 6
 retry = MAX_RETRY
-error_open = False
-snode_api = SNodeClient("0.0.0.0:5000")
-
+db_available = True
 
 while True:
 
@@ -24,24 +23,24 @@ while True:
         is_up = False
 
     if is_up:
-        if error_open is True and retry <= 0:
-            # snode_api.spdk_process_kill()
-            error_open = False
+        if db_available is False and retry <= 0:
+            snode_api.spdk_process_kill()
             retry = MAX_RETRY
+
         else:
             try:
-                reload(fdb)
-                fdb.api_version(constants.KVD_DB_VERSION)
-                db = fdb.open(constants.KVD_DB_FILE_PATH)
-                db.options.set_transaction_timeout(5)
-                d =  db.get_range_startswith(b"/",  limit=1)
-                logger.info("Open db ok")
-                error_open = False
-                retry = MAX_RETRY
+                data = os.popen("fdbcli --exec \"status json\"").read().strip()
+                data = json.loads(data)
+                db_available = data["client"]['database_status']['available']
             except Exception as e:
                 logger.error(e)
+                db_available = False
+
+            if db_available:
+                logger.info("Open db ok")
+                retry = MAX_RETRY
+            else:
                 logger.info("Open db error")
-                error_open = True
                 retry -= 1
 
     time.sleep(10)
