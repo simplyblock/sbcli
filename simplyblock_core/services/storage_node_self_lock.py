@@ -25,7 +25,7 @@ while True:
 
     if is_up:
         if error_open is True and retry <= 0:
-            snode_api.spdk_process_kill()
+            # snode_api.spdk_process_kill()
             error_open = False
             retry = MAX_RETRY
         else:
