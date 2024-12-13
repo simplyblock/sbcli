@@ -1,5 +1,4 @@
 # coding=utf-8
-import datetime
 import pprint
 
 import json
@@ -8,7 +7,6 @@ from typing import Mapping
 
 class BaseModel(object):
 
-    id: str = ""
     uuid: str = ""
     name: str = ""
     status: str = ""
@@ -16,6 +14,7 @@ class BaseModel(object):
     updated_at: str = ""
     create_dt: str= ""
     remove_dt: str= ""
+    object_type: str= "object"
 
     _attribute_map = {}
 
@@ -32,6 +31,13 @@ class BaseModel(object):
             if not s.startswith("_"):
                 self._attribute_map[s]= {"type": getattr(self, s).__class__, "default": getattr(self, s)}
         self.from_dict(data)
+
+    def get_db_id(self, use_this_id=None):
+        if use_this_id:
+            return "%s/%s/%s" % (self.object_type, self.name, use_this_id)
+        else:
+            return "%s/%s/%s" % (self.object_type, self.name, self.get_id())
+
 
     def from_dict(self, data):
         for attr in self._attribute_map:
@@ -62,7 +68,6 @@ class BaseModel(object):
         return self
 
     def to_dict(self):
-        self.id = self.get_id()
         result = {}
         for attr in self._attribute_map:
             value = getattr(self, attr)
@@ -97,10 +102,8 @@ class BaseModel(object):
     def read_from_db(self, kv_store, id="", limit=0, reverse=False):
         try:
             objects = []
-            if not self.create_dt:
-                self.create_dt = str(datetime.datetime.now())
-            prefix = "%s/%s/%s" % (self.create_dt.replace(" ", ""), self.name, id)
-            for k, v in kv_store.db.get_range_startswith(prefix.encode('utf-8'),  limit=limit, reverse=reverse):
+            prefix = self.get_db_id(id)
+            for k, v in kv_store.get_range_startswith(prefix.encode('utf-8'),  limit=limit, reverse=reverse):
                 objects.append(self.__class__().from_dict(json.loads(v)))
             return objects
         except Exception as e:
@@ -108,7 +111,7 @@ class BaseModel(object):
             return []
 
     def get_last(self, kv_store):
-        id = "/".join(self.get_id().split("/")[:2])
+        id = self.get_db_id(" ")
         objects = self.read_from_db(kv_store, id=id, limit=1, reverse=True)
         if objects:
             return objects[0]
@@ -116,14 +119,12 @@ class BaseModel(object):
 
     def write_to_db(self, kv_store=None):
         if not kv_store:
-            from simplyblock_core.kv_store import KVStore
-            kv_store = KVStore()
+            from simplyblock_core.db_controller import DBController
+            kv_store = DBController().kv_store
         try:
-            if not self.create_dt:
-                self.create_dt = str(datetime.datetime.now())
-            prefix = "%s/%s/%s" % (self.create_dt.replace(" ", ""), self.name, self.get_id())
+            prefix = self.get_db_id()
             st = json.dumps(self.to_dict())
-            kv_store.db.set(prefix.encode(), st.encode())
+            kv_store.set(prefix.encode(), st.encode())
             return True
         except Exception as e:
             print("Error Writing to FDB!")
@@ -131,8 +132,8 @@ class BaseModel(object):
             exit(1)
 
     def remove(self, kv_store):
-        prefix = "%s/%s/%s" % (self.create_dt.replace(" ", ""), self.name, self.get_id())
-        return kv_store.db.clear(prefix.encode())
+        prefix = self.get_db_id()
+        return kv_store.clear(prefix.encode())
 
     def __repr__(self):
         """For `print` and `pprint`"""

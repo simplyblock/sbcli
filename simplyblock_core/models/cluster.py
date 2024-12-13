@@ -52,13 +52,10 @@ class Cluster(BaseModel):
     page_size_in_blocks: int = 2097152
     prov_cap_crit: int = 190
     prov_cap_warn: int = 180
-    qpair_count: int = 6
+    qpair_count: int = 32
     secret: str = ""
-    status: str = ""
     strict_node_anti_affinity: bool = False
     tls: bool = False
-    updated_at: str = ""
-    uuid: str = ""
 
     def __init__(self, data=None):
         super(Cluster, self).__init__(data=data)

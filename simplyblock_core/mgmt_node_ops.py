@@ -10,7 +10,7 @@ import docker
 
 from simplyblock_core import utils, scripts
 from simplyblock_core.controllers import mgmt_events
-from simplyblock_core.kv_store import DBController
+from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.mgmt_node import MgmtNode
 
 

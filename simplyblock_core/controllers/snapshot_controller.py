@@ -8,7 +8,7 @@ import uuid
 from simplyblock_core.controllers import lvol_controller, snapshot_events
 
 from simplyblock_core import utils, distr_controller, constants
-from simplyblock_core.kv_store import DBController
+from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.lvol_model import LVol

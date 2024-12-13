@@ -2,7 +2,7 @@
 import time
 
 
-from simplyblock_core import constants, kv_store, cluster_ops, storage_node_ops, utils
+from simplyblock_core import constants, db_controller, cluster_ops, storage_node_ops, utils
 from simplyblock_core.controllers import health_controller, device_controller, tasks_controller
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.nvme_device import NVMeDevice, JMDevice
@@ -13,8 +13,7 @@ logger = utils.get_logger(__name__)
 
 
 # get DB controller
-db_store = kv_store.KVStore()
-db_controller = kv_store.DBController(kv_store=db_store)
+db_controller = db_controller.DBController()
 
 
 def get_cluster_target_status(cluster_id):

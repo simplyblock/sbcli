@@ -1,6 +1,8 @@
 import logging
 import os
 
+from simplyblock_core import utils
+
 KVD_DB_VERSION = 730
 KVD_DB_FILE_PATH = '/etc/foundationdb/fdb.cluster'
 KVD_DB_TIMEOUT_MS = 10000
@@ -54,8 +56,10 @@ FDB_CHECK_INTERVAL_SEC = 60
 
 
 
-SIMPLY_BLOCK_DOCKER_IMAGE = "simplyblock/simplyblock:main"
-SIMPLY_BLOCK_CLI_NAME = "sbcli-dev"
+SIMPLY_BLOCK_DOCKER_IMAGE = utils.get_from_env_var_file(
+        "SIMPLY_BLOCK_DOCKER_IMAGE","simplyblock/simplyblock:main")
+SIMPLY_BLOCK_CLI_NAME = utils.get_from_env_var_file(
+        "SIMPLY_BLOCK_COMMAND_NAME", "sbcli")
 TASK_EXEC_INTERVAL_SEC = 30
 TASK_EXEC_RETRY_COUNT = 8
 

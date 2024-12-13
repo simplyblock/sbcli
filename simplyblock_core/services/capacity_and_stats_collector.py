@@ -1,7 +1,7 @@
 # coding=utf-8
 import time
 
-from simplyblock_core import constants, kv_store, utils
+from simplyblock_core import constants, db_controller, utils
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.rpc_client import RPCClient
 from simplyblock_core.models.stats import DeviceStatObject, NodeStatObject, ClusterStatObject
@@ -150,7 +150,7 @@ def add_cluster_stats(cl, records):
 
 
 # get DB controller
-db_controller = kv_store.DBController()
+db_controller = db_controller.DBController()
 
 logger.info("Starting capacity and stats collector...")
 while True:

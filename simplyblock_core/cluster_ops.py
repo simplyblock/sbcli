@@ -17,7 +17,7 @@ from jinja2 import Environment, FileSystemLoader
 from simplyblock_core import utils, scripts, constants, mgmt_node_ops, storage_node_ops, distr_controller
 from simplyblock_core.controllers import cluster_events, device_controller, storage_events, pool_controller, \
     lvol_controller
-from simplyblock_core.kv_store import DBController, KVStore
+from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.rpc_client import RPCClient
 from simplyblock_core.models.nvme_device import NVMeDevice
@@ -240,7 +240,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
 
     c.status = Cluster.STATUS_UNREADY
     c.create_dt = str(datetime.datetime.now())
-    db_controller = DBController(KVStore())
+    db_controller = DBController()
     c.write_to_db(db_controller.kv_store)
 
     cluster_events.cluster_create(c)

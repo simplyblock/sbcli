@@ -9,8 +9,6 @@ class IFace(BaseModel):
     ip4_address: str = ""
     net_type: str = ""
     port_number: int = -1
-    status: str = ""
-    uuid: str = ""
 
     def get_transport_type(self):
         if self.net_type == 'ether':

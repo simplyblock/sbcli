@@ -5,24 +5,13 @@ from simplyblock_core.models.base_model import BaseModel
 
 
 class EventObj(BaseModel):
+
     LEVEL_DEBUG = "Debug"
     LEVEL_INFO = "Info"
     LEVEL_WARN = "Warning"
     LEVEL_CRITICAL = "Critical"
     LEVEL_ERROR = "Error"
 
-    """
-    uuid:
-    cluster_uuid: 1234
-    event: STATUS_CHANGE
-    domain: Cluster, Management, Storage
-    object_name: cluster,
-    object_dict:
-    caused_by: CLI, API, MONITOR
-    message:
-    meta_data:
-    date:
-    """
     caused_by: str = ""
     cluster_uuid: str = ""
     count: int = 1

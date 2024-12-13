@@ -5,8 +5,6 @@ import re
 import sys
 
 from simplyblock_core import cluster_ops, utils
-from simplyblock_core import kv_store
-from simplyblock_core import compute_node_ops as compute_ops
 from simplyblock_core import storage_node_ops as storage_ops
 from simplyblock_core import mgmt_node_ops as mgmt_ops
 from simplyblock_core import constants
@@ -21,7 +19,6 @@ class CLIWrapper:
     def __init__(self):
         self.logger = logging.getLogger()
         self.logger.setLevel(constants.LOG_LEVEL)
-        self.db_store = kv_store.KVStore()
         self.init_parser()
 
         #
@@ -1264,17 +1261,13 @@ class CLIWrapper:
 
         print(ret)
 
-    def storage_node_list(self, args):
-        out = storage_ops.list_storage_nodes(self.db_store, args.json)
-        return out
-
     def storage_node_list_devices(self, args):
         node_id = args.node_id
         sort = args.sort
         if sort:
             sort = sort[0]
         is_json = args.json
-        out = storage_ops.list_storage_devices(self.db_store, node_id, sort, is_json)
+        out = storage_ops.list_storage_devices(node_id, sort, is_json)
         return out
 
     def cluster_add(self, args):

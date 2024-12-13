@@ -2,7 +2,7 @@
 import time
 
 
-from simplyblock_core import kv_store, storage_node_ops, utils
+from simplyblock_core import db_controller, storage_node_ops, utils
 from simplyblock_core.controllers import tasks_events
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.cluster import Cluster
@@ -11,7 +11,7 @@ from simplyblock_core.models.cluster import Cluster
 logger = utils.get_logger(__name__)
 
 # get DB controller
-db_controller = kv_store.DBController()
+db_controller = db_controller.DBController()
 
 
 logger.info("Starting Tasks runner...")

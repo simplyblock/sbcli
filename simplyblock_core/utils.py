@@ -30,6 +30,18 @@ def get_env_var(name, default=None, is_required=False):
     return os.environ.get(name, default)
 
 
+def get_from_env_var_file(name, default=None):
+    if not name:
+        return False
+
+    with open("../env_var", "r", encoding="utf-8") as fh:
+        for line in fh.readlines():
+            if line.startswith(name):
+                return line.split("=", 1)[1].strip()
+
+    return default
+
+
 def get_baseboard_sn():
     # out, _, _ = shell_utils.run_command("dmidecode -s baseboard-serial-number")
     return get_system_id()
@@ -126,7 +138,7 @@ def generate_string(length):
 
 
 def get_docker_client(cluster_id=None):
-    from simplyblock_core.kv_store import DBController
+    from simplyblock_core.db_controller import DBController
     db_controller = DBController()
     nodes = db_controller.get_mgmt_nodes(cluster_id)
     if not nodes:
@@ -297,7 +309,7 @@ def sum_records(records):
 
 
 def get_random_vuid():
-    from simplyblock_core.kv_store import DBController
+    from simplyblock_core.db_controller import DBController
     db_controller = DBController()
     used_vuids = []
     nodes = db_controller.get_storage_nodes()

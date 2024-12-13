@@ -34,7 +34,6 @@ class StatsObject(BaseModel):
     unmap_io_ps: int = 0
     unmap_latency_ps: int = 0
     unmap_latency_ticks: int = 0
-    uuid: str = ""
     write_bytes: int = 0
     write_bytes_ps: int = 0
     write_io: int = 0
@@ -43,7 +42,7 @@ class StatsObject(BaseModel):
     write_latency_ticks: int = 0
 
     def __init__(self, data=None):
-        super(StatsObject, self).__init__(attributes=None, data=data)
+        super(StatsObject, self).__init__(data=data)
 
     def get_id(self):
         return f"{self.cluster_id}/{self.uuid}/{self.date}/{self.record_duration}"

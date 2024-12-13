@@ -3,7 +3,7 @@ import logging
 import time
 import sys
 
-from simplyblock_core import constants, kv_store, storage_node_ops
+from simplyblock_core import constants, db_controller, storage_node_ops
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
 
@@ -22,8 +22,7 @@ logger.addHandler(logger_handler)
 logger.setLevel(logging.DEBUG)
 
 # get DB controller
-db_store = kv_store.KVStore()
-db_controller = kv_store.DBController()
+db_controller = db_controller.DBController()
 
 
 logger.info("Starting new device discovery service...")

@@ -10,7 +10,7 @@ import uuid
 
 from simplyblock_core import utils
 from simplyblock_core.controllers import pool_events
-from simplyblock_core.kv_store import DBController
+from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.pool import Pool
 
 logger = lg.getLogger()
@@ -53,7 +53,7 @@ def add_pool(name, pool_max, lvol_max, max_rw_iops, max_rw_mbytes, max_r_mbytes,
 
     logger.info("Adding pool")
     pool = Pool()
-    pool.id = str(uuid.uuid4())
+    pool.uuid = str(uuid.uuid4())
     pool.cluster_id = cluster.get_id()
     pool.pool_name = name
     if has_secret:

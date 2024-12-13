@@ -11,7 +11,7 @@ from typing import Tuple
 
 from simplyblock_core import utils, constants, distr_controller
 from simplyblock_core.controllers import snapshot_controller, pool_controller, lvol_events, caching_node_controller
-from simplyblock_core.kv_store import DBController
+from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.lvol_model import LVol
@@ -107,7 +107,7 @@ def validate_add_lvol_func(name, size, host_id_or_name, pool_id_or_name,
     #  pool validation
     pool = None
     for p in db_controller.get_pools():
-        if pool_id_or_name == p.id or pool_id_or_name == p.pool_name:
+        if pool_id_or_name == p.get_id() or pool_id_or_name == p.pool_name:
             pool = p
             break
     if not pool:
@@ -307,7 +307,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
 
     pool = None
     for p in db_controller.get_pools():
-        if pool_id_or_name == p.id or pool_id_or_name == p.pool_name:
+        if pool_id_or_name == p.get_id() or pool_id_or_name == p.pool_name:
             pool = p
             break
     if not pool:

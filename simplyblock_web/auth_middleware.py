@@ -4,7 +4,7 @@
 from functools import wraps
 from flask import request
 
-from simplyblock_core import kv_store
+from simplyblock_core.db_controller import DBController
 
 
 def token_required(f):
@@ -25,7 +25,7 @@ def token_required(f):
                 "error": "Unauthorized"
             }, 401
         try:
-            db_controller = kv_store.DBController()
+            db_controller = DBController()
             cluster = db_controller.get_cluster_by_id(cluster_id)
             if not cluster:
                 return {
