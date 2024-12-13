@@ -3,6 +3,7 @@ import json
 import requests
 import logging
 
+from simplyblock_core import constants
 from requests.adapters import HTTPAdapter
 from urllib3 import Retry
 
@@ -618,7 +619,7 @@ class RPCClient:
             "reconnect_delay_sec": 1,
             "keep_alive_timeout_ms": 10000,
             "transport_ack_timeout": 9,
-            "timeout_us": 0
+            "timeout_us": constants.NVME_TIMEOUT_US
         }
         return self._request("bdev_nvme_set_options", params)
 
