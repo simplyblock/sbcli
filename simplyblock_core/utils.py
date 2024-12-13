@@ -17,9 +17,6 @@ from simplyblock_core import constants
 from simplyblock_core import shell_utils
 
 
-logger = logging.getLogger()
-
-
 def get_env_var(name, default=None, is_required=False):
     if not name:
         logger.warning("Invalid env var name %s", name)
@@ -131,7 +128,7 @@ def get_docker_client(cluster_id=None):
     nodes = db_controller.get_mgmt_nodes(cluster_id)
     if not nodes:
         logger.error("No mgmt nodes was found in the cluster!")
-        exit(1)
+        return False
 
     docker_ips = [node.docker_ip_port for node in nodes]
 
@@ -139,9 +136,10 @@ def get_docker_client(cluster_id=None):
         try:
             c = docker.DockerClient(base_url=f"tcp://{ip}", version="auto")
             return c
-        except docker.errors.DockerException as e:
+        except Exception as e:
             print(e)
-    raise e
+            raise e
+    return False
 
 
 def dict_agg(data, mean=False):
@@ -580,23 +578,23 @@ def decimal_to_hex_power_of_2(decimal_number):
 
 def get_logger(name):
     # first configure a root logger
-    logger = logging.getLogger()
+    logg = logging.getLogger(name)
     log_level = os.getenv("SIMPLYBLOCK_LOG_LEVEL")
     log_level = log_level.upper() if log_level else constants.LOG_LEVEL
 
     try:
-        logger.setLevel(log_level)
+        logg.setLevel(log_level)
     except ValueError as e:
-        logger.warning(f'Invalid SIMPLYBLOCK_LOG_LEVEL: {str(e)}')
-        logger.setLevel(constants.LOG_LEVEL)
+        logg.warning(f'Invalid SIMPLYBLOCK_LOG_LEVEL: {str(e)}')
+        logg.setLevel(constants.LOG_LEVEL)
 
     logger_handler = logging.StreamHandler(stream=sys.stdout)
     logger_handler.setFormatter(logging.Formatter('%(asctime)s: %(levelname)s: %(message)s'))
-    logger.addHandler(logger_handler)
+    logg.addHandler(logger_handler)
 
     gelf_handler = GELFTCPHandler('0.0.0.0', constants.GELF_PORT)
-    logger.addHandler(gelf_handler)
-    return logging.getLogger(name)
+    logg.addHandler(gelf_handler)
+    return logg
 
 
 def parse_size(size_string: str):
@@ -654,3 +652,6 @@ def strfdelta(tdelta):
                 out += f"{values[field]}{field.lower()} "
 
     return out.strip()
+
+
+logger = get_logger(__name__)
