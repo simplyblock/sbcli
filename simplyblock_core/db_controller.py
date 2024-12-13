@@ -29,8 +29,7 @@ class Singleton(type):
             cls._instances[cls] = super(Singleton, cls).__call__(*args, **kwargs)
         return cls._instances[cls]
 
-
-class DBController(metaclass=Singleton):
+class DBController:
     kv_store=None
     try:
         fdb.api_version(constants.KVD_DB_VERSION)
