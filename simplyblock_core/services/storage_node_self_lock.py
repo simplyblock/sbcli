@@ -18,7 +18,11 @@ snode_api = SNodeClient("0.0.0.0:5000")
 
 while True:
 
-    is_up, _ = snode_api.spdk_process_is_up()
+    try:
+        is_up, _ = snode_api.spdk_process_is_up()
+    except:
+        is_up = False
+
     if is_up:
         if error_open is True and retry <= 0:
             snode_api.spdk_process_kill()

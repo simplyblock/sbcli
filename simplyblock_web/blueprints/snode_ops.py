@@ -217,7 +217,6 @@ def spdk_process_start():
 def spdk_process_kill():
     node_docker = get_docker_client()
     for cont in node_docker.containers.list(all=True):
-        logger.debug(cont.attrs)
         if cont.attrs['Name'] == "/spdk" or cont.attrs['Name'] == "/spdk_proxy":
             cont.stop(timeout=5)
             cont.remove(force=True)
@@ -228,7 +227,6 @@ def spdk_process_kill():
 def spdk_process_is_up():
     node_docker = get_docker_client()
     for cont in node_docker.containers.list(all=True):
-        logger.debug(cont.attrs)
         if cont.attrs['Name'] == "/spdk":
             status = cont.attrs['State']["Status"]
             is_running = cont.attrs['State']["Running"]
