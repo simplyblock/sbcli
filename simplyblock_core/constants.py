@@ -1,11 +1,12 @@
 import logging
 import os
+SCRIPT_PATH = os.path.dirname(os.path.realpath(__file__))
 
 
 def get_from_env_var_file(name, default=None):
     if not name:
         return False
-    with open("env_var", "r", encoding="utf-8") as fh:
+    with open(f"{SCRIPT_PATH}/env_var", "r", encoding="utf-8") as fh:
         for line in fh.readlines():
             if line.startswith(name):
                 return line.split("=", 1)[1].strip()
