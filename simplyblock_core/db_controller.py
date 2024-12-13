@@ -2,6 +2,7 @@
 import logging
 
 import fdb
+from typing import List
 
 from simplyblock_core import constants
 from simplyblock_core.models.caching_node import CachingNode
@@ -39,12 +40,12 @@ class DBController:
         logger.error(e)
 
 
-    def get_storage_nodes(self) -> list[StorageNode]:
+    def get_storage_nodes(self) -> List[StorageNode]:
         ret = StorageNode().read_from_db(self.kv_store)
         ret = sorted(ret, key=lambda x: x.create_dt)
         return ret
 
-    def get_storage_nodes_by_cluster_id(self, cluster_id) -> list[StorageNode]:
+    def get_storage_nodes_by_cluster_id(self, cluster_id) -> List[StorageNode]:
         ret = StorageNode().read_from_db(self.kv_store)
         nodes = []
         for n in ret:
@@ -64,7 +65,7 @@ class DBController:
             return ret[0]
 
     # todo: change this function for multi cluster
-    def get_caching_nodes(self) -> list[CachingNode]:
+    def get_caching_nodes(self) -> List[CachingNode]:
         ret = CachingNode().read_from_db(self.kv_store)
         ret = sorted(ret, key=lambda x: x.create_dt)
         return ret
@@ -74,19 +75,19 @@ class DBController:
         if ret:
             return ret[0]
 
-    def get_caching_node_by_system_id(self, system_id)  -> list[CachingNode]:
+    def get_caching_node_by_system_id(self, system_id)  -> List[CachingNode]:
         nodes = CachingNode().read_from_db(self.kv_store)
         for node in nodes:
             if node.system_uuid == system_id:
                 return node
 
-    def get_caching_node_by_hostname(self, hostname)  -> list[CachingNode]:
+    def get_caching_node_by_hostname(self, hostname)  -> List[CachingNode]:
         nodes = self.get_caching_nodes()
         for node in nodes:
             if node.hostname == hostname:
                 return node
 
-    def get_storage_node_by_hostname(self, hostname) -> list[StorageNode]:
+    def get_storage_node_by_hostname(self, hostname) -> List[StorageNode]:
         nodes = self.get_storage_nodes()
         for node in nodes:
             if node.hostname == hostname:
@@ -99,7 +100,7 @@ class DBController:
                 if dev.get_id() == id:
                     return dev
 
-    def get_pools(self, cluster_id=None) -> list[Pool]:
+    def get_pools(self, cluster_id=None) -> List[Pool]:
         pools = []
         if cluster_id:
             for pool in Pool().read_from_db(self.kv_store):
@@ -120,7 +121,7 @@ class DBController:
             if pool.pool_name == name:
                 return pool
 
-    def get_lvols(self, cluster_id=None) -> list[LVol]:
+    def get_lvols(self, cluster_id=None) -> List[LVol]:
         lvols = []
         if cluster_id:
             for pool in self.get_pools(cluster_id):
@@ -132,7 +133,7 @@ class DBController:
             lvols = LVol().read_from_db(self.kv_store)
         return sorted(lvols, key=lambda x: x.create_dt)
 
-    def get_snapshots(self) -> list[SnapShot]:
+    def get_snapshots(self) -> List[SnapShot]:
         ret = SnapShot().read_from_db(self.kv_store)
         return ret
 
@@ -156,7 +157,7 @@ class DBController:
         if ret:
             return ret[0]
 
-    def get_mgmt_nodes(self) -> list[MgmtNode]:
+    def get_mgmt_nodes(self) -> List[MgmtNode]:
         return MgmtNode().read_from_db(self.kv_store)
 
     def get_mgmt_node_by_hostname(self, hostname) -> MgmtNode:
@@ -165,48 +166,48 @@ class DBController:
             if node.hostname == hostname:
                 return node
 
-    def get_lvol_stats(self, lvol, limit=20) -> list[LVolStatObject]:
+    def get_lvol_stats(self, lvol, limit=20) -> List[LVolStatObject]:
         if isinstance(lvol, str):
             lvol = self.get_lvol_by_id(lvol)
         stats = LVolStatObject().read_from_db(self.kv_store, id="%s/%s" % (lvol.pool_uuid, lvol.uuid), limit=limit,
                                               reverse=True)
         return stats
 
-    def get_cached_lvol_stats(self, lvol_id, limit=20) -> list[CachedLVolStatObject]:
+    def get_cached_lvol_stats(self, lvol_id, limit=20) -> List[CachedLVolStatObject]:
         stats = CachedLVolStatObject().read_from_db(self.kv_store, id="%s/%s" % (lvol_id, lvol_id), limit=limit,
                                                     reverse=True)
         return stats
 
-    def get_pool_stats(self, pool, limit=20) -> list[PoolStatObject]:
+    def get_pool_stats(self, pool, limit=20) -> List[PoolStatObject]:
         stats = PoolStatObject().read_from_db(self.kv_store, id="%s/%s" % (pool.get_id(), pool.get_id()), limit=limit,
                                               reverse=True)
         return stats
 
-    def get_cluster_stats(self, cluster, limit=20) -> list[ClusterStatObject]:
+    def get_cluster_stats(self, cluster, limit=20) -> List[ClusterStatObject]:
         return self.get_cluster_capacity(cluster, limit)
 
-    def get_node_stats(self, node, limit=20) -> list[NodeStatObject]:
+    def get_node_stats(self, node, limit=20) -> List[NodeStatObject]:
         return self.get_node_capacity(node, limit)
 
-    def get_device_stats(self, device, limit=20) -> list[DeviceStatObject]:
+    def get_device_stats(self, device, limit=20) -> List[DeviceStatObject]:
         return self.get_device_capacity(device, limit)
 
-    def get_cluster_capacity(self, cl, limit=1) -> list[ClusterStatObject]:
+    def get_cluster_capacity(self, cl, limit=1) -> List[ClusterStatObject]:
         stats = ClusterStatObject().read_from_db(
             self.kv_store, id="%s/%s" % (cl.get_id(), cl.get_id()), limit=limit, reverse=True)
         return stats
 
-    def get_node_capacity(self, node, limit=1) -> list[NodeStatObject]:
+    def get_node_capacity(self, node, limit=1) -> List[NodeStatObject]:
         stats = NodeStatObject().read_from_db(
             self.kv_store, id="%s/%s" % (node.cluster_id, node.get_id()), limit=limit, reverse=True)
         return stats
 
-    def get_device_capacity(self, device, limit=1) -> list[DeviceStatObject]:
+    def get_device_capacity(self, device, limit=1) -> List[DeviceStatObject]:
         stats = DeviceStatObject().read_from_db(
             self.kv_store, id="%s/%s" % (device.cluster_id, device.get_id()), limit=limit, reverse=True)
         return stats
 
-    def get_clusters(self) -> list[Cluster]:
+    def get_clusters(self) -> List[Cluster]:
         return Cluster().read_from_db(self.kv_store)
 
     def get_cluster_by_id(self, cluster_id) -> Cluster:
@@ -214,7 +215,7 @@ class DBController:
         if ret:
             return ret[0]
 
-    def get_deployers(self) -> list[Deployer]:
+    def get_deployers(self) -> List[Deployer]:
         return Deployer().read_from_db(self.kv_store)
 
     def get_deployer_by_id(self, deployer_id) -> Deployer:
@@ -222,14 +223,14 @@ class DBController:
         if ret:
             return ret[0]
 
-    def get_port_stats(self, node_id, port_id, limit=20) -> list[PortStat]:
+    def get_port_stats(self, node_id, port_id, limit=20) -> List[PortStat]:
         stats = PortStat().read_from_db(self.kv_store, id="%s/%s" % (node_id, port_id), limit=limit, reverse=True)
         return stats
 
-    def get_events(self, event_id="") -> list[EventObj]:
+    def get_events(self, event_id="") -> List[EventObj]:
         return EventObj().read_from_db(self.kv_store, id=event_id)
 
-    def get_job_tasks(self, cluster_id, reverse=True) -> list[JobSchedule]:
+    def get_job_tasks(self, cluster_id, reverse=True) -> List[JobSchedule]:
         return JobSchedule().read_from_db(self.kv_store, id=cluster_id, reverse=reverse)
 
     def get_task_by_id(self, task_id) -> JobSchedule:
@@ -237,7 +238,7 @@ class DBController:
             if task.uuid == task_id:
                 return task
 
-    def get_snapshots_by_node_id(self, node_id) -> list[SnapShot]:
+    def get_snapshots_by_node_id(self, node_id) -> List[SnapShot]:
         ret = []
         snaps = SnapShot().read_from_db(self.kv_store)
         for snap in snaps:
@@ -257,7 +258,7 @@ class DBController:
             if node.jm_device and node.jm_device.get_id() == jm_id:
                 return node.jm_device
 
-    def get_primary_storage_nodes_by_cluster_id(self, cluster_id) -> list[StorageNode]:
+    def get_primary_storage_nodes_by_cluster_id(self, cluster_id) -> List[StorageNode]:
         ret = StorageNode().read_from_db(self.kv_store)
         nodes = []
         for n in ret:
@@ -265,7 +266,7 @@ class DBController:
                 nodes.append(n)
         return sorted(nodes, key=lambda x: x.create_dt)
 
-    def get_primary_storage_nodes_by_secondary_node_id(self, node_id) -> list[StorageNode]:
+    def get_primary_storage_nodes_by_secondary_node_id(self, node_id) -> List[StorageNode]:
         ret = StorageNode().read_from_db(self.kv_store)
         nodes = []
         for node in ret:
