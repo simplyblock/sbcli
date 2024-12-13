@@ -3273,10 +3273,8 @@ def get_cluster_map(node_id):
         return False
 
     distribs_list = []
-    nodes = []
-
+    nodes = [snode]
     if snode.is_secondary_node:
-        nodes = [snode]
         for node in db_controller.get_storage_nodes():
             if node.secondary_node_id == snode.get_id():
                 for bdev in node.lvstore_stack:
@@ -3285,7 +3283,11 @@ def get_cluster_map(node_id):
                         distribs_list.extend(bdev["distribs_list"])
 
     else:
-        nodes = [snode, db_controller.get_storage_node_by_id(snode.secondary_node_id)]
+        if snode.secondary_node_id:
+            sec =  db_controller.get_storage_node_by_id(snode.secondary_node_id)
+            if sec:
+                nodes.append(sec)
+
         for bdev in snode.lvstore_stack:
             type = bdev['type']
             if type == "bdev_raid":
