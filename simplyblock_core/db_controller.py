@@ -158,8 +158,11 @@ class DBController(metaclass=Singleton):
         if ret:
             return ret[0]
 
-    def get_mgmt_nodes(self) -> List[MgmtNode]:
-        return MgmtNode().read_from_db(self.kv_store)
+    def get_mgmt_nodes(self, cluster_id=None) -> List[MgmtNode]:
+        nodes = MgmtNode().read_from_db(self.kv_store)
+        if cluster_id:
+            nodes = [n for n in nodes if n.cluster_id == cluster_id]
+        return sorted(nodes, key=lambda x: x.create_dt)
 
     def get_mgmt_node_by_hostname(self, hostname) -> MgmtNode:
         nodes = self.get_mgmt_nodes()

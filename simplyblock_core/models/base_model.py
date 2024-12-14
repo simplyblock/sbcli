@@ -4,6 +4,7 @@ import pprint
 import json
 from inspect import ismethod
 from typing import Mapping
+from collections import ChainMap
 
 
 class BaseModel(object):
@@ -17,21 +18,25 @@ class BaseModel(object):
     remove_dt: str= ""
     object_type: str= "object"
 
-    _attribute_map = {}
 
     def __init__(self, data=None):
         self.name = self.__class__.__name__
-        self.set_attrs(data)
+        self.from_dict(data)
+
+    def all_annotations(self) -> ChainMap:
+        """Returns a dictionary-like ChainMap that includes annotations for all
+           attributes defined in cls or inherited from superclasses."""
+        return ChainMap(*(c.__annotations__ for c in self.__class__.__mro__ if '__annotations__' in c.__dict__))
 
     def get_id(self):
         return self.uuid
 
-    def set_attrs(self, data):
-        self._attribute_map = {}
-        for s in self.__dir__():
+    def get_attrs_map(self):
+        _attribute_map = {}
+        for s , t in self.all_annotations().items():
             if not s.startswith("_") and not ismethod(getattr(self, s)):
-                self._attribute_map[s]= {"type": getattr(self, s).__class__, "default": getattr(self, s)}
-        self.from_dict(data)
+                _attribute_map[s]= {"type": t, "default": getattr(self, s)}
+        return _attribute_map
 
     def get_db_id(self, use_this_id=None):
         if use_this_id:
@@ -39,14 +44,14 @@ class BaseModel(object):
         else:
             return "%s/%s/%s" % (self.object_type, self.name, self.get_id())
 
-
     def from_dict(self, data):
-        for attr in self._attribute_map:
+        for attr , value_dict in self.get_attrs_map().items():
+            value = value_dict['default']
             if data is not None and attr in data:
-                dtype = self._attribute_map[attr]['type']
+                dtype = value_dict['type']
                 value = data[attr]
                 if dtype in [int, float, str, bool]:
-                    value = self._attribute_map[attr]['type'](data[attr])
+                    value = value_dict['type'](data[attr])
                 elif hasattr(dtype, '__origin__'):
                     if dtype.__origin__ == list:
                         if hasattr(dtype, "__args__") and hasattr(dtype.__args__[0], "from_dict"):
@@ -57,20 +62,15 @@ class BaseModel(object):
                         if hasattr(dtype, "__args__") and hasattr(dtype.__args__[1], "from_dict"):
                             value = {item: dtype.__args__[1]().from_dict(data[attr][item]) for item in data[attr]}
                         else:
-                            value = self._attribute_map[attr]['type'](data[attr])
-                elif hasattr(dtype, '__origin__') and hasattr(dtype, "__args__"):
-                    if hasattr(dtype.__args__[0], "from_dict"):
-                        value = dtype.__args__[0]().from_dict(data[attr])
+                            value = value_dict['type'](data[attr])
                 else:
-                    value = self._attribute_map[attr]['type'](data[attr])
-                setattr(self, attr, value)
-            else:
-                setattr(self, attr, self._attribute_map[attr]['default'])
+                    value = value_dict['type'](data[attr])
+            setattr(self, attr, value)
         return self
 
     def to_dict(self):
         result = {}
-        for attr in self._attribute_map:
+        for attr in self.get_attrs_map():
             value = getattr(self, attr)
             if isinstance(value, list):
                 result[attr] = list(map(lambda x: x.to_dict() if hasattr(x, "to_dict") else x, value))
