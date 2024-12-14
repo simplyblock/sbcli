@@ -32,4 +32,4 @@ class JobSchedule(BaseModel):
 
     def write_to_db(self, kv_store=None):
         self.updated_at = str(datetime.datetime.now())
-        self.write_to_db(kv_store)
+        super().write_to_db(kv_store)
