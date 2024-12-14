@@ -1822,6 +1822,13 @@ def restart_storage_node(
         if node_ip:
             # prepare devices on new node
             if snode.num_partitions_per_dev == 0 or snode.jm_percent == 0:
+
+                jm_device = nvme_devs[0]
+                for index, nvme in enumerate(nvme_devs):
+                    if nvme.size < jm_device.size:
+                        jm_device = nvme
+                jm_device.status = NVMeDevice.STATUS_JM
+
                 ret = _prepare_cluster_devices_jm_on_dev(snode, nvme_devs)
             else:
                 ret = _prepare_cluster_devices_partitions(snode, nvme_devs)
