@@ -67,8 +67,8 @@ class CLIWrapper:
         sub_command.add_argument("node_id", help='UUID of storage node')
         sub_command.add_argument("--force-remove", help='Force remove all LVols and snapshots',
                                  dest='force_remove', required=False, action='store_true')
-        sub_command.add_argument("--force-migrate", help='Force migrate All LVols to other nodes',
-                                 dest='force_migrate', required=False, action='store_true')
+        # sub_command.add_argument("--force-migrate", help='Force migrate All LVols to other nodes',
+        #                          dest='force_migrate', required=False, action='store_true')
         # List all storage nodes
         sub_command = self.add_sub_command(subparser, "list", 'List storage nodes')
         sub_command.add_argument("--cluster-id", help='id of the cluster for which nodes are listed', dest='cluster_id')

@@ -94,10 +94,6 @@ class BaseModel(object):
         return data
 
     def to_str(self):
-        """Returns the string representation of the model
-
-        :rtype: str
-        """
         return pprint.pformat(self.to_dict())
 
     def read_from_db(self, kv_store, id="", limit=0, reverse=False):
@@ -128,13 +124,15 @@ class BaseModel(object):
             kv_store.set(prefix.encode(), st.encode())
             return True
         except Exception as e:
-            print("Error Writing to FDB!")
-            print(e)
+            print(f"Error Writing to FDB! {e}")
             exit(1)
 
     def remove(self, kv_store):
         prefix = self.get_db_id()
         return kv_store.clear(prefix.encode())
+
+    def keys(self):
+        return self.get_attrs_map().keys()
 
     def __repr__(self):
         """For `print` and `pprint`"""
@@ -147,7 +145,7 @@ class BaseModel(object):
         return not self == other
 
     def __getitem__(self, item):
-        if isinstance(item, str) and item in self._attribute_map:
+        if isinstance(item, str) and item in self.get_attrs_map().keys():
             return getattr(self, item)
         return False
 

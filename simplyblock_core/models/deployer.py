@@ -46,8 +46,6 @@ class Deployer(BaseModel):
     volumes_per_storage_nodes: int = 0
     whitelist_ips: str = ""
 
-    def __init__(self, data=None):
-        super(Deployer, self).__init__(data=data)
 
     def get_status_code(self):
         if self.status in self.STATUS_CODE_MAP:

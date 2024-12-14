@@ -41,14 +41,9 @@ class StatsObject(BaseModel):
     write_latency_ps: int = 0
     write_latency_ticks: int = 0
 
-    def __init__(self, data=None):
-        super(StatsObject, self).__init__(data=data)
 
     def get_id(self):
         return f"{self.cluster_id}/{self.uuid}/{self.date}/{self.record_duration}"
-
-    def keys(self):
-        return self._attribute_map
 
     def __add__(self, other):
         data = {
@@ -57,8 +52,8 @@ class StatsObject(BaseModel):
         if isinstance(other, StatsObject):
             self_dict = self.to_dict()
             other_dict = other.to_dict()
-            for attr in self._attribute_map:
-                if self._attribute_map[attr]['type'] in [int, float]:
+            for attr, value in self.get_attrs_map().items():
+                if value['type'] in [int, float]:
                     data[attr] = self_dict[attr] + other_dict[attr]
         return StatsObject(data)
 
@@ -69,8 +64,8 @@ class StatsObject(BaseModel):
         if isinstance(other, StatsObject):
             self_dict = self.to_dict()
             other_dict = other.to_dict()
-            for attr in self._attribute_map:
-                if self._attribute_map[attr]['type'] in [int, float]:
+            for attr, value in self.get_attrs_map().items():
+                if value['type'] in [int, float]:
                     data[attr] = self_dict[attr] - other_dict[attr]
         return StatsObject(data)
 

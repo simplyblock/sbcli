@@ -57,9 +57,6 @@ class Cluster(BaseModel):
     strict_node_anti_affinity: bool = False
     tls: bool = False
 
-    def __init__(self, data=None):
-        super(Cluster, self).__init__(data=data)
-
     def get_status_code(self):
         if self.status in self.STATUS_CODE_MAP:
             return self.STATUS_CODE_MAP[self.status]
