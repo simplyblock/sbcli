@@ -21,7 +21,7 @@ class StatsObject(BaseModel):
     record_duration: int = 2
     record_end_time: int = 0
     record_start_time: int = 0
-    pool_id: Pool = None
+    pool_id: str = ""
     size_free: int = 0
     size_prov: int = 0
     size_prov_util: int = 0
@@ -71,7 +71,7 @@ class StatsObject(BaseModel):
 
     def get_range(self, kv_store, start_date, end_date):
         try:
-            prefix = f"{self.create_dt}/{self.name}/{self.cluster_id}/{self.uuid}"
+            prefix = f"{self.object_type}/{self.name}/{self.cluster_id}/{self.uuid}"
             start_key = f"{prefix}/{start_date}"
             end_key = f"{prefix}/{end_date}"
             objects = []
