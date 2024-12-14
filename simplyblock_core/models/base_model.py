@@ -100,7 +100,7 @@ class BaseModel(object):
         try:
             objects = []
             prefix = self.get_db_id(id)
-            for k, v in kv_store.get_range_startswith(prefix.encode('utf-8'),  limit=limit, reverse=reverse):
+            for k, v in kv_store.get_range_startswith(prefix.strip().encode('utf-8'),  limit=limit, reverse=reverse):
                 objects.append(self.__class__().from_dict(json.loads(v)))
             return objects
         except Exception as e:

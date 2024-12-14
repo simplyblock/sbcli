@@ -231,14 +231,14 @@ class DBController(metaclass=Singleton):
         stats = PortStat().read_from_db(self.kv_store, id="%s/%s" % (node_id, port_id), limit=limit, reverse=True)
         return stats
 
-    def get_events(self, event_id="") -> List[EventObj]:
+    def get_events(self, event_id=" ") -> List[EventObj]:
         return EventObj().read_from_db(self.kv_store, id=event_id)
 
     def get_job_tasks(self, cluster_id, reverse=True) -> List[JobSchedule]:
         return JobSchedule().read_from_db(self.kv_store, id=cluster_id, reverse=reverse)
 
     def get_task_by_id(self, task_id) -> JobSchedule:
-        for task in self.get_job_tasks(""):
+        for task in self.get_job_tasks(" "):
             if task.uuid == task_id:
                 return task
 
