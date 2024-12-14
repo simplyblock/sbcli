@@ -33,3 +33,7 @@ class JobSchedule(BaseModel):
     def write_to_db(self, kv_store=None):
         self.updated_at = str(datetime.datetime.now())
         super().write_to_db(kv_store)
+
+
+    def get_id(self):
+        return "%s/%s/%s" % (self.cluster_id, self.date, self.uuid)

@@ -27,6 +27,9 @@ class EventObj(BaseModel):
     storage_id: int = -1
     vuid: int = -1
 
+    def get_id(self):
+        return "%s/%s/%s" % (self.cluster_uuid, self.date, self.uuid)
+
     def get_date_string(self):
         if self.date > 1e10:
             return str(datetime.fromtimestamp(self.date/1000))[:23]
