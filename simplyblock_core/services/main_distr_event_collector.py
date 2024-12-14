@@ -135,7 +135,10 @@ def start_event_collector_on_node(node_id):
                     if events:
                         logger.info(f"Found events: {len(events)}")
                         for event_dict in events:
-                            sid = event_dict['storage_ID']
+                            if "storage_ID" in event_dict:
+                                sid = event_dict['storage_ID']
+                            elif "vuid" in event_dict:
+                                sid = event_dict['vuid']
                             et = event_dict['event_type']
                             msg = event_dict['status']
                             if sid not in events_groups:
