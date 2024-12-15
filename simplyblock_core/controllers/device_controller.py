@@ -49,8 +49,6 @@ def device_set_state(device_id, state):
         snode.write_to_db(db_controller.kv_store)
         device_events.device_status_change(device, device.status, old_status)
 
-    distr_controller.send_dev_status_event(device, device.status)
-
     if state == NVMeDevice.STATUS_ONLINE:
         logger.info("Make other nodes connect to the node devices")
         snodes = db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id)
@@ -59,6 +57,8 @@ def device_set_state(device_id, state):
                 continue
             node.remote_devices = storage_node_ops._connect_to_remote_devs(node)
             node.write_to_db()
+
+    distr_controller.send_dev_status_event(device, device.status)
 
     return True
 
@@ -218,35 +218,6 @@ def restart_device(device_id, force=False):
         logger.error("Failed to create device stack")
         if not force:
             return False
-
-    logger.info("Make other nodes connect to the device")
-    snodes = db_controller.get_storage_nodes()
-    for node_index, node in enumerate(snodes):
-        if node.get_id() == snode.get_id():
-            continue
-        if node.status != snode.STATUS_ONLINE:
-            continue
-
-        rpc_client = RPCClient(node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password)
-        name = f"remote_{device_obj.alceml_bdev}"
-        ret = rpc_client.bdev_nvme_attach_controller_tcp(name, device_obj.nvmf_nqn, device_obj.nvmf_ip,
-                                                         device_obj.nvmf_port)
-        if not ret:
-            logger.error(f"Failed to connect to device: {name}")
-            continue
-
-        device_obj.remote_bdev = f"{name}n1"
-        idx = -1
-        for i, d in enumerate(node.remote_devices):
-            if d.get_id() == device_obj.get_id():
-                idx = i
-                break
-        if idx >= 0:
-            node.remote_devices[idx] = device_obj
-        else:
-            node.remote_devices.append(device_obj)
-        node.write_to_db(db_controller.kv_store)
-        time.sleep(3)
 
     logger.info("Setting device io_error to False")
     device_set_io_error(device_id, False)
