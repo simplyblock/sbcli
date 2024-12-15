@@ -446,7 +446,7 @@ def _create_storage_device_stack(rpc_client, nvme, snode, after_restart):
     alceml_name = device_controller.get_alceml_name(alceml_id)
     logger.info(f"adding {alceml_name}")
     pba_init_mode = 3
-    if after_restart:
+    if after_restart and nvme.status != NVMeDevice.STATUS_NEW:
         pba_init_mode = 1
     alceml_cpu_mask = ""
     alceml_worker_cpu_mask = ""
@@ -875,15 +875,15 @@ def _connect_to_remote_jm_devs(this_node, jm_ids=[]):
         if not org_dev:
             continue
 
-        name = f"remote_{jm_dev.jm_bdev}"
+        name = f"remote_{org_dev.jm_bdev}"
         bdev_name = f"{name}n1"
-        jm_dev.remote_bdev = bdev_name
+        org_dev.remote_bdev = bdev_name
 
         if org_dev.status == NVMeDevice.STATUS_ONLINE:
             if bdev_name in node_bdev_names:
                 logger.debug(f"bdev found {bdev_name}")
-                jm_dev.status = JMDevice.STATUS_ONLINE
-                new_devs.append(jm_dev)
+                org_dev.status = JMDevice.STATUS_ONLINE
+                new_devs.append(org_dev)
             else:
                 if rpc_client.bdev_nvme_controller_list(name):
                     logger.info(f"detaching {name} from {this_node.get_id()}")
@@ -892,21 +892,21 @@ def _connect_to_remote_jm_devs(this_node, jm_ids=[]):
 
                 logger.info(f"Connecting {name} to {this_node.get_id()}")
                 ret = rpc_client.bdev_nvme_attach_controller_tcp_JM(
-                    name, jm_dev.nvmf_nqn, jm_dev.nvmf_ip, jm_dev.nvmf_port)
+                    name, org_dev.nvmf_nqn, org_dev.nvmf_ip, org_dev.nvmf_port)
                 if ret:
-                    jm_dev.status = JMDevice.STATUS_ONLINE
+                    org_dev.status = JMDevice.STATUS_ONLINE
                 else:
                     logger.error(f"failed to connect to remote JM {name}")
-                    jm_dev.status = JMDevice.STATUS_UNAVAILABLE
-                new_devs.append(jm_dev)
+                    org_dev.status = JMDevice.STATUS_UNAVAILABLE
+                new_devs.append(org_dev)
 
         else:
             # if bdev_name in node_bdev_names:
             #     logger.debug(f"bdev found {bdev_name}")
             #     rpc_client.bdev_nvme_detach_controller(name)
 
-            jm_dev.status = JMDevice.STATUS_UNAVAILABLE
-            new_devs.append(jm_dev)
+            org_dev.status = JMDevice.STATUS_UNAVAILABLE
+            new_devs.append(org_dev)
 
     return new_devs
 
@@ -1828,6 +1828,9 @@ def restart_storage_node(
                     if nvme.size < jm_device.size:
                         jm_device = nvme
                 jm_device.status = NVMeDevice.STATUS_JM
+
+                if snode.jm_device and snode.jm_device.get_id():
+                    jm_device.uuid = snode.jm_device.get_id()
 
                 ret = _prepare_cluster_devices_jm_on_dev(snode, nvme_devs)
             else:

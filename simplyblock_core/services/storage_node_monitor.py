@@ -296,11 +296,11 @@ while True:
             else:
                 set_node_offline(snode)
 
-                # if not ping_check and not node_api_check and not spdk_process:
-                #     # restart on new node
-                #     storage_node_ops.set_node_status(snode.get_id(), StorageNode.STATUS_SCHEDULABLE)
+                if not ping_check and not node_api_check and not spdk_process:
+                    # restart on new node
+                    storage_node_ops.set_node_status(snode.get_id(), StorageNode.STATUS_SCHEDULABLE)
 
-                if ping_check and node_api_check and (not spdk_process or not node_rpc_check):
+                elif ping_check and node_api_check and (not spdk_process or not node_rpc_check):
                     # add node to auto restart
                     if cluster.status in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_SUSPENDED]:
                         tasks_controller.add_node_to_auto_restart(snode)

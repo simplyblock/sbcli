@@ -24,18 +24,19 @@ while True:
             logger.warning(f"Skipping node, id: {node.get_id()}, status: {node.status}")
             continue
 
-        known_pcie = [dev.pcie_address for dev in node.nvme_devices]
-        if node.jm_device and 'pcie_address' in node.jm_device.device_data_dict:
-            known_pcie.append(node.jm_device.device_data_dict['pcie_address'])
+        known_sn = [dev.serial_number for dev in node.nvme_devices]
+        if node.jm_device and 'serial_number' in node.jm_device.device_data_dict:
+            known_sn.append(node.jm_device.device_data_dict['serial_number'])
 
         snode_api = SNodeClient(node.api_endpoint)
         node_info, _ = snode_api.info()
 
-        node_pcie = node_info['spdk_pcie_list']
 
         # check for unused nvme devices
         if "lsblk" in node_info:
             for dev in node_info['nvme_devices']:
+                if dev['serial_number'] in known_sn:
+                    continue
                 for block_dev in node_info['lsblk']['blockdevices']:
                     if block_dev['name'] == dev['device_name']:
                         if 'children' not in block_dev:
@@ -43,18 +44,12 @@ while True:
                             # try mount to spdk driver
                             snode_api.bind_device_to_spdk(dev['address'])
                             time.sleep(3)
-
-        # check for dev again
-        node_info, _ = snode_api.info()
-        node_pcie = node_info['spdk_pcie_list']
-        for pc in node_pcie:
-            if pc not in known_pcie:
-                logger.info(f"New ssd found: {pc}")
-                devs = storage_node_ops.addNvmeDevices(node, [pc])
-                if devs:
-                    new_dev = devs[0]
-                    new_dev.status = NVMeDevice.STATUS_NEW
-                    node.nvme_devices.append(new_dev)
-                    node.write_to_db(db_controller.kv_store)
+                            devs = storage_node_ops.addNvmeDevices(node, [dev['address']])
+                            if devs:
+                                logger.info(f"New ssd found: {dev['address']}")
+                                new_dev = devs[0]
+                                new_dev.status = NVMeDevice.STATUS_NEW
+                                node.nvme_devices.append(new_dev)
+                                node.write_to_db(db_controller.kv_store)
 
     time.sleep(constants.DEV_DISCOVERY_INTERVAL_SEC)
