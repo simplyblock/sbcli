@@ -7,7 +7,7 @@ from simplyblock_core.controllers import health_controller, device_controller, t
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.nvme_device import NVMeDevice, JMDevice
 from simplyblock_core.models.storage_node import StorageNode
-from simplyblock_core.rpc_client import RPCClient
+
 
 logger = utils.get_logger(__name__)
 
@@ -181,11 +181,6 @@ def update_cluster_status(cluster_id):
 def set_node_online(node):
     if node.status != StorageNode.STATUS_ONLINE:
 
-        if not node.is_secondary_node and node.status == StorageNode.STATUS_UNREACHABLE and node.lvols and \
-                cluster.status in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_SUSPENDED]:
-                tasks_controller.add_node_to_auto_restart(node)
-                return
-
         # set node online
         storage_node_ops.set_node_status(node.get_id(), StorageNode.STATUS_ONLINE)
 
@@ -212,20 +207,6 @@ def set_node_offline(node):
         # # set jm dev offline
         # if node.jm_device.status != JMDevice.STATUS_UNAVAILABLE:
         #     device_controller.set_jm_device_state(node.jm_device.get_id(), JMDevice.STATUS_UNAVAILABLE)
-
-        if node.secondary_node_id:
-            sec_node = db_controller.get_storage_node_by_id(node.secondary_node_id)
-            if sec_node and sec_node.status == StorageNode.STATUS_ONLINE:
-                remote_rpc_client = RPCClient(sec_node.mgmt_ip, sec_node.rpc_port, sec_node.rpc_username,
-                                              sec_node.rpc_password)
-
-                for lvol_id in node.lvols:
-                    lvol = db_controller.get_lvol_by_id(lvol_id)
-                    if lvol:
-                        for iface in sec_node.data_nics:
-                            if iface.ip4_address:
-                                ret = remote_rpc_client.nvmf_subsystem_listener_set_ana_state(
-                                    lvol.nqn, iface.ip4_address, "4420", True)
 
 
 logger.info("Starting node monitor")
@@ -295,11 +276,11 @@ while True:
             else:
                 set_node_offline(snode)
 
-                # if not ping_check and not node_api_check and not spdk_process:
-                #     # restart on new node
-                #     storage_node_ops.set_node_status(snode.get_id(), StorageNode.STATUS_SCHEDULABLE)
+                if not ping_check and not node_api_check and not spdk_process:
+                    # restart on new node
+                    storage_node_ops.set_node_status(snode.get_id(), StorageNode.STATUS_SCHEDULABLE)
 
-                if ping_check and node_api_check and (not spdk_process or not node_rpc_check):
+                elif ping_check and node_api_check and (not spdk_process or not node_rpc_check):
                     # add node to auto restart
                     if cluster.status in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_SUSPENDED]:
                         tasks_controller.add_node_to_auto_restart(snode)
