@@ -26,20 +26,27 @@ logger = logging.getLogger()
 class Singleton(type):
     _instances = {}
     def __call__(cls, *args, **kwargs):
-        if cls not in cls._instances:
-            cls._instances[cls] = super(Singleton, cls).__call__(*args, **kwargs)
-        return cls._instances[cls]
+        if cls in cls._instances:
+            return cls._instances[cls]
+        else:
+            ins = super(Singleton, cls).__call__(*args, **kwargs)
+            if ins is not None and ins.kv_store is not None:
+                cls._instances[cls] = ins
+            return ins
+
 
 
 class DBController(metaclass=Singleton):
-    kv_store=None
-    try:
-        fdb.api_version(constants.KVD_DB_VERSION)
-        kv_store = fdb.open(constants.KVD_DB_FILE_PATH)
-        kv_store.options.set_transaction_timeout(constants.KVD_DB_TIMEOUT_MS)
-    except Exception as e:
-        logger.error(e)
 
+    kv_store=None
+
+    def __init__(self):
+        try:
+            fdb.api_version(constants.KVD_DB_VERSION)
+            self.kv_store = fdb.open(constants.KVD_DB_FILE_PATH)
+            self.kv_store.options.set_transaction_timeout(constants.KVD_DB_TIMEOUT_MS)
+        except Exception as e:
+            logger.error(e)
 
     def get_storage_nodes(self) -> List[StorageNode]:
         ret = StorageNode().read_from_db(self.kv_store)
@@ -279,4 +286,3 @@ class DBController(metaclass=Singleton):
                     and node.lvstore and len(node.lvols) > 0:
                 nodes.append(node)
         return sorted(nodes, key=lambda x: x.create_dt)
-
