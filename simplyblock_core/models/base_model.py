@@ -33,6 +33,10 @@ class BaseModel(object):
     def get_id(self):
         return self.uuid
 
+    @property
+    def id(self):
+        return self.get_id()
+
     def get_attrs_map(self):
         _attribute_map = {}
         for s , t in self.all_annotations().items():
