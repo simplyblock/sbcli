@@ -1,0 +1,5 @@
+SIMPLY_BLOCK_COMMAND_NAME=sbcli-new-db
+SIMPLY_BLOCK_VERSION=0.1.5
+
+SIMPLY_BLOCK_DOCKER_IMAGE=simplyblock/simplyblock:new-db
+DOCKER_USER=hamdysimplyblock

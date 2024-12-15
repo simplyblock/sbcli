@@ -7,7 +7,7 @@ from simplyblock_core.controllers import health_controller, storage_events, devi
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.rpc_client import RPCClient
-from simplyblock_core import constants, kv_store, utils, distr_controller
+from simplyblock_core import constants, db_controller, utils, distr_controller
 
 logger = utils.get_logger(__name__)
 
@@ -19,7 +19,7 @@ def set_node_health_check(snode, health_check_status):
     old_status = snode.health_check
     snode.health_check = health_check_status
     snode.updated_at = str(datetime.now())
-    snode.write_to_db(db_store)
+    snode.write_to_db()
     storage_events.snode_health_check_change(snode, snode.health_check, old_status, caused_by="monitor")
 
 
@@ -33,14 +33,13 @@ def set_device_health_check(cluster_id, device, health_check_status):
                 if dev.get_id() == device.get_id():
                     old_status = dev.health_check
                     dev.health_check = health_check_status
-                    node.write_to_db(db_store)
+                    node.write_to_db()
                     device_events.device_health_check_change(
                         dev, dev.health_check, old_status, caused_by="monitor")
 
 
 # get DB controller
-db_store = kv_store.KVStore()
-db_controller = kv_store.DBController()
+db_controller = db_controller.DBController()
 
 logger.info("Starting health check service")
 while True:

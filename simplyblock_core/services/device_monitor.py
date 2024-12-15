@@ -1,7 +1,7 @@
 # coding=utf-8
 import time
 
-from simplyblock_core import constants, kv_store, utils
+from simplyblock_core import constants, db_controller, utils
 from simplyblock_core.controllers import tasks_controller
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
@@ -11,8 +11,7 @@ logger = utils.get_logger(__name__)
 
 
 # get DB controller
-db_store = kv_store.KVStore()
-db_controller = kv_store.DBController()
+db_controller = db_controller.DBController()
 
 
 logger.info("Starting Device monitor...")

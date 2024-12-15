@@ -3,7 +3,7 @@ import time
 import psutil
 
 
-from simplyblock_core import constants, kv_store, utils
+from simplyblock_core import constants, db_controller, utils
 from simplyblock_core.models.port_stat import PortStat
 
 
@@ -37,7 +37,7 @@ def update_port_stats(snode, nic, stats):
 
 
 # get DB controller
-db_controller = kv_store.DBController()
+db_controller = db_controller.DBController()
 
 hostname = utils.get_hostname()
 logger.info("Starting port stats collector...")

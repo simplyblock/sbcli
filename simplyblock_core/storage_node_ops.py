@@ -16,7 +16,7 @@ from simplyblock_core import constants, scripts, distr_controller
 from simplyblock_core import utils
 from simplyblock_core.controllers import lvol_controller, storage_events, snapshot_controller, device_events, \
     device_controller, tasks_controller, health_controller
-from simplyblock_core.kv_store import DBController, KVStore
+from simplyblock_core.db_controller import DBController
 from simplyblock_core import shell_utils
 from simplyblock_core.models.iface import IFace
 from simplyblock_core.models.job_schedule import JobSchedule
@@ -1956,8 +1956,8 @@ def list_storage_nodes(is_json, cluster_id=None):
     return output
 
 
-def list_storage_devices(kv_store, node_id, sort, is_json):
-    db_controller = DBController(kv_store)
+def list_storage_devices(node_id, sort, is_json):
+    db_controller = DBController()
     snode = db_controller.get_storage_node_by_id(node_id)
     if not snode:
         logger.error("This storage node is not part of the cluster")
@@ -2305,161 +2305,6 @@ def resume_storage_node(node_id):
 
     logger.info("Setting node status to online")
     set_node_status(snode.get_id(), StorageNode.STATUS_ONLINE)
-    logger.info("Done")
-    return True
-
-
-# not used in AWS, must run on bare-metal servers
-def run_test_storage_device(kv_store, dev_name):
-    db_controller = DBController(kv_store)
-    baseboard_sn = utils.get_baseboard_sn()
-    snode = db_controller.get_storage_node_by_id(baseboard_sn)
-    if not snode:
-        logger.error("This storage node is not part of the cluster")
-        exit(1)
-
-    nvme_device = None
-    for node_nvme_device in snode.nvme_devices:
-        if node_nvme_device.device_name == dev_name:
-            nvme_device = node_nvme_device
-            break
-
-    if nvme_device is None:
-        logger.error("Device not found")
-        exit(1)
-
-    global_settings = db_controller.get_global_settings()
-    logger.debug("Running smart-log on device: %s", dev_name)
-    smart_log_data = _run_nvme_smart_log(dev_name)
-    if "critical_warning" in smart_log_data:
-        critical_warnings = smart_log_data["critical_warning"]
-        if critical_warnings > 0:
-            logger.info("Critical warnings found: %s on device: %s, setting drive to failed state" %
-                        (critical_warnings, dev_name))
-            nvme_device.status = NVMeDevice.STATUS_FAILED
-    logger.debug("Running smart-log-add on device: %s", dev_name)
-    additional_smart_log = _run_nvme_smart_log_add(dev_name)
-    program_fail_count = additional_smart_log['Device stats']['program_fail_count']['normalized']
-    erase_fail_count = additional_smart_log['Device stats']['erase_fail_count']['normalized']
-    crc_error_count = additional_smart_log['Device stats']['crc_error_count']['normalized']
-    if program_fail_count < global_settings.NVME_PROGRAM_FAIL_COUNT:
-        nvme_device.status = NVMeDevice.STATUS_FAILED
-        logger.info("program_fail_count: %s is below %s on drive: %s, setting drive to failed state",
-                    program_fail_count, global_settings.NVME_PROGRAM_FAIL_COUNT, dev_name)
-    if erase_fail_count < global_settings.NVME_ERASE_FAIL_COUNT:
-        nvme_device.status = NVMeDevice.STATUS_FAILED
-        logger.info("erase_fail_count: %s is below %s on drive: %s, setting drive to failed state",
-                    erase_fail_count, global_settings.NVME_ERASE_FAIL_COUNT, dev_name)
-    if crc_error_count < global_settings.NVME_CRC_ERROR_COUNT:
-        nvme_device.status = NVMeDevice.STATUS_FAILED
-        logger.info("crc_error_count: %s is below %s on drive: %s, setting drive to failed state",
-                    crc_error_count, global_settings.NVME_CRC_ERROR_COUNT, dev_name)
-
-    snode.write_to_db(kv_store)
-    logger.info("Done")
-
-
-# Deprecated
-def add_storage_device(dev_name, node_id, cluster_id):
-    db_controller = DBController()
-    kv_store = db_controller.kv_store
-    cluster = db_controller.get_cluster_by_id(cluster_id)
-    if not cluster:
-        logger.error("Cluster not found: %s", cluster_id)
-        return False
-
-    snode = db_controller.get_storage_node_by_id(node_id)
-    if not snode:
-        logger.error("Node is not part of the cluster: %s", node_id)
-        exit(1)
-
-    for node_nvme_device in snode.nvme_devices:
-        if node_nvme_device.device_name == dev_name:
-            logger.error("Device already added to the cluster")
-            exit(1)
-
-    nvme_devs = _get_nvme_list(cluster)
-    for device in nvme_devs:
-        if device.device_name == dev_name:
-            nvme_device = device
-            break
-    else:
-        logger.error("Device not found: %s", dev_name)
-        exit(1)
-
-    # running smart tests
-    logger.debug("Running smart-log on device: %s", dev_name)
-    smart_log_data = _run_nvme_smart_log(dev_name)
-    if "critical_warning" in smart_log_data:
-        critical_warnings = smart_log_data["critical_warning"]
-        if critical_warnings > 0:
-            logger.info("Critical warnings found: %s on device: %s" % (critical_warnings, dev_name))
-            exit(1)
-
-    logger.debug("Running smart-log-add on device: %s", dev_name)
-    additional_smart_log = _run_nvme_smart_log_add(dev_name)
-    program_fail_count = additional_smart_log['Device stats']['program_fail_count']['normalized']
-    erase_fail_count = additional_smart_log['Device stats']['erase_fail_count']['normalized']
-    crc_error_count = additional_smart_log['Device stats']['crc_error_count']['normalized']
-    if program_fail_count < constants.NVME_PROGRAM_FAIL_COUNT:
-        logger.info("program_fail_count: %s is below %s on drive: %s",
-                    program_fail_count, constants.NVME_PROGRAM_FAIL_COUNT, dev_name)
-        exit(1)
-    if erase_fail_count < constants.NVME_ERASE_FAIL_COUNT:
-        logger.info("erase_fail_count: %s is below %s on drive: %s",
-                    erase_fail_count, constants.NVME_ERASE_FAIL_COUNT, dev_name)
-        exit(1)
-    if crc_error_count < constants.NVME_CRC_ERROR_COUNT:
-        logger.info("crc_error_count: %s is below %s on drive: %s",
-                    crc_error_count, constants.NVME_CRC_ERROR_COUNT, dev_name)
-        exit(1)
-
-    logger.info("binding spdk drivers")
-    bind_spdk_driver(nvme_device.pcie_address)
-    time.sleep(1)
-
-    logger.info("init device in spdk")
-    # creating RPCClient instance
-    rpc_client = RPCClient(
-        snode.mgmt_ip,
-        snode.rpc_port,
-        snode.rpc_username,
-        snode.rpc_password)
-
-    # attach bdev controllers
-    logger.info("adding controller")
-    ret = rpc_client.bdev_nvme_controller_attach("nvme_ultr21a_%s" % nvme_device.sequential_number,
-                                                 nvme_device.pcie_address)
-    logger.debug(ret)
-
-    logger.debug("controllers list")
-    ret = rpc_client.bdev_nvme_controller_list()
-    logger.debug(ret)
-
-    # allocate bdevs
-    logger.info("Allocating bdevs")
-    ret = rpc_client.allocate_bdev(nvme_device.device_name, nvme_device.sequential_number)
-    logger.debug(ret)
-
-    # creating namespaces
-    logger.info("Creating namespaces")
-    ret = rpc_client.nvmf_subsystem_add_ns(snode.subsystem, nvme_device.device_name)
-    logger.debug(ret)
-
-    # set device new sequential number, increase node device count
-    nvme_device.sequential_number = snode.sequential_number
-    snode.sequential_number += nvme_device.partitions_count
-    snode.partitions_count += nvme_device.partitions_count
-    snode.nvme_devices.append(nvme_device)
-    snode.write_to_db(kv_store)
-
-    # create or update cluster map
-    logger.info("Updating cluster map")
-    cmap = db_controller.get_cluster_map()
-    cmap.recalculate_partitions()
-    logger.debug(cmap)
-    cmap.write_to_db(kv_store)
-
     logger.info("Done")
     return True
 
@@ -2917,7 +2762,7 @@ def recreate_lvstore_on_sec(snode, primary_node=None):
 
 
 def recreate_lvstore(snode):
-    db_controller = DBController(KVStore())
+    db_controller = DBController()
 
     if snode.is_secondary_node:
         return recreate_lvstore_on_sec(snode)
@@ -2986,7 +2831,7 @@ def recreate_lvstore(snode):
 
 
 def get_next_ha_jms(current_node):
-    db_controller = DBController(KVStore())
+    db_controller = DBController()
     jm_count = {}
     for node in db_controller.get_storage_nodes_by_cluster_id(current_node.cluster_id):
         if (node.get_id() == current_node.get_id() or node.status != StorageNode.STATUS_ONLINE  or
@@ -3006,7 +2851,7 @@ def get_next_ha_jms(current_node):
 
 
 def get_node_jm_names(current_node):
-    db_controller = DBController(KVStore())
+    db_controller = DBController()
     jm_list = []
     if current_node.jm_device:
         jm_list.append(current_node.jm_device.jm_bdev)
@@ -3020,7 +2865,7 @@ def get_node_jm_names(current_node):
 
 
 def get_secondary_nodes(current_node):
-    db_controller = DBController(KVStore())
+    db_controller = DBController()
     nodes = []
     for node in db_controller.get_storage_nodes_by_cluster_id(current_node.cluster_id):
         if node.get_id() != current_node.get_id() and node.is_secondary_node:
@@ -3029,7 +2874,7 @@ def get_secondary_nodes(current_node):
 
 
 def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blocks, max_size, nodes):
-    db_controller = DBController(KVStore())
+    db_controller = DBController()
     lvstore_stack = []
     distrib_list = []
     distrib_vuids = []

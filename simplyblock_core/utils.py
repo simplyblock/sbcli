@@ -123,7 +123,7 @@ def generate_string(length):
 
 
 def get_docker_client(cluster_id=None):
-    from simplyblock_core.kv_store import DBController
+    from simplyblock_core.db_controller import DBController
     db_controller = DBController()
     nodes = db_controller.get_mgmt_nodes(cluster_id)
     if not nodes:
@@ -295,7 +295,7 @@ def sum_records(records):
 
 
 def get_random_vuid():
-    from simplyblock_core.kv_store import DBController
+    from simplyblock_core.db_controller import DBController
     db_controller = DBController()
     used_vuids = []
     nodes = db_controller.get_storage_nodes()

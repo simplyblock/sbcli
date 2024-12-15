@@ -4,7 +4,7 @@ import json
 import logging
 
 from simplyblock_core.models.events import EventObj
-from simplyblock_core.kv_store import DBController
+from simplyblock_core.db_controller import DBController
 from simplyblock_core import constants
 
 from graypy import GELFTCPHandler

@@ -4,13 +4,13 @@ import logging
 import time
 import uuid
 
-from simplyblock_core import kv_store, constants, utils
+from simplyblock_core import db_controller, constants, utils
 from simplyblock_core.controllers import tasks_events, device_controller
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.storage_node import StorageNode
 
 logger = logging.getLogger()
-db_controller = kv_store.DBController()
+db_controller = db_controller.DBController()
 
 
 def _validate_new_task_dev_restart(cluster_id, node_id, device_id):
@@ -75,7 +75,7 @@ def _add_task(function_name, cluster_id, node_id, device_id,
 
 
 def add_device_mig_task(device_id):
-    device = db_controller.get_storage_devices(device_id)
+    device = db_controller.get_storage_device_by_id(device_id)
     for node in db_controller.get_storage_nodes_by_cluster_id(device.cluster_id):
         if node.status == StorageNode.STATUS_REMOVED:
             continue
@@ -171,7 +171,7 @@ def get_active_node_mig_task(cluster_id, node_id):
 
 
 def add_device_failed_mig_task(device_id):
-    device = db_controller.get_storage_devices(device_id)
+    device = db_controller.get_storage_device_by_id(device_id)
     for node in db_controller.get_storage_nodes_by_cluster_id(device.cluster_id):
         if node.status == StorageNode.STATUS_REMOVED:
             continue
@@ -183,7 +183,7 @@ def add_device_failed_mig_task(device_id):
 
 
 def add_new_device_mig_task(device_id):
-    device = db_controller.get_storage_devices(device_id)
+    device = db_controller.get_storage_device_by_id(device_id)
     for node in db_controller.get_storage_nodes_by_cluster_id(device.cluster_id):
         if node.status == StorageNode.STATUS_REMOVED:
             continue

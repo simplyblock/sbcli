@@ -4,7 +4,7 @@ import time
 import sys
 
 
-from simplyblock_core import constants, kv_store
+from simplyblock_core import constants, db_controller
 from simplyblock_core.controllers import tasks_events, tasks_controller, device_controller
 from simplyblock_core.models.job_schedule import JobSchedule
 
@@ -57,7 +57,7 @@ def task_runner(task):
     rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password,
                            timeout=5, retry=2)
     if "migration" not in task.function_params:
-        device = db_controller.get_storage_devices(task.device_id)
+        device = db_controller.get_storage_device_by_id(task.device_id)
         distr_name = task.function_params["distr_name"]
 
         if not device:
@@ -133,7 +133,7 @@ logger.addHandler(logger_handler)
 logger.setLevel(logging.DEBUG)
 
 # get DB controller
-db_controller = kv_store.DBController()
+db_controller = db_controller.DBController()
 logger.info("Starting Tasks runner...")
 while True:
     time.sleep(3)

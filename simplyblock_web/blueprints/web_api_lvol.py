@@ -11,12 +11,12 @@ from simplyblock_core.controllers import lvol_controller, snapshot_controller
 
 from simplyblock_web import utils
 
-from simplyblock_core import kv_store
+from simplyblock_core import db_controller
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 bp = Blueprint("lvol", __name__)
-db_controller = kv_store.DBController()
+db_controller = db_controller.DBController()
 
 
 @bp.route('/lvol', defaults={'uuid': None}, methods=['GET'])
@@ -115,7 +115,7 @@ def add_lvol():
 
     pool = None
     for p in db_controller.get_pools():
-        if pool_id_or_name == p.id or pool_id_or_name == p.pool_name:
+        if pool_id_or_name == p.get_id() or pool_id_or_name == p.pool_name:
             pool = p
             break
     if not pool:

@@ -2,7 +2,7 @@
 import time
 from datetime import datetime
 
-from simplyblock_core import constants, kv_store, utils
+from simplyblock_core import constants, db_controller, utils
 from simplyblock_core.controllers import tasks_events, tasks_controller
 from simplyblock_core.models.job_schedule import JobSchedule
 
@@ -70,7 +70,7 @@ def task_runner(task):
             task.write_to_db(db_controller.kv_store)
             return False
 
-        device = db_controller.get_storage_devices(task.device_id)
+        device = db_controller.get_storage_device_by_id(task.device_id)
         distr_name = task.function_params["distr_name"]
 
         if not device:
@@ -117,7 +117,7 @@ def task_runner(task):
 
 
 # get DB controller
-db_controller = kv_store.DBController()
+db_controller = db_controller.DBController()
 
 logger.info("Starting Tasks runner...")
 while True:

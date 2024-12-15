@@ -1,7 +1,7 @@
 # coding=utf-8
 import time
 
-from simplyblock_core import constants, kv_store, storage_node_ops, utils
+from simplyblock_core import constants, db_controller, storage_node_ops, utils
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
 
@@ -10,8 +10,7 @@ from simplyblock_core.snode_client import SNodeClient
 logger = utils.get_logger(__name__)
 
 # get DB controller
-db_store = kv_store.KVStore()
-db_controller = kv_store.DBController()
+db_controller = db_controller.DBController()
 
 
 logger.info("Starting new device discovery service...")
