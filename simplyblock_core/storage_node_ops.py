@@ -446,7 +446,7 @@ def _create_storage_device_stack(rpc_client, nvme, snode, after_restart):
     alceml_name = device_controller.get_alceml_name(alceml_id)
     logger.info(f"adding {alceml_name}")
     pba_init_mode = 3
-    if after_restart:
+    if after_restart and nvme.status != NVMeDevice.STATUS_NEW:
         pba_init_mode = 1
     alceml_cpu_mask = ""
     alceml_worker_cpu_mask = ""
@@ -485,7 +485,6 @@ def _create_storage_device_stack(rpc_client, nvme, snode, after_restart):
         logger.error(f"Failed to create pt noexcl bdev: {pt_name}")
         return False
 
-    cluster = db_controller.get_cluster_by_id(snode.cluster_id)
     subsystem_nqn = snode.subsystem + ":dev:" + alceml_id
     logger.info("creating subsystem %s", subsystem_nqn)
     ret = rpc_client.subsystem_create(subsystem_nqn, 'sbcli-cn', alceml_id)
@@ -1828,6 +1827,9 @@ def restart_storage_node(
                     if nvme.size < jm_device.size:
                         jm_device = nvme
                 jm_device.status = NVMeDevice.STATUS_JM
+
+                if snode.jm_device and snode.jm_device.get_id():
+                    jm_device.uuid = snode.jm_device.get_id()
 
                 ret = _prepare_cluster_devices_jm_on_dev(snode, nvme_devs)
             else:
