@@ -33,8 +33,8 @@ def _create_update_user(cluster_id, grafana_url, grafana_secret, user_secret, up
     headers = {
         'X-Requested-By': '',
         'Content-Type': 'application/json',
-    }        
-    
+    }
+    retries = 5
     if update_secret:
         url = f"{grafana_url}/api/users/lookup?loginOrEmail={cluster_id}"
         response = session.request("GET", url, headers=headers)
@@ -45,15 +45,16 @@ def _create_update_user(cluster_id, grafana_url, grafana_secret, user_secret, up
         })
         
         url = f"{grafana_url}/api/admin/users/{userid}/password"
-        
-        while True:
+
+        while retries > 0:
             response = session.request("PUT", url, headers=headers, data=payload)
             if response.status_code == 200:
                 logger.debug(f"user create/update {cluster_id} succeeded")
                 break
             logger.debug(response.status_code)
-            logger.debug("waiting for grafana api to come up")        
-            time.sleep(5)
+            logger.debug("waiting for grafana api to come up")
+            retries -= 1
+            time.sleep(3)
 
         return response.status_code == 200
     else:
@@ -69,7 +70,8 @@ def _create_update_user(cluster_id, grafana_url, grafana_secret, user_secret, up
                 logger.debug(f"user create/update {cluster_id} succeeded")
                 break
             logger.debug(response.status_code)
-            logger.debug("waiting for grafana api to come up")        
+            logger.debug("waiting for grafana api to come up")
+            retries -= 1
             time.sleep(5)
 
         return response.status_code == 200

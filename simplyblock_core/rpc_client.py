@@ -1,13 +1,12 @@
 import json
 
 import requests
-import logging
 
-from simplyblock_core import constants
+from simplyblock_core import constants, utils
 from requests.adapters import HTTPAdapter
 from urllib3 import Retry
 
-logger = logging.getLogger()
+logger = utils.get_logger(__name__)
 
 
 def print_dict(d):
