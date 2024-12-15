@@ -74,8 +74,7 @@ class SbcliUtils:
                 if resp.status_code == HTTPStatus.OK:
                     data = resp.json()
                 else:
-                    self.logger.error('request failed. status_code', resp.status_code)
-                    self.logger.error('request failed. text', resp.text)
+                    self.logger.error(f"request failed. status_code: {resp.status_code}, text: {resp.text}")
                     resp.raise_for_status()
                 return data
             except Exception as e:
@@ -85,6 +84,7 @@ class SbcliUtils:
                     self.logger.info(f"Retry attempt exhausted. API {api_url} failed with: {e}.")
                     raise e
                 self.logger.info(f"Retrying API {api_url}. Attempt: {10 - retry + 1}")
+                sleep_n_sec(3)
 
     def delete_request(self, api_url, headers=None):
         """Performs delete request on the given API URL
@@ -106,8 +106,7 @@ class SbcliUtils:
                 if resp.status_code == HTTPStatus.OK:
                     data = resp.json()
                 else:
-                    self.logger.error('request failed. status_code', resp.status_code)
-                    self.logger.error('request failed. text', resp.text)
+                    self.logger.error(f"request failed. status_code: {resp.status_code}, text: {resp.text}")
                     resp.raise_for_status()
                 return data
             except Exception as e:
@@ -117,6 +116,7 @@ class SbcliUtils:
                     self.logger.info(f"Retry attempt exhausted. API {api_url} failed with: {e}.")
                     raise e
                 self.logger.info(f"Retrying API {api_url}. Attempt: {5 - retry + 1}")
+                sleep_n_sec(3)
 
     def put_request(self, api_url, headers=None, body=None):
         """Performs put request on the given API URL
@@ -140,8 +140,7 @@ class SbcliUtils:
                 if resp.status_code == HTTPStatus.OK:
                     data = resp.json()
                 else:
-                    self.logger.error('request failed. status_code', resp.status_code)
-                    self.logger.error('request failed. text', resp.text)
+                    self.logger.error(f"request failed. status_code: {resp.status_code}, text: {resp.text}")
                     resp.raise_for_status()
                 return data
             except Exception as e:
@@ -151,6 +150,7 @@ class SbcliUtils:
                     self.logger.info(f"Retry attempt exhausted. API {api_url} failed with: {e}.")
                     raise e
                 self.logger.info(f"Retrying API {api_url}. Attempt: {10 - retry + 1}")
+                sleep_n_sec(3)
 
     def add_storage_node(self, cluster_id, node_ip, ifname, max_lvol, max_prov, max_snap,
                          number_of_distribs, number_of_devices, partitions, jm_percent,
