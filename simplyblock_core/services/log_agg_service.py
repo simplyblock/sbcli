@@ -5,7 +5,7 @@ import logging
 import time
 import sys
 
-from simplyblock_core import constants, kv_store, utils
+from simplyblock_core import constants, db_controller, utils
 from simplyblock_core.models.stats import DeviceStatObject, NodeStatObject, ClusterStatObject
 
 # Import the GELF logger
@@ -21,7 +21,7 @@ logger.addHandler(logger_handler)
 logger.setLevel(logging.DEBUG)
 
 # get DB controller
-db_controller = kv_store.DBController()
+db_controller = db_controller.DBController()
 
 logger.info("Starting Log aggregation service ...")
 while True:

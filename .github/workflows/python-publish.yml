@@ -3,7 +3,7 @@ name: Python Package Build
 on:
   push:
     paths:
-      - 'env_var'
+      - 'simplyblock_core/env_var'
 
 permissions:
   contents: read

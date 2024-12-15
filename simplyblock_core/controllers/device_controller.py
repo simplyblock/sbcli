@@ -3,7 +3,7 @@ import logging
 
 from simplyblock_core import distr_controller, utils, storage_node_ops
 from simplyblock_core.controllers import device_events, lvol_controller, tasks_controller
-from simplyblock_core.kv_store import DBController
+from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.nvme_device import NVMeDevice, JMDevice
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.rpc_client import RPCClient
@@ -14,7 +14,7 @@ logger = logging.getLogger()
 
 def device_set_state(device_id, state):
     db_controller = DBController()
-    dev = db_controller.get_storage_devices(device_id)
+    dev = db_controller.get_storage_device_by_id(device_id)
     if not dev:
         logger.error("device not found")
         return False
@@ -65,7 +65,7 @@ def device_set_state(device_id, state):
 
 def device_set_io_error(device_id, is_error):
     db_controller = DBController()
-    dev = db_controller.get_storage_devices(device_id)
+    dev = db_controller.get_storage_device_by_id(device_id)
     if not dev:
         logger.error("device not found")
 
@@ -182,7 +182,7 @@ def _def_create_device_stack(device_obj, snode, force=False):
 
 def restart_device(device_id, force=False):
     db_controller = DBController()
-    dev = db_controller.get_storage_devices(device_id)
+    dev = db_controller.get_storage_device_by_id(device_id)
     if not dev:
         logger.error("device not found")
 
@@ -276,7 +276,7 @@ def restart_device(device_id, force=False):
 
 def set_device_testing_mode(device_id, mode):
     db_controller = DBController()
-    device = db_controller.get_storage_devices(device_id)
+    device = db_controller.get_storage_device_by_id(device_id)
     if not device:
         logger.error("device not found")
         return False
@@ -323,7 +323,7 @@ def set_device_testing_mode(device_id, mode):
 
 def device_remove(device_id, force=True):
     db_controller = DBController()
-    dev = db_controller.get_storage_devices(device_id)
+    dev = db_controller.get_storage_device_by_id(device_id)
     if not dev:
         logger.error("device not found")
         return False
@@ -411,7 +411,7 @@ def device_remove(device_id, force=True):
 
 def get_device(device_id):
     db_controller = DBController()
-    device = db_controller.get_storage_devices(device_id)
+    device = db_controller.get_storage_device_by_id(device_id)
     if not device:
         logger.error("device not found")
         return False
@@ -421,7 +421,7 @@ def get_device(device_id):
 
 def get_device_capacity(device_id, history, records_count=20, parse_sizes=True):
     db_controller = DBController()
-    device = db_controller.get_storage_devices(device_id)
+    device = db_controller.get_storage_device_by_id(device_id)
     if not device:
         logger.error("device not found")
 
@@ -453,7 +453,7 @@ def get_device_capacity(device_id, history, records_count=20, parse_sizes=True):
 
 def get_device_iostats(device_id, history, records_count=20, parse_sizes=True):
     db_controller = DBController()
-    device = db_controller.get_storage_devices(device_id)
+    device = db_controller.get_storage_device_by_id(device_id)
     if not device:
         logger.error(f"Device not found: {device_id}")
         return False
@@ -488,7 +488,7 @@ def get_device_iostats(device_id, history, records_count=20, parse_sizes=True):
 
 def reset_storage_device(dev_id):
     db_controller = DBController()
-    device = db_controller.get_storage_devices(dev_id)
+    device = db_controller.get_storage_device_by_id(dev_id)
     if not device:
         logger.error(f"Device not found: {dev_id}")
         return False
@@ -544,7 +544,7 @@ def reset_storage_device(dev_id):
 
 def device_set_retries_exhausted(device_id, retries_exhausted):
     db_controller = DBController()
-    dev = db_controller.get_storage_devices(device_id)
+    dev = db_controller.get_storage_device_by_id(device_id)
     if not dev:
         logger.error("device not found")
         return False
@@ -573,7 +573,7 @@ def device_set_retries_exhausted(device_id, retries_exhausted):
 
 def device_set_failed(device_id):
     db_controller = DBController()
-    dev = db_controller.get_storage_devices(device_id)
+    dev = db_controller.get_storage_device_by_id(device_id)
     if not dev:
         logger.error("device not found")
 
@@ -601,7 +601,7 @@ def device_set_failed(device_id):
 
 def add_device(device_id):
     db_controller = DBController()
-    dev = db_controller.get_storage_devices(device_id)
+    dev = db_controller.get_storage_device_by_id(device_id)
     if not dev:
         logger.error("device not found")
 
@@ -622,7 +622,7 @@ def add_device(device_id):
 
     logger.info(f"Adding device {device_id}")
     if snode.num_partitions_per_dev == 0:
-        ret = _def_create_device_stack(device_obj, snode)
+        ret = _def_create_device_stack(device_obj, snode, force=True)
         if not ret:
             logger.error("Failed to create device stack")
             return False

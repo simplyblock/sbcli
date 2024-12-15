@@ -9,12 +9,12 @@ from simplyblock_web import utils
 from simplyblock_core.controllers import pool_controller
 
 from simplyblock_core.models.pool import Pool
-from simplyblock_core import kv_store, utils as core_utils
+from simplyblock_core import db_controller, utils as core_utils
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 bp = Blueprint("pool", __name__)
-db_controller = kv_store.DBController()
+db_controller = db_controller.DBController()
 
 
 @bp.route('/pool', defaults={'uuid': None}, methods=['GET'])

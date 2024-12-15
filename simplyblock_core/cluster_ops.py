@@ -1,4 +1,5 @@
 # coding=utf-8
+import datetime
 import json
 import logging
 import os
@@ -16,7 +17,7 @@ from jinja2 import Environment, FileSystemLoader
 from simplyblock_core import utils, scripts, constants, mgmt_node_ops, storage_node_ops, distr_controller
 from simplyblock_core.controllers import cluster_events, device_controller, storage_events, pool_controller, \
     lvol_controller
-from simplyblock_core.kv_store import DBController, KVStore
+from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.rpc_client import RPCClient
 from simplyblock_core.models.nvme_device import NVMeDevice
@@ -238,9 +239,8 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     _create_update_user(c.uuid, c.grafana_endpoint, c.grafana_secret, c.secret)
 
     c.status = Cluster.STATUS_UNREADY
-
-    c.updated_at = int(time.time())
-    db_controller = DBController(KVStore())
+    c.create_dt = str(datetime.datetime.now())
+    db_controller = DBController()
     c.write_to_db(db_controller.kv_store)
 
     cluster_events.cluster_create(c)
@@ -347,7 +347,7 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
         cluster.prov_cap_crit = prov_cap_crit
 
     cluster.status = Cluster.STATUS_UNREADY
-    cluster.updated_at = int(time.time())
+    cluster.create_dt = str(datetime.datetime.now())
     cluster.write_to_db(db_controller.kv_store)
     cluster_events.cluster_create(cluster)
 
@@ -536,7 +536,7 @@ def list():
     for cl in cls:
         st = db_controller.get_storage_nodes_by_cluster_id(cl.get_id())
         data.append({
-            "UUID": cl.id,
+            "UUID": cl.get_id(),
             "NQN": cl.nqn,
             "ha_type": cl.ha_type,
             "tls": cl.tls,

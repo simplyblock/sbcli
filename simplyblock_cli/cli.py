@@ -5,8 +5,6 @@ import re
 import sys
 
 from simplyblock_core import cluster_ops, utils
-from simplyblock_core import kv_store
-from simplyblock_core import compute_node_ops as compute_ops
 from simplyblock_core import storage_node_ops as storage_ops
 from simplyblock_core import mgmt_node_ops as mgmt_ops
 from simplyblock_core import constants
@@ -21,7 +19,6 @@ class CLIWrapper:
     def __init__(self):
         self.logger = logging.getLogger()
         self.logger.setLevel(constants.LOG_LEVEL)
-        self.db_store = kv_store.KVStore()
         self.init_parser()
 
         #
@@ -70,8 +67,8 @@ class CLIWrapper:
         sub_command.add_argument("node_id", help='UUID of storage node')
         sub_command.add_argument("--force-remove", help='Force remove all LVols and snapshots',
                                  dest='force_remove', required=False, action='store_true')
-        sub_command.add_argument("--force-migrate", help='Force migrate All LVols to other nodes',
-                                 dest='force_migrate', required=False, action='store_true')
+        # sub_command.add_argument("--force-migrate", help='Force migrate All LVols to other nodes',
+        #                          dest='force_migrate', required=False, action='store_true')
         # List all storage nodes
         sub_command = self.add_sub_command(subparser, "list", 'List storage nodes')
         sub_command.add_argument("--cluster-id", help='id of the cluster for which nodes are listed', dest='cluster_id')
@@ -801,7 +798,7 @@ class CLIWrapper:
                 ret = storage_ops.list_storage_nodes(args.json, args.cluster_id)
 
             elif sub_command == "remove":
-                ret = storage_ops.remove_storage_node(args.node_id, args.force_remove, args.force_migrate)
+                ret = storage_ops.remove_storage_node(args.node_id, args.force_remove)
 
             elif sub_command == "delete":
                 ret = storage_ops.delete_storage_node(args.node_id)
@@ -1264,17 +1261,13 @@ class CLIWrapper:
 
         print(ret)
 
-    def storage_node_list(self, args):
-        out = storage_ops.list_storage_nodes(self.db_store, args.json)
-        return out
-
     def storage_node_list_devices(self, args):
         node_id = args.node_id
         sort = args.sort
         if sort:
             sort = sort[0]
         is_json = args.json
-        out = storage_ops.list_storage_devices(self.db_store, node_id, sort, is_json)
+        out = storage_ops.list_storage_devices(node_id, sort, is_json)
         return out
 
     def cluster_add(self, args):
