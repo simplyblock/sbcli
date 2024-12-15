@@ -17,7 +17,6 @@ class PortStat(BaseModel):
     out_speed: int = 0
     packets_received: int = 0
     packets_sent: int = 0
-    uuid: str = ""
 
     def get_id(self):
         return "%s/%s/%s" % (self.node_id, self.uuid, self.date)

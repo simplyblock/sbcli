@@ -16,7 +16,7 @@ class NVMeDevice(BaseModel):
     STATUS_FAILED_AND_MIGRATED = 'failed_and_migrated'
     STATUS_READONLY = 'read_only'
 
-    STATUS_CODE_MAP = {
+    _STATUS_CODE_MAP = {
         STATUS_ONLINE: 1,
         STATUS_NEW: 2,
         STATUS_UNAVAILABLE: 3,
@@ -60,17 +60,6 @@ class NVMeDevice(BaseModel):
     serial_number: str = ""
     size: int = -1
     testing_bdev: str = ""
-
-    def get_status_code(self):
-        if self.status in self.STATUS_CODE_MAP:
-            return self.STATUS_CODE_MAP[self.status]
-        else:
-            return -1
-
-    def get_clean_dict(self):
-        data = super(NVMeDevice, self).get_clean_dict()
-        data['status_code'] = self.get_status_code()
-        return data
 
 
 class JMDevice(NVMeDevice):

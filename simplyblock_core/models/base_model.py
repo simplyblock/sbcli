@@ -9,6 +9,8 @@ from collections import ChainMap
 
 class BaseModel(object):
 
+    _STATUS_CODE_MAP: dict = {}
+
     uuid: str = ""
     name: str = ""
     status: str = ""
@@ -91,6 +93,7 @@ class BaseModel(object):
         data = self.to_dict()
         for key in ['name', 'object_type']:
             del data[key]
+        data['status_code'] = self.get_status_code()
         return data
 
     def to_str(self):
@@ -134,6 +137,12 @@ class BaseModel(object):
     def keys(self):
         return self.get_attrs_map().keys()
 
+    def get_status_code(self):
+        if self.status in self._STATUS_CODE_MAP:
+            return self._STATUS_CODE_MAP[self.status]
+        else:
+            return -1
+
     def __repr__(self):
         """For `print` and `pprint`"""
         return self.to_str()
@@ -163,7 +172,7 @@ class BaseNodeObject(BaseModel):
     STATUS_UNREACHABLE = 'unreachable'
     STATUS_SCHEDULABLE = 'schedulable'
 
-    STATUS_CODE_MAP = {
+    _STATUS_CODE_MAP = {
         STATUS_ONLINE: 0,
         STATUS_OFFLINE: 1,
         STATUS_SUSPENDED: 2,
@@ -177,14 +186,3 @@ class BaseNodeObject(BaseModel):
 
         STATUS_SCHEDULABLE: 30,
     }
-
-    def get_status_code(self):
-        if self.status in self.STATUS_CODE_MAP:
-            return self.STATUS_CODE_MAP[self.status]
-        else:
-            return -1
-
-    def get_clean_dict(self):
-        data = super(BaseNodeObject, self).get_clean_dict()
-        data['status_code'] = self.get_status_code()
-        return data
