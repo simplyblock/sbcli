@@ -11,6 +11,7 @@ class BaseModel(object):
 
     _STATUS_CODE_MAP: dict = {}
 
+    id: str = ""
     uuid: str = ""
     name: str = ""
     status: str = ""
@@ -32,10 +33,6 @@ class BaseModel(object):
 
     def get_id(self):
         return self.uuid
-
-    @property
-    def id(self):
-        return self.get_id()
 
     def get_attrs_map(self):
         _attribute_map = {}
@@ -72,6 +69,7 @@ class BaseModel(object):
                 else:
                     value = value_dict['type'](data[attr])
             setattr(self, attr, value)
+        self.id = self.uuid
         return self
 
     def to_dict(self):
