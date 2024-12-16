@@ -6,7 +6,7 @@ from simplyblock_core import constants, utils
 from requests.adapters import HTTPAdapter
 from urllib3 import Retry
 
-logger = utils.get_logger(__name__)
+logger = utils.get_logger()
 
 
 def print_dict(d):

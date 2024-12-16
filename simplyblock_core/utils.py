@@ -576,8 +576,9 @@ def decimal_to_hex_power_of_2(decimal_number):
     return hex_result
 
 
-def get_logger(name):
+def get_logger(name=None):
     # first configure a root logger
+    logging.getLogger("urllib3.connectionpool").setLevel(logging.WARNING)
     logg = logging.getLogger(name)
     log_level = os.getenv("SIMPLYBLOCK_LOG_LEVEL")
     log_level = log_level.upper() if log_level else constants.LOG_LEVEL
