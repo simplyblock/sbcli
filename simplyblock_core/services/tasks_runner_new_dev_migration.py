@@ -92,15 +92,19 @@ def task_runner(task):
         if res:
             res_data = res[0]
             migration_status = res_data["status"]
+            error_code = res_data["error"]
             if migration_status == "completed":
-                if res_data['error'] != 0:
-                    task.function_result = "mig completed with errors, retrying"
+                if error_code == 0:
+                    task.function_result = "Done"
+                    task.status = JobSchedule.STATUS_DONE
+                elif error_code == 4 or error_code == 6:
+                    task.function_result = f"mig completed with status: {error_code}"
+                    task.status = JobSchedule.STATUS_DONE
+                else:
+                    task.function_result = f"mig error: {error_code}, retrying"
                     task.retry += 1
                     task.status = JobSchedule.STATUS_SUSPENDED
                     del task.function_params['migration']
-                else:
-                    task.function_result = "Done"
-                    task.status = JobSchedule.STATUS_DONE
 
                 task.write_to_db(db_controller.kv_store)
                 return True
