@@ -17,8 +17,7 @@ from simplyblock_core.models.pool import Pool
 class CLIWrapper:
 
     def __init__(self):
-        self.logger = logging.getLogger()
-        self.logger.setLevel(constants.LOG_LEVEL)
+        self.logger = utils.get_logger()
         self.init_parser()
 
         #
@@ -1399,10 +1398,6 @@ class CLIWrapper:
 
 
 def main():
-    logger_handler = logging.StreamHandler()
-    logger_handler.setFormatter(logging.Formatter('%(asctime)s: %(levelname)s: %(filename)s:%(lineno)d: %(message)s'))
-    logger = logging.getLogger()
-    logger.addHandler(logger_handler)
 
     cli = CLIWrapper()
     cli.run()
