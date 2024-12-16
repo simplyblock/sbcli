@@ -808,6 +808,9 @@ def _connect_to_remote_devs(this_node, force_conect_restarting_nodes=False):
                 logger.debug(f"Device is not online: {dev.get_id()}, status: {dev.status}")
                 continue
 
+            if not dev.alceml_bdev:
+                logger.error(f"device alceml bdev not found!, {dev.get_id()}")
+                continue
             name = f"remote_{dev.alceml_bdev}"
             bdev_name = f"{name}n1"
             if bdev_name in node_bdev_names:
