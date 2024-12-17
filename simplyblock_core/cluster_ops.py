@@ -728,8 +728,8 @@ def cluster_grace_startup(cl_id, clear_data=False):
     if not cluster:
         logger.error(f"Cluster not found {cl_id}")
         return False
-    logger.info(f"Unsuspending cluster: {cl_id}")
-    unsuspend_cluster(cl_id)
+    # logger.info(f"Unsuspending cluster: {cl_id}")
+    # unsuspend_cluster(cl_id)
 
     st = db_controller.get_storage_nodes_by_cluster_id(cl_id)
     for node in st:
