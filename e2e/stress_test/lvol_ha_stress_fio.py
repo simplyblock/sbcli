@@ -462,7 +462,7 @@ class TestLvolHAClusterRunAllScenarios(TestLvolHACluster):
         
         node_up_time = datetime.now()
 
-        sleep_n_sec(300)
+        sleep_n_sec(1000)
 
         self.logger.info(f"Fetching migration tasks for cluster {self.cluster_id}.")
 
@@ -495,7 +495,7 @@ class TestLvolHAClusterRunAllScenarios(TestLvolHACluster):
         
         node_up_time = datetime.now()
 
-        sleep_n_sec(300)
+        sleep_n_sec(1000)
 
         self.logger.info(f"Fetching migration tasks for cluster {self.cluster_id}.")
 
@@ -540,7 +540,7 @@ class TestLvolHAClusterRunAllScenarios(TestLvolHACluster):
         
         node_up_time = datetime.now()
 
-        sleep_n_sec(300)
+        sleep_n_sec(1000)
 
         self.logger.info(f"Fetching migration tasks for cluster {self.cluster_id}.")
 
