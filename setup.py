@@ -48,7 +48,7 @@ VERSION = get_env_var("SIMPLY_BLOCK_VERSION", "1")
 
 data_files = gen_data_files("simplyblock_core","simplyblock_web")
 data_files.append(('', ["requirements.txt"]))
-data_files.append(('/etc/simplyblock', ["requirements.txt"]))
+# data_files.append(('/etc/simplyblock', ["requirements.txt"]))
 
 
 setup(
@@ -69,5 +69,8 @@ setup(
     },
     include_package_data=True,
     data_files=data_files,
-    package_data={}
+    package_data={
+        '': ["/etc/simplyblock/requirements.txt"],
+        '/etc/simplyblock': ["requirements.txt"]
+    }
 )
