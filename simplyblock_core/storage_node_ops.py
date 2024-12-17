@@ -656,7 +656,7 @@ def _prepare_cluster_devices_jm_on_dev(snode, devices):
     return True
 
 
-def _prepare_cluster_devices_on_restart(snode):
+def _prepare_cluster_devices_on_restart(snode, clear_data=False):
     db_controller = DBController()
 
     new_devices = []
@@ -675,8 +675,7 @@ def _prepare_cluster_devices_on_restart(snode):
                                NVMeDevice.STATUS_READONLY, NVMeDevice.STATUS_NEW]:
             logger.debug(f"Device is skipped: {nvme.get_id()}, status: {nvme.status}")
             continue
-
-        dev = _create_storage_device_stack(rpc_client, nvme, snode, after_restart=True)
+        dev = _create_storage_device_stack(rpc_client, nvme, snode, after_restart=not clear_data)
         if not dev:
             logger.error(f"Failed to create dev stack {nvme.get_id()}")
             return False
@@ -706,7 +705,7 @@ def _prepare_cluster_devices_on_restart(snode):
                 break
 
         if all_bdevs_found:
-            ret = _create_jm_stack_on_raid(rpc_client, jm_device.jm_nvme_bdev_list, snode, after_restart=True)
+            ret = _create_jm_stack_on_raid(rpc_client, jm_device.jm_nvme_bdev_list, snode, after_restart=not clear_data)
             if not ret:
                 logger.error(f"Failed to create JM device")
                 return False
@@ -1524,9 +1523,9 @@ def remove_storage_node(node_id, force_remove=False, force_migrate=False):
 
 def restart_storage_node(
         node_id, max_lvol=0, max_snap=0, max_prov=0,
-        spdk_image=None,
-        set_spdk_debug=None,
-        small_bufsize=0, large_bufsize=0, number_of_devices=0, force=False, node_ip=None):
+        spdk_image=None, set_spdk_debug=None,
+        small_bufsize=0, large_bufsize=0, number_of_devices=0,
+        force=False, node_ip=None, clear_data=False):
 
     db_controller = DBController()
     kv_store = db_controller.kv_store
@@ -1843,7 +1842,7 @@ def restart_storage_node(
                 # return False
             snode.nvme_devices.extend(removed_devices)
         else:
-            ret = _prepare_cluster_devices_on_restart(snode)
+            ret = _prepare_cluster_devices_on_restart(snode, clear_data=clear_data)
             if not ret:
                 logger.error("Failed to prepare cluster devices")
                 return False

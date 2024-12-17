@@ -401,6 +401,7 @@ class CLIWrapper:
         # graceful-startup storage nodes
         sub_command = self.add_sub_command(subparser, "graceful-startup", 'Graceful startup of storage nodes')
         sub_command.add_argument("id", help='cluster UUID')
+        sub_command.add_argument("--clear-data", help='clear Alceml data', dest='clear_data', action='store_true')
 
         # get tasks list
         sub_command = self.add_sub_command(subparser, "list-tasks", 'List tasks by cluster ID')
@@ -1012,7 +1013,7 @@ class CLIWrapper:
                 ret = cluster_ops.cluster_grace_shutdown(args.id)
 
             elif sub_command == "graceful-startup":
-                ret = cluster_ops.cluster_grace_startup(args.id)
+                ret = cluster_ops.cluster_grace_startup(args.id, args.clear_data)
 
             elif sub_command == "delete":
                 ret = cluster_ops.delete_cluster(args.id)

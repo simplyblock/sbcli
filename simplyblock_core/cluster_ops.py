@@ -722,7 +722,7 @@ def update_cluster(cl_id):
     return True
 
 
-def cluster_grace_startup(cl_id):
+def cluster_grace_startup(cl_id, clear_data=False):
     db_controller = DBController()
     cluster = db_controller.get_cluster_by_id(cl_id)
     if not cluster:
@@ -734,7 +734,7 @@ def cluster_grace_startup(cl_id):
     st = db_controller.get_storage_nodes_by_cluster_id(cl_id)
     for node in st:
         logger.info(f"Restarting node: {node.get_id()}")
-        storage_node_ops.restart_storage_node(node.get_id())
+        storage_node_ops.restart_storage_node(node.get_id(), clear_data=clear_data)
         time.sleep(5)
         get_node = db_controller.get_storage_node_by_id(node.get_id())
         if get_node.status != StorageNode.STATUS_ONLINE:
