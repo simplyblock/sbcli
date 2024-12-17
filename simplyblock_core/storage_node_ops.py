@@ -2804,7 +2804,7 @@ def recreate_lvstore(snode):
 
     ret = rpc_client.bdev_examine(snode.raid)
     ret = rpc_client.bdev_wait_for_examine()
-    time.sleep(2)
+    # time.sleep(2)
 
     for lvol_id in snode.lvols:
         lvol = db_controller.get_lvol_by_id(lvol_id)
@@ -3054,7 +3054,7 @@ def _create_bdev_stack(snode, lvstore_stack=None, primary_node=False):
             if snode.jm_vuid:
                 ret = rpc_client.jc_explicit_synchronization(snode.jm_vuid)
                 logger.info(f"JM Sync res: {ret}")
-                time.sleep(3)
+                # time.sleep(3)
 
             distribs_list = bdev["distribs_list"]
             strip_size_kb = params["strip_size_kb"]
