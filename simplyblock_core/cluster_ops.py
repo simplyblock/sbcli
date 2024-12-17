@@ -722,7 +722,7 @@ def update_cluster(cl_id):
     return True
 
 
-def cluster_grace_startup(cl_id, clear_data=False):
+def cluster_grace_startup(cl_id, clear_data=False, spdk_image=None):
     db_controller = DBController()
     cluster = db_controller.get_cluster_by_id(cl_id)
     if not cluster:
@@ -734,7 +734,7 @@ def cluster_grace_startup(cl_id, clear_data=False):
     st = db_controller.get_storage_nodes_by_cluster_id(cl_id)
     for node in st:
         logger.info(f"Restarting node: {node.get_id()}")
-        storage_node_ops.restart_storage_node(node.get_id(), clear_data=clear_data, force=True)
+        storage_node_ops.restart_storage_node(node.get_id(), clear_data=clear_data, force=True, spdk_image=spdk_image)
         # time.sleep(5)
         get_node = db_controller.get_storage_node_by_id(node.get_id())
         if get_node.status != StorageNode.STATUS_ONLINE:
@@ -826,3 +826,51 @@ def open_db_from_zip(fip_path):
 
     if os.path.exists(out):
         scripts.deploy_fdb_from_file_service(out)
+
+
+
+def cluster_reset():
+    """
+
+
+set -x
+
+CMD=$(ls ~/.local/bin/sbcli-* | awk '{n=split($0,a,"/"); print a[n]}')
+cl=$($CMD cluster list | tail -n -3 | awk '{print $2}')
+
+#$CMD cluster graceful-shutdown $cl
+
+for sn_id in $($CMD sn list | grep / | awk '{print $2}'); do
+  $CMD -d sn shutdown --force $sn_id
+done
+
+sudo mv /etc/foundationdb/fdb.cluster /etc/foundationdb/fdb.cluster.bck
+for service_id in $(docker service ls | grep / | awk '{print $1}'); do
+  docker service update "$service_id" --force --detach
+done
+
+# restore
+fdb_cont=$(sudo docker ps | grep "app_fdb-server" | awk '{print $1}')
+sudo docker rm --force $fdb_cont
+sudo rm -rf /etc/foundationdb/data/*
+fdbcli --exec "configure new single ssd ; writemode on ; clearrange \"\" \\xff" -C /etc/foundationdb/fdb.cluster.bck
+BF=$(fdbbackup list -b file:///etc/foundationdb/backup/)
+fdbrestore start -r "$BF" --dest-cluster-file /etc/foundationdb/fdb.cluster.bck -t fresh_deploy
+
+sudo mv /etc/foundationdb/fdb.cluster.bck /etc/foundationdb/fdb.cluster
+
+for service_id in $(docker service ls | grep / | awk '{print $1}'); do
+  docker service update "$service_id" --force --detach
+done
+
+sleep 30
+for sn_id in $($CMD sn list | grep / | awk '{print $2}'); do
+  $CMD -d sn shutdown --force $sn_id
+done
+
+sleep 5
+$CMD -d cluster graceful-startup $cl  --clear-data
+
+$CMD -d cluster activate $cl
+
+    """
