@@ -50,13 +50,12 @@ def _create_update_user(cluster_id, grafana_url, grafana_secret, user_secret, up
             response = session.request("PUT", url, headers=headers, data=payload)
             if response.status_code == 200:
                 logger.debug(f"user create/update {cluster_id} succeeded")
-                break
+                return response.status_code == 200
             logger.debug(response.status_code)
             logger.debug("waiting for grafana api to come up")
             retries -= 1
             time.sleep(3)
 
-        return response.status_code == 200
     else:
         payload = json.dumps({
             "name": cluster_id,
@@ -64,17 +63,15 @@ def _create_update_user(cluster_id, grafana_url, grafana_secret, user_secret, up
             "password": user_secret
         })
         url = f"{grafana_url}/api/admin/users"
-        while True:
+        while retries > 0:
             response = session.request("POST", url, headers=headers, data=payload)
             if response.status_code == 200:
                 logger.debug(f"user create/update {cluster_id} succeeded")
-                break
+                return response.status_code == 200
             logger.debug(response.status_code)
             logger.debug("waiting for grafana api to come up")
             retries -= 1
-            time.sleep(5)
-
-        return response.status_code == 200
+            time.sleep(3)
 
 
 def _add_graylog_input(cluster_ip, password):
