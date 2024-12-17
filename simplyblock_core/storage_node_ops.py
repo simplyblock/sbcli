@@ -3162,21 +3162,9 @@ def make_sec_new_primary(node_id):
         logger.error(f"snode not found: {node_id}")
         return False
 
-    dev_order = get_next_cluster_device_order(db_controller, snode.cluster_id)
     for dev in snode.nvme_devices:
         if dev.status == NVMeDevice.STATUS_NEW:
-            dev.cluster_device_order = dev_order
-            dev_order += 1
-    snode.write_to_db()
-
-    for dev in snode.nvme_devices:
-        if dev.status == NVMeDevice.STATUS_NEW:
-            device_controller.device_set_state(dev.get_id(), NVMeDevice.STATUS_ONLINE)
-            tasks_controller.add_new_device_mig_task(dev.get_id())
-
-    for node in db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id):
-        if node.status == StorageNode.STATUS_ONLINE:
-            send_cluster_map(node.get_id())
+            device_controller.add_device(dev.get_id())
 
     time.sleep(5)
     for dev in snode.nvme_devices:
