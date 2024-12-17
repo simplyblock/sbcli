@@ -1539,7 +1539,8 @@ def restart_storage_node(
 
     if snode.status == StorageNode.STATUS_ONLINE:
         logger.error(f"Can not restart online node: {node_id}")
-        return False
+        if force is False:
+            return False
 
     if snode.status == StorageNode.STATUS_REMOVED:
         logger.error(f"Can not restart removed node: {node_id}")
