@@ -33,7 +33,6 @@ def task_runner(task):
         task.status = JobSchedule.STATUS_RUNNING
         task.write_to_db(db_controller.kv_store)
         tasks_events.task_updated(task)
-        time.sleep(30)
 
     if snode.status != StorageNode.STATUS_ONLINE:
         task.function_result = "node is not online, retrying"
@@ -121,7 +120,7 @@ db_controller = db_controller.DBController()
 
 logger.info("Starting Tasks runner...")
 while True:
-    time.sleep(30)
+    time.sleep(10)
     clusters = db_controller.get_clusters()
     if not clusters:
         logger.error("No clusters found!")
