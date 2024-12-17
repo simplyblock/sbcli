@@ -195,7 +195,7 @@ def task_runner_node(task):
 
     # resetting node
     logger.info(f"Restart node {node.get_id()}")
-    ret = storage_node_ops.restart_storage_node(node.get_id(), force=True)
+    ret = storage_node_ops.restart_storage_node(node.get_id())
     if ret:
         logger.info(f"Node restart succeeded")
 
