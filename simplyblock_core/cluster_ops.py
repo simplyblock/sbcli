@@ -321,7 +321,7 @@ def cluster_activate(cl_id, force=False):
 
     ols_status = cluster.status
     set_cluster_status(cl_id, Cluster.STATUS_IN_ACTIVATION)
-    snodes = db_controller.get_primary_storage_nodes_by_cluster_id(cl_id)
+    snodes = db_controller.get_storage_nodes_by_cluster_id(cl_id)
     online_nodes = []
     dev_count = 0
 
@@ -383,10 +383,11 @@ def cluster_activate(cl_id, force=False):
             return False
 
     if not cluster.cluster_max_size:
+        cluster = db_controller.get_cluster_by_id(cl_id)
         cluster.cluster_max_size = max_size
         cluster.cluster_max_devices = dev_count
         cluster.cluster_max_nodes = len(online_nodes)
-    cluster.write_to_db(db_controller.kv_store)
+        cluster.write_to_db(db_controller.kv_store)
     set_cluster_status(cl_id, Cluster.STATUS_ACTIVE)
     logger.info("Cluster activated successfully")
     return True
