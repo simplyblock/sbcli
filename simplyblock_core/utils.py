@@ -125,7 +125,7 @@ def generate_string(length):
 def get_docker_client(cluster_id=None):
     from simplyblock_core.db_controller import DBController
     db_controller = DBController()
-    nodes = db_controller.get_mgmt_nodes(cluster_id)
+    nodes = db_controller.get_mgmt_nodes()
     if not nodes:
         logger.error("No mgmt nodes was found in the cluster!")
         return False

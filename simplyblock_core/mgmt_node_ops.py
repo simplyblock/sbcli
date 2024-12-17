@@ -51,7 +51,7 @@ def deploy_mgmt_node(cluster_ip, cluster_id, ifname, cluster_secret):
     time.sleep(1)
     hostname = utils.get_hostname()
     db_controller = DBController()
-    nodes = db_controller.get_mgmt_nodes(cluster_id=cluster_id)
+    nodes = db_controller.get_mgmt_nodes()
     if not nodes:
         logger.error("No mgmt nodes was found in the cluster!")
         return False
@@ -94,7 +94,7 @@ def deploy_mgmt_node(cluster_ip, cluster_id, ifname, cluster_secret):
     node_id = add_mgmt_node(DEV_IP, cluster_id)
 
     # check if ha setting is required
-    nodes = db_controller.get_mgmt_nodes(cluster_id=cluster_id)
+    nodes = db_controller.get_mgmt_nodes()
     if len(nodes) >= 3:
         logger.info("Waiting for FDB container to be active...")
         fdb_cont = None

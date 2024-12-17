@@ -254,52 +254,6 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     return c.uuid
 
 
-# Deprecated
-def deploy_spdk(node_docker, spdk_cpu_mask, spdk_mem):
-    nodes = node_docker.containers.list(all=True)
-    for node in nodes:
-        if node.attrs["Name"] == "/spdk":
-            logger.info("spdk container found, skip deploy...")
-            return
-    container = node_docker.containers.run(
-        constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE,
-        f"/root/scripts/run_distr.sh {spdk_cpu_mask} {spdk_mem}",
-        detach=True,
-        privileged=True,
-        name="spdk",
-        network_mode="host",
-        volumes=[
-            '/var/tmp:/var/tmp',
-            '/dev:/dev',
-            '/lib/modules/:/lib/modules/',
-            '/sys:/sys'],
-        restart_policy={"Name": "on-failure", "MaximumRetryCount": 99}
-    )
-    container2 = node_docker.containers.run(
-        constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE,
-        "python /root/scripts/spdk_http_proxy.py",
-        name="spdk_proxy",
-        detach=True,
-        network_mode="host",
-        volumes=[
-            '/var/tmp:/var/tmp',
-            '/etc/foundationdb:/etc/foundationdb'],
-        restart_policy={"Name": "on-failure", "MaximumRetryCount": 99}
-    )
-    retries = 10
-    while retries > 0:
-        info = node_docker.containers.get(container.attrs['Id'])
-        status = info.attrs['State']["Status"]
-        is_running = info.attrs['State']["Running"]
-        if not is_running:
-            logger.info("Container is not running, waiting...")
-            time.sleep(3)
-            retries -= 1
-        else:
-            logger.info(f"Container status: {status}, Is Running: {is_running}")
-            break
-
-
 def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
                 distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, enable_node_affinity, qpair_count,
                 max_queue_size, inflight_io_threshold, enable_qos, strict_node_anti_affinity):
@@ -363,10 +317,12 @@ def cluster_activate(cl_id, force=False):
         logger.error(f"Cluster not found {cl_id}")
         return False
     if cluster.status == Cluster.STATUS_ACTIVE:
-        logger.warning("Cluster is not in an ACTIVE state")
+        logger.warning("Cluster is ACTIVE")
         if not force:
             logger.warning(f"Failed to activate cluster, Cluster is in an ACTIVE state, use --force to reactivate")
             return False
+
+    ols_status = cluster.status
     set_cluster_status(cl_id, Cluster.STATUS_IN_ACTIVATION)
     snodes = db_controller.get_primary_storage_nodes_by_cluster_id(cl_id)
     online_nodes = []
@@ -383,8 +339,9 @@ def cluster_activate(cl_id, force=False):
     minimum_devices = cluster.distr_ndcs + cluster.distr_npcs + 1
     if dev_count < minimum_devices:
         logger.error(f"Failed to activate cluster, No enough online device.. Minimum is {minimum_devices}")
-        set_cluster_status(cl_id, Cluster.STATUS_UNREADY)
+        set_cluster_status(cl_id, ols_status)
         return False
+
     records = db_controller.get_cluster_capacity(cluster)
     max_size = records[0]['size_total']
 
@@ -395,13 +352,15 @@ def cluster_activate(cl_id, force=False):
             secondary_nodes = storage_node_ops.get_secondary_nodes(snode)
             if not secondary_nodes:
                 logger.error(f"Failed to activate cluster, No enough secondary nodes")
-                set_cluster_status(cl_id, Cluster.STATUS_UNREADY)
+                set_cluster_status(cl_id, ols_status)
                 return False
             snode.secondary_node_id = secondary_nodes[0]
             snode.write_to_db()
 
     for snode in snodes:
         if snode.is_secondary_node:
+            continue
+        if snode.status != StorageNode.STATUS_ONLINE:
             continue
         if snode.lvstore:
             logger.warning(f"Node {snode.get_id()} already has lvstore {snode.lvstore}")
@@ -411,8 +370,21 @@ def cluster_activate(cl_id, force=False):
                                               cluster.distr_chunk_bs, cluster.page_size_in_blocks, max_size, snodes)
         if not ret:
             logger.error("Failed to activate cluster")
-            set_cluster_status(cl_id, Cluster.STATUS_UNREADY)
+            set_cluster_status(cl_id, ols_status)
             return False
+
+    for snode in snodes:
+        if not snode.is_secondary_node:
+            continue
+        if snode.status != StorageNode.STATUS_ONLINE:
+            continue
+
+        ret = storage_node_ops.recreate_lvstore(snode)
+        if not ret:
+            logger.error("Failed to activate cluster")
+            set_cluster_status(cl_id, ols_status)
+            return False
+
     if not cluster.cluster_max_size:
         cluster.cluster_max_size = max_size
         cluster.cluster_max_devices = dev_count

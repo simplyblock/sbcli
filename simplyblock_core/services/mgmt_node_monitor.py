@@ -79,7 +79,7 @@ while True:
         if n.attrs['Spec']['Availability'] == 'active':
             set_node_online(node)
         else:
-            set_node_online(node)
+            set_node_offline(node)
 
     logger.info(f"Sleeping for {constants.NODE_MONITOR_INTERVAL_SEC} seconds")
     time.sleep(constants.NODE_MONITOR_INTERVAL_SEC)
