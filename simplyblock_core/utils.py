@@ -502,9 +502,9 @@ def calculate_pool_count(alceml_count, number_of_distribs, cpu_count, poller_cou
     poller_number = poller_count if poller_count else cpu_count
     #small_pool_count = (3 + alceml_count + lvol_count + 2 * snap_count + 1) * 256 + poller_number * 127 + 384 + 128 * poller_number + constants.EXTRA_SMALL_POOL_COUNT
 
-    small_pool_count = (6 + alceml_count + number_of_distribs) * 256 + poller_number * 127 + 384 + 128 * poller_number + constants.EXTRA_SMALL_POOL_COUNT
+    small_pool_count = 384 * (alceml_count + number_of_distribs + 3 + poller_count) + (6 + alceml_count + number_of_distribs) * 256 + poller_number * 127 + 384 + 128 * poller_number + constants.EXTRA_SMALL_POOL_COUNT
     #large_pool_count = (3 + alceml_count + lvol_count + 2 * snap_count + 1) * 32 + poller_number * 15 + 384 + 16 * poller_number + constants.EXTRA_LARGE_POOL_COUNT
-    large_pool_count = (6 + alceml_count + number_of_distribs) * 32 + poller_number * 15 + 384 + 16 * poller_number + constants.EXTRA_LARGE_POOL_COUNT
+    large_pool_count = 48 * (alceml_count + number_of_distribs + 3 + poller_count) + (6 + alceml_count + number_of_distribs) * 32 + poller_number * 15 + 384 + 16 * poller_number + constants.EXTRA_LARGE_POOL_COUNT
     return small_pool_count, large_pool_count
 
 

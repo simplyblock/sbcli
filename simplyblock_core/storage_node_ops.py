@@ -1213,6 +1213,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
             logger.error("Failed to set iobuf options")
             return False
     rpc_client.bdev_set_options(0, 0, 0, 0)
+    rpc_client.accel_set_options()
 
     # 2- set socket implementation options
     ret = rpc_client.sock_impl_set_options()
@@ -1712,6 +1713,7 @@ def restart_storage_node(
             logger.error("Failed to set iobuf options")
             return False
     rpc_client.bdev_set_options(0, 0, 0, 0)
+    rpc_client.accel_set_options()
 
     # 2- set socket implementation options
     ret = rpc_client.sock_impl_set_options()

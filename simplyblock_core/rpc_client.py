@@ -652,6 +652,11 @@ class RPCClient:
         else:
             return False
 
+    def accel_set_options(self):
+        params = {"small_cache_size": 512,
+                   "large_cache_size": 64}
+        return self._request("accel_set_options", params)
+
     def distr_status_events_get(self):
         return self._request("distr_status_events_get")
 
