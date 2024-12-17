@@ -144,7 +144,6 @@ while True:
         for cl in clusters:
             tasks = db_controller.get_job_tasks(cl.get_id(), reverse=False)
             for task in tasks:
-                delay_seconds = 5
                 if task.function_name == JobSchedule.FN_FAILED_DEV_MIG:
                     if task.status in [JobSchedule.STATUS_NEW, JobSchedule.STATUS_SUSPENDED]:
                         active_task = tasks_controller.get_active_node_mig_task(task.cluster_id, task.node_id)
@@ -158,4 +157,4 @@ while True:
                         if res:
                             tasks_events.task_updated(task)
                         else:
-                            time.sleep(delay_seconds)
+                            time.sleep(3)

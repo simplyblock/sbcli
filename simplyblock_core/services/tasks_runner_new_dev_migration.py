@@ -97,7 +97,7 @@ def task_runner(task):
                 if error_code == 0:
                     task.function_result = "Done"
                     task.status = JobSchedule.STATUS_DONE
-                elif error_code == 4 or error_code == 6:
+                elif error_code in range(1, 8):
                     task.function_result = f"mig completed with status: {error_code}"
                     task.status = JobSchedule.STATUS_DONE
                 else:
@@ -147,7 +147,6 @@ while True:
         for cl in clusters:
             tasks = db_controller.get_job_tasks(cl.get_id(), reverse=False)
             for task in tasks:
-                delay_seconds = 5
                 if task.function_name == JobSchedule.FN_NEW_DEV_MIG:
                     if task.status in [JobSchedule.STATUS_NEW, JobSchedule.STATUS_SUSPENDED]:
                         active_task = tasks_controller.get_active_node_mig_task(task.cluster_id, task.node_id)
@@ -161,4 +160,4 @@ while True:
                         if res:
                             tasks_events.task_updated(task)
                         else:
-                            time.sleep(delay_seconds)
+                            time.sleep(2)

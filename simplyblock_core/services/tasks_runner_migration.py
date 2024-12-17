@@ -120,7 +120,7 @@ db_controller = db_controller.DBController()
 
 logger.info("Starting Tasks runner...")
 while True:
-    time.sleep(10)
+    time.sleep(3)
     clusters = db_controller.get_clusters()
     if not clusters:
         logger.error("No clusters found!")
@@ -128,7 +128,7 @@ while True:
         for cl in clusters:
             tasks = db_controller.get_job_tasks(cl.get_id(), reverse=False)
             for task in tasks:
-                delay_seconds = 10
+                delay_seconds = 3
                 if task.function_name == JobSchedule.FN_DEV_MIG:
                     if task.status in [JobSchedule.STATUS_NEW, JobSchedule.STATUS_SUSPENDED]:
                         active_task = tasks_controller.get_active_node_mig_task(task.cluster_id, task.node_id)
