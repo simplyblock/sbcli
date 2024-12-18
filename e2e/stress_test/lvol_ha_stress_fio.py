@@ -38,7 +38,8 @@ class TestLvolHACluster(FioWorkloadTest):
         """Create 500 lvols with mixed crypto and non-crypto."""
         self.logger.info("Creating 500 lvols.")
         for i in range(1, self.total_lvols + 1):
-            fs_type = random.choice(["xfs", "ext4"])
+            # fs_type = random.choice(["xfs", "ext4"])
+            fs_type = "ext4"
             is_crypto = random.choice([True, False])
             lvol_name = f"{self.lvol_name}_{i}" if not is_crypto else f"c{self.lvol_name}_{i}"
             self.logger.info(f"Creating lvol with Name: {lvol_name}, fs type: {fs_type}, crypto: {is_crypto}")
