@@ -5,6 +5,7 @@ from e2e_tests.data_migration.data_migration_ha_fio import FioWorkloadTest
 from logger_config import setup_logger
 from datetime import datetime
 from exceptions.custom_exception import LvolNotConnectException
+from requests.exceptions import HTTPError
 
 
 class TestLvolHACluster(FioWorkloadTest):
@@ -237,15 +238,15 @@ class TestLvolHAClusterGracefulShutdown(TestLvolHACluster):
         self.logger.info("Graceful shutdown and restart.")
         timestamp = int(datetime.now().timestamp())
 
-        self.sbcli_utils.suspend_node(node_uuid=self.lvol_node)
+        self.sbcli_utils.suspend_node(node_uuid=self.lvol_node, expected_error_code=[503])
         sleep_n_sec(10)
-        self.sbcli_utils.shutdown_node(node_uuid=self.lvol_node)
+        self.sbcli_utils.shutdown_node(node_uuid=self.lvol_node, expected_error_code=[503])
         self.sbcli_utils.wait_for_storage_node_status(self.lvol_node,
                                                       "offline",
                                                       timeout=4000)
         sleep_n_sec(30)
         restart_start_time = datetime.now()
-        self.sbcli_utils.restart_node(node_uuid=self.lvol_node)
+        self.sbcli_utils.restart_node(node_uuid=self.lvol_node, expected_error_code=[503])
         self.sbcli_utils.wait_for_storage_node_status(self.lvol_node,
                                                       "online",
                                                       timeout=4000)
@@ -445,14 +446,15 @@ class TestLvolHAClusterRunAllScenarios(TestLvolHACluster):
         timestamp = int(datetime.now().timestamp())
         self.logger.info("Graceful shutdown initiated.")
         
-        self.sbcli_utils.suspend_node(node_uuid=self.lvol_node)
+        self.sbcli_utils.suspend_node(node_uuid=self.lvol_node, expected_error_code=[503])
         sleep_n_sec(10)
-        self.sbcli_utils.shutdown_node(node_uuid=self.lvol_node)
+
+        self.sbcli_utils.shutdown_node(node_uuid=self.lvol_node, expected_error_code=[503])
         self.sbcli_utils.wait_for_storage_node_status(self.lvol_node, "offline", timeout=4000)
         sleep_n_sec(30)
         
         restart_start_time = datetime.now()
-        self.sbcli_utils.restart_node(node_uuid=self.lvol_node)
+        self.sbcli_utils.restart_node(node_uuid=self.lvol_node, expected_error_code=[503])
         self.sbcli_utils.wait_for_storage_node_status(self.lvol_node, "online", timeout=4000)
         self.sbcli_utils.wait_for_health_status(self.lvol_node, True, timeout=4000)
         
