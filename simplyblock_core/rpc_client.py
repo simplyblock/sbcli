@@ -42,12 +42,20 @@ class RPCClient:
                         allowed_methods=self.DEFAULT_ALLOWED_METHODS)
         self.session.mount("http://", HTTPAdapter(max_retries=retries))
         self.session.timeout = self.timeout
+        self.bulk_send = False
+        self.bulk_req_list = []
 
     def _request(self, method, params=None):
         ret, _ = self._request2(method, params)
         return ret
 
     def _request2(self, method, params=None):
+        if self.bulk_send:
+            req = {'method': method, 'params':params}
+            self.bulk_req_list.append(req)
+            req_id = len(self.bulk_req_list)
+            return req_id, None
+
         payload = {'id': 1, 'method': method}
         if params:
             payload['params'] = params
@@ -85,6 +93,53 @@ class RPCClient:
             logger.error("Invalid http status : %s", ret_code)
 
         return None, None
+
+    def bulk_send_enable(self):
+        self.bulk_send = True
+        self.bulk_req_list = []
+
+    def bulk_send_disable(self):
+        self.bulk_send = False
+
+    def commit_bulk_send(self):
+        payload = []
+        for i, req in enumerate(self.bulk_req_list):
+            one_req = {'id': i+1, 'method': req['method']}
+            if "params" in req and req['params']:
+                one_req['params'] = req['params']
+            payload.append(one_req)
+
+        if payload:
+            ret = self._internal_bulk_send(payload)
+            if ret:
+                self.bulk_req_list = []
+                return ret
+
+        return False
+
+    def _internal_bulk_send(self, payload):
+        try:
+            response = self.session.post(self.url, data=json.dumps(payload), timeout=self.timeout)
+        except Exception as e:
+            logger.error(e)
+            return False
+
+        ret_code = response.status_code
+        logger.debug("Response: status_code: %s", ret_code)
+
+        if ret_code != 200:
+            logger.error("Invalid http status : %s", ret_code)
+            return None
+
+        try:
+            resp_json = response.json()
+            logger.debug("Response json: %s", json.dumps(resp_json))
+            return resp_json
+        except Exception as e:
+            logger.error(e)
+            logger.debug(f"Response ret_content: {response.content}")
+            return False
+
 
     def get_version(self):
         return self._request("spdk_get_version")
