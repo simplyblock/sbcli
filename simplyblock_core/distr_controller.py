@@ -6,7 +6,7 @@ import re
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.rpc_client import RPCClient
-from simplyblock_core.kv_store import DBController
+from simplyblock_core.db_controller import DBController
 
 logger = logging.getLogger()
 
@@ -96,7 +96,6 @@ def get_distr_cluster_map(snodes, target_node, distr_name=""):
             if dev.status in [NVMeDevice.STATUS_JM, NVMeDevice.STATUS_NEW]:
                 continue
             dev_w = int(dev.size/(1024*1024*1024)) or 1
-            node_w += dev_w
             name = None
             dev_status = dev.status
             if snode.get_id() == target_node.get_id():
@@ -123,6 +122,7 @@ def get_distr_cluster_map(snodes, target_node, distr_name=""):
                 dev_w_map.append({"weight": dev_w, "id": -1})
             else:
                 dev_w_map.append({"weight": dev_w, "id": dev.cluster_device_order})
+                node_w += dev_w
 
         node_status = snode.status
         if node_status == StorageNode.STATUS_SCHEDULABLE:

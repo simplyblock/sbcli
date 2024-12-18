@@ -11,7 +11,7 @@ import docker
 
 from simplyblock_core import utils, scripts, constants
 from simplyblock_core.cnode_client import CNodeClient
-from simplyblock_core.kv_store import DBController
+from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.caching_node import CachingNode, CachedLVol
 from simplyblock_core.models.iface import IFace
 from simplyblock_core.models.nvme_device import NVMeDevice

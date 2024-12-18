@@ -1,17 +1,13 @@
 # coding=utf-8
-import datetime
-import logging as log
-
-import docker
 
 from simplyblock_core import utils, distr_controller
-from simplyblock_core.kv_store import DBController
+from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.nvme_device import NVMeDevice, JMDevice
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.rpc_client import RPCClient
 from simplyblock_core.snode_client import SNodeClient
 
-logger = log.getLogger()
+logger = utils.get_logger(__name__)
 
 
 def check_cluster(cluster_id):
@@ -148,8 +144,9 @@ def _check_node_lvstore(lvstore_stack, node, auto_fix=False):
                         for result in results:
                             if result['Results'] == 'failed':
                                 if result['Kind'] == "Device":
-                                    dev = db_controller.get_storage_device_by_id(result['UUID'])
-                                    distr_controller.send_dev_status_event(dev, dev.status, node)
+                                    if result['Reported Status']:
+                                        dev = db_controller.get_storage_device_by_id(result['UUID'])
+                                        distr_controller.send_dev_status_event(dev, dev.status, node)
                                 if result['Kind'] == "Node":
                                     n = db_controller.get_storage_node_by_id(result['UUID'])
                                     distr_controller.send_node_status_event(n, n.status, node)

@@ -7,7 +7,7 @@ from simplyblock_core.controllers import health_controller, storage_events, devi
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.rpc_client import RPCClient
-from simplyblock_core import constants, kv_store, utils, distr_controller
+from simplyblock_core import constants, db_controller, utils, distr_controller
 
 logger = utils.get_logger(__name__)
 
@@ -19,7 +19,7 @@ def set_node_health_check(snode, health_check_status):
     old_status = snode.health_check
     snode.health_check = health_check_status
     snode.updated_at = str(datetime.now())
-    snode.write_to_db(db_store)
+    snode.write_to_db()
     storage_events.snode_health_check_change(snode, snode.health_check, old_status, caused_by="monitor")
 
 
@@ -33,14 +33,13 @@ def set_device_health_check(cluster_id, device, health_check_status):
                 if dev.get_id() == device.get_id():
                     old_status = dev.health_check
                     dev.health_check = health_check_status
-                    node.write_to_db(db_store)
+                    node.write_to_db()
                     device_events.device_health_check_change(
                         dev, dev.health_check, old_status, caused_by="monitor")
 
 
 # get DB controller
-db_store = kv_store.KVStore()
-db_controller = kv_store.DBController()
+db_controller = db_controller.DBController()
 
 logger.info("Starting health check service")
 while True:
@@ -117,21 +116,26 @@ while True:
                             connected_devices.append(remote_device.get_id())
                         else:
                             logger.info(f"Checking bdev: {remote_device.remote_bdev} ... not found")
-                            name = f"remote_{remote_device.alceml_bdev}"
-                            if rpc_client.bdev_nvme_controller_list(name):
-                                logger.info(f"detaching {name} from {snode.get_id()}")
-                                rpc_client.bdev_nvme_detach_controller(name)
-                                time.sleep(1)
-
-                            logger.info(f"Connecting {name} to {snode.get_id()}")
-                            ret = rpc_client.bdev_nvme_attach_controller_tcp(
-                                name, remote_device.nvmf_nqn, remote_device.nvmf_ip, remote_device.nvmf_port)
-                            if ret:
-                                logger.info(f"Successfully connected to device: {remote_device.get_id()}")
-                                connected_devices.append(remote_device.get_id())
-                                distr_controller.send_dev_status_event(remote_device, NVMeDevice.STATUS_ONLINE, snode)
-                            else:
-                                logger.error(f"Failed to connect to device: {remote_device.get_id()}")
+                            # if not org_dev.alceml_bdev:
+                            #     logger.error(f"device alceml bdev not found!, {org_dev.get_id()}")
+                            #     continue
+                            # name = f"remote_{org_dev.alceml_bdev}"
+                            # if rpc_client.bdev_nvme_controller_list(name):
+                            #     logger.info(f"detaching {name} from {snode.get_id()}")
+                            #     rpc_client.bdev_nvme_detach_controller(name)
+                            #     time.sleep(1)
+                            #
+                            # logger.info(f"Connecting {name} to {snode.get_id()}")
+                            # ret = rpc_client.bdev_nvme_attach_controller_tcp(
+                            #     name, org_dev.nvmf_nqn, org_dev.nvmf_ip, org_dev.nvmf_port)
+                            # if ret:
+                            #     logger.info(f"Successfully connected to device: {org_dev.get_id()}")
+                            #     remote_device.status = NVMeDevice.STATUS_ONLINE
+                            #     connected_devices.append(org_dev.get_id())
+                            #     snode.write_to_db()
+                            #     distr_controller.send_dev_status_event(org_dev, NVMeDevice.STATUS_ONLINE, snode)
+                            # else:
+                            #     logger.error(f"Failed to connect to device: {org_dev.get_id()}")
 
                         node_remote_devices_check &= bool(ret)
 
@@ -141,6 +145,9 @@ while True:
                     for dev in node.nvme_devices:
                         if dev.status == NVMeDevice.STATUS_ONLINE:
                             if dev.get_id() not in connected_devices:
+                                if not dev.alceml_bdev:
+                                    logger.error(f"device alceml bdev not found!, {dev.get_id()}")
+                                    continue
                                 logger.info(f"connecting to online device: {dev.get_id()}")
                                 name = f"remote_{dev.alceml_bdev}"
                                 bdev_name = f"{name}n1"
@@ -156,6 +163,7 @@ while True:
                                 if ret:
                                     logger.info(f"Successfully connected to device: {dev.get_id()}")
                                     dev.remote_bdev = bdev_name
+                                    snode = db_controller.get_storage_node_by_id(snode.get_id())
                                     snode.remote_devices.append(dev)
                                     snode.write_to_db()
                                     distr_controller.send_dev_status_event(dev, NVMeDevice.STATUS_ONLINE, snode)

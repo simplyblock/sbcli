@@ -11,7 +11,7 @@ from typing import Tuple
 
 from simplyblock_core import utils, constants, distr_controller
 from simplyblock_core.controllers import snapshot_controller, pool_controller, lvol_events, caching_node_controller
-from simplyblock_core.kv_store import DBController
+from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.lvol_model import LVol
@@ -107,7 +107,7 @@ def validate_add_lvol_func(name, size, host_id_or_name, pool_id_or_name,
     #  pool validation
     pool = None
     for p in db_controller.get_pools():
-        if pool_id_or_name == p.id or pool_id_or_name == p.pool_name:
+        if pool_id_or_name == p.get_id() or pool_id_or_name == p.pool_name:
             pool = p
             break
     if not pool:
@@ -307,7 +307,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
 
     pool = None
     for p in db_controller.get_pools():
-        if pool_id_or_name == p.id or pool_id_or_name == p.pool_name:
+        if pool_id_or_name == p.get_id() or pool_id_or_name == p.pool_name:
             pool = p
             break
     if not pool:
@@ -525,7 +525,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
     host_node.write_to_db(db_controller.kv_store)
 
     pool = db_controller.get_pool_by_id(pool.get_id())
-    lvol.pool_uuid = pool.id
+    lvol.pool_uuid = pool.get_id()
     pool.lvols.append(lvol.uuid)
     pool.write_to_db(db_controller.kv_store)
 
@@ -1131,7 +1131,7 @@ def resize_lvol(id, new_size):
         logger.error(f"Can not resize clone!")
         return False
 
-    logger.info(f"Resizing LVol: {lvol.id}, new size: {new_size}")
+    logger.info(f"Resizing LVol: {lvol.get_id()}, new size: {new_size}")
 
     snode = db_controller.get_storage_node_by_id(lvol.node_id)
 
@@ -1165,7 +1165,7 @@ def set_read_only(id):
         logger.error(f"Pool is disabled")
         return False
 
-    logger.info(f"Setting LVol: {lvol.id} read only")
+    logger.info(f"Setting LVol: {lvol.get_id()} read only")
 
     snode = db_controller.get_storage_node_by_hostname(lvol.hostname)
 
@@ -1374,7 +1374,7 @@ def inflate_lvol(lvol_id):
         logger.error(f"Pool is disabled")
         return False
 
-    logger.info(f"Inflating LVol: {lvol.id}")
+    logger.info(f"Inflating LVol: {lvol.get_id()}")
     snode = db_controller.get_storage_node_by_id(lvol.node_id)
 
     # creating RPCClient instance

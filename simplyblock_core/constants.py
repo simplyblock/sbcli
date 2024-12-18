@@ -1,5 +1,17 @@
 import logging
 import os
+SCRIPT_PATH = os.path.dirname(os.path.realpath(__file__))
+
+
+def get_from_env_var_file(name, default=None):
+    if not name:
+        return False
+    with open(f"{SCRIPT_PATH}/env_var", "r", encoding="utf-8") as fh:
+        for line in fh.readlines():
+            if line.startswith(name):
+                return line.split("=", 1)[1].strip()
+    return default
+
 
 KVD_DB_VERSION = 730
 KVD_DB_FILE_PATH = '/etc/foundationdb/fdb.cluster'
@@ -54,9 +66,11 @@ FDB_CHECK_INTERVAL_SEC = 60
 
 
 
-SIMPLY_BLOCK_DOCKER_IMAGE = "simplyblock/simplyblock:dev"
-SIMPLY_BLOCK_CLI_NAME = "sbcli-dev"
-TASK_EXEC_INTERVAL_SEC = 10
+SIMPLY_BLOCK_DOCKER_IMAGE = get_from_env_var_file(
+        "SIMPLY_BLOCK_DOCKER_IMAGE","simplyblock/simplyblock:main")
+SIMPLY_BLOCK_CLI_NAME = get_from_env_var_file(
+        "SIMPLY_BLOCK_COMMAND_NAME", "sbcli")
+TASK_EXEC_INTERVAL_SEC = 30
 TASK_EXEC_RETRY_COUNT = 8
 
 

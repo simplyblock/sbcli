@@ -123,9 +123,9 @@ def generate_string(length):
 
 
 def get_docker_client(cluster_id=None):
-    from simplyblock_core.kv_store import DBController
+    from simplyblock_core.db_controller import DBController
     db_controller = DBController()
-    nodes = db_controller.get_mgmt_nodes(cluster_id)
+    nodes = db_controller.get_mgmt_nodes()
     if not nodes:
         logger.error("No mgmt nodes was found in the cluster!")
         return False
@@ -295,7 +295,7 @@ def sum_records(records):
 
 
 def get_random_vuid():
-    from simplyblock_core.kv_store import DBController
+    from simplyblock_core.db_controller import DBController
     db_controller = DBController()
     used_vuids = []
     nodes = db_controller.get_storage_nodes()
@@ -502,9 +502,9 @@ def calculate_pool_count(alceml_count, number_of_distribs, cpu_count, poller_cou
     poller_number = poller_count if poller_count else cpu_count
     #small_pool_count = (3 + alceml_count + lvol_count + 2 * snap_count + 1) * 256 + poller_number * 127 + 384 + 128 * poller_number + constants.EXTRA_SMALL_POOL_COUNT
 
-    small_pool_count = (6 + alceml_count + number_of_distribs) * 256 + poller_number * 127 + 384 + 128 * poller_number + constants.EXTRA_SMALL_POOL_COUNT
+    small_pool_count = 384 * (alceml_count + number_of_distribs + 3 + poller_count) + (6 + alceml_count + number_of_distribs) * 256 + poller_number * 127 + 384 + 128 * poller_number + constants.EXTRA_SMALL_POOL_COUNT
     #large_pool_count = (3 + alceml_count + lvol_count + 2 * snap_count + 1) * 32 + poller_number * 15 + 384 + 16 * poller_number + constants.EXTRA_LARGE_POOL_COUNT
-    large_pool_count = (6 + alceml_count + number_of_distribs) * 32 + poller_number * 15 + 384 + 16 * poller_number + constants.EXTRA_LARGE_POOL_COUNT
+    large_pool_count = 48 * (alceml_count + number_of_distribs + 3 + poller_count) + (6 + alceml_count + number_of_distribs) * 32 + poller_number * 15 + 384 + 16 * poller_number + constants.EXTRA_LARGE_POOL_COUNT
     return small_pool_count, large_pool_count
 
 
@@ -576,9 +576,11 @@ def decimal_to_hex_power_of_2(decimal_number):
     return hex_result
 
 
-def get_logger(name):
+def get_logger(name=""):
     # first configure a root logger
-    logg = logging.getLogger(name)
+    logging.getLogger("urllib3.connectionpool").setLevel(logging.WARNING)
+    logg = logging.getLogger(f"root")
+
     log_level = os.getenv("SIMPLYBLOCK_LOG_LEVEL")
     log_level = log_level.upper() if log_level else constants.LOG_LEVEL
 
@@ -588,12 +590,17 @@ def get_logger(name):
         logg.warning(f'Invalid SIMPLYBLOCK_LOG_LEVEL: {str(e)}')
         logg.setLevel(constants.LOG_LEVEL)
 
-    logger_handler = logging.StreamHandler(stream=sys.stdout)
-    logger_handler.setFormatter(logging.Formatter('%(asctime)s: %(levelname)s: %(message)s'))
-    logg.addHandler(logger_handler)
+    if not logg.hasHandlers():
+        logger_handler = logging.StreamHandler(stream=sys.stdout)
+        logger_handler.setFormatter(logging.Formatter('%(asctime)s: %(levelname)s: %(message)s'))
+        logg.addHandler(logger_handler)
+        gelf_handler = GELFTCPHandler('0.0.0.0', constants.GELF_PORT)
+        logg.addHandler(gelf_handler)
 
-    gelf_handler = GELFTCPHandler('0.0.0.0', constants.GELF_PORT)
-    logg.addHandler(gelf_handler)
+    if name:
+        logg = logging.getLogger(f"root.{name}")
+        logg.propagate = True
+
     return logg
 
 

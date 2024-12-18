@@ -1,4 +1,5 @@
 # coding=utf-8
+import datetime
 import json
 import logging
 import os
@@ -16,7 +17,7 @@ from jinja2 import Environment, FileSystemLoader
 from simplyblock_core import utils, scripts, constants, mgmt_node_ops, storage_node_ops, distr_controller
 from simplyblock_core.controllers import cluster_events, device_controller, storage_events, pool_controller, \
     lvol_controller
-from simplyblock_core.kv_store import DBController, KVStore
+from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.rpc_client import RPCClient
 from simplyblock_core.models.nvme_device import NVMeDevice
@@ -32,8 +33,8 @@ def _create_update_user(cluster_id, grafana_url, grafana_secret, user_secret, up
     headers = {
         'X-Requested-By': '',
         'Content-Type': 'application/json',
-    }        
-    
+    }
+    retries = 5
     if update_secret:
         url = f"{grafana_url}/api/users/lookup?loginOrEmail={cluster_id}"
         response = session.request("GET", url, headers=headers)
@@ -44,17 +45,17 @@ def _create_update_user(cluster_id, grafana_url, grafana_secret, user_secret, up
         })
         
         url = f"{grafana_url}/api/admin/users/{userid}/password"
-        
-        while True:
+
+        while retries > 0:
             response = session.request("PUT", url, headers=headers, data=payload)
             if response.status_code == 200:
                 logger.debug(f"user create/update {cluster_id} succeeded")
-                break
+                return response.status_code == 200
             logger.debug(response.status_code)
-            logger.debug("waiting for grafana api to come up")        
-            time.sleep(5)
+            logger.debug("waiting for grafana api to come up")
+            retries -= 1
+            time.sleep(3)
 
-        return response.status_code == 200
     else:
         payload = json.dumps({
             "name": cluster_id,
@@ -62,16 +63,15 @@ def _create_update_user(cluster_id, grafana_url, grafana_secret, user_secret, up
             "password": user_secret
         })
         url = f"{grafana_url}/api/admin/users"
-        while True:
+        while retries > 0:
             response = session.request("POST", url, headers=headers, data=payload)
             if response.status_code == 200:
                 logger.debug(f"user create/update {cluster_id} succeeded")
-                break
+                return response.status_code == 200
             logger.debug(response.status_code)
-            logger.debug("waiting for grafana api to come up")        
-            time.sleep(5)
-
-        return response.status_code == 200
+            logger.debug("waiting for grafana api to come up")
+            retries -= 1
+            time.sleep(3)
 
 
 def _add_graylog_input(cluster_ip, password):
@@ -238,9 +238,8 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     _create_update_user(c.uuid, c.grafana_endpoint, c.grafana_secret, c.secret)
 
     c.status = Cluster.STATUS_UNREADY
-
-    c.updated_at = int(time.time())
-    db_controller = DBController(KVStore())
+    c.create_dt = str(datetime.datetime.now())
+    db_controller = DBController()
     c.write_to_db(db_controller.kv_store)
 
     cluster_events.cluster_create(c)
@@ -250,52 +249,6 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     logger.info("New Cluster has been created")
     logger.info(c.uuid)
     return c.uuid
-
-
-# Deprecated
-def deploy_spdk(node_docker, spdk_cpu_mask, spdk_mem):
-    nodes = node_docker.containers.list(all=True)
-    for node in nodes:
-        if node.attrs["Name"] == "/spdk":
-            logger.info("spdk container found, skip deploy...")
-            return
-    container = node_docker.containers.run(
-        constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE,
-        f"/root/scripts/run_distr.sh {spdk_cpu_mask} {spdk_mem}",
-        detach=True,
-        privileged=True,
-        name="spdk",
-        network_mode="host",
-        volumes=[
-            '/var/tmp:/var/tmp',
-            '/dev:/dev',
-            '/lib/modules/:/lib/modules/',
-            '/sys:/sys'],
-        restart_policy={"Name": "on-failure", "MaximumRetryCount": 99}
-    )
-    container2 = node_docker.containers.run(
-        constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE,
-        "python /root/scripts/spdk_http_proxy.py",
-        name="spdk_proxy",
-        detach=True,
-        network_mode="host",
-        volumes=[
-            '/var/tmp:/var/tmp',
-            '/etc/foundationdb:/etc/foundationdb'],
-        restart_policy={"Name": "on-failure", "MaximumRetryCount": 99}
-    )
-    retries = 10
-    while retries > 0:
-        info = node_docker.containers.get(container.attrs['Id'])
-        status = info.attrs['State']["Status"]
-        is_running = info.attrs['State']["Running"]
-        if not is_running:
-            logger.info("Container is not running, waiting...")
-            time.sleep(3)
-            retries -= 1
-        else:
-            logger.info(f"Container status: {status}, Is Running: {is_running}")
-            break
 
 
 def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
@@ -347,7 +300,7 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
         cluster.prov_cap_crit = prov_cap_crit
 
     cluster.status = Cluster.STATUS_UNREADY
-    cluster.updated_at = int(time.time())
+    cluster.create_dt = str(datetime.datetime.now())
     cluster.write_to_db(db_controller.kv_store)
     cluster_events.cluster_create(cluster)
 
@@ -361,12 +314,14 @@ def cluster_activate(cl_id, force=False):
         logger.error(f"Cluster not found {cl_id}")
         return False
     if cluster.status == Cluster.STATUS_ACTIVE:
-        logger.warning("Cluster is not in an ACTIVE state")
+        logger.warning("Cluster is ACTIVE")
         if not force:
             logger.warning(f"Failed to activate cluster, Cluster is in an ACTIVE state, use --force to reactivate")
             return False
+
+    ols_status = cluster.status
     set_cluster_status(cl_id, Cluster.STATUS_IN_ACTIVATION)
-    snodes = db_controller.get_primary_storage_nodes_by_cluster_id(cl_id)
+    snodes = db_controller.get_storage_nodes_by_cluster_id(cl_id)
     online_nodes = []
     dev_count = 0
 
@@ -381,8 +336,9 @@ def cluster_activate(cl_id, force=False):
     minimum_devices = cluster.distr_ndcs + cluster.distr_npcs + 1
     if dev_count < minimum_devices:
         logger.error(f"Failed to activate cluster, No enough online device.. Minimum is {minimum_devices}")
-        set_cluster_status(cl_id, Cluster.STATUS_UNREADY)
+        set_cluster_status(cl_id, ols_status)
         return False
+
     records = db_controller.get_cluster_capacity(cluster)
     max_size = records[0]['size_total']
 
@@ -393,13 +349,15 @@ def cluster_activate(cl_id, force=False):
             secondary_nodes = storage_node_ops.get_secondary_nodes(snode)
             if not secondary_nodes:
                 logger.error(f"Failed to activate cluster, No enough secondary nodes")
-                set_cluster_status(cl_id, Cluster.STATUS_UNREADY)
+                set_cluster_status(cl_id, ols_status)
                 return False
             snode.secondary_node_id = secondary_nodes[0]
             snode.write_to_db()
 
     for snode in snodes:
         if snode.is_secondary_node:
+            continue
+        if snode.status != StorageNode.STATUS_ONLINE:
             continue
         if snode.lvstore:
             logger.warning(f"Node {snode.get_id()} already has lvstore {snode.lvstore}")
@@ -409,13 +367,27 @@ def cluster_activate(cl_id, force=False):
                                               cluster.distr_chunk_bs, cluster.page_size_in_blocks, max_size, snodes)
         if not ret:
             logger.error("Failed to activate cluster")
-            set_cluster_status(cl_id, Cluster.STATUS_UNREADY)
+            set_cluster_status(cl_id, ols_status)
             return False
+
+    for snode in snodes:
+        if not snode.is_secondary_node:
+            continue
+        if snode.status != StorageNode.STATUS_ONLINE:
+            continue
+
+        ret = storage_node_ops.recreate_lvstore(snode)
+        if not ret:
+            logger.error("Failed to activate cluster")
+            set_cluster_status(cl_id, ols_status)
+            return False
+
     if not cluster.cluster_max_size:
+        cluster = db_controller.get_cluster_by_id(cl_id)
         cluster.cluster_max_size = max_size
         cluster.cluster_max_devices = dev_count
         cluster.cluster_max_nodes = len(online_nodes)
-    cluster.write_to_db(db_controller.kv_store)
+        cluster.write_to_db(db_controller.kv_store)
     set_cluster_status(cl_id, Cluster.STATUS_ACTIVE)
     logger.info("Cluster activated successfully")
     return True
@@ -536,7 +508,7 @@ def list():
     for cl in cls:
         st = db_controller.get_storage_nodes_by_cluster_id(cl.get_id())
         data.append({
-            "UUID": cl.id,
+            "UUID": cl.get_id(),
             "NQN": cl.nqn,
             "ha_type": cl.ha_type,
             "tls": cl.tls,
@@ -750,20 +722,20 @@ def update_cluster(cl_id):
     return True
 
 
-def cluster_grace_startup(cl_id):
+def cluster_grace_startup(cl_id, clear_data=False, spdk_image=None):
     db_controller = DBController()
     cluster = db_controller.get_cluster_by_id(cl_id)
     if not cluster:
         logger.error(f"Cluster not found {cl_id}")
         return False
-    logger.info(f"Unsuspending cluster: {cl_id}")
-    unsuspend_cluster(cl_id)
+    # logger.info(f"Unsuspending cluster: {cl_id}")
+    # unsuspend_cluster(cl_id)
 
     st = db_controller.get_storage_nodes_by_cluster_id(cl_id)
     for node in st:
         logger.info(f"Restarting node: {node.get_id()}")
-        storage_node_ops.restart_storage_node(node.get_id())
-        time.sleep(5)
+        storage_node_ops.restart_storage_node(node.get_id(), clear_data=clear_data, force=True, spdk_image=spdk_image)
+        # time.sleep(5)
         get_node = db_controller.get_storage_node_by_id(node.get_id())
         if get_node.status != StorageNode.STATUS_ONLINE:
             logger.error("failed to restart node")
@@ -854,3 +826,51 @@ def open_db_from_zip(fip_path):
 
     if os.path.exists(out):
         scripts.deploy_fdb_from_file_service(out)
+
+
+
+def cluster_reset():
+    """
+
+
+set -x
+
+CMD=$(ls ~/.local/bin/sbcli-* | awk '{n=split($0,a,"/"); print a[n]}')
+cl=$($CMD cluster list | tail -n -3 | awk '{print $2}')
+
+#$CMD cluster graceful-shutdown $cl
+
+for sn_id in $($CMD sn list | grep / | awk '{print $2}'); do
+  $CMD -d sn shutdown --force $sn_id
+done
+
+sudo mv /etc/foundationdb/fdb.cluster /etc/foundationdb/fdb.cluster.bck
+for service_id in $(docker service ls | grep / | awk '{print $1}'); do
+  docker service update "$service_id" --force --detach
+done
+
+# restore
+fdb_cont=$(sudo docker ps | grep "app_fdb-server" | awk '{print $1}')
+sudo docker rm --force $fdb_cont
+sudo rm -rf /etc/foundationdb/data/*
+fdbcli --exec "configure new single ssd ; writemode on ; clearrange \"\" \\xff" -C /etc/foundationdb/fdb.cluster.bck
+BF=$(fdbbackup list -b file:///etc/foundationdb/backup/)
+fdbrestore start -r "$BF" --dest-cluster-file /etc/foundationdb/fdb.cluster.bck -t fresh_deploy
+
+sudo mv /etc/foundationdb/fdb.cluster.bck /etc/foundationdb/fdb.cluster
+
+for service_id in $(docker service ls | grep / | awk '{print $1}'); do
+  docker service update "$service_id" --force --detach
+done
+
+sleep 30
+for sn_id in $($CMD sn list | grep / | awk '{print $2}'); do
+  $CMD -d sn shutdown --force $sn_id
+done
+
+sleep 5
+$CMD -d cluster graceful-startup $cl  --clear-data
+
+$CMD -d cluster activate $cl
+
+    """

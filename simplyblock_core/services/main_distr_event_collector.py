@@ -4,7 +4,7 @@ import threading
 import time
 
 
-from simplyblock_core import constants, kv_store, utils, rpc_client, distr_controller
+from simplyblock_core import constants, db_controller, utils, rpc_client, distr_controller
 from simplyblock_core.controllers import events_controller, device_controller, lvol_events
 from simplyblock_core.models.lvol_model import LVol
 
@@ -18,7 +18,7 @@ logger = utils.get_logger(__name__)
 
 
 # get DB controller
-db_controller = kv_store.DBController()
+db_controller = db_controller.DBController()
 
 
 def process_device_event(event):

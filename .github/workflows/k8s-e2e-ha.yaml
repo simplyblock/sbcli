@@ -7,7 +7,7 @@ on:
       simplyBlockDeploy_branch:
         description: 'Branch for simplyBlockDeploy'
         required: true
-        default: 'mgmt-image'
+        default: 'main'
       simplyblock_csi_branch:
         description: 'Branch for simplyblock-csi'
         required: true
@@ -15,7 +15,7 @@ on:
       sbcli_cmd:
         description: 'Command for sbcli execution'
         required: true
-        default: 'sbcli-main-ha'
+        default: 'sbcli-main'
       testname:
         description: 'Name of test to run. Empty to run all'
         required: false

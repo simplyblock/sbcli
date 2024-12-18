@@ -3,7 +3,7 @@
 import time
 
 
-from simplyblock_core import kv_store, constants, cluster_ops, utils
+from simplyblock_core import db_controller, constants, cluster_ops, utils
 from simplyblock_core.controllers import cluster_events
 from simplyblock_core.models.cluster import Cluster
 
@@ -11,7 +11,7 @@ from simplyblock_core.models.cluster import Cluster
 logger = utils.get_logger(__name__)
 
 # get DB controller
-db_controller = kv_store.DBController()
+db_controller = db_controller.DBController()
 
 logger.info("Starting capacity monitoring service...")
 while True:
