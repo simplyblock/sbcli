@@ -2149,11 +2149,11 @@ def suspend_storage_node(node_id, force=False):
     elif len(snode.lvols) > 0:
         nodes.append(snode)
 
-    rpc_client.bulk_send_enable()
 
     for node in nodes:
         if len(node.lvols)==0:
             continue
+
         for lvol_id in node.lvols:
             lvol = db_controller.get_lvol_by_id(lvol_id)
             if lvol:
@@ -2164,9 +2164,7 @@ def suspend_storage_node(node_id, force=False):
 
         rpc_client.bdev_lvol_set_leader(False, lvs_name=node.lvstore)
         rpc_client.bdev_distrib_force_to_non_leader(node.jm_vuid)
-        rpc_client.commit_bulk_send()
 
-    rpc_client.bulk_send_disable()
 
 
     if snode.jm_device and snode.jm_device.status != JMDevice.STATUS_REMOVED:
@@ -2228,8 +2226,6 @@ def resume_storage_node(node_id):
     elif len(snode.lvols) > 0:
         nodes.append(snode)
 
-    rpc_client.bulk_send_enable()
-
     for node in nodes:
         if len(node.lvols)==0 or not node.lvstore:
             continue
@@ -2243,9 +2239,6 @@ def resume_storage_node(node_id):
                         if iface.ip4_address:
                             ret = rpc_client.nvmf_subsystem_listener_set_ana_state(
                                 lvol.nqn, iface.ip4_address, "4420", False)
-        rpc_client.commit_bulk_send()
-
-    rpc_client.bulk_send_disable()
 
         # time.sleep(1)
         # remote_rpc_client.bdev_lvol_set_leader(False, lvs_name=node.lvstore)
@@ -2268,7 +2261,7 @@ def resume_storage_node(node_id):
             sec_node = db_controller.get_storage_node_by_id(node.secondary_node_id)
             if sec_node and sec_node.status == StorageNode.STATUS_ONLINE:
                 remote_rpc_client = RPCClient(sec_node.mgmt_ip, sec_node.rpc_port, sec_node.rpc_username, sec_node.rpc_password)
-                remote_rpc_client.bulk_send_enable()
+
                 for lvol_id in node.lvols:
                     lvol = db_controller.get_lvol_by_id(lvol_id)
                     if lvol:
@@ -2279,7 +2272,6 @@ def resume_storage_node(node_id):
 
                 remote_rpc_client.bdev_lvol_set_leader(False, lvs_name=node.lvstore)
                 remote_rpc_client.bdev_distrib_force_to_non_leader(node.jm_vuid)
-                remote_rpc_client.commit_bulk_send()
                 time.sleep(1)
 
         if node.jm_vuid:
@@ -2287,7 +2279,6 @@ def resume_storage_node(node_id):
             logger.info(f"JM Sync res: {ret}")
             time.sleep(1)
 
-        rpc_client.bulk_send_enable()
         for lvol_id in node.lvols:
             lvol = db_controller.get_lvol_by_id(lvol_id)
             if lvol:
@@ -2296,8 +2287,6 @@ def resume_storage_node(node_id):
                         ret = rpc_client.nvmf_subsystem_listener_set_ana_state(
                                 lvol.nqn, iface.ip4_address, "4420", True)
 
-        rpc_client.commit_bulk_send()
-        rpc_client.bulk_send_disable()
         time.sleep(2)
 
         if node.secondary_node_id:
@@ -2305,7 +2294,7 @@ def resume_storage_node(node_id):
             if sec_node and sec_node.status == StorageNode.STATUS_ONLINE:
                 remote_rpc_client = RPCClient(sec_node.mgmt_ip, sec_node.rpc_port, sec_node.rpc_username,
                                               sec_node.rpc_password)
-                remote_rpc_client.bulk_send_enable()
+
                 for lvol_id in node.lvols:
                     lvol = db_controller.get_lvol_by_id(lvol_id)
                     if lvol:
@@ -2313,7 +2302,6 @@ def resume_storage_node(node_id):
                             if iface.ip4_address:
                                 ret = remote_rpc_client.nvmf_subsystem_listener_set_ana_state(
                                     lvol.nqn, iface.ip4_address, "4420", False)
-                remote_rpc_client.commit_bulk_send()
 
     logger.info("Setting node status to online")
     set_node_status(snode.get_id(), StorageNode.STATUS_ONLINE)
@@ -2788,7 +2776,7 @@ def recreate_lvstore(snode):
         sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
         if sec_node.status == StorageNode.STATUS_ONLINE:
             sec_rpc_client = RPCClient(sec_node.mgmt_ip, sec_node.rpc_port, sec_node.rpc_username, sec_node.rpc_password, timeout=3, retry=2)
-            sec_rpc_client.bulk_send_enable()
+
             for lvol_id in snode.lvols:
                 lvol = db_controller.get_lvol_by_id(lvol_id)
                 if lvol.ha_type == "ha":
@@ -2799,8 +2787,7 @@ def recreate_lvstore(snode):
 
             sec_rpc_client.bdev_lvol_set_leader(False, lvs_name=snode.lvstore)
             sec_rpc_client.bdev_distrib_force_to_non_leader(snode.jm_vuid)
-            sec_rpc_client.commit_bulk_send()
-            sec_rpc_client.bulk_send_disable()
+            time.sleep(1)
 
     ret, err = _create_bdev_stack(snode, [], primary_node=snode)
 
@@ -2828,7 +2815,6 @@ def recreate_lvstore(snode):
     if sec_node and sec_node.status == StorageNode.STATUS_ONLINE:
         time.sleep(5)
         sec_rpc_client = RPCClient(sec_node.mgmt_ip, sec_node.rpc_port, sec_node.rpc_username, sec_node.rpc_password, timeout=3, retry=2)
-        sec_rpc_client.bulk_send_enable()
         for lvol_id in snode.lvols:
             lvol = db_controller.get_lvol_by_id(lvol_id)
             if lvol.ha_type == "ha":
@@ -2836,7 +2822,6 @@ def recreate_lvstore(snode):
                     if iface.ip4_address:
                         ret = sec_rpc_client.nvmf_subsystem_listener_set_ana_state(
                             lvol.nqn, iface.ip4_address, "4420", False)
-        sec_rpc_client.commit_bulk_send()
     return True
 
 
