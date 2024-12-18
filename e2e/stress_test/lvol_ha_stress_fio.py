@@ -240,6 +240,9 @@ class TestLvolHAClusterGracefulShutdown(TestLvolHACluster):
         timestamp = int(datetime.now().timestamp())
 
         self.sbcli_utils.suspend_node(node_uuid=self.lvol_node, expected_error_code=[503])
+        self.sbcli_utils.wait_for_storage_node_status(self.lvol_node,
+                                                      "suspended",
+                                                      timeout=4000)
         sleep_n_sec(10)
         self.sbcli_utils.shutdown_node(node_uuid=self.lvol_node, expected_error_code=[503])
         self.sbcli_utils.wait_for_storage_node_status(self.lvol_node,
@@ -448,6 +451,9 @@ class TestLvolHAClusterRunAllScenarios(TestLvolHACluster):
         self.logger.info("Graceful shutdown initiated.")
         
         self.sbcli_utils.suspend_node(node_uuid=self.lvol_node, expected_error_code=[503])
+        self.sbcli_utils.wait_for_storage_node_status(self.lvol_node,
+                                                      "suspended",
+                                                      timeout=4000)
         sleep_n_sec(10)
 
         self.sbcli_utils.shutdown_node(node_uuid=self.lvol_node, expected_error_code=[503])
