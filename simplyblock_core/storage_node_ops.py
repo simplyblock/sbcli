@@ -111,7 +111,10 @@ def addNvmeDevices(snode, devs):
             pci_st = str(pcie).replace("0", "").replace(":", "").replace(".", "")
             nvme_controller = "nvme_%s" % pci_st
             nvme_bdevs, err = rpc_client.bdev_nvme_controller_attach(nvme_controller, pcie)
-            time.sleep(2)
+            time.sleep(1)
+
+        if not nvme_bdevs:
+            continue
 
         for nvme_bdev in nvme_bdevs:
             rpc_client.bdev_examine(nvme_bdev)
