@@ -5,8 +5,6 @@ import re
 import sys
 
 from simplyblock_core import cluster_ops, utils
-from simplyblock_core import kv_store
-from simplyblock_core import compute_node_ops as compute_ops
 from simplyblock_core import storage_node_ops as storage_ops
 from simplyblock_core import mgmt_node_ops as mgmt_ops
 from simplyblock_core import constants
@@ -19,9 +17,7 @@ from simplyblock_core.models.pool import Pool
 class CLIWrapper:
 
     def __init__(self):
-        self.logger = logging.getLogger()
-        self.logger.setLevel(constants.LOG_LEVEL)
-        self.db_store = kv_store.KVStore()
+        self.logger = utils.get_logger()
         self.init_parser()
 
         #
@@ -70,8 +66,8 @@ class CLIWrapper:
         sub_command.add_argument("node_id", help='UUID of storage node')
         sub_command.add_argument("--force-remove", help='Force remove all LVols and snapshots',
                                  dest='force_remove', required=False, action='store_true')
-        sub_command.add_argument("--force-migrate", help='Force migrate All LVols to other nodes',
-                                 dest='force_migrate', required=False, action='store_true')
+        # sub_command.add_argument("--force-migrate", help='Force migrate All LVols to other nodes',
+        #                          dest='force_migrate', required=False, action='store_true')
         # List all storage nodes
         sub_command = self.add_sub_command(subparser, "list", 'List storage nodes')
         sub_command.add_argument("--cluster-id", help='id of the cluster for which nodes are listed', dest='cluster_id')
@@ -298,7 +294,7 @@ class CLIWrapper:
                                  dest='ha_type', choices=["single", "ha"], default='single')
         sub_command.add_argument("--enable-node-affinity", help='Enable node affinity for storage nodes', action='store_true')
         sub_command.add_argument("--qpair-count", help='tcp transport qpair count', type=int, dest='qpair_count',
-                                 default=20, choices=range(128))
+                                 default=0, choices=range(128))
         sub_command.add_argument("--max-queue-size", help='The max size the queue will grow', type=int, default=128)
         sub_command.add_argument("--inflight-io-threshold", help='The number of inflight IOs allowed before the IO queuing starts', type=int, default=4)
         sub_command.add_argument("--enable-qos", help='Enable qos bdev for storage nodes', action='store_true', dest='enable_qos')
@@ -328,7 +324,7 @@ class CLIWrapper:
                                  dest='ha_type', choices=["single", "ha"], default='single')
         sub_command.add_argument("--enable-node-affinity", help='Enable node affinity for storage nodes', action='store_true')
         sub_command.add_argument("--qpair-count", help='tcp transport qpair count', type=int, dest='qpair_count',
-                                 default=6, choices=range(128))
+                                 default=0, choices=range(128))
         sub_command.add_argument("--max-queue-size", help='The max size the queue will grow', type=int, default=128)
         sub_command.add_argument("--inflight-io-threshold", help='The number of inflight IOs allowed before the IO queuing starts', type=int, default=4)
         sub_command.add_argument("--enable-qos", help='Enable qos bdev for storage nodes', action='store_true', dest='enable_qos')
@@ -405,6 +401,8 @@ class CLIWrapper:
         # graceful-startup storage nodes
         sub_command = self.add_sub_command(subparser, "graceful-startup", 'Graceful startup of storage nodes')
         sub_command.add_argument("id", help='cluster UUID')
+        sub_command.add_argument("--clear-data", help='clear Alceml data', dest='clear_data', action='store_true')
+        sub_command.add_argument("--spdk-image", help='SPDK image uri', dest='spdk_image')
 
         # get tasks list
         sub_command = self.add_sub_command(subparser, "list-tasks", 'List tasks by cluster ID')
@@ -801,7 +799,7 @@ class CLIWrapper:
                 ret = storage_ops.list_storage_nodes(args.json, args.cluster_id)
 
             elif sub_command == "remove":
-                ret = storage_ops.remove_storage_node(args.node_id, args.force_remove, args.force_migrate)
+                ret = storage_ops.remove_storage_node(args.node_id, args.force_remove)
 
             elif sub_command == "delete":
                 ret = storage_ops.delete_storage_node(args.node_id)
@@ -1016,7 +1014,7 @@ class CLIWrapper:
                 ret = cluster_ops.cluster_grace_shutdown(args.id)
 
             elif sub_command == "graceful-startup":
-                ret = cluster_ops.cluster_grace_startup(args.id)
+                ret = cluster_ops.cluster_grace_startup(args.id, args.clear_data, args.spdk_image)
 
             elif sub_command == "delete":
                 ret = cluster_ops.delete_cluster(args.id)
@@ -1264,17 +1262,13 @@ class CLIWrapper:
 
         print(ret)
 
-    def storage_node_list(self, args):
-        out = storage_ops.list_storage_nodes(self.db_store, args.json)
-        return out
-
     def storage_node_list_devices(self, args):
         node_id = args.node_id
         sort = args.sort
         if sort:
             sort = sort[0]
         is_json = args.json
-        out = storage_ops.list_storage_devices(self.db_store, node_id, sort, is_json)
+        out = storage_ops.list_storage_devices(node_id, sort, is_json)
         return out
 
     def cluster_add(self, args):
@@ -1406,10 +1400,6 @@ class CLIWrapper:
 
 
 def main():
-    logger_handler = logging.StreamHandler()
-    logger_handler.setFormatter(logging.Formatter('%(asctime)s: %(levelname)s: %(filename)s:%(lineno)d: %(message)s'))
-    logger = logging.getLogger()
-    logger.addHandler(logger_handler)
 
     cli = CLIWrapper()
     cli.run()

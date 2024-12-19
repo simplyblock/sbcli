@@ -1,12 +1,12 @@
 import json
 
 import requests
-import logging
 
+from simplyblock_core import constants, utils
 from requests.adapters import HTTPAdapter
 from urllib3 import Retry
 
-logger = logging.getLogger()
+logger = utils.get_logger()
 
 
 def print_dict(d):
@@ -618,7 +618,7 @@ class RPCClient:
             "reconnect_delay_sec": 1,
             "keep_alive_timeout_ms": 10000,
             "transport_ack_timeout": 9,
-            "timeout_us": 0
+            "timeout_us": constants.NVME_TIMEOUT_US
         }
         return self._request("bdev_nvme_set_options", params)
 
@@ -651,6 +651,11 @@ class RPCClient:
             return self._request("iobuf_set_options", params)
         else:
             return False
+
+    def accel_set_options(self):
+        params = {"small_cache_size": 512,
+                   "large_cache_size": 64}
+        return self._request("accel_set_options", params)
 
     def distr_status_events_get(self):
         return self._request("distr_status_events_get")

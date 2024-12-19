@@ -8,7 +8,7 @@ from datetime import datetime
 import traceback
 from requests.exceptions import HTTPError
 
-class TestSingleNodeFailureHA(TestClusterBase):
+class TestHASingleNodeFailure(TestClusterBase):
     """
     Steps:
     1. Create Storage Pool and Delete Storage pool

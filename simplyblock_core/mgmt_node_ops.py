@@ -1,4 +1,5 @@
 # coding=utf-8
+import datetime
 import json
 import logging
 import uuid
@@ -9,7 +10,7 @@ import docker
 
 from simplyblock_core import utils, scripts
 from simplyblock_core.controllers import mgmt_events
-from simplyblock_core.kv_store import DBController
+from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.mgmt_node import MgmtNode
 
 
@@ -50,7 +51,7 @@ def deploy_mgmt_node(cluster_ip, cluster_id, ifname, cluster_secret):
     time.sleep(1)
     hostname = utils.get_hostname()
     db_controller = DBController()
-    nodes = db_controller.get_mgmt_nodes(cluster_id=cluster_id)
+    nodes = db_controller.get_mgmt_nodes()
     if not nodes:
         logger.error("No mgmt nodes was found in the cluster!")
         return False
@@ -93,7 +94,7 @@ def deploy_mgmt_node(cluster_ip, cluster_id, ifname, cluster_secret):
     node_id = add_mgmt_node(DEV_IP, cluster_id)
 
     # check if ha setting is required
-    nodes = db_controller.get_mgmt_nodes(cluster_id=cluster_id)
+    nodes = db_controller.get_mgmt_nodes()
     if len(nodes) >= 3:
         logger.info("Waiting for FDB container to be active...")
         fdb_cont = None
@@ -154,6 +155,8 @@ def add_mgmt_node(mgmt_ip, cluster_id=None):
     node.cluster_id = cluster_id
     node.mgmt_ip = mgmt_ip
     node.status = MgmtNode.STATUS_ONLINE
+    node.create_dt = str(datetime.datetime.now())
+
     node.write_to_db(db_controller.kv_store)
 
     mgmt_events.mgmt_add(node)

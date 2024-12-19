@@ -8,7 +8,7 @@ import uuid
 from simplyblock_core.controllers import lvol_controller, snapshot_events
 
 from simplyblock_core import utils, distr_controller, constants
-from simplyblock_core.kv_store import DBController
+from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.lvol_model import LVol
@@ -44,7 +44,7 @@ def add(lvol_id, snapshot_name):
             logger.error(msg)
             return False, msg
 
-    logger.info(f"Creating snapshot: {snapshot_name} from LVol: {lvol.id}")
+    logger.info(f"Creating snapshot: {snapshot_name} from LVol: {lvol.get_id()}")
     snode = db_controller.get_storage_node_by_id(lvol.node_id)
 
 ##############################################################################
@@ -249,10 +249,11 @@ def clone(snapshot_id, clone_name, new_size=0):
     lvol.top_bdev = f"{lvol.lvs_name}/{lvol.lvol_bdev}"
     lvol.hostname = snode.hostname
     lvol.node_id = snode.get_id()
+    lvol.nodes = snap.lvol.nodes
     lvol.mode = 'read-write'
     lvol.cloned_from_snap = snapshot_id
     lvol.nqn = cluster.nqn + ":lvol:" + lvol.uuid
-    lvol.pool_uuid = pool.id
+    lvol.pool_uuid = pool.get_id()
     lvol.ha_type = snap.lvol.ha_type
     lvol.lvol_type = 'lvol'
     lvol.ndcs = snap.lvol.ndcs
@@ -314,7 +315,6 @@ def clone(snapshot_id, clone_name, new_size=0):
     for iface in snode.data_nics:
         if iface.ip4_address:
             tr_type = iface.get_transport_type()
-            ret = rpc_client.transport_create(tr_type, cluster.qpair_count)
             logger.info("adding listener for %s on IP %s" % (subsystem_nqn, iface.ip4_address))
             ret = rpc_client.listeners_create(subsystem_nqn, tr_type, iface.ip4_address, "4420")
 

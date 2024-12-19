@@ -2,7 +2,7 @@
 import time
 
 
-from simplyblock_core import constants, kv_store, storage_node_ops, utils
+from simplyblock_core import constants, db_controller, storage_node_ops, utils
 from simplyblock_core.controllers import device_controller, tasks_events, health_controller, tasks_controller
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.nvme_device import NVMeDevice
@@ -12,7 +12,7 @@ from simplyblock_core.models.storage_node import StorageNode
 logger = utils.get_logger(__name__)
 
 # get DB controller
-db_controller = kv_store.DBController()
+db_controller = db_controller.DBController()
 
 
 def _get_node_unavailable_devices_count(node_id):
@@ -195,7 +195,7 @@ def task_runner_node(task):
 
     # resetting node
     logger.info(f"Restart node {node.get_id()}")
-    ret = storage_node_ops.restart_storage_node(node.get_id(), force=True)
+    ret = storage_node_ops.restart_storage_node(node.get_id())
     if ret:
         logger.info(f"Node restart succeeded")
 

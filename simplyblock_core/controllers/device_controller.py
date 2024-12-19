@@ -3,7 +3,7 @@ import logging
 
 from simplyblock_core import distr_controller, utils, storage_node_ops
 from simplyblock_core.controllers import device_events, lvol_controller, tasks_controller
-from simplyblock_core.kv_store import DBController
+from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.nvme_device import NVMeDevice, JMDevice
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.rpc_client import RPCClient
@@ -14,7 +14,7 @@ logger = logging.getLogger()
 
 def device_set_state(device_id, state):
     db_controller = DBController()
-    dev = db_controller.get_storage_devices(device_id)
+    dev = db_controller.get_storage_device_by_id(device_id)
     if not dev:
         logger.error("device not found")
         return False
@@ -49,8 +49,6 @@ def device_set_state(device_id, state):
         snode.write_to_db(db_controller.kv_store)
         device_events.device_status_change(device, device.status, old_status)
 
-    distr_controller.send_dev_status_event(device, device.status)
-
     if state == NVMeDevice.STATUS_ONLINE:
         logger.info("Make other nodes connect to the node devices")
         snodes = db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id)
@@ -60,12 +58,14 @@ def device_set_state(device_id, state):
             node.remote_devices = storage_node_ops._connect_to_remote_devs(node)
             node.write_to_db()
 
+    distr_controller.send_dev_status_event(device, device.status)
+
     return True
 
 
 def device_set_io_error(device_id, is_error):
     db_controller = DBController()
-    dev = db_controller.get_storage_devices(device_id)
+    dev = db_controller.get_storage_device_by_id(device_id)
     if not dev:
         logger.error("device not found")
 
@@ -163,15 +163,6 @@ def _def_create_device_stack(device_obj, snode, force=False):
     for iface in snode.data_nics:
         if iface.ip4_address:
             tr_type = iface.get_transport_type()
-            ret = rpc_client.transport_list()
-            found = False
-            if ret:
-                for ty in ret:
-                    if ty['trtype'] == tr_type:
-                        found = True
-            if found is False:
-                ret = rpc_client.transport_create(tr_type)
-            # logger.info("adding listener for %s on IP %s" % (subsystem_nqn, iface.ip4_address))
             ret = rpc_client.listeners_create(subsystem_nqn, tr_type, iface.ip4_address, "4420")
             IP = iface.ip4_address
             break
@@ -181,6 +172,7 @@ def _def_create_device_stack(device_obj, snode, force=False):
     if snode.enable_test_device:
         device_obj.testing_bdev = test_name
     device_obj.alceml_bdev = alceml_name
+    device_obj.alceml_name = alceml_name
     device_obj.pt_bdev = pt_name
     device_obj.nvmf_nqn = subsystem_nqn
     device_obj.nvmf_ip = IP
@@ -190,7 +182,7 @@ def _def_create_device_stack(device_obj, snode, force=False):
 
 def restart_device(device_id, force=False):
     db_controller = DBController()
-    dev = db_controller.get_storage_devices(device_id)
+    dev = db_controller.get_storage_device_by_id(device_id)
     if not dev:
         logger.error("device not found")
 
@@ -227,35 +219,6 @@ def restart_device(device_id, force=False):
         if not force:
             return False
 
-    logger.info("Make other nodes connect to the device")
-    snodes = db_controller.get_storage_nodes()
-    for node_index, node in enumerate(snodes):
-        if node.get_id() == snode.get_id():
-            continue
-        if node.status != snode.STATUS_ONLINE:
-            continue
-
-        rpc_client = RPCClient(node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password)
-        name = f"remote_{device_obj.alceml_bdev}"
-        ret = rpc_client.bdev_nvme_attach_controller_tcp(name, device_obj.nvmf_nqn, device_obj.nvmf_ip,
-                                                         device_obj.nvmf_port)
-        if not ret:
-            logger.error(f"Failed to connect to device: {name}")
-            continue
-
-        device_obj.remote_bdev = f"{name}n1"
-        idx = -1
-        for i, d in enumerate(node.remote_devices):
-            if d.get_id() == device_obj.get_id():
-                idx = i
-                break
-        if idx >= 0:
-            node.remote_devices[idx] = device_obj
-        else:
-            node.remote_devices.append(device_obj)
-        node.write_to_db(db_controller.kv_store)
-        time.sleep(3)
-
     logger.info("Setting device io_error to False")
     device_set_io_error(device_id, False)
     logger.info("Setting device online")
@@ -284,7 +247,7 @@ def restart_device(device_id, force=False):
 
 def set_device_testing_mode(device_id, mode):
     db_controller = DBController()
-    device = db_controller.get_storage_devices(device_id)
+    device = db_controller.get_storage_device_by_id(device_id)
     if not device:
         logger.error("device not found")
         return False
@@ -331,7 +294,7 @@ def set_device_testing_mode(device_id, mode):
 
 def device_remove(device_id, force=True):
     db_controller = DBController()
-    dev = db_controller.get_storage_devices(device_id)
+    dev = db_controller.get_storage_device_by_id(device_id)
     if not dev:
         logger.error("device not found")
         return False
@@ -419,7 +382,7 @@ def device_remove(device_id, force=True):
 
 def get_device(device_id):
     db_controller = DBController()
-    device = db_controller.get_storage_devices(device_id)
+    device = db_controller.get_storage_device_by_id(device_id)
     if not device:
         logger.error("device not found")
         return False
@@ -429,7 +392,7 @@ def get_device(device_id):
 
 def get_device_capacity(device_id, history, records_count=20, parse_sizes=True):
     db_controller = DBController()
-    device = db_controller.get_storage_devices(device_id)
+    device = db_controller.get_storage_device_by_id(device_id)
     if not device:
         logger.error("device not found")
 
@@ -461,7 +424,7 @@ def get_device_capacity(device_id, history, records_count=20, parse_sizes=True):
 
 def get_device_iostats(device_id, history, records_count=20, parse_sizes=True):
     db_controller = DBController()
-    device = db_controller.get_storage_devices(device_id)
+    device = db_controller.get_storage_device_by_id(device_id)
     if not device:
         logger.error(f"Device not found: {device_id}")
         return False
@@ -496,7 +459,7 @@ def get_device_iostats(device_id, history, records_count=20, parse_sizes=True):
 
 def reset_storage_device(dev_id):
     db_controller = DBController()
-    device = db_controller.get_storage_devices(dev_id)
+    device = db_controller.get_storage_device_by_id(dev_id)
     if not device:
         logger.error(f"Device not found: {dev_id}")
         return False
@@ -552,7 +515,7 @@ def reset_storage_device(dev_id):
 
 def device_set_retries_exhausted(device_id, retries_exhausted):
     db_controller = DBController()
-    dev = db_controller.get_storage_devices(device_id)
+    dev = db_controller.get_storage_device_by_id(device_id)
     if not dev:
         logger.error("device not found")
         return False
@@ -581,7 +544,7 @@ def device_set_retries_exhausted(device_id, retries_exhausted):
 
 def device_set_failed(device_id):
     db_controller = DBController()
-    dev = db_controller.get_storage_devices(device_id)
+    dev = db_controller.get_storage_device_by_id(device_id)
     if not dev:
         logger.error("device not found")
 
@@ -600,12 +563,16 @@ def device_set_failed(device_id):
 
     ret = device_set_state(device_id, NVMeDevice.STATUS_FAILED)
     if ret:
-        tasks_controller.add_device_failed_mig_task(device_id)
+        for node in db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id):
+            if node.status == StorageNode.STATUS_ONLINE:
+                distr_controller.send_cluster_map_to_node(node)
+
+    tasks_controller.add_device_failed_mig_task(device_id)
 
 
 def add_device(device_id):
     db_controller = DBController()
-    dev = db_controller.get_storage_devices(device_id)
+    dev = db_controller.get_storage_device_by_id(device_id)
     if not dev:
         logger.error("device not found")
 
@@ -626,7 +593,7 @@ def add_device(device_id):
 
     logger.info(f"Adding device {device_id}")
     if snode.num_partitions_per_dev == 0:
-        ret = _def_create_device_stack(device_obj, snode)
+        ret = _def_create_device_stack(device_obj, snode, force=True)
         if not ret:
             logger.error("Failed to create device stack")
             return False
@@ -642,8 +609,15 @@ def add_device(device_id):
         for node in snodes:
             if node.get_id() == snode.get_id() or node.status != StorageNode.STATUS_ONLINE:
                 continue
-            node.remote_devices = storage_node_ops._connect_to_remote_devs(node)
+            node.remote_devices = storage_node_ops._connect_to_remote_devs(node, force_conect_restarting_nodes=True)
             node.write_to_db()
+
+
+        snodes = db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id)
+        for node in snodes:
+            if node.status != StorageNode.STATUS_ONLINE:
+                continue
+            distr_controller.send_cluster_map_to_node(node)
 
         tasks_controller.add_new_device_mig_task(device_id)
         return device_id
@@ -690,6 +664,7 @@ def add_device(device_id):
         logger.error("failed to create devices")
         return False
 
+    distr_controller.send_cluster_map_to_node(snode)
     logger.info("Make other nodes connect to the node devices")
     snodes = db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id)
     for node in snodes:
@@ -697,6 +672,7 @@ def add_device(device_id):
             continue
         node.remote_devices = storage_node_ops._connect_to_remote_devs(node)
         node.write_to_db()
+        distr_controller.send_cluster_map_to_node(node)
 
     for dev in new_devices:
         tasks_controller.add_new_device_mig_task(dev.get_id())
@@ -905,14 +881,6 @@ def restart_jm_device(device_id, force=False, format_alceml=False):
                 for iface in snode.data_nics:
                     if iface.ip4_address:
                         tr_type = iface.get_transport_type()
-                        ret = rpc_client.transport_list()
-                        found = False
-                        if ret:
-                            for ty in ret:
-                                if ty['trtype'] == tr_type:
-                                    found = True
-                        if found is False:
-                            ret = rpc_client.transport_create(tr_type)
                         logger.info("adding listener for %s on IP %s" % (subsystem_nqn, iface.ip4_address))
                         ret = rpc_client.listeners_create(subsystem_nqn, tr_type, iface.ip4_address, "4420")
                         IP = iface.ip4_address

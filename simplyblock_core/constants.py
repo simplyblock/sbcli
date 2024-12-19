@@ -1,5 +1,17 @@
 import logging
 import os
+SCRIPT_PATH = os.path.dirname(os.path.realpath(__file__))
+
+
+def get_from_env_var_file(name, default=None):
+    if not name:
+        return False
+    with open(f"{SCRIPT_PATH}/env_var", "r", encoding="utf-8") as fh:
+        for line in fh.readlines():
+            if line.startswith(name):
+                return line.split("=", 1)[1].strip()
+    return default
+
 
 KVD_DB_VERSION = 730
 KVD_DB_FILE_PATH = '/etc/foundationdb/fdb.cluster'
@@ -54,8 +66,10 @@ FDB_CHECK_INTERVAL_SEC = 60
 
 
 
-SIMPLY_BLOCK_DOCKER_IMAGE = "simplyblock/simplyblock:main"
-SIMPLY_BLOCK_CLI_NAME = "sbcli-dev"
+SIMPLY_BLOCK_DOCKER_IMAGE = get_from_env_var_file(
+        "SIMPLY_BLOCK_DOCKER_IMAGE","simplyblock/simplyblock:main")
+SIMPLY_BLOCK_CLI_NAME = get_from_env_var_file(
+        "SIMPLY_BLOCK_COMMAND_NAME", "sbcli")
 TASK_EXEC_INTERVAL_SEC = 30
 TASK_EXEC_RETRY_COUNT = 8
 
@@ -66,7 +80,7 @@ GELF_PORT = 12202
 
 MIN_HUGE_PAGE_MEMORY_FOR_LVOL = 209715200
 MIN_SYS_MEMORY_FOR_LVOL = 524288000
-EXTRA_SMALL_POOL_COUNT = 1024
+EXTRA_SMALL_POOL_COUNT = 4096
 EXTRA_LARGE_POOL_COUNT = 16000
 # EXTRA_SMALL_POOL_COUNT = 0
 # EXTRA_LARGE_POOL_COUNT = 0
@@ -106,3 +120,8 @@ MAX_SNAP_COUNT = 15
 
 SPDK_PROXY_MULTI_THREADING_ENABLED=True
 SPDK_PROXY_TIMEOUT=60*5
+LVOL_NVME_CONNECT_RECONNECT_DELAY=3
+LVOL_NVME_CONNECT_CTRL_LOSS_TMO=-1
+LVOL_NVME_CONNECT_NR_IO_QUEUES=6
+QPAIR_COUNT=32
+NVME_TIMEOUT_US=20000000

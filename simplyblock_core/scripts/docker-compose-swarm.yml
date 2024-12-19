@@ -20,6 +20,19 @@ services:
       placement:
         constraints: [ node.role == manager ]
 
+  fdb-backup-agent:
+    image: foundationdb/foundationdb:7.3.2
+    entrypoint: "/usr/bin/backup_agent -C  /etc/foundationdb/fdb.cluster"
+    networks:
+      - hostnet
+    environment:
+      FDB_CLUSTER_FILE: '/etc/foundationdb/fdb.cluster'
+    volumes:
+      - "/etc/foundationdb:/etc/foundationdb"
+    deploy:
+      placement:
+        constraints: [ node.role == manager ]
+
   WebAppAPI:
     image: $SIMPLYBLOCK_DOCKER_IMAGE
     command: "python simplyblock_web/app.py"

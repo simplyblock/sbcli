@@ -10,13 +10,13 @@ from flask import request
 from simplyblock_core.controllers import tasks_controller
 from simplyblock_web import utils
 
-from simplyblock_core import kv_store, cluster_ops
+from simplyblock_core import db_controller, cluster_ops
 from simplyblock_core.models.cluster import Cluster
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 bp = Blueprint("cluster", __name__)
-db_controller = kv_store.DBController()
+db_controller = db_controller.DBController()
 
 
 @bp.route('/cluster', methods=['POST'])

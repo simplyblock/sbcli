@@ -2,7 +2,7 @@
 import time
 
 
-from simplyblock_core import constants, kv_store, cluster_ops, storage_node_ops, utils
+from simplyblock_core import constants, db_controller, cluster_ops, storage_node_ops, utils
 from simplyblock_core.controllers import health_controller, device_controller, tasks_controller
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.nvme_device import NVMeDevice, JMDevice
@@ -13,73 +13,20 @@ logger = utils.get_logger(__name__)
 
 
 # get DB controller
-db_store = kv_store.KVStore()
-db_controller = kv_store.DBController(kv_store=db_store)
-
-
-def get_cluster_target_status(cluster_id):
-    cluster = db_controller.get_cluster_by_id(cluster_id)
-    if cluster.status == cluster.STATUS_UNREADY:
-        return Cluster.STATUS_UNREADY
-    snodes = db_controller.get_storage_nodes_by_cluster_id(cluster_id)
-
-    online_nodes = 0
-    offline_nodes = 0
-    affected_nodes = 0
-    online_devices = 0
-    offline_devices = 0
-
-    for node in snodes:
-        if node.status == StorageNode.STATUS_ONLINE:
-            online_nodes += 1
-            node_online_devices = 0
-            node_offline_devices = 0
-            for dev in node.nvme_devices:
-                if dev.status in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_JM, NVMeDevice.STATUS_READONLY]:
-                    node_online_devices += 1
-                else:
-                    node_offline_devices += 1
-
-            if node_offline_devices > 0 or node_online_devices == 0:
-                affected_nodes += 1
-
-            online_devices += node_online_devices
-            offline_devices += node_offline_devices
-
-        else:
-            offline_nodes += 1
-
-
-    logger.debug(f"online_nodes: {online_nodes}")
-    logger.debug(f"offline_nodes: {offline_nodes}")
-    logger.debug(f"affected_nodes: {affected_nodes}")
-    logger.debug(f"online_devices: {online_devices}")
-    logger.debug(f"offline_devices: {offline_devices}")
-
-    # if more than two affected nodes then cluster is suspended
-    if affected_nodes > 2 or offline_nodes > 2:
-        return Cluster.STATUS_SUSPENDED
-
-    # if any device goes offline then cluster is degraded
-    if offline_devices > 0:
-        return Cluster.STATUS_DEGRADED
-
-    # if any node goes offline then cluster is degraded
-    if offline_nodes > 0:
-        return Cluster.STATUS_DEGRADED
-
-    return Cluster.STATUS_ACTIVE
+db_controller = db_controller.DBController()
 
 
 def is_new_migrated_node(cluster_id, node):
-    for item in node.lvstore_stack:
-        if item["type"] == "bdev_distr":
-            if tasks_controller.get_new_device_mig_task(cluster_id, node.uuid, item["name"]):
-                return True
+    for dev in node.nvme_devices:
+        if dev.status == NVMeDevice.STATUS_ONLINE:
+            for item in node.lvstore_stack:
+                if item["type"] == "bdev_distr":
+                    if tasks_controller.get_new_device_mig_task(cluster_id, node.uuid, item["name"],dev.get_id()):
+                        return True
     return False
 
 
-def get_current_cluster_status(cluster_id):
+def get_next_cluster_status(cluster_id):
     cluster = db_controller.get_cluster_by_id(cluster_id)
     if cluster.status == cluster.STATUS_UNREADY:
         return Cluster.STATUS_UNREADY
@@ -95,6 +42,9 @@ def get_current_cluster_status(cluster_id):
 
         node_online_devices = 0
         node_offline_devices = 0
+
+        if node.status == StorageNode.STATUS_IN_CREATION:
+            continue
 
         if node.status == StorageNode.STATUS_ONLINE:
             if is_new_migrated_node(cluster_id, node):
@@ -158,17 +108,39 @@ def get_current_cluster_status(cluster_id):
 
     return Cluster.STATUS_ACTIVE
 
+
 def update_cluster_status(cluster_id):
     cluster = db_controller.get_cluster_by_id(cluster_id)
-
-    if cluster.status == Cluster.STATUS_READONLY or cluster.status == Cluster.STATUS_UNREADY:
+    current_cluster_status = cluster.status
+    logger.info("cluster_status: %s", current_cluster_status)
+    if current_cluster_status in [Cluster.STATUS_READONLY, Cluster.STATUS_UNREADY, Cluster.STATUS_IN_ACTIVATION]:
         return
-    cluster_current_status = get_current_cluster_status(cluster_id)
-    if cluster.status not in [Cluster.STATUS_ACTIVE, Cluster.STATUS_UNREADY] and cluster_current_status == Cluster.STATUS_ACTIVE:
+
+    next_current_status = get_next_cluster_status(cluster_id)
+    logger.info("cluster_new_status: %s", next_current_status)
+
+    if current_cluster_status == Cluster.STATUS_DEGRADED and next_current_status == Cluster.STATUS_ACTIVE:
+    # if cluster.status not in [Cluster.STATUS_ACTIVE, Cluster.STATUS_UNREADY] and cluster_current_status == Cluster.STATUS_ACTIVE:
         # cluster_ops.cluster_activate(cluster_id, True)
         cluster_ops.set_cluster_status(cluster_id, Cluster.STATUS_ACTIVE)
         return
-    cluster_ops.set_cluster_status(cluster_id, cluster_current_status)
+    elif current_cluster_status == Cluster.STATUS_SUSPENDED and next_current_status \
+            in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED]:
+        # needs activation
+        # check node statuss, check auto restart for nodes
+        can_activate = True
+        for node in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
+            if node.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_REMOVED]:
+                can_activate = False
+                break
+            if tasks_controller.get_active_node_restart_task(cluster_id, node.get_id()):
+                can_activate = False
+                break
+
+        if can_activate:
+            cluster_ops.cluster_activate(cluster_id, force=True)
+    else:
+        cluster_ops.set_cluster_status(cluster_id, next_current_status)
 
 
 
@@ -236,13 +208,17 @@ while True:
             if snode.status == StorageNode.STATUS_SCHEDULABLE and not ping_check and not node_api_check:
                 continue
 
-            # 3- check spdk_process
-            spdk_process = health_controller._check_spdk_process_up(snode.mgmt_ip)
+            spdk_process = False
+            if node_api_check:
+                # 3- check spdk_process
+                spdk_process = health_controller._check_spdk_process_up(snode.mgmt_ip)
             logger.info(f"Check: spdk process {snode.mgmt_ip}:5000 ... {spdk_process}")
 
-            # 4- check rpc
-            node_rpc_check = health_controller._check_node_rpc(
-                snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
+            node_rpc_check = False
+            if spdk_process:
+                # 4- check rpc
+                node_rpc_check = health_controller._check_node_rpc(
+                    snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
             logger.info(f"Check: node RPC {snode.mgmt_ip}:{snode.rpc_port} ... {node_rpc_check}")
 
             is_node_online = ping_check and node_api_check and spdk_process and node_rpc_check
@@ -272,7 +248,7 @@ while True:
 
                 elif ping_check and node_api_check and (not spdk_process or not node_rpc_check):
                     # add node to auto restart
-                    if cluster.status == Cluster.STATUS_ACTIVE:
+                    if cluster.status in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_SUSPENDED]:
                         tasks_controller.add_node_to_auto_restart(snode)
 
         update_cluster_status(cluster_id)

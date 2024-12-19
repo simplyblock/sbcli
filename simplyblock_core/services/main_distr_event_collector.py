@@ -4,7 +4,7 @@ import threading
 import time
 
 
-from simplyblock_core import constants, kv_store, utils, rpc_client, distr_controller
+from simplyblock_core import constants, db_controller, utils, rpc_client, distr_controller
 from simplyblock_core.controllers import events_controller, device_controller, lvol_events
 from simplyblock_core.models.lvol_model import LVol
 
@@ -18,7 +18,7 @@ logger = utils.get_logger(__name__)
 
 
 # get DB controller
-db_controller = kv_store.DBController()
+db_controller = db_controller.DBController()
 
 
 def process_device_event(event):
@@ -67,9 +67,7 @@ def process_device_event(event):
         # else:
         logger.info(f"Setting device to unavailable")
         device_controller.device_set_unavailable(device_obj.get_id())
-
-        if device_node_obj.get_id() == event_node_obj.get_id():
-            device_controller.device_set_io_error(device_obj.get_id(), True)
+        device_controller.device_set_io_error(device_obj.get_id(), True)
 
         event.status = 'processed'
 
@@ -135,7 +133,10 @@ def start_event_collector_on_node(node_id):
                     if events:
                         logger.info(f"Found events: {len(events)}")
                         for event_dict in events:
-                            sid = event_dict['storage_ID']
+                            if "storage_ID" in event_dict:
+                                sid = event_dict['storage_ID']
+                            elif "vuid" in event_dict:
+                                sid = event_dict['vuid']
                             et = event_dict['event_type']
                             msg = event_dict['status']
                             if sid not in events_groups:

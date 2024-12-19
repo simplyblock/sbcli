@@ -2,7 +2,7 @@
 import time
 from datetime import datetime
 
-from simplyblock_core import constants, kv_store, utils
+from simplyblock_core import constants, db_controller, utils
 from simplyblock_core.controllers import tasks_events, tasks_controller
 from simplyblock_core.models.job_schedule import JobSchedule
 
@@ -33,7 +33,6 @@ def task_runner(task):
         task.status = JobSchedule.STATUS_RUNNING
         task.write_to_db(db_controller.kv_store)
         tasks_events.task_updated(task)
-        time.sleep(30)
 
     if snode.status != StorageNode.STATUS_ONLINE:
         task.function_result = "node is not online, retrying"
@@ -44,8 +43,8 @@ def task_runner(task):
 
     if snode.online_since:
         diff = datetime.now() - datetime.fromisoformat(snode.online_since)
-        if diff.total_seconds() < 60 * 5:
-            task.function_result = "node is online < 5 min, retrying"
+        if diff.total_seconds() < 60:
+            task.function_result = "node is online < 1 min, retrying"
             task.status = JobSchedule.STATUS_SUSPENDED
             task.retry += 1
             task.write_to_db(db_controller.kv_store)
@@ -70,7 +69,7 @@ def task_runner(task):
             task.write_to_db(db_controller.kv_store)
             return False
 
-        device = db_controller.get_storage_devices(task.device_id)
+        device = db_controller.get_storage_device_by_id(task.device_id)
         distr_name = task.function_params["distr_name"]
 
         if not device:
@@ -117,11 +116,11 @@ def task_runner(task):
 
 
 # get DB controller
-db_controller = kv_store.DBController()
+db_controller = db_controller.DBController()
 
 logger.info("Starting Tasks runner...")
 while True:
-    time.sleep(30)
+    time.sleep(3)
     clusters = db_controller.get_clusters()
     if not clusters:
         logger.error("No clusters found!")
@@ -129,7 +128,7 @@ while True:
         for cl in clusters:
             tasks = db_controller.get_job_tasks(cl.get_id(), reverse=False)
             for task in tasks:
-                delay_seconds = 10
+                delay_seconds = 3
                 if task.function_name == JobSchedule.FN_DEV_MIG:
                     if task.status in [JobSchedule.STATUS_NEW, JobSchedule.STATUS_SUSPENDED]:
                         active_task = tasks_controller.get_active_node_mig_task(task.cluster_id, task.node_id)
