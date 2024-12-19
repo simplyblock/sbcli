@@ -563,7 +563,7 @@ class FioWorkloadTest(TestClusterBase):
 
             for task in filtered_tasks:
                 # Check if the task is stuck (updated_at is more than 15 minutes old)
-                updated_at = datetime.fromtimestamp(task['updated_at'])
+                updated_at = datetime.strptime(task['updated_at'], '%Y-%m-%d %H:%M:%S.%f')
                 if datetime.now() - updated_at > timedelta(minutes=60):
                     raise RuntimeError(f"Migration task {task['id']} is stuck (last updated at {updated_at}).")
 
