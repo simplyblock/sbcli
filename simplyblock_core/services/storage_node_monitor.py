@@ -1,6 +1,6 @@
 # coding=utf-8
 import time
-
+from datetime import datetime
 
 from simplyblock_core import constants, db_controller, cluster_ops, storage_node_ops, utils
 from simplyblock_core.controllers import health_controller, device_controller, tasks_controller
@@ -136,6 +136,12 @@ def update_cluster_status(cluster_id):
             if tasks_controller.get_active_node_restart_task(cluster_id, node.get_id()):
                 can_activate = False
                 break
+
+            if node.online_since:
+                diff = datetime.now() - datetime.fromisoformat(snode.online_since)
+                if diff.total_seconds() < 60:
+                    can_activate = False
+                    break
 
         if can_activate:
             cluster_ops.cluster_activate(cluster_id, force=True)
