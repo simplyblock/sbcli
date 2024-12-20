@@ -2458,6 +2458,10 @@ def deploy(ifname):
     ret = scripts.configure_docker(dev_ip)
 
     start_storage_node_api_container(dev_ip)
+
+    logger.info("Building SPDK...")
+    ret = scripts.build_spdk()
+
     return f"{dev_ip}:5000"
 
 def start_storage_node_api_container(node_ip):
