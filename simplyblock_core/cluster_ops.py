@@ -393,18 +393,19 @@ def cluster_activate(cl_id, force=False):
     set_cluster_status(cl_id, Cluster.STATUS_ACTIVE)
     logger.info("Cluster activated successfully")
 
-    pool_controller.add_pool("pool1", 0, 0, 0, 0, 0, 0, 0, cluster.get_id())
+    if cluster.no_lvstore:
+        pool_controller.add_pool("pool1", 0, 0, 0, 0, 0, 0, 0, cluster.get_id())
 
-    for snode in snodes:
-        if snode.is_secondary_node:
-            continue
-        if snode.status != StorageNode.STATUS_ONLINE:
-            continue
+        for snode in snodes:
+            if snode.is_secondary_node:
+                continue
+            if snode.status != StorageNode.STATUS_ONLINE:
+                continue
 
-        lvol_controller.add_lvol_ha(
-            f"LVOL_{snode.get_id()}", "10g", snode.get_id(), "ha", "pool1",
-            False, False, 0, 0,
-            0, 0, 0)
+            lvol_controller.add_lvol_ha(
+                f"LVOL_{snode.get_id()}", "10g", snode.get_id(), "ha", "pool1",
+                False, False, 0, 0,
+                0, 0, 0)
 
     return True
 
