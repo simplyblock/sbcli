@@ -1381,7 +1381,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
     # Create distribs
     max_size = cluster.cluster_max_size
     ret = create_lvstore(snode, cluster.distr_ndcs, cluster.distr_npcs, cluster.distr_bs,
-                         cluster.distr_chunk_bs, cluster.page_size_in_blocks, max_size, nodes)
+                         cluster.distr_chunk_bs, cluster.page_size_in_blocks, max_size)
     if not ret:
         logger.error("Failed to create lvstore")
         return False
@@ -2715,15 +2715,15 @@ def recreate_lvstore_on_sec(snode, primary_node=None):
                             ret = remote_rpc_client.nvmf_subsystem_listener_set_ana_state(
                                 lvol.nqn, iface.ip4_address, "4420", False, "inaccessible")
 
-                    time.sleep(2)
-
-                remote_rpc_client.bdev_lvol_set_leader(False, lvs_name=node.lvstore)
-                time.sleep(2)
+                time.sleep(1)
+                if node.lvstore:
+                    remote_rpc_client.bdev_lvol_set_leader(False, lvs_name=node.lvstore)
                 remote_rpc_client.bdev_distrib_force_to_non_leader(node.jm_vuid)
+                time.sleep(1)
 
             ret, err = _create_bdev_stack(snode, node.lvstore_stack, primary_node=node)
 
-            time.sleep(5)
+            time.sleep(1)
             ret = rpc_client.bdev_examine(node.raid)
             time.sleep(5)
             ret = rpc_client.bdev_wait_for_examine()
@@ -2792,7 +2792,8 @@ def recreate_lvstore(snode):
                             ret = sec_rpc_client.nvmf_subsystem_listener_set_ana_state(
                                 lvol.nqn, iface.ip4_address, "4420", False, "inaccessible")
 
-            sec_rpc_client.bdev_lvol_set_leader(False, lvs_name=snode.lvstore)
+            if snode.lvstore:
+                sec_rpc_client.bdev_lvol_set_leader(False, lvs_name=snode.lvstore)
             sec_rpc_client.bdev_distrib_force_to_non_leader(snode.jm_vuid)
             time.sleep(1)
 
@@ -2803,8 +2804,9 @@ def recreate_lvstore(snode):
         logger.error(err)
         # return False
 
-    ret = rpc_client.bdev_examine(snode.raid)
-    ret = rpc_client.bdev_wait_for_examine()
+    if snode.lvstore:
+        ret = rpc_client.bdev_examine(snode.raid)
+        ret = rpc_client.bdev_wait_for_examine()
     # time.sleep(2)
 
     for lvol_id in snode.lvols:
@@ -2875,8 +2877,9 @@ def get_secondary_nodes(current_node):
     return nodes
 
 
-def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blocks, max_size, nodes):
+def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blocks, max_size):
     db_controller = DBController()
+    cluster = db_controller.get_cluster_by_id(snode.cluster_id)
     lvstore_stack = []
     distrib_list = []
     distrib_vuids = []
@@ -2901,7 +2904,6 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
             distrib_vuid = utils.get_random_vuid()
 
         distrib_name = f"distrib_{distrib_vuid}"
-        lvs_name = f"LVS_{distrib_vuid}"
         lvstore_stack.extend(
             [
                 {
@@ -2945,20 +2947,22 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
             }
         )
 
-    lvs_name = f"LVS_{jm_vuid}"
-    lvstore_stack.append(
-        {
-            "type": "bdev_lvstore",
-            "name": lvs_name,
-            "params": {
+    lvs_name = ""
+    if not cluster.no_lvstore:
+        lvs_name = f"LVS_{jm_vuid}"
+        lvstore_stack.append(
+            {
+                "type": "bdev_lvstore",
                 "name": lvs_name,
-                "bdev_name": raid_device,
-                "cluster_sz": cluster_sz,
-                "clear_method": "unmap",
-                "num_md_pages_per_cluster_ratio": 1,
+                "params": {
+                    "name": lvs_name,
+                    "bdev_name": raid_device,
+                    "cluster_sz": cluster_sz,
+                    "clear_method": "unmap",
+                    "num_md_pages_per_cluster_ratio": 1,
+                }
             }
-        }
-    )
+        )
 
     ret, err = _create_bdev_stack(snode, lvstore_stack)
     if err:
@@ -2985,7 +2989,7 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
         temp_rpc_client = RPCClient(
                 sec_node_1.mgmt_ip, sec_node_1.rpc_port,
                 sec_node_1.rpc_username, sec_node_1.rpc_password)
-        time.sleep(5)
+        time.sleep(1)
         ret = temp_rpc_client.bdev_examine(snode.raid)
         time.sleep(1)
         ret = temp_rpc_client.bdev_wait_for_examine()

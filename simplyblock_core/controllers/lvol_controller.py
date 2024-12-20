@@ -478,6 +478,12 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
         lvol.crypto_key1 = crypto_key1
         lvol.crypto_key2 = crypto_key2
 
+    if cl.no_lvstore:
+        lvol.bdev_stack = []
+        lvol.lvs_name = ""
+        lvol.top_bdev = host_node.raid
+        lvol.base_bdev = lvol.top_bdev
+
     if ha_type == 'single':
         ret, error = add_lvol_on_node(lvol, host_node)
         if error:
@@ -506,9 +512,9 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
       }
     }
         """
-
-        lvol.lvol_uuid = lvol_bdev['uuid']
-        lvol.blobid = lvol_bdev['driver_specific']['lvol']['blobid']
+        if lvol_bdev:
+            lvol.lvol_uuid = lvol_bdev['uuid']
+            lvol.blobid = lvol_bdev['driver_specific']['lvol']['blobid']
 
         sec_node = db_controller.get_storage_node_by_id(host_node.secondary_node_id)
         ret, error = add_lvol_on_node(lvol, sec_node, ha_inode_self=1)
@@ -587,23 +593,24 @@ def add_lvol_on_node(lvol, snode, ha_comm_addrs=None, ha_inode_self=0):
     rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
     spdk_mem_info_before = rpc_client.ultra21_util_get_malloc_stats()
 
-    if snode.is_secondary_node:
-        rpc_client.bdev_lvol_set_leader(False, lvs_name=lvol.lvs_name)
+    if lvol.lvs_name:
+        if snode.is_secondary_node:
+            rpc_client.bdev_lvol_set_leader(False, lvs_name=lvol.lvs_name)
 
-    else:
-        # Validate adding lvol on storage node
-        snode_api = SNodeClient(snode.api_endpoint)
-        result, _ = snode_api.info()
-        memory_free = result["memory_details"]["free"]
-        huge_free = result["memory_details"]["huge_free"]
+        else:
+            # Validate adding lvol on storage node
+            snode_api = SNodeClient(snode.api_endpoint)
+            result, _ = snode_api.info()
+            memory_free = result["memory_details"]["free"]
+            huge_free = result["memory_details"]["huge_free"]
 
-        total_node_capacity = db_controller.get_snode_size(snode.get_id())
-        error = utils.validate_add_lvol_or_snap_on_node(memory_free, huge_free, snode.max_lvol, lvol.size,  total_node_capacity, len(snode.lvols))
-        if error:
-            logger.error(error)
-            return False, f"Failed to add lvol on node {snode.get_id()}"
+            total_node_capacity = db_controller.get_snode_size(snode.get_id())
+            error = utils.validate_add_lvol_or_snap_on_node(memory_free, huge_free, snode.max_lvol, lvol.size,  total_node_capacity, len(snode.lvols))
+            if error:
+                logger.error(error)
+                return False, f"Failed to add lvol on node {snode.get_id()}"
 
-        rpc_client.bdev_lvol_set_leader(True, lvs_name=lvol.lvs_name)
+            rpc_client.bdev_lvol_set_leader(True, lvs_name=lvol.lvs_name)
 
 
     ret, msg = _create_bdev_stack(lvol, snode)
@@ -652,18 +659,21 @@ def add_lvol_on_node(lvol, snode, ha_comm_addrs=None, ha_inode_self=0):
     logger.info(json.dumps(diff, indent=2))
     lvol.mem_diff = diff
 
-    ret = rpc_client.get_bdevs(f"{lvol.lvs_name}/{lvol.lvol_bdev}")
-    lvol_bdev = ret[0]
+    if lvol.lvs_name:
+        ret = rpc_client.get_bdevs(f"{lvol.lvs_name}/{lvol.lvol_bdev}")
+        lvol_bdev = ret[0]
+        return lvol_bdev, None
 
-    return lvol_bdev, None
+    return {}, None
 
 
 def recreate_lvol_on_node(lvol, snode, ha_inode_self=0, ana_state=None):
     rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
 
-    lv = rpc_client.get_bdevs(f"{lvol.lvs_name}/{lvol.lvol_bdev}")
-    if not lv:
-        return False, "LVol bdev not found!"
+    if lvol.lvs_name:
+        lv = rpc_client.get_bdevs(f"{lvol.lvs_name}/{lvol.lvol_bdev}")
+        if not lv:
+            return False, "LVol bdev not found!"
 
     if "crypto" in lvol.lvol_type:
         ret = _create_crypto_lvol(
