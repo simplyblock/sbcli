@@ -3,13 +3,13 @@ FROM python:3.8-slim
 
 RUN apt-get update; apt-get install -y \
     wget libc6 inetutils-ping dmidecode nvme-cli open-iscsi \
-    iproute2 pciutils sudo nano parted gdisk ; \
+    iproute2 pciutils sudo nano parted gdisk ssh; \
     rm -rf /var/lib/apt/lists/*
 
 # install fdb client library (libfdb_c.dylib) for the Python bindings to interact with the database.
-RUN wget https://github.com/apple/foundationdb/releases/download/7.3.3/foundationdb-clients_7.3.3-1_amd64.deb
-RUN dpkg -i --force-architecture --force-depends foundationdb-clients_7.3.3-1_amd64.deb
-RUN rm -f foundationdb-clients_7.3.3-1_amd64.deb
+RUN wget https://github.com/apple/foundationdb/releases/download/7.3.56/foundationdb-clients_7.3.56-1_amd64.deb
+RUN dpkg -i foundationdb-clients_7*
+RUN rm -f foundationdb-clients_7*
 
 WORKDIR /app
 
