@@ -12,6 +12,7 @@ from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.lvol_model import LVol
+from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.rpc_client import RPCClient
 from simplyblock_core.snode_client import SNodeClient
 
@@ -47,6 +48,11 @@ def add(lvol_id, snapshot_name):
     logger.info(f"Creating snapshot: {snapshot_name} from LVol: {lvol.get_id()}")
     snode = db_controller.get_storage_node_by_id(lvol.node_id)
 
+    if snode.status != StorageNode.STATUS_ONLINE:
+        msg = f"Node is not online, {snode.status}"
+        logger.error(msg)
+        return False, msg
+
 ##############################################################################
     # Validate adding snap on storage node
     snode_api = SNodeClient(snode.api_endpoint)
@@ -73,14 +79,34 @@ def add(lvol_id, snapshot_name):
     rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
     spdk_mem_info_before = rpc_client.ultra21_util_get_malloc_stats()
 
+    blobid = 0
+    snap_uuid = ""
+    rpc_client.bdev_lvol_set_leader(True, lvs_name=lvol.lvs_name)
+    time.sleep(1)
     logger.info("Creating Snapshot bdev")
     ret = rpc_client.lvol_create_snapshot(f"{lvol.lvs_name}/{lvol.lvol_bdev}", snapshot_name)
     if not ret:
         return False, "Failed to create snapshot bdev"
+    time.sleep(1)
 
-##############################################################################
+    snap_bdev = rpc_client.get_bdevs(f"{lvol.lvs_name}/{snapshot_name}")
+    if snap_bdev:
+        snap_uuid = snap_bdev[0]['uuid']
+        blobid = snap_bdev[0]['driver_specific']['lvol']['blobid']
+
+    if snode.secondary_node_id and blobid:
+        sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
+        if sec_node.status == StorageNode.STATUS_ONLINE:
+            sec_rpc_client = RPCClient(sec_node.mgmt_ip, sec_node.rpc_port, sec_node.rpc_username, sec_node.rpc_password)
+            sec_rpc_client.bdev_lvol_set_leader(False, lvs_name=lvol.lvs_name)
+            ret = rpc_client.bdev_lvol_snapshot_register(
+                f"{lvol.lvs_name}/{lvol.lvol_bdev}", snapshot_name, snap_uuid, blobid)
+
+    ##############################################################################
     snap = SnapShot()
     snap.uuid = str(uuid.uuid4())
+    snap.snap_uuid = snap_uuid
+    snap.blobid = blobid
     snap.pool_uuid = pool.get_id()
     snap.cluster_id = pool.cluster_id
     snap.snap_name = snapshot_name

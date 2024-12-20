@@ -1884,9 +1884,9 @@ def restart_storage_node(
         distr_controller.send_dev_status_event(dev, dev.status)
 
 
-    if cluster.status not in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED] and not force:
-        # if snode.jm_device and snode.jm_device.get_id() and snode.jm_device.status == JMDevice.STATUS_UNAVAILABLE:
-        #     device_controller.set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_ONLINE)
+    time.sleep(2)
+
+    if cluster.status not in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED]:
         logger.warning(f"The cluster status is not active ({cluster.status}), adding the node without distribs and lvstore")
         logger.info("Done")
         return "Success"
@@ -1906,10 +1906,6 @@ def restart_storage_node(
             continue
         logger.info(f"Starting migration task for device {dev.get_id()}")
         tasks_controller.add_device_mig_task(dev.get_id())
-
-    # time.sleep(5)
-    # if snode.jm_device and snode.jm_device.get_id() and snode.jm_device.status == JMDevice.STATUS_UNAVAILABLE:
-    #     device_controller.set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_ONLINE)
 
     logger.info("Done")
     return "Success"
@@ -2791,7 +2787,7 @@ def recreate_lvstore(snode):
             if snode.lvstore:
                 sec_rpc_client.bdev_lvol_set_leader(False, lvs_name=snode.lvstore)
             sec_rpc_client.bdev_distrib_force_to_non_leader(snode.jm_vuid)
-            time.sleep(1)
+            time.sleep(2)
 
     ret, err = _create_bdev_stack(snode, [], primary_node=snode)
 

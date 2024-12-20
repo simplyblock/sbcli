@@ -115,6 +115,7 @@ class TestSingleNodeOutage(TestClusterBase):
         self.logger.info("Getting lvol status before shutdown")
         lvol_id = self.sbcli_utils.get_lvol_id(lvol_name=self.lvol_name)
         lvol_details = self.sbcli_utils.get_lvol_details(lvol_id=lvol_id)
+
         for lvol in lvol_details:
             self.logger.info(f"LVOL STATUS: {lvol['status']}")
             assert lvol["status"] == "online", \
@@ -259,6 +260,13 @@ class TestSingleNodeOutage(TestClusterBase):
         self.logger.info(f"Set Final checksum: {final_checksum}")
 
         assert original_checksum == final_checksum, "Checksum mismatch for lvol and clone"
+
+        lvol_files = self.ssh_obj.find_files(self.mgmt_nodes[0], directory=self.mount_path)
+        final_lvl_checksum = self.ssh_obj.generate_checksums(self.mgmt_nodes[0], lvol_files)
+        final_lvl_checksum = set(final_lvl_checksum.values())
+
+        assert original_checksum == final_lvl_checksum, "Checksum mismatch for lvol before and after clone"
+        
 
         self.logger.info("TEST CASE PASSED !!!")
         
