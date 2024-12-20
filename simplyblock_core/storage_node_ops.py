@@ -2488,6 +2488,7 @@ def start_storage_node_api_container(node_ip):
         privileged=True,
         name="SNodeAPI",
         network_mode="host",
+        pid_mode='host',
         volumes=[
             '/etc/simplyblock:/etc/simplyblock',
             '/etc/foundationdb:/etc/foundationdb',

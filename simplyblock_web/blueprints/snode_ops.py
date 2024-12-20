@@ -144,38 +144,46 @@ def spdk_process_start():
             node.remove(force=True)
             time.sleep(2)
 
-    spdk_debug = ""
-    if set_debug:
-        spdk_debug = "1"
+    # spdk_debug = ""
+    # if set_debug:
+    #     spdk_debug = "1"
+    #
+    # spdk_image = constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE
+    # if 'spdk_image' in data and data['spdk_image']:
+    #     spdk_image = data['spdk_image']
+    #     # node_docker.images.pull(spdk_image)
 
-    spdk_image = constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE
-    if 'spdk_image' in data and data['spdk_image']:
-        spdk_image = data['spdk_image']
-        # node_docker.images.pull(spdk_image)
+    os.popen("nsenter -t 1 -m systemctl stop spdk")
+    time.sleep(2)
+    os.popen("nsenter -t 1 -m systemctl start spdk")
+    time.sleep(2)
 
     if "cluster_ip" in data and data['cluster_ip']:
         cluster_ip = data['cluster_ip']
-        log_config = LogConfig(type=LogConfig.types.GELF, config={"gelf-address": f"tcp://{cluster_ip}:12202"})
+        log_config = LogConfig(type=LogConfig.types.GELF, config={
+            "gelf-address": f"tcp://{cluster_ip}:12202",
+            "tag": "{{.Name}}",
+        })
     else:
         log_config = LogConfig(type=LogConfig.types.JOURNALD)
 
-    container = node_docker.containers.run(
-        spdk_image,
-        f"/root/scripts/run_distr.sh {spdk_cpu_mask} {spdk_mem} {spdk_debug}",
-        name="spdk",
-        detach=True,
-        privileged=True,
-        network_mode="host",
-        log_config=log_config,
-        volumes=[
-            '/etc/simplyblock:/etc/simplyblock',
-            '/var/tmp:/var/tmp',
-            '/dev:/dev',
-            '/lib/modules/:/lib/modules/',
-            '/var/lib/systemd/coredump/:/var/lib/systemd/coredump/',
-            '/sys:/sys'],
-        # restart_policy={"Name": "on-failure", "MaximumRetryCount": 99}
-    )
+    # container = node_docker.containers.run(
+    #     spdk_image,
+    #     f"/root/scripts/run_distr.sh {spdk_cpu_mask} {spdk_mem} {spdk_debug}",
+    #     name="spdk",
+    #     detach=True,
+    #     privileged=True,
+    #     network_mode="host",
+    #     log_config=log_config,
+    #     volumes=[
+    #         '/etc/simplyblock:/etc/simplyblock',
+    #         '/var/tmp:/var/tmp',
+    #         '/dev:/dev',
+    #         '/lib/modules/:/lib/modules/',
+    #         '/var/lib/systemd/coredump/:/var/lib/systemd/coredump/',
+    #         '/sys:/sys'],
+    #     # restart_policy={"Name": "on-failure", "MaximumRetryCount": 99}
+    # )
     container2 = node_docker.containers.run(
         constants.SIMPLY_BLOCK_DOCKER_IMAGE,
         "python simplyblock_core/services/spdk_http_proxy_server.py",
@@ -196,45 +204,37 @@ def spdk_process_start():
         ]
         # restart_policy={"Name": "always"}
     )
-    retries = 10
-    while retries > 0:
-        info = node_docker.containers.get(container.attrs['Id'])
-        status = info.attrs['State']["Status"]
-        is_running = info.attrs['State']["Running"]
-        if not is_running:
-            logger.info("Container is not running, waiting...")
-            time.sleep(3)
-            retries -= 1
-        else:
-            logger.info(f"Container status: {status}, Is Running: {is_running}")
-            return utils.get_response(True)
+    # retries = 10
+    # while retries > 0:
+    #     info = node_docker.containers.get(container.attrs['Id'])
+    #     status = info.attrs['State']["Status"]
+    #     is_running = info.attrs['State']["Running"]
+    #     if not is_running:
+    #         logger.info("Container is not running, waiting...")
+    #         time.sleep(3)
+    #         retries -= 1
+    #     else:
+    #         logger.info(f"Container status: {status}, Is Running: {is_running}")
+    return utils.get_response(True)
 
-    return utils.get_response(
-        False, f"Container create max retries reached, Container status: {status}, Is Running: {is_running}")
+    # return utils.get_response(
+    #     False, f"Container create max retries reached, Container status: {status}, Is Running: {is_running}")
 
 
 @bp.route('/spdk_process_kill', methods=['GET'])
 def spdk_process_kill():
-    node_docker = get_docker_client()
-    for cont in node_docker.containers.list(all=True):
-        if cont.attrs['Name'] == "/spdk" or cont.attrs['Name'] == "/spdk_proxy":
-            cont.stop(timeout=5)
-            cont.remove(force=True)
+    os.popen("nsenter -t 1 -m systemctl stop spdk")
     return utils.get_response(True)
 
 
 @bp.route('/spdk_process_is_up', methods=['GET'])
 def spdk_process_is_up():
-    node_docker = get_docker_client()
-    for cont in node_docker.containers.list(all=True):
-        if cont.attrs['Name'] == "/spdk":
-            status = cont.attrs['State']["Status"]
-            is_running = cont.attrs['State']["Running"]
-            if is_running:
-                return utils.get_response(True)
-            else:
-                return utils.get_response(False, f"SPDK container status: {status}, is running: {is_running}")
-    return utils.get_response(False, "SPDK container not found")
+    stream = os.popen("nsenter -t 1 -m systemctl status spdk | grep running")
+    ret = stream.read()
+    if ret:
+        return utils.get_response(True)
+    else:
+        return utils.get_response(False, "SPDK process is not running")
 
 
 def get_cluster_id():
