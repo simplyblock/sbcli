@@ -361,7 +361,7 @@ def cluster_activate(cl_id, force=False):
             continue
         if snode.status != StorageNode.STATUS_ONLINE:
             continue
-        if snode.lvstore or cluster.no_lvstore:
+        if snode.lvstore_stack:
             logger.warning(f"Node {snode.get_id()} already has lvstore {snode.lvstore}")
             ret = storage_node_ops.recreate_lvstore(snode)
         else:
