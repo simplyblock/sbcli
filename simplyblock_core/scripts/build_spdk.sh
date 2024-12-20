@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 
-if [[ "1" == "$(gh auth status ; echo $?)" ]]
+if [[ "1" == "$(gh auth status > /dev/null ; echo $?)" ]]
 then
   gh auth login
 fi
