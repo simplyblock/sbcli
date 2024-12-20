@@ -528,6 +528,7 @@ class CLIWrapper:
         sub_command.add_argument("id", help='LVol id')
         sub_command.add_argument("--history", help='(XXdYYh), list history records (one for every 15 minutes) '
                                                    'for XX days and YY hours (up to 10 days in total).')
+        sub_command.add_argument("--records", help='Number of records, default: 20', type=int, default=20)
 
         # lvol get-io-stats
         sub_command = self.add_sub_command(
@@ -1099,7 +1100,7 @@ class CLIWrapper:
             elif sub_command == "get-capacity":
                 id = args.id
                 history = args.history
-                ret = lvol_controller.get_capacity(id, history)
+                ret = lvol_controller.get_capacity(id, history, args.records)
                 if ret:
                     ret = utils.print_table(ret)
                 else:
