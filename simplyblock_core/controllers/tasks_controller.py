@@ -43,7 +43,8 @@ def _add_task(function_name, cluster_id, node_id, device_id,
     if function_name in [JobSchedule.FN_DEV_RESTART, JobSchedule.FN_DEV_MIG, JobSchedule.FN_FAILED_DEV_MIG]:
         if not _validate_new_task_dev_restart(cluster_id, node_id, device_id):
             return False
-    elif function_name == JobSchedule.FN_NODE_RESTART:
+
+    if function_name == JobSchedule.FN_NODE_RESTART:
         task_id = _validate_new_task_node_restart(cluster_id, node_id)
         if task_id:
             logger.info(f"Task found, skip adding new task: {task_id}")
