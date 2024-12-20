@@ -453,7 +453,7 @@ def clone(snapshot_id, clone_name, new_size=0):
     pool = db_controller.get_pool_by_id(snap.lvol.pool_uuid)
     pool.lvols.append(lvol.uuid)
     pool.write_to_db(db_controller.kv_store)
-    snode = db_controller.get_storage_node_by_id(snode.secondary_node_id)
+    snode = db_controller.get_storage_node_by_id(snode.get_id())
     snode.lvols.append(lvol.uuid)
     snode.write_to_db(db_controller.kv_store)
 
