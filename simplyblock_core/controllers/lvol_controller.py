@@ -668,9 +668,9 @@ def add_lvol_on_node(lvol, snode, ha_comm_addrs=None, ha_inode_self=0):
 def recreate_lvol_on_node(lvol, snode, ha_inode_self=0, ana_state=None):
     rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
 
-    lv = rpc_client.get_bdevs(f"{lvol.lvs_name}/{lvol.lvol_bdev}")
+    lv = rpc_client.get_bdevs(lvol.top_bdev)
     if not lv:
-        return False, "LVol bdev not found!"
+        return False, f"LVol bdev not found: {lvol.top_bdev}"
 
     if "crypto" in lvol.lvol_type:
         ret = _create_crypto_lvol(
