@@ -299,7 +299,7 @@ class CLIWrapper:
         sub_command.add_argument("--inflight-io-threshold", help='The number of inflight IOs allowed before the IO queuing starts', type=int, default=4)
         sub_command.add_argument("--enable-qos", help='Enable qos bdev for storage nodes', action='store_true', dest='enable_qos')
         sub_command.add_argument("--strict-node-anti-affinity", help='Enable strict node anti affinity for storage nodes', action='store_true')
-        sub_command.add_argument("--no-lvstore", help='Create only raid on nodes (testing)', action='store_true', dest='no_lvstore')
+        sub_command.add_argument("--no-lvstore", help='Create only raid on nodes (testing)', action='store_false', dest='no_lvstore', default=True)
 
 
 
