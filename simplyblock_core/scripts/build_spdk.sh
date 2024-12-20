@@ -11,6 +11,6 @@ else
 fi
 
 cd /tmp/ultra/testing/distrib_integration/
-sudo bash -x spdk_deploy.sh --force -c 0xE -m 4000 # -c the cpu mask for spdk, -m the hugepages memory
+sudo bash -x spdk_deploy_in_cluster.sh --force -c 0xE -m 4000 # -c the cpu mask for spdk, -m the hugepages memory
 
 systemctl status spdk
