@@ -6,10 +6,15 @@ RUN apt-get update; apt-get install -y \
     iproute2 pciutils sudo nano parted gdisk ssh; \
     rm -rf /var/lib/apt/lists/*
 
-# install fdb client library (libfdb_c.dylib) for the Python bindings to interact with the database.
-RUN wget https://github.com/apple/foundationdb/releases/download/7.3.56/foundationdb-clients_7.3.56-1_amd64.deb
-RUN dpkg -i foundationdb-clients_7*
-RUN rm -f foundationdb-clients_7*
+ARG TARGETPLATFORM
+RUN if [ "$TARGETPLATFORM" = "linux/arm64" ]; then \
+        echo "ARM64 version"; \
+    else \
+        echo "AMD64 version"; \
+        wget https://github.com/apple/foundationdb/releases/download/7.3.56/foundationdb-clients_7.3.56-1_amd64.deb; \
+        dpkg -i foundationdb-clients_7* ; \
+        rm -f foundationdb-clients_7* ; \
+    fi
 
 WORKDIR /app
 
