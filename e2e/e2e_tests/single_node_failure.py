@@ -277,6 +277,12 @@ class TestSingleNodeFailure(TestClusterBase):
         self.logger.info(f"Set Final checksum: {final_checksum}")
 
         assert original_checksum == final_checksum, "Checksum mismatch for lvol and clone"
+
+        lvol_files = self.ssh_obj.find_files(self.mgmt_nodes[0], directory=self.mount_path)
+        final_lvl_checksum = self.ssh_obj.generate_checksums(self.mgmt_nodes[0], lvol_files)
+        final_lvl_checksum = set(final_lvl_checksum.values())
+
+        assert original_checksum == final_lvl_checksum, "Checksum mismatch for lvol before and after clone"
         
         # total_fio_runtime = end_time - self.ssh_obj.fio_runtime["fio_run_1"]
         # self.logger.info(f"FIO Run Time: {total_fio_runtime}")
