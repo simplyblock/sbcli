@@ -362,6 +362,7 @@ class CLIWrapper:
         sub_command.add_argument("--json", help='Print json output', required=False, action='store_true')
         sub_command.add_argument("--history", help='(XXdYYh), list history records (one for every 15 minutes) '
                                                    'for XX days and YY hours (up to 10 days in total).')
+        sub_command.add_argument("--records", help='Number of records, default: 20', type=int, default=20)
 
         sub_command = self.add_sub_command(
             subparser, 'get-io-stats', 'Get cluster IO statistics')
@@ -973,7 +974,7 @@ class CLIWrapper:
                 cluster_id = args.cluster_id
                 history = args.history
                 is_json = args.json
-                data = cluster_ops.get_capacity(cluster_id, history, is_json=is_json)
+                data = cluster_ops.get_capacity(cluster_id, history, is_json=is_json, records_count=args.records)
                 if is_json:
                     ret = data
                 else:
