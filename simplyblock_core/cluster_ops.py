@@ -402,7 +402,7 @@ def cluster_activate(cl_id, force=False):
             continue
 
         lvol_controller.add_lvol_ha(
-            f"LVOL_{snode.get_id()}", "10g", snode.get_id(), "", "pool1",
+            f"LVOL_{snode.get_id()}", "10g", snode.get_id(), "ha", "pool1",
             False, False, 0, 0,
             0, 0, 0)
 
