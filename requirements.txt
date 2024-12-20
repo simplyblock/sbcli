@@ -1,4 +1,4 @@
-foundationdb==7.3.*
+foundationdb
 requests
 numpy
 prettytable>=3.10.0

@@ -61,7 +61,3 @@ def deploy_fdb_from_file_service(zip_path):
     args.append(zip_path)
     process = subprocess.run(" ".join(args), shell=True,  text=True)
     return process.returncode
-
-def build_spdk():
-    return __run_script(['bash', '-x', os.path.join(DIR_PATH, 'build_spdk.sh')])
-
