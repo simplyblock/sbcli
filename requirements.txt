@@ -1,7 +1,6 @@
 foundationdb==7.3.*
 requests
 numpy
-typing
 prettytable>=3.10.0
 docker
 psutil

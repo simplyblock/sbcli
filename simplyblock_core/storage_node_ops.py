@@ -2502,9 +2502,9 @@ def start_storage_node_api_container(node_ip):
             f"DOCKER_IP={node_ip}"
         ]
     )
-    logger.info("Pulling SPDK images")
-    logger.debug(constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE)
-    node_docker.images.pull(constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE)
+    # logger.info("Pulling SPDK images")
+    # logger.debug(constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE)
+    # node_docker.images.pull(constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE)
 
 
 def deploy_cleaner():
