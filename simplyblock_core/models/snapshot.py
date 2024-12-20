@@ -7,6 +7,7 @@ from simplyblock_core.models.lvol_model import LVol
 class SnapShot(BaseModel):
 
     base_bdev: str = ""
+    blobid: int = 0
     cluster_id: str = ""
     created_at: int = 0
     health_check: bool = True
@@ -17,3 +18,4 @@ class SnapShot(BaseModel):
     snap_bdev: str = ""
     snap_name: str = ""
     snap_ref_id: str = ""
+    snap_uuid: str = ""

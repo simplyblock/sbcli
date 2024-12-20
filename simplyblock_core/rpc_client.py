@@ -955,3 +955,21 @@ class RPCClient:
             "key_name": name
         }
         return self._request("accel_crypto_key_destroy", params)
+
+    def bdev_lvol_snapshot_register(self, lvol_name, snapshot_name, registered_uuid, blobid):
+        params = {
+            "lvol_name": lvol_name,
+            "snapshot_name": snapshot_name,
+            "blobid": blobid,
+            "registered_uuid": registered_uuid,
+        }
+        return self._request("bdev_lvol_snapshot_register", params)
+
+    def bdev_lvol_clone_register(self, clone_name, snapshot_name, registered_uuid, blobid):
+        params = {
+            "snapshot_name": snapshot_name,
+            "clone_name": clone_name,
+            "blobid": blobid,
+            "registered_uuid": registered_uuid,
+        }
+        return self._request("bdev_lvol_clone_register", params)
