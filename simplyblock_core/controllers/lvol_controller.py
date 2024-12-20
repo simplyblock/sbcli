@@ -567,6 +567,13 @@ def _create_bdev_stack(lvol, snode):
             else:
                 ret = rpc_client.create_lvol(**params)
 
+        elif type == "bdev_lvol_clone":
+            if snode.is_secondary_node:
+                ret = rpc_client.bdev_lvol_clone_register(
+                    lvol.lvol_bdev, lvol.snapshot_name, lvol.lvol_uuid, lvol.blobid)
+            else:
+                ret = rpc_client.lvol_clone(**params)
+
         else:
             logger.debug(f"Unknown BDev type: {type}")
             continue
