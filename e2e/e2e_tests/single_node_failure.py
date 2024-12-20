@@ -280,6 +280,7 @@ class TestSingleNodeFailure(TestClusterBase):
 
         lvol_files = self.ssh_obj.find_files(self.mgmt_nodes[0], directory=self.mount_path)
         final_lvl_checksum = self.ssh_obj.generate_checksums(self.mgmt_nodes[0], lvol_files)
+        final_lvl_checksum = set(final_lvl_checksum.values())
 
         assert original_checksum == final_lvl_checksum, "Checksum mismatch for lvol before and after clone"
         
