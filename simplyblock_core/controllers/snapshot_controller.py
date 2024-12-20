@@ -99,7 +99,7 @@ def add(lvol_id, snapshot_name):
         if sec_node.status == StorageNode.STATUS_ONLINE:
             sec_rpc_client = RPCClient(sec_node.mgmt_ip, sec_node.rpc_port, sec_node.rpc_username, sec_node.rpc_password)
             sec_rpc_client.bdev_lvol_set_leader(False, lvs_name=lvol.lvs_name)
-            ret = rpc_client.bdev_lvol_snapshot_register(
+            ret = sec_rpc_client.bdev_lvol_snapshot_register(
                 f"{lvol.lvs_name}/{lvol.lvol_bdev}", snapshot_name, snap_uuid, blobid)
 
     ##############################################################################
