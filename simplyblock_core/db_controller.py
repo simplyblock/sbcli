@@ -1,5 +1,6 @@
 # coding=utf-8
 import logging
+import os.path
 
 import fdb
 from typing import List
@@ -42,6 +43,8 @@ class DBController(metaclass=Singleton):
 
     def __init__(self):
         try:
+            if not os.path.isfile(constants.KVD_DB_FILE_PATH):
+                return
             fdb.api_version(constants.KVD_DB_VERSION)
             self.kv_store = fdb.open(constants.KVD_DB_FILE_PATH)
             self.kv_store.options.set_transaction_timeout(constants.KVD_DB_TIMEOUT_MS)
