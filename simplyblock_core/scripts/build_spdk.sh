@@ -10,7 +10,7 @@ else
   gh repo clone simplyblock-io/ultra /tmp/ultra
 fi
 
-cd /tmo/ultra/testing/distrib_integration/
+cd /tmp/ultra/testing/distrib_integration/
 sudo bash -x spdk_deploy.sh --force -c 0xE -m 4000 # -c the cpu mask for spdk, -m the hugepages memory
 
 systemctl status spdk
