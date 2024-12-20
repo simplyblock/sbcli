@@ -2798,7 +2798,7 @@ def recreate_lvstore(snode):
 
             sec_rpc_client.bdev_lvol_set_leader(False, lvs_name=snode.lvstore)
             sec_rpc_client.bdev_distrib_force_to_non_leader(snode.jm_vuid)
-            time.sleep(1)
+            time.sleep(2)
 
     ret, err = _create_bdev_stack(snode, [], primary_node=snode)
 
