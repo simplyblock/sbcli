@@ -191,7 +191,7 @@ def delete(snapshot_uuid, force_delete=False):
     sec_rpc_client = None
     if snode.secondary_node_id:
         sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
-        if sec_node.status == [StorageNode.STATUS_ONLINE]:
+        if sec_node.status == StorageNode.STATUS_ONLINE:
             sec_rpc_client = RPCClient(
                 sec_node.mgmt_ip,
                 sec_node.rpc_port,
