@@ -717,15 +717,15 @@ def set_jm_device_state(device_id, state):
         snode.write_to_db(db_controller.kv_store)
 
     if snode.enable_ha_jm and state == NVMeDevice.STATUS_ONLINE:
-        rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password, timeout=5)
-        jm_bdev = f"jm_{snode.get_id()}"
-        subsystem_nqn = snode.subsystem + ":dev:" + jm_bdev
-
-        for iface in snode.data_nics:
-            if iface.ip4_address:
-                ret = rpc_client.nvmf_subsystem_listener_set_ana_state(
-                    subsystem_nqn, iface.ip4_address, "4420", True)
-                break
+        # rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password, timeout=5)
+        # jm_bdev = f"jm_{snode.get_id()}"
+        # subsystem_nqn = snode.subsystem + ":dev:" + jm_bdev
+        #
+        # for iface in snode.data_nics:
+        #     if iface.ip4_address:
+        #         ret = rpc_client.nvmf_subsystem_listener_set_ana_state(
+        #             subsystem_nqn, iface.ip4_address, "4420", True)
+        #         break
 
         # make other nodes connect to the new devices
         snodes = db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id)
