@@ -884,10 +884,11 @@ def _connect_to_remote_jm_devs(this_node, jm_ids=[]):
         if not org_dev:
             continue
 
-        if org_dev.status == NVMeDevice.STATUS_ONLINE and org_dev_node.status == StorageNode.STATUS_ONLINE:
-            name = f"remote_{org_dev.jm_bdev}"
-            bdev_name = f"{name}n1"
-            org_dev.remote_bdev = bdev_name
+        name = f"remote_{org_dev.jm_bdev}"
+        bdev_name = f"{name}n1"
+        org_dev.remote_bdev = bdev_name
+
+        if org_dev.status == NVMeDevice.STATUS_ONLINE:
 
             if bdev_name in node_bdev_names:
                 logger.debug(f"bdev found {bdev_name}")
