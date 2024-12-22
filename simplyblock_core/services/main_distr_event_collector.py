@@ -74,11 +74,11 @@ def process_device_event(event):
 
 def process_lvol_event(event):
     if event.message in ["error_open", 'error_read', "error_write", "error_unmap"]:
-        # vuid = event.object_dict['vuid']
+        vuid = event.object_dict['vuid']
         node_id = event.node_id
-        storage_node_ops.set_node_status(node_id, StorageNode.STATUS_SUSPENDED)
-        event_node_obj = db_controller.get_storage_node_by_id(node_id)
-        tasks_controller.add_node_to_auto_restart(event_node_obj)
+        # storage_node_ops.set_node_status(node_id, StorageNode.STATUS_SUSPENDED)
+        # event_node_obj = db_controller.get_storage_node_by_id(node_id)
+        # tasks_controller.add_node_to_auto_restart(event_node_obj)
 
         # lvols = []
         # for lv in db_controller.get_lvols():  # pass
@@ -98,7 +98,7 @@ def process_lvol_event(event):
         #             lvol.write_to_db(db_controller.kv_store)
         #             lvol_events.lvol_status_change(lvol, lvol.status, old_status, caused_by="monitor")
         #             lvol_events.lvol_io_error_change(lvol, True, False, caused_by="monitor")
-        event.status = 'node suspended'
+        event.status = f'distr error {vuid}'
     else:
         logger.error(f"Unknown event message: {event.message}")
         event.status = "event_unknown"
