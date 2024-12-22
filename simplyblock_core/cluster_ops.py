@@ -704,8 +704,9 @@ def update_cluster(cl_id):
         cluster_docker = utils.get_docker_client(cl_id)
         logger.info(f"Pulling image {constants.SIMPLY_BLOCK_DOCKER_IMAGE}")
         cluster_docker.images.pull(constants.SIMPLY_BLOCK_DOCKER_IMAGE)
+        image_without_tag = constants.SIMPLY_BLOCK_DOCKER_IMAGE.split(":")[0]
         for service in cluster_docker.services.list():
-            if service.attrs['Spec']['Labels']['com.docker.stack.image'] == constants.SIMPLY_BLOCK_DOCKER_IMAGE:
+            if image_without_tag in service.attrs['Spec']['Labels']['com.docker.stack.image']:
                 logger.info(f"Updating service {service.name}")
                 service.update(image=constants.SIMPLY_BLOCK_DOCKER_IMAGE, force_update=True)
         logger.info("Done")

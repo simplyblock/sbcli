@@ -873,15 +873,22 @@ def _connect_to_remote_jm_devs(this_node, jm_ids=[]):
         if not jm_dev.jm_bdev:
             continue
 
-        org_dev = db_controller.get_jm_device_by_id(jm_dev.get_id())
+        org_dev = None
+        org_dev_node = None
+        for node in db_controller.get_storage_nodes():
+            if node.jm_device and node.jm_device.get_id() == jm_dev.get_id():
+                org_dev = node.jm_device
+                org_dev_node = node
+                break
+
         if not org_dev:
             continue
 
-        name = f"remote_{org_dev.jm_bdev}"
-        bdev_name = f"{name}n1"
-        org_dev.remote_bdev = bdev_name
+        if org_dev.status == NVMeDevice.STATUS_ONLINE and org_dev_node.status == StorageNode.STATUS_ONLINE:
+            name = f"remote_{org_dev.jm_bdev}"
+            bdev_name = f"{name}n1"
+            org_dev.remote_bdev = bdev_name
 
-        if org_dev.status == NVMeDevice.STATUS_ONLINE:
             if bdev_name in node_bdev_names:
                 logger.debug(f"bdev found {bdev_name}")
                 org_dev.status = JMDevice.STATUS_ONLINE
