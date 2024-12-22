@@ -55,7 +55,7 @@ def _add_task(function_name, cluster_id, node_id, device_id,
             logger.info(f"Task found, skip adding new task: {task_id}")
             return False
     elif function_name == JobSchedule.FN_DEV_MIG:
-        task_id = get_device_mig_task(cluster_id, node_id, function_params['distr_name'])
+        task_id = get_device_mig_task(cluster_id, node_id, device_id, function_params['distr_name'])
         if task_id:
             logger.info(f"Task found, skip adding new task: {task_id}")
             return False
@@ -223,10 +223,10 @@ def get_new_device_mig_task(cluster_id, node_id, distr_name, dev_id=None):
     return False
 
 
-def get_device_mig_task(cluster_id, node_id, distr_name):
+def get_device_mig_task(cluster_id, node_id, device_id, distr_name):
     tasks = db_controller.get_job_tasks(cluster_id)
     for task in tasks:
-        if task.function_name == JobSchedule.FN_DEV_MIG and task.node_id == node_id:
+        if task.function_name == JobSchedule.FN_DEV_MIG and task.node_id == node_id and task.device_id == device_id:
             if task.status != JobSchedule.STATUS_DONE and task.canceled is False \
                     and "distr_name" in task.function_params and task.function_params["distr_name"] == distr_name:
                 return task.uuid
