@@ -139,36 +139,36 @@ while True:
 
                         node_remote_devices_check &= bool(ret)
 
-                for node in db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id):
-                    if node.status != StorageNode.STATUS_ONLINE or node.get_id() == snode.get_id():
-                        continue
-                    for dev in node.nvme_devices:
-                        if dev.status == NVMeDevice.STATUS_ONLINE:
-                            if dev.get_id() not in connected_devices:
-                                if not dev.alceml_bdev:
-                                    logger.error(f"device alceml bdev not found!, {dev.get_id()}")
-                                    continue
-                                logger.info(f"connecting to online device: {dev.get_id()}")
-                                name = f"remote_{dev.alceml_bdev}"
-                                bdev_name = f"{name}n1"
-                                if rpc_client.bdev_nvme_controller_list(name):
-                                    logger.info(f"detaching {name} from {snode.get_id()}")
-                                    rpc_client.bdev_nvme_detach_controller(name)
-                                    time.sleep(1)
-
-                                logger.info(f"Connecting {name} to {snode.get_id()}")
-                                ret = rpc_client.bdev_nvme_attach_controller_tcp(
-                                    name, dev.nvmf_nqn, dev.nvmf_ip,
-                                    dev.nvmf_port)
-                                if ret:
-                                    logger.info(f"Successfully connected to device: {dev.get_id()}")
-                                    dev.remote_bdev = bdev_name
-                                    snode = db_controller.get_storage_node_by_id(snode.get_id())
-                                    snode.remote_devices.append(dev)
-                                    snode.write_to_db()
-                                    distr_controller.send_dev_status_event(dev, NVMeDevice.STATUS_ONLINE, snode)
-                                else:
-                                    logger.error(f"Failed to connect to device: {dev.get_id()}")
+                # for node in db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id):
+                #     if node.status != StorageNode.STATUS_ONLINE or node.get_id() == snode.get_id():
+                #         continue
+                #     for dev in node.nvme_devices:
+                #         if dev.status == NVMeDevice.STATUS_ONLINE:
+                #             if dev.get_id() not in connected_devices:
+                #                 if not dev.alceml_bdev:
+                #                     logger.error(f"device alceml bdev not found!, {dev.get_id()}")
+                #                     continue
+                #                 logger.info(f"connecting to online device: {dev.get_id()}")
+                #                 name = f"remote_{dev.alceml_bdev}"
+                #                 bdev_name = f"{name}n1"
+                #                 if rpc_client.bdev_nvme_controller_list(name):
+                #                     logger.info(f"detaching {name} from {snode.get_id()}")
+                #                     rpc_client.bdev_nvme_detach_controller(name)
+                #                     time.sleep(1)
+                #
+                #                 logger.info(f"Connecting {name} to {snode.get_id()}")
+                #                 ret = rpc_client.bdev_nvme_attach_controller_tcp(
+                #                     name, dev.nvmf_nqn, dev.nvmf_ip,
+                #                     dev.nvmf_port)
+                #                 if ret:
+                #                     logger.info(f"Successfully connected to device: {dev.get_id()}")
+                #                     dev.remote_bdev = bdev_name
+                #                     snode = db_controller.get_storage_node_by_id(snode.get_id())
+                #                     snode.remote_devices.append(dev)
+                #                     snode.write_to_db()
+                #                     distr_controller.send_dev_status_event(dev, NVMeDevice.STATUS_ONLINE, snode)
+                #                 else:
+                #                     logger.error(f"Failed to connect to device: {dev.get_id()}")
 
                 online_jms = 0
                 if snode.jm_device and snode.jm_device.get_id():
@@ -193,19 +193,19 @@ while True:
                         else:
                             logger.info(f"Checking bdev: {remote_device.remote_bdev} ... not found")
 
-                            org_dev = db_controller.get_jm_device_by_id(remote_device.get_id())
-                            if org_dev and org_dev.status == NVMeDevice.STATUS_ONLINE:
-                                name = f"remote_{remote_device.jm_bdev}"
-                                ret = rpc_client.bdev_nvme_attach_controller_tcp_JM(
-                                    name, remote_device.nvmf_nqn, remote_device.nvmf_ip,
-                                    remote_device.nvmf_port)
-                                if ret:
-                                    logger.info(f"Successfully connected to device: {remote_device.get_id()}")
-                                    online_jms += 1
-                                else:
-                                    logger.error(f"Failed to connect to device: {remote_device.get_id()}")
-                            else:
-                                continue
+                            # org_dev = db_controller.get_jm_device_by_id(remote_device.get_id())
+                            # if org_dev and org_dev.status == NVMeDevice.STATUS_ONLINE:
+                            #     name = f"remote_{remote_device.jm_bdev}"
+                            #     ret = rpc_client.bdev_nvme_attach_controller_tcp_JM(
+                            #         name, remote_device.nvmf_nqn, remote_device.nvmf_ip,
+                            #         remote_device.nvmf_port)
+                            #     if ret:
+                            #         logger.info(f"Successfully connected to device: {remote_device.get_id()}")
+                            #         online_jms += 1
+                            #     else:
+                            #         logger.error(f"Failed to connect to device: {remote_device.get_id()}")
+                            # else:
+                            #     continue
 
                     if online_jms < 2:
                         node_remote_devices_check = False
@@ -220,7 +220,8 @@ while True:
                     lvstore_check &= health_controller._check_node_lvstore(lvstore_stack, snode, auto_fix=True)
                     if snode.secondary_node_id:
                         second_node_1 = db_controller.get_storage_node_by_id(snode.secondary_node_id)
-                        lvstore_check &= health_controller._check_node_lvstore(lvstore_stack, second_node_1, auto_fix=True)
+                        if second_node_1 and second_node_1.status == StorageNode.STATUS_ONLINE:
+                            lvstore_check &= health_controller._check_node_lvstore(lvstore_stack, second_node_1, auto_fix=True)
 
                 if snode.is_secondary_node:
                     for node in db_controller.get_storage_nodes():

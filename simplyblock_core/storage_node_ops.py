@@ -309,22 +309,20 @@ def _create_jm_stack_on_raid(rpc_client, jm_nvme_bdevs, snode, after_restart):
         subsystem_nqn = snode.subsystem + ":dev:" + jm_bdev
         logger.info("creating subsystem %s", subsystem_nqn)
         ret = rpc_client.subsystem_create(subsystem_nqn, 'sbcli-cn', jm_bdev)
-        IP = None
-        for iface in snode.data_nics:
-            if iface.ip4_address:
-                tr_type = iface.get_transport_type()
-                logger.info("adding listener for %s on IP %s" % (subsystem_nqn, iface.ip4_address))
-                ana_state = "optimized"
-                if after_restart:
-                    ana_state = "inaccessible"
-                ret = rpc_client.listeners_create(subsystem_nqn, tr_type, iface.ip4_address, "4420", ana_state=ana_state)
-                IP = iface.ip4_address
-                break
         logger.info(f"add {pt_name} to subsystem")
         ret = rpc_client.nvmf_subsystem_add_ns(subsystem_nqn, pt_name)
         if not ret:
             logger.error(f"Failed to add: {pt_name} to the subsystem: {subsystem_nqn}")
             return False
+
+        IP = None
+        for iface in snode.data_nics:
+            if iface.ip4_address:
+                tr_type = iface.get_transport_type()
+                logger.info("adding listener for %s on IP %s" % (subsystem_nqn, iface.ip4_address))
+                ret = rpc_client.listeners_create(subsystem_nqn, tr_type, iface.ip4_address, "4420")
+                IP = iface.ip4_address
+                break
 
     ret = rpc_client.get_bdevs(raid_bdev)
 
@@ -332,7 +330,7 @@ def _create_jm_stack_on_raid(rpc_client, jm_nvme_bdevs, snode, after_restart):
         'uuid': snode.get_id(),
         'device_name': jm_bdev,
         'size': ret[0]["block_size"] * ret[0]["num_blocks"],
-        'status': JMDevice.STATUS_ONLINE if not after_restart else JMDevice.STATUS_UNAVAILABLE,
+        'status': JMDevice.STATUS_ONLINE,
         'jm_nvme_bdev_list': jm_nvme_bdevs,
         'raid_bdev': raid_bdev,
         'alceml_bdev': alceml_name,
@@ -399,28 +397,26 @@ def _create_jm_stack_on_device(rpc_client, nvme, snode, after_restart):
         subsystem_nqn = snode.subsystem + ":dev:" + jm_bdev
         logger.info("creating subsystem %s", subsystem_nqn)
         ret = rpc_client.subsystem_create(subsystem_nqn, 'sbcli-cn', jm_bdev)
-        IP = None
-        for iface in snode.data_nics:
-            if iface.ip4_address:
-                tr_type = iface.get_transport_type()
-                logger.info("adding listener for %s on IP %s" % (subsystem_nqn, iface.ip4_address))
-                ana_state = "optimized"
-                if after_restart:
-                    ana_state = "inaccessible"
-                ret = rpc_client.listeners_create(subsystem_nqn, tr_type, iface.ip4_address, "4420", ana_state=ana_state)
-                IP = iface.ip4_address
-                break
         logger.info(f"add {pt_name} to subsystem")
         ret = rpc_client.nvmf_subsystem_add_ns(subsystem_nqn, pt_name)
         if not ret:
             logger.error(f"Failed to add: {pt_name} to the subsystem: {subsystem_nqn}")
             return False
 
+        IP = None
+        for iface in snode.data_nics:
+            if iface.ip4_address:
+                tr_type = iface.get_transport_type()
+                logger.info("adding listener for %s on IP %s" % (subsystem_nqn, iface.ip4_address))
+                ret = rpc_client.listeners_create(subsystem_nqn, tr_type, iface.ip4_address, "4420")
+                IP = iface.ip4_address
+                break
+
     return JMDevice({
         'uuid': alceml_id,
         'device_name': jm_bdev,
         'size': nvme.size,
-        'status': JMDevice.STATUS_ONLINE if not after_restart else JMDevice.STATUS_UNAVAILABLE,
+        'status': JMDevice.STATUS_ONLINE,
         'alceml_bdev': alceml_name,
         'alceml_name': alceml_name,
         'nvme_bdev': nvme.nvme_bdev,
@@ -732,8 +728,11 @@ def _prepare_cluster_devices_on_restart(snode, clear_data=False):
             alceml_worker_cpu_mask = utils.decimal_to_hex_power_of_2(snode.alceml_worker_cpu_cores[snode.alceml_worker_cpu_index])
             snode.alceml_worker_cpu_index = (snode.alceml_worker_cpu_index + 1) % len(snode.alceml_worker_cpu_cores)
 
+        pba_init_mode = 3
+        if not clear_data:
+            pba_init_mode = 1
         ret = rpc_client.bdev_alceml_create(jm_device.alceml_bdev, nvme_bdev, jm_device.get_id(),
-                                                pba_init_mode=1, alceml_cpu_mask=alceml_cpu_mask, alceml_worker_cpu_mask=alceml_worker_cpu_mask)
+                                                pba_init_mode=pba_init_mode, alceml_cpu_mask=alceml_cpu_mask, alceml_worker_cpu_mask=alceml_worker_cpu_mask)
 
         if not ret:
             logger.error(f"Failed to create alceml bdev: {jm_device.alceml_bdev}")
@@ -767,8 +766,7 @@ def _prepare_cluster_devices_on_restart(snode, clear_data=False):
                 if iface.ip4_address:
                     tr_type = iface.get_transport_type()
                     logger.info("adding listener for %s on IP %s" % (subsystem_nqn, iface.ip4_address))
-                    ret = rpc_client.listeners_create(subsystem_nqn, tr_type, iface.ip4_address, "4420",
-                                                      ana_state="inaccessible")
+                    ret = rpc_client.listeners_create(subsystem_nqn, tr_type, iface.ip4_address, "4420")
                     break
 
 
@@ -1357,7 +1355,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
             snode.secondary_node_id = secondary_nodes[0]
             snode.write_to_db()
 
-    if cluster.status not in  [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED]:
+    if cluster.status not in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED]:
         logger.warning(f"The cluster status is not active ({cluster.status}), adding the node without distribs and lvstore")
         logger.info("Done")
         return "Success"
@@ -1864,13 +1862,11 @@ def restart_storage_node(
         node.remote_devices = _connect_to_remote_devs(node, force_conect_restarting_nodes=True)
         node.write_to_db(kv_store)
 
+    if snode.jm_device and snode.jm_device.status in [JMDevice.STATUS_UNAVAILABLE, JMDevice.STATUS_ONLINE]:
+        device_controller.set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_ONLINE)
 
     logger.info("Setting node status to Online")
     set_node_status(node_id, StorageNode.STATUS_ONLINE)
-
-    if snode.jm_device and snode.jm_device.get_id() \
-            and snode.jm_device.status in [JMDevice.STATUS_UNAVAILABLE, JMDevice.STATUS_ONLINE]:
-        device_controller.set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_ONLINE)
 
     snode = db_controller.get_storage_node_by_id(snode.get_id())
     for db_dev in snode.nvme_devices:
@@ -1883,14 +1879,12 @@ def restart_storage_node(
     for dev in snode.nvme_devices:
         distr_controller.send_dev_status_event(dev, dev.status)
 
-
     time.sleep(2)
 
     if cluster.status not in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED]:
         logger.warning(f"The cluster status is not active ({cluster.status}), adding the node without distribs and lvstore")
         logger.info("Done")
         return "Success"
-
 
     if snode.lvstore_stack or snode.is_secondary_node:
         ret = recreate_lvstore(snode)

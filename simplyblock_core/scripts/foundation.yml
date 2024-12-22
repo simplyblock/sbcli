@@ -2,7 +2,7 @@
 services:
 
   fdb-server:
-    image: foundationdb/foundationdb:7.3.2
+    image: foundationdb/foundationdb:7.3.42
     environment:
       FDB_NETWORKING_MODE: 'container'
       FDB_CLUSTER_FILE: '/etc/foundationdb/fdb.cluster'
@@ -23,11 +23,9 @@ services:
       mode: global
     depends_on:
       - cli
-#    ports:
-#      - 4500:4500
 
   cli:
-    image: "simplyblock/simplyblock:main-ha"
+    image: "simplyblock/simplyblock:main"
     command: "sleep 9999"
 
     deploy:
