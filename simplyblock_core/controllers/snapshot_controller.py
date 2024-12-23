@@ -99,7 +99,7 @@ def add(lvol_id, snapshot_name):
         if sec_node.status == StorageNode.STATUS_ONLINE:
             sec_rpc_client = RPCClient(sec_node.mgmt_ip, sec_node.rpc_port, sec_node.rpc_username, sec_node.rpc_password)
             sec_rpc_client.bdev_lvol_set_leader(False, lvs_name=lvol.lvs_name)
-            ret = rpc_client.bdev_lvol_snapshot_register(
+            ret = sec_rpc_client.bdev_lvol_snapshot_register(
                 f"{lvol.lvs_name}/{lvol.lvol_bdev}", snapshot_name, snap_uuid, blobid)
 
     ##############################################################################
@@ -159,7 +159,7 @@ def list(all=False):
     return utils.print_table(data)
 
 
-def delete(snapshot_uuid, force=False):
+def delete(snapshot_uuid, force_delete=False):
     snap = db_controller.get_snapshot_by_id(snapshot_uuid)
     if not snap:
         logger.error(f"Snapshot not found {snapshot_uuid}")
@@ -179,8 +179,6 @@ def delete(snapshot_uuid, force=False):
 
     logger.info(f"Removing snapshot: {snapshot_uuid}")
 
-    snode = db_controller.get_storage_node_by_id(snap.lvol.node_id)
-
     # creating RPCClient instance
     rpc_client = RPCClient(
         snode.mgmt_ip,
@@ -188,10 +186,57 @@ def delete(snapshot_uuid, force=False):
         snode.rpc_username,
         snode.rpc_password)
 
+    snode = db_controller.get_storage_node_by_id(snap.lvol.node_id)
+
+    sec_rpc_client = None
+    if snode.secondary_node_id:
+        sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
+        if sec_node.status == StorageNode.STATUS_ONLINE:
+            sec_rpc_client = RPCClient(
+                sec_node.mgmt_ip,
+                sec_node.rpc_port,
+                sec_node.rpc_username,
+                sec_node.rpc_password)
+
+            ret = sec_rpc_client.bdev_lvol_set_leader(False, lvs_name=snap.lvol.lvs_name)
+            if not ret:
+                logger.error(f"Failed to set leader for secondary node: {sec_node.get_id()}")
+                if not force_delete:
+                    return False
+            time.sleep(1)
+
+    ret = rpc_client.bdev_lvol_set_leader(True, lvs_name=snap.lvol.lvs_name)
+    if not ret:
+        logger.error(f"Failed to set leader for primary node: {snode.get_id()}")
+        if not force_delete:
+            return False
+
+    time.sleep(1)
     ret = rpc_client.delete_lvol(snap.snap_bdev)
     if not ret:
-        logger.error(f"Failed to delete BDev {snap.snap_bdev}")
-        if not force:
+        logger.error(f"Failed to delete snap from node: {snode.get_id()}")
+        if not force_delete:
+            return False
+    time.sleep(1)
+
+    if sec_rpc_client:
+        ret = sec_rpc_client.delete_lvol(snap.snap_bdev)
+        if not ret:
+            logger.error(f"Failed to delete snap from node: {sec_node.get_id()}")
+            if not force_delete:
+                return False
+        time.sleep(1)
+        ret = sec_rpc_client.bdev_lvol_set_leader(False, lvs_name=snap.lvol.lvs_name)
+        if not ret:
+            logger.error(f"Failed to set leader for secondary node: {sec_node.get_id()}")
+            if not force_delete:
+                return False
+
+    time.sleep(1)
+    ret = rpc_client.bdev_lvol_set_leader(True, lvs_name=snap.lvol.lvs_name)
+    if not ret:
+        logger.error(f"Failed to set leader for primary node: {snode.get_id()}")
+        if not force_delete:
             return False
     snap.remove(db_controller.kv_store)
 
@@ -289,15 +334,36 @@ def clone(snapshot_id, clone_name, new_size=0):
     lvol.distr_page_size = snap.lvol.distr_page_size
     lvol.guid = lvol_controller._generate_hex_string(16)
     lvol.vuid = snap.lvol.vuid
+    lvol.snapshot_name = snap.snap_bdev
 
     lvol.status = LVol.STATUS_ONLINE
-    # lvol.bdev_stack = snap.lvol.bdev_stack
     lvol.bdev_stack = [
         {
             "type": "bdev_lvol_clone",
-            "name": lvol.top_bdev
+            "name": lvol.top_bdev,
+            "params": {
+                "snapshot_name": lvol.snapshot_name,
+                "clone_name": lvol.lvol_bdev
+            }
         }
     ]
+
+    if snap.lvol.crypto_bdev:
+        lvol.crypto_bdev = f"crypto_{lvol.lvol_bdev}"
+        lvol.bdev_stack.append({
+            "type": "crypto",
+            "name": lvol.crypto_bdev,
+            "params": {
+                "name": lvol.crypto_bdev,
+                "base_name": lvol.top_bdev,
+                "key1": snap.lvol.crypto_key1,
+                "key2": snap.lvol.crypto_key2,
+            }
+        })
+        lvol.lvol_type += ',crypto'
+        lvol.top_bdev = lvol.crypto_bdev
+        lvol.crypto_key1 = snap.lvol.crypto_key1
+        lvol.crypto_key2 = snap.lvol.crypto_key2
 
     # if new_size:
     #     if snap.lvol.size >= new_size:
@@ -314,41 +380,66 @@ def clone(snapshot_id, clone_name, new_size=0):
     rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
     spdk_mem_info_before = rpc_client.ultra21_util_get_malloc_stats()
 
-    logger.info("Creating clone bdev")
-    ret = rpc_client.lvol_clone(snap.snap_bdev, lvol.lvol_bdev)
-    if not ret:
-        return False, "Failed to create clone lvol bdev"
+    # logger.info("Creating clone bdev")
+    # ret = rpc_client.lvol_clone(snap.snap_bdev, lvol.lvol_bdev)
+    # if not ret:
+    #     return False, "Failed to create clone lvol bdev"
+    #
+    # if "crypto" in snap.lvol.lvol_type:
+    #     lvol.crypto_bdev = f"crypto_{lvol.lvol_name}"
+    #     lvol.crypto_key1 = snap.lvol.crypto_key1
+    #     lvol.crypto_key2 = snap.lvol.crypto_key2
+    #
+    #     ret = lvol_controller._create_crypto_lvol(
+    #         rpc_client, lvol.crypto_bdev, lvol.top_bdev, lvol.crypto_key1, lvol.crypto_key2)
+    #     if not ret:
+    #         return False, "Failed to create clone lvol bdev"
+    #
+    #     lvol.lvol_type += ',crypto'
+    #     lvol.top_bdev = lvol.crypto_bdev
+    #
+    # subsystem_nqn = lvol.nqn
+    # logger.info("creating subsystem %s", subsystem_nqn)
+    # ret = rpc_client.subsystem_create(subsystem_nqn, 'sbcli-cn', lvol.uuid)
+    #
+    # # add listeners
+    # logger.info("adding listeners")
+    # for iface in snode.data_nics:
+    #     if iface.ip4_address:
+    #         tr_type = iface.get_transport_type()
+    #         logger.info("adding listener for %s on IP %s" % (subsystem_nqn, iface.ip4_address))
+    #         ret = rpc_client.listeners_create(subsystem_nqn, tr_type, iface.ip4_address, "4420")
+    #
+    # logger.info(f"add lvol {clone_name} to subsystem")
+    # ret = rpc_client.nvmf_subsystem_add_ns(subsystem_nqn, lvol.top_bdev, lvol.uuid, lvol.guid)
+    # if not ret:
+    #     return False, "Failed to add bdev to subsystem"
 
-    if "crypto" in snap.lvol.lvol_type:
-        lvol.crypto_bdev = f"crypto_{lvol.lvol_name}"
-        lvol.crypto_key1 = snap.lvol.crypto_key1
-        lvol.crypto_key2 = snap.lvol.crypto_key2
+##########################################################################################################
+    if snap.lvol.ha_type == 'single':
+        ret, error = lvol_controller.add_lvol_on_node(lvol, snode)
+        if error:
+            return ret, error
+        lvol.nodes = [snode.get_id()]
+    elif snap.lvol.ha_type == "ha":
+        lvol_bdev, error = lvol_controller.add_lvol_on_node(lvol, snode)
+        if error:
+            return False, error
 
-        ret = lvol_controller._create_crypto_lvol(
-            rpc_client, lvol.crypto_bdev, lvol.top_bdev, lvol.crypto_key1, lvol.crypto_key2)
-        if not ret:
-            return False, "Failed to create clone lvol bdev"
+        lvol.lvol_uuid = lvol_bdev['uuid']
+        lvol.blobid = lvol_bdev['driver_specific']['lvol']['blobid']
 
-        lvol.lvol_type += ',crypto'
-        lvol.top_bdev = lvol.crypto_bdev
+        sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
+        if sec_node.status == StorageNode.STATUS_ONLINE:
+            ret, error = lvol_controller.add_lvol_on_node(lvol, sec_node, ha_inode_self=1)
+            if error:
+                return ret, error
 
-    subsystem_nqn = lvol.nqn
-    logger.info("creating subsystem %s", subsystem_nqn)
-    ret = rpc_client.subsystem_create(subsystem_nqn, 'sbcli-cn', lvol.uuid)
-
-    # add listeners
-    logger.info("adding listeners")
-    for iface in snode.data_nics:
-        if iface.ip4_address:
-            tr_type = iface.get_transport_type()
-            logger.info("adding listener for %s on IP %s" % (subsystem_nqn, iface.ip4_address))
-            ret = rpc_client.listeners_create(subsystem_nqn, tr_type, iface.ip4_address, "4420")
-
-    logger.info(f"add lvol {clone_name} to subsystem")
-    ret = rpc_client.nvmf_subsystem_add_ns(subsystem_nqn, lvol.top_bdev, lvol.uuid, lvol.guid)
-    if not ret:
-        return False, "Failed to add bdev to subsystem"
-
+        nodes_ids = [
+            snode.get_id(),
+            snode.secondary_node_id]
+        lvol.nodes = nodes_ids
+##########################################################################################################
     spdk_mem_info_after = rpc_client.ultra21_util_get_malloc_stats()
     diff = {}
     for key in spdk_mem_info_after.keys():
@@ -359,8 +450,10 @@ def clone(snapshot_id, clone_name, new_size=0):
     lvol.mem_diff = diff
     lvol.write_to_db(db_controller.kv_store)
 
+    pool = db_controller.get_pool_by_id(snap.lvol.pool_uuid)
     pool.lvols.append(lvol.uuid)
     pool.write_to_db(db_controller.kv_store)
+    snode = db_controller.get_storage_node_by_id(snode.get_id())
     snode.lvols.append(lvol.uuid)
     snode.write_to_db(db_controller.kv_store)
 

@@ -2163,11 +2163,8 @@ def suspend_storage_node(node_id, force=False):
                         ret = rpc_client.nvmf_subsystem_listener_set_ana_state(
                             lvol.nqn, iface.ip4_address, "4420", False, ana="inaccessible")
 
-        time.sleep(1)
         rpc_client.bdev_lvol_set_leader(False, lvs_name=node.lvstore)
-        time.sleep(1)
         rpc_client.bdev_distrib_force_to_non_leader(node.jm_vuid)
-        time.sleep(1)
 
 
 
@@ -2274,9 +2271,7 @@ def resume_storage_node(node_id):
                                 ret = remote_rpc_client.nvmf_subsystem_listener_set_ana_state(
                                         lvol.nqn, iface.ip4_address, "4420", False, ana="inaccessible")
 
-                time.sleep(1)
                 remote_rpc_client.bdev_lvol_set_leader(False, lvs_name=node.lvstore)
-                time.sleep(1)
                 remote_rpc_client.bdev_distrib_force_to_non_leader(node.jm_vuid)
                 time.sleep(1)
 
@@ -2308,7 +2303,6 @@ def resume_storage_node(node_id):
                             if iface.ip4_address:
                                 ret = remote_rpc_client.nvmf_subsystem_listener_set_ana_state(
                                     lvol.nqn, iface.ip4_address, "4420", False)
-                    time.sleep(1)
 
     logger.info("Setting node status to online")
     set_node_status(snode.get_id(), StorageNode.STATUS_ONLINE)
