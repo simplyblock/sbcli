@@ -334,6 +334,7 @@ class CLIWrapper:
         sub_command = self.add_sub_command(subparser, 'activate', 'Create distribs and raid0 bdevs on all the storage node and move the cluster to active state')
         sub_command.add_argument("cluster_id", help='the cluster UUID')
         sub_command.add_argument("--force", help='Force recreate distr and lv stores', required=False, action='store_true')
+        sub_command.add_argument("--force-lvstore-create", help='Force recreate lv stores', required=False, action='store_true', dest='force_lvstore_create')
 
         # show cluster list
         self.add_sub_command(subparser, 'list', 'Show clusters list')
@@ -955,7 +956,7 @@ class CLIWrapper:
                 ret = self.cluster_add(args)
             elif sub_command == 'activate':
                 cluster_id = args.cluster_id
-                ret = cluster_ops.cluster_activate(cluster_id, args.force)
+                ret = cluster_ops.cluster_activate(cluster_id, args.force, args.force_lvstore_create)
             elif sub_command == 'status':
                 cluster_id = args.cluster_id
                 ret = cluster_ops.show_cluster(cluster_id)
