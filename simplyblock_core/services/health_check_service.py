@@ -193,19 +193,27 @@ while True:
                         else:
                             logger.info(f"Checking bdev: {remote_device.remote_bdev} ... not found")
 
-                            # org_dev = db_controller.get_jm_device_by_id(remote_device.get_id())
-                            # if org_dev and org_dev.status == NVMeDevice.STATUS_ONLINE:
-                            #     name = f"remote_{remote_device.jm_bdev}"
-                            #     ret = rpc_client.bdev_nvme_attach_controller_tcp_JM(
-                            #         name, remote_device.nvmf_nqn, remote_device.nvmf_ip,
-                            #         remote_device.nvmf_port)
-                            #     if ret:
-                            #         logger.info(f"Successfully connected to device: {remote_device.get_id()}")
-                            #         online_jms += 1
-                            #     else:
-                            #         logger.error(f"Failed to connect to device: {remote_device.get_id()}")
-                            # else:
-                            #     continue
+                            org_dev = None
+                            org_dev_node = None
+                            for node in db_controller.get_storage_nodes():
+                                if node.jm_device and node.jm_device.get_id() == remote_device.get_id():
+                                    org_dev = node.jm_device
+                                    org_dev_node = node
+                                    break
+
+                            if org_dev and org_dev.status == NVMeDevice.STATUS_ONLINE and \
+                                    org_dev_node.status == StorageNode.STATUS_ONLINE:
+                                name = f"remote_{remote_device.jm_bdev}"
+                                ret = rpc_client.bdev_nvme_attach_controller_tcp(
+                                    name, remote_device.nvmf_nqn, remote_device.nvmf_ip,
+                                    remote_device.nvmf_port)
+                                if ret:
+                                    logger.info(f"Successfully connected to jm device: {remote_device.get_id()}")
+                                    online_jms += 1
+                                else:
+                                    logger.error(f"Failed to connect to jm device: {remote_device.get_id()}")
+                            else:
+                                continue
 
                     if online_jms < 2:
                         node_remote_devices_check = False

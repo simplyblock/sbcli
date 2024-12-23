@@ -537,27 +537,6 @@ class RPCClient:
         }
         return self._request("bdev_nvme_attach_controller", params)
 
-    def bdev_nvme_attach_controller_tcp_JM(self, name, nqn, ip, port):
-        return self.bdev_nvme_attach_controller_tcp(name, nqn, ip, port)
-        # params = {
-        #     "name": name,
-        #     "trtype": "tcp",
-        #     "traddr": ip,
-        #     "adrfam": "ipv4",
-        #     "trsvcid": str(port),
-        #     "subnqn": nqn,
-        #     "fabrics_connect_timeout_us": 100000,
-        #
-        #     "num_io_queues": 16384,
-        #     "ctrlr_loss_timeout_sec": 0,
-        #     "multipath": "disable",
-        #     "reconnect_delay_sec": 0,
-        #
-        #     "fast_io_fail_timeout_sec": 1,
-        #
-        # }
-        # return self._request("bdev_nvme_attach_controller", params)
-
     def bdev_nvme_attach_controller_tcp_caching(self, name, nqn, ip, port):
         params = {
             "name": name,
