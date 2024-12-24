@@ -402,7 +402,7 @@ class RPCClient:
             # "use_scheduling": True,
             "use_optimized": True,
             "pba_nbalign": 4096,
-            "use_map_whole_page_on_1st_write": True
+            "use_map_whole_page_on_1st_write": False
         }
         if alceml_cpu_mask:
             params["bdb_lcpu_mask"] = int(alceml_cpu_mask, 16)
