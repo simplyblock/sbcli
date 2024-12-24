@@ -215,13 +215,11 @@ def spdk_process_start():
 
 @bp.route('/spdk_process_kill', methods=['GET'])
 def spdk_process_kill():
-    force = request.args.get('force', default=False, type=bool)
     node_docker = get_docker_client()
     for cont in node_docker.containers.list(all=True):
-        logger.debug(cont.attrs)
         if cont.attrs['Name'] == "/spdk" or cont.attrs['Name'] == "/spdk_proxy":
-            cont.stop()
-            cont.remove(force=force)
+            cont.stop(timeout=3)
+            cont.remove(force=True)
     return utils.get_response(True)
 
 
@@ -229,7 +227,6 @@ def spdk_process_kill():
 def spdk_process_is_up():
     node_docker = get_docker_client()
     for cont in node_docker.containers.list(all=True):
-        logger.debug(cont.attrs)
         if cont.attrs['Name'] == "/spdk":
             status = cont.attrs['State']["Status"]
             is_running = cont.attrs['State']["Running"]
@@ -320,7 +317,7 @@ def join_swarm():
 
     logger.info("Joining Swarm")
     node_docker = get_docker_client()
-    if node_docker.info()["Swarm"]["LocalNodeState"] == "active":
+    if node_docker.info()["Swarm"]["LocalNodeState"] in ["active", "pending"]:
         logger.info("Node is part of another swarm, leaving swarm")
         node_docker.swarm.leave(force=True)
         time.sleep(2)

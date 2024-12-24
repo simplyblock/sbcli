@@ -39,11 +39,10 @@ class SbcliUtils:
                 resp = requests.get(request_url, headers=headers)
                 if resp.status_code == HTTPStatus.OK:
                     data = resp.json()
+                    return data
                 else:
-                    self.logger.error('request failed. status_code', resp.status_code)
-                    self.logger.error('request failed. text', resp.text)
+                    self.logger.error(f"request failed. status_code: {resp.status_code}, text: {resp.text}")
                     resp.raise_for_status()
-                return data
             except Exception as e:
                 self.logger.debug(f"API call {api_url} failed with error:{e}")
                 retry -= 1
@@ -51,6 +50,7 @@ class SbcliUtils:
                     self.logger.info(f"Retry attempt exhausted. API {api_url} failed with: {e}.")
                     raise e
                 self.logger.info(f"Retrying API {api_url}. Attempt: {10 - retry + 1}")
+                sleep_n_sec(1)
 
     def post_request(self, api_url, headers=None, body=None, retry=10):
         """Performs post request on the given API URL
@@ -74,8 +74,7 @@ class SbcliUtils:
                 if resp.status_code == HTTPStatus.OK:
                     data = resp.json()
                 else:
-                    self.logger.error('request failed. status_code', resp.status_code)
-                    self.logger.error('request failed. text', resp.text)
+                    self.logger.error(f"request failed. status_code: {resp.status_code}, text: {resp.text}")
                     resp.raise_for_status()
                 return data
             except Exception as e:
@@ -85,6 +84,7 @@ class SbcliUtils:
                     self.logger.info(f"Retry attempt exhausted. API {api_url} failed with: {e}.")
                     raise e
                 self.logger.info(f"Retrying API {api_url}. Attempt: {10 - retry + 1}")
+                sleep_n_sec(3)
 
     def delete_request(self, api_url, headers=None):
         """Performs delete request on the given API URL
@@ -106,8 +106,7 @@ class SbcliUtils:
                 if resp.status_code == HTTPStatus.OK:
                     data = resp.json()
                 else:
-                    self.logger.error('request failed. status_code', resp.status_code)
-                    self.logger.error('request failed. text', resp.text)
+                    self.logger.error(f"request failed. status_code: {resp.status_code}, text: {resp.text}")
                     resp.raise_for_status()
                 return data
             except Exception as e:
@@ -117,6 +116,7 @@ class SbcliUtils:
                     self.logger.info(f"Retry attempt exhausted. API {api_url} failed with: {e}.")
                     raise e
                 self.logger.info(f"Retrying API {api_url}. Attempt: {5 - retry + 1}")
+                sleep_n_sec(3)
 
     def put_request(self, api_url, headers=None, body=None):
         """Performs put request on the given API URL
@@ -140,8 +140,7 @@ class SbcliUtils:
                 if resp.status_code == HTTPStatus.OK:
                     data = resp.json()
                 else:
-                    self.logger.error('request failed. status_code', resp.status_code)
-                    self.logger.error('request failed. text', resp.text)
+                    self.logger.error(f"request failed. status_code: {resp.status_code}, text: {resp.text}")
                     resp.raise_for_status()
                 return data
             except Exception as e:
@@ -151,7 +150,38 @@ class SbcliUtils:
                     self.logger.info(f"Retry attempt exhausted. API {api_url} failed with: {e}.")
                     raise e
                 self.logger.info(f"Retrying API {api_url}. Attempt: {10 - retry + 1}")
+                sleep_n_sec(3)
 
+    def add_storage_node(self, cluster_id, node_ip, ifname, max_lvol, max_prov, max_snap,
+                         number_of_distribs, number_of_devices, partitions, jm_percent,
+                         disable_ha_jm, enable_test_device, iobuf_small_pool_count,
+                         iobuf_large_pool_count, spdk_debug, spdk_image, spdk_cpu_mask):
+        """Adds the storage node with given name
+        """
+
+        body = {
+            "cluster_id": cluster_id,
+            "node_ip": node_ip,
+            "ifname": ifname,
+            "max_lvol": max_lvol,
+            "max_prov": max_prov,
+            "max_snap": max_snap,
+            "number_of_distribs": number_of_distribs,
+            "number_of_devices": number_of_devices,
+            "partitions": partitions,
+            "jm_percent": jm_percent,
+            "disable_ha_jm": disable_ha_jm,
+            "enable_test_device": enable_test_device,
+            "iobuf_small_pool_count": iobuf_small_pool_count,
+            "iobuf_large_pool_count": iobuf_large_pool_count,
+            "spdk_debug": spdk_debug,
+            "spdk_image": spdk_image,
+            "spdk_cpu_mask": spdk_cpu_mask
+        }
+
+        self.post_request(api_url="/storagenode/add", body=body)
+
+    
     def get_node_without_lvols(self) -> str:
         """
         returns a single nodeID which doesn't have any lvol attached
@@ -160,7 +190,7 @@ class SbcliUtils:
         node_uuid = ""
         data = self.get_request(api_url="/storagenode")
         for result in data['results']:
-            if len(result['lvols']) == 0:
+            if len(result['lvols']) == 0 and result['is_secondary_node'] is False:
                 node_uuid = result['uuid']
                 break
         return node_uuid
@@ -324,9 +354,13 @@ class SbcliUtils:
 
     def add_lvol(self, lvol_name, pool_name, size="256M", distr_ndcs=0, distr_npcs=0,
                  distr_bs=4096, distr_chunk_bs=4096, max_rw_iops=0, max_rw_mbytes=0,
-                 max_r_mbytes=0, max_w_mbytes=0, host_id=None, retry=10):
+                 max_r_mbytes=0, max_w_mbytes=0, host_id=None, retry=10,
+                 crypto=False, key1=None, key2=None):
         """Adds lvol with given params
         """
+        if crypto:
+            if not key1 or not key2:
+                raise Exception("Need two keys for crypto lvols")
         lvols = self.list_lvols()
         for name in list(lvols.keys()):
             if name == lvol_name:
@@ -337,7 +371,6 @@ class SbcliUtils:
             "name": lvol_name,
             "size": size,
             "pool": pool_name,
-            "crypto": False,
             "max_rw_iops": str(max_rw_iops),
             "max_rw_mbytes": str(max_rw_mbytes),
             "max_r_mbytes": str(max_r_mbytes),
@@ -350,6 +383,10 @@ class SbcliUtils:
             body["chunk_bs"] = str(distr_ndcs)
         if host_id:
             body["host_id"] = host_id
+        if crypto:
+            body["crypto"] = True
+            body["crypto_key1"] = key1
+            body["crypto_key2"] = key2
         
         self.post_request(api_url="/lvol", body=body, retry=retry)
 
@@ -427,6 +464,14 @@ class SbcliUtils:
         cluster_logs = self.get_request(api_url=f"/cluster/get-logs/{cluster_id}")
         self.logger.info(f"Cluster Logs: {cluster_logs}")
         return cluster_logs["results"]
+    
+    def get_cluster_tasks(self, cluster_id=None):
+        """Get Cluster tasks for given cluster id
+        """
+        cluster_id = self.cluster_id if not cluster_id else cluster_id
+        cluster_tasks = self.get_request(api_url=f"/cluster/get-tasks/{cluster_id}")
+        self.logger.debug(f"Cluster Tasks: {cluster_tasks}")
+        return cluster_tasks["results"]
     
     def wait_for_storage_node_status(self, node_id, status, timeout=60):
         actual_status = None
@@ -508,3 +553,19 @@ class SbcliUtils:
                 timeout -= 1
             raise TimeoutError(f"Timed out waiting for device status, Node id: {node_id}, Device id: {device_id}"
                                 f"Expected status: {status}, Actual status: {actual_status}")
+
+    def list_migration_tasks(self, cluster_id):
+        """List all migration tasks for a given cluster."""
+        return self.get_request(f"/cluster/list-tasks/{cluster_id}")
+
+    def get_lvol_connect_str_list(self, lvol_name):
+        """Return connect string for the lvol
+        """
+        lvol_id = self.get_lvol_id(lvol_name=lvol_name)
+        if not lvol_id:
+            self.logger.info(f"Lvol {lvol_name} does not exist. Exiting")
+            return
+
+        data = self.get_request(api_url=f"/lvol/connect/{lvol_id}")
+        self.logger.info(f"Connect lvol resp: {data}")
+        return [d["connect"] for d in data["results"]]

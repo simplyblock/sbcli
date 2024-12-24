@@ -11,12 +11,12 @@ from simplyblock_core.controllers import lvol_controller, snapshot_controller
 
 from simplyblock_web import utils
 
-from simplyblock_core import kv_store
+from simplyblock_core import db_controller
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 bp = Blueprint("lvol", __name__)
-db_controller = kv_store.DBController()
+db_controller = db_controller.DBController()
 
 
 @bp.route('/lvol', defaults={'uuid': None}, methods=['GET'])
@@ -115,7 +115,7 @@ def add_lvol():
 
     pool = None
     for p in db_controller.get_pools():
-        if pool_id_or_name == p.id or pool_id_or_name == p.pool_name:
+        if pool_id_or_name == p.get_id() or pool_id_or_name == p.pool_name:
             pool = p
             break
     if not pool:
@@ -139,6 +139,7 @@ def add_lvol():
     crypto_key1 = utils.get_value_or_default(cl_data, "crypto_key1", None)
     crypto_key2 = utils.get_value_or_default(cl_data, "crypto_key2", None)
     host_id = utils.get_value_or_default(cl_data, "host_id", None)
+    lvol_priority_class = utils.get_value_or_default(cl_data, "lvol_priority_class", 0)
 
     ret, error = lvol_controller.add_lvol_ha(
         name=name,
@@ -159,7 +160,8 @@ def add_lvol():
         crypto_key2=crypto_key2,
 
         use_comp=False,
-        distr_vuid=0
+        distr_vuid=0,
+        lvol_priority_class=lvol_priority_class
     )
 
     return utils.get_response(ret, error, http_code=400)

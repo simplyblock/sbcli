@@ -2,7 +2,7 @@
 import logging
 
 from simplyblock_core.controllers import events_controller as ec
-from simplyblock_core.kv_store import DBController
+from simplyblock_core.db_controller import DBController
 
 logger = logging.getLogger()
 db_controller = DBController()
@@ -16,7 +16,7 @@ def _task_event(task, message, caused_by, event):
         db_object=task,
         caused_by=caused_by,
         message=message,
-        node_id=task.node_id,
+        node_id=task.uuid,
         status=task.status)
 
 

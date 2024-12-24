@@ -104,6 +104,7 @@ class CommonUtils:
         process_fio = [element for element in process_list_after if "grep" not in element]
 
         assert len(process_fio) == 0, f"FIO process list not empty: {process_list_after}"
+        self.logger.info(f"FIO Running: {process_fio}")
 
         return end_time
             
@@ -155,38 +156,137 @@ class CommonUtils:
 
         return nodes, devices
     
-    def start_ec2_instance(self, ec2_client, instance_id):
+    def start_ec2_instance(self, ec2_resource, instance_id):
         """Start ec2 instance
 
         Args:
-            ec2_client (EC2): EC2 class object from boto3
+            ec2_resource (EC2): EC2 class object from boto3
             instance_id (str): Instance id to start
         """
-        response = ec2_client.start_instances(InstanceIds=[instance_id])
-        print(f'Successfully started instance {instance_id}: {response}')
-
-        start_waiter = ec2_client.get_waiter('instance_running')
-        self.logger.info(f"Waiting for instance {instance_id} to start...")
-        start_waiter.wait(InstanceIds=[instance_id])
-        self.logger.info(f'Instance {instance_id} has been successfully started.')
+        instance = ec2_resource.Instance(instance_id)
+        instance.start()
+        self.logger.info(f"Starting instance {instance_id}.")
+        instance.wait_until_running()  # Wait until the instance is fully running
+        self.logger.info(f"Instance {instance_id} is now running.")
 
         sleep_n_sec(30)
 
-    def stop_ec2_instance(self, ec2_client, instance_id):
+    def stop_ec2_instance(self, ec2_resource, instance_id):
         """Stop ec2 instance
 
         Args:
-            ec2_client (EC2): EC2 class object from boto3
+            ec2_resource (EC2): EC2 class object from boto3
             instance_id (str): Instance id to stop
         """
-        response = ec2_client.stop_instances(InstanceIds=[instance_id])
-        self.logger.info(f'Successfully stopped instance {instance_id}: {response}')
-        stop_waiter = ec2_client.get_waiter('instance_stopped')
-        self.logger.info(f"Waiting for instance {instance_id} to stop...")
-        stop_waiter.wait(InstanceIds=[instance_id])
-        self.logger.info((f'Instance {instance_id} has been successfully stopped.'))
-        
+        instance = ec2_resource.Instance(instance_id)
+        instance.stop()
+        self.logger.info(f"Stopping instance {instance_id}.")
+        instance.wait_until_stopped()  # Wait until the instance is fully stopped
+        self.logger.info(f"Instance {instance_id} has stopped.") 
         sleep_n_sec(30)
+    
+    def terminate_instance(self, ec2_resource, instance_id):
+        # Terminate the given instance
+        instance = ec2_resource.Instance(instance_id)
+        instance.terminate()
+        self.logger.info(f"Terminating instance {instance_id}.")
+        instance.wait_until_terminated()  # Wait until the instance is fully terminated
+        self.logger.info(f"Instance {instance_id} has been terminated.")
+        sleep_n_sec(30)
+    
+    def create_instance_from_existing(self, ec2_resource, instance_id, instance_name):
+        # Get the existing instance information
+        instance = ec2_resource.Instance(instance_id)
+
+        # Get key details from the existing instance
+        instance_type = instance.instance_type
+        image_id = instance.image_id
+        key_name = instance.key_name
+        security_groups = instance.security_groups
+        subnet_id = instance.subnet_id
+        
+        # Get block device mappings (volumes) from the source instance
+        block_device_mappings = instance.block_device_mappings
+        
+        # Prepare the block device mappings for the new instance
+        new_block_device_mappings = []
+        for device in block_device_mappings:
+            volume_id = device['Ebs']['VolumeId']
+            
+            # Fetch the volume using the ec2_resource
+            volume = ec2_resource.Volume(volume_id)
+            
+            # Extract necessary information for the new instance
+            volume_size = volume.size
+            volume_type = volume.volume_type
+            encrypted = volume.encrypted
+
+            # Create the new block device mapping
+            ebs_config = {
+                'DeleteOnTermination': device['Ebs']['DeleteOnTermination'],
+                'VolumeSize': volume_size,
+                'VolumeType': volume_type,
+                'Encrypted': encrypted
+            }
+            if volume.snapshot_id:
+                ebs_config['SnapshotId'] = volume.snapshot_id
+
+            new_block_device_mappings.append({
+                'DeviceName': device['DeviceName'],
+                'Ebs': ebs_config
+            })
+
+        # Create a new instance with the same details and give it a name tag
+        self.logger.info(f"Block Device mapping: {new_block_device_mappings}")
+        new_instance = ec2_resource.create_instances(
+            ImageId=image_id,
+            InstanceType=instance_type,
+            KeyName=key_name,
+            SecurityGroupIds=[sg['GroupId'] for sg in security_groups],
+            SubnetId=subnet_id,
+            MinCount=1,
+            MaxCount=1,
+            BlockDeviceMappings=new_block_device_mappings,  # Add the block device mappings here
+            TagSpecifications=[
+                {
+                    'ResourceType': 'instance',
+                    'Tags': [
+                        {
+                            'Key': 'Name',
+                            'Value': instance_name
+                        }
+                    ]
+                }
+            ]
+        )
+        
+        new_instance_id = new_instance[0].id
+        new_instance[0].wait_until_running()  # Wait until the instance is running to get the private IP
+        new_instance[0].reload()  # Refresh the instance attributes after it is running
+        
+        private_ip = new_instance[0].private_ip_address
+        
+        self.logger.info(f"New instance created with ID: {new_instance[0].id}")
+        return new_instance_id, private_ip
+
+    def get_instance_id_by_name(self, ec2_resource, instance_name):
+        instances = ec2_resource.instances.filter(
+            Filters=[
+                {
+                    'Name': 'tag:Name',
+                    'Values': [instance_name]
+                }
+            ]
+        )
+        
+        # Retrieve the instance ID
+        for instance in instances:
+            if instance.state['Name'] != 'terminated':  # Skip terminated instances
+                self.logger.info(f"Instance found: ID = {instance.id}, Name = {instance_name}")
+                return instance.id
+        
+        self.logger.info(f"No running instance found with the name: {instance_name}")
+        return None
     
 
 def sleep_n_sec(seconds):
@@ -198,3 +298,12 @@ def sleep_n_sec(seconds):
     logger = setup_logger(__name__)
     logger.info(f"Sleeping for {seconds} seconds.")
     time.sleep(seconds)
+
+def convert_bytes_to_gb_tb(bytes_value):
+    GB = 10**9  # 1 GB = 1 billion bytes
+    TB = 10**12  # 1 TB = 1 trillion bytes
+    
+    if bytes_value >= TB:
+        return f"{bytes_value // TB}T"
+    else:
+        return f"{bytes_value // GB}G"

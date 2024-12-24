@@ -9,12 +9,12 @@ from simplyblock_web import utils
 from simplyblock_core.controllers import pool_controller
 
 from simplyblock_core.models.pool import Pool
-from simplyblock_core import kv_store, utils as core_utils
+from simplyblock_core import db_controller, utils as core_utils
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 bp = Blueprint("pool", __name__)
-db_controller = kv_store.DBController()
+db_controller = db_controller.DBController()
 
 
 @bp.route('/pool', defaults={'uuid': None}, methods=['GET'])
@@ -160,8 +160,7 @@ def pool_capacity(uuid):
 
     out = []
     total_size = 0
-    for lvol_id in pool.lvols:
-        lvol = db_controller.get_lvol_by_id(lvol_id)
+    for lvol in db_controller.get_lvols_by_pool_id(uuid):
         total_size += lvol.size
         out.append({
             "device name": lvol.lvol_name,

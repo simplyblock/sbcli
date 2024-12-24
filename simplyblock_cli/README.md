@@ -3,9 +3,7 @@
 
 
 ```bash
-usage: sbcli-dev [-h] [-d]
-                 {storage-node,sn,cluster,lvol,mgmt,pool,snapshot,caching-node,cn}
-                 ...
+usage: sbcli-dev [-h] [-d] {storage-node,sn,cluster,lvol,mgmt,pool,snapshot,caching-node,cn} ...
 
 positional arguments:
   {storage-node,sn,cluster,lvol,mgmt,pool,snapshot,caching-node,cn}
@@ -29,11 +27,11 @@ optional arguments:
 
 ```bash
 usage: sbcli-dev storage-node [-h]
-                              {deploy,deploy-cleaner,add-node,delete,remove,list,get,restart,shutdown,suspend,resume,get-io-stats,get-capacity,list-devices,device-testing-mode,get-device,reset-device,restart-device,add-device,remove-device,set-failed-device,get-capacity-device,get-io-stats-device,port-list,port-io-stats,check,check-device,info,info-spdk,remove-jm-device,restart-jm-device,send-cluster-map,get-cluster-map}
+                              {deploy,deploy-cleaner,add-node,delete,remove,list,get,restart,shutdown,suspend,resume,get-io-stats,get-capacity,list-devices,device-testing-mode,get-device,reset-device,restart-device,add-device,remove-device,set-failed-device,get-capacity-device,get-io-stats-device,port-list,port-io-stats,check,check-device,info,info-spdk,remove-jm-device,restart-jm-device,send-cluster-map,get-cluster-map,make-primary,dump-lvstore}
                               ...
 
 positional arguments:
-  {deploy,deploy-cleaner,add-node,delete,remove,list,get,restart,shutdown,suspend,resume,get-io-stats,get-capacity,list-devices,device-testing-mode,get-device,reset-device,restart-device,add-device,remove-device,set-failed-device,get-capacity-device,get-io-stats-device,port-list,port-io-stats,check,check-device,info,info-spdk,remove-jm-device,restart-jm-device,send-cluster-map,get-cluster-map}
+  {deploy,deploy-cleaner,add-node,delete,remove,list,get,restart,shutdown,suspend,resume,get-io-stats,get-capacity,list-devices,device-testing-mode,get-device,reset-device,restart-device,add-device,remove-device,set-failed-device,get-capacity-device,get-io-stats-device,port-list,port-io-stats,check,check-device,info,info-spdk,remove-jm-device,restart-jm-device,send-cluster-map,get-cluster-map,make-primary,dump-lvstore}
     deploy              Deploy local services for remote ops (local run)
     deploy-cleaner      clean local deploy (local run)
     add-node            Add storage node by ip
@@ -70,6 +68,8 @@ positional arguments:
     restart-jm-device   Restart JM device
     send-cluster-map    send cluster map
     get-cluster-map     get cluster map
+    make-primary        In case of HA SNode, make the current node as primary
+    dump-lvstore        Dump lvstore data
 
 optional arguments:
   -h, --help            show this help message and exit
@@ -106,20 +106,9 @@ optional arguments:
 
 
 ```bash
-usage: sbcli-dev storage-node add-node [-h] [--partitions PARTITIONS]
-                                       [--jm-percent JM_PERCENT]
-                                       [--data-nics DATA_NICS [DATA_NICS ...]]
-                                       [--max-lvol MAX_LVOL]
-                                       [--max-snap MAX_SNAP]
-                                       [--max-prov MAX_PROV]
-                                       [--number-of-distribs NUMBER_OF_DISTRIBS]
-                                       [--number-of-devices NUMBER_OF_DEVICES]
-                                       [--cpu-mask SPDK_CPU_MASK]
-                                       [--spdk-image SPDK_IMAGE]
-                                       [--spdk-debug]
-                                       [--iobuf_small_bufsize SMALL_BUFSIZE]
-                                       [--iobuf_large_bufsize LARGE_BUFSIZE]
-                                       [--enable-test-device] [--enable-ha-jm]
+usage: sbcli-dev storage-node add-node [-h] [--partitions PARTITIONS] [--jm-percent JM_PERCENT] [--data-nics DATA_NICS [DATA_NICS ...]] [--max-lvol MAX_LVOL] [--max-snap MAX_SNAP] [--max-prov MAX_PROV]
+                                       [--number-of-distribs NUMBER_OF_DISTRIBS] [--number-of-devices NUMBER_OF_DEVICES] [--cpu-mask SPDK_CPU_MASK] [--spdk-image SPDK_IMAGE] [--spdk-debug]
+                                       [--iobuf_small_bufsize SMALL_BUFSIZE] [--iobuf_large_bufsize LARGE_BUFSIZE] [--enable-test-device] [--disable-ha-jm] [--namespace NAMESPACE]
                                        cluster_id node_ip ifname
 
 positional arguments:
@@ -137,12 +126,11 @@ optional arguments:
                         Data interface names
   --max-lvol MAX_LVOL   Max lvol per storage node
   --max-snap MAX_SNAP   Max snapshot per storage node
-  --max-prov MAX_PROV   Max provisioning size of all storage nodes
+  --max-prov MAX_PROV   Maximum amount of GB to be provisioned via all storage nodes
   --number-of-distribs NUMBER_OF_DISTRIBS
                         The number of distirbs to be created on the node
   --number-of-devices NUMBER_OF_DEVICES
-                        Number of devices per storage node if it's not
-                        supported EC2 instance
+                        Number of devices per storage node if it's not supported EC2 instance
   --cpu-mask SPDK_CPU_MASK
                         SPDK app CPU mask, default is all cores found
   --spdk-image SPDK_IMAGE
@@ -153,7 +141,9 @@ optional arguments:
   --iobuf_large_bufsize LARGE_BUFSIZE
                         bdev_set_options param
   --enable-test-device  Enable creation of test device
-  --enable-ha-jm        Enable HA JM for ditrib creation
+  --disable-ha-jm       Disable HA JM for distrib creation
+  --namespace NAMESPACE
+                        k8s namespace to deploy on
 
 ```
 
@@ -177,8 +167,7 @@ optional arguments:
 
 
 ```bash
-usage: sbcli-dev storage-node remove [-h] [--force-remove] [--force-migrate]
-                                     node_id
+usage: sbcli-dev storage-node remove [-h] [--force-remove] [--force-migrate] node_id
 
 positional arguments:
   node_id          UUID of storage node
@@ -225,15 +214,8 @@ optional arguments:
 All functions and device drivers will be reset. During restart, the node does not accept IO. In a high-availability setup, this will not impact operations
 
 ```bash
-usage: sbcli-dev storage-node restart [-h] [--max-lvol MAX_LVOL]
-                                      [--max-snap MAX_SNAP]
-                                      [--max-prov MAX_PROV]
-                                      [--node-ip NODE_IP]
-                                      [--number-of-devices NUMBER_OF_DEVICES]
-                                      [--spdk-image SPDK_IMAGE] [--spdk-debug]
-                                      [--iobuf_small_bufsize SMALL_BUFSIZE]
-                                      [--iobuf_large_bufsize LARGE_BUFSIZE]
-                                      [--force]
+usage: sbcli-dev storage-node restart [-h] [--max-lvol MAX_LVOL] [--max-snap MAX_SNAP] [--max-prov MAX_PROV] [--node-ip NODE_IP] [--number-of-devices NUMBER_OF_DEVICES] [--spdk-image SPDK_IMAGE]
+                                      [--spdk-debug] [--iobuf_small_bufsize SMALL_BUFSIZE] [--iobuf_large_bufsize LARGE_BUFSIZE] [--force]
                                       node_id
 
 positional arguments:
@@ -246,8 +228,7 @@ optional arguments:
   --max-prov MAX_PROV   Max provisioning size of all storage nodes
   --node-ip NODE_IP     Restart Node on new node
   --number-of-devices NUMBER_OF_DEVICES
-                        Number of devices per storage node if it's not
-                        supported EC2 instance
+                        Number of devices per storage node if it's not supported EC2 instance
   --spdk-image SPDK_IMAGE
                         SPDK image uri
   --spdk-debug          Enable spdk debug logs
@@ -318,9 +299,7 @@ positional arguments:
 
 optional arguments:
   -h, --help         show this help message and exit
-  --history HISTORY  list history records -one for every 15 minutes- for XX
-                     days and YY hours -up to 10 days in total-, format:
-                     XXdYYh
+  --history HISTORY  list history records -one for every 15 minutes- for XX days and YY hours -up to 10 days in total-, format: XXdYYh
 
 ```
 
@@ -336,9 +315,7 @@ positional arguments:
 
 optional arguments:
   -h, --help         show this help message and exit
-  --history HISTORY  list history records -one for every 15 minutes- for XX
-                     days and YY hours -up to 10 days in total-, format:
-                     XXdYYh
+  --history HISTORY  list history records -one for every 15 minutes- for XX days and YY hours -up to 10 days in total-, format: XXdYYh
 
 ```
 
@@ -347,9 +324,7 @@ optional arguments:
 
 
 ```bash
-usage: sbcli-dev storage-node list-devices [-h] [-s {node-seq,dev-seq,serial}]
-                                           [--json]
-                                           node_id
+usage: sbcli-dev storage-node list-devices [-h] [-s {node-seq,dev-seq,serial}] [--json] node_id
 
 positional arguments:
   node_id               the node's UUID
@@ -367,9 +342,7 @@ optional arguments:
 
 
 ```bash
-usage: sbcli-dev storage-node device-testing-mode [-h]
-                                                  device_id
-                                                  {full_pass_through,io_error_on_read,io_error_on_write,io_error_on_unmap,io_error_on_all,discard_io_all,hotplug_removal}
+usage: sbcli-dev storage-node device-testing-mode [-h] device_id {full_pass_through,io_error_on_read,io_error_on_write,io_error_on_unmap,io_error_on_all,discard_io_all,hotplug_removal}
 
 positional arguments:
   device_id             Device UUID
@@ -477,17 +450,14 @@ optional arguments:
 
 
 ```bash
-usage: sbcli-dev storage-node get-capacity-device [-h] [--history HISTORY]
-                                                  device_id
+usage: sbcli-dev storage-node get-capacity-device [-h] [--history HISTORY] device_id
 
 positional arguments:
   device_id          Storage device ID
 
 optional arguments:
   -h, --help         show this help message and exit
-  --history HISTORY  list history records -one for every 15 minutes- for XX
-                     days and YY hours -up to 10 days in total-, format:
-                     XXdYYh
+  --history HISTORY  list history records -one for every 15 minutes- for XX days and YY hours -up to 10 days in total-, format: XXdYYh
 
 ```
 
@@ -496,17 +466,14 @@ optional arguments:
 
 
 ```bash
-usage: sbcli-dev storage-node get-io-stats-device [-h] [--history HISTORY]
-                                                  device_id
+usage: sbcli-dev storage-node get-io-stats-device [-h] [--history HISTORY] device_id
 
 positional arguments:
   device_id          Storage device ID
 
 optional arguments:
   -h, --help         show this help message and exit
-  --history HISTORY  list history records -one for every 15 minutes- for XX
-                     days and YY hours -up to 10 days in total-, format:
-                     XXdYYh
+  --history HISTORY  list history records -one for every 15 minutes- for XX days and YY hours -up to 10 days in total-, format: XXdYYh
 
 ```
 
@@ -537,8 +504,7 @@ positional arguments:
 
 optional arguments:
   -h, --help         show this help message and exit
-  --history HISTORY  list history records -one for every 15 minutes- for XX
-                     days and YY hours -up to 10 days in total, format: XXdYYh
+  --history HISTORY  list history records -one for every 15 minutes- for XX days and YY hours -up to 10 days in total, format: XXdYYh
 
 ```
 
@@ -665,21 +631,48 @@ optional arguments:
 ```
 
     
+### In case of ha snode, make the current node as primary
+
+
+```bash
+usage: sbcli-dev storage-node make-primary [-h] id
+
+positional arguments:
+  id          id
+
+optional arguments:
+  -h, --help  show this help message and exit
+
+```
+
+    
+### Dump lvstore data
+
+
+```bash
+usage: sbcli-dev storage-node dump-lvstore [-h] id
+
+positional arguments:
+  id          id
+
+optional arguments:
+  -h, --help  show this help message and exit
+
+```
+
+    
 ## Cluster commands
 
 
 ```bash
 usage: sbcli-dev cluster [-h]
-                         {create,add,activate,list,status,get,get-capacity,get-io-stats,get-logs,get-secret,upd-secret,check,update,graceful-shutdown,graceful-startup,list-tasks,cancel-task,delete}
-                         ...
+                         {create,add,activate,list,status,get,get-capacity,get-io-stats,get-logs,get-secret,upd-secret,check,update,graceful-shutdown,graceful-startup,list-tasks,cancel-task,delete} ...
 
 positional arguments:
   {create,add,activate,list,status,get,get-capacity,get-io-stats,get-logs,get-secret,upd-secret,check,update,graceful-shutdown,graceful-startup,list-tasks,cancel-task,delete}
-    create              Create an new cluster with this node as mgmt (local
-                        run)
+    create              Create an new cluster with this node as mgmt (local run)
     add                 Add new cluster
-    activate            Create distribs and raid0 bdevs on all the storage
-                        node and move the cluster to active state
+    activate            Create distribs and raid0 bdevs on all the storage node and move the cluster to active state
     list                Show clusters list
     status              Show cluster status
     get                 Show cluster info
@@ -706,21 +699,11 @@ optional arguments:
 
 
 ```bash
-usage: sbcli-dev cluster create [-h] [--blk_size {512,4096}]
-                                [--page_size PAGE_SIZE] [--CLI_PASS CLI_PASS]
-                                [--cap-warn CAP_WARN] [--cap-crit CAP_CRIT]
-                                [--prov-cap-warn PROV_CAP_WARN]
-                                [--prov-cap-crit PROV_CAP_CRIT]
-                                [--ifname IFNAME]
-                                [--log-del-interval LOG_DEL_INTERVAL]
-                                [--metrics-retention-period METRICS_RETENTION_PERIOD]
-                                [--contact-point CONTACT_POINT]
-                                [--grafana-endpoint GRAFANA_ENDPOINT]
-                                [--distr-ndcs DISTR_NDCS]
-                                [--distr-npcs DISTR_NPCS]
-                                [--distr-bs DISTR_BS]
-                                [--distr-chunk-bs DISTR_CHUNK_BS]
-                                [--ha-type {single,ha,default}]
+usage: sbcli-dev cluster create [-h] [--blk_size {512,4096}] [--page_size PAGE_SIZE] [--CLI_PASS CLI_PASS] [--cap-warn CAP_WARN] [--cap-crit CAP_CRIT] [--prov-cap-warn PROV_CAP_WARN]
+                                [--prov-cap-crit PROV_CAP_CRIT] [--ifname IFNAME] [--log-del-interval LOG_DEL_INTERVAL] [--metrics-retention-period METRICS_RETENTION_PERIOD]
+                                [--contact-point CONTACT_POINT] [--grafana-endpoint GRAFANA_ENDPOINT] [--distr-ndcs DISTR_NDCS] [--distr-npcs DISTR_NPCS] [--distr-bs DISTR_BS]
+                                [--distr-chunk-bs DISTR_CHUNK_BS] [--ha-type {single,ha,default}] [--enable-node-affinity]
+                                [--qpair-count {0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63,64,65,66,67,68,69,70,71,72,73,74,75,76,77,78,79,80,81,82,83,84,85,86,87,88,89,90,91,92,93,94,95,96,97,98,99,100,101,102,103,104,105,106,107,108,109,110,111,112,113,114,115,116,117,118,119,120,121,122,123,124,125,126,127}]
 
 optional arguments:
   -h, --help            show this help message and exit
@@ -753,6 +736,10 @@ optional arguments:
                         (Dev) distrb bdev chunk block size, default: 4096
   --ha-type {single,ha,default}
                         LVol HA type (single, ha), default is cluster HA type
+  --enable-node-affinity
+                        Enable node affinity for storage nodes
+  --qpair-count {0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63,64,65,66,67,68,69,70,71,72,73,74,75,76,77,78,79,80,81,82,83,84,85,86,87,88,89,90,91,92,93,94,95,96,97,98,99,100,101,102,103,104,105,106,107,108,109,110,111,112,113,114,115,116,117,118,119,120,121,122,123,124,125,126,127}
+                        tcp transport qpair count
 
 ```
 
@@ -761,15 +748,9 @@ optional arguments:
 
 
 ```bash
-usage: sbcli-dev cluster add [-h] [--blk_size {512,4096}]
-                             [--page_size PAGE_SIZE] [--cap-warn CAP_WARN]
-                             [--cap-crit CAP_CRIT]
-                             [--prov-cap-warn PROV_CAP_WARN]
-                             [--prov-cap-crit PROV_CAP_CRIT]
-                             [--distr-ndcs DISTR_NDCS]
-                             [--distr-npcs DISTR_NPCS] [--distr-bs DISTR_BS]
-                             [--distr-chunk-bs DISTR_CHUNK_BS]
-                             [--ha-type {single,ha,default}]
+usage: sbcli-dev cluster add [-h] [--blk_size {512,4096}] [--page_size PAGE_SIZE] [--cap-warn CAP_WARN] [--cap-crit CAP_CRIT] [--prov-cap-warn PROV_CAP_WARN] [--prov-cap-crit PROV_CAP_CRIT]
+                             [--distr-ndcs DISTR_NDCS] [--distr-npcs DISTR_NPCS] [--distr-bs DISTR_BS] [--distr-chunk-bs DISTR_CHUNK_BS] [--ha-type {single,ha,default}] [--enable-node-affinity]
+                             [--qpair-count {0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63,64,65,66,67,68,69,70,71,72,73,74,75,76,77,78,79,80,81,82,83,84,85,86,87,88,89,90,91,92,93,94,95,96,97,98,99,100,101,102,103,104,105,106,107,108,109,110,111,112,113,114,115,116,117,118,119,120,121,122,123,124,125,126,127}]
 
 optional arguments:
   -h, --help            show this help message and exit
@@ -792,6 +773,10 @@ optional arguments:
                         (Dev) distrb bdev chunk block size, default: 4096
   --ha-type {single,ha,default}
                         LVol HA type (single, ha), default is cluster HA type
+  --enable-node-affinity
+                        Enable node affinity for storage nodes
+  --qpair-count {0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63,64,65,66,67,68,69,70,71,72,73,74,75,76,77,78,79,80,81,82,83,84,85,86,87,88,89,90,91,92,93,94,95,96,97,98,99,100,101,102,103,104,105,106,107,108,109,110,111,112,113,114,115,116,117,118,119,120,121,122,123,124,125,126,127}
+                        tcp transport qpair count
 
 ```
 
@@ -858,8 +843,7 @@ optional arguments:
 
 
 ```bash
-usage: sbcli-dev cluster get-capacity [-h] [--json] [--history HISTORY]
-                                      cluster_id
+usage: sbcli-dev cluster get-capacity [-h] [--json] [--history HISTORY] cluster_id
 
 positional arguments:
   cluster_id         the cluster UUID
@@ -867,8 +851,7 @@ positional arguments:
 optional arguments:
   -h, --help         show this help message and exit
   --json             Print json output
-  --history HISTORY  (XXdYYh), list history records (one for every 15 minutes)
-                     for XX days and YY hours (up to 10 days in total).
+  --history HISTORY  (XXdYYh), list history records (one for every 15 minutes) for XX days and YY hours (up to 10 days in total).
 
 ```
 
@@ -877,9 +860,7 @@ optional arguments:
 
 
 ```bash
-usage: sbcli-dev cluster get-io-stats [-h] [--records RECORDS]
-                                      [--history HISTORY]
-                                      cluster_id
+usage: sbcli-dev cluster get-io-stats [-h] [--records RECORDS] [--history HISTORY] cluster_id
 
 positional arguments:
   cluster_id         the cluster UUID
@@ -887,8 +868,7 @@ positional arguments:
 optional arguments:
   -h, --help         show this help message and exit
   --records RECORDS  Number of records, default: 20
-  --history HISTORY  (XXdYYh), list history records (one for every 15 minutes)
-                     for XX days and YY hours (up to 10 days in total).
+  --history HISTORY  (XXdYYh), list history records (one for every 15 minutes) for XX days and YY hours (up to 10 days in total).
 
 ```
 
@@ -1048,9 +1028,7 @@ optional arguments:
 
 
 ```bash
-usage: sbcli-dev lvol [-h]
-                      {add,qos-set,list,list-mem,get,delete,connect,resize,create-snapshot,clone,move,get-capacity,get-io-stats,check,inflate}
-                      ...
+usage: sbcli-dev lvol [-h] {add,qos-set,list,list-mem,get,delete,connect,resize,create-snapshot,clone,move,get-capacity,get-io-stats,check,inflate} ...
 
 positional arguments:
   {add,qos-set,list,list-mem,get,delete,connect,resize,create-snapshot,clone,move,get-capacity,get-io-stats,check,inflate}
@@ -1080,16 +1058,8 @@ optional arguments:
 
 
 ```bash
-usage: sbcli-dev lvol add [-h] [--snapshot] [--max-size MAX_SIZE]
-                          [--host-id HOST_ID] [--encrypt]
-                          [--crypto-key1 CRYPTO_KEY1]
-                          [--crypto-key2 CRYPTO_KEY2]
-                          [--max-rw-iops MAX_RW_IOPS]
-                          [--max-rw-mbytes MAX_RW_MBYTES]
-                          [--max-r-mbytes MAX_R_MBYTES]
-                          [--max-w-mbytes MAX_W_MBYTES]
-                          [--distr-vuid DISTR_VUID]
-                          [--ha-type {single,ha,default}]
+usage: sbcli-dev lvol add [-h] [--snapshot] [--max-size MAX_SIZE] [--host-id HOST_ID] [--encrypt] [--crypto-key1 CRYPTO_KEY1] [--crypto-key2 CRYPTO_KEY2] [--max-rw-iops MAX_RW_IOPS]
+                          [--max-rw-mbytes MAX_RW_MBYTES] [--max-r-mbytes MAX_R_MBYTES] [--max-w-mbytes MAX_W_MBYTES] [--distr-vuid DISTR_VUID] [--ha-type {single,ha,default}]
                           name size pool
 
 positional arguments:
@@ -1102,8 +1072,7 @@ optional arguments:
   --snapshot, -s        Make LVol with snapshot capability, default is False
   --max-size MAX_SIZE   LVol max size
   --host-id HOST_ID     Primary storage node UUID or Hostname
-  --encrypt             Use inline data encryption and de-cryption on the
-                        logical volume
+  --encrypt             Use inline data encryption and de-cryption on the logical volume
   --crypto-key1 CRYPTO_KEY1
                         the hex value of key1 to be used for lvol encryption
   --crypto-key2 CRYPTO_KEY2
@@ -1128,11 +1097,7 @@ optional arguments:
 
 
 ```bash
-usage: sbcli-dev lvol qos-set [-h] [--max-rw-iops MAX_RW_IOPS]
-                              [--max-rw-mbytes MAX_RW_MBYTES]
-                              [--max-r-mbytes MAX_R_MBYTES]
-                              [--max-w-mbytes MAX_W_MBYTES]
-                              id
+usage: sbcli-dev lvol qos-set [-h] [--max-rw-iops MAX_RW_IOPS] [--max-rw-mbytes MAX_RW_MBYTES] [--max-r-mbytes MAX_R_MBYTES] [--max-w-mbytes MAX_W_MBYTES] id
 
 positional arguments:
   id                    LVol id
@@ -1155,8 +1120,7 @@ optional arguments:
 
 
 ```bash
-usage: sbcli-dev lvol list [-h] [--cluster-id CLUSTER_ID] [--pool POOL]
-                           [--json] [--all]
+usage: sbcli-dev lvol list [-h] [--cluster-id CLUSTER_ID] [--pool POOL] [--json] [--all]
 
 optional arguments:
   -h, --help            show this help message and exit
@@ -1307,8 +1271,7 @@ positional arguments:
 
 optional arguments:
   -h, --help         show this help message and exit
-  --history HISTORY  (XXdYYh), list history records (one for every 15 minutes)
-                     for XX days and YY hours (up to 10 days in total).
+  --history HISTORY  (XXdYYh), list history records (one for every 15 minutes) for XX days and YY hours (up to 10 days in total).
 
 ```
 
@@ -1324,8 +1287,7 @@ positional arguments:
 
 optional arguments:
   -h, --help         show this help message and exit
-  --history HISTORY  (XXdYYh), list history records (one for every 15 minutes)
-                     for XX days and YY hours (up to 10 days in total).
+  --history HISTORY  (XXdYYh), list history records (one for every 15 minutes) for XX days and YY hours (up to 10 days in total).
 
 ```
 
@@ -1382,15 +1344,16 @@ optional arguments:
 
 
 ```bash
-usage: sbcli-dev mgmt add [-h] cluster_ip cluster_id ifname
+usage: sbcli-dev mgmt add [-h] cluster_ip cluster_id cluster_secret ifname
 
 positional arguments:
-  cluster_ip  the cluster IP address
-  cluster_id  the cluster UUID
-  ifname      Management interface name
+  cluster_ip      the cluster IP address
+  cluster_id      the cluster UUID
+  cluster_secret  the cluster secret
+  ifname          Management interface name
 
 optional arguments:
-  -h, --help  show this help message and exit
+  -h, --help      show this help message and exit
 
 ```
 
@@ -1427,9 +1390,7 @@ optional arguments:
 
 
 ```bash
-usage: sbcli-dev pool [-h]
-                      {add,set,list,get,delete,enable,disable,get-secret,upd-secret,get-capacity,get-io-stats}
-                      ...
+usage: sbcli-dev pool [-h] {add,set,list,get,delete,enable,disable,get-secret,upd-secret,get-capacity,get-io-stats} ...
 
 positional arguments:
   {add,set,list,get,delete,enable,disable,get-secret,upd-secret,get-capacity,get-io-stats}
@@ -1455,11 +1416,8 @@ optional arguments:
 
 
 ```bash
-usage: sbcli-dev pool add [-h] [--pool-max POOL_MAX] [--lvol-max LVOL_MAX]
-                          [--max-rw-iops MAX_RW_IOPS]
-                          [--max-rw-mbytes MAX_RW_MBYTES]
-                          [--max-r-mbytes MAX_R_MBYTES]
-                          [--max-w-mbytes MAX_W_MBYTES] [--has-secret]
+usage: sbcli-dev pool add [-h] [--pool-max POOL_MAX] [--lvol-max LVOL_MAX] [--max-rw-iops MAX_RW_IOPS] [--max-rw-mbytes MAX_RW_MBYTES] [--max-r-mbytes MAX_R_MBYTES] [--max-w-mbytes MAX_W_MBYTES]
+                          [--has-secret]
                           name cluster_id
 
 positional arguments:
@@ -1478,9 +1436,7 @@ optional arguments:
                         Maximum Read Mega Bytes Per Second
   --max-w-mbytes MAX_W_MBYTES
                         Maximum Write Mega Bytes Per Second
-  --has-secret          Pool is created with a secret (all further API
-                        interactions with the pool and logical volumes in the
-                        pool require this secret)
+  --has-secret          Pool is created with a secret (all further API interactions with the pool and logical volumes in the pool require this secret)
 
 ```
 
@@ -1489,12 +1445,7 @@ optional arguments:
 
 
 ```bash
-usage: sbcli-dev pool set [-h] [--pool-max POOL_MAX] [--lvol-max LVOL_MAX]
-                          [--max-rw-iops MAX_RW_IOPS]
-                          [--max-rw-mbytes MAX_RW_MBYTES]
-                          [--max-r-mbytes MAX_R_MBYTES]
-                          [--max-w-mbytes MAX_W_MBYTES]
-                          id
+usage: sbcli-dev pool set [-h] [--pool-max POOL_MAX] [--lvol-max LVOL_MAX] [--max-rw-iops MAX_RW_IOPS] [--max-rw-mbytes MAX_RW_MBYTES] [--max-r-mbytes MAX_R_MBYTES] [--max-w-mbytes MAX_W_MBYTES] id
 
 positional arguments:
   id                    Pool UUID
@@ -1648,8 +1599,7 @@ positional arguments:
 
 optional arguments:
   -h, --help         show this help message and exit
-  --history HISTORY  (XXdYYh), list history records (one for every 15 minutes)
-                     for XX days and YY hours (up to 10 days in total).
+  --history HISTORY  (XXdYYh), list history records (one for every 15 minutes) for XX days and YY hours (up to 10 days in total).
 
 ```
 
@@ -1739,9 +1689,7 @@ optional arguments:
 
 
 ```bash
-usage: sbcli-dev caching-node [-h]
-                              {deploy,add-node,list,list-lvols,remove,connect,disconnect,recreate,get-lvol-stats}
-                              ...
+usage: sbcli-dev caching-node [-h] {deploy,add-node,list,list-lvols,remove,connect,disconnect,recreate,get-lvol-stats} ...
 
 positional arguments:
   {deploy,add-node,list,list-lvols,remove,connect,disconnect,recreate,get-lvol-stats}
@@ -1778,12 +1726,7 @@ optional arguments:
 
 
 ```bash
-usage: sbcli-dev caching-node add-node [-h] [--cpu-mask SPDK_CPU_MASK]
-                                       [--memory SPDK_MEM]
-                                       [--spdk-image SPDK_IMAGE]
-                                       [--namespace NAMESPACE]
-                                       [--multipathing {on,off}]
-                                       cluster_id node_ip ifname
+usage: sbcli-dev caching-node add-node [-h] [--cpu-mask SPDK_CPU_MASK] [--memory SPDK_MEM] [--spdk-image SPDK_IMAGE] [--namespace NAMESPACE] [--multipathing {on,off}] cluster_id node_ip ifname
 
 positional arguments:
   cluster_id            UUID of the cluster to which the node will belong
@@ -1794,8 +1737,7 @@ optional arguments:
   -h, --help            show this help message and exit
   --cpu-mask SPDK_CPU_MASK
                         SPDK app CPU mask, default is all cores found
-  --memory SPDK_MEM     SPDK huge memory allocation, default is Max hugepages
-                        available
+  --memory SPDK_MEM     SPDK huge memory allocation, default is Max hugepages available
   --spdk-image SPDK_IMAGE
                         SPDK image uri
   --namespace NAMESPACE
@@ -1907,8 +1849,7 @@ positional arguments:
 
 optional arguments:
   -h, --help         show this help message and exit
-  --history HISTORY  (XXdYYh), list history records (one for every 15 minutes)
-                     for XX days and YY hours (up to 10 days in total).
+  --history HISTORY  (XXdYYh), list history records (one for every 15 minutes) for XX days and YY hours (up to 10 days in total).
 
 ```
 

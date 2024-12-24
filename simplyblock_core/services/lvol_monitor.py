@@ -3,7 +3,7 @@ import time
 from datetime import datetime
 
 
-from simplyblock_core import constants, kv_store, utils
+from simplyblock_core import constants, db_controller, utils
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.controllers import health_controller, lvol_events
 
@@ -16,7 +16,7 @@ def set_lvol_status(lvol, status):
         lvol = db_controller.get_lvol_by_id(lvol.get_id())
         old_status = lvol.status
         lvol.status = status
-        lvol.write_to_db(db_store)
+        lvol.write_to_db()
         lvol_events.lvol_status_change(lvol, lvol.status, old_status, caused_by="monitor")
 
 
@@ -27,7 +27,7 @@ def set_lvol_health_check(lvol, health_check_status):
     old_status = lvol.health_check
     lvol.health_check = health_check_status
     lvol.updated_at = str(datetime.now())
-    lvol.write_to_db(db_store)
+    lvol.write_to_db()
     lvol_events.lvol_health_check_change(lvol, lvol.health_check, old_status, caused_by="monitor")
 
 
@@ -37,12 +37,11 @@ def set_snapshot_health_check(snap, health_check_status):
         return
     snap.health_check = health_check_status
     snap.updated_at = str(datetime.now())
-    snap.write_to_db(db_store)
+    snap.write_to_db()
 
 
 # get DB controller
-db_store = kv_store.KVStore()
-db_controller = kv_store.DBController()
+db_controller = db_controller.DBController()
 
 logger.info("Starting LVol monitor...")
 while True:

@@ -3,7 +3,7 @@ name: Python Package Build
 on:
   push:
     paths:
-      - 'env_var'
+      - 'simplyblock_core/env_var'
 
 permissions:
   contents: read
@@ -24,7 +24,7 @@ jobs:
         python -m pip install --upgrade pip twine setuptools
         pip install build
     - name: Build package
-      run: python setup.py sdist --formats=zip
+      run: python setup.py sdist
     - name: Publish package to pypi
       uses: pypa/gh-action-pypi-publish@release/v1
       with:

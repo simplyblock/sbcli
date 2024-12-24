@@ -19,7 +19,7 @@ from simplyblock_web import utils, node_utils
 from simplyblock_core import scripts, constants, shell_utils
 
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG)
+logger.setLevel(logging.INFO)
 bp = Blueprint("snode", __name__, url_prefix="/snode")
 
 cluster_id_file = "/etc/foundationdb/sbcli_cluster_id"
@@ -406,7 +406,7 @@ def spdk_process_kill():
     try:
         namespace = get_namespace()
         resp = k8s_apps_v1.delete_namespaced_deployment(deployment_name, namespace)
-        retries = 20
+        retries = 10
         while retries > 0:
             resp = k8s_core_v1.list_namespaced_pod(namespace)
             found = False
@@ -446,3 +446,13 @@ def spdk_process_is_up():
     else:
         return utils.get_response(False, f"SPDK container is not running")
 
+
+@bp.route('/get_file_content/<string:file_name>', methods=['GET'])
+def get_file_content(file_name):
+    out, err, _ = node_utils.run_command(f"cat /etc/simplyblock/{file_name}")
+    if out:
+        return utils.get_response(out)
+    elif err:
+        err = err.decode("utf-8")
+        logger.debug(err)
+        return utils.get_response(None, err)

@@ -8,12 +8,12 @@ from flask import Blueprint, request
 from simplyblock_core.controllers import device_controller
 from simplyblock_web import utils
 
-from simplyblock_core import kv_store
+from simplyblock_core import db_controller
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 bp = Blueprint("device", __name__)
-db_controller = kv_store.DBController()
+db_controller = db_controller.DBController()
 
 
 @bp.route('/device/list/<string:uuid>', methods=['GET'])
@@ -90,4 +90,14 @@ def device_remove(uuid):
         return utils.get_response_error(f"devices not found: {uuid}", 404)
 
     data = device_controller.device_remove(uuid)
+    return utils.get_response(data)
+
+
+@bp.route('/device/<string:uuid>', methods=['POST'])
+def device_add(uuid):
+    devices = db_controller.get_storage_device_by_id(uuid)
+    if not devices:
+        return utils.get_response_error(f"devices not found: {uuid}", 404)
+
+    data = device_controller.add_device(uuid)
     return utils.get_response(data)

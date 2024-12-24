@@ -1,8 +1,8 @@
 # coding=utf-8
 import time
+from datetime import datetime
 
-
-from simplyblock_core import constants, kv_store, utils
+from simplyblock_core import constants, db_controller, utils
 from simplyblock_core.controllers import tasks_events, tasks_controller
 from simplyblock_core.models.job_schedule import JobSchedule
 
@@ -29,18 +29,26 @@ def task_runner(task):
         task.write_to_db(db_controller.kv_store)
         return True
 
-    if task.status == JobSchedule.STATUS_NEW:
+    if task.status in [JobSchedule.STATUS_NEW, JobSchedule.STATUS_SUSPENDED]:
         task.status = JobSchedule.STATUS_RUNNING
         task.write_to_db(db_controller.kv_store)
         tasks_events.task_updated(task)
-        time.sleep(30)
 
     if snode.status != StorageNode.STATUS_ONLINE:
         task.function_result = "node is not online, retrying"
-        task.status = JobSchedule.STATUS_NEW
+        task.status = JobSchedule.STATUS_SUSPENDED
         task.retry += 1
         task.write_to_db(db_controller.kv_store)
         return False
+
+    if snode.online_since:
+        diff = datetime.now() - datetime.fromisoformat(snode.online_since)
+        if diff.total_seconds() < 60:
+            task.function_result = "node is online < 1 min, retrying"
+            task.status = JobSchedule.STATUS_SUSPENDED
+            task.retry += 1
+            task.write_to_db(db_controller.kv_store)
+            return False
 
     rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password,
                            timeout=5, retry=2)
@@ -56,12 +64,12 @@ def task_runner(task):
 
         if not all_devs_online:
             task.function_result = "Some devs are offline, retrying"
-            task.status = JobSchedule.STATUS_NEW
+            task.status = JobSchedule.STATUS_SUSPENDED
             task.retry += 1
             task.write_to_db(db_controller.kv_store)
             return False
 
-        device = db_controller.get_storage_devices(task.device_id)
+        device = db_controller.get_storage_device_by_id(task.device_id)
         distr_name = task.function_params["distr_name"]
 
         if not device:
@@ -87,10 +95,10 @@ def task_runner(task):
         res = rpc_client.distr_migration_status(**mig_info)
         for st in res:
             if st['status'] == "completed":
-                if st['error'] == 1:
+                if st['error'] != 0:
                     task.function_result = "mig completed with errors, retrying"
                     task.retry += 1
-                    task.status = JobSchedule.STATUS_NEW
+                    task.status = JobSchedule.STATUS_SUSPENDED
                     del task.function_params['migration']
                 else:
                     task.status = JobSchedule.STATUS_DONE
@@ -108,7 +116,7 @@ def task_runner(task):
 
 
 # get DB controller
-db_controller = kv_store.DBController()
+db_controller = db_controller.DBController()
 
 logger.info("Starting Tasks runner...")
 while True:
@@ -120,9 +128,9 @@ while True:
         for cl in clusters:
             tasks = db_controller.get_job_tasks(cl.get_id(), reverse=False)
             for task in tasks:
-                delay_seconds = 5
+                delay_seconds = 3
                 if task.function_name == JobSchedule.FN_DEV_MIG:
-                    if task.status == JobSchedule.STATUS_NEW:
+                    if task.status in [JobSchedule.STATUS_NEW, JobSchedule.STATUS_SUSPENDED]:
                         active_task = tasks_controller.get_active_node_mig_task(task.cluster_id, task.node_id)
                         if active_task:
                             logger.info("task found on same node, retry")
@@ -133,5 +141,5 @@ while True:
                         res = task_runner(task)
                         if res:
                             tasks_events.task_updated(task)
-                        else:
-                            time.sleep(delay_seconds)
+
+                        time.sleep(delay_seconds)

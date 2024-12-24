@@ -10,13 +10,13 @@ from flask import request
 from simplyblock_core.controllers import tasks_controller
 from simplyblock_web import utils
 
-from simplyblock_core import kv_store, cluster_ops
+from simplyblock_core import db_controller, cluster_ops
 from simplyblock_core.models.cluster import Cluster
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 bp = Blueprint("cluster", __name__)
-db_controller = kv_store.DBController()
+db_controller = db_controller.DBController()
 
 
 @bp.route('/cluster', methods=['POST'])
@@ -45,9 +45,16 @@ def add_cluster():
     distr_chunk_bs = cl_data.get('distr_chunk_bs', 4096)
     ha_type = cl_data.get('ha_type', 'single')
     enable_node_affinity = cl_data.get('enable_node_affinity', False)
+    qpair_count = cl_data.get('qpair_count', 256)
+
+    max_queue_size = cl_data.get('max_queue_size', 128)
+    inflight_io_threshold = cl_data.get('inflight_io_threshold', 4)
+    enable_qos = cl_data.get('enable_qos', False)
+    strict_node_anti_affinity = cl_data.get('strict_node_anti_affinity', False)
 
     ret = cluster_ops.add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
-                                  distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, enable_node_affinity)
+                                  distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, enable_node_affinity,
+                                  qpair_count, max_queue_size, inflight_io_threshold, enable_qos, strict_node_anti_affinity)
 
     return utils.get_response(ret)
 

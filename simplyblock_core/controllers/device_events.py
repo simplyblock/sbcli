@@ -2,7 +2,7 @@
 import logging
 
 from simplyblock_core.controllers import events_controller as ec
-from simplyblock_core.kv_store import DBController
+from simplyblock_core.db_controller import DBController
 
 logger = logging.getLogger()
 db_controller = DBController()
@@ -37,7 +37,7 @@ def device_status_change(device, new_state, old_status, caused_by=ec.CAUSED_BY_C
 
 
 def device_restarted(device, caused_by=ec.CAUSED_BY_CLI):
-    _device_event(device, f"Device restarted", caused_by, ec.EVENT_STATUS_CHANGE)
+    _device_event(device, f"Device restarted, status: {device.status}", caused_by, ec.EVENT_STATUS_CHANGE)
 
 
 def device_reset(device, caused_by=ec.CAUSED_BY_CLI):

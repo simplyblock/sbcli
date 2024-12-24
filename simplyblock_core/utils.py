@@ -17,9 +17,6 @@ from simplyblock_core import constants
 from simplyblock_core import shell_utils
 
 
-logger = logging.getLogger()
-
-
 def get_env_var(name, default=None, is_required=False):
     if not name:
         logger.warning("Invalid env var name %s", name)
@@ -126,12 +123,12 @@ def generate_string(length):
 
 
 def get_docker_client(cluster_id=None):
-    from simplyblock_core.kv_store import DBController
+    from simplyblock_core.db_controller import DBController
     db_controller = DBController()
-    nodes = db_controller.get_mgmt_nodes(cluster_id)
+    nodes = db_controller.get_mgmt_nodes()
     if not nodes:
         logger.error("No mgmt nodes was found in the cluster!")
-        exit(1)
+        return False
 
     docker_ips = [node.docker_ip_port for node in nodes]
 
@@ -139,9 +136,10 @@ def get_docker_client(cluster_id=None):
         try:
             c = docker.DockerClient(base_url=f"tcp://{ip}", version="auto")
             return c
-        except docker.errors.DockerException as e:
+        except Exception as e:
             print(e)
-    raise e
+            raise e
+    return False
 
 
 def dict_agg(data, mean=False):
@@ -181,12 +179,14 @@ def get_weights(node_stats, cluster_stats):
     def _get_key_w(node_id, key):
         w = 0
         if cluster_stats[key] > 0:
-            w = (node_stats[node_id][key] / cluster_stats[key]) * 100
-            if key in ["lvol", "r_io", "w_io", "r_b", "w_b"]:  # get reverse value
-                w = ((cluster_stats[key]-node_stats[node_id][key]) / cluster_stats[key]) * 100
+            w = (cluster_stats[key]/node_stats[node_id][key])*10
+            # if key in ["lvol", "r_io", "w_io", "r_b", "w_b"]:  # get reverse value
+            #     w = (cluster_stats[key]/node_stats[node_id][key]) * 100
         return w
 
     out = {}
+    heavy_node_w = 0
+    heavy_node_id = None
     for node_id in node_stats:
         out[node_id] = {}
         total = 0
@@ -196,6 +196,13 @@ def get_weights(node_stats, cluster_stats):
             out[node_id][key] = w
             total += w
         out[node_id]['total'] = int(total)
+        if total > heavy_node_w:
+            heavy_node_w = total
+            heavy_node_id = node_id
+
+    if heavy_node_id:
+        out[heavy_node_id]['total'] *= 5
+
     return out
 
 
@@ -247,6 +254,11 @@ def parse_history_param(history_string):
 
 def process_records(records, records_count):
     # combine records
+    if not records:
+        return []
+
+    records_count = min(records_count, len(records))
+
     data_per_record = int(len(records) / records_count)
     new_records = []
     for i in range(records_count):
@@ -283,7 +295,25 @@ def sum_records(records):
 
 
 def get_random_vuid():
-    return 1 + int(random.random() * 10000)
+    from simplyblock_core.db_controller import DBController
+    db_controller = DBController()
+    used_vuids = []
+    nodes = db_controller.get_storage_nodes()
+    for node in nodes:
+        for bdev in node.lvstore_stack:
+            type = bdev['type']
+            if type == "bdev_distr":
+                vuid = bdev['params']['vuid']
+            elif type == "bdev_raid":
+                vuid = bdev['jm_vuid']
+            else:
+                continue
+            used_vuids.append(vuid)
+
+    r = 1 + int(random.random() * 10000)
+    while r in used_vuids:
+        r = 1 + int(random.random() * 10000)
+    return r
 
 
 def calculate_core_allocation(cpu_count):
@@ -472,9 +502,9 @@ def calculate_pool_count(alceml_count, number_of_distribs, cpu_count, poller_cou
     poller_number = poller_count if poller_count else cpu_count
     #small_pool_count = (3 + alceml_count + lvol_count + 2 * snap_count + 1) * 256 + poller_number * 127 + 384 + 128 * poller_number + constants.EXTRA_SMALL_POOL_COUNT
 
-    small_pool_count = (6 + alceml_count + number_of_distribs) * 256 + poller_number * 127 + 384 + 128 * poller_number + constants.EXTRA_SMALL_POOL_COUNT
+    small_pool_count = 384 * (alceml_count + number_of_distribs + 3 + poller_count) + (6 + alceml_count + number_of_distribs) * 256 + poller_number * 127 + 384 + 128 * poller_number + constants.EXTRA_SMALL_POOL_COUNT
     #large_pool_count = (3 + alceml_count + lvol_count + 2 * snap_count + 1) * 32 + poller_number * 15 + 384 + 16 * poller_number + constants.EXTRA_LARGE_POOL_COUNT
-    large_pool_count = (6 + alceml_count + number_of_distribs) * 32 + poller_number * 15 + 384 + 16 * poller_number + constants.EXTRA_LARGE_POOL_COUNT
+    large_pool_count = 48 * (alceml_count + number_of_distribs + 3 + poller_count) + (6 + alceml_count + number_of_distribs) * 32 + poller_number * 15 + 384 + 16 * poller_number + constants.EXTRA_LARGE_POOL_COUNT
     return small_pool_count, large_pool_count
 
 
@@ -546,25 +576,32 @@ def decimal_to_hex_power_of_2(decimal_number):
     return hex_result
 
 
-def get_logger(name):
+def get_logger(name=""):
     # first configure a root logger
-    logger = logging.getLogger()
+    logging.getLogger("urllib3.connectionpool").setLevel(logging.WARNING)
+    logg = logging.getLogger(f"root")
+
     log_level = os.getenv("SIMPLYBLOCK_LOG_LEVEL")
     log_level = log_level.upper() if log_level else constants.LOG_LEVEL
 
     try:
-        logger.setLevel(log_level)
+        logg.setLevel(log_level)
     except ValueError as e:
-        logger.warning(f'Invalid SIMPLYBLOCK_LOG_LEVEL: {str(e)}')
-        logger.setLevel(constants.LOG_LEVEL)
+        logg.warning(f'Invalid SIMPLYBLOCK_LOG_LEVEL: {str(e)}')
+        logg.setLevel(constants.LOG_LEVEL)
 
-    logger_handler = logging.StreamHandler(stream=sys.stdout)
-    logger_handler.setFormatter(logging.Formatter('%(asctime)s: %(levelname)s: %(message)s'))
-    logger.addHandler(logger_handler)
+    if not logg.hasHandlers():
+        logger_handler = logging.StreamHandler(stream=sys.stdout)
+        logger_handler.setFormatter(logging.Formatter('%(asctime)s: %(levelname)s: %(message)s'))
+        logg.addHandler(logger_handler)
+        gelf_handler = GELFTCPHandler('0.0.0.0', constants.GELF_PORT)
+        logg.addHandler(gelf_handler)
 
-    gelf_handler = GELFTCPHandler('0.0.0.0', constants.GELF_PORT)
-    logger.addHandler(gelf_handler)
-    return logging.getLogger(name)
+    if name:
+        logg = logging.getLogger(f"root.{name}")
+        logg.propagate = True
+
+    return logg
 
 
 def parse_size(size_string: str):
@@ -607,3 +644,21 @@ def nearest_upper_power_of_2(n):
         return n
     # Otherwise, return the nearest upper power of 2
     return 1 << n.bit_length()
+
+
+def strfdelta(tdelta):
+    remainder = int(tdelta.total_seconds())
+    possible_fields = ('W', 'D', 'H', 'M', 'S')
+    constants = {'W': 604800, 'D': 86400, 'H': 3600, 'M': 60, 'S': 1}
+    values = {}
+    out = ""
+    for field in possible_fields:
+        if field in constants:
+            values[field], remainder = divmod(remainder, constants[field])
+            if values[field] > 0:
+                out += f"{values[field]}{field.lower()} "
+
+    return out.strip()
+
+
+logger = get_logger(__name__)

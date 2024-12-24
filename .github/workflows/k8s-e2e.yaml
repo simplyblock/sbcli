@@ -20,7 +20,7 @@ on:
       sbcli_cmd:
         description: 'Command for sbcli execution'
         required: true
-        default: 'sbcli-dev'
+        default: 'sbcli-main'
       testname:
         description: 'Name of test to run. Empty to run all'
         required: false
@@ -159,12 +159,13 @@ jobs:
         run: |
           cd $GITHUB_WORKSPACE/simplyBlockDeploy
           terraform plan \
-            -var "mgmt_nodes=1" -var "storage_nodes=5" -var "volumes_per_storage_nodes=1" \
+            -var "mgmt_nodes=1" -var "storage_nodes=4" -var "volumes_per_storage_nodes=1" \
             -var storage_nodes_instance_type="m6g.2xlarge" \
             -var "storage_nodes_arch=arm64" -var "snode_deploy_on_k8s=true" \
+            -var "sec_storage_nodes_instance_type=m6g.2xlarge" \
             -var "extra_nodes=1" -var "extra_nodes_instance_type=m6gd.xlarge" \
             -var storage_nodes_ebs_size2=100 -var "region=us-east-2" \
-            -var "extra_nodes_arch=arm64" \
+            -var "extra_nodes_arch=arm64" -var "sec_storage_nodes=1" \
             -var "sbcli_cmd=$SBCLI_CMD" -out=tfplan
         env:
           SBCLI_CMD: ${{ env.SBCLI_CMD }}
@@ -196,7 +197,7 @@ jobs:
             --distr-npcs $NPCS \
             --distr-bs $BS \
             --distr-chunk-bs $CHUNK_BS \
-            --k8s-snode
+            --k8s-snode --ha-type ha
         id: bootstrap_cluster
         env:
           SBCLI_CMD: ${{ env.SBCLI_CMD }}
@@ -232,11 +233,14 @@ jobs:
             --set csiSecret.simplybk.secret="${{ steps.bootstrap_cluster.outputs.cluster_secret }}" \
             --set logicalVolume.pool_name="testing1" \
             --set logicalVolume.snapshot="True" \
-            --set image.spdkcsi.tag=master-arm64 \
+            --set image.spdkcsi.tag=latest \
             --set image.simplyblock.tag=main \
             --set storagenode.spdkImage=simplyblock/spdk:main-latest \
             --set logicalVolume.distr_ndcs="${NDCS}" \
-            --set logicalVolume.distr_npcs="${NPCS}"
+            --set logicalVolume.distr_npcs="${NPCS}" \
+            --set storagenode.create=true \
+            --set cachingnode.create=false \
+            --set logicalVolume.encryption=true
         env:
           NDCS: ${{ env.NDCS }}
           NPCS: ${{ env.NPCS }}
@@ -281,7 +285,7 @@ jobs:
       #   shell: /usr/bin/bash -e {0}
       
       - name: Sleep after Helm Installation
-        run: sleep 400
+        run: sleep 600
 
       - name: Check Cluster Status
         run: |
@@ -462,7 +466,7 @@ jobs:
           if [[ ${{ job.status }} == 'success' ]]; then
             OVERALL_STATUS=":white_check_mark: Overall Status: SUCCESS"
           else
-            OVERALL_STATUS=":x: Overall Status: FAILURE"
+            OVERALL_STATUS=":x: Overall Status: FAILURE <!channel>"
           fi
 
           TIME_TAKEN="${TEST_TIME_HOURS}h ${TEST_TIME_MINS}m ${TEST_TIME_SECS}s"

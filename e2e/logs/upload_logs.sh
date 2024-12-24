@@ -4,7 +4,7 @@ sudo yum install -y unzip
 
 if [ ! -f "awscliv2.zip" ]; then
     curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
-    unzip awscliv2.zip
+    unzip -q awscliv2.zip
     sudo ./aws/install
 else
     echo "awscli already exists."

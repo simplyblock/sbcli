@@ -1,13 +1,12 @@
-
 import json
 
 import requests
-import logging
 
+from simplyblock_core import constants, utils
 from requests.adapters import HTTPAdapter
 from urllib3 import Retry
 
-logger = logging.getLogger()
+logger = utils.get_logger()
 
 
 def print_dict(d):
@@ -59,17 +58,20 @@ class RPCClient:
             logger.error(e)
             return False, str(e)
 
-        logger.debug("Response: status_code: %s, content: %s",
-                     response.status_code, response.content)
         ret_code = response.status_code
+        ret_content = response.content
+        logger.debug("Response: status_code: %s", ret_code)
 
         result = None
         error = None
         if ret_code == 200:
             try:
                 data = response.json()
+                if method != "bdev_get_bdevs":
+                    logger.debug("Response json: %s", json.dumps(data))
             except Exception:
-                return response.content, None
+                logger.debug("Response ret_content: %s", ret_content)
+                return ret_content, None
 
             if 'result' in data:
                 result = data['result']
@@ -80,9 +82,9 @@ class RPCClient:
             else:
                 return data, None
 
-        if ret_code in [500, 400]:
-            raise RPCException("Invalid http status: %s" % ret_code)
-        logger.error("Unknown http status: %s", ret_code)
+        else:
+            logger.error("Invalid http status : %s", ret_code)
+
         return None, None
 
     def get_version(self):
@@ -102,11 +104,12 @@ class RPCClient:
     def subsystem_delete(self, nqn):
         return self._request("nvmf_delete_subsystem", params={'nqn': nqn})
 
-    def subsystem_create(self, nqn, serial_number, model_number):
+    def subsystem_create(self, nqn, serial_number, model_number, min_cntlid=1):
         params = {
             "nqn": nqn,
             "serial_number": serial_number,
             "allow_any_host": True,
+            "min_cntlid": min_cntlid,
             "ana_reporting": True,
             "model_number": model_number}
         return self._request("nvmf_create_subsystem", params)
@@ -121,7 +124,7 @@ class RPCClient:
             params = {"trtype": trtype}
         return self._request("nvmf_get_transports", params)
 
-    def transport_create(self, trtype):
+    def transport_create(self, trtype, qpair_count=256):
         """
             [{'trtype': 'TCP', 'max_queue_depth': 128,
                'max_io_qpairs_per_ctrlr': 127, 'in_capsule_data_size': 4096,
@@ -136,7 +139,7 @@ class RPCClient:
         """
         params = {
             "trtype": trtype,
-            "max_io_qpairs_per_ctrlr": 256,
+            "max_io_qpairs_per_ctrlr": qpair_count,
             "max_queue_depth": 512,
             "abort_timeout_sec": 5,
             "ack_timeout": 512,
@@ -164,7 +167,7 @@ class RPCClient:
         params = {"nqn": nqn}
         return self._request("nvmf_subsystem_get_listeners", params)
 
-    def listeners_create(self, nqn, trtype, traddr, trsvcid):
+    def listeners_create(self, nqn, trtype, traddr, trsvcid, ana_state=None):
         """"
             nqn: Subsystem NQN.
             trtype: Transport type ("RDMA").
@@ -180,6 +183,8 @@ class RPCClient:
                 "trsvcid": trsvcid
             }
         }
+        if ana_state:
+            params["ana_state"] = ana_state
         return self._request("nvmf_subsystem_add_listener", params)
 
     def bdev_nvme_controller_list(self, name=None):
@@ -232,7 +237,7 @@ class RPCClient:
             "nsid": nsid}
         return self._request("nvmf_subsystem_remove_ns", params)
 
-    def nvmf_subsystem_listener_set_ana_state(self, nqn, ip, port, is_optimized=True):
+    def nvmf_subsystem_listener_set_ana_state(self, nqn, ip, port, is_optimized=True, ana=None):
         params = {
             "nqn": nqn,
             "listen_address": {
@@ -246,6 +251,9 @@ class RPCClient:
             params['ana_state'] = "optimized"
         else:
             params['ana_state'] = "non_optimized"
+
+        if ana:
+            params['ana_state'] = ana
 
         return self._request("nvmf_subsystem_listener_set_ana_state", params)
 
@@ -267,7 +275,7 @@ class RPCClient:
         }
         return self._request("bdev_lvol_create_lvstore", params)
 
-    def create_lvol(self, name, size_in_mib, lvs_name):
+    def create_lvol(self, name, size_in_mib, lvs_name, lvol_priority_class=0):
         params = {
             "lvol_name": name,
             "size_in_mib": size_in_mib,
@@ -275,6 +283,8 @@ class RPCClient:
             "thin_provision": True,
             "clear_method": "unmap",
         }
+        if lvol_priority_class:
+            params["lvol_priority_class"] = lvol_priority_class
         return self._request("bdev_lvol_create", params)
 
     def delete_lvol(self, name):
@@ -362,6 +372,22 @@ class RPCClient:
         params = {"name": name}
         return self._request2("ultra21_bdev_pass_delete", params)
 
+    def qos_vbdev_create(self, qos_bdev, base_bdev_name, base_nvme_hw_name, max_queue_size,
+                         inflight_io_threshold):
+        params = {
+            "base_bdev_name": base_bdev_name,
+            "name": qos_bdev,
+            "base_nvme_hw_name": base_nvme_hw_name,
+            "max_queue_size": max_queue_size,
+            "inflight_io_threshold": inflight_io_threshold
+        }
+
+        return self._request("qos_vbdev_create", params)
+
+    def qos_vbdev_delete(self, name):
+        params = {"name": name}
+        return self._request2("qos_vbdev_delete", params)
+
     def bdev_alceml_create(self, alceml_name, nvme_name, uuid, pba_init_mode=3,
                            alceml_cpu_mask="", alceml_worker_cpu_mask=""):
         params = {
@@ -383,7 +409,7 @@ class RPCClient:
         if alceml_cpu_mask:
             params["bdb_lcpu_mask"] = int(alceml_cpu_mask, 16)
         if alceml_worker_cpu_mask:
-            params["bdb_lcpu_mask_alt_workers"] = int(alceml_worker_cpu_mask,16)
+            params["bdb_lcpu_mask_alt_workers"] = int(alceml_worker_cpu_mask, 16)
         return self._request("bdev_alceml_create", params)
 
     def bdev_distrib_create(self, name, vuid, ndcs, npcs, num_blocks, block_size, jm_names,
@@ -574,7 +600,7 @@ class RPCClient:
             "reconnect_delay_sec": 1,
             "keep_alive_timeout_ms": 10000,
             "transport_ack_timeout": 9,
-            "timeout_us": 0
+            "timeout_us": constants.NVME_TIMEOUT_US
         }
         return self._request("bdev_nvme_set_options", params)
 
@@ -607,6 +633,11 @@ class RPCClient:
             return self._request("iobuf_set_options", params)
         else:
             return False
+
+    def accel_set_options(self):
+        params = {"small_cache_size": 512,
+                   "large_cache_size": 64}
+        return self._request("accel_set_options", params)
 
     def distr_status_events_get(self):
         return self._request("distr_status_events_get")
@@ -736,7 +767,6 @@ class RPCClient:
         }
         return self._request("nbd_stop_disk", params)
 
-
     def bdev_jm_unmap_vuid(self, name, vuid):
         params = {"name": name, "vuid": vuid}
         return self._request("bdev_jm_unmap_vuid", params)
@@ -839,3 +869,88 @@ class RPCClient:
             "file": file,
         }
         return self._request("bdev_lvs_dump", params)
+
+    def jc_explicit_synchronization(self, jm_vuid):
+        params = {
+            "jm_vuid": jm_vuid
+        }
+        return self._request("jc_explicit_synchronization", params)
+
+    def listeners_del(self, nqn, trtype, traddr, trsvcid):
+        """"
+            nqn: Subsystem NQN.
+            trtype: Transport type ("RDMA").
+            traddr: Transport address.
+            trsvcid: Transport service ID (required for RDMA or TCP).
+        """
+        params = {
+            "nqn": nqn,
+            "listen_address": {
+                "trtype": trtype,
+                "adrfam": "IPv4",
+                "traddr": traddr,
+                "trsvcid": trsvcid
+            }
+        }
+        return self._request("nvmf_subsystem_remove_listener", params)
+
+
+    def bdev_distrib_force_to_non_leader(self, jm_vuid=0):
+        params = None
+        if jm_vuid:
+            params = {"jm_vuid": jm_vuid}
+        return self._request("bdev_distrib_force_to_non_leader", params)
+
+    def bdev_lvol_set_leader(self, is_leader=False, uuid=None, lvs_name=None):
+        params = {
+            "leadership": is_leader,
+        }
+        if uuid:
+            params["uuid"] = uuid
+        elif lvs_name:
+            params["lvs_name"] = lvs_name
+
+        return self._request("bdev_lvol_set_leader_all", params)
+
+    def bdev_lvol_register(self, name, lvs_name, registered_uuid, blobid, priority_class=0):
+        params = {
+            "lvol_name": name,
+            "lvs_name": lvs_name,
+            "thin_provision": True,
+            "clear_method": "unmap",
+            "blobid": blobid,
+            "registered_uuid": registered_uuid,
+        }
+        if priority_class:
+            params["lvol_priority_class"] = priority_class
+        return self._request("bdev_lvol_register", params)
+
+    def nvmf_subsystem_get_controllers(self, nqn):
+        params = {
+            "nqn": nqn
+        }
+        return self._request("nvmf_subsystem_get_controllers", params)
+
+    def lvol_crypto_key_delete(self, name):
+        params = {
+            "key_name": name
+        }
+        return self._request("accel_crypto_key_destroy", params)
+
+    def bdev_lvol_snapshot_register(self, lvol_name, snapshot_name, registered_uuid, blobid):
+        params = {
+            "lvol_name": lvol_name,
+            "snapshot_name": snapshot_name,
+            "blobid": blobid,
+            "registered_uuid": registered_uuid,
+        }
+        return self._request("bdev_lvol_snapshot_register", params)
+
+    def bdev_lvol_clone_register(self, clone_name, snapshot_name, registered_uuid, blobid):
+        params = {
+            "snapshot_name": snapshot_name,
+            "clone_name": clone_name,
+            "blobid": blobid,
+            "registered_uuid": registered_uuid,
+        }
+        return self._request("bdev_lvol_clone_register", params)

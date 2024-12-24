@@ -1,6 +1,7 @@
 import time
 import paramiko
 import os
+import json
 
 import paramiko.ssh_exception
 from logger_config import setup_logger
@@ -41,7 +42,10 @@ class SshUtils:
         # Load the private key
         if not os.path.exists(SSH_KEY_LOCATION):
             raise FileNotFoundError(f"SSH private key not found at {SSH_KEY_LOCATION}")
-        private_key = paramiko.Ed25519Key(filename=SSH_KEY_LOCATION)
+        try:
+            private_key = paramiko.Ed25519Key(filename=SSH_KEY_LOCATION)
+        except:
+            private_key = paramiko.RSAKey(filename=SSH_KEY_LOCATION)
 
         # Connect to the proxy server first
         if not bastion_server_address:
@@ -130,9 +134,9 @@ class SshUtils:
                     error = stderr.read().decode()
 
                 if output:
-                    self.logger.debug(f"Command output: {output}")
+                    self.logger.info(f"Command output: {output}")
                 if error:
-                    self.logger.debug(f"Command error: {error}")
+                    self.logger.info(f"Command error: {error}")
 
                 if not output and not error:
                     self.logger.warning(f"Command '{command}' executed but returned no output or error.")
@@ -251,7 +255,8 @@ class SshUtils:
 
         command = (f"sudo fio --name={name} {location} --ioengine={ioengine} --direct=1 --iodepth={iodepth} "
                    f"{time_based} --runtime={runtime} --rw={rw} --bs={bs} --size={size} --rwmixread={rwmixread} "
-                   f"--numjobs={numjobs} --nrfiles={nrfiles} --group_reporting{output_format}{output_file}")
+                   f"--verify=md5 --verify_backlog=10 --verify_interval=4k --numjobs={numjobs} --nrfiles={nrfiles} "
+                   f"{output_format}{output_file}")
         
         if kwargs.get("debug", None):
             command = f"{command} --debug=all"
@@ -288,17 +293,12 @@ class SshUtils:
             pid (int, optional): Kill the given pid. Defaults to None.
             process_name (str, optional): Kill the process with name. Defaults to None.
         """
-        kill_command = "sudo kill -9 %s"
         if pid:
-            command = kill_command % pid
-            self.exec_command(node, command)
+            kill_command = f"sudo kill -9 {pid}"
+            self.exec_command(node, kill_command)
         if process_name:
-            pids = self.find_process_name(node=node,
-                                          process_name=process_name,
-                                          return_pid=True)
-            for pid in pids:
-                command = kill_command % pid.strip()
-                self.exec_command(node, command)
+            kill_command = f"sudo pkill {process_name}"
+            self.exec_command(node, kill_command)
 
     def read_file(self, node, file_name):
         """Read the given file
@@ -486,3 +486,63 @@ class SshUtils:
     def restart_device(self, node, device_id):
         command = f"{self.base_cmd} sn restart-device {device_id}"
         self.exec_command(node, command)
+
+    def get_lvol_vs_device(self, node, lvol_id=None):
+        command = "sudo nvme list --output-format=json"
+        output, _ = self.exec_command(node=node, command=command)
+        data = json.loads(output)
+        nvme_dict = {}
+        self.logger.info(f"LVOL DEVICE output: {data}")
+        for device in data.get('Devices', []):
+            device_path = device.get('DevicePath')
+            model_number = device.get('ModelNumber')
+            if device_path and model_number:
+                nvme_dict[model_number] = device_path
+        self.logger.info(f"LVOL vs device dict output: {nvme_dict}")
+        if lvol_id:
+            return nvme_dict.get(lvol_id)
+        return nvme_dict
+    
+    # def get_already_mounted_points(self, node, mount_point):
+    #     command = f"sudo df -h | grep ${mount_point}"
+    #     output, _ = self.exec_command(node=node, command=command)
+    #     lines = output.splitlines()
+    #     filesystem = []
+    #     for line in lines[1:]:
+    #         columns = line.split()
+    #         if len(columns) > 1:
+    #             filesystem.append(columns[0])
+    #     return filesystem
+
+    def deploy_storage_node(self, node):
+        cmd = "sudo yum install -y pip jq"
+        self.exec_command(node=node, command=cmd)
+
+        cmd = f"pip install {self.base_cmd}"
+        self.exec_command(node=node, command=cmd)
+
+        cmd = "pip list"
+        self.exec_command(node=node, command=cmd)
+
+        cmd = f"{self.base_cmd} sn deploy"
+        self.exec_command(node=node, command=cmd, timeout=1200)
+
+    def add_storage_node(self, node, cluster_id, node_ip, ifname, max_lvol, max_prov, max_snap,
+                         number_of_distribs, number_of_devices, partitions, jm_percent,
+                         disable_ha_jm, enable_test_device, spdk_debug, spdk_image, spdk_cpu_mask):
+
+        
+        cmd = (f"{self.base_cmd} storage-node add-node --max-lvol {max_lvol} --max-snap {max_snap} --max-prov {max_prov} "
+               f"--number-of-devices {number_of_devices} --number-of-distribs {number_of_distribs} "
+               f"--partitions {partitions} --jm-percent {jm_percent} "
+               f" --cpu-mask {spdk_cpu_mask} --spdk-image {spdk_image}")
+        
+        if disable_ha_jm:
+            cmd = f"{cmd} --disable-ha-jm"
+        if enable_test_device:
+            cmd = f"{cmd} --enable-test-device"
+        if spdk_debug:
+            cmd = f"{cmd} --spdk-debug"
+    
+        add_node_cmd = f"{cmd} {cluster_id} {node_ip}:5000 {ifname}"
+        self.exec_command(node=node, command=add_node_cmd)

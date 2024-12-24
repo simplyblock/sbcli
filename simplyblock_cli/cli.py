@@ -5,8 +5,6 @@ import re
 import sys
 
 from simplyblock_core import cluster_ops, utils
-from simplyblock_core import kv_store
-from simplyblock_core import compute_node_ops as compute_ops
 from simplyblock_core import storage_node_ops as storage_ops
 from simplyblock_core import mgmt_node_ops as mgmt_ops
 from simplyblock_core import constants
@@ -19,9 +17,7 @@ from simplyblock_core.models.pool import Pool
 class CLIWrapper:
 
     def __init__(self):
-        self.logger = logging.getLogger()
-        self.logger.setLevel(constants.LOG_LEVEL)
-        self.db_store = kv_store.KVStore()
+        self.logger = utils.get_logger()
         self.init_parser()
 
         #
@@ -48,7 +44,7 @@ class CLIWrapper:
         sub_command.add_argument("--max-lvol", help='Max lvol per storage node', dest='max_lvol', type=int)
         sub_command.add_argument("--max-snap", help='Max snapshot per storage node', dest='max_snap', type=int, default=500)
         sub_command.add_argument("--max-prov", help='Maximum amount of GB to be provisioned via all storage nodes', dest='max_prov')
-        sub_command.add_argument("--number-of-distribs", help='The number of distirbs to be created on the node', dest='number_of_distribs', type=int, default=4)
+        sub_command.add_argument("--number-of-distribs", help='The number of distirbs to be created on the node', dest='number_of_distribs', type=int, default=2)
         sub_command.add_argument("--number-of-devices", help='Number of devices per storage node if it\'s not supported EC2 instance', dest='number_of_devices', type=int)
         sub_command.add_argument("--cpu-mask", help='SPDK app CPU mask, default is all cores found', dest='spdk_cpu_mask')
 
@@ -59,6 +55,8 @@ class CLIWrapper:
         sub_command.add_argument("--iobuf_large_bufsize", help='bdev_set_options param', dest='large_bufsize',  type=int, default=0)
         sub_command.add_argument("--enable-test-device", help='Enable creation of test device', action='store_true')
         sub_command.add_argument("--disable-ha-jm", help='Disable HA JM for distrib creation', action='store_false', dest='enable_ha_jm', default=True)
+        sub_command.add_argument("--is-secondary-node", help='add as secondary node', action='store_true', dest='is_secondary_node', default=False)
+        sub_command.add_argument("--namespace", help='k8s namespace to deploy on',)
 
 
         # delete storage node
@@ -70,8 +68,8 @@ class CLIWrapper:
         sub_command.add_argument("node_id", help='UUID of storage node')
         sub_command.add_argument("--force-remove", help='Force remove all LVols and snapshots',
                                  dest='force_remove', required=False, action='store_true')
-        sub_command.add_argument("--force-migrate", help='Force migrate All LVols to other nodes',
-                                 dest='force_migrate', required=False, action='store_true')
+        # sub_command.add_argument("--force-migrate", help='Force migrate All LVols to other nodes',
+        #                          dest='force_migrate', required=False, action='store_true')
         # List all storage nodes
         sub_command = self.add_sub_command(subparser, "list", 'List storage nodes')
         sub_command.add_argument("--cluster-id", help='id of the cluster for which nodes are listed', dest='cluster_id')
@@ -125,6 +123,7 @@ class CLIWrapper:
         sub_command.add_argument("node_id", help='Node ID')
         sub_command.add_argument("--history", help='list history records -one for every 15 minutes- '
                                                    'for XX days and YY hours -up to 10 days in total-, format: XXdYYh')
+        sub_command.add_argument("--records", help='Number of records, default: 20', type=int, default=20)
 
         sub_command = self.add_sub_command(
             subparser, 'get-capacity', 'Get node capacity statistics')
@@ -207,6 +206,7 @@ class CLIWrapper:
         sub_command.add_argument("device_id", help='Storage device ID')
         sub_command.add_argument("--history", help='list history records -one for every 15 minutes- '
                                                    'for XX days and YY hours -up to 10 days in total-, format: XXdYYh')
+        sub_command.add_argument("--records", help='Number of records, default: 20', type=int, default=20)
 
         sub_command = self.add_sub_command(subparser, 'port-list', 'Get Data interfaces list for a node')
         sub_command.add_argument("node_id", help='Storage node ID')
@@ -278,8 +278,8 @@ class CLIWrapper:
         sub_command.add_argument("--prov-cap-crit", help='Capacity critical level in percent, default=190',
                                  type=int, required=False, dest="prov_cap_crit")
         sub_command.add_argument("--ifname", help='Management interface name, default: eth0')
-        sub_command.add_argument("--log-del-interval", help='graylog deletion interval, default: 7d',
-                                 dest='log_del_interval', default='7d')
+        sub_command.add_argument("--log-del-interval", help='graylog deletion interval, default: 2d',
+                                 dest='log_del_interval', default='2d')
         sub_command.add_argument("--metrics-retention-period", help='retention period for prometheus metrics, default: 7d',
                                  dest='metrics_retention_period', default='7d')
         sub_command.add_argument("--contact-point", help='the email or slack webhook url to be used for alerting',
@@ -293,8 +293,16 @@ class CLIWrapper:
         sub_command.add_argument("--distr-chunk-bs", help='(Dev) distrb bdev chunk block size, default: 4096', type=int,
                                  default=4096)
         sub_command.add_argument("--ha-type", help='LVol HA type (single, ha), default is cluster HA type',
-                                 dest='ha_type', choices=["single", "ha", "default"], default='single')
+                                 dest='ha_type', choices=["single", "ha"], default='single')
         sub_command.add_argument("--enable-node-affinity", help='Enable node affinity for storage nodes', action='store_true')
+        sub_command.add_argument("--qpair-count", help='tcp transport qpair count', type=int, dest='qpair_count',
+                                 default=0, choices=range(128))
+        sub_command.add_argument("--max-queue-size", help='The max size the queue will grow', type=int, default=128)
+        sub_command.add_argument("--inflight-io-threshold", help='The number of inflight IOs allowed before the IO queuing starts', type=int, default=4)
+        sub_command.add_argument("--enable-qos", help='Enable qos bdev for storage nodes', action='store_true', dest='enable_qos')
+        sub_command.add_argument("--strict-node-anti-affinity", help='Enable strict node anti affinity for storage nodes', action='store_true')
+
+
 
         # add cluster
         sub_command = self.add_sub_command(subparser, 'add', 'Add new cluster')
@@ -315,13 +323,20 @@ class CLIWrapper:
         sub_command.add_argument("--distr-chunk-bs", help='(Dev) distrb bdev chunk block size, default: 4096', type=int,
                                  default=4096)
         sub_command.add_argument("--ha-type", help='LVol HA type (single, ha), default is cluster HA type',
-                                 dest='ha_type', choices=["single", "ha", "default"], default='default')
+                                 dest='ha_type', choices=["single", "ha"], default='single')
         sub_command.add_argument("--enable-node-affinity", help='Enable node affinity for storage nodes', action='store_true')
+        sub_command.add_argument("--qpair-count", help='tcp transport qpair count', type=int, dest='qpair_count',
+                                 default=0, choices=range(128))
+        sub_command.add_argument("--max-queue-size", help='The max size the queue will grow', type=int, default=128)
+        sub_command.add_argument("--inflight-io-threshold", help='The number of inflight IOs allowed before the IO queuing starts', type=int, default=4)
+        sub_command.add_argument("--enable-qos", help='Enable qos bdev for storage nodes', action='store_true', dest='enable_qos')
+        sub_command.add_argument("--strict-node-anti-affinity", help='Enable strict node anti affinity for storage nodes', action='store_true')
 
         # Activate cluster
         sub_command = self.add_sub_command(subparser, 'activate', 'Create distribs and raid0 bdevs on all the storage node and move the cluster to active state')
         sub_command.add_argument("cluster_id", help='the cluster UUID')
         sub_command.add_argument("--force", help='Force recreate distr and lv stores', required=False, action='store_true')
+        sub_command.add_argument("--force-lvstore-create", help='Force recreate lv stores', required=False, action='store_true', dest='force_lvstore_create')
 
         # show cluster list
         self.add_sub_command(subparser, 'list', 'Show clusters list')
@@ -389,6 +404,8 @@ class CLIWrapper:
         # graceful-startup storage nodes
         sub_command = self.add_sub_command(subparser, "graceful-startup", 'Graceful startup of storage nodes')
         sub_command.add_argument("id", help='cluster UUID')
+        sub_command.add_argument("--clear-data", help='clear Alceml data', dest='clear_data', action='store_true')
+        sub_command.add_argument("--spdk-image", help='SPDK image uri', dest='spdk_image')
 
         # get tasks list
         sub_command = self.add_sub_command(subparser, "list-tasks", 'List tasks by cluster ID')
@@ -438,6 +455,7 @@ class CLIWrapper:
                                  default=0)
         sub_command.add_argument("--ha-type", help='LVol HA type (single, ha), default is cluster HA type',
                                  dest='ha_type', choices=["single", "ha", "default"], default='default')
+        sub_command.add_argument("--lvol-priority-class", help='Lvol priority class', type=int, choices=[0, 1], default=0)
 
 
         # set lvol params
@@ -519,6 +537,7 @@ class CLIWrapper:
         sub_command.add_argument("id", help='LVol id')
         sub_command.add_argument("--history", help='(XXdYYh), list history records (one for every 15 minutes) '
                                                    'for XX days and YY hours (up to 10 days in total).')
+        sub_command.add_argument("--records", help='Number of records, default: 20', type=int, default=20)
 
         sub_command = self.add_sub_command(subparser, "check", 'Health check LVol')
         sub_command.add_argument("id", help='UUID of LVol')
@@ -535,6 +554,7 @@ class CLIWrapper:
         sub_command = self.add_sub_command(subparser, 'add', 'Add Management node to the cluster (local run)')
         sub_command.add_argument("cluster_ip", help='the cluster IP address')
         sub_command.add_argument("cluster_id", help='the cluster UUID')
+        sub_command.add_argument("cluster_secret", help='the cluster secret')
         sub_command.add_argument("ifname", help='Management interface name')
 
         sub_command = self.add_sub_command(subparser, "list", 'List Management nodes')
@@ -612,6 +632,7 @@ class CLIWrapper:
         sub_command.add_argument("id", help='Pool id')
         sub_command.add_argument("--history", help='(XXdYYh), list history records (one for every 15 minutes) '
                                                    'for XX days and YY hours (up to 10 days in total).')
+        sub_command.add_argument("--records", help='Number of records, default: 20', type=int, default=20)
 
         subparser = self.add_command('snapshot', 'Snapshot commands')
 
@@ -674,6 +695,9 @@ class CLIWrapper:
         sub_command.add_argument("--history", help='(XXdYYh), list history records (one for every 15 minutes) '
                                                    'for XX days and YY hours (up to 10 days in total).')
 
+        self.parser.add_argument("--cmd", help='cmd', nargs = '+')
+
+
 
     def init_parser(self):
         self.parser = argparse.ArgumentParser(prog=constants.SIMPLY_BLOCK_CLI_NAME, description='SimplyBlock management CLI')
@@ -694,8 +718,15 @@ class CLIWrapper:
         if args.debug:
             self.logger.setLevel(logging.DEBUG)
         else:
-            self.logger.setLevel(constants.LOG_LEVEL)
+            self.logger.setLevel(logging.INFO)
         logging.getLogger("urllib3.connectionpool").setLevel(logging.WARNING)
+
+        if  args.cmd:
+            cmd = args.cmd
+            func = cmd[0]
+            if func == "deploy-fdb":
+                cluster_ops.open_db_from_zip(" ".join(cmd[1:]))
+            return
 
         args_dict = args.__dict__
         ret = ""
@@ -740,6 +771,7 @@ class CLIWrapper:
                 enable_test_device = args.enable_test_device
                 enable_ha_jm = args.enable_ha_jm
                 number_of_distribs = args.number_of_distribs
+                namespace = args.namespace
 
                 out = storage_ops.add_node(
                     cluster_id=cluster_id,
@@ -758,9 +790,10 @@ class CLIWrapper:
                     jm_percent=jm_percent,
                     number_of_devices=number_of_devices,
                     enable_test_device=enable_test_device,
-                    namespace=None,
+                    namespace=namespace,
                     number_of_distribs=number_of_distribs,
-                    enable_ha_jm=enable_ha_jm
+                    enable_ha_jm=enable_ha_jm,
+                    is_secondary_node=args.is_secondary_node,
                 )
 
                 return out
@@ -769,7 +802,7 @@ class CLIWrapper:
                 ret = storage_ops.list_storage_nodes(args.json, args.cluster_id)
 
             elif sub_command == "remove":
-                ret = storage_ops.remove_storage_node(args.node_id, args.force_remove, args.force_migrate)
+                ret = storage_ops.remove_storage_node(args.node_id, args.force_remove)
 
             elif sub_command == "delete":
                 ret = storage_ops.delete_storage_node(args.node_id)
@@ -841,7 +874,8 @@ class CLIWrapper:
             elif sub_command == "get-io-stats-device":
                 device_id = args.device_id
                 history = args.history
-                data = device_controller.get_device_iostats(device_id, history)
+                records = args.records
+                data = device_controller.get_device_iostats(device_id, history, records_count=records)
                 if data:
                     ret = utils.print_table(data)
                 else:
@@ -859,7 +893,8 @@ class CLIWrapper:
             elif sub_command == "get-io-stats":
                 node_id = args.node_id
                 history = args.history
-                data = storage_ops.get_node_iostats_history(node_id, history)
+                records = args.records
+                data = storage_ops.get_node_iostats_history(node_id, history, records_count=records)
 
                 if data:
                     ret = utils.print_table(data)
@@ -923,7 +958,7 @@ class CLIWrapper:
                 ret = self.cluster_add(args)
             elif sub_command == 'activate':
                 cluster_id = args.cluster_id
-                ret = cluster_ops.cluster_activate(cluster_id, args.force)
+                ret = cluster_ops.cluster_activate(cluster_id, args.force, args.force_lvstore_create)
             elif sub_command == 'status':
                 cluster_id = args.cluster_id
                 ret = cluster_ops.show_cluster(cluster_id)
@@ -982,7 +1017,7 @@ class CLIWrapper:
                 ret = cluster_ops.cluster_grace_shutdown(args.id)
 
             elif sub_command == "graceful-startup":
-                ret = cluster_ops.cluster_grace_startup(args.id)
+                ret = cluster_ops.cluster_grace_startup(args.id, args.clear_data, args.spdk_image)
 
             elif sub_command == "delete":
                 ret = cluster_ops.delete_cluster(args.id)
@@ -1003,6 +1038,7 @@ class CLIWrapper:
                 crypto = args.encrypt
                 distr_vuid = args.distr_vuid
                 with_snapshot = args.snapshot
+                lvol_priority_class = args.lvol_priority_class
                 results, error = lvol_controller.add_lvol_ha(
                     name, size, host_id, ha_type, pool, comp, crypto,
                     distr_vuid,
@@ -1013,7 +1049,8 @@ class CLIWrapper:
                     with_snapshot=with_snapshot,
                     max_size=max_size,
                     crypto_key1=args.crypto_key1,
-                    crypto_key2=args.crypto_key2)
+                    crypto_key2=args.crypto_key2,
+                    lvol_priority_class=lvol_priority_class)
                 if results:
                     ret = results
                 else:
@@ -1055,7 +1092,8 @@ class CLIWrapper:
             elif sub_command == "get-io-stats":
                 id = args.id
                 history = args.history
-                data = lvol_controller.get_io_stats(id, history)
+                records = args.records
+                data = lvol_controller.get_io_stats(id, history, records_count=records)
                 if data:
                     ret = utils.print_table(data)
                 else:
@@ -1064,6 +1102,10 @@ class CLIWrapper:
                 id = args.id
                 history = args.history
                 ret = lvol_controller.get_capacity(id, history)
+                if ret:
+                    ret = utils.print_table(ret)
+                else:
+                    return False
             elif sub_command == "check":
                 id = args.id
                 ret = health_controller.check_lvol(id)
@@ -1079,8 +1121,9 @@ class CLIWrapper:
             if sub_command == "add":
                 cluster_id = args.cluster_id
                 cluster_ip = args.cluster_ip
+                cluster_secret = args.cluster_secret
                 ifname = args.ifname
-                ret = mgmt_ops.deploy_mgmt_node(cluster_ip, cluster_id, ifname)
+                ret = mgmt_ops.deploy_mgmt_node(cluster_ip, cluster_id, ifname, cluster_secret)
             elif sub_command == "list":
                 ret = mgmt_ops.list_mgmt_nodes(args.json)
             elif sub_command == "remove":
@@ -1144,7 +1187,7 @@ class CLIWrapper:
                 ret = pool_controller.get_capacity(args.pool_id)
 
             elif sub_command == "get-io-stats":
-                ret = pool_controller.get_io_stats(args.id, args.history)
+                ret = pool_controller.get_io_stats(args.id, args.history, args.records)
 
             else:
                 self.parser.print_help()
@@ -1222,17 +1265,13 @@ class CLIWrapper:
 
         print(ret)
 
-    def storage_node_list(self, args):
-        out = storage_ops.list_storage_nodes(self.db_store, args.json)
-        return out
-
     def storage_node_list_devices(self, args):
         node_id = args.node_id
         sort = args.sort
         if sort:
             sort = sort[0]
         is_json = args.json
-        out = storage_ops.list_storage_devices(self.db_store, node_id, sort, is_json)
+        out = storage_ops.list_storage_devices(node_id, sort, is_json)
         return out
 
     def cluster_add(self, args):
@@ -1247,11 +1286,20 @@ class CLIWrapper:
         distr_bs = args.distr_bs
         distr_chunk_bs = args.distr_chunk_bs
         ha_type = args.ha_type
+
         enable_node_affinity = args.enable_node_affinity
+        qpair_count = args.qpair_count
+        max_queue_size = args.max_queue_size
+        inflight_io_threshold = args.inflight_io_threshold
+        enable_qos = args.enable_qos
+        strict_node_anti_affinity = args.strict_node_anti_affinity
+
 
         return cluster_ops.add_cluster(
             blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
-            distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, enable_node_affinity)
+            distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, enable_node_affinity,
+            qpair_count, max_queue_size, inflight_io_threshold, enable_qos, strict_node_anti_affinity)
+
 
     def cluster_create(self, args):
         page_size_in_blocks = args.page_size
@@ -1272,12 +1320,20 @@ class CLIWrapper:
         contact_point = args.contact_point
         grafana_endpoint = args.grafana_endpoint
         enable_node_affinity = args.enable_node_affinity
+        qpair_count = args.qpair_count
+        max_queue_size = args.max_queue_size
+        inflight_io_threshold = args.inflight_io_threshold
+        enable_qos = args.enable_qos
+        strict_node_anti_affinity = args.strict_node_anti_affinity
+
 
         return cluster_ops.create_cluster(
             blk_size, page_size_in_blocks,
             CLI_PASS, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
             ifname, log_del_interval, metrics_retention_period, contact_point, grafana_endpoint,
-            distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, enable_node_affinity)
+            distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, enable_node_affinity,
+            qpair_count, max_queue_size, inflight_io_threshold, enable_qos, strict_node_anti_affinity)
+
 
     def query_yes_no(self, question, default="yes"):
         """Ask a yes/no question via raw_input() and return their answer.
@@ -1347,10 +1403,6 @@ class CLIWrapper:
 
 
 def main():
-    logger_handler = logging.StreamHandler()
-    logger_handler.setFormatter(logging.Formatter('%(asctime)s: %(levelname)s: %(filename)s:%(lineno)d: %(message)s'))
-    logger = logging.getLogger()
-    logger.addHandler(logger_handler)
 
     cli = CLIWrapper()
     cli.run()

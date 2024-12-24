@@ -1,13 +1,25 @@
 import logging
 import os
+SCRIPT_PATH = os.path.dirname(os.path.realpath(__file__))
+
+
+def get_from_env_var_file(name, default=None):
+    if not name:
+        return False
+    with open(f"{SCRIPT_PATH}/env_var", "r", encoding="utf-8") as fh:
+        for line in fh.readlines():
+            if line.startswith(name):
+                return line.split("=", 1)[1].strip()
+    return default
+
 
 KVD_DB_VERSION = 730
 KVD_DB_FILE_PATH = '/etc/foundationdb/fdb.cluster'
 KVD_DB_TIMEOUT_MS = 10000
 SPK_DIR = '/home/ec2-user/spdk'
 RPC_HTTP_PROXY_PORT = 8080
-LOG_LEVEL = logging.INFO
-LOG_WEB_DEBUG = False
+LOG_LEVEL = logging.DEBUG
+LOG_WEB_DEBUG = True
 
 INSTALL_DIR = os.path.dirname(os.path.realpath(__file__))
 
@@ -46,25 +58,30 @@ weights = {
 }
 
 
-HEALTH_CHECK_INTERVAL_SEC = 10
+HEALTH_CHECK_INTERVAL_SEC = 30
 
 GRAYLOG_CHECK_INTERVAL_SEC = 60
 
 FDB_CHECK_INTERVAL_SEC = 60
 
-SIMPLY_BLOCK_DOCKER_IMAGE = "simplyblock/simplyblock:snode-mock"
-SIMPLY_BLOCK_CLI_NAME = "sbcli-dev"
-TASK_EXEC_INTERVAL_SEC = 30
+
+
+SIMPLY_BLOCK_DOCKER_IMAGE = get_from_env_var_file(
+        "SIMPLY_BLOCK_DOCKER_IMAGE","simplyblock/simplyblock:main")
+SIMPLY_BLOCK_CLI_NAME = get_from_env_var_file(
+        "SIMPLY_BLOCK_COMMAND_NAME", "sbcli")
+TASK_EXEC_INTERVAL_SEC = 10
 TASK_EXEC_RETRY_COUNT = 8
 
-SIMPLY_BLOCK_SPDK_ULTRA_IMAGE = "simplyblock/spdk:main-latest"
+
+SIMPLY_BLOCK_SPDK_ULTRA_IMAGE = "simplyblock/spdk:lvolstore-ha-snapshot-latest"
 
 GELF_PORT = 12202
 
 MIN_HUGE_PAGE_MEMORY_FOR_LVOL = 209715200
 MIN_SYS_MEMORY_FOR_LVOL = 524288000
-EXTRA_SMALL_POOL_COUNT = 1024
-EXTRA_LARGE_POOL_COUNT = 128
+EXTRA_SMALL_POOL_COUNT = 4096
+EXTRA_LARGE_POOL_COUNT = 16000
 # EXTRA_SMALL_POOL_COUNT = 0
 # EXTRA_LARGE_POOL_COUNT = 0
 EXTRA_HUGE_PAGE_MEMORY = 2147483648
@@ -103,3 +120,8 @@ MAX_SNAP_COUNT = 15
 
 SPDK_PROXY_MULTI_THREADING_ENABLED=True
 SPDK_PROXY_TIMEOUT=60*5
+LVOL_NVME_CONNECT_RECONNECT_DELAY=3
+LVOL_NVME_CONNECT_CTRL_LOSS_TMO=-1
+LVOL_NVME_CONNECT_NR_IO_QUEUES=6
+QPAIR_COUNT=32
+NVME_TIMEOUT_US=20000000

@@ -4,7 +4,7 @@ import time
 import sys
 
 
-from simplyblock_core import constants, kv_store
+from simplyblock_core import constants, db_controller
 from simplyblock_core.controllers import tasks_events, tasks_controller
 from simplyblock_core.models.job_schedule import JobSchedule
 
@@ -32,7 +32,7 @@ def task_runner(task):
         task.write_to_db(db_controller.kv_store)
         return True
 
-    if task.status == JobSchedule.STATUS_NEW:
+    if task.status in [JobSchedule.STATUS_NEW ,JobSchedule.STATUS_SUSPENDED]:
         task.status = JobSchedule.STATUS_RUNNING
         task.write_to_db(db_controller.kv_store)
         tasks_events.task_updated(task)
@@ -40,7 +40,7 @@ def task_runner(task):
     if snode.status != StorageNode.STATUS_ONLINE:
         task.function_result = "node is not online, retrying"
         task.retry += 1
-        task.status = JobSchedule.STATUS_NEW
+        task.status = JobSchedule.STATUS_SUSPENDED
         task.write_to_db(db_controller.kv_store)
         return False
 
@@ -49,18 +49,20 @@ def task_runner(task):
         all_devs_online = True
         for node in db_controller.get_storage_nodes_by_cluster_id(task.cluster_id):
             for dev in node.nvme_devices:
-                if dev.status not in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_FAILED_AND_MIGRATED]:
+                if dev.status not in [NVMeDevice.STATUS_ONLINE,
+                                      NVMeDevice.STATUS_FAILED,
+                                      NVMeDevice.STATUS_FAILED_AND_MIGRATED]:
                     all_devs_online = False
                     break
 
         if not all_devs_online:
             task.function_result = "Some devs are offline, retrying"
             task.retry += 1
-            task.status = JobSchedule.STATUS_NEW
+            task.status = JobSchedule.STATUS_SUSPENDED
             task.write_to_db(db_controller.kv_store)
             return False
 
-        device = db_controller.get_storage_devices(task.device_id)
+        device = db_controller.get_storage_device_by_id(task.device_id)
         distr_name = task.function_params["distr_name"]
 
         if not device:
@@ -90,15 +92,19 @@ def task_runner(task):
         if res:
             res_data = res[0]
             migration_status = res_data["status"]
+            error_code = res_data["error"]
             if migration_status == "completed":
-                if res_data['error'] == 1:
-                    task.function_result = "mig completed with errors, retrying"
-                    task.retry += 1
-                    task.status = JobSchedule.STATUS_NEW
-                    del task.function_params['migration']
-                else:
+                if error_code == 0:
                     task.function_result = "Done"
                     task.status = JobSchedule.STATUS_DONE
+                elif error_code in range(1, 8):
+                    task.function_result = f"mig completed with status: {error_code}"
+                    task.status = JobSchedule.STATUS_DONE
+                else:
+                    task.function_result = f"mig error: {error_code}, retrying"
+                    task.retry += 1
+                    task.status = JobSchedule.STATUS_SUSPENDED
+                    del task.function_params['migration']
 
                 task.write_to_db(db_controller.kv_store)
                 return True
@@ -130,7 +136,7 @@ logger.addHandler(logger_handler)
 logger.setLevel(logging.DEBUG)
 
 # get DB controller
-db_controller = kv_store.DBController()
+db_controller = db_controller.DBController()
 logger.info("Starting Tasks runner...")
 while True:
     time.sleep(3)
@@ -141,9 +147,8 @@ while True:
         for cl in clusters:
             tasks = db_controller.get_job_tasks(cl.get_id(), reverse=False)
             for task in tasks:
-                delay_seconds = 5
                 if task.function_name == JobSchedule.FN_NEW_DEV_MIG:
-                    if task.status == JobSchedule.STATUS_NEW:
+                    if task.status in [JobSchedule.STATUS_NEW, JobSchedule.STATUS_SUSPENDED]:
                         active_task = tasks_controller.get_active_node_mig_task(task.cluster_id, task.node_id)
                         if active_task:
                             logger.info("task found on same node, retry")
@@ -155,4 +160,4 @@ while True:
                         if res:
                             tasks_events.task_updated(task)
                         else:
-                            time.sleep(delay_seconds)
+                            time.sleep(2)

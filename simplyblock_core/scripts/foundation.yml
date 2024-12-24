@@ -1,0 +1,40 @@
+
+services:
+
+  fdb-server:
+    image: foundationdb/foundationdb:7.3.42
+    environment:
+      FDB_NETWORKING_MODE: 'container'
+      FDB_CLUSTER_FILE: '/etc/foundationdb/fdb.cluster'
+    volumes:
+      - "db-data:/etc/foundationdb"
+      - "$FDB_FILE:/fdb.zip"
+      - app-data:/root/app
+
+    entrypoint: [
+      "/usr/bin/tini",
+      "-g",
+      "--",
+      "sh",
+      "-x",
+      "/root/app/simplyblock_core/scripts/prepare_fdb.sh"
+    ]
+    deploy:
+      mode: global
+    depends_on:
+      - cli
+
+  cli:
+    image: "simplyblock/simplyblock:main"
+    command: "sleep 9999"
+
+    deploy:
+      mode: global
+    volumes:
+      - db-data:/etc/foundationdb
+      - app-data:/app
+
+
+volumes:
+  db-data:
+  app-data:
