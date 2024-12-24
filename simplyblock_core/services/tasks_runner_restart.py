@@ -103,7 +103,8 @@ def task_runner_device(task):
     # set device online for the first 3 retries
     if task.retry < 3:
         logger.info(f"Set device online {device.get_id()}")
-        device_controller.device_set_online(device.get_id())
+        device_controller.device_set_io_error(device.get_id(), False)
+        device_controller.device_set_state(device.get_id(), NVMeDevice.STATUS_ONLINE)
     else:
         logger.info(f"Restarting device {device.get_id()}")
         device_controller.restart_device(device.get_id(), force=True)
@@ -238,4 +239,4 @@ while True:
                                 delay_seconds *= 2
                         time.sleep(delay_seconds)
 
-    time.sleep(10)
+    time.sleep(constants.TASK_EXEC_INTERVAL_SEC)

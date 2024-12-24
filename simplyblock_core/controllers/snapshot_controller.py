@@ -82,12 +82,10 @@ def add(lvol_id, snapshot_name):
     blobid = 0
     snap_uuid = ""
     rpc_client.bdev_lvol_set_leader(True, lvs_name=lvol.lvs_name)
-    time.sleep(1)
     logger.info("Creating Snapshot bdev")
     ret = rpc_client.lvol_create_snapshot(f"{lvol.lvs_name}/{lvol.lvol_bdev}", snapshot_name)
     if not ret:
         return False, "Failed to create snapshot bdev"
-    time.sleep(1)
 
     snap_bdev = rpc_client.get_bdevs(f"{lvol.lvs_name}/{snapshot_name}")
     if snap_bdev:
@@ -188,7 +186,18 @@ def delete(snapshot_uuid, force_delete=False):
 
     snode = db_controller.get_storage_node_by_id(snap.lvol.node_id)
 
-    sec_rpc_client = None
+    ret = rpc_client.bdev_lvol_set_leader(True, lvs_name=snap.lvol.lvs_name)
+    if not ret:
+        logger.error(f"Failed to set leader for primary node: {snode.get_id()}")
+        if not force_delete:
+            return False
+
+    ret = rpc_client.delete_lvol(snap.snap_bdev)
+    if not ret:
+        logger.error(f"Failed to delete snap from node: {snode.get_id()}")
+        if not force_delete:
+            return False
+
     if snode.secondary_node_id:
         sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
         if sec_node.status == StorageNode.STATUS_ONLINE:
@@ -203,41 +212,12 @@ def delete(snapshot_uuid, force_delete=False):
                 logger.error(f"Failed to set leader for secondary node: {sec_node.get_id()}")
                 if not force_delete:
                     return False
-            time.sleep(1)
+            ret = sec_rpc_client.delete_lvol(snap.snap_bdev)
+            if not ret:
+                logger.error(f"Failed to delete snap from node: {sec_node.get_id()}")
+                if not force_delete:
+                    return False
 
-    ret = rpc_client.bdev_lvol_set_leader(True, lvs_name=snap.lvol.lvs_name)
-    if not ret:
-        logger.error(f"Failed to set leader for primary node: {snode.get_id()}")
-        if not force_delete:
-            return False
-
-    time.sleep(1)
-    ret = rpc_client.delete_lvol(snap.snap_bdev)
-    if not ret:
-        logger.error(f"Failed to delete snap from node: {snode.get_id()}")
-        if not force_delete:
-            return False
-    time.sleep(1)
-
-    if sec_rpc_client:
-        ret = sec_rpc_client.delete_lvol(snap.snap_bdev)
-        if not ret:
-            logger.error(f"Failed to delete snap from node: {sec_node.get_id()}")
-            if not force_delete:
-                return False
-        time.sleep(1)
-        ret = sec_rpc_client.bdev_lvol_set_leader(False, lvs_name=snap.lvol.lvs_name)
-        if not ret:
-            logger.error(f"Failed to set leader for secondary node: {sec_node.get_id()}")
-            if not force_delete:
-                return False
-
-    time.sleep(1)
-    ret = rpc_client.bdev_lvol_set_leader(True, lvs_name=snap.lvol.lvs_name)
-    if not ret:
-        logger.error(f"Failed to set leader for primary node: {snode.get_id()}")
-        if not force_delete:
-            return False
     snap.remove(db_controller.kv_store)
 
     base_lvol = db_controller.get_lvol_by_id(snap.lvol.get_id())

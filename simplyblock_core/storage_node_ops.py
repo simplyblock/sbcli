@@ -2709,17 +2709,13 @@ def recreate_lvstore_on_sec(snode, primary_node=None):
                             ret = remote_rpc_client.nvmf_subsystem_listener_set_ana_state(
                                 lvol.nqn, iface.ip4_address, "4420", False, "inaccessible")
 
-                    time.sleep(2)
-
                 remote_rpc_client.bdev_lvol_set_leader(False, lvs_name=node.lvstore)
-                time.sleep(2)
                 remote_rpc_client.bdev_distrib_force_to_non_leader(node.jm_vuid)
+                time.sleep(2)
 
             ret, err = _create_bdev_stack(snode, node.lvstore_stack, primary_node=node)
-
-            time.sleep(5)
             ret = rpc_client.bdev_examine(node.raid)
-            time.sleep(5)
+            time.sleep(1)
             ret = rpc_client.bdev_wait_for_examine()
             time.sleep(1)
 
@@ -2737,9 +2733,8 @@ def recreate_lvstore_on_sec(snode, primary_node=None):
                         lvol.health_check = True
                     lvol.write_to_db(db_controller.kv_store)
 
-                time.sleep(2)
+                time.sleep(1)
                 rpc_client.bdev_lvol_set_leader(False, lvs_name=node.lvstore)
-                time.sleep(2)
                 rpc_client.bdev_distrib_force_to_non_leader(node.jm_vuid)
 
                 if node.status == StorageNode.STATUS_ONLINE:
