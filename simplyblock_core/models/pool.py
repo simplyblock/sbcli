@@ -18,7 +18,7 @@ class Pool(BaseModel):
     cluster_id: str = ""
     groups: List[str] = []
     lvol_max_size: int = 0
-    lvols: List[str] = []
+    lvols: int = 0
     max_r_mbytes_per_sec: int = 0
     max_rw_ios_per_sec: int = 0
     max_rw_mbytes_per_sec: int = 0

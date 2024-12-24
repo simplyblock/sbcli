@@ -135,13 +135,26 @@ class DBController(metaclass=Singleton):
     def get_lvols(self, cluster_id=None) -> List[LVol]:
         lvols = []
         if cluster_id:
-            for pool in self.get_pools(cluster_id):
-                for lv_id in pool.lvols:
-                    lv = self.get_lvol_by_id(lv_id)
-                    if lv:
-                        lvols.append(lv)
+            for node in self.get_storage_nodes_by_cluster_id(cluster_id):
+                for lvol in self.get_lvols_by_node_id(node.get_id()):
+                    if lvol:
+                        lvols.append(lvol)
         else:
             lvols = LVol().read_from_db(self.kv_store)
+        return sorted(lvols, key=lambda x: x.create_dt)
+
+    def get_lvols_by_node_id(self, node_id) -> List[LVol]:
+        lvols = []
+        for lvol in self.get_lvols():
+            if lvol.node_id == node_id:
+                lvols.append(lvol)
+        return sorted(lvols, key=lambda x: x.create_dt)
+
+    def get_lvols_by_pool_id(self, pool_id) -> List[LVol]:
+        lvols = []
+        for lvol in self.get_lvols():
+            if lvol.pool_uuid == pool_id:
+                lvols.append(lvol)
         return sorted(lvols, key=lambda x: x.create_dt)
 
     def get_snapshots(self) -> List[SnapShot]:
@@ -286,6 +299,6 @@ class DBController(metaclass=Singleton):
         for node in ret:
             if node.secondary_node_id == node_id \
                     and node.status == StorageNode.STATUS_ONLINE \
-                    and node.lvstore and len(node.lvols) > 0:
+                    and node.lvstore and node.lvols > 0:
                 nodes.append(node)
         return sorted(nodes, key=lambda x: x.create_dt)

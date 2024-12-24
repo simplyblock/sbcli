@@ -96,10 +96,8 @@ def add_node_stats(node, records):
         data.update(records_sum.get_clean_dict())
 
     size_prov = 0
-    for lvol_id in node.lvols:
-        lvol = db_controller.get_lvol_by_id(lvol_id)
-        if lvol:
-            size_prov += lvol.size
+    for lvol in db_controller.get_lvols_by_node_id(node.get_id()):
+        size_prov += lvol.size
 
     size_util = 0
     size_prov_util = 0

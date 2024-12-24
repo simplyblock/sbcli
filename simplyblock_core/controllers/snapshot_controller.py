@@ -282,7 +282,7 @@ def clone(snapshot_id, clone_name, new_size=0):
     huge_free = result["memory_details"]["huge_free"]
     total_node_capacity = db_controller.get_snode_size(snode.get_id())
     error = utils.validate_add_lvol_or_snap_on_node(
-        memory_free, huge_free, snode.max_lvol, snap.lvol.size,  total_node_capacity, len(snode.lvols))
+        memory_free, huge_free, snode.max_lvol, snap.lvol.size,  total_node_capacity, snode.lvols)
     if error:
         logger.error(error)
         return False, f"Failed to add lvol on node {snode.get_id()}"
@@ -431,10 +431,10 @@ def clone(snapshot_id, clone_name, new_size=0):
     lvol.write_to_db(db_controller.kv_store)
 
     pool = db_controller.get_pool_by_id(snap.lvol.pool_uuid)
-    pool.lvols.append(lvol.uuid)
+    pool.lvols += 1
     pool.write_to_db(db_controller.kv_store)
     snode = db_controller.get_storage_node_by_id(snode.get_id())
-    snode.lvols.append(lvol.uuid)
+    snode.lvols += 1
     snode.write_to_db(db_controller.kv_store)
 
     if snap.snap_ref_id:

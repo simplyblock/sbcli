@@ -79,9 +79,7 @@ def _add_task(function_name, cluster_id, node_id, device_id,
 def add_device_mig_task(device_id):
     device = db_controller.get_storage_device_by_id(device_id)
     for node in db_controller.get_storage_nodes_by_cluster_id(device.cluster_id):
-        if node.status == StorageNode.STATUS_REMOVED:
-            continue
-        if not node.lvols:
+        if node.status == StorageNode.STATUS_REMOVED or node.lvols==0:
             continue
         for bdev in node.lvstore_stack:
             if bdev['type'] == "bdev_distr":
