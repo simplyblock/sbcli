@@ -592,22 +592,22 @@ def _create_bdev_stack(lvol, snode):
 
 def add_lvol_on_node(lvol, snode, ha_comm_addrs=None, ha_inode_self=0):
     rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
-    spdk_mem_info_before = rpc_client.ultra21_util_get_malloc_stats()
+    # spdk_mem_info_before = rpc_client.ultra21_util_get_malloc_stats()
 
     if snode.is_secondary_node:
         rpc_client.bdev_lvol_set_leader(False, lvs_name=lvol.lvs_name)
 
     else:
         # Validate adding lvol on storage node
-        snode_api = SNodeClient(snode.api_endpoint)
-        result, _ = snode_api.info()
-        memory_free = result["memory_details"]["free"]
-        huge_free = result["memory_details"]["huge_free"]
-
-        total_node_capacity = db_controller.get_snode_size(snode.get_id())
-        error = utils.validate_add_lvol_or_snap_on_node(memory_free, huge_free, snode.max_lvol, lvol.size,  total_node_capacity, snode.lvols)
-        if error:
-            logger.error(error)
+        # snode_api = SNodeClient(snode.api_endpoint)
+        # result, _ = snode_api.info()
+        # memory_free = result["memory_details"]["free"]
+        # huge_free = result["memory_details"]["huge_free"]
+        #
+        # total_node_capacity = db_controller.get_snode_size(snode.get_id())
+        # error = utils.validate_add_lvol_or_snap_on_node(memory_free, huge_free, snode.max_lvol, lvol.size,  total_node_capacity, snode.lvols)
+        # if error:
+        #     logger.error(error)
             # return False, f"Failed to add lvol on node {snode.get_id()}"
 
         rpc_client.bdev_lvol_set_leader(True, lvs_name=lvol.lvs_name)
@@ -622,7 +622,6 @@ def add_lvol_on_node(lvol, snode, ha_comm_addrs=None, ha_inode_self=0):
     ret = rpc_client.subsystem_create(lvol.nqn, 'sbcli-cn', lvol.uuid, min_cntlid)
     logger.debug(ret)
 
-    cluster = db_controller.get_cluster_by_id(snode.cluster_id)
     # add listeners
     logger.info("adding listeners")
     for iface in snode.data_nics:
@@ -647,17 +646,17 @@ def add_lvol_on_node(lvol, snode, ha_comm_addrs=None, ha_inode_self=0):
     # if not ret:
     #     return False, "Failed to send cluster map"
 
-    spdk_mem_info_after = rpc_client.ultra21_util_get_malloc_stats()
-    logger.debug("ultra21_util_get_malloc_stats:")
-    logger.debug(spdk_mem_info_after)
-
-    diff = {}
-    for key in spdk_mem_info_after.keys():
-        diff[key] = spdk_mem_info_after[key] - spdk_mem_info_before[key]
-
-    logger.info("spdk mem diff:")
-    logger.info(json.dumps(diff, indent=2))
-    lvol.mem_diff = diff
+    # spdk_mem_info_after = rpc_client.ultra21_util_get_malloc_stats()
+    # logger.debug("ultra21_util_get_malloc_stats:")
+    # logger.debug(spdk_mem_info_after)
+    #
+    # diff = {}
+    # for key in spdk_mem_info_after.keys():
+    #     diff[key] = spdk_mem_info_after[key] - spdk_mem_info_before[key]
+    #
+    # logger.info("spdk mem diff:")
+    # logger.info(json.dumps(diff, indent=2))
+    # lvol.mem_diff = diff
 
     ret = rpc_client.get_bdevs(f"{lvol.lvs_name}/{lvol.lvol_bdev}")
     lvol_bdev = ret[0]
