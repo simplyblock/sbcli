@@ -31,7 +31,7 @@ def _validate_new_task_dev_restart(cluster_id, node_id, device_id):
 def _validate_new_task_node_restart(cluster_id, node_id):
     tasks = db_controller.get_job_tasks(cluster_id)
     for task in tasks:
-        if task.function_name == JobSchedule.FN_NODE_RESTART and task.node_id == node_id and task.canceled is False:
+        if task.function_name == JobSchedule.FN_NODE_RESTART and task.node_id == node_id:
             if task.status != JobSchedule.STATUS_DONE:
                 return task.get_id()
     return False
