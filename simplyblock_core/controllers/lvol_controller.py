@@ -670,13 +670,17 @@ def recreate_lvol_on_node(lvol, snode, ha_inode_self=0, ana_state=None):
 
     lv = rpc_client.get_bdevs(lvol.top_bdev)
     if not lv:
-        return False, f"LVol bdev not found: {lvol.top_bdev}"
+        msg = f"LVol bdev not found: {lvol.top_bdev} on node {snode.get_id()}"
+        logger.error(msg)
+        return False, msg
 
     if "crypto" in lvol.lvol_type:
         ret = _create_crypto_lvol(
             rpc_client, lvol.crypto_bdev, f"{lvol.lvs_name}/{lvol.lvol_bdev}", lvol.crypto_key1, lvol.crypto_key2)
         if not ret:
-            return False, "Failed to create crypto bdev"
+            msg=f"Failed to create crypto lvol on node {snode.get_id()}"
+            logger.error(msg)
+            return False, msg
 
     namespace_found = False
     subsys_found = False

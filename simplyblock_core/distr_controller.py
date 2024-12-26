@@ -90,7 +90,7 @@ def get_distr_cluster_map(snodes, target_node, distr_name=""):
         if snode.is_secondary_node:
             continue
         dev_map = {}
-        dev_w_map = []
+        dev_w_map = {}
         node_w = 0
         for i, dev in enumerate(snode.nvme_devices):
             if dev.status in [NVMeDevice.STATUS_JM, NVMeDevice.STATUS_NEW]:
@@ -119,9 +119,9 @@ def get_distr_cluster_map(snodes, target_node, distr_name=""):
                 # "physical_label": dev.physical_label
             }
             if dev.status in [NVMeDevice.STATUS_FAILED, NVMeDevice.STATUS_FAILED_AND_MIGRATED]:
-                dev_w_map.append({"weight": dev_w, "id": -1})
+                dev_w_map[dev.cluster_device_order] = {"weight": dev_w, "id": -1}
             else:
-                dev_w_map.append({"weight": dev_w, "id": dev.cluster_device_order})
+                dev_w_map[dev.cluster_device_order] = {"weight": dev_w, "id": dev.cluster_device_order}
                 node_w += dev_w
 
         node_status = snode.status
@@ -132,7 +132,7 @@ def get_distr_cluster_map(snodes, target_node, distr_name=""):
             "devices": dev_map}
         map_prob.append({
             "weight": node_w,
-            "items": dev_w_map
+            "items": [d for k, d in dev_w_map.items()]
         })
     cl_map = {
         "name": distr_name,
