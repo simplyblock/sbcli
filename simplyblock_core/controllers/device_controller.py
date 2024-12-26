@@ -562,10 +562,10 @@ def device_set_failed(device_id):
         return True
 
     ret = device_set_state(device_id, NVMeDevice.STATUS_FAILED)
-    # if ret:
-    #     for node in db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id):
-    #         if node.status == StorageNode.STATUS_ONLINE:
-    #             distr_controller.send_cluster_map_to_node(node)
+    for node in db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id):
+        if node.status == StorageNode.STATUS_ONLINE:
+            rpc_client = RPCClient(node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password)
+            rpc_client.distr_replace_id_in_map_prob(dev.cluster_device_order, -1)
 
     tasks_controller.add_device_failed_mig_task(device_id)
 
@@ -699,7 +699,14 @@ def add_device(device_id):
 
 
 def device_set_failed_and_migrated(device_id):
-    return device_set_state(device_id, NVMeDevice.STATUS_FAILED_AND_MIGRATED)
+    db_controller = DBController()
+    device_set_state(device_id, NVMeDevice.STATUS_FAILED_AND_MIGRATED)
+    dev = db_controller.get_storage_device_by_id(device_id)
+    for node in db_controller.get_storage_nodes_by_cluster_id(dev.cluster_id):
+        if node.status == StorageNode.STATUS_ONLINE:
+            rpc_client = RPCClient(node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password)
+            rpc_client.distr_replace_id_in_map_prob(dev.cluster_device_order, -1)
+    return True
 
 
 def set_jm_device_state(device_id, state):

@@ -955,3 +955,10 @@ class RPCClient:
             "registered_uuid": registered_uuid,
         }
         return self._request("bdev_lvol_clone_register", params)
+
+    def distr_replace_id_in_map_prob(self, storage_ID_from, storage_ID_to):
+        params = {
+            "storage_ID_from": storage_ID_from,
+            "storage_ID_to": storage_ID_to,
+        }
+        return self._request("distr_replace_id_in_map_prob", params)

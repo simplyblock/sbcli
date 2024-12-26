@@ -47,7 +47,6 @@ def send_dev_status_event(device, dev_status, target_node=None):
         "storage_ID": storage_ID,
         "status": dev_status}
     events = {"events": [node_status_event]}
-    logger.debug(node_status_event)
     if target_node:
         snodes = [target_node]
     else:
@@ -291,12 +290,12 @@ def send_cluster_map_add_device(device: NVMeDevice, target_node):
 
         cl_map = {
             "UUID_node": dnode.get_id(),
-            "devices"[device.cluster_device_order]: {
+            "devices" : {device.cluster_device_order: {
                 "UUID": device.get_id(),
                 "bdev_name": name,
                 "status": dev_status,
                 "weight": dev_w
-            }
+            }}
         }
         ret = rpc_client.distr_add_devices(cl_map)
         if not ret:
