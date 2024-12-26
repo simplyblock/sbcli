@@ -104,7 +104,8 @@ def _add_graylog_input(cluster_ip, password):
 def create_cluster(blk_size, page_size_in_blocks, cli_pass,
                    cap_warn, cap_crit, prov_cap_warn, prov_cap_crit, ifname, log_del_interval, metrics_retention_period,
                    contact_point, grafana_endpoint, distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type,
-                   enable_node_affinity, qpair_count, max_queue_size, inflight_io_threshold, enable_qos, strict_node_anti_affinity):
+                   enable_node_affinity, qpair_count, max_queue_size, inflight_io_threshold, enable_qos, strict_node_anti_affinity,
+                   scale_after_usage,scale_strategy,check_capacity_interval):
 
     logger.info("Installing dependencies...")
     ret = scripts.install_deps()
@@ -179,6 +180,9 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     c.inflight_io_threshold = inflight_io_threshold
     c.enable_qos = enable_qos
     c.strict_node_anti_affinity = strict_node_anti_affinity
+    c.scale_after_usage = scale_after_usage
+    c.scale_strategy = scale_strategy
+    c.check_capacity_interval = check_capacity_interval
 
     alerts_template_folder = os.path.join(TOP_DIR, "simplyblock_core/scripts/alerting/")
     alert_resources_file = "alert_resources.yaml"
@@ -221,7 +225,9 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     logger.info("Deploying swarm stack ...")
     log_level = "DEBUG" if constants.LOG_WEB_DEBUG else "INFO"
     ret = scripts.deploy_stack(cli_pass, DEV_IP, constants.SIMPLY_BLOCK_DOCKER_IMAGE, c.secret, c.uuid,
-                               log_del_interval, metrics_retention_period, log_level, c.grafana_endpoint)
+                               log_del_interval, metrics_retention_period, log_level, c.grafana_endpoint,
+                               c.scale_after_usage,c.scale_strategy,c.check_capacity_interval)
+    
     logger.info("Deploying swarm stack > Done")
 
     if ret == 0:

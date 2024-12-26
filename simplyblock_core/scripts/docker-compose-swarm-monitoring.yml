@@ -12,6 +12,16 @@ services:
     networks:
       - monitoring-net
 
+  storage-scaler:
+    image: simplyblock/storage-scaler:latest
+    environment:
+      CLUSTERID: "${CLUSTER_ID}"
+      CLUSTERIP: "HAProxy"
+      CLUSTERSECRET: "${CLUSTER_SECRET}"
+      SIZE_UTILIZATION: "${SIZE_UTILIZATION}"
+      INTERVAL_MIN: "${INTERVAL_MIN}"
+      STRATEGY: "${STRATEGY}"
+
   opensearch:
     image: "opensearchproject/opensearch:2.4.0"
     environment:

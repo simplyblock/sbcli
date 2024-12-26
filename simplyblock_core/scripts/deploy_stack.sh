@@ -13,6 +13,9 @@ export LOG_DELETION_INTERVAL=$7
 export RETENTION_PERIOD=$8
 export LOG_LEVEL=$9
 export GRAFANA_ENDPOINT=${10}
+export SIZE_UTILIZATION=${11}
+export INTERVAL_MIN=${13}
+export STRATEGY=${12}
 export DIR="$(dirname "$(realpath "$0")")"
 
 if [ -s "/etc/foundationdb/fdb.cluster" ]
