@@ -562,10 +562,10 @@ def device_set_failed(device_id):
         return True
 
     ret = device_set_state(device_id, NVMeDevice.STATUS_FAILED)
-    if ret:
-        for node in db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id):
-            if node.status == StorageNode.STATUS_ONLINE:
-                distr_controller.send_cluster_map_to_node(node)
+    # if ret:
+    #     for node in db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id):
+    #         if node.status == StorageNode.STATUS_ONLINE:
+    #             distr_controller.send_cluster_map_to_node(node)
 
     tasks_controller.add_device_failed_mig_task(device_id)
 
@@ -617,7 +617,7 @@ def add_device(device_id):
         for node in snodes:
             if node.status != StorageNode.STATUS_ONLINE:
                 continue
-            distr_controller.send_cluster_map_to_node(node)
+            distr_controller.send_cluster_map_add_device(device_obj, node)
 
         tasks_controller.add_new_device_mig_task(device_id)
         return device_id
@@ -664,7 +664,9 @@ def add_device(device_id):
         logger.error("failed to create devices")
         return False
 
-    distr_controller.send_cluster_map_to_node(snode)
+    for dev in new_devices:
+        distr_controller.send_cluster_map_add_device(dev, snode)
+
     logger.info("Make other nodes connect to the node devices")
     snodes = db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id)
     for node in snodes:
@@ -672,7 +674,8 @@ def add_device(device_id):
             continue
         node.remote_devices = storage_node_ops._connect_to_remote_devs(node)
         node.write_to_db()
-        distr_controller.send_cluster_map_to_node(node)
+        for dev in new_devices:
+            distr_controller.send_cluster_map_add_device(dev, node)
 
     for dev in new_devices:
         tasks_controller.add_new_device_mig_task(dev.get_id())

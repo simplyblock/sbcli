@@ -516,6 +516,9 @@ class RPCClient:
     def distr_add_nodes(self, params):
         return self._request("distr_add_nodes", params)
 
+    def distr_add_devices(self, params):
+        return self._request("distr_add_devices", params)
+
     def distr_status_events_update(self, params):
         # ultra/DISTR_v2/src_code_app_spdk/specs/message_format_rpcs__distrib__v5.txt#L396C1-L396C27
         return self._request("distr_status_events_update", params)

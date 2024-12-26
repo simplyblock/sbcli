@@ -2,7 +2,7 @@
 import logging
 import time
 import sys
-
+from datetime import datetime
 
 from simplyblock_core import constants, db_controller
 from simplyblock_core.controllers import tasks_events, tasks_controller
@@ -43,6 +43,15 @@ def task_runner(task):
         task.status = JobSchedule.STATUS_SUSPENDED
         task.write_to_db(db_controller.kv_store)
         return False
+
+    if snode.online_since:
+        diff = datetime.now() - datetime.fromisoformat(snode.online_since)
+        if diff.total_seconds() < 60:
+            task.function_result = "node is online < 1 min, retrying"
+            task.status = JobSchedule.STATUS_SUSPENDED
+            task.retry += 1
+            task.write_to_db(db_controller.kv_store)
+            return False
 
     rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password, timeout=5, retry=2)
     if "migration" not in task.function_params:

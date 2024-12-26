@@ -1371,17 +1371,17 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
     logger.info("Sending cluster map")
     snodes = db_controller.get_storage_nodes_by_cluster_id(cluster_id)
     for node_index, node in enumerate(snodes):
-        if  node.status != StorageNode.STATUS_ONLINE:
+        if  node.status != StorageNode.STATUS_ONLINE or node.get_id() == snode.get_id():
             continue
-        ret = distr_controller.send_cluster_map_to_node(node)
+        ret = distr_controller.send_cluster_map_add_node(snode, node)
 
     time.sleep(3)
 
     for dev in snode.nvme_devices:
-        distr_controller.send_dev_status_event(dev, NVMeDevice.STATUS_ONLINE)
+        # distr_controller.send_dev_status_event(dev, NVMeDevice.STATUS_ONLINE)
         tasks_controller.add_new_device_mig_task(dev.get_id())
 
-    time.sleep(3)
+    # time.sleep(3)
 
     nodes = db_controller.get_storage_nodes_by_cluster_id(cluster_id)
     # Create distribs
