@@ -82,7 +82,7 @@ def disconnect_device(device):
 
 def get_distr_cluster_map(snodes, target_node, distr_name=""):
     map_cluster = {}
-    map_prob = []
+    map_prob = {}
     local_node_index = 0
     db_controller = DBController()
     cluster = db_controller.get_cluster_by_id(target_node.cluster_id)
@@ -130,16 +130,15 @@ def get_distr_cluster_map(snodes, target_node, distr_name=""):
         map_cluster[snode.get_id()] = {
             "status": node_status,
             "devices": dev_map}
-        map_prob.append({
+        map_prob[snode.get_id()] = {
             "weight": node_w,
-            "items": [d for k, d in dev_w_map.items()]
-        })
+            "items": [d for k, d in dev_w_map.items()]}
     cl_map = {
         "name": distr_name,
         "UUID_node_target": target_node.get_id(),
         "timestamp": datetime.datetime.now().isoformat("T", "seconds")+'Z',
         "map_cluster": map_cluster,
-        "map_prob": map_prob
+        "map_prob": [d for k, d in map_prob.items()]
     }
     if cluster.enable_node_affinity:
         cl_map['ppln1'] = local_node_index
