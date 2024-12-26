@@ -35,7 +35,7 @@ def deploy_stack(cli_pass, dev_ip, image_name, graylog_password, cluster_id,
     pass_hash = hashlib.sha256(graylog_password.encode('utf-8')).hexdigest()
     return __run_script(
         ['sudo', 'bash', '-x', os.path.join(DIR_PATH, 'deploy_stack.sh'), cli_pass, dev_ip, image_name, pass_hash,
-         graylog_password, cluster_id, log_del_interval, metrics_retention_period, log_level, grafana_endpoint])
+         graylog_password, cluster_id, log_del_interval, metrics_retention_period, log_level, grafana_endpoint,scale_after_usage,scale_strategy,check_capacity_interval])
 
 
 def deploy_cleaner():
