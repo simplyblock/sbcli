@@ -80,21 +80,21 @@ def add(lvol_id, snapshot_name):
     spdk_mem_info_before = rpc_client.ultra21_util_get_malloc_stats()
 
 
-    if lvol.ha_type == "ha":
-        if snode.secondary_node_id:
-            sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
-            if sec_node.status == StorageNode.STATUS_ONLINE:
-                sec_rpc_client = RPCClient(sec_node.mgmt_ip, sec_node.rpc_port, sec_node.rpc_username,
-                                           sec_node.rpc_password)
-                for iface in sec_node.data_nics:
-                    if iface.ip4_address:
-                        ret = sec_rpc_client.nvmf_subsystem_listener_set_ana_state(
-                            lvol.nqn, iface.ip4_address, "4420", False, "inaccessible")
-
-    for iface in snode.data_nics:
-        if iface.ip4_address:
-            ret = rpc_client.nvmf_subsystem_listener_set_ana_state(
-                lvol.nqn, iface.ip4_address, "4420", False, "inaccessible")
+    # if lvol.ha_type == "ha":
+    #     if snode.secondary_node_id:
+    #         sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
+    #         if sec_node.status == StorageNode.STATUS_ONLINE:
+    #             sec_rpc_client = RPCClient(sec_node.mgmt_ip, sec_node.rpc_port, sec_node.rpc_username,
+    #                                        sec_node.rpc_password)
+    #             for iface in sec_node.data_nics:
+    #                 if iface.ip4_address:
+    #                     ret = sec_rpc_client.nvmf_subsystem_listener_set_ana_state(
+    #                         lvol.nqn, iface.ip4_address, "4420", False, "inaccessible")
+    #
+    # for iface in snode.data_nics:
+    #     if iface.ip4_address:
+    #         ret = rpc_client.nvmf_subsystem_listener_set_ana_state(
+    #             lvol.nqn, iface.ip4_address, "4420", False, "inaccessible")
 
     blobid = 0
     snap_uuid = ""
@@ -118,22 +118,22 @@ def add(lvol_id, snapshot_name):
                 f"{lvol.lvs_name}/{lvol.lvol_bdev}", snapshot_name, snap_uuid, blobid)
 
 
-    for iface in snode.data_nics:
-        if iface.ip4_address:
-            ret = rpc_client.nvmf_subsystem_listener_set_ana_state(
-                lvol.nqn, iface.ip4_address, "4420", True)
-
-    if lvol.ha_type == "ha":
-        if snode.secondary_node_id:
-            sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
-            if sec_node.status == StorageNode.STATUS_ONLINE:
-                time.sleep(1)
-                sec_rpc_client = RPCClient(sec_node.mgmt_ip, sec_node.rpc_port, sec_node.rpc_username,
-                                           sec_node.rpc_password)
-                for iface in sec_node.data_nics:
-                    if iface.ip4_address:
-                        ret = sec_rpc_client.nvmf_subsystem_listener_set_ana_state(
-                            lvol.nqn, iface.ip4_address, "4420", False)
+    # for iface in snode.data_nics:
+    #     if iface.ip4_address:
+    #         ret = rpc_client.nvmf_subsystem_listener_set_ana_state(
+    #             lvol.nqn, iface.ip4_address, "4420", True)
+    #
+    # if lvol.ha_type == "ha":
+    #     if snode.secondary_node_id:
+    #         sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
+    #         if sec_node.status == StorageNode.STATUS_ONLINE:
+    #             time.sleep(1)
+    #             sec_rpc_client = RPCClient(sec_node.mgmt_ip, sec_node.rpc_port, sec_node.rpc_username,
+    #                                        sec_node.rpc_password)
+    #             for iface in sec_node.data_nics:
+    #                 if iface.ip4_address:
+    #                     ret = sec_rpc_client.nvmf_subsystem_listener_set_ana_state(
+    #                         lvol.nqn, iface.ip4_address, "4420", False)
 
     ##############################################################################
     snap = SnapShot()
