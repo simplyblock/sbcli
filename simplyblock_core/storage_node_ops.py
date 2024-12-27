@@ -2756,6 +2756,13 @@ def recreate_lvstore(snode):
             sec_rpc_client.bdev_distrib_force_to_non_leader(snode.jm_vuid)
             time.sleep(2)
 
+    # rpc_client.bdev_lvol_set_leader(False, lvs_name=snode.lvstore)
+    rpc_client.bdev_distrib_force_to_non_leader(snode.jm_vuid)
+
+    if snode.jm_vuid:
+        ret = rpc_client.jc_explicit_synchronization(snode.jm_vuid)
+        logger.info(f"JM Sync res: {ret}")
+
     for lvol in lvol_list:
         is_created, error = lvol_controller.recreate_lvol_on_node(lvol, snode)
         if error:
@@ -2768,7 +2775,7 @@ def recreate_lvstore(snode):
         lvol.write_to_db(db_controller.kv_store)
 
     if sec_node and sec_node.status == StorageNode.STATUS_ONLINE:
-        time.sleep(3)
+        time.sleep(5)
         sec_rpc_client = RPCClient(sec_node.mgmt_ip, sec_node.rpc_port, sec_node.rpc_username, sec_node.rpc_password, timeout=3, retry=2)
         for lvol in lvol_list:
             if lvol.ha_type == "ha":
@@ -2997,12 +3004,12 @@ def _create_bdev_stack(snode, lvstore_stack=None, primary_node=False):
             ret = rpc_client.bdev_PT_NoExcl_create(**params)
 
         elif type == "bdev_raid":
-
-            # sync jm
-            if snode.jm_vuid:
-                ret = rpc_client.jc_explicit_synchronization(snode.jm_vuid)
-                logger.info(f"JM Sync res: {ret}")
-                # time.sleep(3)
+            #
+            # # sync jm
+            # if snode.jm_vuid:
+            #     ret = rpc_client.jc_explicit_synchronization(snode.jm_vuid)
+            #     logger.info(f"JM Sync res: {ret}")
+            #     # time.sleep(3)
 
             distribs_list = bdev["distribs_list"]
             strip_size_kb = params["strip_size_kb"]
