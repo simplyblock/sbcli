@@ -40,7 +40,7 @@ def _validate_new_task_node_restart(cluster_id, node_id):
 def _add_task(function_name, cluster_id, node_id, device_id,
               max_retry=constants.TASK_EXEC_RETRY_COUNT, function_params=None):
 
-    if function_name in [JobSchedule.FN_DEV_RESTART, JobSchedule.FN_DEV_MIG, JobSchedule.FN_FAILED_DEV_MIG]:
+    if function_name in [JobSchedule.FN_DEV_RESTART, JobSchedule.FN_FAILED_DEV_MIG]:
         if not _validate_new_task_dev_restart(cluster_id, node_id, device_id):
             return False
 
