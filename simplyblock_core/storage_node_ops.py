@@ -2782,6 +2782,7 @@ def recreate_lvstore(snode):
             lvol.io_error = False
             lvol.health_check = True
         lvol.write_to_db(db_controller.kv_store)
+        time.sleep(3)
 
     if sec_node and sec_node.status == StorageNode.STATUS_ONLINE:
         time.sleep(10)
