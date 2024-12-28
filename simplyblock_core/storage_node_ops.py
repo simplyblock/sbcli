@@ -1882,6 +1882,13 @@ def restart_storage_node(
     snode.write_to_db(db_controller.kv_store)
 
 
+    logger.info("Connecting to remote devices")
+    snode.remote_devices = _connect_to_remote_devs(snode)
+    if snode.enable_ha_jm:
+        snode.remote_jm_devices = _connect_to_remote_jm_devs(snode)
+    snode.health_check = True
+    snode.write_to_db(db_controller.kv_store)
+
     if cluster.status in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED]:
         if snode.lvstore_stack or snode.is_secondary_node:
             ret = recreate_lvstore(snode)
