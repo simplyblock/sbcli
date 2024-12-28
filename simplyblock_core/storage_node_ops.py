@@ -2738,7 +2738,7 @@ def recreate_lvstore(snode):
     ret = rpc_client.bdev_wait_for_examine()
     # time.sleep(1)
     # time.sleep(1)
-    # rpc_client.bdev_distrib_force_to_non_leader(snode.jm_vuid)
+    rpc_client.bdev_distrib_force_to_non_leader(snode.jm_vuid)
     # time.sleep(2)
     sec_node = None
     lvol_list = db_controller.get_lvols_by_node_id(snode.get_id())
