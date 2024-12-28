@@ -2752,31 +2752,31 @@ def recreate_lvstore(snode):
     if snode.is_secondary_node:
         return recreate_lvstore_on_sec(snode)
 
-    rpc_client = RPCClient(
-        snode.mgmt_ip, snode.rpc_port,
-        snode.rpc_username, snode.rpc_password)
+    # rpc_client = RPCClient(
+    #     snode.mgmt_ip, snode.rpc_port,
+    #     snode.rpc_username, snode.rpc_password)
+    #
+    # ret, err = _create_bdev_stack(snode, [], primary_node=snode)
+    #
+    # if err:
+    #     logger.error(f"Failed to recreate lvstore on node {snode.get_id()}")
+    #     logger.error(err)
+    #     return False
+    #
+    # time.sleep(1)
+    # rpc_client.bdev_distrib_force_to_non_leader(snode.jm_vuid)
+    # time.sleep(1)
+    # ret = rpc_client.bdev_examine(snode.raid)
+    # ret = rpc_client.bdev_wait_for_examine()
 
-    ret, err = _create_bdev_stack(snode, [], primary_node=snode)
 
-    if err:
-        logger.error(f"Failed to recreate lvstore on node {snode.get_id()}")
-        logger.error(err)
-        return False
-
-    time.sleep(1)
-    rpc_client.bdev_distrib_force_to_non_leader(snode.jm_vuid)
-    time.sleep(1)
-    ret = rpc_client.bdev_examine(snode.raid)
-    ret = rpc_client.bdev_wait_for_examine()
-
-
-    time.sleep(1)
+    # time.sleep(1)
     # if snode.jm_vuid:
     #     ret = rpc_client.jc_explicit_synchronization(snode.jm_vuid)
     #     logger.info(f"JM Sync res: {ret}")
     #     time.sleep(1)
-    rpc_client.bdev_distrib_force_to_non_leader(snode.jm_vuid)
-    time.sleep(1)
+    # rpc_client.bdev_distrib_force_to_non_leader(snode.jm_vuid)
+    # time.sleep(1)
     sec_node = None
     lvol_list = db_controller.get_lvols_by_node_id(snode.get_id())
     if snode.secondary_node_id:
@@ -2794,12 +2794,28 @@ def recreate_lvstore(snode):
             time.sleep(1)
             sec_rpc_client.bdev_lvol_set_leader(False, lvs_name=snode.lvstore)
             sec_rpc_client.bdev_distrib_force_to_non_leader(snode.jm_vuid)
-            time.sleep(2)
+            time.sleep(1)
 
+    rpc_client = RPCClient(
+        snode.mgmt_ip, snode.rpc_port,
+        snode.rpc_username, snode.rpc_password)
+
+    ret, err = _create_bdev_stack(snode, [], primary_node=snode)
+
+    if err:
+        logger.error(f"Failed to recreate lvstore on node {snode.get_id()}")
+        logger.error(err)
+        return False
+
+    # time.sleep(1)
+    # rpc_client.bdev_distrib_force_to_non_leader(snode.jm_vuid)
+    # time.sleep(1)
+    ret = rpc_client.bdev_examine(snode.raid)
+    ret = rpc_client.bdev_wait_for_examine()
 
     # rpc_client.bdev_lvol_set_leader(False, lvs_name=snode.lvstore)
-    rpc_client.bdev_distrib_force_to_non_leader(snode.jm_vuid)
-    time.sleep(1)
+    # rpc_client.bdev_distrib_force_to_non_leader(snode.jm_vuid)
+    # time.sleep(1)
 
 
     # time.sleep(1)
