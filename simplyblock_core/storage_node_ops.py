@@ -2753,20 +2753,20 @@ def recreate_lvstore(snode):
         snode.mgmt_ip, snode.rpc_port,
         snode.rpc_username, snode.rpc_password)
 
-    # ret, err = _create_bdev_stack(snode, [], primary_node=snode)
-    #
-    # if err:
-    #     logger.error(f"Failed to recreate lvstore on node {snode.get_id()}")
-    #     logger.error(err)
-    #     # return False
-    #
-    # ret = rpc_client.bdev_examine(snode.raid)
-    # ret = rpc_client.bdev_wait_for_examine()
-    #
+    ret, err = _create_bdev_stack(snode, [], primary_node=snode)
 
-    # rpc_client.bdev_lvol_set_leader(False, lvs_name=snode.lvstore)
-    # rpc_client.bdev_distrib_force_to_non_leader(snode.jm_vuid)
-    # time.sleep(1)
+    if err:
+        logger.error(f"Failed to recreate lvstore on node {snode.get_id()}")
+        logger.error(err)
+        # return False
+
+    ret = rpc_client.bdev_examine(snode.raid)
+    # ret = rpc_client.bdev_wait_for_examine()
+
+
+    rpc_client.bdev_lvol_set_leader(False, lvs_name=snode.lvstore)
+    rpc_client.bdev_distrib_force_to_non_leader(snode.jm_vuid)
+    time.sleep(1)
     # time.sleep(1)
     # if snode.jm_vuid:
     #     ret = rpc_client.jc_explicit_synchronization(snode.jm_vuid)
@@ -2795,21 +2795,23 @@ def recreate_lvstore(snode):
 
     # time.sleep(1)
     #
-    ret, err = _create_bdev_stack(snode, [], primary_node=snode)
-
-    if err:
-        logger.error(f"Failed to recreate lvstore on node {snode.get_id()}")
-        logger.error(err)
-        # return False
-
-    ret = rpc_client.bdev_examine(snode.raid)
-    ret = rpc_client.bdev_wait_for_examine()
+    # ret, err = _create_bdev_stack(snode, [], primary_node=snode)
+    #
+    # if err:
+    #     logger.error(f"Failed to recreate lvstore on node {snode.get_id()}")
+    #     logger.error(err)
+    #     # return False
+    #
+    # ret = rpc_client.bdev_examine(snode.raid)
+    # ret = rpc_client.bdev_wait_for_examine()
 
 
     if snode.jm_vuid:
         ret = rpc_client.jc_explicit_synchronization(snode.jm_vuid)
         logger.info(f"JM Sync res: {ret}")
-        time.sleep(1)
+        # time.sleep(1)
+
+    ret = rpc_client.bdev_wait_for_examine()
 
     for lvol in lvol_list:
         lvol_obj = db_controller.get_lvol_by_id(lvol.get_id())
