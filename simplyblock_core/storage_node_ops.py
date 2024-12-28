@@ -1879,10 +1879,6 @@ def restart_storage_node(
         node.remote_devices = _connect_to_remote_devs(node, force_conect_restarting_nodes=True)
         node.write_to_db(kv_store)
 
-    if snode.jm_device and snode.jm_device.status in [JMDevice.STATUS_UNAVAILABLE, JMDevice.STATUS_ONLINE]:
-        device_controller.set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_ONLINE)
-
-
     snode = db_controller.get_storage_node_by_id(snode.get_id())
     for db_dev in snode.nvme_devices:
         if db_dev.status in [NVMeDevice.STATUS_UNAVAILABLE, NVMeDevice.STATUS_READONLY]:
@@ -1907,6 +1903,11 @@ def restart_storage_node(
 
     logger.info("Setting node status to Online")
     set_node_status(node_id, StorageNode.STATUS_ONLINE)
+
+
+    if snode.jm_device and snode.jm_device.status in [JMDevice.STATUS_UNAVAILABLE, JMDevice.STATUS_ONLINE]:
+        device_controller.set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_ONLINE)
+
 
     logger.info(f"Sending device status event")
     for dev in snode.nvme_devices:
