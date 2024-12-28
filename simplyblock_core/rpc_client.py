@@ -962,3 +962,9 @@ class RPCClient:
             "storage_ID_to": storage_ID_to,
         }
         return self._request("distr_replace_id_in_map_prob", params)
+
+    def nvmf_set_max_subsystems(self, max_subsystems):
+        params = {
+            "max_subsystems": max_subsystems,
+        }
+        return self._request("nvmf_set_max_subsystems", params)

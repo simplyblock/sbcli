@@ -1224,6 +1224,10 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
     rpc_client.bdev_set_options(0, 0, 0, 0)
     rpc_client.accel_set_options()
 
+    ret = rpc_client.nvmf_set_max_subsystems(constants.NVMF_MAX_SUBSYSTEMS)
+    if not ret:
+        logger.warning(f"Failed to set nvmf max subsystems {constants.NVMF_MAX_SUBSYSTEMS}")
+
     # 2- set socket implementation options
     ret = rpc_client.sock_impl_set_options()
     if not ret:
@@ -1729,6 +1733,11 @@ def restart_storage_node(
     if not ret:
         logger.error("Failed socket implement set options")
         return False
+
+    ret = rpc_client.nvmf_set_max_subsystems(constants.NVMF_MAX_SUBSYSTEMS)
+    if not ret:
+        logger.warning(f"Failed to set nvmf max subsystems {constants.NVMF_MAX_SUBSYSTEMS}")
+
 
     # 3- set nvme config
     if snode.pollers_mask:
