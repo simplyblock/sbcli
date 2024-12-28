@@ -2773,16 +2773,16 @@ def recreate_lvstore(snode):
         time.sleep(1)
 
     for lvol in lvol_list:
-        is_created, error = lvol_controller.recreate_lvol_on_node(lvol, snode)
+        lvol_obj = db_controller.get_lvol_by_id(lvol.get_id())
+        is_created, error = lvol_controller.recreate_lvol_on_node(lvol_obj, snode)
         if error:
-            logger.error(f"Failed to recreate LVol: {lvol.get_id()} on node: {snode.get_id()}")
-            lvol.status = LVol.STATUS_OFFLINE
+            logger.error(f"Failed to recreate LVol: {lvol_obj.get_id()} on node: {snode.get_id()}")
+            lvol_obj.status = LVol.STATUS_OFFLINE
         else:
-            lvol.status = LVol.STATUS_ONLINE
-            lvol.io_error = False
-            lvol.health_check = True
-        lvol.write_to_db(db_controller.kv_store)
-        time.sleep(3)
+            lvol_obj.status = LVol.STATUS_ONLINE
+            lvol_obj.io_error = False
+            lvol_obj.health_check = True
+        lvol_obj.write_to_db()
 
     if sec_node and sec_node.status == StorageNode.STATUS_ONLINE:
         time.sleep(10)
