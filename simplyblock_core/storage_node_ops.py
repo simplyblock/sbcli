@@ -2790,12 +2790,12 @@ def recreate_lvstore(snode):
             # time.sleep(2)
             sec_rpc_client.bdev_lvol_set_leader(False, lvs_name=snode.lvstore)
             sec_rpc_client.bdev_distrib_force_to_non_leader(snode.jm_vuid)
-            time.sleep(2)
+            # time.sleep(2)
 
 
     # rpc_client.bdev_lvol_set_leader(False, lvs_name=snode.lvstore)
     rpc_client.bdev_distrib_force_to_non_leader(snode.jm_vuid)
-    time.sleep(1)
+    # time.sleep(1)
 
 
     # time.sleep(1)
