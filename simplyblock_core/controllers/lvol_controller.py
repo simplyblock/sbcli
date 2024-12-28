@@ -668,7 +668,7 @@ def add_lvol_on_node(lvol, snode, ha_comm_addrs=None, ha_inode_self=0):
 def recreate_lvol_on_node(lvol, snode, ha_inode_self=0, ana_state=None):
     rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
 
-    retry = 10
+    retry = 5
     while retry > 0:
         lv = rpc_client.get_bdevs(lvol.top_bdev)
         if lv:

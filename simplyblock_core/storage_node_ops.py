@@ -2766,9 +2766,6 @@ def recreate_lvstore(snode):
     ret = rpc_client.bdev_wait_for_examine()
 
 
-    rpc_client.bdev_lvol_set_leader(False, lvs_name=snode.lvstore)
-    rpc_client.bdev_distrib_force_to_non_leader(snode.jm_vuid)
-    time.sleep(1)
     # time.sleep(1)
     # if snode.jm_vuid:
     #     ret = rpc_client.jc_explicit_synchronization(snode.jm_vuid)
@@ -2794,6 +2791,12 @@ def recreate_lvstore(snode):
             sec_rpc_client.bdev_lvol_set_leader(False, lvs_name=snode.lvstore)
             sec_rpc_client.bdev_distrib_force_to_non_leader(snode.jm_vuid)
             time.sleep(2)
+
+
+    # rpc_client.bdev_lvol_set_leader(False, lvs_name=snode.lvstore)
+    rpc_client.bdev_distrib_force_to_non_leader(snode.jm_vuid)
+    time.sleep(1)
+
 
     # time.sleep(1)
     #
