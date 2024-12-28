@@ -2780,7 +2780,7 @@ def recreate_lvstore(snode):
         lvol.write_to_db(db_controller.kv_store)
 
     if sec_node and sec_node.status == StorageNode.STATUS_ONLINE:
-        time.sleep(3)
+        time.sleep(10)
         sec_rpc_client = RPCClient(sec_node.mgmt_ip, sec_node.rpc_port, sec_node.rpc_username, sec_node.rpc_password, timeout=3, retry=2)
         for lvol in lvol_list:
             if lvol.ha_type == "ha":
