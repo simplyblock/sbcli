@@ -2737,13 +2737,6 @@ def recreate_lvstore(snode):
     ret = rpc_client.bdev_examine(snode.raid)
     ret = rpc_client.bdev_wait_for_examine()
 
-    # rpc_client.bdev_lvol_set_leader(False, lvs_name=snode.lvstore)
-    rpc_client.bdev_distrib_force_to_non_leader(snode.jm_vuid)
-
-    if snode.jm_vuid:
-        ret = rpc_client.jc_explicit_synchronization(snode.jm_vuid)
-        logger.info(f"JM Sync res: {ret}")
-
     sec_node = None
     lvol_list = db_controller.get_lvols_by_node_id(snode.get_id())
     if snode.secondary_node_id:
@@ -2762,6 +2755,14 @@ def recreate_lvstore(snode):
             sec_rpc_client.bdev_distrib_force_to_non_leader(snode.jm_vuid)
             time.sleep(2)
 
+    rpc_client.bdev_lvol_set_leader(False, lvs_name=snode.lvstore)
+    rpc_client.bdev_distrib_force_to_non_leader(snode.jm_vuid)
+
+    if snode.jm_vuid:
+        ret = rpc_client.jc_explicit_synchronization(snode.jm_vuid)
+        logger.info(f"JM Sync res: {ret}")
+
+    time.sleep(1)
     for lvol in lvol_list:
         is_created, error = lvol_controller.recreate_lvol_on_node(lvol, snode)
         if error:
