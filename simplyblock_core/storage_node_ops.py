@@ -111,14 +111,15 @@ def addNvmeDevices(snode, devs):
             pci_st = str(pcie).replace("0", "").replace(":", "").replace(".", "")
             nvme_controller = "nvme_%s" % pci_st
             nvme_bdevs, err = rpc_client.bdev_nvme_controller_attach(nvme_controller, pcie)
-            time.sleep(1)
+            # time.sleep(1)
 
         if not nvme_bdevs:
             continue
 
         for nvme_bdev in nvme_bdevs:
             rpc_client.bdev_examine(nvme_bdev)
-            time.sleep(3)
+            rpc_client.bdev_wait_for_examine()
+
             ret = rpc_client.get_bdevs(nvme_bdev)
             nvme_dict = ret[0]
             nvme_driver_data = nvme_dict['driver_specific']['nvme'][0]
@@ -517,7 +518,7 @@ def _create_storage_device_stack(rpc_client, nvme, snode, after_restart):
 
 def _create_device_partitions(rpc_client, nvme, snode, num_partitions_per_dev, jm_percent):
     nbd_device = rpc_client.nbd_start_disk(nvme.nvme_bdev)
-    time.sleep(3)
+    # time.sleep(3)
     if not nbd_device:
         logger.error(f"Failed to start nbd dev")
         return False
@@ -1115,7 +1116,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
         logger.error(e)
         return False
 
-    time.sleep(5)
+    # time.sleep(5)
     if not results:
         logger.error(f"Failed to start spdk: {err}")
         return False
@@ -1354,7 +1355,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
             node.remote_jm_devices = _connect_to_remote_jm_devs(node)
         node.write_to_db(kv_store)
         logger.info(f"connected to devices count: {len(node.remote_devices)}")
-        time.sleep(3)
+        # time.sleep(3)
 
     logger.info("Setting node status to Active")
     set_node_status(snode.get_id(), StorageNode.STATUS_ONLINE)
@@ -1379,7 +1380,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
             continue
         ret = distr_controller.send_cluster_map_add_node(snode, node)
 
-    time.sleep(3)
+    # time.sleep(3)
 
     for dev in snode.nvme_devices:
         # distr_controller.send_dev_status_event(dev, NVMeDevice.STATUS_ONLINE)
@@ -1701,7 +1702,7 @@ def restart_storage_node(
     if not results:
         logger.error(f"Failed to start spdk: {err}")
         return False
-    time.sleep(3)
+    # time.sleep(3)
 
     if small_bufsize:
         snode.iobuf_small_bufsize = small_bufsize
@@ -2459,7 +2460,7 @@ def start_storage_node_api_container(node_ip):
             logger.info("SNodeAPI container found, removing...")
             node.stop(timeout=1)
             node.remove(force=True)
-            time.sleep(1)
+            # time.sleep(1)
 
     logger.info("Creating SNodeAPI container")
     container = node_docker.containers.run(
@@ -2790,12 +2791,12 @@ def recreate_lvstore(snode):
             # time.sleep(2)
             sec_rpc_client.bdev_lvol_set_leader(False, lvs_name=snode.lvstore)
             sec_rpc_client.bdev_distrib_force_to_non_leader(snode.jm_vuid)
-            # time.sleep(2)
+            time.sleep(1)
 
 
     # rpc_client.bdev_lvol_set_leader(False, lvs_name=snode.lvstore)
     rpc_client.bdev_distrib_force_to_non_leader(snode.jm_vuid)
-    # time.sleep(1)
+    time.sleep(1)
 
 
     # time.sleep(1)
@@ -2981,7 +2982,7 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
     snode.raid = raid_device
     snode.write_to_db()
 
-    time.sleep(1)
+    # time.sleep(1)
 
     if snode.secondary_node_id:
         # creating lvstore on secondary
@@ -2995,9 +2996,9 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
         temp_rpc_client = RPCClient(
                 sec_node_1.mgmt_ip, sec_node_1.rpc_port,
                 sec_node_1.rpc_username, sec_node_1.rpc_password)
-        time.sleep(5)
+        # time.sleep(5)
         ret = temp_rpc_client.bdev_examine(snode.raid)
-        time.sleep(1)
+        # time.sleep(1)
         ret = temp_rpc_client.bdev_wait_for_examine()
         sec_node_1.write_to_db()
 
@@ -3108,7 +3109,7 @@ def _remove_bdev_stack(bdev_stack, rpc_client, remove_distr_only=False):
             logger.error(f"Failed to delete BDev {name}")
 
         bdev['status'] = 'deleted'
-        time.sleep(1)
+        # time.sleep(1)
 
 
 def send_cluster_map(node_id):
