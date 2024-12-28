@@ -1873,8 +1873,6 @@ def restart_storage_node(
     if snode.jm_device and snode.jm_device.status in [JMDevice.STATUS_UNAVAILABLE, JMDevice.STATUS_ONLINE]:
         device_controller.set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_ONLINE)
 
-    logger.info("Setting node status to Online")
-    set_node_status(node_id, StorageNode.STATUS_ONLINE)
 
     snode = db_controller.get_storage_node_by_id(snode.get_id())
     for db_dev in snode.nvme_devices:
@@ -1883,26 +1881,20 @@ def restart_storage_node(
             device_events.device_restarted(db_dev)
     snode.write_to_db(db_controller.kv_store)
 
+
+    if cluster.status in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED]:
+        if snode.lvstore_stack or snode.is_secondary_node:
+            ret = recreate_lvstore(snode)
+            if not ret:
+                logger.error("Failed to recreate lvstore")
+                return False
+
+    logger.info("Setting node status to Online")
+    set_node_status(node_id, StorageNode.STATUS_ONLINE)
+
     logger.info(f"Sending device status event")
     for dev in snode.nvme_devices:
         distr_controller.send_dev_status_event(dev, dev.status)
-
-    time.sleep(2)
-
-    if cluster.status not in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED]:
-        logger.warning(f"The cluster status is not active ({cluster.status}), adding the node without distribs and lvstore")
-        logger.info("Done")
-        return "Success"
-
-    if snode.lvstore_stack or snode.is_secondary_node:
-        ret = recreate_lvstore(snode)
-        if not ret:
-            logger.error("Failed to recreate lvstore")
-            return False
-
-    time.sleep(4)
-
-    for dev in snode.nvme_devices:
         if dev.status != NVMeDevice.STATUS_ONLINE:
             logger.debug(f"Device is not online: {dev.get_id()}, status: {dev.status}")
             continue
