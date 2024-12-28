@@ -2097,9 +2097,10 @@ def shutdown_storage_node(node_id, force=False):
 
     tasks = db_controller.get_job_tasks(snode.cluster_id)
     for task in tasks:
-        if task.status in [JobSchedule.STATUS_RUNNING, JobSchedule.STATUS_NEW] and task.node_id == node_id:
-            task.canceled = True
-            task.write_to_db(db_controller.kv_store)
+        if  task.node_id == node_id and task.status != JobSchedule.STATUS_DONE:
+            if task.function_name in [JobSchedule.FN_DEV_MIG, JobSchedule.FN_FAILED_DEV_MIG, JobSchedule.FN_NEW_DEV_MIG]:
+                task.canceled = True
+                task.write_to_db(db_controller.kv_store)
 
     logger.info("Done")
     return True
@@ -2761,7 +2762,7 @@ def recreate_lvstore(snode):
         # return False
 
     ret = rpc_client.bdev_examine(snode.raid)
-    # ret = rpc_client.bdev_wait_for_examine()
+    ret = rpc_client.bdev_wait_for_examine()
 
 
     rpc_client.bdev_lvol_set_leader(False, lvs_name=snode.lvstore)
@@ -2791,7 +2792,7 @@ def recreate_lvstore(snode):
             # time.sleep(2)
             sec_rpc_client.bdev_lvol_set_leader(False, lvs_name=snode.lvstore)
             sec_rpc_client.bdev_distrib_force_to_non_leader(snode.jm_vuid)
-            # time.sleep(2)
+            time.sleep(2)
 
     # time.sleep(1)
     #
