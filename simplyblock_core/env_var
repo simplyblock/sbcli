@@ -1,4 +1,4 @@
 SIMPLY_BLOCK_COMMAND_NAME=sbcli-mig
-SIMPLY_BLOCK_VERSION=1.0.306
+SIMPLY_BLOCK_VERSION=1.0.307
 SIMPLY_BLOCK_DOCKER_IMAGE=simplyblock/simplyblock:storage-scaler
 DOCKER_USER=hamdysimplyblock
