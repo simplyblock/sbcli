@@ -10,7 +10,7 @@ from setuptools.command.install import install as _install
 def _post_install():
     from subprocess import call
     call(['activate-global-python-argcomplete', '-y'])
-    call(["source", f"{Path.home().joinpath('.bash_completion')}"])
+    call([".", f"{Path.home().joinpath('.bash_completion')}"])
 
 
 class install(_install):
