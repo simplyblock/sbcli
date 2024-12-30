@@ -2,21 +2,21 @@ import os
 
 from setuptools import setup, find_packages
 
-import atexit
-from setuptools.command.install import install
 from pathlib import Path
 
-
-def _post_install():
-    # print('POST INSTALL')
-    os.popen("activate-global-python-argcomplete -y")
-    os.popen(f"source {Path.home().joinpath('.bash_completion')}")
+from setuptools.command.install import install as _install
 
 
-class new_install(install):
-    def __init__(self, *args, **kwargs):
-        super(new_install, self).__init__(*args, **kwargs)
-        atexit.register(_post_install)
+def _post_install(dir):
+    from subprocess import call
+    call(['activate-global-python-argcomplete', '-y'])
+    call(["source", f"{Path.home().joinpath('.bash_completion')}"])
+
+
+class install(_install):
+    def run(self):
+        _install.run(self)
+        self.execute(_post_install, (), msg="Running post install task")
 
 
 def get_env_var(name, default=None):
@@ -89,5 +89,5 @@ setup(
         '': ["/etc/simplyblock/requirements.txt"],
         '/etc/simplyblock': ["requirements.txt"]
     },
-    cmdclass={'install': new_install},
+    cmdclass={'install': install},
 )
