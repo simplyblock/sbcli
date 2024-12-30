@@ -2,6 +2,22 @@ import os
 
 from setuptools import setup, find_packages
 
+import atexit
+from setuptools.command.install import install
+from pathlib import Path
+
+
+def _post_install():
+    # print('POST INSTALL')
+    os.popen("activate-global-python-argcomplete -y")
+    os.popen(f"source {Path.home().joinpath('.bash_completion')}")
+
+
+class new_install(install):
+    def __init__(self, *args, **kwargs):
+        super(new_install, self).__init__(*args, **kwargs)
+        atexit.register(_post_install)
+
 
 def get_env_var(name, default=None):
     if not name:
@@ -72,5 +88,6 @@ setup(
     package_data={
         '': ["/etc/simplyblock/requirements.txt"],
         '/etc/simplyblock': ["requirements.txt"]
-    }
+    },
+    cmdclass={'install': new_install},
 )
