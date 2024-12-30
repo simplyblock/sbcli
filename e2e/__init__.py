@@ -18,6 +18,9 @@ from stress_test.lvol_ha_stress_fio import (
     TestLvolHAClusterNetworkInterrupt,
     TestLvolHAClusterRunAllScenarios
 )
+from stress_test.lvol_snap_clone_fio_failover import(
+    TestFailoverScenariosStorageNodes
+)
 
 
 ALL_TESTS = [
@@ -70,6 +73,7 @@ def get_stress_tests():
         TestLvolHAClusterGracefulShutdown,
         TestLvolHAClusterStorageNodeCrash,
         TestLvolHAClusterNetworkInterrupt,
-        TestLvolHAClusterRunAllScenarios
+        TestLvolHAClusterRunAllScenarios,
+        TestFailoverScenariosStorageNodes
     ]
     return tests
