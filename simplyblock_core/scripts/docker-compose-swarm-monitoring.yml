@@ -11,22 +11,6 @@ services:
         constraints: [node.role == manager]
     networks:
       - monitoring-net
-
-  storage-scaler:
-    image: simplyblock/storage-scaler:latest
-    environment:
-      CLUSTERID: "${CLUSTER_ID}"
-      CLUSTERIP: "HAProxy"
-      CLUSTERSECRET: "${CLUSTER_SECRET}"
-      SIZE_UTILIZATION: "${SIZE_UTILIZATION}"
-      INTERVAL_MIN: "${INTERVAL_MIN}"
-      STRATEGY: "${STRATEGY}"
-    deploy:
-      mode: replicated
-      placement:
-        constraints: [node.role == manager]
-    networks:
-      - monitoring-net
     
     
 
@@ -233,6 +217,23 @@ services:
       - ./dashboard.yml:/etc/grafana/provisioning/dashboards/main.yaml
       - ./dashboards:/var/lib/grafana/dashboards
     deploy:
+      placement:
+        constraints: [node.role == manager]
+    networks:
+      - monitoring-net
+
+  
+  storage-scaler:
+    image: simplyblock/storage-scaler:latest
+    environment:
+      CLUSTERID: "${CLUSTER_ID}"
+      CLUSTERIP: "HAProxy"
+      CLUSTERSECRET: "${CLUSTER_SECRET}"
+      SIZE_UTILIZATION: "${SIZE_UTILIZATION}"
+      INTERVAL_MIN: "${INTERVAL_MIN}"
+      STRATEGY: "${STRATEGY}"
+    deploy:
+      mode: replicated
       placement:
         constraints: [node.role == manager]
     networks:
