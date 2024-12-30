@@ -387,9 +387,9 @@ def make_gpt_partitions_for_nbd():
         out, err, ret_code = shell_utils.run_command(cmd)
         logger.debug(out)
         logger.debug(ret_code)
-        if ret_code != 0:
-            logger.error(err)
-            return utils.get_response(False, f"Error running cmd: {cmd}, returncode: {ret_code}, output: {out}, err: {err}")
+        # if ret_code != 0:
+        #     logger.error(err)
+        #     return utils.get_response(False, f"Error running cmd: {cmd}, returncode: {ret_code}, output: {out}, err: {err}")
         time.sleep(1)
 
     return utils.get_response(True)
