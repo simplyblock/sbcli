@@ -93,26 +93,11 @@ def task_runner(task):
     if "migration" in task.function_params:
         mig_info = task.function_params["migration"]
         res = rpc_client.distr_migration_status(**mig_info)
-        for st in res:
-            if st['status'] == "completed":
-                if st['error'] != 0:
-                    task.function_result = "mig completed with errors, retrying"
-                    task.retry += 1
-                    task.status = JobSchedule.STATUS_SUSPENDED
-                    del task.function_params['migration']
-                else:
-                    task.status = JobSchedule.STATUS_DONE
-                    task.function_result = "Done"
-
-                task.write_to_db(db_controller.kv_store)
-                return True
-
-            task.function_result = f"progress: {st['progress']}%, errors: {st['error'] }"
-            task.write_to_db(db_controller.kv_store)
-
-    task.retry += 1
-    task.write_to_db(db_controller.kv_store)
-    return False
+        return utils.handle_task_result(task, res)
+    else:
+        task.retry += 1
+        task.write_to_db(db_controller.kv_store)
+        return False
 
 
 # get DB controller

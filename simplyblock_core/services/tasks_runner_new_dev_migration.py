@@ -4,7 +4,7 @@ import time
 import sys
 from datetime import datetime
 
-from simplyblock_core import constants, db_controller
+from simplyblock_core import constants, db_controller, utils
 from simplyblock_core.controllers import tasks_events, tasks_controller
 from simplyblock_core.models.job_schedule import JobSchedule
 
@@ -98,41 +98,11 @@ def task_runner(task):
 
         mig_info = task.function_params["migration"]
         res = rpc_client.distr_migration_status(**mig_info)
-        if res:
-            res_data = res[0]
-            migration_status = res_data["status"]
-            error_code = res_data["error"]
-            if migration_status == "completed":
-                if error_code == 0:
-                    task.function_result = "Done"
-                    task.status = JobSchedule.STATUS_DONE
-                elif error_code in range(1, 8):
-                    task.function_result = f"mig completed with status: {error_code}"
-                    task.status = JobSchedule.STATUS_DONE
-                else:
-                    task.function_result = f"mig error: {error_code}, retrying"
-                    task.retry += 1
-                    task.status = JobSchedule.STATUS_SUSPENDED
-                    del task.function_params['migration']
-
-                task.write_to_db(db_controller.kv_store)
-                return True
-
-            elif migration_status == "failed":
-                task.status = JobSchedule.STATUS_DONE
-                task.function_result = migration_status
-                task.write_to_db(db_controller.kv_store)
-                return True
-
-            else:
-                task.function_result = f"Status: {migration_status}, progress:{res_data['progress']}"
-                task.write_to_db(db_controller.kv_store)
-        else:
-            logger.error("Failed to get mig status")
-
-    task.retry += 1
-    task.write_to_db(db_controller.kv_store)
-    return False
+        return utils.handle_task_result(task, res, allowed_error_codes=list(range(1, 8)))
+    else:
+        task.retry += 1
+        task.write_to_db(db_controller.kv_store)
+        return False
 
 
 # configure logging

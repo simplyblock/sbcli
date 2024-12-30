@@ -4,7 +4,7 @@ import time
 import sys
 
 
-from simplyblock_core import constants, db_controller
+from simplyblock_core import constants, db_controller, utils
 from simplyblock_core.controllers import tasks_events, tasks_controller, device_controller
 from simplyblock_core.models.job_schedule import JobSchedule
 
@@ -84,43 +84,11 @@ def task_runner(task):
 
         mig_info = task.function_params["migration"]
         res = rpc_client.distr_migration_status(**mig_info)
-        if res:
-            res_data = res[0]
-            migration_status = res_data["status"]
-            if migration_status == "completed":
-                if res_data['error'] == 0:
-                    task.function_result = "Done"
-                    task.status = JobSchedule.STATUS_DONE
-                else:
-                    task.function_result = "Failed to complete migration, retrying"
-                    task.status = JobSchedule.STATUS_SUSPENDED
-                    task.retry += 1
-                    del task.function_params["migration"]
-                task.write_to_db(db_controller.kv_store)
-
-                dev_failed_task = tasks_controller.get_failed_device_mig_task( task.cluster_id, task.device_id)
-                if not dev_failed_task:
-                    device_controller.device_set_failed_and_migrated(task.device_id)
-
-                return True
-
-            elif migration_status == "failed":
-                task.function_result = "Failed to complete migration, retrying"
-                task.status = JobSchedule.STATUS_SUSPENDED
-                task.retry += 1
-                del task.function_params["migration"]
-                task.write_to_db(db_controller.kv_store)
-                return True
-
-            else:
-                task.function_result = f"Status: {migration_status}, progress:{res_data['progress']}"
-                task.write_to_db(db_controller.kv_store)
-        else:
-            logger.error("Failed to get mig status")
-
-    task.retry += 1
-    task.write_to_db(db_controller.kv_store)
-    return False
+        return utils.handle_task_result(task, res)
+    else:
+        task.retry += 1
+        task.write_to_db(db_controller.kv_store)
+        return False
 
 
 # configure logging
