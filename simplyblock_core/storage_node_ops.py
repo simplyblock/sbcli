@@ -518,7 +518,7 @@ def _create_storage_device_stack(rpc_client, nvme, snode, after_restart):
 
 def _create_device_partitions(rpc_client, nvme, snode, num_partitions_per_dev, jm_percent):
     nbd_device = rpc_client.nbd_start_disk(nvme.nvme_bdev)
-    # time.sleep(3)
+    time.sleep(3)
     if not nbd_device:
         logger.error(f"Failed to start nbd dev")
         return False
