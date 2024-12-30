@@ -21,6 +21,14 @@ services:
       SIZE_UTILIZATION: "${SIZE_UTILIZATION}"
       INTERVAL_MIN: "${INTERVAL_MIN}"
       STRATEGY: "${STRATEGY}"
+    deploy:
+      mode: replicated
+      placement:
+        constraints: [node.role == manager]
+    networks:
+      - monitoring-net
+    
+    
 
   opensearch:
     image: "opensearchproject/opensearch:2.4.0"
