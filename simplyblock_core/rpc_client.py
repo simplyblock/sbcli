@@ -516,6 +516,9 @@ class RPCClient:
     def distr_add_nodes(self, params):
         return self._request("distr_add_nodes", params)
 
+    def distr_add_devices(self, params):
+        return self._request("distr_add_devices", params)
+
     def distr_status_events_update(self, params):
         # ultra/DISTR_v2/src_code_app_spdk/specs/message_format_rpcs__distrib__v5.txt#L396C1-L396C27
         return self._request("distr_status_events_update", params)
@@ -952,3 +955,16 @@ class RPCClient:
             "registered_uuid": registered_uuid,
         }
         return self._request("bdev_lvol_clone_register", params)
+
+    def distr_replace_id_in_map_prob(self, storage_ID_from, storage_ID_to):
+        params = {
+            "storage_ID_from": storage_ID_from,
+            "storage_ID_to": storage_ID_to,
+        }
+        return self._request("distr_replace_id_in_map_prob", params)
+
+    def nvmf_set_max_subsystems(self, max_subsystems):
+        params = {
+            "max_subsystems": max_subsystems,
+        }
+        return self._request("nvmf_set_max_subsystems", params)

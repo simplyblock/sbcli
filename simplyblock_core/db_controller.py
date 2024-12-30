@@ -299,6 +299,6 @@ class DBController(metaclass=Singleton):
         for node in ret:
             if node.secondary_node_id == node_id \
                     and node.status == StorageNode.STATUS_ONLINE \
-                    and node.lvstore and node.lvols > 0:
+                    and node.lvstore:
                 nodes.append(node)
         return sorted(nodes, key=lambda x: x.create_dt)

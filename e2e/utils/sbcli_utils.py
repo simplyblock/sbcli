@@ -190,7 +190,7 @@ class SbcliUtils:
         node_uuid = ""
         data = self.get_request(api_url="/storagenode")
         for result in data['results']:
-            if len(result['lvols']) == 0 and result['is_secondary_node'] is False:
+            if result['lvols'] == 0 and result['is_secondary_node'] is False:
                 node_uuid = result['uuid']
                 break
         return node_uuid

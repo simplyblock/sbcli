@@ -47,7 +47,6 @@ def send_dev_status_event(device, dev_status, target_node=None):
         "storage_ID": storage_ID,
         "status": dev_status}
     events = {"events": [node_status_event]}
-    logger.debug(node_status_event)
     if target_node:
         snodes = [target_node]
     else:
@@ -82,7 +81,7 @@ def disconnect_device(device):
 
 def get_distr_cluster_map(snodes, target_node, distr_name=""):
     map_cluster = {}
-    map_prob = []
+    map_prob = {}
     local_node_index = 0
     db_controller = DBController()
     cluster = db_controller.get_cluster_by_id(target_node.cluster_id)
@@ -90,7 +89,7 @@ def get_distr_cluster_map(snodes, target_node, distr_name=""):
         if snode.is_secondary_node:
             continue
         dev_map = {}
-        dev_w_map = []
+        dev_w_map = {}
         node_w = 0
         for i, dev in enumerate(snode.nvme_devices):
             if dev.status in [NVMeDevice.STATUS_JM, NVMeDevice.STATUS_NEW]:
@@ -119,9 +118,9 @@ def get_distr_cluster_map(snodes, target_node, distr_name=""):
                 # "physical_label": dev.physical_label
             }
             if dev.status in [NVMeDevice.STATUS_FAILED, NVMeDevice.STATUS_FAILED_AND_MIGRATED]:
-                dev_w_map.append({"weight": dev_w, "id": -1})
+                dev_w_map[dev.cluster_device_order] = {"weight": dev_w, "id": -1}
             else:
-                dev_w_map.append({"weight": dev_w, "id": dev.cluster_device_order})
+                dev_w_map[dev.cluster_device_order] = {"weight": dev_w, "id": dev.cluster_device_order}
                 node_w += dev_w
 
         node_status = snode.status
@@ -130,16 +129,15 @@ def get_distr_cluster_map(snodes, target_node, distr_name=""):
         map_cluster[snode.get_id()] = {
             "status": node_status,
             "devices": dev_map}
-        map_prob.append({
+        map_prob[snode.get_id()] = {
             "weight": node_w,
-            "items": dev_w_map
-        })
+            "items": [d for k, d in dev_w_map.items()]}
     cl_map = {
         "name": distr_name,
         "UUID_node_target": target_node.get_id(),
         "timestamp": datetime.datetime.now().isoformat("T", "seconds")+'Z',
         "map_cluster": map_cluster,
-        "map_prob": map_prob
+        "map_prob": [d for k, d in map_prob.items()]
     }
     if cluster.enable_node_affinity:
         cl_map['ppln1'] = local_node_index
@@ -233,22 +231,74 @@ def send_cluster_map_to_distr(node, distr_name):
     return True
 
 
-def send_cluster_map_add_node(snode):
-    db_controller = DBController()
-    snodes = db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id)
-    for node in snodes:
-        if node.status != node.STATUS_ONLINE:
-            continue
-        logger.info(f"Sending to: {node.get_id()}")
-        rpc_client = RPCClient(node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password, timeout=5)
+def send_cluster_map_add_node(snode, target_node):
+    if target_node.status != StorageNode.STATUS_ONLINE:
+        return False
+    logger.info(f"Sending to: {target_node.get_id()}")
+    rpc_client = RPCClient(target_node.mgmt_ip, target_node.rpc_port, target_node.rpc_username, target_node.rpc_password, timeout=5)
 
-        cluster_map_data = get_distr_cluster_map([snode], node)
+    cluster_map_data = get_distr_cluster_map([snode], target_node)
+    cl_map = {
+        "map_cluster": cluster_map_data['map_cluster'],
+        "map_prob": cluster_map_data['map_prob']}
+    ret = rpc_client.distr_add_nodes(cl_map)
+    if not ret:
+        logger.error("Failed to send cluster map")
+        return False
+    return True
+
+
+"""
+
+{
+	"UUID_node" : "2373f2e5-609d-471c-8756-ba71c4e45069",
+        "devices": {
+            "4": {
+                "physical_label": "1",
+                "UUID": "67eadedc-94e6-4a47-a74a-10dbe847f3f9",
+                "bdev_name": "alloc0004",
+                "status": "online",
+                "weight": 1000
+            },
+            "5": {
+                "physical_label": "3",
+                "UUID": "6c304117-66b3-4508-b9fc-84d2dbd482ff",
+                "bdev_name": "alloc0005",
+                "status": "online",
+                "weight": 1000
+            }
+        }
+}
+"""
+def send_cluster_map_add_device(device: NVMeDevice, target_node):
+    db_controller = DBController()
+    dnode = db_controller.get_storage_node_by_id(device.node_id)
+    dev_w = int(device.size / (1024 * 1024 * 1024)) or 1
+    if target_node.status == StorageNode.STATUS_ONLINE:
+        rpc_client = RPCClient(target_node.mgmt_ip, target_node.rpc_port, target_node.rpc_username, target_node.rpc_password, timeout=3)
+        name = "not_connected"
+        dev_status = NVMeDevice.STATUS_UNAVAILABLE
+        if target_node.get_id() == dnode.get_id():
+            name = device.alceml_bdev
+            dev_status = device.status
+        else:
+            for dev2 in target_node.remote_devices:
+                if dev2.get_id() == device.get_id():
+                    name = dev2.remote_bdev
+                    dev_status = device.status
+                    break
+
         cl_map = {
-            "map_cluster": cluster_map_data['map_cluster'],
-            "map_prob": cluster_map_data['map_prob']}
-        ret = rpc_client.distr_add_nodes(cl_map)
+            "UUID_node": dnode.get_id(),
+            "devices" : {device.cluster_device_order: {
+                "UUID": device.get_id(),
+                "bdev_name": name,
+                "status": dev_status,
+                "weight": dev_w
+            }}
+        }
+        ret = rpc_client.distr_add_devices(cl_map)
         if not ret:
             logger.error("Failed to send cluster map")
-            logger.info(cl_map)
             return False
     return True

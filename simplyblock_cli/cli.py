@@ -1,9 +1,12 @@
+#!/usr/bin/env python
+# PYTHON_ARGCOMPLETE_OK
+
 import argparse
 import logging
 import math
 import re
 import sys
-
+import argcomplete
 from simplyblock_core import cluster_ops, utils
 from simplyblock_core import storage_node_ops as storage_ops
 from simplyblock_core import mgmt_node_ops as mgmt_ops
@@ -696,7 +699,7 @@ class CLIWrapper:
 
         self.parser.add_argument("--cmd", help='cmd', nargs = '+')
 
-
+        argcomplete.autocomplete(self.parser)
 
     def init_parser(self):
         self.parser = argparse.ArgumentParser(prog=constants.SIMPLY_BLOCK_CLI_NAME, description='SimplyBlock management CLI')
