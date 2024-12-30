@@ -302,7 +302,7 @@ class CLIWrapper:
         sub_command.add_argument("--enable-qos", help='Enable qos bdev for storage nodes', action='store_true', dest='enable_qos')
         sub_command.add_argument("--strict-node-anti-affinity", help='Enable strict node anti affinity for storage nodes', action='store_true')
         sub_command.add_argument("--scale-after-usage", help='scale cluster storage after percentage usage',required=False)
-        sub_command.add_argument("--scale-strategy", help='scale cluster with strategy INCREMENTAL,UNIFORM,ADDSNODE',choices=["INCREMENTAL","UNIFORM","ADDSNODE"],required=False)
+        sub_command.add_argument("--scale-strategy", help='scale cluster with strategy INCREMENTAL,UNIFORM,ADDSNODE',choices=["INCREMENTAL","UNIFORM","ADDSNODE"],required=False,default="ADDSNODE")
         sub_command.add_argument("--check-capacity-interval", help='how often to check cluster capacity(minutes)',required=False)
 
 
