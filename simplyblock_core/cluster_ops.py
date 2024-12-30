@@ -226,8 +226,8 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     log_level = "DEBUG" if constants.LOG_WEB_DEBUG else "INFO"
     
     
-    logger.info(f"Scale after usage: {c.scale_after_usage}, Scale strategy: {c.scale_strategy}, "
-            f"Check capacity interval: {c.check_capacity_interval}")
+    logger.info(f"Scale after usage: {type(c.scale_after_usage)}, Scale strategy: {type(c.scale_strategy)}, "
+            f"Check capacity interval: {type(c.check_capacity_interval)}")
         
     ret = scripts.deploy_stack(cli_pass, DEV_IP, constants.SIMPLY_BLOCK_DOCKER_IMAGE, c.secret, c.uuid,
                                log_del_interval, metrics_retention_period, log_level, c.grafana_endpoint,
