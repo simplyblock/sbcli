@@ -88,5 +88,5 @@ setup(
         '': ["/etc/simplyblock/requirements.txt"],
         '/etc/simplyblock': ["requirements.txt"]
     },
-    cmdclass={'install': install},
+    # cmdclass={'install': install},
 )
