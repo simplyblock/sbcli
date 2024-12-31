@@ -2705,11 +2705,6 @@ def recreate_lvstore_on_sec(snode):
             remote_rpc_client.bdev_distrib_force_to_non_leader(node.jm_vuid)
             time.sleep(2)
 
-        if node.jm_vuid:
-            ret = rpc_client.jc_explicit_synchronization(node.jm_vuid)
-            logger.info(f"JM Sync res: {ret}")
-            time.sleep(1)
-
         for lvol in lvol_list:
             is_created, error = lvol_controller.recreate_lvol_on_node(
                 lvol, snode, 1, ana_state="inaccessible")
