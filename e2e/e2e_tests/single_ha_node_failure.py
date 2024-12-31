@@ -67,7 +67,7 @@ class TestHASingleNodeFailure(TestClusterBase):
 
         no_lvol_node = None
         for node in self.sbcli_utils.get_storage_nodes()['results'][::-1]:
-            if len(node['lvols']) > 0 and node['is_secondary_node'] is False:
+            if node['lvols'] > 0 and node['is_secondary_node'] is False:
                 no_lvol_node = node
                 break
 

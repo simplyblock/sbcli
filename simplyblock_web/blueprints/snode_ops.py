@@ -218,7 +218,7 @@ def spdk_process_kill():
     node_docker = get_docker_client()
     for cont in node_docker.containers.list(all=True):
         if cont.attrs['Name'] == "/spdk" or cont.attrs['Name'] == "/spdk_proxy":
-            cont.stop(timeout=5)
+            cont.stop(timeout=3)
             cont.remove(force=True)
     return utils.get_response(True)
 

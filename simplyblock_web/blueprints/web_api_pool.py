@@ -160,8 +160,7 @@ def pool_capacity(uuid):
 
     out = []
     total_size = 0
-    for lvol_id in pool.lvols:
-        lvol = db_controller.get_lvol_by_id(lvol_id)
+    for lvol in db_controller.get_lvols_by_pool_id(uuid):
         total_size += lvol.size
         out.append({
             "device name": lvol.lvol_name,

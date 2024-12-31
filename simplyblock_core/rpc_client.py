@@ -66,7 +66,8 @@ class RPCClient:
         if ret_code == 200:
             try:
                 data = response.json()
-                logger.debug("Response json: %s", json.dumps(data))
+                if method != "bdev_get_bdevs":
+                    logger.debug("Response json: %s", json.dumps(data))
             except Exception:
                 logger.debug("Response ret_content: %s", ret_content)
                 return ret_content, None
@@ -401,7 +402,7 @@ class RPCClient:
             # "use_scheduling": True,
             "use_optimized": True,
             "pba_nbalign": 4096,
-            "use_map_whole_page_on_1st_write": True
+            "use_map_whole_page_on_1st_write": False
         }
         if alceml_cpu_mask:
             params["bdb_lcpu_mask"] = int(alceml_cpu_mask, 16)
@@ -515,6 +516,9 @@ class RPCClient:
     def distr_add_nodes(self, params):
         return self._request("distr_add_nodes", params)
 
+    def distr_add_devices(self, params):
+        return self._request("distr_add_devices", params)
+
     def distr_status_events_update(self, params):
         # ultra/DISTR_v2/src_code_app_spdk/specs/message_format_rpcs__distrib__v5.txt#L396C1-L396C27
         return self._request("distr_status_events_update", params)
@@ -535,27 +539,6 @@ class RPCClient:
             # "reconnect_delay_sec":1
         }
         return self._request("bdev_nvme_attach_controller", params)
-
-    def bdev_nvme_attach_controller_tcp_JM(self, name, nqn, ip, port):
-        return self.bdev_nvme_attach_controller_tcp(name, nqn, ip, port)
-        # params = {
-        #     "name": name,
-        #     "trtype": "tcp",
-        #     "traddr": ip,
-        #     "adrfam": "ipv4",
-        #     "trsvcid": str(port),
-        #     "subnqn": nqn,
-        #     "fabrics_connect_timeout_us": 100000,
-        #
-        #     "num_io_queues": 16384,
-        #     "ctrlr_loss_timeout_sec": 0,
-        #     "multipath": "disable",
-        #     "reconnect_delay_sec": 0,
-        #
-        #     "fast_io_fail_timeout_sec": 1,
-        #
-        # }
-        # return self._request("bdev_nvme_attach_controller", params)
 
     def bdev_nvme_attach_controller_tcp_caching(self, name, nqn, ip, port):
         params = {
@@ -954,3 +937,34 @@ class RPCClient:
             "key_name": name
         }
         return self._request("accel_crypto_key_destroy", params)
+
+    def bdev_lvol_snapshot_register(self, lvol_name, snapshot_name, registered_uuid, blobid):
+        params = {
+            "lvol_name": lvol_name,
+            "snapshot_name": snapshot_name,
+            "blobid": blobid,
+            "registered_uuid": registered_uuid,
+        }
+        return self._request("bdev_lvol_snapshot_register", params)
+
+    def bdev_lvol_clone_register(self, clone_name, snapshot_name, registered_uuid, blobid):
+        params = {
+            "snapshot_name": snapshot_name,
+            "clone_name": clone_name,
+            "blobid": blobid,
+            "registered_uuid": registered_uuid,
+        }
+        return self._request("bdev_lvol_clone_register", params)
+
+    def distr_replace_id_in_map_prob(self, storage_ID_from, storage_ID_to):
+        params = {
+            "storage_ID_from": storage_ID_from,
+            "storage_ID_to": storage_ID_to,
+        }
+        return self._request("distr_replace_id_in_map_prob", params)
+
+    def nvmf_set_max_subsystems(self, max_subsystems):
+        params = {
+            "max_subsystems": max_subsystems,
+        }
+        return self._request("nvmf_set_max_subsystems", params)

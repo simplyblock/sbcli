@@ -562,10 +562,10 @@ def device_set_failed(device_id):
         return True
 
     ret = device_set_state(device_id, NVMeDevice.STATUS_FAILED)
-    if ret:
-        for node in db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id):
-            if node.status == StorageNode.STATUS_ONLINE:
-                distr_controller.send_cluster_map_to_node(node)
+    for node in db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id):
+        if node.status == StorageNode.STATUS_ONLINE:
+            rpc_client = RPCClient(node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password)
+            rpc_client.distr_replace_id_in_map_prob(dev.cluster_device_order, -1)
 
     tasks_controller.add_device_failed_mig_task(device_id)
 
@@ -617,7 +617,7 @@ def add_device(device_id):
         for node in snodes:
             if node.status != StorageNode.STATUS_ONLINE:
                 continue
-            distr_controller.send_cluster_map_to_node(node)
+            distr_controller.send_cluster_map_add_device(device_obj, node)
 
         tasks_controller.add_new_device_mig_task(device_id)
         return device_id
@@ -664,7 +664,9 @@ def add_device(device_id):
         logger.error("failed to create devices")
         return False
 
-    distr_controller.send_cluster_map_to_node(snode)
+    for dev in new_devices:
+        distr_controller.send_cluster_map_add_device(dev, snode)
+
     logger.info("Make other nodes connect to the node devices")
     snodes = db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id)
     for node in snodes:
@@ -672,7 +674,8 @@ def add_device(device_id):
             continue
         node.remote_devices = storage_node_ops._connect_to_remote_devs(node)
         node.write_to_db()
-        distr_controller.send_cluster_map_to_node(node)
+        for dev in new_devices:
+            distr_controller.send_cluster_map_add_device(dev, node)
 
     for dev in new_devices:
         tasks_controller.add_new_device_mig_task(dev.get_id())
@@ -696,7 +699,14 @@ def add_device(device_id):
 
 
 def device_set_failed_and_migrated(device_id):
-    return device_set_state(device_id, NVMeDevice.STATUS_FAILED_AND_MIGRATED)
+    db_controller = DBController()
+    device_set_state(device_id, NVMeDevice.STATUS_FAILED_AND_MIGRATED)
+    dev = db_controller.get_storage_device_by_id(device_id)
+    for node in db_controller.get_storage_nodes_by_cluster_id(dev.cluster_id):
+        if node.status == StorageNode.STATUS_ONLINE:
+            rpc_client = RPCClient(node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password)
+            rpc_client.distr_replace_id_in_map_prob(dev.cluster_device_order, -1)
+    return True
 
 
 def set_jm_device_state(device_id, state):
@@ -717,15 +727,15 @@ def set_jm_device_state(device_id, state):
         snode.write_to_db(db_controller.kv_store)
 
     if snode.enable_ha_jm and state == NVMeDevice.STATUS_ONLINE:
-        rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password, timeout=5)
-        jm_bdev = f"jm_{snode.get_id()}"
-        subsystem_nqn = snode.subsystem + ":dev:" + jm_bdev
-
-        for iface in snode.data_nics:
-            if iface.ip4_address:
-                ret = rpc_client.nvmf_subsystem_listener_set_ana_state(
-                    subsystem_nqn, iface.ip4_address, "4420", True)
-                break
+        # rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password, timeout=5)
+        # jm_bdev = f"jm_{snode.get_id()}"
+        # subsystem_nqn = snode.subsystem + ":dev:" + jm_bdev
+        #
+        # for iface in snode.data_nics:
+        #     if iface.ip4_address:
+        #         ret = rpc_client.nvmf_subsystem_listener_set_ana_state(
+        #             subsystem_nqn, iface.ip4_address, "4420", True)
+        #         break
 
         # make other nodes connect to the new devices
         snodes = db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id)

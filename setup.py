@@ -2,6 +2,21 @@ import os
 
 from setuptools import setup, find_packages
 
+from pathlib import Path
+
+from setuptools.command.install import install as _install
+
+
+def _post_install():
+    from subprocess import call
+    call(['activate-global-python-argcomplete', '-y'])
+
+
+class install(_install):
+    def run(self):
+        _install.run(self)
+        self.execute(_post_install, (), msg="Running post install task")
+
 
 def get_env_var(name, default=None):
     if not name:
@@ -72,5 +87,6 @@ setup(
     package_data={
         '': ["/etc/simplyblock/requirements.txt"],
         '/etc/simplyblock': ["requirements.txt"]
-    }
+    },
+    cmdclass={'install': install},
 )

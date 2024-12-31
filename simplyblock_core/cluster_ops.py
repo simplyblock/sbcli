@@ -307,7 +307,7 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
     return cluster.get_id()
 
 
-def cluster_activate(cl_id, force=False):
+def cluster_activate(cl_id, force=False, force_lvstore_create=False):
     db_controller = DBController()
     cluster = db_controller.get_cluster_by_id(cl_id)
     if not cluster:
@@ -359,7 +359,7 @@ def cluster_activate(cl_id, force=False):
             continue
         if snode.status != StorageNode.STATUS_ONLINE:
             continue
-        if snode.lvstore:
+        if snode.lvstore and force_lvstore_create is False:
             logger.warning(f"Node {snode.get_id()} already has lvstore {snode.lvstore}")
             ret = storage_node_ops.recreate_lvstore(snode)
         else:
@@ -704,8 +704,9 @@ def update_cluster(cl_id):
         cluster_docker = utils.get_docker_client(cl_id)
         logger.info(f"Pulling image {constants.SIMPLY_BLOCK_DOCKER_IMAGE}")
         cluster_docker.images.pull(constants.SIMPLY_BLOCK_DOCKER_IMAGE)
+        image_without_tag = constants.SIMPLY_BLOCK_DOCKER_IMAGE.split(":")[0]
         for service in cluster_docker.services.list():
-            if service.attrs['Spec']['Labels']['com.docker.stack.image'] == constants.SIMPLY_BLOCK_DOCKER_IMAGE:
+            if image_without_tag in service.attrs['Spec']['Labels']['com.docker.stack.image']:
                 logger.info(f"Updating service {service.name}")
                 service.update(image=constants.SIMPLY_BLOCK_DOCKER_IMAGE, force_update=True)
         logger.info("Done")

@@ -20,7 +20,7 @@ on:
       sbcli_cmd:
         description: 'Command for sbcli execution'
         required: true
-        default: 'sbcli-main'
+        default: 'sbcli-dev'
       testname:
         description: 'Name of test to run. Empty to run all'
         required: false
@@ -235,7 +235,6 @@ jobs:
             --set logicalVolume.snapshot="True" \
             --set image.spdkcsi.tag=latest \
             --set image.simplyblock.tag=main \
-            --set storagenode.spdkImage=simplyblock/spdk:main-latest \
             --set logicalVolume.distr_ndcs="${NDCS}" \
             --set logicalVolume.distr_npcs="${NPCS}" \
             --set storagenode.create=true \

@@ -4,8 +4,8 @@ import threading
 import time
 
 
-from simplyblock_core import constants, db_controller, utils, rpc_client, distr_controller
-from simplyblock_core.controllers import events_controller, device_controller, lvol_events
+from simplyblock_core import constants, db_controller, utils, rpc_client, distr_controller, storage_node_ops
+from simplyblock_core.controllers import events_controller, device_controller, lvol_events, tasks_controller
 from simplyblock_core.models.lvol_model import LVol
 
 
@@ -74,29 +74,33 @@ def process_device_event(event):
 
 def process_lvol_event(event):
     if event.message in ["error_open", 'error_read', "error_write", "error_unmap"]:
-        # vuid = event.object_dict['vuid']
+        vuid = event.object_dict['vuid']
         node_id = event.node_id
-        lvols = []
-        for lv in db_controller.get_lvols():  # pass
-            if lv.node_id == node_id:
-                lvols.append(lv)
+        # storage_node_ops.set_node_status(node_id, StorageNode.STATUS_SUSPENDED)
+        # event_node_obj = db_controller.get_storage_node_by_id(node_id)
+        # tasks_controller.add_node_to_auto_restart(event_node_obj)
 
-        if not lvols:
-            logger.error(f"LVols on node {node_id} not found")
-            event.status = 'lvols_not_found'
-        else:
-            for lvol in lvols:
-                if lvol.status == LVol.STATUS_ONLINE:
-                    logger.info("Setting LVol to offline")
-                    lvol.io_error = True
-                    old_status = lvol.status
-                    lvol.status = LVol.STATUS_OFFLINE
-                    lvol.write_to_db(db_controller.kv_store)
-                    lvol_events.lvol_status_change(lvol, lvol.status, old_status, caused_by="monitor")
-                    lvol_events.lvol_io_error_change(lvol, True, False, caused_by="monitor")
-            event.status = 'processed'
+        # lvols = []
+        # for lv in db_controller.get_lvols():  # pass
+        #     if lv.node_id == node_id:
+        #         lvols.append(lv)
+        #
+        # if not lvols:
+        #     logger.error(f"LVols on node {node_id} not found")
+        #     event.status = 'lvols_not_found'
+        # else:
+        #     for lvol in lvols:
+        #         if lvol.status == LVol.STATUS_ONLINE:
+        #             logger.info("Setting LVol to offline")
+        #             lvol.io_error = True
+        #             old_status = lvol.status
+        #             lvol.status = LVol.STATUS_OFFLINE
+        #             lvol.write_to_db(db_controller.kv_store)
+        #             lvol_events.lvol_status_change(lvol, lvol.status, old_status, caused_by="monitor")
+        #             lvol_events.lvol_io_error_change(lvol, True, False, caused_by="monitor")
+        event.status = f'distr error {vuid}'
     else:
-        logger.error(f"Unknown LVol event message: {event.message}")
+        logger.error(f"Unknown event message: {event.message}")
         event.status = "event_unknown"
 
 

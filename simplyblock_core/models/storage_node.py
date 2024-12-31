@@ -45,7 +45,7 @@ class StorageNode(BaseNodeObject):
     jm_device: JMDevice = None
     jm_percent: int = 3
     jm_vuid: int = 0
-    lvols: List[str] = []
+    lvols: int = 0
     lvstore: str = ""
     lvstore_stack: List[dict] = []
     lvstore_stack_secondary_1: List[dict] = []

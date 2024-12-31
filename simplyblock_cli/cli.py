@@ -1,10 +1,13 @@
+#!/usr/bin/env python
+# PYTHON_ARGCOMPLETE_OK
+
 import argparse
 import logging
 import math
 import re
 import sys
-
-from simplyblock_core import cluster_ops, utils
+import argcomplete
+from simplyblock_core import cluster_ops, utils, db_controller
 from simplyblock_core import storage_node_ops as storage_ops
 from simplyblock_core import mgmt_node_ops as mgmt_ops
 from simplyblock_core import constants
@@ -59,11 +62,11 @@ class CLIWrapper:
 
         # delete storage node
         sub_command = self.add_sub_command(subparser, "delete", 'Delete storage node obj')
-        sub_command.add_argument("node_id", help='UUID of storage node')
+        sub_command.add_argument("node_id", help='UUID of storage node').completer = self._completer_get_sn_list
 
         # remove storage node
         sub_command = self.add_sub_command(subparser, "remove", 'Remove storage node')
-        sub_command.add_argument("node_id", help='UUID of storage node')
+        sub_command.add_argument("node_id", help='UUID of storage node').completer = self._completer_get_sn_list
         sub_command.add_argument("--force-remove", help='Force remove all LVols and snapshots',
                                  dest='force_remove', required=False, action='store_true')
         # sub_command.add_argument("--force-migrate", help='Force migrate All LVols to other nodes',
@@ -74,14 +77,14 @@ class CLIWrapper:
         sub_command.add_argument("--json", help='Print outputs in json format', action='store_true')
 
         sub_command = self.add_sub_command(subparser, "get", 'Get storage node info')
-        sub_command.add_argument("id", help='UUID of storage node')
+        sub_command.add_argument("id", help='UUID of storage node').completer = self._completer_get_sn_list
 
         # Restart storage node
         sub_command = self.add_sub_command(
             subparser, "restart", 'Restart a storage node', usage='All functions and device drivers will be reset. '
                                   'During restart, the node does not accept IO. In a high-availability setup, '
                                   'this will not impact operations')
-        sub_command.add_argument("node_id", help='UUID of storage node')
+        sub_command.add_argument("node_id", help='UUID of storage node').completer = self._completer_get_sn_list
         sub_command.add_argument("--max-lvol", help='Max lvol per storage node', dest='max_lvol', type=int, default=0)
         sub_command.add_argument("--max-snap", help='Max snapshot per storage node', dest='max_snap', type=int, default=0)
         sub_command.add_argument("--max-prov", help='Max provisioning size of all storage nodes', dest='max_prov', default="")
@@ -103,35 +106,35 @@ class CLIWrapper:
             subparser, "shutdown", 'Shutdown a storage node', usage='Once the command is issued, the node will stop accepting '
                                    'IO,but IO, which was previously received, will still be processed. '
                                    'In a high-availability setup, this will not impact operations.')
-        sub_command.add_argument("node_id", help='UUID of storage node')
+        sub_command.add_argument("node_id", help='UUID of storage node').completer = self._completer_get_sn_list
         sub_command.add_argument("--force", help='Force node shutdown', required=False, action='store_true')
 
         # Suspend storage node
         sub_command = self.add_sub_command(
             subparser, "suspend", 'Suspend a storage node', usage='The node will stop accepting new IO, but will finish '
                                   'processing any IO, which has been received already.')
-        sub_command.add_argument("node_id", help='UUID of storage node')
+        sub_command.add_argument("node_id", help='UUID of storage node').completer = self._completer_get_sn_list
         sub_command.add_argument("--force", help='Force node suspend', required=False, action='store_true')
 
         # Resume storage node
         sub_command = self.add_sub_command(subparser, "resume", 'Resume a storage node')
-        sub_command.add_argument("node_id", help='UUID of storage node')
+        sub_command.add_argument("node_id", help='UUID of storage node').completer = self._completer_get_sn_list
 
         sub_command = self.add_sub_command(subparser, "get-io-stats", 'Get node IO statistics')
-        sub_command.add_argument("node_id", help='Node ID')
+        sub_command.add_argument("node_id", help='UUID of storage node').completer = self._completer_get_sn_list
         sub_command.add_argument("--history", help='list history records -one for every 15 minutes- '
                                                    'for XX days and YY hours -up to 10 days in total-, format: XXdYYh')
         sub_command.add_argument("--records", help='Number of records, default: 20', type=int, default=20)
 
         sub_command = self.add_sub_command(
             subparser, 'get-capacity', 'Get node capacity statistics')
-        sub_command.add_argument("node_id", help='Node ID')
+        sub_command.add_argument("node_id", help='UUID of storage node').completer = self._completer_get_sn_list
         sub_command.add_argument("--history", help='list history records -one for every 15 minutes- '
                                                    'for XX days and YY hours -up to 10 days in total-, format: XXdYYh')
 
         # List storage devices of the storage node
         sub_command = self.add_sub_command(subparser, "list-devices", 'List storage devices')
-        sub_command.add_argument("node_id", help='the node\'s UUID')
+        sub_command.add_argument("node_id", help='UUID of storage node').completer = self._completer_get_sn_list
         sub_command.add_argument(
             "-s", '--sort', help='Sort the outputs', required=False, nargs=1, choices=['node-seq', 'dev-seq', 'serial'])
         sub_command.add_argument(
@@ -216,7 +219,7 @@ class CLIWrapper:
 
         # check storage node
         sub_command = self.add_sub_command(subparser, "check", 'Health check storage node')
-        sub_command.add_argument("id", help='UUID of storage node')
+        sub_command.add_argument("id", help='UUID of storage node').completer = self._completer_get_sn_list
 
         # check device
         sub_command = self.add_sub_command(subparser, "check-device", 'Health check device')
@@ -224,11 +227,11 @@ class CLIWrapper:
 
         # node info
         sub_command = self.add_sub_command(subparser, "info", 'Get node information')
-        sub_command.add_argument("id", help='Node UUID')
+        sub_command.add_argument("id", help='UUID of storage node').completer = self._completer_get_sn_list
 
         # node info-spdk
         sub_command = self.add_sub_command(subparser, "info-spdk", 'Get SPDK memory information')
-        sub_command.add_argument("id", help='Node UUID')
+        sub_command.add_argument("id", help='UUID of storage node').completer = self._completer_get_sn_list
 
         sub_command = self.add_sub_command(subparser, 'remove-jm-device', 'Remove JM device')
         sub_command.add_argument("jm_device_id", help='JM device ID')
@@ -239,17 +242,17 @@ class CLIWrapper:
         sub_command.add_argument("--force", help='Force device remove', required=False, action='store_true')
 
         sub_command = self.add_sub_command(subparser, 'send-cluster-map', 'send cluster map')
-        sub_command.add_argument("id", help='id')
+        sub_command.add_argument("id", help='UUID of storage node').completer = self._completer_get_sn_list
 
         sub_command = self.add_sub_command(subparser, 'get-cluster-map', 'get cluster map')
-        sub_command.add_argument("id", help='id')
+        sub_command.add_argument("id", help='UUID of storage node').completer = self._completer_get_sn_list
 
         sub_command = self.add_sub_command(subparser, 'make-primary',
                                            'In case of HA SNode, make the current node as primary')
-        sub_command.add_argument("id", help='id')
+        sub_command.add_argument("id", help='UUID of storage node').completer = self._completer_get_sn_list
 
         sub_command = self.add_sub_command(subparser, 'dump-lvstore','Dump lvstore data')
-        sub_command.add_argument("id", help='id')
+        sub_command.add_argument("id", help='UUID of storage node').completer = self._completer_get_sn_list
 
         # check lvol
         #
@@ -332,8 +335,9 @@ class CLIWrapper:
 
         # Activate cluster
         sub_command = self.add_sub_command(subparser, 'activate', 'Create distribs and raid0 bdevs on all the storage node and move the cluster to active state')
-        sub_command.add_argument("cluster_id", help='the cluster UUID')
+        sub_command.add_argument("cluster_id", help='the cluster UUID').completer = self._completer_get_cluster_list
         sub_command.add_argument("--force", help='Force recreate distr and lv stores', required=False, action='store_true')
+        sub_command.add_argument("--force-lvstore-create", help='Force recreate lv stores', required=False, action='store_true', dest='force_lvstore_create')
 
         # show cluster list
         self.add_sub_command(subparser, 'list', 'Show clusters list')
@@ -341,11 +345,11 @@ class CLIWrapper:
         # show cluster info
         sub_command = self.add_sub_command(
             subparser, 'status', 'Show cluster status')
-        sub_command.add_argument("cluster_id", help='the cluster UUID')
+        sub_command.add_argument("cluster_id", help='the cluster UUID').completer = self._completer_get_cluster_list
 
         # show cluster info
         sub_command = self.add_sub_command(subparser, 'get', 'Show cluster info')
-        sub_command.add_argument("id", help='the cluster UUID')
+        sub_command.add_argument("id", help='the cluster UUID').completer = self._completer_get_cluster_list
 
         #sub_command = self.add_sub_command(
         #    subparser, 'suspend', 'Suspend cluster')
@@ -357,14 +361,14 @@ class CLIWrapper:
 
         sub_command = self.add_sub_command(
             subparser, 'get-capacity', 'Get cluster capacity')
-        sub_command.add_argument("cluster_id", help='the cluster UUID')
+        sub_command.add_argument("cluster_id", help='the cluster UUID').completer = self._completer_get_cluster_list
         sub_command.add_argument("--json", help='Print json output', required=False, action='store_true')
         sub_command.add_argument("--history", help='(XXdYYh), list history records (one for every 15 minutes) '
                                                    'for XX days and YY hours (up to 10 days in total).')
 
         sub_command = self.add_sub_command(
             subparser, 'get-io-stats', 'Get cluster IO statistics')
-        sub_command.add_argument("cluster_id", help='the cluster UUID')
+        sub_command.add_argument("cluster_id", help='the cluster UUID').completer = self._completer_get_cluster_list
         sub_command.add_argument("--records", help='Number of records, default: 20', type=int, default=20)
         sub_command.add_argument("--history", help='(XXdYYh), list history records (one for every 15 minutes) '
                                                    'for XX days and YY hours (up to 10 days in total).')
@@ -375,38 +379,38 @@ class CLIWrapper:
 
         # get-logs
         sub_command = self.add_sub_command(subparser, 'get-logs', 'Returns cluster status logs')
-        sub_command.add_argument("cluster_id", help='cluster uuid')
+        sub_command.add_argument("cluster_id", help='cluster uuid').completer = self._completer_get_cluster_list
 
         # get-secret
         sub_command = self.add_sub_command(subparser, 'get-secret', 'Get cluster secret')
-        sub_command.add_argument("cluster_id", help='cluster uuid')
+        sub_command.add_argument("cluster_id", help='cluster uuid').completer = self._completer_get_cluster_list
 
         # set-secret
         sub_command = self.add_sub_command(subparser, 'upd-secret', 'Updates the cluster secret')
-        sub_command.add_argument("cluster_id", help='cluster uuid')
+        sub_command.add_argument("cluster_id", help='cluster uuid').completer = self._completer_get_cluster_list
         sub_command.add_argument("secret", help='new 20 characters password')
 
         # check cluster
         sub_command = self.add_sub_command(subparser, "check", 'Health check cluster')
-        sub_command.add_argument("id", help='cluster UUID')
+        sub_command.add_argument("id", help='cluster UUID').completer = self._completer_get_cluster_list
 
         # update cluster
         sub_command = self.add_sub_command(subparser, "update", 'Update cluster mgmt services')
-        sub_command.add_argument("id", help='cluster UUID')
+        sub_command.add_argument("id", help='cluster UUID').completer = self._completer_get_cluster_list
 
         # graceful-shutdown storage nodes
         sub_command = self.add_sub_command(subparser, "graceful-shutdown", 'Graceful shutdown of storage nodes')
-        sub_command.add_argument("id", help='cluster UUID')
+        sub_command.add_argument("id", help='cluster UUID').completer = self._completer_get_cluster_list
 
         # graceful-startup storage nodes
         sub_command = self.add_sub_command(subparser, "graceful-startup", 'Graceful startup of storage nodes')
-        sub_command.add_argument("id", help='cluster UUID')
+        sub_command.add_argument("id", help='cluster UUID').completer = self._completer_get_cluster_list
         sub_command.add_argument("--clear-data", help='clear Alceml data', dest='clear_data', action='store_true')
         sub_command.add_argument("--spdk-image", help='SPDK image uri', dest='spdk_image')
 
         # get tasks list
         sub_command = self.add_sub_command(subparser, "list-tasks", 'List tasks by cluster ID')
-        sub_command.add_argument("cluster_id", help='UUID of the cluster')
+        sub_command.add_argument("cluster_id", help='UUID of the cluster').completer = self._completer_get_cluster_list
 
         # cancel task
         sub_command = self.add_sub_command(subparser, "cancel-task", 'Cancel task by ID')
@@ -416,7 +420,7 @@ class CLIWrapper:
         sub_command = self.add_sub_command(
             subparser, 'delete', 'Delete Cluster',
             usage="This is only possible, if no storage nodes and pools are attached to the cluster")
-        sub_command.add_argument("id", help='cluster UUID')
+        sub_command.add_argument("id", help='cluster UUID').completer = self._completer_get_cluster_list
 
 
         #
@@ -694,7 +698,7 @@ class CLIWrapper:
 
         self.parser.add_argument("--cmd", help='cmd', nargs = '+')
 
-
+        argcomplete.autocomplete(self.parser)
 
     def init_parser(self):
         self.parser = argparse.ArgumentParser(prog=constants.SIMPLY_BLOCK_CLI_NAME, description='SimplyBlock management CLI')
@@ -955,7 +959,7 @@ class CLIWrapper:
                 ret = self.cluster_add(args)
             elif sub_command == 'activate':
                 cluster_id = args.cluster_id
-                ret = cluster_ops.cluster_activate(cluster_id, args.force)
+                ret = cluster_ops.cluster_activate(cluster_id, args.force, args.force_lvstore_create)
             elif sub_command == 'status':
                 cluster_id = args.cluster_id
                 ret = cluster_ops.show_cluster(cluster_id)
@@ -1397,6 +1401,15 @@ class CLIWrapper:
 
     def validate_cpu_mask(self, spdk_cpu_mask):
         return re.match("^(0x|0X)?[a-fA-F0-9]+$", spdk_cpu_mask)
+
+    def _completer_get_cluster_list(self, prefix, parsed_args, **kwargs):
+        db = db_controller.DBController()
+        return (cluster.get_id() for cluster in db.get_clusters() if cluster.get_id().startswith(prefix))
+
+
+    def _completer_get_sn_list(self, prefix, parsed_args, **kwargs):
+        db = db_controller.DBController()
+        return (cluster.get_id() for cluster in db.get_storage_nodes() if cluster.get_id().startswith(prefix))
 
 
 def main():
