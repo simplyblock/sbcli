@@ -1380,13 +1380,10 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
             continue
         ret = distr_controller.send_cluster_map_add_node(snode, node)
 
-    # time.sleep(3)
-
     for dev in snode.nvme_devices:
-        # distr_controller.send_dev_status_event(dev, NVMeDevice.STATUS_ONLINE)
-        tasks_controller.add_new_device_mig_task(dev.get_id())
+        if dev.status == NVMeDevice.STATUS_ONLINE:
+            tasks_controller.add_new_device_mig_task(dev.get_id())
 
-    # time.sleep(3)
 
     nodes = db_controller.get_storage_nodes_by_cluster_id(cluster_id)
     # Create distribs
@@ -2227,7 +2224,6 @@ def resume_storage_node(node_id):
         snode.mgmt_ip, snode.rpc_port,
         snode.rpc_username, snode.rpc_password)
 
-
     nodes = []
     if snode.is_secondary_node:
         ret = db_controller.get_primary_storage_nodes_by_secondary_node_id(node_id)
@@ -2248,49 +2244,15 @@ def resume_storage_node(node_id):
                             ret = rpc_client.nvmf_subsystem_listener_set_ana_state(
                                 lvol.nqn, iface.ip4_address, "4420", False)
 
-    for node in nodes:
-        if node.lvols == 0 or node.get_id() != snode.get_id():
-            continue
 
-        if node.secondary_node_id:
-            sec_node = db_controller.get_storage_node_by_id(node.secondary_node_id)
-            if sec_node and sec_node.status == StorageNode.STATUS_ONLINE:
-                remote_rpc_client = RPCClient(sec_node.mgmt_ip, sec_node.rpc_port, sec_node.rpc_username, sec_node.rpc_password)
-
-                for lvol in db_controller.get_lvols_by_node_id(node.get_id()):
-                    for iface in sec_node.data_nics:
-                        if iface.ip4_address:
-                            ret = remote_rpc_client.nvmf_subsystem_listener_set_ana_state(
-                                    lvol.nqn, iface.ip4_address, "4420", False, ana="inaccessible")
-
-                remote_rpc_client.bdev_lvol_set_leader(False, lvs_name=node.lvstore)
-                remote_rpc_client.bdev_distrib_force_to_non_leader(node.jm_vuid)
-                time.sleep(1)
-
-        if node.jm_vuid:
-            ret = rpc_client.jc_explicit_synchronization(node.jm_vuid)
-            logger.info(f"JM Sync res: {ret}")
-            time.sleep(1)
-
-        for lvol in db_controller.get_lvols_by_node_id(node.get_id()):
-            for iface in node.data_nics:
+    if not snode.is_secondary_node and snode.lvols > 0:
+        for lvol in db_controller.get_lvols_by_node_id(snode.get_id()):
+            for iface in snode.data_nics:
                 if iface.ip4_address:
                     ret = rpc_client.nvmf_subsystem_listener_set_ana_state(
                             lvol.nqn, iface.ip4_address, "4420", True)
 
-        time.sleep(2)
-
-        if node.secondary_node_id:
-            sec_node = db_controller.get_storage_node_by_id(node.secondary_node_id)
-            if sec_node and sec_node.status == StorageNode.STATUS_ONLINE:
-                remote_rpc_client = RPCClient(sec_node.mgmt_ip, sec_node.rpc_port, sec_node.rpc_username,
-                                              sec_node.rpc_password)
-
-                for lvol in db_controller.get_lvols_by_node_id(node.get_id()):
-                    for iface in sec_node.data_nics:
-                        if iface.ip4_address:
-                            ret = remote_rpc_client.nvmf_subsystem_listener_set_ana_state(
-                                lvol.nqn, iface.ip4_address, "4420", False)
+        time.sleep(1)
 
     logger.info("Setting node status to online")
     set_node_status(snode.get_id(), StorageNode.STATUS_ONLINE)
@@ -2688,12 +2650,6 @@ def recreate_lvstore_on_sec(snode):
 
         lvol_list = db_controller.get_lvols_by_node_id(node.get_id())
 
-        ret, err = _create_bdev_stack(snode, node.lvstore_stack, primary_node=node)
-        ret = rpc_client.bdev_examine(node.raid)
-        ret = rpc_client.bdev_wait_for_examine()
-
-        # time.sleep(2)
-
         if node.status == StorageNode.STATUS_ONLINE:
             for lvol in lvol_list:
                 for iface in node.data_nics:
@@ -2703,7 +2659,11 @@ def recreate_lvstore_on_sec(snode):
 
             remote_rpc_client.bdev_lvol_set_leader(False, lvs_name=node.lvstore)
             remote_rpc_client.bdev_distrib_force_to_non_leader(node.jm_vuid)
-            time.sleep(2)
+
+        ret, err = _create_bdev_stack(snode, node.lvstore_stack, primary_node=node)
+        ret = rpc_client.bdev_examine(node.raid)
+        ret = rpc_client.bdev_wait_for_examine()
+        ret = rpc_client.bdev_lvol_set_lvs_groupid(node.lvstore, node.jm_vuid)
 
         for lvol in lvol_list:
             is_created, error = lvol_controller.recreate_lvol_on_node(
@@ -2727,9 +2687,6 @@ def recreate_lvstore_on_sec(snode):
                         ret = remote_rpc_client.nvmf_subsystem_listener_set_ana_state(
                             lvol.nqn, iface.ip4_address, "4420", True)
 
-            # remote_rpc_client.bdev_lvol_set_leader(False, lvs_name=node.lvstore)
-            # remote_rpc_client.bdev_distrib_force_to_non_leader(node.jm_vuid)
-            # time.sleep(2)
             time.sleep(5)
 
         for lvol in lvol_list:
@@ -2747,31 +2704,6 @@ def recreate_lvstore(snode):
     if snode.is_secondary_node:
         return recreate_lvstore_on_sec(snode)
 
-    # rpc_client = RPCClient(
-    #     snode.mgmt_ip, snode.rpc_port,
-    #     snode.rpc_username, snode.rpc_password)
-    #
-    # ret, err = _create_bdev_stack(snode, [], primary_node=snode)
-    #
-    # if err:
-    #     logger.error(f"Failed to recreate lvstore on node {snode.get_id()}")
-    #     logger.error(err)
-    #     return False
-    #
-    # time.sleep(1)
-    # rpc_client.bdev_distrib_force_to_non_leader(snode.jm_vuid)
-    # time.sleep(1)
-    # ret = rpc_client.bdev_examine(snode.raid)
-    # ret = rpc_client.bdev_wait_for_examine()
-
-
-    # time.sleep(1)
-    # if snode.jm_vuid:
-    #     ret = rpc_client.jc_explicit_synchronization(snode.jm_vuid)
-    #     logger.info(f"JM Sync res: {ret}")
-    #     time.sleep(1)
-    # rpc_client.bdev_distrib_force_to_non_leader(snode.jm_vuid)
-    # time.sleep(1)
     sec_node = None
     lvol_list = db_controller.get_lvols_by_node_id(snode.get_id())
     if snode.secondary_node_id:
@@ -2786,10 +2718,8 @@ def recreate_lvstore(snode):
                             ret = sec_rpc_client.nvmf_subsystem_listener_set_ana_state(
                                 lvol.nqn, iface.ip4_address, "4420", False, "inaccessible")
 
-            time.sleep(1)
             sec_rpc_client.bdev_lvol_set_leader(False, lvs_name=snode.lvstore)
             sec_rpc_client.bdev_distrib_force_to_non_leader(snode.jm_vuid)
-            time.sleep(1)
 
     rpc_client = RPCClient(
         snode.mgmt_ip, snode.rpc_port,
@@ -2802,35 +2732,13 @@ def recreate_lvstore(snode):
         logger.error(err)
         return False
 
-    # time.sleep(1)
-    # rpc_client.bdev_distrib_force_to_non_leader(snode.jm_vuid)
-    # time.sleep(1)
     ret = rpc_client.bdev_examine(snode.raid)
     ret = rpc_client.bdev_wait_for_examine()
-
-    # rpc_client.bdev_lvol_set_leader(False, lvs_name=snode.lvstore)
-    # rpc_client.bdev_distrib_force_to_non_leader(snode.jm_vuid)
-    # time.sleep(1)
-
-
-    # time.sleep(1)
-    #
-    # ret, err = _create_bdev_stack(snode, [], primary_node=snode)
-    #
-    # if err:
-    #     logger.error(f"Failed to recreate lvstore on node {snode.get_id()}")
-    #     logger.error(err)
-    #     # return False
-    #
-    # ret = rpc_client.bdev_examine(snode.raid)
-    # ret = rpc_client.bdev_wait_for_examine()
-
+    ret = rpc_client.bdev_lvol_set_lvs_groupid(snode.lvstore, snode.jm_vuid)
 
     if snode.jm_vuid:
         ret = rpc_client.jc_explicit_synchronization(snode.jm_vuid)
         logger.info(f"JM Sync res: {ret}")
-
-    # ret = rpc_client.bdev_wait_for_examine()
 
     for lvol in lvol_list:
         lvol_obj = db_controller.get_lvol_by_id(lvol.get_id())
@@ -3009,10 +2917,11 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
         temp_rpc_client = RPCClient(
                 sec_node_1.mgmt_ip, sec_node_1.rpc_port,
                 sec_node_1.rpc_username, sec_node_1.rpc_password)
-        # time.sleep(5)
+
         ret = temp_rpc_client.bdev_examine(snode.raid)
-        # time.sleep(1)
         ret = temp_rpc_client.bdev_wait_for_examine()
+        ret = temp_rpc_client.bdev_lvol_set_lvs_groupid(snode.lvstore, snode.jm_vuid)
+
         sec_node_1.write_to_db()
 
     return True
@@ -3069,17 +2978,13 @@ def _create_bdev_stack(snode, lvstore_stack=None, primary_node=False):
 
         elif type == "bdev_lvstore" and lvstore_stack and not snode.is_secondary_node:
             ret = rpc_client.create_lvstore(**params)
+            if ret and snode.jm_vuid > 0:
+                rpc_client.bdev_lvol_set_lvs_groupid(snode.lvstore, snode.jm_vuid)
 
         elif type == "bdev_ptnonexcl":
             ret = rpc_client.bdev_PT_NoExcl_create(**params)
 
         elif type == "bdev_raid":
-            #
-            # # sync jm
-            # if snode.jm_vuid:
-            #     ret = rpc_client.jc_explicit_synchronization(snode.jm_vuid)
-            #     logger.info(f"JM Sync res: {ret}")
-            #     # time.sleep(3)
 
             distribs_list = bdev["distribs_list"]
             strip_size_kb = params["strip_size_kb"]

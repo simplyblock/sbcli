@@ -968,3 +968,10 @@ class RPCClient:
             "max_subsystems": max_subsystems,
         }
         return self._request("nvmf_set_max_subsystems", params)
+
+    def bdev_lvol_set_lvs_groupid(self, lvs_name, groupid):
+        params = {
+            "groupid": groupid,
+            "lvs_name": lvs_name,
+        }
+        return self._request("bdev_lvol_set_lvs_groupid", params)
