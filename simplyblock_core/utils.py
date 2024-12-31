@@ -662,7 +662,7 @@ def strfdelta(tdelta):
     return out.strip()
 
 
-def handle_task_result(task: JobSchedule, res: dict, allowed_error_codes: list[int]=[]):
+def handle_task_result(task: JobSchedule, res: dict, allowed_error_codes = None):
     if res:
         res_data = res[0]
         migration_status = res_data.get("status")
