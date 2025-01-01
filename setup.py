@@ -9,10 +9,10 @@ from setuptools.command.install import install as _install
 
 def _post_install():
     from subprocess import getstatusoutput
-    _, out = getstatusoutput('activate-global-python-argcomplete')
+    _, out = getstatusoutput('activate-global-python-argcomplete;env')
     print(out)
 
-    if "zsh" in os.environ.get("SHELL"):
+    if "zsh" in os.environ.get("SHELL", ""):
         path = f"{os.environ.get('HOME')}/.zshenv"
     else:
         path = f"{os.environ.get('HOME')}/.bash_completion"
