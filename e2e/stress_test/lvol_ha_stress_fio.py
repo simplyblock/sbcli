@@ -96,7 +96,7 @@ class TestLvolHACluster(FioWorkloadTest):
             for snap_idx in range(1, self.snapshot_per_lvol + 1):
                 snapshot_name = f"{self.snapshot_name}_{idx + 1}_{snap_idx}"
                 self.ssh_obj.add_snapshot(node=self.node, lvol_id=lvol_id, snapshot_name=snapshot_name)
-                self.lvol_mount_details[lvol_id]["snapshot"].append(snapshot_name)
+                self.lvol_mount_details[lvol_id]["snapshots"].append(snapshot_name)
         self.logger.info("Snapshots created.")
 
     # def fill_volumes(self):
