@@ -133,6 +133,11 @@ class TestFailoverScenariosStorageNodes(TestLvolHAClusterWithClones):
         # Run failover scenarios sequentially
         self.logger.info("Running failover scenarios.")
         self.run_failover_scenario(failover_type="graceful_shutdown")
+
+        self.common_utils.manage_fio_threads(node=self.node, threads=self.fio_threads, timeout=10000)
+
+        for thread in self.fio_threads:
+            thread.join()
         # self.run_failover_scenario(failover_type="container_stop")
         # self.run_failover_scenario(failover_type="network_interrupt")
         # self.run_failover_scenario(failover_type="instance_stop")
