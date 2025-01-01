@@ -60,7 +60,8 @@ class TestLvolHACluster(FioWorkloadTest):
                    "Device": None,
                    "MD5": None,
                    "FS": fs_type,
-                   "Log": f"{self.log_path}/{lvol_name}.log"
+                   "Log": f"{self.log_path}/{lvol_name}.log",
+                   "snapshots": []
             }
             connect_ls = self.sbcli_utils.get_lvol_connect_str(lvol_name=lvol_name)
 
@@ -89,12 +90,13 @@ class TestLvolHACluster(FioWorkloadTest):
         self.logger.info("Completed lvol creation.")
 
     def create_snapshots(self):
-        """Create 3000 snapshots for existing lvols."""
-        self.logger.info("Creating 3000 snapshots.")
+        """Create given number of snapshots for existing lvols."""
+        self.logger.info("Creating given number of snapshots.")
         for idx, lvol_id in enumerate(list(self.lvol_mount_details.keys())):
             for snap_idx in range(1, self.snapshot_per_lvol + 1):
                 snapshot_name = f"{self.snapshot_name}_{idx + 1}_{snap_idx}"
                 self.ssh_obj.add_snapshot(node=self.node, lvol_id=lvol_id, snapshot_name=snapshot_name)
+                self.lvol_mount_details[lvol_id]["snapshot"].append(snapshot_name)
         self.logger.info("Snapshots created.")
 
     # def fill_volumes(self):

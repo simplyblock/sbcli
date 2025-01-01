@@ -3,6 +3,8 @@ from logger_config import setup_logger
 from datetime import datetime
 from lvol_ha_stress_fio import TestLvolHACluster
 import threading
+from exceptions.custom_exception import LvolNotConnectException
+
 
 class TestLvolHAClusterWithClones(TestLvolHACluster):
     """
@@ -13,50 +15,100 @@ class TestLvolHAClusterWithClones(TestLvolHACluster):
         super().__init__(**kwargs)
         self.logger = setup_logger(__name__)
         self.clone_name = "clone"
-        self.total_clones = 10
+        self.lvol_size = "50G"
+        self.fio_size = "1G"
+        self.total_lvols = 30
+        self.snapshot_per_lvol = 7
+        self.total_clones_per_lvol = 1
+        self.fio_threads = []
+        self.lvol_node = None
+        self.clone_mount_details = {}
 
     def create_clones(self):
         """Create clones for snapshots."""
         self.logger.info("Creating clones from snapshots.")
         for idx, lvol_id in enumerate(list(self.lvol_mount_details.keys())):
-            snapshot_name = f"{self.snapshot_name}_{idx + 1}_1"
-            for clone_idx in range(1, self.total_clones + 1):
+            snapshot_name = self.lvol_mount_details[lvol_id]["snapshot"][0]
+            snapshot_id = self.ssh_obj.get_snapshot_id(node=self.node, snapshot_name=snapshot_name)
+            self.lvol_mount_details[lvol_id]["clones"] = []
+            for clone_idx in range(1, self.total_clones_per_lvol + 1):
                 clone_name = f"{self.clone_name}_{idx + 1}_{clone_idx}"
-                self.ssh_obj.create_clone(
-                    node=self.node, snapshot_name=snapshot_name, clone_name=clone_name
+                self.ssh_obj.add_clone(
+                    node=self.node, snapshot_id=snapshot_id, clone_name=clone_name
                 )
+                clone_id = self.sbcli_utils.get_lvol_id(lvol_name=clone_name)
+                connect_ls = self.sbcli_utils.get_lvol_connect_str(lvol_name=clone_name)
+
+                self.lvol_mount_details[lvol_id]["clones"].append(clone_id)
+                self.clone_mount_details[clone_id] = {
+                   "Name": clone_name,
+                   "Command": connect_ls,
+                   "Mount": None,
+                   "Device": None,
+                   "MD5": None,
+                   "FS": self.lvol_mount_details[lvol_id]["FS"],
+                   "Log": f"{self.log_path}/{clone_name}.log",
+                   "snapshot": snapshot_name
+                }
+
+                initial_devices = self.ssh_obj.get_devices(node=self.node)
+                for connect_str in connect_ls:
+                    self.ssh_obj.exec_command(node=self.node, command=connect_str)
+
+                sleep_n_sec(3)
+                final_devices = self.ssh_obj.get_devices(node=self.node)
+                clone_device = None
+                for device in final_devices:
+                    if device not in initial_devices:
+                        clone_device = f"/dev/{device.strip()}"
+                        break
+                if not clone_device:
+                    raise LvolNotConnectException("Clone did not connect")
+                self.clone_mount_details[clone_id]["Device"] = clone_device
+
+                # Mount and Run FIO
+                mount_point = f"{self.mount_path}/{clone_name}"
+                self.ssh_obj.mount_path(node=self.node, device=clone_device, mount_path=mount_point)
+                self.clone_mount_details[clone_id]["Mount"] = mount_point
         self.logger.info("Clones created successfully.")
 
-    def run_fio_on_clones(self):
-        """Run FIO workloads on all clones."""
-        self.logger.info("Running FIO workloads on clones.")
-        fio_threads = []
+    def run_fio_on_lvols_clones(self):
+        """Run FIO workloads on all lvols and clones."""
+        self.logger.info("Running FIO workloads on lvols and clones.")
 
-        for idx, lvol_id in enumerate(self.lvol_mount_details.keys()):
-            for clone_idx in range(1, self.total_clones + 1):
-                clone_name = f"{self.clone_name}_{idx + 1}_{clone_idx}"
-                mount_path = f"{self.mount_path}/{clone_name}"
-                log_file = f"{self.log_path}/{clone_name}.log"
+        for _, lvol_details in self.lvol_mount_details.items():
+            fio_thread = threading.Thread(
+                target=self.ssh_obj.run_fio_test,
+                args=(self.node, None, lvol_details["Mount"], lvol_details["Log"]),
+                kwargs={
+                    "size": self.fio_size,
+                    "name": f"{lvol_details['Name']}_fio",
+                    "rw": "randrw",
+                    "bs": "4K-128K",
+                    "numjobs": 32,
+                    "iodepth": 512,
+                },
+            )
+            fio_thread.start()
+            self.fio_threads.append(fio_thread)
 
-                fio_thread = threading.Thread(
-                    target=self.ssh_obj.run_fio_test,
-                    args=(self.node, None, mount_path, log_file),
-                    kwargs={
-                        "size": self.fio_size,
-                        "name": f"{clone_name}_fio",
-                        "rw": "randrw",
-                        "bs": "4K-128K",
-                        "numjobs": 32,
-                        "iodepth": 512,
-                    },
-                )
-                fio_thread.start()
-                fio_threads.append(fio_thread)
+        for _, clone_details in self.clone_mount_details.items():
+            fio_thread = threading.Thread(
+                target=self.ssh_obj.run_fio_test,
+                args=(self.node, None, clone_details["Mount"], clone_details["Log"]),
+                kwargs={
+                    "size": self.fio_size,
+                    "name": f"{clone_details['Name']}_fio",
+                    "rw": "randrw",
+                    "bs": "4K-128K",
+                    "numjobs": 32,
+                    "iodepth": 512,
+                },
+            )
+            fio_thread.start()
+            self.fio_threads.append(fio_thread)
 
-        for thread in fio_threads:
-            thread.join()
-
-        self.logger.info("FIO workloads on clones completed.")
+        self.logger.info("FIO workloads on lvols and clones started.")
 
 class TestFailoverScenariosStorageNodes(TestLvolHAClusterWithClones):
     """
@@ -70,15 +122,13 @@ class TestFailoverScenariosStorageNodes(TestLvolHAClusterWithClones):
         # Ensure the setup is performed once
         self.logger.info("Performing initial setup.")
         self.node = self.mgmt_nodes[0]
-        self.ssh_obj.make_directory(node=self.node, dir_name=self.log_path)
+
         self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
-        self.lvol_node = self.sbcli_utils.get_node_without_lvols()
 
         self.create_lvols()
         self.create_snapshots()
         self.create_clones()
-        self.fill_volumes()
-        self.run_fio_on_clones()
+        self.run_fio_on_lvols_clones()
 
         # Run failover scenarios sequentially
         self.logger.info("Running failover scenarios.")
