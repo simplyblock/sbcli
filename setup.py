@@ -8,8 +8,16 @@ from setuptools.command.install import install as _install
 
 
 def _post_install():
-    from subprocess import call
-    call(['activate-global-python-argcomplete', '-y'])
+    from subprocess import getstatusoutput
+    _, out = getstatusoutput('activate-global-python-argcomplete')
+    print(out)
+
+    if "zsh" in os.environ.get("SHELL"):
+        path = f"{os.environ.get('HOME')}/.zshenv"
+    else:
+        path = f"{os.environ.get('HOME')}/.bash_completion"
+    if os.path.isfile(path):
+        _, out = getstatusoutput(f'source {path}')
 
 
 class install(_install):
@@ -88,5 +96,5 @@ setup(
         '': ["/etc/simplyblock/requirements.txt"],
         '/etc/simplyblock': ["requirements.txt"]
     },
-    # cmdclass={'install': install},
+    cmdclass={'install': install},
 )
