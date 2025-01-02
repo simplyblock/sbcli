@@ -2788,22 +2788,21 @@ def recreate_lvstore(snode):
 
     time.sleep(2)
     lv = rpc_client.bdev_lvol_get_lvstores(snode.lvstore)
-    print("lvstore:")
-    print(lv)
-    lvs = [dev['name'] for dev in rpc_client.get_bdevs() if "lvol" in str(dev['name']).lower()]
-    print("lvols")
-    print(lvs)
+    print(f"lvstore: {lv}")
+    bdevs = [dev['name'] for dev in rpc_client.get_bdevs()]
+    print("bdevs")
+    print(bdevs)
 
     print("after examine")
     rpc_client.bdev_lvol_set_lvs_groupid(snode.lvstore, snode.jm_vuid)
     rpc_client.bdev_distrib_force_to_non_leader(snode.jm_vuid)
     time.sleep(2)
+
     lv = rpc_client.bdev_lvol_get_lvstores(snode.lvstore)
-    print("lvstore:")
-    print(lv)
-    lvs = [dev['name'] for dev in rpc_client.get_bdevs() if "lvol" in str(dev['name']).lower()]
-    print("lvols")
-    print(lvs)
+    print(f"lvstore: {lv}")
+    bdevs = [dev['name'] for dev in rpc_client.get_bdevs()]
+    print("bdevs")
+    print(bdevs)
 
     sec_node = None
     lvol_list = db_controller.get_lvols_by_node_id(snode.get_id())
@@ -2826,12 +2825,12 @@ def recreate_lvstore(snode):
     time.sleep(3)
 
     print("after sec is suspended")
+
     lv = rpc_client.bdev_lvol_get_lvstores(snode.lvstore)
-    print("lvstore:")
-    print(lv)
-    lvs = [dev['name'] for dev in rpc_client.get_bdevs() if "lvol" in str(dev['name']).lower()]
-    print("lvols")
-    print(lvs)
+    print(f"lvstore: {lv}")
+    bdevs = [dev['name'] for dev in rpc_client.get_bdevs()]
+    print("bdevs")
+    print(bdevs)
 
     if snode.jm_vuid:
         ret = rpc_client.jc_explicit_synchronization(snode.jm_vuid)
@@ -2840,12 +2839,12 @@ def recreate_lvstore(snode):
     time.sleep(3)
 
     print("after jc sync")
+
     lv = rpc_client.bdev_lvol_get_lvstores(snode.lvstore)
-    print("lvstore:")
-    print(lv)
-    lvs = [dev['name'] for dev in rpc_client.get_bdevs() if "lvol" in str(dev['name']).lower()]
-    print("lvols")
-    print(lvs)
+    print(f"lvstore: {lv}")
+    bdevs = [dev['name'] for dev in rpc_client.get_bdevs()]
+    print("bdevs")
+    print(bdevs)
 
     for lvol in lvol_list:
         lvol_obj = db_controller.get_lvol_by_id(lvol.get_id())
