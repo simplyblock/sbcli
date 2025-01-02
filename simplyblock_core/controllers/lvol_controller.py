@@ -713,7 +713,6 @@ def recreate_lvol_on_node(lvol, snode, ha_inode_self=0, ana_state=None):
         if not ret:
             return False, "Failed to add bdev to subsystem"
 
-    cluster = db_controller.get_cluster_by_id(snode.cluster_id)
     # add listeners
     logger.info("adding listeners")
     for iface in snode.data_nics:
