@@ -2811,6 +2811,7 @@ def recreate_lvstore(snode):
         ret = rpc_client.jc_explicit_synchronization(snode.jm_vuid)
         logger.info(f"JM Sync res: {ret}")
 
+    time.sleep(1)
 
     for lvol in lvol_list:
         lvol_obj = db_controller.get_lvol_by_id(lvol.get_id())
