@@ -28,7 +28,7 @@ class TestLvolHAClusterWithClones(TestLvolHACluster):
         """Create clones for snapshots."""
         self.logger.info("Creating clones from snapshots.")
         for idx, lvol_id in enumerate(list(self.lvol_mount_details.keys())):
-            snapshot_name = self.lvol_mount_details[lvol_id]["snapshot"][0]
+            snapshot_name = self.lvol_mount_details[lvol_id]["snapshots"][0]
             snapshot_id = self.ssh_obj.get_snapshot_id(node=self.node, snapshot_name=snapshot_name)
             self.lvol_mount_details[lvol_id]["clones"] = []
             for clone_idx in range(1, self.total_clones_per_lvol + 1):
@@ -48,7 +48,7 @@ class TestLvolHAClusterWithClones(TestLvolHACluster):
                    "MD5": None,
                    "FS": self.lvol_mount_details[lvol_id]["FS"],
                    "Log": f"{self.log_path}/{clone_name}.log",
-                   "snapshot": snapshot_name
+                   "snapshots": snapshot_name
                 }
 
                 initial_devices = self.ssh_obj.get_devices(node=self.node)
