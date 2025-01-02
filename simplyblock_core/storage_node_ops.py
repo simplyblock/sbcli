@@ -2786,7 +2786,23 @@ def recreate_lvstore(snode):
         logger.error(err)
         return False
 
+    print("before examine")
+
+    lv = rpc_client.bdev_lvol_get_lvstores()
+    print("lvstore")
+    pprint(lv)
+    lvols = rpc_client.bdev_lvol_get_lvols()
+    print("lvols")
+    pprint(lvols)
+
+    time.sleep(2)
+
+
     ret = rpc_client.bdev_examine(snode.raid)
+
+    time.sleep(2)
+
+
     ret = rpc_client.bdev_wait_for_examine()
 
     print("after examine")
