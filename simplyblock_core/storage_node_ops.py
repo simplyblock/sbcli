@@ -2774,6 +2774,8 @@ def recreate_lvstore(snode):
         snode.mgmt_ip, snode.rpc_port,
         snode.rpc_username, snode.rpc_password)
 
+    time.sleep(2)
+
     ret, err = _create_bdev_stack(snode, [], primary_node=snode)
 
     if err:
