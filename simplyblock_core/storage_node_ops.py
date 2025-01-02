@@ -2781,7 +2781,11 @@ def recreate_lvstore(snode):
         logger.error(err)
         return False
 
-    time.sleep(2)
+    if ret:
+        ret = distr_controller.send_cluster_map_to_node(snode)
+        if not ret:
+            return False, "Failed to send cluster map"
+    time.sleep(1)
 
     ret = rpc_client.bdev_examine(snode.raid)
     ret = rpc_client.bdev_wait_for_examine()
@@ -3077,11 +3081,11 @@ def _create_bdev_stack(snode, lvstore_stack=None, primary_node=False):
                 params['distrib_cpu_mask'] = distrib_cpu_mask
                 snode.distrib_cpu_index = (snode.distrib_cpu_index + 1) % len(snode.distrib_cpu_cores)
             ret = rpc_client.bdev_distrib_create(**params)
-            if ret:
-                ret = distr_controller.send_cluster_map_to_distr(snode, name)
-                if not ret:
-                    return False, "Failed to send cluster map"
-                # time.sleep(1)
+            # if ret:
+            #     ret = distr_controller.send_cluster_map_to_distr(snode, name)
+            #     if not ret:
+            #         return False, "Failed to send cluster map"
+            #     # time.sleep(1)
 
         elif type == "bdev_lvstore" and lvstore_stack and not snode.is_secondary_node:
             ret = rpc_client.create_lvstore(**params)
