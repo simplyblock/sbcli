@@ -833,12 +833,11 @@ class RPCClient:
         }
         return self._request("bdev_raid_remove_base_bdev", params)
 
-    def bdev_lvol_get_lvstores(self, name):
-        params = {"lvs_name": name}
-        _, err = self._request2("bdev_lvol_get_lvstores", params)
-        if err:
-            return False
-        return True
+    def bdev_lvol_get_lvstores(self, name=None):
+        params = {}
+        if name:
+            params = {"lvs_name": name}
+        return self._request("bdev_lvol_get_lvstores", params)
 
     def bdev_lvol_resize(self, name, size_in_mib):
         params = {
@@ -975,3 +974,6 @@ class RPCClient:
             "lvs_name": lvs_name,
         }
         return self._request("bdev_lvol_set_lvs_groupid", params)
+
+    def bdev_lvol_get_lvols(self):
+        return self._request("bdev_lvol_get_lvols")

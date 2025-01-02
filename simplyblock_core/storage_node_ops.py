@@ -2764,6 +2764,9 @@ def recreate_lvstore_2(snode):
     return True
 
 
+from pprint import pprint
+
+
 def recreate_lvstore(snode):
     db_controller = DBController()
 
@@ -2786,23 +2789,26 @@ def recreate_lvstore(snode):
     ret = rpc_client.bdev_examine(snode.raid)
     ret = rpc_client.bdev_wait_for_examine()
 
-    time.sleep(2)
-    lv = rpc_client.bdev_lvol_get_lvstores(snode.lvstore)
-    print(f"lvstore: {lv}")
-    bdevs = [(dev['name'], dev['aliases']) for dev in rpc_client.get_bdevs()]
-    print("bdevs")
-    print(bdevs)
-
     print("after examine")
+
+    lv = rpc_client.bdev_lvol_get_lvstores()
+    print("lvstore")
+    pprint(lv)
+    lvols = rpc_client.bdev_lvol_get_lvols()
+    print("lvols")
+    pprint(lvols)
+
     rpc_client.bdev_lvol_set_lvs_groupid(snode.lvstore, snode.jm_vuid)
     rpc_client.bdev_distrib_force_to_non_leader(snode.jm_vuid)
     time.sleep(2)
 
-    lv = rpc_client.bdev_lvol_get_lvstores(snode.lvstore)
-    print(f"lvstore: {lv}")
-    bdevs = [(dev['name'], dev['aliases']) for dev in rpc_client.get_bdevs()]
-    print("bdevs")
-    print(bdevs)
+    print("after primary force non leader")
+    lv = rpc_client.bdev_lvol_get_lvstores()
+    print("lvstore")
+    pprint(lv)
+    lvols = rpc_client.bdev_lvol_get_lvols()
+    print("lvols")
+    pprint(lvols)
 
     sec_node = None
     lvol_list = db_controller.get_lvols_by_node_id(snode.get_id())
@@ -2826,11 +2832,12 @@ def recreate_lvstore(snode):
 
     print("after sec is suspended")
 
-    lv = rpc_client.bdev_lvol_get_lvstores(snode.lvstore)
-    print(f"lvstore: {lv}")
-    bdevs = [(dev['name'], dev['aliases']) for dev in rpc_client.get_bdevs()]
-    print("bdevs")
-    print(bdevs)
+    lv = rpc_client.bdev_lvol_get_lvstores()
+    print("lvstore")
+    pprint(lv)
+    lvols = rpc_client.bdev_lvol_get_lvols()
+    print("lvols")
+    pprint(lvols)
 
     if snode.jm_vuid:
         ret = rpc_client.jc_explicit_synchronization(snode.jm_vuid)
@@ -2839,12 +2846,12 @@ def recreate_lvstore(snode):
     time.sleep(3)
 
     print("after jc sync")
-
-    lv = rpc_client.bdev_lvol_get_lvstores(snode.lvstore)
-    print(f"lvstore: {lv}")
-    bdevs = [(dev['name'], dev['aliases']) for dev in rpc_client.get_bdevs()]
-    print("bdevs")
-    print(bdevs)
+    lv = rpc_client.bdev_lvol_get_lvstores()
+    print("lvstore")
+    pprint(lv)
+    lvols = rpc_client.bdev_lvol_get_lvols()
+    print("lvols")
+    pprint(lvols)
 
     for lvol in lvol_list:
         lvol_obj = db_controller.get_lvol_by_id(lvol.get_id())
