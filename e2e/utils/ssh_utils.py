@@ -383,12 +383,12 @@ class SshUtils:
 
     def get_lvol_id(self, node, lvol_name):
         """Get logical volume IDs on the node."""
-        cmd = "%s lvol list | grep -i %s | awk '{{print $2}}'" % (self.base_cmd, lvol_name)
+        cmd = "%s lvol list | grep -i '%s ' | awk '{{print $2}}'" % (self.base_cmd, lvol_name)
         output, error = self.exec_command(node=node, command=cmd)
         return output.strip().split()
     
     def get_snapshot_id(self, node, snapshot_name):
-        cmd = "%s snapshot list | grep -i '%s' | awk '{print $2}'" % (self.base_cmd, snapshot_name)
+        cmd = "%s snapshot list | grep -i '%s ' | awk '{print $2}'" % (self.base_cmd, snapshot_name)
         output, error = self.exec_command(node=node, command=cmd)
 
         return output.strip()
