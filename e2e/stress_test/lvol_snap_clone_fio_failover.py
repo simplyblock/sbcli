@@ -17,8 +17,8 @@ class TestLvolHAClusterWithClones(TestLvolHACluster):
         self.clone_name = "clone"
         self.lvol_size = "50G"
         self.fio_size = "1G"
-        self.total_lvols = 30
-        self.snapshot_per_lvol = 7
+        self.total_lvols = 10
+        self.snapshot_per_lvol = 20
         self.total_clones_per_lvol = 1
         self.fio_threads = []
         self.lvol_node = None
@@ -138,9 +138,14 @@ class TestFailoverScenariosStorageNodes(TestLvolHAClusterWithClones):
 
         for thread in self.fio_threads:
             thread.join()
-        # self.run_failover_scenario(failover_type="container_stop")
-        # self.run_failover_scenario(failover_type="network_interrupt")
-        # self.run_failover_scenario(failover_type="instance_stop")
+        
+        storage_nodes = self.sbcli_utils.get_storage_nodes()
+        for result in storage_nodes['results']:
+            self.lvol_node = result["uuid"]
+            self.run_failover_scenario(failover_type="graceful_shutdown")
+            # self.run_failover_scenario(failover_type="container_stop")
+            # self.run_failover_scenario(failover_type="network_interrupt")
+            # self.run_failover_scenario(failover_type="instance_stop")
 
     def run_failover_scenario(self, failover_type):
         """Run specific failover scenario."""
