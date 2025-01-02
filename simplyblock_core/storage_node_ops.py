@@ -3119,7 +3119,7 @@ def dump_lvstore(node_id):
         logger.error("Storage node does not have lvstore")
         return False
 
-    rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password, timeout=180)
+    rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password, timeout=300, retry=0)
     logger.info(f"Dumping lvstore data on node: {snode.get_id()}")
     file_name = f"LVS_dump_{snode.hostname}_{snode.lvstore}_{str(datetime.datetime.now().isoformat())}.txt"
     file_path = f"/etc/simplyblock/{file_name}"
@@ -3128,8 +3128,5 @@ def dump_lvstore(node_id):
         logger.error("faild to dump lvstore data")
         return False
 
-    logger.info(f"LVS dump file path: {file_name}")
-    snode_api = SNodeClient(f"{snode.mgmt_ip}:5000")
-    file_content, _ = snode_api.get_file_content(file_name)
-
-    return file_content
+    logger.info(f"LVS dump file path: {file_path}")
+    return True
