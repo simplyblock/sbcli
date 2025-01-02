@@ -2781,15 +2781,29 @@ def recreate_lvstore(snode):
         logger.error(err)
         return False
 
+    time.sleep(2)
+
     ret = rpc_client.bdev_examine(snode.raid)
     ret = rpc_client.bdev_wait_for_examine()
 
     time.sleep(2)
+    lv = rpc_client.bdev_lvol_get_lvstores(snode.lvstore)
+    print("lvstore:")
+    print(lv)
+    lvs = [dev['name'] for dev in rpc_client.get_bdevs() if "lvol" in str(dev['name']).lower()]
+    print("lvols")
+    print(lvs)
+
+    print("after examine")
     rpc_client.bdev_lvol_set_lvs_groupid(snode.lvstore, snode.jm_vuid)
     rpc_client.bdev_distrib_force_to_non_leader(snode.jm_vuid)
     time.sleep(2)
-    lv = rpc_client.get_bdevs()
+    lv = rpc_client.bdev_lvol_get_lvstores(snode.lvstore)
+    print("lvstore:")
     print(lv)
+    lvs = [dev['name'] for dev in rpc_client.get_bdevs() if "lvol" in str(dev['name']).lower()]
+    print("lvols")
+    print(lvs)
 
     sec_node = None
     lvol_list = db_controller.get_lvols_by_node_id(snode.get_id())
@@ -2809,16 +2823,29 @@ def recreate_lvstore(snode):
             sec_rpc_client.bdev_distrib_force_to_non_leader(snode.jm_vuid)
 
 
-    time.sleep(1)
+    time.sleep(3)
 
-    lv = rpc_client.get_bdevs()
+    print("after sec is suspended")
+    lv = rpc_client.bdev_lvol_get_lvstores(snode.lvstore)
+    print("lvstore:")
     print(lv)
+    lvs = [dev['name'] for dev in rpc_client.get_bdevs() if "lvol" in str(dev['name']).lower()]
+    print("lvols")
+    print(lvs)
 
     if snode.jm_vuid:
         ret = rpc_client.jc_explicit_synchronization(snode.jm_vuid)
         logger.info(f"JM Sync res: {ret}")
 
-    time.sleep(1)
+    time.sleep(3)
+
+    print("after jc sync")
+    lv = rpc_client.bdev_lvol_get_lvstores(snode.lvstore)
+    print("lvstore:")
+    print(lv)
+    lvs = [dev['name'] for dev in rpc_client.get_bdevs() if "lvol" in str(dev['name']).lower()]
+    print("lvols")
+    print(lvs)
 
     for lvol in lvol_list:
         lvol_obj = db_controller.get_lvol_by_id(lvol.get_id())
