@@ -2786,27 +2786,12 @@ def recreate_lvstore(snode):
         logger.error(err)
         return False
 
-    print("before examine")
-
-    lv = rpc_client.bdev_lvol_get_lvstores()
-    print("lvstore")
-    pprint(lv)
-    lvols = rpc_client.bdev_lvol_get_lvols()
-    print("lvols")
-    pprint(lvols)
-
     time.sleep(2)
-
-
     ret = rpc_client.bdev_examine(snode.raid)
-
     time.sleep(2)
-
-
     ret = rpc_client.bdev_wait_for_examine()
 
     print("after examine")
-
     lv = rpc_client.bdev_lvol_get_lvstores()
     print("lvstore")
     pprint(lv)
@@ -2844,10 +2829,9 @@ def recreate_lvstore(snode):
             sec_rpc_client.bdev_distrib_force_to_non_leader(snode.jm_vuid)
 
 
-    time.sleep(3)
+    # time.sleep(1)
 
     print("after sec is suspended")
-
     lv = rpc_client.bdev_lvol_get_lvstores()
     print("lvstore")
     pprint(lv)
@@ -2859,7 +2843,7 @@ def recreate_lvstore(snode):
         ret = rpc_client.jc_explicit_synchronization(snode.jm_vuid)
         logger.info(f"JM Sync res: {ret}")
 
-    time.sleep(3)
+    time.sleep(1)
 
     print("after jc sync")
     lv = rpc_client.bdev_lvol_get_lvstores()
