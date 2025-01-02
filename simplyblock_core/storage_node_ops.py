@@ -2789,7 +2789,7 @@ def recreate_lvstore(snode):
     time.sleep(2)
     lv = rpc_client.bdev_lvol_get_lvstores(snode.lvstore)
     print(f"lvstore: {lv}")
-    bdevs = [dev['name'] for dev in rpc_client.get_bdevs()]
+    bdevs = [(dev['name'], dev['aliases']) for dev in rpc_client.get_bdevs()]
     print("bdevs")
     print(bdevs)
 
@@ -2800,7 +2800,7 @@ def recreate_lvstore(snode):
 
     lv = rpc_client.bdev_lvol_get_lvstores(snode.lvstore)
     print(f"lvstore: {lv}")
-    bdevs = [dev['name'] for dev in rpc_client.get_bdevs()]
+    bdevs = [(dev['name'], dev['aliases']) for dev in rpc_client.get_bdevs()]
     print("bdevs")
     print(bdevs)
 
@@ -2828,7 +2828,7 @@ def recreate_lvstore(snode):
 
     lv = rpc_client.bdev_lvol_get_lvstores(snode.lvstore)
     print(f"lvstore: {lv}")
-    bdevs = [dev['name'] for dev in rpc_client.get_bdevs()]
+    bdevs = [(dev['name'], dev['aliases']) for dev in rpc_client.get_bdevs()]
     print("bdevs")
     print(bdevs)
 
@@ -2842,7 +2842,7 @@ def recreate_lvstore(snode):
 
     lv = rpc_client.bdev_lvol_get_lvstores(snode.lvstore)
     print(f"lvstore: {lv}")
-    bdevs = [dev['name'] for dev in rpc_client.get_bdevs()]
+    bdevs = [(dev['name'], dev['aliases']) for dev in rpc_client.get_bdevs()]
     print("bdevs")
     print(bdevs)
 
