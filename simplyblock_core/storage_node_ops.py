@@ -2788,6 +2788,8 @@ def recreate_lvstore(snode):
     rpc_client.bdev_lvol_set_lvs_groupid(snode.lvstore, snode.jm_vuid)
     rpc_client.bdev_distrib_force_to_non_leader(snode.jm_vuid)
     time.sleep(2)
+    lv = rpc_client.get_bdevs()
+    print(lv)
 
     sec_node = None
     lvol_list = db_controller.get_lvols_by_node_id(snode.get_id())
@@ -2806,6 +2808,11 @@ def recreate_lvstore(snode):
             sec_rpc_client.bdev_lvol_set_leader(False, lvs_name=snode.lvstore)
             sec_rpc_client.bdev_distrib_force_to_non_leader(snode.jm_vuid)
 
+
+    time.sleep(1)
+
+    lv = rpc_client.get_bdevs()
+    print(lv)
 
     if snode.jm_vuid:
         ret = rpc_client.jc_explicit_synchronization(snode.jm_vuid)
