@@ -305,7 +305,7 @@ def get_random_vuid():
             type = bdev['type']
             if type == "bdev_distr":
                 vuid = bdev['params']['vuid']
-            elif type == "bdev_raid":
+            elif type == "bdev_raid"  and "jm_vuid" in bdev:
                 vuid = bdev['jm_vuid']
             else:
                 continue
