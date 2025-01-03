@@ -190,6 +190,6 @@ class TestFailoverScenariosStorageNodes(TestLvolHAClusterWithClones):
         self.sbcli_utils.wait_for_health_status(self.lvol_node, True, timeout=4000)
 
         self.logger.info("Waiting for data migration to complete.")
-        self.validate_migration_for_node(timestamp, timeout=4000, None)
+        self.validate_migration_for_node(timestamp, 4000, None)
 
         self.logger.info(f"{failover_type} failover scenario completed.")
