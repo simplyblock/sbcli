@@ -2777,8 +2777,6 @@ def recreate_lvstore(snode):
         snode.mgmt_ip, snode.rpc_port,
         snode.rpc_username, snode.rpc_password)
 
-    time.sleep(2)
-
     ret, err = _create_bdev_stack(snode, [], primary_node=snode)
 
     if err:
@@ -2786,12 +2784,12 @@ def recreate_lvstore(snode):
         logger.error(err)
         return False
 
-    time.sleep(2)
-    ret = rpc_client.bdev_examine(snode.raid)
-    time.sleep(2)
-    ret = rpc_client.bdev_wait_for_examine()
-
-    time.sleep(5)
+    # time.sleep(2)
+    # ret = rpc_client.bdev_examine(snode.raid)
+    # time.sleep(2)
+    # ret = rpc_client.bdev_wait_for_examine()
+    #
+    # time.sleep(5)
 
     print("after examine")
     lv = rpc_client.bdev_lvol_get_lvstores()
@@ -2801,7 +2799,7 @@ def recreate_lvstore(snode):
     print("lvols")
     pprint(lvols)
 
-    rpc_client.bdev_lvol_set_lvs_groupid(snode.lvstore, snode.jm_vuid)
+    # rpc_client.bdev_lvol_set_lvs_groupid(snode.lvstore, snode.jm_vuid)
     rpc_client.bdev_distrib_force_to_non_leader(snode.jm_vuid)
     time.sleep(2)
 
@@ -2826,9 +2824,10 @@ def recreate_lvstore(snode):
                         if iface.ip4_address:
                             ret = sec_rpc_client.nvmf_subsystem_listener_set_ana_state(
                                 lvol.nqn, iface.ip4_address, "4420", False, "inaccessible")
-            time.sleep(2)
-            sec_rpc_client.bdev_lvol_set_leader(False, lvs_name=snode.lvstore)
+            # time.sleep(1)
+            # sec_rpc_client.bdev_lvol_set_leader(False, lvs_name=snode.lvstore)
             sec_rpc_client.bdev_distrib_force_to_non_leader(snode.jm_vuid)
+            # time.sleep(1)
 
 
     # time.sleep(3)
@@ -2846,6 +2845,10 @@ def recreate_lvstore(snode):
         logger.info(f"JM Sync res: {ret}")
 
     time.sleep(1)
+
+
+    ret = rpc_client.bdev_examine(snode.raid)
+    ret = rpc_client.bdev_wait_for_examine()
 
     print("after jc sync")
     lv = rpc_client.bdev_lvol_get_lvstores()
