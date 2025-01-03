@@ -4,6 +4,20 @@ from datetime import datetime
 from stress_test.lvol_ha_stress_fio import TestLvolHACluster
 import threading
 from exceptions.custom_exception import LvolNotConnectException
+import random
+import string
+
+
+def random_char(len):
+    """Gee
+
+    Args:
+        y (_type_): _description_
+
+    Returns:
+        _type_: _description_
+    """
+    return ''.join(random.choice(string.ascii_letters) for _ in range(len))
 
 
 class TestLvolHAClusterWithClones(TestLvolHACluster):
@@ -14,7 +28,9 @@ class TestLvolHAClusterWithClones(TestLvolHACluster):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.logger = setup_logger(__name__)
-        self.clone_name = "clone"
+        self.lvol_name = f"lvl{random_char(3)}"
+        self.clone_name = f"cln{random_char(3)}"
+        self.snapshot_name = f"snap{random_char(3)}"
         self.lvol_size = "50G"
         self.fio_size = "1G"
         self.total_lvols = 10
