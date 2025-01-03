@@ -546,9 +546,13 @@ class FioWorkloadTest(TestClusterBase):
         start_time = datetime.now()
         end_time = start_time + timedelta(seconds=timeout)
 
-        output, _ = self.ssh_obj.exec_command(node=self.mgmt_nodes[0], 
-                                              command=f"{self.base_cmd} cluster list-tasks {self.cluster_id}")
-        self.logger.info(f"Data migration output: {output}")
+        output = None
+        while output is not None:
+            output, _ = self.ssh_obj.exec_command(node=self.mgmt_nodes[0], 
+                                                command=f"{self.base_cmd} cluster list-tasks {self.cluster_id}")
+            self.logger.info(f"Data migration output: {output}")
+            if no_task_ok:
+                break
 
         while datetime.now() < end_time:
             tasks = self.sbcli_utils.get_cluster_tasks(self.cluster_id)
