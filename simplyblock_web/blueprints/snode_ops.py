@@ -67,15 +67,16 @@ def get_equinix_cloud_info():
 def get_amazon_cloud_info():
     try:
         import ec2_metadata
+        import requests
         session = requests.session()
         session.timeout = 3
-        data = ec2_metadata.EC2Metadata(session).instance_identity_document
+        data = ec2_metadata.EC2Metadata(session=session).instance_identity_document
         return {
             "id": data["instanceId"],
             "type": data["instanceType"],
             "cloud": "amazon",
             "ip": data["privateIp"],
-            "public_ip": ec2_metadata.public_ipv4 or "",
+            "public_ip":  "",
         }
     except:
         pass
