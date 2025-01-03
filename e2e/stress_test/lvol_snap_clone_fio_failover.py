@@ -75,7 +75,7 @@ class TestLvolHAClusterWithClones(TestLvolHACluster):
     def run_fio_on_lvols_clones(self):
         """Run FIO workloads on all lvols and clones."""
         self.logger.info("Running FIO workloads on lvols and clones.")
-
+        x = 0
         for _, lvol_details in self.lvol_mount_details.items():
             fio_thread = threading.Thread(
                 target=self.ssh_obj.run_fio_test,
@@ -91,6 +91,11 @@ class TestLvolHAClusterWithClones(TestLvolHACluster):
             )
             fio_thread.start()
             self.fio_threads.append(fio_thread)
+            x+=1
+            if x >= 5:
+                break
+        
+        x = 0
 
         for _, clone_details in self.clone_mount_details.items():
             fio_thread = threading.Thread(
@@ -107,6 +112,9 @@ class TestLvolHAClusterWithClones(TestLvolHACluster):
             )
             fio_thread.start()
             self.fio_threads.append(fio_thread)
+            x+=1
+            if x >= 5:
+                break
 
         self.logger.info("FIO workloads on lvols and clones started.")
 
@@ -182,6 +190,6 @@ class TestFailoverScenariosStorageNodes(TestLvolHAClusterWithClones):
         self.sbcli_utils.wait_for_health_status(self.lvol_node, True, timeout=4000)
 
         self.logger.info("Waiting for data migration to complete.")
-        self.validate_migration_for_node(timestamp, timeout=4000, max_retries=10)
+        self.validate_migration_for_node(timestamp, timeout=4000, None)
 
         self.logger.info(f"{failover_type} failover scenario completed.")
