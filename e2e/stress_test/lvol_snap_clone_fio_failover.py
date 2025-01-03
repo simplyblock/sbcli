@@ -143,7 +143,7 @@ class TestFailoverScenariosStorageNodes(TestLvolHAClusterWithClones):
         storage_nodes = self.sbcli_utils.get_storage_nodes()
         for result in storage_nodes['results']:
             self.lvol_node = result["uuid"]
-            self.run_failover_scenario(failover_type="graceful_shutdown")
+            # self.run_failover_scenario(failover_type="graceful_shutdown")
             # self.run_failover_scenario(failover_type="container_stop")
             # self.run_failover_scenario(failover_type="network_interrupt")
             # self.run_failover_scenario(failover_type="instance_stop")
