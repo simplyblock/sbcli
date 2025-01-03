@@ -2826,12 +2826,12 @@ def recreate_lvstore(snode):
                         if iface.ip4_address:
                             ret = sec_rpc_client.nvmf_subsystem_listener_set_ana_state(
                                 lvol.nqn, iface.ip4_address, "4420", False, "inaccessible")
-            time.sleep(1)
+            time.sleep(2)
             sec_rpc_client.bdev_lvol_set_leader(False, lvs_name=snode.lvstore)
             sec_rpc_client.bdev_distrib_force_to_non_leader(snode.jm_vuid)
 
 
-    time.sleep(3)
+    # time.sleep(3)
 
     print("after sec is suspended")
     lv = rpc_client.bdev_lvol_get_lvstores()
