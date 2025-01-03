@@ -156,11 +156,11 @@ def spdk_process_start():
         spdk_image = data['spdk_image']
         # node_docker.images.pull(spdk_image)
 
-    if "cluster_ip" in data and data['cluster_ip']:
-        cluster_ip = data['cluster_ip']
-        log_config = LogConfig(type=LogConfig.types.GELF, config={"gelf-address": f"tcp://{cluster_ip}:12202"})
-    else:
-        log_config = LogConfig(type=LogConfig.types.JOURNALD)
+    # if "cluster_ip" in data and data['cluster_ip']:
+    #     cluster_ip = data['cluster_ip']
+    #     log_config = LogConfig(type=LogConfig.types.GELF, config={"gelf-address": f"tcp://{cluster_ip}:12202"})
+    # else:
+    log_config = LogConfig(type=LogConfig.types.JOURNALD)
 
     container = node_docker.containers.run(
         spdk_image,
