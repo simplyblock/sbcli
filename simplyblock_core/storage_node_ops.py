@@ -2831,7 +2831,7 @@ def recreate_lvstore(snode):
             sec_rpc_client.bdev_distrib_force_to_non_leader(snode.jm_vuid)
 
 
-    # time.sleep(1)
+    time.sleep(3)
 
     print("after sec is suspended")
     lv = rpc_client.bdev_lvol_get_lvstores()
