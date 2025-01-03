@@ -9,13 +9,13 @@ import string
 
 
 def random_char(len):
-    """Gee
+    """Generate number of characters
 
     Args:
-        y (_type_): _description_
+        len (int): NUmber of characters in string
 
     Returns:
-        _type_: _description_
+        str: random string with given length
     """
     return ''.join(random.choice(string.ascii_letters) for _ in range(len))
 
