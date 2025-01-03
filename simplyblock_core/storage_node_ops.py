@@ -2791,6 +2791,8 @@ def recreate_lvstore(snode):
     time.sleep(2)
     ret = rpc_client.bdev_wait_for_examine()
 
+    time.sleep(5)
+
     print("after examine")
     lv = rpc_client.bdev_lvol_get_lvstores()
     print("lvstore")
