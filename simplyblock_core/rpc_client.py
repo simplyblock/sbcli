@@ -370,14 +370,14 @@ class RPCClient:
         params = {"name": name}
         return self._request2("ultra21_bdev_pass_delete", params)
 
-    def qos_vbdev_create(self, qos_bdev, base_bdev_name, base_nvme_hw_name, max_queue_size,
-                         inflight_io_threshold):
+    def qos_vbdev_create(self, qos_bdev, base_bdev_name, inflight_io_threshold):
         params = {
             "base_bdev_name": base_bdev_name,
             "name": qos_bdev,
-            "base_nvme_hw_name": base_nvme_hw_name,
-            "max_queue_size": max_queue_size,
-            "inflight_io_threshold": inflight_io_threshold
+            "max_num_queues": 2,
+            "standard_queue_weight": 3,
+            "low_priority_3_queue_weight": 1,
+            "inflight_io_threshold": inflight_io_threshold or 12
         }
 
         return self._request("qos_vbdev_create", params)
