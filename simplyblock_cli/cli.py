@@ -456,7 +456,7 @@ class CLIWrapper:
                                  default=0)
         sub_command.add_argument("--ha-type", help='LVol HA type (single, ha), default is cluster HA type',
                                  dest='ha_type', choices=["single", "ha", "default"], default='default')
-        sub_command.add_argument("--lvol-priority-class", help='Lvol priority class', type=int, choices=[0, 1], default=0)
+        sub_command.add_argument("--lvol-priority-class", help='Lvol priority class', type=int, default=0)
 
 
         # set lvol params

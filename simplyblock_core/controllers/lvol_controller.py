@@ -451,7 +451,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
     }
 
     if lvol.lvol_priority_class:
-        lvol_dict["lvol_priority_class"] = lvol.lvol_priority_class
+        lvol_dict["params"]["lvol_priority_class"] = lvol.lvol_priority_class
     lvol.bdev_stack = [lvol_dict]
 
     if use_crypto:
