@@ -158,11 +158,12 @@ class TestFailoverScenariosStorageNodes(TestLvolHAClusterWithClones):
         self.logger.info("Running failover scenarios.")
         storage_nodes = self.sbcli_utils.get_storage_nodes()
         for result in storage_nodes['results']:
-            self.lvol_node = result["uuid"]
-            self.run_failover_scenario(failover_type="graceful_shutdown")
-            # self.run_failover_scenario(failover_type="container_stop")
-            # self.run_failover_scenario(failover_type="network_interrupt")
-            # self.run_failover_scenario(failover_type="instance_stop")
+            if result["is_secondary_node"] is False:
+                self.lvol_node = result["uuid"]
+                self.run_failover_scenario(failover_type="graceful_shutdown")
+                # self.run_failover_scenario(failover_type="container_stop")
+                # self.run_failover_scenario(failover_type="network_interrupt")
+                # self.run_failover_scenario(failover_type="instance_stop")
 
         self.common_utils.manage_fio_threads(node=self.node, threads=self.fio_threads, timeout=10000)
 
@@ -171,7 +172,7 @@ class TestFailoverScenariosStorageNodes(TestLvolHAClusterWithClones):
 
     def run_failover_scenario(self, failover_type):
         """Run specific failover scenario."""
-        self.logger.info(f"Running {failover_type} failover scenario.")
+        self.logger.info(f"Running {failover_type} failover scenario on node {self.lvol_node}.")
         timestamp = int(datetime.now().timestamp())
 
         if failover_type == "graceful_shutdown":

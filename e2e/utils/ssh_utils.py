@@ -1,8 +1,8 @@
 import time
 import paramiko
+# paramiko.common.logging.basicConfig(level=paramiko.common.DEBUG)
 import os
 import json
-
 import paramiko.ssh_exception
 from logger_config import setup_logger
 from pathlib import Path
