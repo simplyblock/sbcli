@@ -668,24 +668,25 @@ def add_lvol_on_node(lvol, snode, ha_comm_addrs=None, ha_inode_self=0):
 def recreate_lvol_on_node(lvol, snode, ha_inode_self=0, ana_state=None):
     rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
 
+    base=f"{lvol.lvs_name}/{lvol.lvol_bdev}"
     retry = 3
     while retry > 0:
-        lv = rpc_client.get_bdevs(lvol.top_bdev)
+        lv = rpc_client.get_bdevs(base)
         if lv:
             break
         else:
             retry -= 1
-            msg = f"LVol bdev not found: {lvol.top_bdev} on node {snode.get_id()}, retrying"
+            msg = f"LVol bdev not found: {base} on node {snode.get_id()}, retrying"
             logger.warning(msg)
             time.sleep(2)
     else:
-        msg = f"LVol bdev not found: {lvol.top_bdev} on node {snode.get_id()}"
+        msg = f"LVol bdev not found: {base} on node {snode.get_id()}"
         logger.error(msg)
         return False, msg
 
     if "crypto" in lvol.lvol_type:
         ret = _create_crypto_lvol(
-            rpc_client, lvol.crypto_bdev, f"{lvol.lvs_name}/{lvol.lvol_bdev}", lvol.crypto_key1, lvol.crypto_key2)
+            rpc_client, lvol.crypto_bdev, base, lvol.crypto_key1, lvol.crypto_key2)
         if not ret:
             msg=f"Failed to create crypto lvol on node {snode.get_id()}"
             logger.error(msg)
