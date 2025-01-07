@@ -54,4 +54,5 @@ app.wsgi_app = DispatcherMiddleware(app.wsgi_app, {
 
 app.config['JSONIFY_PRETTYPRINT_REGULAR'] = True
 if __name__ == '__main__':
+    logging.getLogger('werkzeug').setLevel(constants.LOG_LEVEL)
     app.run(host='0.0.0.0', debug=constants.LOG_WEB_DEBUG)
