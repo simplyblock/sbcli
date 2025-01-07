@@ -1892,6 +1892,9 @@ def restart_storage_node(
     snode.health_check = True
     snode.write_to_db(db_controller.kv_store)
 
+    logger.info("Setting node status to Online")
+    set_node_status(node_id, StorageNode.STATUS_ONLINE)
+
     if cluster.status in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED]:
         if snode.lvstore_stack or snode.is_secondary_node:
             ret = recreate_lvstore(snode)
@@ -1899,13 +1902,8 @@ def restart_storage_node(
                 logger.error("Failed to recreate lvstore")
                 return False
 
-    logger.info("Setting node status to Online")
-    set_node_status(node_id, StorageNode.STATUS_ONLINE)
-
-
     if snode.jm_device and snode.jm_device.status in [JMDevice.STATUS_UNAVAILABLE, JMDevice.STATUS_ONLINE]:
         device_controller.set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_ONLINE)
-
 
     logger.info(f"Sending device status event")
     for dev in snode.nvme_devices:
@@ -2069,7 +2067,7 @@ def shutdown_storage_node(node_id, force=False):
         if force is False:
             return False
 
-    task_id = tasks_controller.get_active_node_mig_task(snode.cluster_id, snode.get_id())
+    task_id = tasks_controller.get_active_node_task(snode.cluster_id, snode.get_id())
     if task_id:
         logger.error(f"Migration task found: {task_id}, can not shutdown storage node")
         if force is False:
@@ -2127,6 +2125,12 @@ def suspend_storage_node(node_id, force=False):
     task_id = tasks_controller.get_active_node_restart_task(snode.cluster_id, snode.get_id())
     if task_id:
         logger.error(f"Restart task found: {task_id}, can not suspend storage node")
+        if force is False:
+            return False
+
+    task_id = tasks_controller.get_active_node_task(snode.cluster_id, snode.get_id())
+    if task_id:
+        logger.error(f"Migration task found: {task_id}, can not suspend storage node")
         if force is False:
             return False
 
