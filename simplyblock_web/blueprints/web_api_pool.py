@@ -12,7 +12,7 @@ from simplyblock_core.models.pool import Pool
 from simplyblock_core import db_controller, utils as core_utils
 
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG)
+
 bp = Blueprint("pool", __name__)
 db_controller = db_controller.DBController()
 
