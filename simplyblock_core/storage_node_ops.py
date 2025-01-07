@@ -2067,7 +2067,7 @@ def shutdown_storage_node(node_id, force=False):
         if force is False:
             return False
 
-    task_id = tasks_controller.get_active_node_mig_task(snode.cluster_id, snode.get_id())
+    task_id = tasks_controller.get_active_node_task(snode.cluster_id, snode.get_id())
     if task_id:
         logger.error(f"Migration task found: {task_id}, can not shutdown storage node")
         if force is False:
@@ -2128,7 +2128,7 @@ def suspend_storage_node(node_id, force=False):
         if force is False:
             return False
 
-    task_id = tasks_controller.get_active_node_mig_task(snode.cluster_id, snode.get_id())
+    task_id = tasks_controller.get_active_node_task(snode.cluster_id, snode.get_id())
     if task_id:
         logger.error(f"Migration task found: {task_id}, can not suspend storage node")
         if force is False:
