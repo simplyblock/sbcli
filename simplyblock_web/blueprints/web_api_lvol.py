@@ -37,7 +37,11 @@ def list_lvols(uuid):
         lvols = db_controller.get_lvols(cluster_id)
     data = []
     for lvol in lvols:
-        data.append(lvol.get_clean_dict())
+        tmp = lvol.get_clean_dict()
+        records_list = db_controller.get_lvol_stats(lvol, limit=1)
+        if records_list:
+            tmp['iostats'] = records_list[0]
+        data.append(tmp)
     return utils.get_response(data)
 
 
