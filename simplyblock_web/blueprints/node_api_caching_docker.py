@@ -14,7 +14,7 @@ from simplyblock_web import utils, node_utils
 from simplyblock_core import scripts, constants
 
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG)
+
 bp = Blueprint("node_api_caching_docker", __name__, url_prefix="/cnode")
 
 

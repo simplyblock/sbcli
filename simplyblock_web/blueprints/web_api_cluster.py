@@ -14,7 +14,7 @@ from simplyblock_core import db_controller, cluster_ops
 from simplyblock_core.models.cluster import Cluster
 
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG)
+
 bp = Blueprint("cluster", __name__)
 db_controller = db_controller.DBController()
 

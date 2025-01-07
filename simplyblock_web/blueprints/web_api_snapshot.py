@@ -12,7 +12,7 @@ from simplyblock_core.controllers import snapshot_controller
 
 
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG)
+
 db_controller = db_controller.DBController()
 bp = Blueprint("snapshot", __name__)
 
