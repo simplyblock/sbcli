@@ -40,7 +40,7 @@ class TestLvolHACluster(FioWorkloadTest):
         for i in range(1, self.total_lvols + 1):
             # fs_type = random.choice(["xfs", "ext4"])
             fs_type = "ext4"
-            is_crypto = random.choice([False, False])
+            is_crypto = random.choice([True, False])
             lvol_name = f"{self.lvol_name}_{i}" if not is_crypto else f"c{self.lvol_name}_{i}"
             self.logger.info(f"Creating lvol with Name: {lvol_name}, fs type: {fs_type}, crypto: {is_crypto}")
             self.sbcli_utils.add_lvol(
@@ -442,8 +442,8 @@ class TestLvolHAClusterRunAllScenarios(TestLvolHACluster):
         self.run_storage_node_crash_scenario()
         
         # Scenario 3: Network Interrupt
-        # self.logger.info("Running Scenario 3: Network Interrupt.")
-        # self.run_network_interrupt_scenario()
+        self.logger.info("Running Scenario 3: Network Interrupt.")
+        self.run_network_interrupt_scenario()
 
         self.logger.info("All scenarios completed successfully.")
 
