@@ -2128,6 +2128,12 @@ def suspend_storage_node(node_id, force=False):
         if force is False:
             return False
 
+    task_id = tasks_controller.get_active_node_mig_task(snode.cluster_id, snode.get_id())
+    if task_id:
+        logger.error(f"Migration task found: {task_id}, can not suspend storage node")
+        if force is False:
+            return False
+
     cluster = db_controller.get_cluster_by_id(snode.cluster_id)
     snodes = db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id)
     online_nodes = 0
