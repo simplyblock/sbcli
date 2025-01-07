@@ -21,6 +21,7 @@ logger.setLevel(constants.LOG_LEVEL)
 
 
 app = Flask(__name__)
+app.logger.setLevel(constants.LOG_LEVEL)
 app.url_map.strict_slashes = False
 
 
