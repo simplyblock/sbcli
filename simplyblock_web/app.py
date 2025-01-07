@@ -17,11 +17,11 @@ logger_handler = logging.StreamHandler(sys.stdout)
 logger_handler.setFormatter(logging.Formatter('%(asctime)s: %(levelname)s: %(message)s'))
 logger = logging.getLogger()
 logger.addHandler(logger_handler)
-logger.setLevel(constants.LOG_LEVEL)
+logger.setLevel(constants.LOG_WEB_LEVEL)
 
 
 app = Flask(__name__)
-app.logger.setLevel(constants.LOG_LEVEL)
+app.logger.setLevel(constants.LOG_WEB_LEVEL)
 app.url_map.strict_slashes = False
 
 
@@ -54,5 +54,5 @@ app.wsgi_app = DispatcherMiddleware(app.wsgi_app, {
 
 app.config['JSONIFY_PRETTYPRINT_REGULAR'] = True
 if __name__ == '__main__':
-    logging.getLogger('werkzeug').setLevel(constants.LOG_LEVEL)
+    logging.getLogger('werkzeug').setLevel(constants.LOG_WEB_LEVEL)
     app.run(host='0.0.0.0', debug=constants.LOG_WEB_DEBUG)
