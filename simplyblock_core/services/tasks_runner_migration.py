@@ -78,7 +78,10 @@ def task_runner(task):
             task.write_to_db(db_controller.kv_store)
             return True
 
-        rsp = rpc_client.distr_migration_to_primary_start(device.cluster_device_order, distr_name)
+        qos_high_priority = False
+        if db_controller.get_cluster_by_id(snode.cluster_id).enable_qos:
+            qos_high_priority = True
+        rsp = rpc_client.distr_migration_to_primary_start(device.cluster_device_order, distr_name, qos_high_priority)
         if not rsp:
             logger.error(f"Failed to start device migration task, storage_ID: {device.cluster_device_order}")
             task.function_result = "Failed to start device migration task"

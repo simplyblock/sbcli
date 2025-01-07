@@ -795,10 +795,11 @@ class RPCClient:
         params = {"id": app_thread_process_id, "cpumask": app_thread_mask}
         return self._request("thread_set_cpumask", params)
 
-    def distr_migration_to_primary_start(self, storage_ID, name):
+    def distr_migration_to_primary_start(self, storage_ID, name, qos_high_priority=False):
         params = {
             "name": name,
             "storage_ID": storage_ID,
+            "qos_high_priority": qos_high_priority,
         }
         return self._request("distr_migration_to_primary_start", params)
 
@@ -806,16 +807,18 @@ class RPCClient:
         params = {"name": name}
         return self._request("distr_migration_status", params)
 
-    def distr_migration_failure_start(self, name, storage_ID):
+    def distr_migration_failure_start(self, name, storage_ID, qos_high_priority=False):
         params = {
             "name": name,
-            "storage_ID": storage_ID
+            "storage_ID": storage_ID,
+            "qos_high_priority": qos_high_priority,
         }
         return self._request("distr_migration_failure_start", params)
 
-    def distr_migration_expansion_start(self, name):
+    def distr_migration_expansion_start(self, name, qos_high_priority=False):
         params = {
             "name": name,
+            "qos_high_priority": qos_high_priority,
         }
         return self._request("distr_migration_expansion_start", params)
 
