@@ -472,7 +472,7 @@ def _create_storage_device_stack(rpc_client, nvme, snode, after_restart):
         max_queue_size = cluster.max_queue_size
         inflight_io_threshold = cluster.inflight_io_threshold
         qos_bdev = f"{alceml_name}_qos"
-        ret = rpc_client.qos_vbdev_create(qos_bdev, alceml_name, nvme.nvme_controller, max_queue_size, inflight_io_threshold)
+        ret = rpc_client.qos_vbdev_create(qos_bdev, alceml_name, inflight_io_threshold)
         if not ret:
             logger.error(f"Failed to create qos bdev: {qos_bdev}")
             return False
