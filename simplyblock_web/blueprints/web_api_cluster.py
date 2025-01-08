@@ -62,14 +62,24 @@ def add_cluster():
 @bp.route('/cluster', methods=['GET'], defaults={'uuid': None})
 @bp.route('/cluster/<string:uuid>', methods=['GET'])
 def list_clusters(uuid):
-    cluster_id = utils.get_cluster_id(request)
-    cluster = db_controller.get_cluster_by_id(cluster_id)
-    if not cluster:
-        return utils.get_response_error(f"Cluster not found: {cluster_id}", 404)
+    clusters_list = []
+    if uuid:
+        cl = db_controller.get_cluster_by_id(uuid)
+        if cl:
+            clusters_list.append(cl)
+        else:
+            return utils.get_response_error(f"Cluster not found: {uuid}", 404)
+    else:
+        cls = db_controller.get_clusters()
+        if cls:
+            clusters_list.extend(cls)
 
-    d = cluster.get_clean_dict()
-    d['status_code'] = cluster.get_status_code()
-    return utils.get_response([d])
+    data = []
+    for cluster in clusters_list:
+        d = cluster.get_clean_dict()
+        d['status_code'] = cluster.get_status_code()
+        data.append(d)
+    return utils.get_response(data)
 
 
 @bp.route('/cluster/capacity/<string:uuid>/history/<string:history>', methods=['GET'])
