@@ -457,6 +457,9 @@ class CLIWrapper:
         sub_command.add_argument("--ha-type", help='LVol HA type (single, ha), default is cluster HA type',
                                  dest='ha_type', choices=["single", "ha", "default"], default='default')
         sub_command.add_argument("--lvol-priority-class", help='Lvol priority class', type=int, default=0)
+        sub_command.add_argument("--namespace", help='Set LVol namespace for k8s clients')
+        sub_command.add_argument("--uid", help='Set LVol UUID')
+        sub_command.add_argument("--pvc_name", help='Set LVol PVC name for k8s clients')
 
 
         # set lvol params
@@ -1051,7 +1054,8 @@ class CLIWrapper:
                     max_size=max_size,
                     crypto_key1=args.crypto_key1,
                     crypto_key2=args.crypto_key2,
-                    lvol_priority_class=lvol_priority_class)
+                    lvol_priority_class=lvol_priority_class,
+                    uid=args.uid, pvc_name=args.pvc_name, namespace=args.namespace)
                 if results:
                     ret = results
                 else:

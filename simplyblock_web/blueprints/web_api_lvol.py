@@ -148,6 +148,9 @@ def add_lvol():
     crypto_key2 = utils.get_value_or_default(cl_data, "crypto_key2", None)
     host_id = utils.get_value_or_default(cl_data, "host_id", None)
     lvol_priority_class = utils.get_value_or_default(cl_data, "lvol_priority_class", 0)
+    namespace = utils.get_value_or_default(cl_data, "namespace", None)
+    uid = utils.get_value_or_default(cl_data, "uid", None)
+    pvc_name = utils.get_value_or_default(cl_data, "pvc_name", None)
 
     ret, error = lvol_controller.add_lvol_ha(
         name=name,
@@ -169,7 +172,10 @@ def add_lvol():
 
         use_comp=False,
         distr_vuid=0,
-        lvol_priority_class=lvol_priority_class
+        lvol_priority_class=lvol_priority_class,
+        namespace=namespace,
+        uid=uid,
+        pvc_name=pvc_name
     )
 
     return utils.get_response(ret, error, http_code=400)

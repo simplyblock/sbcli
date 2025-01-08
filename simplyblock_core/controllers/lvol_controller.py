@@ -294,7 +294,8 @@ def validate_aes_xts_keys(key1: str, key2: str) -> Tuple[bool, str]:
 
 def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp, use_crypto,
                 distr_vuid, max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes,
-                with_snapshot=False, max_size=0, crypto_key1=None, crypto_key2=None, lvol_priority_class=0):
+                with_snapshot=False, max_size=0, crypto_key1=None, crypto_key2=None, lvol_priority_class=0,
+                uid=None, pvc_name=None, namespace=None):
 
     logger.info(f"Adding LVol: {name}")
     host_node = None
@@ -396,6 +397,8 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
     logger.info(f"Max size: {utils.humanbytes(max_size)}")
     lvol = LVol()
     lvol.lvol_name = name
+    lvol.pvc_name = pvc_name or ""
+    lvol.namespace = namespace or ""
     lvol.size = int(size)
     lvol.max_size = int(max_size)
     lvol.status = LVol.STATUS_ONLINE
@@ -403,7 +406,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
     lvol.create_dt = str(datetime.now())
     lvol.ha_type = ha_type
     lvol.bdev_stack = []
-    lvol.uuid = str(uuid.uuid4())
+    lvol.uuid = uid or str(uuid.uuid4())
     lvol.guid = _generate_hex_string(16)
     lvol.vuid = vuid
     lvol.lvol_bdev = f"LVOL_{vuid}"

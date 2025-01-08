@@ -46,6 +46,7 @@ class LVol(BaseModel):
     max_size: int = 0
     mem_diff: dict = {}
     mode: str = "read-write"
+    namespace: str = ""
     ndcs: int = 0
     node_id: str = ""
     nodes: List[str] = []
@@ -53,6 +54,7 @@ class LVol(BaseModel):
     nqn: str = ""
     nvme_dev: NVMeDevice = None
     pool_uuid: str = ""
+    pvc_name: str = ""
     r_mbytes_per_sec: int = 0
     rw_ios_per_sec: int = 0
     rw_mbytes_per_sec: int = 0
