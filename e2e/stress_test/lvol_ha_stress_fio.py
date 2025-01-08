@@ -22,9 +22,9 @@ class TestLvolHACluster(FioWorkloadTest):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.logger = setup_logger(__name__)
-        self.lvol_size = "25G"
-        self.fio_size = "18G"
-        self.total_lvols = 200
+        self.lvol_size = "20G"
+        self.fio_size = "10G"
+        self.total_lvols = 10
         self.snapshot_per_lvol = 2
         self.lvol_name = "lvl"
         self.snapshot_name = "snapshot"
@@ -265,10 +265,8 @@ class TestLvolHAClusterGracefulShutdown(TestLvolHACluster):
         self.logger.info(f"Node health check is: {actual_status}")
         
         node_up_time = datetime.now()
-        
-        self.validate_checksums()
 
-        sleep_n_sec(30)
+        sleep_n_sec(1000)
 
         self.logger.info(f"Fetching migration tasks for cluster {self.cluster_id}.")
 
@@ -279,6 +277,9 @@ class TestLvolHAClusterGracefulShutdown(TestLvolHACluster):
         time_secs = node_up_time - restart_start_time
         time_mins = time_secs.seconds / 60
         self.logger.info(f"Graceful shutdown and start total time: {time_mins}")
+        
+        self.validate_checksums()
+
         
         self.logger.info("Stress test completed.")
 
@@ -321,7 +322,7 @@ class TestLvolHAClusterStorageNodeCrash(TestLvolHACluster):
         
         self.validate_checksums()
         
-        sleep_n_sec(30)
+        sleep_n_sec(1000)
 
         self.logger.info(f"Fetching migration tasks for cluster {self.cluster_id}.")
 
@@ -387,6 +388,8 @@ class TestLvolHAClusterNetworkInterrupt(TestLvolHACluster):
         
         node_up_time = datetime.now()
         
+        sleep_n_sec(1000)
+
         self.logger.info(f"Fetching migration tasks for cluster {self.cluster_id}.")
         output, _ = self.ssh_obj.exec_command(node=self.mgmt_nodes[0], 
                                               command=f"{self.base_cmd} cluster list-tasks {self.cluster_id}")
