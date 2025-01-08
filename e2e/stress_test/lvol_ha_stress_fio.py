@@ -193,26 +193,26 @@ class TestLvolHACluster(FioWorkloadTest):
     
     def validate_checksums(self):
         "Validating checksums"
-        existing_devices = []
-        for lvol_id, lvol in self.lvol_mount_details.items():
-            self.ssh_obj.unmount_path(node=self.node, device=lvol["Mount"])
-            existing_devices.append(lvol["Device"][5:-1])
+        # existing_devices = []
+        # for lvol_id, lvol in self.lvol_mount_details.items():
+        #     self.ssh_obj.unmount_path(node=self.node, device=lvol["Mount"])
+        #     existing_devices.append(lvol["Device"][5:-1])
 
-        self.wait_for_all_devices(existing_devices)
+        # self.wait_for_all_devices(existing_devices)
         
-        for lvol_id, lvol in self.lvol_mount_details.items():
-            device = lvol["Device"][5:-1]
-            final_devices = self.ssh_obj.get_devices(node=self.node)
-            lvol_device = None
-            for cur_device in final_devices:
-                if device in cur_device:
-                    lvol_device = cur_device
-                    break
-            if lvol_device:
-                self.lvol_mount_details[lvol_id]["Device"] = f"/dev/{lvol_device}"
-            self.ssh_obj.mount_path(node=self.node, 
-                                    device=self.lvol_mount_details[lvol_id]["Device"],
-                                    mount_path=lvol["Mount"])
+        # for lvol_id, lvol in self.lvol_mount_details.items():
+        #     device = lvol["Device"][5:-1]
+        #     final_devices = self.ssh_obj.get_devices(node=self.node)
+        #     lvol_device = None
+        #     for cur_device in final_devices:
+        #         if device in cur_device:
+        #             lvol_device = cur_device
+        #             break
+        #     if lvol_device:
+        #         self.lvol_mount_details[lvol_id]["Device"] = f"/dev/{lvol_device}"
+        #     self.ssh_obj.mount_path(node=self.node, 
+        #                             device=self.lvol_mount_details[lvol_id]["Device"],
+        #                             mount_path=lvol["Mount"])
                 
         for _, lvol in self.lvol_mount_details.items():
             final_files = self.ssh_obj.find_files(node=self.node, directory=lvol['Mount'])
@@ -251,6 +251,9 @@ class TestLvolHAClusterGracefulShutdown(TestLvolHACluster):
                                                       "offline",
                                                       timeout=4000)
         sleep_n_sec(30)
+
+        self.validate_checksums()
+
         restart_start_time = datetime.now()
         self.sbcli_utils.restart_node(node_uuid=self.lvol_node, expected_error_code=[503])
         self.sbcli_utils.wait_for_storage_node_status(self.lvol_node,
@@ -307,6 +310,10 @@ class TestLvolHAClusterStorageNodeCrash(TestLvolHACluster):
         node_ip = node_details[0]["mgmt_ip"]
         
         self.ssh_obj.stop_spdk_process(node_ip)
+        sleep_n_sec(30)
+        
+        self.validate_checksums()
+
         restart_start_time = datetime.now()
         self.sbcli_utils.wait_for_storage_node_status(self.lvol_node,
                                                       "online",
@@ -375,6 +382,9 @@ class TestLvolHAClusterNetworkInterrupt(TestLvolHACluster):
         self.ssh_obj.exec_command(node_ip, command=cmd)
         
         unavailable_thread.join()
+
+        self.validate_checksums()
+        
         self.sbcli_utils.wait_for_storage_node_status(self.lvol_node,
                                                       "online",
                                                       timeout=4000)
@@ -464,6 +474,7 @@ class TestLvolHAClusterRunAllScenarios(TestLvolHACluster):
         self.sbcli_utils.shutdown_node(node_uuid=self.lvol_node, expected_error_code=[503])
         self.sbcli_utils.wait_for_storage_node_status(self.lvol_node, "offline", timeout=4000)
         sleep_n_sec(30)
+        self.validate_checksums()
         
         restart_start_time = datetime.now()
         self.sbcli_utils.restart_node(node_uuid=self.lvol_node, expected_error_code=[503])
@@ -499,6 +510,8 @@ class TestLvolHAClusterRunAllScenarios(TestLvolHACluster):
         node_ip = node_details[0]["mgmt_ip"]
         
         self.ssh_obj.stop_spdk_process(node_ip)
+        sleep_n_sec(30)
+        self.validate_checksums()
         restart_start_time = datetime.now()
         self.sbcli_utils.wait_for_storage_node_status(self.lvol_node, "online", timeout=4000)
         self.sbcli_utils.wait_for_health_status(self.lvol_node, True, timeout=4000)
@@ -544,6 +557,8 @@ class TestLvolHAClusterRunAllScenarios(TestLvolHACluster):
         disconnect_start_time = datetime.now()
         self.ssh_obj.exec_command(node_ip, command=cmd)
         unavailable_thread.join()
+
+        self.validate_checksums()
         
         self.sbcli_utils.wait_for_storage_node_status(self.lvol_node, "online", timeout=4000)
         self.sbcli_utils.wait_for_health_status(self.lvol_node, True, timeout=4000)
