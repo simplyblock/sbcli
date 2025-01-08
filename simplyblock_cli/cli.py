@@ -300,7 +300,7 @@ class CLIWrapper:
                                  default=0, choices=range(128))
         sub_command.add_argument("--max-queue-size", help='The max size the queue will grow', type=int, default=128)
         sub_command.add_argument("--inflight-io-threshold", help='The number of inflight IOs allowed before the IO queuing starts', type=int, default=4)
-        sub_command.add_argument("--enable-qos", help='Enable qos bdev for storage nodes', action='store_true', dest='enable_qos')
+        sub_command.add_argument("--disable-qos", help='Disable qos bdev for storage nodes', action='store_false', dest='enable_qos')
         sub_command.add_argument("--strict-node-anti-affinity", help='Enable strict node anti affinity for storage nodes', action='store_true')
 
 
