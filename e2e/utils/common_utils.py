@@ -288,6 +288,71 @@ class CommonUtils:
         self.logger.info(f"No running instance found with the name: {instance_name}")
         return None
     
+    def calculate_time_duration(self, start_timestamp, end_timestamp):
+        """
+        Calculate time duration between start and end timestamps in 'XhrYm' format.
+        Args:
+            start_timestamp (int): Start time in Unix timestamp
+            end_timestamp (int): End time in Unix timestamp
+
+        Returns:
+            str: Time duration in the format 'XhrYm'
+        """
+        duration_seconds = end_timestamp - start_timestamp
+        hours = duration_seconds // 3600
+        minutes = (duration_seconds % 3600) // 60
+        time_duration = f"{hours}h{minutes}m" if hours > 0 else f"{minutes}m"
+        self.logger.info(f"Calculated time duration: {time_duration}")
+        return time_duration
+    
+    def validate_io_stats(self, cluster_id, start_timestamp, end_timestamp, time_duration):
+        """
+        Validate I/O stats ensuring all metrics are non-zero within the failover time range.
+        Args:
+            cluster_id (str): Cluster ID
+            start_timestamp (int): Start of failover in Unix timestamp
+            end_timestamp (int): End of failover in Unix timestamp
+            time_duration (str): Time duration for API call (e.g., '1hr30m')
+        """
+        self.logger.info(f"Validating I/O stats for cluster {cluster_id} during {time_duration}.")
+
+        # Fetch I/O stats from the API
+        io_stats = self.sbcli_utils.get_io_stats(cluster_id, time_duration)
+
+        # Filter stats by failover time range
+        filtered_stats = [
+            stat for stat in io_stats
+            if start_timestamp <= stat["date"] <= end_timestamp
+        ]
+
+        if not filtered_stats:
+            self.logger.error("No I/O stats found within the specified time range.")
+            raise AssertionError("No I/O stats found within the specified time range.")
+
+        # Validate non-zero values for relevant metrics
+        for stat in filtered_stats:
+            self.logger.info(f"Validating I/O stats for record with date: {stat['date']}")
+            self.assert_non_zero_io_stat(stat, "read_bytes")
+            self.assert_non_zero_io_stat(stat, "write_bytes")
+            self.assert_non_zero_io_stat(stat, "read_io")
+            self.assert_non_zero_io_stat(stat, "write_io")
+        self.logger.info("All I/O stats are valid and non-zero within the failover time range.")
+
+    def assert_non_zero_io_stat(self, stat, key):
+        """
+        Assert that a specific I/O stat key is non-zero.
+        Args:
+            stat (dict): I/O stat record
+            key (str): Key to validate
+        """
+        value = stat.get(key, 0)
+        if value == 0:
+            self.logger.error(f"{key} is 0 for record: {stat}")
+            raise AssertionError(f"{key} is 0 for record: {stat}")
+        self.logger.info(f"{key}: {value} is valid.")
+
+
+    
 
 def sleep_n_sec(seconds):
     """Sleeps for given seconds

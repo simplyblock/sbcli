@@ -608,3 +608,18 @@ class SbcliUtils:
         """List all migration tasks for a given cluster."""
         return self.get_request(f"/cluster/list-tasks/{cluster_id}")
     
+    def get_io_stats(self, cluster_id, time_duration):
+        """
+        Fetch I/O statistics for the given cluster at the specified time duration.
+        Args:
+            cluster_id (str): Cluster ID
+            time_duration (str): Time duration (e.g., '1hr30m', '40m')
+
+        Returns:
+            dict: Parsed I/O stats
+        """
+        api_url = f"/cluster/iostats/{cluster_id}/history/{time_duration}"
+        self.logger.info(f"Fetching I/O stats for cluster {cluster_id} with time duration {time_duration}.")
+        response = self.get_request(api_url)
+        return response.get("results", {}).get("stats", [])
+    

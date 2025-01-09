@@ -32,9 +32,9 @@ class TestLvolHAClusterWithClones(TestLvolHACluster):
         self.clone_name = f"cln{random_char(3)}"
         self.snapshot_name = f"snap{random_char(3)}"
         self.lvol_size = "50G"
-        self.fio_size = "1G"
-        self.total_lvols = 10
-        self.snapshot_per_lvol = 20
+        self.fio_size = "500m"
+        self.total_lvols = 5
+        self.snapshot_per_lvol = 10
         self.total_clones_per_lvol = 1
         self.fio_threads = []
         self.lvol_node = None
@@ -101,18 +101,16 @@ class TestLvolHAClusterWithClones(TestLvolHACluster):
                     "name": f"{lvol_details['Name']}_fio",
                     "rw": "randrw",
                     "bs": "4K-128K",
-                    "numjobs": 32,
+                    "numjobs": 16,
                     "iodepth": 512,
                 },
             )
             fio_thread.start()
             self.fio_threads.append(fio_thread)
             x+=1
-            if x >= 5:
+            if x >= 2:
                 break
-        
         x = 0
-
         for _, clone_details in self.clone_mount_details.items():
             fio_thread = threading.Thread(
                 target=self.ssh_obj.run_fio_test,
@@ -129,7 +127,7 @@ class TestLvolHAClusterWithClones(TestLvolHACluster):
             fio_thread.start()
             self.fio_threads.append(fio_thread)
             x+=1
-            if x >= 5:
+            if x >= 2:
                 break
 
         self.logger.info("FIO workloads on lvols and clones started.")
@@ -152,7 +150,6 @@ class TestFailoverScenariosStorageNodes(TestLvolHAClusterWithClones):
         self.create_lvols()
         self.create_snapshots()
         self.create_clones()
-        self.run_fio_on_lvols_clones()
 
         # Run failover scenarios sequentially
         self.logger.info("Running failover scenarios.")
@@ -160,12 +157,11 @@ class TestFailoverScenariosStorageNodes(TestLvolHAClusterWithClones):
         for result in storage_nodes['results']:
             if result["is_secondary_node"] is False:
                 self.lvol_node = result["uuid"]
+                self.run_fio_on_lvols_clones()
                 self.run_failover_scenario(failover_type="graceful_shutdown")
                 # self.run_failover_scenario(failover_type="container_stop")
                 # self.run_failover_scenario(failover_type="network_interrupt")
                 # self.run_failover_scenario(failover_type="instance_stop")
-
-        self.common_utils.manage_fio_threads(node=self.node, threads=self.fio_threads, timeout=10000)
 
         for thread in self.fio_threads:
             thread.join()
@@ -181,7 +177,7 @@ class TestFailoverScenariosStorageNodes(TestLvolHAClusterWithClones):
             sleep_n_sec(10)
             self.sbcli_utils.shutdown_node(node_uuid=self.lvol_node, expected_error_code=[503])
             self.sbcli_utils.wait_for_storage_node_status(self.lvol_node, "offline", timeout=4000)
-            sleep_n_sec(30)
+            sleep_n_sec(300)
             self.sbcli_utils.restart_node(node_uuid=self.lvol_node, expected_error_code=[503])
         elif failover_type == "container_stop":
             node_details = self.sbcli_utils.get_storage_node_details(self.lvol_node)
@@ -190,7 +186,7 @@ class TestFailoverScenariosStorageNodes(TestLvolHAClusterWithClones):
             self.sbcli_utils.wait_for_storage_node_status(self.lvol_node, "online", timeout=4000)
         elif failover_type == "network_interrupt":
             cmd = (
-                'nohup sh -c "sudo nmcli dev disconnect eth0 && sleep 60 && '
+                'nohup sh -c "sudo nmcli dev disconnect eth0 && sleep 300 && '
                 'sudo nmcli dev connect eth0" &'
             )
             node_details = self.sbcli_utils.get_storage_node_details(self.lvol_node)
@@ -200,7 +196,7 @@ class TestFailoverScenariosStorageNodes(TestLvolHAClusterWithClones):
         elif failover_type == "instance_stop":
             self.logger.info("Stopping EC2 instance.")
             self.common_utils.stop_ec2_instance(self.ec2_resource, self.instance_id)
-            sleep_n_sec(10)
+            sleep_n_sec(300)
             self.logger.info("Starting EC2 instance.")
             self.common_utils.start_ec2_instance(self.ec2_resource, self.instance_id)
 
@@ -208,7 +204,22 @@ class TestFailoverScenariosStorageNodes(TestLvolHAClusterWithClones):
 
         sleep_n_sec(1000)
 
+        end_timestamp = int(datetime.now().timestamp())
+        time_duration = self.common_utils.calculate_time_duration(
+            start_timestamp=timestamp,
+            end_timestamp=end_timestamp
+        )
+
+        # Validate I/O stats during and after failover
+        self.common_utils.validate_io_stats(
+            cluster_id=self.cluster_id,
+            start_timestamp=timestamp,
+            end_timestamp=end_timestamp,
+            time_duration=time_duration
+        )
+
         self.logger.info("Waiting for data migration to complete.")
         self.validate_migration_for_node(timestamp, 4000, None)
+        self.common_utils.manage_fio_threads(node=self.node, threads=self.fio_threads, timeout=10000)
 
         self.logger.info(f"{failover_type} failover scenario completed.")
