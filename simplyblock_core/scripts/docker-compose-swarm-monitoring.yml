@@ -15,16 +15,16 @@ services:
   spdk-exporter:
     image: "anantsb/spdk-stats-exporter"
     environment:
-      - CLUSTERID: "${CLUSTER_ID}"
-      - CLUSTERIP: "http://HAProxy"
-      - CLUSTERSECRET: "${CLUSTER_SECRET}"
+      CLUSTERID: "${CLUSTER_ID}"
+      CLUSTERIP: "http://HAProxy"
+      CLUSTERSECRET: "${CLUSTER_SECRET}"
     ports:
-      - "8000:8000/tcp"
+    - "8000:8000/tcp"
     deploy:
       mode: global
-    
     networks:
-      - monitoring-net 
+      - monitoring-net
+
   opensearch:
     image: "opensearchproject/opensearch:2.4.0"
     environment:
