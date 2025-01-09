@@ -158,8 +158,8 @@ class TestFailoverScenariosStorageNodes(TestLvolHAClusterWithClones):
             if result["is_secondary_node"] is False:
                 self.lvol_node = result["uuid"]
                 self.run_fio_on_lvols_clones()
-                self.run_failover_scenario(failover_type="graceful_shutdown")
-                # self.run_failover_scenario(failover_type="container_stop")
+                # self.run_failover_scenario(failover_type="graceful_shutdown")
+                self.run_failover_scenario(failover_type="container_stop")
                 # self.run_failover_scenario(failover_type="network_interrupt")
                 # self.run_failover_scenario(failover_type="instance_stop")
 
