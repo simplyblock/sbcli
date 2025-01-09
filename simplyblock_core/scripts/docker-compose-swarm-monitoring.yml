@@ -12,6 +12,19 @@ services:
     networks:
       - monitoring-net
 
+  spdk-exporter:
+    image: "565979732541.dkr.ecr.us-east-1.amazonaws.com/spdk-exporter:latest"
+    environment:
+      - CLUSTERID: "${CLUSTER_ID}"
+      - CLUSTERIP: "http://HAProxy"
+      - CLUSTERSECRET: "${CLUSTER_SECRET}"
+    ports:
+      - "8000:8000/tcp"
+    deploy:
+      mode: global
+    
+    networks:
+      - monitoring-net 
   opensearch:
     image: "opensearchproject/opensearch:2.4.0"
     environment:
