@@ -203,12 +203,17 @@ def delete(snapshot_uuid, force_delete=False):
         logger.error(f"Storage node not found {snap.lvol.node_id}")
         return False
 
+    clones = []
     for lvol in db_controller.get_lvols(snode.cluster_id):
         if lvol.cloned_from_snap and lvol.cloned_from_snap == snapshot_uuid:
-            logger.warning(f"Soft delete snapshot with clones, lvol ID: {lvol.get_id()}")
-            snap.deleted = True
-            snap.write_to_db(db_controller.kv_store)
-            return True
+            clones.append(lvol)
+
+    if len(clones) > 1:
+        logger.warning(f"Soft delete snapshot with clones")
+        snap = db_controller.get_snapshot_by_id(snapshot_uuid)
+        snap.deleted = True
+        snap.write_to_db(db_controller.kv_store)
+        return True
 
     logger.info(f"Removing snapshot: {snapshot_uuid}")
 
@@ -218,8 +223,6 @@ def delete(snapshot_uuid, force_delete=False):
         snode.rpc_port,
         snode.rpc_username,
         snode.rpc_password)
-
-    snode = db_controller.get_storage_node_by_id(snap.lvol.node_id)
 
     ret = rpc_client.bdev_lvol_set_leader(True, lvs_name=snap.lvol.lvs_name)
     if not ret:
