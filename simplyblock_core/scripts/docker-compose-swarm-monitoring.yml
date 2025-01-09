@@ -13,7 +13,7 @@ services:
       - monitoring-net
 
   spdk-exporter:
-    image: "565979732541.dkr.ecr.us-east-1.amazonaws.com/spdk-exporter:latest"
+    image: "anantsb/spdk-stats-exporter"
     environment:
       - CLUSTERID: "${CLUSTER_ID}"
       - CLUSTERIP: "http://HAProxy"
