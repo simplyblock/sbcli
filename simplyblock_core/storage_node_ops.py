@@ -2655,8 +2655,7 @@ def recreate_lvstore_on_sec(snode):
 
     for node in nodes:
         remote_rpc_client = RPCClient(
-            node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password,
-            timeout=3, retry=2)
+            node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password)
 
         lvol_list = db_controller.get_lvols_by_node_id(node.get_id())
 
@@ -2719,7 +2718,7 @@ def recreate_lvstore(snode):
     if snode.secondary_node_id:
         sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
         if sec_node.status == StorageNode.STATUS_ONLINE:
-            sec_rpc_client = RPCClient(sec_node.mgmt_ip, sec_node.rpc_port, sec_node.rpc_username, sec_node.rpc_password, timeout=3, retry=2)
+            sec_rpc_client = RPCClient(sec_node.mgmt_ip, sec_node.rpc_port, sec_node.rpc_username, sec_node.rpc_password)
 
             for lvol in lvol_list:
                 if lvol.ha_type == "ha":
