@@ -799,8 +799,9 @@ class RPCClient:
         params = {
             "name": name,
             "storage_ID": storage_ID,
-            "qos_high_priority": qos_high_priority,
         }
+        if qos_high_priority:
+            params["qos_high_priority"] = qos_high_priority
         return self._request("distr_migration_to_primary_start", params)
 
     def distr_migration_status(self, name):
@@ -811,15 +812,17 @@ class RPCClient:
         params = {
             "name": name,
             "storage_ID": storage_ID,
-            "qos_high_priority": qos_high_priority,
         }
+        if qos_high_priority:
+            params["qos_high_priority"] = qos_high_priority
         return self._request("distr_migration_failure_start", params)
 
     def distr_migration_expansion_start(self, name, qos_high_priority=False):
         params = {
             "name": name,
-            "qos_high_priority": qos_high_priority,
         }
+        if qos_high_priority:
+            params["qos_high_priority"] = qos_high_priority
         return self._request("distr_migration_expansion_start", params)
 
     def bdev_raid_add_base_bdev(self, raid_bdev, base_bdev):
