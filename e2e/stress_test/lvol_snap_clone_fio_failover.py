@@ -32,13 +32,15 @@ class TestLvolHAClusterWithClones(TestLvolHACluster):
         self.clone_name = f"cln{random_char(3)}"
         self.snapshot_name = f"snap{random_char(3)}"
         self.lvol_size = "50G"
-        self.fio_size = "500m"
-        self.total_lvols = 5
+        self.fio_size = "1G"
+        self.total_lvols = 3
         self.snapshot_per_lvol = 10
         self.total_clones_per_lvol = 1
         self.fio_threads = []
         self.lvol_node = None
         self.clone_mount_details = {}
+        self.lvol_mount_details = {}
+        self.node_vs_lvol = []
 
     def create_clones(self):
         """Create clones for snapshots."""
@@ -91,7 +93,7 @@ class TestLvolHAClusterWithClones(TestLvolHACluster):
     def run_fio_on_lvols_clones(self):
         """Run FIO workloads on all lvols and clones."""
         self.logger.info("Running FIO workloads on lvols and clones.")
-        x = 0
+        
         for _, lvol_details in self.lvol_mount_details.items():
             fio_thread = threading.Thread(
                 target=self.ssh_obj.run_fio_test,
@@ -107,10 +109,7 @@ class TestLvolHAClusterWithClones(TestLvolHACluster):
             )
             fio_thread.start()
             self.fio_threads.append(fio_thread)
-            x+=1
-            if x >= 2:
-                break
-        x = 0
+
         for _, clone_details in self.clone_mount_details.items():
             fio_thread = threading.Thread(
                 target=self.ssh_obj.run_fio_test,
@@ -126,9 +125,6 @@ class TestLvolHAClusterWithClones(TestLvolHACluster):
             )
             fio_thread.start()
             self.fio_threads.append(fio_thread)
-            x+=1
-            if x >= 2:
-                break
 
         self.logger.info("FIO workloads on lvols and clones started.")
 
@@ -147,19 +143,22 @@ class TestFailoverScenariosStorageNodes(TestLvolHAClusterWithClones):
 
         self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
 
-        self.create_lvols()
-        self.create_snapshots()
-        self.create_clones()
-
         # Run failover scenarios sequentially
         self.logger.info("Running failover scenarios.")
         storage_nodes = self.sbcli_utils.get_storage_nodes()
         for result in storage_nodes['results']:
             if result["is_secondary_node"] is False:
                 self.lvol_node = result["uuid"]
+                self.fio_threads = []
+                self.clone_mount_details = {}
+                self.node_vs_lvol = []
+                self.lvol_mount_details = {}
+                self.create_lvols()
+                self.create_snapshots()
+                self.create_clones()
                 self.run_fio_on_lvols_clones()
-                # self.run_failover_scenario(failover_type="graceful_shutdown")
-                self.run_failover_scenario(failover_type="container_stop")
+                self.run_failover_scenario(failover_type="graceful_shutdown")
+                # self.run_failover_scenario(failover_type="container_stop")
                 # self.run_failover_scenario(failover_type="network_interrupt")
                 # self.run_failover_scenario(failover_type="instance_stop")
 
