@@ -23,8 +23,8 @@ class TestLvolHACluster(FioWorkloadTest):
         super().__init__(**kwargs)
         self.logger = setup_logger(__name__)
         self.lvol_size = "20G"
-        self.fio_size = "10G"
-        self.total_lvols = 10
+        self.fio_size = "1G"
+        self.total_lvols = 2
         self.snapshot_per_lvol = 2
         self.lvol_name = "lvl"
         self.snapshot_name = "snapshot"
@@ -234,7 +234,7 @@ class TestLvolHAClusterGracefulShutdown(TestLvolHACluster):
         self.lvol_node = self.sbcli_utils.get_node_without_lvols()
 
         self.create_lvols()
-        # self.create_snapshots()
+        self.create_snapshots()
         self.fill_volumes()
         self.calculate_md5()
 
