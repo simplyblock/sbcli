@@ -129,9 +129,9 @@ def delete_pool(uuid):
         logger.error(f"Pool is disabled")
         return False
 
-    if pool.lvols:
-        logger.error(f"Pool is not empty {uuid}")
-        return False
+    # if pool.lvols:
+    #     logger.error(f"Pool is not empty {uuid}")
+    #     return False
 
     logger.info(f"Deleting pool {pool.get_id()}")
     pool_events.pool_remove(pool)

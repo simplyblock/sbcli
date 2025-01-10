@@ -100,8 +100,8 @@ def delete_pool(uuid):
         if req_secret != pool.secret:
             return utils.get_response_error(f"Pool secret doesn't mach the value in the request header", 400)
 
-    if pool.lvols:
-        return utils.get_response_error(f"Can not delete Pool with LVols", 400)
+    # if pool.lvols:
+    #     return utils.get_response_error(f"Can not delete Pool with LVols", 400)
 
     pool.remove(db_controller.kv_store)
     return utils.get_response("Done")
