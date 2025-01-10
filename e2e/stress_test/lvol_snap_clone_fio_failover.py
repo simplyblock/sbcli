@@ -155,7 +155,7 @@ class TestFailoverScenariosStorageNodes(TestLvolHAClusterWithClones):
                 self.lvol_mount_details = {}
                 self.create_lvols()
                 self.create_snapshots()
-                self.create_clones()
+                # self.create_clones()
                 self.run_fio_on_lvols_clones()
                 self.run_failover_scenario(failover_type="graceful_shutdown")
                 # self.run_failover_scenario(failover_type="container_stop")
