@@ -221,4 +221,12 @@ class TestFailoverScenariosStorageNodes(TestLvolHAClusterWithClones):
         self.validate_migration_for_node(timestamp, 4000, None)
         self.common_utils.manage_fio_threads(node=self.node, threads=self.fio_threads, timeout=10000)
 
+        sleep_n_sec(60)
+
+        for _, lvol_details in self.lvol_mount_details.items():
+            self.common_utils.validate_fio_test(self.node, lvol_details["Log"])
+        
+        for _, clone_details in self.clone_mount_details.items():
+            self.common_utils.validate_fio_test(self.node, clone_details["Log"])
+
         self.logger.info(f"{failover_type} failover scenario completed.")
