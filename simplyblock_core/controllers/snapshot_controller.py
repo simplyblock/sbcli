@@ -5,7 +5,7 @@ import logging as lg
 import time
 import uuid
 
-from simplyblock_core.controllers import lvol_controller, snapshot_events
+from simplyblock_core.controllers import lvol_controller, snapshot_events, pool_controller
 
 from simplyblock_core import utils, distr_controller, constants
 from simplyblock_core.db_controller import DBController
@@ -74,27 +74,23 @@ def add(lvol_id, snapshot_name):
         logger.error(error)
         return False
 
+    if pool.pool_max_size > 0:
+        total = pool_controller.get_pool_total_capacity(pool.get_id())
+        if total + lvol.size > pool.pool_max_size:
+            msg = f"Pool max size has reached {utils.humanbytes(total)} of {utils.humanbytes(pool.pool_max_size)}"
+            logger.error(msg)
+            return False, msg
+
+    if snode.max_snap:
+        cnt = db_controller.get_snapshots_by_node_id(snode.get_id())
+        if cnt and len(cnt)+1 > snode.max_snap:
+            msg = f"Storage node snapshots count must be less than max_snap:{snode.max_snap}"
+            logger.error(msg)
+            return False, msg
+
 ##############################################################################
 
     rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
-    spdk_mem_info_before = rpc_client.ultra21_util_get_malloc_stats()
-
-
-    # if lvol.ha_type == "ha":
-    #     if snode.secondary_node_id:
-    #         sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
-    #         if sec_node.status == StorageNode.STATUS_ONLINE:
-    #             sec_rpc_client = RPCClient(sec_node.mgmt_ip, sec_node.rpc_port, sec_node.rpc_username,
-    #                                        sec_node.rpc_password)
-    #             for iface in sec_node.data_nics:
-    #                 if iface.ip4_address:
-    #                     ret = sec_rpc_client.nvmf_subsystem_listener_set_ana_state(
-    #                         lvol.nqn, iface.ip4_address, "4420", False, "inaccessible")
-    #
-    # for iface in snode.data_nics:
-    #     if iface.ip4_address:
-    #         ret = rpc_client.nvmf_subsystem_listener_set_ana_state(
-    #             lvol.nqn, iface.ip4_address, "4420", False, "inaccessible")
 
     blobid = 0
     snap_uuid = ""
@@ -104,10 +100,12 @@ def add(lvol_id, snapshot_name):
     if not ret:
         return False, "Failed to create snapshot bdev"
 
+    size = lvol.size
     snap_bdev = rpc_client.get_bdevs(f"{lvol.lvs_name}/{snapshot_name}")
     if snap_bdev:
         snap_uuid = snap_bdev[0]['uuid']
         blobid = snap_bdev[0]['driver_specific']['lvol']['blobid']
+        size = snap_bdev[0]['driver_specific']['lvol']['num_allocated_clusters'] * lvol.cluster_size
 
     if snode.secondary_node_id and blobid:
         sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
@@ -118,27 +116,10 @@ def add(lvol_id, snapshot_name):
                 f"{lvol.lvs_name}/{lvol.lvol_bdev}", snapshot_name, snap_uuid, blobid)
 
 
-    # for iface in snode.data_nics:
-    #     if iface.ip4_address:
-    #         ret = rpc_client.nvmf_subsystem_listener_set_ana_state(
-    #             lvol.nqn, iface.ip4_address, "4420", True)
-    #
-    # if lvol.ha_type == "ha":
-    #     if snode.secondary_node_id:
-    #         sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
-    #         if sec_node.status == StorageNode.STATUS_ONLINE:
-    #             time.sleep(1)
-    #             sec_rpc_client = RPCClient(sec_node.mgmt_ip, sec_node.rpc_port, sec_node.rpc_username,
-    #                                        sec_node.rpc_password)
-    #             for iface in sec_node.data_nics:
-    #                 if iface.ip4_address:
-    #                     ret = sec_rpc_client.nvmf_subsystem_listener_set_ana_state(
-    #                         lvol.nqn, iface.ip4_address, "4420", False)
-
-    ##############################################################################
     snap = SnapShot()
     snap.uuid = str(uuid.uuid4())
     snap.snap_uuid = snap_uuid
+    snap.size = size
     snap.blobid = blobid
     snap.pool_uuid = pool.get_id()
     snap.cluster_id = pool.cluster_id
@@ -147,15 +128,6 @@ def add(lvol_id, snapshot_name):
     snap.created_at = int(time.time())
     snap.lvol = lvol
 
-    spdk_mem_info_after = rpc_client.ultra21_util_get_malloc_stats()
-    logger.debug("ultra21_util_get_malloc_stats:")
-    logger.debug(spdk_mem_info_after)
-    diff = {}
-    for key in spdk_mem_info_after.keys():
-        diff[key] = spdk_mem_info_after[key] - spdk_mem_info_before[key]
-    logger.info("spdk mem diff:")
-    logger.info(json.dumps(diff, indent=2))
-    snap.mem_diff = diff
     snap.write_to_db(db_controller.kv_store)
 
     if lvol.cloned_from_snap:
@@ -183,7 +155,7 @@ def list(all=False):
         data.append({
             "UUID": snap.uuid,
             "Name": snap.snap_name,
-            "Size": utils.humanbytes(snap.lvol.size),
+            "Size": utils.humanbytes(snap.size),
             "BDev": snap.snap_bdev,
             "LVol ID": snap.lvol.get_id(),
             "Created At": time.strftime("%H:%M:%S, %d/%m/%Y", time.gmtime(snap.created_at)),
@@ -325,6 +297,20 @@ def clone(snapshot_id, clone_name, new_size=0):
         logger.error(error)
         return False, f"Failed to add lvol on node {snode.get_id()}"
 
+    if pool.pool_max_size > 0:
+        total = pool_controller.get_pool_total_capacity(pool.get_id())
+        if total + snap.lvol.size > pool.pool_max_size:
+            msg = f"Pool max size has reached {utils.humanbytes(total)} of {utils.humanbytes(pool.pool_max_size)}"
+            logger.error(msg)
+            return False, msg
+
+    if snode.max_snap:
+        cnt = db_controller.get_snapshots_by_node_id(snode.get_id())
+        if cnt and len(cnt)+1 > snode.max_lvol:
+            msg = f"Storage node LVol count must be less than max_lvol:{snode.max_lvol}"
+            logger.error(msg)
+            return False, msg
+
     cluster = db_controller.get_cluster_by_id(snode.cluster_id)
 
     lvol = LVol()
@@ -383,57 +369,20 @@ def clone(snapshot_id, clone_name, new_size=0):
         lvol.crypto_key1 = snap.lvol.crypto_key1
         lvol.crypto_key2 = snap.lvol.crypto_key2
 
-    # if new_size:
-    #     if snap.lvol.size >= new_size:
-    #         msg = f"New size {new_size} must be higher than the original size {snap.lvol.size}"
-    #         logger.error(msg)
-    #         return False, msg
-    #
-    #     if snap.lvol.max_size < new_size:
-    #         msg = f"New size {new_size} must be smaller than the max size {snap.lvol.max_size}"
-    #         logger.error(msg)
-    #         return False, msg
-    #     lvol.size = new_size
+    if new_size:
+        if snap.lvol.size >= new_size:
+            msg = f"New size {new_size} must be higher than the original size {snap.lvol.size}"
+            logger.error(msg)
+            return False, msg
+
+        if snap.lvol.max_size < new_size:
+            msg = f"New size {new_size} must be smaller than the max size {snap.lvol.max_size}"
+            logger.error(msg)
+            return False, msg
+        lvol.size = new_size
 
     rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
-    spdk_mem_info_before = rpc_client.ultra21_util_get_malloc_stats()
 
-    # logger.info("Creating clone bdev")
-    # ret = rpc_client.lvol_clone(snap.snap_bdev, lvol.lvol_bdev)
-    # if not ret:
-    #     return False, "Failed to create clone lvol bdev"
-    #
-    # if "crypto" in snap.lvol.lvol_type:
-    #     lvol.crypto_bdev = f"crypto_{lvol.lvol_name}"
-    #     lvol.crypto_key1 = snap.lvol.crypto_key1
-    #     lvol.crypto_key2 = snap.lvol.crypto_key2
-    #
-    #     ret = lvol_controller._create_crypto_lvol(
-    #         rpc_client, lvol.crypto_bdev, lvol.top_bdev, lvol.crypto_key1, lvol.crypto_key2)
-    #     if not ret:
-    #         return False, "Failed to create clone lvol bdev"
-    #
-    #     lvol.lvol_type += ',crypto'
-    #     lvol.top_bdev = lvol.crypto_bdev
-    #
-    # subsystem_nqn = lvol.nqn
-    # logger.info("creating subsystem %s", subsystem_nqn)
-    # ret = rpc_client.subsystem_create(subsystem_nqn, 'sbcli-cn', lvol.uuid)
-    #
-    # # add listeners
-    # logger.info("adding listeners")
-    # for iface in snode.data_nics:
-    #     if iface.ip4_address:
-    #         tr_type = iface.get_transport_type()
-    #         logger.info("adding listener for %s on IP %s" % (subsystem_nqn, iface.ip4_address))
-    #         ret = rpc_client.listeners_create(subsystem_nqn, tr_type, iface.ip4_address, "4420")
-    #
-    # logger.info(f"add lvol {clone_name} to subsystem")
-    # ret = rpc_client.nvmf_subsystem_add_ns(subsystem_nqn, lvol.top_bdev, lvol.uuid, lvol.guid)
-    # if not ret:
-    #     return False, "Failed to add bdev to subsystem"
-
-##########################################################################################################
     if snap.lvol.ha_type == 'single':
         ret, error = lvol_controller.add_lvol_on_node(lvol, snode)
         if error:
@@ -458,15 +407,15 @@ def clone(snapshot_id, clone_name, new_size=0):
             snode.secondary_node_id]
         lvol.nodes = nodes_ids
 ##########################################################################################################
-    spdk_mem_info_after = rpc_client.ultra21_util_get_malloc_stats()
-    diff = {}
-    for key in spdk_mem_info_after.keys():
-        diff[key] = spdk_mem_info_after[key] - spdk_mem_info_before[key]
-
-    logger.info("spdk mem diff:")
-    logger.info(json.dumps(diff, indent=2))
-    lvol.mem_diff = diff
-    lvol.write_to_db(db_controller.kv_store)
+    # spdk_mem_info_after = rpc_client.ultra21_util_get_malloc_stats()
+    # diff = {}
+    # for key in spdk_mem_info_after.keys():
+    #     diff[key] = spdk_mem_info_after[key] - spdk_mem_info_before[key]
+    #
+    # logger.info("spdk mem diff:")
+    # logger.info(json.dumps(diff, indent=2))
+    # lvol.mem_diff = diff
+    # lvol.write_to_db(db_controller.kv_store)
 
     pool = db_controller.get_pool_by_id(snap.lvol.pool_uuid)
     pool.lvols += 1
@@ -485,6 +434,6 @@ def clone(snapshot_id, clone_name, new_size=0):
 
     logger.info("Done")
     snapshot_events.snapshot_clone(snap, lvol)
-    # if new_size:
-    #     lvol_controller.resize_lvol(lvol.get_id(), new_size)
+    if new_size:
+        lvol_controller.resize_lvol(lvol.get_id(), new_size)
     return True, lvol.uuid
