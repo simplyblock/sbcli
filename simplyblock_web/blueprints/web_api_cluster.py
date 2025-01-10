@@ -90,7 +90,7 @@ def cluster_capacity(uuid, history):
         logger.error(f"Cluster not found {uuid}")
         return utils.get_response_error(f"Cluster not found: {uuid}", 404)
 
-    ret = cluster_ops.get_capacity(uuid, history, parse_sizes=False)
+    ret = cluster_ops.get_capacity(uuid, history, is_json=True)
     return utils.get_response(ret)
 
 
