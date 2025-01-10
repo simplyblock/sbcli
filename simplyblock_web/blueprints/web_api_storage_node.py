@@ -34,6 +34,8 @@ def list_storage_nodes(uuid):
     for node in nodes:
         d = node.get_clean_dict()
         d['status_code'] = node.get_status_code()
+        lvs = db_controller.get_lvols_by_node_id(node.get_id()) or []
+        d['lvols'] = len(lvs)
         data.append(d)
     return utils.get_response(data)
 

@@ -187,10 +187,11 @@ def _get_next_3_nodes(cluster_id, lvol_size=0):
             #     continue
             #
             online_nodes.append(node)
+            lvols = db_controller.get_lvols_by_node_id(node.get_id()) or []
             # node_stat_list = db_controller.get_node_stats(node, limit=1000)
             # combined_record = utils.sum_records(node_stat_list)
             node_st = {
-                "lvol": node.lvols+1,
+                "lvol": len(lvols)+1,
                 # "cpu": 1 + (node.cpu * node.cpu_hz),
                 # "r_io": combined_record.read_io_ps,
                 # "w_io": combined_record.write_io_ps,
@@ -523,14 +524,14 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
             host_node.secondary_node_id]
         lvol.nodes = nodes_ids
 
-    host_node = db_controller.get_storage_node_by_id(host_node.get_id())
-    host_node.lvols += 1
-    host_node.write_to_db(db_controller.kv_store)
+    # host_node = db_controller.get_storage_node_by_id(host_node.get_id())
+    # host_node.lvols += 1
+    # host_node.write_to_db(db_controller.kv_store)
 
-    pool = db_controller.get_pool_by_id(pool.get_id())
+    # pool = db_controller.get_pool_by_id(pool.get_id())
     lvol.pool_uuid = pool.get_id()
-    pool.lvols += 1
-    pool.write_to_db(db_controller.kv_store)
+    # pool.lvols += 1
+    # pool.write_to_db(db_controller.kv_store)
 
     lvol.write_to_db(db_controller.kv_store)
     lvol_events.lvol_create(lvol)
@@ -608,7 +609,8 @@ def add_lvol_on_node(lvol, snode, ha_comm_addrs=None, ha_inode_self=0):
         huge_free = result["memory_details"]["huge_free"]
 
         total_node_capacity = db_controller.get_snode_size(snode.get_id())
-        error = utils.validate_add_lvol_or_snap_on_node(memory_free, huge_free, snode.max_lvol, lvol.size,  total_node_capacity, snode.lvols)
+        lvols = len(db_controller.get_lvols_by_node_id(snode.get_id()))
+        error = utils.validate_add_lvol_or_snap_on_node(memory_free, huge_free, snode.max_lvol, lvol.size,  total_node_capacity, lvols)
         if error:
             logger.error(error)
             return False, f"Failed to add lvol on node {snode.get_id()}"
@@ -929,16 +931,16 @@ def delete_lvol(id_or_name, force_delete=False):
                 return False
 
     # remove from db
-    snode = db_controller.get_storage_node_by_id(lvol.node_id)
-    # logger.debug(snode)
-    logger.debug(f"removing lvol: {lvol.get_id()} from node {snode.get_id()}")
-    snode.lvols -= 1
-    snode.write_to_db(db_controller.kv_store)
+    # snode = db_controller.get_storage_node_by_id(lvol.node_id)
+    # # logger.debug(snode)
+    # logger.debug(f"removing lvol: {lvol.get_id()} from node {snode.get_id()}")
+    # snode.lvols -= 1
+    # snode.write_to_db(db_controller.kv_store)
 
-    # remove from pool
-    pool = db_controller.get_pool_by_id(lvol.pool_uuid)
-    pool.lvols -= 1
-    pool.write_to_db(db_controller.kv_store)
+    # # remove from pool
+    # pool = db_controller.get_pool_by_id(lvol.pool_uuid)
+    # pool.lvols -= 1
+    # pool.write_to_db(db_controller.kv_store)
 
     lvol_events.lvol_delete(lvol)
     lvol.remove(db_controller.kv_store)

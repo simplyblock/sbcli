@@ -31,7 +31,10 @@ def list_pools(uuid):
         pools = db_controller.get_pools(cluster_id)
     data = []
     for pool in pools:
-        data.append(pool.get_clean_dict())
+        d = pool.get_clean_dict()
+        lvs = db_controller.get_lvols_by_pool_id(pool.get_id()) or []
+        d['lvols'] = len(lvs)
+        data.append(d)
     return utils.get_response(data)
 
 
@@ -168,7 +171,7 @@ def pool_capacity(uuid):
             "util_percent": 0,
             "util": 0,
         })
-    if pool.lvols:
+    if total_size:
         out.append({
             "device name": "Total",
             "provisioned": total_size,

@@ -1463,13 +1463,14 @@ def remove_storage_node(node_id, force_remove=False, force_migrate=False):
                 if task.status != JobSchedule.STATUS_DONE and task.canceled is False:
                     tasks_controller.cancel_task(task.get_id())
 
-    if snode.lvols:
+    lvols = db_controller.get_lvols_by_node_id(node_id)
+    if lvols:
         if force_migrate:
-            for lvol in db_controller.get_lvols_by_node_id(node_id):
+            for lvol in lvols:
                 pass
                 # lvol_controller.migrate(lvol_id)
         elif force_remove:
-            for lvol in db_controller.get_lvols_by_node_id(node_id):
+            for lvol in lvols:
                 lvol_controller.delete_lvol(lvol.get_id(), True)
         else:
             logger.error("LVols found on the storage node, use --force-remove or --force-migrate")
@@ -1943,12 +1944,13 @@ def list_storage_nodes(is_json, cluster_id=None):
         for dev in node.nvme_devices:
             if dev.status == NVMeDevice.STATUS_ONLINE:
                 online_devices += 1
+        lvs = db_controller.get_lvols_by_node_id(node.get_id()) or []
         data.append({
             "UUID": node.uuid,
             "Hostname": node.hostname,
             "Management IP": node.mgmt_ip,
             "Devices": f"{total_devices}/{online_devices}",
-            "LVols": f"{node.lvols}",
+            "LVols": f"{len(lvs)}",
             "Status": node.status,
             "Health": node.health_check,
             "Up time": uptime,
@@ -2161,18 +2163,16 @@ def suspend_storage_node(node_id, force=False):
         snode.rpc_username, snode.rpc_password, timeout=5, retry=1)
 
     nodes = []
+    lvols = db_controller.get_lvols_by_node_id(node_id)
     if snode.is_secondary_node:
         ret = db_controller.get_primary_storage_nodes_by_secondary_node_id(node_id)
         if ret:
             nodes.extend(ret)
-    elif snode.lvols > 0:
+    elif lvols:
         nodes.append(snode)
 
 
     for node in nodes:
-        if node.lvols==0:
-            continue
-
         for lvol in db_controller.get_lvols_by_node_id(node.get_id()):
             for iface in snode.data_nics:
                 if iface.ip4_address:
@@ -2235,15 +2235,16 @@ def resume_storage_node(node_id):
         snode.rpc_username, snode.rpc_password)
 
     nodes = []
+    lvols = db_controller.get_lvols_by_node_id(node_id)
     if snode.is_secondary_node:
         ret = db_controller.get_primary_storage_nodes_by_secondary_node_id(node_id)
         if ret:
             nodes.extend(ret)
-    elif snode.lvols > 0:
+    elif lvols:
         nodes.append(snode)
 
     for node in nodes:
-        if node.lvols==0 or not node.lvstore:
+        if not node.lvstore:
             continue
 
         if node.get_id() != snode.get_id():
@@ -2255,7 +2256,7 @@ def resume_storage_node(node_id):
                                 lvol.nqn, iface.ip4_address, "4420", False)
 
 
-    if not snode.is_secondary_node and snode.lvols > 0:
+    if not snode.is_secondary_node:
         for lvol in db_controller.get_lvols_by_node_id(snode.get_id()):
             for iface in snode.data_nics:
                 if iface.ip4_address:
