@@ -1023,13 +1023,13 @@ def list_lvols(is_json, cluster_id, pool_id_or_name, all=False):
                 for lv in db_controller.get_lvols_by_pool_id(pool.get_id()):
                     lvols.append(lv)
     else:
-        lvols = db_controller.get_lvols()
+        lvols = db_controller.get_all_lvols()
 
     data = []
     for lvol in lvols:
         logger.debug(lvol)
-        if lvol.deleted is True and all is False:
-            continue
+        # if lvol.deleted is True and all is False:
+        #     continue
         data.append({
             "Id": lvol.uuid,
             "Name": lvol.lvol_name,
