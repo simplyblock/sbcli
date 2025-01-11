@@ -1211,7 +1211,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
     # creating RPCClient instance
     rpc_client = RPCClient(
         snode.mgmt_ip, snode.rpc_port,
-        snode.rpc_username, snode.rpc_password, timeout=60, retry=5)
+        snode.rpc_username, snode.rpc_password, timeout=3*60, retry=3)
 
     # 1- set iobuf options
     if (snode.iobuf_small_pool_count or snode.iobuf_large_pool_count or
