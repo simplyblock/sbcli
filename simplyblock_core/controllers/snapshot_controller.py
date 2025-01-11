@@ -90,18 +90,19 @@ def add(lvol_id, snapshot_name):
 
 ##############################################################################
 
+    snap_bdev_name = f"SNAP_{utils.get_random_vuid()}"
     rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
 
     blobid = 0
     snap_uuid = ""
     rpc_client.bdev_lvol_set_leader(True, lvs_name=lvol.lvs_name)
     logger.info("Creating Snapshot bdev")
-    ret = rpc_client.lvol_create_snapshot(f"{lvol.lvs_name}/{lvol.lvol_bdev}", snapshot_name)
+    ret = rpc_client.lvol_create_snapshot(f"{lvol.lvs_name}/{lvol.lvol_bdev}", snap_bdev_name)
     if not ret:
         return False, "Failed to create snapshot bdev"
 
     size = lvol.size
-    snap_bdev = rpc_client.get_bdevs(f"{lvol.lvs_name}/{snapshot_name}")
+    snap_bdev = rpc_client.get_bdevs(f"{lvol.lvs_name}/{snap_bdev_name}")
     if snap_bdev:
         snap_uuid = snap_bdev[0]['uuid']
         blobid = snap_bdev[0]['driver_specific']['lvol']['blobid']
@@ -124,7 +125,7 @@ def add(lvol_id, snapshot_name):
     snap.pool_uuid = pool.get_id()
     snap.cluster_id = pool.cluster_id
     snap.snap_name = snapshot_name
-    snap.snap_bdev = f"{lvol.lvs_name}/{snapshot_name}"
+    snap.snap_bdev = f"{lvol.lvs_name}/{snap_bdev_name}"
     snap.created_at = int(time.time())
     snap.lvol = lvol
 
@@ -132,13 +133,14 @@ def add(lvol_id, snapshot_name):
 
     if lvol.cloned_from_snap:
         original_snap = db_controller.get_snapshot_by_id(lvol.cloned_from_snap)
-        if original_snap.snap_ref_id:
-            original_snap = db_controller.get_snapshot_by_id(original_snap.snap_ref_id)
+        if original_snap:
+            if original_snap.snap_ref_id:
+                original_snap = db_controller.get_snapshot_by_id(original_snap.snap_ref_id)
 
-        original_snap.ref_count += 1
-        original_snap.write_to_db(db_controller.kv_store)
-        snap.snap_ref_id = original_snap.get_id()
-        snap.write_to_db(db_controller.kv_store)
+            original_snap.ref_count += 1
+            original_snap.write_to_db(db_controller.kv_store)
+            snap.snap_ref_id = original_snap.get_id()
+            snap.write_to_db(db_controller.kv_store)
 
     logger.info("Done")
     snapshot_events.snapshot_create(snap)
