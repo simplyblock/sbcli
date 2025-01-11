@@ -22,16 +22,12 @@ class LVol(BaseModel):
     bdev_stack: List = []
     blobid: int = 0
     cloned_from_snap: str = ""
-    cluster_size: int = 0
     comp_bdev: str = ""
     crypto_bdev: str = ""
     crypto_key1: str = ""
     crypto_key2: str = ""
     crypto_key_name: str = ""
     deletion_status: str = ""
-    distr_bs: int = 0
-    distr_chunk_bs: int = 0
-    distr_page_size: int = 0
     guid: str = ""
     ha_type: str = ""
     health_check: bool = True
@@ -47,10 +43,8 @@ class LVol(BaseModel):
     mem_diff: dict = {}
     mode: str = "read-write"
     namespace: str = ""
-    ndcs: int = 0
     node_id: str = ""
     nodes: List[str] = []
-    npcs: int = 0
     nqn: str = ""
     nvme_dev: NVMeDevice = None
     pool_uuid: str = ""

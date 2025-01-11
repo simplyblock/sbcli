@@ -106,7 +106,6 @@ def add(lvol_id, snapshot_name):
     if snap_bdev:
         snap_uuid = snap_bdev[0]['uuid']
         blobid = snap_bdev[0]['driver_specific']['lvol']['blobid']
-        size = snap_bdev[0]['driver_specific']['lvol']['num_allocated_clusters'] * lvol.cluster_size
 
     if snode.secondary_node_id and blobid:
         sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
@@ -334,11 +333,6 @@ def clone(snapshot_id, clone_name, new_size=0):
     lvol.pool_uuid = pool.get_id()
     lvol.ha_type = snap.lvol.ha_type
     lvol.lvol_type = 'lvol'
-    lvol.ndcs = snap.lvol.ndcs
-    lvol.npcs = snap.lvol.npcs
-    lvol.distr_bs = snap.lvol.distr_bs
-    lvol.distr_chunk_bs = snap.lvol.distr_chunk_bs
-    lvol.distr_page_size = snap.lvol.distr_page_size
     lvol.guid = lvol_controller._generate_hex_string(16)
     lvol.vuid = snap.lvol.vuid
     lvol.snapshot_name = snap.snap_bdev

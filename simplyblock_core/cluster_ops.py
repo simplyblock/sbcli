@@ -514,6 +514,7 @@ def list():
             "tls": cl.tls,
             "mgmt nodes": len(mt),
             "storage nodes": len(st),
+            "Mod": f"{cl.distr_ndcs}x{cl.distr_npcs}",
             "Status": cl.status,
         })
     return utils.print_table(data)

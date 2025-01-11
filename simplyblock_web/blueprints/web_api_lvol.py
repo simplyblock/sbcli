@@ -69,9 +69,9 @@ def lvol_iostats(uuid, history):
     }
     return utils.get_response(ret)
 
-
-@bp.route('/lvol/capacity/<string:uuid>', methods=['GET'])
-def lvol_capacity(uuid):
+@bp.route('/lvol/capacity/<string:uuid>/history/<string:history>', methods=['GET'])
+@bp.route('/lvol/capacity/<string:uuid>', methods=['GET'], defaults={'history': None})
+def lvol_capacity(uuid, history):
     lvol = db_controller.get_lvol_by_id(uuid)
     if not lvol:
         return utils.get_response_error(f"LVol not found: {uuid}", 404)
@@ -82,12 +82,12 @@ def lvol_capacity(uuid):
         if req_secret != pool.secret:
             return utils.get_response_error(f"Pool secret doesn't mach the value in the request header", 400)
 
-    out = {
-        "provisioned": lvol.size,
-        "util_percent": 0,
-        "util": 0,
+    data = lvol_controller.get_capacity(uuid, history, parse_sizes=False)
+    ret = {
+        "object_data": lvol.get_clean_dict(),
+        "stats": data or []
     }
-    return utils.get_response(out)
+    return utils.get_response(ret)
 
 
 @bp.route('/lvol', methods=['POST'])

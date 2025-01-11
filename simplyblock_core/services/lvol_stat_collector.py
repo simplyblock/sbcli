@@ -35,7 +35,7 @@ def sum_stats(stats_list):
     return ret
 
 
-def add_lvol_stats(pool, lvol, stats_list, capacity_dict=None, connected_clients=0):
+def add_lvol_stats(cluster, pool, lvol, stats_list, capacity_dict=None, connected_clients=0):
     now = int(time.time())
     data = {
         "pool_id": pool.get_id(),
@@ -49,9 +49,10 @@ def add_lvol_stats(pool, lvol, stats_list, capacity_dict=None, connected_clients
         size_used = 0
         lvol_dict = capacity_dict[0]
         size_total = int(lvol_dict['num_blocks']*lvol_dict['block_size'])
+        cluster_size = cluster.ndcs * cluster.page_size_in_blocks
         if "driver_specific" in lvol_dict and "lvol" in lvol_dict["driver_specific"]:
             num_allocated_clusters = lvol_dict["driver_specific"]["lvol"]["num_allocated_clusters"]
-            size_used = int(num_allocated_clusters*lvol.cluster_size)
+            size_used = int(num_allocated_clusters*cluster_size)
 
         size_free = size_total - size_used
         size_util = 0
@@ -186,11 +187,8 @@ while True:
     pools = db_controller.get_pools()
     all_lvols = db_controller.get_lvols()  # pass
     for pool in pools:
-        lvols = []
-        for lvol in all_lvols:
-            if lvol.pool_uuid == pool.get_id():
-                lvols.append(lvol)
-
+        cluster = db_controller.get_cluster_by_id(pool.cluster_id)
+        lvols = db_controller.get_lvols_by_pool_id(pool.get_id())
         if not lvols:
             logger.error("LVols list is empty")
 
@@ -227,7 +225,7 @@ while True:
                 if ret:
                     connected_clients = max(len(ret), connected_clients)
 
-            record = add_lvol_stats(pool, lvol, stats, capacity_dict, connected_clients)
+            record = add_lvol_stats(cluster, pool, lvol, stats, capacity_dict, connected_clients)
             stat_records.append(record)
 
         if stat_records:
