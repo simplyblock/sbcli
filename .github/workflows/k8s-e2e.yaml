@@ -291,20 +291,26 @@ jobs:
           CLUSTER_API_GATEWAY_ENDPOINT=${{ steps.bootstrap_cluster.outputs.cluster_api_gateway_endpoint }}
           CLUSTER_UUID=${{ steps.bootstrap_cluster.outputs.cluster_id }}
           CLUSTER_SECRET=${{ steps.bootstrap_cluster.outputs.cluster_secret }}
-   
-          response=$(curl -s -X GET "$CLUSTER_API_GATEWAY_ENDPOINT/cluster/$CLUSTER_UUID" \
-            -H "Content-Type: application/json" \
-            -H "Authorization: $CLUSTER_UUID $CLUSTER_SECRET")
-     
-          status=$(echo $response | jq -r '.results[0].status')
-       
-          if [ "$status" != "active" ]; then
-              echo "Cluster status is not active, current status: $status"
-              exit 1
-          else
-              echo "Cluster status is active"
-              exit 0
-          fi
+          n=0
+          until [ "$n" -ge 60 ]
+          do
+            response=$(curl -s -X GET "$CLUSTER_API_GATEWAY_ENDPOINT/cluster/$CLUSTER_UUID" \
+              -H "Content-Type: application/json" \
+              -H "Authorization: $CLUSTER_UUID $CLUSTER_SECRET")
+            
+            status=$(echo $response | jq -r '.results[0].status')
+            
+            if [ "$status" != "active" ]; then
+                echo "Cluster status is not active, current status: $status, retrying"
+                n=$((n+1)) 
+                sleep 10
+            else
+                echo "Cluster status is active"
+                exit 0
+            fi
+          done
+          echo "Cluster status is not active"
+          exit 1
 
       - name: Record Test Start Time
         run: echo "TEST_START_TIME=$(date +%s)" >> $GITHUB_ENV
