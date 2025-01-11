@@ -1206,12 +1206,12 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
     snode.num_partitions_per_dev = num_partitions_per_dev
     snode.jm_percent = jm_percent
 
-    snode.write_to_db(kv_store)
+    time.sleep(10)
 
     # creating RPCClient instance
     rpc_client = RPCClient(
         snode.mgmt_ip, snode.rpc_port,
-        snode.rpc_username, snode.rpc_password, timeout=3*60, retry=3)
+        snode.rpc_username, snode.rpc_password, timeout=3*60, retry=10)
 
     # 1- set iobuf options
     if (snode.iobuf_small_pool_count or snode.iobuf_large_pool_count or
@@ -1224,6 +1224,8 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
             return False
     rpc_client.bdev_set_options(0, 0, 0, 0)
     rpc_client.accel_set_options()
+
+    snode.write_to_db(kv_store)
 
     ret = rpc_client.nvmf_set_max_subsystems(constants.NVMF_MAX_SUBSYSTEMS)
     if not ret:
