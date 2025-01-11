@@ -208,8 +208,6 @@ jobs:
 
       - name: Bootstrap k3s
         run: |
-          echo "Sleeping for 30 seconds before bootstrap-k3s"
-          sleep 30
           cd $GITHUB_WORKSPACE/simplyBlockDeploy
           ./bootstrap-k3s.sh --k8s-snode
         id: bootstrap_k3s
@@ -224,7 +222,6 @@ jobs:
         run: |
           cd $GITHUB_WORKSPACE/simplyblock-csi/charts/latest/spdk-csi/
           echo "Sleeping for 30 seconds before helm install"
-          sleep 30
           helm install spdk-csi ./ \
             --namespace spdk-csi \
             --create-namespace \
@@ -244,47 +241,6 @@ jobs:
           NDCS: ${{ env.NDCS }}
           NPCS: ${{ env.NPCS }}
 
-      # - name: Wait for Storage Nodes to Become Online
-      #   run: |
-      #     echo "Sleeping for 120 seconds before helm install"
-      #     sleep 120
-      #     while true; do
-      #       echo "Checking storage node status..."
-            
-      #       NODE_STATUS=$(ssh -i "$HOME/.ssh/${{ steps.terraform_outputs.outputs.key_name }}" \
-      #         -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no \
-      #         -o ProxyCommand="ssh -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -i \"$HOME/.ssh/${{ steps.terraform_outputs.outputs.key_name }}\" -W %h:%p ec2-user@${{ steps.terraform_outputs.outputs.bastion_public_ip }}" \
-      #         ec2-user@${{ steps.terraform_outputs.outputs.mgmt_private_ip }} \
-      #         "sbcli-dev sn list | grep -Eo 'online|offline'" || echo "SSH command failed")
-
-      #       SSH_EXIT_CODE=$?
-      #       if [ $SSH_EXIT_CODE -ne 0 ]; then
-      #         echo "SSH command failed with exit code $SSH_EXIT_CODE. Retrying..."
-      #         sleep 30
-      #         continue
-      #       fi
-
-      #       if [ -z "$NODE_STATUS" ]; then
-      #         echo "No output from sbcli-dev sn list. Retrying..."
-      #         sleep 30
-      #         continue
-      #       fi
-
-      #       echo "Node Status: $NODE_STATUS"
-      #       ONLINE_NODES=$(echo "$NODE_STATUS" | grep -c "online")
-            
-      #       if [ "$ONLINE_NODES" -ge 3 ]; then
-      #         echo "All 3 storage nodes are online."
-      #         break
-      #       else
-      #         echo "$ONLINE_NODES nodes online. Waiting for more nodes to come online..."
-      #         sleep 30
-      #       fi
-      #     done
-      #   shell: /usr/bin/bash -e {0}
-      
-      - name: Sleep after Helm Installation
-        run: sleep 600
 
       - name: Check Cluster Status
         run: |
