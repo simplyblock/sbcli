@@ -382,7 +382,7 @@ def clone(snapshot_id, clone_name, new_size=0):
             return False, msg
         lvol.size = new_size
 
-    rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
+    lvol.write_to_db(db_controller.kv_store)
 
     if snap.lvol.ha_type == 'single':
         ret, error = lvol_controller.add_lvol_on_node(lvol, snode)
@@ -407,23 +407,8 @@ def clone(snapshot_id, clone_name, new_size=0):
             snode.get_id(),
             snode.secondary_node_id]
         lvol.nodes = nodes_ids
-##########################################################################################################
-    # spdk_mem_info_after = rpc_client.ultra21_util_get_malloc_stats()
-    # diff = {}
-    # for key in spdk_mem_info_after.keys():
-    #     diff[key] = spdk_mem_info_after[key] - spdk_mem_info_before[key]
-    #
-    # logger.info("spdk mem diff:")
-    # logger.info(json.dumps(diff, indent=2))
-    # lvol.mem_diff = diff
-    # lvol.write_to_db(db_controller.kv_store)
 
-    # pool = db_controller.get_pool_by_id(snap.lvol.pool_uuid)
-    # pool.lvols += 1
-    # pool.write_to_db(db_controller.kv_store)
-    # snode = db_controller.get_storage_node_by_id(snode.get_id())
-    # snode.lvols += 1
-    # snode.write_to_db(db_controller.kv_store)
+    lvol.write_to_db(db_controller.kv_store)
 
     if snap.snap_ref_id:
         ref_snap = db_controller.get_snapshot_by_id(snap.snap_ref_id)
