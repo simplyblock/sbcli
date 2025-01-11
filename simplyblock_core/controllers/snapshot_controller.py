@@ -182,7 +182,7 @@ def delete(snapshot_uuid, force_delete=False):
         if lvol.cloned_from_snap and lvol.cloned_from_snap == snapshot_uuid:
             clones.append(lvol)
 
-    if len(clones) > 1:
+    if len(clones) >= 1:
         logger.warning(f"Soft delete snapshot with clones")
         snap = db_controller.get_snapshot_by_id(snapshot_uuid)
         snap.deleted = True
@@ -322,7 +322,7 @@ def clone(snapshot_id, clone_name, new_size=0):
     lvol.size = snap.lvol.size
     lvol.max_size = snap.lvol.max_size
     lvol.base_bdev = snap.lvol.base_bdev
-    lvol.lvol_bdev = f"CLN_{clone_name}"
+    lvol.lvol_bdev = f"CLN_{utils.get_random_vuid()}"
     lvol.lvs_name = snap.lvol.lvs_name
     lvol.top_bdev = f"{lvol.lvs_name}/{lvol.lvol_bdev}"
     lvol.hostname = snode.hostname

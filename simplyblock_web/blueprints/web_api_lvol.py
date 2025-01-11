@@ -106,6 +106,10 @@ def add_lvol():
         | crypto_key1     | the hex value of key1 to be used for lvol encryption
         | crypto_key2     | the hex value of key2 to be used for lvol encryption
         | host_id         | the hostID on which the lvol is created
+        | lvol_priority_class | the LVol priority class (0, 1)
+        | namespace       | the LVol namespace for k8s
+        | uid             | use this UUID for this LVol
+        | pvc_name        | set PVC name for this LVol
     """""
 
     cl_data = request.get_json()
