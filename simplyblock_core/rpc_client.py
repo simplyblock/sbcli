@@ -27,7 +27,7 @@ class RPCClient:
     # ref: https://spdk.io/doc/jsonrpc.html
     DEFAULT_ALLOWED_METHODS = ["HEAD", "GET", "PUT", "DELETE", "OPTIONS", "TRACE", "POST"]
 
-    def __init__(self, ip_address, port, username, password, timeout=60, retry=3):
+    def __init__(self, ip_address, port, username, password, timeout=180, retry=3):
         self.ip_address = ip_address
         self.port = port
         self.url = 'http://%s:%s/' % (self.ip_address, self.port)
