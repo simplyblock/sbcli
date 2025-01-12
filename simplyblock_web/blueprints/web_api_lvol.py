@@ -82,10 +82,22 @@ def lvol_capacity(uuid, history):
         if req_secret != pool.secret:
             return utils.get_response_error(f"Pool secret doesn't mach the value in the request header", 400)
 
-    data = lvol_controller.get_capacity(uuid, history, parse_sizes=True)
+    data = lvol_controller.get_capacity(uuid, history, parse_sizes=False)
+    out = []
+    if data:
+        for record in data:
+            out.append({
+                "date":record.date,
+                "prov": record.size_prov,
+                "used": record.size_used,
+                "free": record.size_free,
+                "util": record.size_util,
+                "prov_util": record.size_prov_util,
+            })
+
     ret = {
         "object_data": lvol.get_clean_dict(),
-        "stats": data or []
+        "stats": out or []
     }
     return utils.get_response(ret)
 
