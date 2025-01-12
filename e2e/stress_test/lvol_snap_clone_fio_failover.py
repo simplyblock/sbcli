@@ -103,7 +103,7 @@ class TestLvolHAClusterWithClones(TestLvolHACluster):
                     "name": f"{lvol_details['Name']}_fio",
                     "rw": "randrw",
                     "bs": "4K-128K",
-                    "numjobs": 16,
+                    "numjobs": 32,
                     "iodepth": 512,
                 },
             )
