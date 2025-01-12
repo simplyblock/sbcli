@@ -113,7 +113,7 @@ def add(lvol_id, snapshot_name):
             sec_rpc_client = RPCClient(sec_node.mgmt_ip, sec_node.rpc_port, sec_node.rpc_username, sec_node.rpc_password)
             sec_rpc_client.bdev_lvol_set_leader(False, lvs_name=lvol.lvs_name)
             ret = sec_rpc_client.bdev_lvol_snapshot_register(
-                f"{lvol.lvs_name}/{snap_bdev_name}", snapshot_name, snap_uuid, blobid)
+                f"{lvol.lvs_name}/{lvol.lvol_bdev}", snap_bdev_name, snap_uuid, blobid)
 
 
     snap = SnapShot()

@@ -1019,8 +1019,8 @@ def list_lvols(is_json, cluster_id, pool_id_or_name, all=False):
     data = []
     for lvol in lvols:
         logger.debug(lvol)
-        # if lvol.deleted is True and all is False:
-        #     continue
+        if lvol.deleted is True and all is False:
+            continue
         data.append({
             "Id": lvol.uuid,
             "Name": lvol.lvol_name,
