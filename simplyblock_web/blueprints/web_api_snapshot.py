@@ -45,14 +45,7 @@ def list_snapshots():
     for snap in snaps:
         if snap.cluster_id != cluster_id:
             continue
-        data.append({
-            "uuid": snap.uuid,
-            "name": snap.pool_name,
-            "size": str(snap.lvol.size),
-            "pool_id": snap.pool_uuid,
-            "source_uuid": snap.lvol.get_id(),
-            "created_at": str(snap.created_at),
-        })
+        data.append(snap.get_clean_dict())
     return utils.get_response(data)
 
 
