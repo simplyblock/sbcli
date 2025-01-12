@@ -87,12 +87,12 @@ def lvol_capacity(uuid, history):
     if data:
         for record in data:
             out.append({
-                "date":record.date,
-                "prov": record.size_prov,
-                "used": record.size_used,
-                "free": record.size_free,
-                "util": record.size_util,
-                "prov_util": record.size_prov_util,
+                "date":record["date"],
+                "prov": record["size_prov"],
+                "used": record["size_used"],
+                "free": record["size_free"],
+                "util": record["size_util"],
+                "prov_util": record["size_prov_util"],
             })
 
     ret = {
