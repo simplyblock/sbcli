@@ -33,6 +33,20 @@ def task_runner(task):
         return True
 
     if task.status in [JobSchedule.STATUS_NEW ,JobSchedule.STATUS_SUSPENDED]:
+        if task.status == JobSchedule.STATUS_NEW:
+            for node in db_controller.get_storage_nodes_by_cluster_id(task.cluster_id):
+                if node.online_since:
+                    try:
+                        diff = datetime.now() - datetime.fromisoformat(node.online_since)
+                        if diff.total_seconds() < 60:
+                            task.function_result = "node is online < 1 min, retrying"
+                            task.status = JobSchedule.STATUS_SUSPENDED
+                            task.retry += 1
+                            task.write_to_db(db_controller.kv_store)
+                            return False
+                    except Exception as e:
+                        logger.error(f"Failed to get online since: {e}")
+
         task.status = JobSchedule.STATUS_RUNNING
         task.write_to_db(db_controller.kv_store)
         tasks_events.task_updated(task)
@@ -43,15 +57,6 @@ def task_runner(task):
         task.status = JobSchedule.STATUS_SUSPENDED
         task.write_to_db(db_controller.kv_store)
         return False
-
-    if snode.online_since:
-        diff = datetime.now() - datetime.fromisoformat(snode.online_since)
-        if diff.total_seconds() < 60:
-            task.function_result = "node is online < 1 min, retrying"
-            task.status = JobSchedule.STATUS_SUSPENDED
-            task.retry += 1
-            task.write_to_db(db_controller.kv_store)
-            return False
 
     rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password, timeout=5, retry=2)
     if "migration" not in task.function_params:

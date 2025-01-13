@@ -2,7 +2,7 @@
 import logging
 import time
 import sys
-
+from datetime import datetime
 
 from simplyblock_core import constants, db_controller, utils
 from simplyblock_core.controllers import tasks_events, tasks_controller, device_controller
@@ -33,6 +33,20 @@ def task_runner(task):
         return True
 
     if task.status in [JobSchedule.STATUS_NEW ,JobSchedule.STATUS_SUSPENDED]:
+        if task.status == JobSchedule.STATUS_NEW:
+            for node in db_controller.get_storage_nodes_by_cluster_id(task.cluster_id):
+                if node.online_since:
+                    try:
+                        diff = datetime.now() - datetime.fromisoformat(node.online_since)
+                        if diff.total_seconds() < 60:
+                            task.function_result = "node is online < 1 min, retrying"
+                            task.status = JobSchedule.STATUS_SUSPENDED
+                            task.retry += 1
+                            task.write_to_db(db_controller.kv_store)
+                            return False
+                    except Exception as e:
+                        logger.error(f"Failed to get online since: {e}")
+
         task.status = JobSchedule.STATUS_RUNNING
         task.write_to_db(db_controller.kv_store)
         tasks_events.task_updated(task)

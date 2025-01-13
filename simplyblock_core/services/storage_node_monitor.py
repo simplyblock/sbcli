@@ -138,7 +138,7 @@ def update_cluster_status(cluster_id):
                 break
 
             if node.online_since:
-                diff = datetime.now() - datetime.fromisoformat(snode.online_since)
+                diff = datetime.now() - datetime.fromisoformat(node.online_since)
                 if diff.total_seconds() < 60:
                     can_activate = False
                     break

@@ -866,7 +866,7 @@ def _connect_to_remote_jm_devs(this_node, jm_ids=[]):
                     continue
                 if node.jm_device and node.jm_device.status == JMDevice.STATUS_ONLINE:
                     remote_devices.append(node.jm_device)
-                    if len(remote_devices) >= 2 :
+                    if len(remote_devices) >= 3 :
                         break
 
     new_devs = []
@@ -2793,7 +2793,7 @@ def get_next_ha_jms(current_node):
                 except :
                     pass
     jm_count = dict(sorted(jm_count.items(), key=lambda x: x[1]))
-    return list(jm_count.keys())[:2]
+    return list(jm_count.keys())[:3]
 
 
 def get_node_jm_names(current_node):
@@ -2805,7 +2805,7 @@ def get_node_jm_names(current_node):
         jm_list.append("JM_LOCAL")
 
     if current_node.enable_ha_jm:
-        for jm_dev in current_node.remote_jm_devices[:2]:
+        for jm_dev in current_node.remote_jm_devices[:3]:
             jm_list.append(jm_dev.remote_bdev)
     return jm_list
 
@@ -2939,7 +2939,7 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
     return True
 
 
-def _create_bdev_stack(snode, lvstore_stack=None, primary_node=False):
+def _create_bdev_stack(snode, lvstore_stack=None, primary_node=None):
     rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
 
     created_bdevs = []
@@ -2971,7 +2971,7 @@ def _create_bdev_stack(snode, lvstore_stack=None, primary_node=False):
                     jm_list.append(bdev_name)
                 else:
                     jm_list.append("JM_LOCAL")
-                for jm_dev in primary_node.remote_jm_devices[:2]:
+                for jm_dev in primary_node.remote_jm_devices[:3]:
                     jm_list.append(jm_dev.remote_bdev)
                 params['jm_names'] = jm_list
             else:
