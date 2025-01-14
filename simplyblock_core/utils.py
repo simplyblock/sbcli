@@ -664,6 +664,9 @@ def strfdelta(tdelta):
 
 def handle_task_result(task: JobSchedule, res: dict, allowed_error_codes = None):
     if res:
+        if not allowed_error_codes:
+            allowed_error_codes = [0]
+
         res_data = res[0]
         migration_status = res_data.get("status")
         error_code = res_data.get("error", -1)
