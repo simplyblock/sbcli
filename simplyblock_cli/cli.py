@@ -12,7 +12,7 @@ from simplyblock_core import storage_node_ops as storage_ops
 from simplyblock_core import mgmt_node_ops as mgmt_ops
 from simplyblock_core import constants
 from simplyblock_core.controllers import pool_controller, lvol_controller, snapshot_controller, device_controller, \
-    tasks_controller
+    tasks_controller, backup_controller
 from simplyblock_core.controllers import caching_node_controller, health_controller
 from simplyblock_core.models.pool import Pool
 
@@ -701,6 +701,14 @@ class CLIWrapper:
 
         self.parser.add_argument("--cmd", help='cmd', nargs = '+')
 
+
+        subparser = self.add_command('backup', 'FDB Backup operations')
+        sub_command = self.add_sub_command(subparser, 'list', 'List backups')
+        sub_command = self.add_sub_command(subparser, 'status', 'status backups')
+        sub_command = self.add_sub_command(subparser, 'add', 'add backup')
+
+
+
         argcomplete.autocomplete(self.parser)
 
     def init_parser(self):
@@ -1264,6 +1272,15 @@ class CLIWrapper:
                     ret = utils.print_table(data)
                 else:
                     return False
+
+        elif args.command in ['backup']:
+            sub_command = args_dict['backup']
+            if sub_command == "create":
+                ret = backup_controller.create_backup()
+            elif sub_command == "list":
+                ret = backup_controller.backup_list()
+            elif sub_command == "status":
+                ret = backup_controller.backup_status()
 
         else:
             self.parser.print_help()
