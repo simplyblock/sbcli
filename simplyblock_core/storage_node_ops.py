@@ -2845,7 +2845,6 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
             distrib_vuid = utils.get_random_vuid()
 
         distrib_name = f"distrib_{distrib_vuid}"
-        lvs_name = f"LVS_{distrib_vuid}"
         lvstore_stack.extend(
             [
                 {
@@ -2904,18 +2903,16 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
         }
     )
 
-    ret, err = _create_bdev_stack(snode, lvstore_stack)
-    if err:
-        logger.error(f"Failed to create lvstore on node {snode.get_id()}")
-        logger.error(err)
-        return False
-
     snode.lvstore = lvs_name
     snode.lvstore_stack = lvstore_stack
     snode.raid = raid_device
     snode.write_to_db()
 
-    # time.sleep(1)
+    ret, err = _create_bdev_stack(snode, lvstore_stack)
+    if err:
+        logger.error(f"Failed to create lvstore on node {snode.get_id()}")
+        logger.error(err)
+        return False
 
     if snode.secondary_node_id:
         # creating lvstore on secondary
