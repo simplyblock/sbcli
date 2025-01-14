@@ -319,6 +319,14 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
     if cl.status not in [cl.STATUS_ACTIVE, cl.STATUS_DEGRADED]:
         return False, f"Cluster is not active, status: {cl.status}"
 
+    if uid:
+        for lvol in db_controller.get_lvols():
+            if lvol.get_id() == uid:
+                lvol.pc_name = pvc_name
+                lvol.lvol_name = name
+                lvol.write_to_db()
+                return uid, None
+
     if ha_type == "default":
         ha_type = cl.ha_type
 
