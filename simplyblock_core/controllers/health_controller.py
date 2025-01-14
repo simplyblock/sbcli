@@ -396,6 +396,9 @@ def check_lvol_on_node(lvol_id, node_id):
         return False
 
     snode = db_controller.get_storage_node_by_id(node_id)
+    if not snode:
+        return False
+
     rpc_client = RPCClient(
         snode.mgmt_ip, snode.rpc_port,
         snode.rpc_username, snode.rpc_password, timeout=5, retry=1)
@@ -443,7 +446,7 @@ def check_lvol(lvol_id):
         passed = True
         for nodes_id in lvol.nodes:
             node = db_controller.get_storage_node_by_id(nodes_id)
-            if node.status == StorageNode.STATUS_ONLINE:
+            if node and node.status == StorageNode.STATUS_ONLINE:
                 ret = check_lvol_on_node(lvol_id, nodes_id)
                 if not ret:
                     passed = False
