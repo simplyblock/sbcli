@@ -705,7 +705,8 @@ class CLIWrapper:
         subparser = self.add_command('backup', 'FDB Backup operations')
         sub_command = self.add_sub_command(subparser, 'list', 'List backups')
         sub_command = self.add_sub_command(subparser, 'status', 'status backups')
-        sub_command = self.add_sub_command(subparser, 'add', 'add backup')
+        sub_command = self.add_sub_command(subparser, 'create', 'add backup')
+        sub_command = self.add_sub_command(subparser, 'show', 'add backup')
 
 
 
@@ -1281,6 +1282,8 @@ class CLIWrapper:
                 ret = backup_controller.backup_list()
             elif sub_command == "status":
                 ret = backup_controller.backup_status()
+            elif sub_command == "show":
+                ret = backup_controller.show_backup()
 
         else:
             self.parser.print_help()
