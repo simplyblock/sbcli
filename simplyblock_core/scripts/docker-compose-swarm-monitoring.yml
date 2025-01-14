@@ -203,7 +203,7 @@ services:
     image: grafana/grafana:10.0.12
     environment:
       GF_SECURITY_ADMIN_USER: "admin"
-      GF_SECURITY_ADMIN_PASSWORD: "${GRAYLOG_ROOT_PASSWORD_SHA2}"
+      GF_SECURITY_ADMIN_PASSWORD: "${CLUSTER_SECRET}"
       GF_ALERTING_ENABLED: "true"
       GF_PATHS_PROVISIONING: "/etc/grafana/provisioning"
       GF_INSTALL_PLUGINS: "grafana-opensearch-datasource"
