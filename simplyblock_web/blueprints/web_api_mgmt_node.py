@@ -33,5 +33,7 @@ def list_mgmt_nodes(uuid):
     for node in nodes:
         d = node.get_clean_dict()
         d['status_code'] = node.get_status_code()
+        if "secret" in d:
+            del d['secret']
         data.append(d)
     return utils.get_response(data)

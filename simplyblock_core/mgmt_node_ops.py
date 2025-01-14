@@ -140,7 +140,7 @@ def deploy_mgmt_node(cluster_ip, cluster_id, ifname, cluster_secret):
     return node_id
 
 
-def add_mgmt_node(mgmt_ip, cluster_id=None):
+def add_mgmt_node(mgmt_ip, cluster_id=None, secret=None, endpoint=None):
     db_controller = DBController()
     hostname = utils.get_hostname()
     node = db_controller.get_mgmt_node_by_hostname(hostname)
@@ -155,10 +155,13 @@ def add_mgmt_node(mgmt_ip, cluster_id=None):
     node.cluster_id = cluster_id
     node.mgmt_ip = mgmt_ip
     node.status = MgmtNode.STATUS_ONLINE
+    if secret:
+        node.secret = secret
+    if endpoint:
+        node.endpoint = endpoint
     node.create_dt = str(datetime.datetime.now())
 
     node.write_to_db(db_controller.kv_store)
-
     mgmt_events.mgmt_add(node)
     logger.info("Done")
     return node.uuid

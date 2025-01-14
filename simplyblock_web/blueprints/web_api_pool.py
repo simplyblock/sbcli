@@ -21,14 +21,19 @@ db_controller = db_controller.DBController()
 @bp.route('/pool/<string:uuid>', methods=['GET'])
 def list_pools(uuid):
     cluster_id = utils.get_cluster_id(request)
-    if uuid:
-        pool = db_controller.get_pool_by_id(uuid)
-        if pool and pool.cluster_id == cluster_id:
-            pools = [pool]
-        else:
-            return utils.get_response_error(f"Pool not found: {uuid}", 404)
+    if cluster_id == "admin":
+        pools = db_controller.get_pools()
     else:
         pools = db_controller.get_pools(cluster_id)
+
+    if uuid:
+        for pool in pools:
+            if pool.cluster_id == cluster_id:
+                pools = [pool]
+                break
+        else:
+            return utils.get_response_error(f"Pool not found: {uuid}", 404)
+
     data = []
     for pool in pools:
         d = pool.get_clean_dict()

@@ -43,7 +43,7 @@ def list_snapshots():
     snaps = db_controller.get_snapshots()
     data = []
     for snap in snaps:
-        if snap.cluster_id != cluster_id:
+        if cluster_id != "admin" and snap.cluster_id != cluster_id:
             continue
         data.append(snap.get_clean_dict())
     return utils.get_response(data)

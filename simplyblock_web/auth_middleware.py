@@ -26,6 +26,10 @@ def token_required(f):
             }, 401
         try:
             db_controller = DBController()
+            if cluster_id == "admin":
+                for node in db_controller.get_mgmt_nodes():
+                    if node.secret and node.secret == cluster_secret:
+                        return f(*args, **kwargs)
             cluster = db_controller.get_cluster_by_id(cluster_id)
             if not cluster:
                 return {

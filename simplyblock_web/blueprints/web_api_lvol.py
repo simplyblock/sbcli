@@ -23,18 +23,19 @@ db_controller = db_controller.DBController()
 @bp.route('/lvol/<string:uuid>', methods=['GET'])
 def list_lvols(uuid):
     cluster_id = utils.get_cluster_id(request)
-    lvols = []
-    if uuid:
-        lvol = db_controller.get_lvol_by_id(uuid)
-        if lvol:
-            node = db_controller.get_storage_node_by_id(lvol.node_id)
-            if node.cluster_id == cluster_id:
-                lvols = [lvol]
-
-        if not lvols:
-            return utils.get_response_error(f"LVol not found: {uuid}", 404)
+    if cluster_id == "admin":
+        lvols = db_controller.get_lvols()
     else:
         lvols = db_controller.get_lvols(cluster_id)
+
+    if uuid:
+        for lvol in lvols:
+            if lvol.get_id() == uuid:
+                lvols = [lvol]
+                break
+        else:
+            return utils.get_response_error(f"LVol not found: {uuid}", 404)
+
     data = []
     for lvol in lvols:
         tmp = lvol.get_clean_dict()

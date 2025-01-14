@@ -62,17 +62,18 @@ def add_cluster():
 @bp.route('/cluster', methods=['GET'], defaults={'uuid': None})
 @bp.route('/cluster/<string:uuid>', methods=['GET'])
 def list_clusters(uuid):
+    cluster_id = utils.get_cluster_id(request)
     clusters_list = []
-    if uuid:
-        cl = db_controller.get_cluster_by_id(uuid)
-        if cl:
-            clusters_list.append(cl)
-        else:
-            return utils.get_response_error(f"Cluster not found: {uuid}", 404)
+    if cluster_id == "admin":
+        clusters_list = db_controller.get_clusters()
+        if uuid:
+            cl = db_controller.get_cluster_by_id(uuid)
+            if cl:
+                clusters_list = [cl]
     else:
-        cls = db_controller.get_clusters()
-        if cls:
-            clusters_list.extend(cls)
+        cl = db_controller.get_cluster_by_id(cluster_id)
+        if cl:
+            clusters_list = [cl]
 
     data = []
     for cluster in clusters_list:
