@@ -706,8 +706,8 @@ class CLIWrapper:
         sub_command = self.add_sub_command(subparser, 'list', 'List backups')
         sub_command = self.add_sub_command(subparser, 'status', 'status backups')
         sub_command = self.add_sub_command(subparser, 'create', 'add backup')
-        # sub_command = self.add_sub_command(subparser, 'show', 'add backup')
-
+        sub_command = self.add_sub_command(subparser, 'restore', 'restore backup')
+        sub_command.add_argument("backup_name", help='backup name')
 
 
         argcomplete.autocomplete(self.parser)
@@ -1282,8 +1282,8 @@ class CLIWrapper:
                 ret = backup_controller.list_backups()
             elif sub_command == "status":
                 ret = backup_controller.backup_status()
-            # elif sub_command == "show":
-            #     ret = backup_controller.show_backup()
+            elif sub_command == "restore":
+                ret = backup_controller.backup_restore(args.backup_name)
 
         else:
             self.parser.print_help()
