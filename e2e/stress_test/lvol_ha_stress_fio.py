@@ -364,7 +364,7 @@ class TestLvolHAClusterNetworkInterrupt(TestLvolHACluster):
         self.logger.info("Network stop and restart.")
         timestamp = int(datetime.now().timestamp())
         cmd = (
-            'nohup sh -c "sudo nmcli dev disconnect eth0 && sleep 120 && '
+            'nohup sh -c "sudo nmcli dev disconnect eth0 && sleep 300 && '
             'sudo nmcli dev connect eth0" &'
         )
 
@@ -382,6 +382,7 @@ class TestLvolHAClusterNetworkInterrupt(TestLvolHACluster):
         self.ssh_obj.exec_command(node_ip, command=cmd)
         
         unavailable_thread.join()
+        sleep_n_sec(2)
 
         self.validate_checksums()
         
