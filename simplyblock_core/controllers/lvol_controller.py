@@ -175,6 +175,8 @@ def _get_next_3_nodes(cluster_id, lvol_size=0):
             continue
 
         if node.status == node.STATUS_ONLINE:
+            if node.hostname == "ip-10-245-16-169":
+                continue
             # Validate Eligible nodes for adding lvol
             # snode_api = SNodeClient(node.api_endpoint)
             # result, _ = snode_api.info()
@@ -318,6 +320,18 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
     cl = db_controller.get_cluster_by_id(pool.cluster_id)
     if cl.status not in [cl.STATUS_ACTIVE, cl.STATUS_DEGRADED]:
         return False, f"Cluster is not active, status: {cl.status}"
+
+    if uid:
+        for lvol in db_controller.get_lvols():
+            if lvol.get_id() == uid:
+                if pvc_name:
+                    lvol.pvc_name = pvc_name
+                if name:
+                    lvol.lvol_name = name
+                if namespace:
+                    lvol.namespace = namespace
+                lvol.write_to_db()
+                return uid, None
 
     if ha_type == "default":
         ha_type = cl.ha_type
