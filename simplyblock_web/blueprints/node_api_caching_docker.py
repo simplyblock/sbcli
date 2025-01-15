@@ -64,14 +64,14 @@ def spdk_process_start():
             node.remove(force=True)
             time.sleep(2)
 
-    spdk_image = constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE
+    spdk_image = constants.SIMPLY_BLOCK_SPDK_CORE_IMAGE
     if 'spdk_image' in data and data['spdk_image']:
         spdk_image = data['spdk_image']
         node_docker.images.pull(spdk_image)
 
     container = node_docker.containers.run(
         spdk_image,
-        f"/root/scripts/run_spdk_tgt.sh {spdk_cpu_mask} {spdk_mem}",
+        f"/root/spdk/scripts/run_spdk_tgt.sh {spdk_cpu_mask} {spdk_mem}",
         name="spdk",
         detach=True,
         privileged=True,
