@@ -101,7 +101,12 @@ def task_runner(task):
 
         mig_info = task.function_params["migration"]
         res = rpc_client.distr_migration_status(**mig_info)
-        return utils.handle_task_result(task, res)
+        out = utils.handle_task_result(task, res)
+        dev_failed_task = tasks_controller.get_failed_device_mig_task(task.cluster_id, task.device_id)
+        if not dev_failed_task:
+            device_controller.device_set_failed_and_migrated(task.device_id)
+
+        return out
     else:
         task.retry += 1
         task.write_to_db(db_controller.kv_store)
