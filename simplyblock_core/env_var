@@ -1,5 +1,5 @@
 SIMPLY_BLOCK_COMMAND_NAME=sbcli-alsh
 SIMPLY_BLOCK_VERSION=10.3.9
 
-SIMPLY_BLOCK_DOCKER_IMAGE=simplyblock/simplyblock:main
+SIMPLY_BLOCK_DOCKER_IMAGE=simplyblock/simplyblock:sfam1631
 DOCKER_USER=hamdysimplyblock
