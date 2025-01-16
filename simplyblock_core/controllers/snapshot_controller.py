@@ -380,29 +380,22 @@ def clone(snapshot_id, clone_name, new_size=0):
 
     lvol.write_to_db(db_controller.kv_store)
 
-    if snap.lvol.ha_type == 'single':
-        ret, error = lvol_controller.add_lvol_on_node(lvol, snode)
-        if error:
-            return ret, error
-        lvol.nodes = [snode.get_id()]
-    elif snap.lvol.ha_type == "ha":
-        lvol_bdev, error = lvol_controller.add_lvol_on_node(lvol, snode)
-        if error:
-            return False, error
+    lvol_bdev, error = lvol_controller.add_lvol_on_node(lvol, snode)
+    if error:
+        return False, error
+    lvol.nodes = [snode.get_id()]
+    lvol.lvol_uuid = lvol_bdev['uuid']
+    lvol.blobid = lvol_bdev['driver_specific']['lvol']['blobid']
 
-        lvol.lvol_uuid = lvol_bdev['uuid']
-        lvol.blobid = lvol_bdev['driver_specific']['lvol']['blobid']
-
+    if snap.lvol.ha_type == "ha":
         sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
         if sec_node.status == StorageNode.STATUS_ONLINE:
             ret, error = lvol_controller.add_lvol_on_node(lvol, sec_node, ha_inode_self=1)
             if error:
-                return ret, error
+                return False, error
 
-        nodes_ids = [
-            snode.get_id(),
-            snode.secondary_node_id]
-        lvol.nodes = nodes_ids
+        lvol.nodes.append(snode.secondary_node_id)
+
 
     lvol.write_to_db(db_controller.kv_store)
 

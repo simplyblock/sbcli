@@ -38,7 +38,6 @@ while True:
                             task.function_result = "canceled"
                             task.status = JobSchedule.STATUS_DONE
                             task.write_to_db(db_controller.kv_store)
-                            tasks_events.task_updated(task)
                             continue
 
                         if db_controller.get_cluster_by_id(cl.get_id()).status == Cluster.STATUS_IN_ACTIVATION:
@@ -50,7 +49,6 @@ while True:
                         if task.status != JobSchedule.STATUS_RUNNING:
                             task.status = JobSchedule.STATUS_RUNNING
                             task.write_to_db(db_controller.kv_store)
-                            tasks_events.task_updated(task)
 
                         res = storage_node_ops.add_node(**task.function_params)
                         logger.info(f"Node add result: {res}")

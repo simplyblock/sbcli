@@ -175,8 +175,6 @@ def _get_next_3_nodes(cluster_id, lvol_size=0):
             continue
 
         if node.status == node.STATUS_ONLINE:
-            if node.hostname == "ip-10-245-16-169":
-                continue
             # Validate Eligible nodes for adding lvol
             # snode_api = SNodeClient(node.api_endpoint)
             # result, _ = snode_api.info()
@@ -487,57 +485,22 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
         lvol.crypto_key1 = crypto_key1
         lvol.crypto_key2 = crypto_key2
 
-    if ha_type == 'single':
-        ret, error = add_lvol_on_node(lvol, host_node)
-        if error:
-            return ret, error
-        lvol.nodes = [host_node.get_id()]
-    elif ha_type == "ha":
 
-        lvol_bdev, error = add_lvol_on_node(lvol, host_node)
-        if error:
-            return False, error
+    lvol_bdev, error = add_lvol_on_node(lvol, host_node)
+    if error:
+        return False, error
+    lvol.nodes = [host_node.get_id()]
+    lvol.lvol_uuid = lvol_bdev['uuid']
+    lvol.blobid = lvol_bdev['driver_specific']['lvol']['blobid']
 
-        """
-    "driver_specific": {
-      "lvol": {
-        "lvol_store_uuid": "0aa735b5-67d2-477a-95d4-4e7108f0e769",
-        "base_bdev": "raid0_9768",
-        "thin_provision": true,
-        "num_allocated_clusters": 0,
-        "snapshot": false,
-        "clone": false,
-        "lvol_leadership": true,
-        "lvs_leadership": true,
-        "blobid": 4294967297,
-        "lvol_priority_class": 0,
-        "esnap_clone": false
-      }
-    }
-        """
-
-        lvol.lvol_uuid = lvol_bdev['uuid']
-        lvol.blobid = lvol_bdev['driver_specific']['lvol']['blobid']
-
+    if ha_type == "ha":
         sec_node = db_controller.get_storage_node_by_id(host_node.secondary_node_id)
         ret, error = add_lvol_on_node(lvol, sec_node, ha_inode_self=1)
         if error:
-            return ret, error
+            return False, error
+        lvol.nodes.append(host_node.secondary_node_id)
 
-        nodes_ids = [
-            host_node.get_id(),
-            host_node.secondary_node_id]
-        lvol.nodes = nodes_ids
-
-    # host_node = db_controller.get_storage_node_by_id(host_node.get_id())
-    # host_node.lvols += 1
-    # host_node.write_to_db(db_controller.kv_store)
-
-    # pool = db_controller.get_pool_by_id(pool.get_id())
     lvol.pool_uuid = pool.get_id()
-    # pool.lvols += 1
-    # pool.write_to_db(db_controller.kv_store)
-
     lvol.write_to_db(db_controller.kv_store)
     lvol_events.lvol_create(lvol)
 
@@ -601,7 +564,6 @@ def _create_bdev_stack(lvol, snode):
 
 def add_lvol_on_node(lvol, snode, ha_comm_addrs=None, ha_inode_self=0):
     rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
-    spdk_mem_info_before = rpc_client.ultra21_util_get_malloc_stats()
 
     if snode.is_secondary_node:
         rpc_client.bdev_lvol_set_leader(False, lvs_name=lvol.lvs_name)
@@ -652,22 +614,9 @@ def add_lvol_on_node(lvol, snode, ha_comm_addrs=None, ha_inode_self=0):
     if not ret:
         return False, "Failed to add bdev to subsystem"
 
-    # logger.info("Sending cluster map to LVol")
-    # ret = distr_controller.send_cluster_map_to_node(snode)
-    # if not ret:
-    #     return False, "Failed to send cluster map"
-
     spdk_mem_info_after = rpc_client.ultra21_util_get_malloc_stats()
     logger.debug("ultra21_util_get_malloc_stats:")
     logger.debug(spdk_mem_info_after)
-
-    diff = {}
-    for key in spdk_mem_info_after.keys():
-        diff[key] = spdk_mem_info_after[key] - spdk_mem_info_before[key]
-
-    logger.info("spdk mem diff:")
-    logger.info(json.dumps(diff, indent=2))
-    lvol.mem_diff = diff
 
     ret = rpc_client.get_bdevs(f"{lvol.lvs_name}/{lvol.lvol_bdev}")
     lvol_bdev = ret[0]
@@ -1063,6 +1012,7 @@ def list_lvols(is_json, cluster_id, pool_id_or_name, all=False):
             "Size": utils.humanbytes(lvol.size),
             "Hostname": lvol.hostname,
             "HA": lvol.ha_type,
+            "BlobID": lvol.blobid or "",
             "Priority": lvol.lvol_priority_class,
             "Status": lvol.status,
             "IO Err": lvol.io_error,
