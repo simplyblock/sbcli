@@ -295,17 +295,20 @@ def get_huge_memory():
         return 0
 
 
+CPU_INFO = cpuinfo.get_cpu_info()
+HOSTNAME, _, _ = node_utils.run_command("hostname -s")
+SYSTEM_ID, _, _ = node_utils.run_command("dmidecode -s system-uuid")
+
+
 @bp.route('/info', methods=['GET'])
 def get_info():
-    hostname, _, _ = run_command("hostname -s")
-    system_id, _, _ = run_command("dmidecode -s system-uuid")
 
     out = {
-        "hostname": hostname,
-        "system_id": system_id,
+        "hostname": HOSTNAME,
+        "system_id": SYSTEM_ID,
 
-        "cpu_count": cpuinfo.get_cpu_info()['count'],
-        "cpu_hz": cpuinfo.get_cpu_info()['hz_advertised'][0] if 'hz_advertised' in cpuinfo.get_cpu_info() else 1,
+        "cpu_count": CPU_INFO['count'],
+        "cpu_hz": CPU_INFO['hz_advertised'][0] if 'hz_advertised' in CPU_INFO else 1,
 
         "memory": get_memory(),
         "hugepages": get_huge_memory(),
