@@ -210,3 +210,10 @@ def remove_mgmt_node(uuid):
     mgmt_events.mgmt_remove(snode)
     logging.info("done")
 
+
+def get_secret():
+    db_controller = DBController()
+    nodes = db_controller.get_mgmt_nodes()
+    for node in nodes:
+        if node.secret:
+            return node.secret

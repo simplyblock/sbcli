@@ -567,6 +567,8 @@ class CLIWrapper:
         sub_command = self.add_sub_command(subparser, "remove", 'Remove Management node')
         sub_command.add_argument("id", help='Mgmt node uuid')
 
+        sub_command = self.add_sub_command(subparser, "get-secret", 'get admin secret')
+
         # pool ops
         subparser = self.add_command('pool', 'Pool commands')
         # add pool
@@ -1133,6 +1135,8 @@ class CLIWrapper:
                 ret = mgmt_ops.list_mgmt_nodes(args.json)
             elif sub_command == "remove":
                 ret = mgmt_ops.remove_mgmt_node(args.id)
+            elif sub_command == "get-secret":
+                ret = mgmt_ops.get_secret()
             else:
                 self.parser.print_help()
 

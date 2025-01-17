@@ -39,10 +39,7 @@ def list_storage_devices(uuid):
         devices = [dev]
     else:
         cluster_id = utils.get_cluster_id(request)
-        if cluster_id == "admin":
-            nodes = db_controller.get_storage_nodes()
-        else:
-            nodes = db_controller.get_storage_nodes_by_cluster_id(cluster_id)
+        nodes = db_controller.get_storage_nodes_by_cluster_id(cluster_id)
         for node in nodes:
             devices.append(node.nvme_devices)
     data = []
