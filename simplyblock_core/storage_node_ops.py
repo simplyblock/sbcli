@@ -2164,26 +2164,56 @@ def suspend_storage_node(node_id, force=False):
         snode.mgmt_ip, snode.rpc_port,
         snode.rpc_username, snode.rpc_password, timeout=5, retry=1)
 
-    nodes = []
-    lvols = db_controller.get_lvols_by_node_id(node_id)
+
+
     if snode.is_secondary_node:
-        ret = db_controller.get_primary_storage_nodes_by_secondary_node_id(node_id)
-        if ret:
-            nodes.extend(ret)
-    elif lvols:
-        nodes.append(snode)
+        nodes = db_controller.get_primary_storage_nodes_by_secondary_node_id(node_id)
+        if nodes:
+            for node in nodes:
+                for lvol in db_controller.get_lvols_by_node_id(node.get_id()):
+                    for iface in snode.data_nics:
+                        if iface.ip4_address:
+                            ret = rpc_client.nvmf_subsystem_listener_set_ana_state(
+                                lvol.nqn, iface.ip4_address, "4420", False, ana="inaccessible")
+
+                rpc_client.bdev_lvol_set_leader(False, lvs_name=node.lvstore)
+                rpc_client.bdev_distrib_force_to_non_leader(node.jm_vuid)
 
 
-    for node in nodes:
-        for lvol in db_controller.get_lvols_by_node_id(node.get_id()):
+    else:
+        sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
+        if sec_node and sec_node.status == StorageNode.STATUS_ONLINE:
+            sec_node_client =  RPCClient(
+                sec_node.mgmt_ip, sec_node.rpc_port, sec_node.rpc_username, sec_node.rpc_password, timeout=5, retry=1)
+            for lvol in db_controller.get_lvols_by_node_id(snode.get_id()):
+                for iface in snode.data_nics:
+                    if iface.ip4_address:
+                        ret = sec_node_client.nvmf_subsystem_listener_set_ana_state(
+                            lvol.nqn, iface.ip4_address, "4420", False, ana="inaccessible")
+
+            # sec_node_client.bdev_lvol_set_leader(False, lvs_name=snode.lvstore)
+            # sec_node_client.bdev_distrib_force_to_non_leader(snode.jm_vuid)
+            time.sleep(1)
+
+        for lvol in db_controller.get_lvols_by_node_id(snode.get_id()):
             for iface in snode.data_nics:
                 if iface.ip4_address:
                     ret = rpc_client.nvmf_subsystem_listener_set_ana_state(
                         lvol.nqn, iface.ip4_address, "4420", False, ana="inaccessible")
+            time.sleep(3)
 
-        rpc_client.bdev_lvol_set_leader(False, lvs_name=node.lvstore)
-        rpc_client.bdev_distrib_force_to_non_leader(node.jm_vuid)
+        rpc_client.bdev_lvol_set_leader(False, lvs_name=snode.lvstore)
+        rpc_client.bdev_distrib_force_to_non_leader(snode.jm_vuid)
 
+
+        if sec_node and sec_node.status == StorageNode.STATUS_ONLINE:
+            sec_node_client =  RPCClient(
+                sec_node.mgmt_ip, sec_node.rpc_port, sec_node.rpc_username, sec_node.rpc_password, timeout=5, retry=1)
+            for lvol in db_controller.get_lvols_by_node_id(snode.get_id()):
+                for iface in snode.data_nics:
+                    if iface.ip4_address:
+                        ret = sec_node_client.nvmf_subsystem_listener_set_ana_state(
+                            lvol.nqn, iface.ip4_address, "4420", False)
 
 
     if snode.jm_device and snode.jm_device.status != JMDevice.STATUS_REMOVED:
@@ -2236,20 +2266,14 @@ def resume_storage_node(node_id):
         snode.mgmt_ip, snode.rpc_port,
         snode.rpc_username, snode.rpc_password)
 
-    nodes = []
-    lvols = db_controller.get_lvols_by_node_id(node_id)
+
+
+
     if snode.is_secondary_node:
-        ret = db_controller.get_primary_storage_nodes_by_secondary_node_id(node_id)
-        if ret:
-            nodes.extend(ret)
-    elif lvols:
-        nodes.append(snode)
-
-    for node in nodes:
-        if not node.lvstore:
-            continue
-
-        if node.get_id() != snode.get_id():
+        nodes = db_controller.get_primary_storage_nodes_by_secondary_node_id(node_id)
+        for node in nodes:
+            if not node.lvstore:
+                continue
             for lvol in db_controller.get_lvols_by_node_id(node.get_id()):
                 if lvol:
                     for iface in snode.data_nics:
@@ -2258,7 +2282,21 @@ def resume_storage_node(node_id):
                                 lvol.nqn, iface.ip4_address, "4420", False)
 
 
-    if not snode.is_secondary_node:
+    else:
+
+        sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
+        if sec_node and sec_node.status == StorageNode.STATUS_ONLINE:
+            sec_node_client =  RPCClient(
+                sec_node.mgmt_ip, sec_node.rpc_port, sec_node.rpc_username, sec_node.rpc_password, timeout=5, retry=1)
+            for lvol in db_controller.get_lvols_by_node_id(snode.get_id()):
+                for iface in snode.data_nics:
+                    if iface.ip4_address:
+                        ret = sec_node_client.nvmf_subsystem_listener_set_ana_state(
+                            lvol.nqn, iface.ip4_address, "4420", False, ana="inaccessible")
+            sec_node_client.bdev_lvol_set_leader(False, lvs_name=snode.lvstore)
+            sec_node_client.bdev_distrib_force_to_non_leader(snode.jm_vuid)
+            time.sleep(1)
+
         for lvol in db_controller.get_lvols_by_node_id(snode.get_id()):
             for iface in snode.data_nics:
                 if iface.ip4_address:
@@ -2266,6 +2304,15 @@ def resume_storage_node(node_id):
                             lvol.nqn, iface.ip4_address, "4420", True)
 
         time.sleep(1)
+
+        if sec_node and sec_node.status == StorageNode.STATUS_ONLINE:
+            sec_node_client =  RPCClient(
+                sec_node.mgmt_ip, sec_node.rpc_port, sec_node.rpc_username, sec_node.rpc_password, timeout=5, retry=1)
+            for lvol in db_controller.get_lvols_by_node_id(snode.get_id()):
+                for iface in snode.data_nics:
+                    if iface.ip4_address:
+                        ret = sec_node_client.nvmf_subsystem_listener_set_ana_state(
+                            lvol.nqn, iface.ip4_address, "4420", False)
 
     logger.info("Setting node status to online")
     set_node_status(snode.get_id(), StorageNode.STATUS_ONLINE)
