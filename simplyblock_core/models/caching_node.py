@@ -50,3 +50,7 @@ class CachingNode(BaseNodeObject):
     services: List[str] = []
     subsystem: str = ""
     system_uuid: str = ""
+    namespace: str = ""
+    spdk_cpu_mask: str = ""
+    spdk_mem: int = ""
+    spdk_image: str = ""

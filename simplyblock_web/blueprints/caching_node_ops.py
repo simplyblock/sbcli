@@ -35,7 +35,7 @@ def run_command(cmd):
     process = subprocess.Popen(
         cmd.split(), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     stdout, stderr = process.communicate()
-    return stdout.strip().decode("utf-8"), stderr.strip(), process.returncode
+    return stdout.strip().decode("utf-8"), stderr.strip().decode("utf-8"), process.returncode
 
 
 def _get_spdk_pcie_list():  # return: ['0000:00:1e.0', '0000:00:1f.0']
@@ -176,7 +176,7 @@ def spdk_process_start():
             node.remove(force=True)
             time.sleep(2)
 
-    spdk_image = constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE
+    spdk_image = constants.SIMPLY_BLOCK_SPDK_CORE_IMAGE
 
     if 'spdk_image' in data and data['spdk_image']:
         spdk_image = data['spdk_image']
@@ -184,7 +184,7 @@ def spdk_process_start():
 
     container = node_docker.containers.run(
         spdk_image,
-        f"/root/scripts/run_spdk_tgt.sh {spdk_cpu_mask} {spdk_mem}",
+        f"/root/spdk/scripts/run_spdk_tgt.sh {spdk_cpu_mask} {spdk_mem}",
         name="spdk",
         detach=True,
         privileged=True,
@@ -295,17 +295,20 @@ def get_huge_memory():
         return 0
 
 
+CPU_INFO = cpuinfo.get_cpu_info()
+HOSTNAME, _, _ = node_utils.run_command("hostname -s")
+SYSTEM_ID, _, _ = node_utils.run_command("dmidecode -s system-uuid")
+
+
 @bp.route('/info', methods=['GET'])
 def get_info():
-    hostname, _, _ = run_command("hostname -s")
-    system_id, _, _ = run_command("dmidecode -s system-uuid")
 
     out = {
-        "hostname": hostname,
-        "system_id": system_id,
+        "hostname": HOSTNAME,
+        "system_id": SYSTEM_ID,
 
-        "cpu_count": cpuinfo.get_cpu_info()['count'],
-        "cpu_hz": cpuinfo.get_cpu_info()['hz_advertised'][0] if 'hz_advertised' in cpuinfo.get_cpu_info() else 1,
+        "cpu_count": CPU_INFO['count'],
+        "cpu_hz": CPU_INFO['hz_advertised'][0] if 'hz_advertised' in CPU_INFO else 1,
 
         "memory": get_memory(),
         "hugepages": get_huge_memory(),

@@ -73,6 +73,7 @@ SIMPLY_BLOCK_CLI_NAME = get_from_env_var_file(
         "SIMPLY_BLOCK_COMMAND_NAME", "sbcli")
 TASK_EXEC_INTERVAL_SEC = 10
 TASK_EXEC_RETRY_COUNT = 8
+SIMPLY_BLOCK_SPDK_CORE_IMAGE = "simplyblock/spdk-core:v24.05-tag-latest"
 
 
 SIMPLY_BLOCK_SPDK_ULTRA_IMAGE = "simplyblock/spdk:lvolstore-ha-snapshot-latest"

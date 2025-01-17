@@ -98,7 +98,6 @@ def task_runner_device(task):
     if task.status != JobSchedule.STATUS_RUNNING:
         task.status = JobSchedule.STATUS_RUNNING
         task.write_to_db(db_controller.kv_store)
-        tasks_events.task_updated(task)
 
     # set device online for the first 3 retries
     if task.retry < 3:
@@ -171,7 +170,6 @@ def task_runner_node(task):
             return True
         task.status = JobSchedule.STATUS_RUNNING
         task.write_to_db(db_controller.kv_store)
-        tasks_events.task_updated(task)
 
     # is node reachable?
     ping_check = health_controller._check_node_ping(node.mgmt_ip)
@@ -230,8 +228,8 @@ while True:
                         task = db_controller.get_task_by_id(task.uuid)
                         res = task_runner(task)
                         if res:
-                            tasks_events.task_updated(task)
                             if task.status == JobSchedule.STATUS_DONE:
+                                tasks_events.task_updated(task)
                                 break
                         else:
                             if task.retry <= 3:
