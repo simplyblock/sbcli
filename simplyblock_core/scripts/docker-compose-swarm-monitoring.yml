@@ -70,7 +70,7 @@ services:
   promagent:
     image: simplyblock/promagent
     environment:
-      ClusterID: "${CLUSTER_ID}"
+      ClusterID: "admin"
       ClusterIP: "HAProxy"
       ClusterSecret: "${CLUSTER_SECRET}"
     deploy:
