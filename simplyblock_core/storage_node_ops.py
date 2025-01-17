@@ -1063,9 +1063,6 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
     minimum_hp_memory = utils.calculate_minimum_hp_memory(small_pool_count, large_pool_count, max_lvol, max_prov,
                                                           cpu_count)
 
-    # Calculate minimum sys memory
-    minimum_sys_memory = utils.calculate_minimum_sys_memory(max_prov)
-
     # check for memory
     if "memory_details" in node_info and node_info['memory_details']:
         memory_details = node_info['memory_details']
@@ -1076,6 +1073,9 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
     else:
         logger.error(f"Cannot get memory info from the instance.. Exiting")
         return False
+
+    # Calculate minimum sys memory
+    minimum_sys_memory = utils.calculate_minimum_sys_memory(max_prov, int(memory_details['total']))
 
     satisfied, spdk_mem = utils.calculate_spdk_memory(minimum_hp_memory,
                                                       minimum_sys_memory,
@@ -1657,9 +1657,6 @@ def restart_storage_node(
     minimum_hp_memory = utils.calculate_minimum_hp_memory(small_pool_count, large_pool_count, snode.max_lvol, snode.max_prov,
                                                           snode.cpu)
 
-    # Calculate minimum sys memory
-    minimum_sys_memory = utils.calculate_minimum_sys_memory(snode.max_prov)
-
     # check for memory
     if "memory_details" in node_info and node_info['memory_details']:
         memory_details = node_info['memory_details']
@@ -1670,6 +1667,9 @@ def restart_storage_node(
     else:
         logger.error(f"Cannot get memory info from the instance.. Exiting")
         return False
+
+    # Calculate minimum sys memory
+    minimum_sys_memory = utils.calculate_minimum_sys_memory(snode.max_prov, memory_details['total'])
 
     satisfied, spdk_mem = utils.calculate_spdk_memory(minimum_hp_memory,
                                                       minimum_sys_memory,
