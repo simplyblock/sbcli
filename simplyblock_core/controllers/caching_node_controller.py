@@ -367,7 +367,7 @@ def recreate(node_id):
 
     if snode.lvols:
         for lvol in snode.lvols:
-            ret = connect(snode.get_id(), lvol.lvol_id)
+            ret = connect(snode.get_id(), lvol.lvol_id, force=True)
             if ret:
                 logger.info(f"connecting lvol {lvol.lvol_id} ... ok")
             else:
@@ -381,7 +381,7 @@ def recreate(node_id):
     return True
 
 
-def connect(caching_node_id, lvol_id):
+def connect(caching_node_id, lvol_id, force=False):
     lvol = db_controller.get_lvol_by_id(lvol_id)
     if not lvol:
         logger.error(f"LVol not found: {lvol_id}")
@@ -413,7 +413,8 @@ def connect(caching_node_id, lvol_id):
     for clvol in cnode.lvols:
         if clvol.lvol_id == lvol_id:
             logger.info(f"Already connected, dev path: {clvol.device_path}")
-            return False
+            if not force:
+                return False
 
     if cnode.cluster_id != pool.cluster_id:
         logger.error("Caching node and LVol are in different clusters")
@@ -453,7 +454,8 @@ def connect(caching_node_id, lvol_id):
     logger.debug(ret)
     if not ret:
         logger.error("Failed to create OCF bdev")
-        return False
+        if not force:
+            return False
 
     # logger.info("Creating local subsystem")
     # create subsystem (local)
@@ -473,7 +475,8 @@ def connect(caching_node_id, lvol_id):
 
     if not ret:
         logger.error(f"Failed to add: {cach_bdev} to the subsystem: {subsystem_nqn}")
-        return False
+        if not force:
+            return False
 
     logger.info("Connecting to local subsystem")
     # make nvme connect to nqn
@@ -481,7 +484,8 @@ def connect(caching_node_id, lvol_id):
     ret, _ = cnode_client.connect_nvme('127.0.0.1', "4420", subsystem_nqn)
     if not ret:
         logger.error("Failed to connect to local subsystem")
-        return False
+        if not force:
+            return False
 
     if cnode.multipathing:
         snode = db_controller.get_storage_node_by_id(lvol.node_id)
