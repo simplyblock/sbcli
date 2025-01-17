@@ -1135,7 +1135,7 @@ def resize_lvol(id, new_size):
     snode = db_controller.get_storage_node_by_id(lvol.node_id)
 
     logger.info(f"Resizing LVol: {lvol.get_id()} on primary node: {snode.get_id()}")
-    logger.info(f"Current size: {utils.humanbytes(lvol.size)}, new size: {new_size}")
+    logger.info(f"Current size: {utils.humanbytes(lvol.size)}, new size: {utils.humanbytes(new_size)}")
 
     # creating RPCClient instance
     rpc_client = RPCClient(
