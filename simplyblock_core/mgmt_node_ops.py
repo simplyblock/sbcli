@@ -132,9 +132,6 @@ def deploy_mgmt_node(cluster_ip, cluster_id, ifname, cluster_secret):
         logger.info("Configuring Double DB...")
         time.sleep(3)
         scripts.set_db_config_double()
-        for cl in db_controller.get_clusters():
-            cl.ha_type = "ha"
-            cl.write_to_db(db_controller.kv_store)
 
     logger.info("Node joined the cluster")
     return node_id
