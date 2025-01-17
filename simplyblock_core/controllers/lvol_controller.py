@@ -1127,14 +1127,16 @@ def resize_lvol(id, new_size):
     if lvol.max_size < new_size:
         logger.error(f"New size {new_size} must be smaller than the max size {lvol.max_size}")
         return False
-
-    if lvol.cloned_from_snap:
-        logger.error(f"Can not resize clone!")
-        return False
-
-    logger.info(f"Resizing LVol: {lvol.get_id()}, new size: {new_size}")
+    #
+    # if lvol.cloned_from_snap:
+    #     logger.error(f"Can not resize clone!")
+    #     return False
 
     snode = db_controller.get_storage_node_by_id(lvol.node_id)
+
+    logger.info(f"Resizing LVol: {lvol.get_id()} on primary node: {snode.get_id()}")
+    logger.info(f"Current size: {utils.humanbytes(lvol.size)}, new size: {new_size}")
+
     # creating RPCClient instance
     rpc_client = RPCClient(
         snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
@@ -1142,7 +1144,7 @@ def resize_lvol(id, new_size):
     size_in_mib = int(new_size / (1000*1000))
     ret = rpc_client.bdev_lvol_resize(f"{lvol.lvs_name}/{lvol.lvol_bdev}", size_in_mib)
     if not ret:
-        logger.error("Error resizing lvol")
+        logger.error(f"Error resizing lvol on node: {snode.get_id()}")
         return False
 
     if lvol.ha_type == "ha":
@@ -1151,12 +1153,13 @@ def resize_lvol(id, new_size):
             sec_node_rpc_client = RPCClient(
                 sec_node.mgmt_ip, sec_node.rpc_port, sec_node.rpc_username, sec_node.rpc_password)
             time.sleep(3)
+            logger.info(f"Resizing LVol: {lvol.get_id()} on secondary node: {sec_node.get_id()}")
             sec_node_rpc_client.bdev_lvol_set_leader(False, lvs_name=lvol.lvs_name)
             ret = sec_node_rpc_client.bdev_lvol_resize(f"{lvol.lvs_name}/{lvol.lvol_bdev}", size_in_mib)
-            # if not ret:
-            #     logger.error("Error resizing lvol")
-            #     return False
+            if not ret:
+                logger.error(f"Error resizing lvol on node: {sec_node.get_id()}")
 
+    lvol = db_controller.get_lvol_by_id(id)
     lvol.size = new_size
     lvol.write_to_db(db_controller.kv_store)
     logger.info("Done")
