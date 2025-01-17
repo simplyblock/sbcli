@@ -2186,7 +2186,7 @@ def suspend_storage_node(node_id, force=False):
             sec_node_client =  RPCClient(
                 sec_node.mgmt_ip, sec_node.rpc_port, sec_node.rpc_username, sec_node.rpc_password, timeout=5, retry=1)
             for lvol in db_controller.get_lvols_by_node_id(snode.get_id()):
-                for iface in snode.data_nics:
+                for iface in sec_node.data_nics:
                     if iface.ip4_address:
                         ret = sec_node_client.nvmf_subsystem_listener_set_ana_state(
                             lvol.nqn, iface.ip4_address, "4420", False, ana="inaccessible")
@@ -2204,13 +2204,14 @@ def suspend_storage_node(node_id, force=False):
 
         rpc_client.bdev_lvol_set_leader(False, lvs_name=snode.lvstore)
         rpc_client.bdev_distrib_force_to_non_leader(snode.jm_vuid)
+        time.sleep(1)
 
 
         if sec_node and sec_node.status == StorageNode.STATUS_ONLINE:
             sec_node_client =  RPCClient(
                 sec_node.mgmt_ip, sec_node.rpc_port, sec_node.rpc_username, sec_node.rpc_password, timeout=5, retry=1)
             for lvol in db_controller.get_lvols_by_node_id(snode.get_id()):
-                for iface in snode.data_nics:
+                for iface in sec_node.data_nics:
                     if iface.ip4_address:
                         ret = sec_node_client.nvmf_subsystem_listener_set_ana_state(
                             lvol.nqn, iface.ip4_address, "4420", False)
