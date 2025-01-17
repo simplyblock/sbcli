@@ -1118,6 +1118,8 @@ def resize_lvol(id, new_size):
         logger.error(f"Pool is disabled")
         return False
 
+    new_size = utils.parse_size(new_size)
+
     if lvol.size >= new_size:
         logger.error(f"New size {new_size} must be higher than the original size {lvol.size}")
         return False
@@ -1133,19 +1135,27 @@ def resize_lvol(id, new_size):
     logger.info(f"Resizing LVol: {lvol.get_id()}, new size: {new_size}")
 
     snode = db_controller.get_storage_node_by_id(lvol.node_id)
-
     # creating RPCClient instance
     rpc_client = RPCClient(
-        snode.mgmt_ip,
-        snode.rpc_port,
-        snode.rpc_username,
-        snode.rpc_password)
-
+        snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
+    rpc_client.bdev_lvol_set_leader(True, lvs_name=lvol.lvs_name)
     size_in_mib = int(new_size / (1000*1000))
-    ret = rpc_client.bdev_lvol_resize(lvol.top_bdev, size_in_mib)
+    ret = rpc_client.bdev_lvol_resize(f"{lvol.lvs_name}/{lvol.lvol_bdev}", size_in_mib)
     if not ret:
         logger.error("Error resizing lvol")
         return False
+
+    if lvol.ha_type == "ha":
+        sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
+        if sec_node and sec_node.status == StorageNode.STATUS_ONLINE:
+            sec_node_rpc_client = RPCClient(
+                sec_node.mgmt_ip, sec_node.rpc_port, sec_node.rpc_username, sec_node.rpc_password)
+            time.sleep(3)
+            sec_node_rpc_client.bdev_lvol_set_leader(False, lvs_name=lvol.lvs_name)
+            ret = sec_node_rpc_client.bdev_lvol_resize(f"{lvol.lvs_name}/{lvol.lvol_bdev}", size_in_mib)
+            # if not ret:
+            #     logger.error("Error resizing lvol")
+            #     return False
 
     lvol.size = new_size
     lvol.write_to_db(db_controller.kv_store)
