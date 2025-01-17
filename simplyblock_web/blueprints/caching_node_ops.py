@@ -35,7 +35,7 @@ def run_command(cmd):
     process = subprocess.Popen(
         cmd.split(), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     stdout, stderr = process.communicate()
-    return stdout.strip().decode("utf-8"), stderr.strip(), process.returncode
+    return stdout.strip().decode("utf-8"), stderr.strip().decode("utf-8"), process.returncode
 
 
 def _get_spdk_pcie_list():  # return: ['0000:00:1e.0', '0000:00:1f.0']
