@@ -32,7 +32,7 @@ def task_runner(task):
         task.write_to_db(db_controller.kv_store)
         return True
 
-    if task.status in [JobSchedule.STATUS_NEW ,JobSchedule.STATUS_SUSPENDED]:
+    if task.status in [JobSchedule.STATUS_NEW, JobSchedule.STATUS_SUSPENDED]:
         if task.status == JobSchedule.STATUS_NEW:
             for node in db_controller.get_storage_nodes_by_cluster_id(task.cluster_id):
                 if node.online_since:
@@ -58,17 +58,20 @@ def task_runner(task):
         return False
 
     rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password, timeout=5, retry=2)
-    if "migration" not in task.function_params:
-        all_devs_online = True
-        for node in db_controller.get_storage_nodes_by_cluster_id(task.cluster_id):
-            for dev in node.nvme_devices:
-                if dev.status not in [NVMeDevice.STATUS_ONLINE,
-                                      NVMeDevice.STATUS_FAILED,
-                                      NVMeDevice.STATUS_FAILED_AND_MIGRATED]:
-                    all_devs_online = False
-                    break
+    all_devs_online = True
+    all_devs_online_or_failed = True
+    for node in db_controller.get_storage_nodes_by_cluster_id(task.cluster_id):
+        for dev in node.nvme_devices:
+            if dev.status == NVMeDevice.STATUS_FAILED:
+                all_devs_online = False
+            elif dev.status not in [NVMeDevice.STATUS_ONLINE,
+                                  NVMeDevice.STATUS_FAILED_AND_MIGRATED]:
+                all_devs_online_or_failed = False
+                all_devs_online = False
+                break
 
-        if not all_devs_online:
+    if "migration" not in task.function_params:
+        if not all_devs_online_or_failed:
             task.function_result = "Some devs are offline, retrying"
             task.retry += 1
             task.status = JobSchedule.STATUS_SUSPENDED
@@ -102,10 +105,10 @@ def task_runner(task):
         time.sleep(3)
 
     if "migration" in task.function_params:
-
+        allowed_error_codes = list(range(1, 8)) if not all_devs_online else [0]
         mig_info = task.function_params["migration"]
         res = rpc_client.distr_migration_status(**mig_info)
-        return utils.handle_task_result(task, res, allowed_error_codes=list(range(1, 8)))
+        return utils.handle_task_result(task, res, allowed_error_codes=allowed_error_codes)
     else:
         task.retry += 1
         task.write_to_db(db_controller.kv_store)
