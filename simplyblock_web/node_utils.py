@@ -176,8 +176,10 @@ def detach_ebs_volumes(instance_id):
     detached_volumes = []
 
     try:
-        ec2 = boto3.resource("ec2")
-        client = boto3.client("ec2")
+        session = boto3.Session()
+
+        ec2 = session.resource("ec2")
+        client = session.client("ec2")
 
         instance = ec2.Instance(instance_id)
         volumes = instance.volumes.all()
