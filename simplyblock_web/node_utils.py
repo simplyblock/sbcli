@@ -181,6 +181,8 @@ def detach_ebs_volumes(instance_id):
         ec2 = session.resource("ec2")
         client = session.client("ec2")
 
+        logger.info(">>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>")
+
         instance = ec2.Instance(instance_id)
         volumes = instance.volumes.all()
 
