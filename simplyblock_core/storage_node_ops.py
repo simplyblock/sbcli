@@ -1804,7 +1804,6 @@ def restart_storage_node(
     else:
         if node_ip:
             if node_ip != snode.api_endpoint:
-                logger.info(f"Restarting on new node with ip: {node_ip}")
                 snode_api = SNodeClient(node_ip, timeout=5*60, retry=3)
                 node_info, _ = snode_api.info()
                 new_cloud_instance_id = node_info['cloud_instance']['id']
