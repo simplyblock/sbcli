@@ -271,6 +271,8 @@ class RandomFailoverTest(TestLvolHACluster):
         self.node = self.mgmt_nodes[0]
         iteration = 1
 
+        self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
+        
         self.create_lvols_with_fio(self.total_lvols)
         storage_nodes = self.sbcli_utils.get_storage_nodes()
 
