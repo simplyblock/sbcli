@@ -181,15 +181,12 @@ def detach_ebs_volumes(instance_id):
         ec2 = session.resource("ec2")
         client = session.client("ec2")
 
-        logger.info(">>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>")
-
         instance = ec2.Instance(instance_id)
         volumes = instance.volumes.all()
 
         logger.info(f"Checking volumes attached to instance {instance_id}.")
 
         for volume in volumes:
-            #tags = {tag['Key']: tag['Value'] for tag in (volume.tags or [])}
             for tag in (volume.tags or []):
                 logger.debug(f"Tags for volume {volume.id}: {tag}")
                 if "simplyblock-jm" in tag['Value'] or "simplyblock-storage" in tag['Value']:
@@ -211,3 +208,55 @@ def detach_ebs_volumes(instance_id):
         logger.error(f"Failed to detach EBS volumes: {str(e)}")
 
     return detached_volumes
+
+def attach_ebs_volumes(instance_id, volume_ids):
+    try:
+        session = boto3.Session(region_name='us-east-2')
+        client = session.client("ec2")
+
+        logger.info(f"Attaching volumes to instance {instance_id}. Volumes: {volume_ids}")
+
+        for volume_id in volume_ids:
+            device_name = get_available_device_name(instance_id)
+            
+            if not device_name:
+                logger.error(f"Could not find an available device name for volume {volume_id}.")
+                continue
+
+            # Attach the volume to the instance
+            client.attach_volume(VolumeId=volume_id, InstanceId=instance_id, Device=device_name)
+            logger.info(f"Successfully attached volume {volume_id} to instance {instance_id} with device name {device_name}.")
+
+        logger.info("All volumes attached successfully.")
+        return True 
+    except Exception as e:
+        logger.error(f"Failed to attach EBS volumes: {str(e)}")
+        return False
+
+def get_available_device_name(instance_id):
+    session = boto3.Session(region_name='us-east-2')  
+    ec2 = session.client('ec2')
+
+    try:
+        response = ec2.describe_instances(InstanceIds=[instance_id])
+        instance = response['Reservations'][0]['Instances'][0]
+
+        block_device_mappings = instance.get('BlockDeviceMappings', [])
+        
+        in_use_devices = [device['DeviceName'] for device in block_device_mappings]
+        
+        logger.info(f"Current devices in use by instance {instance_id}: {in_use_devices}")
+
+        device_letter = ord('f')
+        while True:
+            device_name = f'/dev/sd{chr(device_letter)}'
+            
+            if device_name not in in_use_devices:
+                logger.info(f"Available device name for attachment: {device_name}")
+                return device_name
+
+            device_letter += 1
+
+    except Exception as e:
+        logger.error(f"Failed to get available device name: {str(e)}")
+        return None

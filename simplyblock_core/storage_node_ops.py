@@ -1583,6 +1583,7 @@ def restart_storage_node(
             logger.info(f"Restarting on new node with ip: {node_ip}")
             snode_api = SNodeClient(node_ip, timeout=5*60, retry=3)
             node_info, _ = snode_api.info()
+            new_cloud_instance_id = node_info['cloud_instance']['id']
             if not node_info:
                 logger.error("Failed to get node info!")
                 return False
@@ -1600,11 +1601,6 @@ def restart_storage_node(
                         'net_type': device['net_type']}))
             snode.data_nics = data_nics
             snode.hostname = node_info['hostname']
-            if snode.num_partitions_per_dev == 0:
-                detached_volumes = node_utils.detach_ebs_volumes(snode.cloud_instance_id)
-                if not detached_volumes:
-                    logger.error("No volumes with matching tags were detached.")
-                    return False
         else:
             node_ip = None
 
@@ -1807,6 +1803,24 @@ def restart_storage_node(
         #     return False
 
     else:
+        if node_ip:
+            if node_ip != snode.api_endpoint:
+                logger.info(f"Restarting on new node with ip: {node_ip}")
+                snode_api = SNodeClient(node_ip, timeout=5*60, retry=3)
+                node_info, _ = snode_api.info()
+                new_cloud_instance_id = node_info['cloud_instance']['id']
+                if snode.num_partitions_per_dev == 0:
+                    detached_volumes = node_utils.detach_ebs_volumes(snode.cloud_instance_id)
+                    if not detached_volumes:
+                        logger.error("No volumes with matching tags were detached.")
+                        return False
+
+                    attached_volumes = node_utils.attach_ebs_volumes(new_cloud_instance_id, detached_volumes) 
+                    if not attached_volumes:
+                        logger.error("Failed to attach volumes.")
+                        return False
+                        
+                    snode.cloud_instance_id = new_cloud_instance_id
 
         nvme_devs = addNvmeDevices(snode, node_info['spdk_pcie_list'])
         if not nvme_devs:
