@@ -176,7 +176,7 @@ def detach_ebs_volumes(instance_id):
     detached_volumes = []
 
     try:
-        session = boto3.Session()
+        session = boto3.Session(region_name='us-east-2')
 
         ec2 = session.resource("ec2")
         client = session.client("ec2")
