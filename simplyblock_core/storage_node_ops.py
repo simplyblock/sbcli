@@ -27,6 +27,8 @@ from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.pci_utils import bind_spdk_driver
 from simplyblock_core.rpc_client import RPCClient
 from simplyblock_core.snode_client import SNodeClient
+from simplyblock_web import node_utils
+
 
 logger = log.getLogger()
 
@@ -1598,6 +1600,11 @@ def restart_storage_node(
                         'net_type': device['net_type']}))
             snode.data_nics = data_nics
             snode.hostname = node_info['hostname']
+            if snode.num_partitions_per_dev == 0:
+                detached_volumes = node_utils.detach_ebs_volumes(snode.cloud_instance_id)
+                if not detached_volumes:
+                    logger.error("No volumes with matching tags were detached.")
+                    return False
         else:
             node_ip = None
 

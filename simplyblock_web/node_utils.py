@@ -5,6 +5,7 @@ import logging
 import os
 import subprocess
 
+import boto3
 from simplyblock_web import utils
 
 logger = logging.getLogger(__name__)
@@ -170,3 +171,37 @@ def get_memory_details():
 def get_host_arch():
     out, err, rc = run_command("uname -m")
     return out
+
+def detach_ebs_volumes(instance_id):
+    detached_volumes = []
+
+    try:
+        ec2 = boto3.resource("ec2")
+        client = boto3.client("ec2")
+
+        instance = ec2.Instance(instance_id)
+        volumes = instance.volumes.all()
+
+        logger.info(f"Checking volumes attached to instance {instance_id}.")
+
+        for volume in volumes:
+            tags = {tag['Key']: tag['Value'] for tag in (volume.tags or [])}
+            if "simplyblock-jm" in tags or "simplyblock-storage" in tags:
+                volume_id = volume.id
+                logger.info(f"Found volume {volume_id} with matching tags on instance {instance_id}.")
+
+                # Detach the volume
+                client.detach_volume(VolumeId=volume_id, InstanceId=instance_id, Force=True)
+                logger.info(f"Successfully detached volume {volume_id} from instance {instance_id}.")
+                
+                detached_volumes.append(volume_id)
+
+        if detached_volumes:
+            logger.info(f"Detached volumes: {detached_volumes}")
+        else:
+            logger.info(f"No volumes with matching tags found on instance {instance_id}.")
+
+    except Exception as e:
+        logger.error(f"Failed to detach EBS volumes: {str(e)}")
+
+    return detached_volumes
