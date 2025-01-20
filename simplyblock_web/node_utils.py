@@ -189,17 +189,18 @@ def detach_ebs_volumes(instance_id):
         logger.info(f"Checking volumes attached to instance {instance_id}.")
 
         for volume in volumes:
-            tags = {tag['Key']: tag['Value'] for tag in (volume.tags or [])}
-            logger.debug(f"Tags for volume {volume.id}: {tags}")
-            if "simplyblock-jm" in tags or "simplyblock-storage" in tags:
-                volume_id = volume.id
-                logger.info(f"Found volume {volume_id} with matching tags on instance {instance_id}.")
+            #tags = {tag['Key']: tag['Value'] for tag in (volume.tags or [])}
+            for tag in (volume.tags or []):
+                logger.debug(f"Tags for volume {volume.id}: {tag}")
+                if "simplyblock-jm" in tag['Value'] or "simplyblock-storage" in tag['Value']:
+                    volume_id = volume.id
+                    logger.info(f"Found volume {volume_id} with matching tags on instance {instance_id}.")
 
-                # Detach the volume
-                client.detach_volume(VolumeId=volume_id, InstanceId=instance_id, Force=True)
-                logger.info(f"Successfully detached volume {volume_id} from instance {instance_id}.")
-                
-                detached_volumes.append(volume_id)
+                    # Detach the volume
+                    client.detach_volume(VolumeId=volume_id, InstanceId=instance_id, Force=True)
+                    logger.info(f"Successfully detached volume {volume_id} from instance {instance_id}.")
+                    
+                    detached_volumes.append(volume_id)
 
         if detached_volumes:
             logger.info(f"Detached volumes: {detached_volumes}")
