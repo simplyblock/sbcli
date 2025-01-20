@@ -361,20 +361,26 @@ class TestLvolHAClusterNetworkInterrupt(TestLvolHACluster):
         self.fill_volumes()
         self.calculate_md5()
 
-        self.logger.info("Network stop and restart.")
-        timestamp = int(datetime.now().timestamp())
         cmd = (
             'nohup sh -c "sudo nmcli dev disconnect eth0 && sleep 300 && '
             'sudo nmcli dev connect eth0" &'
         )
-
         node_details = self.sbcli_utils.get_storage_node_details(self.lvol_node)
         node_ip = node_details[0]["mgmt_ip"]
 
+        def execute_disconnect():
+            self.logger.info(f"Executing disconnect command on node {node_ip}.")
+            self.ssh_obj.exec_command(node_ip, command=cmd)
+
+        self.logger.info("Network stop and restart.")
+        timestamp = int(datetime.now().timestamp())
+
+        disconnect_thread = threading.Thread(target=execute_disconnect)
         unavailable_thread = threading.Thread(
             target=lambda: self.sbcli_utils.wait_for_storage_node_status(self.lvol_node, "schedulable", 4000)
         )
 
+        disconnect_thread.start()
         unavailable_thread.start()
 
         disconnect_start_time = datetime.now()
@@ -382,9 +388,12 @@ class TestLvolHAClusterNetworkInterrupt(TestLvolHACluster):
         self.ssh_obj.exec_command(node_ip, command=cmd)
         
         unavailable_thread.join()
-        sleep_n_sec(2)
-
+        
+        self.logger.info("Waiting for 30 seconds to run checksum validation.")
+        sleep_n_sec(30)
         self.validate_checksums()
+
+        disconnect_thread.join()
         
         self.sbcli_utils.wait_for_storage_node_status(self.lvol_node,
                                                       "online",
@@ -546,20 +555,35 @@ class TestLvolHAClusterRunAllScenarios(TestLvolHACluster):
             'nohup sh -c "sudo nmcli dev disconnect eth0 && sleep 300 && '
             'sudo nmcli dev connect eth0" &'
         )
-        
         node_details = self.sbcli_utils.get_storage_node_details(self.lvol_node)
         node_ip = node_details[0]["mgmt_ip"]
-        
+
+        def execute_disconnect():
+            self.logger.info(f"Executing disconnect command on node {node_ip}.")
+            self.ssh_obj.exec_command(node_ip, command=cmd)
+
+        self.logger.info("Network stop and restart.")
+        timestamp = int(datetime.now().timestamp())
+
+        disconnect_thread = threading.Thread(target=execute_disconnect)
         unavailable_thread = threading.Thread(
             target=lambda: self.sbcli_utils.wait_for_storage_node_status(self.lvol_node, "schedulable", 4000)
         )
-        unavailable_thread.start()
-        
-        disconnect_start_time = datetime.now()
-        self.ssh_obj.exec_command(node_ip, command=cmd)
-        unavailable_thread.join()
 
+        disconnect_thread.start()
+        unavailable_thread.start()
+
+        disconnect_start_time = datetime.now()
+        
+        self.ssh_obj.exec_command(node_ip, command=cmd)
+        
+        unavailable_thread.join()
+        
+        self.logger.info("Waiting for 30 seconds to run checksum validation.")
+        sleep_n_sec(30)
         self.validate_checksums()
+
+        disconnect_thread.join()
         
         self.sbcli_utils.wait_for_storage_node_status(self.lvol_node, "online", timeout=4000)
         self.sbcli_utils.wait_for_health_status(self.lvol_node, True, timeout=4000)
