@@ -126,6 +126,11 @@ def addNvmeDevices(snode, devs):
             model_number = nvme_driver_data['ctrlr_data']['model_number']
             total_size = nvme_dict['block_size'] * nvme_dict['num_blocks']
 
+            serial_number = nvme_driver_data['ctrlr_data']['serial_number']
+            if snode.id_device_by_nqn:
+                subnqn = nvme_driver_data['ctrlr_data']['subnqn']
+                serial_number = subnqn.split(":")[-1] + "_" + nvme_driver_data['ctrlr_data']['cntlid']
+
             devices.append(
                 NVMeDevice({
                     'uuid': str(uuid.uuid4()),
@@ -134,7 +139,7 @@ def addNvmeDevices(snode, devs):
                     'physical_label': next_physical_label,
                     'pcie_address': nvme_driver_data['pci_address'],
                     'model_id': model_number,
-                    'serial_number': nvme_driver_data['ctrlr_data']['serial_number'],
+                    'serial_number': serial_number,
                     'nvme_bdev': nvme_bdev,
                     'nvme_controller': nvme_controller,
                     'node_id': snode.get_id(),
@@ -926,7 +931,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
              max_lvol, max_snap, max_prov, spdk_image=None, spdk_debug=False,
              small_bufsize=0, large_bufsize=0, spdk_cpu_mask=None,
              num_partitions_per_dev=0, jm_percent=0, number_of_devices=0, enable_test_device=False,
-             namespace=None, number_of_distribs=2, enable_ha_jm=False, is_secondary_node=False):
+             namespace=None, number_of_distribs=2, enable_ha_jm=False, is_secondary_node=False, id_device_by_nqn=False):
 
     db_controller = DBController()
     kv_store = db_controller.kv_store
@@ -1205,6 +1210,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
 
     snode.num_partitions_per_dev = num_partitions_per_dev
     snode.jm_percent = jm_percent
+    snode.id_device_by_nqn = id_device_by_nqn
 
     time.sleep(10)
 
@@ -1930,7 +1936,7 @@ def list_storage_nodes(is_json, cluster_id=None):
         nodes = db_controller.get_storage_nodes()
     data = []
     output = ""
-    now = datetime.datetime.now()
+    now = datetime.datetime.now(datetime.UTC)
 
     for node in nodes:
         logger.debug(node)
@@ -2678,9 +2684,9 @@ def set_node_status(node_id, status):
     if snode.status != status:
         old_status = snode.status
         snode.status = status
-        snode.updated_at = str(datetime.datetime.now())
+        snode.updated_at = str(datetime.datetime.now(datetime.UTC))
         if status == StorageNode.STATUS_ONLINE:
-            snode.online_since = str(datetime.datetime.now())
+            snode.online_since = str(datetime.datetime.now(datetime.UTC))
         else:
             snode.online_since = ""
         snode.write_to_db(db_controller.kv_store)
