@@ -1803,6 +1803,7 @@ def restart_storage_node(
 
     else:
         if node_ip:
+            logger.info(">>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>")
             snode_api = SNodeClient(node_ip, timeout=5*60, retry=3)
             node_info, _ = snode_api.info()
             new_cloud_instance_id = node_info['cloud_instance']['id']
