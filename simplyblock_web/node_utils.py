@@ -4,7 +4,7 @@ import json
 import logging
 import os
 import subprocess
-
+import requests
 import boto3
 from simplyblock_web import utils
 
@@ -172,11 +172,24 @@ def get_host_arch():
     out, err, rc = run_command("uname -m")
     return out
 
+def get_region():
+    try:
+        response = requests.get("http://169.254.169.254/latest/meta-data/placement/region", timeout=2)
+        response.raise_for_status()
+        region = response.text
+        logger.info(f"Dynamically retrieved region: {region}")
+        return region
+    except Exception as e:
+        logger.error(f"Failed to retrieve region: {str(e)}")
+        return ""
+
+
 def detach_ebs_volumes(instance_id):
     detached_volumes = []
 
     try:
-        session = boto3.Session(region_name='us-east-2')
+        region = get_region()
+        session = boto3.Session(region_name=region)
 
         ec2 = session.resource("ec2")
         client = session.client("ec2")
@@ -211,7 +224,8 @@ def detach_ebs_volumes(instance_id):
 
 def attach_ebs_volumes(instance_id, volume_ids):
     try:
-        session = boto3.Session(region_name='us-east-2')
+        region = get_region()
+        session = boto3.Session(region_name=region)  
         client = session.client("ec2")
 
         logger.info(f"Attaching volumes to instance {instance_id}. Volumes: {volume_ids}")
@@ -234,7 +248,8 @@ def attach_ebs_volumes(instance_id, volume_ids):
         return False
 
 def get_available_device_name(instance_id):
-    session = boto3.Session(region_name='us-east-2')  
+    region = get_region()
+    session = boto3.Session(region_name=region)  
     ec2 = session.client('ec2')
 
     try:
