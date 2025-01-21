@@ -2866,7 +2866,7 @@ def get_node_jm_names(current_node):
         jm_list.append("JM_LOCAL")
 
     if current_node.enable_ha_jm:
-        for jm_dev in current_node.remote_jm_devices[:3]:
+        for jm_dev in current_node.remote_jm_devices[:constants.HA_JM_COUNT-1]:
             jm_list.append(jm_dev.remote_bdev)
     return jm_list
 
@@ -2894,7 +2894,7 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
     jm_ids = []
     if snode.enable_ha_jm:
         jm_vuid = utils.get_random_vuid()
-        jm_ids = get_next_ha_jms(snode)
+        jm_ids = get_sorted_ha_jms(snode)
         logger.debug(f"online_jms: {str(jm_ids)}")
         snode.remote_jm_devices = _connect_to_remote_jm_devs(snode, jm_ids)
         snode.jm_vuid = jm_vuid
@@ -3029,7 +3029,7 @@ def _create_bdev_stack(snode, lvstore_stack=None, primary_node=None):
                     jm_list.append(bdev_name)
                 else:
                     jm_list.append("JM_LOCAL")
-                for jm_dev in primary_node.remote_jm_devices[:3]:
+                for jm_dev in primary_node.remote_jm_devices[:constants.HA_JM_COUNT-1]:
                     jm_list.append(jm_dev.remote_bdev)
                 params['jm_names'] = jm_list
             else:
