@@ -1825,7 +1825,8 @@ def restart_storage_node(
 
                 time.sleep(3)
                 snode.cloud_instance_id = new_cloud_instance_id
-
+                node_info, _ = snode_api.info()
+                
         nvme_devs = addNvmeDevices(snode, node_info['spdk_pcie_list'])
         if not nvme_devs:
             logger.error("No NVMe devices was found!")
