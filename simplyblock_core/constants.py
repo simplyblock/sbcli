@@ -76,7 +76,7 @@ TASK_EXEC_RETRY_COUNT = 8
 SIMPLY_BLOCK_SPDK_CORE_IMAGE = "simplyblock/spdk-core:v24.05-tag-latest"
 
 
-SIMPLY_BLOCK_SPDK_ULTRA_IMAGE = "simplyblock/spdk:lvolstore-ha-snapshot-latest"
+SIMPLY_BLOCK_SPDK_ULTRA_IMAGE = "simplyblock/spdk:main-latest"
 
 GELF_PORT = 12202
 
@@ -129,3 +129,4 @@ QPAIR_COUNT=32
 NVME_TIMEOUT_US=20000000
 
 NVMF_MAX_SUBSYSTEMS=50000
+HA_JM_COUNT=3
