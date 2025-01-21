@@ -18,7 +18,7 @@ class TestClusterBase:
             "Content-Type": "application/json",
             "Authorization": f"{self.cluster_id} {self.cluster_secret}"
         }
-        self.bastion_server = os.environ.get("BASTION_SERVER")
+        self.bastion_server = os.environ.get("BASTION_SERVER", None)
 
         self.ssh_obj = SshUtils(bastion_server=self.bastion_server)
         self.logger = setup_logger(__name__)

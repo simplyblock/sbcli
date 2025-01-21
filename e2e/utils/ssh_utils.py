@@ -22,10 +22,10 @@ class SshUtils:
         self.logger = setup_logger(__name__)
         self.fio_runtime = {}
 
-    def connect(self, address: str, port: int=22,
-                bastion_server_address: str=None,
-                username: str="ec2-user",
-                is_bastion_server: bool=False):
+    def connect(self, address: str, port: int = 22,
+                bastion_server_address: str = None,
+                username: str = "ec2-user",
+                is_bastion_server: bool = False):
         """Connect to cluster nodes
 
         Args:
@@ -47,9 +47,26 @@ class SshUtils:
         except:
             private_key = paramiko.RSAKey(filename=SSH_KEY_LOCATION)
 
-        # Connect to the proxy server first
+        # Check if we need to connect to the bastion server
+        bastion_server_address = bastion_server_address or self.bastion_server
         if not bastion_server_address:
-            bastion_server_address = self.bastion_server
+            # Direct connection to the target server
+            self.logger.info(f"Connecting directly to {address} on port {port}...")
+            ssh.connect(hostname=address,
+                        username=username,
+                        port=port,
+                        pkey=private_key,
+                        timeout=10000)
+            self.logger.info("Connected directly to the target server.")
+
+            # Store the connection
+            if self.ssh_connections.get(address, None):
+                self.ssh_connections[address].close()
+            self.ssh_connections[address] = ssh
+            return
+
+        # Connect to the bastion server
+        self.logger.info(f"Connecting to bastion server {bastion_server_address}...")
         ssh.connect(hostname=bastion_server_address,
                     username=username,
                     port=port,
@@ -57,15 +74,16 @@ class SshUtils:
                     timeout=10000)
         self.logger.info("Connected to bastion server.")
 
+        # Store bastion server connection
         if self.ssh_connections.get(bastion_server_address, None):
             self.ssh_connections[bastion_server_address].close()
-
         self.ssh_connections[bastion_server_address] = ssh
 
         if is_bastion_server:
             return
 
         # Setup the transport to the target server through the proxy
+        self.logger.info(f"Connecting to target server {address} through bastion server...")
         transport = ssh.get_transport()
         dest_addr = (address, port)
         local_addr = ('localhost', 0)
@@ -75,16 +93,18 @@ class SshUtils:
         target_ssh = paramiko.SSHClient()
         target_ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
         target_ssh.connect(address,
-                           username=username,
-                           port=port,
-                           sock=channel,
-                           pkey=private_key,
-                           timeout=10000)
+                        username=username,
+                        port=port,
+                        sock=channel,
+                        pkey=private_key,
+                        timeout=10000)
         self.logger.info("Connected to target server through proxy.")
 
+        # Store the connection
         if self.ssh_connections.get(address, None):
             self.ssh_connections[address].close()
         self.ssh_connections[address] = target_ssh
+
 
     def exec_command(self, node, command, timeout=360, max_retries=3):
         """Executes command on given machine with a retry mechanism in case of failure.

@@ -241,7 +241,17 @@ class RandomFailoverTest(TestLvolHACluster):
             snapshots = self.lvol_mount_details[lvol]["snapshots"]
             for clone_name, clone_details in self.clone_mount_details.items():
                 if clone_details["snapshot"] in snapshots:
-                    self.ssh_obj.kill_processes(self.node, process_name=clone_name)
+                    fio_pids = self.ssh_obj.find_process_name(self.node, f"{clone_name}_fio", return_pid=True)
+                    for pid in fio_pids:
+                        self.ssh_obj.kill_processes(self.node, pid=pid)
+                    attempt = 1
+                    while len(fio_pids) > 1:
+                        fio_pids = self.ssh_obj.find_process_name(self.node, f"{clone_name}_fio", return_pid=True)
+                        if attempt >= 10:
+                            raise Exception("FIO not killed on clone")
+                        attempt += 1
+                        sleep_n_sec(100)
+                        
                     self.ssh_obj.unmount_path(self.node, f"/mnt/{clone_name}")
                     self.ssh_obj.remove_dir(self.node, dir_path=f"/mnt/{clone_name}")
                     self.sbcli_utils.delete_lvol(clone_name)
@@ -249,7 +259,16 @@ class RandomFailoverTest(TestLvolHACluster):
             for snapshot in snapshots:
                 self.ssh_obj.delete_snapshot(self.node, snapshot_id=snapshot)
 
-            self.ssh_obj.kill_processes(self.node, process_name=lvol)
+            fio_pids = self.ssh_obj.find_process_name(self.node, f"{lvol}_fio", return_pid=True)
+            for pid in fio_pids:
+                self.ssh_obj.kill_processes(self.node, pid=pid)
+            attempt = 1
+            while len(fio_pids) > 1:
+                fio_pids = self.ssh_obj.find_process_name(self.node, f"{lvol}_fio", return_pid=True)
+                if attempt >= 10:
+                    raise Exception("FIO not killed on clone")
+                attempt += 1
+                sleep_n_sec(100)
             self.ssh_obj.unmount_path(self.node, f"/mnt/{lvol}")
             self.sbcli_utils.delete_lvol(lvol)
             self.ssh_obj.remove_dir(self.node, dir_path=f"/mnt/{lvol}")
