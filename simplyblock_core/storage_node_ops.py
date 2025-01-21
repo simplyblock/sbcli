@@ -1619,7 +1619,7 @@ def restart_storage_node(
                     logger.error("Failed to attach volumes.")
                     return False
 
-                time.sleep(60)
+                time.sleep(120)
                 snode.cloud_instance_id = new_cloud_instance_id
         else:
             node_ip = None
