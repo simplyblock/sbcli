@@ -1803,7 +1803,6 @@ def restart_storage_node(
 
     else:
         if node_ip:
-            logger.info(">>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>")
             snode_api = SNodeClient(node_ip, timeout=5*60, retry=3)
             node_info, _ = snode_api.info()
             new_cloud_instance_id = node_info['cloud_instance']['id']
@@ -1818,6 +1817,7 @@ def restart_storage_node(
                     logger.error("Failed to attach volumes.")
                     return False
 
+                time.sleep(3)
                 snode.cloud_instance_id = new_cloud_instance_id
 
         nvme_devs = addNvmeDevices(snode, node_info['spdk_pcie_list'])
