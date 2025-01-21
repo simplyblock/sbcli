@@ -35,6 +35,7 @@ class StorageNode(BaseNodeObject):
     hostname: str = ""
     hugepages: int = 0
     ib_devices: List[IFace] = []
+    id_device_by_nqn: bool = False
     iobuf_large_bufsize: int = 0
     iobuf_large_pool_count: int = 0
     iobuf_small_bufsize: int = 0
