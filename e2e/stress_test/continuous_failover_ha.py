@@ -32,7 +32,7 @@ class RandomFailoverTest(TestLvolHACluster):
         self.clone_name = f"cln{random_char(3)}"
         self.snapshot_name = f"snap{random_char(3)}"
         self.lvol_size = "50G"
-        self.fio_size = "1G"
+        self.fio_size = "5G"
         self.fio_threads = []
         self.lvol_node = None
         self.clone_mount_details = {}
@@ -103,6 +103,8 @@ class RandomFailoverTest(TestLvolHACluster):
             self.ssh_obj.mount_path(node=self.node, device=lvol_device, mount_path=mount_point)
             self.lvol_mount_details[lvol_name]["Mount"] = mount_point
 
+            sleep_n_sec(10)
+
             # Start FIO
             fio_thread = threading.Thread(
                 target=self.ssh_obj.run_fio_test,
@@ -112,12 +114,14 @@ class RandomFailoverTest(TestLvolHACluster):
                     "name": f"{lvol_name}_fio",
                     "rw": "randrw",
                     "bs": f"{random.randint(4, 128)}K",
+                    "nrfiles": 5,
                     "iodepth": 1,
-                    "numjobs": 32,
+                    "numjobs": 4,
                 },
             )
             fio_thread.start()
             self.fio_threads.append(fio_thread)
+            sleep_n_sec(10)
 
     def perform_random_outage(self):
         """Perform a random outage on the cluster."""
@@ -221,8 +225,9 @@ class RandomFailoverTest(TestLvolHACluster):
                     "name": f"{clone_name}_fio",
                     "rw": "randrw",
                     "bs": f"{random.randint(4, 128)}K",
+                    "nrfiles": 5,
                     "iodepth": 1,
-                    "numjobs": 32,
+                    "numjobs": 4,
                 },
             )
             fio_thread.start()
@@ -238,6 +243,7 @@ class RandomFailoverTest(TestLvolHACluster):
                 if clone_details["snapshot"] in snapshots:
                     self.ssh_obj.kill_processes(self.node, process_name=clone_name)
                     self.ssh_obj.unmount_path(self.node, f"/mnt/{clone_name}")
+                    self.ssh_obj.remove_dir(self.node, dir_path=f"/mnt/{clone_name}")
                     self.sbcli_utils.delete_lvol(clone_name)
                     del self.clone_mount_details[clone_name]
             for snapshot in snapshots:
@@ -246,6 +252,7 @@ class RandomFailoverTest(TestLvolHACluster):
             self.ssh_obj.kill_processes(self.node, process_name=lvol)
             self.ssh_obj.unmount_path(self.node, f"/mnt/{lvol}")
             self.sbcli_utils.delete_lvol(lvol)
+            self.ssh_obj.remove_dir(self.node, dir_path=f"/mnt/{lvol}")
             del self.lvol_mount_details[lvol]
 
     def perform_failover_during_outage(self):
@@ -272,7 +279,7 @@ class RandomFailoverTest(TestLvolHACluster):
         iteration = 1
 
         self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
-        
+
         self.create_lvols_with_fio(self.total_lvols)
         storage_nodes = self.sbcli_utils.get_storage_nodes()
 
@@ -280,7 +287,7 @@ class RandomFailoverTest(TestLvolHACluster):
             if result["is_secondary_node"] is False:
                 self.sn_nodes.append(result["uuid"])
         
-        while iteration <= 100:
+        while True:
             outage_type = self.perform_random_outage()
             self.create_lvols_with_fio(5)
             self.delete_random_lvols(5)
@@ -319,6 +326,7 @@ class RandomFailoverTest(TestLvolHACluster):
             )
             self.validate_migration_for_node(self.outage_start_time, 4000, None)
             self.common_utils.manage_fio_threads(self.node, self.fio_threads, timeout=10000)
+
             self.logger.info(f"Failover iteration {iteration} complete.")
             iteration += 1
-        self.logger.info("Complete outage scenario complete")
+        # self.logger.info("Complete outage scenario complete")
