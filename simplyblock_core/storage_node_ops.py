@@ -1607,8 +1607,8 @@ def restart_storage_node(
             snode.data_nics = data_nics
             snode.hostname = node_info['hostname']
 
-            new_cloud_instance_id = node_info['cloud_instance']['id']
             if snode.num_partitions_per_dev == 0:
+                new_cloud_instance_id = node_info['cloud_instance']['id']
                 detached_volumes = node_utils.detach_ebs_volumes(snode.cloud_instance_id)
                 if not detached_volumes:
                     logger.error("No volumes with matching tags were detached.")
@@ -1619,7 +1619,7 @@ def restart_storage_node(
                     logger.error("Failed to attach volumes.")
                     return False
 
-                time.sleep(3)
+                time.sleep(60)
                 snode.cloud_instance_id = new_cloud_instance_id
         else:
             node_ip = None
