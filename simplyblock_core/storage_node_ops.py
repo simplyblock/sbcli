@@ -2796,7 +2796,7 @@ def recreate_lvstore(snode):
 
     rpc_client = RPCClient(
         snode.mgmt_ip, snode.rpc_port,
-        snode.rpc_username, snode.rpc_password)
+        snode.rpc_username, snode.rpc_password, retry=1, timeout=30)
 
     ret, err = _create_bdev_stack(snode, [], primary_node=snode)
 
