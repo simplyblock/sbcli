@@ -129,7 +129,7 @@ def addNvmeDevices(snode, devs):
             serial_number = nvme_driver_data['ctrlr_data']['serial_number']
             if snode.id_device_by_nqn:
                 subnqn = nvme_driver_data['ctrlr_data']['subnqn']
-                serial_number = subnqn.split(":")[-1] + "_" + nvme_driver_data['ctrlr_data']['cntlid']
+                serial_number = subnqn.split(":")[-1] + f"_{nvme_driver_data['ctrlr_data']['cntlid']}"
 
             devices.append(
                 NVMeDevice({
