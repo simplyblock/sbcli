@@ -1901,7 +1901,8 @@ def restart_storage_node(
         if len(snode.remote_jm_devices) < 2:
             devs = get_sorted_ha_jms(snode)
             if devs:
-                snode.remote_jm_devices.append(devs[0])
+                dev = db_controller.get_jm_device_by_id(devs[0])
+                snode.remote_jm_devices.append(dev)
         snode.remote_jm_devices = _connect_to_remote_jm_devs(snode)
     snode.health_check = True
     snode.write_to_db(db_controller.kv_store)
