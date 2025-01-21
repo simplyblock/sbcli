@@ -1898,6 +1898,10 @@ def restart_storage_node(
     logger.info("Connecting to remote devices")
     snode.remote_devices = _connect_to_remote_devs(snode)
     if snode.enable_ha_jm:
+        if len(snode.remote_jm_devices) < 2:
+            devs = get_sorted_ha_jms(snode)
+            if devs:
+                snode.remote_jm_devices.append(devs[0])
         snode.remote_jm_devices = _connect_to_remote_jm_devs(snode)
     snode.health_check = True
     snode.write_to_db(db_controller.kv_store)
@@ -2832,7 +2836,7 @@ def recreate_lvstore(snode):
     return True
 
 
-def get_next_ha_jms(current_node):
+def get_sorted_ha_jms(current_node):
     db_controller = DBController()
     jm_count = {}
     for node in db_controller.get_storage_nodes_by_cluster_id(current_node.cluster_id):
