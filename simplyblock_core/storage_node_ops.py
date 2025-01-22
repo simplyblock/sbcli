@@ -2699,6 +2699,7 @@ def set_node_status(node_id, status):
         distr_controller.send_node_status_event(snode, status)
 
     if snode.status == StorageNode.STATUS_ONLINE:
+        snode = db_controller.get_storage_node_by_id(node_id)
         logger.info("Connecting to remote devices")
         snode.remote_devices = _connect_to_remote_devs(snode)
         if snode.enable_ha_jm:
@@ -3022,7 +3023,8 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
 
 
 def _create_bdev_stack(snode, lvstore_stack=None, primary_node=None):
-    rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
+    rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password,
+                           retry=1, timeout=30)
 
     created_bdevs = []
     if not lvstore_stack:
