@@ -3023,8 +3023,7 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
 
 
 def _create_bdev_stack(snode, lvstore_stack=None, primary_node=None):
-    rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password,
-                           retry=1, timeout=30)
+    rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password )
 
     created_bdevs = []
     if not lvstore_stack:
