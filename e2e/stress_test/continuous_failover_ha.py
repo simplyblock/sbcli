@@ -41,6 +41,7 @@ class RandomFailoverTest(TestLvolHACluster):
         self.node = None
         self.sn_nodes = []
         self.current_outage_node = None
+        self.snapshot_names = []
         self.disconnect_thread = None
         self.outage_start_time = None
         self.outage_end_time = None
@@ -192,10 +193,13 @@ class RandomFailoverTest(TestLvolHACluster):
         for _ in range(5):
             lvol = random.choice(available_lvols)
             snapshot_name = f"snap_{lvol}"
+            if snapshot_name in self.snapshot_names:
+                snapshot_name = f"snap_{lvol}_{random_char(2)}"
             self.ssh_obj.add_snapshot(self.node, self.lvol_mount_details[lvol]["ID"], snapshot_name)
-            snapshot_id = self.ssh_obj.get_snapshot_id(self.node, snapshot_name)
-            self.lvol_mount_details[lvol]["snapshots"].append(snapshot_id)
+            self.snapshot_names.append(snapshot_name)
+            self.lvol_mount_details[lvol]["snapshots"].append(snapshot_name)
             clone_name = f"clone_{lvol}"
+            snapshot_id = self.ssh_obj.get_snapshot_id(self.node, snapshot_name)
             self.ssh_obj.add_clone(self.node, snapshot_id, clone_name)
             self.clone_mount_details[clone_name] = {
                    "ID": self.sbcli_utils.get_lvol_id(clone_name),
@@ -204,7 +208,7 @@ class RandomFailoverTest(TestLvolHACluster):
                    "Device": None,
                    "MD5": None,
                    "Log": f"{self.log_path}/{clone_name}.log",
-                   "snapshot": snapshot_id
+                   "snapshot": snapshot_name
             }
 
             self.logger.info(f"Created clone {clone_name}.")
@@ -281,7 +285,9 @@ class RandomFailoverTest(TestLvolHACluster):
                     self.sbcli_utils.delete_lvol(clone_name)
                     del self.clone_mount_details[clone_name]
             for snapshot in snapshots:
-                self.ssh_obj.delete_snapshot(self.node, snapshot_id=snapshot)
+                snapshot_id = self.ssh_obj.get_snapshot_id(self.node, snapshot)
+                self.ssh_obj.delete_snapshot(self.node, snapshot_id=snapshot_id)
+                self.snapshot_names.remove(snapshot)
 
             self.ssh_obj.find_process_name(self.node, f"{lvol}_fio", return_pid=False)
             fio_pids = self.ssh_obj.find_process_name(self.node, f"{lvol}_fio", return_pid=True)
