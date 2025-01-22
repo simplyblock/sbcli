@@ -424,3 +424,64 @@ groups:
           labels:
             app: simplyblock
           isPaused: false
+        - uid: f2d58d12-4b5e-4c8c-9aef-73e06c097e18
+          title: Root Filesystem Low Space Alert
+          condition: C
+          data:
+            - refId: A
+              relativeTimeRange:
+                from: 600
+                to: 0
+              datasourceUid: PBFA97CFB590B2093
+              model:
+                disableTextWrap: false
+                editorMode: builder
+                expr: |
+                  (node_filesystem_avail_bytes{mountpoint="/",fstype!~"tmpfs|overlay"} / 
+                   node_filesystem_size_bytes{mountpoint="/",fstype!~"tmpfs|overlay"}) * 100
+                fullMetaSearch: false
+                includeNullMetadata: true
+                instant: true
+                intervalMs: 1000
+                legendFormat: __auto
+                maxDataPoints: 43200
+                range: false
+                refId: A
+                useBackend: false
+            - refId: C
+              relativeTimeRange:
+                from: 600
+                to: 0
+              datasourceUid: __expr__
+              model:
+                conditions:
+                  - evaluator:
+                      params:
+                        - 95
+                      type: lt
+                    operator:
+                      type: and
+                    query:
+                      params:
+                        - C
+                    reducer:
+                      params: []
+                      type: last
+                    type: query
+                datasource:
+                    type: __expr__
+                    uid: __expr__
+                expression: A
+                intervalMs: 1000
+                maxDataPoints: 43200
+                refId: C
+                type: threshold
+          noDataState: NoData
+          execErrState: Error
+          for: 1m
+          annotations:
+            description: The rule alerts when root filesystem space is critically low (below 20%).
+            summary: 'Root filesystem space is critically low on {{ $labels.instance }}.'
+          labels:
+            app: simplyblock
+          isPaused: false
