@@ -34,7 +34,6 @@ class RandomFailoverTest(TestLvolHACluster):
         self.lvol_size = "15G"
         self.fio_size = "3G"
         self.fio_threads = []
-        self.lvol_node = None
         self.clone_mount_details = {}
         self.lvol_mount_details = {}
         self.node_vs_lvol = []
@@ -66,7 +65,6 @@ class RandomFailoverTest(TestLvolHACluster):
                 crypto=is_crypto,
                 key1=self.lvol_crypt_keys[0],
                 key2=self.lvol_crypt_keys[1],
-                host_id=self.lvol_node
             )
             self.lvol_mount_details[lvol_name] = {
                    "ID": self.sbcli_utils.get_lvol_id(lvol_name),
@@ -177,7 +175,7 @@ class RandomFailoverTest(TestLvolHACluster):
         elif outage_type == "network_interrupt":
             self.disconnect_thread.join()
         self.sbcli_utils.wait_for_storage_node_status(self.current_outage_node, "online", timeout=4000)
-        self.sbcli_utils.wait_for_health_status(self.lvol_node, True, timeout=4000)
+        self.sbcli_utils.wait_for_health_status(self.current_outage_node, True, timeout=4000)
         self.outage_end_time = int(datetime.now().timestamp())
             
 
