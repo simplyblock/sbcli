@@ -191,12 +191,15 @@ class RandomFailoverTest(TestLvolHACluster):
         for _ in range(5):
             lvol = random.choice(available_lvols)
             snapshot_name = f"snap_{lvol}"
+            temp_name = f"{lvol}_{random_char(2)}"
             if snapshot_name in self.snapshot_names:
-                snapshot_name = f"snap_{lvol}_{random_char(2)}"
+                snapshot_name = f"{snapshot_name}_{temp_name}"
             self.ssh_obj.add_snapshot(self.node, self.lvol_mount_details[lvol]["ID"], snapshot_name)
             self.snapshot_names.append(snapshot_name)
             self.lvol_mount_details[lvol]["snapshots"].append(snapshot_name)
             clone_name = f"clone_{lvol}"
+            if clone_name in list(self.clone_mount_details):
+                clone_name = f"{clone_name}_{temp_name}"
             snapshot_id = self.ssh_obj.get_snapshot_id(self.node, snapshot_name)
             self.ssh_obj.add_clone(self.node, snapshot_id, clone_name)
             self.clone_mount_details[clone_name] = {
