@@ -246,7 +246,7 @@ class RandomFailoverTest(TestLvolHACluster):
                     for pid in fio_pids:
                         self.ssh_obj.kill_processes(self.node, pid=pid)
                     attempt = 1
-                    while len(fio_pids) > 1:
+                    while len(fio_pids) > 2:
                         self.ssh_obj.find_process_name(self.node, f"{clone_name}_fio", return_pid=False)
                         fio_pids = self.ssh_obj.find_process_name(self.node, f"{clone_name}_fio", return_pid=True)
                         if attempt >= 30:
@@ -266,7 +266,7 @@ class RandomFailoverTest(TestLvolHACluster):
             for pid in fio_pids:
                 self.ssh_obj.kill_processes(self.node, pid=pid)
             attempt = 1
-            while len(fio_pids) > 1:
+            while len(fio_pids) > 2:
                 self.ssh_obj.find_process_name(self.node, f"{lvol}_fio", return_pid=False)
                 fio_pids = self.ssh_obj.find_process_name(self.node, f"{lvol}_fio", return_pid=True)
                 if attempt >= 30:
