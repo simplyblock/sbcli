@@ -44,6 +44,7 @@ class RandomFailoverTest(TestLvolHACluster):
         self.disconnect_thread = None
         self.outage_start_time = None
         self.outage_end_time = None
+        self.node_vs_lvol = {}
         # self.outage_types = ["partial_nw", "full_nw", "spdk_crash", "graceful_shutdown"]
         self.outage_types = ["network_interrupt", "container_stop", "graceful_shutdown"]
 
@@ -78,6 +79,14 @@ class RandomFailoverTest(TestLvolHACluster):
             }
 
             self.logger.info(f"Created lvol {lvol_name}.")
+
+            lvol_node_id = self.sbcli_utils.get_lvol_details(
+                lvol_id=self.lvol_mount_details[lvol_name]["ID"])["node_id"]
+            
+            if lvol_node_id in self.node_vs_lvol:
+                self.node_vs_lvol[lvol_node_id].append(lvol_name)
+            else:
+                self.node_vs_lvol[lvol_node_id] = [lvol_name]
 
             connect_ls = self.sbcli_utils.get_lvol_connect_str(lvol_name=lvol_name)
 
@@ -173,8 +182,15 @@ class RandomFailoverTest(TestLvolHACluster):
 
     def create_snapshots_and_clones(self):
         """Create snapshots and clones during an outage."""
+        # Filter lvols on nodes that are not in outage
+        available_lvols = [
+            lvol for node, lvols in self.node_vs_lvol.items() if node != self.current_outage_node for lvol in lvols
+        ]
+        if not available_lvols:
+            self.logger.warning("No available lvols to create snapshots and clones.")
+            return
         for _ in range(5):
-            lvol = random.choice(list(self.lvol_mount_details.keys()))
+            lvol = random.choice(available_lvols)
             snapshot_name = f"snap_{lvol}"
             self.ssh_obj.add_snapshot(self.node, self.lvol_mount_details[lvol]["ID"], snapshot_name)
             snapshot_id = self.ssh_obj.get_snapshot_id(self.node, snapshot_name)
@@ -236,7 +252,13 @@ class RandomFailoverTest(TestLvolHACluster):
 
     def delete_random_lvols(self, count):
         """Delete random lvols during an outage."""
-        for lvol in random.sample(list(self.lvol_mount_details.keys()), count):
+        available_lvols = [
+            lvol for node, lvols in self.node_vs_lvol.items() if node != self.current_outage_node for lvol in lvols
+        ]
+        if len(available_lvols) < count:
+            self.logger.warning("Not enough lvols available to delete the requested count.")
+            count = len(available_lvols)
+        for lvol in random.sample(available_lvols, count):
             self.logger.info(f"Deleting lvol {lvol}.")
             snapshots = self.lvol_mount_details[lvol]["snapshots"]
             for clone_name, clone_details in self.clone_mount_details.items():
