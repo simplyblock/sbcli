@@ -214,7 +214,7 @@ class RandomFailoverTest(TestLvolHACluster):
             # Mount and Run FIO
             mount_point = f"{self.mount_path}/{clone_name}"
             self.ssh_obj.mount_path(node=self.node, device=lvol_device, mount_path=mount_point)
-            self.lvol_mount_details[clone_name]["Mount"] = mount_point
+            self.clone_mount_details[clone_name]["Mount"] = mount_point
 
             # Start FIO
             fio_thread = threading.Thread(
