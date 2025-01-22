@@ -263,6 +263,7 @@ class RandomFailoverTest(TestLvolHACluster):
         if len(available_lvols) < count:
             self.logger.warning("Not enough lvols available to delete the requested count.")
             count = len(available_lvols)
+        to_delete = []
         for lvol in random.sample(available_lvols, count):
             self.logger.info(f"Deleting lvol {lvol}.")
             snapshots = self.lvol_mount_details[lvol]["snapshots"]
@@ -284,7 +285,9 @@ class RandomFailoverTest(TestLvolHACluster):
                     self.ssh_obj.unmount_path(self.node, f"/mnt/{clone_name}")
                     self.ssh_obj.remove_dir(self.node, dir_path=f"/mnt/{clone_name}")
                     self.sbcli_utils.delete_lvol(clone_name)
-                    del self.clone_mount_details[clone_name]
+                    to_delete.append(clone_name)
+            for del_key in to_delete:
+                del self.clone_mount_details[del_key]
             for snapshot in snapshots:
                 snapshot_id = self.ssh_obj.get_snapshot_id(self.node, snapshot)
                 self.ssh_obj.delete_snapshot(self.node, snapshot_id=snapshot_id)
