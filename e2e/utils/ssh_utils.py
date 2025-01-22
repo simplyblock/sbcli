@@ -50,6 +50,7 @@ class SshUtils:
         if not bastion_server_address:
             # Direct connection to the target server
             self.logger.info(f"Connecting directly to {address} on port {port}...")
+            username = "root"
             ssh.connect(hostname=address,
                         username=username,
                         port=port,

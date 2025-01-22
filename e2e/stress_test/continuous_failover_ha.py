@@ -300,6 +300,10 @@ class RandomFailoverTest(TestLvolHACluster):
             self.sbcli_utils.delete_lvol(lvol)
             self.ssh_obj.remove_dir(self.node, dir_path=f"/mnt/{lvol}")
             del self.lvol_mount_details[lvol]
+            for _, lvols in self.node_vs_lvol.items():
+                if lvol in lvols:
+                    lvols.remove(lvol)
+                    break
 
     def perform_failover_during_outage(self):
         """Perform failover during an outage and manage lvols, clones, and snapshots."""
