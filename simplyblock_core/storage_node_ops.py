@@ -2798,6 +2798,30 @@ def recreate_lvstore(snode):
         snode.mgmt_ip, snode.rpc_port,
         snode.rpc_username, snode.rpc_password, retry=1, timeout=30)
 
+    # connecting to remote devices
+    logger.info("Connecting to remote devices")
+    snode = db_controller.get_storage_node_by_id(snode.get_id())
+    snode.remote_devices = _connect_to_remote_devs(snode)
+    if snode.enable_ha_jm:
+        online_devs = []
+        for remote_device in snode.remote_jm_devices:
+            if remote_device.status == StorageNode.STATUS_ONLINE:
+                online_devs.append(remote_device)
+
+        if len(online_devs) < 2:
+            devs = get_sorted_ha_jms(snode)
+            for did in devs:
+                dev = db_controller.get_jm_device_by_id(did)
+                online_devs.append(dev)
+                if len(online_devs) > constants.HA_JM_COUNT - 1:
+                    break
+
+        snode.remote_jm_devices = online_devs
+        snode.remote_jm_devices = _connect_to_remote_jm_devs(snode)
+    snode.write_to_db()
+
+    time.sleep(2)
+
     ret, err = _create_bdev_stack(snode, [], primary_node=snode)
 
     if err:
@@ -3044,7 +3068,7 @@ def _create_bdev_stack(snode, lvstore_stack=None, primary_node=None):
                 ret = distr_controller.send_cluster_map_to_distr(snode, name)
                 if not ret:
                     return False, "Failed to send cluster map"
-                # time.sleep(1)
+                time.sleep(1)
 
         elif type == "bdev_lvstore" and lvstore_stack and not snode.is_secondary_node:
             ret = rpc_client.create_lvstore(**params)
