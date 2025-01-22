@@ -2,6 +2,7 @@
 
 from simplyblock_core import utils, distr_controller
 from simplyblock_core.db_controller import DBController
+from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.nvme_device import NVMeDevice, JMDevice
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.rpc_client import RPCClient
@@ -115,6 +116,10 @@ def _check_node_lvstore(lvstore_stack, node, auto_fix=False):
     logger.info(f"Checking distr stack on node : {node.get_id()}")
     rpc_client = RPCClient(
         node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password, timeout=3, retry=1)
+    cluster = db_controller.get_cluster_by_id(node.cluster_id)
+    if cluster.status in [Cluster.STATUS_INACTIVE, Cluster.STATUS_IN_ACTIVATION]:
+        auto_fix = False
+
     distribs_list = []
     raid = None
     bdev_lvstore = None

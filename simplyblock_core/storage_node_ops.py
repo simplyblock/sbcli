@@ -126,6 +126,11 @@ def addNvmeDevices(snode, devs):
             model_number = nvme_driver_data['ctrlr_data']['model_number']
             total_size = nvme_dict['block_size'] * nvme_dict['num_blocks']
 
+            serial_number = nvme_driver_data['ctrlr_data']['serial_number']
+            if snode.id_device_by_nqn:
+                subnqn = nvme_driver_data['ctrlr_data']['subnqn']
+                serial_number = subnqn.split(":")[-1] + f"_{nvme_driver_data['ctrlr_data']['cntlid']}"
+
             devices.append(
                 NVMeDevice({
                     'uuid': str(uuid.uuid4()),
@@ -134,7 +139,7 @@ def addNvmeDevices(snode, devs):
                     'physical_label': next_physical_label,
                     'pcie_address': nvme_driver_data['pci_address'],
                     'model_id': model_number,
-                    'serial_number': nvme_driver_data['ctrlr_data']['serial_number'],
+                    'serial_number': serial_number,
                     'nvme_bdev': nvme_bdev,
                     'nvme_controller': nvme_controller,
                     'node_id': snode.get_id(),
@@ -926,7 +931,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
              max_lvol, max_snap, max_prov, spdk_image=None, spdk_debug=False,
              small_bufsize=0, large_bufsize=0, spdk_cpu_mask=None,
              num_partitions_per_dev=0, jm_percent=0, number_of_devices=0, enable_test_device=False,
-             namespace=None, number_of_distribs=2, enable_ha_jm=False, is_secondary_node=False):
+             namespace=None, number_of_distribs=2, enable_ha_jm=False, is_secondary_node=False, id_device_by_nqn=False):
 
     db_controller = DBController()
     kv_store = db_controller.kv_store
@@ -1205,6 +1210,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
 
     snode.num_partitions_per_dev = num_partitions_per_dev
     snode.jm_percent = jm_percent
+    snode.id_device_by_nqn = id_device_by_nqn
 
     time.sleep(10)
 
@@ -1892,6 +1898,11 @@ def restart_storage_node(
     logger.info("Connecting to remote devices")
     snode.remote_devices = _connect_to_remote_devs(snode)
     if snode.enable_ha_jm:
+        if len(snode.remote_jm_devices) < 2:
+            devs = get_sorted_ha_jms(snode)
+            if devs:
+                dev = db_controller.get_jm_device_by_id(devs[0])
+                snode.remote_jm_devices.append(dev)
         snode.remote_jm_devices = _connect_to_remote_jm_devs(snode)
     snode.health_check = True
     snode.write_to_db(db_controller.kv_store)
@@ -2688,6 +2699,7 @@ def set_node_status(node_id, status):
         distr_controller.send_node_status_event(snode, status)
 
     if snode.status == StorageNode.STATUS_ONLINE:
+        snode = db_controller.get_storage_node_by_id(node_id)
         logger.info("Connecting to remote devices")
         snode.remote_devices = _connect_to_remote_devs(snode)
         if snode.enable_ha_jm:
@@ -2785,7 +2797,31 @@ def recreate_lvstore(snode):
 
     rpc_client = RPCClient(
         snode.mgmt_ip, snode.rpc_port,
-        snode.rpc_username, snode.rpc_password)
+        snode.rpc_username, snode.rpc_password, retry=1, timeout=30)
+
+    # connecting to remote devices
+    logger.info("Connecting to remote devices")
+    snode = db_controller.get_storage_node_by_id(snode.get_id())
+    snode.remote_devices = _connect_to_remote_devs(snode)
+    if snode.enable_ha_jm:
+        online_devs = []
+        for remote_device in snode.remote_jm_devices:
+            if remote_device.status == StorageNode.STATUS_ONLINE:
+                online_devs.append(remote_device)
+
+        if len(online_devs) < 2:
+            devs = get_sorted_ha_jms(snode)
+            for did in devs:
+                dev = db_controller.get_jm_device_by_id(did)
+                online_devs.append(dev)
+                if len(online_devs) > constants.HA_JM_COUNT - 1:
+                    break
+
+        snode.remote_jm_devices = online_devs
+        snode.remote_jm_devices = _connect_to_remote_jm_devs(snode)
+    snode.write_to_db()
+
+    time.sleep(2)
 
     ret, err = _create_bdev_stack(snode, [], primary_node=snode)
 
@@ -2826,7 +2862,7 @@ def recreate_lvstore(snode):
     return True
 
 
-def get_next_ha_jms(current_node):
+def get_sorted_ha_jms(current_node):
     db_controller = DBController()
     jm_count = {}
     for node in db_controller.get_storage_nodes_by_cluster_id(current_node.cluster_id):
@@ -2855,7 +2891,7 @@ def get_node_jm_names(current_node):
         jm_list.append("JM_LOCAL")
 
     if current_node.enable_ha_jm:
-        for jm_dev in current_node.remote_jm_devices[:3]:
+        for jm_dev in current_node.remote_jm_devices[:constants.HA_JM_COUNT-1]:
             jm_list.append(jm_dev.remote_bdev)
     return jm_list
 
@@ -2883,7 +2919,7 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
     jm_ids = []
     if snode.enable_ha_jm:
         jm_vuid = utils.get_random_vuid()
-        jm_ids = get_next_ha_jms(snode)
+        jm_ids = get_sorted_ha_jms(snode)
         logger.debug(f"online_jms: {str(jm_ids)}")
         snode.remote_jm_devices = _connect_to_remote_jm_devs(snode, jm_ids)
         snode.jm_vuid = jm_vuid
@@ -2987,7 +3023,8 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
 
 
 def _create_bdev_stack(snode, lvstore_stack=None, primary_node=None):
-    rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
+    rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password,
+                           retry=1, timeout=30)
 
     created_bdevs = []
     if not lvstore_stack:
@@ -3018,7 +3055,7 @@ def _create_bdev_stack(snode, lvstore_stack=None, primary_node=None):
                     jm_list.append(bdev_name)
                 else:
                     jm_list.append("JM_LOCAL")
-                for jm_dev in primary_node.remote_jm_devices[:3]:
+                for jm_dev in primary_node.remote_jm_devices[:constants.HA_JM_COUNT-1]:
                     jm_list.append(jm_dev.remote_bdev)
                 params['jm_names'] = jm_list
             else:
@@ -3033,7 +3070,7 @@ def _create_bdev_stack(snode, lvstore_stack=None, primary_node=None):
                 ret = distr_controller.send_cluster_map_to_distr(snode, name)
                 if not ret:
                     return False, "Failed to send cluster map"
-                # time.sleep(1)
+                time.sleep(1)
 
         elif type == "bdev_lvstore" and lvstore_stack and not snode.is_secondary_node:
             ret = rpc_client.create_lvstore(**params)

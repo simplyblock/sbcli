@@ -365,7 +365,7 @@ def cluster_activate(cl_id, force=False, force_lvstore_create=False):
         else:
             ret = storage_node_ops.create_lvstore(snode, cluster.distr_ndcs, cluster.distr_npcs, cluster.distr_bs,
                                               cluster.distr_chunk_bs, cluster.page_size_in_blocks, max_size, snodes)
-        if not ret:
+        if not ret and not force:
             logger.error("Failed to activate cluster")
             set_cluster_status(cl_id, ols_status)
             return False
@@ -377,7 +377,7 @@ def cluster_activate(cl_id, force=False, force_lvstore_create=False):
             continue
 
         ret = storage_node_ops.recreate_lvstore(snode)
-        if not ret:
+        if not ret and not force:
             logger.error("Failed to activate cluster")
             set_cluster_status(cl_id, ols_status)
             return False

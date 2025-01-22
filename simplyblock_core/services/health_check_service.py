@@ -4,6 +4,7 @@ from datetime import datetime
 
 
 from simplyblock_core.controllers import health_controller, storage_events, device_events
+from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.rpc_client import RPCClient
@@ -193,6 +194,8 @@ while True:
                         else:
                             logger.info(f"Checking bdev: {remote_device.remote_bdev} ... not found")
 
+                            if cluster.status in [Cluster.STATUS_IN_ACTIVATION, Cluster.STATUS_INACTIVE]:
+                                continue
                             org_dev = None
                             org_dev_node = None
                             for node in db_controller.get_storage_nodes():

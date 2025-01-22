@@ -58,7 +58,7 @@ class CLIWrapper:
         sub_command.add_argument("--disable-ha-jm", help='Disable HA JM for distrib creation', action='store_false', dest='enable_ha_jm', default=True)
         sub_command.add_argument("--is-secondary-node", help='add as secondary node', action='store_true', dest='is_secondary_node', default=False)
         sub_command.add_argument("--namespace", help='k8s namespace to deploy on',)
-
+        sub_command.add_argument("--id-device-by-nqn", help='Use device nqn to identify it instead of serial number', action='store_true', dest='id_device_by_nqn', default=False)
 
         # delete storage node
         sub_command = self.add_sub_command(subparser, "delete", 'Delete storage node obj')
@@ -798,6 +798,7 @@ class CLIWrapper:
                     number_of_distribs=number_of_distribs,
                     enable_ha_jm=enable_ha_jm,
                     is_secondary_node=args.is_secondary_node,
+                    id_device_by_nqn=args.id_device_by_nqn,
                 )
 
                 return out
