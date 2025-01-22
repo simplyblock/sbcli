@@ -31,8 +31,8 @@ class RandomFailoverTest(TestLvolHACluster):
         self.lvol_name = f"lvl{random_char(3)}"
         self.clone_name = f"cln{random_char(3)}"
         self.snapshot_name = f"snap{random_char(3)}"
-        self.lvol_size = "50G"
-        self.fio_size = "5G"
+        self.lvol_size = "15G"
+        self.fio_size = "3G"
         self.fio_threads = []
         self.lvol_node = None
         self.clone_mount_details = {}
@@ -81,7 +81,7 @@ class RandomFailoverTest(TestLvolHACluster):
             self.logger.info(f"Created lvol {lvol_name}.")
 
             lvol_node_id = self.sbcli_utils.get_lvol_details(
-                lvol_id=self.lvol_mount_details[lvol_name]["ID"])["node_id"]
+                lvol_id=self.lvol_mount_details[lvol_name]["ID"])[0]["node_id"]
             
             if lvol_node_id in self.node_vs_lvol:
                 self.node_vs_lvol[lvol_node_id].append(lvol_name)
