@@ -62,7 +62,7 @@ def get_next_cluster_status(cluster_id):
             else:
                 node_offline_devices += 1
 
-        if node_offline_devices > 0 or node_online_devices == 0:
+        if node_offline_devices > 0 or (node_online_devices == 0 and node.status != StorageNode.STATUS_REMOVED):
             affected_nodes += 1
 
         online_devices += node_online_devices
@@ -138,7 +138,7 @@ def update_cluster_status(cluster_id):
                 break
 
             if node.online_since:
-                diff = datetime.now() - datetime.fromisoformat(snode.online_since)
+                diff = datetime.now() - datetime.fromisoformat(node.online_since)
                 if diff.total_seconds() < 60:
                     can_activate = False
                     break

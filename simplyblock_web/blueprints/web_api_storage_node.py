@@ -13,7 +13,7 @@ from simplyblock_core import db_controller
 from simplyblock_core import storage_node_ops
 
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG)
+
 bp = Blueprint("snode", __name__)
 db_controller = db_controller.DBController()
 
@@ -34,6 +34,8 @@ def list_storage_nodes(uuid):
     for node in nodes:
         d = node.get_clean_dict()
         d['status_code'] = node.get_status_code()
+        lvs = db_controller.get_lvols_by_node_id(node.get_id()) or []
+        d['lvols'] = len(lvs)
         data.append(d)
     return utils.get_response(data)
 

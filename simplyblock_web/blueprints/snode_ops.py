@@ -18,7 +18,7 @@ from simplyblock_web import utils, node_utils
 from simplyblock_core import scripts, constants, shell_utils
 
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG)
+
 bp = Blueprint("snode", __name__, url_prefix="/snode")
 
 cluster_id_file = "/etc/foundationdb/sbcli_cluster_id"
@@ -27,7 +27,8 @@ cluster_id_file = "/etc/foundationdb/sbcli_cluster_id"
 def get_google_cloud_info():
     try:
         headers = {'Metadata-Flavor': 'Google'}
-        response = requests.get("http://169.254.169.254/computeMetadata/v1/instance/?recursive=true", headers=headers)
+        response = requests.get("http://169.254.169.254/computeMetadata/v1/instance/?recursive=true",
+                                headers=headers, timeout=3)
         data = response.json()
         return {
             "id": str(data["id"]),
@@ -42,7 +43,7 @@ def get_google_cloud_info():
 
 def get_equinix_cloud_info():
     try:
-        response = requests.get("https://metadata.platformequinix.com/metadata")
+        response = requests.get("https://metadata.platformequinix.com/metadata", timeout=3)
         data = response.json()
         public_ip = ""
         ip = ""
@@ -65,14 +66,17 @@ def get_equinix_cloud_info():
 
 def get_amazon_cloud_info():
     try:
-        from ec2_metadata import ec2_metadata
-        data = ec2_metadata.instance_identity_document
+        import ec2_metadata
+        import requests
+        session = requests.session()
+        session.timeout = 3
+        data = ec2_metadata.EC2Metadata(session=session).instance_identity_document
         return {
             "id": data["instanceId"],
             "type": data["instanceType"],
             "cloud": "amazon",
             "ip": data["privateIp"],
-            "public_ip": ec2_metadata.public_ipv4 or "",
+            "public_ip":  "",
         }
     except:
         pass

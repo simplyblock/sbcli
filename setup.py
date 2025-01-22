@@ -2,14 +2,21 @@ import os
 
 from setuptools import setup, find_packages
 
-from pathlib import Path
-
 from setuptools.command.install import install as _install
 
 
 def _post_install():
-    from subprocess import call
-    call(['activate-global-python-argcomplete', '-y'])
+    from subprocess import getstatusoutput
+    _, out = getstatusoutput('activate-global-python-argcomplete --user')
+    print(out)
+
+    if os.environ.get("SHELL") and os.environ.get("HOME"):
+        if "zsh" in os.environ.get("SHELL", ""):
+            path = f"{os.environ.get('HOME')}/.zshenv"
+        else:
+            path = f"{os.environ.get('HOME')}/.bash_completion"
+        if os.path.isfile(path):
+            _, out = getstatusoutput(f'source {path}')
 
 
 class install(_install):

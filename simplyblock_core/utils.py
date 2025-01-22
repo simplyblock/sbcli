@@ -305,7 +305,7 @@ def get_random_vuid():
             type = bdev['type']
             if type == "bdev_distr":
                 vuid = bdev['params']['vuid']
-            elif type == "bdev_raid":
+            elif type == "bdev_raid"  and "jm_vuid" in bdev:
                 vuid = bdev['jm_vuid']
             else:
                 continue
@@ -523,9 +523,9 @@ def calculate_minimum_hp_memory(small_pool_count, large_pool_count, lvol_count, 
     return int(memory_consumption)
 
 
-def calculate_minimum_sys_memory(max_prov):
+def calculate_minimum_sys_memory(max_prov, total):
     max_prov_tb = max_prov / (1024 * 1024 * 1024 * 1024)
-    minimum_sys_memory = (250 * 1024 * 1024) * 1.1 * max_prov_tb + constants.EXTRA_SYS_MEMORY
+    minimum_sys_memory = (250 * 1024 * 1024) * 1.1 * max_prov_tb + (constants.EXTRA_SYS_MEMORY * total)
     logger.debug(f"Minimum system memory is {humanbytes(minimum_sys_memory)}")
     return int(minimum_sys_memory)
 
@@ -662,8 +662,11 @@ def strfdelta(tdelta):
     return out.strip()
 
 
-def handle_task_result(task: JobSchedule, res: dict, allowed_error_codes: list[int]=[]):
+def handle_task_result(task: JobSchedule, res: dict, allowed_error_codes = None):
     if res:
+        if not allowed_error_codes:
+            allowed_error_codes = [0]
+
         res_data = res[0]
         migration_status = res_data.get("status")
         error_code = res_data.get("error", -1)

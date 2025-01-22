@@ -30,9 +30,22 @@ def task_runner(task):
         return True
 
     if task.status in [JobSchedule.STATUS_NEW, JobSchedule.STATUS_SUSPENDED]:
+        if task.status == JobSchedule.STATUS_NEW:
+            for node in db_controller.get_storage_nodes_by_cluster_id(task.cluster_id):
+                if node.online_since:
+                    try:
+                        diff = datetime.now() - datetime.fromisoformat(node.online_since)
+                        if diff.total_seconds() < 60:
+                            task.function_result = "node is online < 1 min, retrying"
+                            task.status = JobSchedule.STATUS_SUSPENDED
+                            task.retry += 1
+                            task.write_to_db(db_controller.kv_store)
+                            return False
+                    except Exception as e:
+                        logger.error(f"Failed to get online since: {e}")
+
         task.status = JobSchedule.STATUS_RUNNING
         task.write_to_db(db_controller.kv_store)
-        tasks_events.task_updated(task)
 
     if snode.status != StorageNode.STATUS_ONLINE:
         task.function_result = "node is not online, retrying"
@@ -40,15 +53,6 @@ def task_runner(task):
         task.retry += 1
         task.write_to_db(db_controller.kv_store)
         return False
-
-    if snode.online_since:
-        diff = datetime.now() - datetime.fromisoformat(snode.online_since)
-        if diff.total_seconds() < 60:
-            task.function_result = "node is online < 1 min, retrying"
-            task.status = JobSchedule.STATUS_SUSPENDED
-            task.retry += 1
-            task.write_to_db(db_controller.kv_store)
-            return False
 
     rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password,
                            timeout=5, retry=2)
@@ -78,7 +82,10 @@ def task_runner(task):
             task.write_to_db(db_controller.kv_store)
             return True
 
-        rsp = rpc_client.distr_migration_to_primary_start(device.cluster_device_order, distr_name)
+        qos_high_priority = False
+        if db_controller.get_cluster_by_id(snode.cluster_id).enable_qos:
+            qos_high_priority = True
+        rsp = rpc_client.distr_migration_to_primary_start(device.cluster_device_order, distr_name, qos_high_priority)
         if not rsp:
             logger.error(f"Failed to start device migration task, storage_ID: {device.cluster_device_order}")
             task.function_result = "Failed to start device migration task"

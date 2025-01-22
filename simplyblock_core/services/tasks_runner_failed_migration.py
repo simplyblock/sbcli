@@ -2,7 +2,7 @@
 import logging
 import time
 import sys
-
+from datetime import datetime
 
 from simplyblock_core import constants, db_controller, utils
 from simplyblock_core.controllers import tasks_events, tasks_controller, device_controller
@@ -33,9 +33,22 @@ def task_runner(task):
         return True
 
     if task.status in [JobSchedule.STATUS_NEW ,JobSchedule.STATUS_SUSPENDED]:
+        if task.status == JobSchedule.STATUS_NEW:
+            for node in db_controller.get_storage_nodes_by_cluster_id(task.cluster_id):
+                if node.online_since:
+                    try:
+                        diff = datetime.now() - datetime.fromisoformat(node.online_since)
+                        if diff.total_seconds() < 60:
+                            task.function_result = "node is online < 1 min, retrying"
+                            task.status = JobSchedule.STATUS_SUSPENDED
+                            task.retry += 1
+                            task.write_to_db(db_controller.kv_store)
+                            return False
+                    except Exception as e:
+                        logger.error(f"Failed to get online since: {e}")
+
         task.status = JobSchedule.STATUS_RUNNING
         task.write_to_db(db_controller.kv_store)
-        tasks_events.task_updated(task)
 
     if snode.status != StorageNode.STATUS_ONLINE:
         task.function_result = "node is not online, retrying"
@@ -67,7 +80,10 @@ def task_runner(task):
             return True
 
 
-        rsp = rpc_client.distr_migration_failure_start(distr_name, device.cluster_device_order)
+        qos_high_priority = False
+        if db_controller.get_cluster_by_id(snode.cluster_id).enable_qos:
+            qos_high_priority = True
+        rsp = rpc_client.distr_migration_failure_start(distr_name, device.cluster_device_order, qos_high_priority)
         if not rsp:
             logger.error(f"Failed to start device migration task, storage_ID: {device.cluster_device_order}")
             task.function_result = "Failed to start device migration task"
@@ -84,7 +100,12 @@ def task_runner(task):
 
         mig_info = task.function_params["migration"]
         res = rpc_client.distr_migration_status(**mig_info)
-        return utils.handle_task_result(task, res)
+        out = utils.handle_task_result(task, res)
+        dev_failed_task = tasks_controller.get_failed_device_mig_task(task.cluster_id, task.device_id)
+        if not dev_failed_task:
+            device_controller.device_set_failed_and_migrated(task.device_id)
+
+        return out
     else:
         task.retry += 1
         task.write_to_db(db_controller.kv_store)

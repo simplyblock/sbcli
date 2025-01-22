@@ -58,7 +58,7 @@ class CLIWrapper:
         sub_command.add_argument("--disable-ha-jm", help='Disable HA JM for distrib creation', action='store_false', dest='enable_ha_jm', default=True)
         sub_command.add_argument("--is-secondary-node", help='add as secondary node', action='store_true', dest='is_secondary_node', default=False)
         sub_command.add_argument("--namespace", help='k8s namespace to deploy on',)
-
+        sub_command.add_argument("--id-device-by-nqn", help='Use device nqn to identify it instead of serial number', action='store_true', dest='id_device_by_nqn', default=False)
 
         # delete storage node
         sub_command = self.add_sub_command(subparser, "delete", 'Delete storage node obj')
@@ -279,8 +279,8 @@ class CLIWrapper:
         sub_command.add_argument("--prov-cap-crit", help='Capacity critical level in percent, default=190',
                                  type=int, required=False, dest="prov_cap_crit")
         sub_command.add_argument("--ifname", help='Management interface name, default: eth0')
-        sub_command.add_argument("--log-del-interval", help='graylog deletion interval, default: 2d',
-                                 dest='log_del_interval', default='2d')
+        sub_command.add_argument("--log-del-interval", help='graylog deletion interval, default: 3d',
+                                 dest='log_del_interval', default='3d')
         sub_command.add_argument("--metrics-retention-period", help='retention period for prometheus metrics, default: 7d',
                                  dest='metrics_retention_period', default='7d')
         sub_command.add_argument("--contact-point", help='the email or slack webhook url to be used for alerting',
@@ -456,7 +456,10 @@ class CLIWrapper:
                                  default=0)
         sub_command.add_argument("--ha-type", help='LVol HA type (single, ha), default is cluster HA type',
                                  dest='ha_type', choices=["single", "ha", "default"], default='default')
-        sub_command.add_argument("--lvol-priority-class", help='Lvol priority class', type=int, choices=[0, 1], default=0)
+        sub_command.add_argument("--lvol-priority-class", help='Lvol priority class', type=int, default=0)
+        sub_command.add_argument("--namespace", help='Set LVol namespace for k8s clients')
+        sub_command.add_argument("--uid", help='Set LVol UUID')
+        sub_command.add_argument("--pvc_name", help='Set LVol PVC name for k8s clients')
 
 
         # set lvol params
@@ -795,6 +798,7 @@ class CLIWrapper:
                     number_of_distribs=number_of_distribs,
                     enable_ha_jm=enable_ha_jm,
                     is_secondary_node=args.is_secondary_node,
+                    id_device_by_nqn=args.id_device_by_nqn,
                 )
 
                 return out
@@ -1051,7 +1055,8 @@ class CLIWrapper:
                     max_size=max_size,
                     crypto_key1=args.crypto_key1,
                     crypto_key2=args.crypto_key2,
-                    lvol_priority_class=lvol_priority_class)
+                    lvol_priority_class=lvol_priority_class,
+                    uid=args.uid, pvc_name=args.pvc_name, namespace=args.namespace)
                 if results:
                     ret = results
                 else:

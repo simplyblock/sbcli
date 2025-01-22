@@ -14,7 +14,7 @@ from simplyblock_web import utils
 from simplyblock_core import db_controller
 
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG)
+
 bp = Blueprint("lvol", __name__)
 db_controller = db_controller.DBController()
 
@@ -37,7 +37,15 @@ def list_lvols(uuid):
         lvols = db_controller.get_lvols(cluster_id)
     data = []
     for lvol in lvols:
-        data.append(lvol.get_clean_dict())
+        tmp = lvol.get_clean_dict()
+        tmp['pool_name'] = db_controller.get_pool_by_id(lvol.pool_uuid).pool_name
+        # records_list = lvol_controller.get_io_stats(lvol.get_id(), history=None, parse_sizes=False)
+        # records_list = False
+        # if records_list:
+        #     tmp['iostats'] = records_list
+        # else:
+        tmp['iostats'] = []
+        data.append(tmp)
     return utils.get_response(data)
 
 
@@ -61,9 +69,9 @@ def lvol_iostats(uuid, history):
     }
     return utils.get_response(ret)
 
-
-@bp.route('/lvol/capacity/<string:uuid>', methods=['GET'])
-def lvol_capacity(uuid):
+@bp.route('/lvol/capacity/<string:uuid>/history/<string:history>', methods=['GET'])
+@bp.route('/lvol/capacity/<string:uuid>', methods=['GET'], defaults={'history': None})
+def lvol_capacity(uuid, history):
     lvol = db_controller.get_lvol_by_id(uuid)
     if not lvol:
         return utils.get_response_error(f"LVol not found: {uuid}", 404)
@@ -74,12 +82,24 @@ def lvol_capacity(uuid):
         if req_secret != pool.secret:
             return utils.get_response_error(f"Pool secret doesn't mach the value in the request header", 400)
 
-    out = {
-        "provisioned": lvol.size,
-        "util_percent": 0,
-        "util": 0,
+    data = lvol_controller.get_capacity(uuid, history, parse_sizes=False)
+    out = []
+    if data:
+        for record in data:
+            out.append({
+                "date":record["date"],
+                "prov": record["size_prov"],
+                "used": record["size_used"],
+                "free": record["size_free"],
+                "util": record["size_util"],
+                "prov_util": record["size_prov_util"],
+            })
+
+    ret = {
+        "object_data": lvol.get_clean_dict(),
+        "stats": out or []
     }
-    return utils.get_response(out)
+    return utils.get_response(ret)
 
 
 @bp.route('/lvol', methods=['POST'])
@@ -98,6 +118,10 @@ def add_lvol():
         | crypto_key1     | the hex value of key1 to be used for lvol encryption
         | crypto_key2     | the hex value of key2 to be used for lvol encryption
         | host_id         | the hostID on which the lvol is created
+        | lvol_priority_class | the LVol priority class (0, 1)
+        | namespace       | the LVol namespace for k8s
+        | uid             | use this UUID for this LVol
+        | pvc_name        | set PVC name for this LVol
     """""
 
     cl_data = request.get_json()
@@ -140,6 +164,9 @@ def add_lvol():
     crypto_key2 = utils.get_value_or_default(cl_data, "crypto_key2", None)
     host_id = utils.get_value_or_default(cl_data, "host_id", None)
     lvol_priority_class = utils.get_value_or_default(cl_data, "lvol_priority_class", 0)
+    namespace = utils.get_value_or_default(cl_data, "namespace", None)
+    uid = utils.get_value_or_default(cl_data, "uid", None)
+    pvc_name = utils.get_value_or_default(cl_data, "pvc_name", None)
 
     ret, error = lvol_controller.add_lvol_ha(
         name=name,
@@ -161,7 +188,10 @@ def add_lvol():
 
         use_comp=False,
         distr_vuid=0,
-        lvol_priority_class=lvol_priority_class
+        lvol_priority_class=lvol_priority_class,
+        namespace=namespace,
+        uid=uid,
+        pvc_name=pvc_name
     )
 
     return utils.get_response(ret, error, http_code=400)
