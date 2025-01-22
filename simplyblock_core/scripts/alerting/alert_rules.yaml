@@ -457,7 +457,7 @@ groups:
                 conditions:
                   - evaluator:
                       params:
-                        - 95
+                        - 20
                       type: lt
                     operator:
                       type: and
