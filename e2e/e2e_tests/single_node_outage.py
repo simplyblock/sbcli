@@ -199,9 +199,9 @@ class TestSingleNodeOutage(TestClusterBase):
                                clone_name=f"{self.lvol_name}_cl_2")
         
         initial_devices = self.ssh_obj.get_devices(node=self.mgmt_nodes[0])
-        connect_str = self.sbcli_utils.get_lvol_connect_str(lvol_name=f"{self.lvol_name}_cl_1")
-        self.ssh_obj.exec_command(node=self.mgmt_nodes[0],
-                                  command=connect_str)
+        connect_ls = self.sbcli_utils.get_lvol_connect_str(lvol_name=f"{self.lvol_name}_cl_1")
+        for connect_str in connect_ls:
+            self.ssh_obj.exec_command(node=self.mgmt_nodes[0], command=connect_str)
         
         final_devices = self.ssh_obj.get_devices(node=self.mgmt_nodes[0])
         disk_use = None
@@ -222,9 +222,9 @@ class TestSingleNodeOutage(TestClusterBase):
                                 mount_path=f"{clone_mount_file}_1")
         
         initial_devices = final_devices
-        connect_str = self.sbcli_utils.get_lvol_connect_str(lvol_name=f"{self.lvol_name}_cl_2")
-        self.ssh_obj.exec_command(node=self.mgmt_nodes[0],
-                                  command=connect_str)
+        connect_ls = self.sbcli_utils.get_lvol_connect_str(lvol_name=f"{self.lvol_name}_cl_2")
+        for connect_str in connect_ls:
+            self.ssh_obj.exec_command(node=self.mgmt_nodes[0], command=connect_str)
         
         final_devices = self.ssh_obj.get_devices(node=self.mgmt_nodes[0])
         disk_use = None
