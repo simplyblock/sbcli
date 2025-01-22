@@ -265,6 +265,9 @@ class CLIWrapper:
                                            'Create an new cluster with this node as mgmt (local run)')
         sub_command.add_argument(
             "--blk_size", help='The block size in bytes', type=int, choices=[512, 4096], default=512)
+        sub_command.add_argument(
+            "--backup", help='adding this flag enables cluster backup service',action='store_true'
+        )
 
         sub_command.add_argument(
             "--page_size", help='The size of a data page in bytes', type=int, default=2097152)
@@ -958,6 +961,7 @@ class CLIWrapper:
         elif args.command == 'cluster':
             sub_command = args_dict[args.command]
             if sub_command == 'create':
+                
                 ret = self.cluster_create(args)
             elif sub_command == 'add':
                 ret = self.cluster_add(args)
@@ -1331,6 +1335,7 @@ class CLIWrapper:
         inflight_io_threshold = args.inflight_io_threshold
         enable_qos = args.enable_qos
         strict_node_anti_affinity = args.strict_node_anti_affinity
+        backup = args.backup
 
 
         return cluster_ops.create_cluster(
@@ -1338,7 +1343,7 @@ class CLIWrapper:
             CLI_PASS, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
             ifname, log_del_interval, metrics_retention_period, contact_point, grafana_endpoint,
             distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, enable_node_affinity,
-            qpair_count, max_queue_size, inflight_io_threshold, enable_qos, strict_node_anti_affinity)
+            qpair_count, max_queue_size, inflight_io_threshold, enable_qos, strict_node_anti_affinity,backup)
 
 
     def query_yes_no(self, question, default="yes"):
