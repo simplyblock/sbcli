@@ -257,8 +257,8 @@ def get_file_content(file_name):
 
 
 def set_cluster_id(cluster_id):
-    out, _, _ = node_utils.run_command(f"echo {cluster_id} > {cluster_id_file}")
-    return out
+    ret = os.popen(f"echo {cluster_id} > {cluster_id_file}").read().strip()
+    return ret
 
 
 def delete_cluster_id():
@@ -326,13 +326,13 @@ def join_swarm():
         node_docker.swarm.leave(force=True)
         time.sleep(2)
     node_docker.swarm.join([f"{cluster_ip}:2377"], join_token)
-    retries = 10
-    while retries > 0:
-        if node_docker.info()["Swarm"]["LocalNodeState"] == "active":
-            break
-        logger.info("Waiting for node to be active...")
-        retries -= 1
-        time.sleep(1)
+    # retries = 10
+    # while retries > 0:
+    #     if node_docker.info()["Swarm"]["LocalNodeState"] == "active":
+    #         break
+    #     logger.info("Waiting for node to be active...")
+    #     retries -= 1
+    #     time.sleep(1)
     logger.info("Joining docker swarm > Done")
 
     try:
