@@ -521,14 +521,18 @@ def _create_storage_device_stack(rpc_client, nvme, snode, after_restart):
     return nvme
 
 
-def _create_device_partitions(rpc_client, nvme, snode, num_partitions_per_dev, jm_percent):
+def _create_device_partitions(rpc_client, nvme, snode, num_partitions_per_dev, jm_percent, partition_size=0):
     nbd_device = rpc_client.nbd_start_disk(nvme.nvme_bdev)
     time.sleep(3)
     if not nbd_device:
         logger.error(f"Failed to start nbd dev")
         return False
     snode_api = SNodeClient(snode.api_endpoint)
-    result, error = snode_api.make_gpt_partitions(nbd_device, jm_percent, num_partitions_per_dev)
+    partition_percent = 0
+    if partition_size:
+        partition_percent = int(partition_size*100/nvme.size)
+
+    result, error = snode_api.make_gpt_partitions(nbd_device, jm_percent, num_partitions_per_dev, partition_percent)
     if error:
         logger.error(f"Failed to make partitions")
         logger.error(error)
@@ -585,7 +589,7 @@ def _prepare_cluster_devices_partitions(snode, devices):
                 logger.info("Partitioned devices found")
             else:
                 logger.info(f"Creating partitions for {nvme.nvme_bdev}")
-                _create_device_partitions(rpc_client, nvme, snode, snode.num_partitions_per_dev, snode.jm_percent)
+                _create_device_partitions(rpc_client, nvme, snode, snode.num_partitions_per_dev, snode.jm_percent, snode.partition_size)
                 partitioned_devices = _search_for_partitions(rpc_client, nvme)
                 if len(partitioned_devices) == (1 + snode.num_partitions_per_dev):
                     logger.info("Device partitions created")
@@ -865,14 +869,14 @@ def _connect_to_remote_jm_devs(this_node, jm_ids=[]):
                     remote_devices.append(jm_dev)
         elif len(this_node.remote_jm_devices) > 0:
             remote_devices = this_node.remote_jm_devices
-        else:
-            for node in db_controller.get_storage_nodes_by_cluster_id(this_node.cluster_id):
-                if node.get_id() == this_node.get_id() or node.is_secondary_node:
-                    continue
-                if node.jm_device and node.jm_device.status == JMDevice.STATUS_ONLINE:
-                    remote_devices.append(node.jm_device)
-                    if len(remote_devices) >= 3 :
-                        break
+
+        for node in db_controller.get_storage_nodes_by_cluster_id(this_node.cluster_id):
+            if node.get_id() == this_node.get_id() or node.is_secondary_node:
+                continue
+            if node.jm_device and node.jm_device.status == JMDevice.STATUS_ONLINE:
+                remote_devices.append(node.jm_device)
+                if len(remote_devices) >= 3 :
+                    break
 
     new_devs = []
     for jm_dev in remote_devices:
@@ -931,7 +935,8 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
              max_lvol, max_snap, max_prov, spdk_image=None, spdk_debug=False,
              small_bufsize=0, large_bufsize=0, spdk_cpu_mask=None,
              num_partitions_per_dev=0, jm_percent=0, number_of_devices=0, enable_test_device=False,
-             namespace=None, number_of_distribs=2, enable_ha_jm=False, is_secondary_node=False, id_device_by_nqn=False):
+             namespace=None, number_of_distribs=2, enable_ha_jm=False, is_secondary_node=False, id_device_by_nqn=False,
+             partition_size=0):
 
     db_controller = DBController()
     kv_store = db_controller.kv_store
@@ -1211,8 +1216,9 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
     snode.num_partitions_per_dev = num_partitions_per_dev
     snode.jm_percent = jm_percent
     snode.id_device_by_nqn = id_device_by_nqn
+    snode.partition_size = partition_size
 
-    time.sleep(10)
+    time.sleep(5)
 
     # creating RPCClient instance
     rpc_client = RPCClient(
@@ -2025,8 +2031,8 @@ def list_storage_devices(node_id, sort, is_json):
             "UUID": device.uuid,
             "Name": device.device_name,
             "Size": utils.humanbytes(device.size),
-            "Serial Number": device.serial_number,
             "Node ID": device.node_id,
+            "Status": device.status,
         })
 
     for device in snode.remote_jm_devices:
@@ -2036,8 +2042,8 @@ def list_storage_devices(node_id, sort, is_json):
             "UUID": device.uuid,
             "Name": device.remote_bdev,
             "Size": utils.humanbytes(device.size),
-            "Serial Number": "",
-            "Node ID": "",
+            "Node ID": device.node_id,
+            "Status": device.status,
         })
 
     if sort and sort in ['node-seq', 'dev-seq', 'serial']:

@@ -363,11 +363,12 @@ def make_gpt_partitions_for_nbd():
     nbd_device = '/dev/nbd0'
     jm_percent = '3'
     num_partitions = 1
-
+    partition_percent = 0
     try:
         data = request.get_json()
         nbd_device = data['nbd_device']
         jm_percent = data['jm_percent']
+        partition_percent = data['partition_percent']
         num_partitions = data['num_partitions']
     except:
         pass
@@ -379,7 +380,11 @@ def make_gpt_partitions_for_nbd():
     sg_cmd_list = [
         f"sgdisk -t 1:6527994e-2c5a-4eec-9613-8f5944074e8b {nbd_device}",
     ]
-    perc_per_partition = int((100 - jm_percent) / num_partitions)
+    if partition_percent:
+        perc_per_partition = int(partition_percent)
+    else:
+        perc_per_partition = int((100 - jm_percent) / num_partitions)
+
     for i in range(num_partitions):
         st = jm_percent + (i * perc_per_partition)
         en = st + perc_per_partition
