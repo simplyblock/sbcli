@@ -370,26 +370,44 @@ class TestClusterBase:
 
         return running_containers
     
-    def is_container_running(self, stg_ip, container_name):
+    def is_container_running(self, stg_ip, container_name, max_retries=3, retry_delay=2):
         """Check if a Docker container is running on a specific storage node.
 
         Args:
             stg_ip (str): IP of the storage node.
             container_name (str): Name of the Docker container.
+            max_retries (int): Maximum number of retries for transient failures.
+            retry_delay (int): Delay (in seconds) between retries.
 
         Returns:
             bool: True if the container is running, False otherwise.
         """
-        cmd = "sudo docker inspect -f '{{.State.Running}}' %s" % container_name
-        try:
-            output, error = self.ssh_obj.exec_command(stg_ip, cmd)
-            if error:
-                self.logger.error(f"Error checking container status on {stg_ip}: {error}")
+        cmd = f"sudo docker inspect -f '{{{{.State.Running}}}}' {container_name}"
+        retry_count = 0
+
+        while retry_count < max_retries:
+            try:
+                output, error = self.ssh_obj.exec_command(stg_ip, cmd)
+                if error:
+                    if "No such object" in error:
+                        self.logger.error(f"Container '{container_name}' not found on {stg_ip}.")
+                        return False  # Container doesn't exist
+                    self.logger.warning(f"Error checking container status on {stg_ip} (Retry {retry_count + 1}/{max_retries}): {error}")
+                    retry_count += 1
+                    sleep_n_sec(retry_delay)
+                    continue
+
+                if output.strip().lower() == 'true':
+                    return True
                 return False
-            return output.strip().lower() == 'true'
-        except Exception as e:
-            self.logger.error(f"Error checking container status on {stg_ip}: {e}")
-            return False
+            except Exception as e:
+                self.logger.error(f"Exception while checking container status on {stg_ip}: {e} (Retry {retry_count + 1}/{max_retries})")
+                retry_count += 1
+                sleep_n_sec(retry_delay)
+
+        self.logger.error(f"Failed to determine container status for '{container_name}' on {stg_ip} after {max_retries} retries.")
+        return False
+
 
     def monitor_docker_logs(self, stg_ip, container_name, remote_log_path):
         """Monitor Docker logs for a container and save them directly on the remote node.
