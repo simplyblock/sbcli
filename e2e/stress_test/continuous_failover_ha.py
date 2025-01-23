@@ -283,6 +283,8 @@ class RandomFailoverTest(TestLvolHACluster):
                         attempt += 1
                         sleep_n_sec(200)
                         
+                    self.common_utils.validate_fio_test(self.node,
+                                                        log_file=clone_details["Log"])
                     self.ssh_obj.unmount_path(self.node, f"/mnt/{clone_name}")
                     self.ssh_obj.remove_dir(self.node, dir_path=f"/mnt/{clone_name}")
                     self.disconnect_lvol(clone_details['ID'])
@@ -308,6 +310,8 @@ class RandomFailoverTest(TestLvolHACluster):
                 attempt += 1
                 sleep_n_sec(200)
 
+            self.common_utils.validate_fio_test(self.node,
+                                                log_file=self.lvol_mount_details[lvol]["Log"])
             self.ssh_obj.unmount_path(self.node, f"/mnt/{lvol}")
             self.ssh_obj.remove_dir(self.node, dir_path=f"/mnt/{lvol}")
             self.disconnect_lvol(self.lvol_mount_details[lvol]['ID'])
@@ -389,6 +393,17 @@ class RandomFailoverTest(TestLvolHACluster):
             )
             self.validate_migration_for_node(self.outage_start_time, 4000, None)
             self.common_utils.manage_fio_threads(self.node, self.fio_threads, timeout=10000)
+
+            for lvol_name, lvol_details in self.lvol_mount_details.items():
+                self.common_utils.validate_fio_test(
+                    self.node,
+                    lvol_details["Log"]
+                )
+            for clone_name, clone_details in self.clone_mount_details.items():
+                self.common_utils.validate_fio_test(
+                    self.node,
+                    clone_details["Log"]
+                )
 
             self.logger.info(f"Failover iteration {iteration} complete.")
             iteration += 1
