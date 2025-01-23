@@ -180,6 +180,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     c.enable_qos = enable_qos
     c.strict_node_anti_affinity = strict_node_anti_affinity
     c.backup = backup
+    print (backup)
 
     alerts_template_folder = os.path.join(TOP_DIR, "simplyblock_core/scripts/alerting/")
     alert_resources_file = "alert_resources.yaml"
@@ -222,7 +223,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     logger.info("Deploying swarm stack ...")
     log_level = "DEBUG" if constants.LOG_WEB_DEBUG else "INFO"
     ret = scripts.deploy_stack(cli_pass, DEV_IP, constants.SIMPLY_BLOCK_DOCKER_IMAGE, c.secret, c.uuid,
-                               log_del_interval, metrics_retention_period, log_level, c.grafana_endpoint,c.backup)
+                               log_del_interval, metrics_retention_period, log_level, c.grafana_endpoint,backup)
     logger.info("Deploying swarm stack > Done")
 
     if ret == 0:
