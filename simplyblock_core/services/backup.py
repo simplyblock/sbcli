@@ -30,13 +30,6 @@ EBS_MOUNT_PATH = "/mnt/backup-storage"
 
 
 
-
-
-
-
-
-
-
 def lvol_add(lvol_info):
 
     url = f"{API_BASE_URL}/lvol/"
@@ -601,7 +594,8 @@ while True:
     currenttime = datetime.now(timezone.utc)
     schedule_datetime = datetime.strptime('03:00:00', '%H:%M:%S')
     
-    if currenttime != schedule_datetime:
+    # if currenttime != schedule_datetime:
+    if False:
         print("backup runs at 03:00:00 UTC ")
         continue
     else:
@@ -625,7 +619,7 @@ while True:
 
                 if mode == "backup":
                     print("Starting backup process...")
-                    backup_lvols()
+                    # backup_lvols()
                 elif mode == "restore":
                     print("skipping restore process...")
                     # restore()
