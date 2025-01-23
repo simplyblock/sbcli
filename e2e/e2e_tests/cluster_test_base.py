@@ -391,37 +391,44 @@ class TestClusterBase:
             self.logger.error(f"Error checking container status on {stg_ip}: {e}")
             return False
 
-    def monitor_docker_logs(self, stg_ip, container_name, log_path):
-        """Monitor Docker logs for a container on a specific storage node.
+    def monitor_docker_logs(self, stg_ip, container_name, remote_log_path):
+        """Monitor Docker logs for a container and save them directly on the remote node.
 
         Args:
             stg_ip (str): IP of the storage node.
             container_name (str): Name of the Docker container.
-            log_path (str): Directory to save the log files.
+            remote_log_path (str): Directory to save the log files on the remote node.
         """
-        log_file_path = f"{log_path}/{stg_ip}_{container_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
-        self.ssh_obj.make_directory(stg_ip, log_path)  # Ensure the log directory exists
+        # List of monitoring containers to ignore
+        monitoring_containers = ["node-exporter", "monitoring_", "prometheus", "grafana"]
+        
+        # Skip log collection for monitoring containers
+        if any(ignore in container_name for ignore in monitoring_containers):
+            self.logger.info(f"Ignoring log collection for monitoring container '{container_name}' on node {stg_ip}")
+            return
 
-        def stream_callback(chunk, is_error):
-            """Callback function to handle streaming logs."""
-            with open(log_file_path, 'a') as log_file:
-                log_type = "STDERR" if is_error else "STDOUT"
-                self.logger.debug(f"[{log_type}] {chunk.strip()}")
-                log_file.write(chunk)
+        # Construct the remote log file path
+        remote_log_file = f"{remote_log_path}/{container_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+        mkdir_cmd = f"mkdir -p {remote_log_path}"
 
         while True:
             if self.is_container_running(stg_ip, container_name):
                 self.logger.info(f"Starting log collection for container '{container_name}' on node {stg_ip}")
                 try:
-                    cmd = f"sudo docker logs --follow {container_name}"
-                    self.ssh_obj.exec_command(
-                        node=stg_ip,
-                        command=cmd,
-                        stream_callback=stream_callback
-                    )
+                    # Ensure the log directory exists on the remote node
+                    self.ssh_obj.exec_command(stg_ip, mkdir_cmd)
+
+                    # Command to redirect docker logs to a file
+                    cmd = f"sudo docker logs --follow {container_name} >> {remote_log_file} 2>&1 &"
+                    self.ssh_obj.exec_command(stg_ip, cmd)
+
+                    self.logger.info(f"Log collection started for '{container_name}' on node {stg_ip}, logs at: {remote_log_file}")
+                    break  # Exit loop after starting log collection
+
                 except Exception as e:
                     self.logger.error(f"Error while collecting logs for container '{container_name}' on node {stg_ip}: {e}")
             else:
                 self.logger.warning(f"Container '{container_name}' on node {stg_ip} is not running. Retrying in 5 seconds.")
                 sleep_n_sec(5)  # Wait before checking if the container is back online
+
 
