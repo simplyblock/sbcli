@@ -409,17 +409,17 @@ class TestClusterBase:
 
         # Construct the remote log file path
         remote_log_file = f"{remote_log_path}/{container_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
-        mkdir_cmd = f"sudo mkdir -p {remote_log_path}"
+        mkdir_cmd = f"sudo mkdir -p {remote_log_path} && sudo chmod -R 777 {remote_log_path}"
 
         while True:
             if self.is_container_running(stg_ip, container_name):
                 self.logger.info(f"Starting log collection for container '{container_name}' on node {stg_ip}")
                 try:
-                    # Ensure the log directory exists on the remote node
+                    # Ensure the log directory exists on the remote node with proper permissions
                     self.ssh_obj.exec_command(stg_ip, mkdir_cmd)
 
-                    # Command to redirect docker logs to a file
-                    cmd = f"sudo docker logs --follow {container_name} >> {remote_log_file} 2>&1 &"
+                    # Command to redirect docker logs to a file with sudo
+                    cmd = f"sudo bash -c 'docker logs --follow {container_name} >> {remote_log_file} 2>&1 &'"
                     self.ssh_obj.exec_command(stg_ip, cmd)
 
                     self.logger.info(f"Log collection started for '{container_name}' on node {stg_ip}, logs at: {remote_log_file}")
@@ -430,5 +430,6 @@ class TestClusterBase:
             else:
                 self.logger.warning(f"Container '{container_name}' on node {stg_ip} is not running. Retrying in 5 seconds.")
                 sleep_n_sec(5)  # Wait before checking if the container is back online
+
 
 
