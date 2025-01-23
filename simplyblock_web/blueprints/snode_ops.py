@@ -418,6 +418,8 @@ def delete_gpt_partitions_for_dev():
         f"echo -n \"{device_pci}\" > /sys/bus/pci/drivers/uio_pci_generic/unbind",
         f"echo -n \"{device_pci}\" > /sys/bus/pci/drivers/nvme/bind",
         f"echo \"nvme\" > /sys/bus/pci/devices/{device_pci}/driver_override",
+        f"echo -n \"{device_pci}\" > /sys/bus/pci/drivers/nvme/bind",
+
     ]
 
     for cmd in cmd_list:
