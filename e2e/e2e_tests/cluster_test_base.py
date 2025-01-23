@@ -400,7 +400,7 @@ class TestClusterBase:
             log_path (str): Directory to save the log files.
         """
         log_file_path = f"{log_path}/{stg_ip}_{container_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
-        self.ssh_obj.make_directory(log_path)  # Ensure the log directory exists
+        self.ssh_obj.make_directory(stg_ip, log_path)  # Ensure the log directory exists
 
         def stream_callback(chunk, is_error):
             """Callback function to handle streaming logs."""
