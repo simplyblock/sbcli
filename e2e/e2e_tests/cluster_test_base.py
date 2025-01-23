@@ -102,7 +102,6 @@ class TestClusterBase:
         self.ec2_resource = session.resource('ec2')
 
         self.container_log_path = f"{os.path.dirname(self.mount_path)}/container_logs"
-        os.makedirs(self.container_log_path, exist_ok=True)
 
         running_containers = self.get_running_containers()
         self.log_threads = []
