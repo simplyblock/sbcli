@@ -426,16 +426,34 @@ def delete_gpt_partitions_for_dev():
         time.sleep(1)
 
     device_name = os.popen(f"ls /sys/devices/pci0000:00/{device_pci}/nvme/nvme*/ | grep nvme").read().strip()
-    cmd_list = [
-        f"parted -fs /dev/{device_name} mklabel gpt",
-        f"echo -n \"{device_pci}\" > /sys/bus/pci/drivers/nvme/unbind",
-    ]
 
-    for cmd in cmd_list:
-        logger.debug(cmd)
-        ret = os.popen(cmd).read().strip()
-        logger.debug(ret)
-        time.sleep(1)
+    if not device_name:
+        cmd_list = [
+            f"echo -n \"{device_pci}\" > /sys/bus/pci/drivers/uio_pci_generic/unbind",
+            f"echo -n \"{device_pci}\" > /sys/bus/pci/drivers/nvme/bind",
+            f"echo -n \"{device_pci}\" > /sys/bus/pci/drivers/nvme/bind",
+            f"echo -n \"{device_pci}\" > /sys/bus/pci/drivers/nvme/bind",
+        ]
+
+        for cmd in cmd_list:
+            logger.debug(cmd)
+            ret = os.popen(cmd).read().strip()
+            logger.debug(ret)
+            time.sleep(3)
+
+    device_name = os.popen(f"ls /sys/devices/pci0000:00/{device_pci}/nvme/nvme*/ | grep nvme").read().strip()
+
+    if device_name:
+        cmd_list = [
+            f"parted -fs /dev/{device_name} mklabel gpt",
+            f"echo -n \"{device_pci}\" > /sys/bus/pci/drivers/nvme/unbind",
+        ]
+
+        for cmd in cmd_list:
+            logger.debug(cmd)
+            ret = os.popen(cmd).read().strip()
+            logger.debug(ret)
+            time.sleep(3)
 
     return utils.get_response(True)
 

@@ -47,7 +47,7 @@ class CLIWrapper:
         sub_command.add_argument("--max-prov", help='Maximum amount of GB to be provisioned via all storage nodes', dest='max_prov')
         sub_command.add_argument("--number-of-distribs", help='The number of distirbs to be created on the node', dest='number_of_distribs', type=int, default=2)
         sub_command.add_argument("--number-of-devices", help='Number of devices per storage node if it\'s not supported EC2 instance', dest='number_of_devices', type=int)
-        sub_command.add_argument("--size-of-device", help='Size of device per storage node', dest='partition_size', type=int)
+        sub_command.add_argument("--size-of-device", help='Size of device per storage node', dest='partition_size')
         sub_command.add_argument("--cpu-mask", help='SPDK app CPU mask, default is all cores found', dest='spdk_cpu_mask')
 
         sub_command.add_argument("--spdk-image", help='SPDK image uri', dest='spdk_image')
