@@ -409,7 +409,7 @@ class TestClusterBase:
 
         # Construct the remote log file path
         remote_log_file = f"{remote_log_path}/{container_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
-        mkdir_cmd = f"mkdir -p {remote_log_path}"
+        mkdir_cmd = f"sudo mkdir -p {remote_log_path}"
 
         while True:
             if self.is_container_running(stg_ip, container_name):
