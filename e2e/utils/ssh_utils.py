@@ -105,25 +105,25 @@ class SshUtils:
         self.ssh_connections[address] = target_ssh
 
 
-    def exec_command(self, node, command, timeout=360, max_retries=3):
-        """Executes command on given machine with a retry mechanism in case of failure.
+    def exec_command(self, node, command, timeout=360, max_retries=3, stream_callback=None):
+        """Executes a command on a given machine with streaming output and retry mechanism.
 
         Args:
-            node (str): Machine to run command on
-            command (str): Command to run
-            timeout (int): Timeout in seconds
-            max_retries (int): Number of retries in case of failures
+            node (str): Machine to run command on.
+            command (str): Command to run.
+            timeout (int): Timeout in seconds.
+            max_retries (int): Number of retries in case of failures.
+            stream_callback (callable, optional): A callback function for streaming output. Defaults to None.
 
         Returns:
-            str: Output of command
+            tuple: Final output and error strings after command execution.
         """
         retry_count = 0
         while retry_count < max_retries:
             ssh_connection = self.ssh_connections.get(node)
             try:
                 # Ensure the SSH connection is active, otherwise reconnect
-                if not ssh_connection or not ssh_connection.get_transport().is_active() \
-                    or retry_count > 0:
+                if not ssh_connection or not ssh_connection.get_transport().is_active() or retry_count > 0:
                     self.logger.info(f"Reconnecting SSH to node {node}")
                     self.connect(
                         address=node,
@@ -133,29 +133,51 @@ class SshUtils:
 
                 self.logger.info(f"Executing command: {command}")
                 stdin, stdout, stderr = ssh_connection.exec_command(command, timeout=timeout)
-                
+
                 output = []
                 error = []
-                if "sudo fio" in command:
-                    self.logger.info("Inside while loop")
-                    # Read stdout and stderr in a non-blocking way
-                    while not stdout.channel.exit_status_ready():
-                        if stdout.channel.recv_ready():
-                            output.append(stdout.channel.recv(1024).decode())
-                        if stderr.channel.recv_stderr_ready():
-                            error.append(stderr.channel.recv_stderr(1024).decode())
-                        time.sleep(0.1)
-                    output = " ".join(output)
-                    error = " ".join(error)
 
+                # Read stdout and stderr dynamically if stream_callback is provided
+                if stream_callback:
+                    while not stdout.channel.exit_status_ready():
+                        # Process stdout
+                        if stdout.channel.recv_ready():
+                            chunk = stdout.channel.recv(1024).decode()
+                            output.append(chunk)
+                            stream_callback(chunk, is_error=False)  # Callback for stdout
+
+                        # Process stderr
+                        if stderr.channel.recv_stderr_ready():
+                            chunk = stderr.channel.recv_stderr(1024).decode()
+                            error.append(chunk)
+                            stream_callback(chunk, is_error=True)  # Callback for stderr
+
+                        time.sleep(0.1)
+
+                    # Finalize any remaining output
+                    if stdout.channel.recv_ready():
+                        chunk = stdout.channel.recv(1024).decode()
+                        output.append(chunk)
+                        stream_callback(chunk, is_error=False)
+
+                    if stderr.channel.recv_stderr_ready():
+                        chunk = stderr.channel.recv_stderr(1024).decode()
+                        error.append(chunk)
+                        stream_callback(chunk, is_error=True)
                 else:
+                    # Default behavior: Read the entire output at once
                     output = stdout.read().decode()
                     error = stderr.read().decode()
 
+                # Combine the output into strings
+                output = "".join(output) if isinstance(output, list) else output
+                error = "".join(error) if isinstance(error, list) else error
+
+                # Log the results
                 if output:
                     self.logger.info(f"Command output: {output}")
                 if error:
-                    self.logger.info(f"Command error: {error}")
+                    self.logger.error(f"Command error: {error}")
 
                 if not output and not error:
                     self.logger.warning(f"Command '{command}' executed but returned no output or error.")
@@ -175,6 +197,7 @@ class SshUtils:
         # If we exhaust retries, return failure
         self.logger.error(f"Failed to execute command '{command}' on node {node} after {max_retries} retries.")
         return "", "Command failed after max retries"
+
     
     def format_disk(self, node, device, fs_type="ext4"):
         """Format disk on the given node

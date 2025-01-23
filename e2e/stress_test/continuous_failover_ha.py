@@ -47,6 +47,26 @@ class RandomFailoverTest(TestLvolHACluster):
         self.node_vs_lvol = {}
         # self.outage_types = ["partial_nw", "full_nw", "spdk_crash", "graceful_shutdown"]
         self.outage_types = ["network_interrupt", "container_stop", "graceful_shutdown"]
+        self.outage_log_file = f"{self.log_path}/outage_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+        self._initialize_outage_log()
+
+    def _initialize_outage_log(self):
+        """Create or initialize the outage log file."""
+        with open(self.outage_log_file, 'w') as log:
+            log.write("Timestamp,Node,Outage_Type,Event\n")
+
+    def log_outage_event(self, node, outage_type, event):
+        """Log an outage event to the outage log file.
+
+        Args:
+            node (str): Node UUID or IP where the event occurred.
+            outage_type (str): Type of outage (e.g., network_interrupt, container_stop, graceful_shutdown).
+            event (str): Event description (e.g., 'Outage started', 'Node restarted').
+        """
+        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        with open(self.outage_log_file, 'a') as log:
+            log.write(f"{timestamp},{node},{outage_type},{event}\n")
+
 
     def create_lvols_with_fio(self, count):
         """Create lvols and start FIO with random configurations."""
@@ -143,6 +163,8 @@ class RandomFailoverTest(TestLvolHACluster):
         node_ip = node_details[0]["mgmt_ip"]
 
         self.logger.info(f"Performing {outage_type} on node {self.current_outage_node}.")
+        self.log_outage_event(self.current_outage_node, outage_type, "Outage started")
+        
         if outage_type == "graceful_shutdown":
             self.sbcli_utils.suspend_node(node_uuid=self.current_outage_node, expected_error_code=[503])
             self.sbcli_utils.wait_for_storage_node_status(self.current_outage_node, "suspended", timeout=4000)
@@ -166,6 +188,7 @@ class RandomFailoverTest(TestLvolHACluster):
             self.disconnect_thread.start()
         
         return outage_type
+
     
     def restart_nodes_after_failover(self, outage_type):
         """Perform steps for node restart."""
@@ -177,6 +200,9 @@ class RandomFailoverTest(TestLvolHACluster):
         self.sbcli_utils.wait_for_storage_node_status(self.current_outage_node, "online", timeout=4000)
         self.sbcli_utils.wait_for_health_status(self.current_outage_node, True, timeout=4000)
         self.outage_end_time = int(datetime.now().timestamp())
+
+        # Log the restart event
+        self.log_outage_event(self.current_outage_node, outage_type, "Node restarted")
             
 
     def create_snapshots_and_clones(self):
@@ -270,6 +296,8 @@ class RandomFailoverTest(TestLvolHACluster):
             to_delete = []
             for clone_name, clone_details in self.clone_mount_details.items():
                 if clone_details["snapshot"] in snapshots:
+                    self.common_utils.validate_fio_test(self.node,
+                                                        log_file=clone_details["Log"])
                     self.ssh_obj.find_process_name(self.node, f"{clone_name}_fio", return_pid=False)
                     fio_pids = self.ssh_obj.find_process_name(self.node, f"{clone_name}_fio", return_pid=True)
                     for pid in fio_pids:
@@ -283,8 +311,6 @@ class RandomFailoverTest(TestLvolHACluster):
                         attempt += 1
                         sleep_n_sec(200)
                         
-                    self.common_utils.validate_fio_test(self.node,
-                                                        log_file=clone_details["Log"])
                     self.ssh_obj.unmount_path(self.node, f"/mnt/{clone_name}")
                     self.ssh_obj.remove_dir(self.node, dir_path=f"/mnt/{clone_name}")
                     self.disconnect_lvol(clone_details['ID'])
@@ -297,6 +323,8 @@ class RandomFailoverTest(TestLvolHACluster):
                 self.ssh_obj.delete_snapshot(self.node, snapshot_id=snapshot_id)
                 self.snapshot_names.remove(snapshot)
 
+            self.common_utils.validate_fio_test(self.node,
+                                                log_file=self.lvol_mount_details[lvol]["Log"])
             self.ssh_obj.find_process_name(self.node, f"{lvol}_fio", return_pid=False)
             fio_pids = self.ssh_obj.find_process_name(self.node, f"{lvol}_fio", return_pid=True)
             for pid in fio_pids:
@@ -310,8 +338,6 @@ class RandomFailoverTest(TestLvolHACluster):
                 attempt += 1
                 sleep_n_sec(200)
 
-            self.common_utils.validate_fio_test(self.node,
-                                                log_file=self.lvol_mount_details[lvol]["Log"])
             self.ssh_obj.unmount_path(self.node, f"/mnt/{lvol}")
             self.ssh_obj.remove_dir(self.node, dir_path=f"/mnt/{lvol}")
             self.disconnect_lvol(self.lvol_mount_details[lvol]['ID'])
@@ -375,6 +401,14 @@ class RandomFailoverTest(TestLvolHACluster):
                 time_duration=time_duration
             )
             self.validate_migration_for_node(self.outage_start_time, 4000, None)
+
+            for clone, clone_details in self.clone_mount_details.items():
+                self.common_utils.validate_fio_test(self.node,
+                                                    log_file=clone_details["Log"])
+            
+            for lvol, lvol_details in self.lvol_mount_details.items():
+                self.common_utils.validate_fio_test(self.node,
+                                                    log_file=lvol_details["Log"])
 
             # Perform failover and manage resources during outage
             self.perform_failover_during_outage()

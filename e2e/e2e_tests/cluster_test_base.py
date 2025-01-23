@@ -1,11 +1,13 @@
 import os
 import boto3
+from datetime import datetime
 from utils.sbcli_utils import SbcliUtils
 from utils.ssh_utils import SshUtils
 from utils.common_utils import CommonUtils
 from logger_config import setup_logger
 from utils.common_utils import sleep_n_sec
 import traceback
+import threading
 
 
 class TestClusterBase:
@@ -99,10 +101,35 @@ class TestClusterBase:
         )
         self.ec2_resource = session.resource('ec2')
 
+        self.container_log_path = f"{os.path.dirname(self.mount_path)}/container_logs"
+        os.makedirs(self.container_log_path, exist_ok=True)
+
+        running_containers = self.get_running_containers()
+        self.log_threads = []
+
+        for stg_ip, containers in running_containers.items():
+            for container in containers:
+                log_thread = threading.Thread(
+                    target=self.monitor_docker_logs,
+                    args=(stg_ip, container, self.container_log_path)
+                )
+                log_thread.daemon = True  # Ensure threads stop when the main program exits
+                log_thread.start()
+                self.log_threads.append(log_thread)
+
+        self.logger.info("Started log monitoring for all storage nodes.")
+
+    def stop_docker_logs_collect(self):
+        for thread in self.log_threads:
+            if thread.is_alive():
+                thread.join(timeout=5)  # Wait for the thread to finish
+        self.logger.info("All log monitoring threads stopped.")
+
     def teardown(self):
         """Contains teradown required post test case execution
         """
         self.logger.info("Inside teardown function")
+        
         self.ssh_obj.kill_processes(node=self.mgmt_nodes[0],
                                     process_name="fio")
         retry_check = 100
@@ -321,3 +348,81 @@ class TestClusterBase:
             delete_snapshot_command = f"sbcli-lvol snapshot delete {snapshot} --force"
             self.ssh_obj.exec_command(node=self.mgmt_nodes[0], command=delete_snapshot_command)
             
+    def get_running_containers(self):
+        """Get a list of all running Docker containers on all storage nodes.
+
+        Returns:
+            dict: A dictionary with storage node IPs as keys and lists of container names as values.
+        """
+        running_containers = {}
+        cmd = "docker ps --format '{{.Names}}'"
+
+        for stg_ip in self.storage_nodes:
+            try:
+                output, error = self.ssh_obj.exec_command(stg_ip, cmd)
+                if error:
+                    self.logger.error(f"Error fetching containers on {stg_ip}: {error}")
+                    continue
+                containers = output.strip().splitlines()
+                running_containers[stg_ip] = containers
+                self.logger.info(f"Running containers on {stg_ip}: {containers}")
+            except Exception as e:
+                self.logger.error(f"Error fetching running containers from {stg_ip}: {e}")
+
+        return running_containers
+    
+    def is_container_running(self, stg_ip, container_name):
+        """Check if a Docker container is running on a specific storage node.
+
+        Args:
+            stg_ip (str): IP of the storage node.
+            container_name (str): Name of the Docker container.
+
+        Returns:
+            bool: True if the container is running, False otherwise.
+        """
+        cmd = f"docker inspect -f '{{{{.State.Running}}}}' {container_name}"
+        try:
+            output, error = self.ssh_obj.exec_command(stg_ip, cmd)
+            if error:
+                self.logger.error(f"Error checking container status on {stg_ip}: {error}")
+                return False
+            return output.strip().lower() == 'true'
+        except Exception as e:
+            self.logger.error(f"Error checking container status on {stg_ip}: {e}")
+            return False
+
+    def monitor_docker_logs(self, stg_ip, container_name, log_path):
+        """Monitor Docker logs for a container on a specific storage node.
+
+        Args:
+            stg_ip (str): IP of the storage node.
+            container_name (str): Name of the Docker container.
+            log_path (str): Directory to save the log files.
+        """
+        log_file_path = f"{log_path}/{stg_ip}_{container_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+        os.makedirs(log_path, exist_ok=True)  # Ensure the log directory exists
+
+        def stream_callback(chunk, is_error):
+            """Callback function to handle streaming logs."""
+            with open(log_file_path, 'a') as log_file:
+                log_type = "STDERR" if is_error else "STDOUT"
+                self.logger.debug(f"[{log_type}] {chunk.strip()}")
+                log_file.write(chunk)
+
+        while True:
+            if self.is_container_running(stg_ip, container_name):
+                self.logger.info(f"Starting log collection for container '{container_name}' on node {stg_ip}")
+                try:
+                    cmd = f"docker logs --follow {container_name}"
+                    self.ssh_obj.exec_command(
+                        node=stg_ip,
+                        command=cmd,
+                        stream_callback=stream_callback
+                    )
+                except Exception as e:
+                    self.logger.error(f"Error while collecting logs for container '{container_name}' on node {stg_ip}: {e}")
+            else:
+                self.logger.warning(f"Container '{container_name}' on node {stg_ip} is not running. Retrying in 5 seconds.")
+                sleep_n_sec(5)  # Wait before checking if the container is back online
+
