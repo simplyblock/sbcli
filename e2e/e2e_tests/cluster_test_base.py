@@ -380,7 +380,7 @@ class TestClusterBase:
         Returns:
             bool: True if the container is running, False otherwise.
         """
-        cmd = f"sudo docker inspect -f '{{.State.Running}}' {container_name}"
+        cmd = "sudo docker inspect -f '{{.State.Running}}' %s" % container_name
         try:
             output, error = self.ssh_obj.exec_command(stg_ip, cmd)
             if error:
