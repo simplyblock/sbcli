@@ -263,10 +263,11 @@ class RandomFailoverTest(TestLvolHACluster):
         if len(available_lvols) < count:
             self.logger.warning("Not enough lvols available to delete the requested count.")
             count = len(available_lvols)
-        to_delete = []
+
         for lvol in random.sample(available_lvols, count):
             self.logger.info(f"Deleting lvol {lvol}.")
             snapshots = self.lvol_mount_details[lvol]["snapshots"]
+            to_delete = []
             for clone_name, clone_details in self.clone_mount_details.items():
                 if clone_details["snapshot"] in snapshots:
                     self.ssh_obj.find_process_name(self.node, f"{clone_name}_fio", return_pid=False)
