@@ -355,7 +355,7 @@ class TestClusterBase:
             dict: A dictionary with storage node IPs as keys and lists of container names as values.
         """
         running_containers = {}
-        cmd = "docker ps --format '{{.Names}}'"
+        cmd = "sudo docker ps --format '{{.Names}}'"
 
         for stg_ip in self.storage_nodes:
             try:
@@ -381,7 +381,7 @@ class TestClusterBase:
         Returns:
             bool: True if the container is running, False otherwise.
         """
-        cmd = f"docker inspect -f '{{{{.State.Running}}}}' {container_name}"
+        cmd = f"sudo docker inspect -f '{{{{.State.Running}}}}' {container_name}"
         try:
             output, error = self.ssh_obj.exec_command(stg_ip, cmd)
             if error:
@@ -401,7 +401,7 @@ class TestClusterBase:
             log_path (str): Directory to save the log files.
         """
         log_file_path = f"{log_path}/{stg_ip}_{container_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
-        os.makedirs(log_path, exist_ok=True)  # Ensure the log directory exists
+        self.ssh_obj.make_directory(log_path)  # Ensure the log directory exists
 
         def stream_callback(chunk, is_error):
             """Callback function to handle streaming logs."""
@@ -414,7 +414,7 @@ class TestClusterBase:
             if self.is_container_running(stg_ip, container_name):
                 self.logger.info(f"Starting log collection for container '{container_name}' on node {stg_ip}")
                 try:
-                    cmd = f"docker logs --follow {container_name}"
+                    cmd = f"sudo docker logs --follow {container_name}"
                     self.ssh_obj.exec_command(
                         node=stg_ip,
                         command=cmd,
