@@ -104,14 +104,14 @@ class TestClusterBase:
         )
         self.ec2_resource = session.resource('ec2')
 
-        # self.setup_log_monitoring()
+        self.setup_log_monitoring()
 
-        # self.logger.info("Started log monitoring for all storage nodes.")
+        self.logger.info("Started log monitoring for all storage nodes.")
 
     def stop_docker_logs_collect(self):
-        # for thread in self.log_threads:
-        #     if thread.is_alive():
-        #         thread.join(timeout=5)  # Wait for the thread to finish
+        for thread in self.log_threads:
+            if thread.is_alive():
+                thread.join(timeout=5)  # Wait for the thread to finish
         self.logger.info("All log monitoring threads stopped.")
 
     def teardown(self):
@@ -348,6 +348,7 @@ class TestClusterBase:
                 args=(stg_ip, containers, self.container_log_path),
                 daemon=True
             )
+
             log_thread.daemon = True
             log_thread.start()
             self.log_threads.append(log_thread)
