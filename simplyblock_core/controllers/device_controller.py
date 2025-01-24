@@ -790,11 +790,6 @@ def remove_jm_device(device_id, force=False):
         logger.error("device not found")
         return False
 
-    if jm_device.status != JMDevice.STATUS_ONLINE:
-        logger.warning("device is not online")
-        if not force:
-            return False
-
     set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_UNAVAILABLE)
 
     if snode.status == StorageNode.STATUS_ONLINE:

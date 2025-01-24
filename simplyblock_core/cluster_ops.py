@@ -130,6 +130,10 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
         if c.swarm.attrs and "ID" in c.swarm.attrs:
             logger.info("Docker swarm found, leaving swarm now")
             c.swarm.leave(force=True)
+            try:
+                c.volumes.get("monitoring_grafana_data").remove(force=True)
+            except:
+                pass
             time.sleep(3)
 
         c.swarm.init(DEV_IP)
@@ -160,7 +164,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     if prov_cap_crit and prov_cap_crit > 0:
         c.prov_cap_crit = prov_cap_crit
     if distr_ndcs == 0 and distr_npcs == 0:
-        c.distr_ndcs = 4
+        c.distr_ndcs = 1
         c.distr_npcs = 1
     else:
         c.distr_ndcs = distr_ndcs
@@ -365,7 +369,7 @@ def cluster_activate(cl_id, force=False, force_lvstore_create=False):
         else:
             ret = storage_node_ops.create_lvstore(snode, cluster.distr_ndcs, cluster.distr_npcs, cluster.distr_bs,
                                               cluster.distr_chunk_bs, cluster.page_size_in_blocks, max_size, snodes)
-        if not ret:
+        if not ret and not force:
             logger.error("Failed to activate cluster")
             set_cluster_status(cl_id, ols_status)
             return False
@@ -377,7 +381,7 @@ def cluster_activate(cl_id, force=False, force_lvstore_create=False):
             continue
 
         ret = storage_node_ops.recreate_lvstore(snode)
-        if not ret:
+        if not ret and not force:
             logger.error("Failed to activate cluster")
             set_cluster_status(cl_id, ols_status)
             return False
