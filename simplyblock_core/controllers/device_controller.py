@@ -817,6 +817,20 @@ def remove_jm_device(device_id, force=False):
         ret = rpc_client.bdev_raid_delete(snode.jm_device.raid_bdev)
 
     set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_REMOVED)
+
+    for node in db_controller.get_storage_nodes():
+        for nm, id in node.remote_jm_map:
+            if id == device_id:
+                ls = storage_node_ops.get_sorted_ha_jms(node)
+                if ls:
+                    new_dev = ls[0]
+                    node.remote_jm_map[nm] = new_dev
+                    node.remote_jm_devices.append(db_controller.get_jm_device_by_id(new_dev))
+                    node.remote_jm_devices = storage_node_ops._connect_to_remote_jm_devs(node)
+                    node.write_to_db()
+                    break
+
+
     return True
 
 

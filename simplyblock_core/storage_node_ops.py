@@ -891,19 +891,41 @@ def _connect_to_remote_jm_devs(this_node, jm_ids=[]):
                 org_dev_node = node
                 break
 
-        if not org_dev or org_dev in new_devs:
+        if not org_dev or org_dev in new_devs or org_dev.status == JMDevice.STATUS_REMOVED:
             continue
 
-        name = f"remote_{org_dev.jm_bdev}"
+        name = None
+        found_in_map = False
+        for rem_name, jm_id in this_node.remote_jm_map.items():
+            if jm_id == jm_dev.get_id():
+                name = rem_name
+                found_in_map = True
+                break
+        #
+        # if not name and this_node.is_secondary_node:
+        #     for node in db_controller.get_primary_storage_nodes_by_secondary_node_id(this_node.get_id()):
+        #         for rem_name, jm_id in node.remote_jm_map.items():
+        #             if jm_id == org_dev.get_id():
+        #                 name = rem_name
+        #                 break
+        #
+        if not name:
+            name = f"JM_VUID_{org_dev_node.jm_vuid}_JM_LOCAL"
+
+        if not found_in_map:
+            this_node = db_controller.get_storage_node_by_id(this_node.get_id())
+            this_node.remote_jm_map[name] = jm_dev.get_id()
+            this_node.write_to_db()
+
         bdev_name = f"{name}n1"
         org_dev.remote_bdev = bdev_name
+        new_devs.append(org_dev)
 
         if org_dev.status == NVMeDevice.STATUS_ONLINE:
 
             if bdev_name in node_bdev_names:
                 logger.debug(f"bdev found {bdev_name}")
-                org_dev.status = JMDevice.STATUS_ONLINE
-                new_devs.append(org_dev)
+
             else:
                 if rpc_client.bdev_nvme_controller_list(name):
                     logger.info(f"detaching {name} from {this_node.get_id()}")
@@ -918,15 +940,10 @@ def _connect_to_remote_jm_devs(this_node, jm_ids=[]):
                 else:
                     logger.error(f"failed to connect to remote JM {name}")
                     org_dev.status = JMDevice.STATUS_UNAVAILABLE
-                new_devs.append(org_dev)
 
         else:
-            # if bdev_name in node_bdev_names:
-            #     logger.debug(f"bdev found {bdev_name}")
-            #     rpc_client.bdev_nvme_detach_controller(name)
-
             org_dev.status = JMDevice.STATUS_UNAVAILABLE
-            new_devs.append(org_dev)
+
 
     return new_devs
 
@@ -2819,20 +2836,25 @@ def recreate_lvstore(snode):
     snode = db_controller.get_storage_node_by_id(snode.get_id())
     snode.remote_devices = _connect_to_remote_devs(snode)
     if snode.enable_ha_jm:
-        online_devs = []
-        for remote_device in snode.remote_jm_devices:
-            if remote_device.status == StorageNode.STATUS_ONLINE:
-                online_devs.append(remote_device)
+        remote_jms = []
+        remote_jm_map = snode.remote_jm_map
+        for rem_name, jm_id in snode.remote_jm_map.items():
+            org_dev = db_controller.get_jm_device_by_id(jm_id)
+            if not org_dev:
+                continue
+            if org_dev.status == JMDevice.STATUS_ONLINE:
+                remote_jms.append(org_dev)
+            else:
+                devs = get_sorted_ha_jms(snode)
+                for did in devs:
+                    dev = db_controller.get_jm_device_by_id(did)
+                    if dev:
+                        remote_jms.append(dev)
+                        remote_jm_map[rem_name] = dev.get_id()
+                        break
 
-        if len(online_devs) < 2:
-            devs = get_sorted_ha_jms(snode)
-            for did in devs:
-                dev = db_controller.get_jm_device_by_id(did)
-                online_devs.append(dev)
-                if len(online_devs) > constants.HA_JM_COUNT - 1:
-                    break
-
-        snode.remote_jm_devices = online_devs
+        snode.remote_jm_map = remote_jm_map
+        snode.remote_jm_devices = remote_jms
         snode.remote_jm_devices = _connect_to_remote_jm_devs(snode)
     snode.write_to_db()
 
@@ -2897,18 +2919,45 @@ def get_sorted_ha_jms(current_node):
     return list(jm_count.keys())[:3]
 
 
-def get_node_jm_names(current_node):
+def get_node_jm_names_for_primary_on_second(primary_node, sec_node):
     db_controller = DBController()
-    jm_list = []
-    if current_node.jm_device:
-        jm_list.append(current_node.jm_device.jm_bdev)
+    jm_ids = []
+    lst = []
+    if primary_node.jm_device and primary_node.jm_device.status != JMDevice.STATUS_REMOVED:
+        jm_ids.append(primary_node.jm_device.get_id())
     else:
-        jm_list.append("JM_LOCAL")
+        lst.append("NO_JM")
 
-    if current_node.enable_ha_jm:
-        for jm_dev in current_node.remote_jm_devices[:constants.HA_JM_COUNT-1]:
-            jm_list.append(jm_dev.remote_bdev)
-    return jm_list
+    for nm, id in primary_node.remote_jm_map.items():
+        jm_ids.append(id)
+
+    remote_jm_map = {}
+    for idd in jm_ids:
+        for nm, id in sec_node.remote_jm_map.items():
+            if id == idd:
+                lst.append(nm+"n1")
+                break
+        else:
+            nm = f"JM_VUID_{primary_node.jm_vuid}_JM_%s" %(len(sec_node.remote_jm_map)+len(remote_jm_map))
+            remote_jm_map[nm] = idd
+            lst.append(nm+"n1")
+
+    if remote_jm_map:
+        sec_node = db_controller.get_storage_node_by_id(sec_node.get_id())
+        sec_node.remote_jm_map += remote_jm_map
+        sec_node.write_to_db()
+    return lst
+
+
+def get_node_jm_names(node):
+    lst = []
+    if node.jm_device and node.jm_device.status != JMDevice.STATUS_REMOVED:
+        lst.append(node.jm_device.jm_bdev)
+    else:
+        lst.append("NO_JM")
+
+    lst.extend([n+"n1" for n in node.remote_jm_map])
+    return lst
 
 
 def get_secondary_nodes(current_node):
@@ -2918,6 +2967,19 @@ def get_secondary_nodes(current_node):
         if node.get_id() != current_node.get_id() and node.is_secondary_node:
             nodes.append(node.get_id())
     return nodes
+
+
+def get_node_jm_map(node, remote_jm_ids):
+    if node.is_secondary_node:
+        return None
+
+    st = f"JM_VUID_{node.jm_vuid}_JM_%s"
+    m = {}
+
+    for index, jm_id in enumerate(remote_jm_ids):
+        m[st % (index + 1)] = jm_id
+
+    return m
 
 
 def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blocks, max_size, nodes):
@@ -2934,10 +2996,11 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
     jm_ids = []
     if snode.enable_ha_jm:
         jm_vuid = utils.get_random_vuid()
+        snode.jm_vuid = jm_vuid
         jm_ids = get_sorted_ha_jms(snode)
         logger.debug(f"online_jms: {str(jm_ids)}")
+        snode.remote_jm_map = get_node_jm_map(snode, jm_ids)
         snode.remote_jm_devices = _connect_to_remote_jm_devs(snode, jm_ids)
-        snode.jm_vuid = jm_vuid
         snode.write_to_db()
 
     for _ in range(snode.number_of_distribs):
@@ -3063,15 +3126,7 @@ def _create_bdev_stack(snode, lvstore_stack=None, primary_node=None):
 
         elif type == "bdev_distr":
             if snode.is_secondary_node and primary_node:
-                jm_list = []
-                if primary_node.jm_device and primary_node.jm_device.status == JMDevice.STATUS_ONLINE:
-                    bdev_name = f"remote_{primary_node.jm_device.jm_bdev}n1"
-                    jm_list.append(bdev_name)
-                else:
-                    jm_list.append("JM_LOCAL")
-                for jm_dev in primary_node.remote_jm_devices[:constants.HA_JM_COUNT-1]:
-                    jm_list.append(jm_dev.remote_bdev)
-                params['jm_names'] = jm_list
+                params['jm_names'] = get_node_jm_names_for_primary_on_second(primary_node, snode)
             else:
                 params['jm_names'] = get_node_jm_names(snode)
 

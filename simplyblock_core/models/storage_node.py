@@ -83,3 +83,4 @@ class StorageNode(BaseNodeObject):
     partition_size: int = 0
     subsystem: str = ""
     system_uuid: str = ""
+    remote_jm_map: dict = {}
