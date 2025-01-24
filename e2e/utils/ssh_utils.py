@@ -6,6 +6,8 @@ import json
 import paramiko.ssh_exception
 from logger_config import setup_logger
 from pathlib import Path
+from datetime import datetime
+
 
 
 SSH_KEY_LOCATION = os.path.join(Path.home(), ".ssh", os.environ.get("KEY_NAME"))
@@ -605,4 +607,123 @@ class SshUtils:
                     self.logger.error(f"Error during `dd` command: {e}. Retrying...")
                     if attempt == retries - 1:
                         self.logger.error(f"Failed after {retries} retries. Aborting.")
+
+    def get_active_interfaces(self, node_ip):
+        """
+        Get the list of active physical network interfaces on the node.
+
+        Args:
+            node_ip (str): IP of the target node.
+        Returns:
+            list: List of active physical network interfaces.
+        """
+        try:
+            cmd = (
+                "sudo nmcli device status | grep 'connected' | awk '{print $1}' | grep -Ev '^(docker|lo)'"
+            )
+            output, error = self.exec_command(node_ip, cmd)
+            if error:
+                self.logger.error(f"Error fetching active interfaces on {node_ip}: {error}")
+                return []
+            interfaces = output.strip().split("\n")
+            self.logger.info(f"Filtered active interfaces on {node_ip}: {interfaces}")
+            return interfaces
+        except Exception as e:
+            self.logger.error(f"Failed to fetch active interfaces on {node_ip}: {e}")
+            return []
+        
+
+    def disconnect_all_active_interfaces(self, node_ip, interfaces):
+        """
+        Disconnect all active network interfaces on a node in a single SSH call.
+
+        Args:
+            node_ip (str): IP of the target node.
+            interfaces (list): List of active network interfaces to disconnect.
+        """
+        if not interfaces:
+            self.logger.warning(f"No active interfaces to disconnect on node {node_ip}.")
+            return
+
+        # Combine disconnect commands for all interfaces
+        disconnect_cmds = " && ".join([f"sudo nmcli dev disconnect {iface}" for iface in interfaces])
+        reconnect_cmds = " && ".join([f"sudo nmcli dev connect {iface}" for iface in interfaces])
+
+        cmd = (
+            f'nohup sh -c "{disconnect_cmds} && sleep 300 && {reconnect_cmds}" &'
+        )
+        self.logger.info(f"Executing combined disconnect command on node {node_ip}: {cmd}")
+        try:
+            self.exec_command(node_ip, cmd)
+        except Exception as e:
+            self.logger.error(f"Failed to execute combined disconnect command on {node_ip}: {e}")
+
+    def start_docker_logging(self, node_ip, containers, log_dir, test_name):
+        """
+        Start continuous Docker logs collection for all containers on a node.
+
+        Args:
+            ssh_obj (object): SSH utility object.
+            node_ip (str): IP of the target node.
+            containers (list): List of container names to log.
+            log_dir (str): Directory to save log files.
+            test_name (str): Name of the test for log identification.
+        """
+        try:
+            # Ensure the log directory exists on the node
+            self.exec_command(node_ip, f"sudo mkdir -p {log_dir}")
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            for container in containers:
+                log_file = f"{log_dir}/{container}_{test_name}_{timestamp}_before_outage.txt"
+                cmd = (
+                    f"sudo nohup docker logs --follow {container} > {log_file} 2>&1 &"
+                )
+                self.logger.info(f"Starting Docker log collection for container '{container}' on {node_ip}. Command: {cmd}")
+                self.exec_command(node_ip, cmd)
+        except Exception as e:
+            self.logger.error(f"Failed to start Docker log collection on node {node_ip}: {e}")
+
+
+    def restart_docker_logging(self, node_ip, containers, log_dir, test_name):
+        """
+        Restart Docker logs collection after an outage.
+
+        Args:
+            node_ip (str): IP of the target node.
+            containers (list): List of container names to log.
+            log_dir (str): Directory to save log files.
+            test_name (str): Name of the test for log identification.
+        """
+        try:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            for container in containers:
+                log_file = f"{log_dir}/{container}_{test_name}_{timestamp}_after_outage.txt"
+                cmd = (
+                    f"sudo nohup docker logs --follow {container} > {log_file} 2>&1 &"
+                )
+                self.logger.info(f"Restarting Docker log collection for container '{container}' on {node_ip}. Command: {cmd}")
+                self.exec_command(node_ip, cmd)
+        except Exception as e:
+            self.logger.error(f"Failed to restart Docker log collection on node {node_ip}: {e}")
+
+    def get_running_containers(self, node_ip):
+        """
+        Fetch running containers from all storage nodes.
+
+        Returns:
+            dict: A dictionary mapping storage node IPs to a list of running container names.
+        """
+        containers_by_node = []
+        try:
+            cmd = "sudo docker ps --format '{{.Names}}'"
+            output, error = self.exec_command(node_ip, cmd)
+            if error:
+                self.logger.error(f"Error fetching containers on {node_ip}: {error}")
+
+            containers = output.strip().split("\n")
+            containers_by_node = [c for c in containers if c and "monitoring" not in c]  # Filter out empty names
+        except Exception as e:
+            self.logger.error(f"Error fetching running containers on {node_ip}: {e}")
+        return containers_by_node
+
 

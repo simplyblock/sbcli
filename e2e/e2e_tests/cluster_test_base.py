@@ -1,6 +1,5 @@
 import os
 import boto3
-from datetime import datetime
 from utils.sbcli_utils import SbcliUtils
 from utils.ssh_utils import SshUtils
 from utils.common_utils import CommonUtils
@@ -48,6 +47,8 @@ class TestClusterBase:
                                 "78505636c8133d9be42e347f82785b81a879cd8133046f8fc0b36f17b078ad0c"]
         self.container_log_path = f"{os.path.dirname(self.mount_path)}/container_logs"
         self.log_threads = []
+        self.test_name = ""
+        self.container_nodes = {}
 
 
     def setup(self):
@@ -80,6 +81,7 @@ class TestClusterBase:
                 address=node,
                 bastion_server_address=self.bastion_server,
             )
+
         # command = "python3 -c \"from importlib.metadata import version;print(f'SBCLI Version: {version('''sbcli-dev''')}')\""
         # self.ssh_obj.exec_command(
         #     self.mgmt_nodes[0], command=command
@@ -104,14 +106,28 @@ class TestClusterBase:
         )
         self.ec2_resource = session.resource('ec2')
 
-        self.setup_log_monitoring()
+        self.docker_logs_path = f"/home/container-logs/"
+        
+        for node in self.storage_nodes:
+            containers = self.ssh_obj.get_running_containers(node_ip=node)
+            self.container_nodes[node] = containers
+            self.ssh_obj.start_docker_logging(node_ip=node,
+                                              containers=containers,
+                                              log_dir=self.docker_logs_path,
+                                              test_name=self.test_name
+                                              )
 
         self.logger.info("Started log monitoring for all storage nodes.")
 
     def stop_docker_logs_collect(self):
-        for thread in self.log_threads:
-            if thread.is_alive():
-                thread.join(timeout=5)  # Wait for the thread to finish
+        for node in self.storage_nodes:
+            pids = self.ssh_obj.find_process_name(
+                node=node,
+                process_name="'docker logs --follow'",
+                return_pid=True
+            )
+            for pid in pids:
+                self.ssh_obj.kill_processes(node=node, pid=pid)
         self.logger.info("All log monitoring threads stopped.")
 
     def teardown(self):
@@ -337,94 +353,7 @@ class TestClusterBase:
             delete_snapshot_command = f"sbcli-lvol snapshot delete {snapshot} --force"
             self.ssh_obj.exec_command(node=self.mgmt_nodes[0], command=delete_snapshot_command)
             
-    def setup_log_monitoring(self):
-        """
-        Set up log monitoring for all target containers on storage nodes.
-        """
-        for stg_ip, containers in self.get_running_containers().items():
-            # Start a thread to monitor container events and dynamically collect logs
-            log_thread = threading.Thread(
-                target=self.monitor_container_events,
-                args=(stg_ip, containers, self.container_log_path),
-                daemon=True
-            )
-
-            log_thread.daemon = True
-            log_thread.start()
-            self.log_threads.append(log_thread)
-
-    def monitor_container_events(self, stg_ip, containers, remote_log_path):
-        """
-        Monitor Docker events on a storage node and dynamically manage log collection.
-
-        Args:
-            stg_ip (str): IP of the storage node.
-            containers (list): List of Docker container names to monitor.
-            remote_log_path (str): Directory to save the log files on the remote node.
-        """
-        def start_log_collection(container_name):
-            log_file = f"{remote_log_path}/{container_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
-            cmd = f"sudo docker logs --follow {container_name} >> {log_file} 2>&1 &"
-            try:
-                self.ssh_obj.exec_command(stg_ip, cmd)
-                self.logger.info(f"Started log collection for container '{container_name}' on node {stg_ip}")
-            except Exception as e:
-                self.logger.error(f"Failed to start log collection for container '{container_name}' on node {stg_ip}: {e}")
-
-        try:
-            # Ensure the log directory exists
-            mkdir_cmd = f"sudo mkdir -p {remote_log_path} && sudo chmod -R 777 {remote_log_path}"
-            self.ssh_obj.exec_command(stg_ip, mkdir_cmd)
-
-            # Monitor Docker events
-            event_cmd = "sudo docker events --filter event=start --filter event=stop --filter event=destroy --format '{{json .}}'"
-            self.logger.info(f"Monitoring Docker events on node {stg_ip} for containers: {containers}")
-
-            def handle_event(event_json):
-                import json
-                try:
-                    event = json.loads(event_json)
-                    action = event.get("Action")
-                    container_name = event.get("Actor", {}).get("Attributes", {}).get("name")
-
-                    if container_name in containers:
-                        if action == "start":
-                            self.logger.info(f"Container '{container_name}' started on node {stg_ip}")
-                            start_log_collection(container_name)
-                        elif action in ["stop", "destroy"]:
-                            self.logger.warning(f"Container '{container_name}' {action} on node {stg_ip}")
-                except Exception as e:
-                    self.logger.error(f"Error parsing Docker event: {e}")
-
-            self.ssh_obj.exec_command(
-                node=stg_ip,
-                command=event_cmd,
-                stream_callback=lambda chunk, _: handle_event(chunk.strip())
-            )
-        except Exception as e:
-            self.logger.error(f"Error while monitoring container events on node {stg_ip}: {e}")
     
-    def get_running_containers(self):
-        """
-        Fetch running containers from all storage nodes.
-
-        Returns:
-            dict: A dictionary mapping storage node IPs to a list of running container names.
-        """
-        containers_by_node = {}
-        for stg_ip in self.storage_nodes:
-            try:
-                cmd = "sudo docker ps --format '{{.Names}}'"
-                output, error = self.ssh_obj.exec_command(stg_ip, cmd)
-                if error:
-                    self.logger.error(f"Error fetching containers on {stg_ip}: {error}")
-                    continue
-
-                containers = output.strip().split("\n")
-                containers_by_node[stg_ip] = [c for c in containers if c]  # Filter out empty names
-            except Exception as e:
-                self.logger.error(f"Error fetching running containers on {stg_ip}: {e}")
-        return containers_by_node
 
 
 

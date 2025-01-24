@@ -6,6 +6,7 @@ from exceptions.custom_exception import LvolNotConnectException
 import threading
 import string
 import random
+import os
 
 
 def random_char(len):
@@ -45,9 +46,10 @@ class RandomFailoverTest(TestLvolHACluster):
         self.outage_start_time = None
         self.outage_end_time = None
         self.node_vs_lvol = {}
+        self.test_name = "continuous_random_failover_ha"
         # self.outage_types = ["partial_nw", "full_nw", "spdk_crash", "graceful_shutdown"]
         self.outage_types = ["network_interrupt", "container_stop", "graceful_shutdown"]
-        self.outage_log_file = f"{self.log_path}/outage_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+        self.outage_log_file = os.path.join("logs" ,f"outage_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
         self._initialize_outage_log()
 
     def _initialize_outage_log(self):
@@ -175,16 +177,23 @@ class RandomFailoverTest(TestLvolHACluster):
         elif outage_type == "container_stop":
             self.ssh_obj.stop_spdk_process(node_ip)
         elif outage_type == "network_interrupt":
-            cmd = (
-                'nohup sh -c "sudo nmcli dev disconnect eth0 && sleep 300 && '
-                'sudo nmcli dev connect eth0" &'
-            )
-            def execute_disconnect():
-                self.logger.info(f"Executing disconnect command on node {node_ip}.")
-                self.ssh_obj.exec_command(node_ip, command=cmd)
+            # cmd = (
+            #     'nohup sh -c "sudo nmcli dev disconnect eth0 && sleep 300 && '
+            #     'sudo nmcli dev connect eth0" &'
+            # )
+            # def execute_disconnect():
+            #     self.logger.info(f"Executing disconnect command on node {node_ip}.")
+            #     self.ssh_obj.exec_command(node_ip, command=cmd)
 
-            self.logger.info("Network stop and restart.")
-            self.disconnect_thread = threading.Thread(target=execute_disconnect)
+            # self.logger.info("Network stop and restart.")
+            # self.disconnect_thread = threading.Thread(target=execute_disconnect)
+            # self.disconnect_thread.start()
+            self.logger.info("Handling network interruption...")
+            active_interfaces = self.ssh_obj.get_active_interfaces(node_ip)
+            self.disconnect_thread = threading.Thread(
+                target=self.ssh_obj.disconnect_all_active_interfaces,
+                args=(node_ip, active_interfaces),
+            )
             self.disconnect_thread.start()
         
         return outage_type
@@ -200,6 +209,14 @@ class RandomFailoverTest(TestLvolHACluster):
         self.sbcli_utils.wait_for_storage_node_status(self.current_outage_node, "online", timeout=4000)
         self.sbcli_utils.wait_for_health_status(self.current_outage_node, True, timeout=4000)
         self.outage_end_time = int(datetime.now().timestamp())
+        node_details = self.sbcli_utils.get_storage_node_details(self.current_outage_node)
+        node_ip = node_details[0]["mgmt_ip"]
+        self.ssh_obj.restart_docker_logging(
+            node_ip=node_ip,
+            containers=self.container_nodes[node_ip],
+            log_dir=self.docker_logs_path,
+            test_name=self.test_name
+        )
 
         # Log the restart event
         self.log_outage_event(self.current_outage_node, outage_type, "Node restarted")
