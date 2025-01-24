@@ -574,11 +574,13 @@ def _prepare_cluster_devices_partitions(snode, devices):
                 if dev_part not in jm_devices:
                     jm_devices.append(dev_part)
 
-            new_device = _create_storage_device_stack(rpc_client, nvme, snode, after_restart=True)
+            new_device = _create_storage_device_stack(rpc_client, nvme, snode, after_restart=False)
             if not new_device:
                 logger.error("failed to create dev stack")
                 return False
             new_devices.append(new_device)
+            if new_device.status == NVMeDevice.STATUS_ONLINE:
+                device_events.device_create(new_device)
 
         else:
             # look for partitions
@@ -600,18 +602,16 @@ def _prepare_cluster_devices_partitions(snode, devices):
             jm_devices.append(partitioned_devices.pop(0).nvme_bdev)
 
             for dev in partitioned_devices:
-                new_device = _create_storage_device_stack(rpc_client, dev, snode, after_restart=False)
-                if not new_device:
+                ret = _create_storage_device_stack(rpc_client, dev, snode, after_restart=False)
+                if not ret:
                     logger.error("failed to create dev stack")
                     return False
-                if nvme.status == NVMeDevice.STATUS_NEW:
-                    new_device.status = NVMeDevice.STATUS_NEW
-                else:
-                    new_device.status = NVMeDevice.STATUS_ONLINE
-                    new_device.cluster_device_order = dev_order
-                    dev_order += 1
-                    device_events.device_create(new_device)
-                new_devices.append(new_device)
+                if dev.status == NVMeDevice.STATUS_ONLINE:
+                    if dev.cluster_device_order < 0:
+                        dev.cluster_device_order = dev_order
+                        dev_order += 1
+                    device_events.device_create(dev)
+                new_devices.append(dev)
 
     snode.nvme_devices = new_devices
 
@@ -651,12 +651,12 @@ def _prepare_cluster_devices_jm_on_dev(snode, devices):
         if nvme.status not in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_NEW]:
             logger.debug(f"Device is not online : {nvme.get_id()}, status: {nvme.status}")
         else:
-            nvme = _create_storage_device_stack(rpc_client, nvme, snode, after_restart=False)
-            if not nvme:
+            ret = _create_storage_device_stack(rpc_client, nvme, snode, after_restart=False)
+            if not ret:
                 logger.error("failed to create dev stack")
                 return False
             if nvme.status == NVMeDevice.STATUS_ONLINE:
-                if nvme.cluster_device_order <= 0 :
+                if nvme.cluster_device_order < 0 :
                     nvme.cluster_device_order = dev_order
                     dev_order += 1
                 device_events.device_create(nvme)
@@ -1829,22 +1829,29 @@ def restart_storage_node(
         active_devices = []
         removed_devices = []
         known_devices_sn = []
-        devices_sn = [d.serial_number for d in nvme_devs]
+        devices_sn_dict = {d.serial_number:d for d in nvme_devs}
         for db_dev in snode.nvme_devices:
             known_devices_sn.append(db_dev.serial_number)
-            if db_dev.status in [NVMeDevice.STATUS_FAILED_AND_MIGRATED, NVMeDevice.STATUS_FAILED]:
+            if db_dev.status in [NVMeDevice.STATUS_FAILED_AND_MIGRATED, NVMeDevice.STATUS_FAILED, NVMeDevice.STATUS_REMOVED]:
                 removed_devices.append(db_dev)
                 continue
-            if db_dev.serial_number in devices_sn:
+            if db_dev.serial_number in devices_sn_dict.keys():
                 logger.info(f"Device found: {db_dev.get_id()}, status {db_dev.status}")
-                # if db_dev.status not in [NVMeDevice.STATUS_JM, NVMeDevice.STATUS_FAILED, NVMeDevice.STATUS_NEW]:
-                #     db_dev.status = NVMeDevice.STATUS_ONLINE
+                found_dev = devices_sn_dict[db_dev.serial_number]
+                if not db_dev.is_partition and not found_dev.is_partition:
+                    db_dev.device_name = found_dev.device_name
+                    db_dev.nvme_bdev = found_dev.nvme_bdev
+                    db_dev.nvme_controller =found_dev.nvme_controller
+                    db_dev.pcie_address = found_dev.pcie_address
+
+                if db_dev.status in [NVMeDevice.STATUS_READONLY, NVMeDevice.STATUS_UNAVAILABLE]:
+                    db_dev.status = NVMeDevice.STATUS_ONLINE
                 active_devices.append(db_dev)
             else:
                 logger.info(f"Device not found: {db_dev.get_id()}")
                 db_dev.status = NVMeDevice.STATUS_REMOVED
                 removed_devices.append(db_dev)
-                distr_controller.send_dev_status_event(db_dev, db_dev.status)
+                # distr_controller.send_dev_status_event(db_dev, db_dev.status)
 
         if snode.jm_device and "serial_number" in snode.jm_device.device_data_dict:
             known_devices_sn.append(snode.jm_device.device_data_dict['serial_number'])
@@ -1861,22 +1868,21 @@ def restart_storage_node(
             # prepare devices on new node
             if snode.num_partitions_per_dev == 0 or snode.jm_percent == 0:
 
-                jm_device = nvme_devs[0]
-                for index, nvme in enumerate(nvme_devs):
-                    if nvme.size < jm_device.size:
+                jm_device = snode.nvme_devices[0]
+                for index, nvme in enumerate(snode.nvme_devices):
+                    if nvme.status in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_NEW] and nvme.size < jm_device.size:
                         jm_device = nvme
                 jm_device.status = NVMeDevice.STATUS_JM
 
                 if snode.jm_device and snode.jm_device.get_id():
                     jm_device.uuid = snode.jm_device.get_id()
 
-                ret = _prepare_cluster_devices_jm_on_dev(snode, nvme_devs)
+                ret = _prepare_cluster_devices_jm_on_dev(snode, snode.nvme_devices)
             else:
-                ret = _prepare_cluster_devices_partitions(snode, nvme_devs)
+                ret = _prepare_cluster_devices_partitions(snode, snode.nvme_devices)
             if not ret:
                 logger.error("Failed to prepare cluster devices")
                 # return False
-            snode.nvme_devices.extend(removed_devices)
         else:
             ret = _prepare_cluster_devices_on_restart(snode, clear_data=clear_data)
             if not ret:
@@ -1901,6 +1907,8 @@ def restart_storage_node(
             device_events.device_restarted(db_dev)
     snode.write_to_db(db_controller.kv_store)
 
+    for db_dev in snode.nvme_devices:
+        distr_controller.send_dev_status_event(db_dev, db_dev.status)
 
     logger.info("Connecting to remote devices")
     snode.remote_devices = _connect_to_remote_devs(snode)
