@@ -901,17 +901,9 @@ def _connect_to_remote_jm_devs(this_node, jm_ids=[]):
                 name = rem_name
                 found_in_map = True
                 break
-        #
-        if not name and this_node.is_secondary_node:
-            for node in db_controller.get_primary_storage_nodes_by_secondary_node_id(this_node.get_id()):
-                if node.jm_device and node.jm_device.get_id() == jm_dev.get_id():
-                # for rem_name, jm_id in node.remote_jm_map.items():
-                #     if jm_id == org_dev.get_id():
-                    name = rem_name
-                    break
 
         if not name:
-            name = f"JM_VUID_{org_dev_node.jm_vuid}_JM_LOCAL"
+            name = f"JM_VUID_{org_dev_node.jm_vuid}_JM_0"
 
         if not found_in_map:
             this_node = db_controller.get_storage_node_by_id(this_node.get_id())
@@ -2922,32 +2914,21 @@ def get_sorted_ha_jms(current_node):
 
 def get_node_jm_names_for_primary_on_second(primary_node, sec_node):
     db_controller = DBController()
-    jm_ids = []
+
     lst = []
     if primary_node.jm_device and primary_node.jm_device.status != JMDevice.STATUS_REMOVED:
-        jm_ids.append(primary_node.jm_device.get_id())
+        nm = f"JM_VUID_{primary_node.jm_vuid}_JM_0"
+        lst.append(nm + "n1")
     else:
         lst.append("NO_JM")
 
     for nm, id in primary_node.remote_jm_map.items():
-        jm_ids.append(id)
+        dev = db_controller.get_jm_device_by_id(id)
+        n = db_controller.get_storage_node_by_id(dev.node_id)
+        nm = f"JM_VUID_{n.jm_vuid}_JM_0"
+        lst.append(nm + "n1")
 
-    remote_jm_map = {}
-    for idd in jm_ids:
-        for nm, id in sec_node.remote_jm_map.items():
-            if id == idd:
-                lst.append(nm+"n1")
-                break
-        else:
-            nm = f"JM_VUID_{primary_node.jm_vuid}_JM_%s" %(len(sec_node.remote_jm_map)+len(remote_jm_map))
-            remote_jm_map[nm] = idd
-            lst.append(nm+"n1")
-
-    if remote_jm_map:
-        sec_node = db_controller.get_storage_node_by_id(sec_node.get_id())
-        sec_node.remote_jm_map.update(remote_jm_map)
-        sec_node.write_to_db()
-    return lst
+    return lst[:constants.HA_JM_COUNT+1]
 
 
 def get_node_jm_names(node):
@@ -2958,7 +2939,7 @@ def get_node_jm_names(node):
         lst.append("NO_JM")
 
     lst.extend([n+"n1" for n in node.remote_jm_map])
-    return lst
+    return lst[:constants.HA_JM_COUNT+1]
 
 
 def get_secondary_nodes(current_node):
