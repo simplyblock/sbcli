@@ -48,6 +48,7 @@ class TestSingleNodeFailure(TestClusterBase):
         super().__init__(**kwargs)
         self.snapshot_name = "snapshot"
         self.logger = setup_logger(__name__)
+        self.test_name = "single_node_failure"
 
     def run(self):
         """ Performs each step of the testcase
@@ -187,6 +188,13 @@ class TestSingleNodeFailure(TestClusterBase):
                          lvol_status="online",
                          health_check_status=True
                          )
+
+        self.ssh_obj.restart_docker_logging(
+            node_ip=node_ip,
+            containers=self.container_nodes[node_ip],
+            log_dir=self.docker_logs_path,
+            test_name=self.test_name
+        )
 
         # Write steps in order
         steps = {
