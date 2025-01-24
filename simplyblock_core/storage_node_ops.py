@@ -902,13 +902,14 @@ def _connect_to_remote_jm_devs(this_node, jm_ids=[]):
                 found_in_map = True
                 break
         #
-        # if not name and this_node.is_secondary_node:
-        #     for node in db_controller.get_primary_storage_nodes_by_secondary_node_id(this_node.get_id()):
-        #         for rem_name, jm_id in node.remote_jm_map.items():
-        #             if jm_id == org_dev.get_id():
-        #                 name = rem_name
-        #                 break
-        #
+        if not name and this_node.is_secondary_node:
+            for node in db_controller.get_primary_storage_nodes_by_secondary_node_id(this_node.get_id()):
+                if node.jm_device and node.jm_device.get_id() == jm_dev.get_id():
+                # for rem_name, jm_id in node.remote_jm_map.items():
+                #     if jm_id == org_dev.get_id():
+                    name = rem_name
+                    break
+
         if not name:
             name = f"JM_VUID_{org_dev_node.jm_vuid}_JM_LOCAL"
 
@@ -2944,7 +2945,7 @@ def get_node_jm_names_for_primary_on_second(primary_node, sec_node):
 
     if remote_jm_map:
         sec_node = db_controller.get_storage_node_by_id(sec_node.get_id())
-        sec_node.remote_jm_map += remote_jm_map
+        sec_node.remote_jm_map.update(remote_jm_map)
         sec_node.write_to_db()
     return lst
 
