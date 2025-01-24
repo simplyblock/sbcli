@@ -45,8 +45,7 @@ if $BACKUP;then
    docker stack deploy --compose-file="$DIR"/docker-compose-swarm-withbackup.yml app
 else
    docker stack deploy --compose-file="$DIR"/docker-compose-swarm.yml app
-
-
+fi
 
 
 # wait for the services to become online
