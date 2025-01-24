@@ -869,14 +869,14 @@ def _connect_to_remote_jm_devs(this_node, jm_ids=[]):
                     remote_devices.append(jm_dev)
         elif len(this_node.remote_jm_devices) > 0:
             remote_devices = this_node.remote_jm_devices
-
-        for node in db_controller.get_storage_nodes_by_cluster_id(this_node.cluster_id):
-            if node.get_id() == this_node.get_id() or node.is_secondary_node:
-                continue
-            if node.jm_device and node.jm_device.status == JMDevice.STATUS_ONLINE:
-                remote_devices.append(node.jm_device)
-                if len(remote_devices) >= 3 :
-                    break
+        else:
+            for node in db_controller.get_storage_nodes_by_cluster_id(this_node.cluster_id):
+                if node.get_id() == this_node.get_id() or node.is_secondary_node:
+                    continue
+                if node.jm_device and node.jm_device.status == JMDevice.STATUS_ONLINE:
+                    remote_devices.append(node.jm_device)
+                    if len(remote_devices) >= 3 :
+                        break
 
     new_devs = []
     for jm_dev in remote_devices:
@@ -891,7 +891,7 @@ def _connect_to_remote_jm_devs(this_node, jm_ids=[]):
                 org_dev_node = node
                 break
 
-        if not org_dev:
+        if not org_dev or org_dev in new_devs:
             continue
 
         name = f"remote_{org_dev.jm_bdev}"
