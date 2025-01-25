@@ -671,7 +671,7 @@ class SshUtils:
         """
         try:
             # Ensure the log directory exists on the node
-            self.exec_command(node_ip, f"sudo mkdir -p {log_dir}")
+            self.exec_command(node_ip, f"sudo mkdir -p {log_dir} && sudo chmod 777 {log_dir}")
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             for container in containers:
                 log_file = f"{log_dir}/{container}_{test_name}_{timestamp}_before_outage.txt"
@@ -695,6 +695,7 @@ class SshUtils:
             test_name (str): Name of the test for log identification.
         """
         try:
+            self.exec_command(node_ip, f"sudo mkdir -p {log_dir} && sudo chmod 777 {log_dir}")
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             for container in containers:
                 log_file = f"{log_dir}/{container}_{test_name}_{timestamp}_after_outage.txt"
