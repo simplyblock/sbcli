@@ -130,6 +130,10 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
         if c.swarm.attrs and "ID" in c.swarm.attrs:
             logger.info("Docker swarm found, leaving swarm now")
             c.swarm.leave(force=True)
+            try:
+                c.volumes.get("monitoring_grafana_data").remove(force=True)
+            except:
+                pass
             time.sleep(3)
 
         c.swarm.init(DEV_IP)
@@ -160,7 +164,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     if prov_cap_crit and prov_cap_crit > 0:
         c.prov_cap_crit = prov_cap_crit
     if distr_ndcs == 0 and distr_npcs == 0:
-        c.distr_ndcs = 4
+        c.distr_ndcs = 1
         c.distr_npcs = 1
     else:
         c.distr_ndcs = distr_ndcs
