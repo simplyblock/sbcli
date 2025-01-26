@@ -37,7 +37,7 @@ class CommonUtils:
                 "restart": [
                     re.compile(r"Device status changed from: .+ to: unavailable"),
                     # TODO: Change from unavailable to online once bug is fixed.
-                    re.compile(r"Device restarted")
+                    # re.compile(r"Device restarted")
                 ]
             }
         }
