@@ -158,30 +158,30 @@ jobs:
 #          output_key_name=$(terraform output -raw key_name)
 #          echo "::set-output name=key_name::$output_key_name"
 
-#      - name: Bootstrap Cluster
-#        run: |
-#          cd $GITHUB_WORKSPACE/simplyBlockDeploy
-#          ./bootstrap-cluster.sh --sbcli-cmd "$SBCLI_CMD" \
-#            --max-lvol 10 --max-snap 10 --max-prov 900G --number-of-devices 3 \
-#            --distr-ndcs $NDCS \
-#            --distr-npcs $NPCS \
-#            --distr-bs $BS \
-#            --distr-chunk-bs $CHUNK_BS \
-#            --partitions 3
-#        id: bootstrap_cluster
-#        env:
-#          SBCLI_CMD: ${{ env.SBCLI_CMD }}
-#          NDCS: ${{ env.NDCS }}
-#          NPCS: ${{ env.NPCS }}
-#          BS: ${{ env.BS }}
-#          CHUNK_BS: ${{ env.CHUNK_BS }}
-#          KEY_NAME: "simplyblock-us-east-2.pem"
-#          BASTION_IP: "172.16.53.10"
-#          GRAFANA_ENDPOINT: "http://172.16.53.10/grafana"
-#          mnodes: "172.16.53.10"
-#          storage_private_ips: "172.16.53.11 172.16.53.12 172.16.53.13"
-#          sec_storage_private_ips: "172.16.53.14"
-#          API_INVOKE_URL: "http://172.16.53.10/"
+      - name: Bootstrap Cluster
+        run: |
+          cd $GITHUB_WORKSPACE/simplyBlockDeploy
+          ./bootstrap-cluster.sh --sbcli-cmd "$SBCLI_CMD" \
+            --max-lvol 10 --max-snap 10 --max-prov 900G --number-of-devices 3 \
+            --distr-ndcs $NDCS \
+            --distr-npcs $NPCS \
+            --distr-bs $BS \
+            --distr-chunk-bs $CHUNK_BS \
+            --partitions 3
+        id: bootstrap_cluster
+        env:
+          SBCLI_CMD: ${{ env.SBCLI_CMD }}
+          NDCS: ${{ env.NDCS }}
+          NPCS: ${{ env.NPCS }}
+          BS: ${{ env.BS }}
+          CHUNK_BS: ${{ env.CHUNK_BS }}
+          KEY_NAME: "simplyblock-us-east-2.pem"
+          BASTION_IP: "172.16.53.10"
+          GRAFANA_ENDPOINT: "http://172.16.53.10/grafana"
+          mnodes: "172.16.53.10"
+          storage_private_ips: "172.16.53.11 172.16.53.12 172.16.53.13"
+          sec_storage_private_ips: "172.16.53.14"
+          API_INVOKE_URL: "http://172.16.53.10/"
 
       - name: Record Test Start Time
         run: echo "TEST_START_TIME=$(date +%s)" >> $GITHUB_ENV
@@ -190,7 +190,7 @@ jobs:
         timeout-minutes: 120
         run: |
           cd $GITHUB_WORKSPACE/e2e
-
+          pip install virtualenv
           python3 -m venv myenv
           source myenv/bin/activate
           python3 -m pip install -r requirements.txt
@@ -234,19 +234,19 @@ jobs:
           echo "TEST_TIME_MINS=$TEST_TIME_MINS" >> $GITHUB_ENV
           echo "TEST_TIME_SECS=$TEST_TIME_SECS" >> $GITHUB_ENV
 
-#      - name: Upload automation and docker logs to s3
-#        run: |
-#          cd $GITHUB_WORKSPACE/e2e/logs
-#          ./upload_logs.sh
-#          cd $GITHUB_WORKSPACE/simplyBlockDeploy
-#          ./upload_docker_logs_to_s3.sh
-#        if: always()
-#        env:
-#          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-#          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-#          AWS_REGION: ${{ secrets.AWS_REGION }}
-#          S3_BUCKET_NAME: "simplyblock-e2e-test-logs"
-#          RUN_ID: ${{ github.run_id }}
+      - name: Upload automation and docker logs to s3
+        run: |
+          cd $GITHUB_WORKSPACE/e2e/logs
+          ./upload_logs.sh
+          cd $GITHUB_WORKSPACE/simplyBlockDeploy
+          ./upload_docker_logs_to_s3.sh
+        if: always()
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_REGION: ${{ secrets.AWS_REGION }}
+          S3_BUCKET_NAME: "simplyblock-e2e-test-logs"
+          RUN_ID: ${{ github.run_id }}
 
       - name: Parse test results
         if: always() && (github.event_name == 'schedule' || env.send_slack_notification == 'true')
