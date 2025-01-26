@@ -60,13 +60,13 @@ def main():
             logger.error(traceback.format_exc())
             errors[f"{test.__name__}"] = [exp]
         try:
-            # test_obj.teardown()
-            pass
+            test_obj.stop_docker_logs_collect()
+            test_obj.teardown()
+            # pass
         except Exception as _:
             logger.error(f"Error During Teardown for test: {test.__name__}")
             logger.error(traceback.format_exc())
         finally:
-            test_obj.stop_docker_logs_collect()
             if check_for_dumps():
                 logger.info("Found a core dump during test execution. "
                             "Cannot execute more tests as cluster is not stable. Exiting")
