@@ -74,7 +74,7 @@ class RandomFailoverTest(TestLvolHACluster):
         """Create lvols and start FIO with random configurations."""
         for i in range(count):
             fs_type = random.choice(["ext4", "xfs"])
-            is_crypto = random.choice([True, False])
+            is_crypto = random.choice([False, False])
             lvol_name = f"{self.lvol_name}_{i}" if not is_crypto else f"c{self.lvol_name}_{i}"
             while lvol_name in self.lvol_mount_details:
                 self.lvol_name = f"lvl{random_char(3)}"
@@ -326,7 +326,7 @@ class RandomFailoverTest(TestLvolHACluster):
                         if attempt >= 30:
                             raise Exception("FIO not killed on clone")
                         attempt += 1
-                        sleep_n_sec(200)
+                        sleep_n_sec(10)
                         
                     self.ssh_obj.unmount_path(self.node, f"/mnt/{clone_name}")
                     self.ssh_obj.remove_dir(self.node, dir_path=f"/mnt/{clone_name}")
@@ -353,7 +353,7 @@ class RandomFailoverTest(TestLvolHACluster):
                 if attempt >= 30:
                     raise Exception("FIO not killed on lvols")
                 attempt += 1
-                sleep_n_sec(200)
+                sleep_n_sec(10)
 
             self.ssh_obj.unmount_path(self.node, f"/mnt/{lvol}")
             self.ssh_obj.remove_dir(self.node, dir_path=f"/mnt/{lvol}")

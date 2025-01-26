@@ -318,12 +318,14 @@ class CommonUtils:
 
         # Fetch I/O stats from the API
         io_stats = self.sbcli_utils.get_io_stats(cluster_id, time_duration)
+        self.logger.info(f"IO Stats: {io_stats}")
 
         # Filter stats by failover time range
         filtered_stats = [
             stat for stat in io_stats
             if start_timestamp <= stat["date"] <= end_timestamp
         ]
+        self.logger.info(f"Filtered IO Stats: {io_stats}")
 
         if not filtered_stats:
             self.logger.error("No I/O stats found within the specified time range.")
