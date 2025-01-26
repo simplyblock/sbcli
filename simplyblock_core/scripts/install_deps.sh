@@ -1,9 +1,13 @@
 #!/usr/bin/env bash
 
-if [[ -z $(grep "$(hostname)" /etc/hosts) ]]
+if grep -q "$(hostname)" /etc/hosts
 then
-  sudo sh -c 'echo "127.0.0.1   $(hostname)" >> /etc/hosts'
+  sudo sh -c 'echo "
+127.0.0.1   localhost localhost.localdomain localhost4 localhost4.localdomain4
+::1         localhost localhost.localdomain localhost6 localhost6.localdomain6
+" > /etc/hosts'
 fi
+
 
 sudo yum install -y yum-utils xorg-x11-xauth nvme-cli fio
 sudo yum-config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo

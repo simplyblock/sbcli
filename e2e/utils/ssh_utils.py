@@ -38,6 +38,7 @@ class SshUtils:
             username (str): Username to connect node at
             is_bastion_server (bool): Address given is of bastion server or not
         """
+        username="root"
         # Initialize the SSH client
         ssh = paramiko.SSHClient()
         ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())

@@ -1853,18 +1853,24 @@ def restart_storage_node(
                 removed_devices.append(db_dev)
                 # distr_controller.send_dev_status_event(db_dev, db_dev.status)
 
+        jm_dev_sn = ""
         if snode.jm_device and "serial_number" in snode.jm_device.device_data_dict:
-            known_devices_sn.append(snode.jm_device.device_data_dict['serial_number'])
+            jm_dev_sn = snode.jm_device.device_data_dict['serial_number']
+            known_devices_sn.append(jm_dev_sn)
 
         for dev in nvme_devs:
-            if dev.serial_number not in known_devices_sn:
+            if dev.serial_number == jm_dev_sn:
+                logger.info(f"JM device found: {snode.jm_device.get_id()}")
+                snode.jm_device.nvme_bdev = dev.nvme_bdev
+
+            elif dev.serial_number not in known_devices_sn:
                 logger.info(f"New device found: {dev.get_id()}")
                 dev.status = NVMeDevice.STATUS_NEW
                 new_devices.append(dev)
                 snode.nvme_devices.append(dev)
 
         snode.write_to_db(db_controller.kv_store)
-        if node_ip:
+        if node_ip and len(new_devices)>0:
             # prepare devices on new node
             if snode.num_partitions_per_dev == 0 or snode.jm_percent == 0:
 
@@ -1902,7 +1908,7 @@ def restart_storage_node(
 
     snode = db_controller.get_storage_node_by_id(snode.get_id())
     for db_dev in snode.nvme_devices:
-        if db_dev.status in [NVMeDevice.STATUS_UNAVAILABLE, NVMeDevice.STATUS_READONLY]:
+        if db_dev.status in [NVMeDevice.STATUS_UNAVAILABLE, NVMeDevice.STATUS_READONLY, NVMeDevice.STATUS_ONLINE]:
             db_dev.status = NVMeDevice.STATUS_ONLINE
             device_events.device_restarted(db_dev)
     snode.write_to_db(db_controller.kv_store)
@@ -2365,7 +2371,16 @@ def get_node_capacity(node_id, history, records_count=20, parse_sizes=True):
         records_number = 20
 
     records = db_controller.get_node_capacity(this_node, records_number)
-    new_records = utils.process_records(records, records_count)
+    cap_stats_keys = [
+        "date",
+        "size_total",
+        "size_prov",
+        "size_used",
+        "size_free",
+        "size_util",
+        "size_prov_util",
+    ]
+    new_records = utils.process_records(records, records_count, keys=cap_stats_keys)
 
     if not parse_sizes:
         return new_records
@@ -2400,7 +2415,20 @@ def get_node_iostats_history(node_id, history, records_count=20, parse_sizes=Tru
         records_number = 20
 
     records = db_controller.get_node_stats(node, records_number)
-    new_records = utils.process_records(records, records_count)
+
+    io_stats_keys = [
+        "date",
+        "read_bytes",
+        "read_bytes_ps",
+        "read_io_ps",
+        "read_latency_ps",
+        "write_bytes",
+        "write_bytes_ps",
+        "write_io_ps",
+        "write_latency_ps",
+    ]
+    # combine records
+    new_records = utils.process_records(records, records_count, keys=io_stats_keys)
 
     if not parse_sizes:
         return new_records

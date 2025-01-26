@@ -432,7 +432,14 @@ def get_device_capacity(device_id, history, records_count=20, parse_sizes=True):
         records_number = 20
 
     records = db_controller.get_device_capacity(device, records_number)
-    records_list = utils.process_records(records, records_count)
+    cap_stats_keys = [
+        "date",
+        "size_total",
+        "size_used",
+        "size_free",
+        "size_util",
+    ]
+    records_list = utils.process_records(records, records_count, keys=cap_stats_keys)
 
     if not parse_sizes:
         return records_list
@@ -466,7 +473,19 @@ def get_device_iostats(device_id, history, records_count=20, parse_sizes=True):
         records_number = 20
 
     records_list = db_controller.get_device_stats(device, records_number)
-    new_records = utils.process_records(records_list, records_count)
+    io_stats_keys = [
+        "date",
+        "read_bytes",
+        "read_bytes_ps",
+        "read_io_ps",
+        "read_latency_ps",
+        "write_bytes",
+        "write_bytes_ps",
+        "write_io_ps",
+        "write_latency_ps",
+    ]
+    # combine records
+    new_records = utils.process_records(records_list, records_count, keys=io_stats_keys)
 
     if not parse_sizes:
         return new_records
