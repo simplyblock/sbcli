@@ -115,11 +115,11 @@ jobs:
         run: |
           cd $GITHUB_WORKSPACE/simplyBlockDeploy
           ./bootstrap-cluster.sh --sbcli-cmd "$SBCLI_CMD" \
-            --max-lvol 10 --max-snap 10 --max-prov 900G --number-of-devices 3 \
+            --max-lvol 100 --max-snap 100 --max-prov 3t --number-of-devices 3 \
             --distr-ndcs $NDCS \
             --distr-npcs $NPCS \
             --distr-bs $BS \
-            --distr-chunk-bs $CHUNK_BS \
+            --distr-chunk-bs $CHUNK_BS --ha-type ha \
             --partitions 3
           
           echo "::set-output name=bastion_public_ip::$BASTION_IP"
