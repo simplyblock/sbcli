@@ -62,6 +62,7 @@ def main():
             logger.error(traceback.format_exc())
             errors[f"{test.__name__}"] = [exp]
         try:
+            test_obj.stop_docker_logs_collect()
             test_obj.teardown()
             # pass
         except Exception as _:
@@ -117,6 +118,7 @@ def check_for_dumps():
         if "core" in files:
             core_exist = True
             break
+
 
     for node, ssh in ssh_obj.ssh_connections.items():
         logger.info(f"Closing node ssh connection for {node}")

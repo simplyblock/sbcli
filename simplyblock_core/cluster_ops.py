@@ -593,10 +593,14 @@ def get_iostats_history(cluster_id, history_string, records_count=20, parse_size
 
     io_stats_keys = [
         "date",
+        "read_bytes",
         "read_bytes_ps",
         "read_io_ps",
+        "read_io",
         "read_latency_ps",
+        "write_bytes",
         "write_bytes_ps",
+        "write_io",
         "write_io_ps",
         "write_latency_ps",
     ]

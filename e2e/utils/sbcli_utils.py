@@ -20,7 +20,7 @@ class SbcliUtils:
         }
         self.logger = setup_logger(__name__)
 
-    def get_request(self, api_url, headers=None):
+    def get_request(self, api_url, headers=None, expected_error_code=None):
         """Performs get request on the given API URL
 
         Args:
@@ -34,6 +34,7 @@ class SbcliUtils:
         headers = headers if headers else self.headers
         self.logger.info(f"Calling GET for {api_url} with headers: {headers}")
         retry = 10
+        data = None
         while retry > 0:
             try:
                 resp = requests.get(request_url, headers=headers)
@@ -43,6 +44,18 @@ class SbcliUtils:
                 else:
                     self.logger.error(f"request failed. status_code: {resp.status_code}, text: {resp.text}")
                     resp.raise_for_status()
+            except requests.exceptions.HTTPError as e:
+                self.logger.debug(f"API call {api_url} failed with error:{e}")
+                if expected_error_code:
+                    if e.response.status_code in expected_error_code:
+                        self.logger.info(f"Expected error: {e}")
+                else:
+                    retry -= 1
+                    if retry == 0:
+                        self.logger.info(f"Retry attempt exhausted. API {api_url} failed with: {e}.")
+                        raise e
+                    self.logger.info(f"Retrying API {api_url}. Attempt: {10 - retry + 1}")
+                    sleep_n_sec(1)
             except Exception as e:
                 self.logger.debug(f"API call {api_url} failed with error:{e}")
                 retry -= 1
@@ -52,7 +65,7 @@ class SbcliUtils:
                 self.logger.info(f"Retrying API {api_url}. Attempt: {10 - retry + 1}")
                 sleep_n_sec(1)
 
-    def post_request(self, api_url, headers=None, body=None, retry=10):
+    def post_request(self, api_url, headers=None, body=None, retry=10, expected_error_code=None):
         """Performs post request on the given API URL
 
         Args:
@@ -77,6 +90,18 @@ class SbcliUtils:
                     self.logger.error(f"request failed. status_code: {resp.status_code}, text: {resp.text}")
                     resp.raise_for_status()
                 return data
+            except requests.exceptions.HTTPError as e:
+                self.logger.debug(f"API call {api_url} failed with error:{e}")
+                if expected_error_code:
+                    if e.response.status_code in expected_error_code:
+                        self.logger.info(f"Expected error: {e}")
+                else:
+                    retry -= 1
+                    if retry == 0:
+                        self.logger.info(f"Retry attempt exhausted. API {api_url} failed with: {e}.")
+                        raise e
+                    self.logger.info(f"Retrying API {api_url}. Attempt: {10 - retry + 1}")
+                    sleep_n_sec(1)
             except Exception as e:
                 self.logger.debug(f"API call {api_url} failed with error:{e}")
                 retry -= 1
@@ -86,7 +111,7 @@ class SbcliUtils:
                 self.logger.info(f"Retrying API {api_url}. Attempt: {10 - retry + 1}")
                 sleep_n_sec(3)
 
-    def delete_request(self, api_url, headers=None):
+    def delete_request(self, api_url, headers=None, expected_error_code=None):
         """Performs delete request on the given API URL
 
         Args:
@@ -109,6 +134,18 @@ class SbcliUtils:
                     self.logger.error(f"request failed. status_code: {resp.status_code}, text: {resp.text}")
                     resp.raise_for_status()
                 return data
+            except requests.exceptions.HTTPError as e:
+                self.logger.debug(f"API call {api_url} failed with error:{e}")
+                if expected_error_code:
+                    if e.response.status_code in expected_error_code:
+                        self.logger.info(f"Expected error: {e}")
+                else:
+                    retry -= 1
+                    if retry == 0:
+                        self.logger.info(f"Retry attempt exhausted. API {api_url} failed with: {e}.")
+                        raise e
+                    self.logger.info(f"Retrying API {api_url}. Attempt: {10 - retry + 1}")
+                    sleep_n_sec(1)
             except Exception as e:
                 self.logger.debug(f"API call {api_url} failed with error:{e}")
                 retry -= 1
@@ -118,7 +155,7 @@ class SbcliUtils:
                 self.logger.info(f"Retrying API {api_url}. Attempt: {5 - retry + 1}")
                 sleep_n_sec(3)
 
-    def put_request(self, api_url, headers=None, body=None):
+    def put_request(self, api_url, headers=None, body=None, expected_error_code=None):
         """Performs put request on the given API URL
 
         Args:
@@ -143,6 +180,18 @@ class SbcliUtils:
                     self.logger.error(f"request failed. status_code: {resp.status_code}, text: {resp.text}")
                     resp.raise_for_status()
                 return data
+            except requests.exceptions.HTTPError as e:
+                self.logger.debug(f"API call {api_url} failed with error:{e}")
+                if expected_error_code:
+                    if e.response.status_code in expected_error_code:
+                        self.logger.info(f"Expected error: {e}")
+                else:
+                    retry -= 1
+                    if retry == 0:
+                        self.logger.info(f"Retry attempt exhausted. API {api_url} failed with: {e}.")
+                        raise e
+                    self.logger.info(f"Retrying API {api_url}. Attempt: {10 - retry + 1}")
+                    sleep_n_sec(1)
             except Exception as e:
                 self.logger.debug(f"API call {api_url} failed with error:{e}")
                 retry -= 1
@@ -195,21 +244,21 @@ class SbcliUtils:
                 break
         return node_uuid
 
-    def shutdown_node(self, node_uuid: str):
+    def shutdown_node(self, node_uuid: str, expected_error_code=None):
         """
         given a node_UUID, shutdowns the node
         """
         # TODO: parse and display error accordingly: {'results': True, 'status': True}
         self.logger.info(f"Shutting down node with uuid: {node_uuid}")
-        self.get_request(api_url=f"/storagenode/shutdown/{node_uuid}")
+        self.get_request(api_url=f"/storagenode/shutdown/{node_uuid}", expected_error_code=expected_error_code)
 
 
-    def suspend_node(self, node_uuid: str):
+    def suspend_node(self, node_uuid: str, expected_error_code=None):
         """
         given a node_UUID, suspends the node
         """
         # TODO: parse and display error accordingly: {'results': True, 'status': True}
-        self.get_request(api_url=f"/storagenode/suspend/{node_uuid}")
+        self.get_request(api_url=f"/storagenode/suspend/{node_uuid}", expected_error_code=expected_error_code)
 
 
     def resume_node(self, node_uuid: str):
@@ -219,7 +268,7 @@ class SbcliUtils:
         # TODO: parse and display error accordingly: {'results': True, 'status': True}
         self.get_request(api_url=f"/storagenode/resume/{node_uuid}")
 
-    def restart_node(self, node_uuid: str):
+    def restart_node(self, node_uuid: str, expected_error_code=None):
         """
         given a node_UUID, restarts the node
         """
@@ -228,7 +277,7 @@ class SbcliUtils:
             "uuid": node_uuid
         }
 
-        self.put_request(api_url="/storagenode/restart/", body=body)
+        self.put_request(api_url="/storagenode/restart/", body=body, expected_error_code=expected_error_code)
 
     def get_all_nodes_ip(self):
         """Return all nodes part of cluster
@@ -426,7 +475,8 @@ class SbcliUtils:
 
         data = self.get_request(api_url=f"/lvol/connect/{lvol_id}")
         self.logger.info(f"Connect lvol resp: {data}")
-        return data["results"][0]["connect"]
+
+        return [d["connect"] for d in data["results"]]
 
     def get_cluster_status(self, cluster_id=None):
         """Return cluster status for given cluster id
@@ -557,15 +607,19 @@ class SbcliUtils:
     def list_migration_tasks(self, cluster_id):
         """List all migration tasks for a given cluster."""
         return self.get_request(f"/cluster/list-tasks/{cluster_id}")
-
-    def get_lvol_connect_str_list(self, lvol_name):
-        """Return connect string for the lvol
+    
+    def get_io_stats(self, cluster_id, time_duration):
         """
-        lvol_id = self.get_lvol_id(lvol_name=lvol_name)
-        if not lvol_id:
-            self.logger.info(f"Lvol {lvol_name} does not exist. Exiting")
-            return
+        Fetch I/O statistics for the given cluster at the specified time duration.
+        Args:
+            cluster_id (str): Cluster ID
+            time_duration (str): Time duration (e.g., '1hr30m', '40m')
 
-        data = self.get_request(api_url=f"/lvol/connect/{lvol_id}")
-        self.logger.info(f"Connect lvol resp: {data}")
-        return [d["connect"] for d in data["results"]]
+        Returns:
+            dict: Parsed I/O stats
+        """
+        api_url = f"/cluster/iostats/{cluster_id}/history/{time_duration}"
+        self.logger.info(f"Fetching I/O stats for cluster {cluster_id} with time duration {time_duration}.")
+        response = self.get_request(api_url)
+        return response.get("results", {}).get("stats", [])
+    

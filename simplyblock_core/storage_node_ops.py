@@ -1908,7 +1908,7 @@ def restart_storage_node(
 
     snode = db_controller.get_storage_node_by_id(snode.get_id())
     for db_dev in snode.nvme_devices:
-        if db_dev.status in [NVMeDevice.STATUS_UNAVAILABLE, NVMeDevice.STATUS_READONLY]:
+        if db_dev.status in [NVMeDevice.STATUS_UNAVAILABLE, NVMeDevice.STATUS_READONLY, NVMeDevice.STATUS_ONLINE]:
             db_dev.status = NVMeDevice.STATUS_ONLINE
             device_events.device_restarted(db_dev)
     snode.write_to_db(db_controller.kv_store)
@@ -2418,10 +2418,14 @@ def get_node_iostats_history(node_id, history, records_count=20, parse_sizes=Tru
 
     io_stats_keys = [
         "date",
+        "read_bytes",
         "read_bytes_ps",
         "read_io_ps",
+        "read_io",
         "read_latency_ps",
+        "write_bytes",
         "write_bytes_ps",
+        "write_io",
         "write_io_ps",
         "write_latency_ps",
     ]
