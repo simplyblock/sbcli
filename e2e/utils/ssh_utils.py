@@ -23,6 +23,7 @@ class SshUtils:
         self.base_cmd = os.environ.get("SBCLI_CMD", "sbcli-dev")
         self.logger = setup_logger(__name__)
         self.fio_runtime = {}
+        self.ssh_user = os.environ.get("SSH_USER", None)
 
     def connect(self, address: str, port: int = 22,
                 bastion_server_address: str = None,
@@ -40,6 +41,7 @@ class SshUtils:
         # Initialize the SSH client
         ssh = paramiko.SSHClient()
         ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        username = self.ssh_user if self.ssh_user else username
 
         # Load the private key
         if not os.path.exists(SSH_KEY_LOCATION):
