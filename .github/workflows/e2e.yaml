@@ -12,7 +12,7 @@ on:
       simplyBlockDeploy_branch:
         description: 'Branch for simplyBlockDeploy'
         required: true
-        default: 'main'
+        default: 'run-on-server1'
       spdk_csi_branch:
         description: 'Branch for spdk-csi'
         required: true
@@ -28,7 +28,7 @@ on:
       send_slack_notification:
         description: 'Send Slack notification?'
         required: false
-        default: true
+        default: false
         type: boolean
       ndcs:
         description: 'Value for NDCS'
@@ -84,35 +84,35 @@ jobs:
           path: 'simplyBlockDeploy'
           token: ${{ secrets.GH_ACCESS_KEY_ID_HAMDI }}
 
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v3
-        with:
-          terraform_wrapper: false
+#      - name: Setup Terraform
+#        uses: hashicorp/setup-terraform@v3
+#        with:
+#          terraform_wrapper: false
+#
+#      - name: Initialize Terraform
+#        run: |
+#          cd $GITHUB_WORKSPACE/simplyBlockDeploy
+#          export TFSTATE_BUCKET=simplyblock-terraform-state-bucket
+#          export TFSTATE_KEY=csi
+#          export TFSTATE_REGION=us-east-2
+#          export TFSTATE_DYNAMODB_TABLE=terraform-up-and-running-locks
+#
+#          terraform init -reconfigure \
+#              -backend-config="bucket=${TFSTATE_BUCKET}" \
+#              -backend-config="key=${TFSTATE_KEY}" \
+#              -backend-config="region=${TFSTATE_REGION}" \
+#              -backend-config="dynamodb_table=${TFSTATE_DYNAMODB_TABLE}" \
+#              -backend-config="encrypt=true"
 
-      - name: Initialize Terraform
-        run: |
-          cd $GITHUB_WORKSPACE/simplyBlockDeploy
-          export TFSTATE_BUCKET=simplyblock-terraform-state-bucket
-          export TFSTATE_KEY=csi
-          export TFSTATE_REGION=us-east-2
-          export TFSTATE_DYNAMODB_TABLE=terraform-up-and-running-locks
-
-          terraform init -reconfigure \
-              -backend-config="bucket=${TFSTATE_BUCKET}" \
-              -backend-config="key=${TFSTATE_KEY}" \
-              -backend-config="region=${TFSTATE_REGION}" \
-              -backend-config="dynamodb_table=${TFSTATE_DYNAMODB_TABLE}" \
-              -backend-config="encrypt=true"
-
-      - name: Select or Create Workspace
-        run: |
-          cd $GITHUB_WORKSPACE/simplyBlockDeploy
-          terraform workspace select -or-create ghiaction-sbclie2e
-
-      - name: Validate Terraform Configuration
-        run: |
-          cd $GITHUB_WORKSPACE/simplyBlockDeploy
-          terraform validate
+#      - name: Select or Create Workspace
+#        run: |
+#          cd $GITHUB_WORKSPACE/simplyBlockDeploy
+#          terraform workspace select -or-create ghiaction-sbclie2e
+#
+#      - name: Validate Terraform Configuration
+#        run: |
+#          cd $GITHUB_WORKSPACE/simplyBlockDeploy
+#          terraform validate
 
       - name: Set parameters based on branch and input
         run: |
@@ -132,31 +132,31 @@ jobs:
           echo "CHUNK_BS=${{ github.event.inputs.chunk_bs || 4096 }}" >> $GITHUB_ENV
         shell: bash
 
-      - name: Plan Terraform Changes
-        run: |
-          cd $GITHUB_WORKSPACE/simplyBlockDeploy
-          terraform plan \
-            -var "mgmt_nodes=1" -var "storage_nodes=4" -var "volumes_per_storage_nodes=0" \
-            -var mgmt_nodes_instance_type="m6i.2xlarge" -var storage_nodes_instance_type="m6id.2xlarge" \
-            -var "extra_nodes=1" -var "extra_nodes_instance_type=m6id.xlarge" \
-            -var storage_nodes_ebs_size2=100 -var "region=us-east-2" \
-            -var "sbcli_cmd=$SBCLI_CMD" -out=tfplan
-        env:
-          SBCLI_CMD: ${{ env.SBCLI_CMD }}
+#      - name: Plan Terraform Changes
+#        run: |
+#          cd $GITHUB_WORKSPACE/simplyBlockDeploy
+#          terraform plan \
+#            -var "mgmt_nodes=1" -var "storage_nodes=4" -var "volumes_per_storage_nodes=0" \
+#            -var mgmt_nodes_instance_type="m6i.2xlarge" -var storage_nodes_instance_type="m6id.2xlarge" \
+#            -var "extra_nodes=1" -var "extra_nodes_instance_type=m6id.xlarge" \
+#            -var storage_nodes_ebs_size2=100 -var "region=us-east-2" \
+#            -var "sbcli_cmd=$SBCLI_CMD" -out=tfplan
+#        env:
+#          SBCLI_CMD: ${{ env.SBCLI_CMD }}
 
-      - name: Apply Terraform Changes
-        run: |
-          cd $GITHUB_WORKSPACE/simplyBlockDeploy
-          terraform apply tfplan
-
-      - name: Get Terraform Outputs
-        id: terraform_outputs
-        run: |
-          cd $GITHUB_WORKSPACE/simplyBlockDeploy
-          output_bastion_public_ip=$(terraform output -raw bastion_public_ip)
-          echo "::set-output name=bastion_public_ip::$output_bastion_public_ip"
-          output_key_name=$(terraform output -raw key_name)
-          echo "::set-output name=key_name::$output_key_name"
+#      - name: Apply Terraform Changes
+#        run: |
+#          cd $GITHUB_WORKSPACE/simplyBlockDeploy
+#          terraform apply tfplan
+#
+#      - name: Get Terraform Outputs
+#        id: terraform_outputs
+#        run: |
+#          cd $GITHUB_WORKSPACE/simplyBlockDeploy
+#          output_bastion_public_ip=$(terraform output -raw bastion_public_ip)
+#          echo "::set-output name=bastion_public_ip::$output_bastion_public_ip"
+#          output_key_name=$(terraform output -raw key_name)
+#          echo "::set-output name=key_name::$output_key_name"
 
       - name: Bootstrap Cluster
         run: |
@@ -175,6 +175,13 @@ jobs:
           NPCS: ${{ env.NPCS }}
           BS: ${{ env.BS }}
           CHUNK_BS: ${{ env.CHUNK_BS }}
+          KEY_NAME: "simplyblock-us-east-2.pem"
+          BASTION_IP: "172.16.53.10"
+          GRAFANA_ENDPOINT: "172.16.53.10/grafana"
+          mnodes: "172.16.53.10"
+          storage_private_ips: "172.16.53.11 172.16.53.12 172.16.53.13"
+          sec_storage_private_ips: "172.16.53.14"
+          API_INVOKE_URL: "http://172.16.53.10/"
 
       - name: Record Test Start Time
         run: echo "TEST_START_TIME=$(date +%s)" >> $GITHUB_ENV
@@ -187,13 +194,13 @@ jobs:
           python3 -m venv myenv
           source myenv/bin/activate
           python3 -m pip install -r requirements.txt
-          echo "Running tests in namespace ${{ steps.get-namespace.outputs.namespace }}"
+          echo "Running tests in namespace default"
           export CLUSTER_ID=${{ steps.bootstrap_cluster.outputs.cluster_id }}
           export CLUSTER_SECRET=${{ steps.bootstrap_cluster.outputs.cluster_secret }}
           export CLUSTER_IP=${{ steps.bootstrap_cluster.outputs.cluster_ip }}
           export API_BASE_URL=${{ steps.bootstrap_cluster.outputs.cluster_api_gateway_endpoint }}
-          export BASTION_SERVER=${{ steps.terraform_outputs.outputs.bastion_public_ip }}
-          export KEY_NAME=${{ steps.terraform_outputs.outputs.key_name }}
+          export BASTION_SERVER="172.16.53.10"
+          export KEY_NAME="simplyblock-us-east-2.pem"
           export AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }}
           export AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }}
           export AWS_REGION=${{ secrets.AWS_REGION }}
@@ -342,11 +349,11 @@ jobs:
 
           curl -X POST -H 'Content-type: application/json' --data "{\"text\":\"${MESSAGE}\"}" $SLACK_WEBHOOK_URL
 
-      - name: Destroy Cluster
-        if: always()
-        run: |
-          cd $GITHUB_WORKSPACE/simplyBlockDeploy
-          terraform destroy --auto-approve
+#      - name: Destroy Cluster
+#        if: always()
+#        run: |
+#          cd $GITHUB_WORKSPACE/simplyBlockDeploy
+#          terraform destroy --auto-approve
       
       - name: 'Cleanup build folder'
         run: |
