@@ -2418,9 +2418,11 @@ def get_node_iostats_history(node_id, history, records_count=20, parse_sizes=Tru
 
     io_stats_keys = [
         "date",
+        "read_bytes",
         "read_bytes_ps",
         "read_io_ps",
         "read_latency_ps",
+        "write_bytes",
         "write_bytes_ps",
         "write_io_ps",
         "write_latency_ps",
