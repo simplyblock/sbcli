@@ -312,7 +312,7 @@ class SshUtils:
         self.logger.info(f"{command}")
 
         start_time = time.time()
-        output, error = self.exec_command(node=node, command=command, timeout=runtime)
+        output, error = self.exec_command(node=node, command=command, timeout=runtime * 2)
         end_time = time.time()
 
         total_time = end_time - start_time
