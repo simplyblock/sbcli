@@ -1853,11 +1853,17 @@ def restart_storage_node(
                 removed_devices.append(db_dev)
                 # distr_controller.send_dev_status_event(db_dev, db_dev.status)
 
+        jm_dev_sn = ""
         if snode.jm_device and "serial_number" in snode.jm_device.device_data_dict:
-            known_devices_sn.append(snode.jm_device.device_data_dict['serial_number'])
+            jm_dev_sn = snode.jm_device.device_data_dict['serial_number']
+            known_devices_sn.append(jm_dev_sn)
 
         for dev in nvme_devs:
-            if dev.serial_number not in known_devices_sn:
+            if dev.serial_number == jm_dev_sn:
+                logger.info(f"JM device found: {snode.jm_device.get_id()}")
+                snode.jm_device.nvme_bdev = dev.nvme_bdev
+
+            elif dev.serial_number not in known_devices_sn:
                 logger.info(f"New device found: {dev.get_id()}")
                 dev.status = NVMeDevice.STATUS_NEW
                 new_devices.append(dev)
