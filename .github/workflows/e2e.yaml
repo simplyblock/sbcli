@@ -158,7 +158,7 @@ jobs:
 #          output_key_name=$(terraform output -raw key_name)
 #          echo "::set-output name=key_name::$output_key_name"
 
-      - name: Bootstrap Cluster
+#      - name: Bootstrap Cluster
 #        run: |
 #          cd $GITHUB_WORKSPACE/simplyBlockDeploy
 #          ./bootstrap-cluster.sh --sbcli-cmd "$SBCLI_CMD" \
