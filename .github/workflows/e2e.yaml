@@ -159,29 +159,29 @@ jobs:
 #          echo "::set-output name=key_name::$output_key_name"
 
       - name: Bootstrap Cluster
-        run: |
-          cd $GITHUB_WORKSPACE/simplyBlockDeploy
-          ./bootstrap-cluster.sh --sbcli-cmd "$SBCLI_CMD" \
-            --max-lvol 10 --max-snap 10 --max-prov 900G --number-of-devices 3 \
-            --distr-ndcs $NDCS \
-            --distr-npcs $NPCS \
-            --distr-bs $BS \
-            --distr-chunk-bs $CHUNK_BS \
-            --partitions 3
-        id: bootstrap_cluster
-        env:
-          SBCLI_CMD: ${{ env.SBCLI_CMD }}
-          NDCS: ${{ env.NDCS }}
-          NPCS: ${{ env.NPCS }}
-          BS: ${{ env.BS }}
-          CHUNK_BS: ${{ env.CHUNK_BS }}
-          KEY_NAME: "simplyblock-us-east-2.pem"
-          BASTION_IP: "172.16.53.10"
-          GRAFANA_ENDPOINT: "http://172.16.53.10/grafana"
-          mnodes: "172.16.53.10"
-          storage_private_ips: "172.16.53.11 172.16.53.12 172.16.53.13"
-          sec_storage_private_ips: "172.16.53.14"
-          API_INVOKE_URL: "http://172.16.53.10/"
+#        run: |
+#          cd $GITHUB_WORKSPACE/simplyBlockDeploy
+#          ./bootstrap-cluster.sh --sbcli-cmd "$SBCLI_CMD" \
+#            --max-lvol 10 --max-snap 10 --max-prov 900G --number-of-devices 3 \
+#            --distr-ndcs $NDCS \
+#            --distr-npcs $NPCS \
+#            --distr-bs $BS \
+#            --distr-chunk-bs $CHUNK_BS \
+#            --partitions 3
+#        id: bootstrap_cluster
+#        env:
+#          SBCLI_CMD: ${{ env.SBCLI_CMD }}
+#          NDCS: ${{ env.NDCS }}
+#          NPCS: ${{ env.NPCS }}
+#          BS: ${{ env.BS }}
+#          CHUNK_BS: ${{ env.CHUNK_BS }}
+#          KEY_NAME: "simplyblock-us-east-2.pem"
+#          BASTION_IP: "172.16.53.10"
+#          GRAFANA_ENDPOINT: "http://172.16.53.10/grafana"
+#          mnodes: "172.16.53.10"
+#          storage_private_ips: "172.16.53.11 172.16.53.12 172.16.53.13"
+#          sec_storage_private_ips: "172.16.53.14"
+#          API_INVOKE_URL: "http://172.16.53.10/"
 
       - name: Record Test Start Time
         run: echo "TEST_START_TIME=$(date +%s)" >> $GITHUB_ENV
@@ -190,15 +190,15 @@ jobs:
         timeout-minutes: 120
         run: |
           cd $GITHUB_WORKSPACE/e2e
-          sudo apt-get install -y python3.12-venv
+
           python3 -m venv myenv
           source myenv/bin/activate
           python3 -m pip install -r requirements.txt
           echo "Running tests in namespace default"
-          export CLUSTER_ID=${{ steps.bootstrap_cluster.outputs.cluster_id }}
-          export CLUSTER_SECRET=${{ steps.bootstrap_cluster.outputs.cluster_secret }}
-          export CLUSTER_IP=${{ steps.bootstrap_cluster.outputs.cluster_ip }}
-          export API_BASE_URL=${{ steps.bootstrap_cluster.outputs.cluster_api_gateway_endpoint }}
+          export CLUSTER_ID="c5925e00-fe1d-4be5-a23d-c43563261be3"
+          export CLUSTER_SECRET="hTckwrKFNp0wNHOujwaz"
+          export CLUSTER_IP="172.16.53.10"
+          export API_BASE_URL="http://172.16.53.10/"
           export BASTION_SERVER="172.16.53.10"
           export KEY_NAME="simplyblock-us-east-2.pem"
           export AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }}
