@@ -143,10 +143,12 @@ def get_docker_client(cluster_id=None):
     return False
 
 
-def dict_agg(data, mean=False):
+def dict_agg(data, mean=False, keys=None):
     out = {}
+    if not keys and data:
+        keys = data[0].keys()
     for d in data:
-        for key in d.keys():
+        for key in keys:
             if isinstance(d[key], int) or isinstance(d[key], float):
                 if key in out:
                     out[key] += d[key]
@@ -249,11 +251,11 @@ def parse_history_param(history_string):
         if ind == 'm':
             history_in_seconds += v * 60
 
-    records_number = int(history_in_seconds/2)
+    records_number = int(history_in_seconds/5)
     return records_number
 
 
-def process_records(records, records_count):
+def process_records(records, records_count, keys=None):
     # combine records
     if not records:
         return []
@@ -267,7 +269,7 @@ def process_records(records, records_count):
         last_index = (i + 1) * data_per_record
         last_index = min(last_index, len(records))
         sl = records[first_index:last_index]
-        rec = dict_agg(sl, mean=True)
+        rec = dict_agg(sl, mean=True, keys=keys)
         new_records.append(rec)
     return new_records
 

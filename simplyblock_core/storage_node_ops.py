@@ -2365,7 +2365,16 @@ def get_node_capacity(node_id, history, records_count=20, parse_sizes=True):
         records_number = 20
 
     records = db_controller.get_node_capacity(this_node, records_number)
-    new_records = utils.process_records(records, records_count)
+    cap_stats_keys = [
+        "date",
+        "size_total",
+        "size_prov",
+        "size_used",
+        "size_free",
+        "size_util",
+        "size_prov_util",
+    ]
+    new_records = utils.process_records(records, records_count, keys=cap_stats_keys)
 
     if not parse_sizes:
         return new_records
@@ -2400,7 +2409,18 @@ def get_node_iostats_history(node_id, history, records_count=20, parse_sizes=Tru
         records_number = 20
 
     records = db_controller.get_node_stats(node, records_number)
-    new_records = utils.process_records(records, records_count)
+
+    io_stats_keys = [
+        "date",
+        "read_bytes_ps",
+        "read_io_ps",
+        "read_latency_ps",
+        "write_bytes_ps",
+        "write_io_ps",
+        "write_latency_ps",
+    ]
+    # combine records
+    new_records = utils.process_records(records, records_count, keys=io_stats_keys)
 
     if not parse_sizes:
         return new_records
