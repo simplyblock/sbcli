@@ -19,7 +19,7 @@ KVD_DB_TIMEOUT_MS = 10000
 SPK_DIR = '/home/ec2-user/spdk'
 RPC_HTTP_PROXY_PORT = 8080
 LOG_LEVEL = logging.INFO
-LOG_WEB_LEVEL = logging.DEBUG
+LOG_WEB_LEVEL = logging.INFO
 LOG_WEB_DEBUG = True if LOG_WEB_LEVEL == logging.DEBUG else False
 
 INSTALL_DIR = os.path.dirname(os.path.realpath(__file__))
@@ -76,7 +76,7 @@ TASK_EXEC_RETRY_COUNT = 8
 SIMPLY_BLOCK_SPDK_CORE_IMAGE = "simplyblock/spdk-core:v24.05-tag-latest"
 
 
-SIMPLY_BLOCK_SPDK_ULTRA_IMAGE = "simplyblock/spdk:main-latest"
+SIMPLY_BLOCK_SPDK_ULTRA_IMAGE = "simplyblock/spdk:R25v1-latest"
 
 GELF_PORT = 12202
 
