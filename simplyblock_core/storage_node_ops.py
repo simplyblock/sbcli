@@ -1908,7 +1908,7 @@ def restart_storage_node(
 
     snode = db_controller.get_storage_node_by_id(snode.get_id())
     for db_dev in snode.nvme_devices:
-        if db_dev.status in [NVMeDevice.STATUS_UNAVAILABLE, NVMeDevice.STATUS_READONLY]:
+        if db_dev.status in [NVMeDevice.STATUS_UNAVAILABLE, NVMeDevice.STATUS_READONLY, NVMeDevice.STATUS_ONLINE]:
             db_dev.status = NVMeDevice.STATUS_ONLINE
             device_events.device_restarted(db_dev)
     snode.write_to_db(db_controller.kv_store)
