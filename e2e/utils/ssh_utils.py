@@ -1,11 +1,13 @@
 import time
 import paramiko
+# paramiko.common.logging.basicConfig(level=paramiko.common.DEBUG)
 import os
 import json
-
 import paramiko.ssh_exception
 from logger_config import setup_logger
 from pathlib import Path
+from datetime import datetime
+
 
 
 SSH_KEY_LOCATION = os.path.join(Path.home(), ".ssh", os.environ.get("KEY_NAME"))
@@ -21,11 +23,12 @@ class SshUtils:
         self.base_cmd = os.environ.get("SBCLI_CMD", "sbcli-dev")
         self.logger = setup_logger(__name__)
         self.fio_runtime = {}
+        self.ssh_user = os.environ.get("SSH_USER", None)
 
-    def connect(self, address: str, port: int=22,
-                bastion_server_address: str=None,
-                username: str="ec2-user",
-                is_bastion_server: bool=False):
+    def connect(self, address: str, port: int = 22,
+                bastion_server_address: str = None,
+                username: str = "ec2-user",
+                is_bastion_server: bool = False):
         """Connect to cluster nodes
 
         Args:
@@ -35,38 +38,55 @@ class SshUtils:
             username (str): Username to connect node at
             is_bastion_server (bool): Address given is of bastion server or not
         """
-        username="root"
         # Initialize the SSH client
         ssh = paramiko.SSHClient()
         ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        username = self.ssh_user if self.ssh_user else username
 
         # Load the private key
         if not os.path.exists(SSH_KEY_LOCATION):
             raise FileNotFoundError(f"SSH private key not found at {SSH_KEY_LOCATION}")
-        try:
-            private_key = paramiko.Ed25519Key(filename=SSH_KEY_LOCATION)
-        except:
-            private_key = paramiko.RSAKey(filename=SSH_KEY_LOCATION)
+        
+        private_key = paramiko.Ed25519Key(filename=SSH_KEY_LOCATION)
 
-        # Connect to the proxy server first
+        # Check if we need to connect to the bastion server
+        bastion_server_address = bastion_server_address or self.bastion_server
         if not bastion_server_address:
-            bastion_server_address = self.bastion_server
+            # Direct connection to the target server
+            self.logger.info(f"Connecting directly to {address} on port {port}...")
+            username = "root"
+            ssh.connect(hostname=address,
+                        username=username,
+                        port=port,
+                        pkey=private_key,
+                        timeout=10000)
+            self.logger.info("Connected directly to the target server.")
+
+            # Store the connection
+            if self.ssh_connections.get(address, None):
+                self.ssh_connections[address].close()
+            self.ssh_connections[address] = ssh
+            return
+
+        # Connect to the bastion server
+        self.logger.info(f"Connecting to bastion server {bastion_server_address}...")
         ssh.connect(hostname=bastion_server_address,
                     username=username,
                     port=port,
                     pkey=private_key,
-                    timeout=360)
+                    timeout=10000)
         self.logger.info("Connected to bastion server.")
 
+        # Store bastion server connection
         if self.ssh_connections.get(bastion_server_address, None):
             self.ssh_connections[bastion_server_address].close()
-
         self.ssh_connections[bastion_server_address] = ssh
 
         if is_bastion_server:
             return
 
         # Setup the transport to the target server through the proxy
+        self.logger.info(f"Connecting to target server {address} through bastion server...")
         transport = ssh.get_transport()
         dest_addr = (address, port)
         local_addr = ('localhost', 0)
@@ -76,36 +96,38 @@ class SshUtils:
         target_ssh = paramiko.SSHClient()
         target_ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
         target_ssh.connect(address,
-                           username=username,
-                           port=port,
-                           sock=channel,
-                           pkey=private_key,
-                           timeout=3600)
+                        username=username,
+                        port=port,
+                        sock=channel,
+                        pkey=private_key,
+                        timeout=10000)
         self.logger.info("Connected to target server through proxy.")
 
+        # Store the connection
         if self.ssh_connections.get(address, None):
             self.ssh_connections[address].close()
         self.ssh_connections[address] = target_ssh
 
-    def exec_command(self, node, command, timeout=360, max_retries=3):
-        """Executes command on given machine with a retry mechanism in case of failure.
+
+    def exec_command(self, node, command, timeout=360, max_retries=3, stream_callback=None):
+        """Executes a command on a given machine with streaming output and retry mechanism.
 
         Args:
-            node (str): Machine to run command on
-            command (str): Command to run
-            timeout (int): Timeout in seconds
-            max_retries (int): Number of retries in case of failures
+            node (str): Machine to run command on.
+            command (str): Command to run.
+            timeout (int): Timeout in seconds.
+            max_retries (int): Number of retries in case of failures.
+            stream_callback (callable, optional): A callback function for streaming output. Defaults to None.
 
         Returns:
-            str: Output of command
+            tuple: Final output and error strings after command execution.
         """
         retry_count = 0
         while retry_count < max_retries:
             ssh_connection = self.ssh_connections.get(node)
             try:
                 # Ensure the SSH connection is active, otherwise reconnect
-                if not ssh_connection or not ssh_connection.get_transport().is_active() \
-                    or retry_count > 0:
+                if not ssh_connection or not ssh_connection.get_transport().is_active() or retry_count > 0:
                     self.logger.info(f"Reconnecting SSH to node {node}")
                     self.connect(
                         address=node,
@@ -115,29 +137,51 @@ class SshUtils:
 
                 self.logger.info(f"Executing command: {command}")
                 stdin, stdout, stderr = ssh_connection.exec_command(command, timeout=timeout)
-                
+
                 output = []
                 error = []
-                if "sudo fio" in command:
-                    self.logger.info("Inside while loop")
-                    # Read stdout and stderr in a non-blocking way
-                    while not stdout.channel.exit_status_ready():
-                        if stdout.channel.recv_ready():
-                            output.append(stdout.channel.recv(1024).decode())
-                        if stderr.channel.recv_stderr_ready():
-                            error.append(stderr.channel.recv_stderr(1024).decode())
-                        time.sleep(0.1)
-                    output = " ".join(output)
-                    error = " ".join(error)
 
+                # Read stdout and stderr dynamically if stream_callback is provided
+                if stream_callback:
+                    while not stdout.channel.exit_status_ready():
+                        # Process stdout
+                        if stdout.channel.recv_ready():
+                            chunk = stdout.channel.recv(1024).decode()
+                            output.append(chunk)
+                            stream_callback(chunk, is_error=False)  # Callback for stdout
+
+                        # Process stderr
+                        if stderr.channel.recv_stderr_ready():
+                            chunk = stderr.channel.recv_stderr(1024).decode()
+                            error.append(chunk)
+                            stream_callback(chunk, is_error=True)  # Callback for stderr
+
+                        time.sleep(0.1)
+
+                    # Finalize any remaining output
+                    if stdout.channel.recv_ready():
+                        chunk = stdout.channel.recv(1024).decode()
+                        output.append(chunk)
+                        stream_callback(chunk, is_error=False)
+
+                    if stderr.channel.recv_stderr_ready():
+                        chunk = stderr.channel.recv_stderr(1024).decode()
+                        error.append(chunk)
+                        stream_callback(chunk, is_error=True)
                 else:
+                    # Default behavior: Read the entire output at once
                     output = stdout.read().decode()
                     error = stderr.read().decode()
 
+                # Combine the output into strings
+                output = "".join(output) if isinstance(output, list) else output
+                error = "".join(error) if isinstance(error, list) else error
+
+                # Log the results
                 if output:
                     self.logger.info(f"Command output: {output}")
                 if error:
-                    self.logger.info(f"Command error: {error}")
+                    self.logger.error(f"Command error: {error}")
 
                 if not output and not error:
                     self.logger.warning(f"Command '{command}' executed but returned no output or error.")
@@ -157,6 +201,7 @@ class SshUtils:
         # If we exhaust retries, return failure
         self.logger.error(f"Failed to execute command '{command}' on node {node} after {max_retries} retries.")
         return "", "Command failed after max retries"
+
     
     def format_disk(self, node, device, fs_type="ext4"):
         """Format disk on the given node
@@ -256,13 +301,13 @@ class SshUtils:
 
         command = (f"sudo fio --name={name} {location} --ioengine={ioengine} --direct=1 --iodepth={iodepth} "
                    f"{time_based} --runtime={runtime} --rw={rw} --bs={bs} --size={size} --rwmixread={rwmixread} "
-                   f"--verify=md5 --verify_backlog=10 --verify_interval=4k --numjobs={numjobs} --nrfiles={nrfiles} "
+                   f"--verify=md5 --verify_backlog=2 --verify_interval={bs} --numjobs={numjobs} --nrfiles={nrfiles} "
                    f"{output_format}{output_file}")
         
         if kwargs.get("debug", None):
             command = f"{command} --debug=all"
         if log_file:
-            command = f"{command} >> {log_file}"
+            command = f"{command} >> {log_file} 2>&1"
 
         self.logger.info(f"{command}")
 
@@ -384,12 +429,12 @@ class SshUtils:
 
     def get_lvol_id(self, node, lvol_name):
         """Get logical volume IDs on the node."""
-        cmd = "%s lvol list | grep -i %s | awk '{{print $2}}'" % (self.base_cmd, lvol_name)
+        cmd = "%s lvol list | grep -i '%s ' | awk '{{print $2}}'" % (self.base_cmd, lvol_name)
         output, error = self.exec_command(node=node, command=cmd)
         return output.strip().split()
     
     def get_snapshot_id(self, node, snapshot_name):
-        cmd = "%s snapshot list | grep -i '%s' | awk '{print $2}'" % (self.base_cmd, snapshot_name)
+        cmd = "%s snapshot list | grep -i '%s ' | awk '{print $2}'" % (self.base_cmd, snapshot_name)
         output, error = self.exec_command(node=node, command=cmd)
 
         return output.strip()
@@ -547,3 +592,141 @@ class SshUtils:
     
         add_node_cmd = f"{cmd} {cluster_id} {node_ip}:5000 {ifname}"
         self.exec_command(node=node, command=add_node_cmd)
+
+    def create_random_files(self, node, mount_path, file_size, file_prefix="random_file", file_count=1):
+        for i in range(1, file_count + 1):
+            file_path = f"{mount_path}/{file_prefix}_{i}"
+            command = f"sudo dd if=/dev/urandom of={file_path} bs=512K count={int(file_size[:-1]) * 2048} status=none"
+            retries = 3
+            for attempt in range(retries):
+                try:
+                    self.logger.info(f"Executing cmd: {command} (Attempt {attempt + 1}/{retries})")
+                    output, error = self.exec_command(node, command, timeout=10000)
+                    if error:
+                        raise Exception(error)
+                    break
+                except Exception as e:
+                    self.logger.error(f"Error during `dd` command: {e}. Retrying...")
+                    if attempt == retries - 1:
+                        self.logger.error(f"Failed after {retries} retries. Aborting.")
+
+    def get_active_interfaces(self, node_ip):
+        """
+        Get the list of active physical network interfaces on the node.
+
+        Args:
+            node_ip (str): IP of the target node.
+        Returns:
+            list: List of active physical network interfaces.
+        """
+        try:
+            cmd = (
+                "sudo nmcli device status | grep 'connected' | awk '{print $1}' | grep -Ev '^(docker|lo)'"
+            )
+            output, error = self.exec_command(node_ip, cmd)
+            if error:
+                self.logger.error(f"Error fetching active interfaces on {node_ip}: {error}")
+                return []
+            interfaces = output.strip().split("\n")
+            self.logger.info(f"Filtered active interfaces on {node_ip}: {interfaces}")
+            return interfaces
+        except Exception as e:
+            self.logger.error(f"Failed to fetch active interfaces on {node_ip}: {e}")
+            return []
+        
+
+    def disconnect_all_active_interfaces(self, node_ip, interfaces):
+        """
+        Disconnect all active network interfaces on a node in a single SSH call.
+
+        Args:
+            node_ip (str): IP of the target node.
+            interfaces (list): List of active network interfaces to disconnect.
+        """
+        if not interfaces:
+            self.logger.warning(f"No active interfaces to disconnect on node {node_ip}.")
+            return
+
+        # Combine disconnect commands for all interfaces
+        disconnect_cmds = " && ".join([f"sudo nmcli dev disconnect {iface}" for iface in interfaces])
+        reconnect_cmds = " && ".join([f"sudo nmcli dev connect {iface}" for iface in interfaces])
+
+        cmd = (
+            f'nohup sh -c "{disconnect_cmds} && sleep 300 && {reconnect_cmds}" &'
+        )
+        self.logger.info(f"Executing combined disconnect command on node {node_ip}: {cmd}")
+        try:
+            self.exec_command(node_ip, cmd)
+        except Exception as e:
+            self.logger.error(f"Failed to execute combined disconnect command on {node_ip}: {e}")
+
+    def start_docker_logging(self, node_ip, containers, log_dir, test_name):
+        """
+        Start continuous Docker logs collection for all containers on a node.
+
+        Args:
+            ssh_obj (object): SSH utility object.
+            node_ip (str): IP of the target node.
+            containers (list): List of container names to log.
+            log_dir (str): Directory to save log files.
+            test_name (str): Name of the test for log identification.
+        """
+        try:
+            # Ensure the log directory exists on the node
+            self.exec_command(node_ip, f"sudo mkdir -p {log_dir} && sudo chmod 777 {log_dir}")
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            for container in containers:
+                log_file = f"{log_dir}/{container}_{test_name}_{timestamp}_before_outage.txt"
+                cmd = (
+                    f"sudo nohup docker logs --follow {container} > {log_file} 2>&1 &"
+                )
+                self.logger.info(f"Starting Docker log collection for container '{container}' on {node_ip}. Command: {cmd}")
+                self.exec_command(node_ip, cmd)
+        except Exception as e:
+            self.logger.error(f"Failed to start Docker log collection on node {node_ip}: {e}")
+
+
+    def restart_docker_logging(self, node_ip, containers, log_dir, test_name):
+        """
+        Restart Docker logs collection after an outage.
+
+        Args:
+            node_ip (str): IP of the target node.
+            containers (list): List of container names to log.
+            log_dir (str): Directory to save log files.
+            test_name (str): Name of the test for log identification.
+        """
+        try:
+            self.exec_command(node_ip, f"sudo mkdir -p {log_dir} && sudo chmod 777 {log_dir}")
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            for container in containers:
+                log_file = f"{log_dir}/{container}_{test_name}_{timestamp}_after_outage.txt"
+                cmd = (
+                    f"sudo nohup docker logs --follow {container} > {log_file} 2>&1 &"
+                )
+                self.logger.info(f"Restarting Docker log collection for container '{container}' on {node_ip}. Command: {cmd}")
+                self.exec_command(node_ip, cmd)
+        except Exception as e:
+            self.logger.error(f"Failed to restart Docker log collection on node {node_ip}: {e}")
+
+    def get_running_containers(self, node_ip):
+        """
+        Fetch running containers from all storage nodes.
+
+        Returns:
+            dict: A dictionary mapping storage node IPs to a list of running container names.
+        """
+        containers_by_node = []
+        try:
+            cmd = "sudo docker ps --format '{{.Names}}'"
+            output, error = self.exec_command(node_ip, cmd)
+            if error:
+                self.logger.error(f"Error fetching containers on {node_ip}: {error}")
+
+            containers = output.strip().split("\n")
+            containers_by_node = [c for c in containers if c and "monitoring" not in c]  # Filter out empty names
+        except Exception as e:
+            self.logger.error(f"Error fetching running containers on {node_ip}: {e}")
+        return containers_by_node
+
+

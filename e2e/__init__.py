@@ -12,6 +12,16 @@ from e2e_tests.multi_node_crash_fio_clone import TestMultiFioSnapshotDowntime
 from e2e_tests.single_ha_node_failure import TestHASingleNodeFailure
 
 from stress_test.lvol_stress_fio_run import TestStressLvolClusterFioRun
+from stress_test.lvol_ha_stress_fio import (
+    TestLvolHAClusterGracefulShutdown,
+    TestLvolHAClusterStorageNodeCrash,
+    TestLvolHAClusterNetworkInterrupt,
+    TestLvolHAClusterRunAllScenarios
+)
+from stress_test.lvol_snap_clone_fio_failover import(
+    TestFailoverScenariosStorageNodes
+)
+from stress_test.continuous_failover_ha import RandomFailoverTest
 
 
 ALL_TESTS = [
@@ -60,6 +70,12 @@ def get_all_tests(custom=True, k8s_test=False):
 
 def get_stress_tests():
     tests = [
-        TestStressLvolClusterFioRun
+        TestStressLvolClusterFioRun,
+        TestLvolHAClusterGracefulShutdown,
+        TestLvolHAClusterStorageNodeCrash,
+        TestLvolHAClusterNetworkInterrupt,
+        TestLvolHAClusterRunAllScenarios,
+        TestFailoverScenariosStorageNodes,
+        RandomFailoverTest,
     ]
     return tests

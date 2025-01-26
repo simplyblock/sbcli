@@ -63,8 +63,9 @@ class FioWorkloadTest(TestClusterBase):
             for lvol in lvol_list:
                 initial_devices = self.ssh_obj.get_devices(node=self.mgmt_nodes[0])
             
-                connect_str = self.sbcli_utils.get_lvol_connect_str(lvol_name=lvol)
-                self.ssh_obj.exec_command(self.mgmt_nodes[0], connect_str)
+                connect_ls = self.sbcli_utils.get_lvol_connect_str(lvol_name=lvol)
+                for connect_str in connect_ls:
+                    self.ssh_obj.exec_command(node=self.mgmt_nodes[0], command=connect_str)
                 sleep_n_sec(5)
 
                 # Step 3: Check for new device after connecting the lvol
@@ -98,6 +99,8 @@ class FioWorkloadTest(TestClusterBase):
 
         # Step 5: Run fio workloads with different configurations
         fio_threads = self.run_fio(lvol_fio_path)
+
+        # SCE-1: Graceful Shutdown
 
         # Step 6: Continue with node shutdown, restart, and migration task validation
         affected_node = list(sn_lvol_data.keys())[0]
@@ -150,6 +153,7 @@ class FioWorkloadTest(TestClusterBase):
 
         sleep_n_sec(120)
 
+        # SCE-2: Node crash
         # # Step 7: Stop container on another node
         affected_node = list(sn_lvol_data.keys())[1]
         timestamp = int(datetime.now().timestamp())
@@ -199,6 +203,8 @@ class FioWorkloadTest(TestClusterBase):
         )
         self.logger.info(f"Output for sn list: {output}")
 
+        
+        # SCE-3: Instance terminate and new add
         # # Step 8: Stop instance
         timestamp = int(datetime.now().timestamp())
         affected_node = list(sn_lvol_data.keys())[2]
@@ -522,7 +528,8 @@ class FioWorkloadTest(TestClusterBase):
         ]
         return filtered_tasks
 
-    def validate_migration_for_node(self, timestamp, timeout, node_id=None, check_interval=60):
+    def validate_migration_for_node(self, timestamp, timeout, node_id=None, check_interval=60,
+                                    no_task_ok=False):
         """
         Validate that all `device_migration` tasks for a specific node have completed successfully 
         and check for stuck tasks until the timeout is reached.
@@ -539,15 +546,19 @@ class FioWorkloadTest(TestClusterBase):
         start_time = datetime.now()
         end_time = start_time + timedelta(seconds=timeout)
 
-        output, _ = self.ssh_obj.exec_command(node=self.mgmt_nodes[0], 
-                                              command=f"{self.base_cmd} cluster list-tasks {self.cluster_id}")
-        self.logger.info(f"Data migration output: {output}")
+        output = None
+        while output is not None:
+            output, _ = self.ssh_obj.exec_command(node=self.mgmt_nodes[0], 
+                                                command=f"{self.base_cmd} cluster list-tasks {self.cluster_id}")
+            self.logger.info(f"Data migration output: {output}")
+            if no_task_ok:
+                break
 
         while datetime.now() < end_time:
             tasks = self.sbcli_utils.get_cluster_tasks(self.cluster_id)
             filtered_tasks = self.filter_migration_tasks(tasks, node_id, timestamp)
             
-            if not filtered_tasks:
+            if not filtered_tasks and not no_task_ok:
                 raise RuntimeError(f"No migration tasks found for {'node ' + node_id if node_id else 'the cluster'} after the specified timestamp.")
 
             self.logger.info(f"Checking migration tasks: {filtered_tasks}")
@@ -556,7 +567,7 @@ class FioWorkloadTest(TestClusterBase):
 
             for task in filtered_tasks:
                 # Check if the task is stuck (updated_at is more than 15 minutes old)
-                updated_at = datetime.fromtimestamp(task['updated_at'])
+                updated_at = datetime.strptime(task['updated_at'], '%Y-%m-%d %H:%M:%S.%f')
                 if datetime.now() - updated_at > timedelta(minutes=60):
                     raise RuntimeError(f"Migration task {task['id']} is stuck (last updated at {updated_at}).")
 

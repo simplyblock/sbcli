@@ -56,12 +56,12 @@ class TestStressLvolClusterFioRun(TestClusterBase):
                 "mount_path": None,
                 "log": None
             }
-            connect_str = self.sbcli_utils.get_lvol_connect_str(lvol_name=lvol_name)
-            
             initial_devices = self.ssh_obj.get_devices(node=self.mgmt_nodes[0])
-            
-            self.ssh_obj.exec_command(node=self.mgmt_nodes[0], command=connect_str)
 
+            connect_ls = self.sbcli_utils.get_lvol_connect_str(lvol_name=lvol_name)
+            for connect_str in connect_ls:
+                self.ssh_obj.exec_command(node=self.mgmt_nodes[0], command=connect_str)
+            
             final_devices = self.ssh_obj.get_devices(node=self.mgmt_nodes[0])
             lvol_device = None
             for device in final_devices:
