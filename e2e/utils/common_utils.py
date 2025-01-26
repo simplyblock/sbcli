@@ -315,24 +315,18 @@ class CommonUtils:
             time_duration (str): Time duration for API call (e.g., '1hr30m')
         """
         self.logger.info(f"Validating I/O stats for cluster {cluster_id} during {time_duration}.")
+        self.logger.info(f"Start Date: {start_timestamp}, {end_timestamp}")
 
         # Fetch I/O stats from the API
         io_stats = self.sbcli_utils.get_io_stats(cluster_id, time_duration)
         self.logger.info(f"IO Stats: {io_stats}")
 
-        # Filter stats by failover time range
-        filtered_stats = [
-            stat for stat in io_stats
-            if start_timestamp <= stat["date"] <= end_timestamp
-        ]
-        self.logger.info(f"Filtered IO Stats: {io_stats}")
-
-        if not filtered_stats:
+        if not io_stats:
             self.logger.error("No I/O stats found within the specified time range.")
             raise AssertionError("No I/O stats found within the specified time range.")
 
         # Validate non-zero values for relevant metrics
-        for stat in filtered_stats:
+        for stat in io_stats:
             self.logger.info(f"Validating I/O stats for record with date: {stat['date']}")
             self.assert_non_zero_io_stat(stat, "read_bytes")
             self.assert_non_zero_io_stat(stat, "write_bytes")
