@@ -260,7 +260,60 @@ class CLIWrapper:
         # ----------------- cluster -----------------
         #
 
+        
         subparser = self.add_command('cluster', 'Cluster commands')
+        
+        
+        sub_command = self.add_sub_command(subparser,'deploy',
+                                           'Deploy storage nodes')
+        sub_command.add_argument(
+            "--storage-nodes",type=list 
+        )
+        sub_command.add_argument(
+            "--test", type=bool
+        )
+
+        sub_command.add_argument("--ha-type", help='LVol HA type (single, ha), default is cluster HA type',
+                                 dest='ha_type', choices=["single", "ha"], default='single')
+        sub_command.add_argument("--distr-ndcs", help='(Dev) set ndcs manually, default: 1', type=int, default=1)
+        sub_command.add_argument("--distr-npcs", help='(Dev) set npcs manually, default: 1', type=int, default=1)
+        sub_command.add_argument("--enable-qos", help='Enable qos bdev for storage nodes', action='store_true', dest='enable_qos')
+        sub_command.add_argument("--ifname", help='Management interface name, default: eth0')
+        sub_command.add_argument(
+            "--blk_size", help='The block size in bytes', type=int, choices=[512, 4096], default=512)
+
+        sub_command.add_argument(
+            "--page_size", help='The size of a data page in bytes', type=int, default=2097152)
+
+        sub_command.add_argument("--CLI_PASS", help='Password for CLI SSH connection', required=False)
+        sub_command.add_argument("--cap-warn", help='Capacity warning level in percent, default=80',
+                                 type=int, required=False, dest="cap_warn")
+        sub_command.add_argument("--cap-crit", help='Capacity critical level in percent, default=90',
+                                 type=int, required=False, dest="cap_crit")
+        sub_command.add_argument("--prov-cap-warn", help='Capacity warning level in percent, default=180',
+                                 type=int, required=False, dest="prov_cap_warn")
+        sub_command.add_argument("--prov-cap-crit", help='Capacity critical level in percent, default=190',
+                                 type=int, required=False, dest="prov_cap_crit")
+        sub_command.add_argument("--log-del-interval", help='graylog deletion interval, default: 3d',
+                                 dest='log_del_interval', default='3d')
+        sub_command.add_argument("--metrics-retention-period", help='retention period for prometheus metrics, default: 7d',
+                                 dest='metrics_retention_period', default='7d')
+        sub_command.add_argument("--contact-point", help='the email or slack webhook url to be used for alerting',
+                                 dest='contact_point', default='')
+        sub_command.add_argument("--grafana-endpoint", help='the endpoint url for grafana',
+                                 dest='grafana_endpoint', default='')
+        sub_command.add_argument("--distr-bs", help='(Dev) distrb bdev block size, default: 4096', type=int,
+                                 default=4096)
+        sub_command.add_argument("--distr-chunk-bs", help='(Dev) distrb bdev chunk block size, default: 4096', type=int,
+                                 default=4096)
+        sub_command.add_argument("--enable-node-affinity", help='Enable node affinity for storage nodes', action='store_true')
+        sub_command.add_argument("--qpair-count", help='tcp transport qpair count', type=int, dest='qpair_count',
+                                 default=0, choices=range(128))
+        sub_command.add_argument("--max-queue-size", help='The max size the queue will grow', type=int, default=128)
+        sub_command.add_argument("--inflight-io-threshold", help='The number of inflight IOs allowed before the IO queuing starts', type=int, default=4)
+        sub_command.add_argument("--strict-node-anti-affinity", help='Enable strict node anti affinity for storage nodes', action='store_true')
+        
+        
 
         sub_command = self.add_sub_command(subparser, 'create',
                                            'Create an new cluster with this node as mgmt (local run)')
@@ -977,6 +1030,8 @@ class CLIWrapper:
             elif sub_command == 'unsuspend':
                 cluster_id = args.cluster_id
                 ret = cluster_ops.unsuspend_cluster(cluster_id)
+            elif sub_command == 'deploy':
+                ret = self.cluster_deploy(args)
             elif sub_command == "get-capacity":
                 cluster_id = args.cluster_id
                 history = args.history
@@ -1309,6 +1364,40 @@ class CLIWrapper:
             qpair_count, max_queue_size, inflight_io_threshold, enable_qos, strict_node_anti_affinity)
 
 
+    def cluster_deploy(self,args){
+        storage_nodes = args.storage_nodes
+        test = args.test
+        ha_type = args.ha_type
+        distr_ndcs = args.distr_ndcs
+        distr_npcs = args.distr_npcs
+        enable_qos = args.enable_qos
+        ifname = args.ifname
+        page_size_in_blocks = args.page_size
+        blk_size = args.blk_size
+        CLI_PASS = args.CLI_PASS
+        cap_warn = args.cap_warn
+        cap_crit = args.cap_crit
+        prov_cap_warn = args.prov_cap_warn
+        prov_cap_crit = args.prov_cap_crit
+        distr_bs = args.distr_bs
+        distr_chunk_bs = args.distr_chunk_bs
+        log_del_interval = args.log_del_interval
+        metrics_retention_period = args.metrics_retention_period
+        contact_point = args.contact_point
+        grafana_endpoint = args.grafana_endpoint
+        enable_node_affinity = args.enable_node_affinity
+        qpair_count = args.qpair_count
+        max_queue_size = args.max_queue_size
+        inflight_io_threshold = args.inflight_io_threshold
+        strict_node_anti_affinity = args.strict_node_anti_affinity
+        
+        return cluster_ops.deploy_cluster(
+            storage_nodes,test,ha_type,distr_ndcs,distr_npcs,enable_qos,ifname,
+            blk_size, page_size_in_blocks,CLI_PASS, cap_warn, cap_crit, prov_cap_warn, 
+            prov_cap_crit,log_del_interval, metrics_retention_period, contact_point, grafana_endpoint,
+            distr_bs, distr_chunk_bs, enable_node_affinity,
+            qpair_count, max_queue_size, inflight_io_threshold, strict_node_anti_affinity)
+    }
     def cluster_create(self, args):
         page_size_in_blocks = args.page_size
         blk_size = args.blk_size
