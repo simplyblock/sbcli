@@ -123,7 +123,7 @@ class TestSingleNodeInstanceReboot(TestClusterBase):
         sleep_n_sec(30)
         timestamp = int(datetime.now().timestamp())
 
-        if len(instance_id) > 0:
+        if "i-" in instance_id[0:2]:
             # AWS way stop
             self.common_utils.stop_ec2_instance(ec2_resource=self.ec2_resource,
                                                 instance_id=instance_id)
@@ -190,7 +190,7 @@ class TestSingleNodeInstanceReboot(TestClusterBase):
             raise exp
 
         # self.sbcli_utils.restart_node(node_uuid=no_lvol_node_uuid)
-        if len(instance_id) > 0:
+        if "i-" in instance_id[0:2]:
             self.common_utils.start_ec2_instance(ec2_resource=self.ec2_resource,
                                                  instance_id=instance_id)
         else:
@@ -389,7 +389,7 @@ class TestHASingleNodeReboot(TestClusterBase):
         for i in range(2):
             timestamp = int(datetime.now().timestamp())
             sleep_n_sec(30)
-            if len(instance_id) > 0:
+            if "i-" in instance_id[0:2]:
                 # AWS way stop
                 self.common_utils.stop_ec2_instance(ec2_resource=self.ec2_resource,
                                                     instance_id=instance_id)
@@ -413,7 +413,7 @@ class TestHASingleNodeReboot(TestClusterBase):
                 raise exp
 
             # self.sbcli_utils.restart_node(node_uuid=no_lvol_node_uuid)
-            if len(instance_id) > 0:
+            if "i-" in instance_id[0:2]:
                 self.common_utils.start_ec2_instance(ec2_resource=self.ec2_resource,
                                                     instance_id=instance_id)
             else:
