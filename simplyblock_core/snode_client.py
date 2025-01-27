@@ -72,7 +72,8 @@ class SNodeClient:
 
     def spdk_process_start(self, spdk_cpu_mask, spdk_mem, spdk_image=None, spdk_debug=None, cluster_ip=None,
                            fdb_connection=None, namespace=None, server_ip=None, rpc_port=None,
-                           rpc_username=None, rpc_password=None, multi_threading_enabled=False, timeout=0):
+                           rpc_username=None, rpc_password=None, multi_threading_enabled=False, timeout=0,
+                           allowed_pci=[]):
         params = {
             "cluster_ip": cluster_ip,
             "server_ip": server_ip,
@@ -96,6 +97,8 @@ class SNodeClient:
             params["multi_threading_enabled"] = multi_threading_enabled
         if timeout:
             params["timeout"] = timeout
+        if allowed_pci:
+            params["allowed_pci"] = allowed_pci
         return self._request("POST", "spdk_process_start", params)
 
     def join_swarm(self, cluster_ip, join_token, db_connection, cluster_id):

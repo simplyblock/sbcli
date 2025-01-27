@@ -60,6 +60,7 @@ class CLIWrapper:
         sub_command.add_argument("--is-secondary-node", help='add as secondary node', action='store_true', dest='is_secondary_node', default=False)
         sub_command.add_argument("--namespace", help='k8s namespace to deploy on',)
         sub_command.add_argument("--id-device-by-nqn", help='Use device nqn to identify it instead of serial number', action='store_true', dest='id_device_by_nqn', default=False)
+        sub_command.add_argument("--allow-pci", help='list of space separated full length pci address', nargs='+', dest='allowed_pci_list')
 
         # delete storage node
         sub_command = self.add_sub_command(subparser, "delete", 'Delete storage node obj')
@@ -801,6 +802,7 @@ class CLIWrapper:
                     is_secondary_node=args.is_secondary_node,
                     id_device_by_nqn=args.id_device_by_nqn,
                     partition_size=args.partition_size,
+                    allowed_pci_list=args.allowed_pci_list,
                 )
 
                 return out

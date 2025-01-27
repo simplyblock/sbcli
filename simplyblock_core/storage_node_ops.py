@@ -936,7 +936,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
              small_bufsize=0, large_bufsize=0, spdk_cpu_mask=None,
              num_partitions_per_dev=0, jm_percent=0, number_of_devices=0, enable_test_device=False,
              namespace=None, number_of_distribs=2, enable_ha_jm=False, is_secondary_node=False, id_device_by_nqn=False,
-             partition_size=""):
+             partition_size="", allowed_pci_list=[]):
 
     db_controller = DBController()
     kv_store = db_controller.kv_store
@@ -1121,7 +1121,8 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
         results, err = snode_api.spdk_process_start(
             spdk_cpu_mask, spdk_mem, spdk_image, spdk_debug, cluster_ip, fdb_connection,
             namespace, mgmt_ip, constants.RPC_HTTP_PROXY_PORT, rpc_user, rpc_pass,
-            multi_threading_enabled=constants.SPDK_PROXY_MULTI_THREADING_ENABLED, timeout=constants.SPDK_PROXY_TIMEOUT)
+            multi_threading_enabled=constants.SPDK_PROXY_MULTI_THREADING_ENABLED, timeout=constants.SPDK_PROXY_TIMEOUT,
+            allowed_pci=allowed_pci_list)
     except Exception as e:
         logger.error(e)
         return False
@@ -1218,6 +1219,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
     snode.id_device_by_nqn = id_device_by_nqn
     if partition_size:
         snode.partition_size = utils.parse_size(partition_size)
+    snode.allowed_pci_list=allowed_pci_list
 
     time.sleep(5)
 
@@ -1708,7 +1710,8 @@ def restart_storage_node(
         results, err = snode_api.spdk_process_start(
             snode.spdk_cpu_mask, spdk_mem, snode.spdk_image, spdk_debug, cluster_ip, fdb_connection,
             snode.namespace, snode.mgmt_ip, constants.RPC_HTTP_PROXY_PORT, snode.rpc_username, snode.rpc_password,
-            multi_threading_enabled=constants.SPDK_PROXY_MULTI_THREADING_ENABLED, timeout=constants.SPDK_PROXY_TIMEOUT)
+            multi_threading_enabled=constants.SPDK_PROXY_MULTI_THREADING_ENABLED, timeout=constants.SPDK_PROXY_TIMEOUT,
+            allowed_pci=snode.allowed_pci_list)
     except Exception as e:
         logger.error(e)
         return False

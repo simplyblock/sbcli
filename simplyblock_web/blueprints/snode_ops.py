@@ -148,14 +148,14 @@ def spdk_process_start():
             node.remove(force=True)
             time.sleep(2)
 
-    spdk_debug = ""
-    if set_debug:
-        spdk_debug = "1"
+    allowed_pci_list = ""
+    if 'allowed_pci' in data and data['allowed_pci']:
+        allowed_pci_list = " ".join(data['allowed_pci'])
 
     spdk_image = constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE
     if 'spdk_image' in data and data['spdk_image']:
         spdk_image = data['spdk_image']
-        # node_docker.images.pull(spdk_image)
+        node_docker.images.pull(spdk_image)
 
     if "cluster_ip" in data and data['cluster_ip']:
         cluster_ip = data['cluster_ip']
@@ -165,7 +165,7 @@ def spdk_process_start():
 
     container = node_docker.containers.run(
         spdk_image,
-        f"/root/scripts/run_distr.sh {spdk_cpu_mask} {spdk_mem} {spdk_debug}",
+        f"/root/scripts/run_distr.sh {spdk_cpu_mask} {spdk_mem} {allowed_pci_list}",
         name="spdk",
         detach=True,
         privileged=True,
