@@ -1627,6 +1627,14 @@ def restart_storage_node(
                     return False
 
                 snode.cloud_instance_id = new_cloud_instance_id
+                known_sn = [dev.serial_number for dev in snode.nvme_devices]
+                if snode.jm_device and 'serial_number' in snode.jm_device.device_data_dict:
+                   known_sn.append(snode.jm_device.device_data_dict['serial_number'])
+
+                node_info, _ = snode_api.info()
+                for dev in node_info['nvme_devices']:
+                    if dev['serial_number'] in known_sn:
+                        snode_api.bind_device_to_spdk(dev['address'])
         else:
             node_ip = None
 
