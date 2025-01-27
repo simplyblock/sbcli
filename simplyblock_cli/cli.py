@@ -1442,6 +1442,7 @@ class CLIWrapper:
         
         
         
+        
         return cluster_ops.deploy_cluster(
             storage_nodes,test,ha_type,distr_ndcs,distr_npcs,enable_qos,ifname,
             blk_size, page_size_in_blocks,CLI_PASS, cap_warn, cap_crit, prov_cap_warn, 

@@ -260,7 +260,45 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
 
 
 
+def parse_nvme_list_output(output, target_model):
+    lines = output.splitlines()
+    for line in lines:
+        if target_model in line:
+            return line.split()[0]
+    raise Exception(f"Device with model {target_model} not found in nvme list")
 
+
+def run_fio(file_path):
+
+    if not file_path:
+        raise ValueError("File path cannot be empty.")
+    
+    fio_config = f"""
+[global]
+ioengine=libaio
+direct=1
+bs=4k
+size=1G
+rw=write
+
+[test]
+filename={file_path}
+"""
+    config_file = "fio.cfg"
+    with open(config_file, "w") as f:
+        f.write(fio_config)
+    
+    try:
+        result = subprocess.run(["fio", config_file], check=True, text=True, capture_output=True)
+        print(result.stdout)
+    except subprocess.CalledProcessError as e:
+        print(f"Error running fio: {e.stderr}")
+    finally:
+        import os
+        if os.path.exists(config_file):
+            os.remove(config_file)
+        print("fio configuration file removed.")
+    
 
 def deploy_cluster(storage_nodes,test,ha_type,distr_ndcs,distr_npcs,enable_qos,ifname,blk_size, page_size_in_blocks, cli_pass,
                    cap_warn, cap_crit, prov_cap_warn, prov_cap_crit, log_del_interval, metrics_retention_period,
@@ -279,7 +317,7 @@ def deploy_cluster(storage_nodes,test,ha_type,distr_ndcs,distr_npcs,enable_qos,i
             qpair_count, max_queue_size, inflight_io_threshold, enable_qos, strict_node_anti_affinity)
     
     for node in storage_nodes:
-        dev_ip=storage_node_ops.deploy(ifname)
+        dev_ip=f"{node}:5000"
         
         add_node_status=storage_node_ops.add_node(cluster_uuid,dev_ip,ifname,data_nics,max_lvol,max_snap,max_prov,spdk_image,spdk_debug,
                                   small_bufsize,large_bufsize,spdk_cpu_mask,num_partitions_per_dev,jm_percent,number_of_devices,
@@ -288,8 +326,56 @@ def deploy_cluster(storage_nodes,test,ha_type,distr_ndcs,distr_npcs,enable_qos,i
         if not add_node_status:
             logger.error("Could not add storage node successfully")
             return False
+        node_id=
 
         if test:
+            pool_id=pool_controller.add_pool("testing2",100,10,"","","","","",cluster_uuid)
+            
+            lvol_uuid=lvol_controller.add_lvol_ha("testt","10G",ha_type,pool_id)
+            
+            lvol_controller.connect_lvol(lvol_uuid)
+            connect_string=lvol_controller[0]["connect"]
+            
+            subprocess.run("sudo modprobe nvme-fabrics", shell=True, check=True)
+
+            subprocess.run(connect_string, shell=True, check=True)
+            
+            nvme_list_command = "sudo nvme list"
+            print(f"Executing NVMe list command: {nvme_list_command}")
+            result = subprocess.run(nvme_list_command, shell=True, check=True, capture_output=True, text=True)
+
+            nvme_output = result.stdout
+            device_name = parse_nvme_list_output(nvme_output, lvol_uuid)
+            
+            mkfs_command = f"sudo mkfs.ext4 {device_name}"
+            subprocess.run(mkfs_command, shell=True, check=True)
+            
+            
+            mount_point = os.path.join(os.path.expanduser("~"), lvol_uuid)
+            os.makedirs(mount_point, exist_ok=True)
+            mount_command = f"sudo mount {device_name} {mount_point}"
+            
+            subprocess.run(mount_command, shell=True, check=True)
+
+            run_fio(mount_point)
+            
+            match = re.search(r'--nqn=([^\s]+)', connect_string)
+            nqn_value = match.group(1)
+            subprocess.run(f"sudo nvme disconnect -n {nqn_value}")
+            
+            
+            status=lvol_controller.delete_lvol(lvol_uuid)
+            
+            pool_controller.delete_pool(pool_id)
+            
+
+
+           
+            
+
+            
+            
+            
             
         
     
