@@ -47,6 +47,7 @@ class TestSingleNodeOutage(TestClusterBase):
         super().__init__(**kwargs)
         self.snapshot_name = "snapshot"
         self.logger = setup_logger(__name__)
+        self.test_name = "single_node_outage"
 
     def run(self):
         """ Performs each step of the testcase
@@ -81,10 +82,9 @@ class TestSingleNodeOutage(TestClusterBase):
         assert self.lvol_name in list(lvols.keys()), \
             f"Lvol {self.lvol_name} present in list of lvols post add: {lvols}"
 
-        connect_str = self.sbcli_utils.get_lvol_connect_str(lvol_name=self.lvol_name)
-
-        self.ssh_obj.exec_command(node=self.mgmt_nodes[0],
-                                  command=connect_str)
+        connect_ls = self.sbcli_utils.get_lvol_connect_str(lvol_name=self.lvol_name)
+        for connect_str in connect_ls:
+            self.ssh_obj.exec_command(node=self.mgmt_nodes[0], command=connect_str)
 
         final_devices = self.ssh_obj.get_devices(node=self.mgmt_nodes[0])
         disk_use = None
@@ -167,6 +167,15 @@ class TestSingleNodeOutage(TestClusterBase):
                          lvol_status="online",
                          health_check_status=True
                          )
+        
+        node_details = self.sbcli_utils.get_storage_node_details(no_lvol_node_uuid)
+        node_ip = node_details[0]["mgmt_ip"]
+        self.ssh_obj.restart_docker_logging(
+            node_ip=node_ip,
+            containers=self.container_nodes[node_ip],
+            log_dir=self.docker_logs_path,
+            test_name=self.test_name
+        )
 
         # Write steps in order
         steps = {
@@ -200,9 +209,9 @@ class TestSingleNodeOutage(TestClusterBase):
                                clone_name=f"{self.lvol_name}_cl_2")
         
         initial_devices = self.ssh_obj.get_devices(node=self.mgmt_nodes[0])
-        connect_str = self.sbcli_utils.get_lvol_connect_str(lvol_name=f"{self.lvol_name}_cl_1")
-        self.ssh_obj.exec_command(node=self.mgmt_nodes[0],
-                                  command=connect_str)
+        connect_ls = self.sbcli_utils.get_lvol_connect_str(lvol_name=f"{self.lvol_name}_cl_1")
+        for connect_str in connect_ls:
+            self.ssh_obj.exec_command(node=self.mgmt_nodes[0], command=connect_str)
         
         final_devices = self.ssh_obj.get_devices(node=self.mgmt_nodes[0])
         disk_use = None
@@ -223,9 +232,9 @@ class TestSingleNodeOutage(TestClusterBase):
                                 mount_path=f"{clone_mount_file}_1")
         
         initial_devices = final_devices
-        connect_str = self.sbcli_utils.get_lvol_connect_str(lvol_name=f"{self.lvol_name}_cl_2")
-        self.ssh_obj.exec_command(node=self.mgmt_nodes[0],
-                                  command=connect_str)
+        connect_ls = self.sbcli_utils.get_lvol_connect_str(lvol_name=f"{self.lvol_name}_cl_2")
+        for connect_str in connect_ls:
+            self.ssh_obj.exec_command(node=self.mgmt_nodes[0], command=connect_str)
         
         final_devices = self.ssh_obj.get_devices(node=self.mgmt_nodes[0])
         disk_use = None

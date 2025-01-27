@@ -1,10 +1,5 @@
 #!/usr/bin/env bash
 
-if [[ -z $(grep "$(hostname)" /etc/hosts) ]]
-then
-  sudo sh -c 'echo "127.0.0.1   $(hostname)" >> /etc/hosts'
-fi
-
 sudo yum install -y yum-utils xorg-x11-xauth nvme-cli fio
 sudo yum-config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
 sudo yum install hostname pkg-config git wget python3-pip yum-utils docker-ce docker-ce-cli \

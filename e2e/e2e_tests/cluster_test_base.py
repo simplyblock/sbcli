@@ -6,6 +6,7 @@ from utils.common_utils import CommonUtils
 from logger_config import setup_logger
 from utils.common_utils import sleep_n_sec
 import traceback
+import threading
 
 
 class TestClusterBase:
@@ -18,7 +19,7 @@ class TestClusterBase:
             "Content-Type": "application/json",
             "Authorization": f"{self.cluster_id} {self.cluster_secret}"
         }
-        self.bastion_server = os.environ.get("BASTION_SERVER")
+        self.bastion_server = os.environ.get("BASTION_SERVER", None)
 
         self.ssh_obj = SshUtils(bastion_server=self.bastion_server)
         self.logger = setup_logger(__name__)
@@ -44,6 +45,11 @@ class TestClusterBase:
         self.ec2_resource = None
         self.lvol_crypt_keys = ["7b3695268e2a6611a25ac4b1ee15f27f9bf6ea9783dada66a4a730ebf0492bfd",
                                 "78505636c8133d9be42e347f82785b81a879cd8133046f8fc0b36f17b078ad0c"]
+        self.container_log_path = f"{os.path.dirname(self.mount_path)}/container_logs"
+        self.log_threads = []
+        self.test_name = ""
+        self.container_nodes = {}
+
 
     def setup(self):
         """Contains setup required to run the test case
@@ -75,6 +81,7 @@ class TestClusterBase:
                 address=node,
                 bastion_server_address=self.bastion_server,
             )
+
         # command = "python3 -c \"from importlib.metadata import version;print(f'SBCLI Version: {version('''sbcli-dev''')}')\""
         # self.ssh_obj.exec_command(
         #     self.mgmt_nodes[0], command=command
@@ -99,10 +106,35 @@ class TestClusterBase:
         )
         self.ec2_resource = session.resource('ec2')
 
+        self.docker_logs_path = f"/home/container-logs/"
+        
+        for node in self.storage_nodes:
+            containers = self.ssh_obj.get_running_containers(node_ip=node)
+            self.container_nodes[node] = containers
+            self.ssh_obj.start_docker_logging(node_ip=node,
+                                              containers=containers,
+                                              log_dir=self.docker_logs_path,
+                                              test_name=self.test_name
+                                              )
+
+        self.logger.info("Started log monitoring for all storage nodes.")
+
+    def stop_docker_logs_collect(self):
+        for node in self.storage_nodes:
+            pids = self.ssh_obj.find_process_name(
+                node=node,
+                process_name="'docker logs --follow'",
+                return_pid=True
+            )
+            for pid in pids:
+                self.ssh_obj.kill_processes(node=node, pid=pid)
+        self.logger.info("All log monitoring threads stopped.")
+
     def teardown(self):
         """Contains teradown required post test case execution
         """
         self.logger.info("Inside teardown function")
+        
         self.ssh_obj.kill_processes(node=self.mgmt_nodes[0],
                                     process_name="fio")
         retry_check = 100
@@ -148,7 +180,7 @@ class TestClusterBase:
                 sleep_n_sec(2)
             self.sbcli_utils.delete_all_storage_pools()
             sleep_n_sec(2)
-            self.ssh_obj.remove_dir(self.mgmt_nodes[0], "/mnt/de*")
+            self.ssh_obj.remove_dir(self.mgmt_nodes[0], "/mnt/*")
             for node, ssh in self.ssh_obj.ssh_connections.items():
                 self.logger.info(f"Closing node ssh connection for {node}")
                 ssh.close()
@@ -321,3 +353,7 @@ class TestClusterBase:
             delete_snapshot_command = f"sbcli-lvol snapshot delete {snapshot} --force"
             self.ssh_obj.exec_command(node=self.mgmt_nodes[0], command=delete_snapshot_command)
             
+    
+
+
+

@@ -1222,7 +1222,14 @@ def get_capacity(lvol_uuid, history, records_count=20, parse_sizes=True):
     records_list = db_controller.get_lvol_stats(lvol, limit=records_number)
     if not records_list:
         return False
-    new_records = utils.process_records(records_list, min(records_count, len(records_list)))
+    cap_stats_keys = [
+        "date",
+        "size_total",
+        "size_used",
+        "size_free",
+        "size_util",
+    ]
+    new_records = utils.process_records(records_list, records_count, keys=cap_stats_keys)
 
     if not parse_sizes:
         return new_records
@@ -1256,7 +1263,20 @@ def get_io_stats(lvol_uuid, history, records_count=20, parse_sizes=True):
     records_list = db_controller.get_lvol_stats(lvol, limit=records_number)
     if not records_list:
         return False
-    new_records = utils.process_records(records_list, min(records_count, len(records_list)))
+    io_stats_keys = [
+        "date",
+        "read_bytes",
+        "read_bytes_ps",
+        "read_io_ps",
+        "read_latency_ps",
+        "write_bytes",
+        "write_bytes_ps",
+        "write_io_ps",
+        "write_latency_ps",
+        "connected_clients",
+    ]
+    # combine records
+    new_records = utils.process_records(records_list, records_count, keys=io_stats_keys)
 
     if not parse_sizes:
         return new_records

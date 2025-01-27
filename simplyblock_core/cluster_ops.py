@@ -541,7 +541,16 @@ def get_capacity(cluster_id, history, records_count=20, is_json=False):
 
     records = db_controller.get_cluster_capacity(cluster, records_number)
 
-    new_records = utils.process_records(records, records_count)
+    cap_stats_keys = [
+        "date",
+        "size_total",
+        "size_prov",
+        "size_used",
+        "size_free",
+        "size_util",
+        "size_prov_util",
+    ]
+    new_records = utils.process_records(records, records_count, keys=cap_stats_keys)
 
     if is_json:
         return json.dumps(new_records, indent=2)
@@ -582,8 +591,21 @@ def get_iostats_history(cluster_id, history_string, records_count=20, parse_size
 
     records = db_controller.get_cluster_stats(cluster, records_number)
 
+    io_stats_keys = [
+        "date",
+        "read_bytes",
+        "read_bytes_ps",
+        "read_io_ps",
+        "read_io",
+        "read_latency_ps",
+        "write_bytes",
+        "write_bytes_ps",
+        "write_io",
+        "write_io_ps",
+        "write_latency_ps",
+    ]
     # combine records
-    new_records = utils.process_records(records, records_count)
+    new_records = utils.process_records(records, records_count, keys=io_stats_keys)
 
     if not parse_sizes:
         return new_records
