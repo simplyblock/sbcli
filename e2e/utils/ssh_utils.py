@@ -683,7 +683,7 @@ class SshUtils:
 
                 # Run the Docker log collection command with `setsid` to ensure persistence
                 command_logs = (
-                    f"nohup setsid docker logs --follow {container} > {log_file} 2>&1 &"
+                    f"sudo nohup setsid docker logs --follow {container} > {log_file} 2>&1 &"
                 )
                 self.exec_command(node_ip, command_logs)  # Start the process without waiting
 
@@ -718,7 +718,7 @@ class SshUtils:
             for container in containers:
                 log_file = f"{log_dir}/{container}_{test_name}_{timestamp}_after_outage.txt"
                 cmd = (
-                    f"nohup setsid docker logs --follow {container} > {log_file} 2>&1 &"
+                    f"sudo nohup setsid docker logs --follow {container} > {log_file} 2>&1 &"
                 )
                 self.logger.info(f"Restarting Docker log collection for container '{container}' on {node_ip}. Command: {cmd}")
                 self.exec_command(node_ip, cmd)
