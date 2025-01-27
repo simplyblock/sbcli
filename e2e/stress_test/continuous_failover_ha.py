@@ -166,6 +166,8 @@ class RandomFailoverTest(TestLvolHACluster):
 
         self.logger.info(f"Performing {outage_type} on node {self.current_outage_node}.")
         self.log_outage_event(self.current_outage_node, outage_type, "Outage started")
+
+        sleep_n_sec(120)
         
         if outage_type == "graceful_shutdown":
             self.sbcli_utils.suspend_node(node_uuid=self.current_outage_node, expected_error_code=[503])
@@ -173,7 +175,6 @@ class RandomFailoverTest(TestLvolHACluster):
             sleep_n_sec(10)
             self.sbcli_utils.shutdown_node(node_uuid=self.current_outage_node, expected_error_code=[503])
             self.sbcli_utils.wait_for_storage_node_status(self.current_outage_node, "offline", timeout=4000)
-            sleep_n_sec(300)
         elif outage_type == "container_stop":
             self.ssh_obj.stop_spdk_process(node_ip)
         elif outage_type == "network_interrupt":
@@ -195,6 +196,8 @@ class RandomFailoverTest(TestLvolHACluster):
                 args=(node_ip, active_interfaces),
             )
             self.disconnect_thread.start()
+            
+        sleep_n_sec(120)
         
         return outage_type
 
