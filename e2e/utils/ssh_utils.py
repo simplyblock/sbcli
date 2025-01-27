@@ -7,7 +7,6 @@ import paramiko.ssh_exception
 from logger_config import setup_logger
 from pathlib import Path
 from datetime import datetime
-import re
 
 
 
@@ -804,8 +803,10 @@ class SshUtils:
             if block_all_ss_ports:
                 if not mgmt_ip:
                     raise ValueError("mgmt_ip must be provided when block_all_ss_ports is True.")
-                ss_output = self.exec_command(node_ip, f"ss -tnp | grep {mgmt_ip}")
-                ports_to_block = set(re.findall(r":(\d+)", ss_output))
+                cmd = "ss -tnp | grep %s | awk '{print $4}'" % mgmt_ip
+                ss_output, _ = self.exec_command(node_ip, cmd)
+                ip_with_ports = ss_output.split()
+                ports_to_block = set([r.split(":")[1] for r in ip_with_ports])
                 for port in ports_to_block:
                     if port not in blocked_ports:
                         self.exec_command(node_ip, f"sudo iptables -A OUTPUT -p tcp --sport {port} -j DROP")
