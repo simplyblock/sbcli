@@ -451,7 +451,7 @@ class TestLvolHAClusterPartialNetworkOutage(TestLvolHACluster):
         timestamp = int(datetime.now().timestamp())
 
         unavailable_thread = threading.Thread(
-            target=lambda: self.sbcli_utils.wait_for_storage_node_status(self.lvol_node, "offline", 4000)
+            target=lambda: self.sbcli_utils.wait_for_storage_node_status(self.lvol_node, "unreachable", 4000)
         )
         unavailable_thread.start()
         
