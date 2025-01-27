@@ -1,5 +1,12 @@
 from e2e_tests.single_node_outage import TestSingleNodeOutage
-from e2e_tests.single_node_failure import TestSingleNodeFailure
+from e2e_tests.single_node_failure import (
+    TestSingleNodeFailure,
+    TestHASingleNodeFailure
+)
+from e2e_tests.single_node_reboot import (
+    TestSingleNodeInstanceReboot,
+    TestHASingleNodeReboot
+)
 from e2e_tests.single_node_multi_fio_perf import (
     TestLvolFioNpcs0, TestLvolFioNpcs1, TestLvolFioNpcs2, TestLvolFioNpcsCustom
 )
@@ -9,13 +16,14 @@ from e2e_tests.cloning_and_snapshot.multi_lvol_snapshot_fio import TestMultiLvol
 from e2e_tests.ha_journal.lvol_journal_device_node_restart import TestDeviceNodeRestart
 from e2e_tests.data_migration.data_migration_ha_fio import FioWorkloadTest
 from e2e_tests.multi_node_crash_fio_clone import TestMultiFioSnapshotDowntime
-from e2e_tests.single_ha_node_failure import TestHASingleNodeFailure
+
 
 from stress_test.lvol_stress_fio_run import TestStressLvolClusterFioRun
 from stress_test.lvol_ha_stress_fio import (
     TestLvolHAClusterGracefulShutdown,
     TestLvolHAClusterStorageNodeCrash,
     TestLvolHAClusterNetworkInterrupt,
+    TestLvolHAClusterPartialNetworkOutage,
     TestLvolHAClusterRunAllScenarios
 )
 from stress_test.lvol_snap_clone_fio_failover import(
@@ -37,7 +45,9 @@ ALL_TESTS = [
     TestBatchLVOLsLimit,
     TestMultiLvolFio,
     TestDeviceNodeRestart,
-    TestHASingleNodeFailure
+    TestHASingleNodeFailure,
+    TestSingleNodeInstanceReboot,
+    TestHASingleNodeReboot
 ]
 
 def get_all_tests(custom=True, ha_test=False):
@@ -49,6 +59,8 @@ def get_all_tests(custom=True, ha_test=False):
         TestSingleNodeOutage,
         TestSingleNodeFailure,
         TestHASingleNodeFailure,
+        TestSingleNodeInstanceReboot,
+        TestHASingleNodeReboot
         # FioWorkloadTest,
         # TestMultiFioSnapshotDowntime,
         # TestManyLvolSameNode,
@@ -69,6 +81,7 @@ def get_all_tests(custom=True, ha_test=False):
         tests.remove(TestLvolFioNpcs2)
     if not ha_test:
         tests.remove(TestHASingleNodeFailure)
+        tests.remove(TestHASingleNodeReboot)
     return tests
 
 def get_stress_tests():
@@ -77,6 +90,7 @@ def get_stress_tests():
         TestLvolHAClusterGracefulShutdown,
         TestLvolHAClusterStorageNodeCrash,
         TestLvolHAClusterNetworkInterrupt,
+        TestLvolHAClusterPartialNetworkOutage,
         TestLvolHAClusterRunAllScenarios,
         TestFailoverScenariosStorageNodes,
         RandomFailoverTest,

@@ -8,7 +8,7 @@ from datetime import datetime
 import traceback
 from requests.exceptions import HTTPError
 
-class TestSingleNodeFailure(TestClusterBase):
+class TestSingleNodeInstanceReboot(TestClusterBase):
     """
     Steps:
     1. Create Storage Pool and Delete Storage pool
@@ -20,7 +20,7 @@ class TestSingleNodeFailure(TestClusterBase):
     7. While FIO is running, validate this scenario:
         a. In a cluster with three nodes, select one node, which does not
            have any lvol attached.
-        b. Stop the spdk docker container of that node
+        b. Reboot the instance
         c. Check status of objects during outage:
             - the node is in status “offline”
             - the devices of the node are in status “unavailable”
@@ -34,7 +34,7 @@ class TestSingleNodeFailure(TestClusterBase):
             - health-check status of all nodes and devices is “true”
         d. check that fio remains running without interruption.
 
-    8. Wait for node spdk to automatically restart.
+    8. Wait for node to become online.
         a. check the status again:
             - the status of all nodes is “online”
             - all devices in the cluster are in status “online”
@@ -104,6 +104,7 @@ class TestSingleNodeFailure(TestClusterBase):
         no_lvol_node_uuid = self.sbcli_utils.get_node_without_lvols()
         no_lvol_node = self.sbcli_utils.get_storage_node_details(storage_node_id=no_lvol_node_uuid)
         node_ip = no_lvol_node[0]["mgmt_ip"]
+        instance_id = no_lvol_node[0]["cloud_instance_id"]
         
         self.logger.info("Taking snapshot")
         self.ssh_obj.add_snapshot(node=self.mgmt_nodes[0],
@@ -120,7 +121,17 @@ class TestSingleNodeFailure(TestClusterBase):
                          )
         
         sleep_n_sec(30)
-        self.ssh_obj.stop_spdk_process(node=node_ip)
+        timestamp = int(datetime.now().timestamp())
+
+        if len(instance_id) > 0:
+            # AWS way stop
+            self.common_utils.stop_ec2_instance(ec2_resource=self.ec2_resource,
+                                                instance_id=instance_id)
+        else:
+            # Perform node reboot
+            reboot_thread = threading.Thread(target=self.ssh_obj.reboot_node, args=(node_ip, 300,),)
+            reboot_thread.start()
+
 
         try:
             self.logger.info(f"Waiting for node to become offline/unreachable, {no_lvol_node_uuid}")
@@ -179,6 +190,12 @@ class TestSingleNodeFailure(TestClusterBase):
             raise exp
 
         # self.sbcli_utils.restart_node(node_uuid=no_lvol_node_uuid)
+        if len(instance_id) > 0:
+            self.common_utils.start_ec2_instance(ec2_resource=self.ec2_resource,
+                                                 instance_id=instance_id)
+        else:
+            reboot_thread.join()
+
         self.logger.info(f"Waiting for node to become online, {no_lvol_node_uuid}")
         self.sbcli_utils.wait_for_storage_node_status(no_lvol_node_uuid, "online", timeout=300)
         sleep_n_sec(30)
@@ -195,6 +212,8 @@ class TestSingleNodeFailure(TestClusterBase):
             log_dir=self.docker_logs_path,
             test_name=self.test_name
         )
+        self.logger.info(f"Validating migration tasks for node {no_lvol_node_uuid}.")
+        self.validate_migration_for_node(timestamp, 5000, None)
 
         # Write steps in order
         steps = {
@@ -290,17 +309,11 @@ class TestSingleNodeFailure(TestClusterBase):
         final_lvl_checksum = set(final_lvl_checksum.values())
 
         assert original_checksum == final_lvl_checksum, "Checksum mismatch for lvol before and after clone"
-        
-        # total_fio_runtime = end_time - self.ssh_obj.fio_runtime["fio_run_1"]
-        # self.logger.info(f"FIO Run Time: {total_fio_runtime}")
-        
-        # assert  total_fio_runtime >= 500, \
-        #     f'FIO Run Time Interrupted before given runtime. Actual: {self.ssh_obj.fio_runtime["fio_run_1"]}'
 
         self.logger.info("TEST CASE PASSED !!!")
 
 
-class TestHASingleNodeFailure(TestClusterBase):
+class TestHASingleNodeReboot(TestClusterBase):
     """
     Steps:
     1. Create Storage Pool and Delete Storage pool
@@ -310,9 +323,8 @@ class TestHASingleNodeFailure(TestClusterBase):
     5. Mount Device
     6. Start FIO tests
     7. While FIO is running, validate this scenario:
-        a. In a cluster with three nodes, select one node, which does not
-           have any lvol attached.
-        b. Stop the spdk docker container of that node
+        a. In a cluster with three nodes, select one node, which has the lvol
+        b. Reboot the node
         c. Check status of objects during outage:
             - the node is in status “offline”
             - the devices of the node are in status “unavailable”
@@ -326,7 +338,7 @@ class TestHASingleNodeFailure(TestClusterBase):
             - health-check status of all nodes and devices is “true”
         d. check that fio remains running without interruption.
 
-    8. Wait for node spdk to automatically restart.
+    8. Wait for node to become online.
         a. check the status again:
             - the status of all nodes is “online”
             - all devices in the cluster are in status “online”
@@ -365,6 +377,7 @@ class TestHASingleNodeFailure(TestClusterBase):
 
         no_lvol_node_uuid = no_lvol_node['uuid']
         node_ip = no_lvol_node["mgmt_ip"]
+        instance_id = no_lvol_node["cloud_instance_id"]
 
         self.validations(node_uuid=no_lvol_node_uuid,
                          node_status="online",
@@ -374,9 +387,16 @@ class TestHASingleNodeFailure(TestClusterBase):
                          )
 
         for i in range(2):
-
+            timestamp = int(datetime.now().timestamp())
             sleep_n_sec(30)
-            self.ssh_obj.stop_spdk_process(node=node_ip)
+            if len(instance_id) > 0:
+                # AWS way stop
+                self.common_utils.stop_ec2_instance(ec2_resource=self.ec2_resource,
+                                                    instance_id=instance_id)
+            else:
+                # Perform node reboot
+                reboot_thread = threading.Thread(target=self.ssh_obj.reboot_node, args=(node_ip, 300,),)
+                reboot_thread.start()
 
             try:
                 self.logger.info(f"Waiting for node to become offline/unreachable, {no_lvol_node_uuid}")
@@ -393,6 +413,12 @@ class TestHASingleNodeFailure(TestClusterBase):
                 raise exp
 
             # self.sbcli_utils.restart_node(node_uuid=no_lvol_node_uuid)
+            if len(instance_id) > 0:
+                self.common_utils.start_ec2_instance(ec2_resource=self.ec2_resource,
+                                                    instance_id=instance_id)
+            else:
+                reboot_thread.join()
+
             self.logger.info(f"Waiting for node to become online, {no_lvol_node_uuid}")
             self.sbcli_utils.wait_for_storage_node_status(no_lvol_node_uuid, "online", timeout=300)
             sleep_n_sec(30)
@@ -402,6 +428,14 @@ class TestHASingleNodeFailure(TestClusterBase):
                              lvol_status="online",
                              health_check_status=True
                              )
+            self.ssh_obj.restart_docker_logging(
+                node_ip=node_ip,
+                containers=self.container_nodes[node_ip],
+                log_dir=self.docker_logs_path,
+                test_name=self.test_name
+            )
+            self.logger.info(f"Validating migration tasks for node {no_lvol_node_uuid}.")
+            self.validate_migration_for_node(timestamp, 5000, None)
 
 
         # Write steps in order

@@ -47,8 +47,8 @@ class RandomFailoverTest(TestLvolHACluster):
         self.outage_end_time = None
         self.node_vs_lvol = {}
         self.test_name = "continuous_random_failover_ha"
-        # self.outage_types = ["partial_nw", "full_nw", "spdk_crash", "graceful_shutdown"]
-        self.outage_types = ["network_interrupt", "container_stop", "graceful_shutdown"]
+        self.outage_types = ["partial_nw", "full_nw", "spdk_crash", "graceful_shutdown"]
+        self.blocked_ports = None
         self.outage_log_file = os.path.join("logs" ,f"outage_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
         self._initialize_outage_log()
 
@@ -196,6 +196,10 @@ class RandomFailoverTest(TestLvolHACluster):
                 args=(node_ip, active_interfaces),
             )
             self.disconnect_thread.start()
+        elif outage_type == "partial_nw":
+            ports_to_block = [4420, 8080, 5000, 2270]
+            self.blocked_ports = self.ssh_obj.partial_nw_outage(node_ip=node_ip, mgmt_ip=self.mgmt_nodes[0],
+                                                                block_ports=ports_to_block, block_all_ss_ports=True)
             
         sleep_n_sec(120)
         
@@ -204,16 +208,19 @@ class RandomFailoverTest(TestLvolHACluster):
     
     def restart_nodes_after_failover(self, outage_type):
         """Perform steps for node restart."""
+        node_details = self.sbcli_utils.get_storage_node_details(self.current_outage_node)
+        node_ip = node_details[0]["mgmt_ip"]
         self.logger.info(f"Performing/Waiting for {outage_type} restart on node {self.current_outage_node}.")
         if outage_type == "graceful_shutdown":
             self.sbcli_utils.restart_node(node_uuid=self.current_outage_node, expected_error_code=[503])
         elif outage_type == "network_interrupt":
             self.disconnect_thread.join()
+        elif outage_type == "partial_nw":
+            self.ssh_obj.remove_partial_nw_outage(node_ip=node_ip, blocked_ports=self.blocked_ports)
         self.sbcli_utils.wait_for_storage_node_status(self.current_outage_node, "online", timeout=4000)
         self.sbcli_utils.wait_for_health_status(self.current_outage_node, True, timeout=4000)
         self.outage_end_time = int(datetime.now().timestamp())
-        node_details = self.sbcli_utils.get_storage_node_details(self.current_outage_node)
-        node_ip = node_details[0]["mgmt_ip"]
+        
         self.ssh_obj.restart_docker_logging(
             node_ip=node_ip,
             containers=self.container_nodes[node_ip],
@@ -397,8 +404,7 @@ class RandomFailoverTest(TestLvolHACluster):
         storage_nodes = self.sbcli_utils.get_storage_nodes()
 
         for result in storage_nodes['results']:
-            if result["is_secondary_node"] is False:
-                self.sn_nodes.append(result["uuid"])
+            self.sn_nodes.append(result["uuid"])
         
         while True:
             outage_type = self.perform_random_outage()

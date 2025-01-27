@@ -7,6 +7,7 @@ import paramiko.ssh_exception
 from logger_config import setup_logger
 from pathlib import Path
 from datetime import datetime
+import re
 
 
 
@@ -728,5 +729,110 @@ class SshUtils:
         except Exception as e:
             self.logger.error(f"Error fetching running containers on {node_ip}: {e}")
         return containers_by_node
+    
+    def reboot_node(self, node_ip, wait_time=300):
+        """
+        Reboot a node using SSH and wait for it to come online.
 
+        Args:
+            node_ip (str): IP address of the node to reboot.
+            wait_time (int): Maximum time (in seconds) to wait for the node to come online.
+        """
+        try:
+            self.logger.info(f"Initiating reboot for node: {node_ip}")
+            # Execute the reboot command
+            reboot_command = "sudo reboot"
+            self.exec_command(node=node_ip, command=reboot_command)
+            self.logger.info(f"Reboot command executed for node: {node_ip}")
+            
+            # Disconnect the current SSH connection
+            if node_ip in self.ssh_connections:
+                self.ssh_connections[node_ip].close()
+                del self.ssh_connections[node_ip]
+            
+            time.sleep(10)
+            
+            # Wait for the node to come online
+            self.logger.info(f"Waiting for node {node_ip} to come online...")
+            start_time = time.time()
+            while time.time() - start_time < wait_time:
+                try:
+                    # Attempt to reconnect
+                    self.connect(address=node_ip,
+                                 bastion_server_address=self.bastion_server)
+                    self.logger.info(f"Node {node_ip} is back online.")
+                    return True
+                except Exception as e:
+                    self.logger.info(f"Node {node_ip} is not online yet: {e}")
+                    time.sleep(10)  # Wait before retrying
+            
+            self.logger.error(f"Node {node_ip} failed to come online within {wait_time} seconds.")
+            return False
 
+        except Exception as e:
+            self.logger.error(f"Error during node reboot for {node_ip}: {e}")
+            return False
+        
+    def partial_nw_outage(self, node_ip, mgmt_ip=None, block_ports=None, block_all_ss_ports=False):
+        """
+        Simulate a partial network outage by blocking specific ports.
+        Optionally, block all ports listed by `ss` command for the given management IP.
+
+        Args:
+            node_ip (str): IP address of the target node.
+            mgmt_ip (str, optional): Management IP address to filter the `ss` command output. Required if block_all_ss_ports is True.
+            block_ports (list): List of ports to block.
+            block_all_ss_ports (bool): If True, block all ports listed by the `ss` command for the given mgmt_ip.
+
+        Returns:
+            list: List of all blocked ports (unique).
+        """
+        blocked_ports = set()  # Use a set to ensure uniqueness
+        try:
+            if block_ports is None:
+                block_ports = []
+
+            # Block explicitly provided ports
+            for port in block_ports:
+                if port not in blocked_ports:
+                    self.exec_command(node_ip, f"sudo iptables -A OUTPUT -p tcp --sport {port} -j DROP")
+                    self.exec_command(node_ip, f"sudo iptables -A INPUT -p tcp --dport {port} -j DROP")
+                    self.logger.info(f"Blocked port {port} on {node_ip}.")
+                    blocked_ports.add(port)
+
+            # If flag is set, block all ports from the `ss` command filtered by mgmt_ip
+            if block_all_ss_ports:
+                if not mgmt_ip:
+                    raise ValueError("mgmt_ip must be provided when block_all_ss_ports is True.")
+                ss_output = self.exec_command(node_ip, f"ss -tnp | grep {mgmt_ip}")
+                ports_to_block = set(re.findall(r":(\d+)", ss_output))
+                for port in ports_to_block:
+                    if port not in blocked_ports:
+                        self.exec_command(node_ip, f"sudo iptables -A OUTPUT -p tcp --sport {port} -j DROP")
+                        self.exec_command(node_ip, f"sudo iptables -A INPUT -p tcp --dport {port} -j DROP")
+                        self.logger.info(f"Blocked port {port} for mgmt_ip {mgmt_ip} on {node_ip}.")
+                        blocked_ports.add(port)
+
+        except Exception as e:
+            self.logger.error(f"Failed to block ports on {node_ip}: {e}")
+
+        return list(blocked_ports)  # Return as a list for consistency
+
+    def remove_partial_nw_outage(self, node_ip, blocked_ports):
+        """
+        Remove partial network outage by unblocking specified ports.
+
+        Args:
+            node_ip (str): IP address of the target node.
+            blocked_ports (list): List of ports to unblock.
+
+        Returns:
+            None
+        """
+        try:
+            for port in blocked_ports:
+                self.exec_command(node_ip, f"sudo iptables -D OUTPUT -p tcp --sport {port} -j DROP")
+                self.exec_command(node_ip, f"sudo iptables -D INPUT -p tcp --dport {port} -j DROP")
+                self.logger.info(f"Unblocked port {port} on {node_ip}.")
+        except Exception as e:
+            self.logger.error(f"Failed to unblock ports on {node_ip}: {e}")
