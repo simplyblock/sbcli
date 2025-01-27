@@ -314,6 +314,29 @@ class CLIWrapper:
         sub_command.add_argument("--strict-node-anti-affinity", help='Enable strict node anti affinity for storage nodes', action='store_true')
         
         
+        sub_command.add_argument("--partitions", help='Number of partitions to create per device', type=int, default=1)
+        sub_command.add_argument("--jm-percent", help='Number in percent to use for JM from each device',
+                                 type=int, default=3, dest='jm_percent')
+        sub_command.add_argument("--data-nics", help='Data interface names', nargs='+', dest='data_nics')
+        sub_command.add_argument("--max-lvol", help='Max lvol per storage node', dest='max_lvol', type=int)
+        sub_command.add_argument("--max-snap", help='Max snapshot per storage node', dest='max_snap', type=int, default=500)
+        sub_command.add_argument("--max-prov", help='Maximum amount of GB to be provisioned via all storage nodes', dest='max_prov')
+        sub_command.add_argument("--number-of-distribs", help='The number of distirbs to be created on the node', dest='number_of_distribs', type=int, default=2)
+        sub_command.add_argument("--number-of-devices", help='Number of devices per storage node if it\'s not supported EC2 instance', dest='number_of_devices', type=int)
+        sub_command.add_argument("--size-of-device", help='Size of device per storage node', dest='partition_size')
+        sub_command.add_argument("--cpu-mask", help='SPDK app CPU mask, default is all cores found', dest='spdk_cpu_mask')
+
+        sub_command.add_argument("--spdk-image", help='SPDK image uri', dest='spdk_image')
+        sub_command.add_argument("--spdk-debug", help='Enable spdk debug logs', dest='spdk_debug', required=False, action='store_true')
+
+        sub_command.add_argument("--iobuf_small_bufsize", help='bdev_set_options param', dest='small_bufsize',  type=int, default=0)
+        sub_command.add_argument("--iobuf_large_bufsize", help='bdev_set_options param', dest='large_bufsize',  type=int, default=0)
+        sub_command.add_argument("--enable-test-device", help='Enable creation of test device', action='store_true')
+        sub_command.add_argument("--disable-ha-jm", help='Disable HA JM for distrib creation', action='store_false', dest='enable_ha_jm', default=True)
+        sub_command.add_argument("--is-secondary-node", help='add as secondary node', action='store_true', dest='is_secondary_node', default=False)
+        sub_command.add_argument("--namespace", help='k8s namespace to deploy on',)
+        sub_command.add_argument("--id-device-by-nqn", help='Use device nqn to identify it instead of serial number', action='store_true', dest='id_device_by_nqn', default=False)
+        
 
         sub_command = self.add_sub_command(subparser, 'create',
                                            'Create an new cluster with this node as mgmt (local run)')
@@ -1364,7 +1387,8 @@ class CLIWrapper:
             qpair_count, max_queue_size, inflight_io_threshold, enable_qos, strict_node_anti_affinity)
 
 
-    def cluster_deploy(self,args){
+    def cluster_deploy(self,args):
+        
         storage_nodes = args.storage_nodes
         test = args.test
         ha_type = args.ha_type
@@ -1391,13 +1415,42 @@ class CLIWrapper:
         inflight_io_threshold = args.inflight_io_threshold
         strict_node_anti_affinity = args.strict_node_anti_affinity
         
+        data_nics = args.data_nics
+        spdk_image = args.spdk_image
+        spdk_debug = args.spdk_debug
+
+        small_bufsize = args.small_bufsize
+        large_bufsize = args.large_bufsize
+        num_partitions_per_dev = args.partitions
+        jm_percent = args.jm_percent
+        spdk_cpu_mask = None
+        if args.spdk_cpu_mask:
+            if self.validate_cpu_mask(args.spdk_cpu_mask):
+                spdk_cpu_mask = args.spdk_cpu_mask
+            else:
+                return f"Invalid cpu mask value: {args.spdk_cpu_mask}"
+
+        max_lvol = args.max_lvol
+        max_snap = args.max_snap
+        max_prov = args.max_prov
+        number_of_devices = args.number_of_devices
+        enable_test_device = args.enable_test_device
+        enable_ha_jm = args.enable_ha_jm
+        number_of_distribs = args.number_of_distribs
+        namespace = args.namespace
+        
+        
+        
+        
         return cluster_ops.deploy_cluster(
             storage_nodes,test,ha_type,distr_ndcs,distr_npcs,enable_qos,ifname,
             blk_size, page_size_in_blocks,CLI_PASS, cap_warn, cap_crit, prov_cap_warn, 
             prov_cap_crit,log_del_interval, metrics_retention_period, contact_point, grafana_endpoint,
             distr_bs, distr_chunk_bs, enable_node_affinity,
-            qpair_count, max_queue_size, inflight_io_threshold, strict_node_anti_affinity)
-    }
+            qpair_count, max_queue_size, inflight_io_threshold, strict_node_anti_affinity,data_nics,
+            spdk_image,spdk_debug,small_bufsize,large_bufsize,num_partitions_per_dev,jm_percent,spdk_cpu_mask,max_lvol,
+            max_snap,max_prov,number_of_devices,enable_test_device,enable_ha_jm,number_of_distribs,namespace)
+
     def cluster_create(self, args):
         page_size_in_blocks = args.page_size
         blk_size = args.blk_size

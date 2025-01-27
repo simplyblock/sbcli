@@ -265,7 +265,11 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
 def deploy_cluster(storage_nodes,test,ha_type,distr_ndcs,distr_npcs,enable_qos,ifname,blk_size, page_size_in_blocks, cli_pass,
                    cap_warn, cap_crit, prov_cap_warn, prov_cap_crit, log_del_interval, metrics_retention_period,
                    contact_point, grafana_endpoint, distr_bs, distr_chunk_bs,
-                   enable_node_affinity, qpair_count, max_queue_size, inflight_io_threshold, strict_node_anti_affinity):
+                   enable_node_affinity, qpair_count, max_queue_size, inflight_io_threshold, strict_node_anti_affinity,
+                   data_nics,spdk_image,spdk_debug,small_bufsize,large_bufsize,num_partitions_per_dev,jm_percent,
+                   spdk_cpu_mask,max_lvol,max_snap,max_prov,number_of_devices,enable_test_device,enable_ha_jm,
+                   number_of_distribs,namespace):
+    
     logger.info("creating cluster")
     cluster_uuid = create_cluster(
             blk_size, page_size_in_blocks,
@@ -275,7 +279,19 @@ def deploy_cluster(storage_nodes,test,ha_type,distr_ndcs,distr_npcs,enable_qos,i
             qpair_count, max_queue_size, inflight_io_threshold, enable_qos, strict_node_anti_affinity)
     
     for node in storage_nodes:
-        storage_node_ops.add_node(cluster_uuid,node,ifname,)
+        dev_ip=storage_node_ops.deploy(ifname)
+        
+        add_node_status=storage_node_ops.add_node(cluster_uuid,dev_ip,ifname,data_nics,max_lvol,max_snap,max_prov,spdk_image,spdk_debug,
+                                  small_bufsize,large_bufsize,spdk_cpu_mask,num_partitions_per_dev,jm_percent,number_of_devices,
+                                  enable_test_device,namespace,number_of_distribs,enable_ha_jm,False,False,"")
+        
+        if not add_node_status:
+            logger.error("Could not add storage node successfully")
+            return False
+
+        if test:
+            
+        
     
 
 def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
