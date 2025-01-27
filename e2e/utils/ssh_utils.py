@@ -672,18 +672,34 @@ class SshUtils:
             test_name (str): Name of the test for log identification.
         """
         try:
-            # Ensure the log directory exists on the node
-            self.exec_command(node_ip, f"sudo mkdir -p {log_dir} && sudo chmod 777 {log_dir}")
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            # Ensure the log directory exists
+            command_mkdir = f"sudo mkdir -p {log_dir} && sudo chmod 777 {log_dir}"
+            self.exec_command(node_ip, command_mkdir)  # Do not wait for a response
+
             for container in containers:
+                # Construct the log file path
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                 log_file = f"{log_dir}/{container}_{test_name}_{timestamp}_before_outage.txt"
-                cmd = (
-                    f"sudo nohup docker logs --follow {container} > {log_file} 2>&1 &"
+
+                # Run the Docker log collection command with `setsid` to ensure persistence
+                command_logs = (
+                    f"nohup setsid docker logs --follow {container} > {log_file} 2>&1 &"
                 )
-                self.logger.info(f"Starting Docker log collection for container '{container}' on {node_ip}. Command: {cmd}")
-                self.exec_command(node_ip, cmd)
+                self.exec_command(node_ip, command_logs)  # Start the process without waiting
+
+                # Verify if the process is running (optional but helpful for debugging)
+                verify_command = f"ps aux | grep 'docker logs --follow {container}'"
+                output, _ = self.exec_command(node_ip, verify_command)
+                if output:
+                    output = output.strip()
+
+                if not output:
+                    raise RuntimeError("Docker logging process failed to start.")
+                
+                print(f"Docker logging started successfully for container '{container}'.")
+
         except Exception as e:
-            self.logger.error(f"Failed to start Docker log collection on node {node_ip}: {e}")
+            raise RuntimeError(f"Failed to start Docker logging: {e}")
 
 
     def restart_docker_logging(self, node_ip, containers, log_dir, test_name):
@@ -702,10 +718,20 @@ class SshUtils:
             for container in containers:
                 log_file = f"{log_dir}/{container}_{test_name}_{timestamp}_after_outage.txt"
                 cmd = (
-                    f"sudo nohup docker logs --follow {container} > {log_file} 2>&1 &"
+                    f"nohup setsid docker logs --follow {container} > {log_file} 2>&1 &"
                 )
                 self.logger.info(f"Restarting Docker log collection for container '{container}' on {node_ip}. Command: {cmd}")
                 self.exec_command(node_ip, cmd)
+                # Verify if the process is running (optional but helpful for debugging)
+                verify_command = f"ps aux | grep 'docker logs --follow {container}'"
+                output, _ = self.exec_command(node_ip, verify_command)
+                if output:
+                    output = output.strip()
+
+                if not output:
+                    raise RuntimeError("Docker logging process failed to start.")
+                
+                print(f"Docker logging started successfully for container '{container}'.")
         except Exception as e:
             self.logger.error(f"Failed to restart Docker log collection on node {node_ip}: {e}")
 

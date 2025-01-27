@@ -463,11 +463,15 @@ class TestLvolHAClusterPartialNetworkOutage(TestLvolHACluster):
         )
 
         unavailable_thread.join()
+        sleep_n_sec(300)
 
         self.validate_checksums()
 
         restart_start_time = datetime.now()
         self.ssh_obj.remove_partial_nw_outage(node_ip=node_ip, blocked_ports=ports_blocked)
+        self.sbcli_utils.wait_for_storage_node_status(self.lvol_node,
+                                                      "in_restart",
+                                                      timeout=4000)
         self.sbcli_utils.wait_for_storage_node_status(self.lvol_node,
                                                       "online",
                                                       timeout=4000)
