@@ -25,11 +25,6 @@ on:
         description: 'Name of test to run. Empty to run all'
         required: false
         default: ''
-      send_slack_notification:
-        description: 'Send Slack notification?'
-        required: false
-        default: false
-        type: boolean
       ndcs:
         description: 'Value for NDCS'
         required: false
@@ -46,6 +41,16 @@ on:
         description: 'Value for Chunk block size'
         required: false
         default: 4096
+      send_slack_notification:
+        description: 'Send Slack notification?'
+        required: false
+        default: false
+        type: boolean
+      run_ha_test:
+        description: 'Run HA tests or not'
+        required: false
+        default: true
+        type: boolean
 
 jobs:
   e2e:
@@ -170,7 +175,7 @@ jobs:
             TESTNAME="--testname ${{ github.event.inputs.testname }}"
           fi
           python3 e2e.py $TESTNAME \
-                  --ndcs $NDCS --npcs $NPCS --bs $BS --chunk_bs $CHUNK_BS
+                  --ndcs $NDCS --npcs $NPCS --bs $BS --chunk_bs $CHUNK_BS --run_ha ${{ github.event.inputs.run_ha_test }}
         env:
           SBCLI_CMD: ${{ env.SBCLI_CMD }}
           NDCS: ${{ env.NDCS }}

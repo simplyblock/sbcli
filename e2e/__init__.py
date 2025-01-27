@@ -40,7 +40,7 @@ ALL_TESTS = [
     TestHASingleNodeFailure
 ]
 
-def get_all_tests(custom=True, k8s_test=False):
+def get_all_tests(custom=True, ha_test=False):
     tests = [
         TestLvolFioNpcsCustom,
         TestLvolFioNpcs0,
@@ -48,6 +48,7 @@ def get_all_tests(custom=True, k8s_test=False):
         TestLvolFioNpcs2,
         TestSingleNodeOutage,
         TestSingleNodeFailure,
+        TestHASingleNodeFailure,
         # FioWorkloadTest,
         # TestMultiFioSnapshotDowntime,
         # TestManyLvolSameNode,
@@ -66,6 +67,8 @@ def get_all_tests(custom=True, k8s_test=False):
         tests.remove(TestLvolFioNpcs0)
         tests.remove(TestLvolFioNpcs1)
         tests.remove(TestLvolFioNpcs2)
+    if not ha_test:
+        tests.remove(TestHASingleNodeFailure)
     return tests
 
 def get_stress_tests():
