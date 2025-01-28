@@ -29,9 +29,9 @@ def main():
     args = parser.parse_args()
 
     if args.ndcs == 0 and args.npcs == 0:
-        tests = get_all_tests(custom=False, k8s_test=args.run_k8s, ha_test=args.run_ha)
+        tests = get_all_tests(custom=False, ha_test=args.run_ha)
     else:
-        tests = get_all_tests(custom=True, k8s_test=args.run_k8s, ha_test=args.run_ha)
+        tests = get_all_tests(custom=True, ha_test=args.run_ha)
 
     test_class_run = []
     if args.testname is None or len(args.testname.strip()) == 0:
