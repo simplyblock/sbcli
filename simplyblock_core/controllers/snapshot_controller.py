@@ -102,10 +102,15 @@ def add(lvol_id, snapshot_name):
         return False, "Failed to create snapshot bdev"
 
     size = lvol.size
+    used_size = 0
     snap_bdev = rpc_client.get_bdevs(f"{lvol.lvs_name}/{snap_bdev_name}")
     if snap_bdev:
         snap_uuid = snap_bdev[0]['uuid']
         blobid = snap_bdev[0]['driver_specific']['lvol']['blobid']
+        cluster = db_controller.get_cluster_by_id(pool.cluster_id)
+        cluster_size = cluster.distr_ndcs * cluster.page_size_in_blocks
+        num_allocated_clusters = snap_bdev[0]["driver_specific"]["lvol"]["num_allocated_clusters"]
+        used_size = int(num_allocated_clusters*cluster_size)
 
     if snode.secondary_node_id and blobid:
         sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
@@ -120,6 +125,7 @@ def add(lvol_id, snapshot_name):
     snap.uuid = str(uuid.uuid4())
     snap.snap_uuid = snap_uuid
     snap.size = size
+    snap.used_size = used_size
     snap.blobid = blobid
     snap.pool_uuid = pool.get_id()
     snap.cluster_id = pool.cluster_id
@@ -156,6 +162,7 @@ def list(all=False):
         data.append({
             "UUID": snap.uuid,
             "Name": snap.snap_name,
+            "Used Size": utils.humanbytes(snap.used_size),
             "Size": utils.humanbytes(snap.size),
             "BDev": snap.snap_bdev,
             "LVol ID": snap.lvol.get_id(),
