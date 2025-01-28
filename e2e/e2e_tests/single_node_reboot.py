@@ -134,9 +134,9 @@ class TestSingleNodeReboot(TestClusterBase):
 
 
         try:
-            self.logger.info(f"Waiting for node to become offline/unreachable, {no_lvol_node_uuid}")
+            self.logger.info(f"Waiting for node to become offline/unreachable/schedulable, {no_lvol_node_uuid}")
             self.sbcli_utils.wait_for_storage_node_status(no_lvol_node_uuid,
-                                                          ["unreachable", "offline"],
+                                                          ["unreachable", "offline", "schedulable"],
                                                           timeout=500)
             # sleep_n_sec(30)
             # self.validations(node_uuid=no_lvol_node_uuid,
@@ -183,6 +183,11 @@ class TestSingleNodeReboot(TestClusterBase):
         except Exception as exp:
             self.logger.debug(exp)
             # self.sbcli_utils.restart_node(node_uuid=no_lvol_node_uuid)
+            if "i-" in instance_id[0:2]:
+                self.common_utils.start_ec2_instance(ec2_resource=self.ec2_resource,
+                                                     instance_id=instance_id)
+            else:
+                reboot_thread.join()
             self.logger.info(f"Waiting for node to become online, {no_lvol_node_uuid}")
             self.sbcli_utils.wait_for_storage_node_status(no_lvol_node_uuid,
                                                           "online",
@@ -399,12 +404,17 @@ class TestHASingleNodeReboot(TestClusterBase):
                 reboot_thread.start()
 
             try:
-                self.logger.info(f"Waiting for node to become offline/unreachable, {no_lvol_node_uuid}")
+                self.logger.info(f"Waiting for node to become offline/unreachable/schedulable, {no_lvol_node_uuid}")
                 self.sbcli_utils.wait_for_storage_node_status(no_lvol_node_uuid,
-                                                              ["unreachable", "offline"],
+                                                              ["unreachable", "offline", "schedulable"],
                                                               timeout=500)
             except Exception as exp:
                 self.logger.debug(exp)
+                if "i-" in instance_id[0:2]:
+                    self.common_utils.start_ec2_instance(ec2_resource=self.ec2_resource,
+                                                         instance_id=instance_id)
+                else:
+                    reboot_thread.join()
                 # self.sbcli_utils.restart_node(node_uuid=no_lvol_node_uuid)
                 self.logger.info(f"Waiting for node to become online, {no_lvol_node_uuid}")
                 self.sbcli_utils.wait_for_storage_node_status(no_lvol_node_uuid,
