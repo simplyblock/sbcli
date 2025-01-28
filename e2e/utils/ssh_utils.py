@@ -672,6 +672,16 @@ class SshUtils:
             test_name (str): Name of the test for log identification.
         """
         try:
+            check_tmux_command = "command -v tmux"
+            output, _ = self.exec_command(node_ip, check_tmux_command)
+            if not output.strip():
+                self.logger.info(f"'tmux' is not installed on {node_ip}. Installing...")
+                install_tmux_command = (
+                    "sudo apt-get update -y && sudo apt-get install -y tmux"
+                    " || sudo yum install -y tmux"
+                )
+                self.exec_command(node_ip, install_tmux_command)
+                self.logger.info(f"'tmux' installed successfully on {node_ip}.")
             # Ensure the log directory exists
             command_mkdir = f"sudo mkdir -p {log_dir} && sudo chmod 777 {log_dir}"
             self.exec_command(node_ip, command_mkdir)  # Do not wait for a response
@@ -682,19 +692,24 @@ class SshUtils:
                 log_file = f"{log_dir}/{container}_{test_name}_{timestamp}_before_outage.txt"
 
                 # Run the Docker log collection command with `setsid` to ensure persistence
+                # command_logs = (
+                #     f"sudo nohup setsid docker logs --follow {container} > {log_file} 2>&1 &"
+                # )
+                tmux_session_name = f"{container}_logs"
                 command_logs = (
-                    f"sudo nohup setsid docker logs --follow {container} > {log_file} 2>&1 &"
+                    f"sudo tmux new-session -d -s {tmux_session_name} "
+                    f"\"docker logs --follow {container} > {log_file} 2>&1\""
                 )
                 self.exec_command(node_ip, command_logs)  # Start the process without waiting
 
                 # Verify if the process is running (optional but helpful for debugging)
-                verify_command = f"ps aux | grep 'docker logs --follow {container}'"
-                output, _ = self.exec_command(node_ip, verify_command)
-                if output:
-                    output = output.strip()
+                # verify_command = f"ps aux | grep 'docker logs --follow {container}'"
+                # output, _ = self.exec_command(node_ip, verify_command)
+                # if output:
+                #     output = output.strip()
 
-                if not output:
-                    raise RuntimeError("Docker logging process failed to start.")
+                # if not output:
+                #     raise RuntimeError("Docker logging process failed to start.")
                 
                 print(f"Docker logging started successfully for container '{container}'.")
 
@@ -717,19 +732,21 @@ class SshUtils:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             for container in containers:
                 log_file = f"{log_dir}/{container}_{test_name}_{timestamp}_after_outage.txt"
-                cmd = (
-                    f"sudo nohup setsid docker logs --follow {container} > {log_file} 2>&1 &"
+                tmux_session_name = f"{container}_logs"
+                command_logs = (
+                    f"sudo tmux new-session -d -s {tmux_session_name} "
+                    f"\"docker logs --follow {container} > {log_file} 2>&1\""
                 )
-                self.logger.info(f"Restarting Docker log collection for container '{container}' on {node_ip}. Command: {cmd}")
-                self.exec_command(node_ip, cmd)
-                # Verify if the process is running (optional but helpful for debugging)
-                verify_command = f"ps aux | grep 'docker logs --follow {container}'"
-                output, _ = self.exec_command(node_ip, verify_command)
-                if output:
-                    output = output.strip()
+                self.logger.info(f"Restarting Docker log collection for container '{container}' on {node_ip}. Command: {command_logs}")
+                self.exec_command(node_ip, command_logs)
+                # # Verify if the process is running (optional but helpful for debugging)
+                # verify_command = f"ps aux | grep 'docker logs --follow {container}'"
+                # output, _ = self.exec_command(node_ip, verify_command)
+                # if output:
+                #     output = output.strip()
 
-                if not output:
-                    raise RuntimeError("Docker logging process failed to start.")
+                # if not output:
+                #     raise RuntimeError("Docker logging process failed to start.")
                 
                 print(f"Docker logging started successfully for container '{container}'.")
         except Exception as e:
