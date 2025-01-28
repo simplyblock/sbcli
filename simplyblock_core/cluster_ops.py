@@ -355,14 +355,17 @@ def deploy_cluster(storage_nodes,test,ha_type,distr_ndcs,distr_npcs,enable_qos,i
     
     
     if test:
-        pool_id=pool_controller.add_pool("testing2",100,10,"","","","","",cluster_uuid)
+        pool_max = utils.parse_size("100G")
+        lvol_max = utils.parse_size("20G")
+        
+        pool_id=pool_controller.add_pool("testing2",pool_max,lvol_max,"","","","","",cluster_uuid)
         
         if not pool_id:
             logger.error("pool did not create successfully")
 
         
-
-        lvol_uuid=lvol_controller.add_lvol_ha("testt","10G","",ha_type,pool_id,False,False,"","","","","","","","","","","","")
+        lvol_size = utils.parse_size("10G")
+        lvol_uuid=lvol_controller.add_lvol_ha("testt",lvol_size,"",ha_type,pool_id,False,False,"","","","","","","","","","","","")
         
         if not lvol_uuid:
             logger.error("lvol creation failed")
