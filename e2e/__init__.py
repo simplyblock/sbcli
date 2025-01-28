@@ -4,7 +4,7 @@ from e2e_tests.single_node_failure import (
     TestHASingleNodeFailure
 )
 from e2e_tests.single_node_reboot import (
-    TestSingleNodeInstanceReboot,
+    TestSingleNodeReboot,
     TestHASingleNodeReboot
 )
 from e2e_tests.single_node_multi_fio_perf import (
@@ -46,7 +46,7 @@ ALL_TESTS = [
     TestMultiLvolFio,
     TestDeviceNodeRestart,
     TestHASingleNodeFailure,
-    TestSingleNodeInstanceReboot,
+    TestSingleNodeReboot,
     TestHASingleNodeReboot
 ]
 
@@ -59,7 +59,7 @@ def get_all_tests(custom=True, ha_test=False):
         TestSingleNodeOutage,
         TestSingleNodeFailure,
         TestHASingleNodeFailure,
-        TestSingleNodeInstanceReboot,
+        TestSingleNodeReboot,
         TestHASingleNodeReboot
         # FioWorkloadTest,
         # TestMultiFioSnapshotDowntime,
