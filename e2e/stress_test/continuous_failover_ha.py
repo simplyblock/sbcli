@@ -409,7 +409,7 @@ class RandomFailoverTest(TestLvolHACluster):
         storage_nodes = self.sbcli_utils.get_storage_nodes()
 
         for result in storage_nodes['results']:
-            if result['is_secondary_node'] is False
+            if result['is_secondary_node'] is False:
                 self.sn_nodes.append(result["uuid"])
         
         while True:
