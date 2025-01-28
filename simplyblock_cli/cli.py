@@ -1441,6 +1441,7 @@ class CLIWrapper:
         enable_ha_jm = args.enable_ha_jm
         number_of_distribs = args.number_of_distribs
         namespace = args.namespace
+        secondary_nodes = args.secondary_nodes
         
         
         
@@ -1453,7 +1454,7 @@ class CLIWrapper:
             distr_bs, distr_chunk_bs, enable_node_affinity,
             qpair_count, max_queue_size, inflight_io_threshold, strict_node_anti_affinity,data_nics,
             spdk_image,spdk_debug,small_bufsize,large_bufsize,num_partitions_per_dev,jm_percent,spdk_cpu_mask,max_lvol,
-            max_snap,max_prov,number_of_devices,enable_test_device,enable_ha_jm,number_of_distribs,namespace)
+            max_snap,max_prov,number_of_devices,enable_test_device,enable_ha_jm,number_of_distribs,namespace,secondary_nodes)
 
     def cluster_create(self, args):
         page_size_in_blocks = args.page_size
