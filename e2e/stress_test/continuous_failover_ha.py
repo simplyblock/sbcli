@@ -409,7 +409,8 @@ class RandomFailoverTest(TestLvolHACluster):
         storage_nodes = self.sbcli_utils.get_storage_nodes()
 
         for result in storage_nodes['results']:
-            self.sn_nodes.append(result["uuid"])
+            if result['is_secondary_node'] is False
+                self.sn_nodes.append(result["uuid"])
         
         while True:
             outage_type = self.perform_random_outage()
