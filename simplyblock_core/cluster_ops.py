@@ -316,8 +316,11 @@ def deploy_cluster(storage_nodes,test,ha_type,distr_ndcs,distr_npcs,enable_qos,i
             distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, enable_node_affinity,
             qpair_count, max_queue_size, inflight_io_threshold, enable_qos, strict_node_anti_affinity)
     
-    for node in storage_nodes:
-        dev_ip=f"{node}:5000"
+    storage_nodes_list=storage_nodes.split(",")
+    
+    for node in storage_nodes_list:
+        node_ip = node.strip()
+        dev_ip=f"{node_ip}:5000"
         
         add_node_status=storage_node_ops.add_node(cluster_uuid,dev_ip,ifname,data_nics,max_lvol,max_snap,max_prov,spdk_image,spdk_debug,
                                   small_bufsize,large_bufsize,spdk_cpu_mask,num_partitions_per_dev,jm_percent,number_of_devices,

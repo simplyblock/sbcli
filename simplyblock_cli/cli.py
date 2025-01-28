@@ -267,7 +267,7 @@ class CLIWrapper:
         sub_command = self.add_sub_command(subparser,'deploy',
                                            'Deploy storage nodes')
         sub_command.add_argument(
-            "--storage-nodes",type=list 
+            "--storage-nodes",type=str,help='comma separated ip addresses'
         )
         sub_command.add_argument(
             "--test", type=bool
