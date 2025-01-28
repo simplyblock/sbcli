@@ -1555,7 +1555,7 @@ def restart_storage_node(
         node_id, max_lvol=0, max_snap=0, max_prov=0,
         spdk_image=None, set_spdk_debug=None,
         small_bufsize=0, large_bufsize=0, number_of_devices=0,
-        force=False, node_ip=None, clear_data=False):
+        force=False, node_ip=None, reattach_volume=False, clear_data=False):
 
     db_controller = DBController()
     kv_store = db_controller.kv_store
@@ -1614,7 +1614,7 @@ def restart_storage_node(
             snode.data_nics = data_nics
             snode.hostname = node_info['hostname']
 
-            if snode.num_partitions_per_dev == 0:
+            if snode.num_partitions_per_dev == 0 and reattach_volume:
                 new_cloud_instance_id = node_info['cloud_instance']['id']
                 detached_volumes = node_utils.detach_ebs_volumes(snode.cloud_instance_id)
                 if not detached_volumes:

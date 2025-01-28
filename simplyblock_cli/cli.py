@@ -93,6 +93,7 @@ class CLIWrapper:
         sub_command.add_argument("--number-of-devices", help='Number of devices per storage node if it\'s not supported EC2 instance', dest='number_of_devices', type=int, default=0)
 
         sub_command.add_argument("--spdk-image", help='SPDK image uri', dest='spdk_image')
+        sub_command.add_argument("--reattach-volume", help='Reattach volume to new instance', dest='reattach_volume', required=False, action='store_true')
         sub_command.add_argument("--spdk-debug", help='Enable spdk debug logs', dest='spdk_debug', required=False, action='store_true')
 
         sub_command.add_argument("--iobuf_small_bufsize", help='bdev_set_options param', dest='small_bufsize',  type=int, default=0)
@@ -831,7 +832,7 @@ class CLIWrapper:
                 ret = storage_ops.restart_storage_node(
                     node_id, max_lvol, max_snap, max_prov,
                     spdk_image, spdk_debug,
-                    small_bufsize, large_bufsize, number_of_devices, node_ip=args.node_ip, force=args.force)
+                    small_bufsize, large_bufsize, number_of_devices, node_ip=args.node_ip, reattach_volume=args.reattach_volume, force=args.force)
 
             elif sub_command == "list-devices":
                 ret = self.storage_node_list_devices(args)
