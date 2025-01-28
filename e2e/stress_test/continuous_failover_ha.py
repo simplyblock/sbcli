@@ -191,16 +191,19 @@ class RandomFailoverTest(TestLvolHACluster):
             # self.disconnect_thread = threading.Thread(target=execute_disconnect)
             # self.disconnect_thread.start()
             self.logger.info("Handling network interruption...")
-            active_interfaces = self.ssh_obj.get_active_interfaces(node_ip)
-            self.disconnect_thread = threading.Thread(
-                target=self.ssh_obj.disconnect_all_active_interfaces,
-                args=(node_ip, active_interfaces),
-            )
-            self.disconnect_thread.start()
-        elif outage_type == "partial_nw":
-            ports_to_block = [4420, 8080, 5000, 2270]
+            # active_interfaces = self.ssh_obj.get_active_interfaces(node_ip)
+            # self.disconnect_thread = threading.Thread(
+            #     target=self.ssh_obj.disconnect_all_active_interfaces,
+            #     args=(node_ip, active_interfaces),
+            # )
+            # self.disconnect_thread.start()
+            ports_to_block = [80, 4420, 8080, 5000, 2270, 2377, 7946]
             self.blocked_ports = self.ssh_obj.partial_nw_outage(node_ip=node_ip, mgmt_ip=self.mgmt_nodes[0],
                                                                 block_ports=ports_to_block, block_all_ss_ports=True)
+        elif outage_type == "partial_nw":
+            ports_to_block = [4420]
+            self.blocked_ports = self.ssh_obj.partial_nw_outage(node_ip=node_ip, mgmt_ip=self.mgmt_nodes[0],
+                                                                block_ports=ports_to_block, block_all_ss_ports=False)
             
         sleep_n_sec(120)
         
@@ -215,7 +218,8 @@ class RandomFailoverTest(TestLvolHACluster):
         if outage_type == "graceful_shutdown":
             self.sbcli_utils.restart_node(node_uuid=self.current_outage_node, expected_error_code=[503])
         elif outage_type == "network_interrupt":
-            self.disconnect_thread.join()
+            # self.disconnect_thread.join()
+            self.ssh_obj.remove_partial_nw_outage(node_ip=node_ip, blocked_ports=self.blocked_ports)
         elif outage_type == "partial_nw":
             self.ssh_obj.remove_partial_nw_outage(node_ip=node_ip, blocked_ports=self.blocked_ports)
         self.sbcli_utils.wait_for_storage_node_status(self.current_outage_node, "online", timeout=4000)
@@ -412,6 +416,7 @@ class RandomFailoverTest(TestLvolHACluster):
             self.delete_random_lvols(5)
             self.create_lvols_with_fio(5)
             self.create_snapshots_and_clones()
+            sleep_n_sec(300)
             self.restart_nodes_after_failover(outage_type)
             self.logger.info("Waiting for fallback.")
             sleep_n_sec(1000)
