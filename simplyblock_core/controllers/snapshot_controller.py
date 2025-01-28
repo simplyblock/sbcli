@@ -162,8 +162,8 @@ def list(all=False):
         data.append({
             "UUID": snap.uuid,
             "Name": snap.snap_name,
-            "Used Size": utils.humanbytes(snap.used_size),
-            "Size": utils.humanbytes(snap.size),
+            "Size": utils.humanbytes(snap.used_size),
+            "ProvSize": utils.humanbytes(snap.size),
             "BDev": snap.snap_bdev,
             "LVol ID": snap.lvol.get_id(),
             "Created At": time.strftime("%H:%M:%S, %d/%m/%Y", time.gmtime(snap.created_at)),
@@ -188,7 +188,7 @@ def delete(snapshot_uuid, force_delete=False):
         if lvol.cloned_from_snap and lvol.cloned_from_snap == snapshot_uuid:
             clones.append(lvol)
 
-    if len(clones) >= 1:
+    if len(clones) > 1:
         logger.warning(f"Soft delete snapshot with clones")
         snap = db_controller.get_snapshot_by_id(snapshot_uuid)
         snap.deleted = True
