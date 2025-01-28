@@ -272,6 +272,9 @@ class CLIWrapper:
         sub_command.add_argument(
             "--test", type=bool
         )
+        sub_command.add_argument(
+            "--secondary-nodes", type=str, help='comma separated ip addresses'
+        )
 
         sub_command.add_argument("--ha-type", help='LVol HA type (single, ha), default is cluster HA type',
                                  dest='ha_type', choices=["single", "ha"], default='single')
