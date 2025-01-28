@@ -370,6 +370,8 @@ def deploy_cluster(storage_nodes,test,ha_type,distr_ndcs,distr_npcs,enable_qos,i
         if not lvol_uuid:
             logger.error("lvol creation failed")
         
+        
+        os.sleep(20)
         connect=lvol_controller.connect_lvol(lvol_uuid)
         
         if not connect:
