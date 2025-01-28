@@ -330,65 +330,70 @@ def deploy_cluster(storage_nodes,test,ha_type,distr_ndcs,distr_npcs,enable_qos,i
         if not add_node_status:
             logger.error("Could not add storage node successfully")
             return False
-
-        if test:
-            pool_id=pool_controller.add_pool("testing2",100,10,"","","","","",cluster_uuid)
-            
-            if not pool_id:
-                logger.error("No previous clusters found!")
     
-            
+    activated = cluster_activate(cluster_uuid)
+    if not activated:
+        logger.error("cluster failed to activate")
+    
+    
+    if test:
+        pool_id=pool_controller.add_pool("testing2",100,10,"","","","","",cluster_uuid)
+        
+        if not pool_id:
+            logger.error("No previous clusters found!")
 
-            
-            lvol_uuid=lvol_controller.add_lvol_ha("testt","10G",ha_type,pool_id)
-            
-            if not lvol_uuid:
-                logger.error("lvol creation failed")
-            
-            connect=lvol_controller.connect_lvol(lvol_uuid)
-            
-            if not connect:
-                logger.error("connect command generation failed")
+        
 
-            connect_string=connect[0]["connect"]
-            
-            
-            
-            subprocess.run("sudo modprobe nvme-fabrics", shell=True, check=True)
+        
+        lvol_uuid=lvol_controller.add_lvol_ha("testt","10G",ha_type,pool_id)
+        
+        if not lvol_uuid:
+            logger.error("lvol creation failed")
+        
+        connect=lvol_controller.connect_lvol(lvol_uuid)
+        
+        if not connect:
+            logger.error("connect command generation failed")
 
-            subprocess.run(connect_string, shell=True, check=True)
-            
-            nvme_list_command = "sudo nvme list"
-            print(f"Executing NVMe list command: {nvme_list_command}")
-            result = subprocess.run(nvme_list_command, shell=True, check=True, capture_output=True, text=True)
+        connect_string=connect[0]["connect"]
+        
+        
+        
+        subprocess.run("sudo modprobe nvme-fabrics", shell=True, check=True)
 
-            nvme_output = result.stdout
-            device_name = parse_nvme_list_output(nvme_output, lvol_uuid)
-            
-            mkfs_command = f"sudo mkfs.ext4 {device_name}"
-            subprocess.run(mkfs_command, shell=True, check=True)
-            
-            
-            mount_point = os.path.join(os.path.expanduser("~"), lvol_uuid)
-            os.makedirs(mount_point, exist_ok=True)
-            mount_command = f"sudo mount {device_name} {mount_point}"
-            
-            subprocess.run(mount_command, shell=True, check=True)
+        subprocess.run(connect_string, shell=True, check=True)
+        
+        nvme_list_command = "sudo nvme list"
+        print(f"Executing NVMe list command: {nvme_list_command}")
+        result = subprocess.run(nvme_list_command, shell=True, check=True, capture_output=True, text=True)
 
-            run_fio(mount_point)
-            
-            match = re.search(r'--nqn=([^\s]+)', connect_string)
-            nqn_value = match.group(1)
-            subprocess.run(f"sudo nvme disconnect -n {nqn_value}")
-            
-            
-            status=lvol_controller.delete_lvol(lvol_uuid)
-            
-            pool_controller.delete_pool(pool_id)
-            return True
-        else:
-            return True
-            
+        nvme_output = result.stdout
+        device_name = parse_nvme_list_output(nvme_output, lvol_uuid)
+        
+        mkfs_command = f"sudo mkfs.ext4 {device_name}"
+        subprocess.run(mkfs_command, shell=True, check=True)
+        
+        
+        mount_point = os.path.join(os.path.expanduser("~"), lvol_uuid)
+        os.makedirs(mount_point, exist_ok=True)
+        mount_command = f"sudo mount {device_name} {mount_point}"
+        
+        subprocess.run(mount_command, shell=True, check=True)
+
+        run_fio(mount_point)
+        
+        match = re.search(r'--nqn=([^\s]+)', connect_string)
+        nqn_value = match.group(1)
+        subprocess.run(f"sudo nvme disconnect -n {nqn_value}")
+        
+        
+        status=lvol_controller.delete_lvol(lvol_uuid)
+        
+        pool_controller.delete_pool(pool_id)
+        return True
+    else:
+        return True
+        
             
         
     
