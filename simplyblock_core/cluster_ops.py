@@ -332,7 +332,9 @@ def deploy_cluster(storage_nodes,test,ha_type,distr_ndcs,distr_npcs,enable_qos,i
             logger.error("Could not add storage node successfully")
             return False
     
-    for node in secondary_nodes:
+    
+    secondary_nodes_list = secondary_nodes.split(",")
+    for node in secondary_nodes_list:
         node_ip = node.strip()
         dev_ip=f"{node_ip}:5000"
         #ifname is hardcoded in bootstrap_script
