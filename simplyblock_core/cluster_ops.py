@@ -358,12 +358,11 @@ def deploy_cluster(storage_nodes,test,ha_type,distr_ndcs,distr_npcs,enable_qos,i
         pool_id=pool_controller.add_pool("testing2",100,10,"","","","","",cluster_uuid)
         
         if not pool_id:
-            logger.error("No previous clusters found!")
+            logger.error("pool did not create successfully")
 
         
 
-        
-        lvol_uuid=lvol_controller.add_lvol_ha("testt","10G",ha_type,pool_id)
+        lvol_uuid=lvol_controller.add_lvol_ha("testt","10G","",ha_type,pool_id,False,False,"","","","","","","","","","","","")
         
         if not lvol_uuid:
             logger.error("lvol creation failed")
