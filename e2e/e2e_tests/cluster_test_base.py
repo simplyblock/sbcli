@@ -373,7 +373,7 @@ class TestClusterBase:
         ]
         return filtered_tasks
 
-    def validate_migration_for_node(self, timestamp, node_online_time, timeout, node_id=None, check_interval=60,
+    def validate_migration_for_node(self, timestamp, timeout, node_id=None, check_interval=60,
                                     no_task_ok=False):
         """
         Validate that all `device_migration` tasks for a specific node have completed successfully 
