@@ -569,7 +569,7 @@ def list_all_info(cluster_id):
     rec = records[0]
 
     data.append({
-        "Cluster": cl.get_id(),
+        "Cluster UUID": cl.get_id(),
         "Type": cl.ha_type,
         "Mod": f"{cl.distr_ndcs}x{cl.distr_npcs}",
 
@@ -579,12 +579,12 @@ def list_all_info(cluster_id):
         "Pools": f"{len(pools)}/{len(p_online)}",
         "Lvols": f"{len(lvols)}/{len(lv_online)}",
         "Snaps": f"{len(snaps)}",
-
-        "Size total": f"{utils.humanbytes(rec.size_total)}",
-        "Size Used": f"{utils.humanbytes(rec.size_used)}",
-        "Size util": f"{rec.size_util}%",
-        "Size prov": f"{utils.humanbytes(rec.size_prov)}",
-        "Size prov util": f"{rec.size_prov_util}%",
+        #
+        # "Size total": f"{utils.humanbytes(rec.size_total)}",
+        # "Size Used": f"{utils.humanbytes(rec.size_used)}",
+        # "Size prov": f"{utils.humanbytes(rec.size_prov)}",
+        # "Size util": f"{rec.size_util}%",
+        # "Size prov util": f"{rec.size_prov_util}%",
 
         "Status": cl.status,
 
@@ -593,6 +593,29 @@ def list_all_info(cluster_id):
 
 
     data = []
+
+    data.append({
+        "UUID": cl.uuid,
+        "Type": "Cluster",
+        "Devices": f"{len(devs)}/{len(devs_online)}",
+        "Lvols": f"{len(lvols)}/{len(lv_online)}",
+
+        "Size total": f"{utils.humanbytes(rec.size_total)}",
+        "Size Used": f"{utils.humanbytes(rec.size_used)}",
+        "Size prov": f"{utils.humanbytes(rec.size_prov)}",
+        "Size util": f"{rec.size_util}%",
+        "Size prov util": f"{rec.size_prov_util}%",
+
+        "Read BW/s": f"{utils.humanbytes(rec.read_bytes_ps)}",
+        "Write BW/s": f"{utils.humanbytes(rec.write_bytes_ps)}",
+
+        "Read IOP/s": f"{utils.humanbytes(rec.read_io_ps)}",
+        "Write IOP/s": f"{utils.humanbytes(rec.write_io_ps)}",
+
+        "Status": cl.status,
+
+    })
+
     for node in st:
         records = db_controller.get_cluster_capacity(cl, 1)
         rec = records[0]
@@ -606,12 +629,15 @@ def list_all_info(cluster_id):
 
         data.append({
             "UUID": node.uuid,
-            "Management IP": node.mgmt_ip,
+            "Type": "Storage",
             "Devices": f"{total_devices}/{online_devices}",
             "LVols": f"{len(lvs)}",
 
             "Size total": f"{utils.humanbytes(rec.size_total)}",
             "Size Used": f"{utils.humanbytes(rec.size_used)}",
+            "Size prov": f"{utils.humanbytes(rec.size_prov)}",
+            "Size util": f"{rec.size_util}%",
+            "Size prov util": f"{rec.size_prov_util}%",
 
             "Read BW/s": f"{utils.humanbytes(rec.read_bytes_ps)}",
             "Write BW/s": f"{utils.humanbytes(rec.write_bytes_ps)}",
@@ -619,10 +645,34 @@ def list_all_info(cluster_id):
             "Read IOP/s": f"{utils.humanbytes(rec.read_io_ps)}",
             "Write IOP/s": f"{utils.humanbytes(rec.write_io_ps)}",
 
-            "Health": node.health_check,
             "Status": node.status,
 
         })
+
+        for dev in node.nvme_devices:
+            rec = db_controller.get_device_capacity(dev)[0]
+            data.append({
+                "UUID": dev.uuid,
+                "Type": "Device",
+                "Devices": "",
+                "LVols": "",
+
+                "Size total": f"{utils.humanbytes(rec.size_total)}",
+                "Size Used": f"{utils.humanbytes(rec.size_used)}",
+                "Size prov": f"{utils.humanbytes(rec.size_prov)}",
+                "Size util": f"{rec.size_util}%",
+                "Size prov util": f"{rec.size_prov_util}%",
+
+                "Read BW/s": f"{utils.humanbytes(rec.read_bytes_ps)}",
+                "Write BW/s": f"{utils.humanbytes(rec.write_bytes_ps)}",
+
+                "Read IOP/s": f"{utils.humanbytes(rec.read_io_ps)}",
+                "Write IOP/s": f"{utils.humanbytes(rec.write_io_ps)}",
+
+                "Health": dev.health_check,
+                "Status": dev.status,
+
+            })
 
     out = out + "\n" + utils.print_table(data)
 
