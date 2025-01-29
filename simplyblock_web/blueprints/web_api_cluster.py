@@ -116,7 +116,7 @@ def cluster_status(uuid):
     if not cluster:
         logger.error(f"Cluster not found {uuid}")
         return utils.get_response_error(f"Cluster not found: {uuid}", 404)
-    data = cluster_ops.show_cluster(uuid, is_json=True)
+    data = cluster_ops.get_cluster_status(uuid, is_json=True)
     return utils.get_response(json.loads(data))
 
 

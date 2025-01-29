@@ -2780,7 +2780,7 @@ def recreate_lvstore_on_sec(snode):
             remote_rpc_client.bdev_distrib_force_to_non_leader(node.jm_vuid)
 
         ret, err = _create_bdev_stack(snode, node.lvstore_stack, primary_node=node)
-        ret = rpc_client.bdev_examine(node.raid)
+        # ret = rpc_client.bdev_examine(node.raid)
         ret = rpc_client.bdev_wait_for_examine()
         ret = rpc_client.bdev_lvol_set_lvs_groupid(node.lvstore, node.jm_vuid)
 
@@ -2875,7 +2875,7 @@ def recreate_lvstore(snode):
         logger.error(err)
         return False
 
-    ret = rpc_client.bdev_examine(snode.raid)
+    # ret = rpc_client.bdev_examine(snode.raid)
     ret = rpc_client.bdev_wait_for_examine()
     ret = rpc_client.bdev_lvol_set_lvs_groupid(snode.lvstore, snode.jm_vuid)
 
@@ -3058,7 +3058,7 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
                 sec_node_1.mgmt_ip, sec_node_1.rpc_port,
                 sec_node_1.rpc_username, sec_node_1.rpc_password)
 
-        ret = temp_rpc_client.bdev_examine(snode.raid)
+        # ret = temp_rpc_client.bdev_examine(snode.raid)
         ret = temp_rpc_client.bdev_wait_for_examine()
         ret = temp_rpc_client.bdev_lvol_set_lvs_groupid(snode.lvstore, snode.jm_vuid)
 

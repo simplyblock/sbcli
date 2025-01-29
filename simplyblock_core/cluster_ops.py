@@ -19,6 +19,9 @@ from simplyblock_core.controllers import cluster_events, device_controller, stor
     lvol_controller
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.cluster import Cluster
+from simplyblock_core.models.lvol_model import LVol
+from simplyblock_core.models.mgmt_node import MgmtNode
+from simplyblock_core.models.pool import Pool
 from simplyblock_core.rpc_client import RPCClient
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
@@ -397,7 +400,7 @@ def cluster_activate(cl_id, force=False, force_lvstore_create=False):
     return True
 
 
-def show_cluster(cl_id, is_json=False):
+def get_cluster_status(cl_id, is_json=False):
     db_controller = DBController()
     cluster = db_controller.get_cluster_by_id(cl_id)
     if not cluster:
@@ -521,6 +524,55 @@ def list():
             "Mod": f"{cl.distr_ndcs}x{cl.distr_npcs}",
             "Status": cl.status,
         })
+    return utils.print_table(data)
+
+
+
+def list_all_info(cluster_id):
+    db_controller = DBController()
+    cl = db_controller.get_cluster_by_id(cluster_id)
+    if not cl:
+        logger.error(f"Cluster not found {cluster_id}")
+        return False
+
+    mt = db_controller.get_mgmt_nodes()
+    mt_online = [m for m in mt if m.status == MgmtNode.STATUS_ONLINE]
+
+    data = []
+
+    st = db_controller.get_storage_nodes_by_cluster_id(cl.get_id())
+    st_online = [s for s in st if s.status == StorageNode.STATUS_ONLINE]
+
+    pools = db_controller.get_pools(cluster_id)
+    p_online = [p for p in pools if p.status == Pool.STATUS_ACTIVE]
+
+    lvols = db_controller.get_lvols(cluster_id)
+    lv_online = [p for p in lvols if p.status == LVol.STATUS_ONLINE]
+
+    devs = []
+    devs_online = []
+    for n in st:
+        for dev in n.nvme_devices:
+            devs.append(dev)
+            if dev.status == NVMeDevice.STATUS_ONLINE:
+                devs_online.append(dev)
+
+    data.append({
+        "Cluster": cl.get_id(),
+        "ha_type": cl.ha_type,
+        "Status": cl.status,
+        "Mod": f"{cl.distr_ndcs}x{cl.distr_npcs}",
+
+        "# MGMT": f"{len(mt)}/{len(mt_online)}",
+        "# STRG": f"{len(st)}/{len(st_online)}",
+
+        "# DEVS": f"{len(devs)}/{len(devs_online)}",
+        "# POOL": f"{len(pools)}/{len(p_online)}",
+        "# LVOL": f"{len(lvols)}/{len(lv_online)}",
+
+
+
+    })
     return utils.print_table(data)
 
 

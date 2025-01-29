@@ -348,6 +348,10 @@ class CLIWrapper:
             subparser, 'status', 'Show cluster status')
         sub_command.add_argument("cluster_id", help='the cluster UUID').completer = self._completer_get_cluster_list
 
+        sub_command = self.add_sub_command(
+            subparser, 'show', 'Show cluster info')
+        sub_command.add_argument("cluster_id", help='the cluster UUID').completer = self._completer_get_cluster_list
+
         # show cluster info
         sub_command = self.add_sub_command(subparser, 'get', 'Show cluster info')
         sub_command.add_argument("id", help='the cluster UUID').completer = self._completer_get_cluster_list
@@ -968,7 +972,10 @@ class CLIWrapper:
                 ret = cluster_ops.cluster_activate(cluster_id, args.force, args.force_lvstore_create)
             elif sub_command == 'status':
                 cluster_id = args.cluster_id
-                ret = cluster_ops.show_cluster(cluster_id)
+                ret = cluster_ops.get_cluster_status(cluster_id)
+            elif sub_command == 'show':
+                cluster_id = args.cluster_id
+                ret = cluster_ops.list_all_info(cluster_id)
             elif sub_command == 'list':
                 ret = cluster_ops.list()
             elif sub_command == 'suspend':

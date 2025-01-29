@@ -392,7 +392,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
     elif cl.prov_cap_warn and cl.prov_cap_warn < cluster_size_prov_util:
         logger.warning(f"Cluster provisioned cap warning, util: {cluster_size_prov_util}% of cluster util: {cl.prov_cap_warn}")
 
-    if distr_vuid == 0:
+    if not distr_vuid:
         vuid = utils.get_random_vuid()
     else:
         vuid = distr_vuid
@@ -905,18 +905,6 @@ def delete_lvol(id_or_name, force_delete=False):
             logger.error(f"Failed to set leader for primary node: {snode.get_id()}")
             if not force_delete:
                 return False
-
-    # remove from db
-    # snode = db_controller.get_storage_node_by_id(lvol.node_id)
-    # # logger.debug(snode)
-    # logger.debug(f"removing lvol: {lvol.get_id()} from node {snode.get_id()}")
-    # snode.lvols -= 1
-    # snode.write_to_db(db_controller.kv_store)
-
-    # # remove from pool
-    # pool = db_controller.get_pool_by_id(lvol.pool_uuid)
-    # pool.lvols -= 1
-    # pool.write_to_db(db_controller.kv_store)
 
     lvol_events.lvol_delete(lvol)
     lvol.remove(db_controller.kv_store)
