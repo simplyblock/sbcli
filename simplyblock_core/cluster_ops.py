@@ -307,6 +307,9 @@ def deploy_cluster(storage_nodes,test,ha_type,distr_ndcs,distr_npcs,enable_qos,i
                    data_nics,spdk_image,spdk_debug,small_bufsize,large_bufsize,num_partitions_per_dev,jm_percent,
                    spdk_cpu_mask,max_lvol,max_snap,max_prov,number_of_devices,enable_test_device,enable_ha_jm,
                    number_of_distribs,namespace,secondary_nodes):
+    logger.info("run deploy-cleaner")
+    
+    storage_node_ops.deploy_cleaner()
     
     logger.info("creating cluster")
     cluster_uuid = create_cluster(
@@ -365,13 +368,14 @@ def deploy_cluster(storage_nodes,test,ha_type,distr_ndcs,distr_npcs,enable_qos,i
 
         
         lvol_size = utils.parse_size("10G")
-        lvol_uuid=lvol_controller.add_lvol_ha("testt",lvol_size,"",ha_type,pool_id,False,False,"","","","","","","","","","","","")
+        lvol_uuid=lvol_controller.add_lvol_ha("testt",lvol_size,"",ha_type,pool_id,False,False,"","","","","","","","","",None,"","")
         
         if not lvol_uuid:
             logger.error("lvol creation failed")
         
         
         time.sleep(20)
+        
         connect=lvol_controller.connect_lvol(lvol_uuid)
         
         if not connect:
