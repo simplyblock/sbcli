@@ -301,7 +301,7 @@ class SshUtils:
 
         command = (f"sudo fio --name={name} {location} --ioengine={ioengine} --direct=1 --iodepth={iodepth} "
                    f"{time_based} --runtime={runtime} --rw={rw} --bs={bs} --size={size} --rwmixread={rwmixread} "
-                   f"--verify=md5 --verify_backlog=1 --verify_fatal=1 --verify_interval={bs} --numjobs={numjobs} --nrfiles={nrfiles} "
+                   f"--verify=md5 --verify_backlog=1000 --verify_fatal=1 --numjobs={numjobs} --nrfiles={nrfiles} "
                    f"{output_format}{output_file}")
         
         if kwargs.get("debug", None):
