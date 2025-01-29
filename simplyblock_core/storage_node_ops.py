@@ -2885,7 +2885,7 @@ def recreate_lvstore(snode):
         logger.error(err)
         return False
 
-    # ret = rpc_client.bdev_examine(snode.raid)
+    ret = rpc_client.bdev_examine(snode.raid)
     ret = rpc_client.bdev_wait_for_examine()
     ret = rpc_client.bdev_lvol_set_lvs_groupid(snode.lvstore, snode.jm_vuid)
 
