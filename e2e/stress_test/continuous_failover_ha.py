@@ -396,6 +396,28 @@ class RandomFailoverTest(TestLvolHACluster):
 
         self.logger.info("Failover during outage completed.")
         self.restart_nodes_after_failover(outage_type)
+    
+    def validate_iostats_continuously(self):
+        """Continuously validates I/O stats while FIO is running, checking every 60 seconds."""
+        self.logger.info("Starting continuous I/O stats validation thread.")
+        
+        while True:
+            try:
+                start_timestamp = datetime.now().timestamp()  # Current time as start time
+                end_timestamp = start_timestamp + 300  # End time is 5 minutes (300 seconds) later
+
+                self.common_utils.validate_io_stats(
+                    cluster_id=self.cluster_id,
+                    start_timestamp=start_timestamp,
+                    end_timestamp=end_timestamp,
+                    time_duration=None  # Not needed in this case
+                )
+
+                sleep_n_sec(60)  # Sleep for 60 seconds before the next validation
+            except Exception as e:
+                self.logger.error(f"Error in continuous I/O stats validation: {str(e)}")
+                break  # Exit the thread on failure
+
 
     def run(self):
         """Main execution loop for the random failover test."""
@@ -412,7 +434,11 @@ class RandomFailoverTest(TestLvolHACluster):
             if result['is_secondary_node'] is False:
                 self.sn_nodes.append(result["uuid"])
         
+        sleep_n_sec(30)
+        
         while True:
+            validation_thread = threading.Thread(target=self.validate_iostats_continuously, daemon=True)
+            validation_thread.start()
             outage_type = self.perform_random_outage()
             self.delete_random_lvols(5)
             self.create_lvols_with_fio(5)

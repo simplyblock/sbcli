@@ -353,7 +353,7 @@ class CommonUtils:
         self.logger.info(f"Calculated time duration: {time_duration}")
         return time_duration
     
-    def validate_io_stats(self, cluster_id, start_timestamp, end_timestamp, time_duration):
+    def validate_io_stats(self, cluster_id, start_timestamp, end_timestamp, time_duration=None):
         """
         Validate I/O stats ensuring all metrics are non-zero within the failover time range.
         Args:
