@@ -185,22 +185,54 @@ class CommonUtils:
         self.logger.info(f"Instance {instance_id} has stopped.") 
         sleep_n_sec(30)
 
-    def reboot_ec2_instance(self, ec2_resource, instance_id):
-        """Reboot ec2 instance
+    def reboot_ec2_instance(self, ec2_resource, instance_id, timeout=300, wait_interval=10):
+        """
+        Reboots the specified EC2 instance and verifies that it is back up within a given timeout.
 
         Args:
-            ec2_resource (EC2): EC2 class object from boto3
-            instance_id (str): Instance id to start
+            instance_id (str): The ID of the EC2 instance to reboot.
+            timeout (int): Maximum time (in seconds) to wait for the instance to be available.
+            wait_interval (int): Time interval (in seconds) between status checks.
         """
         try:
-            ec2_client = ec2_resource.meta.client  # Get the EC2 client
+            ec2_client = ec2_resource.meta.client
+
+            # Initiate reboot
+            print(f"Rebooting instance {instance_id}...")
             ec2_client.reboot_instances(InstanceIds=[instance_id])
-            print(f"Reboot initiated for instance {instance_id}.")
-            sleep_n_sec(30)
+
+            # Start timeout tracking
+            start_time = time.time()
+
+            print(f"Waiting for instance {instance_id} to pass status checks...")
+
+            while (time.time() - start_time) < timeout:
+                instance = ec2_resource.Instance(instance_id)
+                instance.load()  # Refresh state
+
+                # Fetch instance status checks
+                status_response = ec2_client.describe_instance_status(InstanceIds=[instance_id])
+                if status_response['InstanceStatuses']:
+                    instance_status = status_response['InstanceStatuses'][0]
+                    system_status_ok = instance_status['SystemStatus']['Status'] == 'ok'
+                    instance_status_ok = instance_status['InstanceStatus']['Status'] == 'ok'
+
+                    if system_status_ok and instance_status_ok:
+                        print(f"Instance {instance_id} is fully online and healthy!")
+                        sleep_n_sec(30)
+                        return
+
+                elapsed_time = int(time.time() - start_time)
+                print(f"[{elapsed_time}s elapsed] Instance state: '{instance.state['Name']}'. Waiting for AWS status checks...")
+                time.sleep(wait_interval)
+
+            print(f"Error: Instance {instance_id} did not become available within {timeout} seconds.")
+            raise RuntimeError(f"Error: Instance {instance_id} did not become available within {timeout} seconds.")
+
         except Exception as e:
             print(f"Error rebooting instance {instance_id}: {e}")
             raise e
-    
+        
     def terminate_instance(self, ec2_resource, instance_id):
         # Terminate the given instance
         instance = ec2_resource.Instance(instance_id)

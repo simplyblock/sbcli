@@ -125,8 +125,10 @@ class TestSingleNodeReboot(TestClusterBase):
 
         if "i-" in instance_id[0:2]:
             # AWS way stop
-            self.common_utils.stop_ec2_instance(ec2_resource=self.ec2_resource,
-                                                instance_id=instance_id)
+            # self.common_utils.stop_ec2_instance(ec2_resource=self.ec2_resource,
+            #                                     instance_id=instance_id)
+            reboot_thread = threading.Thread(target=self.common_utils.reboot_ec2_instance, args=(self.ec2_resource, instance_id,),)
+            reboot_thread.start()
         else:
             # Perform node reboot
             reboot_thread = threading.Thread(target=self.ssh_obj.reboot_node, args=(node_ip, 300,),)
@@ -183,11 +185,7 @@ class TestSingleNodeReboot(TestClusterBase):
         except Exception as exp:
             self.logger.debug(exp)
             # self.sbcli_utils.restart_node(node_uuid=no_lvol_node_uuid)
-            if "i-" in instance_id[0:2]:
-                self.common_utils.start_ec2_instance(ec2_resource=self.ec2_resource,
-                                                     instance_id=instance_id)
-            else:
-                reboot_thread.join()
+            reboot_thread.join()
             self.logger.info(f"Waiting for node to become online, {no_lvol_node_uuid}")
             self.sbcli_utils.wait_for_storage_node_status(no_lvol_node_uuid,
                                                           "online",
@@ -195,11 +193,7 @@ class TestSingleNodeReboot(TestClusterBase):
             raise exp
 
         # self.sbcli_utils.restart_node(node_uuid=no_lvol_node_uuid)
-        if "i-" in instance_id[0:2]:
-            self.common_utils.start_ec2_instance(ec2_resource=self.ec2_resource,
-                                                 instance_id=instance_id)
-        else:
-            reboot_thread.join()
+        reboot_thread.join()
 
         self.logger.info(f"Waiting for node to become online, {no_lvol_node_uuid}")
         self.sbcli_utils.wait_for_storage_node_status(no_lvol_node_uuid, "online", timeout=300)
@@ -396,8 +390,8 @@ class TestHASingleNodeReboot(TestClusterBase):
             sleep_n_sec(30)
             if "i-" in instance_id[0:2]:
                 # AWS way stop
-                self.common_utils.stop_ec2_instance(ec2_resource=self.ec2_resource,
-                                                    instance_id=instance_id)
+                reboot_thread = threading.Thread(target=self.common_utils.reboot_ec2_instance, args=(self.ec2_resource, instance_id,),)
+                reboot_thread.start()
             else:
                 # Perform node reboot
                 reboot_thread = threading.Thread(target=self.ssh_obj.reboot_node, args=(node_ip, 300,),)
@@ -410,11 +404,8 @@ class TestHASingleNodeReboot(TestClusterBase):
                                                               timeout=500)
             except Exception as exp:
                 self.logger.debug(exp)
-                if "i-" in instance_id[0:2]:
-                    self.common_utils.start_ec2_instance(ec2_resource=self.ec2_resource,
-                                                         instance_id=instance_id)
-                else:
-                    reboot_thread.join()
+                
+                reboot_thread.join()
                 # self.sbcli_utils.restart_node(node_uuid=no_lvol_node_uuid)
                 self.logger.info(f"Waiting for node to become online, {no_lvol_node_uuid}")
                 self.sbcli_utils.wait_for_storage_node_status(no_lvol_node_uuid,
@@ -423,12 +414,7 @@ class TestHASingleNodeReboot(TestClusterBase):
                 raise exp
 
             # self.sbcli_utils.restart_node(node_uuid=no_lvol_node_uuid)
-            if "i-" in instance_id[0:2]:
-                sleep_n_sec(300)
-                self.common_utils.start_ec2_instance(ec2_resource=self.ec2_resource,
-                                                    instance_id=instance_id)
-            else:
-                reboot_thread.join()
+            reboot_thread.join()
 
             self.logger.info(f"Waiting for node to become online, {no_lvol_node_uuid}")
             self.sbcli_utils.wait_for_storage_node_status(no_lvol_node_uuid, "online", timeout=300)
