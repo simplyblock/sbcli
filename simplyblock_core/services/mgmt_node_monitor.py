@@ -69,7 +69,7 @@ while True:
         nl = c.nodes.list(filters={'role': 'manager'})
         docker_node = None
         for n in nl:
-            if n.attrs['Status']['Addr'] == node.mgmt_ip:
+            if n.attrs['ManagerStatus']['Addr'].startswith(node.mgmt_ip):
                 docker_node = n
                 break
         if not docker_node:
@@ -77,7 +77,7 @@ while True:
             set_node_offline(node)
             continue
 
-        if docker_node.attrs['Status']['State'] == 'ready':
+        if docker_node.attrs['ManagerStatus']['Reachability'] == 'reachable':
             set_node_online(node)
         else:
             set_node_offline(node)
