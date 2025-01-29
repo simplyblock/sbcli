@@ -718,8 +718,7 @@ def list_all_info(cluster_id):
             rec = StatsObject()
 
         lvol_data.append({
-            "UUID": lvol.uuid,
-            "Type": "LVol",
+            "LVol UUID": lvol.uuid,
 
             "Size prov": f"{utils.humanbytes(rec.size_total)}",
             "Size Used": f"{utils.humanbytes(rec.size_used)}",

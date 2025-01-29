@@ -2319,18 +2319,23 @@ def resume_storage_node(node_id):
     else:
 
         sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
-        if sec_node and sec_node.status == StorageNode.STATUS_ONLINE:
-            sec_node_client =  RPCClient(
-                sec_node.mgmt_ip, sec_node.rpc_port, sec_node.rpc_username, sec_node.rpc_password, timeout=5, retry=1)
-            for lvol in db_controller.get_lvols_by_node_id(snode.get_id()):
-                for iface in sec_node.data_nics:
-                    if iface.ip4_address:
-                        ret = sec_node_client.nvmf_subsystem_listener_set_ana_state(
-                            lvol.nqn, iface.ip4_address, "4420", False, ana="inaccessible")
-            time.sleep(1)
-            sec_node_client.bdev_lvol_set_leader(False, lvs_name=snode.lvstore)
-            sec_node_client.bdev_distrib_force_to_non_leader(snode.jm_vuid)
-            time.sleep(1)
+        if sec_node :
+            if sec_node.status == StorageNode.STATUS_UNREACHABLE:
+                logger.error("Secondary node is unreachable, cannot resume primary node")
+                return False
+
+            elif sec_node.status == StorageNode.STATUS_ONLINE:
+                sec_node_client =  RPCClient(
+                    sec_node.mgmt_ip, sec_node.rpc_port, sec_node.rpc_username, sec_node.rpc_password, timeout=5, retry=1)
+                for lvol in db_controller.get_lvols_by_node_id(snode.get_id()):
+                    for iface in sec_node.data_nics:
+                        if iface.ip4_address:
+                            ret = sec_node_client.nvmf_subsystem_listener_set_ana_state(
+                                lvol.nqn, iface.ip4_address, "4420", False, ana="inaccessible")
+                time.sleep(1)
+                sec_node_client.bdev_lvol_set_leader(False, lvs_name=snode.lvstore)
+                sec_node_client.bdev_distrib_force_to_non_leader(snode.jm_vuid)
+                time.sleep(1)
 
         for lvol in db_controller.get_lvols_by_node_id(snode.get_id()):
             for iface in snode.data_nics:
@@ -2823,11 +2828,13 @@ def recreate_lvstore(snode):
     if snode.is_secondary_node:
         return recreate_lvstore_on_sec(snode)
 
-    sec_node = None
+    sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
+    prim_node_suspend = False
     lvol_list = db_controller.get_lvols_by_node_id(snode.get_id())
-    if snode.secondary_node_id:
-        sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
-        if sec_node.status == StorageNode.STATUS_ONLINE:
+    if sec_node:
+        if sec_node.status == StorageNode.STATUS_UNREACHABLE:
+            prim_node_suspend = True
+        elif sec_node.status == StorageNode.STATUS_ONLINE:
             sec_rpc_client = RPCClient(sec_node.mgmt_ip, sec_node.rpc_port, sec_node.rpc_username, sec_node.rpc_password)
 
             for lvol in lvol_list:
@@ -2868,6 +2875,9 @@ def recreate_lvstore(snode):
 
     time.sleep(2)
 
+    if not lvol_list:
+        prim_node_suspend = False
+
     ret, err = _create_bdev_stack(snode, [], primary_node=snode)
 
     if err:
@@ -2879,13 +2889,18 @@ def recreate_lvstore(snode):
     ret = rpc_client.bdev_wait_for_examine()
     ret = rpc_client.bdev_lvol_set_lvs_groupid(snode.lvstore, snode.jm_vuid)
 
-    if snode.jm_vuid:
-        ret = rpc_client.jc_explicit_synchronization(snode.jm_vuid)
-        logger.info(f"JM Sync res: {ret}")
+    if not prim_node_suspend:
+        if snode.jm_vuid:
+            ret = rpc_client.jc_explicit_synchronization(snode.jm_vuid)
+            logger.info(f"JM Sync res: {ret}")
+
+    lvol_ana_state = "optimized"
+    if prim_node_suspend:
+        lvol_ana_state = "inaccessible"
 
     for lvol in lvol_list:
         lvol_obj = db_controller.get_lvol_by_id(lvol.get_id())
-        is_created, error = lvol_controller.recreate_lvol_on_node(lvol_obj, snode)
+        is_created, error = lvol_controller.recreate_lvol_on_node(lvol_obj, snode, ana_state=lvol_ana_state)
         if error:
             logger.error(f"Failed to recreate LVol: {lvol_obj.get_id()} on node: {snode.get_id()}")
             lvol_obj.status = LVol.STATUS_OFFLINE
@@ -2894,6 +2909,12 @@ def recreate_lvstore(snode):
             lvol_obj.io_error = False
             lvol_obj.health_check = True
         lvol_obj.write_to_db()
+
+    if prim_node_suspend:
+        set_node_status(snode.get_id(), StorageNode.STATUS_SUSPENDED)
+        logger.info("Node restart interrupted because secondary node is unreachable")
+        logger.info("Node status changed to suspended")
+        return False
 
     if sec_node and sec_node.status == StorageNode.STATUS_ONLINE:
         time.sleep(10)
