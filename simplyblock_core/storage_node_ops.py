@@ -936,7 +936,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
              small_bufsize=0, large_bufsize=0, spdk_cpu_mask=None,
              num_partitions_per_dev=0, jm_percent=0, number_of_devices=0, enable_test_device=False,
              namespace=None, number_of_distribs=2, enable_ha_jm=False, is_secondary_node=False, id_device_by_nqn=False,
-             partition_size=""):
+             partition_size="", ha_jm_count=3):
 
     db_controller = DBController()
     kv_store = db_controller.kv_store
@@ -1175,7 +1175,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
     snode.number_of_distribs = number_of_distribs
     snode.enable_ha_jm = enable_ha_jm
     snode.is_secondary_node = is_secondary_node
-    snode.ha_jm_count = constants.DOUBLE_NODE_OUTAGE_JM_COUNT if cluster.ha_type == 'ha2' else constants.HA_JM_COUNT
+    snode.ha_jm_count = ha_jm_count
 
     if 'cpu_count' in node_info:
         snode.cpu = node_info['cpu_count']
