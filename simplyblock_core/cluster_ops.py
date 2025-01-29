@@ -361,7 +361,7 @@ def deploy_cluster(storage_nodes,test,ha_type,distr_ndcs,distr_npcs,enable_qos,i
         pool_max = utils.parse_size("100G")
         lvol_max = utils.parse_size("20G")
         
-        pool_id=pool_controller.add_pool("testing2",pool_max,lvol_max,"","","","","",cluster_uuid)
+        pool_id=pool_controller.add_pool("testing2",pool_max,lvol_max,None,None,None,None,None,cluster_uuid)
         
         if not pool_id:
             logger.error("pool did not create successfully")
