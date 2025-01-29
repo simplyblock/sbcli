@@ -819,16 +819,16 @@ def delete_lvol(id_or_name, force_delete=False):
         snode.rpc_username,
         snode.rpc_password)
 
-    # soft delete LVol if it has snapshots
-    snaps = db_controller.get_snapshots()
-    for snap in snaps:
-        if snap.deleted is False and snap.lvol.get_id() == lvol.get_id():
-            logger.warning(f"Soft delete LVol that has snapshots. Snapshot:{snap.get_id()}")
-            ret = rpc_client.subsystem_delete(lvol.nqn)
-            logger.debug(ret)
-            lvol.deleted = True
-            lvol.write_to_db(db_controller.kv_store)
-            return True
+    # # soft delete LVol if it has snapshots
+    # snaps = db_controller.get_snapshots()
+    # for snap in snaps:
+    #     if snap.deleted is False and snap.lvol.get_id() == lvol.get_id():
+    #         logger.warning(f"Soft delete LVol that has snapshots. Snapshot:{snap.get_id()}")
+    #         ret = rpc_client.subsystem_delete(lvol.nqn)
+    #         logger.debug(ret)
+    #         lvol.deleted = True
+    #         lvol.write_to_db(db_controller.kv_store)
+    #         return True
 
     if snode.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_REMOVED]:
         logger.error(f"Node status is not online or removed, node: {snode.get_id()}, status: {snode.status}")
