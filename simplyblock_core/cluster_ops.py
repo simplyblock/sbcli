@@ -368,7 +368,7 @@ def deploy_cluster(storage_nodes,test,ha_type,distr_ndcs,distr_npcs,enable_qos,i
 
         
         lvol_size = utils.parse_size("10G")
-        lvol_uuid=lvol_controller.add_lvol_ha("testt",lvol_size,"",ha_type,pool_id,False,False,"","","","","","","","","",None,"","")
+        lvol_uuid=lvol_controller.add_lvol_ha("testt",lvol_size,"",ha_type,pool_id,False,False,None,None,None,None,None,None,None,None,None,None,None,None)
         
         if not lvol_uuid:
             logger.error("lvol creation failed")
