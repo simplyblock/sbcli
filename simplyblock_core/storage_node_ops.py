@@ -1157,6 +1157,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
     snode.cloud_instance_id = cloud_instance['id']
     snode.cloud_instance_type = cloud_instance['type']
     snode.cloud_instance_public_ip = cloud_instance['public_ip']
+    snode.cloud_name = cloud_instance['cloud'] or ""
 
     snode.namespace = namespace
     snode.hostname = hostname

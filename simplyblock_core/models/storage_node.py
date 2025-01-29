@@ -19,6 +19,7 @@ class StorageNode(BaseNodeObject):
     cloud_instance_id: str = ""
     cloud_instance_public_ip: str = ""
     cloud_instance_type: str = ""
+    cloud_name: str = ""
     cluster_id: str = ""
     cpu: int = 0
     cpu_hz: int = 0
