@@ -184,6 +184,22 @@ class CommonUtils:
         instance.wait_until_stopped()  # Wait until the instance is fully stopped
         self.logger.info(f"Instance {instance_id} has stopped.") 
         sleep_n_sec(30)
+
+    def reboot_ec2_instance(self, ec2_resource, instance_id):
+        """Reboot ec2 instance
+
+        Args:
+            ec2_resource (EC2): EC2 class object from boto3
+            instance_id (str): Instance id to start
+        """
+        try:
+            ec2_client = ec2_resource.meta.client  # Get the EC2 client
+            ec2_client.reboot_instances(InstanceIds=[instance_id])
+            print(f"Reboot initiated for instance {instance_id}.")
+            sleep_n_sec(30)
+        except Exception as e:
+            print(f"Error rebooting instance {instance_id}: {e}")
+            raise e
     
     def terminate_instance(self, ec2_resource, instance_id):
         # Terminate the given instance

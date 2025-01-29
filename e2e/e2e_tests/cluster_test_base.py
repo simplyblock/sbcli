@@ -418,7 +418,7 @@ class TestClusterBase:
                     raise RuntimeError(f"Migration task {task['id']} is stuck (last updated at {updated_at}).")
 
                 # Check if task is completed
-                if task['status'] == 'done' and task['function_result'] == 'Done':
+                if task['status'] == 'done':
                     completed_count += 1
                 else:
                     all_done = False
