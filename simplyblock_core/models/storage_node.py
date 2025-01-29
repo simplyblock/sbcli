@@ -28,6 +28,7 @@ class StorageNode(BaseNodeObject):
     distrib_cpu_index: int = 0
     distrib_cpu_mask: str = ""
     enable_ha_jm: bool = False
+    ha_jm_count: int = 3
     enable_test_device: bool = False
     health_check: bool = True
     host_nqn: str = ""

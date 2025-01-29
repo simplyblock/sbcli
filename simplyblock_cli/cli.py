@@ -295,7 +295,7 @@ class CLIWrapper:
         sub_command.add_argument("--distr-chunk-bs", help='(Dev) distrb bdev chunk block size, default: 4096', type=int,
                                  default=4096)
         sub_command.add_argument("--ha-type", help='LVol HA type (single, ha), default is cluster HA type',
-                                 dest='ha_type', choices=["single", "ha"], default='single')
+                                 dest='ha_type', choices=["single", "ha", "ha2"], default='single')
         sub_command.add_argument("--enable-node-affinity", help='Enable node affinity for storage nodes', action='store_true')
         sub_command.add_argument("--qpair-count", help='tcp transport qpair count', type=int, dest='qpair_count',
                                  default=0, choices=range(128))

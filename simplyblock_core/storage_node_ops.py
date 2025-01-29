@@ -1175,6 +1175,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
     snode.number_of_distribs = number_of_distribs
     snode.enable_ha_jm = enable_ha_jm
     snode.is_secondary_node = is_secondary_node
+    snode.ha_jm_count = constants.DOUBLE_NODE_OUTAGE_JM_COUNT if cluster.ha_type == 'ha2' else constants.HA_JM_COUNT
 
     if 'cpu_count' in node_info:
         snode.cpu = node_info['cpu_count']
@@ -2866,7 +2867,7 @@ def recreate_lvstore(snode):
             for did in devs:
                 dev = db_controller.get_jm_device_by_id(did)
                 online_devs.append(dev)
-                if len(online_devs) > constants.HA_JM_COUNT - 1:
+                if len(online_devs) > snode.ha_jm_count - 1:
                     break
 
         snode.remote_jm_devices = online_devs
@@ -2957,7 +2958,7 @@ def get_node_jm_names(current_node):
         jm_list.append("JM_LOCAL")
 
     if current_node.enable_ha_jm:
-        for jm_dev in current_node.remote_jm_devices[:constants.HA_JM_COUNT-1]:
+        for jm_dev in current_node.remote_jm_devices[:current_node.ha_jm_count-1]:
             jm_list.append(jm_dev.remote_bdev)
     return jm_list
 
@@ -3120,7 +3121,7 @@ def _create_bdev_stack(snode, lvstore_stack=None, primary_node=None):
                     jm_list.append(bdev_name)
                 else:
                     jm_list.append("JM_LOCAL")
-                for jm_dev in primary_node.remote_jm_devices[:constants.HA_JM_COUNT-1]:
+                for jm_dev in primary_node.remote_jm_devices[:primary_node.ha_jm_count-1]:
                     jm_list.append(jm_dev.remote_bdev)
                 params['jm_names'] = jm_list
             else:
