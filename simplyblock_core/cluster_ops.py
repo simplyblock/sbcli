@@ -702,12 +702,14 @@ def list_all_info(cluster_id):
             })
 
     out += "\n"
-    out +=  utils.print_table(data, title="Storage Nodes Stats")
-    out += "\n"
+    if data:
+        out +=  utils.print_table(data, title="Storage Nodes Stats")
+        out += "\n"
 
     out += "\n"
-    out +=  utils.print_table(dev_data, title="Storage Devices Stats")
-    out += "\n"
+    if dev_data:
+        out +=  utils.print_table(dev_data, title="Storage Devices Stats")
+        out += "\n"
 
     lvol_data = []
     for lvol in db_controller.get_lvols(cluster_id):
@@ -738,8 +740,9 @@ def list_all_info(cluster_id):
         })
 
     out += "\n"
-    out += utils.print_table(lvol_data, title="LVol Stats")
-    out += "\n"
+    if lvol_data:
+        out += utils.print_table(lvol_data, title="LVol Stats")
+        out += "\n"
 
     return out
 
