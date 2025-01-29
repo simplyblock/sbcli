@@ -22,6 +22,7 @@ from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.mgmt_node import MgmtNode
 from simplyblock_core.models.pool import Pool
+from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.rpc_client import RPCClient
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
@@ -549,6 +550,13 @@ def list_all_info(cluster_id):
     lvols = db_controller.get_lvols(cluster_id)
     lv_online = [p for p in lvols if p.status == LVol.STATUS_ONLINE]
 
+    snaps = []
+    for sn in db_controller.get_snapshots():
+        if sn.cluster_id == cl.get_id():
+            snaps.append(sn)
+
+    lv_online = [p for p in lvols if p.status == LVol.STATUS_ONLINE]
+
     devs = []
     devs_online = []
     for n in st:
@@ -557,23 +565,31 @@ def list_all_info(cluster_id):
             if dev.status == NVMeDevice.STATUS_ONLINE:
                 devs_online.append(dev)
 
+    records = db_controller.get_cluster_capacity(cl, 1)
+    rec = records[0]
+
     data.append({
         "Cluster": cl.get_id(),
-        "ha_type": cl.ha_type,
-        "Status": cl.status,
+        "Type": cl.ha_type,
         "Mod": f"{cl.distr_ndcs}x{cl.distr_npcs}",
+        "Status": cl.status,
 
-        "# MGMT": f"{len(mt)}/{len(mt_online)}",
-        "# STRG": f"{len(st)}/{len(st_online)}",
+        "Mgmt Nodes": f"{len(mt)}/{len(mt_online)}",
+        "Stor Nodes": f"{len(st)}/{len(st_online)}",
+        "Devices": f"{len(devs)}/{len(devs_online)}",
+        "Pools": f"{len(pools)}/{len(p_online)}",
+        "Lvols": f"{len(lvols)}/{len(lv_online)}",
+        "Snaps": f"{len(snaps)}",
 
-        "# DEVS": f"{len(devs)}/{len(devs_online)}",
-        "# POOL": f"{len(pools)}/{len(p_online)}",
-        "# LVOL": f"{len(lvols)}/{len(lv_online)}",
-
-
+        "Size total": f"{utils.humanbytes(rec.size_total)}",
+        "Size Used": f"{utils.humanbytes(rec.size_used)}",
 
     })
-    return utils.print_table(data)
+    out = utils.print_table(data)
+
+
+
+    return out
 
 
 def get_capacity(cluster_id, history, records_count=20, is_json=False):
