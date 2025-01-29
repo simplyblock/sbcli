@@ -612,8 +612,8 @@ def list_all_info(cluster_id):
     data = []
 
     data.append({
-        "UUID": cl.uuid,
-        "Type": "Cluster Object",
+        "Cluster UUID": cl.uuid,
+        # "Type": "Cluster Object",
         # "Devices": f"{len(devs)}/{len(devs_online)}",
         # "Lvols": f"{len(lvols)}/{len(lv_online)}",
 
@@ -656,8 +656,7 @@ def list_all_info(cluster_id):
                 online_devices += 1
 
         data.append({
-            "UUID": node.uuid,
-            "Type": "Storage",
+            "Storage node UUID": node.uuid,
             "Devices": f"{total_devices}/{online_devices}",
             "LVols": f"{len(lvs)}",
 
@@ -684,8 +683,7 @@ def list_all_info(cluster_id):
                 rec = StatsObject()
 
             dev_data.append({
-                "UUID": dev.uuid,
-                "Type": "Storage Device",
+                "Device UUID": dev.uuid,
 
                 "Size total": f"{utils.humanbytes(rec.size_total)}",
                 "Size Used": f"{utils.humanbytes(rec.size_used)}",
@@ -704,7 +702,7 @@ def list_all_info(cluster_id):
             })
 
     out += "\n"
-    out +=  utils.print_table(data, title="Storage nodes Stats")
+    out +=  utils.print_table(data, title="Storage Nodes Stats")
     out += "\n"
 
     out += "\n"
