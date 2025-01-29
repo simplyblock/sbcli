@@ -45,6 +45,11 @@ def add(lvol_id, snapshot_name):
             logger.error(msg)
             return False, msg
 
+    for sn in db_controller.get_snapshots():
+        if sn.cluster_id == pool.cluster_id:
+            if sn.snap_name == snapshot_name:
+                return False, f"Snapshot name must be unique: {snapshot_name}"
+
     logger.info(f"Creating snapshot: {snapshot_name} from LVol: {lvol.get_id()}")
     snode = db_controller.get_storage_node_by_id(lvol.node_id)
 
