@@ -295,7 +295,7 @@ class CLIWrapper:
                                  default=4096)
         sub_command.add_argument("--distr-chunk-bs", help='(Dev) distrb bdev chunk block size, default: 4096', type=int,
                                  default=4096)
-        sub_command.add_argument("--ha-type", help='LVol HA type (single, ha), default is cluster HA type',
+        sub_command.add_argument("--ha-type", help='LVol HA type (single, ha), default is cluster single type',
                                  dest='ha_type', choices=["single", "ha"], default='single')
         sub_command.add_argument("--enable-node-affinity", help='Enable node affinity for storage nodes', action='store_true')
         sub_command.add_argument("--qpair-count", help='tcp transport qpair count', type=int, dest='qpair_count',
@@ -325,7 +325,7 @@ class CLIWrapper:
                                  default=4096)
         sub_command.add_argument("--distr-chunk-bs", help='(Dev) distrb bdev chunk block size, default: 4096', type=int,
                                  default=4096)
-        sub_command.add_argument("--ha-type", help='LVol HA type (single, ha), default is cluster HA type',
+        sub_command.add_argument("--ha-type", help='LVol HA type (single, ha), default is cluster single type',
                                  dest='ha_type', choices=["single", "ha"], default='single')
         sub_command.add_argument("--enable-node-affinity", help='Enable node affinity for storage nodes', action='store_true')
         sub_command.add_argument("--qpair-count", help='tcp transport qpair count', type=int, dest='qpair_count',
