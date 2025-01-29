@@ -136,7 +136,7 @@ class TestSingleNodeReboot(TestClusterBase):
         try:
             self.logger.info(f"Waiting for node to become offline/unreachable/schedulable, {no_lvol_node_uuid}")
             self.sbcli_utils.wait_for_storage_node_status(no_lvol_node_uuid,
-                                                          ["unreachable", "offline", "schedulable"],
+                                                          ["unreachable", "offline", "schedulable", "in_shutdown"],
                                                           timeout=500)
             # sleep_n_sec(30)
             # self.validations(node_uuid=no_lvol_node_uuid,
@@ -406,7 +406,7 @@ class TestHASingleNodeReboot(TestClusterBase):
             try:
                 self.logger.info(f"Waiting for node to become offline/unreachable/schedulable, {no_lvol_node_uuid}")
                 self.sbcli_utils.wait_for_storage_node_status(no_lvol_node_uuid,
-                                                              ["unreachable", "offline", "schedulable"],
+                                                              ["unreachable", "offline", "schedulable", "in_shutdown"],
                                                               timeout=500)
             except Exception as exp:
                 self.logger.debug(exp)
