@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import time
 import uuid
+from tracemalloc import Snapshot
 
 import docker
 import requests
@@ -19,10 +20,12 @@ from simplyblock_core.controllers import cluster_events, device_controller, stor
     lvol_controller
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.cluster import Cluster
+from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.mgmt_node import MgmtNode
 from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.snapshot import SnapShot
+from simplyblock_core.models.stats import StatsObject
 from simplyblock_core.rpc_client import RPCClient
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
@@ -550,12 +553,7 @@ def list_all_info(cluster_id):
     lvols = db_controller.get_lvols(cluster_id)
     lv_online = [p for p in lvols if p.status == LVol.STATUS_ONLINE]
 
-    snaps = []
-    for sn in db_controller.get_snapshots():
-        if sn.cluster_id == cl.get_id():
-            snaps.append(sn)
-
-    lv_online = [p for p in lvols if p.status == LVol.STATUS_ONLINE]
+    snaps = [sn for sn in db_controller.get_snapshots() if sn.cluster_id == cluster_id]
 
     devs = []
     devs_online = []
@@ -566,19 +564,37 @@ def list_all_info(cluster_id):
                 devs_online.append(dev)
 
     records = db_controller.get_cluster_capacity(cl, 1)
-    rec = records[0]
+    if records:
+        rec = records[0]
+    else:
+        rec = StatsObject()
+
+    task_total = 0
+    task_running = 0
+    task_pending = 0
+    for task in db_controller.get_job_tasks(cl.get_id()):
+        task_total += 1
+        if task.status == JobSchedule.STATUS_RUNNING:
+            task_running += 1
+        elif task.status in [JobSchedule.STATUS_NEW, JobSchedule.STATUS_SUSPENDED]:
+            task_pending += 1
+
 
     data.append({
         "Cluster UUID": cl.get_id(),
-        "Type": cl.ha_type,
+        "Type": cl.ha_type.upper(),
         "Mod": f"{cl.distr_ndcs}x{cl.distr_npcs}",
 
         "Mgmt Nodes": f"{len(mt)}/{len(mt_online)}",
-        "Stor Nodes": f"{len(st)}/{len(st_online)}",
+        "Storage Nodes": f"{len(st)}/{len(st_online)}",
         "Devices": f"{len(devs)}/{len(devs_online)}",
         "Pools": f"{len(pools)}/{len(p_online)}",
         "Lvols": f"{len(lvols)}/{len(lv_online)}",
         "Snaps": f"{len(snaps)}",
+
+        "Tasks total": f"{task_total}",
+        "Tasks running": f"{task_running}",
+        "Tasks pending": f"{task_pending}",
         #
         # "Size total": f"{utils.humanbytes(rec.size_total)}",
         # "Size Used": f"{utils.humanbytes(rec.size_used)}",
@@ -589,36 +605,48 @@ def list_all_info(cluster_id):
         "Status": cl.status,
 
     })
-    out = utils.print_table(data)
 
+    out = utils.print_table(data, title="Cluster Info")
+    out += "\n"
 
     data = []
 
     data.append({
         "UUID": cl.uuid,
-        "Type": "Cluster",
-        "Devices": f"{len(devs)}/{len(devs_online)}",
-        "Lvols": f"{len(lvols)}/{len(lv_online)}",
+        "Type": "Cluster Object",
+        # "Devices": f"{len(devs)}/{len(devs_online)}",
+        # "Lvols": f"{len(lvols)}/{len(lv_online)}",
 
-        "Size total": f"{utils.humanbytes(rec.size_total)}",
-        "Size Used": f"{utils.humanbytes(rec.size_used)}",
         "Size prov": f"{utils.humanbytes(rec.size_prov)}",
-        "Size util": f"{rec.size_util}%",
-        "Size prov util": f"{rec.size_prov_util}%",
+        "Size Used": f"{utils.humanbytes(rec.size_used)}",
+        "Size free": f"{utils.humanbytes(rec.size_free)}",
+        "Size %": f"{rec.size_util}%",
+        "Size prov %": f"{rec.size_prov_util}%",
 
         "Read BW/s": f"{utils.humanbytes(rec.read_bytes_ps)}",
         "Write BW/s": f"{utils.humanbytes(rec.write_bytes_ps)}",
+        "Read IOP/s": f"{rec.read_io_ps}",
+        "Write IOP/s": f"{rec.write_io_ps}",
 
-        "Read IOP/s": f"{utils.humanbytes(rec.read_io_ps)}",
-        "Write IOP/s": f"{utils.humanbytes(rec.write_io_ps)}",
-
+        "Health": "True",
         "Status": cl.status,
 
     })
 
+    out += "\n"
+    out += utils.print_table(data, title="Cluster Stats")
+    out += "\n"
+
+    data = []
+
+    dev_data = []
+
     for node in st:
-        records = db_controller.get_cluster_capacity(cl, 1)
-        rec = records[0]
+        records = db_controller.get_node_capacity(node, 1)
+        if records:
+            rec = records[0]
+        else:
+            rec = StatsObject()
 
         lvs = db_controller.get_lvols_by_node_id(node.get_id()) or []
         total_devices = len(node.nvme_devices)
@@ -629,52 +657,93 @@ def list_all_info(cluster_id):
 
         data.append({
             "UUID": node.uuid,
-            "Type": "Storage",
+            "Type": "Storage Node",
             "Devices": f"{total_devices}/{online_devices}",
             "LVols": f"{len(lvs)}",
 
-            "Size total": f"{utils.humanbytes(rec.size_total)}",
-            "Size Used": f"{utils.humanbytes(rec.size_used)}",
             "Size prov": f"{utils.humanbytes(rec.size_prov)}",
-            "Size util": f"{rec.size_util}%",
-            "Size prov util": f"{rec.size_prov_util}%",
+            "Size Used": f"{utils.humanbytes(rec.size_used)}",
+            "Size free": f"{utils.humanbytes(rec.size_free)}",
+            "Size %": f"{rec.size_util}%",
+            "Size prov %": f"{rec.size_prov_util}%",
 
             "Read BW/s": f"{utils.humanbytes(rec.read_bytes_ps)}",
             "Write BW/s": f"{utils.humanbytes(rec.write_bytes_ps)}",
+            "Read IOP/s": f"{rec.read_io_ps}",
+            "Write IOP/s": f"{rec.write_io_ps}",
 
-            "Read IOP/s": f"{utils.humanbytes(rec.read_io_ps)}",
-            "Write IOP/s": f"{utils.humanbytes(rec.write_io_ps)}",
-
+            "Health": node.health_check,
             "Status": node.status,
 
         })
 
         for dev in node.nvme_devices:
-            rec = db_controller.get_device_capacity(dev)[0]
-            data.append({
-                "UUID": dev.uuid,
-                "Type": "Device",
-                "Devices": "",
-                "LVols": "",
+            records = db_controller.get_device_capacity(dev)
+            if records:
+                rec = records[0]
+            else:
+                rec = StatsObject()
 
-                "Size total": f"{utils.humanbytes(rec.size_total)}",
-                "Size Used": f"{utils.humanbytes(rec.size_used)}",
+            dev_data.append({
+                "UUID": dev.uuid,
+                "Type": "Storage Device",
+
                 "Size prov": f"{utils.humanbytes(rec.size_prov)}",
-                "Size util": f"{rec.size_util}%",
-                "Size prov util": f"{rec.size_prov_util}%",
+                "Size Used": f"{utils.humanbytes(rec.size_used)}",
+                "Size free": f"{utils.humanbytes(rec.size_free)}",
+                "Size %": f"{rec.size_util}%",
+                # "Size prov %": f"{rec.size_prov_util}%",
 
                 "Read BW/s": f"{utils.humanbytes(rec.read_bytes_ps)}",
                 "Write BW/s": f"{utils.humanbytes(rec.write_bytes_ps)}",
-
-                "Read IOP/s": f"{utils.humanbytes(rec.read_io_ps)}",
-                "Write IOP/s": f"{utils.humanbytes(rec.write_io_ps)}",
+                "Read IOP/s": f"{rec.read_io_ps}",
+                "Write IOP/s": f"{rec.write_io_ps}",
 
                 "Health": dev.health_check,
                 "Status": dev.status,
 
             })
 
-    out = out + "\n" + utils.print_table(data)
+    out += "\n"
+    out +=  utils.print_table(data, title="Storage nodes Stats")
+    out += "\n"
+
+    out += "\n"
+    out +=  utils.print_table(dev_data, title="Storage Devices Stats")
+    out += "\n"
+
+    lvol_data = []
+    for lvol in db_controller.get_lvols(cluster_id):
+        records = db_controller.get_lvol_stats(lvol, 1)
+        if records:
+            rec = records[0]
+        else:
+            rec = StatsObject()
+
+        lvol_data.append({
+            "UUID": lvol.uuid,
+            "Type": "LVol",
+
+            "Size prov": f"{utils.humanbytes(rec.size_prov)}",
+            "Size Used": f"{utils.humanbytes(rec.size_used)}",
+            "Size free": f"{utils.humanbytes(rec.size_free)}",
+            "Size %": f"{rec.size_util}%",
+            # "Size prov %": f"{rec.size_prov_util}%",
+
+            "Read BW/s": f"{utils.humanbytes(rec.read_bytes_ps)}",
+            "Write BW/s": f"{utils.humanbytes(rec.write_bytes_ps)}",
+            "Read IOP/s": f"{rec.read_io_ps}",
+            "Write IOP/s": f"{rec.write_io_ps}",
+
+            "Connections": f"{rec.connected_clients}",
+            "Health": lvol.health_check,
+            "Status": lvol.status,
+
+        })
+
+    out += "\n"
+    out += utils.print_table(lvol_data, title="LVol Stats")
+    out += "\n"
 
     return out
 

@@ -133,5 +133,6 @@ while True:
                         res = task_runner(task)
                         if res:
                             tasks_events.task_updated(task)
+                            continue
 
                         time.sleep(delay_seconds)
