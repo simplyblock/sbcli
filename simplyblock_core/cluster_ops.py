@@ -657,11 +657,11 @@ def list_all_info(cluster_id):
 
         data.append({
             "UUID": node.uuid,
-            "Type": "Storage Node",
+            "Type": "Storage",
             "Devices": f"{total_devices}/{online_devices}",
             "LVols": f"{len(lvs)}",
 
-            "Size prov": f"{utils.humanbytes(rec.size_prov)}",
+            "Size prov": f"{utils.humanbytes(rec.size_total)}",
             "Size Used": f"{utils.humanbytes(rec.size_used)}",
             "Size free": f"{utils.humanbytes(rec.size_free)}",
             "Size %": f"{rec.size_util}%",
@@ -672,7 +672,6 @@ def list_all_info(cluster_id):
             "Read IOP/s": f"{rec.read_io_ps}",
             "Write IOP/s": f"{rec.write_io_ps}",
 
-            "Health": node.health_check,
             "Status": node.status,
 
         })
@@ -688,7 +687,7 @@ def list_all_info(cluster_id):
                 "UUID": dev.uuid,
                 "Type": "Storage Device",
 
-                "Size prov": f"{utils.humanbytes(rec.size_prov)}",
+                "Size total": f"{utils.humanbytes(rec.size_total)}",
                 "Size Used": f"{utils.humanbytes(rec.size_used)}",
                 "Size free": f"{utils.humanbytes(rec.size_free)}",
                 "Size %": f"{rec.size_util}%",
@@ -724,7 +723,7 @@ def list_all_info(cluster_id):
             "UUID": lvol.uuid,
             "Type": "LVol",
 
-            "Size prov": f"{utils.humanbytes(rec.size_prov)}",
+            "Size prov": f"{utils.humanbytes(rec.size_total)}",
             "Size Used": f"{utils.humanbytes(rec.size_used)}",
             "Size free": f"{utils.humanbytes(rec.size_free)}",
             "Size %": f"{rec.size_util}%",
