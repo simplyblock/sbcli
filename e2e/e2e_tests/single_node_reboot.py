@@ -424,6 +424,7 @@ class TestHASingleNodeReboot(TestClusterBase):
 
             # self.sbcli_utils.restart_node(node_uuid=no_lvol_node_uuid)
             if "i-" in instance_id[0:2]:
+                sleep_n_sec(300)
                 self.common_utils.start_ec2_instance(ec2_resource=self.ec2_resource,
                                                     instance_id=instance_id)
             else:
