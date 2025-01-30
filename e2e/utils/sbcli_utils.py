@@ -49,6 +49,7 @@ class SbcliUtils:
                 if expected_error_code:
                     if e.response.status_code in expected_error_code:
                         self.logger.info(f"Expected error: {e}")
+                        break
                 else:
                     retry -= 1
                     if retry == 0:
