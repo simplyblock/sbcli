@@ -58,6 +58,25 @@ def add(lvol_id, snapshot_name):
         logger.error(msg)
         return False, msg
 
+
+    rec = db_controller.get_lvol_stats(lvol, 1)
+    if rec:
+        size = rec[0].size_used
+    else:
+        size = lvol.size
+
+    if 0 < pool.lvol_max_size < size:
+        logger.error(f"Pool Max LVol size is: {utils.humanbytes(pool.lvol_max_size)}, LVol size: {utils.humanbytes(size)} must be below this limit")
+        return False
+
+    if pool.pool_max_size > 0:
+        total = pool_controller.get_pool_total_capacity(pool.get_id())
+        if total + size > pool.pool_max_size:
+            logger.error( f"Invalid LVol size: {utils.humanbytes(size)} " 
+                          f"Pool max size has reached {utils.humanbytes(total+size)} of {utils.humanbytes(pool.pool_max_size)}")
+            return False
+
+
 ##############################################################################
     # Validate adding snap on storage node
     snode_api = SNodeClient(snode.api_endpoint)
@@ -297,6 +316,19 @@ def clone(snapshot_id, clone_name, new_size=0):
                 msg=f"LVol name must be unique: {clone_name}"
                 logger.error(msg)
                 return False, msg
+
+    size = snap.size
+    if 0 < pool.lvol_max_size < size:
+        logger.error(f"Pool Max LVol size is: {utils.humanbytes(pool.lvol_max_size)}, LVol size: {utils.humanbytes(size)} must be below this limit")
+        return False
+
+    if pool.pool_max_size > 0:
+        total = pool_controller.get_pool_total_capacity(pool.get_id())
+        if total + size > pool.pool_max_size:
+            logger.error( f"Invalid LVol size: {utils.humanbytes(size)} " 
+                          f"Pool max size has reached {utils.humanbytes(total+size)} of {utils.humanbytes(pool.pool_max_size)}")
+            return False
+
 
     # Validate cloning snap on storage node
     snode_api = SNodeClient(snode.api_endpoint)

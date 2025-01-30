@@ -123,7 +123,7 @@ def validate_add_lvol_func(name, size, host_id_or_name, pool_id_or_name,
         total = pool_controller.get_pool_total_capacity(pool.get_id())
         if total + size > pool.pool_max_size:
             return False, f"Invalid LVol size: {utils.humanbytes(size)} " \
-                          f"Pool max size has reached {utils.humanbytes(total)} of {utils.humanbytes(pool.pool_max_size)}"
+                          f"Pool max size has reached {utils.humanbytes(total+size)} of {utils.humanbytes(pool.pool_max_size)}"
 
     for lvol in db_controller.get_lvols(pool.cluster_id):
         if lvol.pool_uuid == pool.get_id():
@@ -1115,10 +1115,17 @@ def resize_lvol(id, new_size):
     if lvol.max_size < new_size:
         logger.error(f"New size {new_size} must be smaller than the max size {lvol.max_size}")
         return False
-    #
-    # if lvol.cloned_from_snap:
-    #     logger.error(f"Can not resize clone!")
-    #     return False
+
+    if 0 < pool.lvol_max_size < new_size:
+        logger.error(f"Pool Max LVol size is: {utils.humanbytes(pool.lvol_max_size)}, LVol size: {utils.humanbytes(new_size)} must be below this limit")
+        return False
+
+    if pool.pool_max_size > 0:
+        total = pool_controller.get_pool_total_capacity(pool.get_id())
+        if total + new_size > pool.pool_max_size:
+            logger.error( f"Invalid LVol size: {utils.humanbytes(new_size)} " 
+                          f"Pool max size has reached {utils.humanbytes(total+new_size)} of {utils.humanbytes(pool.pool_max_size)}")
+            return False
 
     snode = db_controller.get_storage_node_by_id(lvol.node_id)
 
