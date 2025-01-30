@@ -166,10 +166,9 @@ class RandomFailoverTest(TestLvolHACluster):
         node_details = self.sbcli_utils.get_storage_node_details(self.current_outage_node)
         node_ip = node_details[0]["mgmt_ip"]
 
+        sleep_n_sec(120)
         self.logger.info(f"Performing {outage_type} on node {self.current_outage_node}.")
         self.log_outage_event(self.current_outage_node, outage_type, "Outage started")
-
-        sleep_n_sec(120)
         
         if outage_type == "graceful_shutdown":
             self.sbcli_utils.suspend_node(node_uuid=self.current_outage_node, expected_error_code=[503])
