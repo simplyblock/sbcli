@@ -7,11 +7,15 @@ import paramiko.ssh_exception
 from logger_config import setup_logger
 from pathlib import Path
 from datetime import datetime
+import random, string
 
 
 
 SSH_KEY_LOCATION = os.path.join(Path.home(), ".ssh", os.environ.get("KEY_NAME"))
 
+def generate_random_string(length=6):
+    """Generate a random string of uppercase letters and digits."""
+    return ''.join(random.choices(string.ascii_uppercase + string.digits, k=length))
 
 class SshUtils:
     """Class to perform all ssh level operationa
@@ -695,7 +699,8 @@ class SshUtils:
                 # command_logs = (
                 #     f"sudo nohup setsid docker logs --follow {container} > {log_file} 2>&1 &"
                 # )
-                tmux_session_name = f"{container}_logs"
+                random_suffix = generate_random_string()
+                tmux_session_name = f"{container}_logs_{random_suffix}"
                 command_logs = (
                     f"sudo tmux new-session -d -s {tmux_session_name} "
                     f"\"docker logs --follow {container} > {log_file} 2>&1\""
@@ -732,7 +737,8 @@ class SshUtils:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             for container in containers:
                 log_file = f"{log_dir}/{container}_{test_name}_{timestamp}_after_outage.txt"
-                tmux_session_name = f"{container}_logs"
+                random_suffix = generate_random_string()
+                tmux_session_name = f"{container}_logs_{random_suffix}"
                 command_logs = (
                     f"sudo tmux new-session -d -s {tmux_session_name} "
                     f"\"docker logs --follow {container} > {log_file} 2>&1\""
