@@ -1167,6 +1167,12 @@ def resize_lvol(id, new_size):
             ret = sec_node_rpc_client.bdev_lvol_resize(f"{lvol.lvs_name}/{lvol.lvol_bdev}", size_in_mib)
             if not ret:
                 logger.error(f"Error resizing lvol on node: {sec_node.get_id()}")
+                logger.info(f"Revert size on node {snode.get_id()}")
+                size_in_mib = int(lvol.size / (1000 * 1000))
+                ret = rpc_client.bdev_lvol_resize(f"{lvol.lvs_name}/{lvol.lvol_bdev}", size_in_mib)
+                if not ret:
+                    logger.error(f"Failed to revert size for lvol on node {snode.get_id()}, LVol current size: {utils.humanbytes(new_size)}")
+                return False
 
     lvol = db_controller.get_lvol_by_id(id)
     lvol.size = new_size
