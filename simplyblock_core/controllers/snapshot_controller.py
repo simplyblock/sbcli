@@ -123,7 +123,7 @@ def add(lvol_id, snapshot_name):
     logger.info("Creating Snapshot bdev")
     ret = rpc_client.lvol_create_snapshot(f"{lvol.lvs_name}/{lvol.lvol_bdev}", snap_bdev_name)
     if not ret:
-        return False, "Failed to create snapshot bdev"
+        return False, f"Failed to create snapshot on node: {snode.get_id()}"
 
     size = lvol.size
     used_size = 0
@@ -143,6 +143,14 @@ def add(lvol_id, snapshot_name):
             sec_rpc_client.bdev_lvol_set_leader(False, lvs_name=lvol.lvs_name)
             ret = sec_rpc_client.bdev_lvol_snapshot_register(
                 f"{lvol.lvs_name}/{lvol.lvol_bdev}", snap_bdev_name, snap_uuid, blobid)
+            if not ret:
+                msg = f"Failed to register snapshot on node: {sec_node.get_id()}"
+                logger.error(msg)
+                logger.info(f"Removing snapshot from {snode.get_id()}")
+                ret = rpc_client.delete_lvol(f"{lvol.lvs_name}/{snap_bdev_name}")
+                if not ret:
+                    logger.error(f"Failed to delete snap from node: {snode.get_id()}")
+                return False, msg
 
 
     snap = SnapShot()
@@ -436,6 +444,17 @@ def clone(snapshot_id, clone_name, new_size=0):
         if sec_node.status == StorageNode.STATUS_ONLINE:
             ret, error = lvol_controller.add_lvol_on_node(lvol, sec_node, ha_inode_self=1)
             if error:
+                logger.error(error)
+                logger.error(f"Failed to add clone on node: {sec_node.get_id()}")
+                logger.info(f"Removing clone from {snode.get_id()}")
+                lvol.status = LVol.STATUS_IN_DELETION
+                lvol.write_to_db(db_controller.kv_store)
+                ret = lvol_controller.delete_lvol_from_node(lvol.get_id(), snode.get_id())
+                if ret:
+                    lvol.remove(db_controller.kv_store)
+                else:
+                    logger.error(f"Failed to remove clone from node {snode.get_id()}, LVol status: {lvol.status}")
+
                 return False, error
 
         lvol.nodes.append(snode.secondary_node_id)
