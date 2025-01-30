@@ -845,6 +845,8 @@ class SshUtils:
                 if port not in blocked_ports:
                     self.exec_command(node_ip, f"sudo iptables -A OUTPUT -p tcp --dport {port} -j DROP")
                     self.exec_command(node_ip, f"sudo iptables -A INPUT -p tcp --dport {port} -j DROP")
+                    self.exec_command(node_ip, f"sudo iptables -A OUTPUT -p tcp --sport {port} -j DROP")
+                    self.exec_command(node_ip, f"sudo iptables -A INPUT -p tcp --sport {port} -j DROP")
                     self.logger.info(f"Blocked port {port} on {node_ip}.")
                     blocked_ports.add(port)
 
