@@ -854,6 +854,8 @@ class SshUtils:
                     if port not in blocked_ports:
                         self.exec_command(node_ip, f"sudo iptables -A OUTPUT -p tcp --dport {port} -j DROP")
                         self.exec_command(node_ip, f"sudo iptables -A INPUT -p tcp --dport {port} -j DROP")
+                        self.exec_command(node_ip, f"sudo iptables -A OUTPUT -p tcp --sport {port} -j DROP")
+                        self.exec_command(node_ip, f"sudo iptables -A INPUT -p tcp --sport {port} -j DROP")
                         self.logger.info(f"Blocked port {port} for mgmt_ip {mgmt_ip} on {node_ip}.")
                         blocked_ports.add(port)
             time.sleep(5)
@@ -881,6 +883,8 @@ class SshUtils:
             for port in blocked_ports:
                 self.exec_command(node_ip, f"sudo iptables -D OUTPUT -p tcp --dport {port} -j DROP")
                 self.exec_command(node_ip, f"sudo iptables -D INPUT -p tcp --dport {port} -j DROP")
+                self.exec_command(node_ip, f"sudo iptables -D OUTPUT -p tcp --sport {port} -j DROP")
+                self.exec_command(node_ip, f"sudo iptables -D INPUT -p tcp --sport {port} -j DROP")
                 self.logger.info(f"Unblocked port {port} on {node_ip}.")
             time.sleep(5)
             self.logger.info("Network outage: IPTable Input List:")
