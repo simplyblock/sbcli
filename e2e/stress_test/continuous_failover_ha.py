@@ -304,7 +304,7 @@ class RandomFailoverTest(TestLvolHACluster):
                     "name": f"{clone_name}_fio",
                     "rw": "randrw",
                     "bs": f"{2 ** random.randint(2, 7)}K",
-                    "nrfiles": 5,
+                    "nrfiles": 16,
                     "iodepth": 1,
                     "numjobs": 4,
                 },
