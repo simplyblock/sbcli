@@ -338,7 +338,7 @@ def clone(snapshot_id, clone_name, new_size=0):
             return False
 
     lvol_count = len(db_controller.get_lvols_by_node_id(snode.get_id()))
-    if lvol_count >= snode.max_lvols:
+    if lvol_count >= snode.max_lvol:
         error = f"Too many lvols on node: {snode.get_id()}, max lvols reached: {lvol_count}"
         logger.error(error)
         return False, error
