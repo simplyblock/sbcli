@@ -10,7 +10,8 @@ from datetime import datetime
 from typing import Tuple
 
 from simplyblock_core import utils, constants, distr_controller
-from simplyblock_core.controllers import snapshot_controller, pool_controller, lvol_events, caching_node_controller
+from simplyblock_core.controllers import snapshot_controller, pool_controller, lvol_events, caching_node_controller, \
+    tasks_controller
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.pool import Pool
@@ -175,6 +176,11 @@ def _get_next_3_nodes(cluster_id, lvol_size=0):
             continue
 
         if node.status == node.STATUS_ONLINE:
+
+            lvol_count = len(db_controller.get_lvols_by_node_id(node.get_id()))
+            if lvol_count >= node.max_lvols:
+                continue
+
             # Validate Eligible nodes for adding lvol
             # snode_api = SNodeClient(node.api_endpoint)
             # result, _ = snode_api.info()
@@ -187,11 +193,10 @@ def _get_next_3_nodes(cluster_id, lvol_size=0):
             #     continue
             #
             online_nodes.append(node)
-            lvols = db_controller.get_lvols_by_node_id(node.get_id()) or []
             # node_stat_list = db_controller.get_node_stats(node, limit=1000)
             # combined_record = utils.sum_records(node_stat_list)
             node_st = {
-                "lvol": len(lvols)+1,
+                "lvol": lvol_count+1,
                 # "cpu": 1 + (node.cpu * node.cpu_hz),
                 # "r_io": combined_record.read_io_ps,
                 # "w_io": combined_record.write_io_ps,
@@ -583,18 +588,12 @@ def add_lvol_on_node(lvol, snode, ha_comm_addrs=None, ha_inode_self=0):
         rpc_client.bdev_lvol_set_leader(False, lvs_name=lvol.lvs_name)
 
     else:
-        # Validate adding lvol on storage node
-        snode_api = SNodeClient(snode.api_endpoint)
-        result, _ = snode_api.info()
-        memory_free = result["memory_details"]["free"]
-        huge_free = result["memory_details"]["huge_free"]
 
-        total_node_capacity = db_controller.get_snode_size(snode.get_id())
-        lvols = len(db_controller.get_lvols_by_node_id(snode.get_id()))
-        error = utils.validate_add_lvol_or_snap_on_node(memory_free, huge_free, snode.max_lvol, lvol.size,  total_node_capacity, lvols)
-        if error:
+        lvol_count = len(db_controller.get_lvols_by_node_id(snode.get_id()))
+        if lvol_count >= snode.max_lvols:
+            error = f"Too many lvols on node: {snode.get_id()}, max lvols reached: {lvol_count}"
             logger.error(error)
-            return False, f"Failed to add lvol on node {snode.get_id()}"
+            return False, error
 
         rpc_client.bdev_lvol_set_leader(True, lvs_name=lvol.lvs_name)
 

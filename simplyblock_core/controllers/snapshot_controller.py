@@ -78,25 +78,25 @@ def add(lvol_id, snapshot_name):
 
 
 ##############################################################################
-    # Validate adding snap on storage node
-    snode_api = SNodeClient(snode.api_endpoint)
-    result, _ = snode_api.info()
-    memory_free = result["memory_details"]["free"]
-    huge_free = result["memory_details"]["huge_free"]
-    total_node_capacity = db_controller.get_snode_size(snode.get_id())
-
-    error = utils.validate_add_lvol_or_snap_on_node(
-        memory_free,
-        huge_free,
-        snode.max_snap,
-        lvol.size,
-        total_node_capacity,
-        len(db_controller.get_snapshots_by_node_id(lvol.node_id)))
-
-    if error:
-        logger.error(f"Failed to add snap on node {lvol.node_id}")
-        logger.error(error)
-        return False
+    # # Validate adding snap on storage node
+    # snode_api = SNodeClient(snode.api_endpoint)
+    # result, _ = snode_api.info()
+    # memory_free = result["memory_details"]["free"]
+    # huge_free = result["memory_details"]["huge_free"]
+    # total_node_capacity = db_controller.get_snode_size(snode.get_id())
+    #
+    # error = utils.validate_add_lvol_or_snap_on_node(
+    #     memory_free,
+    #     huge_free,
+    #     snode.max_snap,
+    #     lvol.size,
+    #     total_node_capacity,
+    #     len(db_controller.get_snapshots_by_node_id(lvol.node_id)))
+    #
+    # if error:
+    #     logger.error(f"Failed to add snap on node {lvol.node_id}")
+    #     logger.error(error)
+    #     return False
 
     if pool.pool_max_size > 0:
         total = pool_controller.get_pool_total_capacity(pool.get_id())
@@ -105,12 +105,12 @@ def add(lvol_id, snapshot_name):
             logger.error(msg)
             return False, msg
 
-    if snode.max_snap:
-        cnt = db_controller.get_snapshots_by_node_id(snode.get_id())
-        if cnt and len(cnt)+1 > snode.max_snap:
-            msg = f"Storage node snapshots count must be less than max_snap:{snode.max_snap}"
-            logger.error(msg)
-            return False, msg
+    # if snode.max_snap:
+    #     cnt = db_controller.get_snapshots_by_node_id(snode.get_id())
+    #     if cnt and len(cnt)+1 > snode.max_snap:
+    #         msg = f"Storage node snapshots count must be less than max_snap:{snode.max_snap}"
+    #         logger.error(msg)
+    #         return False, msg
 
 ##############################################################################
 
@@ -337,19 +337,11 @@ def clone(snapshot_id, clone_name, new_size=0):
                           f"Pool max size has reached {utils.humanbytes(total+size)} of {utils.humanbytes(pool.pool_max_size)}")
             return False
 
-
-    # Validate cloning snap on storage node
-    snode_api = SNodeClient(snode.api_endpoint)
-    result, _ = snode_api.info()
-    memory_free = result["memory_details"]["free"]
-    huge_free = result["memory_details"]["huge_free"]
-    total_node_capacity = db_controller.get_snode_size(snode.get_id())
-    lvols = db_controller.get_lvols_by_node_id(snode.get_id())
-    error = utils.validate_add_lvol_or_snap_on_node(
-        memory_free, huge_free, snode.max_lvol, snap.lvol.size,  total_node_capacity, len(lvols))
-    if error:
+    lvol_count = len(db_controller.get_lvols_by_node_id(snode.get_id()))
+    if lvol_count >= snode.max_lvols:
+        error = f"Too many lvols on node: {snode.get_id()}, max lvols reached: {lvol_count}"
         logger.error(error)
-        return False, f"Failed to add lvol on node {snode.get_id()}"
+        return False, error
 
     if pool.pool_max_size > 0:
         total = pool_controller.get_pool_total_capacity(pool.get_id())
@@ -358,12 +350,6 @@ def clone(snapshot_id, clone_name, new_size=0):
             logger.error(msg)
             return False, msg
 
-    if snode.max_snap:
-        cnt = db_controller.get_snapshots_by_node_id(snode.get_id())
-        if cnt and len(cnt)+1 > snode.max_lvol:
-            msg = f"Storage node LVol count must be less than max_lvol:{snode.max_lvol}"
-            logger.error(msg)
-            return False, msg
 
     cluster = db_controller.get_cluster_by_id(snode.cluster_id)
 
