@@ -313,6 +313,9 @@ def get_random_vuid():
                 continue
             used_vuids.append(vuid)
 
+    for lvol in db_controller.get_lvols():
+        used_vuids.append(lvol.vuid)
+
     r = 1 + int(random.random() * 10000)
     while r in used_vuids:
         r = 1 + int(random.random() * 10000)
