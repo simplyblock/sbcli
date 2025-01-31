@@ -279,7 +279,7 @@ class SshUtils:
         if directory:
             location = f"--directory={directory}"
 
-        filename_format = f"{directory}/file_" + r"${jobnum}_${filenum}"
+        # filename_format = f"{directory}/file_" + r"${jobnum}_${filenum}"
         
         runtime = kwargs.get("runtime", 3600)
         rw = kwargs.get("rw", "randrw")
@@ -307,7 +307,7 @@ class SshUtils:
 
         command = (f"sudo fio --name={name} {location} --ioengine={ioengine} --direct=1 --iodepth={iodepth} "
                    f"{time_based} --runtime={runtime} --rw={rw} --bs={bs} --size={size} --rwmixread={rwmixread} "
-                   f"--verify=md5 --verify_fatal=1 --numjobs={numjobs} --nrfiles={nrfiles} --filename_format={filename_format}"
+                   f"--verify=md5 --verify_fatal=1 --numjobs={numjobs} --nrfiles={nrfiles} "
                    f"{output_format}{output_file}")
         
         if kwargs.get("debug", None):
