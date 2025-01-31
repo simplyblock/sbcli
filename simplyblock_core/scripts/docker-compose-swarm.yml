@@ -5,8 +5,6 @@ services:
   spdk-stats-collector:
     image: $SIMPLYBLOCK_DOCKER_IMAGE
     command: "python simplyblock_core/services/spdk_stats_collector.py"
-    networks:
-      - hostnet
     volumes:
           - '/etc/simplyblock:/etc/simplyblock'
           - '/var/tmp/spdk.sock:/var/tmp/spdk.sock'
