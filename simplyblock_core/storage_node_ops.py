@@ -2887,7 +2887,7 @@ def recreate_lvstore(snode):
                             ret = sec_rpc_client.nvmf_subsystem_listener_set_ana_state(
                                 lvol.nqn, iface.ip4_address, "4420", False, "inaccessible")
 
-            sec_rpc_client.bdev_lvol_set_leader(False, lvs_name=snode.lvstore)
+            sec_rpc_client.bdev_lvol_set_leader(False, lvs_name=snode.lvstore, bs_nonleadership=True)
             sec_rpc_client.bdev_distrib_force_to_non_leader(snode.jm_vuid)
             time.sleep(1)
 
