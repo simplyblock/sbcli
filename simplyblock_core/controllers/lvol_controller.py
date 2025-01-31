@@ -178,7 +178,7 @@ def _get_next_3_nodes(cluster_id, lvol_size=0):
         if node.status == node.STATUS_ONLINE:
 
             lvol_count = len(db_controller.get_lvols_by_node_id(node.get_id()))
-            if lvol_count >= node.max_lvols:
+            if lvol_count >= node.max_lvol:
                 continue
 
             # Validate Eligible nodes for adding lvol
@@ -590,7 +590,7 @@ def add_lvol_on_node(lvol, snode, ha_comm_addrs=None, ha_inode_self=0):
     else:
 
         lvol_count = len(db_controller.get_lvols_by_node_id(snode.get_id()))
-        if lvol_count >= snode.max_lvols:
+        if lvol_count >= snode.max_lvol:
             error = f"Too many lvols on node: {snode.get_id()}, max lvols reached: {lvol_count}"
             logger.error(error)
             return False, error
