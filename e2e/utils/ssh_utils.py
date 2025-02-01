@@ -903,3 +903,76 @@ class SshUtils:
             self.exec_command(node_ip, "sudo iptables -L OUTPUT -v -n --line-numbers")
         except Exception as e:
             self.logger.error(f"Failed to unblock ports on {node_ip}: {e}")
+
+    def set_aio_max_nr(self, node_ip, value=1048576):
+        """
+        Set the aio-max-nr value on the target node.
+
+        Args:
+            node_ip (str): IP address of the target node.
+            value (int, optional): The aio-max-nr value to set. Defaults to 1048576.
+        """
+        try:
+            # Check the current aio-max-nr value
+            check_cmd = "cat /proc/sys/fs/aio-max-nr"
+            current_value, _ = self.exec_command(node_ip, check_cmd)
+
+            if current_value.strip() == str(value):
+                self.logger.info(f"aio-max-nr is already set to {value} on {node_ip}. No changes needed.")
+                return
+            
+            self.logger.info(f"Updating aio-max-nr to {value} on {node_ip}.")
+
+            # Set the new aio-max-nr value
+            update_cmd = f'echo "fs.aio-max-nr = {value}" | sudo tee /etc/sysctl.d/99-sysctl.conf'
+            self.exec_command(node_ip, update_cmd)
+
+            # Apply the new setting
+            apply_cmd = "sudo sysctl -p /etc/sysctl.d/99-sysctl.conf"
+            self.exec_command(node_ip, apply_cmd)
+
+            self.logger.info(f"Successfully updated aio-max-nr to {value} on {node_ip}.")
+
+        except Exception as e:
+            self.logger.error(f"Failed to update aio-max-nr on {node_ip}: {e}")
+
+    def dump_lvstore(self, node_ip, storage_node_id):
+        """
+        Runs 'sbcli-dev sn dump-lvstore' on a given storage node and extracts the LVS dump file path.
+
+        Args:
+            node_ip (str): IP address of the target node.
+            storage_node_id (str): The Storage Node ID to dump lvstore.
+
+        Returns:
+            str: The extracted LVS dump file path, or None if not found.
+        """
+        try:
+            command = f"sbcli-dev sn dump-lvstore {storage_node_id} | grep 'LVS dump file will be here'"
+            self.logger.info(f"Executing 'sbcli-dev sn dump-lvstore' on {node_ip} for Storage Node ID: {storage_node_id}")
+            
+            output, error = self.exec_command(node_ip, command)
+
+            if error:
+                self.logger.error(f"Error executing 'sbcli-dev sn dump-lvstore' on {node_ip}: {error}")
+                return None
+
+            # Extract only the LVS dump file path
+            dump_file_path = None
+            for line in output.split("\n"):
+                if "LVS dump file will be here" in line:
+                    dump_file_path = line.strip()
+                    break
+
+            if dump_file_path:
+                self.logger.info(f"LVS dump file located: {dump_file_path}")
+                return dump_file_path
+            else:
+                self.logger.warning(f"No LVS dump file found in the output from {node_ip}.")
+                return None
+
+        except Exception as e:
+            self.logger.error(f"Failed to dump lvstore on {node_ip}: {e}")
+            return None
+
+

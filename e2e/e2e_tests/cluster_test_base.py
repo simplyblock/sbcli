@@ -76,12 +76,16 @@ class TestClusterBase:
                 address=node,
                 bastion_server_address=self.bastion_server,
             )
+            sleep_n_sec(2)
+            self.ssh_obj.set_aio_max_nr(node)
         for node in self.storage_nodes:
             self.logger.info(f"**Connecting to storage nodes** - {node}")
             self.ssh_obj.connect(
                 address=node,
                 bastion_server_address=self.bastion_server,
             )
+            sleep_n_sec(2)
+            self.ssh_obj.set_aio_max_nr(node)
 
         # command = "python3 -c \"from importlib.metadata import version;print(f'SBCLI Version: {version('''sbcli-dev''')}')\""
         # self.ssh_obj.exec_command(

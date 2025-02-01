@@ -167,9 +167,12 @@ class RandomFailoverTest(TestLvolHACluster):
         node_ip = node_details[0]["mgmt_ip"]
 
         sleep_n_sec(120)
+        for node in self.sn_nodes:
+            self.ssh_obj.dump_lvstore(node_ip=self.mgmt_nodes[0],
+                                      storage_node_id=node)
+
         self.logger.info(f"Performing {outage_type} on node {self.current_outage_node}.")
         self.log_outage_event(self.current_outage_node, outage_type, "Outage started")
-        
         if outage_type == "graceful_shutdown":
             self.sbcli_utils.suspend_node(node_uuid=self.current_outage_node, expected_error_code=[503])
             self.sbcli_utils.wait_for_storage_node_status(self.current_outage_node, "suspended", timeout=4000)
@@ -232,6 +235,10 @@ class RandomFailoverTest(TestLvolHACluster):
             log_dir=self.docker_logs_path,
             test_name=self.test_name
         )
+
+        for node in self.sn_nodes:
+            self.ssh_obj.dump_lvstore(node_ip=self.mgmt_nodes[0],
+                                      storage_node_id=node)
 
         # Log the restart event
         self.log_outage_event(self.current_outage_node, outage_type, "Node restarted")
@@ -388,11 +395,11 @@ class RandomFailoverTest(TestLvolHACluster):
         self.sn_nodes.append(self.current_outage_node)
         outage_type = self.perform_random_outage()
 
-        self.delete_random_lvols(5)
+        # self.delete_random_lvols(5)
 
         self.logger.info("Creating 5 new lvols, clones, and snapshots.")
         self.create_lvols_with_fio(5)
-        # self.create_snapshots_and_clones()
+        self.create_snapshots_and_clones()
 
         self.logger.info("Failover during outage completed.")
         self.restart_nodes_after_failover(outage_type)
@@ -440,9 +447,9 @@ class RandomFailoverTest(TestLvolHACluster):
             validation_thread = threading.Thread(target=self.validate_iostats_continuously, daemon=True)
             validation_thread.start()
             outage_type = self.perform_random_outage()
-            self.delete_random_lvols(5)
+            # self.delete_random_lvols(5)
             self.create_lvols_with_fio(5)
-            # self.create_snapshots_and_clones()
+            self.create_snapshots_and_clones()
             sleep_n_sec(300)
             self.restart_nodes_after_failover(outage_type)
             self.logger.info("Waiting for fallback.")
