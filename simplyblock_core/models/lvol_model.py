@@ -8,6 +8,7 @@ from simplyblock_core.models.nvme_device import NVMeDevice
 
 class LVol(BaseModel):
 
+    STATUS_IN_CREATION = 'in_creation'
     STATUS_ONLINE = 'online'
     STATUS_OFFLINE = 'offline'
     STATUS_IN_DELETION = 'in_deletion'
@@ -16,6 +17,7 @@ class LVol(BaseModel):
         STATUS_ONLINE: 1,
         STATUS_OFFLINE: 2,
         STATUS_IN_DELETION: 3,
+        STATUS_IN_CREATION: 4,
     }
 
     base_bdev: str = ""

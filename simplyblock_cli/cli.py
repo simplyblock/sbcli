@@ -57,6 +57,7 @@ class CLIWrapper:
         sub_command.add_argument("--iobuf_large_bufsize", help='bdev_set_options param', dest='large_bufsize',  type=int, default=0)
         sub_command.add_argument("--enable-test-device", help='Enable creation of test device', action='store_true')
         sub_command.add_argument("--disable-ha-jm", help='Disable HA JM for distrib creation', action='store_false', dest='enable_ha_jm', default=True)
+        sub_command.add_argument("--ha-jm-count", help='HA JM count', dest='ha_jm_count', type=int, default=constants.HA_JM_COUNT)
         sub_command.add_argument("--is-secondary-node", help='add as secondary node', action='store_true', dest='is_secondary_node', default=False)
         sub_command.add_argument("--namespace", help='k8s namespace to deploy on',)
         sub_command.add_argument("--id-device-by-nqn", help='Use device nqn to identify it instead of serial number', action='store_true', dest='id_device_by_nqn', default=False)
@@ -294,7 +295,7 @@ class CLIWrapper:
                                  default=4096)
         sub_command.add_argument("--distr-chunk-bs", help='(Dev) distrb bdev chunk block size, default: 4096', type=int,
                                  default=4096)
-        sub_command.add_argument("--ha-type", help='LVol HA type (single, ha), default is cluster HA type',
+        sub_command.add_argument("--ha-type", help='LVol HA type (single, ha), default is cluster single type',
                                  dest='ha_type', choices=["single", "ha"], default='single')
         sub_command.add_argument("--enable-node-affinity", help='Enable node affinity for storage nodes', action='store_true')
         sub_command.add_argument("--qpair-count", help='tcp transport qpair count', type=int, dest='qpair_count',
@@ -324,7 +325,7 @@ class CLIWrapper:
                                  default=4096)
         sub_command.add_argument("--distr-chunk-bs", help='(Dev) distrb bdev chunk block size, default: 4096', type=int,
                                  default=4096)
-        sub_command.add_argument("--ha-type", help='LVol HA type (single, ha), default is cluster HA type',
+        sub_command.add_argument("--ha-type", help='LVol HA type (single, ha), default is cluster single type',
                                  dest='ha_type', choices=["single", "ha"], default='single')
         sub_command.add_argument("--enable-node-affinity", help='Enable node affinity for storage nodes', action='store_true')
         sub_command.add_argument("--qpair-count", help='tcp transport qpair count', type=int, dest='qpair_count',
@@ -346,6 +347,10 @@ class CLIWrapper:
         # show cluster info
         sub_command = self.add_sub_command(
             subparser, 'status', 'Show cluster status')
+        sub_command.add_argument("cluster_id", help='the cluster UUID').completer = self._completer_get_cluster_list
+
+        sub_command = self.add_sub_command(
+            subparser, 'show', 'Show cluster info')
         sub_command.add_argument("cluster_id", help='the cluster UUID').completer = self._completer_get_cluster_list
 
         # show cluster info
@@ -777,6 +782,7 @@ class CLIWrapper:
                 enable_ha_jm = args.enable_ha_jm
                 number_of_distribs = args.number_of_distribs
                 namespace = args.namespace
+                ha_jm_count = args.ha_jm_count
 
                 out = storage_ops.add_node(
                     cluster_id=cluster_id,
@@ -801,6 +807,7 @@ class CLIWrapper:
                     is_secondary_node=args.is_secondary_node,
                     id_device_by_nqn=args.id_device_by_nqn,
                     partition_size=args.partition_size,
+                    ha_jm_count=ha_jm_count,
                 )
 
                 return out
@@ -968,7 +975,10 @@ class CLIWrapper:
                 ret = cluster_ops.cluster_activate(cluster_id, args.force, args.force_lvstore_create)
             elif sub_command == 'status':
                 cluster_id = args.cluster_id
-                ret = cluster_ops.show_cluster(cluster_id)
+                ret = cluster_ops.get_cluster_status(cluster_id)
+            elif sub_command == 'show':
+                cluster_id = args.cluster_id
+                ret = cluster_ops.list_all_info(cluster_id)
             elif sub_command == 'list':
                 ret = cluster_ops.list()
             elif sub_command == 'suspend':

@@ -84,9 +84,9 @@ def get_iface_ip(ifname):
     return False
 
 
-def print_table(data: list):
+def print_table(data: list, title=None):
     if data:
-        x = PrettyTable(field_names=data[0].keys(), max_width=70)
+        x = PrettyTable(field_names=data[0].keys(), max_width=70, title=title)
         x.align = 'l'
         for node_data in data:
             row = []
@@ -312,6 +312,9 @@ def get_random_vuid():
             else:
                 continue
             used_vuids.append(vuid)
+
+    for lvol in db_controller.get_lvols():
+        used_vuids.append(lvol.vuid)
 
     r = 1 + int(random.random() * 10000)
     while r in used_vuids:
