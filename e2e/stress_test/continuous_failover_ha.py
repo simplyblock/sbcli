@@ -46,6 +46,7 @@ class RandomFailoverTest(TestLvolHACluster):
         self.outage_start_time = None
         self.outage_end_time = None
         self.node_vs_lvol = {}
+        self.sn_nodes_with_sec = []
         self.test_name = "continuous_random_failover_ha"
         # self.outage_types = ["partial_nw", "network_interrupt", "container_stop", "graceful_shutdown"]
         self.outage_types = ["network_interrupt", "container_stop", "graceful_shutdown"]
@@ -167,7 +168,7 @@ class RandomFailoverTest(TestLvolHACluster):
         node_ip = node_details[0]["mgmt_ip"]
 
         sleep_n_sec(120)
-        for node in self.sn_nodes:
+        for node in self.sn_nodes_with_sec:
             self.ssh_obj.dump_lvstore(node_ip=self.mgmt_nodes[0],
                                       storage_node_id=node)
 
@@ -236,7 +237,7 @@ class RandomFailoverTest(TestLvolHACluster):
             test_name=self.test_name
         )
 
-        for node in self.sn_nodes:
+        for node in self.sn_nodes_with_sec:
             self.ssh_obj.dump_lvstore(node_ip=self.mgmt_nodes[0],
                                       storage_node_id=node)
 
@@ -395,11 +396,11 @@ class RandomFailoverTest(TestLvolHACluster):
         self.sn_nodes.append(self.current_outage_node)
         outage_type = self.perform_random_outage()
 
-        # self.delete_random_lvols(5)
+        self.delete_random_lvols(5)
 
         self.logger.info("Creating 5 new lvols, clones, and snapshots.")
         self.create_lvols_with_fio(5)
-        self.create_snapshots_and_clones()
+        # self.create_snapshots_and_clones()
 
         self.logger.info("Failover during outage completed.")
         self.restart_nodes_after_failover(outage_type)
@@ -440,6 +441,7 @@ class RandomFailoverTest(TestLvolHACluster):
         for result in storage_nodes['results']:
             if result['is_secondary_node'] is False:
                 self.sn_nodes.append(result["uuid"])
+            self.sn_nodes_with_sec.append(result["uuid"])
         
         sleep_n_sec(30)
         
@@ -447,9 +449,9 @@ class RandomFailoverTest(TestLvolHACluster):
             validation_thread = threading.Thread(target=self.validate_iostats_continuously, daemon=True)
             validation_thread.start()
             outage_type = self.perform_random_outage()
-            # self.delete_random_lvols(5)
+            self.delete_random_lvols(5)
             self.create_lvols_with_fio(5)
-            self.create_snapshots_and_clones()
+            # self.create_snapshots_and_clones()
             sleep_n_sec(300)
             self.restart_nodes_after_failover(outage_type)
             self.logger.info("Waiting for fallback.")
