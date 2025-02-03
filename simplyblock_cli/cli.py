@@ -458,8 +458,7 @@ class CLIWrapper:
         sub_command.add_argument("--max-rw-mbytes", help='Maximum Read Write Mega Bytes Per Second', type=int)
         sub_command.add_argument("--max-r-mbytes", help='Maximum Read Mega Bytes Per Second', type=int)
         sub_command.add_argument("--max-w-mbytes", help='Maximum Write Mega Bytes Per Second', type=int)
-        sub_command.add_argument("--distr-vuid", help='(Dev) set vuid manually, default: random (1-99999)', type=int,
-                                 default=0)
+
         sub_command.add_argument("--ha-type", help='LVol HA type (single, ha), default is cluster HA type',
                                  dest='ha_type', choices=["single", "ha", "default"], default='default')
         sub_command.add_argument("--lvol-priority-class", help='Lvol priority class', type=int, default=0)
@@ -1053,7 +1052,7 @@ class CLIWrapper:
                 pool = args.pool
                 comp = None
                 crypto = args.encrypt
-                distr_vuid = args.distr_vuid
+                distr_vuid = 0
                 with_snapshot = args.snapshot
                 lvol_priority_class = args.lvol_priority_class
                 results, error = lvol_controller.add_lvol_ha(
