@@ -910,7 +910,7 @@ class RPCClient:
 
     def bdev_lvol_set_leader(self, is_leader=False, uuid=None, lvs_name=None, bs_nonleadership=False):
         params = {
-            "leadership": is_leader,
+            "lvs_leadership": is_leader,
         }
         if uuid:
             params["uuid"] = uuid

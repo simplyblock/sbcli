@@ -692,7 +692,7 @@ def handle_task_result(task: JobSchedule, res: dict, allowed_error_codes = None)
             task.write_to_db()
             return True
 
-        elif migration_status == "failed":
+        elif migration_status in ["failed", "none"]:
             task.status = JobSchedule.STATUS_DONE
             task.function_result = migration_status
             task.write_to_db()
