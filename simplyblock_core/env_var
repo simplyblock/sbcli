@@ -1,5 +1,5 @@
-SIMPLY_BLOCK_COMMAND_NAME=sbcli-dev
+SIMPLY_BLOCK_COMMAND_NAME=sbcli-fri
 SIMPLY_BLOCK_VERSION=11.0.5
 
-SIMPLY_BLOCK_DOCKER_IMAGE=simplyblock/simplyblock:main
+SIMPLY_BLOCK_DOCKER_IMAGE=simplyblock/simplyblock:sbcli-fri
 DOCKER_USER=hamdysimplyblock
