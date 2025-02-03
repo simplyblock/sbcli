@@ -917,7 +917,7 @@ class RPCClient:
         elif lvs_name:
             params["lvs_name"] = lvs_name
 
-        params["bs_nonleadership"] = bs_nonleadership
+        params["bs_nonleadership"] = False
 
         return self._request("bdev_lvol_set_leader_all", params)
 
