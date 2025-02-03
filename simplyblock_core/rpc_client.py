@@ -178,7 +178,7 @@ class RPCClient:
                 "trtype": trtype,
                 "adrfam": "IPv4",
                 "traddr": traddr,
-                "trsvcid": trsvcid
+                "trsvcid": str(trsvcid)
             }
         }
         if ana_state:
@@ -896,7 +896,7 @@ class RPCClient:
                 "trtype": trtype,
                 "adrfam": "IPv4",
                 "traddr": traddr,
-                "trsvcid": trsvcid
+                "trsvcid": str(trsvcid)
             }
         }
         return self._request("nvmf_subsystem_remove_listener", params)
