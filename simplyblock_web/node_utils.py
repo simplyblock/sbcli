@@ -176,23 +176,26 @@ def firewall_port(port_id=9090, port_type="tcp", block=True):
 
     if block:
         cmd_list=[
-            "systemctl restart iptables",
-            "iptables -L -n",
+            # "systemctl restart iptables",
+            "iptables -F",
+            "iptables -X",
             "iptables -P INPUT ACCEPT",
             "iptables -P FORWARD ACCEPT",
             "iptables -P OUTPUT ACCEPT",
             f"iptables -A INPUT -p {port_type} --dport {port_id} -j DROP",
             f"iptables -A INPUT -p {port_type} --dport {port_id} -j REJECT",
             f"iptables -A OUTPUT -p {port_type} --dport {port_id} -j DROP",
-            f"iptables -A OUTPUT -p {port_type} --dport {port_id} -j REJECT"
+            f"iptables -A OUTPUT -p {port_type} --dport {port_id} -j REJECT",
+            "iptables -L -n",
         ]
     else:
         cmd_list=[
-            "systemctl restart iptables",
-            "iptables -L -n",
+            "iptables -F",
+            "iptables -X",
             "iptables -P INPUT ACCEPT",
             "iptables -P FORWARD ACCEPT",
             "iptables -P OUTPUT ACCEPT",
+            "iptables -L -n",
             # f"iptables -D INPUT -p {port_type} --dport {port_id} -j DROP",
             # f"iptables -D INPUT -p {port_type} --dport {port_id} -j REJECT",
             # f"iptables -D OUTPUT -p {port_type} --dport {port_id} -j DROP",
