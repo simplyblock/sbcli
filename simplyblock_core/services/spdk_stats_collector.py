@@ -24,18 +24,14 @@ if __name__ == '__main__':
 
     out_file = None
     while True:
-        try:
-            ret = client.call(method)
-            now = str(datetime.datetime.now()).split(".")[0]
-            if ret and "threads" in ret:
-                if not out_file:
-                    out_file = get_file(ret)
-                out_file.write(now+", ")
-                for stats in ret["threads"]:
-                    out_file.write(", ".join([str(k) for k in stats.values()]))
-                out_file.write("\n")
-
-        except Exception as e:
-            print(e)
+        ret = client.call(method)
+        now = str(datetime.datetime.now()).split(".")[0]
+        if ret and "threads" in ret:
+            if not out_file:
+                out_file = get_file(ret)
+            out_file.write(now+", ")
+            for stats in ret["threads"]:
+                out_file.write(", ".join([str(k) for k in stats.values()]))
+            out_file.write("\n")
 
         time.sleep(10)

@@ -2209,7 +2209,7 @@ def suspend_storage_node(node_id, force=False):
                     for iface in snode.data_nics:
                         if iface.ip4_address:
                             ret = rpc_client.nvmf_subsystem_listener_set_ana_state(
-                                lvol.nqn, iface.ip4_address, "4420", False, ana="inaccessible")
+                                lvol.nqn, iface.ip4_address, constants.LVOL_PORT, False, ana="inaccessible")
 
                 rpc_client.bdev_lvol_set_leader(False, lvs_name=node.lvstore)
                 rpc_client.bdev_distrib_force_to_non_leader(node.jm_vuid)
@@ -2224,7 +2224,7 @@ def suspend_storage_node(node_id, force=False):
                 for iface in sec_node.data_nics:
                     if iface.ip4_address:
                         ret = sec_node_client.nvmf_subsystem_listener_set_ana_state(
-                            lvol.nqn, iface.ip4_address, "4420", False, ana="inaccessible")
+                            lvol.nqn, iface.ip4_address, constants.LVOL_PORT, False, ana="inaccessible")
 
             # sec_node_client.bdev_lvol_set_leader(False, lvs_name=snode.lvstore)
             # sec_node_client.bdev_distrib_force_to_non_leader(snode.jm_vuid)
@@ -2234,7 +2234,7 @@ def suspend_storage_node(node_id, force=False):
             for iface in snode.data_nics:
                 if iface.ip4_address:
                     ret = rpc_client.nvmf_subsystem_listener_set_ana_state(
-                        lvol.nqn, iface.ip4_address, "4420", False, ana="inaccessible")
+                        lvol.nqn, iface.ip4_address, constants.LVOL_PORT, False, ana="inaccessible")
             time.sleep(3)
 
         rpc_client.bdev_lvol_set_leader(False, lvs_name=snode.lvstore)
@@ -2249,7 +2249,7 @@ def suspend_storage_node(node_id, force=False):
                 for iface in sec_node.data_nics:
                     if iface.ip4_address:
                         ret = sec_node_client.nvmf_subsystem_listener_set_ana_state(
-                            lvol.nqn, iface.ip4_address, "4420", False)
+                            lvol.nqn, iface.ip4_address, constants.LVOL_PORT, False)
 
 
     if snode.jm_device and snode.jm_device.status != JMDevice.STATUS_REMOVED:
@@ -2315,7 +2315,7 @@ def resume_storage_node(node_id):
                     for iface in snode.data_nics:
                         if iface.ip4_address:
                             ret = rpc_client.nvmf_subsystem_listener_set_ana_state(
-                                lvol.nqn, iface.ip4_address, "4420", False)
+                                lvol.nqn, iface.ip4_address, constants.LVOL_PORT, False)
 
 
     else:
@@ -2333,7 +2333,7 @@ def resume_storage_node(node_id):
                     for iface in sec_node.data_nics:
                         if iface.ip4_address:
                             ret = sec_node_client.nvmf_subsystem_listener_set_ana_state(
-                                lvol.nqn, iface.ip4_address, "4420", False, ana="inaccessible")
+                                lvol.nqn, iface.ip4_address, constants.LVOL_PORT, False, ana="inaccessible")
                 time.sleep(1)
                 sec_node_client.bdev_lvol_set_leader(False, lvs_name=snode.lvstore)
                 sec_node_client.bdev_distrib_force_to_non_leader(snode.jm_vuid)
@@ -2343,7 +2343,7 @@ def resume_storage_node(node_id):
             for iface in snode.data_nics:
                 if iface.ip4_address:
                     ret = rpc_client.nvmf_subsystem_listener_set_ana_state(
-                            lvol.nqn, iface.ip4_address, "4420", True)
+                            lvol.nqn, iface.ip4_address, constants.LVOL_PORT, True)
 
         time.sleep(3)
 
@@ -2354,7 +2354,7 @@ def resume_storage_node(node_id):
                 for iface in sec_node.data_nics:
                     if iface.ip4_address:
                         ret = sec_node_client.nvmf_subsystem_listener_set_ana_state(
-                            lvol.nqn, iface.ip4_address, "4420", False)
+                            lvol.nqn, iface.ip4_address, constants.LVOL_PORT, False)
 
     logger.info("Setting node status to online")
     set_node_status(snode.get_id(), StorageNode.STATUS_ONLINE)
@@ -2781,7 +2781,7 @@ def recreate_lvstore_on_sec(snode):
                 for iface in node.data_nics:
                     if iface.ip4_address:
                         ret = remote_rpc_client.nvmf_subsystem_listener_set_ana_state(
-                            lvol.nqn, iface.ip4_address, "4420", False, "inaccessible")
+                            lvol.nqn, iface.ip4_address, constants.LVOL_PORT, False, "inaccessible")
 
             remote_rpc_client.bdev_lvol_set_leader(False, lvs_name=node.lvstore)
             remote_rpc_client.bdev_distrib_force_to_non_leader(node.jm_vuid)
@@ -2811,7 +2811,7 @@ def recreate_lvstore_on_sec(snode):
                 for iface in node.data_nics:
                     if iface.ip4_address:
                         ret = remote_rpc_client.nvmf_subsystem_listener_set_ana_state(
-                            lvol.nqn, iface.ip4_address, "4420", True)
+                            lvol.nqn, iface.ip4_address, constants.LVOL_PORT, True)
 
             time.sleep(5)
 
@@ -2819,7 +2819,7 @@ def recreate_lvstore_on_sec(snode):
             for iface in snode.data_nics:
                 if iface.ip4_address:
                     ret = rpc_client.nvmf_subsystem_listener_set_ana_state(
-                        lvol.nqn, iface.ip4_address, "4420", False)
+                        lvol.nqn, iface.ip4_address, constants.LVOL_PORT, False)
 
     return True
 
@@ -2885,7 +2885,7 @@ def recreate_lvstore(snode):
                     for iface in sec_node.data_nics:
                         if iface.ip4_address:
                             ret = sec_rpc_client.nvmf_subsystem_listener_set_ana_state(
-                                lvol.nqn, iface.ip4_address, "4420", False, "inaccessible")
+                                lvol.nqn, iface.ip4_address, constants.LVOL_PORT, False, "inaccessible")
 
             sec_rpc_client.bdev_lvol_set_leader(False, lvs_name=snode.lvstore, bs_nonleadership=True)
             sec_rpc_client.bdev_distrib_force_to_non_leader(snode.jm_vuid)
@@ -2969,7 +2969,7 @@ def recreate_lvstore(snode):
                 for iface in sec_node.data_nics:
                     if iface.ip4_address:
                         ret = sec_rpc_client.nvmf_subsystem_listener_set_ana_state(
-                            lvol.nqn, iface.ip4_address, "4420", False)
+                            lvol.nqn, iface.ip4_address, constants.LVOL_PORT, False)
     return True
 
 

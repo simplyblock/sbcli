@@ -462,7 +462,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
         }
     }
 
-    if lvol.lvol_priority_class:
+    if cl.enable_qos and lvol.lvol_priority_class >= 0:
         lvol_dict["params"]["lvol_priority_class"] = lvol.lvol_priority_class
     lvol.bdev_stack = [lvol_dict]
 
@@ -614,13 +614,13 @@ def add_lvol_on_node(lvol, snode, ha_comm_addrs=None, ha_inode_self=0):
         if iface.ip4_address:
             tr_type = iface.get_transport_type()
             logger.info("adding listener for %s on IP %s" % (lvol.nqn, iface.ip4_address))
-            ret = rpc_client.listeners_create(lvol.nqn, tr_type, iface.ip4_address, "4420")
+            ret = rpc_client.listeners_create(lvol.nqn, tr_type, iface.ip4_address, constants.LVOL_PORT)
             is_optimized = False
             if lvol.node_id == snode.get_id():
                 is_optimized = True
             logger.info(f"Setting ANA state: {is_optimized}")
             ret = rpc_client.nvmf_subsystem_listener_set_ana_state(
-                lvol.nqn, iface.ip4_address, "4420", is_optimized)
+                lvol.nqn, iface.ip4_address, constants.LVOL_PORT, is_optimized)
 
     logger.info("Add BDev to subsystem")
     ret = rpc_client.nvmf_subsystem_add_ns(lvol.nqn, lvol.top_bdev, lvol.uuid, lvol.guid)
@@ -697,7 +697,7 @@ def recreate_lvol_on_node(lvol, snode, ha_inode_self=0, ana_state=None):
                     ana_state = "optimized"
             logger.info("adding listener for %s on IP %s" % (lvol.nqn, iface.ip4_address))
             logger.info(f"Setting ANA state: {ana_state}")
-            ret = rpc_client.listeners_create(lvol.nqn, tr_type, iface.ip4_address, "4420", ana_state)
+            ret = rpc_client.listeners_create(lvol.nqn, tr_type, iface.ip4_address, constants.LVOL_PORT, ana_state)
 
     return True, None
 
@@ -1091,7 +1091,7 @@ def connect_lvol(uuid):
         for nic in snode.data_nics:
             transport = nic.get_transport_type().lower()
             ip = nic.ip4_address
-            port = 4420
+            port = constants.LVOL_PORT
             out.append({
                 "transport": transport,
                 "ip": ip,
