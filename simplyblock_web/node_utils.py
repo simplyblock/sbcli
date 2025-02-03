@@ -170,3 +170,51 @@ def get_memory_details():
 def get_host_arch():
     out, err, rc = run_command("uname -m")
     return out
+
+
+def firewall_port(port_id=9090, port_type="tcp", block=True):
+
+    if block:
+        cmd_list=[
+            "systemctl restart iptables",
+            "iptables -L -n",
+            "iptables -P INPUT ACCEPT",
+            "iptables -P FORWARD ACCEPT",
+            "iptables -P OUTPUT ACCEPT",
+            f"iptables -A INPUT -p {port_type} --dport {port_id} -j DROP",
+            f"iptables -A INPUT -p {port_type} --dport {port_id} -j REJECT",
+            f"iptables -A OUTPUT -p {port_type} --dport {port_id} -j DROP",
+            f"iptables -A OUTPUT -p {port_type} --dport {port_id} -j REJECT"
+        ]
+    else:
+        cmd_list=[
+            "systemctl restart iptables",
+            "iptables -L -n",
+            "iptables -P INPUT ACCEPT",
+            "iptables -P FORWARD ACCEPT",
+            "iptables -P OUTPUT ACCEPT",
+            # f"iptables -D INPUT -p {port_type} --dport {port_id} -j DROP",
+            # f"iptables -D INPUT -p {port_type} --dport {port_id} -j REJECT",
+            # f"iptables -D OUTPUT -p {port_type} --dport {port_id} -j DROP",
+            # f"iptables -D OUTPUT -p {port_type} --dport {port_id} -j REJECT"
+        ]
+# systemctl start iptables
+# iptables -L -n
+# sudo iptables -P INPUT ACCEPT
+# sudo iptables -P FORWARD ACCEPT
+# sudo iptables -P OUTPUT ACCEPT
+
+# iptables -A INPUT -p tcp --dport 9090 -j DROP
+# iptables -A INPUT -p tcp --dport 9090 -j REJECT
+# iptables -A OUTPUT -p tcp --dport 9090 -j DROP
+# iptables -A OUTPUT -p tcp --dport 9090 -j REJECT
+
+    out = ""
+    for cmd in cmd_list:
+        stream = os.popen(cmd)
+        ret = stream.read()
+        if ret != "":
+            out += ret + "\n"
+            logger.info(ret)
+
+    return out
