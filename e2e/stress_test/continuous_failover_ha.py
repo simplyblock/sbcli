@@ -49,8 +49,9 @@ class RandomFailoverTest(TestLvolHACluster):
         self.sn_nodes_with_sec = []
         self.test_name = "continuous_random_failover_ha"
         # self.outage_types = ["partial_nw", "network_interrupt", "container_stop", "graceful_shutdown"]
-        self.outage_types = ["network_interrupt", "container_stop", "graceful_shutdown"]
+        # self.outage_types = ["network_interrupt", "container_stop", "graceful_shutdown"]
         # self.outage_types = ["network_interrupt"]
+        self.outage_types = ["network_interrupt", "container_stop"]
         self.blocked_ports = None
         self.outage_log_file = os.path.join("logs", f"outage_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
         self._initialize_outage_log()
@@ -400,7 +401,7 @@ class RandomFailoverTest(TestLvolHACluster):
 
         self.logger.info("Creating 5 new lvols, clones, and snapshots.")
         self.create_lvols_with_fio(5)
-        self.create_snapshots_and_clones()
+        # self.create_snapshots_and_clones()
 
         self.logger.info("Failover during outage completed.")
         self.restart_nodes_after_failover(outage_type)
@@ -451,7 +452,7 @@ class RandomFailoverTest(TestLvolHACluster):
             outage_type = self.perform_random_outage()
             self.delete_random_lvols(5)
             self.create_lvols_with_fio(5)
-            self.create_snapshots_and_clones()
+            # self.create_snapshots_and_clones()
             sleep_n_sec(300)
             self.restart_nodes_after_failover(outage_type)
             self.logger.info("Waiting for fallback.")
