@@ -18,7 +18,7 @@ KVD_DB_FILE_PATH = '/etc/foundationdb/fdb.cluster'
 KVD_DB_TIMEOUT_MS = 10000
 SPK_DIR = '/home/ec2-user/spdk'
 RPC_HTTP_PROXY_PORT = 8080
-LOG_LEVEL = logging.INFO
+LOG_LEVEL = logging.DEBUG
 LOG_WEB_LEVEL = logging.DEBUG
 LOG_WEB_DEBUG = True if LOG_WEB_LEVEL == logging.DEBUG else False
 
@@ -132,4 +132,4 @@ NVMF_MAX_SUBSYSTEMS=50000
 HA_JM_COUNT=3
 
 
-LVOL_PORT=9090
+LVOL_PORT=4420
