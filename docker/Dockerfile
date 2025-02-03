@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 FROM simplyblock/simplyblock:base-image
 
-RUN apt-get install -y iptables
+RUN apt-get update -y ;  apt-get install -y iptables
 
 WORKDIR /app
 
