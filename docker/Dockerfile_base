@@ -1,9 +1,9 @@
 # syntax=docker/dockerfile:1
 FROM python:3.9-slim
 
-RUN apt-get update; apt-get install -y \
-    wget libc6 inetutils-ping dmidecode nvme-cli open-iscsi \
-    iproute2 pciutils sudo nano parted gdisk ssh; \
+RUN apt-get update -y; apt-get install -y \
+    wget libc6 inetutils-ping dmidecode nvme-cli open-iscsi iptables \
+    iproute2 pciutils sudo nano parted gdisk ssh ; \
     rm -rf /var/lib/apt/lists/*
 
 ARG TARGETPLATFORM
@@ -21,6 +21,9 @@ WORKDIR /app
 # pip install
 COPY requirements.txt requirements.txt
 COPY simplyblock_web/requirements.txt simplyblock_web/requirements.txt
+
+RUN pip3 install --upgrade pip
+RUN pip3 install setuptools --upgrade
 
 RUN pip3 install -r requirements.txt
 RUN pip3 install -r simplyblock_web/requirements.txt

@@ -84,9 +84,9 @@ def get_iface_ip(ifname):
     return False
 
 
-def print_table(data: list):
+def print_table(data: list, title=None):
     if data:
-        x = PrettyTable(field_names=data[0].keys(), max_width=70)
+        x = PrettyTable(field_names=data[0].keys(), max_width=70, title=title)
         x.align = 'l'
         for node_data in data:
             row = []
@@ -312,6 +312,9 @@ def get_random_vuid():
             else:
                 continue
             used_vuids.append(vuid)
+
+    for lvol in db_controller.get_lvols():
+        used_vuids.append(lvol.vuid)
 
     r = 1 + int(random.random() * 10000)
     while r in used_vuids:
@@ -689,7 +692,7 @@ def handle_task_result(task: JobSchedule, res: dict, allowed_error_codes = None)
             task.write_to_db()
             return True
 
-        elif migration_status == "failed":
+        elif migration_status in ["failed", "none"]:
             task.status = JobSchedule.STATUS_DONE
             task.function_result = migration_status
             task.write_to_db()

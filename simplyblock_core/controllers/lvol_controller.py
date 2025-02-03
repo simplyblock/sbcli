@@ -10,7 +10,8 @@ from datetime import datetime
 from typing import Tuple
 
 from simplyblock_core import utils, constants, distr_controller
-from simplyblock_core.controllers import snapshot_controller, pool_controller, lvol_events, caching_node_controller
+from simplyblock_core.controllers import snapshot_controller, pool_controller, lvol_events, caching_node_controller, \
+    tasks_controller
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.pool import Pool
@@ -123,7 +124,7 @@ def validate_add_lvol_func(name, size, host_id_or_name, pool_id_or_name,
         total = pool_controller.get_pool_total_capacity(pool.get_id())
         if total + size > pool.pool_max_size:
             return False, f"Invalid LVol size: {utils.humanbytes(size)} " \
-                          f"Pool max size has reached {utils.humanbytes(total)} of {utils.humanbytes(pool.pool_max_size)}"
+                          f"Pool max size has reached {utils.humanbytes(total+size)} of {utils.humanbytes(pool.pool_max_size)}"
 
     for lvol in db_controller.get_lvols(pool.cluster_id):
         if lvol.pool_uuid == pool.get_id():
@@ -175,6 +176,11 @@ def _get_next_3_nodes(cluster_id, lvol_size=0):
             continue
 
         if node.status == node.STATUS_ONLINE:
+
+            lvol_count = len(db_controller.get_lvols_by_node_id(node.get_id()))
+            if lvol_count >= node.max_lvol:
+                continue
+
             # Validate Eligible nodes for adding lvol
             # snode_api = SNodeClient(node.api_endpoint)
             # result, _ = snode_api.info()
@@ -187,11 +193,10 @@ def _get_next_3_nodes(cluster_id, lvol_size=0):
             #     continue
             #
             online_nodes.append(node)
-            lvols = db_controller.get_lvols_by_node_id(node.get_id()) or []
             # node_stat_list = db_controller.get_node_stats(node, limit=1000)
             # combined_record = utils.sum_records(node_stat_list)
             node_st = {
-                "lvol": len(lvols)+1,
+                "lvol": lvol_count+1,
                 # "cpu": 1 + (node.cpu * node.cpu_hz),
                 # "r_io": combined_record.read_io_ps,
                 # "w_io": combined_record.write_io_ps,
@@ -392,7 +397,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
     elif cl.prov_cap_warn and cl.prov_cap_warn < cluster_size_prov_util:
         logger.warning(f"Cluster provisioned cap warning, util: {cluster_size_prov_util}% of cluster util: {cl.prov_cap_warn}")
 
-    if distr_vuid == 0:
+    if not distr_vuid:
         vuid = utils.get_random_vuid()
     else:
         vuid = distr_vuid
@@ -414,7 +419,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
     lvol.namespace = namespace or ""
     lvol.size = int(size)
     lvol.max_size = int(max_size)
-    lvol.status = LVol.STATUS_ONLINE
+    lvol.status = LVol.STATUS_IN_CREATION
 
     lvol.create_dt = str(datetime.now())
     lvol.ha_type = ha_type
@@ -457,7 +462,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
         }
     }
 
-    if lvol.lvol_priority_class:
+    if cl.enable_qos and lvol.lvol_priority_class >= 0:
         lvol_dict["params"]["lvol_priority_class"] = lvol.lvol_priority_class
     lvol.bdev_stack = [lvol_dict]
 
@@ -485,6 +490,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
         lvol.crypto_key1 = crypto_key1
         lvol.crypto_key2 = crypto_key2
 
+    lvol.write_to_db(db_controller.kv_store)
 
     lvol_bdev, error = add_lvol_on_node(lvol, host_node)
     if error:
@@ -495,12 +501,25 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
 
     if ha_type == "ha":
         sec_node = db_controller.get_storage_node_by_id(host_node.secondary_node_id)
-        ret, error = add_lvol_on_node(lvol, sec_node, ha_inode_self=1)
-        if error:
-            return False, error
-        lvol.nodes.append(host_node.secondary_node_id)
+        if sec_node and sec_node.status == StorageNode.STATUS_ONLINE:
+            ret, error = add_lvol_on_node(lvol, sec_node, ha_inode_self=1)
+            if error:
+                logger.error(error)
+                logger.error(f"Failed to add lvol on node: {sec_node.get_id()}")
+                logger.info(f"Removing LVol from {host_node.get_id()}")
+                lvol.status = LVol.STATUS_IN_DELETION
+                lvol.write_to_db(db_controller.kv_store)
+                ret=delete_lvol_from_node(lvol.get_id(), host_node.get_id())
+                if ret:
+                    lvol.remove(db_controller.kv_store)
+                else:
+                    logger.error(f"Failed to remove lvol from node {host_node.get_id()}, LVol status: {lvol.status}")
+                return False, error
+
+            lvol.nodes.append(host_node.secondary_node_id)
 
     lvol.pool_uuid = pool.get_id()
+    lvol.status = LVol.STATUS_ONLINE
     lvol.write_to_db(db_controller.kv_store)
     lvol_events.lvol_create(lvol)
 
@@ -569,18 +588,12 @@ def add_lvol_on_node(lvol, snode, ha_comm_addrs=None, ha_inode_self=0):
         rpc_client.bdev_lvol_set_leader(False, lvs_name=lvol.lvs_name)
 
     else:
-        # Validate adding lvol on storage node
-        snode_api = SNodeClient(snode.api_endpoint)
-        result, _ = snode_api.info()
-        memory_free = result["memory_details"]["free"]
-        huge_free = result["memory_details"]["huge_free"]
 
-        total_node_capacity = db_controller.get_snode_size(snode.get_id())
-        lvols = len(db_controller.get_lvols_by_node_id(snode.get_id()))
-        error = utils.validate_add_lvol_or_snap_on_node(memory_free, huge_free, snode.max_lvol, lvol.size,  total_node_capacity, lvols)
-        if error:
+        lvol_count = len(db_controller.get_lvols_by_node_id(snode.get_id()))
+        if lvol_count >= snode.max_lvol:
+            error = f"Too many lvols on node: {snode.get_id()}, max lvols reached: {lvol_count}"
             logger.error(error)
-            return False, f"Failed to add lvol on node {snode.get_id()}"
+            return False, error
 
         rpc_client.bdev_lvol_set_leader(True, lvs_name=lvol.lvs_name)
 
@@ -601,13 +614,13 @@ def add_lvol_on_node(lvol, snode, ha_comm_addrs=None, ha_inode_self=0):
         if iface.ip4_address:
             tr_type = iface.get_transport_type()
             logger.info("adding listener for %s on IP %s" % (lvol.nqn, iface.ip4_address))
-            ret = rpc_client.listeners_create(lvol.nqn, tr_type, iface.ip4_address, "4420")
+            ret = rpc_client.listeners_create(lvol.nqn, tr_type, iface.ip4_address, constants.LVOL_PORT)
             is_optimized = False
             if lvol.node_id == snode.get_id():
                 is_optimized = True
             logger.info(f"Setting ANA state: {is_optimized}")
             ret = rpc_client.nvmf_subsystem_listener_set_ana_state(
-                lvol.nqn, iface.ip4_address, "4420", is_optimized)
+                lvol.nqn, iface.ip4_address, constants.LVOL_PORT, is_optimized)
 
     logger.info("Add BDev to subsystem")
     ret = rpc_client.nvmf_subsystem_add_ns(lvol.nqn, lvol.top_bdev, lvol.uuid, lvol.guid)
@@ -628,20 +641,20 @@ def recreate_lvol_on_node(lvol, snode, ha_inode_self=0, ana_state=None):
     rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
 
     base=f"{lvol.lvs_name}/{lvol.lvol_bdev}"
-    retry = 3
-    while retry > 0:
-        lv = rpc_client.get_bdevs(base)
-        if lv:
-            break
-        else:
-            retry -= 1
-            msg = f"LVol bdev not found: {base} on node {snode.get_id()}, retrying"
-            logger.warning(msg)
-            time.sleep(2)
-    else:
-        msg = f"LVol bdev not found: {base} on node {snode.get_id()}"
-        logger.error(msg)
-        return False, msg
+    # retry = 3
+    # while retry > 0:
+    #     lv = rpc_client.get_bdevs(base)
+    #     if lv:
+    #         break
+    #     else:
+    #         retry -= 1
+    #         msg = f"LVol bdev not found: {base} on node {snode.get_id()}, retrying"
+    #         logger.warning(msg)
+    #         time.sleep(2)
+    # else:
+    #     msg = f"LVol bdev not found: {base} on node {snode.get_id()}"
+    #     logger.error(msg)
+    #     return False, msg
 
     if "crypto" in lvol.lvol_type:
         ret = _create_crypto_lvol(
@@ -651,27 +664,27 @@ def recreate_lvol_on_node(lvol, snode, ha_inode_self=0, ana_state=None):
             logger.error(msg)
             return False, msg
 
-    namespace_found = False
-    subsys_found = False
-    ret = rpc_client.subsystem_list(lvol.nqn)
-    if ret :
-        subsys_found = True
-        if ret[0]["namespaces"]:
-            for ns in ret[0]["namespaces"]:
-                if ns['name'] == lvol.top_bdev:
-                    namespace_found = True
-                    break
+    # namespace_found = False
+    # subsys_found = False
+    # ret = rpc_client.subsystem_list(lvol.nqn)
+    # if ret :
+    #     subsys_found = True
+    #     if ret[0]["namespaces"]:
+    #         for ns in ret[0]["namespaces"]:
+    #             if ns['name'] == lvol.top_bdev:
+    #                 namespace_found = True
+    #                 break
 
-    if subsys_found is False:
-        min_cntlid = 1 + 1000 * ha_inode_self
-        logger.info("creating subsystem %s", lvol.nqn)
-        rpc_client.subsystem_create(lvol.nqn, 'sbcli-cn', lvol.uuid, min_cntlid)
+    # if subsys_found is False:
+    min_cntlid = 1 + 1000 * ha_inode_self
+    logger.info("creating subsystem %s", lvol.nqn)
+    rpc_client.subsystem_create(lvol.nqn, 'sbcli-cn', lvol.uuid, min_cntlid)
 
-    if namespace_found is False:
-        logger.info("Add BDev to subsystem")
-        ret = rpc_client.nvmf_subsystem_add_ns(lvol.nqn, lvol.top_bdev, lvol.uuid, lvol.guid)
-        if not ret:
-            return False, "Failed to add bdev to subsystem"
+    # if namespace_found is False:
+    logger.info("Add BDev to subsystem")
+    ret = rpc_client.nvmf_subsystem_add_ns(lvol.nqn, lvol.top_bdev, lvol.uuid, lvol.guid)
+    # if not ret:
+    #     return False, "Failed to add bdev to subsystem"
 
     # add listeners
     logger.info("adding listeners")
@@ -684,7 +697,7 @@ def recreate_lvol_on_node(lvol, snode, ha_inode_self=0, ana_state=None):
                     ana_state = "optimized"
             logger.info("adding listener for %s on IP %s" % (lvol.nqn, iface.ip4_address))
             logger.info(f"Setting ANA state: {ana_state}")
-            ret = rpc_client.listeners_create(lvol.nqn, tr_type, iface.ip4_address, "4420", ana_state)
+            ret = rpc_client.listeners_create(lvol.nqn, tr_type, iface.ip4_address, constants.LVOL_PORT, ana_state)
 
     return True, None
 
@@ -819,16 +832,16 @@ def delete_lvol(id_or_name, force_delete=False):
         snode.rpc_username,
         snode.rpc_password)
 
-    # soft delete LVol if it has snapshots
-    snaps = db_controller.get_snapshots()
-    for snap in snaps:
-        if snap.deleted is False and snap.lvol.get_id() == lvol.get_id():
-            logger.warning(f"Soft delete LVol that has snapshots. Snapshot:{snap.get_id()}")
-            ret = rpc_client.subsystem_delete(lvol.nqn)
-            logger.debug(ret)
-            lvol.deleted = True
-            lvol.write_to_db(db_controller.kv_store)
-            return True
+    # # soft delete LVol if it has snapshots
+    # snaps = db_controller.get_snapshots()
+    # for snap in snaps:
+    #     if snap.deleted is False and snap.lvol.get_id() == lvol.get_id():
+    #         logger.warning(f"Soft delete LVol that has snapshots. Snapshot:{snap.get_id()}")
+    #         ret = rpc_client.subsystem_delete(lvol.nqn)
+    #         logger.debug(ret)
+    #         lvol.deleted = True
+    #         lvol.write_to_db(db_controller.kv_store)
+    #         return True
 
     if snode.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_REMOVED]:
         logger.error(f"Node status is not online or removed, node: {snode.get_id()}, status: {snode.status}")
@@ -905,18 +918,6 @@ def delete_lvol(id_or_name, force_delete=False):
             logger.error(f"Failed to set leader for primary node: {snode.get_id()}")
             if not force_delete:
                 return False
-
-    # remove from db
-    # snode = db_controller.get_storage_node_by_id(lvol.node_id)
-    # # logger.debug(snode)
-    # logger.debug(f"removing lvol: {lvol.get_id()} from node {snode.get_id()}")
-    # snode.lvols -= 1
-    # snode.write_to_db(db_controller.kv_store)
-
-    # # remove from pool
-    # pool = db_controller.get_pool_by_id(lvol.pool_uuid)
-    # pool.lvols -= 1
-    # pool.write_to_db(db_controller.kv_store)
 
     lvol_events.lvol_delete(lvol)
     lvol.remove(db_controller.kv_store)
@@ -1090,7 +1091,7 @@ def connect_lvol(uuid):
         for nic in snode.data_nics:
             transport = nic.get_transport_type().lower()
             ip = nic.ip4_address
-            port = 4420
+            port = constants.LVOL_PORT
             out.append({
                 "transport": transport,
                 "ip": ip,
@@ -1127,10 +1128,17 @@ def resize_lvol(id, new_size):
     if lvol.max_size < new_size:
         logger.error(f"New size {new_size} must be smaller than the max size {lvol.max_size}")
         return False
-    #
-    # if lvol.cloned_from_snap:
-    #     logger.error(f"Can not resize clone!")
-    #     return False
+
+    if 0 < pool.lvol_max_size < new_size:
+        logger.error(f"Pool Max LVol size is: {utils.humanbytes(pool.lvol_max_size)}, LVol size: {utils.humanbytes(new_size)} must be below this limit")
+        return False
+
+    if pool.pool_max_size > 0:
+        total = pool_controller.get_pool_total_capacity(pool.get_id())
+        if total + new_size > pool.pool_max_size:
+            logger.error( f"Invalid LVol size: {utils.humanbytes(new_size)} " 
+                          f"Pool max size has reached {utils.humanbytes(total+new_size)} of {utils.humanbytes(pool.pool_max_size)}")
+            return False
 
     snode = db_controller.get_storage_node_by_id(lvol.node_id)
 
@@ -1158,6 +1166,12 @@ def resize_lvol(id, new_size):
             ret = sec_node_rpc_client.bdev_lvol_resize(f"{lvol.lvs_name}/{lvol.lvol_bdev}", size_in_mib)
             if not ret:
                 logger.error(f"Error resizing lvol on node: {sec_node.get_id()}")
+                logger.info(f"Revert size on node {snode.get_id()}")
+                size_in_mib = int(lvol.size / (1000 * 1000))
+                ret = rpc_client.bdev_lvol_resize(f"{lvol.lvs_name}/{lvol.lvol_bdev}", size_in_mib)
+                if not ret:
+                    logger.error(f"Failed to revert size for lvol on node {snode.get_id()}, LVol current size: {utils.humanbytes(new_size)}")
+                return False
 
     lvol = db_controller.get_lvol_by_id(id)
     lvol.size = new_size

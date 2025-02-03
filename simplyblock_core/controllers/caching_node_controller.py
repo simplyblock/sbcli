@@ -430,7 +430,7 @@ def connect(caching_node_id, lvol_id, force=False):
     if lvol.ha_type == 'single':
         snode = db_controller.get_storage_node_by_id(lvol.node_id)
         for nic in snode.data_nics:
-            ret = rpc_client.bdev_nvme_attach_controller_tcp_caching(rem_name, lvol.nqn, nic.ip4_address, "4420")
+            ret = rpc_client.bdev_nvme_attach_controller_tcp_caching(rem_name, lvol.nqn, nic.ip4_address, constants.LVOL_PORT)
             logger.debug(ret)
             if not ret:
                 logger.warning("Failed to connect to LVol")
@@ -440,7 +440,7 @@ def connect(caching_node_id, lvol_id, force=False):
         for nodes_id in lvol.nodes:
             snode = db_controller.get_storage_node_by_id(nodes_id)
             for nic in snode.data_nics:
-                ret = rpc_client.bdev_nvme_attach_controller_tcp_caching(rem_name, lvol.nqn, nic.ip4_address, "4420")
+                ret = rpc_client.bdev_nvme_attach_controller_tcp_caching(rem_name, lvol.nqn, nic.ip4_address, constants.LVOL_PORT)
                 logger.debug(ret)
                 # if not ret:
                 #     logger.error("Failed to connect to LVol")
@@ -491,7 +491,7 @@ def connect(caching_node_id, lvol_id, force=False):
         snode = db_controller.get_storage_node_by_id(lvol.node_id)
         for nic in snode.data_nics:
             ip = nic.ip4_address
-            ret, _ = cnode_client.connect_nvme(ip, "4420", subsystem_nqn)
+            ret, _ = cnode_client.connect_nvme(ip, constants.LVOL_PORT, subsystem_nqn)
             break
 
     time.sleep(3)

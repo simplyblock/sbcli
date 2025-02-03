@@ -178,7 +178,7 @@ class RPCClient:
                 "trtype": trtype,
                 "adrfam": "IPv4",
                 "traddr": traddr,
-                "trsvcid": trsvcid
+                "trsvcid": str(trsvcid)
             }
         }
         if ana_state:
@@ -896,7 +896,7 @@ class RPCClient:
                 "trtype": trtype,
                 "adrfam": "IPv4",
                 "traddr": traddr,
-                "trsvcid": trsvcid
+                "trsvcid": str(trsvcid)
             }
         }
         return self._request("nvmf_subsystem_remove_listener", params)
@@ -908,14 +908,16 @@ class RPCClient:
             params = {"jm_vuid": jm_vuid}
         return self._request("bdev_distrib_force_to_non_leader", params)
 
-    def bdev_lvol_set_leader(self, is_leader=False, uuid=None, lvs_name=None):
+    def bdev_lvol_set_leader(self, is_leader=False, uuid=None, lvs_name=None, bs_nonleadership=False):
         params = {
-            "leadership": is_leader,
+            "lvs_leadership": is_leader,
         }
         if uuid:
             params["uuid"] = uuid
         elif lvs_name:
             params["lvs_name"] = lvs_name
+
+        params["bs_nonleadership"] = bs_nonleadership
 
         return self._request("bdev_lvol_set_leader_all", params)
 
@@ -981,3 +983,9 @@ class RPCClient:
             "lvs_name": lvs_name,
         }
         return self._request("bdev_lvol_set_lvs_groupid", params)
+
+    def bdev_lvol_get_lvol_delete_status(self, name):
+        params = {
+            "name": name,
+        }
+        return self._request("bdev_lvol_get_lvol_delete_status", params)
