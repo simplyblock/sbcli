@@ -1028,10 +1028,15 @@ class SshUtils:
 
             # Convert JSON object to string and escape quotes for bash command
             rpc_json_str = json.dumps(rpc_json).replace('"', '\\"')
+            remote_json_path = "/tmp/stack.json"
+
+            # Create JSON file on the storage node
+            create_json_command = f"echo '{rpc_json_str}' > {remote_json_path}"
+            self.exec_command(storage_node_ip, create_json_command)
 
             # Save JSON inside SPDK container
             rpc_script_path = "/tmp/stack.json"
-            create_json_command = f"sudo docker exec spdk bash -c \"echo \\\"{rpc_json_str}\\\" > {rpc_script_path}\""
+            create_json_command = f"sudo docker cp {remote_json_path} spdk:{rpc_script_path}"
             self.exec_command(storage_node_ip, create_json_command)
 
             # Execute RPC call inside SPDK Docker container
