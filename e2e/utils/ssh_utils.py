@@ -1027,7 +1027,8 @@ class SshUtils:
             }
 
             # Convert JSON object to string and escape quotes for bash command
-            rpc_json_str = json.dumps(rpc_json).replace('"', '\\"')
+            # rpc_json_str = json.dumps(rpc_json).replace('"', '\\"')
+            rpc_json_str = json.dumps(rpc_json)
             remote_json_path = "/tmp/stack.json"
 
             # Create JSON file on the storage node
