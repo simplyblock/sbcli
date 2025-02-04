@@ -1009,6 +1009,8 @@ class SshUtils:
         self.logger.info(f"Distributions found: {distribs}")
         
         for distrib in distribs:
+            self.logger.info(f"Processing distrib: {distrib}")
+
             # Create JSON for the RPC call
             rpc_json = {
                 "subsystems": [
@@ -1024,14 +1026,18 @@ class SshUtils:
                 ]
             }
 
-            # Save JSON file inside SPDK container
+            # Convert JSON object to string and escape quotes for bash command
+            rpc_json_str = json.dumps(rpc_json).replace('"', '\\"')
+
+            # Save JSON inside SPDK container
             rpc_script_path = "/tmp/stack.json"
-            create_json_command = f"sudo docker exec spdk bash -c \"echo '{json.dumps(rpc_json)}' > {rpc_script_path}\""
+            create_json_command = f"sudo docker exec spdk bash -c \"echo \\\"{rpc_json_str}\\\" > {rpc_script_path}\""
             self.exec_command(storage_node_ip, create_json_command)
 
             # Execute RPC call inside SPDK Docker container
             rpc_command = f"sudo docker exec spdk bash -c 'python scripts/rpc_sock.py {rpc_script_path}'"
             self.exec_command(storage_node_ip, rpc_command)
+
 
             # Find log file name dynamically
             find_log_command = "sudo docker exec spdk ls /tmp/ | grep distrib"
