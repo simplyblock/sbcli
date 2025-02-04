@@ -69,14 +69,15 @@ while True:
         nl = c.nodes.list(filters={'role': 'manager'})
         docker_node = None
         for n in nl:
-            if n.attrs['Description']['Hostname'] == node.hostname:
+            if n.attrs['ManagerStatus']['Addr'].startswith(node.mgmt_ip):
                 docker_node = n
                 break
-        if docker_node:
+        if not docker_node:
             logger.error("Node is not part of the docker swarm!")
+            set_node_offline(node)
             continue
 
-        if n.attrs['Spec']['Availability'] == 'active':
+        if docker_node.attrs['ManagerStatus']['Reachability'] == 'reachable':
             set_node_online(node)
         else:
             set_node_offline(node)

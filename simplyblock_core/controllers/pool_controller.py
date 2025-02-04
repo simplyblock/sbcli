@@ -282,7 +282,7 @@ def get_pool_total_capacity(pool_id):
     snaps = db_controller.get_snapshots()
     for snap in snaps:
         if snap.lvol.pool_uuid == pool_id:
-            total += snap.lvol.size
+            total += snap.used_size
     return total
 
 
