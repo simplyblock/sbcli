@@ -135,6 +135,12 @@ class TestClusterBase:
                 self.ssh_obj.kill_processes(node=node, pid=pid)
         self.logger.info("All log monitoring threads stopped.")
 
+    def fetch_all_nodes_distrib_log(self):
+        storage_nodes = self.sbcli_utils.get_storage_nodes()
+        for result in storage_nodes['results']:
+            if result['is_secondary_node'] is False:
+                self.ssh_obj.fetch_distrib_logs(result["mgmt_ip"], result["uuid"])
+
     def teardown(self):
         """Contains teradown required post test case execution
         """

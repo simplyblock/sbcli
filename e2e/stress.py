@@ -61,6 +61,7 @@ def main():
             errors[f"{test.__name__}"] = [exp]
         try:
             test_obj.stop_docker_logs_collect()
+            test_obj.fetch_all_nodes_distrib_log()
             # test_obj.teardown()
             # pass
         except Exception as _:
