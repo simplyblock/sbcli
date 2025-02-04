@@ -108,10 +108,6 @@ def _add_graylog_input(cluster_ip, password):
     return response.status_code == 201
 
 
-
-
-    
-
 def create_cluster(blk_size, page_size_in_blocks, cli_pass,
                    cap_warn, cap_crit, prov_cap_warn, prov_cap_crit, ifname, log_del_interval, metrics_retention_period,
                    contact_point, grafana_endpoint, distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type,
@@ -1344,4 +1340,3 @@ $CMD -d cluster graceful-startup $cl  --clear-data
 $CMD -d cluster activate $cl
 
     """
-    
