@@ -275,6 +275,12 @@ class TestSingleNodeOutage(TestClusterBase):
         final_lvl_checksum = set(final_lvl_checksum.values())
 
         assert original_checksum == final_lvl_checksum, "Checksum mismatch for lvol before and after clone"
+
+        storage_nodes = self.sbcli_utils.get_storage_nodes()
+
+        for result in storage_nodes['results']:
+            if result['is_secondary_node'] is False:
+                self.ssh_obj.fetch_distrib_logs(result["mgmt_ip"], result["uuid"])
         
 
         self.logger.info("TEST CASE PASSED !!!")
