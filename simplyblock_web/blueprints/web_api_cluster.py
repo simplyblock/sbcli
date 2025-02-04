@@ -102,7 +102,7 @@ def cluster_iostats(uuid, history):
         logger.error(f"Cluster not found {uuid}")
         return utils.get_response_error(f"Cluster not found: {uuid}", 404)
 
-    data = cluster_ops.get_iostats_history(uuid, history, parse_sizes=False)
+    data = cluster_ops.get_iostats_history(uuid, history, parse_sizes=False, with_sizes=True)
     ret = {
         "object_data": cluster.get_clean_dict(),
         "stats": data or []
