@@ -1026,15 +1026,15 @@ class SshUtils:
 
             # Save JSON file inside SPDK container
             rpc_script_path = "/tmp/stack.json"
-            create_json_command = f"sudo docker exec -it spdk bash -c \"echo '{json.dumps(rpc_json)}' > {rpc_script_path}\""
+            create_json_command = f"sudo docker exec spdk bash -c \"echo '{json.dumps(rpc_json)}' > {rpc_script_path}\""
             self.exec_command(storage_node_ip, create_json_command)
 
             # Execute RPC call inside SPDK Docker container
-            rpc_command = f"sudo docker exec -it spdk bash -c 'python scripts/rpc_sock.py {rpc_script_path}'"
+            rpc_command = f"sudo docker exec spdk bash -c 'python scripts/rpc_sock.py {rpc_script_path}'"
             self.exec_command(storage_node_ip, rpc_command)
 
             # Find log file name dynamically
-            find_log_command = "sudo docker exec -it spdk ls /tmp/ | grep distrib"
+            find_log_command = "sudo docker exec spdk ls /tmp/ | grep distrib"
             log_file_name, _ = self.exec_command(storage_node_ip, find_log_command)
             log_file_name = log_file_name.strip().replace("\r", "").replace("\n", "")
 
@@ -1051,7 +1051,8 @@ class SshUtils:
 
             self.logger.info(f"Processed {distrib}: Logs copied to {destination_path}")
 
-            delete_command = f"sudo docker exec -it spdk rm -f {log_file_path}"
+            # Remove log file from container
+            delete_command = f"sudo docker exec spdk rm -f {log_file_path}"
             self.exec_command(storage_node_ip, delete_command)
             self.logger.info(f"Processed {distrib}: Logs copied to {destination_path} and deleted from container.")
 
