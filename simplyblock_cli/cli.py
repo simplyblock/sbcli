@@ -341,6 +341,33 @@ class CLIWrapper:
         sub_command.add_argument("--id-device-by-nqn", help='Use device nqn to identify it instead of serial number', action='store_true', dest='id_device_by_nqn', default=False)
         
 
+        sub_command.add_argument("--lvol-name", help='LVol name or id', dest='lvol_name')
+        sub_command.add_argument("--lvol-size", help='LVol size: 10M, 10G, 10(bytes)', dest='lvol_size')
+        sub_command.add_argument("--pool-name", help='Pool UUID or name', dest='pool_name')
+        sub_command.add_argument("--pool-max", help='Pool maximum size: 20M, 20G, 0(default)', default="0")
+        sub_command.add_argument("--snapshot", "-s", help='Make LVol with snapshot capability, default is False',
+                                 required=False, action='store_true')
+        sub_command.add_argument("--max-size", help='LVol max size', dest='max_size', default="0")
+        sub_command.add_argument("--host-id", help='Primary storage node UUID or Hostname', dest='host_id')
+        sub_command.add_argument("--encrypt", help='Use inline data encryption and de-cryption on the logical volume',
+                                 required=False, action='store_true')
+        sub_command.add_argument("--crypto-key1", help='the hex value of key1 to be used for lvol encryption',
+                                 dest='crypto_key1', default=None)
+        sub_command.add_argument("--crypto-key2", help='the hex value of key2 to be used for lvol encryption',
+                                 dest='crypto_key2', default=None)
+        sub_command.add_argument("--max-rw-iops", help='Maximum Read Write IO Per Second', type=int)
+        sub_command.add_argument("--max-rw-mbytes", help='Maximum Read Write Mega Bytes Per Second', type=int)
+        sub_command.add_argument("--max-r-mbytes", help='Maximum Read Mega Bytes Per Second', type=int)
+        sub_command.add_argument("--max-w-mbytes", help='Maximum Write Mega Bytes Per Second', type=int)
+        sub_command.add_argument("--distr-vuid", help='(Dev) set vuid manually, default: random (1-99999)', type=int,
+                                 default=0)
+        sub_command.add_argument("--lvol-ha-type", help='LVol HA type (single, ha), default is cluster HA type',
+                                 dest='lvol_ha_type', choices=["single", "ha", "default"], default='default')
+        sub_command.add_argument("--lvol-priority-class", help='Lvol priority class', type=int, default=0)
+        sub_command.add_argument("--fstype", help='Filesystem type for testing (ext4, xfs)',
+                                choices=["ext4", "xfs"], default='xfs')
+
+
         sub_command = self.add_sub_command(subparser, 'create',
                                            'Create an new cluster with this node as mgmt (local run)')
         sub_command.add_argument(
@@ -1445,8 +1472,31 @@ class CLIWrapper:
         
         
         
+<<<<<<< HEAD
         
         
+=======
+        lvol_name = args.lvol_name
+        lvol_size = self.parse_size(args.lvol_size)
+        max_size = self.parse_size(args.max_size)
+        lvol_ha_type = args.lvol_ha_type
+        pool_name = args.pool_name
+        pool_max = self.parse_size(args.pool_max)
+        host_id = args.host_id
+        comp = None
+        crypto = args.encrypt
+        distr_vuid = args.distr_vuid
+        with_snapshot = args.snapshot
+        lvol_priority_class = args.lvol_priority_class
+        max_rw_iops = args.max_rw_iops
+        max_rw_mbytes = args.max_rw_mbytes
+        max_r_mbytes = args.max_r_mbytes
+        max_w_mbytes = args.max_w_mbytes
+        crypto_key1 = args.crypto_key1
+        crypto_key2 = args.crypto_key2
+        fstype = args.fstype
+
+>>>>>>> 86b9ed8 (refactored code)
         return cluster_ops.deploy_cluster(
             storage_nodes,test,ha_type,distr_ndcs,distr_npcs,enable_qos,ifname,
             blk_size, page_size_in_blocks,CLI_PASS, cap_warn, cap_crit, prov_cap_warn, 
