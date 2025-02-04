@@ -57,6 +57,7 @@ class CLIWrapper:
         sub_command.add_argument("--iobuf_large_bufsize", help='bdev_set_options param', dest='large_bufsize',  type=int, default=0)
         sub_command.add_argument("--enable-test-device", help='Enable creation of test device', action='store_true')
         sub_command.add_argument("--disable-ha-jm", help='Disable HA JM for distrib creation', action='store_false', dest='enable_ha_jm', default=True)
+        sub_command.add_argument("--ha-jm-count", help='HA JM count', dest='ha_jm_count', type=int, default=constants.HA_JM_COUNT)
         sub_command.add_argument("--is-secondary-node", help='add as secondary node', action='store_true', dest='is_secondary_node', default=False)
         sub_command.add_argument("--namespace", help='k8s namespace to deploy on',)
         sub_command.add_argument("--id-device-by-nqn", help='Use device nqn to identify it instead of serial number', action='store_true', dest='id_device_by_nqn', default=False)
@@ -266,18 +267,13 @@ class CLIWrapper:
         
         sub_command = self.add_sub_command(subparser,'deploy',
                                            'Deploy storage nodes')
-        sub_command.add_argument(
-            "--storage-nodes",type=str,help='comma separated ip addresses'
-        )
-        sub_command.add_argument(
-            "--test", type=bool
-        )
-        sub_command.add_argument(
-            "--secondary-nodes", type=str, help='comma separated ip addresses'
-        )
+        sub_command.add_argument("--storage-nodes", help='comma separated ip addresses', dest="storage_nodes")
+        sub_command.add_argument("--test", help='Enable spdk debug logs', dest='test', required=False, action='store_true')
+        sub_command.add_argument("--secondary-nodes", help='comma separated ip addresses', dest="secondary_nodes")
 
         sub_command.add_argument("--ha-type", help='LVol HA type (single, ha), default is cluster HA type',
                                  dest='ha_type', choices=["single", "ha"], default='single')
+        sub_command.add_argument("--ha-jm-count", help='HA JM count', dest='ha_jm_count', type=int, default=constants.HA_JM_COUNT)
         sub_command.add_argument("--distr-ndcs", help='(Dev) set ndcs manually, default: 1', type=int, default=1)
         sub_command.add_argument("--distr-npcs", help='(Dev) set npcs manually, default: 1', type=int, default=1)
         sub_command.add_argument("--enable-qos", help='Enable qos bdev for storage nodes', action='store_true', dest='enable_qos')
@@ -400,7 +396,7 @@ class CLIWrapper:
                                  default=4096)
         sub_command.add_argument("--distr-chunk-bs", help='(Dev) distrb bdev chunk block size, default: 4096', type=int,
                                  default=4096)
-        sub_command.add_argument("--ha-type", help='LVol HA type (single, ha), default is cluster HA type',
+        sub_command.add_argument("--ha-type", help='LVol HA type (single, ha), default is cluster single type',
                                  dest='ha_type', choices=["single", "ha"], default='single')
         sub_command.add_argument("--enable-node-affinity", help='Enable node affinity for storage nodes', action='store_true')
         sub_command.add_argument("--qpair-count", help='tcp transport qpair count', type=int, dest='qpair_count',
@@ -430,7 +426,7 @@ class CLIWrapper:
                                  default=4096)
         sub_command.add_argument("--distr-chunk-bs", help='(Dev) distrb bdev chunk block size, default: 4096', type=int,
                                  default=4096)
-        sub_command.add_argument("--ha-type", help='LVol HA type (single, ha), default is cluster HA type',
+        sub_command.add_argument("--ha-type", help='LVol HA type (single, ha), default is cluster single type',
                                  dest='ha_type', choices=["single", "ha"], default='single')
         sub_command.add_argument("--enable-node-affinity", help='Enable node affinity for storage nodes', action='store_true')
         sub_command.add_argument("--qpair-count", help='tcp transport qpair count', type=int, dest='qpair_count',
@@ -452,6 +448,10 @@ class CLIWrapper:
         # show cluster info
         sub_command = self.add_sub_command(
             subparser, 'status', 'Show cluster status')
+        sub_command.add_argument("cluster_id", help='the cluster UUID').completer = self._completer_get_cluster_list
+
+        sub_command = self.add_sub_command(
+            subparser, 'show', 'Show cluster info')
         sub_command.add_argument("cluster_id", help='the cluster UUID').completer = self._completer_get_cluster_list
 
         # show cluster info
@@ -883,6 +883,7 @@ class CLIWrapper:
                 enable_ha_jm = args.enable_ha_jm
                 number_of_distribs = args.number_of_distribs
                 namespace = args.namespace
+                ha_jm_count = args.ha_jm_count
 
                 out = storage_ops.add_node(
                     cluster_id=cluster_id,
@@ -907,6 +908,7 @@ class CLIWrapper:
                     is_secondary_node=args.is_secondary_node,
                     id_device_by_nqn=args.id_device_by_nqn,
                     partition_size=args.partition_size,
+                    ha_jm_count=ha_jm_count,
                 )
 
                 return out
@@ -1074,7 +1076,10 @@ class CLIWrapper:
                 ret = cluster_ops.cluster_activate(cluster_id, args.force, args.force_lvstore_create)
             elif sub_command == 'status':
                 cluster_id = args.cluster_id
-                ret = cluster_ops.show_cluster(cluster_id)
+                ret = cluster_ops.get_cluster_status(cluster_id)
+            elif sub_command == 'show':
+                cluster_id = args.cluster_id
+                ret = cluster_ops.list_all_info(cluster_id)
             elif sub_command == 'list':
                 ret = cluster_ops.list()
             elif sub_command == 'suspend':
@@ -1422,6 +1427,7 @@ class CLIWrapper:
         storage_nodes = args.storage_nodes
         test = args.test
         ha_type = args.ha_type
+        ha_jm_count = args.ha_jm_count
         distr_ndcs = args.distr_ndcs
         distr_npcs = args.distr_npcs
         enable_qos = args.enable_qos
@@ -1452,6 +1458,7 @@ class CLIWrapper:
         small_bufsize = args.small_bufsize
         large_bufsize = args.large_bufsize
         num_partitions_per_dev = args.partitions
+        partition_size = args.partition_size
         jm_percent = args.jm_percent
         spdk_cpu_mask = None
         if args.spdk_cpu_mask:
@@ -1472,10 +1479,6 @@ class CLIWrapper:
         
         
         
-<<<<<<< HEAD
-        
-        
-=======
         lvol_name = args.lvol_name
         lvol_size = self.parse_size(args.lvol_size)
         max_size = self.parse_size(args.max_size)
@@ -1496,7 +1499,6 @@ class CLIWrapper:
         crypto_key2 = args.crypto_key2
         fstype = args.fstype
 
->>>>>>> 86b9ed8 (refactored code)
         return cluster_ops.deploy_cluster(
             storage_nodes,test,ha_type,distr_ndcs,distr_npcs,enable_qos,ifname,
             blk_size, page_size_in_blocks,CLI_PASS, cap_warn, cap_crit, prov_cap_warn, 
@@ -1504,7 +1506,9 @@ class CLIWrapper:
             distr_bs, distr_chunk_bs, enable_node_affinity,
             qpair_count, max_queue_size, inflight_io_threshold, strict_node_anti_affinity,data_nics,
             spdk_image,spdk_debug,small_bufsize,large_bufsize,num_partitions_per_dev,jm_percent,spdk_cpu_mask,max_lvol,
-            max_snap,max_prov,number_of_devices,enable_test_device,enable_ha_jm,number_of_distribs,namespace,secondary_nodes)
+            max_snap,max_prov,number_of_devices,enable_test_device,enable_ha_jm,ha_jm_count,number_of_distribs,namespace,secondary_nodes,partition_size,
+            lvol_name, lvol_size, lvol_ha_type, pool_name, pool_max, host_id, comp, crypto, distr_vuid, max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes, 
+            with_snapshot, max_size, crypto_key1, crypto_key2, lvol_priority_class, fstype)
 
     def cluster_create(self, args):
         page_size_in_blocks = args.page_size

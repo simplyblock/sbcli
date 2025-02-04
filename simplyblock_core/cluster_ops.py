@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import time
 import uuid
+from tracemalloc import Snapshot
 
 import docker
 import requests
@@ -19,6 +20,12 @@ from simplyblock_core.controllers import cluster_events, device_controller, stor
     lvol_controller
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.cluster import Cluster
+from simplyblock_core.models.job_schedule import JobSchedule
+from simplyblock_core.models.lvol_model import LVol
+from simplyblock_core.models.mgmt_node import MgmtNode
+from simplyblock_core.models.pool import Pool
+from simplyblock_core.models.snapshot import SnapShot
+from simplyblock_core.models.stats import StatsObject
 from simplyblock_core.rpc_client import RPCClient
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
@@ -267,37 +274,73 @@ def parse_nvme_list_output(output, target_model):
             return line.split()[0]
     raise Exception(f"Device with model {target_model} not found in nvme list")
 
+def cleanup_nvme(mount_point, nqn_value):
+    if not nqn_value:
+        logger.error("NQN value is empty. Skipping disconnect.")
+        return False
+    
+    logger.info(f"Starting cleanup for NVMe device with NQN: {nqn_value}")
 
-def run_fio(file_path):
+    # Unmount the filesystem
+    try:
+        subprocess.run(["sudo", "umount", mount_point], check=True)
+        logger.info(f"Unmounted {mount_point}")
+    except subprocess.CalledProcessError:
+        logger.warning(f"Failed to unmount {mount_point}, continuing...")
+        return False
 
-    if not file_path:
-        raise ValueError("File path cannot be empty.")
+    # Disconnect NVMe device
+    try:
+        subprocess.run(["sudo", "nvme", "disconnect", "-n", nqn_value], check=True)
+        logger.info(f"Disconnected NVMe device: {nqn_value}")
+    except subprocess.CalledProcessError:
+        logger.error(f"Failed to disconnect NVMe device: {nqn_value}")
+        return False
+
+    # Remove the mount point directory
+    try:
+        subprocess.run(["sudo", "rm", "-rf", mount_point], check=True)
+        logger.info(f"Removed mount point: {mount_point}")
+    except subprocess.CalledProcessError:
+        logger.warning(f"Failed to remove mount point {mount_point}")
+        return False
+
+    return True
+
+def run_fio(mount_point):
+
+    if not mount_point:
+        raise ValueError("Mount point cannot be empty.")
+
+    if not os.path.exists(mount_point):
+        os.makedirs(mount_point, exist_ok=True)
     
     fio_config = f"""
-[global]
-ioengine=libaio
-direct=1
-bs=4k
-size=1G
-rw=write
-
 [test]
-filename={file_path}
+ioengine=aiolib
+direct=1
+iodepth=4
+readwrite=randrw
+bs=4K
+nrfiles=4
+size=1G
+verify=md5
+numjobs=3
+directory={mount_point}
 """
     config_file = "fio.cfg"
     with open(config_file, "w") as f:
         f.write(fio_config)
     
     try:
-        result = subprocess.run(["fio", config_file], check=True, text=True, capture_output=True)
-        print(result.stdout)
+        result = subprocess.run(["sudo", "fio", config_file], check=True, text=True, capture_output=True)
+        logger.info(result.stdout)
     except subprocess.CalledProcessError as e:
-        print(f"Error running fio: {e.stderr}")
+        logger.error(f"Error running fio: {e.stderr}")
     finally:
-        import os
         if os.path.exists(config_file):
             os.remove(config_file)
-        print("fio configuration file removed.")
+            logger.info("fio configuration file removed.")
     
 
 def deploy_cluster(storage_nodes,test,ha_type,distr_ndcs,distr_npcs,enable_qos,ifname,blk_size, page_size_in_blocks, cli_pass,
@@ -306,7 +349,10 @@ def deploy_cluster(storage_nodes,test,ha_type,distr_ndcs,distr_npcs,enable_qos,i
                    enable_node_affinity, qpair_count, max_queue_size, inflight_io_threshold, strict_node_anti_affinity,
                    data_nics,spdk_image,spdk_debug,small_bufsize,large_bufsize,num_partitions_per_dev,jm_percent,
                    spdk_cpu_mask,max_lvol,max_snap,max_prov,number_of_devices,enable_test_device,enable_ha_jm,
-                   number_of_distribs,namespace,secondary_nodes):
+                   ha_jm_count, number_of_distribs,namespace,secondary_nodes,partition_size,
+                   lvol_name, lvol_size, lvol_ha_type, pool_name, pool_max, host_id, comp, crypto, distr_vuid, max_rw_iops,
+                   max_rw_mbytes, max_r_mbytes, max_w_mbytes, with_snapshot, max_size, crypto_key1, crypto_key2,
+                   lvol_priority_class, fstype):
     logger.info("run deploy-cleaner")
     
     storage_node_ops.deploy_cleaner()
@@ -319,8 +365,9 @@ def deploy_cluster(storage_nodes,test,ha_type,distr_ndcs,distr_npcs,enable_qos,i
             distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, enable_node_affinity,
             qpair_count, max_queue_size, inflight_io_threshold, enable_qos, strict_node_anti_affinity)
     
+    time.sleep(5)
+
     storage_nodes_list=storage_nodes.split(",")
-    
     for node in storage_nodes_list:
         node_ip = node.strip()
         dev_ip=f"{node_ip}:5000"
@@ -328,76 +375,83 @@ def deploy_cluster(storage_nodes,test,ha_type,distr_ndcs,distr_npcs,enable_qos,i
         ifname="eth0"
         add_node_status=storage_node_ops.add_node(cluster_uuid,dev_ip,ifname,data_nics,max_lvol,max_snap,max_prov,spdk_image,spdk_debug,
                                   small_bufsize,large_bufsize,spdk_cpu_mask,num_partitions_per_dev,jm_percent,number_of_devices,
-                                  enable_test_device,namespace,number_of_distribs,enable_ha_jm,False,False,None)
+                                  enable_test_device,namespace,number_of_distribs,enable_ha_jm,False,False,partition_size,ha_jm_count)
         
         
         if not add_node_status:
             logger.error("Could not add storage node successfully")
             return False
+
+        time.sleep(5)
     
-    
-    secondary_nodes_list = secondary_nodes.split(",")
-    for node in secondary_nodes_list:
-        node_ip = node.strip()
-        dev_ip=f"{node_ip}:5000"
-        #ifname is hardcoded in bootstrap_script
-        ifname="eth0"
-        add_node_status=storage_node_ops.add_node(cluster_uuid,dev_ip,ifname,data_nics,max_lvol,max_snap,max_prov,spdk_image,spdk_debug,
-                                  small_bufsize,large_bufsize,spdk_cpu_mask,num_partitions_per_dev,jm_percent,number_of_devices,
-                                  enable_test_device,namespace,number_of_distribs,enable_ha_jm,True,False,None)
-        
-        
-        if not add_node_status:
-            logger.error("Could not add storage node successfully")
-            return False
-    
+    if secondary_nodes:
+        secondary_nodes_list = secondary_nodes.split(",")
+        for node in secondary_nodes_list:
+            node_ip = node.strip()
+            dev_ip=f"{node_ip}:5000"
+            #ifname is hardcoded in bootstrap_script
+            ifname="eth0"
+            add_node_status=storage_node_ops.add_node(cluster_uuid,dev_ip,ifname,data_nics,max_lvol,max_snap,max_prov,spdk_image,spdk_debug,
+                                    small_bufsize,large_bufsize,spdk_cpu_mask,num_partitions_per_dev,jm_percent,number_of_devices,
+                                    enable_test_device,namespace,number_of_distribs,enable_ha_jm,True,False,partition_size,ha_jm_count)
+                    
+            if not add_node_status:
+                logger.error("Could not add storage node successfully")
+                return False
+
+        time.sleep(5)
     
     activated = cluster_activate(cluster_uuid)
     if not activated:
         logger.error("cluster failed to activate")
     
-    
-    if test:
-        pool_max = utils.parse_size("100G")
-        lvol_max = utils.parse_size("20G")
-        
-        pool_id=pool_controller.add_pool("testing2",pool_max,lvol_max,None,None,None,None,None,cluster_uuid)
+    if test:        
+        pool_id=pool_controller.add_pool(pool_name,pool_max,max_size,
+                            max_rw_iops,max_rw_mbytes,max_r_mbytes,max_w_mbytes,None,cluster_uuid)
         
         if not pool_id:
             logger.error("pool did not create successfully")
+        
+        lvol_uuid, msg = lvol_controller.add_lvol_ha(
+                    lvol_name, lvol_size, host_id, lvol_ha_type, pool_name, comp, crypto,
+                    distr_vuid,
+                    max_rw_iops=max_rw_iops,
+                    max_rw_mbytes=max_rw_mbytes,
+                    max_r_mbytes=max_r_mbytes,
+                    max_w_mbytes=max_w_mbytes,
+                    with_snapshot=with_snapshot,
+                    max_size=max_size,
+                    crypto_key1=crypto_key1,
+                    crypto_key2=crypto_key2,
+                    lvol_priority_class=lvol_priority_class,
+                    uid=None, pvc_name=None, namespace=None)
 
-        
-        lvol_size = utils.parse_size("10G")
-        lvol_uuid=lvol_controller.add_lvol_ha("testt",lvol_size,"",ha_type,pool_id,False,False,None,None,None,None,None,None,None,None,None,None,None,None)
-        
         if not lvol_uuid:
-            logger.error("lvol creation failed")
+            logger.error(f"lvol creation failed {msg}")
         
         
-        time.sleep(20)
+        time.sleep(5)
         
+        subprocess.run("sudo modprobe nvme-tcp", shell=True, check=True)
+
         connect=lvol_controller.connect_lvol(lvol_uuid)
         
         if not connect:
             logger.error("connect command generation failed")
 
-
-        connect_string=connect[0].get("connect")
-        
-        
-        
-        subprocess.run("sudo modprobe nvme-fabrics", shell=True, check=True)
-
-        subprocess.run(connect_string, shell=True, check=True)
+        for entry in connect:
+            connect_string = entry.get("connect")
+                
+            subprocess.run(connect_string, shell=True, check=True)
         
         nvme_list_command = "sudo nvme list"
-        print(f"Executing NVMe list command: {nvme_list_command}")
+        logger.info(f"Executing NVMe list command: {nvme_list_command}")
         result = subprocess.run(nvme_list_command, shell=True, check=True, capture_output=True, text=True)
 
         nvme_output = result.stdout
         device_name = parse_nvme_list_output(nvme_output, lvol_uuid)
         
-        mkfs_command = f"sudo mkfs.ext4 {device_name}"
+        mkfs_command = f"sudo mkfs.{fstype} {device_name}"
         subprocess.run(mkfs_command, shell=True, check=True)
         
         
@@ -407,13 +461,17 @@ def deploy_cluster(storage_nodes,test,ha_type,distr_ndcs,distr_npcs,enable_qos,i
         
         subprocess.run(mount_command, shell=True, check=True)
 
+        logger.info(f"running fio on mount point {mount_point}")
+
         run_fio(mount_point)
         
         match = re.search(r'--nqn=([^\s]+)', connect_string)
         nqn_value = match.group(1)
-        subprocess.run(f"sudo nvme disconnect -n {nqn_value}")
         
-        
+        cleaned = cleanup_nvme(mount_point, nqn_value)
+        if not cleaned:
+            return False
+
         status=lvol_controller.delete_lvol(lvol_uuid)
         
         pool_controller.delete_pool(pool_id)
@@ -422,9 +480,7 @@ def deploy_cluster(storage_nodes,test,ha_type,distr_ndcs,distr_npcs,enable_qos,i
         return True
         
             
-        
-    
-
+            
 def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
                 distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, enable_node_affinity, qpair_count,
                 max_queue_size, inflight_io_threshold, enable_qos, strict_node_anti_affinity):
@@ -567,7 +623,7 @@ def cluster_activate(cl_id, force=False, force_lvstore_create=False):
     return True
 
 
-def show_cluster(cl_id, is_json=False):
+def get_cluster_status(cl_id, is_json=False):
     db_controller = DBController()
     cluster = db_controller.get_cluster_by_id(cl_id)
     if not cluster:
@@ -692,6 +748,222 @@ def list():
             "Status": cl.status,
         })
     return utils.print_table(data)
+
+
+
+def list_all_info(cluster_id):
+    db_controller = DBController()
+    cl = db_controller.get_cluster_by_id(cluster_id)
+    if not cl:
+        logger.error(f"Cluster not found {cluster_id}")
+        return False
+
+    mt = db_controller.get_mgmt_nodes()
+    mt_online = [m for m in mt if m.status == MgmtNode.STATUS_ONLINE]
+
+    data = []
+
+    st = db_controller.get_storage_nodes_by_cluster_id(cl.get_id())
+    st_online = [s for s in st if s.status == StorageNode.STATUS_ONLINE]
+
+    pools = db_controller.get_pools(cluster_id)
+    p_online = [p for p in pools if p.status == Pool.STATUS_ACTIVE]
+
+    lvols = db_controller.get_lvols(cluster_id)
+    lv_online = [p for p in lvols if p.status == LVol.STATUS_ONLINE]
+
+    snaps = [sn for sn in db_controller.get_snapshots() if sn.cluster_id == cluster_id]
+
+    devs = []
+    devs_online = []
+    for n in st:
+        for dev in n.nvme_devices:
+            devs.append(dev)
+            if dev.status == NVMeDevice.STATUS_ONLINE:
+                devs_online.append(dev)
+
+    records = db_controller.get_cluster_capacity(cl, 1)
+    if records:
+        rec = records[0]
+    else:
+        rec = StatsObject()
+
+    task_total = 0
+    task_running = 0
+    task_pending = 0
+    for task in db_controller.get_job_tasks(cl.get_id()):
+        task_total += 1
+        if task.status == JobSchedule.STATUS_RUNNING:
+            task_running += 1
+        elif task.status in [JobSchedule.STATUS_NEW, JobSchedule.STATUS_SUSPENDED]:
+            task_pending += 1
+
+
+    data.append({
+        "Cluster UUID": cl.get_id(),
+        "Type": cl.ha_type.upper(),
+        "Mod": f"{cl.distr_ndcs}x{cl.distr_npcs}",
+
+        "Mgmt Nodes": f"{len(mt)}/{len(mt_online)}",
+        "Storage Nodes": f"{len(st)}/{len(st_online)}",
+        "Devices": f"{len(devs)}/{len(devs_online)}",
+        "Pools": f"{len(pools)}/{len(p_online)}",
+        "Lvols": f"{len(lvols)}/{len(lv_online)}",
+        "Snaps": f"{len(snaps)}",
+
+        "Tasks total": f"{task_total}",
+        "Tasks running": f"{task_running}",
+        "Tasks pending": f"{task_pending}",
+        #
+        # "Size total": f"{utils.humanbytes(rec.size_total)}",
+        # "Size Used": f"{utils.humanbytes(rec.size_used)}",
+        # "Size prov": f"{utils.humanbytes(rec.size_prov)}",
+        # "Size util": f"{rec.size_util}%",
+        # "Size prov util": f"{rec.size_prov_util}%",
+
+        "Status": cl.status,
+
+    })
+
+    out = utils.print_table(data, title="Cluster Info")
+    out += "\n"
+
+    data = []
+
+    data.append({
+        "Cluster UUID": cl.uuid,
+        # "Type": "Cluster Object",
+        # "Devices": f"{len(devs)}/{len(devs_online)}",
+        # "Lvols": f"{len(lvols)}/{len(lv_online)}",
+
+        "Size prov": f"{utils.humanbytes(rec.size_prov)}",
+        "Size Used": f"{utils.humanbytes(rec.size_used)}",
+        "Size free": f"{utils.humanbytes(rec.size_free)}",
+        "Size %": f"{rec.size_util}%",
+        "Size prov %": f"{rec.size_prov_util}%",
+
+        "Read BW/s": f"{utils.humanbytes(rec.read_bytes_ps)}",
+        "Write BW/s": f"{utils.humanbytes(rec.write_bytes_ps)}",
+        "Read IOP/s": f"{rec.read_io_ps}",
+        "Write IOP/s": f"{rec.write_io_ps}",
+
+        "Health": "True",
+        "Status": cl.status,
+
+    })
+
+    out += "\n"
+    out += utils.print_table(data, title="Cluster Stats")
+    out += "\n"
+
+    data = []
+
+    dev_data = []
+
+    for node in st:
+        records = db_controller.get_node_capacity(node, 1)
+        if records:
+            rec = records[0]
+        else:
+            rec = StatsObject()
+
+        lvs = db_controller.get_lvols_by_node_id(node.get_id()) or []
+        total_devices = len(node.nvme_devices)
+        online_devices = 0
+        for dev in node.nvme_devices:
+            if dev.status == NVMeDevice.STATUS_ONLINE:
+                online_devices += 1
+
+        data.append({
+            "Storage node UUID": node.uuid,
+            "Devices": f"{total_devices}/{online_devices}",
+            "LVols": f"{len(lvs)}",
+
+            "Size prov": f"{utils.humanbytes(rec.size_total)}",
+            "Size Used": f"{utils.humanbytes(rec.size_used)}",
+            "Size free": f"{utils.humanbytes(rec.size_free)}",
+            "Size %": f"{rec.size_util}%",
+            "Size prov %": f"{rec.size_prov_util}%",
+
+            "Read BW/s": f"{utils.humanbytes(rec.read_bytes_ps)}",
+            "Write BW/s": f"{utils.humanbytes(rec.write_bytes_ps)}",
+            "Read IOP/s": f"{rec.read_io_ps}",
+            "Write IOP/s": f"{rec.write_io_ps}",
+
+            "Status": node.status,
+
+        })
+
+        for dev in node.nvme_devices:
+            records = db_controller.get_device_capacity(dev)
+            if records:
+                rec = records[0]
+            else:
+                rec = StatsObject()
+
+            dev_data.append({
+                "Device UUID": dev.uuid,
+
+                "Size total": f"{utils.humanbytes(rec.size_total)}",
+                "Size Used": f"{utils.humanbytes(rec.size_used)}",
+                "Size free": f"{utils.humanbytes(rec.size_free)}",
+                "Size %": f"{rec.size_util}%",
+                # "Size prov %": f"{rec.size_prov_util}%",
+
+                "Read BW/s": f"{utils.humanbytes(rec.read_bytes_ps)}",
+                "Write BW/s": f"{utils.humanbytes(rec.write_bytes_ps)}",
+                "Read IOP/s": f"{rec.read_io_ps}",
+                "Write IOP/s": f"{rec.write_io_ps}",
+
+                "Health": dev.health_check,
+                "Status": dev.status,
+
+            })
+
+    out += "\n"
+    if data:
+        out +=  utils.print_table(data, title="Storage Nodes Stats")
+        out += "\n"
+
+    out += "\n"
+    if dev_data:
+        out +=  utils.print_table(dev_data, title="Storage Devices Stats")
+        out += "\n"
+
+    lvol_data = []
+    for lvol in db_controller.get_lvols(cluster_id):
+        records = db_controller.get_lvol_stats(lvol, 1)
+        if records:
+            rec = records[0]
+        else:
+            rec = StatsObject()
+
+        lvol_data.append({
+            "LVol UUID": lvol.uuid,
+
+            "Size prov": f"{utils.humanbytes(rec.size_total)}",
+            "Size Used": f"{utils.humanbytes(rec.size_used)}",
+            "Size free": f"{utils.humanbytes(rec.size_free)}",
+            "Size %": f"{rec.size_util}%",
+            # "Size prov %": f"{rec.size_prov_util}%",
+
+            "Read BW/s": f"{utils.humanbytes(rec.read_bytes_ps)}",
+            "Write BW/s": f"{utils.humanbytes(rec.write_bytes_ps)}",
+            "Read IOP/s": f"{rec.read_io_ps}",
+            "Write IOP/s": f"{rec.write_io_ps}",
+
+            "Connections": f"{rec.connected_clients}",
+            "Health": lvol.health_check,
+            "Status": lvol.status,
+
+        })
+
+    out += "\n"
+    if lvol_data:
+        out += utils.print_table(lvol_data, title="LVol Stats")
+        out += "\n"
+
+    return out
 
 
 def get_capacity(cluster_id, history, records_count=20, is_json=False):
@@ -1072,3 +1344,4 @@ $CMD -d cluster graceful-startup $cl  --clear-data
 $CMD -d cluster activate $cl
 
     """
+    
