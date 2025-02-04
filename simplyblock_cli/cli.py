@@ -1477,8 +1477,6 @@ class CLIWrapper:
         namespace = args.namespace
         secondary_nodes = args.secondary_nodes
         
-        
-        
         lvol_name = args.lvol_name
         lvol_size = self.parse_size(args.lvol_size)
         max_size = self.parse_size(args.max_size)

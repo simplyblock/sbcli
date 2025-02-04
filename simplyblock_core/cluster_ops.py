@@ -261,8 +261,6 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     logger.info(c.uuid)
     return c.uuid
 
-
-
 def parse_nvme_list_output(output, target_model):
     lines = output.splitlines()
     for line in lines:
@@ -474,9 +472,7 @@ def deploy_cluster(storage_nodes,test,ha_type,distr_ndcs,distr_npcs,enable_qos,i
         return True
     else:
         return True
-        
-            
-            
+                    
 def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
                 distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, enable_node_affinity, qpair_count,
                 max_queue_size, inflight_io_threshold, enable_qos, strict_node_anti_affinity):
