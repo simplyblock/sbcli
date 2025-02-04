@@ -1047,6 +1047,18 @@ def get_iostats_history(cluster_id, history_string, records_count=20, parse_size
                 "size_free",
                 "size_util",
                 "size_prov_util",
+                "read_latency_ticks",
+                "record_duration",
+                "record_end_time",
+                "record_start_time",
+                "unmap_bytes",
+                "unmap_bytes_ps",
+                "unmap_io",
+                "unmap_io_ps",
+                "unmap_latency_ps",
+                "unmap_latency_ticks",
+                "write_bytes_ps",
+                "write_latency_ticks",
             ]
         )
     # combine records
