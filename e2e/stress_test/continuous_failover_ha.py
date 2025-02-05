@@ -32,7 +32,8 @@ class RandomFailoverTest(TestLvolHACluster):
         self.lvol_name = f"lvl{random_char(3)}"
         self.clone_name = f"cln{random_char(3)}"
         self.snapshot_name = f"snap{random_char(3)}"
-        self.lvol_size = "50G"
+        self.lvol_size = "30G"
+        self.int_lvol_size = 30
         self.fio_size = "1G"
         self.fio_threads = []
         self.clone_mount_details = {}
@@ -253,6 +254,7 @@ class RandomFailoverTest(TestLvolHACluster):
     def create_snapshots_and_clones(self):
         """Create snapshots and clones during an outage."""
         # Filter lvols on nodes that are not in outage
+        self.int_lvol_size += 1
         available_lvols = [
             lvol for node, lvols in self.node_vs_lvol.items() if node != self.current_outage_node for lvol in lvols
         ]
@@ -260,7 +262,8 @@ class RandomFailoverTest(TestLvolHACluster):
             self.logger.warning("No available lvols to create snapshots and clones.")
             return
         for _ in range(5):
-            lvol = random.choice(available_lvols)
+            random.shuffle(available_lvols)
+            lvol = available_lvols[0]
             snapshot_name = f"snap_{lvol}"
             temp_name = f"{lvol}_{random_char(2)}"
             if snapshot_name in self.snapshot_names:
@@ -333,6 +336,11 @@ class RandomFailoverTest(TestLvolHACluster):
             fio_thread.start()
             self.fio_threads.append(fio_thread)
             self.logger.info(f"Created snapshot {snapshot_name} and clone {clone_name}.")
+
+            self.sbcli_utils.resize_lvol(lvol_id=self.lvol_mount_details[lvol]["ID"],
+                                         new_size=f"{self.int_lvol_size}G")
+            self.sbcli_utils.resize_lvol(lvol_id=self.clone_mount_details[clone_name]["ID"],
+                                         new_size=f"{self.int_lvol_size}G")
 
     def delete_random_lvols(self, count):
         """Delete random lvols during an outage."""
