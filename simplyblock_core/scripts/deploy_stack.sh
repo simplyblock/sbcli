@@ -41,6 +41,5 @@ docker stack deploy --compose-file="$DIR"/docker-compose-swarm.yml app
 
 # wait for the services to become online
 bash "$DIR"/stack_deploy_wait.sh app
-sudo rm -rf /etc/foundationdb/data/
 
 exit $?
