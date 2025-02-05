@@ -509,6 +509,7 @@ class RandomFailoverTest(TestLvolHACluster):
             )
             self.validate_migration_for_node(self.outage_start_time, 4000, None)
             self.common_utils.manage_fio_threads(self.node, self.fio_threads, timeout=100000)
+            validation_thread.join()
 
             for lvol_name, lvol_details in self.lvol_mount_details.items():
                 self.common_utils.validate_fio_test(

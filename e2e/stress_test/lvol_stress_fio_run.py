@@ -333,13 +333,13 @@ class TestStressLvolCloneClusterFioRun(TestLvolHACluster):
             self.delete_random_lvols(5)
             self.create_lvols_with_fio(5)
             self.create_snapshots_and_clones()
-            sleep_n_sec(1000)
 
             self.common_utils.manage_fio_threads(
                 node=self.node,
                 threads=self.fio_threads,
                 timeout=100000
             )
+            validation_thread.join()
 
             for clone, clone_details in self.clone_mount_details.items():
                 self.common_utils.validate_fio_test(self.node,

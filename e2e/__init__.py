@@ -1,4 +1,7 @@
-from e2e_tests.single_node_outage import TestSingleNodeOutage
+from e2e_tests.single_node_outage import (
+    TestSingleNodeOutage,
+    TestHASingleNodeOutage
+)
 from e2e_tests.single_node_failure import (
     TestSingleNodeFailure,
     TestHASingleNodeFailure
@@ -47,7 +50,8 @@ ALL_TESTS = [
     TestDeviceNodeRestart,
     TestHASingleNodeFailure,
     TestSingleNodeReboot,
-    TestHASingleNodeReboot
+    TestHASingleNodeReboot,
+    TestHASingleNodeOutage
 ]
 
 def get_all_tests(custom=True, ha_test=False):
@@ -60,7 +64,8 @@ def get_all_tests(custom=True, ha_test=False):
         TestSingleNodeFailure,
         TestHASingleNodeFailure,
         TestSingleNodeReboot,
-        TestHASingleNodeReboot
+        TestHASingleNodeReboot,
+        TestHASingleNodeOutage
         # FioWorkloadTest,
         # TestMultiFioSnapshotDowntime,
         # TestManyLvolSameNode,
@@ -82,6 +87,7 @@ def get_all_tests(custom=True, ha_test=False):
     if not ha_test:
         tests.remove(TestHASingleNodeFailure)
         tests.remove(TestHASingleNodeReboot)
+        tests.remove(TestHASingleNodeOutage)
     return tests
 
 def get_stress_tests():
