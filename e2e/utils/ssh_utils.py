@@ -825,33 +825,25 @@ class SshUtils:
         
     def partial_nw_outage(self, node_ip, mgmt_ip=None, block_ports=None, block_all_ss_ports=False):
         """
-        Simulate a partial network outage by blocking specific ports.
+        Simulate a partial network outage by blocking multiple ports at once using multiport matching.
         Optionally, block all ports listed by `ss` command for the given management IP.
 
         Args:
             node_ip (str): IP address of the target node.
-            mgmt_ip (str, optional): Management IP address to filter the `ss` command output. Required if block_all_ss_ports is True.
+            mgmt_ip (str, optional): Management IP address to filter the `ss` command output.
             block_ports (list): List of ports to block.
-            block_all_ss_ports (bool): If True, block all ports listed by the `ss` command for the given mgmt_ip.
+            block_all_ss_ports (bool): If True, block all ports from the `ss` command for mgmt_ip.
 
         Returns:
             list: List of all blocked ports (unique).
         """
-        blocked_ports = set()  # Use a set to ensure uniqueness
+        blocked_ports = set()
+
         try:
             if block_ports is None:
                 block_ports = []
 
-            # Block explicitly provided ports
-            for port in block_ports:
-                if port not in blocked_ports:
-                    self.exec_command(node_ip, f"sudo iptables -A OUTPUT -p tcp -m multiport --sports {port} --dports {port} -j DROP")
-                    self.exec_command(node_ip, f"sudo iptables -A INPUT -p tcp -m multiport --sports {port} --dports {port} -j DROP")
-
-                    self.logger.info(f"Blocked port {port} on {node_ip}.")
-                    blocked_ports.add(port)
-
-            # If flag is set, block all ports from the `ss` command filtered by mgmt_ip
+            # If flag is set, fetch and add all ports from the `ss` command filtered by mgmt_ip
             if block_all_ss_ports:
                 if not mgmt_ip:
                     raise ValueError("mgmt_ip must be provided when block_all_ss_ports is True.")
@@ -859,26 +851,35 @@ class SshUtils:
                 ss_output, _ = self.exec_command(node_ip, cmd)
                 ip_with_ports = ss_output.split()
                 ports_to_block = set([r.split(":")[1] for r in ip_with_ports])
-                for port in ports_to_block:
-                    if port not in blocked_ports:
-                        self.exec_command(node_ip, f"sudo iptables -A OUTPUT -p tcp -m multiport --sports {port} --dports {port} -j DROP")
-                        self.exec_command(node_ip, f"sudo iptables -A INPUT -p tcp -m multiport --sports {port} --dports {port} -j DROP")
+                block_ports.extend(ports_to_block)
 
-                        self.logger.info(f"Blocked port {port} for mgmt_ip {mgmt_ip} on {node_ip}.")
-                        blocked_ports.add(port)
+            # Remove duplicates
+            block_ports = list(set(block_ports))
+
+            if block_ports:
+                # Construct a single iptables rule for both INPUT & OUTPUT chains
+                ports_str = ",".join(block_ports)
+                block_command = (
+                    f"sudo iptables -A INPUT -p tcp -m multiport --sports {ports_str} --dports {ports_str} -j DROP && "
+                    f"sudo iptables -A OUTPUT -p tcp -m multiport --sports {ports_str} --dports {ports_str} -j DROP"
+                )
+                self.exec_command(node_ip, block_command)
+                blocked_ports.update(block_ports)
+                self.logger.info(f"Blocked ports {ports_str} on {node_ip}.")
+
             time.sleep(5)
-            self.logger.info("Network outage: IPTable Input List:")
-            self.exec_command(node_ip, "sudo iptables -L INPUT -v -n --line-numbers")
-            self.logger.info("Network outage: IPTable Output List:")
-            self.exec_command(node_ip, "sudo iptables -L OUTPUT -v -n --line-numbers")
+            self.logger.info("Network outage: IPTable Rules List:")
+            self.exec_command(node_ip, "sudo iptables -L -v -n --line-numbers")
+
         except Exception as e:
             self.logger.error(f"Failed to block ports on {node_ip}: {e}")
 
-        return list(blocked_ports)  # Return as a list for consistency
+        return list(blocked_ports)
+
 
     def remove_partial_nw_outage(self, node_ip, blocked_ports):
         """
-        Remove partial network outage by unblocking specified ports.
+        Remove partial network outage by unblocking multiple ports at once.
 
         Args:
             node_ip (str): IP address of the target node.
@@ -888,19 +889,22 @@ class SshUtils:
             None
         """
         try:
-            for port in blocked_ports:
-                self.exec_command(node_ip, f"sudo iptables -D OUTPUT -p tcp --dport {port} -j DROP")
-                self.exec_command(node_ip, f"sudo iptables -D INPUT -p tcp --dport {port} -j DROP")
-                self.exec_command(node_ip, f"sudo iptables -D OUTPUT -p tcp --sport {port} -j DROP")
-                self.exec_command(node_ip, f"sudo iptables -D INPUT -p tcp --sport {port} -j DROP")
-                self.logger.info(f"Unblocked port {port} on {node_ip}.")
+            if blocked_ports:
+                ports_str = ",".join(blocked_ports)
+                unblock_command = (
+                    f"sudo iptables -D INPUT -p tcp -m multiport --sports {ports_str} --dports {ports_str} -j DROP && "
+                    f"sudo iptables -D OUTPUT -p tcp -m multiport --sports {ports_str} --dports {ports_str} -j DROP"
+                )
+                self.exec_command(node_ip, unblock_command)
+                self.logger.info(f"Unblocked ports {ports_str} on {node_ip}.")
+
             time.sleep(5)
-            self.logger.info("Network outage: IPTable Input List:")
-            self.exec_command(node_ip, "sudo iptables -L INPUT -v -n --line-numbers")
-            self.logger.info("Network outage: IPTable Output List:")
-            self.exec_command(node_ip, "sudo iptables -L OUTPUT -v -n --line-numbers")
+            self.logger.info("Network outage: IPTable Rules List:")
+            self.exec_command(node_ip, "sudo iptables -L -v -n --line-numbers")
+
         except Exception as e:
             self.logger.error(f"Failed to unblock ports on {node_ip}: {e}")
+
 
     def set_aio_max_nr(self, node_ip, value=1048576):
         """
