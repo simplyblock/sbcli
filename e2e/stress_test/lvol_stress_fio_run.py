@@ -111,6 +111,11 @@ class TestStressLvolCloneClusterFioRun(TestLvolHACluster):
 
             sleep_n_sec(10)
 
+            self.ssh_obj.delete_files(self.node, f"{mount_point}/*fio*")
+            self.ssh_obj.delete_files(self.node, f"{self.log_path}/local-{lvol_name}_fio*")
+
+            sleep_n_sec(5)
+
             # Start FIO
             fio_thread = threading.Thread(
                 target=self.ssh_obj.run_fio_test,
@@ -133,7 +138,7 @@ class TestStressLvolCloneClusterFioRun(TestLvolHACluster):
         """Create snapshots and clones during an outage."""
         # Filter lvols on nodes that are not in outage
         available_lvols = [
-            lvol for node, lvols in self.node_vs_lvol.items() if node != self.current_outage_node for lvol in lvols
+            lvol for _, lvols in self.node_vs_lvol.items() for lvol in lvols
         ]
         if not available_lvols:
             self.logger.warning("No available lvols to create snapshots and clones.")
@@ -186,6 +191,13 @@ class TestStressLvolCloneClusterFioRun(TestLvolHACluster):
             mount_point = f"{self.mount_path}/{clone_name}"
             self.ssh_obj.mount_path(node=self.node, device=lvol_device, mount_path=mount_point)
             self.clone_mount_details[clone_name]["Mount"] = mount_point
+            
+            sleep_n_sec(10)
+
+            self.ssh_obj.delete_files(self.node, f"{mount_point}/*fio*")
+            self.ssh_obj.delete_files(self.node, f"{self.log_path}/local-{clone_name}_fio*")
+
+            sleep_n_sec(4)
 
             # Start FIO
             fio_thread = threading.Thread(
@@ -206,9 +218,9 @@ class TestStressLvolCloneClusterFioRun(TestLvolHACluster):
             self.logger.info(f"Created snapshot {snapshot_name} and clone {clone_name}.")
 
     def delete_random_lvols(self, count):
-        """Delete random lvols during an outage."""
+        """Delete random lvols"""
         available_lvols = [
-            lvol for node, lvols in self.node_vs_lvol.items() if node != self.current_outage_node for lvol in lvols
+            lvol for _, lvols in self.node_vs_lvol.items() for lvol in lvols
         ]
         if len(available_lvols) < count:
             self.logger.warning("Not enough lvols available to delete the requested count.")

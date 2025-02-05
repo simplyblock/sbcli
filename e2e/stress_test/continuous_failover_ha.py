@@ -138,6 +138,11 @@ class RandomFailoverTest(TestLvolHACluster):
 
             sleep_n_sec(10)
 
+            self.ssh_obj.delete_files(self.node, f"{mount_point}/*fio*")
+            self.ssh_obj.delete_files(self.node, f"local-{lvol_name}_fio*")  
+
+            sleep_n_sec(5)
+
             # Start FIO
             fio_thread = threading.Thread(
                 target=self.ssh_obj.run_fio_test,
@@ -302,6 +307,13 @@ class RandomFailoverTest(TestLvolHACluster):
             mount_point = f"{self.mount_path}/{clone_name}"
             self.ssh_obj.mount_path(node=self.node, device=lvol_device, mount_path=mount_point)
             self.clone_mount_details[clone_name]["Mount"] = mount_point
+
+            sleep_n_sec(10)
+
+            self.ssh_obj.delete_files(self.node, f"{mount_point}/*fio*")
+            self.ssh_obj.delete_files(self.node, f"local-{clone_name}_fio*")  
+
+            sleep_n_sec(5)
 
             # Start FIO
             fio_thread = threading.Thread(
