@@ -155,6 +155,7 @@ class RandomFailoverTest(TestLvolHACluster):
                     "nrfiles": 16,
                     "iodepth": 1,
                     "numjobs": 4,
+                    "time_based": False,
                 },
             )
             fio_thread.start()
@@ -327,6 +328,7 @@ class RandomFailoverTest(TestLvolHACluster):
                     "nrfiles": 16,
                     "iodepth": 1,
                     "numjobs": 4,
+                    "time_based": False,
                 },
             )
             fio_thread.start()
