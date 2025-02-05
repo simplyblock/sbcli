@@ -842,6 +842,8 @@ class SshUtils:
         try:
             if block_ports is None:
                 block_ports = []
+            else:
+                block_ports = [str(port) for port in block_ports]
 
             # If flag is set, fetch and add all ports from the `ss` command filtered by mgmt_ip
             if block_all_ss_ports:
