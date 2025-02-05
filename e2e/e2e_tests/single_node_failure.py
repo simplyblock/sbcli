@@ -111,6 +111,9 @@ class TestSingleNodeFailure(TestClusterBase):
                                   snapshot_name=f"{self.snapshot_name}_1")
         snapshot_id_1 = self.ssh_obj.get_snapshot_id(node=self.mgmt_nodes[0],
                                                      snapshot_name=f"{self.snapshot_name}_1")
+        
+        self.sbcli_utils.resize_lvol(lvol_id=self.sbcli_utils.get_lvol_id(self.lvol_name),
+                                     new_size="20G")
 
         self.validations(node_uuid=no_lvol_node_uuid,
                          node_status="online",
@@ -188,6 +191,10 @@ class TestSingleNodeFailure(TestClusterBase):
                          lvol_status="online",
                          health_check_status=True
                          )
+        
+
+        self.sbcli_utils.resize_lvol(lvol_id=self.sbcli_utils.get_lvol_id(self.lvol_name),
+                                     new_size="25G")
 
         self.ssh_obj.restart_docker_logging(
             node_ip=node_ip,
@@ -272,6 +279,11 @@ class TestSingleNodeFailure(TestClusterBase):
         self.common_utils.validate_fio_test(node=self.mgmt_nodes[0],
                                             log_file=self.log_path)
         
+        self.sbcli_utils.resize_lvol(lvol_id=self.sbcli_utils.get_lvol_id(f"{self.lvol_name}_cl_1"),
+                                     new_size="30G")
+        self.sbcli_utils.resize_lvol(lvol_id=self.sbcli_utils.get_lvol_id(f"{self.lvol_name}_cl_2"),
+                                     new_size="30G")
+        
         clone_files = self.ssh_obj.find_files(self.mgmt_nodes[0], directory=f"{clone_mount_file}_2")
         final_checksum = self.ssh_obj.generate_checksums(self.mgmt_nodes[0], clone_files)
 
@@ -284,6 +296,8 @@ class TestSingleNodeFailure(TestClusterBase):
         self.logger.info(f"Set Final checksum: {final_checksum}")
 
         assert original_checksum == final_checksum, "Checksum mismatch for lvol and clone"
+        self.sbcli_utils.resize_lvol(lvol_id=self.sbcli_utils.get_lvol_id(self.lvol_name),
+                                     new_size="30G")
 
         lvol_files = self.ssh_obj.find_files(self.mgmt_nodes[0], directory=self.mount_path)
         final_lvl_checksum = self.ssh_obj.generate_checksums(self.mgmt_nodes[0], lvol_files)
@@ -372,6 +386,9 @@ class TestHASingleNodeFailure(TestClusterBase):
                          lvol_status="online",
                          health_check_status=True
                          )
+        
+        self.sbcli_utils.resize_lvol(lvol_id=self.sbcli_utils.get_lvol_id(self.lvol_name),
+                                     new_size="20G")
 
         for i in range(2):
 
@@ -403,7 +420,8 @@ class TestHASingleNodeFailure(TestClusterBase):
                              health_check_status=True
                              )
 
-
+        self.sbcli_utils.resize_lvol(lvol_id=self.sbcli_utils.get_lvol_id(self.lvol_name),
+                                     new_size="25G")
         # Write steps in order
         steps = {
             "Storage Node": ["shutdown", "restart"],

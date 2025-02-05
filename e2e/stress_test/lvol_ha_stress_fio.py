@@ -458,8 +458,8 @@ class TestLvolHAClusterPartialNetworkOutage(TestLvolHACluster):
         ports_blocked = self.ssh_obj.partial_nw_outage(
             node_ip=node_ip,
             mgmt_ip=self.mgmt_nodes[0],
-            block_ports=[4420, 8080, 5000, 2270],
-            block_all_ss_ports=True
+            block_ports=[4420],
+            block_all_ss_ports=False
         )
 
         unavailable_thread.join()

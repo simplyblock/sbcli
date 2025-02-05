@@ -629,3 +629,17 @@ class SbcliUtils:
             response = self.get_request(api_url)
         return response.get("results", {}).get("stats", [])
     
+    def resize_lvol(self, lvol_id, new_size):
+        """Resizes lvol to given size
+
+        Args:
+            lvol_id (str): LVOL id for which we need to modify size
+            new_size (str): New size of lvol. Eg: 20G
+        """
+        body = {
+            "size": new_size
+        }
+        self.put_request(api_url=f"/lvol/resize/{lvol_id}", 
+                         body=body)
+
+    
