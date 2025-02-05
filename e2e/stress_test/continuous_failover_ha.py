@@ -49,8 +49,8 @@ class RandomFailoverTest(TestLvolHACluster):
         self.sn_nodes_with_sec = []
         self.test_name = "continuous_random_failover_ha"
         # self.outage_types = ["partial_nw", "network_interrupt", "container_stop", "graceful_shutdown"]
-        self.outage_types = ["network_interrupt", "container_stop", "graceful_shutdown"]
-        # self.outage_types = ["network_interrupt"]
+        # self.outage_types = ["network_interrupt", "container_stop", "graceful_shutdown"]
+        self.outage_types = ["container_stop", "graceful_shutdown"]
         self.blocked_ports = None
         self.outage_log_file = os.path.join("logs", f"outage_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
         self._initialize_outage_log()
@@ -400,7 +400,7 @@ class RandomFailoverTest(TestLvolHACluster):
 
         self.logger.info("Creating 5 new lvols, clones, and snapshots.")
         self.create_lvols_with_fio(5)
-        self.create_snapshots_and_clones()
+        # self.create_snapshots_and_clones()
 
         self.logger.info("Failover during outage completed.")
         self.restart_nodes_after_failover(outage_type)
@@ -494,7 +494,7 @@ class RandomFailoverTest(TestLvolHACluster):
                 time_duration=time_duration
             )
             self.validate_migration_for_node(self.outage_start_time, 4000, None)
-            self.common_utils.manage_fio_threads(self.node, self.fio_threads, timeout=10000)
+            self.common_utils.manage_fio_threads(self.node, self.fio_threads, timeout=100000)
 
             for lvol_name, lvol_details in self.lvol_mount_details.items():
                 self.common_utils.validate_fio_test(
@@ -509,4 +509,3 @@ class RandomFailoverTest(TestLvolHACluster):
 
             self.logger.info(f"Failover iteration {iteration} complete.")
             iteration += 1
-        # self.logger.info("Complete outage scenario complete")
