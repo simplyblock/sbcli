@@ -111,8 +111,8 @@ class TestStressLvolCloneClusterFioRun(TestLvolHACluster):
 
             sleep_n_sec(10)
 
-            self.ssh_obj.delete_files(self.node, f"{mount_point}/*fio*")
-            self.ssh_obj.delete_files(self.node, f"{self.log_path}/local-{lvol_name}_fio*")
+            self.ssh_obj.delete_files(self.node, [f"{mount_point}/*fio*"])
+            self.ssh_obj.delete_files(self.node, [f"{self.log_path}/local-{lvol_name}_fio*"])
 
             sleep_n_sec(5)
 
@@ -195,8 +195,8 @@ class TestStressLvolCloneClusterFioRun(TestLvolHACluster):
             
             sleep_n_sec(10)
 
-            self.ssh_obj.delete_files(self.node, f"{mount_point}/*fio*")
-            self.ssh_obj.delete_files(self.node, f"{self.log_path}/local-{clone_name}_fio*")
+            self.ssh_obj.delete_files(self.node, [f"{mount_point}/*fio*"])
+            self.ssh_obj.delete_files(self.node, [f"{self.log_path}/local-{clone_name}_fio*"])
 
             sleep_n_sec(4)
 
