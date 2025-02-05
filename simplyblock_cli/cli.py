@@ -268,7 +268,7 @@ class CLIWrapper:
         sub_command = self.add_sub_command(subparser,'deploy',
                                            'Deploy storage nodes')
         sub_command.add_argument("--storage-nodes", help='comma separated ip addresses', dest="storage_nodes")
-        sub_command.add_argument("--test", help='Enable spdk debug logs', dest='test', required=False, action='store_true')
+        sub_command.add_argument("--test", help='Test Cluster', dest='test', required=False, action='store_true')
         sub_command.add_argument("--secondary-nodes", help='comma separated ip addresses', dest="secondary_nodes")
 
         sub_command.add_argument("--ha-type", help='LVol HA type (single, ha), default is cluster HA type',

@@ -6,6 +6,7 @@ import random
 import sys
 import time
 import uuid
+import fdb
 from datetime import datetime
 from typing import Tuple
 
@@ -302,8 +303,10 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
                 distr_vuid, max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes,
                 with_snapshot=False, max_size=0, crypto_key1=None, crypto_key2=None, lvol_priority_class=0,
                 uid=None, pvc_name=None, namespace=None):
-                
+
     db_controller = DBController()
+    db_controller.kv_store = fdb.open(constants.KVD_DB_FILE_PATH)
+
     logger.info(f"Adding LVol: {name}")
     host_node = None
     if host_id_or_name:
