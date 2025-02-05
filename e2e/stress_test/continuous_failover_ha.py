@@ -49,8 +49,7 @@ class RandomFailoverTest(TestLvolHACluster):
         self.sn_nodes_with_sec = []
         self.test_name = "continuous_random_failover_ha"
         # self.outage_types = ["partial_nw", "network_interrupt", "container_stop", "graceful_shutdown"]
-        # self.outage_types = ["network_interrupt", "container_stop", "graceful_shutdown"]
-        self.outage_types = ["container_stop", "graceful_shutdown"]
+        self.outage_types = ["network_interrupt", "container_stop", "graceful_shutdown"]
         self.blocked_ports = None
         self.outage_log_file = os.path.join("logs", f"outage_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
         self._initialize_outage_log()
