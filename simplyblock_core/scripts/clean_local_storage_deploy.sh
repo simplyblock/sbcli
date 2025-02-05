@@ -11,4 +11,4 @@ sudo docker container prune -f
 sudo docker volume prune -a -f
 sudo service docker restart
 echo "Done"
-sudo rm -rf /etc/foundationdb/data/
+sudo rm -rf /etc/foundationdb/*
