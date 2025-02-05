@@ -165,8 +165,6 @@ class RandomFailoverTest(TestLvolHACluster):
     def perform_random_outage(self):
         """Perform a random outage on the cluster."""
         outage_type = random.choice(self.outage_types)
-        if self.current_outage_node and self.current_outage_node in self.sn_nodes:
-            self.sn_nodes.remove(self.current_outage_node)
         self.current_outage_node = random.choice(self.sn_nodes)
 
         self.outage_start_time = int(datetime.now().timestamp())
@@ -407,14 +405,13 @@ class RandomFailoverTest(TestLvolHACluster):
         self.logger.info("Performing failover during outage.")
 
         # Randomly select a node and outage type for failover
-        self.sn_nodes.append(self.current_outage_node)
         outage_type = self.perform_random_outage()
 
         self.delete_random_lvols(5)
 
         self.logger.info("Creating 5 new lvols, clones, and snapshots.")
         self.create_lvols_with_fio(5)
-        # self.create_snapshots_and_clones()
+        self.create_snapshots_and_clones()
 
         self.logger.info("Failover during outage completed.")
         self.restart_nodes_after_failover(outage_type)
@@ -469,7 +466,7 @@ class RandomFailoverTest(TestLvolHACluster):
             sleep_n_sec(300)
             self.restart_nodes_after_failover(outage_type)
             self.logger.info("Waiting for fallback.")
-            sleep_n_sec(1000)
+            sleep_n_sec(600)
             time_duration = self.common_utils.calculate_time_duration(
                 start_timestamp=self.outage_start_time,
                 end_timestamp=self.outage_end_time
@@ -494,7 +491,7 @@ class RandomFailoverTest(TestLvolHACluster):
 
             # Perform failover and manage resources during outage
             self.perform_failover_during_outage()
-            sleep_n_sec(1000)
+            sleep_n_sec(600)
             time_duration = self.common_utils.calculate_time_duration(
                 start_timestamp=self.outage_start_time,
                 end_timestamp=self.outage_end_time
@@ -509,7 +506,6 @@ class RandomFailoverTest(TestLvolHACluster):
             )
             self.validate_migration_for_node(self.outage_start_time, 4000, None)
             self.common_utils.manage_fio_threads(self.node, self.fio_threads, timeout=100000)
-            validation_thread.join()
 
             for lvol_name, lvol_details in self.lvol_mount_details.items():
                 self.common_utils.validate_fio_test(
