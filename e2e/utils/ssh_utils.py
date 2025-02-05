@@ -845,10 +845,9 @@ class SshUtils:
             # Block explicitly provided ports
             for port in block_ports:
                 if port not in blocked_ports:
-                    self.exec_command(node_ip, f"sudo iptables -A OUTPUT -p tcp --dport {port} -j DROP")
-                    self.exec_command(node_ip, f"sudo iptables -A INPUT -p tcp --dport {port} -j DROP")
-                    self.exec_command(node_ip, f"sudo iptables -A OUTPUT -p tcp --sport {port} -j DROP")
-                    self.exec_command(node_ip, f"sudo iptables -A INPUT -p tcp --sport {port} -j DROP")
+                    self.exec_command(node_ip, f"sudo iptables -A OUTPUT -p tcp -m multiport --sports {port} --dports {port} -j DROP")
+                    self.exec_command(node_ip, f"sudo iptables -A INPUT -p tcp -m multiport --sports {port} --dports {port} -j DROP")
+
                     self.logger.info(f"Blocked port {port} on {node_ip}.")
                     blocked_ports.add(port)
 
@@ -862,10 +861,9 @@ class SshUtils:
                 ports_to_block = set([r.split(":")[1] for r in ip_with_ports])
                 for port in ports_to_block:
                     if port not in blocked_ports:
-                        self.exec_command(node_ip, f"sudo iptables -A OUTPUT -p tcp --dport {port} -j DROP")
-                        self.exec_command(node_ip, f"sudo iptables -A INPUT -p tcp --dport {port} -j DROP")
-                        self.exec_command(node_ip, f"sudo iptables -A OUTPUT -p tcp --sport {port} -j DROP")
-                        self.exec_command(node_ip, f"sudo iptables -A INPUT -p tcp --sport {port} -j DROP")
+                        self.exec_command(node_ip, f"sudo iptables -A OUTPUT -p tcp -m multiport --sports {port} --dports {port} -j DROP")
+                        self.exec_command(node_ip, f"sudo iptables -A INPUT -p tcp -m multiport --sports {port} --dports {port} -j DROP")
+
                         self.logger.info(f"Blocked port {port} for mgmt_ip {mgmt_ip} on {node_ip}.")
                         blocked_ports.add(port)
             time.sleep(5)
