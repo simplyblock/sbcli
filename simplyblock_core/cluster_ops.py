@@ -412,7 +412,6 @@ def deploy_cluster(storage_nodes,test,ha_type,distr_ndcs,distr_npcs,enable_qos,i
         else:
             logger.error(f"################## Pool found: {pool_id}")
 
-        time.sleep(5)
         lvol_uuid, msg = lvol_controller.add_lvol_ha(
                     lvol_name, lvol_size, host_id, lvol_ha_type, pool_id, comp, crypto,
                     distr_vuid,
