@@ -396,13 +396,21 @@ def deploy_cluster(storage_nodes,test,ha_type,distr_ndcs,distr_npcs,enable_qos,i
     if not activated:
         logger.error("cluster failed to activate")
     
-    if test:        
+    if test:
+        if not pool_name:
+            logger.error("Pool name is empty!")
+            return False        
         pool_id=pool_controller.add_pool(pool_name,pool_max,max_size,
                             max_rw_iops,max_rw_mbytes,max_r_mbytes,max_w_mbytes,None,cluster_uuid)
         
         if not pool_id:
             logger.error("pool did not create successfully")
+            return False 
 
+        if not lvol_name or lvol_size:
+            logger.error("lvol name or size is empty!")
+            return False   
+            
         lvol_uuid, msg = lvol_controller.add_lvol_ha(
                     lvol_name, lvol_size, host_id, lvol_ha_type, pool_id, comp, crypto,
                     distr_vuid,
