@@ -107,6 +107,23 @@ def _add_graylog_input(cluster_ip, password):
     logger.debug(response.text)
     return response.status_code == 201
 
+def _set_max_result_window(cluster_ip, max_window=50000):
+    url = f"http://{cluster_ip}:9200/_template/all_indices_template"
+    payload = json.dumps({
+        "index_patterns": ["*"],
+        "settings": {
+            "index.max_result_window": max_window
+        }
+    })
+    headers = {
+        'X-Requested-By': '',
+        'Content-Type': 'application/json',
+    }
+    
+    session = requests.session()
+    response = session.request("PUT", url, headers=headers, data=payload)
+    print(response.text)
+    return response.status_code == 200
 
 def create_cluster(blk_size, page_size_in_blocks, cli_pass,
                    cap_warn, cap_crit, prov_cap_warn, prov_cap_crit, ifname, log_del_interval, metrics_retention_period,
@@ -243,6 +260,8 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     logger.info("Configuring DB...")
     out = scripts.set_db_config_single()
     logger.info("Configuring DB > Done")
+
+    _set_max_result_window(DEV_IP)
 
     _add_graylog_input(DEV_IP, c.secret)
 
