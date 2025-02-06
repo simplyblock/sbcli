@@ -446,18 +446,18 @@ class SshUtils:
         return output.strip()
 
     def add_snapshot(self, node, lvol_id, snapshot_name):
-        cmd = f"{self.base_cmd} snapshot add {lvol_id} {snapshot_name}"
+        cmd = f"{self.base_cmd} -d snapshot add {lvol_id} {snapshot_name}"
         self.exec_command(node=node, command=cmd)
     
     def add_clone(self, node, snapshot_id, clone_name):
-        cmd = f"{self.base_cmd} snapshot clone {snapshot_id} {clone_name}"
+        cmd = f"{self.base_cmd} -d snapshot clone {snapshot_id} {clone_name}"
         self.exec_command(node=node, command=cmd)
 
     def delete_snapshot(self, node, snapshot_id):
         cmd = "%s snapshot list | grep -i '%s' | awk '{print $4}'" % (self.base_cmd, snapshot_id)
         output, error = self.exec_command(node=node, command=cmd)
         self.logger.info(f"Deleting snapshot: {output}")
-        cmd = f"{self.base_cmd} snapshot delete {snapshot_id} --force"
+        cmd = f"{self.base_cmd} -d snapshot delete {snapshot_id} --force"
         output, error = self.exec_command(node=node, command=cmd)
 
         return output, error
@@ -576,7 +576,7 @@ class SshUtils:
         cmd = "pip list"
         self.exec_command(node=node, command=cmd)
 
-        cmd = f"{self.base_cmd} sn deploy"
+        cmd = f"{self.base_cmd} -d sn deploy"
         self.exec_command(node=node, command=cmd, timeout=1200)
 
     def add_storage_node(self, node, cluster_id, node_ip, ifname, max_lvol, max_prov, max_snap,
@@ -584,7 +584,7 @@ class SshUtils:
                          disable_ha_jm, enable_test_device, spdk_debug, spdk_image, spdk_cpu_mask):
 
         
-        cmd = (f"{self.base_cmd} storage-node add-node --max-lvol {max_lvol} --max-snap {max_snap} --max-prov {max_prov} "
+        cmd = (f"{self.base_cmd} -d storage-node add-node --max-lvol {max_lvol} --max-snap {max_snap} --max-prov {max_prov} "
                f"--number-of-devices {number_of_devices} --number-of-distribs {number_of_distribs} "
                f"--partitions {partitions} --jm-percent {jm_percent} "
                f" --cpu-mask {spdk_cpu_mask} --spdk-image {spdk_image}")
@@ -861,10 +861,20 @@ class SshUtils:
             if block_ports:
                 # Construct a single iptables rule for both INPUT & OUTPUT chains
                 ports_str = ",".join(block_ports)
+                # block_command = (
+                #     f"sudo iptables -A INPUT -p tcp -m multiport --sports {ports_str} --dports {ports_str} -j DROP && "
+                #     f"sudo iptables -A OUTPUT -p tcp -m multiport --sports {ports_str} --dports {ports_str} -j DROP"
+                # )
+
                 block_command = (
-                    f"sudo iptables -A INPUT -p tcp -m multiport --sports {ports_str} --dports {ports_str} -j DROP && "
-                    f"sudo iptables -A OUTPUT -p tcp -m multiport --sports {ports_str} --dports {ports_str} -j DROP"
+                    f"{{ "
+                    f"sudo iptables -A INPUT -p tcp -m multiport --sports {ports_str} -j DROP; "
+                    f"sudo iptables -A INPUT -p tcp -m multiport --dports {ports_str} -j DROP; "
+                    f"sudo iptables -A OUTPUT -p tcp -m multiport --sports {ports_str} -j DROP; "
+                    f"sudo iptables -A OUTPUT -p tcp -m multiport --dports {ports_str} -j DROP; "
+                    f"}}"
                 )
+                
                 self.exec_command(node_ip, block_command)
                 blocked_ports.update(block_ports)
                 self.logger.info(f"Blocked ports {ports_str} on {node_ip}.")
@@ -952,13 +962,13 @@ class SshUtils:
             str: The extracted LVS dump file path, or None if not found.
         """
         try:
-            command = f"{self.base_cmd} sn dump-lvstore {storage_node_id} | grep 'LVS dump file will be here'"
-            self.logger.info(f"Executing '{self.base_cmd} sn dump-lvstore' on {node_ip} for Storage Node ID: {storage_node_id}")
+            command = f"{self.base_cmd} -d sn dump-lvstore {storage_node_id} | grep 'LVS dump file will be here'"
+            self.logger.info(f"Executing '{self.base_cmd} -d sn dump-lvstore' on {node_ip} for Storage Node ID: {storage_node_id}")
             
             output, error = self.exec_command(node_ip, command)
 
             if error:
-                self.logger.error(f"Error executing '{self.base_cmd} sn dump-lvstore' on {node_ip}: {error}")
+                self.logger.error(f"Error executing '{self.base_cmd} -d sn dump-lvstore' on {node_ip}: {error}")
                 return None
 
             # Extract only the LVS dump file path
