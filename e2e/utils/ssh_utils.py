@@ -876,8 +876,8 @@ class SshUtils:
                 # """ % (ports_str, ports_str, ports_str, ports_str)
 
                 for port in block_ports:
-                    block_command = (f"sudo iptables -A OUTPUT -p tcp --sport {port} --dport {port} -j DROP && "
-                                     f"sudo iptables -A INPUT -p tcp --sport {port} --dport {port} -j DROP"
+                    block_command = (f"sudo iptables -A INPUT -p tcp --sport {port} --dport {port} -j DROP && "
+                                     f"sudo iptables -A OUTPUT -p tcp --sport {port} --dport {port} -j DROP"
                                      )
                 
                     self.exec_command(node_ip, block_command)
@@ -918,8 +918,8 @@ class SshUtils:
                 # """ % (ports_str, ports_str, ports_str, ports_str)
 
                 for port in blocked_ports:
-                    unblock_command = (f"sudo iptables -D INPUT -p tcp --sport {port} --dport {port} -j DROP && "
-                                       f"sudo iptables -D OUTPUT -p tcp --sport {port} --dport {port} -j DROP"
+                    unblock_command = (f"sudo iptables -D OUTPUT -p tcp --sport {port} --dport {port} -j DROP && "
+                                       f"sudo iptables -D INPUT -p tcp --sport {port} --dport {port} -j DROP"
                                        )
                     self.exec_command(node_ip, unblock_command)
                     self.logger.info(f"Unblocked port {port} on {node_ip}.")
