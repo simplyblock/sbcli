@@ -866,14 +866,14 @@ class SshUtils:
                 #     f"sudo iptables -A OUTPUT -p tcp -m multiport --sports {ports_str} --dports {ports_str} -j DROP"
                 # )
 
-                block_command = (
-                    f"{{ "
-                    f"sudo iptables -A INPUT -p tcp -m multiport --sports {ports_str} -j DROP; "
-                    f"sudo iptables -A INPUT -p tcp -m multiport --dports {ports_str} -j DROP; "
-                    f"sudo iptables -A OUTPUT -p tcp -m multiport --sports {ports_str} -j DROP; "
-                    f"sudo iptables -A OUTPUT -p tcp -m multiport --dports {ports_str} -j DROP; "
-                    f"}}"
-                )
+                block_command = """
+                {{
+                    sudo iptables -A INPUT -p tcp -m multiport --sports %s -j DROP;
+                    sudo iptables -A INPUT -p tcp -m multiport --dports %s -j DROP;
+                    sudo iptables -A OUTPUT -p tcp -m multiport --sports %s -j DROP;
+                    sudo iptables -A OUTPUT -p tcp -m multiport --dports %s -j DROP;
+                }}
+                """ % (ports_str, ports_str, ports_str, ports_str)
                 
                 self.exec_command(node_ip, block_command)
                 blocked_ports.update(block_ports)
