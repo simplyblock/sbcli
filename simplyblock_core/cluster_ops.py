@@ -792,7 +792,7 @@ def get_capacity(cluster_id, history, records_count=20, is_json=False):
     return out
 
 
-def get_iostats_history(cluster_id, history_string, records_count=20, parse_sizes=True):
+def get_iostats_history(cluster_id, history_string, records_count=20, parse_sizes=True, with_sizes=False):
     db_controller = DBController()
     cluster = db_controller.get_cluster_by_id(cluster_id)
     if not cluster:
@@ -827,6 +827,29 @@ def get_iostats_history(cluster_id, history_string, records_count=20, parse_size
         "write_io_ps",
         "write_latency_ps",
     ]
+    if with_sizes:
+        io_stats_keys.extend(
+            [
+                "size_total",
+                "size_prov",
+                "size_used",
+                "size_free",
+                "size_util",
+                "size_prov_util",
+                "read_latency_ticks",
+                "record_duration",
+                "record_end_time",
+                "record_start_time",
+                "unmap_bytes",
+                "unmap_bytes_ps",
+                "unmap_io",
+                "unmap_io_ps",
+                "unmap_latency_ps",
+                "unmap_latency_ticks",
+                "write_bytes_ps",
+                "write_latency_ticks",
+            ]
+        )
     # combine records
     new_records = utils.process_records(records, records_count, keys=io_stats_keys)
 

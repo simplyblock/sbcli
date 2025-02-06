@@ -62,7 +62,7 @@ def storagenode_iostats(uuid, history):
     if not node:
         return utils.get_response_error(f"node not found: {uuid}", 404)
 
-    data = storage_node_ops.get_node_iostats_history(uuid, history, parse_sizes=False)
+    data = storage_node_ops.get_node_iostats_history(uuid, history, parse_sizes=False, with_sizes=True)
     ret = {
         "object_data": node.get_clean_dict(),
         "stats": data or []
