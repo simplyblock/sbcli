@@ -207,7 +207,7 @@ class RandomFailoverTest(TestLvolHACluster):
             #     args=(node_ip, active_interfaces),
             # )
             # self.disconnect_thread.start()
-            ports_to_block = [80, 4420, 8080, 5000, 2270, 2377, 7946]
+            ports_to_block = [4420, 80, 8080, 5000, 2270, 2377, 7946]
             self.blocked_ports = self.ssh_obj.partial_nw_outage(node_ip=node_ip, mgmt_ip=self.mgmt_nodes[0],
                                                                 block_ports=ports_to_block, block_all_ss_ports=True)
         elif outage_type == "partial_nw":

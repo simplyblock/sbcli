@@ -837,7 +837,7 @@ class SshUtils:
         Returns:
             list: List of all blocked ports (unique).
         """
-        blocked_ports = set()
+        blocked_ports = []
 
         try:
             if block_ports is None:
@@ -860,24 +860,29 @@ class SshUtils:
 
             if block_ports:
                 # Construct a single iptables rule for both INPUT & OUTPUT chains
-                ports_str = ",".join(block_ports)
+                # ports_str = ",".join(block_ports)
                 # block_command = (
                 #     f"sudo iptables -A INPUT -p tcp -m multiport --sports {ports_str} --dports {ports_str} -j DROP && "
                 #     f"sudo iptables -A OUTPUT -p tcp -m multiport --sports {ports_str} --dports {ports_str} -j DROP"
                 # )
 
-                block_command = """
-                {{
-                    sudo iptables -A INPUT -p tcp -m multiport --sports %s -j DROP;
-                    sudo iptables -A INPUT -p tcp -m multiport --dports %s -j DROP;
-                    sudo iptables -A OUTPUT -p tcp -m multiport --sports %s -j DROP;
-                    sudo iptables -A OUTPUT -p tcp -m multiport --dports %s -j DROP;
-                }}
-                """ % (ports_str, ports_str, ports_str, ports_str)
+                # block_command = """
+                # {{
+                #     sudo iptables -A INPUT -p tcp -m multiport --sports %s -j DROP;
+                #     sudo iptables -A INPUT -p tcp -m multiport --dports %s -j DROP;
+                #     sudo iptables -A OUTPUT -p tcp -m multiport --sports %s -j DROP;
+                #     sudo iptables -A OUTPUT -p tcp -m multiport --dports %s -j DROP;
+                # }}
+                # """ % (ports_str, ports_str, ports_str, ports_str)
+
+                for port in block_ports:
+                    block_command = (f"sudo iptables -A OUTPUT -p tcp --sport {port} --dport {port} -j DROP && "
+                                     f"sudo iptables -A INPUT -p tcp --sport {port} --dport {port} -j DROP"
+                                     )
                 
-                self.exec_command(node_ip, block_command)
-                blocked_ports.update(block_ports)
-                self.logger.info(f"Blocked ports {ports_str} on {node_ip}.")
+                    self.exec_command(node_ip, block_command)
+                    blocked_ports.append(port)
+                    self.logger.info(f"Blocked port {port} on {node_ip}.")
 
             time.sleep(5)
             self.logger.info("Network outage: IPTable Rules List:")
@@ -886,7 +891,7 @@ class SshUtils:
         except Exception as e:
             self.logger.error(f"Failed to block ports on {node_ip}: {e}")
 
-        return list(blocked_ports)
+        return blocked_ports
 
 
     def remove_partial_nw_outage(self, node_ip, blocked_ports):
@@ -902,17 +907,22 @@ class SshUtils:
         """
         try:
             if blocked_ports:
-                ports_str = ",".join(blocked_ports)
-                unblock_command = """
-                {{
-                    sudo iptables -D INPUT -p tcp -m multiport --sports %s -j DROP;
-                    sudo iptables -D INPUT -p tcp -m multiport --dports %s -j DROP;
-                    sudo iptables -D OUTPUT -p tcp -m multiport --sports %s -j DROP;
-                    sudo iptables -D OUTPUT -p tcp -m multiport --dports %s -j DROP;
-                }}
-                """ % (ports_str, ports_str, ports_str, ports_str)
-                self.exec_command(node_ip, unblock_command)
-                self.logger.info(f"Unblocked ports {ports_str} on {node_ip}.")
+                # ports_str = ",".join(blocked_ports)
+                # unblock_command = """
+                # {{
+                #     sudo iptables -D INPUT -p tcp -m multiport --sports %s -j DROP;
+                #     sudo iptables -D INPUT -p tcp -m multiport --dports %s -j DROP;
+                #     sudo iptables -D OUTPUT -p tcp -m multiport --sports %s -j DROP;
+                #     sudo iptables -D OUTPUT -p tcp -m multiport --dports %s -j DROP;
+                # }}
+                # """ % (ports_str, ports_str, ports_str, ports_str)
+
+                for port in blocked_ports:
+                    unblock_command = (f"sudo iptables -D INPUT -p tcp --sport {port} --dport {port} -j DROP && "
+                                       f"sudo iptables -D OUTPUT -p tcp --sport {port} --dport {port} -j DROP"
+                                       )
+                    self.exec_command(node_ip, unblock_command)
+                    self.logger.info(f"Unblocked port {port} on {node_ip}.")
 
             time.sleep(5)
             self.logger.info("Network outage: IPTable Rules List:")
