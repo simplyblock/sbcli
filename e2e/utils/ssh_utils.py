@@ -903,10 +903,14 @@ class SshUtils:
         try:
             if blocked_ports:
                 ports_str = ",".join(blocked_ports)
-                unblock_command = (
-                    f"sudo iptables -D INPUT -p tcp -m multiport --sports {ports_str} --dports {ports_str} -j DROP && "
-                    f"sudo iptables -D OUTPUT -p tcp -m multiport --sports {ports_str} --dports {ports_str} -j DROP"
-                )
+                unblock_command = """
+                {{
+                    sudo iptables -D INPUT -p tcp -m multiport --sports %s -j DROP;
+                    sudo iptables -D INPUT -p tcp -m multiport --dports %s -j DROP;
+                    sudo iptables -D OUTPUT -p tcp -m multiport --sports %s -j DROP;
+                    sudo iptables -D OUTPUT -p tcp -m multiport --dports %s -j DROP;
+                }}
+                """ % (ports_str, ports_str, ports_str, ports_str)
                 self.exec_command(node_ip, unblock_command)
                 self.logger.info(f"Unblocked ports {ports_str} on {node_ip}.")
 
