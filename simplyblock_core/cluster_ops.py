@@ -107,7 +107,7 @@ def _add_graylog_input(cluster_ip, password):
     logger.debug(response.text)
     return response.status_code == 201
 
-def set_max_result_window(cluster_ip, max_window=50000):
+def _set_max_result_window(cluster_ip, max_window=50000):
     url_existing_indices = f"http://{cluster_ip}:9200/_all/_settings"
     payload_existing = json.dumps({
         "settings": {
