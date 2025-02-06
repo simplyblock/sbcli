@@ -108,24 +108,36 @@ def _add_graylog_input(cluster_ip, password):
     return response.status_code == 201
 
 def _set_max_result_window(cluster_ip, max_window=50000):
-    url = f"http://{cluster_ip}/opensearch/_all/_settings"
-    payload = json.dumps({
+    url_existing_indices = f"http://{cluster_ip}:9200/_all/_settings"
+    payload_existing = json.dumps({
         "settings": {
-            "index": {
-                "max_result_window": max_window
-            }
+            "index.max_result_window": max_window
         }
     })
-    
     headers = {
-        'X-Requested-By': '',
         'Content-Type': 'application/json',
     }
-    session = requests.session()
-    response = session.request("PUT", url, headers=headers, data=payload)
-    logger.debug(response.text)
-    return response.status_code == 200
-
+    response = requests.put(url_existing_indices, headers=headers, data=payload_existing)
+    if response.status_code == 200:
+        logger.info("Settings updated for existing indices.")
+    else:
+        logger.error(f"Failed to update settings for existing indices: {response.text}")
+        return False
+    
+    url_template = f"http://{cluster_ip}:9200/_template/all_indices_template"
+    payload_template = json.dumps({
+        "index_patterns": ["*"],
+        "settings": {
+            "index.max_result_window": max_window
+        }
+    })
+    response_template = requests.put(url_template, headers=headers, data=payload_template)
+    if response_template.status_code == 200:
+        logger.info("Template created for future indices.")
+        return True
+    else:
+        logger.error(f"Failed to create template for future indices: {response_template.text}")
+        return False
 
 def create_cluster(blk_size, page_size_in_blocks, cli_pass,
                    cap_warn, cap_crit, prov_cap_warn, prov_cap_crit, ifname, log_del_interval, metrics_retention_period,
