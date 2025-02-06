@@ -1,5 +1,5 @@
 SIMPLY_BLOCK_COMMAND_NAME=sbcli-mig
-SIMPLY_BLOCK_VERSION=1.0.402
+SIMPLY_BLOCK_VERSION=1.0.403
 
 SIMPLY_BLOCK_DOCKER_IMAGE=simplyblock/simplyblock:set_max_result_window
 DOCKER_USER=hamdysimplyblock
