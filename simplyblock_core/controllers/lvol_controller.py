@@ -21,7 +21,6 @@ from simplyblock_core.rpc_client import RPCClient
 from simplyblock_core.snode_client import SNodeClient
 
 logger = lg.getLogger()
-#db_controller = DBController()
 
 
 def _generate_hex_string(length):

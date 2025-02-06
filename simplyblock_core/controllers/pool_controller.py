@@ -15,8 +15,6 @@ from simplyblock_core.models.pool import Pool
 
 logger = lg.getLogger()
 
-#db_controller = DBController()
-
 
 def _generate_string(length):
     return ''.join(random.SystemRandom().choice(
