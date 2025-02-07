@@ -136,8 +136,8 @@ class TestSingleNodeOutage(TestClusterBase):
         snapshot_id_1 = self.ssh_obj.get_snapshot_id(node=self.mgmt_nodes[0],
                                                      snapshot_name=f"{self.snapshot_name}_1")
         
-        # self.sbcli_utils.resize_lvol(lvol_id=self.sbcli_utils.get_lvol_id(self.lvol_name),
-        #                              new_size="20G")
+        self.sbcli_utils.resize_lvol(lvol_id=self.sbcli_utils.get_lvol_id(self.lvol_name),
+                                     new_size="20G")
 
         self.sbcli_utils.suspend_node(node_uuid=no_lvol_node_uuid)
         try:
@@ -172,8 +172,8 @@ class TestSingleNodeOutage(TestClusterBase):
                          health_check_status=True
                          )
         
-        # self.sbcli_utils.resize_lvol(lvol_id=self.sbcli_utils.get_lvol_id(self.lvol_name),
-        #                              new_size="25G")
+        self.sbcli_utils.resize_lvol(lvol_id=self.sbcli_utils.get_lvol_id(self.lvol_name),
+                                     new_size="25G")
         
         node_details = self.sbcli_utils.get_storage_node_details(no_lvol_node_uuid)
         node_ip = node_details[0]["mgmt_ip"]
@@ -368,8 +368,8 @@ class TestHASingleNodeOutage(TestClusterBase):
                          health_check_status=True
                          )
         
-        self.sbcli_utils.resize_lvol(lvol_id=self.sbcli_utils.get_lvol_id(self.lvol_name),
-                                     new_size="20G")
+        # self.sbcli_utils.resize_lvol(lvol_id=self.sbcli_utils.get_lvol_id(self.lvol_name),
+        #                              new_size="20G")
 
         for i in range(2):
             timestamp = int(datetime.now().timestamp())
@@ -423,8 +423,8 @@ class TestHASingleNodeOutage(TestClusterBase):
         self.common_utils.validate_event_logs(cluster_id=self.cluster_id,
                                               operations=steps)
         
-        self.sbcli_utils.resize_lvol(lvol_id=self.sbcli_utils.get_lvol_id(self.lvol_name),
-                                     new_size="25G")
+        # self.sbcli_utils.resize_lvol(lvol_id=self.sbcli_utils.get_lvol_id(self.lvol_name),
+        #                              new_size="25G")
 
         end_time = self.common_utils.manage_fio_threads(node=self.mgmt_nodes[0],
                                                         threads=self.fio_threads,
