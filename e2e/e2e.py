@@ -5,7 +5,8 @@ from __init__ import get_all_tests, ALL_TESTS
 from logger_config import setup_logger
 from exceptions.custom_exception import (
     TestNotFoundException,
-    MultipleExceptions
+    MultipleExceptions,
+    SkippedTestsException
 )
 from e2e_tests.cluster_test_base import TestClusterBase
 from utils.sbcli_utils import SbcliUtils
@@ -47,6 +48,7 @@ def main():
         raise TestNotFoundException(args.testname, available_tests)
 
     errors = {}
+    passed_cases = []
     for test in test_class_run:
         logger.info(f"Running Test {test}")
         test_obj = test(fio_debug=args.fio_debug,
@@ -58,6 +60,7 @@ def main():
         try:
             test_obj.setup()
             test_obj.run()
+            passed_cases.append(f"{test.__name__}")
         except Exception as exp:
             logger.error(traceback.format_exc())
             errors[f"{test.__name__}"] = [exp]
@@ -76,19 +79,25 @@ def main():
                 break
 
     failed_cases = list(errors.keys())
+    skipped_cases = len(test_class_run) - (len(passed_cases) + len(failed_cases))
     logger.info(f"Number of Total Cases: {len(test_class_run)}")
-    logger.info(f"Number of Passed Cases: {len(test_class_run) - len(failed_cases)}")
+    logger.info(f"Number of Passed Cases: {len(passed_cases)}")
     logger.info(f"Number of Failed Cases: {len(failed_cases)}")
+    logger.info(f"Number of Skipped Cases: {skipped_cases}")
 
     logger.info("Test Wise run status:")
     for test in test_class_run:
-        if test.__name__ not in failed_cases:
+        if test.__name__ in passed_cases:
             logger.info(f"{test.__name__} PASSED CASE.")
-        else:
+        elif test.__name__ in failed_cases:
             logger.info(f"{test.__name__} FAILED CASE.")
+        else:
+            logger.info(f"{test.__name__} SKIPPED CASE.")
 
     if errors:
         raise MultipleExceptions(errors)
+    if skipped_cases:
+        raise SkippedTestsException("There are SKIPPED Tests. Please check!!")
 
 
 def check_for_dumps():

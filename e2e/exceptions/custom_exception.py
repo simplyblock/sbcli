@@ -17,3 +17,7 @@ class MultipleExceptions(Exception):
 class LvolNotConnectException(Exception):
     def __init__(self, message) -> None:
         super().__init__(message)
+
+class SkippedTestsException(Exception):
+    def __init__(self, message) -> None:
+        super().__init__(message)
