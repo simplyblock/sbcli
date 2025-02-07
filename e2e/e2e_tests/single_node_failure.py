@@ -355,6 +355,7 @@ class TestHASingleNodeFailure(TestClusterBase):
         self.fio_runtime = 5*60
         self.logger = setup_logger(__name__)
         self.fio_threads = []
+        self.test_name = "single_node_failure_ha"
 
     def run(self):
         """ Performs each step of the testcase
@@ -419,6 +420,12 @@ class TestHASingleNodeFailure(TestClusterBase):
                              lvol_status="online",
                              health_check_status=True
                              )
+            self.ssh_obj.restart_docker_logging(
+                node_ip=node_ip,
+                containers=self.container_nodes[node_ip],
+                log_dir=self.docker_logs_path,
+                test_name=self.test_name
+            )
 
         # self.sbcli_utils.resize_lvol(lvol_id=self.sbcli_utils.get_lvol_id(self.lvol_name),
         #                              new_size="25G")

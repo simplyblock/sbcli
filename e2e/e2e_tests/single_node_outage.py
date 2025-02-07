@@ -334,6 +334,7 @@ class TestHASingleNodeOutage(TestClusterBase):
         self.fio_runtime = 5*60
         self.logger = setup_logger(__name__)
         self.fio_threads = []
+        self.test_name = "single_node_outage_ha"
 
     def run(self):
         """ Performs each step of the testcase

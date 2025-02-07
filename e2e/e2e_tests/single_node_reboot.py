@@ -48,7 +48,7 @@ class TestSingleNodeReboot(TestClusterBase):
         super().__init__(**kwargs)
         self.snapshot_name = "snapshot"
         self.logger = setup_logger(__name__)
-        self.test_name = "single_node_failure"
+        self.test_name = "single_node_reboot"
 
     def run(self):
         """ Performs each step of the testcase
@@ -366,6 +366,7 @@ class TestHASingleNodeReboot(TestClusterBase):
         self.fio_runtime = 5*60
         self.logger = setup_logger(__name__)
         self.fio_threads = []
+        self.test_name = "single_node_reboot_ha"
 
     def run(self):
         """ Performs each step of the testcase
