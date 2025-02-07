@@ -951,7 +951,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
         return False
 
     logger.info(f"Adding Storage node: {node_ip}")
-    timeout = 60
+    timeout = 90
     if spdk_image:
         timeout = 5 * 60
     snode_api = SNodeClient(node_ip, timeout=timeout, retry=10)
