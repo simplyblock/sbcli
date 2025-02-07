@@ -15,6 +15,7 @@ services:
 
   fdb-server:
     image: foundationdb/foundationdb:7.3.42
+    entrypoint: "/usr/bin/fdbserver --listen-address 0.0.0.0:4500 --public-address $CLUSTER_IP:4500 --datadir /var/fdb/data --logdir /var/fdb/logs --locality-zoneid=$HOSTNAME --locality-machineid=$HOSTNAME --class unset"
     networks:
       - hostnet
     environment:

@@ -62,7 +62,7 @@ def lvol_iostats(uuid, history):
         if req_secret != pool.secret:
             return utils.get_response_error(f"Pool secret doesn't mach the value in the request header", 400)
 
-    data = lvol_controller.get_io_stats(uuid, history, parse_sizes=False)
+    data = lvol_controller.get_io_stats(uuid, history, parse_sizes=False, with_sizes=True)
     ret = {
         "object_data": lvol.get_clean_dict(),
         "stats": data or []

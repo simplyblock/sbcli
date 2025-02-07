@@ -10,14 +10,15 @@ db_controller = DBController()
 
 def _device_event(device, message, caused_by, event):
     snode = db_controller.get_storage_node_by_id(device.node_id)
-    ec.log_event_cluster(
-        cluster_id=snode.cluster_id,
-        domain=ec.DOMAIN_CLUSTER,
-        event=event,
-        db_object=device,
-        caused_by=caused_by,
-        message=message,
-        node_id=device.get_id())
+    if snode:
+        ec.log_event_cluster(
+            cluster_id=snode.cluster_id,
+            domain=ec.DOMAIN_CLUSTER,
+            event=event,
+            db_object=device,
+            caused_by=caused_by,
+            message=message,
+            node_id=device.get_id())
 
 
 def device_create(device, caused_by=ec.CAUSED_BY_CLI):

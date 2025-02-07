@@ -120,12 +120,12 @@ jobs:
         run: |
           cd $GITHUB_WORKSPACE/simplyBlockDeploy
           ./bootstrap-cluster.sh --sbcli-cmd "$SBCLI_CMD" \
-            --max-lvol 100 --max-snap 100 --max-prov 3t --number-of-devices 3 \
+            --max-lvol 100 --max-snap 100 --max-prov 1t --number-of-devices 3 \
             --distr-ndcs $NDCS \
             --distr-npcs $NPCS \
             --distr-bs $BS \
             --distr-chunk-bs $CHUNK_BS --ha-type ha \
-            --partitions 3
+            --partitions 0
           
           echo "::set-output name=bastion_public_ip::$BASTION_IP"
           echo "::set-output name=key_name::$KEY_NAME"
@@ -140,12 +140,12 @@ jobs:
           BS: ${{ env.BS }}
           CHUNK_BS: ${{ env.CHUNK_BS }}
           KEY_NAME: "simplyblock-us-east-2.pem"
-          BASTION_IP: "172.16.53.10"
-          GRAFANA_ENDPOINT: "http://172.16.53.10/grafana"
-          mnodes: "172.16.53.10"
-          storage_private_ips: "172.16.53.11 172.16.53.12 172.16.53.13"
-          sec_storage_private_ips: "172.16.53.14"
-          API_INVOKE_URL: "http://172.16.53.10/"
+          BASTION_IP: "192.168.10.66"
+          GRAFANA_ENDPOINT: "http://192.168.10.66/grafana"
+          mnodes: "192.168.10.66"
+          storage_private_ips: "192.168.10.67 192.168.10.68 192.168.10.69"
+          sec_storage_private_ips: "192.168.10.70"
+          API_INVOKE_URL: "http://192.168.10.66/"
 
       - name: Record Test Start Time
         run: echo "TEST_START_TIME=$(date +%s)" >> $GITHUB_ENV

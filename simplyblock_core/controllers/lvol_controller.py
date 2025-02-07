@@ -1260,7 +1260,7 @@ def get_capacity(lvol_uuid, history, records_count=20, parse_sizes=True):
     return out
 
 
-def get_io_stats(lvol_uuid, history, records_count=20, parse_sizes=True):
+def get_io_stats(lvol_uuid, history, records_count=20, parse_sizes=True, with_sizes=False):
     lvol = db_controller.get_lvol_by_id(lvol_uuid)
     if not lvol:
         logger.error(f"LVol not found: {lvol_uuid}")
@@ -1289,6 +1289,29 @@ def get_io_stats(lvol_uuid, history, records_count=20, parse_sizes=True):
         "write_latency_ps",
         "connected_clients",
     ]
+    if with_sizes:
+        io_stats_keys.extend(
+            [
+                "size_total",
+                "size_prov",
+                "size_used",
+                "size_free",
+                "size_util",
+                "size_prov_util",
+                "read_latency_ticks",
+                "record_duration",
+                "record_end_time",
+                "record_start_time",
+                "unmap_bytes",
+                "unmap_bytes_ps",
+                "unmap_io",
+                "unmap_io_ps",
+                "unmap_latency_ps",
+                "unmap_latency_ticks",
+                "write_bytes_ps",
+                "write_latency_ticks",
+            ]
+        )
     # combine records
     new_records = utils.process_records(records_list, records_count, keys=io_stats_keys)
 

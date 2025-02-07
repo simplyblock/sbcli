@@ -15,7 +15,7 @@ then
     "max-file": "3"
   }
 }
-' > /etc/docker/daemon.json
+' | sudo tee /etc/docker/daemon.json > /dev/null
 fi
 
 
