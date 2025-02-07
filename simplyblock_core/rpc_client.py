@@ -138,16 +138,16 @@ class RPCClient:
         params = {
             "trtype": trtype,
             "max_io_qpairs_per_ctrlr": qpair_count,
-            "max_queue_depth": 1024,
+            "max_queue_depth": 512,
             "abort_timeout_sec": 5,
-            "ack_timeout": 1024,
+            "ack_timeout": 512,
             "zcopy": True,
             "in_capsule_data_size": 4096,
             "max_io_size": 131072,
             "io_unit_size": 8192,
             "max_aq_depth": 128,
-            "num_shared_buffers": 16000,
-            "buf_cache_size": 94,
+            "num_shared_buffers": 8192,
+            "buf_cache_size": 32,
             "dif_insert_or_strip": False,
             "c2h_success": True,
             "sock_priority": 0
@@ -600,8 +600,7 @@ class RPCClient:
             "fast_io_fail_timeout_sec": 0,
             "reconnect_delay_sec": 1,
             "keep_alive_timeout_ms": 10000,
-            "transport_ack_timeout": 10,
-            "io_queue_requests" : 1024,
+            "transport_ack_timeout": 9,
             "timeout_us": constants.NVME_TIMEOUT_US
         }
         return self._request("bdev_nvme_set_options", params)
