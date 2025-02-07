@@ -14,6 +14,7 @@ class TestLvolFioBase(TestClusterBase):
     def setup(self):
         """Call setup from TestClusterBase and then create the storage pool."""
         super().setup()
+        self.test_name = "single_node_fio_perf"
 
         self.lvol_devices = {}
 
@@ -105,7 +106,7 @@ class TestLvolFioBase(TestClusterBase):
                 "name": f"fio_{lvol_name}",
                 "rw": readwrite,
                 "ioengine": "libaio",
-                "iodepth": 64,
+                "iodepth": 1,
                 "bs": 4096,
                 "size": "2G",
                 "time_based": True,

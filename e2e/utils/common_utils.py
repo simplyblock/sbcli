@@ -184,7 +184,55 @@ class CommonUtils:
         instance.wait_until_stopped()  # Wait until the instance is fully stopped
         self.logger.info(f"Instance {instance_id} has stopped.") 
         sleep_n_sec(30)
-    
+
+    def reboot_ec2_instance(self, ec2_resource, instance_id, timeout=300, wait_interval=10):
+        """
+        Reboots the specified EC2 instance and verifies that it is back up within a given timeout.
+
+        Args:
+            instance_id (str): The ID of the EC2 instance to reboot.
+            timeout (int): Maximum time (in seconds) to wait for the instance to be available.
+            wait_interval (int): Time interval (in seconds) between status checks.
+        """
+        try:
+            ec2_client = ec2_resource.meta.client
+
+            # Initiate reboot
+            print(f"Rebooting instance {instance_id}...")
+            ec2_client.reboot_instances(InstanceIds=[instance_id])
+
+            # Start timeout tracking
+            start_time = time.time()
+
+            print(f"Waiting for instance {instance_id} to pass status checks...")
+
+            while (time.time() - start_time) < timeout:
+                instance = ec2_resource.Instance(instance_id)
+                instance.load()  # Refresh state
+
+                # Fetch instance status checks
+                status_response = ec2_client.describe_instance_status(InstanceIds=[instance_id])
+                if status_response['InstanceStatuses']:
+                    instance_status = status_response['InstanceStatuses'][0]
+                    system_status_ok = instance_status['SystemStatus']['Status'] == 'ok'
+                    instance_status_ok = instance_status['InstanceStatus']['Status'] == 'ok'
+
+                    if system_status_ok and instance_status_ok:
+                        print(f"Instance {instance_id} is fully online and healthy!")
+                        sleep_n_sec(30)
+                        return
+
+                elapsed_time = int(time.time() - start_time)
+                print(f"[{elapsed_time}s elapsed] Instance state: '{instance.state['Name']}'. Waiting for AWS status checks...")
+                time.sleep(wait_interval)
+
+            print(f"Error: Instance {instance_id} did not become available within {timeout} seconds.")
+            raise RuntimeError(f"Error: Instance {instance_id} did not become available within {timeout} seconds.")
+
+        except Exception as e:
+            print(f"Error rebooting instance {instance_id}: {e}")
+            raise e
+        
     def terminate_instance(self, ec2_resource, instance_id):
         # Terminate the given instance
         instance = ec2_resource.Instance(instance_id)
@@ -305,7 +353,7 @@ class CommonUtils:
         self.logger.info(f"Calculated time duration: {time_duration}")
         return time_duration
     
-    def validate_io_stats(self, cluster_id, start_timestamp, end_timestamp, time_duration):
+    def validate_io_stats(self, cluster_id, start_timestamp, end_timestamp, time_duration=None):
         """
         Validate I/O stats ensuring all metrics are non-zero within the failover time range.
         Args:
@@ -315,22 +363,18 @@ class CommonUtils:
             time_duration (str): Time duration for API call (e.g., '1hr30m')
         """
         self.logger.info(f"Validating I/O stats for cluster {cluster_id} during {time_duration}.")
+        self.logger.info(f"Start Date: {start_timestamp}, {end_timestamp}")
 
         # Fetch I/O stats from the API
         io_stats = self.sbcli_utils.get_io_stats(cluster_id, time_duration)
+        self.logger.info(f"IO Stats: {io_stats}")
 
-        # Filter stats by failover time range
-        filtered_stats = [
-            stat for stat in io_stats
-            if start_timestamp <= stat["date"] <= end_timestamp
-        ]
-
-        if not filtered_stats:
+        if not io_stats:
             self.logger.error("No I/O stats found within the specified time range.")
             raise AssertionError("No I/O stats found within the specified time range.")
 
         # Validate non-zero values for relevant metrics
-        for stat in filtered_stats:
+        for stat in io_stats:
             self.logger.info(f"Validating I/O stats for record with date: {stat['date']}")
             self.assert_non_zero_io_stat(stat, "read_bytes")
             self.assert_non_zero_io_stat(stat, "write_bytes")

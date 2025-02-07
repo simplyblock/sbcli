@@ -24,7 +24,7 @@ def main():
     parser.add_argument('--bs', type=int, help="Block size (bs)", default=4096)
     parser.add_argument('--chunk_bs', type=int, help="Chunk block size (chunk_bs)", default=4096)
     parser.add_argument('--run_k8s', type=bool, help="Run K8s setup", default=False)
-
+    # parser.add_argument('--run_ha', type=bool, help="Run HA tests", default=False)
 
     args = parser.parse_args()
 
@@ -61,7 +61,8 @@ def main():
             errors[f"{test.__name__}"] = [exp]
         try:
             test_obj.stop_docker_logs_collect()
-            test_obj.teardown()
+            test_obj.fetch_all_nodes_distrib_log()
+            # test_obj.teardown()
             # pass
         except Exception as _:
             logger.error(f"Error During Teardown for test: {test.__name__}")

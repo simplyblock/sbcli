@@ -698,6 +698,14 @@ def handle_task_result(task: JobSchedule, res: dict, allowed_error_codes = None)
             task.write_to_db()
             return True
 
+        elif migration_status == "none":
+            task.function_result = f"mig retry after restart"
+            task.retry += 1
+            task.status = JobSchedule.STATUS_SUSPENDED
+            del task.function_params['migration']
+            task.write_to_db()
+            return True
+
         else:
             task.function_result = f"Status: {migration_status}, progress:{progress}"
             task.write_to_db()
