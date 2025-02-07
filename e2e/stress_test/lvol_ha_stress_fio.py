@@ -6,6 +6,7 @@ from logger_config import setup_logger
 from datetime import datetime
 from exceptions.custom_exception import LvolNotConnectException
 from requests.exceptions import HTTPError
+from pathlib import Path
 
 
 class TestLvolHACluster(FioWorkloadTest):
@@ -32,7 +33,7 @@ class TestLvolHACluster(FioWorkloadTest):
         self.lvol_node = None
         self.mount_path = "/mnt/"
         self.lvol_mount_details = {}
-        self.log_path = "/home/ec2-user/"
+        self.log_path = Path.home()
     
     def create_lvols(self):
         """Create 500 lvols with mixed crypto and non-crypto."""
