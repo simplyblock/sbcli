@@ -7,6 +7,7 @@ from logger_config import setup_logger
 from utils.common_utils import sleep_n_sec
 import traceback
 import threading
+from datetime import datetime, timedelta
 
 
 class TestClusterBase:
@@ -75,12 +76,16 @@ class TestClusterBase:
                 address=node,
                 bastion_server_address=self.bastion_server,
             )
+            sleep_n_sec(2)
+            self.ssh_obj.set_aio_max_nr(node)
         for node in self.storage_nodes:
             self.logger.info(f"**Connecting to storage nodes** - {node}")
             self.ssh_obj.connect(
                 address=node,
                 bastion_server_address=self.bastion_server,
             )
+            sleep_n_sec(2)
+            self.ssh_obj.set_aio_max_nr(node)
 
         # command = "python3 -c \"from importlib.metadata import version;print(f'SBCLI Version: {version('''sbcli-dev''')}')\""
         # self.ssh_obj.exec_command(
@@ -129,6 +134,12 @@ class TestClusterBase:
             for pid in pids:
                 self.ssh_obj.kill_processes(node=node, pid=pid)
         self.logger.info("All log monitoring threads stopped.")
+
+    def fetch_all_nodes_distrib_log(self):
+        storage_nodes = self.sbcli_utils.get_storage_nodes()
+        for result in storage_nodes['results']:
+            if result['is_secondary_node'] is False:
+                self.ssh_obj.fetch_distrib_logs(result["mgmt_ip"], result["uuid"])
 
     def teardown(self):
         """Contains teradown required post test case execution
@@ -352,6 +363,91 @@ class TestClusterBase:
             self.logger.info(f"Deleting snapshot: {snapshot}")
             delete_snapshot_command = f"sbcli-lvol snapshot delete {snapshot} --force"
             self.ssh_obj.exec_command(node=self.mgmt_nodes[0], command=delete_snapshot_command)
+
+    def filter_migration_tasks(self, tasks, node_id, timestamp):
+        """
+        Filters `device_migration` tasks for a specific node and timestamp.
+
+        Args:
+            tasks (list): List of task dictionaries from the API response.
+            node_id (str): The UUID of the node to check for migration tasks.
+            timestamp (int): The timestamp to filter tasks created after this time.
+
+        Returns:
+            list: List of `device_migration` tasks for the specific node created after the given timestamp.
+        """
+        filtered_tasks = [
+            task for task in tasks
+            if task['function_name'] == 'device_migration' and task['date'] > timestamp
+            and (node_id is None or task['node_id'] == node_id)
+        ]
+        return filtered_tasks
+
+    def validate_migration_for_node(self, timestamp, timeout, node_id=None, check_interval=60,
+                                    no_task_ok=False):
+        """
+        Validate that all `device_migration` tasks for a specific node have completed successfully 
+        and check for stuck tasks until the timeout is reached.
+
+        Args:
+            timestamp (int): The timestamp to filter tasks created after this time.
+            timeout (int): Maximum time in seconds to keep checking for task completion.
+            node_id (str): The UUID of the node to check for migration tasks (or None for all nodes).
+            check_interval (int): Time interval in seconds to wait between checks.
+
+        Raises:
+            RuntimeError: If any migration task failed, is incomplete, is stuck, or if the timeout is reached.
+        """
+        start_time = datetime.now()
+        end_time = start_time + timedelta(seconds=timeout)
+
+        output = None
+        while output is not None:
+            output, _ = self.ssh_obj.exec_command(node=self.mgmt_nodes[0], 
+                                                command=f"{self.base_cmd} cluster list-tasks {self.cluster_id}")
+            self.logger.info(f"Data migration output: {output}")
+            if no_task_ok:
+                break
+
+        while datetime.now() < end_time:
+            tasks = self.sbcli_utils.get_cluster_tasks(self.cluster_id)
+            filtered_tasks = self.filter_migration_tasks(tasks, node_id, timestamp)
+            
+            if not filtered_tasks and not no_task_ok:
+                raise RuntimeError(f"No migration tasks found for {'node ' + node_id if node_id else 'the cluster'} after the specified timestamp.")
+
+            self.logger.info(f"Checking migration tasks: {filtered_tasks}")
+            all_done = True
+            completed_count = 0
+
+            for task in filtered_tasks:
+                # Check if the task is stuck (updated_at is more than 15 minutes old)
+                updated_at = datetime.strptime(task['updated_at'], '%Y-%m-%d %H:%M:%S.%f')
+                if datetime.now() - updated_at > timedelta(minutes=65) \
+                    and task["status"] != "done":
+                    raise RuntimeError(f"Migration task {task['id']} is stuck (last updated at {updated_at}).")
+
+                # Check if task is completed
+                if task['status'] == 'done':
+                    completed_count += 1
+                else:
+                    all_done = False
+
+            # Logging the counts after each check
+            total_tasks = len(filtered_tasks)
+            remaining_tasks = total_tasks - completed_count
+            self.logger.info(f"Total migration tasks: {total_tasks}, Completed: {completed_count}, Remaining: {remaining_tasks}")
+
+            # If all tasks are done, break out of the loop
+            if all_done:
+                self.logger.info(f"All migration tasks for {'node ' + node_id if node_id else 'the cluster'} completed successfully without any stuck tasks.")
+                return
+
+            # Wait for the next check
+            sleep_n_sec(check_interval)
+
+        # If the loop exits without completing all tasks, raise a timeout error
+        raise RuntimeError(f"Timeout reached: Not all migration tasks completed within the specified timeout of {timeout} seconds.")
             
     
 

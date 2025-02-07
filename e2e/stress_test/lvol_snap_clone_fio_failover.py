@@ -104,7 +104,7 @@ class TestLvolHAClusterWithClones(TestLvolHACluster):
                     "rw": "randrw",
                     "bs": "4K-128K",
                     "numjobs": 32,
-                    "iodepth": 512,
+                    "iodepth": 1,
                 },
             )
             fio_thread.start()
@@ -120,7 +120,7 @@ class TestLvolHAClusterWithClones(TestLvolHACluster):
                     "rw": "randrw",
                     "bs": "4K-128K",
                     "numjobs": 32,
-                    "iodepth": 512,
+                    "iodepth": 1,
                 },
             )
             fio_thread.start()
