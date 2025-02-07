@@ -32,7 +32,7 @@ class RandomFailoverTest(TestLvolHACluster):
         self.lvol_name = f"lvl{random_char(3)}"
         self.clone_name = f"cln{random_char(3)}"
         self.snapshot_name = f"snap{random_char(3)}"
-        self.lvol_size = "10G"
+        self.lvol_size = "8G"
         self.int_lvol_size = 8
         self.fio_size = "1G"
         self.fio_threads = []
@@ -115,7 +115,7 @@ class RandomFailoverTest(TestLvolHACluster):
             else:
                 self.node_vs_lvol[lvol_node_id] = [lvol_name]
 
-            connect_ls = [self.sbcli_utils.get_lvol_connect_str(lvol_name=lvol_name)[0]]
+            connect_ls = self.sbcli_utils.get_lvol_connect_str(lvol_name=lvol_name)
 
             initial_devices = self.ssh_obj.get_devices(node=self.node)
             for connect_str in connect_ls:
@@ -158,7 +158,7 @@ class RandomFailoverTest(TestLvolHACluster):
                     "nrfiles": 16,
                     "iodepth": 1,
                     "numjobs": 4,
-                    "time_based": True,
+                    "time_based": False,
                 },
             )
             fio_thread.start()
@@ -339,7 +339,7 @@ class RandomFailoverTest(TestLvolHACluster):
             self.ssh_obj.exec_command(node=self.node,
                                       command=f"{self.base_cmd} lvol list")
 
-            connect_ls = [self.sbcli_utils.get_lvol_connect_str(lvol_name=clone_name)[0]]
+            connect_ls = self.sbcli_utils.get_lvol_connect_str(lvol_name=clone_name)
 
             initial_devices = self.ssh_obj.get_devices(node=self.node)
             for connect_str in connect_ls:
@@ -381,7 +381,7 @@ class RandomFailoverTest(TestLvolHACluster):
                     "nrfiles": 16,
                     "iodepth": 1,
                     "numjobs": 4,
-                    "time_based": True,
+                    "time_based": False,
                 },
             )
             fio_thread.start()
