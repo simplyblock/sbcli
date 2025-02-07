@@ -220,7 +220,7 @@ def delete(snapshot_uuid, force_delete=False):
         if lvol.cloned_from_snap and lvol.cloned_from_snap == snapshot_uuid:
             clones.append(lvol)
 
-    if len(clones) > 1:
+    if len(clones) >= 1:
         logger.warning(f"Soft delete snapshot with clones")
         snap = db_controller.get_snapshot_by_id(snapshot_uuid)
         snap.deleted = True
