@@ -5,8 +5,7 @@ on:
     branches:
       - pre-release
       - sbcli
-  schedule:
-    - cron: '0 5 * * *'  # Runs every day at 5 AM UTC
+
   workflow_dispatch:
     inputs:
       simplyBlockDeploy_branch:
@@ -125,7 +124,7 @@ jobs:
             --distr-npcs $NPCS \
             --distr-bs $BS \
             --distr-chunk-bs $CHUNK_BS --ha-type ha \
-            --partitions 0
+            --partitions 0 --spdk-image "simplyblock/spdk:main-2e48d3fc-amd64"
           
           echo "::set-output name=bastion_public_ip::$BASTION_IP"
           echo "::set-output name=key_name::$KEY_NAME"
