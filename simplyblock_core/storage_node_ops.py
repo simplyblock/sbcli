@@ -1964,7 +1964,7 @@ def list_storage_nodes(is_json, cluster_id=None):
         nodes = db_controller.get_storage_nodes()
     data = []
     output = ""
-    now = datetime.datetime.now()
+    now = datetime.datetime.now(datetime.timezone.utc)
 
     for node in nodes:
         logger.debug(node)
@@ -2765,9 +2765,9 @@ def set_node_status(node_id, status):
     if snode.status != status:
         old_status = snode.status
         snode.status = status
-        snode.updated_at = str(datetime.datetime.now())
+        snode.updated_at = str(datetime.datetime.now(datetime.timezone.utc))
         if status == StorageNode.STATUS_ONLINE:
-            snode.online_since = str(datetime.datetime.now())
+            snode.online_since = str(datetime.datetime.now(datetime.timezone.utc))
         else:
             snode.online_since = ""
         snode.write_to_db(db_controller.kv_store)
