@@ -11,6 +11,7 @@ from exceptions.custom_exception import (
 from e2e_tests.cluster_test_base import TestClusterBase
 from utils.sbcli_utils import SbcliUtils
 from utils.ssh_utils import SshUtils
+from utils.common_utils import CommonUtils
 
 
 def main():
@@ -26,6 +27,8 @@ def main():
     parser.add_argument('--chunk_bs', type=int, help="Chunk block size (chunk_bs)", default=4096)
     parser.add_argument('--run_k8s', type=bool, help="Run K8s tests", default=False)
     parser.add_argument('--run_ha', type=bool, help="Run HA tests", default=False)
+    parser.add_argument('--send_debug_notification', type=bool, help="Send notification for debug", default=False)
+    
 
     args = parser.parse_args()
 
@@ -85,20 +88,43 @@ def main():
     logger.info(f"Number of Failed Cases: {len(failed_cases)}")
     logger.info(f"Number of Skipped Cases: {skipped_cases}")
 
+    summary = f"""
+        *Total Test Cases:* {len(test_class_run)}
+        *Passed Cases:* {len(passed_cases)}
+        *Failed Cases:* {len(failed_cases)}
+        *Skipped Cases:* {skipped_cases}
+
+        *Test Wise Run Status:*
+    """
+
     logger.info("Test Wise run status:")
     for test in test_class_run:
         if test.__name__ in passed_cases:
             logger.info(f"{test.__name__} PASSED CASE.")
+            summary += f"✅ {test.__name__}: *PASSED*\n"
         elif test.__name__ in failed_cases:
             logger.info(f"{test.__name__} FAILED CASE.")
+            summary += f"❌ {test.__name__}: *FAILED*\n"
         else:
             logger.info(f"{test.__name__} SKIPPED CASE.")
+            summary += f"⚠️ {test.__name__}: *SKIPPED*\n"
+    
+    if args.send_debug_notification:
+        # Send Slack notification
+        cluster_base = TestClusterBase()
+        ssh_obj = SshUtils(bastion_server=cluster_base.bastion_server)
+        sbcli_utils = SbcliUtils(
+            cluster_api_url=cluster_base.api_base_url,
+            cluster_id=cluster_base.cluster_id,
+            cluster_secret=cluster_base.cluster_secret
+        )
+        common_utils = CommonUtils(sbcli_utils, ssh_obj)
+        common_utils.send_slack_summary("E2E Test Summary Report", summary)
 
     if errors:
         raise MultipleExceptions(errors)
     if skipped_cases:
         raise SkippedTestsException("There are SKIPPED Tests. Please check!!")
-
 
 def check_for_dumps():
     """Validates whether core dumps present on machines

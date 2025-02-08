@@ -8,6 +8,7 @@ from utils.common_utils import sleep_n_sec
 import traceback
 import threading
 from datetime import datetime, timedelta
+from pathlib import Path
 
 
 class TestClusterBase:
@@ -46,11 +47,10 @@ class TestClusterBase:
         self.ec2_resource = None
         self.lvol_crypt_keys = ["7b3695268e2a6611a25ac4b1ee15f27f9bf6ea9783dada66a4a730ebf0492bfd",
                                 "78505636c8133d9be42e347f82785b81a879cd8133046f8fc0b36f17b078ad0c"]
-        self.container_log_path = f"{os.path.dirname(self.mount_path)}/container_logs"
         self.log_threads = []
         self.test_name = ""
         self.container_nodes = {}
-
+        self.docker_logs_path = ""
 
     def setup(self):
         """Contains setup required to run the test case
@@ -111,9 +111,16 @@ class TestClusterBase:
         )
         self.ec2_resource = session.resource('ec2')
 
-        self.docker_logs_path = f"/home/container-logs/"
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        # Construct the logs path with test name and timestamp
+        self.docker_logs_path = os.path.join(Path.home(), "container-logs", f"{self.test_name}-{timestamp}")
         
         for node in self.storage_nodes:
+            self.ssh_obj.delete_old_folders(
+                node=node,
+                folder_path=os.path.join(Path.home(), "container-logs"),
+                days=3
+            )
             containers = self.ssh_obj.get_running_containers(node_ip=node)
             self.container_nodes[node] = containers
             self.ssh_obj.start_docker_logging(node_ip=node,
