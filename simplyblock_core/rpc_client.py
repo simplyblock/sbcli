@@ -595,12 +595,12 @@ class RPCClient:
         params = {
             # "action_on_timeout": "abort",
             "bdev_retry_count": 0,
-            "transport_retry_count": 0,
+            "transport_retry_count": 5,
             "ctrlr_loss_timeout_sec": 1,
             "fast_io_fail_timeout_sec": 0,
             "reconnect_delay_sec": 1,
             "keep_alive_timeout_ms": 10000,
-            "transport_ack_timeout": 9,
+            "transport_ack_timeout": 10,
             "timeout_us": constants.NVME_TIMEOUT_US
         }
         return self._request("bdev_nvme_set_options", params)
