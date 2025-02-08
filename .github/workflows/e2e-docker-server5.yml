@@ -124,7 +124,7 @@ jobs:
             --distr-npcs $NPCS \
             --distr-bs $BS \
             --distr-chunk-bs $CHUNK_BS --ha-type ha \
-            --partitions 0 --data-nic ens16
+            --partitions 0 --data-nic ens16  --cpu-mask 0xe
           
           echo "::set-output name=bastion_public_ip::$BASTION_IP"
           echo "::set-output name=key_name::$KEY_NAME"
