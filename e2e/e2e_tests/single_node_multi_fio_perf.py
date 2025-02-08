@@ -1,5 +1,6 @@
 from datetime import datetime
 import os
+from pathlib import Path
 from e2e_tests.cluster_test_base import TestClusterBase
 import threading
 import json
@@ -90,7 +91,7 @@ class TestLvolFioBase(TestClusterBase):
             mount_path = None
             if config["mount"]:
                 self.ssh_obj.format_disk(node=self.mgmt_nodes[0], device=disk_use)
-                mount_path = f"/home/ec2-user/test_location_{lvol_name}"
+                mount_path = f"{Path.home()}/test_location_{lvol_name}"
                 self.ssh_obj.mount_path(node=self.mgmt_nodes[0], device=disk_use, mount_path=mount_path)
 
             # Store device information
@@ -112,7 +113,7 @@ class TestLvolFioBase(TestClusterBase):
                 "time_based": True,
                 "runtime": 100,
                 "output_format": "json",
-                "output_file": f"/home/ec2-user/{lvol_name}_log.json",
+                "output_file": f"{Path.home()}/{lvol_name}_log.json",
                 "nrfiles": 5,
                 "debug": self.fio_debug
             }
@@ -124,7 +125,7 @@ class TestLvolFioBase(TestClusterBase):
                             trim_check=False):
         """Validate the FIO output for IOPS and MB/s."""
 
-        log_file = f"/home/ec2-user/{lvol_name}_log.json"
+        log_file = f"{Path.home()}/{lvol_name}_log.json"
         output = self.ssh_obj.read_file(node=self.mgmt_nodes[0], file_name=log_file)
         fio_result = ""
         self.logger.info(f"FIO output for {lvol_name}: {output}")
