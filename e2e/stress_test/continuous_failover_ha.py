@@ -32,8 +32,8 @@ class RandomFailoverTest(TestLvolHACluster):
         self.lvol_name = f"lvl{random_char(3)}"
         self.clone_name = f"cln{random_char(3)}"
         self.snapshot_name = f"snap{random_char(3)}"
-        self.lvol_size = "30G"
-        self.int_lvol_size = 30
+        self.lvol_size = "8G"
+        self.int_lvol_size = 8
         self.fio_size = "1G"
         self.fio_threads = []
         self.clone_mount_details = {}
@@ -103,6 +103,9 @@ class RandomFailoverTest(TestLvolHACluster):
             }
 
             self.logger.info(f"Created lvol {lvol_name}.")
+            
+            self.ssh_obj.exec_command(node=self.node,
+                                      command=f"{self.base_cmd} lvol list")
 
             lvol_node_id = self.sbcli_utils.get_lvol_details(
                 lvol_id=self.lvol_mount_details[lvol_name]["ID"])[0]["node_id"]
@@ -333,6 +336,8 @@ class RandomFailoverTest(TestLvolHACluster):
             }
 
             self.logger.info(f"Created clone {clone_name}.")
+            self.ssh_obj.exec_command(node=self.node,
+                                      command=f"{self.base_cmd} lvol list")
 
             connect_ls = self.sbcli_utils.get_lvol_connect_str(lvol_name=clone_name)
 
