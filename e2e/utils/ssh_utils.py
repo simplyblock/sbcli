@@ -895,7 +895,10 @@ class SshUtils:
                 block_ports.extend(ports_to_block)
 
             # Remove duplicates
+            block_ports = [str(port) for port in block_ports]
             block_ports = list(set(block_ports))
+            if "22" in block_ports:
+                block_ports.remove("22")
 
             if block_ports:
                 # Construct a single iptables rule for both INPUT & OUTPUT chains
