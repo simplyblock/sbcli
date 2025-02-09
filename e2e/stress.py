@@ -32,7 +32,7 @@ def main():
 
     args = parser.parse_args()
     
-    tests = get_stress_tests(custom=False, ha_test=args.run_ha)
+    tests = get_stress_tests()
 
     test_class_run = []
     if args.testname is None or len(args.testname.strip()) == 0:
