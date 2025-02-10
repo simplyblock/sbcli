@@ -1,6 +1,9 @@
 import time
 from logger_config import setup_logger
 import re
+import os
+import requests
+import json
 
 
 class CommonUtils:
@@ -10,6 +13,36 @@ class CommonUtils:
         self.sbcli_utils = sbcli_utils
         self.ssh_utils = ssh_utils
         self.logger = setup_logger(__name__)
+        self.slack_webhook_url = os.getenv("SLACK_WEBHOOK_URL")  # Load from environment variable
+
+    def send_slack_summary(self, subject, body):
+        """
+        Sends a Slack message with the test summary.
+
+        Args:
+            subject (str): The title of the Slack message
+            body (str): The content of the Slack message
+        """
+        if not self.slack_webhook_url:
+            self.logger.error("SLACK_WEBHOOK_URL is not set. Cannot send Slack notification.")
+            return
+
+        # Format Slack message
+        slack_message = {
+            "text": f"*{subject}*\n{body}"
+        }
+
+        try:
+            response = requests.post(self.slack_webhook_url, 
+                                     data=json.dumps(slack_message), 
+                                     headers={"Content-Type": "application/json"},
+                                     timeout=30)
+            if response.status_code == 200:
+                self.logger.info("Slack notification sent successfully.")
+            else:
+                self.logger.error(f"Failed to send Slack notification. Response: {response.text}")
+        except Exception as e:
+            self.logger.error(f"Error sending Slack notification: {e}")
 
     def validate_event_logs(self, cluster_id, operations):
         """Validates event logs for cluster

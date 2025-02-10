@@ -8,6 +8,7 @@ from utils.common_utils import sleep_n_sec
 import traceback
 import threading
 from datetime import datetime, timedelta
+from pathlib import Path
 
 
 class TestClusterBase:
@@ -39,18 +40,17 @@ class TestClusterBase:
         self.k8s_test = kwargs.get("k8s_run", False)
         self.pool_name = "test_pool"
         self.lvol_name = f"test_lvl_{self.ndcs}_{self.npcs}"
-        self.mount_path = "/home/ec2-user/test_location"
+        self.mount_path = f"{Path.home()}/test_location"
         self.log_path = f"{os.path.dirname(self.mount_path)}/log_file.log"
         self.base_cmd = os.environ.get("SBCLI_CMD", "sbcli-dev")
         self.fio_debug = kwargs.get("fio_debug", False)
         self.ec2_resource = None
         self.lvol_crypt_keys = ["7b3695268e2a6611a25ac4b1ee15f27f9bf6ea9783dada66a4a730ebf0492bfd",
                                 "78505636c8133d9be42e347f82785b81a879cd8133046f8fc0b36f17b078ad0c"]
-        self.container_log_path = f"{os.path.dirname(self.mount_path)}/container_logs"
         self.log_threads = []
         self.test_name = ""
         self.container_nodes = {}
-
+        self.docker_logs_path = ""
 
     def setup(self):
         """Contains setup required to run the test case
@@ -111,9 +111,17 @@ class TestClusterBase:
         )
         self.ec2_resource = session.resource('ec2')
 
-        self.docker_logs_path = f"/home/container-logs/"
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        # Construct the logs path with test name and timestamp
+        self.docker_logs_path = os.path.join(Path.home(), "container-logs", f"{self.test_name}-{timestamp}")
         
         for node in self.storage_nodes:
+            self.ssh_obj.delete_old_folders(
+                node=node,
+                folder_path=os.path.join(Path.home(), "container-logs"),
+                days=3
+            )
+
             containers = self.ssh_obj.get_running_containers(node_ip=node)
             self.container_nodes[node] = containers
             self.ssh_obj.start_docker_logging(node_ip=node,
@@ -123,6 +131,12 @@ class TestClusterBase:
                                               )
 
         self.logger.info("Started log monitoring for all storage nodes.")
+
+    def cleanup_logs(self):
+        for node in self.storage_nodes:
+            self.ssh_obj.delete_file_dir(node, entity="/etc/simplyblock/*", recursive=True)
+            self.ssh_obj.delete_file_dir(node, entity="/root/distrib*", recursive=True)
+            self.ssh_obj.delete_file_dir(node, entity="/root/*.txt", recursive=True)
 
     def stop_docker_logs_collect(self):
         for node in self.storage_nodes:
@@ -141,6 +155,39 @@ class TestClusterBase:
             if result['is_secondary_node'] is False:
                 self.ssh_obj.fetch_distrib_logs(result["mgmt_ip"], result["uuid"])
 
+    def collect_management_details(self):
+        base_path = Path.home()
+        cmd = f"{self.base_cmd} cluster list >& {base_path}/cluster_list.txt"
+        self.ssh_obj.exec_command(node=self.mgmt_nodes[0],
+                                  command=cmd)
+        
+        cmd = f"{self.base_cmd} cluster status {self.cluster_id} >& {base_path}/cluster_status.txt"
+        self.ssh_obj.exec_command(node=self.mgmt_nodes[0],
+                                  command=cmd)
+        
+        cmd = f"{self.base_cmd} cluster get-logs {self.cluster_id} >& {base_path}/cluster_get_logs.txt"
+        self.ssh_obj.exec_command(node=self.mgmt_nodes[0],
+                                  command=cmd)
+        
+        cmd = f"{self.base_cmd} cluster list-tasks {self.cluster_id} >& {base_path}/cluster_list_tasks.txt"
+        self.ssh_obj.exec_command(node=self.mgmt_nodes[0],
+                                  command=cmd)
+        
+        cmd = f"{self.base_cmd} sn list >& {base_path}/sn_list.txt"
+        self.ssh_obj.exec_command(node=self.mgmt_nodes[0],
+                                  command=cmd)
+        
+        storage_nodes = self.sbcli_utils.get_storage_nodes()
+        node=1
+        for result in storage_nodes['results']:
+            cmd = f"{self.base_cmd} sn list-devices {result['uuid']} >& {base_path}/node{node}_list_devices.txt"
+            self.ssh_obj.exec_command(self.mgmt_nodes[0], cmd)
+
+            cmd = f"{self.base_cmd} sn check {result['uuid']} >& {base_path}/node{node}_check.txt"
+            self.ssh_obj.exec_command(self.mgmt_nodes[0], cmd)
+
+            node+=1
+            
     def teardown(self):
         """Contains teradown required post test case execution
         """

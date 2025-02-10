@@ -1,3 +1,4 @@
+from pathlib import Path
 import threading
 import json
 from e2e_tests.cluster_test_base import TestClusterBase
@@ -360,7 +361,7 @@ class FioWorkloadTest(TestClusterBase):
                                     "size": "300M",
                                     "time_based": True,
                                     "runtime": 2000,
-                                    "output_file": f"/home/ec2-user/{lvol}.log",
+                                    "output_file": f"{Path.home()}/{lvol}.log",
                                     "numjobs": 2,
                                     "debug": self.fio_debug
                                 }
@@ -378,7 +379,7 @@ class FioWorkloadTest(TestClusterBase):
                                     "size": "300M",
                                     "time_based": True,
                                     "runtime": 2000,
-                                    "output_file": f"/home/ec2-user/{lvol}.log",
+                                    "output_file": f"{Path.home()}/{lvol}.log",
                                     "nrfiles": 2,
                                     "debug": self.fio_debug
                                 }
