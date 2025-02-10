@@ -7,11 +7,15 @@ import paramiko.ssh_exception
 from logger_config import setup_logger
 from pathlib import Path
 from datetime import datetime
+import random, string
 
 
 
 SSH_KEY_LOCATION = os.path.join(Path.home(), ".ssh", os.environ.get("KEY_NAME"))
 
+def generate_random_string(length=6):
+    """Generate a random string of uppercase letters and digits."""
+    return ''.join(random.choices(string.ascii_uppercase + string.digits, k=length))
 
 class SshUtils:
     """Class to perform all ssh level operationa
@@ -274,6 +278,8 @@ class SshUtils:
             location = f"--filename={device}"
         if directory:
             location = f"--directory={directory}"
+
+        # filename_format = f"{directory}/file_" + r"${jobnum}_${filenum}"
         
         runtime = kwargs.get("runtime", 3600)
         rw = kwargs.get("rw", "randrw")
@@ -301,7 +307,7 @@ class SshUtils:
 
         command = (f"sudo fio --name={name} {location} --ioengine={ioengine} --direct=1 --iodepth={iodepth} "
                    f"{time_based} --runtime={runtime} --rw={rw} --bs={bs} --size={size} --rwmixread={rwmixread} "
-                   f"--verify=md5 --verify_backlog=2 --verify_interval={bs} --numjobs={numjobs} --nrfiles={nrfiles} "
+                   f"--verify=md5 --verify_fatal=1 --numjobs={numjobs} --nrfiles={nrfiles} "
                    f"{output_format}{output_file}")
         
         if kwargs.get("debug", None):
@@ -376,6 +382,45 @@ class SshUtils:
         output, _ = self.exec_command(node=node, command=cmd)
         return output
     
+    def delete_old_folders(self, node, folder_path, days=3):
+        """
+        Deletes folders older than the given number of days on a remote machine.
+
+        Args:
+            node (str): The IP address of the remote machine.
+            folder_path (str): The base directory to check for old folders.
+            days (int): The number of days beyond which folders should be deleted.
+        """
+        # Get the current date from the remote machine
+        get_date_command = "date +%s"
+        remote_timestamp, error = self.exec_command(node, get_date_command)
+        
+        if error:
+            self.logger.error(f"Failed to fetch remote date from {node}: {error}")
+            return
+        
+        # Convert remote timestamp to an integer
+        remote_timestamp = int(remote_timestamp.strip())
+        
+        # Calculate threshold timestamp in seconds
+        threshold_timestamp = remote_timestamp - (days * 86400)
+        
+        # Construct the remote find command using remote timestamps
+        command = f"""
+            find {folder_path} -mindepth 1 -maxdepth 1 -type d \
+            -printf '%T@ %p\n' | awk '$1 < {threshold_timestamp} {{print $2}}' | xargs -I {{}} rm -rf {{}}
+        """
+
+        self.logger.info(f"Executing remote folder cleanup on {node}: {command}")
+        
+        _, error = self.exec_command(node, command)
+
+        if error:
+            self.logger.error(f"Failed to delete old folders on {node}: {error}")
+        else:
+            self.logger.info(f"Old folders deleted successfully on {node}.")
+
+    
     def list_files(self, node, location):
         """List the entities in given location on a node
         Args:
@@ -440,18 +485,18 @@ class SshUtils:
         return output.strip()
 
     def add_snapshot(self, node, lvol_id, snapshot_name):
-        cmd = f"{self.base_cmd} snapshot add {lvol_id} {snapshot_name}"
+        cmd = f"{self.base_cmd} -d snapshot add {lvol_id} {snapshot_name}"
         self.exec_command(node=node, command=cmd)
     
     def add_clone(self, node, snapshot_id, clone_name):
-        cmd = f"{self.base_cmd} snapshot clone {snapshot_id} {clone_name}"
+        cmd = f"{self.base_cmd} -d snapshot clone {snapshot_id} {clone_name}"
         self.exec_command(node=node, command=cmd)
 
     def delete_snapshot(self, node, snapshot_id):
         cmd = "%s snapshot list | grep -i '%s' | awk '{print $4}'" % (self.base_cmd, snapshot_id)
         output, error = self.exec_command(node=node, command=cmd)
         self.logger.info(f"Deleting snapshot: {output}")
-        cmd = f"{self.base_cmd} snapshot delete {snapshot_id} --force"
+        cmd = f"{self.base_cmd} -d snapshot delete {snapshot_id} --force"
         output, error = self.exec_command(node=node, command=cmd)
 
         return output, error
@@ -570,7 +615,7 @@ class SshUtils:
         cmd = "pip list"
         self.exec_command(node=node, command=cmd)
 
-        cmd = f"{self.base_cmd} sn deploy"
+        cmd = f"{self.base_cmd} -d sn deploy"
         self.exec_command(node=node, command=cmd, timeout=1200)
 
     def add_storage_node(self, node, cluster_id, node_ip, ifname, max_lvol, max_prov, max_snap,
@@ -578,7 +623,7 @@ class SshUtils:
                          disable_ha_jm, enable_test_device, spdk_debug, spdk_image, spdk_cpu_mask):
 
         
-        cmd = (f"{self.base_cmd} storage-node add-node --max-lvol {max_lvol} --max-snap {max_snap} --max-prov {max_prov} "
+        cmd = (f"{self.base_cmd} -d storage-node add-node --max-lvol {max_lvol} --max-snap {max_snap} --max-prov {max_prov} "
                f"--number-of-devices {number_of_devices} --number-of-distribs {number_of_distribs} "
                f"--partitions {partitions} --jm-percent {jm_percent} "
                f" --cpu-mask {spdk_cpu_mask} --spdk-image {spdk_image}")
@@ -672,18 +717,50 @@ class SshUtils:
             test_name (str): Name of the test for log identification.
         """
         try:
-            # Ensure the log directory exists on the node
-            self.exec_command(node_ip, f"sudo mkdir -p {log_dir} && sudo chmod 777 {log_dir}")
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            for container in containers:
-                log_file = f"{log_dir}/{container}_{test_name}_{timestamp}_before_outage.txt"
-                cmd = (
-                    f"sudo nohup docker logs --follow {container} > {log_file} 2>&1 &"
+            check_tmux_command = "command -v tmux"
+            output, _ = self.exec_command(node_ip, check_tmux_command)
+            if not output.strip():
+                self.logger.info(f"'tmux' is not installed on {node_ip}. Installing...")
+                install_tmux_command = (
+                    "sudo apt-get update -y && sudo apt-get install -y tmux"
+                    " || sudo yum install -y tmux"
                 )
-                self.logger.info(f"Starting Docker log collection for container '{container}' on {node_ip}. Command: {cmd}")
-                self.exec_command(node_ip, cmd)
+                self.exec_command(node_ip, install_tmux_command)
+                self.logger.info(f"'tmux' installed successfully on {node_ip}.")
+            # Ensure the log directory exists
+            command_mkdir = f"sudo mkdir -p {log_dir} && sudo chmod 777 {log_dir}"
+            self.exec_command(node_ip, command_mkdir)  # Do not wait for a response
+
+            for container in containers:
+                # Construct the log file path
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                log_file = f"{log_dir}/{container}_{test_name}_{timestamp}_before_outage.txt"
+
+                # Run the Docker log collection command with `setsid` to ensure persistence
+                # command_logs = (
+                #     f"sudo nohup setsid docker logs --follow {container} > {log_file} 2>&1 &"
+                # )
+                random_suffix = generate_random_string()
+                tmux_session_name = f"{container}_logs_{random_suffix}"
+                command_logs = (
+                    f"sudo tmux new-session -d -s {tmux_session_name} "
+                    f"\"docker logs --follow {container} > {log_file} 2>&1\""
+                )
+                self.exec_command(node_ip, command_logs)  # Start the process without waiting
+
+                # Verify if the process is running (optional but helpful for debugging)
+                # verify_command = f"ps aux | grep 'docker logs --follow {container}'"
+                # output, _ = self.exec_command(node_ip, verify_command)
+                # if output:
+                #     output = output.strip()
+
+                # if not output:
+                #     raise RuntimeError("Docker logging process failed to start.")
+                
+                print(f"Docker logging started successfully for container '{container}'.")
+
         except Exception as e:
-            self.logger.error(f"Failed to start Docker log collection on node {node_ip}: {e}")
+            raise RuntimeError(f"Failed to start Docker logging: {e}")
 
 
     def restart_docker_logging(self, node_ip, containers, log_dir, test_name):
@@ -701,11 +778,24 @@ class SshUtils:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             for container in containers:
                 log_file = f"{log_dir}/{container}_{test_name}_{timestamp}_after_outage.txt"
-                cmd = (
-                    f"sudo nohup docker logs --follow {container} > {log_file} 2>&1 &"
+                random_suffix = generate_random_string()
+                tmux_session_name = f"{container}_logs_{random_suffix}"
+                command_logs = (
+                    f"sudo tmux new-session -d -s {tmux_session_name} "
+                    f"\"docker logs --follow {container} > {log_file} 2>&1\""
                 )
-                self.logger.info(f"Restarting Docker log collection for container '{container}' on {node_ip}. Command: {cmd}")
-                self.exec_command(node_ip, cmd)
+                self.logger.info(f"Restarting Docker log collection for container '{container}' on {node_ip}. Command: {command_logs}")
+                self.exec_command(node_ip, command_logs)
+                # # Verify if the process is running (optional but helpful for debugging)
+                # verify_command = f"ps aux | grep 'docker logs --follow {container}'"
+                # output, _ = self.exec_command(node_ip, verify_command)
+                # if output:
+                #     output = output.strip()
+
+                # if not output:
+                #     raise RuntimeError("Docker logging process failed to start.")
+                
+                print(f"Docker logging started successfully for container '{container}'.")
         except Exception as e:
             self.logger.error(f"Failed to restart Docker log collection on node {node_ip}: {e}")
 
@@ -728,5 +818,333 @@ class SshUtils:
         except Exception as e:
             self.logger.error(f"Error fetching running containers on {node_ip}: {e}")
         return containers_by_node
+    
+    def reboot_node(self, node_ip, wait_time=300):
+        """
+        Reboot a node using SSH and wait for it to come online.
+
+        Args:
+            node_ip (str): IP address of the node to reboot.
+            wait_time (int): Maximum time (in seconds) to wait for the node to come online.
+        """
+        try:
+            self.logger.info(f"Initiating reboot for node: {node_ip}")
+            # Execute the reboot command
+            reboot_command = "sudo reboot"
+            self.exec_command(node=node_ip, command=reboot_command)
+            self.logger.info(f"Reboot command executed for node: {node_ip}")
+            
+            # Disconnect the current SSH connection
+            if node_ip in self.ssh_connections:
+                self.ssh_connections[node_ip].close()
+                del self.ssh_connections[node_ip]
+            
+            time.sleep(10)
+            
+            # Wait for the node to come online
+            self.logger.info(f"Waiting for node {node_ip} to come online...")
+            start_time = time.time()
+            while time.time() - start_time < wait_time:
+                try:
+                    # Attempt to reconnect
+                    self.connect(address=node_ip,
+                                 bastion_server_address=self.bastion_server)
+                    self.logger.info(f"Node {node_ip} is back online.")
+                    return True
+                except Exception as e:
+                    self.logger.info(f"Node {node_ip} is not online yet: {e}")
+                    time.sleep(10)  # Wait before retrying
+            
+            self.logger.error(f"Node {node_ip} failed to come online within {wait_time} seconds.")
+            return False
+
+        except Exception as e:
+            self.logger.error(f"Error during node reboot for {node_ip}: {e}")
+            return False
+        
+    def partial_nw_outage(self, node_ip, mgmt_ip=None, block_ports=None, block_all_ss_ports=False):
+        """
+        Simulate a partial network outage by blocking multiple ports at once using multiport matching.
+        Optionally, block all ports listed by `ss` command for the given management IP.
+
+        Args:
+            node_ip (str): IP address of the target node.
+            mgmt_ip (str, optional): Management IP address to filter the `ss` command output.
+            block_ports (list): List of ports to block.
+            block_all_ss_ports (bool): If True, block all ports from the `ss` command for mgmt_ip.
+
+        Returns:
+            list: List of all blocked ports (unique).
+        """
+        blocked_ports = set()
+
+        try:
+            if block_ports is None:
+                block_ports = []
+            else:
+                block_ports = [str(port) for port in block_ports]
+
+            # If flag is set, fetch and add all ports from the `ss` command filtered by mgmt_ip
+            if block_all_ss_ports:
+                if not mgmt_ip:
+                    raise ValueError("mgmt_ip must be provided when block_all_ss_ports is True.")
+                cmd = "ss -tnp | grep %s | awk '{print $4}'" % mgmt_ip
+                ss_output, _ = self.exec_command(node_ip, cmd)
+                ip_with_ports = ss_output.split()
+                ports_to_block = set([r.split(":")[1] for r in ip_with_ports])
+                block_ports.extend(ports_to_block)
+
+            # Remove duplicates
+            block_ports = [str(port) for port in block_ports]
+            block_ports = list(set(block_ports))
+            if "22" in block_ports:
+                block_ports.remove("22")
+
+            if block_ports:
+                # Construct a single iptables rule for both INPUT & OUTPUT chains
+                ports_str = ",".join(block_ports)
+                # block_command = (
+                #     f"sudo iptables -A INPUT -p tcp -m multiport --sports {ports_str} --dports {ports_str} -j DROP && "
+                #     f"sudo iptables -A OUTPUT -p tcp -m multiport --sports {ports_str} --dports {ports_str} -j DROP"
+                # )
+
+                block_command = f"""
+                    sudo iptables -A INPUT -p tcp -m multiport --dports {ports_str} -j DROP;
+                    sudo iptables -A INPUT -p tcp -m multiport --sports {ports_str} -j DROP;
+                    sudo iptables -A OUTPUT -p tcp -m multiport --dports {ports_str} -j DROP;
+                    sudo iptables -A OUTPUT -p tcp -m multiport --sports {ports_str} -j DROP;
+                """
+
+                # for port in block_ports:
+                #     block_command = (f"sudo iptables -A INPUT -p tcp --sport {port} --dport {port} -j DROP && "
+                #                      f"sudo iptables -A OUTPUT -p tcp --sport {port} --dport {port} -j DROP"
+                #                      )
+                
+                self.exec_command(node_ip, block_command)
+                blocked_ports.update(block_ports)
+                self.logger.info(f"Blocked ports {ports_str} on {node_ip}.")
+
+            time.sleep(5)
+            self.logger.info("Network outage: IPTable Rules List:")
+            self.exec_command(node_ip, "sudo iptables -L -v -n --line-numbers")
+
+        except Exception as e:
+            self.logger.error(f"Failed to block ports on {node_ip}: {e}")
+
+        return list(blocked_ports)
 
 
+    def remove_partial_nw_outage(self, node_ip, blocked_ports):
+        """
+        Remove partial network outage by unblocking multiple ports at once.
+
+        Args:
+            node_ip (str): IP address of the target node.
+            blocked_ports (list): List of ports to unblock.
+
+        Returns:
+            None
+        """
+        try:
+            if blocked_ports:
+                ports_str = ",".join(blocked_ports)
+                unblock_command = f"""
+                    sudo iptables -D OUTPUT -p tcp -m multiport --sports {ports_str} -j DROP;
+                    sudo iptables -D OUTPUT -p tcp -m multiport --dports {ports_str} -j DROP;
+                    sudo iptables -D INPUT -p tcp -m multiport --dports {ports_str} -j DROP;
+                    sudo iptables -D INPUT -p tcp -m multiport --sports {ports_str} -j DROP;
+                """
+
+                # for port in blocked_ports:
+                #     unblock_command = (f"sudo iptables -D OUTPUT -p tcp --sport {port} --dport {port} -j DROP && "
+                #                        f"sudo iptables -D INPUT -p tcp --sport {port} --dport {port} -j DROP"
+                #                        )
+                self.exec_command(node_ip, unblock_command)
+                self.logger.info(f"Unblocked ports {ports_str} on {node_ip}.")
+
+            time.sleep(5)
+            self.logger.info("Network outage: IPTable Rules List:")
+            self.exec_command(node_ip, "sudo iptables -L -v -n --line-numbers")
+
+        except Exception as e:
+            self.logger.error(f"Failed to unblock ports on {node_ip}: {e}")
+
+
+    def set_aio_max_nr(self, node_ip, value=1048576):
+        """
+        Set the aio-max-nr value on the target node.
+
+        Args:
+            node_ip (str): IP address of the target node.
+            value (int, optional): The aio-max-nr value to set. Defaults to 1048576.
+        """
+        try:
+            # Check the current aio-max-nr value
+            check_cmd = "cat /proc/sys/fs/aio-max-nr"
+            current_value, _ = self.exec_command(node_ip, check_cmd)
+
+            if current_value.strip() == str(value):
+                self.logger.info(f"aio-max-nr is already set to {value} on {node_ip}. No changes needed.")
+                return
+            
+            self.logger.info(f"Updating aio-max-nr to {value} on {node_ip}.")
+
+            # Set the new aio-max-nr value
+            update_cmd = f'echo "fs.aio-max-nr = {value}" | sudo tee /etc/sysctl.d/99-sysctl.conf'
+            self.exec_command(node_ip, update_cmd)
+
+            # Apply the new setting
+            apply_cmd = "sudo sysctl -p /etc/sysctl.d/99-sysctl.conf"
+            self.exec_command(node_ip, apply_cmd)
+
+            self.logger.info(f"Successfully updated aio-max-nr to {value} on {node_ip}.")
+
+        except Exception as e:
+            self.logger.error(f"Failed to update aio-max-nr on {node_ip}: {e}")
+
+    def dump_lvstore(self, node_ip, storage_node_id):
+        """
+        Runs 'sn dump-lvstore' on a given storage node and extracts the LVS dump file path.
+
+        Args:
+            node_ip (str): IP address of the target node.
+            storage_node_id (str): The Storage Node ID to dump lvstore.
+
+        Returns:
+            str: The extracted LVS dump file path, or None if not found.
+        """
+        try:
+            command = f"{self.base_cmd} -d sn dump-lvstore {storage_node_id} | grep 'LVS dump file will be here'"
+            self.logger.info(f"Executing '{self.base_cmd} -d sn dump-lvstore' on {node_ip} for Storage Node ID: {storage_node_id}")
+            
+            output, error = self.exec_command(node_ip, command)
+
+            if error:
+                self.logger.error(f"Error executing '{self.base_cmd} -d sn dump-lvstore' on {node_ip}: {error}")
+                return None
+
+            # Extract only the LVS dump file path
+            dump_file_path = None
+            for line in output.split("\n"):
+                if "LVS dump file will be here" in line:
+                    dump_file_path = line.strip()
+                    break
+
+            if dump_file_path:
+                self.logger.info(f"LVS dump file located: {dump_file_path}")
+                return dump_file_path
+            else:
+                self.logger.warning(f"No LVS dump file found in the output from {node_ip}.")
+                return None
+
+        except Exception as e:
+            self.logger.error(f"Failed to dump lvstore on {node_ip}: {e}")
+            return None
+        
+    def fetch_distrib_logs(self, storage_node_ip, storage_node_id):
+        """
+        Fetch distrib names, generate and execute RPC JSON, and copy logs from SPDK container.
+
+        Args:
+            storage_node_ip (str): IP of the storage node
+            storage_node_id (str): ID of the storage node
+        """
+        self.logger.info(f"Fetching distrib logs for Storage Node ID: {storage_node_id} on {storage_node_ip}")
+        
+        # Fetch lvstore_stack JSON output
+        command = f"{self.base_cmd} sn get {storage_node_id} | jq .lvstore_stack"
+        output, error = self.exec_command(storage_node_ip, command)
+        
+        if error:
+            self.logger.error(f"Error fetching lvstore stack: {error}")
+            return
+        
+        # Parse JSON output
+        try:
+            lvstore_stack = json.loads(output)
+            distribs = [entry["distribs_list"] for entry in lvstore_stack if "distribs_list" in entry]
+            distribs = distribs[0] if distribs else []
+        except json.JSONDecodeError as e:
+            self.logger.error(f"JSON Parsing Error: {e}")
+            return
+        
+        if not distribs:
+            self.logger.warning("No distrib names found.")
+            return
+        
+        self.logger.info(f"Distributions found: {distribs}")
+        
+        for distrib in distribs:
+            self.logger.info(f"Processing distrib: {distrib}")
+
+            # Create JSON for the RPC call
+            rpc_json = {
+                "subsystems": [
+                    {
+                        "subsystem": "distr",
+                        "config": [
+                            {
+                                "method": "distr_debug_placement_map_dump",
+                                "params": {"name": distrib}
+                            }
+                        ]
+                    }
+                ]
+            }
+
+            # Convert JSON object to string and escape quotes for bash command
+            # rpc_json_str = json.dumps(rpc_json).replace('"', '\\"')
+            rpc_json_str = json.dumps(rpc_json)
+            remote_json_path = "/tmp/stack.json"
+
+            # Create JSON file on the storage node
+            create_json_command = f"echo '{rpc_json_str}' > {remote_json_path}"
+            self.exec_command(storage_node_ip, create_json_command)
+
+            # Save JSON inside SPDK container
+            rpc_script_path = "/tmp/stack.json"
+            create_json_command = f"sudo docker cp {remote_json_path} spdk:{rpc_script_path}"
+            self.exec_command(storage_node_ip, create_json_command)
+
+            # Execute RPC call inside SPDK Docker container
+            rpc_command = f"sudo docker exec spdk bash -c 'python scripts/rpc_sock.py {rpc_script_path}'"
+            self.exec_command(storage_node_ip, rpc_command)
+
+
+            # Find log file name dynamically
+            find_log_command = "sudo docker exec spdk ls /tmp/ | grep distrib"
+            log_file_name, _ = self.exec_command(storage_node_ip, find_log_command)
+            log_file_name = log_file_name.strip().replace("\r", "").replace("\n", "")
+
+            if not log_file_name:
+                self.logger.error(f"No log file found for distrib {distrib} in /tmp/.")
+                continue
+
+            log_file_path = f"/tmp/{log_file_name}"
+            destination_path = f"{Path.home()}/{log_file_name}"
+
+            # Copy log file from inside container to host machine
+            copy_command = f"sudo docker cp spdk:{log_file_path} {destination_path}"
+            self.exec_command(storage_node_ip, copy_command)
+
+            self.logger.info(f"Processed {distrib}: Logs copied to {destination_path}")
+
+            # Remove log file from container
+            delete_command = f"sudo docker exec spdk rm -f {log_file_path}"
+            self.exec_command(storage_node_ip, delete_command)
+            self.logger.info(f"Processed {distrib}: Logs copied to {destination_path} and deleted from container.")
+
+        self.logger.info("All logs retrieved successfully!")
+
+    def clone_mount_gen_uuid(self, node, device):
+        """Repair the XFS filesystem and generate a new UUID.
+        Args:
+            node (str): Node to perform operations on.
+            device (str): Device path to modify.
+
+        """
+        self.logger.info(f"Repairing XFS filesystem on {device} (forcing log removal).")
+        self.exec_command(node, f"sudo xfs_repair -L {device}")  # Force repair and clear log
+
+        self.logger.info(f"Generating new UUID for {device} on {node}.")
+        self.exec_command(node, f"sudo xfs_admin -U generate {device}")  # Generate new UUID

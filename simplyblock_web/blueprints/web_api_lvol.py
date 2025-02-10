@@ -38,7 +38,7 @@ def list_lvols(uuid):
     data = []
     for lvol in lvols:
         tmp = lvol.get_clean_dict()
-        tmp['pool_name'] = db_controller.get_pool_by_id(lvol.pool_uuid).pool_name
+        tmp['pool_name'] = lvol.pool_uuid
         # records_list = lvol_controller.get_io_stats(lvol.get_id(), history=None, parse_sizes=False)
         # records_list = False
         # if records_list:
