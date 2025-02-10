@@ -91,9 +91,9 @@ def task_runner(task):
         if not rsp:
             logger.error(f"Failed to start device migration task, storage_ID: {device.cluster_device_order}")
             task.function_result = "Failed to start device migration task"
-            task.retry += 1
+            task.status = JobSchedule.STATUS_DONE
             task.write_to_db(db_controller.kv_store)
-            return False
+            return True
         task.function_params['migration'] = {
             "name": distr_name}
         task.write_to_db(db_controller.kv_store)
