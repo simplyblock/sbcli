@@ -80,6 +80,7 @@ def main():
             if check_for_dumps():
                 logger.info("Found a core dump during test execution. "
                             "Cannot execute more tests as cluster is not stable. Exiting")
+                test_obj.collect_management_details()
                 break
 
     failed_cases = list(errors.keys())
