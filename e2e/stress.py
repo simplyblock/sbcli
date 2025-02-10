@@ -49,7 +49,7 @@ def main():
 
     errors = {}
     passed_cases = []
-    for test in test_class_run:
+    for i, test in enumerate(test_class_run):
         logger.info(f"Running Test {test}")
         test_obj = test(fio_debug=args.fio_debug,
                         ndcs=args.ndcs,
@@ -59,6 +59,8 @@ def main():
                         k8s_run=args.run_k8s)
         try:
             test_obj.setup()
+            if i == 0:
+                test_obj.cleanup_logs()
             test_obj.run()
             passed_cases.append(f"{test.__name__}")
         except Exception as exp:
@@ -67,6 +69,8 @@ def main():
         try:
             test_obj.stop_docker_logs_collect()
             test_obj.fetch_all_nodes_distrib_log()
+            if i == (len(test_class_run) - 1):
+                test_obj.collect_management_details()
             # test_obj.teardown()
             # pass
         except Exception as _:
