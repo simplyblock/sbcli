@@ -1,3 +1,4 @@
+from pathlib import Path
 import threading
 import json
 from e2e_tests.cluster_test_base import TestClusterBase
@@ -142,7 +143,7 @@ class TestDeviceNodeRestart(TestClusterBase):
                                     "size": "2G",
                                     "time_based": True,
                                     "runtime": 200,
-                                    "output_file": f"/home/ec2-user/{lvol_name}_log.json",
+                                    "output_file": f"{Path.home()}/{lvol_name}_log.json",
                                     "nrfiles": 5,
                                     "debug": self.fio_debug
                                 }
@@ -160,7 +161,7 @@ class TestDeviceNodeRestart(TestClusterBase):
                                     "size": "2G",
                                     "time_based": True,
                                     "runtime": 200,
-                                    "output_file": f"/home/ec2-user/{lvol_name}_log.json",
+                                    "output_file": f"{Path.home()}/{lvol_name}_log.json",
                                     "nrfiles": 5,
                                     "debug": self.fio_debug
                                 }
@@ -310,7 +311,7 @@ class TestDeviceNodeRestart(TestClusterBase):
         self.logger.info("Validating fio test results.")
         for i in range(4):
             lvol_name = f"test_lvol_{i+1}"
-            output_file = f"/home/ec2-user/{lvol_name}_log.json",
+            output_file = f"{Path.home()}/{lvol_name}_log.json",
             self.common_utils.validate_fio_test(self.mgmt_nodes[0], output_file)
         self.logger.info("Test case passed.")
     

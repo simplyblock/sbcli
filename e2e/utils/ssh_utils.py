@@ -382,6 +382,45 @@ class SshUtils:
         output, _ = self.exec_command(node=node, command=cmd)
         return output
     
+    def delete_old_folders(self, node, folder_path, days=3):
+        """
+        Deletes folders older than the given number of days on a remote machine.
+
+        Args:
+            node (str): The IP address of the remote machine.
+            folder_path (str): The base directory to check for old folders.
+            days (int): The number of days beyond which folders should be deleted.
+        """
+        # Get the current date from the remote machine
+        get_date_command = "date +%s"
+        remote_timestamp, error = self.exec_command(node, get_date_command)
+        
+        if error:
+            self.logger.error(f"Failed to fetch remote date from {node}: {error}")
+            return
+        
+        # Convert remote timestamp to an integer
+        remote_timestamp = int(remote_timestamp.strip())
+        
+        # Calculate threshold timestamp in seconds
+        threshold_timestamp = remote_timestamp - (days * 86400)
+        
+        # Construct the remote find command using remote timestamps
+        command = f"""
+            find {folder_path} -mindepth 1 -maxdepth 1 -type d \
+            -printf '%T@ %p\n' | awk '$1 < {threshold_timestamp} {{print $2}}' | xargs -I {{}} rm -rf {{}}
+        """
+
+        self.logger.info(f"Executing remote folder cleanup on {node}: {command}")
+        
+        _, error = self.exec_command(node, command)
+
+        if error:
+            self.logger.error(f"Failed to delete old folders on {node}: {error}")
+        else:
+            self.logger.info(f"Old folders deleted successfully on {node}.")
+
+    
     def list_files(self, node, location):
         """List the entities in given location on a node
         Args:
@@ -856,7 +895,10 @@ class SshUtils:
                 block_ports.extend(ports_to_block)
 
             # Remove duplicates
+            block_ports = [str(port) for port in block_ports]
             block_ports = list(set(block_ports))
+            if "22" in block_ports:
+                block_ports.remove("22")
 
             if block_ports:
                 # Construct a single iptables rule for both INPUT & OUTPUT chains
