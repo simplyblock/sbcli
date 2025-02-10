@@ -480,7 +480,8 @@ class RPCClient:
             "name": name,
             "raid_level": raid_level,
             "strip_size_kb": strip_size_kb,
-            "base_bdevs": bdevs_list
+            "base_bdevs": bdevs_list,
+            "io_unmap_limit": 100
         }
         if raid_level == "1":
             params["strip_size_kb"] = 0
