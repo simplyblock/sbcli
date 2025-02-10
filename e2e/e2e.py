@@ -72,7 +72,7 @@ def main():
         try:
             test_obj.stop_docker_logs_collect()
             test_obj.fetch_all_nodes_distrib_log()
-            if i == (len(test_class_run) - 1):
+            if i == (len(test_class_run) - 1) or check_for_dumps():
                 test_obj.collect_management_details()
             test_obj.teardown()
             # pass
@@ -83,7 +83,6 @@ def main():
             if check_for_dumps():
                 logger.info("Found a core dump during test execution. "
                             "Cannot execute more tests as cluster is not stable. Exiting")
-                test_obj.collect_management_details()
                 break
 
     failed_cases = list(errors.keys())
