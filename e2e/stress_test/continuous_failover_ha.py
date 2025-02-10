@@ -325,6 +325,7 @@ class RandomFailoverTest(TestLvolHACluster):
                 clone_name = f"{clone_name}_{temp_name}"
             snapshot_id = self.ssh_obj.get_snapshot_id(self.node, snapshot_name)
             self.ssh_obj.add_clone(self.node, snapshot_id, clone_name)
+            fs_type = self.lvol_mount_details[lvol]["FS"]
             self.clone_mount_details[clone_name] = {
                    "ID": self.sbcli_utils.get_lvol_id(clone_name),
                    "Command": None,
@@ -358,6 +359,8 @@ class RandomFailoverTest(TestLvolHACluster):
             self.clone_mount_details[clone_name]["Device"] = lvol_device
 
             # Mount and Run FIO
+            if fs_type == "xfs":
+                self.ssh_obj.clone_mount_gen_uuid(self.node, lvol_device)
             mount_point = f"{self.mount_path}/{clone_name}"
             self.ssh_obj.mount_path(node=self.node, device=lvol_device, mount_path=mount_point)
             self.clone_mount_details[clone_name]["Mount"] = mount_point

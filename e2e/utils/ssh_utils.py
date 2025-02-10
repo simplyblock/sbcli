@@ -1135,3 +1135,16 @@ class SshUtils:
             self.logger.info(f"Processed {distrib}: Logs copied to {destination_path} and deleted from container.")
 
         self.logger.info("All logs retrieved successfully!")
+
+    def clone_mount_gen_uuid(self, node, device):
+        """Repair the XFS filesystem and generate a new UUID.
+        Args:
+            node (str): Node to perform operations on.
+            device (str): Device path to modify.
+
+        """
+        self.logger.info(f"Repairing XFS filesystem on {device} (forcing log removal).")
+        self.exec_command(node, f"sudo xfs_repair -L {device}")  # Force repair and clear log
+
+        self.logger.info(f"Generating new UUID for {device} on {node}.")
+        self.exec_command(node, f"sudo xfs_admin -U generate {device}")  # Generate new UUID
