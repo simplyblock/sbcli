@@ -115,7 +115,8 @@ jobs:
         run: |
           cd $GITHUB_WORKSPACE/simplyBlockDeploy
           ./bootstrap-cluster.sh --sbcli-cmd "$SBCLI_CMD" \
-            --max-lvol 50 --max-prov 500g --number-of-devices 3 \
+            --max-lvol 100 --max-snap 100 --max-prov 600G \ 
+            --number-of-devices 3 \
             --distr-ndcs $NDCS \
             --distr-npcs $NPCS \
             --distr-bs $BS \
