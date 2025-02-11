@@ -16,10 +16,10 @@ on:
         description: 'Command for sbcli execution'
         required: true
         default: 'sbcli-dev'
-      testname:
-        description: 'Name of test to run. Empty to run all'
-        required: false
-        default: ''
+#      testname:
+#        description: 'Name of test to run. Empty to run all'
+#        required: false
+#        default: ''
       ndcs:
         description: 'Value for NDCS'
         required: false
@@ -172,9 +172,9 @@ jobs:
           export SBCLI_CMD=${SBCLI_CMD}
           export SSH_USER=root
           TESTNAME=""
-          if [ -n "${{ github.event.inputs.testname }}" ]; then
-            TESTNAME="--testname ${{ github.event.inputs.testname }}"
-          fi
+#          if [ -n "${{ github.event.inputs.testname }}" ]; then
+#            TESTNAME="--testname ${{ github.event.inputs.testname }}"
+#          fi
           python3 e2e.py $TESTNAME \
                   --ndcs $NDCS --npcs $NPCS --bs $BS --chunk_bs $CHUNK_BS --run_ha ${{ github.event.inputs.run_ha_test }}
         env:
