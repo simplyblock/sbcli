@@ -5,6 +5,7 @@ from utils.ssh_utils import SshUtils
 from utils.common_utils import CommonUtils
 from logger_config import setup_logger
 from utils.common_utils import sleep_n_sec
+from exceptions.custom_exception import CoreFileFoundException
 import traceback
 import threading
 from datetime import datetime, timedelta
@@ -513,8 +514,18 @@ class TestClusterBase:
 
         # If the loop exits without completing all tasks, raise a timeout error
         raise RuntimeError(f"Timeout reached: Not all migration tasks completed within the specified timeout of {timeout} seconds.")
-            
     
-
-
-
+    def check_core_dump(self):
+        for node in self.storage_nodes:
+            files = self.ssh_obj.list_files(node, "/etc/simplyblock/")
+            self.logger.info(f"Files in /etc/simplyblock: {files}")
+            if "core" in files:
+                cur_date = datetime.now().strftime("%Y-%m-%d")
+                self.logger.info(f"Core file found on storage node {node} at {cur_date}")
+        
+        for node in self.mgmt_nodes:
+            files = self.ssh_obj.list_files(node, "/etc/simplyblock/")
+            self.logger.info(f"Files in /etc/simplyblock: {files}")
+            if "core" in files:
+                cur_date = datetime.now().strftime("%Y-%m-%d")
+                self.logger.info(f"Core file found on management node {node} at {cur_date}")

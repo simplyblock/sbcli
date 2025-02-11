@@ -600,6 +600,8 @@ class RandomFailoverTest(TestLvolHACluster):
                 end_timestamp=self.outage_end_time
             )
 
+            self.check_core_dump()
+
             # Validate I/O stats during and after failover
             self.common_utils.validate_io_stats(
                 cluster_id=self.cluster_id,
@@ -624,6 +626,8 @@ class RandomFailoverTest(TestLvolHACluster):
                 start_timestamp=self.outage_start_time,
                 end_timestamp=self.outage_end_time
             )
+
+            self.check_core_dump()
 
             # Validate I/O stats during and after failover
             self.common_utils.validate_io_stats(
