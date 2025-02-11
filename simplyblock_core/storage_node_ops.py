@@ -1,7 +1,6 @@
 # coding=utf-8
 import datetime
 import json
-import logging as log
 import math
 import os
 
@@ -24,11 +23,10 @@ from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.nvme_device import NVMeDevice, JMDevice
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.models.cluster import Cluster
-from simplyblock_core.pci_utils import bind_spdk_driver
 from simplyblock_core.rpc_client import RPCClient
 from simplyblock_core.snode_client import SNodeClient
 
-logger = log.getLogger()
+logger = utils.get_logger(__name__)
 
 
 class StorageOpsException(Exception):
