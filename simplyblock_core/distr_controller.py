@@ -36,17 +36,11 @@ def send_node_status_event(node, node_status, target_node=None):
         ret = rpc_client.distr_status_events_update(events)
 
 
-def send_dev_status_event(device, dev_status, target_node=None):
-    if dev_status == NVMeDevice.STATUS_NEW:
+def send_dev_status_event(device, status, target_node=None):
+    if status == NVMeDevice.STATUS_NEW:
         return
     db_controller = DBController()
     storage_ID = device.cluster_device_order
-    node_status_event = {
-        "timestamp": datetime.datetime.now().isoformat("T", "seconds") + 'Z',
-        "event_type": "device_status",
-        "storage_ID": storage_ID,
-        "status": dev_status}
-    events = {"events": [node_status_event]}
     if target_node:
         snodes = [target_node]
     else:
@@ -54,6 +48,24 @@ def send_dev_status_event(device, dev_status, target_node=None):
     for node in snodes:
         if node.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED]:
             continue
+
+        dev_status = status
+
+        if node.get_id() != device.node_id:
+            rem_dev = None
+            for dev2 in node.remote_devices:
+                if dev2.get_id() == device.get_id() and dev2.status == NVMeDevice.STATUS_ONLINE:
+                    rem_dev = dev2
+                    break
+
+            if not rem_dev and status == NVMeDevice.STATUS_ONLINE:
+                dev_status = NVMeDevice.STATUS_UNAVAILABLE
+
+        events = {"events": [{
+            "timestamp": datetime.datetime.now().isoformat("T", "seconds") + 'Z',
+            "event_type": "device_status",
+            "storage_ID": storage_ID,
+            "status": dev_status}]}
         logging.debug(f"Sending event updates, device: {storage_ID}, status: {dev_status}, node: {node.get_id()}")
         rpc_client = RPCClient(node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password, timeout=3, retry=2)
         ret = rpc_client.distr_status_events_update(events)

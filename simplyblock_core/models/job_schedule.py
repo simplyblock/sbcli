@@ -31,7 +31,7 @@ class JobSchedule(BaseModel):
     retry: int = 0
 
     def write_to_db(self, kv_store=None):
-        self.updated_at = str(datetime.datetime.now())
+        self.updated_at = str(datetime.datetime.now(datetime.timezone.utc))
         super().write_to_db(kv_store)
 
 

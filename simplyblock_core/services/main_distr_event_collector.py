@@ -65,9 +65,16 @@ def process_device_event(event):
         #     logger.info(f"Setting device to read-only")
         #     device_controller.device_set_read_only(device_obj.get_id())
         # else:
+
+        if device_node_obj.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED]:
+            logger.info(f"Node is not online, skipping. status: {event_node_obj.status}")
+            event.status = 'skipped:node_offline'
+            return
+
         logger.info(f"Setting device to unavailable")
         device_controller.device_set_unavailable(device_obj.get_id())
-        device_controller.device_set_io_error(device_obj.get_id(), True)
+        if event.message in ['error_write', 'error_unmap', 'error_read']:
+            device_controller.device_set_io_error(device_obj.get_id(), True)
 
         event.status = 'processed'
 

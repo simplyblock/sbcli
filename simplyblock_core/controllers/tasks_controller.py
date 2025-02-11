@@ -121,8 +121,13 @@ def list_tasks(cluster_id, is_json=False):
 
         upd = task.updated_at
         if upd:
-            upd = datetime.datetime.strptime(upd, "%Y-%m-%d %H:%M:%S.%f").strftime(
-                "%H:%M:%S, %d/%m/%Y")
+            try:
+                parsed = datetime.datetime.strptime(upd, "%Y-%m-%d %H:%M:%S.%f")
+                parsed = parsed.astimezone()
+                upd = parsed.strftime("%H:%M:%S, %d/%m/%Y")
+            except Exception as e:
+                logger.error(e)
+
         data.append({
             "Task ID": task.uuid,
             "Node ID / Device ID": f"{task.node_id}\n{task.device_id}",
@@ -130,7 +135,7 @@ def list_tasks(cluster_id, is_json=False):
             "Retry": retry,
             "Status": task.status,
             "Result": task.function_result,
-            "Updated At": upd,
+            "Updated At": upd or "",
         })
     return utils.print_table(data)
 

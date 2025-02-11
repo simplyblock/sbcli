@@ -37,6 +37,7 @@ def set_device_health_check(cluster_id, device, health_check_status):
                     node.write_to_db()
                     device_events.device_health_check_change(
                         dev, dev.health_check, old_status, caused_by="monitor")
+                    return
 
 
 # get DB controller
@@ -53,6 +54,10 @@ while True:
 
         for snode in snodes:
             logger.info("Node: %s, status %s", snode.get_id(), snode.status)
+
+            if snode.status in [StorageNode.STATUS_RESTARTING, StorageNode.STATUS_IN_CREATION, StorageNode.STATUS_IN_SHUTDOWN]:
+                logger.info(f"Node status is: {snode.status}, skipping")
+                continue
 
             if snode.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_UNREACHABLE, StorageNode.STATUS_SUSPENDED]:
                 logger.info(f"Node status is: {snode.status}, skipping")
@@ -194,7 +199,7 @@ while True:
                         else:
                             logger.info(f"Checking bdev: {remote_device.remote_bdev} ... not found")
 
-                            if cluster.status in [Cluster.STATUS_IN_ACTIVATION, Cluster.STATUS_INACTIVE]:
+                            if cluster.status not in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_READONLY]:
                                 continue
                             org_dev = None
                             org_dev_node = None
@@ -236,7 +241,7 @@ while True:
 
                 if snode.is_secondary_node:
                     for node in db_controller.get_storage_nodes():
-                        if node.secondary_node_id == snode.get_id():
+                        if node.secondary_node_id == snode.get_id() and node.status == StorageNode.STATUS_ONLINE:
                             logger.info(f"Checking stack from node : {node.get_id()}")
                             lvstore_check &= health_controller._check_node_lvstore(node.lvstore_stack, snode, auto_fix=True)
 

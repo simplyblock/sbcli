@@ -33,7 +33,7 @@ def get_env_var(name, default=None, is_required=False):
 
 def rpc_call(req):
     req_data = json.loads(req.decode('ascii'))
-    logger.info(f"Request function: {str(req_data['method'])}")
+    logger.info(f"Request function: {str(req_data['method'])}, params: {str(req_data['params'])}")
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     sock.settimeout(TIMEOUT)
     sock.connect(rpc_sock)

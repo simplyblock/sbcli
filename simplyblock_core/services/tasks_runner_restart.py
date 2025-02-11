@@ -190,6 +190,7 @@ def task_runner_node(task):
     ret = storage_node_ops.shutdown_storage_node(node.get_id(), force=True)
     if ret:
         logger.info(f"Node shutdown succeeded")
+
     time.sleep(3)
 
     # resetting node
@@ -200,7 +201,7 @@ def task_runner_node(task):
 
     time.sleep(3)
     node = db_controller.get_storage_node_by_id(task.node_id)
-    if node.status == StorageNode.STATUS_ONLINE:
+    if _get_node_unavailable_devices_count(node.get_id()) == 0 and node.status == StorageNode.STATUS_ONLINE:
         logger.info(f"Node is online: {node.get_id()}")
         task.function_result = "done"
         task.status = JobSchedule.STATUS_DONE

@@ -117,7 +117,7 @@ def _check_node_lvstore(lvstore_stack, node, auto_fix=False):
     rpc_client = RPCClient(
         node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password, timeout=3, retry=1)
     cluster = db_controller.get_cluster_by_id(node.cluster_id)
-    if cluster.status in [Cluster.STATUS_INACTIVE, Cluster.STATUS_IN_ACTIVATION]:
+    if cluster.status not in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_READONLY]:
         auto_fix = False
 
     distribs_list = []
@@ -283,7 +283,7 @@ def check_node(node_id, with_devices=True):
 
         if snode.is_secondary_node:
             for node in db_controller.get_storage_nodes():
-                if node.secondary_node_id == snode.get_id():
+                if node.secondary_node_id == snode.get_id() and node.status == StorageNode.STATUS_ONLINE:
                     logger.info(f"Checking stack from node : {node.get_id()}")
                     lvstore_check &= _check_node_lvstore(node.lvstore_stack, snode)
 
