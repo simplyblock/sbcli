@@ -32,9 +32,9 @@ class RandomFailoverTest(TestLvolHACluster):
         self.lvol_name = f"lvl{random_char(3)}"
         self.clone_name = f"cln{random_char(3)}"
         self.snapshot_name = f"snap{random_char(3)}"
-        self.lvol_size = "20G"
-        self.int_lvol_size = 8
-        self.fio_size = "3G"
+        self.lvol_size = "15G"
+        self.int_lvol_size = 15
+        self.fio_size = "2G"
         self.fio_threads = []
         self.clone_mount_details = {}
         self.lvol_mount_details = {}
@@ -156,7 +156,7 @@ class RandomFailoverTest(TestLvolHACluster):
                     "bs": f"{2 ** random.randint(2, 7)}K",
                     "nrfiles": 16,
                     "iodepth": 1,
-                    "numjobs": 4,
+                    "numjobs": 3,
                     "time_based": True,
                     "runtime": 1000,
                 },
@@ -383,7 +383,7 @@ class RandomFailoverTest(TestLvolHACluster):
                     "bs": f"{2 ** random.randint(2, 7)}K",
                     "nrfiles": 16,
                     "iodepth": 1,
-                    "numjobs": 4,
+                    "numjobs": 3,
                     "time_based": True,
                     "runtime": 1000,
                 },
@@ -501,6 +501,69 @@ class RandomFailoverTest(TestLvolHACluster):
                 self.logger.error(f"Error in continuous I/O stats validation: {str(e)}")
                 break  # Exit the thread on failure
 
+    def restart_fio(self, iteration):
+        """ Restart FIO on all clones and lvols """
+        for lvol, lvol_details in self.lvol_mount_details.items():
+            sleep_n_sec(10)
+
+            mount_point = lvol_details["Mount"]
+            log_file = f"{self.log_path}/{lvol}-{iteration}.log"
+
+            self.ssh_obj.delete_files(self.fio_node, [f"{mount_point}/*fio*"])
+            self.ssh_obj.delete_files(self.fio_node, [f"{self.log_path}/local-{lvol}_fio*"])
+
+            sleep_n_sec(5)
+
+            # Start FIO
+            fio_thread = threading.Thread(
+                target=self.ssh_obj.run_fio_test,
+                args=(self.fio_node, None, mount_point, log_file),
+                kwargs={
+                    "size": self.fio_size,
+                    "name": f"{lvol}_fio",
+                    "rw": "randrw",
+                    "bs": f"{2 ** random.randint(2, 7)}K",
+                    "nrfiles": 16,
+                    "iodepth": 1,
+                    "numjobs": 3,
+                    "time_based": True,
+                    "runtime": 1000,
+                },
+            )
+            fio_thread.start()
+            self.fio_threads.append(fio_thread)
+
+        for clone, clone_details in self.clone_mount_details.items():
+            sleep_n_sec(10)
+
+            mount_point = clone_details["Mount"]
+            log_file = f"{self.log_path}/{clone}-{iteration}.log"
+
+            self.ssh_obj.delete_files(self.fio_node, [f"{mount_point}/*fio*"])
+            self.ssh_obj.delete_files(self.fio_node, [f"{self.log_path}/local-{clone}_fio*"])
+
+            sleep_n_sec(5)
+
+            # Start FIO
+            fio_thread = threading.Thread(
+                target=self.ssh_obj.run_fio_test,
+                args=(self.fio_node, None, mount_point, log_file),
+                kwargs={
+                    "size": self.fio_size,
+                    "name": f"{clone}_fio",
+                    "rw": "randrw",
+                    "bs": f"{2 ** random.randint(2, 7)}K",
+                    "nrfiles": 16,
+                    "iodepth": 1,
+                    "numjobs": 3,
+                    "time_based": True,
+                    "runtime": 1000,
+                },
+            )
+            fio_thread.start()
+            self.fio_threads.append(fio_thread)
+
+
 
     def run(self):
         """Main execution loop for the random failover test."""
@@ -522,6 +585,8 @@ class RandomFailoverTest(TestLvolHACluster):
         while True:
             validation_thread = threading.Thread(target=self.validate_iostats_continuously, daemon=True)
             validation_thread.start()
+            if iteration > 1:
+                self.restart_fio(iteration=iteration)
             outage_type = self.perform_random_outage()
             self.delete_random_lvols(5)
             self.create_lvols_with_fio(5)
