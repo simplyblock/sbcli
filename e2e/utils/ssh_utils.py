@@ -876,8 +876,6 @@ class SshUtils:
         Returns:
             list: List of all blocked ports (unique).
         """
-        blocked_ports = set()
-
         try:
             if block_ports is None:
                 block_ports = []
@@ -891,12 +889,14 @@ class SshUtils:
                 cmd = "ss -tnp | grep %s | awk '{print $4}'" % mgmt_ip
                 ss_output, _ = self.exec_command(node_ip, cmd)
                 ip_with_ports = ss_output.split()
-                ports_to_block = set([r.split(":")[1] for r in ip_with_ports])
+                ports_to_block = [str(r.split(":")[1]) for r in ip_with_ports]
                 block_ports.extend(ports_to_block)
 
             # Remove duplicates
             block_ports = [str(port) for port in block_ports]
-            block_ports = list(set(block_ports))
+            block_ports = list(dict.fromkeys(block_ports))
+            block_ports = sorted(block_ports)
+            
             if "22" in block_ports:
                 block_ports.remove("22")
 
@@ -921,7 +921,6 @@ class SshUtils:
                 #                      )
                 
                 self.exec_command(node_ip, block_command)
-                blocked_ports.update(block_ports)
                 self.logger.info(f"Blocked ports {ports_str} on {node_ip}.")
 
             time.sleep(5)
@@ -931,7 +930,7 @@ class SshUtils:
         except Exception as e:
             self.logger.error(f"Failed to block ports on {node_ip}: {e}")
 
-        return list(blocked_ports)
+        return block_ports
 
 
     def remove_partial_nw_outage(self, node_ip, blocked_ports):
@@ -947,6 +946,8 @@ class SshUtils:
         """
         try:
             if blocked_ports:
+                blocked_ports = list(dict.fromkeys(blocked_ports))
+                blocked_ports = sorted(blocked_ports)
                 ports_str = ",".join(blocked_ports)
                 unblock_command = f"""
                     sudo iptables -D OUTPUT -p tcp -m multiport --sports {ports_str} -j DROP;
