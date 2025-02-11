@@ -122,8 +122,7 @@ def list_tasks(cluster_id, is_json=False):
         upd = task.updated_at
         if upd:
             try:
-                parsed = datetime.datetime.strptime(upd, "%Y-%m-%d %H:%M:%S.%f")
-                parsed = parsed.astimezone()
+                parsed = datetime.datetime.fromisoformat(upd)
                 upd = parsed.strftime("%H:%M:%S, %d/%m/%Y")
             except Exception as e:
                 logger.error(e)
