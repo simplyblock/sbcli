@@ -140,7 +140,7 @@ class RPCClient:
             "max_io_qpairs_per_ctrlr": qpair_count,
             "max_queue_depth": 512,
             "abort_timeout_sec": 5,
-            "ack_timeout": 2048,
+            "ack_timeout": 512,
             "zcopy": True,
             "in_capsule_data_size": 4096,
             "max_io_size": 131072,
