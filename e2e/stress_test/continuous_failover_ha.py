@@ -32,9 +32,9 @@ class RandomFailoverTest(TestLvolHACluster):
         self.lvol_name = f"lvl{random_char(3)}"
         self.clone_name = f"cln{random_char(3)}"
         self.snapshot_name = f"snap{random_char(3)}"
-        self.lvol_size = "8G"
+        self.lvol_size = "20G"
         self.int_lvol_size = 8
-        self.fio_size = "1G"
+        self.fio_size = "3G"
         self.fio_threads = []
         self.clone_mount_details = {}
         self.lvol_mount_details = {}
@@ -157,7 +157,8 @@ class RandomFailoverTest(TestLvolHACluster):
                     "nrfiles": 16,
                     "iodepth": 1,
                     "numjobs": 4,
-                    "time_based": False,
+                    "time_based": True,
+                    "runtime": 1000,
                 },
             )
             fio_thread.start()
@@ -383,7 +384,8 @@ class RandomFailoverTest(TestLvolHACluster):
                     "nrfiles": 16,
                     "iodepth": 1,
                     "numjobs": 4,
-                    "time_based": False,
+                    "time_based": True,
+                    "runtime": 1000,
                 },
             )
             fio_thread.start()
@@ -494,7 +496,7 @@ class RandomFailoverTest(TestLvolHACluster):
                     time_duration=None  # Not needed in this case
                 )
 
-                sleep_n_sec(60)  # Sleep for 60 seconds before the next validation
+                sleep_n_sec(300)  # Sleep for 60 seconds before the next validation
             except Exception as e:
                 self.logger.error(f"Error in continuous I/O stats validation: {str(e)}")
                 break  # Exit the thread on failure
