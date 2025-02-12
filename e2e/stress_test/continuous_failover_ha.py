@@ -194,12 +194,20 @@ class RandomFailoverTest(TestLvolHACluster):
             # Retry mechanism for suspending the node
             for attempt in range(max_retries):
                 try:
-                    self.sbcli_utils.suspend_node(node_uuid=self.current_outage_node, expected_error_code=[503])
+                    if attempt == max_retries - 1:
+                        self.logger.info("[CHECK] Suspending Node via CLI as via API Fails.")
+                        self.ssh_obj.suspend_node(node=self.mgmt_nodes[0],
+                                                  node_id=self.current_outage_node)
+                    else:
+                        self.sbcli_utils.suspend_node(node_uuid=self.current_outage_node, expected_error_code=[503])
                     self.sbcli_utils.wait_for_storage_node_status(self.current_outage_node, "suspended", timeout=4000)
                     break  # Exit loop if successful
                 except Exception as _:
-                    if attempt < max_retries - 1:
+                    if attempt < max_retries - 2:
                         self.logger.info(f"Attempt {attempt + 1} failed to suspend node. Retrying in {retry_delay} seconds...")
+                        sleep_n_sec(retry_delay)
+                    elif attempt < max_retries - 1:
+                        self.logger.info(f"Attempt {attempt + 1} failed to suspend node via API. Retrying in {retry_delay} seconds via CMD...")
                         sleep_n_sec(retry_delay)
                     else:
                         self.logger.info("Max retries reached. Failed to suspend node.")
@@ -210,12 +218,21 @@ class RandomFailoverTest(TestLvolHACluster):
             # Retry mechanism for shutting down the node
             for attempt in range(max_retries):
                 try:
-                    self.sbcli_utils.shutdown_node(node_uuid=self.current_outage_node, expected_error_code=[503])
+                    if attempt == max_retries - 1:
+                        self.logger.info("[CHECK] Shutting down Node via CLI as via API Fails.")
+                        self.ssh_obj.shutdown_node(node=self.mgmt_nodes[0],
+                                                   node_id=self.current_outage_node,
+                                                   force=True)
+                    else:
+                        self.sbcli_utils.shutdown_node(node_uuid=self.current_outage_node, expected_error_code=[503])
                     self.sbcli_utils.wait_for_storage_node_status(self.current_outage_node, "offline", timeout=4000)
                     break  # Exit loop if successful
                 except Exception as _:
-                    if attempt < max_retries - 1:
+                    if attempt < max_retries - 2:
                         self.logger.info(f"Attempt {attempt + 1} failed to shutdown node. Retrying in {retry_delay} seconds...")
+                        sleep_n_sec(retry_delay)
+                    elif attempt < max_retries - 1:
+                        self.logger.info(f"Attempt {attempt + 1} failed to shutdown node via API. Retrying in {retry_delay} seconds via CMD...")
                         sleep_n_sec(retry_delay)
                     else:
                         self.logger.info("Max retries reached. Failed to shutdown node.")
@@ -266,12 +283,21 @@ class RandomFailoverTest(TestLvolHACluster):
             # Retry mechanism for restarting the node
             for attempt in range(max_retries):
                 try:
-                    self.sbcli_utils.restart_node(node_uuid=self.current_outage_node, expected_error_code=[503])
+                    if attempt == max_retries - 1:
+                        self.logger.info("[CHECK] Restarting Node via CLI as via API Fails.")
+                        self.ssh_obj.restart_node(node=self.mgmt_nodes[0],
+                                                  node_id=self.current_outage_node,
+                                                  force=True)
+                    else:
+                        self.sbcli_utils.restart_node(node_uuid=self.current_outage_node, expected_error_code=[503])
                     self.sbcli_utils.wait_for_storage_node_status(self.current_outage_node, "online", timeout=4000)
                     break  # Exit loop if successful
                 except Exception as _:
-                    if attempt < max_retries - 1:
+                    if attempt < max_retries - 2:
                         self.logger.info(f"Attempt {attempt + 1} failed to restart node. Retrying in {retry_delay} seconds...")
+                        sleep_n_sec(retry_delay)
+                    elif attempt < max_retries - 1:
+                        self.logger.info(f"Attempt {attempt + 1} failed to restart node via API. Retrying in {retry_delay} seconds via CMD...")
                         sleep_n_sec(retry_delay)
                     else:
                         self.logger.info("Max retries reached. Failed to restart node.")

@@ -471,6 +471,26 @@ class SshUtils:
         cmd = "%s snapshot list | grep -i ss | awk '{{print $2}}'" % self.base_cmd
         output, error = self.exec_command(node=node, command=cmd)
         return output.strip().split()
+    
+    def suspend_node(self, node, node_id):
+        """Suspend node."""
+        cmd = f"{self.base_cmd} -d sn suspend {node_id}"
+        output, _ = self.exec_command(node=node, command=cmd)
+        return output.strip().split()
+    
+    def shutdown_node(self, node, node_id, force=False):
+        """Shutdown Node."""
+        force_cmd = " --force" if force else ""
+        cmd = f"{self.base_cmd} -d sn shutdown {node_id}{force_cmd}"
+        output, _ = self.exec_command(node=node, command=cmd)
+        return output.strip().split()
+    
+    def restart_node(self, node, node_id, force=False):
+        """Shutdown Node."""
+        force_cmd = " --force" if force else ""
+        cmd = f"{self.base_cmd} -d sn restart {node_id}{force_cmd}"
+        output, _ = self.exec_command(node=node, command=cmd)
+        return output.strip().split()
 
     def get_lvol_id(self, node, lvol_name):
         """Get logical volume IDs on the node."""
