@@ -546,7 +546,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
     return lvol.uuid, None
 
 
-def _create_bdev_stack(lvol, snode):
+def _create_bdev_stack(lvol, snode, sec_is_prime=False):
     rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
 
     created_bdevs = []
@@ -569,14 +569,14 @@ def _create_bdev_stack(lvol, snode):
             ret = rpc_client.create_lvstore(**params)
 
         elif type == "bdev_lvol":
-            if snode.is_secondary_node:
+            if snode.is_secondary_node and not sec_is_prime:
                 ret = rpc_client.bdev_lvol_register(
                     lvol.lvol_bdev, lvol.lvs_name, lvol.lvol_uuid, lvol.blobid, lvol.lvol_priority_class)
             else:
                 ret = rpc_client.create_lvol(**params)
 
         elif type == "bdev_lvol_clone":
-            if snode.is_secondary_node:
+            if snode.is_secondary_node and not sec_is_prime:
                 ret = rpc_client.bdev_lvol_clone_register(
                     lvol.lvol_bdev, lvol.snapshot_name, lvol.lvol_uuid, lvol.blobid)
             else:
@@ -615,7 +615,7 @@ def add_lvol_on_node(lvol, snode, ha_comm_addrs=None, ha_inode_self=0, sec_is_pr
 
         rpc_client.bdev_lvol_set_leader(True, lvs_name=lvol.lvs_name)
 
-    ret, msg = _create_bdev_stack(lvol, snode)
+    ret, msg = _create_bdev_stack(lvol, snode, sec_is_prime)
     if not ret:
         return False, msg
 
