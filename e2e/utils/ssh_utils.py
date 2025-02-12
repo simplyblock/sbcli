@@ -953,44 +953,44 @@ class SshUtils:
         return block_ports
 
 
-    # def remove_partial_nw_outage(self, node_ip, blocked_ports):
-    #     """
-    #     Remove partial network outage by unblocking multiple ports at once.
+    def remove_partial_nw_outage(self, node_ip, blocked_ports):
+        """
+        Remove partial network outage by unblocking multiple ports at once.
 
-    #     Args:
-    #         node_ip (str): IP address of the target node.
-    #         blocked_ports (list): List of ports to unblock.
+        Args:
+            node_ip (str): IP address of the target node.
+            blocked_ports (list): List of ports to unblock.
 
-    #     Returns:
-    #         None
-    #     """
-    #     try:
-    #         if blocked_ports:
-    #             blocked_ports = list(dict.fromkeys(blocked_ports))
-    #             blocked_ports = sorted(blocked_ports)
-    #             ports_str = ",".join(blocked_ports)
-    #             unblock_command = f"""
-    #                 sudo iptables -D OUTPUT -p tcp -m multiport --sports {ports_str} -j DROP;
-    #                 sudo iptables -D OUTPUT -p tcp -m multiport --dports {ports_str} -j DROP;
-    #                 sudo iptables -D INPUT -p tcp -m multiport --dports {ports_str} -j DROP;
-    #                 sudo iptables -D INPUT -p tcp -m multiport --sports {ports_str} -j DROP;
-    #             """
+        Returns:
+            None
+        """
+        try:
+            if blocked_ports:
+                blocked_ports = list(dict.fromkeys(blocked_ports))
+                blocked_ports = sorted(blocked_ports)
+                ports_str = ",".join(blocked_ports)
+                unblock_command = f"""
+                    sudo iptables -D OUTPUT -p tcp -m multiport --sports {ports_str} -j DROP;
+                    sudo iptables -D OUTPUT -p tcp -m multiport --dports {ports_str} -j DROP;
+                    sudo iptables -D INPUT -p tcp -m multiport --dports {ports_str} -j DROP;
+                    sudo iptables -D INPUT -p tcp -m multiport --sports {ports_str} -j DROP;
+                """
 
-    #             # for port in blocked_ports:
-    #             #     unblock_command = (f"sudo iptables -D OUTPUT -p tcp --sport {port} --dport {port} -j DROP && "
-    #             #                        f"sudo iptables -D INPUT -p tcp --sport {port} --dport {port} -j DROP"
-    #             #                        )
-    #             self.exec_command(node_ip, unblock_command)
-    #             self.logger.info(f"Unblocked ports {ports_str} on {node_ip}.")
+                # for port in blocked_ports:
+                #     unblock_command = (f"sudo iptables -D OUTPUT -p tcp --sport {port} --dport {port} -j DROP && "
+                #                        f"sudo iptables -D INPUT -p tcp --sport {port} --dport {port} -j DROP"
+                #                        )
+                self.exec_command(node_ip, unblock_command)
+                self.logger.info(f"Unblocked ports {ports_str} on {node_ip}.")
 
-    #         time.sleep(5)
-    #         self.logger.info("Network outage: IPTable Rules List:")
-    #         self.exec_command(node_ip, "sudo iptables -L -v -n --line-numbers")
+            time.sleep(5)
+            self.logger.info("Network outage: IPTable Rules List:")
+            self.exec_command(node_ip, "sudo iptables -L -v -n --line-numbers")
 
-    #     except Exception as e:
-    #         self.logger.error(f"Failed to unblock ports on {node_ip}: {e}")
+        except Exception as e:
+            self.logger.error(f"Failed to unblock ports on {node_ip}: {e}")
 
-    def remove_partial_nw_outage(self, node_ip, blocked_ports=None):
+    def remove_partial_nw_outage2(self, node_ip, blocked_ports=None):
         """
         Remove partial network outage by unblocking multiple ports at once.
 
