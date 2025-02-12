@@ -278,7 +278,7 @@ class RandomFailoverTest(TestLvolHACluster):
                         raise  # Rethrow the last exception
         elif outage_type == "network_interrupt":
             # self.disconnect_thread.join()
-            self.ssh_obj.remove_partial_nw_outage(node_ip=node_ip, blocked_ports=self.blocked_ports)
+            self.ssh_obj.remove_partial_nw_outage(node_ip=node_ip, blocked_ports=None)
         elif outage_type == "partial_nw":
             self.ssh_obj.remove_partial_nw_outage(node_ip=node_ip, blocked_ports=self.blocked_ports)
         self.sbcli_utils.wait_for_storage_node_status(self.current_outage_node, "online", timeout=4000)
