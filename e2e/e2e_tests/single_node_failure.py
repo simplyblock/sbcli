@@ -123,6 +123,7 @@ class TestSingleNodeFailure(TestClusterBase):
                          )
         
         sleep_n_sec(30)
+        timestamp = int(datetime.now().timestamp())
         self.ssh_obj.stop_spdk_process(node=node_ip)
 
         try:
@@ -201,6 +202,12 @@ class TestSingleNodeFailure(TestClusterBase):
             containers=self.container_nodes[node_ip],
             log_dir=self.docker_logs_path,
             test_name=self.test_name
+        )
+        sleep_n_sec(120)
+        self.validate_migration_for_node(
+            timestamp=timestamp,
+            timeout=1000,
+            node_id=None
         )
 
         # Write steps in order
@@ -394,6 +401,7 @@ class TestHASingleNodeFailure(TestClusterBase):
         for i in range(2):
 
             sleep_n_sec(30)
+            timestamp = int(datetime.now().timestamp())
             self.ssh_obj.stop_spdk_process(node=node_ip)
 
             try:
@@ -425,6 +433,12 @@ class TestHASingleNodeFailure(TestClusterBase):
                 containers=self.container_nodes[node_ip],
                 log_dir=self.docker_logs_path,
                 test_name=self.test_name
+            )
+            sleep_n_sec(120)
+            self.validate_migration_for_node(
+                timestamp=timestamp,
+                timeout=1000,
+                node_id=None
             )
 
         # self.sbcli_utils.resize_lvol(lvol_id=self.sbcli_utils.get_lvol_id(self.lvol_name),
