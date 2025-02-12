@@ -494,6 +494,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
 
     lvol_bdev, error = add_lvol_on_node(lvol, host_node)
     if error:
+        lvol.remove(db_controller.kv_store)
         return False, error
     lvol.nodes = [host_node.get_id()]
     lvol.lvol_uuid = lvol_bdev['uuid']
@@ -876,8 +877,9 @@ def delete_lvol(id_or_name, force_delete=False):
             sec_node.mgmt_ip,
             sec_node.rpc_port,
             sec_node.rpc_username,
-            sec_node.rpc_password)
+            sec_node.rpc_password, timeout=5, retry=1)
 
+        ret = sec_rpc_client.subsystem_delete(lvol.nqn)
         ret = sec_rpc_client.bdev_lvol_set_leader(False, lvs_name=lvol.lvs_name)
         if not ret:
             logger.error(f"Failed to set leader for secondary node: {sec_node.get_id()}")
@@ -885,6 +887,7 @@ def delete_lvol(id_or_name, force_delete=False):
                 return False
 
         time.sleep(1)
+        rpc_client.subsystem_delete(lvol.nqn)
         rpc_client.bdev_lvol_set_leader(True, lvs_name=lvol.lvs_name)
         if not ret:
             logger.error(f"Failed to set leader for primary node: {snode.get_id()}")
