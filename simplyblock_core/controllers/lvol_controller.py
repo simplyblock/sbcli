@@ -527,7 +527,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
             logger.error(msg)
             return False, msg
 
-        lvol_bdev, error = add_lvol_on_node(lvol, sec_node)
+        lvol_bdev, error = add_lvol_on_node(lvol, sec_node, ha_inode_self=1, sec_is_prime=True)
         if error:
             lvol.remove(db_controller.kv_store)
             return False, error
@@ -598,22 +598,22 @@ def _create_bdev_stack(lvol, snode):
     return True, None
 
 
-def add_lvol_on_node(lvol, snode, ha_comm_addrs=None, ha_inode_self=0):
+def add_lvol_on_node(lvol, snode, ha_comm_addrs=None, ha_inode_self=0, sec_is_prime=False):
     rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
 
-    if snode.is_secondary_node:
+    if snode.is_secondary_node and not sec_is_prime:
         rpc_client.bdev_lvol_set_leader(False, lvs_name=lvol.lvs_name)
 
     else:
 
-        lvol_count = len(db_controller.get_lvols_by_node_id(snode.get_id()))
-        if lvol_count >= snode.max_lvol:
-            error = f"Too many lvols on node: {snode.get_id()}, max lvols reached: {lvol_count}"
-            logger.error(error)
-            return False, error
+        if not sec_is_prime:
+            lvol_count = len(db_controller.get_lvols_by_node_id(snode.get_id()))
+            if lvol_count >= snode.max_lvol:
+                error = f"Too many lvols on node: {snode.get_id()}, max lvols reached: {lvol_count}"
+                logger.error(error)
+                return False, error
 
         rpc_client.bdev_lvol_set_leader(True, lvs_name=lvol.lvs_name)
-
 
     ret, msg = _create_bdev_stack(lvol, snode)
     if not ret:
@@ -1165,33 +1165,48 @@ def resize_lvol(id, new_size):
     logger.info(f"Resizing LVol: {lvol.get_id()} on primary node: {snode.get_id()}")
     logger.info(f"Current size: {utils.humanbytes(lvol.size)}, new size: {utils.humanbytes(new_size)}")
 
-    # creating RPCClient instance
-    rpc_client = RPCClient(
-        snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
-    rpc_client.bdev_lvol_set_leader(True, lvs_name=lvol.lvs_name)
-    size_in_mib = int(new_size / (1000*1000))
-    ret = rpc_client.bdev_lvol_resize(f"{lvol.lvs_name}/{lvol.lvol_bdev}", size_in_mib)
-    if not ret:
-        logger.error(f"Error resizing lvol on node: {snode.get_id()}")
-        return False
+    size_in_mib = int(new_size / (1000 * 1000))
 
-    if lvol.ha_type == "ha":
-        sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
-        if sec_node and sec_node.status == StorageNode.STATUS_ONLINE:
-            sec_node_rpc_client = RPCClient(
-                sec_node.mgmt_ip, sec_node.rpc_port, sec_node.rpc_username, sec_node.rpc_password)
-            time.sleep(3)
-            logger.info(f"Resizing LVol: {lvol.get_id()} on secondary node: {sec_node.get_id()}")
-            sec_node_rpc_client.bdev_lvol_set_leader(False, lvs_name=lvol.lvs_name)
-            ret = sec_node_rpc_client.bdev_lvol_resize(f"{lvol.lvs_name}/{lvol.lvol_bdev}", size_in_mib)
-            if not ret:
-                logger.error(f"Error resizing lvol on node: {sec_node.get_id()}")
-                logger.info(f"Revert size on node {snode.get_id()}")
-                size_in_mib = int(lvol.size / (1000 * 1000))
-                ret = rpc_client.bdev_lvol_resize(f"{lvol.lvs_name}/{lvol.lvol_bdev}", size_in_mib)
+    if snode.status == StorageNode.STATUS_ONLINE:
+
+        rpc_client = RPCClient(
+            snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
+        rpc_client.bdev_lvol_set_leader(True, lvs_name=lvol.lvs_name)
+        ret = rpc_client.bdev_lvol_resize(f"{lvol.lvs_name}/{lvol.lvol_bdev}", size_in_mib)
+        if not ret:
+            logger.error(f"Error resizing lvol on node: {snode.get_id()}")
+            return False
+
+        if lvol.ha_type == "ha":
+            sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
+            if sec_node and sec_node.status == StorageNode.STATUS_ONLINE:
+                sec_node_rpc_client = RPCClient(
+                    sec_node.mgmt_ip, sec_node.rpc_port, sec_node.rpc_username, sec_node.rpc_password)
+                time.sleep(3)
+                logger.info(f"Resizing LVol: {lvol.get_id()} on secondary node: {sec_node.get_id()}")
+                sec_node_rpc_client.bdev_lvol_set_leader(False, lvs_name=lvol.lvs_name)
+                ret = sec_node_rpc_client.bdev_lvol_resize(f"{lvol.lvs_name}/{lvol.lvol_bdev}", size_in_mib)
                 if not ret:
-                    logger.error(f"Failed to revert size for lvol on node {snode.get_id()}, LVol current size: {utils.humanbytes(new_size)}")
-                return False
+                    logger.error(f"Error resizing lvol on node: {sec_node.get_id()}")
+                    logger.info(f"Revert size on node {snode.get_id()}")
+                    size_in_mib = int(lvol.size / (1000 * 1000))
+                    ret = rpc_client.bdev_lvol_resize(f"{lvol.lvs_name}/{lvol.lvol_bdev}", size_in_mib)
+                    if not ret:
+                        logger.error(f"Failed to revert size for lvol on node {snode.get_id()}, LVol current size: {utils.humanbytes(new_size)}")
+                    return False
+
+    else:
+        sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
+        if not sec_node or sec_node.status != StorageNode.STATUS_ONLINE:
+            msg = f"Host nodes are not online"
+            logger.error(msg)
+            return False
+
+        sec_rpc_client = RPCClient(sec_node.mgmt_ip, sec_node.rpc_port, sec_node.rpc_username, sec_node.rpc_password)
+        ret = sec_rpc_client.bdev_lvol_resize(f"{lvol.lvs_name}/{lvol.lvol_bdev}", size_in_mib)
+        if not ret:
+            logger.error(f"Error resizing lvol on node: {sec_node.get_id()}")
+            return False
 
     lvol = db_controller.get_lvol_by_id(id)
     lvol.size = new_size

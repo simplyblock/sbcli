@@ -452,7 +452,7 @@ def clone(snapshot_id, clone_name, new_size=0):
             logger.error(msg)
             return False, msg
 
-        lvol_bdev, error = lvol_controller.add_lvol_on_node(lvol, sec_node)
+        lvol_bdev, error = lvol_controller.add_lvol_on_node(lvol, sec_node, ha_inode_self=1, sec_is_prime=True)
         if error:
             return False, error
         lvol.nodes = [snode.get_id(), sec_node.get_id()]
