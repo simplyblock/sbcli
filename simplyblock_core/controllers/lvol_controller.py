@@ -492,32 +492,48 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
 
     lvol.write_to_db(db_controller.kv_store)
 
-    lvol_bdev, error = add_lvol_on_node(lvol, host_node)
-    if error:
-        lvol.remove(db_controller.kv_store)
-        return False, error
-    lvol.nodes = [host_node.get_id()]
-    lvol.lvol_uuid = lvol_bdev['uuid']
-    lvol.blobid = lvol_bdev['driver_specific']['lvol']['blobid']
+    if host_node.status == StorageNode.STATUS_ONLINE:
 
-    if ha_type == "ha":
-        lvol.nodes.append(host_node.secondary_node_id)
+        lvol_bdev, error = add_lvol_on_node(lvol, host_node)
+        if error:
+            lvol.remove(db_controller.kv_store)
+            return False, error
+        lvol.nodes = [host_node.get_id()]
+        lvol.lvol_uuid = lvol_bdev['uuid']
+        lvol.blobid = lvol_bdev['driver_specific']['lvol']['blobid']
+
+        if ha_type == "ha":
+            lvol.nodes.append(host_node.secondary_node_id)
+            sec_node = db_controller.get_storage_node_by_id(host_node.secondary_node_id)
+            if sec_node and sec_node.status == StorageNode.STATUS_ONLINE:
+                ret, error = add_lvol_on_node(lvol, sec_node, ha_inode_self=1)
+                if error:
+                    logger.error(error)
+                    logger.error(f"Failed to add lvol on node: {sec_node.get_id()}")
+                    logger.info(f"Removing LVol from {host_node.get_id()}")
+                    lvol.status = LVol.STATUS_IN_DELETION
+                    lvol.write_to_db(db_controller.kv_store)
+                    ret=delete_lvol_from_node(lvol.get_id(), host_node.get_id())
+                    if ret:
+                        lvol.remove(db_controller.kv_store)
+                    else:
+                        logger.error(f"Failed to remove lvol from node {host_node.get_id()}, LVol status: {lvol.status}")
+                    return False, error
+
+    else:
         sec_node = db_controller.get_storage_node_by_id(host_node.secondary_node_id)
-        if sec_node and sec_node.status == StorageNode.STATUS_ONLINE:
-            ret, error = add_lvol_on_node(lvol, sec_node, ha_inode_self=1)
-            if error:
-                logger.error(error)
-                logger.error(f"Failed to add lvol on node: {sec_node.get_id()}")
-                logger.info(f"Removing LVol from {host_node.get_id()}")
-                lvol.status = LVol.STATUS_IN_DELETION
-                lvol.write_to_db(db_controller.kv_store)
-                ret=delete_lvol_from_node(lvol.get_id(), host_node.get_id())
-                if ret:
-                    lvol.remove(db_controller.kv_store)
-                else:
-                    logger.error(f"Failed to remove lvol from node {host_node.get_id()}, LVol status: {lvol.status}")
-                return False, error
+        if not sec_node or sec_node.status != StorageNode.STATUS_ONLINE:
+            msg = f"Host nodes are not online"
+            logger.error(msg)
+            return False, msg
 
+        lvol_bdev, error = add_lvol_on_node(lvol, sec_node)
+        if error:
+            lvol.remove(db_controller.kv_store)
+            return False, error
+        lvol.nodes = [host_node.get_id(), sec_node.get_id()]
+        lvol.lvol_uuid = lvol_bdev['uuid']
+        lvol.blobid = lvol_bdev['driver_specific']['lvol']['blobid']
 
     lvol.pool_uuid = pool.get_id()
     lvol.status = LVol.STATUS_ONLINE
