@@ -138,7 +138,7 @@ class RPCClient:
         params = {
             "trtype": trtype,
             "max_io_qpairs_per_ctrlr": qpair_count,
-            "max_queue_depth": 512,
+            "max_queue_depth": 2048,
             "abort_timeout_sec": 5,
             "ack_timeout": 2048,
             "zcopy": True,
@@ -595,7 +595,7 @@ class RPCClient:
     def bdev_nvme_set_options(self):
         params = {
             # "action_on_timeout": "abort",
-            "bdev_retry_count": 0,
+            "bdev_retry_count": 3,
             "transport_retry_count": 5,
             "ctrlr_loss_timeout_sec": 1,
             "fast_io_fail_timeout_sec": 0,
