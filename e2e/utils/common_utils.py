@@ -116,7 +116,7 @@ class CommonUtils:
         while True:
             process = self.ssh_utils.find_process_name(node=node,
                                                        process_name="fio")
-            process_fio = [element for element in process if "grep" not in element]
+            process_fio = [element for element in process if "grep" not in element and not element.startswith("kworker")]
             self.logger.info(f"Process info: {process_fio}")
             
             if len(process_fio) == 0:
@@ -134,7 +134,7 @@ class CommonUtils:
                                                               process_name="fio")
         self.logger.info(f"Process List: {process_list_after}")
 
-        process_fio = [element for element in process_list_after if "grep" not in element]
+        process_fio = [element for element in process_list_after if "grep" not in element and not element.startswith("kworker")]
 
         assert len(process_fio) == 0, f"FIO process list not empty: {process_list_after}"
         self.logger.info(f"FIO Running: {process_fio}")
