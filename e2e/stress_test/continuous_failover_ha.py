@@ -48,8 +48,8 @@ class RandomFailoverTest(TestLvolHACluster):
         self.node_vs_lvol = {}
         self.sn_nodes_with_sec = []
         self.test_name = "continuous_random_failover_ha"
-        # self.outage_types = ["partial_nw", "network_interrupt", "container_stop", "graceful_shutdown"]
-        self.outage_types = ["network_interrupt", "container_stop", "graceful_shutdown"]
+        self.outage_types = ["partial_nw", "network_interrupt", "container_stop", "graceful_shutdown"]
+        # self.outage_types = ["network_interrupt", "container_stop", "graceful_shutdown"]
         self.blocked_ports = None
         self.outage_log_file = os.path.join("logs", f"outage_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
         self._initialize_outage_log()
@@ -265,8 +265,13 @@ class RandomFailoverTest(TestLvolHACluster):
             ports_to_block = [4420]
             self.blocked_ports = self.ssh_obj.partial_nw_outage(node_ip=node_ip, mgmt_ip=self.fio_node,
                                                                 block_ports=ports_to_block, block_all_ss_ports=False)
+            lvols = self.node_vs_lvol[self.current_outage_node]
+            for lvol in lvols:
+                self.ssh_obj.disconnect_lvol_node_device(node=self.fio_node, device=self.lvol_mount_details[lvol]["Device"])
+            sleep_n_sec(60)
             
-        sleep_n_sec(120)
+        if outage_type != "partial_nw":
+            sleep_n_sec(120)
         
         return outage_type
 
@@ -318,6 +323,14 @@ class RandomFailoverTest(TestLvolHACluster):
             test_name=self.test_name
         )
 
+        if outage_type == "partial_nw":
+            sleep_n_sec(600)
+            lvols = self.node_vs_lvol[self.current_outage_node]
+            for lvol in lvols:
+                connect = self.sbcli_utils.get_lvol_connect_str(lvol_name=lvol)[0]
+                self.ssh_obj.exec_command(node=self.fio_node, command=connect)
+            sleep_n_sec(30)
+
         for node in self.sn_nodes_with_sec:
             self.ssh_obj.dump_lvstore(node_ip=self.mgmt_nodes[0],
                                       storage_node_id=node)
@@ -331,7 +344,7 @@ class RandomFailoverTest(TestLvolHACluster):
         # Filter lvols on nodes that are not in outage
         self.int_lvol_size += 1
         available_lvols = [
-            lvol for node, lvols in self.node_vs_lvol.items() if node != self.current_outage_node for lvol in lvols
+            lvol for _, lvols in self.node_vs_lvol.items() for lvol in lvols
         ]
         if not available_lvols:
             self.logger.warning("No available lvols to create snapshots and clones.")
@@ -358,6 +371,7 @@ class RandomFailoverTest(TestLvolHACluster):
                    "Mount": None,
                    "Device": None,
                    "MD5": None,
+                   "FS": fs_type,
                    "Log": f"{self.log_path}/{clone_name}.log",
                    "snapshot": snapshot_name
             }
@@ -391,6 +405,11 @@ class RandomFailoverTest(TestLvolHACluster):
             self.ssh_obj.mount_path(node=self.fio_node, device=lvol_device, mount_path=mount_point)
             self.clone_mount_details[clone_name]["Mount"] = mount_point
 
+            # clone_node_id = self.sbcli_utils.get_lvol_details(
+            #     lvol_id=self.lvol_mount_details[clone_name]["ID"])[0]["node_id"]
+            
+            # self.node_vs_lvol[clone_node_id].append(clone_name)
+
             sleep_n_sec(10)
 
             self.ssh_obj.delete_files(self.fio_node, [f"{mount_point}/*fio*"])
@@ -418,15 +437,16 @@ class RandomFailoverTest(TestLvolHACluster):
             self.fio_threads.append(fio_thread)
             self.logger.info(f"Created snapshot {snapshot_name} and clone {clone_name}.")
 
-            # self.sbcli_utils.resize_lvol(lvol_id=self.lvol_mount_details[lvol]["ID"],
-            #                              new_size=f"{self.int_lvol_size}G")
-            # self.sbcli_utils.resize_lvol(lvol_id=self.clone_mount_details[clone_name]["ID"],
-            #                              new_size=f"{self.int_lvol_size}G")
+            self.sbcli_utils.resize_lvol(lvol_id=self.lvol_mount_details[lvol]["ID"],
+                                         new_size=f"{self.int_lvol_size}G")
+            self.sbcli_utils.resize_lvol(lvol_id=self.clone_mount_details[clone_name]["ID"],
+                                         new_size=f"{self.int_lvol_size}G")
+            
 
     def delete_random_lvols(self, count):
         """Delete random lvols during an outage."""
         available_lvols = [
-            lvol for node, lvols in self.node_vs_lvol.items() if node != self.current_outage_node for lvol in lvols
+            lvol for _, lvols in self.node_vs_lvol.items() for lvol in lvols
         ]
         if len(available_lvols) < count:
             self.logger.warning("Not enough lvols available to delete the requested count.")
@@ -502,6 +522,9 @@ class RandomFailoverTest(TestLvolHACluster):
         self.logger.info("Creating 5 new lvols, clones, and snapshots.")
         self.create_lvols_with_fio(5)
         self.create_snapshots_and_clones()
+
+        if outage_type != "partial_nw":
+            sleep_n_sec(300)
 
         self.logger.info("Failover during outage completed.")
         self.restart_nodes_after_failover(outage_type)
@@ -602,8 +625,7 @@ class RandomFailoverTest(TestLvolHACluster):
         storage_nodes = self.sbcli_utils.get_storage_nodes()
 
         for result in storage_nodes['results']:
-            if result['is_secondary_node'] is False:
-                self.sn_nodes.append(result["uuid"])
+            self.sn_nodes.append(result["uuid"])
             self.sn_nodes_with_sec.append(result["uuid"])
         
         sleep_n_sec(30)
@@ -617,10 +639,12 @@ class RandomFailoverTest(TestLvolHACluster):
             self.delete_random_lvols(5)
             self.create_lvols_with_fio(5)
             self.create_snapshots_and_clones()
-            sleep_n_sec(300)
+            if outage_type != "partial_nw":
+                sleep_n_sec(300)
             self.restart_nodes_after_failover(outage_type)
             self.logger.info("Waiting for fallback.")
-            sleep_n_sec(600)
+            if outage_type != "partial_nw":
+                sleep_n_sec(600)
             time_duration = self.common_utils.calculate_time_duration(
                 start_timestamp=self.outage_start_time,
                 end_timestamp=self.outage_end_time
@@ -647,7 +671,8 @@ class RandomFailoverTest(TestLvolHACluster):
 
             # Perform failover and manage resources during outage
             self.perform_failover_during_outage()
-            sleep_n_sec(600)
+            if outage_type != "partial_nw":
+                sleep_n_sec(600)
             time_duration = self.common_utils.calculate_time_duration(
                 start_timestamp=self.outage_start_time,
                 end_timestamp=self.outage_end_time

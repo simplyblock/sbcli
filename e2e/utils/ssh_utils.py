@@ -7,15 +7,28 @@ import paramiko.ssh_exception
 from logger_config import setup_logger
 from pathlib import Path
 from datetime import datetime
-import random, string
+import random, string, re
 
 
 
 SSH_KEY_LOCATION = os.path.join(Path.home(), ".ssh", os.environ.get("KEY_NAME"))
 
+
 def generate_random_string(length=6):
     """Generate a random string of uppercase letters and digits."""
     return ''.join(random.choices(string.ascii_uppercase + string.digits, k=length))
+
+
+def get_parent_device(partition_path: str) -> str:
+    # Match typical partition patterns (e.g. /dev/nvme1n1 -> /dev/nvme1)
+    match = re.match(r"(/dev/nvme\d+)", partition_path)
+    if match:
+        return match.group(1)
+    elif partition_path.startswith("/dev/"):
+        # For other devices like /dev/sda1 -> /dev/sda
+        return re.sub(r"\d+$", "", partition_path)
+    else:
+        raise ValueError(f"Invalid partition path: {partition_path}")
 
 class SshUtils:
     """Class to perform all ssh level operationa
@@ -457,6 +470,17 @@ class SshUtils:
     def disconnect_nvme(self, node, nqn_grep):
         """Disconnect NVMe device on the node."""
         cmd = f"sudo nvme disconnect -n {nqn_grep}"
+        output, error = self.exec_command(node=node, command=cmd)
+        return output, error
+    
+    def disconnect_lvol_node_device(self, node, device):
+        """Disconnects given lvol nqn for a specific device.
+        Used to disconnect either on primary or secondary. not both.
+
+        Device format: /dev/nvme1
+        """
+        device = get_parent_device(device)
+        cmd = f"sudo nvme disconnect -d {device}"
         output, error = self.exec_command(node=node, command=cmd)
         return output, error
 
