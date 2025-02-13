@@ -71,10 +71,19 @@ def process_device_event(event):
             event.status = 'skipped:node_offline'
             return
 
-        logger.info(f"Setting device to unavailable")
-        device_controller.device_set_unavailable(device_obj.get_id())
-        if event.message in ['error_write', 'error_unmap', 'error_read']:
-            device_controller.device_set_io_error(device_obj.get_id(), True)
+        if device_node_obj.get_id() != event_node_obj.get_id() and event.message == 'error_open':
+            for dev in event_node_obj.remote_devices:
+                if dev.get_id() == device_obj.get_id():
+                    dev.status = NVMeDevice.STATUS_UNAVAILABLE
+                    event_node_obj.write_to_db()
+                    break
+
+        else:
+
+            logger.info(f"Setting device to unavailable")
+            device_controller.device_set_unavailable(device_obj.get_id())
+            if event.message in ['error_write', 'error_unmap', 'error_read']:
+                device_controller.device_set_io_error(device_obj.get_id(), True)
 
         event.status = 'processed'
 
