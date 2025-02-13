@@ -147,15 +147,15 @@ class TestClusterBase:
 
     def cleanup_logs(self):
         base_path = Path.home()
-        self.ssh_obj.delete_file_dir(self.fio_node, entity=f"{base_path}/*.log", recursive=True)
-        self.ssh_obj.delete_file_dir(self.fio_node, entity=f"{base_path}/*.state", recursive=True)
+        self.ssh_obj.delete_file_dir(self.fio_node, entity=f"{base_path}/*.log*", recursive=True)
+        self.ssh_obj.delete_file_dir(self.fio_node, entity=f"{base_path}/*.state*", recursive=True)
         self.ssh_obj.delete_file_dir(self.mgmt_nodes[0], entity="/etc/simplyblock/*", recursive=True)
-        self.ssh_obj.delete_file_dir(self.mgmt_nodes[0], entity=f"{base_path}/*.txt", recursive=True)
+        self.ssh_obj.delete_file_dir(self.mgmt_nodes[0], entity=f"{base_path}/*.txt*", recursive=True)
         for node in self.storage_nodes:
             self.ssh_obj.delete_file_dir(node, entity="/etc/simplyblock/*", recursive=True)
             self.ssh_obj.delete_file_dir(node, entity=f"{base_path}/distrib*", recursive=True)
-            self.ssh_obj.delete_file_dir(node, entity=f"{base_path}/*.txt", recursive=True)
-            self.ssh_obj.delete_file_dir(node, entity=f"{base_path}/*.log", recursive=True)
+            self.ssh_obj.delete_file_dir(node, entity=f"{base_path}/*.txt*", recursive=True)
+            self.ssh_obj.delete_file_dir(node, entity=f"{base_path}/*.log*", recursive=True)
 
     def stop_docker_logs_collect(self):
         for node in self.storage_nodes:

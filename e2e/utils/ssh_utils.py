@@ -326,7 +326,7 @@ class SshUtils:
         if kwargs.get("debug", None):
             command = f"{command} --debug=all"
         if log_file:
-            command = f"{command} >> {log_file} 2>&1"
+            command = f"{command} > {log_file} 2>&1"
 
         self.logger.info(f"{command}")
 
