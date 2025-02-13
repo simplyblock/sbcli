@@ -2813,7 +2813,7 @@ def recreate_lvstore_on_sec(snode):
         ret, err = _create_bdev_stack(snode, node.lvstore_stack, primary_node=node)
         ret = rpc_client.bdev_examine(node.raid)
         ret = rpc_client.bdev_wait_for_examine()
-        ret = rpc_client.bdev_lvol_set_lvs_groupid(node.lvstore, node.jm_vuid)
+        ret = rpc_client.bdev_lvol_set_lvs_ops(node.lvstore, node.jm_vuid)
 
         for lvol in lvol_list:
             is_created, error = lvol_controller.recreate_lvol_on_node(
@@ -2913,7 +2913,7 @@ def recreate_lvstore(snode):
 
     ret = rpc_client.bdev_examine(snode.raid)
     ret = rpc_client.bdev_wait_for_examine()
-    ret = rpc_client.bdev_lvol_set_lvs_groupid(snode.lvstore, snode.jm_vuid)
+    ret = rpc_client.bdev_lvol_set_lvs_ops(snode.lvstore, snode.jm_vuid)
 
     if not prim_node_suspend:
         if snode.jm_vuid:
@@ -3107,7 +3107,7 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
 
         ret = temp_rpc_client.bdev_examine(snode.raid)
         ret = temp_rpc_client.bdev_wait_for_examine()
-        ret = temp_rpc_client.bdev_lvol_set_lvs_groupid(snode.lvstore, snode.jm_vuid)
+        ret = temp_rpc_client.bdev_lvol_set_lvs_ops(snode.lvstore, snode.jm_vuid)
 
         sec_node_1.write_to_db()
 
@@ -3166,7 +3166,7 @@ def _create_bdev_stack(snode, lvstore_stack=None, primary_node=None):
         elif type == "bdev_lvstore" and lvstore_stack and not snode.is_secondary_node:
             ret = rpc_client.create_lvstore(**params)
             if ret and snode.jm_vuid > 0:
-                rpc_client.bdev_lvol_set_lvs_groupid(snode.lvstore, snode.jm_vuid)
+                rpc_client.bdev_lvol_set_lvs_ops(snode.lvstore, snode.jm_vuid)
 
         elif type == "bdev_ptnonexcl":
             ret = rpc_client.bdev_PT_NoExcl_create(**params)
