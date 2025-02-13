@@ -2921,12 +2921,14 @@ def recreate_lvstore(snode):
 
     ret = rpc_client.bdev_examine(snode.raid)
     ret = rpc_client.bdev_wait_for_examine()
+    time.sleep(1)
+
     ret = rpc_client.bdev_lvol_set_lvs_ops(snode.lvstore, snode.jm_vuid, snode.lvol_subsys_port)
 
-    if not prim_node_suspend:
-        if snode.jm_vuid:
-            ret = rpc_client.jc_explicit_synchronization(snode.jm_vuid)
-            logger.info(f"JM Sync res: {ret}")
+    # if not prim_node_suspend:
+    #     if snode.jm_vuid:
+    #         ret = rpc_client.jc_explicit_synchronization(snode.jm_vuid)
+    #         logger.info(f"JM Sync res: {ret}")
 
     lvol_ana_state = "optimized"
     if prim_node_suspend:
@@ -2958,7 +2960,7 @@ def recreate_lvstore(snode):
                 for iface in sec_node.data_nics:
                     if iface.ip4_address:
                         ret = sec_rpc_client.nvmf_subsystem_listener_set_ana_state(
-                            lvol.nqn, iface.ip4_address, "4420", False)
+                            lvol.nqn, iface.ip4_address, lvol.subsys_port, False)
     return True
 
 
