@@ -2352,6 +2352,10 @@ def resume_storage_node(node_id):
                 if iface.ip4_address:
                     ret = rpc_client.nvmf_subsystem_listener_set_ana_state(
                             lvol.nqn, iface.ip4_address, lvol.subsys_port, True)
+            lvol.status = LVol.STATUS_ONLINE
+            lvol.io_error = False
+            lvol.health_check = True
+            lvol.write_to_db(db_controller.kv_store)
 
         time.sleep(3)
 
