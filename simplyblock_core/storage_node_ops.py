@@ -2289,6 +2289,9 @@ def resume_storage_node(node_id):
         if dev.status == NVMeDevice.STATUS_UNAVAILABLE:
             device_controller.device_set_online(dev.get_id())
 
+    for db_dev in snode.nvme_devices:
+        distr_controller.send_dev_status_event(db_dev, db_dev.status)
+
     logger.info("Set JM Online")
     if snode.jm_device and snode.jm_device.get_id():
         device_controller.set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_ONLINE)
@@ -2946,15 +2949,17 @@ def recreate_lvstore(snode):
             lvol_obj.health_check = True
         lvol_obj.write_to_db()
 
+
+    sec_node_api = SNodeClient(sec_node.api_endpoint)
     if prim_node_suspend:
+        sec_node_api.firewall_set_port(snode.lvol_subsys_port, "tcp", "allow")
         set_node_status(snode.get_id(), StorageNode.STATUS_SUSPENDED)
         logger.info("Node restart interrupted because secondary node is unreachable")
         logger.info("Node status changed to suspended")
         return False
 
-    if sec_node and sec_node.status == StorageNode.STATUS_ONLINE:
+    if sec_node.status == StorageNode.STATUS_ONLINE:
         time.sleep(10)
-        sec_node_api = SNodeClient(sec_node.api_endpoint)
         sec_node_api.firewall_set_port(snode.lvol_subsys_port, "tcp", "allow")
 
         # sec_rpc_client = RPCClient(sec_node.mgmt_ip, sec_node.rpc_port, sec_node.rpc_username, sec_node.rpc_password, timeout=3, retry=2)
