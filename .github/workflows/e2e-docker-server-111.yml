@@ -15,7 +15,7 @@ on:
       sbcli_cmd:
         description: 'Command for sbcli execution'
         required: true
-        default: 'sbcli-dev'
+        default: 'sbcli-hmdi'
       ndcs:
         description: 'Value for NDCS'
         required: false

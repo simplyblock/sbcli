@@ -8,7 +8,7 @@ from utils.common_utils import sleep_n_sec
 from exceptions.custom_exception import CoreFileFoundException
 import traceback
 import threading
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 
@@ -489,7 +489,7 @@ class TestClusterBase:
             for task in filtered_tasks:
                 # Check if the task is stuck (updated_at is more than 15 minutes old)
                 updated_at = datetime.fromisoformat(task['updated_at'])
-                if datetime.now() - updated_at > timedelta(minutes=65) \
+                if datetime.now(timezone.utc) - updated_at > timedelta(minutes=65) \
                     and task["status"] != "done":
                     raise RuntimeError(f"Migration task {task['id']} is stuck (last updated at {updated_at}).")
 
