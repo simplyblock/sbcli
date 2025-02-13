@@ -3,7 +3,7 @@
 sudo yum install -y yum-utils xorg-x11-xauth nvme-cli fio
 sudo yum-config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
 sudo yum install hostname pkg-config git wget python3-pip yum-utils docker-ce docker-ce-cli \
-  containerd.io docker-buildx-plugin docker-compose-plugin -y
+  containerd.io docker-buildx-plugin docker-compose-plugin iptables -y
 
 sudo systemctl enable docker
 sudo systemctl start docker
@@ -28,3 +28,10 @@ sudo chmod 777 /etc/simplyblock
 sudo sh -c 'echo 1 >  /proc/sys/vm/drop_caches'
 
 sudo sed -i 's/ProcessSizeMax=.*/ProcessSizeMax=5G/' /etc/systemd/coredump.conf
+
+sudo systemctl restart iptables
+sudo iptables -F
+sudo iptables -X
+sudo iptables -P INPUT ACCEPT
+sudo iptables -P FORWARD ACCEPT
+sudo iptables -P OUTPUT ACCEPT

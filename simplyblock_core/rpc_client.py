@@ -178,7 +178,7 @@ class RPCClient:
                 "trtype": trtype,
                 "adrfam": "IPv4",
                 "traddr": traddr,
-                "trsvcid": trsvcid
+                "trsvcid": str(trsvcid)
             }
         }
         if ana_state:
@@ -901,7 +901,7 @@ class RPCClient:
                 "trtype": trtype,
                 "adrfam": "IPv4",
                 "traddr": traddr,
-                "trsvcid": trsvcid
+                "trsvcid": str(trsvcid)
             }
         }
         return self._request("nvmf_subsystem_remove_listener", params)
@@ -980,9 +980,10 @@ class RPCClient:
         }
         return self._request("nvmf_set_max_subsystems", params)
 
-    def bdev_lvol_set_lvs_groupid(self, lvs_name, groupid):
+    def bdev_lvol_set_lvs_ops(self, lvs_name, groupid, subsystem_port=9090):
         params = {
             "groupid": groupid,
             "lvs_name": lvs_name,
+            "subsystem_port": subsystem_port,
         }
-        return self._request("bdev_lvol_set_lvs_groupid", params)
+        return self._request("bdev_lvol_set_lvs_op", params)
