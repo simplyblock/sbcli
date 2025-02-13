@@ -488,7 +488,7 @@ class TestClusterBase:
 
             for task in filtered_tasks:
                 # Check if the task is stuck (updated_at is more than 15 minutes old)
-                updated_at = datetime.strptime(task['updated_at'], '%Y-%m-%d %H:%M:%S.%f')
+                updated_at = datetime.fromisoformat(task['updated_at'])
                 if datetime.now() - updated_at > timedelta(minutes=65) \
                     and task["status"] != "done":
                     raise RuntimeError(f"Migration task {task['id']} is stuck (last updated at {updated_at}).")
