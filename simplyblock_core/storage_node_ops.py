@@ -2897,20 +2897,20 @@ def recreate_lvstore(snode):
     snode = db_controller.get_storage_node_by_id(snode.get_id())
     snode.remote_devices = _connect_to_remote_devs(snode)
     if snode.enable_ha_jm:
-        online_devs = []
-        for remote_device in snode.remote_jm_devices:
-            if remote_device.status == StorageNode.STATUS_ONLINE:
-                online_devs.append(remote_device)
-
-        if len(online_devs) < 2:
-            devs = get_sorted_ha_jms(snode)
-            for did in devs:
-                dev = db_controller.get_jm_device_by_id(did)
-                online_devs.append(dev)
-                if len(online_devs) > snode.ha_jm_count - 1:
-                    break
-
-        snode.remote_jm_devices = online_devs
+        # online_devs = []
+        # for remote_device in snode.remote_jm_devices:
+        #     if remote_device.status == StorageNode.STATUS_ONLINE:
+        #         online_devs.append(remote_device)
+        #
+        # if len(online_devs) < 2:
+        #     devs = get_sorted_ha_jms(snode)
+        #     for did in devs:
+        #         dev = db_controller.get_jm_device_by_id(did)
+        #         online_devs.append(dev)
+        #         if len(online_devs) > snode.ha_jm_count - 1:
+        #             break
+        #
+        # snode.remote_jm_devices = online_devs
         snode.remote_jm_devices = _connect_to_remote_jm_devs(snode)
     snode.write_to_db()
 
@@ -2953,6 +2953,9 @@ def recreate_lvstore(snode):
             lvol_obj.health_check = True
         lvol_obj.write_to_db()
 
+    if snode.jm_vuid:
+        ret = rpc_client.jc_explicit_synchronization(snode.jm_vuid)
+        logger.info(f"JM Sync res: {ret}")
 
     sec_node_api = SNodeClient(sec_node.api_endpoint)
     if prim_node_suspend:

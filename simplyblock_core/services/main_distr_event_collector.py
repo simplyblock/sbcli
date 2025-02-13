@@ -82,8 +82,8 @@ def process_device_event(event):
 
             logger.info(f"Setting device to unavailable")
             device_controller.device_set_unavailable(device_obj.get_id())
-            if event.message in ['error_write', 'error_unmap', 'error_read']:
-                device_controller.device_set_io_error(device_obj.get_id(), True)
+            # if event.message in ['error_write', 'error_unmap', 'error_read']:
+            device_controller.device_set_io_error(device_obj.get_id(), True)
 
         event.status = 'processed'
 
