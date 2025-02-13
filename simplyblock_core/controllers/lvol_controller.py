@@ -861,11 +861,6 @@ def delete_lvol(id_or_name, force_delete=False):
     #         lvol.write_to_db(db_controller.kv_store)
     #         return True
 
-    if snode.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_REMOVED]:
-        logger.error(f"Node status is not online or removed, node: {snode.get_id()}, status: {snode.status}")
-        if not force_delete:
-            return False
-
     # set status
     lvol.status = LVol.STATUS_IN_DELETION
     lvol.write_to_db(db_controller.kv_store)
@@ -878,17 +873,19 @@ def delete_lvol(id_or_name, force_delete=False):
                 caching_node_controller.disconnect(cnode.get_id(), lvol.get_id())
 
     if lvol.ha_type == 'single':
+        if snode.status  != StorageNode.STATUS_ONLINE:
+            logger.error(f"Node status is not online, node: {snode.get_id()}, status: {snode.status}")
+            if not force_delete:
+                return False
+
         ret = delete_lvol_from_node(lvol.get_id(), lvol.node_id)
         if not ret:
             return False
+
+
     elif lvol.ha_type == "ha":
 
         sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
-
-        if sec_node.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_OFFLINE, StorageNode.STATUS_REMOVED]:
-            logger.error(f"Secondary node status is not online or offline, node: {sec_node.get_id()}, status: {sec_node.status}")
-            if not force_delete:
-                return False
 
         sec_rpc_client = RPCClient(
             sec_node.mgmt_ip,
@@ -896,48 +893,75 @@ def delete_lvol(id_or_name, force_delete=False):
             sec_node.rpc_username,
             sec_node.rpc_password, timeout=5, retry=1)
 
-        ret = sec_rpc_client.subsystem_delete(lvol.nqn)
-        ret = sec_rpc_client.bdev_lvol_set_leader(False, lvs_name=lvol.lvs_name)
-        if not ret:
-            logger.error(f"Failed to set leader for secondary node: {sec_node.get_id()}")
-            if not force_delete:
-                return False
+        if snode.status != StorageNode.STATUS_ONLINE:
 
-        time.sleep(1)
-        rpc_client.subsystem_delete(lvol.nqn)
-        rpc_client.bdev_lvol_set_leader(True, lvs_name=lvol.lvs_name)
-        if not ret:
-            logger.error(f"Failed to set leader for primary node: {snode.get_id()}")
-            if not force_delete:
-                return False
+            if sec_node.status != StorageNode.STATUS_ONLINE:
+                logger.error(f"Secondary node status is not online or offline, node: {sec_node.get_id()}, status: {sec_node.status}")
+                if not force_delete:
+                    return False
 
-        time.sleep(1)
+            ret = sec_rpc_client.bdev_lvol_set_leader(True, lvs_name=lvol.lvs_name)
+            if not ret:
+                logger.error(f"Failed to set leader for secondary node: {sec_node.get_id()}")
+                if not force_delete:
+                    return False
+            ret = delete_lvol_from_node(lvol.get_id(), sec_node.get_id())
+            if not ret:
+                logger.error(f"Failed to delete lvol from node: {sec_node.get_id()}")
+                if not force_delete:
+                    return False
+
+        else:
+
+
+            if sec_node.status == StorageNode.STATUS_ONLINE:
+                ret = sec_rpc_client.subsystem_delete(lvol.nqn)
+
+
+        # ret = sec_rpc_client.bdev_lvol_set_leader(False, lvs_name=lvol.lvs_name)
+        # if not ret:
+        #     logger.error(f"Failed to set leader for secondary node: {sec_node.get_id()}")
+        #     if not force_delete:
+        #         return False
+        #
+        # time.sleep(1)
+        # rpc_client.subsystem_delete(lvol.nqn)
+        # rpc_client.bdev_lvol_set_leader(True, lvs_name=lvol.lvs_name)
+        # if not ret:
+        #     logger.error(f"Failed to set leader for primary node: {snode.get_id()}")
+        #     if not force_delete:
+        #         return False
+        #
+        # time.sleep(1)
         ret = delete_lvol_from_node(lvol.get_id(), lvol.node_id)
         if not ret:
             logger.error(f"Failed to delete lvol from node: {snode.get_id()}")
             if not force_delete:
                 return False
 
-        time.sleep(1)
-        ret = delete_lvol_from_node(lvol.get_id(), snode.secondary_node_id)
-        if not ret:
-            logger.error(f"Failed to delete lvol from node: {sec_node.get_id()}")
-            if not force_delete:
-                return False
+        # time.sleep(1)
 
-        time.sleep(1)
-        ret = sec_rpc_client.bdev_lvol_set_leader(False, lvs_name=lvol.lvs_name)
-        if not ret:
-            logger.error(f"Failed to set leader for secondary node: {sec_node.get_id()}")
-            if not force_delete:
-                return False
+        if sec_node.status == StorageNode.STATUS_ONLINE:
 
-        time.sleep(1)
-        ret = rpc_client.bdev_lvol_set_leader(True, lvs_name=lvol.lvs_name)
-        if not ret:
-            logger.error(f"Failed to set leader for primary node: {snode.get_id()}")
-            if not force_delete:
-                return False
+            ret = delete_lvol_from_node(lvol.get_id(), snode.secondary_node_id)
+            if not ret:
+                logger.error(f"Failed to delete lvol from node: {sec_node.get_id()}")
+                if not force_delete:
+                    return False
+        #
+        # time.sleep(1)
+        # ret = sec_rpc_client.bdev_lvol_set_leader(False, lvs_name=lvol.lvs_name)
+        # if not ret:
+        #     logger.error(f"Failed to set leader for secondary node: {sec_node.get_id()}")
+        #     if not force_delete:
+        #         return False
+        #
+        # time.sleep(1)
+        # ret = rpc_client.bdev_lvol_set_leader(True, lvs_name=lvol.lvs_name)
+        # if not ret:
+        #     logger.error(f"Failed to set leader for primary node: {snode.get_id()}")
+        #     if not force_delete:
+        #         return False
 
     lvol_events.lvol_delete(lvol)
     lvol.remove(db_controller.kv_store)

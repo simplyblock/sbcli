@@ -2868,15 +2868,15 @@ def recreate_lvstore(snode):
         elif sec_node.status == StorageNode.STATUS_ONLINE:
             sec_rpc_client = RPCClient(sec_node.mgmt_ip, sec_node.rpc_port, sec_node.rpc_username, sec_node.rpc_password)
 
-            for lvol in lvol_list:
-                if lvol.ha_type == "ha":
-                    for iface in sec_node.data_nics:
-                        if iface.ip4_address:
-                            ret = sec_rpc_client.nvmf_subsystem_listener_set_ana_state(
-                                lvol.nqn, iface.ip4_address, lvol.subsys_port, False, "inaccessible")
+            # for lvol in lvol_list:
+            #     if lvol.ha_type == "ha":
+            #         for iface in sec_node.data_nics:
+            #             if iface.ip4_address:
+            #                 ret = sec_rpc_client.nvmf_subsystem_listener_set_ana_state(
+            #                     lvol.nqn, iface.ip4_address, lvol.subsys_port, False, "inaccessible")
 
-            # sec_node_api = SNodeClient(sec_node.api_endpoint)
-            # sec_node_api.firewall_set_port(snode.lvol_subsys_port, "tcp", "block")
+            sec_node_api = SNodeClient(sec_node.api_endpoint)
+            sec_node_api.firewall_set_port(snode.lvol_subsys_port, "tcp", "block")
 
             sec_rpc_client.bdev_lvol_set_leader(False, lvs_name=snode.lvstore)
             sec_rpc_client.bdev_distrib_force_to_non_leader(snode.jm_vuid)
@@ -2954,13 +2954,16 @@ def recreate_lvstore(snode):
 
     if sec_node and sec_node.status == StorageNode.STATUS_ONLINE:
         time.sleep(10)
-        sec_rpc_client = RPCClient(sec_node.mgmt_ip, sec_node.rpc_port, sec_node.rpc_username, sec_node.rpc_password, timeout=3, retry=2)
-        for lvol in lvol_list:
-            if lvol.ha_type == "ha":
-                for iface in sec_node.data_nics:
-                    if iface.ip4_address:
-                        ret = sec_rpc_client.nvmf_subsystem_listener_set_ana_state(
-                            lvol.nqn, iface.ip4_address, lvol.subsys_port, False)
+        sec_node_api = SNodeClient(sec_node.api_endpoint)
+        sec_node_api.firewall_set_port(snode.lvol_subsys_port, "tcp", "allow")
+
+        # sec_rpc_client = RPCClient(sec_node.mgmt_ip, sec_node.rpc_port, sec_node.rpc_username, sec_node.rpc_password, timeout=3, retry=2)
+        # for lvol in lvol_list:
+        #     if lvol.ha_type == "ha":
+        #         for iface in sec_node.data_nics:
+        #             if iface.ip4_address:
+        #                 ret = sec_rpc_client.nvmf_subsystem_listener_set_ana_state(
+        #                     lvol.nqn, iface.ip4_address, lvol.subsys_port, False)
     return True
 
 
