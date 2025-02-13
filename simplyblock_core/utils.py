@@ -714,3 +714,22 @@ def handle_task_result(task: JobSchedule, res: dict, allowed_error_codes = None)
 
 
 logger = get_logger(__name__)
+
+
+def get_next_port(cluster_id):
+    from simplyblock_core.db_controller import DBController
+    db_controller = DBController()
+
+    port = 9090
+    used_ports = []
+    for node in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
+        if node.lvol_subsys_port > 0 and node.lvol_subsys_port != 4420:
+            used_ports.append(node.lvol_subsys_port)
+
+    for i in range(100):
+        next_port = port + i
+
+        if next_port not in used_ports:
+            return next_port
+
+    return 0

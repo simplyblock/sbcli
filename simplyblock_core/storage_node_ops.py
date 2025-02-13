@@ -3031,7 +3031,7 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
     strip_size_kb = utils.nearest_upper_power_of_2(strip_size_kb)
     jm_vuid = 0
     jm_ids = []
-    lvol_subsys_port = 9090
+    lvol_subsys_port = utils.get_next_port(snode.cluster_id)
     if snode.enable_ha_jm:
         jm_vuid = utils.get_random_vuid()
         jm_ids = get_sorted_ha_jms(snode)
