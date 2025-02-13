@@ -5,6 +5,7 @@ from utils.ssh_utils import SshUtils
 from utils.common_utils import CommonUtils
 from logger_config import setup_logger
 from utils.common_utils import sleep_n_sec
+from exceptions.custom_exception import CoreFileFoundException
 import traceback
 import threading
 from datetime import datetime, timedelta
@@ -17,6 +18,7 @@ class TestClusterBase:
         self.cluster_id = os.environ.get("CLUSTER_ID")
 
         self.api_base_url = os.environ.get("API_BASE_URL")
+        self.client_machine = os.environ.get("CLIENT_IP", "")
         self.headers = {
             "Content-Type": "application/json",
             "Authorization": f"{self.cluster_id} {self.cluster_secret}"
@@ -33,6 +35,7 @@ class TestClusterBase:
         self.common_utils = CommonUtils(self.sbcli_utils, self.ssh_obj)
         self.mgmt_nodes = None
         self.storage_nodes = None
+        self.fio_node = None
         self.ndcs = kwargs.get("ndcs", 1)
         self.npcs = kwargs.get("npcs", 1)
         self.bs = kwargs.get("bs", 4096)
@@ -86,6 +89,16 @@ class TestClusterBase:
             )
             sleep_n_sec(2)
             self.ssh_obj.set_aio_max_nr(node)
+        if self.client_machine:
+            self.logger.info(f"**Connecting to client machine** - {self.client_machine}")
+            self.ssh_obj.connect(
+                address=self.client_machine,
+                bastion_server_address=self.bastion_server,
+            )
+            sleep_n_sec(2)
+            self.ssh_obj.set_aio_max_nr(self.client_machine)
+
+        self.fio_node = self.client_machine if self.client_machine else self.mgmt_nodes[0]
 
         # command = "python3 -c \"from importlib.metadata import version;print(f'SBCLI Version: {version('''sbcli-dev''')}')\""
         # self.ssh_obj.exec_command(
@@ -94,7 +107,7 @@ class TestClusterBase:
         sleep_n_sec(2)
         self.unmount_all(base_path=self.mount_path)
         sleep_n_sec(2)
-        self.ssh_obj.unmount_path(node=self.mgmt_nodes[0],
+        self.ssh_obj.unmount_path(node=self.fio_node,
                                   device=self.mount_path)
         sleep_n_sec(2)
         self.ssh_obj.delete_all_snapshots(node=self.mgmt_nodes[0])
@@ -134,15 +147,15 @@ class TestClusterBase:
 
     def cleanup_logs(self):
         base_path = Path.home()
-        self.ssh_obj.delete_file_dir(self.mgmt_nodes[0], entity=f"{base_path}/*.log", recursive=True)
+        self.ssh_obj.delete_file_dir(self.fio_node, entity=f"{base_path}/*.log*", recursive=True)
+        self.ssh_obj.delete_file_dir(self.fio_node, entity=f"{base_path}/*.state*", recursive=True)
         self.ssh_obj.delete_file_dir(self.mgmt_nodes[0], entity="/etc/simplyblock/*", recursive=True)
-        self.ssh_obj.delete_file_dir(self.mgmt_nodes[0], entity=f"{base_path}/*.state", recursive=True)
-        self.ssh_obj.delete_file_dir(self.mgmt_nodes[0], entity=f"{base_path}/*.txt", recursive=True)
+        self.ssh_obj.delete_file_dir(self.mgmt_nodes[0], entity=f"{base_path}/*.txt*", recursive=True)
         for node in self.storage_nodes:
             self.ssh_obj.delete_file_dir(node, entity="/etc/simplyblock/*", recursive=True)
             self.ssh_obj.delete_file_dir(node, entity=f"{base_path}/distrib*", recursive=True)
-            self.ssh_obj.delete_file_dir(node, entity=f"{base_path}/*.txt", recursive=True)
-            self.ssh_obj.delete_file_dir(node, entity=f"{base_path}/*.log", recursive=True)
+            self.ssh_obj.delete_file_dir(node, entity=f"{base_path}/*.txt*", recursive=True)
+            self.ssh_obj.delete_file_dir(node, entity=f"{base_path}/*.log*", recursive=True)
 
     def stop_docker_logs_collect(self):
         for node in self.storage_nodes:
@@ -199,12 +212,12 @@ class TestClusterBase:
         """
         self.logger.info("Inside teardown function")
         
-        self.ssh_obj.kill_processes(node=self.mgmt_nodes[0],
+        self.ssh_obj.kill_processes(node=self.fio_node,
                                     process_name="fio")
         retry_check = 100
         while retry_check:
             fio_process = self.ssh_obj.find_process_name(
-                node=self.mgmt_nodes[0],
+                node=self.fio_node,
                 process_name="fio"
             )
             if len(fio_process) <= 2:
@@ -225,17 +238,17 @@ class TestClusterBase:
             self.unmount_all(base_path=self.mount_path)
             self.unmount_all(base_path="/mnt/")
             sleep_n_sec(2)
-            self.ssh_obj.unmount_path(node=self.mgmt_nodes[0],
+            self.ssh_obj.unmount_path(node=self.fio_node,
                                     device=self.mount_path)
             sleep_n_sec(2)
             if lvols is not None:
                 for _, lvol_id in lvols.items():
                     lvol_details = self.sbcli_utils.get_lvol_details(lvol_id=lvol_id)
                     nqn = lvol_details[0]["nqn"]
-                    self.ssh_obj.unmount_path(node=self.mgmt_nodes[0],
+                    self.ssh_obj.unmount_path(node=self.fio_node,
                                               device=self.mount_path)
                     sleep_n_sec(2)
-                    self.ssh_obj.exec_command(node=self.mgmt_nodes[0],
+                    self.ssh_obj.exec_command(node=self.fio_node,
                                             command=f"sudo nvme disconnect -n {nqn}")
                     sleep_n_sec(2)
                 self.disconnect_lvols()
@@ -244,7 +257,7 @@ class TestClusterBase:
                 sleep_n_sec(2)
             self.sbcli_utils.delete_all_storage_pools()
             sleep_n_sec(2)
-            self.ssh_obj.remove_dir(self.mgmt_nodes[0], "/mnt/*")
+            self.ssh_obj.remove_dir(self.fio_node, "/mnt/*")
             for node, ssh in self.ssh_obj.ssh_connections.items():
                 self.logger.info(f"Closing node ssh connection for {node}")
                 ssh.close()
@@ -379,34 +392,34 @@ class TestClusterBase:
         self.logger.info("Unmounting all mount points")
         if not base_path:
             base_path = self.mount_path
-        mount_points = self.ssh_obj.get_mount_points(node=self.mgmt_nodes[0], base_path=base_path)
+        mount_points = self.ssh_obj.get_mount_points(node=self.fio_node, base_path=base_path)
         for mount_point in mount_points:
             self.logger.info(f"Unmounting {mount_point}")
-            self.ssh_obj.unmount_path(node=self.mgmt_nodes[0], device=mount_point)
+            self.ssh_obj.unmount_path(node=self.fio_node, device=mount_point)
 
     def remove_mount_dirs(self):
         """ Remove all mount point directories """
         self.logger.info("Removing all mount point directories")
-        mount_dirs = self.ssh_obj.get_mount_points(node=self.mgmt_nodes[0], base_path=self.mount_path)
+        mount_dirs = self.ssh_obj.get_mount_points(node=self.fio_node, base_path=self.mount_path)
         for mount_dir in mount_dirs:
             self.logger.info(f"Removing directory {mount_dir}")
-            self.ssh_obj.remove_dir(node=self.mgmt_nodes[0], dir_path=mount_dir)
+            self.ssh_obj.remove_dir(node=self.fio_node, dir_path=mount_dir)
     
     def disconnect_lvol(self, lvol_device):
         """Disconnects the logical volume."""
-        nqn_lvol = self.ssh_obj.get_nvme_subsystems(node=self.mgmt_nodes[0],
+        nqn_lvol = self.ssh_obj.get_nvme_subsystems(node=self.fio_node,
                                                     nqn_filter=lvol_device)
         for nqn in nqn_lvol:
             self.logger.info(f"Disconnecting NVMe subsystem: {nqn}")
-            self.ssh_obj.disconnect_nvme(node=self.mgmt_nodes[0], nqn_grep=nqn)
+            self.ssh_obj.disconnect_nvme(node=self.fio_node, nqn_grep=nqn)
 
     def disconnect_lvols(self):
         """ Disconnect all NVMe devices with NQN containing 'lvol' """
         self.logger.info("Disconnecting all NVMe devices with NQN containing 'lvol'")
-        subsystems = self.ssh_obj.get_nvme_subsystems(node=self.mgmt_nodes[0], nqn_filter="lvol")
+        subsystems = self.ssh_obj.get_nvme_subsystems(node=self.fio_node, nqn_filter="lvol")
         for subsys in subsystems:
             self.logger.info(f"Disconnecting NVMe subsystem: {subsys}")
-            self.ssh_obj.disconnect_nvme(node=self.mgmt_nodes[0], nqn_grep=subsys)
+            self.ssh_obj.disconnect_nvme(node=self.fio_node, nqn_grep=subsys)
 
     def delete_snapshots(self):
         """ Delete all snapshots """
@@ -501,8 +514,18 @@ class TestClusterBase:
 
         # If the loop exits without completing all tasks, raise a timeout error
         raise RuntimeError(f"Timeout reached: Not all migration tasks completed within the specified timeout of {timeout} seconds.")
-            
     
-
-
-
+    def check_core_dump(self):
+        for node in self.storage_nodes:
+            files = self.ssh_obj.list_files(node, "/etc/simplyblock/")
+            self.logger.info(f"Files in /etc/simplyblock: {files}")
+            if "core" in files:
+                cur_date = datetime.now().strftime("%Y-%m-%d")
+                self.logger.info(f"Core file found on storage node {node} at {cur_date}")
+        
+        for node in self.mgmt_nodes:
+            files = self.ssh_obj.list_files(node, "/etc/simplyblock/")
+            self.logger.info(f"Files in /etc/simplyblock: {files}")
+            if "core" in files:
+                cur_date = datetime.now().strftime("%Y-%m-%d")
+                self.logger.info(f"Core file found on management node {node} at {cur_date}")

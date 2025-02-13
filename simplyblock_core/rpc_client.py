@@ -138,16 +138,16 @@ class RPCClient:
         params = {
             "trtype": trtype,
             "max_io_qpairs_per_ctrlr": qpair_count,
-            "max_queue_depth": 512,
-            "abort_timeout_sec": 2,
-            "ack_timeout": 512,
+            "max_queue_depth": 2048,
+            "abort_timeout_sec": 5,
+            "ack_timeout": 2048,
             "zcopy": True,
             "in_capsule_data_size": 4096,
             "max_io_size": 131072,
             "io_unit_size": 8192,
             "max_aq_depth": 128,
             "num_shared_buffers": 8192,
-            "buf_cache_size": 512,
+            "buf_cache_size": 32,
             "dif_insert_or_strip": False,
             "c2h_success": True,
             "sock_priority": 0
@@ -480,7 +480,8 @@ class RPCClient:
             "name": name,
             "raid_level": raid_level,
             "strip_size_kb": strip_size_kb,
-            "base_bdevs": bdevs_list
+            "base_bdevs": bdevs_list,
+            "io_unmap_limit": 100
         }
         if raid_level == "1":
             params["strip_size_kb"] = 0
@@ -594,14 +595,14 @@ class RPCClient:
     def bdev_nvme_set_options(self):
         params = {
             # "action_on_timeout": "abort",
-            "bdev_retry_count": 0,
-            "transport_retry_count": 0,
+            "bdev_retry_count": 3,
+            "transport_retry_count": 5,
             "ctrlr_loss_timeout_sec": 1,
             "fast_io_fail_timeout_sec": 0,
             "reconnect_delay_sec": 1,
-            "keep_alive_timeout_ms": 1000,
-            "transport_ack_timeout": 3,
-            "timeout_us": 200000
+            "keep_alive_timeout_ms": 10000,
+            "transport_ack_timeout": 10,
+            "timeout_us": constants.NVME_TIMEOUT_US
         }
         return self._request("bdev_nvme_set_options", params)
 

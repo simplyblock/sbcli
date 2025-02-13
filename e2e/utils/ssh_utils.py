@@ -7,15 +7,28 @@ import paramiko.ssh_exception
 from logger_config import setup_logger
 from pathlib import Path
 from datetime import datetime
-import random, string
+import random, string, re
 
 
 
 SSH_KEY_LOCATION = os.path.join(Path.home(), ".ssh", os.environ.get("KEY_NAME"))
 
+
 def generate_random_string(length=6):
     """Generate a random string of uppercase letters and digits."""
     return ''.join(random.choices(string.ascii_uppercase + string.digits, k=length))
+
+
+def get_parent_device(partition_path: str) -> str:
+    # Match typical partition patterns (e.g. /dev/nvme1n1 -> /dev/nvme1)
+    match = re.match(r"(/dev/nvme\d+)", partition_path)
+    if match:
+        return match.group(1)
+    elif partition_path.startswith("/dev/"):
+        # For other devices like /dev/sda1 -> /dev/sda
+        return re.sub(r"\d+$", "", partition_path)
+    else:
+        raise ValueError(f"Invalid partition path: {partition_path}")
 
 class SshUtils:
     """Class to perform all ssh level operationa
@@ -313,7 +326,7 @@ class SshUtils:
         if kwargs.get("debug", None):
             command = f"{command} --debug=all"
         if log_file:
-            command = f"{command} >> {log_file} 2>&1"
+            command = f"{command} > {log_file} 2>&1"
 
         self.logger.info(f"{command}")
 
@@ -459,6 +472,17 @@ class SshUtils:
         cmd = f"sudo nvme disconnect -n {nqn_grep}"
         output, error = self.exec_command(node=node, command=cmd)
         return output, error
+    
+    def disconnect_lvol_node_device(self, node, device):
+        """Disconnects given lvol nqn for a specific device.
+        Used to disconnect either on primary or secondary. not both.
+
+        Device format: /dev/nvme1
+        """
+        device = get_parent_device(device)
+        cmd = f"sudo nvme disconnect -d {device}"
+        output, error = self.exec_command(node=node, command=cmd)
+        return output, error
 
     def get_nvme_subsystems(self, node, nqn_filter="lvol"):
         """Get NVMe subsystems on the node."""
@@ -470,6 +494,26 @@ class SshUtils:
         """Get all snapshots on the node."""
         cmd = "%s snapshot list | grep -i ss | awk '{{print $2}}'" % self.base_cmd
         output, error = self.exec_command(node=node, command=cmd)
+        return output.strip().split()
+    
+    def suspend_node(self, node, node_id):
+        """Suspend node."""
+        cmd = f"{self.base_cmd} -d sn suspend {node_id}"
+        output, _ = self.exec_command(node=node, command=cmd)
+        return output.strip().split()
+    
+    def shutdown_node(self, node, node_id, force=False):
+        """Shutdown Node."""
+        force_cmd = " --force" if force else ""
+        cmd = f"{self.base_cmd} -d sn shutdown {node_id}{force_cmd}"
+        output, _ = self.exec_command(node=node, command=cmd)
+        return output.strip().split()
+    
+    def restart_node(self, node, node_id, force=False):
+        """Shutdown Node."""
+        force_cmd = " --force" if force else ""
+        cmd = f"{self.base_cmd} -d sn restart {node_id}{force_cmd}"
+        output, _ = self.exec_command(node=node, command=cmd)
         return output.strip().split()
 
     def get_lvol_id(self, node, lvol_name):
@@ -876,8 +920,6 @@ class SshUtils:
         Returns:
             list: List of all blocked ports (unique).
         """
-        blocked_ports = set()
-
         try:
             if block_ports is None:
                 block_ports = []
@@ -891,12 +933,14 @@ class SshUtils:
                 cmd = "ss -tnp | grep %s | awk '{print $4}'" % mgmt_ip
                 ss_output, _ = self.exec_command(node_ip, cmd)
                 ip_with_ports = ss_output.split()
-                ports_to_block = set([r.split(":")[1] for r in ip_with_ports])
+                ports_to_block = [str(r.split(":")[1]) for r in ip_with_ports]
                 block_ports.extend(ports_to_block)
 
             # Remove duplicates
             block_ports = [str(port) for port in block_ports]
-            block_ports = list(set(block_ports))
+            block_ports = list(dict.fromkeys(block_ports))
+            block_ports = sorted(block_ports)
+            
             if "22" in block_ports:
                 block_ports.remove("22")
 
@@ -921,7 +965,6 @@ class SshUtils:
                 #                      )
                 
                 self.exec_command(node_ip, block_command)
-                blocked_ports.update(block_ports)
                 self.logger.info(f"Blocked ports {ports_str} on {node_ip}.")
 
             time.sleep(5)
@@ -931,7 +974,7 @@ class SshUtils:
         except Exception as e:
             self.logger.error(f"Failed to block ports on {node_ip}: {e}")
 
-        return list(blocked_ports)
+        return block_ports
 
 
     def remove_partial_nw_outage(self, node_ip, blocked_ports):
@@ -947,6 +990,8 @@ class SshUtils:
         """
         try:
             if blocked_ports:
+                blocked_ports = list(dict.fromkeys(blocked_ports))
+                blocked_ports = sorted(blocked_ports)
                 ports_str = ",".join(blocked_ports)
                 unblock_command = f"""
                     sudo iptables -D OUTPUT -p tcp -m multiport --sports {ports_str} -j DROP;
@@ -968,6 +1013,57 @@ class SshUtils:
 
         except Exception as e:
             self.logger.error(f"Failed to unblock ports on {node_ip}: {e}")
+
+    def remove_partial_nw_outage2(self, node_ip, blocked_ports=None):
+        """
+        Remove partial network outage by unblocking multiple ports at once.
+
+        Args:
+            node_ip (str): IP address of the target node.
+            blocked_ports (list, optional): List of ports to unblock. If None, fetch from iptables.
+
+        Returns:
+            None
+        """
+        try:
+            if blocked_ports is None:
+                # Fetch existing blocked ports from iptables
+                cmd = "sudo iptables -L -v -n --line-numbers"
+                output, _ = self.exec_command(node_ip, cmd)
+
+                blocked_ports = []
+
+                for line in output.split("\n"):
+                    if "multiport dports" in line or "multiport sports" in line:
+                        parts = line.split()
+                        for part in parts:
+                            if "multiport" in part:
+                                idx = parts.index(part)
+                                if idx + 1 < len(parts):
+                                    ports = parts[idx + 1].split(",")
+                                    for port in ports:
+                                        if port not in blocked_ports:
+                                            blocked_ports.append(port)
+
+            if blocked_ports:
+                ports_str = ",".join(blocked_ports)
+                unblock_command = f"""
+                    sudo iptables -D OUTPUT -p tcp -m multiport --sports {ports_str} -j DROP;
+                    sudo iptables -D OUTPUT -p tcp -m multiport --dports {ports_str} -j DROP;
+                    sudo iptables -D INPUT -p tcp -m multiport --dports {ports_str} -j DROP;
+                    sudo iptables -D INPUT -p tcp -m multiport --sports {ports_str} -j DROP;
+                """
+
+                self.exec_command(node_ip, unblock_command)
+                self.logger.info(f"Unblocked ports {ports_str} on {node_ip}.")
+
+            time.sleep(5)
+            self.logger.info("Network outage: IPTable Rules List After Unblocking:")
+            self.exec_command(node_ip, "sudo iptables -L -v -n --line-numbers")
+
+        except Exception as e:
+            self.logger.error(f"Failed to unblock ports on {node_ip}: {e}")
+
 
 
     def set_aio_max_nr(self, node_ip, value=1048576):

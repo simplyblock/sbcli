@@ -138,6 +138,8 @@ class TestSingleNodeOutage(TestClusterBase):
         
         self.sbcli_utils.resize_lvol(lvol_id=self.sbcli_utils.get_lvol_id(self.lvol_name),
                                      new_size="20G")
+        
+        timestamp = int(datetime.now().timestamp())
 
         self.sbcli_utils.suspend_node(node_uuid=no_lvol_node_uuid)
         try:
@@ -182,6 +184,13 @@ class TestSingleNodeOutage(TestClusterBase):
             containers=self.container_nodes[node_ip],
             log_dir=self.docker_logs_path,
             test_name=self.test_name
+        )
+
+        sleep_n_sec(120)
+        self.validate_migration_for_node(
+            timestamp=timestamp,
+            timeout=1000,
+            node_id=None
         )
 
         # Write steps in order
@@ -412,6 +421,7 @@ class TestHASingleNodeOutage(TestClusterBase):
                 test_name=self.test_name
             )
             self.logger.info(f"Validating migration tasks for node {no_lvol_node_uuid}.")
+            sleep_n_sec(120)
             self.validate_migration_for_node(timestamp, 5000, None)
 
 
