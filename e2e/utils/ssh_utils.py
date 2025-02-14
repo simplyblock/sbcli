@@ -1261,37 +1261,41 @@ class SshUtils:
         self.check_and_install_tcpdump(node_ip=node_ip)
         
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        
-        tcpdump_log_file = f"{log_dir}/tcpdump_{node_ip}_{timestamp}.txt"
-        pid_file = f"/tmp/tcpdump_pid_{node_ip}"
 
-        # Combined tcpdump commands with & to run them all simultaneously
-        tcpdump_command = f"""
-        (
-            sudo tcpdump -i ens16 -nn '(tcp[tcpflags] == 2 and tcp[14:2] > 1)' &
-            sudo tcpdump -i ens16 -nn -v '(tcp[13] & 0x10 != 0 and tcp[14:2] == 0)' &
-            sudo tcpdump -i ens16 -nn '(tcp[13] & 0x04 != 0)' &
-            sudo tcpdump -i ens16 -nn -tttt | awk '
-                /Flags \\\[.\\\]/ {{
-                    if (prev_time != "") {{
-                        diff = $1-prev_time;
-                        if (diff > 0.5) print prev_time, "->", $1, "ACK timeout:", diff, "sec"
-                    }}
-                    prev_time = $1
-                }}
-            '
-        ) > {tcpdump_log_file} 2>&1 &
+        # Define log file names for each tcpdump command
+        syn_timeout_log = f"{log_dir}/tcpdump_syn_timeout_{node_ip}_{timestamp}.txt"
+        rcv_buffer_full_log = f"{log_dir}/tcpdump_rcv_buffer_full_{node_ip}_{timestamp}.txt"
+        conn_reset_log = f"{log_dir}/tcpdump_conn_reset_{node_ip}_{timestamp}.txt"
+        ack_timeout_log = f"{log_dir}/tcpdump_ack_timeout_{node_ip}_{timestamp}.txt"
 
-        echo $! > {pid_file}
-        """
+        # Create tcpdump commands for different anomalies
+        tcpdump_commands = [
+            f"sudo tcpdump -i ens16 -nn '(tcp[tcpflags] == 2 and tcp[14:2] > 1)' > {syn_timeout_log} 2>&1 &",
+            f"sudo tcpdump -i ens16 -nn -v '(tcp[13] & 0x10 != 0 and tcp[14:2] == 0)' > {rcv_buffer_full_log} 2>&1 &",
+            f"sudo tcpdump -i ens16 -nn '(tcp[13] & 0x04 != 0)' > {conn_reset_log} 2>&1 &",
 
-        # Execute the command remotely using SSH
-        self.exec_command(node_ip, tcpdump_command)
-        self.logger.info(f"Started all tcpdump logging on {node_ip}, saving to {tcpdump_log_file}")
+            ("sudo tcpdump -i ens16 -nn -tttt | awk '/Flags \\[.\\]/ {"
+            " if (prev_time != \"\") {"
+            " diff = $1-prev_time;"
+            " if (diff > 0.5) print prev_time, \"->\", $1, \"ACK timeout:\", diff, \"sec\""
+            " }"
+            " prev_time = $1"
+            " }' > %s 2>&1 &") 
+            % ack_timeout_log
+        ]
+
+        # Execute each tcpdump command remotely
+        for cmd in tcpdump_commands:
+            self.exec_command(node_ip, cmd)
+
+        # Log the output filenames for reference
+        self.logger.info(f"Started tcpdump for SYN timeouts on {node_ip}, saving to {syn_timeout_log}")
+        self.logger.info(f"Started tcpdump for RCV buffer full on {node_ip}, saving to {rcv_buffer_full_log}")
+        self.logger.info(f"Started tcpdump for Connection resets on {node_ip}, saving to {conn_reset_log}")
+        self.logger.info(f"Started tcpdump for ACK timeouts on {node_ip}, saving to {ack_timeout_log}")
 
     def stop_all_tcpdump(self, node_ip):
         """Kill all tcpdump processes on a remote node."""
-
         stop_command = """
         sudo pkill -f tcpdump && echo "All tcpdump processes stopped" || echo "No tcpdump process found"
         """
