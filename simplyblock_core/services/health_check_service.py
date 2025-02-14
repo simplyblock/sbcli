@@ -136,9 +136,14 @@ while True:
                                 name, org_dev.nvmf_nqn, org_dev.nvmf_ip, org_dev.nvmf_port)
                             if ret:
                                 logger.info(f"Successfully connected to device: {org_dev.get_id()}")
-                                remote_device.status = NVMeDevice.STATUS_ONLINE
                                 connected_devices.append(org_dev.get_id())
-                                snode.write_to_db()
+                                sn = db_controller.get_storage_node_by_id(snode.get_id())
+                                for d in sn.remote_devices:
+                                    if d.get_id() == remote_device.get_id():
+                                        d.status = NVMeDevice.STATUS_ONLINE
+                                        sn.write_to_db()
+                                        break
+
                                 distr_controller.send_dev_status_event(org_dev, NVMeDevice.STATUS_ONLINE, snode)
                             else:
                                 logger.error(f"Failed to connect to device: {org_dev.get_id()}")
