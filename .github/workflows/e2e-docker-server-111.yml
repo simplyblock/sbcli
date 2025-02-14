@@ -137,7 +137,7 @@ jobs:
           CHUNK_BS: ${{ env.CHUNK_BS }}
           KEY_NAME: "simplyblock-us-east-2.pem"
           SECRET_VALUE: ${{ secrets.simplyblock_us_east_2_pem }}
-          BASTION_IP: "192.168.10.141"
+          BASTION_IP: "192.168.10.146"
           GRAFANA_ENDPOINT: "http://192.168.10.141/grafana"
           mnodes: "192.168.10.141"
           storage_private_ips: "192.168.10.142 192.168.10.143 192.168.10.144"
