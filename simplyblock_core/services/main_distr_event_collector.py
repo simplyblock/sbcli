@@ -71,7 +71,8 @@ def process_device_event(event):
             event.status = 'skipped:node_offline'
             return
 
-        if device_node_obj.get_id() != event_node_obj.get_id() and event.message == 'error_open':
+        if device_node_obj.get_id() != event_node_obj.get_id() and event.message in ['error_open', 'SPDK_BDEV_EVENT_REMOVE']:
+            event_node_obj = db_controller.get_storage_node_by_id(event_node_obj.get_id())
             for dev in event_node_obj.remote_devices:
                 if dev.get_id() == device_obj.get_id():
                     dev.status = NVMeDevice.STATUS_UNAVAILABLE

@@ -151,11 +151,11 @@ def _check_node_lvstore(lvstore_stack, node, auto_fix=False):
                                 if result['Kind'] == "Device":
                                     if result['Reported Status']:
                                         dev = db_controller.get_storage_device_by_id(result['UUID'])
-                                        # if dev.status == NVMeDevice.STATUS_ONLINE:
-                                        #     node = db_controller.get_storage_node_by_id(node.get_id())
-                                        #     remote_devices = storage_node_ops._connect_to_remote_devs(node)
-                                        #     node.remote_devices = remote_devices
-                                        #     node.write_to_db()
+                                        if dev.status == NVMeDevice.STATUS_ONLINE:
+                                            remote_devices = storage_node_ops._connect_to_remote_devs(node)
+                                            n = db_controller.get_storage_node_by_id(node.get_id())
+                                            n.remote_devices = remote_devices
+                                            n.write_to_db()
                                         distr_controller.send_dev_status_event(dev, dev.status, node)
                                 if result['Kind'] == "Node":
                                     n = db_controller.get_storage_node_by_id(result['UUID'])
