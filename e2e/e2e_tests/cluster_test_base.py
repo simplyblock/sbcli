@@ -142,6 +142,7 @@ class TestClusterBase:
                                               log_dir=self.docker_logs_path,
                                               test_name=self.test_name
                                               )
+            self.ssh_obj.start_tcpdump_logging(node_ip=node, log_dir=self.docker_logs_path)
 
         self.logger.info("Started log monitoring for all storage nodes.")
 
@@ -214,6 +215,10 @@ class TestClusterBase:
         
         self.ssh_obj.kill_processes(node=self.fio_node,
                                     process_name="fio")
+        
+        for node in self.storage_nodes:
+            self.ssh_obj.stop_all_tcpdump(node_ip=node)
+
         retry_check = 100
         while retry_check:
             fio_process = self.ssh_obj.find_process_name(
@@ -449,8 +454,7 @@ class TestClusterBase:
         ]
         return filtered_tasks
 
-    def validate_migration_for_node(self, timestamp, timeout, node_id=None, check_interval=60,
-                                    no_task_ok=False):
+    def validate_migration_for_node(self, timestamp, timeout, node_id=None, check_interval=60, no_task_ok=False):
         """
         Validate that all `device_migration` tasks for a specific node have completed successfully 
         and check for stuck tasks until the timeout is reached.
@@ -464,34 +468,46 @@ class TestClusterBase:
         Raises:
             RuntimeError: If any migration task failed, is incomplete, is stuck, or if the timeout is reached.
         """
-        start_time = datetime.now()
+        start_time = datetime.now(timezone.utc)  # Aware datetime
         end_time = start_time + timedelta(seconds=timeout)
 
         output = None
         while output is not None:
-            output, _ = self.ssh_obj.exec_command(node=self.mgmt_nodes[0], 
-                                                command=f"{self.base_cmd} cluster list-tasks {self.cluster_id}")
+            output, _ = self.ssh_obj.exec_command(
+                node=self.mgmt_nodes[0], 
+                command=f"{self.base_cmd} cluster list-tasks {self.cluster_id}"
+            )
             self.logger.info(f"Data migration output: {output}")
             if no_task_ok:
                 break
 
-        while datetime.now() < end_time:
+        while datetime.now(timezone.utc) < end_time:
             tasks = self.sbcli_utils.get_cluster_tasks(self.cluster_id)
             filtered_tasks = self.filter_migration_tasks(tasks, node_id, timestamp)
             
             if not filtered_tasks and not no_task_ok:
-                raise RuntimeError(f"No migration tasks found for {'node ' + node_id if node_id else 'the cluster'} after the specified timestamp.")
+                raise RuntimeError(
+                    f"No migration tasks found for {'node ' + node_id if node_id else 'the cluster'} "
+                    f"after the specified timestamp."
+                )
 
             self.logger.info(f"Checking migration tasks: {filtered_tasks}")
             all_done = True
             completed_count = 0
 
             for task in filtered_tasks:
-                # Check if the task is stuck (updated_at is more than 15 minutes old)
-                updated_at = datetime.fromisoformat(task['updated_at'])
-                if datetime.now(timezone.utc) - updated_at > timedelta(minutes=65) \
-                    and task["status"] != "done":
-                    raise RuntimeError(f"Migration task {task['id']} is stuck (last updated at {updated_at}).")
+                try:
+                    # Convert to aware datetime (UTC) for comparison
+                    updated_at = datetime.fromisoformat(task['updated_at']).astimezone(timezone.utc)
+                except ValueError as e:
+                    self.logger.error(f"Error parsing timestamp for task {task['id']}: {e}")
+                    continue
+
+                # Check if task is stuck (not updated for more than 65 minutes)
+                if datetime.now(timezone.utc) - updated_at > timedelta(minutes=65) and task["status"] != "done":
+                    raise RuntimeError(
+                        f"Migration task {task['id']} is stuck (last updated at {updated_at.isoformat()})."
+                    )
 
                 # Check if task is completed
                 if task['status'] == 'done':
@@ -502,18 +518,26 @@ class TestClusterBase:
             # Logging the counts after each check
             total_tasks = len(filtered_tasks)
             remaining_tasks = total_tasks - completed_count
-            self.logger.info(f"Total migration tasks: {total_tasks}, Completed: {completed_count}, Remaining: {remaining_tasks}")
+            self.logger.info(
+                f"Total migration tasks: {total_tasks}, Completed: {completed_count}, Remaining: {remaining_tasks}"
+            )
 
             # If all tasks are done, break out of the loop
             if all_done:
-                self.logger.info(f"All migration tasks for {'node ' + node_id if node_id else 'the cluster'} completed successfully without any stuck tasks.")
+                self.logger.info(
+                    f"All migration tasks for {'node ' + node_id if node_id else 'the cluster'} "
+                    f"completed successfully without any stuck tasks."
+                )
                 return
 
             # Wait for the next check
             sleep_n_sec(check_interval)
 
         # If the loop exits without completing all tasks, raise a timeout error
-        raise RuntimeError(f"Timeout reached: Not all migration tasks completed within the specified timeout of {timeout} seconds.")
+        raise RuntimeError(
+            f"Timeout reached: Not all migration tasks completed within the specified timeout of {timeout} seconds."
+        )
+
     
     def check_core_dump(self):
         for node in self.storage_nodes:

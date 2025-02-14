@@ -1917,6 +1917,7 @@ def restart_storage_node(
     for db_dev in snode.nvme_devices:
         if db_dev.status in [NVMeDevice.STATUS_UNAVAILABLE, NVMeDevice.STATUS_READONLY, NVMeDevice.STATUS_ONLINE]:
             db_dev.status = NVMeDevice.STATUS_ONLINE
+            db_dev.health_check = True
             device_events.device_restarted(db_dev)
     snode.write_to_db(db_controller.kv_store)
 
@@ -2928,6 +2929,7 @@ def recreate_lvstore(snode):
 
             sec_rpc_client.bdev_lvol_set_leader(False, lvs_name=snode.lvstore, bs_nonleadership=True)
             sec_rpc_client.bdev_distrib_force_to_non_leader(snode.jm_vuid)
+            time.sleep(0.5)
 
     rpc_client = RPCClient(
         snode.mgmt_ip, snode.rpc_port,
@@ -2936,31 +2938,6 @@ def recreate_lvstore(snode):
     ret = rpc_client.bdev_examine(snode.raid)
     ret = rpc_client.bdev_wait_for_examine()
     ret = rpc_client.bdev_lvol_set_lvs_ops(snode.lvstore, snode.jm_vuid, snode.lvol_subsys_port)
-    # time.sleep(1)
-
-    # # connecting to remote devices
-    # logger.info("Connecting to remote devices")
-    # snode = db_controller.get_storage_node_by_id(snode.get_id())
-    # snode.remote_devices = _connect_to_remote_devs(snode)
-    # if snode.enable_ha_jm:
-    #     # online_devs = []
-    #     # for remote_device in snode.remote_jm_devices:
-    #     #     if remote_device.status == StorageNode.STATUS_ONLINE:
-    #     #         online_devs.append(remote_device)
-    #     #
-    #     # if len(online_devs) < 2:
-    #     #     devs = get_sorted_ha_jms(snode)
-    #     #     for did in devs:
-    #     #         dev = db_controller.get_jm_device_by_id(did)
-    #     #         online_devs.append(dev)
-    #     #         if len(online_devs) > snode.ha_jm_count - 1:
-    #     #             break
-    #     #
-    #     # snode.remote_jm_devices = online_devs
-    #     snode.remote_jm_devices = _connect_to_remote_jm_devs(snode)
-    # snode.write_to_db()
-    #
-    # time.sleep(2)
 
     if not lvol_list:
         prim_node_suspend = False
@@ -3002,6 +2979,8 @@ def recreate_lvstore(snode):
     #     ret = rpc_client.jc_explicit_synchronization(snode.jm_vuid)
     #     logger.info(f"JM Sync res: {ret}")
 
+    rpc_client.bdev_lvol_set_leader(True, lvs_name=snode.lvstore)
+
     if prim_node_suspend:
         if sec_node.status == StorageNode.STATUS_ONLINE:
             sec_node_api.firewall_set_port(snode.lvol_subsys_port, "tcp", "allow")
@@ -3012,7 +2991,7 @@ def recreate_lvstore(snode):
         return False
 
     if sec_node.status == StorageNode.STATUS_ONLINE:
-        time.sleep(5)
+        time.sleep(10)
         sec_node_api.firewall_set_port(snode.lvol_subsys_port, "tcp", "allow")
 
         # sec_rpc_client = RPCClient(sec_node.mgmt_ip, sec_node.rpc_port, sec_node.rpc_username, sec_node.rpc_password, timeout=3, retry=2)

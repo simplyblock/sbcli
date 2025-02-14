@@ -315,6 +315,9 @@ class RandomFailoverTest(TestLvolHACluster):
         self.sbcli_utils.wait_for_storage_node_status(self.current_outage_node, "online", timeout=4000)
         self.sbcli_utils.wait_for_health_status(self.current_outage_node, True, timeout=4000)
         self.outage_end_time = int(datetime.now().timestamp())
+
+        # Log the restart event
+        self.log_outage_event(self.current_outage_node, outage_type, "Node restarted")
         
         self.ssh_obj.restart_docker_logging(
             node_ip=node_ip,
@@ -322,6 +325,27 @@ class RandomFailoverTest(TestLvolHACluster):
             log_dir=self.docker_logs_path,
             test_name=self.test_name
         )
+
+        search_start_iso = datetime.fromtimestamp(self.outage_start_time - 30).isoformat(timespec='microseconds')
+        search_end_iso = datetime.fromtimestamp(self.outage_end_time + 10).isoformat(timespec='microseconds')
+
+        self.logger.info(f"Fetching dmesg logs on {node_ip} from {search_start_iso} to {search_end_iso}")
+
+        # Get dmesg logs with ISO timestamps
+        dmesg_logs = self.ssh_obj.get_dmesg_logs_within_iso_window(
+            self.fio_node, search_start_iso, search_end_iso
+        )
+
+        nvme_issues = [
+            line for line in dmesg_logs if "nvme" in line.lower() or "connection" in line.lower()
+        ]
+
+        if nvme_issues:
+            self.logger.warning(f"Potential NVMe issues detected on {node_ip}:")
+            for issue in nvme_issues:
+                self.logger.warning(issue)
+        else:
+            self.logger.info(f"No NVMe issues found on {node_ip} between {search_start_iso} and {search_end_iso}")
 
         if outage_type == "partial_nw":
             sleep_n_sec(600)
@@ -335,9 +359,6 @@ class RandomFailoverTest(TestLvolHACluster):
             self.ssh_obj.dump_lvstore(node_ip=self.mgmt_nodes[0],
                                       storage_node_id=node)
 
-        # Log the restart event
-        self.log_outage_event(self.current_outage_node, outage_type, "Node restarted")
-            
 
     def create_snapshots_and_clones(self):
         """Create snapshots and clones during an outage."""

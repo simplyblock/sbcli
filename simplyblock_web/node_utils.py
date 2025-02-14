@@ -179,20 +179,15 @@ def firewall_port(port_id=9090, port_type="tcp", block=True):
 
             f"iptables -D INPUT -p {port_type} --dport {port_id} -j ACCEPT",
             f"iptables -D OUTPUT -p {port_type} --dport {port_id} -j ACCEPT",
-
             f"iptables -A INPUT -p {port_type} --dport {port_id} -j DROP",
-            # f"iptables -A INPUT -p {port_type} --dport {port_id} -j REJECT",
             f"iptables -A OUTPUT -p {port_type} --dport {port_id} -j DROP",
-            # f"iptables -A OUTPUT -p {port_type} --dport {port_id} -j REJECT",
             "iptables -L -n",
         ]
     else:
         cmd_list=[
 
             f"iptables -D INPUT -p {port_type} --dport {port_id} -j DROP",
-            # f"iptables -D INPUT -p {port_type} --dport {port_id} -j REJECT",
             f"iptables -D OUTPUT -p {port_type} --dport {port_id} -j DROP",
-            # f"iptables -D OUTPUT -p {port_type} --dport {port_id} -j REJECT",
 
             f"iptables -A INPUT -p {port_type} --dport {port_id} -j ACCEPT",
             f"iptables -A OUTPUT -p {port_type} --dport {port_id} -j ACCEPT",
