@@ -911,14 +911,14 @@ class RPCClient:
 
     def bdev_lvol_set_leader(self, is_leader=False, uuid=None, lvs_name=None, bs_nonleadership=False):
         params = {
-            "lvs_leadership": is_leader,
+            "leadership": is_leader,
         }
         if uuid:
             params["uuid"] = uuid
         elif lvs_name:
             params["lvs_name"] = lvs_name
 
-        params["bs_nonleadership"] = bs_nonleadership
+        # params["bs_nonleadership"] = bs_nonleadership
 
         return self._request("bdev_lvol_set_leader_all", params)
 
