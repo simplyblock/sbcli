@@ -76,7 +76,7 @@ TASK_EXEC_RETRY_COUNT = 8
 SIMPLY_BLOCK_SPDK_CORE_IMAGE = "simplyblock/spdk-core:v24.05-tag-latest"
 
 
-SIMPLY_BLOCK_SPDK_ULTRA_IMAGE = "simplyblock/spdk:main-6c4d644e-amd64"
+SIMPLY_BLOCK_SPDK_ULTRA_IMAGE = "simplyblock/spdk:SFAM-1702_ultra-96049924"
 
 GELF_PORT = 12202
 
