@@ -56,13 +56,13 @@ ALL_TESTS = [
 
 def get_all_tests(custom=True, ha_test=False):
     tests = [
-        TestLvolFioNpcsCustom,
+        TestSingleNodeOutage,
         TestLvolFioNpcs0,
         TestLvolFioNpcs1,
         TestLvolFioNpcs2,
         TestSingleNodeFailure,
         TestHASingleNodeFailure,
-        TestSingleNodeOutage,
+        TestLvolFioNpcsCustom,
         # TestSingleNodeReboot,
         # TestHASingleNodeReboot,
         # TestHASingleNodeOutage
