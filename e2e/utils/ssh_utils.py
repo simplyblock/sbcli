@@ -1258,6 +1258,8 @@ class SshUtils:
 
     def start_tcpdump_logging(self, node_ip, log_dir):
         """Start tcpdump logging for various TCP anomalies on a remote node."""
+        self.check_and_install_tcpdump(node_ip=node_ip)
+        
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         
         tcpdump_log_file = f"{log_dir}/tcpdump_{node_ip}_{timestamp}.txt"
