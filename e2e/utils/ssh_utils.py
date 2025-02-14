@@ -1244,3 +1244,90 @@ class SshUtils:
 
         self.logger.info(f"Generating new UUID for {device} on {node}.")
         self.exec_command(node, f"sudo xfs_admin -U generate {device}")  # Generate new UUID
+
+    def check_and_install_tcpdump(self, node_ip):
+        output, _ = self.exec_command(node_ip, "which tcpdump")
+        if not output:
+            self.logger.info("tcpdump not found, installing...")
+            install_tcpdump_command = (
+                "sudo apt-get update -y && sudo apt-get install -y tcpdump"
+                " || sudo yum install -y tcpdump"
+            )
+            output, _ = self.exec_command(node_ip, install_tcpdump_command)
+            self.logger.info(f"tcpdump installed successfully: {output}")
+
+    def start_tcpdump_logging(self, node_ip, log_dir):
+        """Start tcpdump logging for various TCP anomalies on a remote node."""
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        
+        tcpdump_log_file = f"{log_dir}/tcpdump_{node_ip}_{timestamp}.txt"
+        pid_file = f"/tmp/tcpdump_pid_{node_ip}"
+
+        # Combined tcpdump commands with & to run them all simultaneously
+        tcpdump_command = f"""
+        (
+            sudo tcpdump -i ens16 -nn '(tcp[tcpflags] == 2 and tcp[14:2] > 1)' &
+            sudo tcpdump -i ens16 -nn -v '(tcp[13] & 0x10 != 0 and tcp[14:2] == 0)' &
+            sudo tcpdump -i ens16 -nn '(tcp[13] & 0x04 != 0)' &
+            sudo tcpdump -i ens16 -nn -tttt | awk '
+                /Flags \\\[.\\\]/ {{
+                    if (prev_time != "") {{
+                        diff = $1-prev_time;
+                        if (diff > 0.5) print prev_time, "->", $1, "ACK timeout:", diff, "sec"
+                    }}
+                    prev_time = $1
+                }}
+            '
+        ) > {tcpdump_log_file} 2>&1 &
+
+        echo $! > {pid_file}
+        """
+
+        # Execute the command remotely using SSH
+        self.exec_command(node_ip, tcpdump_command)
+        self.logger.info(f"Started all tcpdump logging on {node_ip}, saving to {tcpdump_log_file}")
+
+    def stop_all_tcpdump(self, node_ip):
+        """Kill all tcpdump processes on a remote node."""
+
+        stop_command = """
+        sudo pkill -f tcpdump && echo "All tcpdump processes stopped" || echo "No tcpdump process found"
+        """
+        self.exec_command(node_ip, stop_command)
+        self.logger.info(f"Stopped all tcpdump processes on {node_ip}")
+
+    def get_dmesg_logs_within_iso_window(self, node_ip, start_iso, end_iso):
+        """
+        Fetch dmesg logs with ISO timestamps on a remote node within a time window.
+
+        Args:
+            node_ip (str): Node IP to fetch logs from.
+            start_iso (str): Start time in ISO 8601 format.
+            end_iso (str): End time in ISO 8601 format.
+
+        Returns:
+            list: List of filtered dmesg log lines.
+        """
+        # Get dmesg logs in ISO format
+        cmd = "sudo dmesg --time-format=iso"
+        output, error = self.exec_command(node_ip, cmd)
+
+        if error:
+            self.logger.error(f"Error fetching dmesg logs from {node_ip}: {error}")
+            return []
+
+        logs_in_window = []
+        start_time = datetime.fromisoformat(start_iso)
+        end_time = datetime.fromisoformat(end_iso)
+
+        for line in output.splitlines():
+            try:
+                timestamp_str = line.split()[0]
+                log_time = datetime.fromisoformat(timestamp_str.replace(',', '.'))
+
+                if start_time <= log_time <= end_time:
+                    logs_in_window.append(line)
+            except Exception as e:
+                self.logger.warning(f"Skipping malformed dmesg line: {line} ({e})")
+
+        return logs_in_window
