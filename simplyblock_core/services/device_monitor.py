@@ -31,7 +31,7 @@ while True:
             if dev.status == NVMeDevice.STATUS_ONLINE:
                 online_devices.append(dev)
 
-            if dev.io_error and dev.status == NVMeDevice.STATUS_UNAVAILABLE and not dev.retries_exhausted:
+            if dev.status == NVMeDevice.STATUS_UNAVAILABLE and not dev.retries_exhausted:
                 logger.info("Adding device to auto restart")
                 auto_restart_devices.append(dev)
 
