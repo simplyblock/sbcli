@@ -1256,6 +1256,21 @@ class SshUtils:
             output, _ = self.exec_command(node_ip, install_tcpdump_command)
             self.logger.info(f"tcpdump installed successfully: {output}")
 
+    def exec_command_no_wait(self, node_ip, command):
+        """Execute a command on a remote node without waiting for output (background process)."""
+        try:
+            client = self.ssh_connections[node_ip]
+            stdin, stdout, stderr = client.exec_command(command, timeout=5, get_pty=True)
+            
+            # Immediately close streams to prevent blocking
+            stdin.close()
+            stdout.channel.close()
+            stderr.channel.close()
+
+            self.logger.info(f"Executed command in background on {node_ip}: {command}")
+        except Exception as e:
+            self.logger.error(f"Error executing command on {node_ip}: {e}")
+
     def start_tcpdump_logging(self, node_ip, log_dir):
         """Start tcpdump logging for various TCP anomalies on a remote node with proper background handling."""
         self.check_and_install_tcpdump(node_ip=node_ip)
@@ -1284,9 +1299,9 @@ class SshUtils:
             ) % ack_timeout_log
         ]
 
-        # Execute each tcpdump command remotely using Paramiko
+        # Execute each tcpdump command remotely
         for cmd in tcpdump_commands:
-            self.exec_command(node_ip, cmd)
+            self.exec_command_no_wait(node_ip, cmd)
 
         # Log the output filenames for reference
         self.logger.info(f"Started tcpdump for SYN timeouts on {node_ip}, saving to {syn_timeout_log}")
