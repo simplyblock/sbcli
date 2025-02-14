@@ -775,14 +775,9 @@ class RPCClient:
 
     def sock_impl_set_options(self):
         method = "sock_impl_set_options"
-        params = {
-            "impl_name": "posix",
-            "enable_quickack": True,
-            "enable_zerocopy_send_server": False,
-            "enable_zerocopy_send_client": True,
-            "recv_buf_size": 6097152,
-            "send_buf_size": 6097152
-        }
+        params = {"impl_name": "posix", "enable_quickack": True,
+                  "enable_zerocopy_send_server": True,
+                  "enable_zerocopy_send_client": True}
         return self._request(method, params)
 
     def nvmf_set_config(self, poll_groups_mask):
@@ -914,14 +909,16 @@ class RPCClient:
             params = {"jm_vuid": jm_vuid}
         return self._request("bdev_distrib_force_to_non_leader", params)
 
-    def bdev_lvol_set_leader(self, is_leader=False, uuid=None, lvs_name=None):
+    def bdev_lvol_set_leader(self, is_leader=False, uuid=None, lvs_name=None, bs_nonleadership=False):
         params = {
-            "leadership": is_leader,
+            "lvs_leadership": is_leader,
         }
         if uuid:
             params["uuid"] = uuid
         elif lvs_name:
             params["lvs_name"] = lvs_name
+
+        params["bs_nonleadership"] = bs_nonleadership
 
         return self._request("bdev_lvol_set_leader_all", params)
 

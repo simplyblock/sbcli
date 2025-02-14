@@ -463,7 +463,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
         }
     }
 
-    if lvol.lvol_priority_class:
+    if cl.enable_qos and lvol.lvol_priority_class >= 0:
         lvol_dict["params"]["lvol_priority_class"] = lvol.lvol_priority_class
     lvol.bdev_stack = [lvol_dict]
 
@@ -659,20 +659,20 @@ def recreate_lvol_on_node(lvol, snode, ha_inode_self=0, ana_state=None):
     rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
 
     base=f"{lvol.lvs_name}/{lvol.lvol_bdev}"
-    retry = 3
-    while retry > 0:
-        lv = rpc_client.get_bdevs(base)
-        if lv:
-            break
-        else:
-            retry -= 1
-            msg = f"LVol bdev not found: {base} on node {snode.get_id()}, retrying"
-            logger.warning(msg)
-            time.sleep(2)
-    else:
-        msg = f"LVol bdev not found: {base} on node {snode.get_id()}"
-        logger.error(msg)
-        return False, msg
+    # retry = 3
+    # while retry > 0:
+    #     lv = rpc_client.get_bdevs(base)
+    #     if lv:
+    #         break
+    #     else:
+    #         retry -= 1
+    #         msg = f"LVol bdev not found: {base} on node {snode.get_id()}, retrying"
+    #         logger.warning(msg)
+    #         time.sleep(2)
+    # else:
+    #     msg = f"LVol bdev not found: {base} on node {snode.get_id()}"
+    #     logger.error(msg)
+    #     return False, msg
 
     if "crypto" in lvol.lvol_type:
         ret = _create_crypto_lvol(
@@ -682,27 +682,27 @@ def recreate_lvol_on_node(lvol, snode, ha_inode_self=0, ana_state=None):
             logger.error(msg)
             return False, msg
 
-    namespace_found = False
-    subsys_found = False
-    ret = rpc_client.subsystem_list(lvol.nqn)
-    if ret :
-        subsys_found = True
-        if ret[0]["namespaces"]:
-            for ns in ret[0]["namespaces"]:
-                if ns['name'] == lvol.top_bdev:
-                    namespace_found = True
-                    break
+    # namespace_found = False
+    # subsys_found = False
+    # ret = rpc_client.subsystem_list(lvol.nqn)
+    # if ret :
+    #     subsys_found = True
+    #     if ret[0]["namespaces"]:
+    #         for ns in ret[0]["namespaces"]:
+    #             if ns['name'] == lvol.top_bdev:
+    #                 namespace_found = True
+    #                 break
 
-    if subsys_found is False:
-        min_cntlid = 1 + 1000 * ha_inode_self
-        logger.info("creating subsystem %s", lvol.nqn)
-        rpc_client.subsystem_create(lvol.nqn, 'sbcli-cn', lvol.uuid, min_cntlid)
+    # if subsys_found is False:
+    min_cntlid = 1 + 1000 * ha_inode_self
+    logger.info("creating subsystem %s", lvol.nqn)
+    rpc_client.subsystem_create(lvol.nqn, 'sbcli-cn', lvol.uuid, min_cntlid)
 
-    if namespace_found is False:
-        logger.info("Add BDev to subsystem")
-        ret = rpc_client.nvmf_subsystem_add_ns(lvol.nqn, lvol.top_bdev, lvol.uuid, lvol.guid)
-        if not ret:
-            return False, "Failed to add bdev to subsystem"
+    # if namespace_found is False:
+    logger.info("Add BDev to subsystem")
+    ret = rpc_client.nvmf_subsystem_add_ns(lvol.nqn, lvol.top_bdev, lvol.uuid, lvol.guid)
+    # if not ret:
+    #     return False, "Failed to add bdev to subsystem"
 
     # add listeners
     logger.info("adding listeners")

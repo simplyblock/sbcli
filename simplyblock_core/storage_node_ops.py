@@ -2866,7 +2866,46 @@ def recreate_lvstore(snode):
     if snode.is_secondary_node:
         return recreate_lvstore_on_sec(snode)
 
+    # connecting to remote devices
+    logger.info("Connecting to remote devices")
+    snode = db_controller.get_storage_node_by_id(snode.get_id())
+    snode.remote_devices = _connect_to_remote_devs(snode)
+    if snode.enable_ha_jm:
+        online_devs = []
+        for remote_device in snode.remote_jm_devices:
+            if remote_device.status == StorageNode.STATUS_ONLINE:
+                online_devs.append(remote_device)
+
+        if len(online_devs) < 2:
+            devs = get_sorted_ha_jms(snode)
+            for did in devs:
+                dev = db_controller.get_jm_device_by_id(did)
+                online_devs.append(dev)
+                if len(online_devs) > snode.ha_jm_count - 1:
+                    break
+
+        snode.remote_jm_devices = online_devs
+        snode.remote_jm_devices = _connect_to_remote_jm_devs(snode)
+    snode.write_to_db()
+
+    time.sleep(1)
+
+    ret, err = _create_bdev_stack(snode, [], primary_node=snode)
+
+    if err:
+        logger.error(f"Failed to recreate lvstore on node {snode.get_id()}")
+        logger.error(err)
+        return False
+
+    # ret = rpc_client.bdev_examine(snode.raid)
+    # ret = rpc_client.bdev_wait_for_examine()
+    # ret = rpc_client.bdev_lvol_set_lvs_groupid(snode.lvstore, snode.jm_vuid)
+    # time.sleep(1)
+
+
     sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
+    sec_node_api = SNodeClient(sec_node.api_endpoint)
+
     prim_node_suspend = False
     lvol_list = db_controller.get_lvols_by_node_id(snode.get_id())
     if sec_node:
@@ -2882,60 +2921,64 @@ def recreate_lvstore(snode):
             #                 ret = sec_rpc_client.nvmf_subsystem_listener_set_ana_state(
             #                     lvol.nqn, iface.ip4_address, lvol.subsys_port, False, "inaccessible")
 
-            sec_node_api = SNodeClient(sec_node.api_endpoint)
             sec_node_api.firewall_set_port(snode.lvol_subsys_port, "tcp", "block")
 
-            sec_rpc_client.bdev_lvol_set_leader(False, lvs_name=snode.lvstore)
+            sec_rpc_client.bdev_lvol_set_leader(False, lvs_name=snode.lvstore, bs_nonleadership=True)
             sec_rpc_client.bdev_distrib_force_to_non_leader(snode.jm_vuid)
 
     rpc_client = RPCClient(
         snode.mgmt_ip, snode.rpc_port,
         snode.rpc_username, snode.rpc_password, retry=1, timeout=30)
 
-    # connecting to remote devices
-    logger.info("Connecting to remote devices")
-    snode = db_controller.get_storage_node_by_id(snode.get_id())
-    snode.remote_devices = _connect_to_remote_devs(snode)
-    if snode.enable_ha_jm:
-        # online_devs = []
-        # for remote_device in snode.remote_jm_devices:
-        #     if remote_device.status == StorageNode.STATUS_ONLINE:
-        #         online_devs.append(remote_device)
-        #
-        # if len(online_devs) < 2:
-        #     devs = get_sorted_ha_jms(snode)
-        #     for did in devs:
-        #         dev = db_controller.get_jm_device_by_id(did)
-        #         online_devs.append(dev)
-        #         if len(online_devs) > snode.ha_jm_count - 1:
-        #             break
-        #
-        # snode.remote_jm_devices = online_devs
-        snode.remote_jm_devices = _connect_to_remote_jm_devs(snode)
-    snode.write_to_db()
+    ret = rpc_client.bdev_examine(snode.raid)
+    ret = rpc_client.bdev_wait_for_examine()
+    ret = rpc_client.bdev_lvol_set_lvs_ops(snode.lvstore, snode.jm_vuid, snode.lvol_subsys_port)
+    # time.sleep(1)
 
-    time.sleep(2)
+    # # connecting to remote devices
+    # logger.info("Connecting to remote devices")
+    # snode = db_controller.get_storage_node_by_id(snode.get_id())
+    # snode.remote_devices = _connect_to_remote_devs(snode)
+    # if snode.enable_ha_jm:
+    #     # online_devs = []
+    #     # for remote_device in snode.remote_jm_devices:
+    #     #     if remote_device.status == StorageNode.STATUS_ONLINE:
+    #     #         online_devs.append(remote_device)
+    #     #
+    #     # if len(online_devs) < 2:
+    #     #     devs = get_sorted_ha_jms(snode)
+    #     #     for did in devs:
+    #     #         dev = db_controller.get_jm_device_by_id(did)
+    #     #         online_devs.append(dev)
+    #     #         if len(online_devs) > snode.ha_jm_count - 1:
+    #     #             break
+    #     #
+    #     # snode.remote_jm_devices = online_devs
+    #     snode.remote_jm_devices = _connect_to_remote_jm_devs(snode)
+    # snode.write_to_db()
+    #
+    # time.sleep(2)
 
     if not lvol_list:
         prim_node_suspend = False
 
-    ret, err = _create_bdev_stack(snode, [], primary_node=snode)
+    # ret, err = _create_bdev_stack(snode, [], primary_node=snode)
+    #
+    # if err:
+    #     logger.error(f"Failed to recreate lvstore on node {snode.get_id()}")
+    #     logger.error(err)
+    #     return False
+    #
+    # ret = rpc_client.bdev_examine(snode.raid)
+    # ret = rpc_client.bdev_wait_for_examine()
+    # time.sleep(1)
+    #
+    # ret = rpc_client.bdev_lvol_set_lvs_ops(snode.lvstore, snode.jm_vuid, snode.lvol_subsys_port)
 
-    if err:
-        logger.error(f"Failed to recreate lvstore on node {snode.get_id()}")
-        logger.error(err)
-        return False
-
-    ret = rpc_client.bdev_examine(snode.raid)
-    ret = rpc_client.bdev_wait_for_examine()
-    time.sleep(1)
-
-    ret = rpc_client.bdev_lvol_set_lvs_ops(snode.lvstore, snode.jm_vuid, snode.lvol_subsys_port)
-
-    # if not prim_node_suspend:
-    #     if snode.jm_vuid:
-    #         ret = rpc_client.jc_explicit_synchronization(snode.jm_vuid)
-    #         logger.info(f"JM Sync res: {ret}")
+    if not prim_node_suspend:
+        if snode.jm_vuid:
+            ret = rpc_client.jc_explicit_synchronization(snode.jm_vuid)
+            logger.info(f"JM Sync res: {ret}")
 
     lvol_ana_state = "optimized"
     if prim_node_suspend:
@@ -2953,13 +2996,14 @@ def recreate_lvstore(snode):
             lvol_obj.health_check = True
         lvol_obj.write_to_db()
 
-    if snode.jm_vuid:
-        ret = rpc_client.jc_explicit_synchronization(snode.jm_vuid)
-        logger.info(f"JM Sync res: {ret}")
+    # if snode.jm_vuid:
+    #     ret = rpc_client.jc_explicit_synchronization(snode.jm_vuid)
+    #     logger.info(f"JM Sync res: {ret}")
 
-    sec_node_api = SNodeClient(sec_node.api_endpoint)
     if prim_node_suspend:
-        sec_node_api.firewall_set_port(snode.lvol_subsys_port, "tcp", "allow")
+        if sec_node.status == StorageNode.STATUS_ONLINE:
+            sec_node_api.firewall_set_port(snode.lvol_subsys_port, "tcp", "allow")
+
         set_node_status(snode.get_id(), StorageNode.STATUS_SUSPENDED)
         logger.info("Node restart interrupted because secondary node is unreachable")
         logger.info("Node status changed to suspended")
