@@ -1257,9 +1257,9 @@ class SshUtils:
             self.logger.info(f"tcpdump installed successfully: {output}")
 
     def start_tcpdump_logging(self, node_ip, log_dir):
-        """Start tcpdump logging for various TCP anomalies on a remote node."""
+        """Start tcpdump logging for various TCP anomalies on a remote node with proper background handling."""
         self.check_and_install_tcpdump(node_ip=node_ip)
-        
+
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
         # Define log file names for each tcpdump command
@@ -1268,23 +1268,23 @@ class SshUtils:
         conn_reset_log = f"{log_dir}/tcpdump_conn_reset_{node_ip}_{timestamp}.txt"
         ack_timeout_log = f"{log_dir}/tcpdump_ack_timeout_{node_ip}_{timestamp}.txt"
 
-        # Create tcpdump commands for different anomalies
+        # Create tcpdump commands with `nohup` to detach from the SSH session
         tcpdump_commands = [
-            f"sudo tcpdump -i ens16 -nn '(tcp[tcpflags] == 2 and tcp[14:2] > 1)' > {syn_timeout_log} 2>&1 &",
-            f"sudo tcpdump -i ens16 -nn -v '(tcp[13] & 0x10 != 0 and tcp[14:2] == 0)' > {rcv_buffer_full_log} 2>&1 &",
-            f"sudo tcpdump -i ens16 -nn '(tcp[13] & 0x04 != 0)' > {conn_reset_log} 2>&1 &",
-
-            ("sudo tcpdump -i ens16 -nn -tttt | awk '/Flags \\[.\\]/ {"
-            " if (prev_time != \"\") {"
-            " diff = $1-prev_time;"
-            " if (diff > 0.5) print prev_time, \"->\", $1, \"ACK timeout:\", diff, \"sec\""
-            " }"
-            " prev_time = $1"
-            " }' > %s 2>&1 &") 
-            % ack_timeout_log
+            f"nohup sudo tcpdump -i ens16 -nn '(tcp[tcpflags] == 2 and tcp[14:2] > 1)' > {syn_timeout_log} 2>&1 &",
+            f"nohup sudo tcpdump -i ens16 -nn -v '(tcp[13] & 0x10 != 0 and tcp[14:2] == 0)' > {rcv_buffer_full_log} 2>&1 &",
+            f"nohup sudo tcpdump -i ens16 -nn '(tcp[13] & 0x04 != 0)' > {conn_reset_log} 2>&1 &",
+            (
+                "nohup sudo tcpdump -i ens16 -nn -tttt | awk '/Flags \\[.\\]/ {"
+                " if (prev_time != \"\") {"
+                " diff = $1-prev_time;"
+                " if (diff > 0.5) print prev_time, \"->\", $1, \"ACK timeout:\", diff, \"sec\""
+                " }"
+                " prev_time = $1"
+                " }' > %s 2>&1 &"
+            ) % ack_timeout_log
         ]
 
-        # Execute each tcpdump command remotely
+        # Execute each tcpdump command remotely using Paramiko
         for cmd in tcpdump_commands:
             self.exec_command(node_ip, cmd)
 
