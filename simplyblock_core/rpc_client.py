@@ -595,13 +595,13 @@ class RPCClient:
     def bdev_nvme_set_options(self):
         params = {
             # "action_on_timeout": "abort",
-            "bdev_retry_count": 3,
-            "transport_retry_count": 5,
+            "bdev_retry_count": 0,
+            "transport_retry_count": 0,
             "ctrlr_loss_timeout_sec": 1,
             "fast_io_fail_timeout_sec": 0,
             "reconnect_delay_sec": 1,
             "keep_alive_timeout_ms": 10000,
-            "transport_ack_timeout": 10,
+            "transport_ack_timeout": 9,
             "timeout_us": constants.NVME_TIMEOUT_US
         }
         return self._request("bdev_nvme_set_options", params)
@@ -918,7 +918,7 @@ class RPCClient:
         elif lvs_name:
             params["lvs_name"] = lvs_name
 
-        # params["bs_nonleadership"] = bs_nonleadership
+        params["bs_nonleadership"] = bs_nonleadership
 
         return self._request("bdev_lvol_set_leader_all", params)
 
