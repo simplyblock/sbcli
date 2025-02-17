@@ -137,6 +137,8 @@ class TestClusterBase:
 
             containers = self.ssh_obj.get_running_containers(node_ip=node)
             self.container_nodes[node] = containers
+            self.ssh_obj.exec_command(node=node,
+                                      command="sudo tmux kill-server")
             self.ssh_obj.start_docker_logging(node_ip=node,
                                               containers=containers,
                                               log_dir=self.docker_logs_path,

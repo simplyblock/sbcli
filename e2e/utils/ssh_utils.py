@@ -1270,7 +1270,6 @@ class SshUtils:
         conn_reset_log = f"{log_dir}/tcpdump_conn_reset_{node_ip}_{timestamp}.txt"
         ack_timeout_log = f"{log_dir}/tcpdump_ack_timeout_{node_ip}_{timestamp}.txt"
 
-
         # Create tcpdump commands with `nohup` to detach from the SSH session
         tcpdump_commands = [
             f"sudo tmux new-session -d -s sync_timeout_log_session \"tcpdump -i ens16 -nn '(tcp[tcpflags] == 2 and tcp[14:2] > 1)' > {syn_timeout_log} 2>&1\"",
