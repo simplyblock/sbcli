@@ -147,6 +147,38 @@ jobs:
       - name: Record Test Start Time
         run: echo "TEST_START_TIME=$(date +%s)" >> $GITHUB_ENV
 
+
+      - name: Run Test TestLvolFioNpcsCustom
+        timeout-minutes: 120
+        run: |
+          cd $GITHUB_WORKSPACE/e2e
+          pip install virtualenv
+          python3 -m venv myenv
+          source myenv/bin/activate
+          python3 -m pip install -r requirements.txt
+          echo "Running tests in namespace default"
+          export CLUSTER_ID=${{ steps.bootstrap_cluster.outputs.cluster_id }}
+          export CLUSTER_SECRET=${{ steps.bootstrap_cluster.outputs.cluster_secret }}
+          export CLUSTER_IP=${{ steps.bootstrap_cluster.outputs.cluster_ip }}
+          export API_BASE_URL=${{ steps.bootstrap_cluster.outputs.cluster_api_gateway_endpoint }}
+          export BASTION_SERVER=${{ steps.bootstrap_cluster.outputs.bastion_public_ip }}
+          export KEY_NAME=${{ steps.bootstrap_cluster.outputs.key_name }} 
+          export AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }}
+          export AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          export AWS_REGION=${{ secrets.AWS_REGION }}
+          export SBCLI_CMD=${SBCLI_CMD}
+          export SSH_USER=root
+          TESTNAME="--testname TestLvolFioNpcsCustom"
+          python3 e2e.py $TESTNAME \
+                  --ndcs $NDCS --npcs $NPCS --bs $BS --chunk_bs $CHUNK_BS --run_ha ${{ github.event.inputs.run_ha_test }}
+        env:
+          SBCLI_CMD: ${{ env.SBCLI_CMD }}
+          NDCS: ${{ env.NDCS }}
+          NPCS: ${{ env.NPCS }}
+          BS: ${{ env.BS }}
+          CHUNK_BS: ${{ env.CHUNK_BS }}
+
+
       - name: Setup Tests & Run Tests
         timeout-minutes: 120
         run: |

@@ -204,3 +204,10 @@ def firewall_port(port_id=9090, port_type="tcp", block=True):
             logger.info(ret)
 
     return out
+
+
+def firewall_get():
+    cmd = "iptables -L -n"
+    stream = os.popen(cmd)
+    ret = stream.read()
+    return ret

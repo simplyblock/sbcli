@@ -501,3 +501,9 @@ def firewall_set_port():
 
     ret = node_utils.firewall_port(port_id, port_type, block=action=="block")
     return utils.get_response(ret)
+
+
+@bp.route('/get_firewall', methods=['GET'])
+def get_firewall():
+    ret = node_utils.firewall_get()
+    return utils.get_response(ret)
