@@ -18,7 +18,7 @@ logger_handler = logging.StreamHandler(stream=sys.stdout)
 logger_handler.setFormatter(logging.Formatter('%(asctime)s: %(levelname)s: %(message)s'))
 logger = logging.getLogger()
 logger.addHandler(logger_handler)
-logger.setLevel(logging.DEBUG)
+logger.setLevel(logging.INFO)
 
 
 def get_env_var(name, default=None, is_required=False):
@@ -33,7 +33,7 @@ def get_env_var(name, default=None, is_required=False):
 
 def rpc_call(req):
     req_data = json.loads(req.decode('ascii'))
-    logger.debug(f"Request data: {str(req_data)}")
+    logger.info(f"Request function: {str(req_data['method'])}")
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     sock.settimeout(TIMEOUT)
     sock.connect(rpc_sock)
@@ -49,7 +49,7 @@ def rpc_call(req):
 
     while not closed:
         newdata = sock.recv(1024)
-        if (newdata == b''):
+        if newdata == b'':
             closed = True
         buf += newdata.decode('ascii')
         try:
@@ -74,6 +74,11 @@ class ServerHandler(BaseHTTPRequestHandler):
 
     def do_HEAD(self):
         self.send_response(200)
+        self.send_header('Content-type', 'text/html')
+        self.end_headers()
+
+    def do_HEAD_no_content(self):
+        self.send_response(204)
         self.send_header('Content-type', 'text/html')
         self.end_headers()
 
@@ -117,6 +122,9 @@ class ServerHandler(BaseHTTPRequestHandler):
                 if response is not None:
                     self.do_HEAD()
                     self.wfile.write(bytes(response.encode(encoding='ascii')))
+                else:
+                    self.do_HEAD_no_content()
+
             except ValueError:
                 self.do_INTERNALERROR()
 

@@ -136,7 +136,7 @@ jobs:
         run: |
           cd $GITHUB_WORKSPACE/simplyBlockDeploy
           terraform plan \
-            -var "mgmt_nodes=1" -var "storage_nodes=3" -var "volumes_per_storage_nodes=0" \
+            -var "mgmt_nodes=1" -var "storage_nodes=4" -var "volumes_per_storage_nodes=0" \
             -var mgmt_nodes_instance_type="m6i.2xlarge" -var storage_nodes_instance_type="m6id.2xlarge" \
             -var "extra_nodes=1" -var "extra_nodes_instance_type=m6id.xlarge" \
             -var storage_nodes_ebs_size2=100 -var "region=us-east-2" \
@@ -333,7 +333,7 @@ jobs:
           if [[ ${{ job.status }} == 'success' ]]; then
             OVERALL_STATUS=":white_check_mark: Overall Status: SUCCESS"
           else
-            OVERALL_STATUS=":x: Overall Status: FAILURE"
+            OVERALL_STATUS=":x: Overall Status: FAILURE <!channel>"
           fi
 
           TIME_TAKEN="${TEST_TIME_HOURS}h ${TEST_TIME_MINS}m ${TEST_TIME_SECS}s"

@@ -10,7 +10,7 @@ import uuid
 
 from simplyblock_core import utils
 from simplyblock_core.controllers import pool_events
-from simplyblock_core.kv_store import DBController
+from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.pool import Pool
 
 logger = lg.getLogger()
@@ -53,7 +53,7 @@ def add_pool(name, pool_max, lvol_max, max_rw_iops, max_rw_mbytes, max_r_mbytes,
 
     logger.info("Adding pool")
     pool = Pool()
-    pool.id = str(uuid.uuid4())
+    pool.uuid = str(uuid.uuid4())
     pool.cluster_id = cluster.get_id()
     pool.pool_name = name
     if has_secret:
@@ -69,7 +69,7 @@ def add_pool(name, pool_max, lvol_max, max_rw_iops, max_rw_mbytes, max_r_mbytes,
 
     pool_events.pool_add(pool)
     logger.info("Done")
-    return pool.id
+    return pool.get_id()
 
 
 def set_pool_value_if_above(pool, key, value):
@@ -129,11 +129,11 @@ def delete_pool(uuid):
         logger.error(f"Pool is disabled")
         return False
 
-    if pool.lvols:
-        logger.error(f"Pool is not empty {uuid}")
-        return False
+    # if pool.lvols:
+    #     logger.error(f"Pool is not empty {uuid}")
+    #     return False
 
-    logger.info(f"Deleting pool {pool.id}")
+    logger.info(f"Deleting pool {pool.get_id()}")
     pool_events.pool_remove(pool)
     pool.remove(db_controller.kv_store)
     logger.info("Done")
@@ -144,13 +144,14 @@ def list_pools(is_json, cluster_id=None):
     pools = db_controller.get_pools(cluster_id)
     data = []
     for pool in pools:
+        lvs = db_controller.get_lvols_by_pool_id(pool.get_id()) or []
         data.append({
-            "UUID": pool.id,
+            "UUID": pool.get_id(),
             "Name": pool.pool_name,
             "Capacity": utils.humanbytes(get_pool_total_capacity(pool.get_id())),
             "Max size": utils.humanbytes(pool.pool_max_size),
             "LVol Max Size": utils.humanbytes(pool.lvol_max_size),
-            "LVols": f"{len(pool.lvols)}",
+            "LVols": f"{len(lvs)}",
             "QOS": f"{pool.has_qos()}",
             "Status": pool.status,
         })
@@ -159,27 +160,6 @@ def list_pools(is_json, cluster_id=None):
         return json.dumps(data, indent=2)
     else:
         return utils.print_table(data)
-
-
-def delete_lvol(lvol_id, pool_id):
-    pool = db_controller.get_pool_by_id(pool_id)
-    logger.info(f"Removing lvol:{lvol_id} from pool:{pool_id}")
-    if not pool:
-        logger.error(f"Pool not found {pool_id}")
-        return False
-
-    if lvol_id in pool.lvols:
-        pool.lvols.remove(lvol_id)
-    pool.write_to_db(db_controller.kv_store)
-
-    lvol = db_controller.get_lvol_by_id(lvol_id)
-    if not lvol:
-        logger.error("lvol not found")
-        return False
-    lvol.pool_uuid = ''
-    lvol.write_to_db(db_controller.kv_store)
-    logger.info("Done")
-    return True
 
 
 def set_status(pool_id, status):
@@ -215,8 +195,7 @@ def get_capacity(pool_id):
 
     out = []
     total_size = 0
-    for lvol_id in pool.lvols:
-        lvol = db_controller.get_lvol_by_id(lvol_id)
+    for lvol in db_controller.get_lvols_by_pool_id(pool_id):
         total_size += lvol.size
         out.append({
             "LVol name": lvol.lvol_name,
@@ -224,7 +203,7 @@ def get_capacity(pool_id):
             "util_percent": 0,
             "util": 0,
         })
-    if pool.lvols:
+    if total_size:
         out.append({
             "device name": "Total",
             "provisioned": utils.humanbytes(total_size),
@@ -297,14 +276,13 @@ def get_pool_total_capacity(pool_id):
         logger.error(f"Pool not found {pool_id}")
         return False
     total = 0
-    for lvol_id in pool.lvols:
-        lvol = db_controller.get_lvol_by_id(lvol_id)
+    for lvol in db_controller.get_lvols_by_pool_id(pool_id):
         total += lvol.size
 
     snaps = db_controller.get_snapshots()
     for snap in snaps:
         if snap.lvol.pool_uuid == pool_id:
-            total += snap.lvol.size
+            total += snap.used_size
     return total
 
 
@@ -317,8 +295,7 @@ def get_pool_total_rw_iops(pool_id):
         return 0
 
     total = 0
-    for lvol_id in pool.lvols:
-        lvol = db_controller.get_lvol_by_id(lvol_id)
+    for lvol in db_controller.get_lvols_by_pool_id(pool_id):
         total += lvol.rw_ios_per_sec
 
     return total
@@ -333,8 +310,7 @@ def get_pool_total_rw_mbytes(pool_id):
         return 0
 
     total = 0
-    for lvol_id in pool.lvols:
-        lvol = db_controller.get_lvol_by_id(lvol_id)
+    for lvol in db_controller.get_lvols_by_pool_id(pool_id):
         total += lvol.rw_mbytes_per_sec
 
     return total
@@ -349,8 +325,7 @@ def get_pool_total_r_mbytes(pool_id):
         return 0
 
     total = 0
-    for lvol_id in pool.lvols:
-        lvol = db_controller.get_lvol_by_id(lvol_id)
+    for lvol in db_controller.get_lvols_by_pool_id(pool_id):
         total += lvol.r_mbytes_per_sec
 
     return total
@@ -365,8 +340,7 @@ def get_pool_total_w_mbytes(pool_id):
         return 0
 
     total = 0
-    for lvol_id in pool.lvols:
-        lvol = db_controller.get_lvol_by_id(lvol_id)
+    for lvol in db_controller.get_lvols_by_pool_id(pool_id):
         total += lvol.w_mbytes_per_sec
 
     return total

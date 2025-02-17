@@ -1,6 +1,9 @@
 import time
 from logger_config import setup_logger
 import re
+import os
+import requests
+import json
 
 
 class CommonUtils:
@@ -10,6 +13,36 @@ class CommonUtils:
         self.sbcli_utils = sbcli_utils
         self.ssh_utils = ssh_utils
         self.logger = setup_logger(__name__)
+        self.slack_webhook_url = os.getenv("SLACK_WEBHOOK_URL")  # Load from environment variable
+
+    def send_slack_summary(self, subject, body):
+        """
+        Sends a Slack message with the test summary.
+
+        Args:
+            subject (str): The title of the Slack message
+            body (str): The content of the Slack message
+        """
+        if not self.slack_webhook_url:
+            self.logger.error("SLACK_WEBHOOK_URL is not set. Cannot send Slack notification.")
+            return
+
+        # Format Slack message
+        slack_message = {
+            "text": f"*{subject}*\n{body}"
+        }
+
+        try:
+            response = requests.post(self.slack_webhook_url, 
+                                     data=json.dumps(slack_message), 
+                                     headers={"Content-Type": "application/json"},
+                                     timeout=30)
+            if response.status_code == 200:
+                self.logger.info("Slack notification sent successfully.")
+            else:
+                self.logger.error(f"Failed to send Slack notification. Response: {response.text}")
+        except Exception as e:
+            self.logger.error(f"Error sending Slack notification: {e}")
 
     def validate_event_logs(self, cluster_id, operations):
         """Validates event logs for cluster
@@ -83,7 +116,7 @@ class CommonUtils:
         while True:
             process = self.ssh_utils.find_process_name(node=node,
                                                        process_name="fio")
-            process_fio = [element for element in process if "grep" not in element]
+            process_fio = [element for element in process if "grep" not in element and not element.startswith("kworker")]
             self.logger.info(f"Process info: {process_fio}")
             
             if len(process_fio) == 0:
@@ -101,7 +134,7 @@ class CommonUtils:
                                                               process_name="fio")
         self.logger.info(f"Process List: {process_list_after}")
 
-        process_fio = [element for element in process_list_after if "grep" not in element]
+        process_fio = [element for element in process_list_after if "grep" not in element and not element.startswith("kworker")]
 
         assert len(process_fio) == 0, f"FIO process list not empty: {process_list_after}"
         self.logger.info(f"FIO Running: {process_fio}")
@@ -184,7 +217,55 @@ class CommonUtils:
         instance.wait_until_stopped()  # Wait until the instance is fully stopped
         self.logger.info(f"Instance {instance_id} has stopped.") 
         sleep_n_sec(30)
-    
+
+    def reboot_ec2_instance(self, ec2_resource, instance_id, timeout=300, wait_interval=10):
+        """
+        Reboots the specified EC2 instance and verifies that it is back up within a given timeout.
+
+        Args:
+            instance_id (str): The ID of the EC2 instance to reboot.
+            timeout (int): Maximum time (in seconds) to wait for the instance to be available.
+            wait_interval (int): Time interval (in seconds) between status checks.
+        """
+        try:
+            ec2_client = ec2_resource.meta.client
+
+            # Initiate reboot
+            print(f"Rebooting instance {instance_id}...")
+            ec2_client.reboot_instances(InstanceIds=[instance_id])
+
+            # Start timeout tracking
+            start_time = time.time()
+
+            print(f"Waiting for instance {instance_id} to pass status checks...")
+
+            while (time.time() - start_time) < timeout:
+                instance = ec2_resource.Instance(instance_id)
+                instance.load()  # Refresh state
+
+                # Fetch instance status checks
+                status_response = ec2_client.describe_instance_status(InstanceIds=[instance_id])
+                if status_response['InstanceStatuses']:
+                    instance_status = status_response['InstanceStatuses'][0]
+                    system_status_ok = instance_status['SystemStatus']['Status'] == 'ok'
+                    instance_status_ok = instance_status['InstanceStatus']['Status'] == 'ok'
+
+                    if system_status_ok and instance_status_ok:
+                        print(f"Instance {instance_id} is fully online and healthy!")
+                        sleep_n_sec(30)
+                        return
+
+                elapsed_time = int(time.time() - start_time)
+                print(f"[{elapsed_time}s elapsed] Instance state: '{instance.state['Name']}'. Waiting for AWS status checks...")
+                time.sleep(wait_interval)
+
+            print(f"Error: Instance {instance_id} did not become available within {timeout} seconds.")
+            raise RuntimeError(f"Error: Instance {instance_id} did not become available within {timeout} seconds.")
+
+        except Exception as e:
+            print(f"Error rebooting instance {instance_id}: {e}")
+            raise e
+        
     def terminate_instance(self, ec2_resource, instance_id):
         # Terminate the given instance
         instance = ec2_resource.Instance(instance_id)
@@ -287,6 +368,67 @@ class CommonUtils:
         
         self.logger.info(f"No running instance found with the name: {instance_name}")
         return None
+    
+    def calculate_time_duration(self, start_timestamp, end_timestamp):
+        """
+        Calculate time duration between start and end timestamps in 'XhrYm' format.
+        Args:
+            start_timestamp (int): Start time in Unix timestamp
+            end_timestamp (int): End time in Unix timestamp
+
+        Returns:
+            str: Time duration in the format 'XhrYm'
+        """
+        duration_seconds = end_timestamp - start_timestamp
+        hours = duration_seconds // 3600
+        minutes = (duration_seconds % 3600) // 60
+        time_duration = f"{hours}h{minutes}m" if hours > 0 else f"{minutes}m"
+        self.logger.info(f"Calculated time duration: {time_duration}")
+        return time_duration
+    
+    def validate_io_stats(self, cluster_id, start_timestamp, end_timestamp, time_duration=None):
+        """
+        Validate I/O stats ensuring all metrics are non-zero within the failover time range.
+        Args:
+            cluster_id (str): Cluster ID
+            start_timestamp (int): Start of failover in Unix timestamp
+            end_timestamp (int): End of failover in Unix timestamp
+            time_duration (str): Time duration for API call (e.g., '1hr30m')
+        """
+        self.logger.info(f"Validating I/O stats for cluster {cluster_id} during {time_duration}.")
+        self.logger.info(f"Start Date: {start_timestamp}, {end_timestamp}")
+
+        # Fetch I/O stats from the API
+        io_stats = self.sbcli_utils.get_io_stats(cluster_id, time_duration)
+        self.logger.info(f"IO Stats: {io_stats}")
+
+        if not io_stats:
+            self.logger.error("No I/O stats found within the specified time range.")
+            raise AssertionError("No I/O stats found within the specified time range.")
+
+        # Validate non-zero values for relevant metrics
+        for stat in io_stats:
+            self.logger.info(f"Validating I/O stats for record with date: {stat['date']}")
+            self.assert_non_zero_io_stat(stat, "read_bytes")
+            self.assert_non_zero_io_stat(stat, "write_bytes")
+            self.assert_non_zero_io_stat(stat, "read_io")
+            self.assert_non_zero_io_stat(stat, "write_io")
+        self.logger.info("All I/O stats are valid and non-zero within the failover time range.")
+
+    def assert_non_zero_io_stat(self, stat, key):
+        """
+        Assert that a specific I/O stat key is non-zero.
+        Args:
+            stat (dict): I/O stat record
+            key (str): Key to validate
+        """
+        value = stat.get(key, 0)
+        if value == 0:
+            self.logger.error(f"{key} is 0 for record: {stat}")
+            raise AssertionError(f"{key} is 0 for record: {stat}")
+        self.logger.info(f"{key}: {value} is valid.")
+
+
     
 
 def sleep_n_sec(seconds):

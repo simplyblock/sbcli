@@ -19,7 +19,7 @@ from simplyblock_core import constants, shell_utils
 from simplyblock_web import utils, node_utils
 
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG)
+
 bp = Blueprint("caching_node_k", __name__, url_prefix="/cnode")
 
 
@@ -112,7 +112,7 @@ def spdk_process_start():
 
     spdk_mem_gega = int(spdk_mem / 1024)
 
-    spdk_image = constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE
+    spdk_image = constants.SIMPLY_BLOCK_SPDK_CORE_IMAGE
 
     if 'spdk_image' in data and data['spdk_image']:
         spdk_image = data['spdk_image']

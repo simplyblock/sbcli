@@ -9,13 +9,13 @@ from flask import Blueprint, request
 from simplyblock_core.controllers import tasks_controller
 from simplyblock_web import utils
 
-from simplyblock_core import kv_store
+from simplyblock_core import db_controller
 from simplyblock_core import storage_node_ops
 
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG)
+
 bp = Blueprint("snode", __name__)
-db_controller = kv_store.DBController()
+db_controller = db_controller.DBController()
 
 
 @bp.route('/storagenode', methods=['GET'], defaults={'uuid': None})
@@ -34,6 +34,8 @@ def list_storage_nodes(uuid):
     for node in nodes:
         d = node.get_clean_dict()
         d['status_code'] = node.get_status_code()
+        lvs = db_controller.get_lvols_by_node_id(node.get_id()) or []
+        d['lvols'] = len(lvs)
         data.append(d)
     return utils.get_response(data)
 
@@ -60,7 +62,7 @@ def storagenode_iostats(uuid, history):
     if not node:
         return utils.get_response_error(f"node not found: {uuid}", 404)
 
-    data = storage_node_ops.get_node_iostats_history(uuid, history, parse_sizes=False)
+    data = storage_node_ops.get_node_iostats_history(uuid, history, parse_sizes=False, with_sizes=True)
     ret = {
         "object_data": node.get_clean_dict(),
         "stats": data or []
@@ -197,7 +199,7 @@ def storage_node_add():
     max_lvol = int(req_data['max_lvol'])
     max_snap = int(req_data.get('max_snap', 500))
     max_prov = req_data['max_prov']
-    number_of_distribs = int(req_data.get('number_of_distribs', 4))
+    number_of_distribs = int(req_data.get('number_of_distribs', 2))
     if req_data.get('disable_ha_jm', "") == "true":
         disable_ha_jm = True
     else:
@@ -249,6 +251,11 @@ def storage_node_add():
     if 'iobuf_large_pool_count' in req_data:
         iobuf_large_pool_count = int(req_data['iobuf_large_pool_count'])
 
+    is_secondary_node = False
+    if 'is_secondary_node' in req_data:
+        is_secondary_node = bool(req_data['is_secondary_node'])
+
+
     tasks_controller.add_node_add_task(cluster_id, {
         "cluster_id": cluster_id,
         "node_ip": node_ip,
@@ -268,7 +275,9 @@ def storage_node_add():
         "enable_test_device": enable_test_device,
         "number_of_distribs": number_of_distribs,
         "namespace": namespace,
-        "enable_ha_jm": not disable_ha_jm})
+        "enable_ha_jm": not disable_ha_jm,
+        "is_secondary_node": is_secondary_node,
+    })
 
     return utils.get_response(True)
 

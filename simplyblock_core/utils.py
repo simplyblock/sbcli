@@ -15,9 +15,7 @@ from graypy import GELFTCPHandler
 
 from simplyblock_core import constants
 from simplyblock_core import shell_utils
-
-
-logger = logging.getLogger()
+from simplyblock_core.models.job_schedule import JobSchedule
 
 
 def get_env_var(name, default=None, is_required=False):
@@ -86,9 +84,9 @@ def get_iface_ip(ifname):
     return False
 
 
-def print_table(data: list):
+def print_table(data: list, title=None):
     if data:
-        x = PrettyTable(field_names=data[0].keys(), max_width=70)
+        x = PrettyTable(field_names=data[0].keys(), max_width=70, title=title)
         x.align = 'l'
         for node_data in data:
             row = []
@@ -126,12 +124,12 @@ def generate_string(length):
 
 
 def get_docker_client(cluster_id=None):
-    from simplyblock_core.kv_store import DBController
+    from simplyblock_core.db_controller import DBController
     db_controller = DBController()
-    nodes = db_controller.get_mgmt_nodes(cluster_id)
+    nodes = db_controller.get_mgmt_nodes()
     if not nodes:
         logger.error("No mgmt nodes was found in the cluster!")
-        exit(1)
+        return False
 
     docker_ips = [node.docker_ip_port for node in nodes]
 
@@ -139,15 +137,18 @@ def get_docker_client(cluster_id=None):
         try:
             c = docker.DockerClient(base_url=f"tcp://{ip}", version="auto")
             return c
-        except docker.errors.DockerException as e:
+        except Exception as e:
             print(e)
-    raise e
+            raise e
+    return False
 
 
-def dict_agg(data, mean=False):
+def dict_agg(data, mean=False, keys=None):
     out = {}
+    if not keys and data:
+        keys = data[0].keys()
     for d in data:
-        for key in d.keys():
+        for key in keys:
             if isinstance(d[key], int) or isinstance(d[key], float):
                 if key in out:
                     out[key] += d[key]
@@ -187,6 +188,8 @@ def get_weights(node_stats, cluster_stats):
         return w
 
     out = {}
+    heavy_node_w = 0
+    heavy_node_id = None
     for node_id in node_stats:
         out[node_id] = {}
         total = 0
@@ -196,6 +199,13 @@ def get_weights(node_stats, cluster_stats):
             out[node_id][key] = w
             total += w
         out[node_id]['total'] = int(total)
+        if total > heavy_node_w:
+            heavy_node_w = total
+            heavy_node_id = node_id
+
+    if heavy_node_id:
+        out[heavy_node_id]['total'] *= 5
+
     return out
 
 
@@ -241,12 +251,17 @@ def parse_history_param(history_string):
         if ind == 'm':
             history_in_seconds += v * 60
 
-    records_number = int(history_in_seconds/2)
+    records_number = int(history_in_seconds/5)
     return records_number
 
 
-def process_records(records, records_count):
+def process_records(records, records_count, keys=None):
     # combine records
+    if not records:
+        return []
+
+    records_count = min(records_count, len(records))
+
     data_per_record = int(len(records) / records_count)
     new_records = []
     for i in range(records_count):
@@ -254,7 +269,7 @@ def process_records(records, records_count):
         last_index = (i + 1) * data_per_record
         last_index = min(last_index, len(records))
         sl = records[first_index:last_index]
-        rec = dict_agg(sl, mean=True)
+        rec = dict_agg(sl, mean=True, keys=keys)
         new_records.append(rec)
     return new_records
 
@@ -283,7 +298,28 @@ def sum_records(records):
 
 
 def get_random_vuid():
-    return 1 + int(random.random() * 10000)
+    from simplyblock_core.db_controller import DBController
+    db_controller = DBController()
+    used_vuids = []
+    nodes = db_controller.get_storage_nodes()
+    for node in nodes:
+        for bdev in node.lvstore_stack:
+            type = bdev['type']
+            if type == "bdev_distr":
+                vuid = bdev['params']['vuid']
+            elif type == "bdev_raid"  and "jm_vuid" in bdev:
+                vuid = bdev['jm_vuid']
+            else:
+                continue
+            used_vuids.append(vuid)
+
+    for lvol in db_controller.get_lvols():
+        used_vuids.append(lvol.vuid)
+
+    r = 1 + int(random.random() * 10000)
+    while r in used_vuids:
+        r = 1 + int(random.random() * 10000)
+    return r
 
 
 def calculate_core_allocation(cpu_count):
@@ -472,15 +508,15 @@ def calculate_pool_count(alceml_count, number_of_distribs, cpu_count, poller_cou
     poller_number = poller_count if poller_count else cpu_count
     #small_pool_count = (3 + alceml_count + lvol_count + 2 * snap_count + 1) * 256 + poller_number * 127 + 384 + 128 * poller_number + constants.EXTRA_SMALL_POOL_COUNT
 
-    small_pool_count = (6 + alceml_count + number_of_distribs) * 256 + poller_number * 127 + 384 + 128 * poller_number + constants.EXTRA_SMALL_POOL_COUNT
+    small_pool_count = 384 * (alceml_count + number_of_distribs + 3 + poller_count) + (6 + alceml_count + number_of_distribs) * 256 + poller_number * 127 + 384 + 128 * poller_number + constants.EXTRA_SMALL_POOL_COUNT
     #large_pool_count = (3 + alceml_count + lvol_count + 2 * snap_count + 1) * 32 + poller_number * 15 + 384 + 16 * poller_number + constants.EXTRA_LARGE_POOL_COUNT
-    large_pool_count = (6 + alceml_count + number_of_distribs) * 32 + poller_number * 15 + 384 + 16 * poller_number + constants.EXTRA_LARGE_POOL_COUNT
+    large_pool_count = 48 * (alceml_count + number_of_distribs + 3 + poller_count) + (6 + alceml_count + number_of_distribs) * 32 + poller_number * 15 + 384 + 16 * poller_number + constants.EXTRA_LARGE_POOL_COUNT
     return small_pool_count, large_pool_count
 
 
 def calculate_minimum_hp_memory(small_pool_count, large_pool_count, lvol_count, max_prov, cpu_count):
     '''
-    1092 (initial consumption) + 4 * CPU + 1.0277 * POOL_COUNT(Sum in MB) + (7) * lvol_count
+    1092 (initial consumption) + 4 * CPU + 1.0277 * POOL_COUNT(Sum in MB) + (25) * lvol_count
     then you can amend the expected memory need for the creation of lvols (6MB),
     connection number over lvols (7MB per connection), creation of snaps (12MB),
     extra buffer 2GB
@@ -488,13 +524,13 @@ def calculate_minimum_hp_memory(small_pool_count, large_pool_count, lvol_count, 
     '''
     pool_consumption = (small_pool_count * 8 + large_pool_count * 128) / 1024 + 1092
     max_prov_tb = max_prov / (1024 * 1024 * 1024 * 1024)
-    memory_consumption = (4 * cpu_count + 1.0277 * pool_consumption + 7 * lvol_count) * (1024 * 1024) + (250 * 1024 * 1024) * 1.1 * max_prov_tb + constants.EXTRA_HUGE_PAGE_MEMORY
+    memory_consumption = (4 * cpu_count + 1.0277 * pool_consumption + 25 * lvol_count) * (1024 * 1024) + (250 * 1024 * 1024) * 1.1 * max_prov_tb + constants.EXTRA_HUGE_PAGE_MEMORY
     return int(memory_consumption)
 
 
-def calculate_minimum_sys_memory(max_prov):
+def calculate_minimum_sys_memory(max_prov, total):
     max_prov_tb = max_prov / (1024 * 1024 * 1024 * 1024)
-    minimum_sys_memory = (250 * 1024 * 1024) * 1.1 * max_prov_tb + constants.EXTRA_SYS_MEMORY
+    minimum_sys_memory = (250 * 1024 * 1024) * 1.1 * max_prov_tb + (constants.EXTRA_SYS_MEMORY * total)
     logger.debug(f"Minimum system memory is {humanbytes(minimum_sys_memory)}")
     return int(minimum_sys_memory)
 
@@ -546,25 +582,32 @@ def decimal_to_hex_power_of_2(decimal_number):
     return hex_result
 
 
-def get_logger(name):
+def get_logger(name=""):
     # first configure a root logger
-    logger = logging.getLogger()
+    logging.getLogger("urllib3.connectionpool").setLevel(logging.WARNING)
+    logg = logging.getLogger(f"root")
+
     log_level = os.getenv("SIMPLYBLOCK_LOG_LEVEL")
     log_level = log_level.upper() if log_level else constants.LOG_LEVEL
 
     try:
-        logger.setLevel(log_level)
+        logg.setLevel(log_level)
     except ValueError as e:
-        logger.warning(f'Invalid SIMPLYBLOCK_LOG_LEVEL: {str(e)}')
-        logger.setLevel(constants.LOG_LEVEL)
+        logg.warning(f'Invalid SIMPLYBLOCK_LOG_LEVEL: {str(e)}')
+        logg.setLevel(constants.LOG_LEVEL)
 
-    logger_handler = logging.StreamHandler(stream=sys.stdout)
-    logger_handler.setFormatter(logging.Formatter('%(asctime)s: %(levelname)s: %(message)s'))
-    logger.addHandler(logger_handler)
+    if not logg.hasHandlers():
+        logger_handler = logging.StreamHandler(stream=sys.stdout)
+        logger_handler.setFormatter(logging.Formatter('%(asctime)s: %(levelname)s: %(message)s'))
+        logg.addHandler(logger_handler)
+        gelf_handler = GELFTCPHandler('0.0.0.0', constants.GELF_PORT)
+        logg.addHandler(gelf_handler)
 
-    gelf_handler = GELFTCPHandler('0.0.0.0', constants.GELF_PORT)
-    logger.addHandler(gelf_handler)
-    return logging.getLogger(name)
+    if name:
+        logg = logging.getLogger(f"root.{name}")
+        logg.propagate = True
+
+    return logg
 
 
 def parse_size(size_string: str):
@@ -607,3 +650,67 @@ def nearest_upper_power_of_2(n):
         return n
     # Otherwise, return the nearest upper power of 2
     return 1 << n.bit_length()
+
+
+def strfdelta(tdelta):
+    remainder = int(tdelta.total_seconds())
+    possible_fields = ('W', 'D', 'H', 'M', 'S')
+    constants = {'W': 604800, 'D': 86400, 'H': 3600, 'M': 60, 'S': 1}
+    values = {}
+    out = ""
+    for field in possible_fields:
+        if field in constants:
+            values[field], remainder = divmod(remainder, constants[field])
+            if values[field] > 0:
+                out += f"{values[field]}{field.lower()} "
+
+    return out.strip()
+
+
+def handle_task_result(task: JobSchedule, res: dict, allowed_error_codes = None):
+    if res:
+        if not allowed_error_codes:
+            allowed_error_codes = [0]
+
+        res_data = res[0]
+        migration_status = res_data.get("status")
+        error_code = res_data.get("error", -1)
+        progress = res_data.get("progress", -1)
+        if migration_status == "completed":
+            if error_code == 0:
+                task.function_result = "Done"
+                task.status = JobSchedule.STATUS_DONE
+            elif error_code in allowed_error_codes:
+                task.function_result = f"mig completed with status: {error_code}"
+                task.status = JobSchedule.STATUS_DONE
+            else:
+                task.function_result = f"mig error: {error_code}, retrying"
+                task.retry += 1
+                task.status = JobSchedule.STATUS_SUSPENDED
+                del task.function_params['migration']
+
+            task.write_to_db()
+            return True
+
+        elif migration_status == "failed":
+            task.status = JobSchedule.STATUS_DONE
+            task.function_result = migration_status
+            task.write_to_db()
+            return True
+
+        elif migration_status == "none":
+            task.function_result = f"mig retry after restart"
+            task.retry += 1
+            task.status = JobSchedule.STATUS_SUSPENDED
+            del task.function_params['migration']
+            task.write_to_db()
+            return True
+
+        else:
+            task.function_result = f"Status: {migration_status}, progress:{progress}"
+            task.write_to_db()
+    else:
+        logger.error("Failed to get mig status")
+
+
+logger = get_logger(__name__)

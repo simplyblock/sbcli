@@ -2,7 +2,8 @@ version: '3.8'
 
 services:
   fdb-server:
-    image: foundationdb/foundationdb:7.3.2
+    image: foundationdb/foundationdb:7.3.42
+    entrypoint: "/usr/bin/fdbserver --listen-address 0.0.0.0:4500 --public-address $CLUSTER_IP:4500 --datadir /var/fdb/data --logdir /var/fdb/logs --locality-zoneid=$HOSTNAME --locality-machineid=$HOSTNAME --class unset"
     networks:
       - hostnet
     environment:
@@ -17,6 +18,22 @@ services:
 
     deploy:
       mode: global
+      placement:
+        constraints: [ node.role == manager ]
+      resources:
+        limits:
+          memory: 4g
+
+  fdb-backup-agent:
+    image: foundationdb/foundationdb:7.3.42
+    entrypoint: "/usr/bin/backup_agent -C  /etc/foundationdb/fdb.cluster"
+    networks:
+      - hostnet
+    environment:
+      FDB_CLUSTER_FILE: '/etc/foundationdb/fdb.cluster'
+    volumes:
+      - "/etc/foundationdb:/etc/foundationdb"
+    deploy:
       placement:
         constraints: [ node.role == manager ]
 
@@ -124,6 +141,7 @@ services:
     ports:
       - 80:80
       - 12202:12202
+      - 9200:9200
     networks:
       - localnet
       - monitoring-net

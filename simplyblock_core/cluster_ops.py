@@ -1,4 +1,5 @@
 # coding=utf-8
+import datetime
 import json
 import logging
 import os
@@ -8,15 +9,23 @@ import shutil
 import subprocess
 import time
 import uuid
+from tracemalloc import Snapshot
 
 import docker
 import requests
 from jinja2 import Environment, FileSystemLoader
 
 from simplyblock_core import utils, scripts, constants, mgmt_node_ops, storage_node_ops, distr_controller
-from simplyblock_core.controllers import cluster_events, device_controller, storage_events
-from simplyblock_core.kv_store import DBController, KVStore
+from simplyblock_core.controllers import cluster_events, device_controller, storage_events, pool_controller, \
+    lvol_controller
+from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.cluster import Cluster
+from simplyblock_core.models.job_schedule import JobSchedule
+from simplyblock_core.models.lvol_model import LVol
+from simplyblock_core.models.mgmt_node import MgmtNode
+from simplyblock_core.models.pool import Pool
+from simplyblock_core.models.snapshot import SnapShot
+from simplyblock_core.models.stats import StatsObject
 from simplyblock_core.rpc_client import RPCClient
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
@@ -31,8 +40,8 @@ def _create_update_user(cluster_id, grafana_url, grafana_secret, user_secret, up
     headers = {
         'X-Requested-By': '',
         'Content-Type': 'application/json',
-    }        
-    
+    }
+    retries = 5
     if update_secret:
         url = f"{grafana_url}/api/users/lookup?loginOrEmail={cluster_id}"
         response = session.request("GET", url, headers=headers)
@@ -43,17 +52,17 @@ def _create_update_user(cluster_id, grafana_url, grafana_secret, user_secret, up
         })
         
         url = f"{grafana_url}/api/admin/users/{userid}/password"
-        
-        while True:
+
+        while retries > 0:
             response = session.request("PUT", url, headers=headers, data=payload)
             if response.status_code == 200:
                 logger.debug(f"user create/update {cluster_id} succeeded")
-                break
+                return response.status_code == 200
             logger.debug(response.status_code)
-            logger.debug("waiting for grafana api to come up")        
-            time.sleep(5)
+            logger.debug("waiting for grafana api to come up")
+            retries -= 1
+            time.sleep(3)
 
-        return response.status_code == 200
     else:
         payload = json.dumps({
             "name": cluster_id,
@@ -61,16 +70,15 @@ def _create_update_user(cluster_id, grafana_url, grafana_secret, user_secret, up
             "password": user_secret
         })
         url = f"{grafana_url}/api/admin/users"
-        while True:
+        while retries > 0:
             response = session.request("POST", url, headers=headers, data=payload)
             if response.status_code == 200:
                 logger.debug(f"user create/update {cluster_id} succeeded")
-                break
+                return response.status_code == 200
             logger.debug(response.status_code)
-            logger.debug("waiting for grafana api to come up")        
-            time.sleep(5)
-
-        return response.status_code == 200
+            logger.debug("waiting for grafana api to come up")
+            retries -= 1
+            time.sleep(3)
 
 
 def _add_graylog_input(cluster_ip, password):
@@ -99,11 +107,42 @@ def _add_graylog_input(cluster_ip, password):
     logger.debug(response.text)
     return response.status_code == 201
 
+def _set_max_result_window(cluster_ip, max_window=100000):
+    url_existing_indices = f"http://{cluster_ip}:9200/_all/_settings"
+    payload_existing = json.dumps({
+        "settings": {
+            "index.max_result_window": max_window
+        }
+    })
+    headers = {
+        'Content-Type': 'application/json',
+    }
+    response = requests.put(url_existing_indices, headers=headers, data=payload_existing)
+    if response.status_code == 200:
+        logger.info("Settings updated for existing indices.")
+    else:
+        logger.error(f"Failed to update settings for existing indices: {response.text}")
+        return False
+    
+    url_template = f"http://{cluster_ip}:9200/_template/all_indices_template"
+    payload_template = json.dumps({
+        "index_patterns": ["*"],
+        "settings": {
+            "index.max_result_window": max_window
+        }
+    })
+    response_template = requests.put(url_template, headers=headers, data=payload_template)
+    if response_template.status_code == 200:
+        logger.info("Template created for future indices.")
+        return True
+    else:
+        logger.error(f"Failed to create template for future indices: {response_template.text}")
+        return False
 
 def create_cluster(blk_size, page_size_in_blocks, cli_pass,
                    cap_warn, cap_crit, prov_cap_warn, prov_cap_crit, ifname, log_del_interval, metrics_retention_period,
                    contact_point, grafana_endpoint, distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type,
-                   enable_node_affinity, qpair_count, max_queue_size, inflight_io_threshold, enable_qos):
+                   enable_node_affinity, qpair_count, max_queue_size, inflight_io_threshold, enable_qos, strict_node_anti_affinity):
 
     logger.info("Installing dependencies...")
     ret = scripts.install_deps()
@@ -129,6 +168,10 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
         if c.swarm.attrs and "ID" in c.swarm.attrs:
             logger.info("Docker swarm found, leaving swarm now")
             c.swarm.leave(force=True)
+            try:
+                c.volumes.get("monitoring_grafana_data").remove(force=True)
+            except:
+                pass
             time.sleep(3)
 
         c.swarm.init(DEV_IP)
@@ -148,6 +191,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     c.nqn = f"{constants.CLUSTER_NQN}:{c.uuid}"
     c.cli_pass = cli_pass
     c.secret = utils.generate_string(20)
+    c.grafana_secret = c.secret
     c.db_connection = db_connection
     if cap_warn and cap_warn > 0:
         c.cap_warn = cap_warn
@@ -158,7 +202,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     if prov_cap_crit and prov_cap_crit > 0:
         c.prov_cap_crit = prov_cap_crit
     if distr_ndcs == 0 and distr_npcs == 0:
-        c.distr_ndcs = 4
+        c.distr_ndcs = 1
         c.distr_npcs = 1
     else:
         c.distr_ndcs = distr_ndcs
@@ -171,11 +215,12 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     else:
         c.grafana_endpoint = f"http://{DEV_IP}/grafana"
     c.enable_node_affinity = enable_node_affinity
-    c.qpair_count = qpair_count or 256
+    c.qpair_count = qpair_count or constants.QPAIR_COUNT
 
     c.max_queue_size = max_queue_size
     c.inflight_io_threshold = inflight_io_threshold
     c.enable_qos = enable_qos
+    c.strict_node_anti_affinity = strict_node_anti_affinity
 
     alerts_template_folder = os.path.join(TOP_DIR, "simplyblock_core/scripts/alerting/")
     alert_resources_file = "alert_resources.yaml"
@@ -196,7 +241,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
 
     values = {
         'CONTACT_POINT': contact_point,
-        'GRAFANA_ENDPOINT': grafana_endpoint,
+        'GRAFANA_ENDPOINT': c.grafana_endpoint,
         'ALERT_TYPE': ALERT_TYPE,
     }
 
@@ -218,7 +263,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     logger.info("Deploying swarm stack ...")
     log_level = "DEBUG" if constants.LOG_WEB_DEBUG else "INFO"
     ret = scripts.deploy_stack(cli_pass, DEV_IP, constants.SIMPLY_BLOCK_DOCKER_IMAGE, c.secret, c.uuid,
-                               log_del_interval, metrics_retention_period, log_level=log_level)
+                               log_del_interval, metrics_retention_period, log_level, c.grafana_endpoint)
     logger.info("Deploying swarm stack > Done")
 
     if ret == 0:
@@ -230,12 +275,15 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     out = scripts.set_db_config_single()
     logger.info("Configuring DB > Done")
 
+    _set_max_result_window(DEV_IP)
+
     _add_graylog_input(DEV_IP, c.secret)
 
-    c.status = Cluster.STATUS_UNREADY
+    _create_update_user(c.uuid, c.grafana_endpoint, c.grafana_secret, c.secret)
 
-    c.updated_at = int(time.time())
-    db_controller = DBController(KVStore())
+    c.status = Cluster.STATUS_UNREADY
+    c.create_dt = str(datetime.datetime.now())
+    db_controller = DBController()
     c.write_to_db(db_controller.kv_store)
 
     cluster_events.cluster_create(c)
@@ -247,78 +295,33 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     return c.uuid
 
 
-# Deprecated
-def deploy_spdk(node_docker, spdk_cpu_mask, spdk_mem):
-    nodes = node_docker.containers.list(all=True)
-    for node in nodes:
-        if node.attrs["Name"] == "/spdk":
-            logger.info("spdk container found, skip deploy...")
-            return
-    container = node_docker.containers.run(
-        constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE,
-        f"/root/scripts/run_distr.sh {spdk_cpu_mask} {spdk_mem}",
-        detach=True,
-        privileged=True,
-        name="spdk",
-        network_mode="host",
-        volumes=[
-            '/var/tmp:/var/tmp',
-            '/dev:/dev',
-            '/lib/modules/:/lib/modules/',
-            '/sys:/sys'],
-        restart_policy={"Name": "on-failure", "MaximumRetryCount": 99}
-    )
-    container2 = node_docker.containers.run(
-        constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE,
-        "python /root/scripts/spdk_http_proxy.py",
-        name="spdk_proxy",
-        detach=True,
-        network_mode="host",
-        volumes=[
-            '/var/tmp:/var/tmp',
-            '/etc/foundationdb:/etc/foundationdb'],
-        restart_policy={"Name": "on-failure", "MaximumRetryCount": 99}
-    )
-    retries = 10
-    while retries > 0:
-        info = node_docker.containers.get(container.attrs['Id'])
-        status = info.attrs['State']["Status"]
-        is_running = info.attrs['State']["Running"]
-        if not is_running:
-            logger.info("Container is not running, waiting...")
-            time.sleep(3)
-            retries -= 1
-        else:
-            logger.info(f"Container status: {status}, Is Running: {is_running}")
-            break
-
-
 def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
                 distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, enable_node_affinity, qpair_count,
-                enable_qos):
+                max_queue_size, inflight_io_threshold, enable_qos, strict_node_anti_affinity):
     db_controller = DBController()
     clusters = db_controller.get_clusters()
     if not clusters:
         logger.error("No previous clusters found!")
         return False
 
-    default_cluster = clusters[0]
     logger.info("Adding new cluster")
     cluster = Cluster()
     cluster.uuid = str(uuid.uuid4())
     cluster.blk_size = blk_size
     cluster.page_size_in_blocks = page_size_in_blocks
-    cluster.ha_type = default_cluster.ha_type
     cluster.nqn = f"{constants.CLUSTER_NQN}:{cluster.uuid}"
-    cluster.cli_pass = default_cluster.cli_pass
     cluster.secret = utils.generate_string(20)
+    cluster.strict_node_anti_affinity = strict_node_anti_affinity
+
+    default_cluster = clusters[0]
     cluster.db_connection = default_cluster.db_connection
+    cluster.grafana_secret = default_cluster.grafana_secret
     cluster.grafana_endpoint = default_cluster.grafana_endpoint
 
-    _create_update_user(cluster.uuid, cluster.grafana_endpoint, default_cluster.secret, cluster.secret)
+    _create_update_user(cluster.uuid, cluster.grafana_endpoint, cluster.grafana_secret, cluster.secret)
 
     if distr_ndcs == 0 and distr_npcs == 0:
-        cluster.distr_ndcs = 4
+        cluster.distr_ndcs = 2
         cluster.distr_npcs = 1
     else:
         cluster.distr_ndcs = distr_ndcs
@@ -327,7 +330,9 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
     cluster.distr_chunk_bs = distr_chunk_bs
     cluster.ha_type = ha_type
     cluster.enable_node_affinity = enable_node_affinity
-    cluster.qpair_count = qpair_count or 256
+    cluster.qpair_count = qpair_count or constants.QPAIR_COUNT
+    cluster.max_queue_size = max_queue_size
+    cluster.inflight_io_threshold = inflight_io_threshold
     cluster.enable_qos = enable_qos
     if cap_warn and cap_warn > 0:
         cluster.cap_warn = cap_warn
@@ -339,30 +344,34 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
         cluster.prov_cap_crit = prov_cap_crit
 
     cluster.status = Cluster.STATUS_UNREADY
-    cluster.updated_at = int(time.time())
+    cluster.create_dt = str(datetime.datetime.now())
     cluster.write_to_db(db_controller.kv_store)
     cluster_events.cluster_create(cluster)
 
     return cluster.get_id()
 
 
-def cluster_activate(cl_id, force=False):
+def cluster_activate(cl_id, force=False, force_lvstore_create=False):
     db_controller = DBController()
     cluster = db_controller.get_cluster_by_id(cl_id)
     if not cluster:
         logger.error(f"Cluster not found {cl_id}")
         return False
     if cluster.status == Cluster.STATUS_ACTIVE:
-        logger.warning("Cluster is not in an ACTIVE state")
+        logger.warning("Cluster is ACTIVE")
         if not force:
             logger.warning(f"Failed to activate cluster, Cluster is in an ACTIVE state, use --force to reactivate")
             return False
+
+    ols_status = cluster.status
     set_cluster_status(cl_id, Cluster.STATUS_IN_ACTIVATION)
     snodes = db_controller.get_storage_nodes_by_cluster_id(cl_id)
     online_nodes = []
     dev_count = 0
 
     for node in snodes:
+        if node.is_secondary_node:
+            continue
         if node.status == node.STATUS_ONLINE:
             online_nodes.append(node)
             for dev in node.nvme_devices:
@@ -371,31 +380,64 @@ def cluster_activate(cl_id, force=False):
     minimum_devices = cluster.distr_ndcs + cluster.distr_npcs + 1
     if dev_count < minimum_devices:
         logger.error(f"Failed to activate cluster, No enough online device.. Minimum is {minimum_devices}")
-        set_cluster_status(cl_id, Cluster.STATUS_UNREADY)
+        set_cluster_status(cl_id, ols_status)
         return False
+
     records = db_controller.get_cluster_capacity(cluster)
     max_size = records[0]['size_total']
 
+    if cluster.ha_type == "ha":
+        for snode in snodes:
+            if snode.is_secondary_node or snode.secondary_node_id:
+                continue
+            secondary_nodes = storage_node_ops.get_secondary_nodes(snode)
+            if not secondary_nodes:
+                logger.error(f"Failed to activate cluster, No enough secondary nodes")
+                set_cluster_status(cl_id, ols_status)
+                return False
+            snode.secondary_node_id = secondary_nodes[0]
+            snode.write_to_db()
+
     for snode in snodes:
-        if snode.lvstore:
+        if snode.is_secondary_node:
+            continue
+        if snode.status != StorageNode.STATUS_ONLINE:
+            continue
+        if snode.lvstore and force_lvstore_create is False:
             logger.warning(f"Node {snode.get_id()} already has lvstore {snode.lvstore}")
             ret = storage_node_ops.recreate_lvstore(snode)
         else:
             ret = storage_node_ops.create_lvstore(snode, cluster.distr_ndcs, cluster.distr_npcs, cluster.distr_bs,
                                               cluster.distr_chunk_bs, cluster.page_size_in_blocks, max_size, snodes)
-        if not ret:
+        if not ret and not force:
             logger.error("Failed to activate cluster")
-            set_cluster_status(cl_id, Cluster.STATUS_UNREADY)
+            set_cluster_status(cl_id, ols_status)
             return False
+
+    for snode in snodes:
+        if not snode.is_secondary_node:
+            continue
+        if snode.status != StorageNode.STATUS_ONLINE:
+            continue
+
+        ret = storage_node_ops.recreate_lvstore(snode)
+        if not ret and not force:
+            logger.error("Failed to activate cluster")
+            set_cluster_status(cl_id, ols_status)
+            return False
+
     if not cluster.cluster_max_size:
+        cluster = db_controller.get_cluster_by_id(cl_id)
         cluster.cluster_max_size = max_size
-    cluster.write_to_db(db_controller.kv_store)
+        cluster.cluster_max_devices = dev_count
+        cluster.cluster_max_nodes = len(online_nodes)
+        cluster.write_to_db(db_controller.kv_store)
     set_cluster_status(cl_id, Cluster.STATUS_ACTIVE)
     logger.info("Cluster activated successfully")
     return True
 
 
-def show_cluster(cl_id, is_json=False):
+def get_cluster_status(cl_id, is_json=False):
     db_controller = DBController()
     cluster = db_controller.get_cluster_by_id(cl_id)
     if not cluster:
@@ -510,15 +552,232 @@ def list():
     for cl in cls:
         st = db_controller.get_storage_nodes_by_cluster_id(cl.get_id())
         data.append({
-            "UUID": cl.id,
+            "UUID": cl.get_id(),
             "NQN": cl.nqn,
             "ha_type": cl.ha_type,
             "tls": cl.tls,
             "mgmt nodes": len(mt),
             "storage nodes": len(st),
+            "Mod": f"{cl.distr_ndcs}x{cl.distr_npcs}",
             "Status": cl.status,
         })
     return utils.print_table(data)
+
+
+
+def list_all_info(cluster_id):
+    db_controller = DBController()
+    cl = db_controller.get_cluster_by_id(cluster_id)
+    if not cl:
+        logger.error(f"Cluster not found {cluster_id}")
+        return False
+
+    mt = db_controller.get_mgmt_nodes()
+    mt_online = [m for m in mt if m.status == MgmtNode.STATUS_ONLINE]
+
+    data = []
+
+    st = db_controller.get_storage_nodes_by_cluster_id(cl.get_id())
+    st_online = [s for s in st if s.status == StorageNode.STATUS_ONLINE]
+
+    pools = db_controller.get_pools(cluster_id)
+    p_online = [p for p in pools if p.status == Pool.STATUS_ACTIVE]
+
+    lvols = db_controller.get_lvols(cluster_id)
+    lv_online = [p for p in lvols if p.status == LVol.STATUS_ONLINE]
+
+    snaps = [sn for sn in db_controller.get_snapshots() if sn.cluster_id == cluster_id]
+
+    devs = []
+    devs_online = []
+    for n in st:
+        for dev in n.nvme_devices:
+            devs.append(dev)
+            if dev.status == NVMeDevice.STATUS_ONLINE:
+                devs_online.append(dev)
+
+    records = db_controller.get_cluster_capacity(cl, 1)
+    if records:
+        rec = records[0]
+    else:
+        rec = StatsObject()
+
+    task_total = 0
+    task_running = 0
+    task_pending = 0
+    for task in db_controller.get_job_tasks(cl.get_id()):
+        task_total += 1
+        if task.status == JobSchedule.STATUS_RUNNING:
+            task_running += 1
+        elif task.status in [JobSchedule.STATUS_NEW, JobSchedule.STATUS_SUSPENDED]:
+            task_pending += 1
+
+
+    data.append({
+        "Cluster UUID": cl.get_id(),
+        "Type": cl.ha_type.upper(),
+        "Mod": f"{cl.distr_ndcs}x{cl.distr_npcs}",
+
+        "Mgmt Nodes": f"{len(mt)}/{len(mt_online)}",
+        "Storage Nodes": f"{len(st)}/{len(st_online)}",
+        "Devices": f"{len(devs)}/{len(devs_online)}",
+        "Pools": f"{len(pools)}/{len(p_online)}",
+        "Lvols": f"{len(lvols)}/{len(lv_online)}",
+        "Snaps": f"{len(snaps)}",
+
+        "Tasks total": f"{task_total}",
+        "Tasks running": f"{task_running}",
+        "Tasks pending": f"{task_pending}",
+        #
+        # "Size total": f"{utils.humanbytes(rec.size_total)}",
+        # "Size Used": f"{utils.humanbytes(rec.size_used)}",
+        # "Size prov": f"{utils.humanbytes(rec.size_prov)}",
+        # "Size util": f"{rec.size_util}%",
+        # "Size prov util": f"{rec.size_prov_util}%",
+
+        "Status": cl.status,
+
+    })
+
+    out = utils.print_table(data, title="Cluster Info")
+    out += "\n"
+
+    data = []
+
+    data.append({
+        "Cluster UUID": cl.uuid,
+        # "Type": "Cluster Object",
+        # "Devices": f"{len(devs)}/{len(devs_online)}",
+        # "Lvols": f"{len(lvols)}/{len(lv_online)}",
+
+        "Size prov": f"{utils.humanbytes(rec.size_prov)}",
+        "Size Used": f"{utils.humanbytes(rec.size_used)}",
+        "Size free": f"{utils.humanbytes(rec.size_free)}",
+        "Size %": f"{rec.size_util}%",
+        "Size prov %": f"{rec.size_prov_util}%",
+
+        "Read BW/s": f"{utils.humanbytes(rec.read_bytes_ps)}",
+        "Write BW/s": f"{utils.humanbytes(rec.write_bytes_ps)}",
+        "Read IOP/s": f"{rec.read_io_ps}",
+        "Write IOP/s": f"{rec.write_io_ps}",
+
+        "Health": "True",
+        "Status": cl.status,
+
+    })
+
+    out += "\n"
+    out += utils.print_table(data, title="Cluster Stats")
+    out += "\n"
+
+    data = []
+
+    dev_data = []
+
+    for node in st:
+        records = db_controller.get_node_capacity(node, 1)
+        if records:
+            rec = records[0]
+        else:
+            rec = StatsObject()
+
+        lvs = db_controller.get_lvols_by_node_id(node.get_id()) or []
+        total_devices = len(node.nvme_devices)
+        online_devices = 0
+        for dev in node.nvme_devices:
+            if dev.status == NVMeDevice.STATUS_ONLINE:
+                online_devices += 1
+
+        data.append({
+            "Storage node UUID": node.uuid,
+            "Devices": f"{total_devices}/{online_devices}",
+            "LVols": f"{len(lvs)}",
+
+            "Size prov": f"{utils.humanbytes(rec.size_total)}",
+            "Size Used": f"{utils.humanbytes(rec.size_used)}",
+            "Size free": f"{utils.humanbytes(rec.size_free)}",
+            "Size %": f"{rec.size_util}%",
+            "Size prov %": f"{rec.size_prov_util}%",
+
+            "Read BW/s": f"{utils.humanbytes(rec.read_bytes_ps)}",
+            "Write BW/s": f"{utils.humanbytes(rec.write_bytes_ps)}",
+            "Read IOP/s": f"{rec.read_io_ps}",
+            "Write IOP/s": f"{rec.write_io_ps}",
+
+            "Status": node.status,
+
+        })
+
+        for dev in node.nvme_devices:
+            records = db_controller.get_device_capacity(dev)
+            if records:
+                rec = records[0]
+            else:
+                rec = StatsObject()
+
+            dev_data.append({
+                "Device UUID": dev.uuid,
+
+                "Size total": f"{utils.humanbytes(rec.size_total)}",
+                "Size Used": f"{utils.humanbytes(rec.size_used)}",
+                "Size free": f"{utils.humanbytes(rec.size_free)}",
+                "Size %": f"{rec.size_util}%",
+                # "Size prov %": f"{rec.size_prov_util}%",
+
+                "Read BW/s": f"{utils.humanbytes(rec.read_bytes_ps)}",
+                "Write BW/s": f"{utils.humanbytes(rec.write_bytes_ps)}",
+                "Read IOP/s": f"{rec.read_io_ps}",
+                "Write IOP/s": f"{rec.write_io_ps}",
+
+                "Health": dev.health_check,
+                "Status": dev.status,
+
+            })
+
+    out += "\n"
+    if data:
+        out +=  utils.print_table(data, title="Storage Nodes Stats")
+        out += "\n"
+
+    out += "\n"
+    if dev_data:
+        out +=  utils.print_table(dev_data, title="Storage Devices Stats")
+        out += "\n"
+
+    lvol_data = []
+    for lvol in db_controller.get_lvols(cluster_id):
+        records = db_controller.get_lvol_stats(lvol, 1)
+        if records:
+            rec = records[0]
+        else:
+            rec = StatsObject()
+
+        lvol_data.append({
+            "LVol UUID": lvol.uuid,
+
+            "Size prov": f"{utils.humanbytes(rec.size_total)}",
+            "Size Used": f"{utils.humanbytes(rec.size_used)}",
+            "Size free": f"{utils.humanbytes(rec.size_free)}",
+            "Size %": f"{rec.size_util}%",
+            # "Size prov %": f"{rec.size_prov_util}%",
+
+            "Read BW/s": f"{utils.humanbytes(rec.read_bytes_ps)}",
+            "Write BW/s": f"{utils.humanbytes(rec.write_bytes_ps)}",
+            "Read IOP/s": f"{rec.read_io_ps}",
+            "Write IOP/s": f"{rec.write_io_ps}",
+
+            "Connections": f"{rec.connected_clients}",
+            "Health": lvol.health_check,
+            "Status": lvol.status,
+
+        })
+
+    out += "\n"
+    if lvol_data:
+        out += utils.print_table(lvol_data, title="LVol Stats")
+        out += "\n"
+
+    return out
 
 
 def get_capacity(cluster_id, history, records_count=20, is_json=False):
@@ -538,7 +797,16 @@ def get_capacity(cluster_id, history, records_count=20, is_json=False):
 
     records = db_controller.get_cluster_capacity(cluster, records_number)
 
-    new_records = utils.process_records(records, records_count)
+    cap_stats_keys = [
+        "date",
+        "size_total",
+        "size_prov",
+        "size_used",
+        "size_free",
+        "size_util",
+        "size_prov_util",
+    ]
+    new_records = utils.process_records(records, records_count, keys=cap_stats_keys)
 
     if is_json:
         return json.dumps(new_records, indent=2)
@@ -557,7 +825,7 @@ def get_capacity(cluster_id, history, records_count=20, is_json=False):
     return out
 
 
-def get_iostats_history(cluster_id, history_string, records_count=20, parse_sizes=True):
+def get_iostats_history(cluster_id, history_string, records_count=20, parse_sizes=True, with_sizes=False):
     db_controller = DBController()
     cluster = db_controller.get_cluster_by_id(cluster_id)
     if not cluster:
@@ -579,8 +847,44 @@ def get_iostats_history(cluster_id, history_string, records_count=20, parse_size
 
     records = db_controller.get_cluster_stats(cluster, records_number)
 
+    io_stats_keys = [
+        "date",
+        "read_bytes",
+        "read_bytes_ps",
+        "read_io_ps",
+        "read_io",
+        "read_latency_ps",
+        "write_bytes",
+        "write_bytes_ps",
+        "write_io",
+        "write_io_ps",
+        "write_latency_ps",
+    ]
+    if with_sizes:
+        io_stats_keys.extend(
+            [
+                "size_total",
+                "size_prov",
+                "size_used",
+                "size_free",
+                "size_util",
+                "size_prov_util",
+                "read_latency_ticks",
+                "record_duration",
+                "record_end_time",
+                "record_start_time",
+                "unmap_bytes",
+                "unmap_bytes_ps",
+                "unmap_io",
+                "unmap_io_ps",
+                "unmap_latency_ps",
+                "unmap_latency_ticks",
+                "write_bytes_ps",
+                "write_latency_ticks",
+            ]
+        )
     # combine records
-    new_records = utils.process_records(records, records_count)
+    new_records = utils.process_records(records, records_count, keys=io_stats_keys)
 
     if not parse_sizes:
         return new_records
@@ -620,8 +924,7 @@ def get_secret(cluster_id):
 def set_secret(cluster_id, secret):
     
     db_controller = DBController()
-    clusters = db_controller.get_clusters()
-    
+
     cluster = db_controller.get_cluster_by_id(cluster_id)
     if not cluster:
         logger.error(f"Cluster not found {cluster_id}")
@@ -631,7 +934,7 @@ def set_secret(cluster_id, secret):
     if len(secret) < 20:
         return "Secret must be at least 20 char"
     
-    _create_update_user(cluster_id, clusters[0].grafana_endpoint, clusters[0].secret, secret, update_secret=True)
+    _create_update_user(cluster_id, cluster.grafana_endpoint, cluster.grafana_secret, secret, update_secret=True)
     
     cluster.secret = secret
     cluster.write_to_db(db_controller.kv_store)
@@ -658,12 +961,16 @@ def get_logs(cluster_id, is_json=False):
         if 'vuid' in record.object_dict:
             vuid = record.object_dict['vuid']
 
+        msg =  record.message
+        if record.event in ["device_status", "node_status"]:
+            msg = msg+f" ({record.count})"
+
         out.append({
             "Date": record.get_date_string(),
             "NodeId": record.node_id,
             "Event": record.event,
             "Level": record.event_level,
-            "Message": record.message,
+            "Message":msg,
             "Storage_ID": str(Storage_ID),
             "VUID": str(vuid),
             "Status": record.status,
@@ -681,7 +988,7 @@ def get_cluster(cl_id):
         logger.error(f"Cluster not found {cl_id}")
         return False
 
-    return json.dumps(cluster.get_clean_dict(), indent=2)
+    return json.dumps(cluster.get_clean_dict(), indent=2, sort_keys=True)
 
 
 def update_cluster(cl_id):
@@ -703,41 +1010,39 @@ def update_cluster(cl_id):
         cluster_docker = utils.get_docker_client(cl_id)
         logger.info(f"Pulling image {constants.SIMPLY_BLOCK_DOCKER_IMAGE}")
         cluster_docker.images.pull(constants.SIMPLY_BLOCK_DOCKER_IMAGE)
+        image_without_tag = constants.SIMPLY_BLOCK_DOCKER_IMAGE.split(":")[0]
         for service in cluster_docker.services.list():
-            if service.attrs['Spec']['Labels']['com.docker.stack.image'] == constants.SIMPLY_BLOCK_DOCKER_IMAGE:
+            if image_without_tag in service.attrs['Spec']['Labels']['com.docker.stack.image']:
                 logger.info(f"Updating service {service.name}")
                 service.update(image=constants.SIMPLY_BLOCK_DOCKER_IMAGE, force_update=True)
         logger.info("Done")
     except Exception as e:
         print(e)
 
-    # for node in db_controller.get_storage_nodes_by_cluster_id(cl_id):
-    #     node_docker = docker.DockerClient(base_url=f"tcp://{node.mgmt_ip}:2375", version="auto")
-    #     logger.info(f"Pulling image {constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE}")
-    #     node_docker.images.pull(constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE)
-    #     if node.status == StorageNode.STATUS_ONLINE:
-    #         storage_node_ops.shutdown_storage_node(node.get_id(), force=True)
-    #         time.sleep(3)
-    #     storage_node_ops.restart_storage_node(node.get_id())
+    for node in db_controller.get_storage_nodes_by_cluster_id(cl_id):
+        try:
+            storage_node_ops.start_storage_node_api_container(node.mgmt_ip)
+        except:
+            pass
 
     logger.info("Done")
     return True
 
 
-def cluster_grace_startup(cl_id):
+def cluster_grace_startup(cl_id, clear_data=False, spdk_image=None):
     db_controller = DBController()
     cluster = db_controller.get_cluster_by_id(cl_id)
     if not cluster:
         logger.error(f"Cluster not found {cl_id}")
         return False
-    logger.info(f"Unsuspending cluster: {cl_id}")
-    unsuspend_cluster(cl_id)
+    # logger.info(f"Unsuspending cluster: {cl_id}")
+    # unsuspend_cluster(cl_id)
 
     st = db_controller.get_storage_nodes_by_cluster_id(cl_id)
     for node in st:
         logger.info(f"Restarting node: {node.get_id()}")
-        storage_node_ops.restart_storage_node(node.get_id())
-        time.sleep(5)
+        storage_node_ops.restart_storage_node(node.get_id(), clear_data=clear_data, force=True, spdk_image=spdk_image)
+        # time.sleep(5)
         get_node = db_controller.get_storage_node_by_id(node.get_id())
         if get_node.status != StorageNode.STATUS_ONLINE:
             logger.error("failed to restart node")
@@ -781,7 +1086,98 @@ def delete_cluster(cl_id):
         logger.error("Can only remove Empty cluster, Pools found")
         return False
 
+    if len(db_controller.get_clusters()) == 1 :
+        logger.error("Can not remove the last cluster!")
+        return False
+
     logger.info(f"Deleting Cluster {cl_id}")
     cluster_events.cluster_delete(cluster)
     cluster.remove(db_controller.kv_store)
     logger.info("Done")
+
+def open_db_from_zip(fip_path):
+    import boto3
+    s3 = boto3.client('s3')
+
+
+    out = '/tmp/fdb.zip'
+    try:
+        os.remove(out)
+    except:
+        pass
+
+    buket_name = 'simplyblock-e2e-test-logs'
+    file_name = ""
+    if fip_path.startswith('s3://'):
+        # s3://simplyblock-e2e-test-logs/12220160320/mgmt/fdb.zip
+        buket_name = fip_path.split("/")[2]
+        file_name = "/".join(fip_path.split("/")[3:])
+
+
+    elif len(fip_path.split('/'))<=3:
+        # /12220160320/mgmt/fdb.zip
+        file_name = fip_path
+
+    elif fip_path.startswith('https://'):
+        #https://simplyblock-e2e-test-logs.s3.us-east-2.amazonaws.com/12220160320/mgmt/fdb.zip
+        buket_name = fip_path.split("/")[2]
+        buket_name = buket_name.split(".")[0]
+        file_name = "/".join(fip_path.split("/")[3:])
+    else:
+        file_name = fip_path
+
+    try:
+        ret = s3.download_file(buket_name, file_name, out)
+    except Exception as e:
+        logger.error(e)
+
+    if os.path.exists(out):
+        scripts.deploy_fdb_from_file_service(out)
+
+
+
+def cluster_reset():
+    """
+
+
+set -x
+
+CMD=$(ls ~/.local/bin/sbcli-* | awk '{n=split($0,a,"/"); print a[n]}')
+cl=$($CMD cluster list | tail -n -3 | awk '{print $2}')
+
+#$CMD cluster graceful-shutdown $cl
+
+for sn_id in $($CMD sn list | grep / | awk '{print $2}'); do
+  $CMD -d sn shutdown --force $sn_id
+done
+
+sudo mv /etc/foundationdb/fdb.cluster /etc/foundationdb/fdb.cluster.bck
+for service_id in $(docker service ls | grep / | awk '{print $1}'); do
+  docker service update "$service_id" --force --detach
+done
+
+# restore
+fdb_cont=$(sudo docker ps | grep "app_fdb-server" | awk '{print $1}')
+sudo docker rm --force $fdb_cont
+sudo rm -rf /etc/foundationdb/data/*
+fdbcli --exec "configure new single ssd ; writemode on ; clearrange \"\" \\xff" -C /etc/foundationdb/fdb.cluster.bck
+BF=$(fdbbackup list -b file:///etc/foundationdb/backup/)
+fdbrestore start -r "$BF" --dest-cluster-file /etc/foundationdb/fdb.cluster.bck -t fresh_deploy
+
+sudo mv /etc/foundationdb/fdb.cluster.bck /etc/foundationdb/fdb.cluster
+
+for service_id in $(docker service ls | grep / | awk '{print $1}'); do
+  docker service update "$service_id" --force --detach
+done
+
+sleep 30
+for sn_id in $($CMD sn list | grep / | awk '{print $2}'); do
+  $CMD -d sn shutdown --force $sn_id
+done
+
+sleep 5
+$CMD -d cluster graceful-startup $cl  --clear-data
+
+$CMD -d cluster activate $cl
+
+    """

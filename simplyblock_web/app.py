@@ -10,15 +10,18 @@ from blueprints import web_api_cluster, web_api_mgmt_node, web_api_device, \
     web_api_lvol, web_api_storage_node, web_api_pool, web_api_caching_node, web_api_snapshot, web_api_deployer
 from auth_middleware import token_required
 from simplyblock_core import constants
+from werkzeug.middleware.dispatcher import DispatcherMiddleware
+from prometheus_client import make_wsgi_app
 
 logger_handler = logging.StreamHandler(sys.stdout)
 logger_handler.setFormatter(logging.Formatter('%(asctime)s: %(levelname)s: %(message)s'))
 logger = logging.getLogger()
 logger.addHandler(logger_handler)
-logger.setLevel(logging.DEBUG)
+logger.setLevel(constants.LOG_WEB_LEVEL)
 
 
 app = Flask(__name__)
+app.logger.setLevel(constants.LOG_WEB_LEVEL)
 app.url_map.strict_slashes = False
 
 
@@ -45,6 +48,11 @@ def status():
     return utils.get_response("Live")
 
 
+app.wsgi_app = DispatcherMiddleware(app.wsgi_app, {
+    '/cluster/metrics': make_wsgi_app()
+})
+
 app.config['JSONIFY_PRETTYPRINT_REGULAR'] = True
 if __name__ == '__main__':
+    logging.getLogger('werkzeug').setLevel(constants.LOG_WEB_LEVEL)
     app.run(host='0.0.0.0', debug=constants.LOG_WEB_DEBUG)

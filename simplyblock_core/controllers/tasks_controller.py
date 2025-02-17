@@ -1,16 +1,17 @@
 # coding=utf-8
+import datetime
 import json
 import logging
 import time
 import uuid
 
-from simplyblock_core import kv_store, constants, utils
+from simplyblock_core import db_controller, constants, utils
 from simplyblock_core.controllers import tasks_events, device_controller
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.storage_node import StorageNode
 
 logger = logging.getLogger()
-db_controller = kv_store.DBController()
+db_controller = db_controller.DBController()
 
 
 def _validate_new_task_dev_restart(cluster_id, node_id, device_id):
@@ -30,7 +31,7 @@ def _validate_new_task_dev_restart(cluster_id, node_id, device_id):
 def _validate_new_task_node_restart(cluster_id, node_id):
     tasks = db_controller.get_job_tasks(cluster_id)
     for task in tasks:
-        if task.function_name == JobSchedule.FN_NODE_RESTART and task.node_id == node_id and task.canceled is False:
+        if task.function_name == JobSchedule.FN_NODE_RESTART and task.node_id == node_id:
             if task.status != JobSchedule.STATUS_DONE:
                 return task.get_id()
     return False
@@ -39,10 +40,11 @@ def _validate_new_task_node_restart(cluster_id, node_id):
 def _add_task(function_name, cluster_id, node_id, device_id,
               max_retry=constants.TASK_EXEC_RETRY_COUNT, function_params=None):
 
-    if function_name in [JobSchedule.FN_DEV_RESTART, JobSchedule.FN_DEV_MIG, JobSchedule.FN_FAILED_DEV_MIG]:
+    if function_name in [JobSchedule.FN_DEV_RESTART, JobSchedule.FN_FAILED_DEV_MIG]:
         if not _validate_new_task_dev_restart(cluster_id, node_id, device_id):
             return False
-    elif function_name == JobSchedule.FN_NODE_RESTART:
+
+    if function_name == JobSchedule.FN_NODE_RESTART:
         task_id = _validate_new_task_node_restart(cluster_id, node_id)
         if task_id:
             logger.info(f"Task found, skip adding new task: {task_id}")
@@ -53,7 +55,7 @@ def _add_task(function_name, cluster_id, node_id, device_id,
             logger.info(f"Task found, skip adding new task: {task_id}")
             return False
     elif function_name == JobSchedule.FN_DEV_MIG:
-        task_id = get_device_mig_task(cluster_id, node_id, function_params['distr_name'])
+        task_id = get_device_mig_task(cluster_id, node_id, device_id, function_params['distr_name'])
         if task_id:
             logger.info(f"Task found, skip adding new task: {task_id}")
             return False
@@ -75,12 +77,14 @@ def _add_task(function_name, cluster_id, node_id, device_id,
 
 
 def add_device_mig_task(device_id):
-    device = db_controller.get_storage_devices(device_id)
+    device = db_controller.get_storage_device_by_id(device_id)
     for node in db_controller.get_storage_nodes_by_cluster_id(device.cluster_id):
         if node.status == StorageNode.STATUS_REMOVED:
             continue
-        if not node.lvols:
+        lvols = db_controller.get_lvols_by_node_id(node.get_id())
+        if not lvols:
             continue
+
         for bdev in node.lvstore_stack:
             if bdev['type'] == "bdev_distr":
                 _add_task(JobSchedule.FN_DEV_MIG, device.cluster_id, node.get_id(), device.get_id(),
@@ -115,6 +119,10 @@ def list_tasks(cluster_id, is_json=False):
         else:
             retry = f"{task.retry}"
 
+        upd = task.updated_at
+        if upd:
+            upd = datetime.datetime.strptime(upd, "%Y-%m-%d %H:%M:%S.%f").strftime(
+                "%H:%M:%S, %d/%m/%Y")
         data.append({
             "Task ID": task.uuid,
             "Node ID / Device ID": f"{task.node_id}\n{task.device_id}",
@@ -122,7 +130,7 @@ def list_tasks(cluster_id, is_json=False):
             "Retry": retry,
             "Status": task.status,
             "Result": task.function_result,
-            "Updated at": time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(task.updated_at)),
+            "Updated At": upd,
         })
     return utils.print_table(data)
 
@@ -171,7 +179,7 @@ def get_active_node_mig_task(cluster_id, node_id):
 
 
 def add_device_failed_mig_task(device_id):
-    device = db_controller.get_storage_devices(device_id)
+    device = db_controller.get_storage_device_by_id(device_id)
     for node in db_controller.get_storage_nodes_by_cluster_id(device.cluster_id):
         if node.status == StorageNode.STATUS_REMOVED:
             continue
@@ -183,7 +191,7 @@ def add_device_failed_mig_task(device_id):
 
 
 def add_new_device_mig_task(device_id):
-    device = db_controller.get_storage_devices(device_id)
+    device = db_controller.get_storage_device_by_id(device_id)
     for node in db_controller.get_storage_nodes_by_cluster_id(device.cluster_id):
         if node.status == StorageNode.STATUS_REMOVED:
             continue
@@ -207,20 +215,23 @@ def get_active_node_task(cluster_id, node_id):
     return False
 
 
-def get_new_device_mig_task(cluster_id, node_id, distr_name):
+def get_new_device_mig_task(cluster_id, node_id, distr_name, dev_id=None):
     tasks = db_controller.get_job_tasks(cluster_id)
     for task in tasks:
         if task.function_name == JobSchedule.FN_NEW_DEV_MIG and task.node_id == node_id:
+            if dev_id:
+                if task.device_id != dev_id:
+                    continue
             if task.status != JobSchedule.STATUS_DONE and task.canceled is False \
                     and "distr_name" in task.function_params and task.function_params["distr_name"] == distr_name:
                 return task.uuid
     return False
 
 
-def get_device_mig_task(cluster_id, node_id, distr_name):
+def get_device_mig_task(cluster_id, node_id, device_id, distr_name):
     tasks = db_controller.get_job_tasks(cluster_id)
     for task in tasks:
-        if task.function_name == JobSchedule.FN_DEV_MIG and task.node_id == node_id:
+        if task.function_name == JobSchedule.FN_DEV_MIG and task.node_id == node_id and task.device_id == device_id:
             if task.status != JobSchedule.STATUS_DONE and task.canceled is False \
                     and "distr_name" in task.function_params and task.function_params["distr_name"] == distr_name:
                 return task.uuid

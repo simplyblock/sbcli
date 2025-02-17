@@ -12,6 +12,7 @@ export CLUSTER_ID=$6
 export LOG_DELETION_INTERVAL=$7
 export RETENTION_PERIOD=$8
 export LOG_LEVEL=$9
+export GRAFANA_ENDPOINT=${10}
 export DIR="$(dirname "$(realpath "$0")")"
 
 if [ -s "/etc/foundationdb/fdb.cluster" ]
@@ -40,3 +41,4 @@ docker stack deploy --compose-file="$DIR"/docker-compose-swarm.yml app
 
 # wait for the services to become online
 bash "$DIR"/stack_deploy_wait.sh app
+exit $?

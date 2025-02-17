@@ -1,5 +1,6 @@
 from datetime import datetime
 import os
+from pathlib import Path
 from e2e_tests.cluster_test_base import TestClusterBase
 import threading
 import json
@@ -13,6 +14,8 @@ class TestLvolFioBase(TestClusterBase):
 
     def setup(self):
         """Call setup from TestClusterBase and then create the storage pool."""
+        self.test_name = "single_node_fio_perf"
+        
         super().setup()
 
         self.lvol_devices = {}
@@ -69,8 +72,9 @@ class TestLvolFioBase(TestClusterBase):
             initial_devices = self.ssh_obj.get_devices(node=self.mgmt_nodes[0])
 
             # Get LVOL connection string
-            connect_str = self.sbcli_utils.get_lvol_connect_str(lvol_name=lvol_name)
-            self.ssh_obj.exec_command(node=self.mgmt_nodes[0], command=connect_str)
+            connect_ls = self.sbcli_utils.get_lvol_connect_str(lvol_name=lvol_name)
+            for connect_str in connect_ls:
+                self.ssh_obj.exec_command(node=self.mgmt_nodes[0], command=connect_str)
 
             # Identify the newly connected device
             sleep_n_sec(10)
@@ -88,7 +92,7 @@ class TestLvolFioBase(TestClusterBase):
             mount_path = None
             if config["mount"]:
                 self.ssh_obj.format_disk(node=self.mgmt_nodes[0], device=disk_use)
-                mount_path = f"/home/ec2-user/test_location_{lvol_name}"
+                mount_path = f"{Path.home()}/test_location_{lvol_name}"
                 self.ssh_obj.mount_path(node=self.mgmt_nodes[0], device=disk_use, mount_path=mount_path)
 
             # Store device information
@@ -104,13 +108,13 @@ class TestLvolFioBase(TestClusterBase):
                 "name": f"fio_{lvol_name}",
                 "rw": readwrite,
                 "ioengine": "libaio",
-                "iodepth": 64,
+                "iodepth": 1,
                 "bs": 4096,
                 "size": "2G",
                 "time_based": True,
                 "runtime": 100,
                 "output_format": "json",
-                "output_file": f"/home/ec2-user/{lvol_name}_log.json",
+                "output_file": f"{Path.home()}/{lvol_name}_log.json",
                 "nrfiles": 5,
                 "debug": self.fio_debug
             }
@@ -122,9 +126,25 @@ class TestLvolFioBase(TestClusterBase):
                             trim_check=False):
         """Validate the FIO output for IOPS and MB/s."""
 
-        log_file = f"/home/ec2-user/{lvol_name}_log.json"
+        log_file = f"{Path.home()}/{lvol_name}_log.json"
         output = self.ssh_obj.read_file(node=self.mgmt_nodes[0], file_name=log_file)
-        fio_result = json.loads(output)
+        fio_result = ""
+        self.logger.info(f"FIO output for {lvol_name}: {output}")
+
+        start_index = output.find('{')  # Find the first opening brace
+        if start_index != -1:
+            json_content = output[start_index:]  # Extract everything starting from the JSON
+            try:
+                self.logger.info(f"Removed str FIO output for {lvol_name}: {fio_result}")
+                # Parse the extracted JSON
+                fio_result = json.loads(json_content)
+            except json.JSONDecodeError as e:
+                print(f"Error decoding JSON: {e}")
+                return None
+        else:
+            print("No JSON content found in the file.")
+            return None
+        # fio_result = json.loads(output)
         self.logger.info(f"FIO output for {lvol_name}: {fio_result}")
 
         job = fio_result['jobs'][0]

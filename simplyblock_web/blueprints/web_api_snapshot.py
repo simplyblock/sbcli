@@ -7,13 +7,13 @@ from flask import Blueprint
 from flask import request
 
 from simplyblock_web import utils
-from simplyblock_core import kv_store
+from simplyblock_core import db_controller
 from simplyblock_core.controllers import snapshot_controller
 
 
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG)
-db_controller = kv_store.DBController()
+
+db_controller = db_controller.DBController()
 bp = Blueprint("snapshot", __name__)
 
 
@@ -45,14 +45,7 @@ def list_snapshots():
     for snap in snaps:
         if snap.cluster_id != cluster_id:
             continue
-        data.append({
-            "uuid": snap.uuid,
-            "name": snap.pool_name,
-            "size": str(snap.lvol.size),
-            "pool_id": snap.pool_uuid,
-            "source_uuid": snap.lvol.get_id(),
-            "created_at": str(snap.created_at),
-        })
+        data.append(snap.get_clean_dict())
     return utils.get_response(data)
 
 

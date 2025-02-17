@@ -9,12 +9,12 @@ from simplyblock_web import utils
 from simplyblock_core.controllers import pool_controller
 
 from simplyblock_core.models.pool import Pool
-from simplyblock_core import kv_store, utils as core_utils
+from simplyblock_core import db_controller, utils as core_utils
 
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG)
+
 bp = Blueprint("pool", __name__)
-db_controller = kv_store.DBController()
+db_controller = db_controller.DBController()
 
 
 @bp.route('/pool', defaults={'uuid': None}, methods=['GET'])
@@ -31,7 +31,10 @@ def list_pools(uuid):
         pools = db_controller.get_pools(cluster_id)
     data = []
     for pool in pools:
-        data.append(pool.get_clean_dict())
+        d = pool.get_clean_dict()
+        lvs = db_controller.get_lvols_by_pool_id(pool.get_id()) or []
+        d['lvols'] = len(lvs)
+        data.append(d)
     return utils.get_response(data)
 
 
@@ -100,8 +103,8 @@ def delete_pool(uuid):
         if req_secret != pool.secret:
             return utils.get_response_error(f"Pool secret doesn't mach the value in the request header", 400)
 
-    if pool.lvols:
-        return utils.get_response_error(f"Can not delete Pool with LVols", 400)
+    # if pool.lvols:
+    #     return utils.get_response_error(f"Can not delete Pool with LVols", 400)
 
     pool.remove(db_controller.kv_store)
     return utils.get_response("Done")
@@ -125,23 +128,23 @@ def update_pool(uuid):
 
     pool.pool_name = pool_data.get('name') or pool.pool_name
 
-    if 'pool-max' in pool_data:
-        pool.pool_max_size = utils.parse_size(pool_data['pool-max'])
+    if 'pool_max' in pool_data:
+        pool.pool_max_size = utils.parse_size(pool_data['pool_max'])
 
-    if 'lvol-max' in pool_data:
-        pool.lvol_max_size = utils.parse_size(pool_data['lvol-max'])
+    if 'lvol_max' in pool_data:
+        pool.lvol_max_size = utils.parse_size(pool_data['lvol_max'])
 
-    if 'max-r-iops' in pool_data:
-        pool.max_r_iops = utils.parse_size(pool_data['max-r-iops'])
+    if 'max_r_iops' in pool_data:
+        pool.max_r_iops = utils.parse_size(pool_data['max_r_iops'])
 
-    if 'max-w-iops' in pool_data:
-        pool.max_w_iops = utils.parse_size(pool_data['max-w-iops'])
+    if 'max_w_iops' in pool_data:
+        pool.max_w_iops = utils.parse_size(pool_data['max_w_iops'])
 
-    if 'max-r-mbytes' in pool_data:
-        pool.max_r_mbytes_per_sec = utils.parse_size(pool_data['max-r-mbytes'])
+    if 'max_r_mbytes' in pool_data:
+        pool.max_r_mbytes_per_sec = utils.parse_size(pool_data['max_r_mbytes'])
 
-    if 'max-w-mbytes' in pool_data:
-        pool.max_w_mbytes_per_sec = utils.parse_size(pool_data['max-w-mbytes'])
+    if 'max_w_mbytes' in pool_data:
+        pool.max_w_mbytes_per_sec = utils.parse_size(pool_data['max_w_mbytes'])
 
     pool.write_to_db(db_controller.kv_store)
     return utils.get_response(pool.to_dict())
@@ -160,8 +163,7 @@ def pool_capacity(uuid):
 
     out = []
     total_size = 0
-    for lvol_id in pool.lvols:
-        lvol = db_controller.get_lvol_by_id(lvol_id)
+    for lvol in db_controller.get_lvols_by_pool_id(uuid):
         total_size += lvol.size
         out.append({
             "device name": lvol.lvol_name,
@@ -169,7 +171,7 @@ def pool_capacity(uuid):
             "util_percent": 0,
             "util": 0,
         })
-    if pool.lvols:
+    if total_size:
         out.append({
             "device name": "Total",
             "provisioned": total_size,

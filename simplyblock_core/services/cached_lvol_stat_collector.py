@@ -1,7 +1,7 @@
 # coding=utf-8
 import time
 
-from simplyblock_core import constants, kv_store, utils
+from simplyblock_core import constants, db_controller, utils
 from simplyblock_core.models.stats import CachedLVolStatObject
 from simplyblock_core.rpc_client import RPCClient
 
@@ -72,8 +72,7 @@ def add_lvol_stats(lvol, stats_dict):
     return stat_obj
 
 
-db_store = kv_store.KVStore()
-db_controller = kv_store.DBController()
+db_controller = db_controller.DBController()
 
 logger.info("Starting stats collector...")
 while True:

@@ -10,13 +10,13 @@ from flask import request
 from simplyblock_core.controllers import tasks_controller
 from simplyblock_web import utils
 
-from simplyblock_core import kv_store, cluster_ops
+from simplyblock_core import db_controller, cluster_ops
 from simplyblock_core.models.cluster import Cluster
 
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG)
+
 bp = Blueprint("cluster", __name__)
-db_controller = kv_store.DBController()
+db_controller = db_controller.DBController()
 
 
 @bp.route('/cluster', methods=['POST'])
@@ -49,10 +49,12 @@ def add_cluster():
 
     max_queue_size = cl_data.get('max_queue_size', 128)
     inflight_io_threshold = cl_data.get('inflight_io_threshold', 4)
+    enable_qos = cl_data.get('enable_qos', False)
+    strict_node_anti_affinity = cl_data.get('strict_node_anti_affinity', False)
 
     ret = cluster_ops.add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
                                   distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, enable_node_affinity,
-                                  qpair_count, max_queue_size, inflight_io_threshold)
+                                  qpair_count, max_queue_size, inflight_io_threshold, enable_qos, strict_node_anti_affinity)
 
     return utils.get_response(ret)
 
@@ -60,14 +62,24 @@ def add_cluster():
 @bp.route('/cluster', methods=['GET'], defaults={'uuid': None})
 @bp.route('/cluster/<string:uuid>', methods=['GET'])
 def list_clusters(uuid):
-    cluster_id = utils.get_cluster_id(request)
-    cluster = db_controller.get_cluster_by_id(cluster_id)
-    if not cluster:
-        return utils.get_response_error(f"Cluster not found: {cluster_id}", 404)
+    clusters_list = []
+    if uuid:
+        cl = db_controller.get_cluster_by_id(uuid)
+        if cl:
+            clusters_list.append(cl)
+        else:
+            return utils.get_response_error(f"Cluster not found: {uuid}", 404)
+    else:
+        cls = db_controller.get_clusters()
+        if cls:
+            clusters_list.extend(cls)
 
-    d = cluster.get_clean_dict()
-    d['status_code'] = cluster.get_status_code()
-    return utils.get_response([d])
+    data = []
+    for cluster in clusters_list:
+        d = cluster.get_clean_dict()
+        d['status_code'] = cluster.get_status_code()
+        data.append(d)
+    return utils.get_response(data)
 
 
 @bp.route('/cluster/capacity/<string:uuid>/history/<string:history>', methods=['GET'])
@@ -78,7 +90,7 @@ def cluster_capacity(uuid, history):
         logger.error(f"Cluster not found {uuid}")
         return utils.get_response_error(f"Cluster not found: {uuid}", 404)
 
-    ret = cluster_ops.get_capacity(uuid, history, parse_sizes=False)
+    ret = cluster_ops.get_capacity(uuid, history, is_json=True)
     return utils.get_response(ret)
 
 
@@ -90,7 +102,7 @@ def cluster_iostats(uuid, history):
         logger.error(f"Cluster not found {uuid}")
         return utils.get_response_error(f"Cluster not found: {uuid}", 404)
 
-    data = cluster_ops.get_iostats_history(uuid, history, parse_sizes=False)
+    data = cluster_ops.get_iostats_history(uuid, history, parse_sizes=False, with_sizes=True)
     ret = {
         "object_data": cluster.get_clean_dict(),
         "stats": data or []
@@ -104,7 +116,7 @@ def cluster_status(uuid):
     if not cluster:
         logger.error(f"Cluster not found {uuid}")
         return utils.get_response_error(f"Cluster not found: {uuid}", 404)
-    data = cluster_ops.show_cluster(uuid, is_json=True)
+    data = cluster_ops.get_cluster_status(uuid, is_json=True)
     return utils.get_response(json.loads(data))
 
 

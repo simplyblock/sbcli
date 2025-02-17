@@ -21,42 +21,36 @@ class Deployer(BaseModel):
         TF_APPLY: 3,
     }
 
-    attributes = {
-        "uuid": {"type": str, 'default': ""},
-        "region": {"type": str, 'default': ""},
-        "availability_zone": {"type": str, 'default': ""},
-        "sbcli_cmd": {"type": str, 'default': ""},
-        "sbcli_pkg_version": {"type": str, 'default': ""},
-        "whitelist_ips": {"type": str, 'default': ""},  # todo: make this a list
-        "mgmt_nodes": {"type": int, 'default': 0},
-        "storage_nodes": {"type": int, 'default': 0},
-        "extra_nodes": {"type": int, 'default': 0},
-        "mgmt_nodes_instance_type": {"type": str, 'default': ""},
-        "storage_nodes_instance_type": {"type": str, 'default': ""},
-        "extra_nodes_instance_type": {"type": str, 'default': ""},
-        "storage_nodes_ebs_size1": {"type": int, 'default': 0},  # size in GB
-        "storage_nodes_ebs_size2": {"type": int, 'default': 0},  # size in GB
-        "volumes_per_storage_nodes": {"type": int, 'default': 0},
-        "nr_hugepages": {"type": int, 'default': 0},
-        "tf_state_bucket_name": {"type": str, 'default': ""},
-        "tf_state_bucket_region": {"type": str, 'default': ""},
-        "tf_workspace": {"type": str, 'default': ""},
-        "status": {"type": str, 'default': ""},
-        "tf_logs_bucket_name": {"type": str, 'default': ""},
-        "ecr_account_id": {"type": str, 'default': ""},
-        "ecr_region": {"type": str, 'default': ""},
-        "ecr_repository_name": {"type": str, 'default': ""},
-        "ecr_image_tag": {"type": str, 'default': ""},
-        "tf_output": {"type": str, 'default': ""},
-    }
+    availability_zone: str = ""
+    ecr_account_id: str = ""
+    ecr_image_tag: str = ""
+    ecr_region: str = ""
+    ecr_repository_name: str = ""
+    extra_nodes: int = 0
+    extra_nodes_instance_type: str = ""
+    mgmt_nodes: int = 0
+    mgmt_nodes_instance_type: str = ""
+    nr_hugepages: int = 0
+    region: str = ""
+    sbcli_cmd: str = ""
+    sbcli_pkg_version: str = ""
+    storage_nodes: int = 0
+    storage_nodes_ebs_size1: int = 0
+    storage_nodes_ebs_size2: int = 0
+    storage_nodes_instance_type: str = ""
+    tf_logs_bucket_name: str = ""
+    tf_output: str = ""
+    tf_state_bucket_name: str = ""
+    tf_state_bucket_region: str = ""
+    tf_workspace: str = ""
+    volumes_per_storage_nodes: int = 0
+    whitelist_ips: str = ""
 
-    def __init__(self, data=None):
-        super(Deployer, self).__init__()
-        self.set_attrs(self.attributes, data)
-        self.object_type = "object"
-
-    def get_id(self):
-        return self.uuid
 
     def get_status_code(self):
-        return self.status
+        if self.status in self.STATUS_CODE_MAP:
+            return self.STATUS_CODE_MAP[self.status]
+        else:
+            return -1
+
+
