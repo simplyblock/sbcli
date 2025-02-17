@@ -1278,14 +1278,16 @@ class SshUtils:
             f"sudo tmux new-session -d -s conn_reset_log_session \"tcpdump -i ens16 -nn '(tcp[13] & 0x04 != 0)' > {conn_reset_log} 2>&1\"",
             (
                 "sudo tmux new-session -d -s ack_timeout_log_session "
-                "\"tcpdump -i ens16 -nn -tttt | awk '/Flags \\[.\\]/ {"
-                " if (prev_time != \"\") {"
-                " diff = $1-prev_time;"
-                " if (diff > 0.5) print prev_time, \"->\", $1, \"ACK timeout:\", diff, \"sec\""
-                " }"
-                " prev_time = $1"
-                " }' > %s 2>&1\""
+                "\"tcpdump -i ens16 -nn -tttt | awk "
+                "'/Flags \\\\[.\\\\]/ { "
+                "if (prev_time != \\\"\\\") { "
+                "diff = \\$1 - prev_time; "
+                "if (diff > 0.5) print prev_time, \\\"->\\\", \\$1, \\\"ACK timeout:\\\", diff, \\\"sec\\\"; "
+                "} "
+                "prev_time = \\$1; "
+                "}' > %s 2>&1\""
             ) % ack_timeout_log
+
         ]
 
         # Execute each tcpdump command remotely
