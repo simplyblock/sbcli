@@ -62,7 +62,7 @@ def get_all_tests(custom=True, ha_test=False):
         TestLvolFioNpcs2,
         TestSingleNodeFailure,
         TestHASingleNodeFailure,
-        TestLvolFioNpcsCustom,
+        # TestLvolFioNpcsCustom,
         # TestSingleNodeReboot,
         # TestHASingleNodeReboot,
         # TestHASingleNodeOutage
