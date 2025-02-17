@@ -22,6 +22,15 @@ sudo sysctl -w net.ipv6.conf.all.disable_ipv6=1
 # required for graylog
 sudo sysctl -w vm.max_map_count=262144
 
+echo "net.core.rmem_max=16777216" >> /etc/sysctl.conf
+echo "net.core.rmem_default=87380" >> /etc/sysctl.conf
+echo "net.ipv4.tcp_rmem=4096 87380 16777216" >> /etc/sysctl.conf
+echo "net.core.somaxconn=1024" >> /etc/sysctl.conf
+echo "net.ipv4.tcp_max_syn_backlog=4096" >> /etc/sysctl.conf
+echo "net.ipv4.tcp_window_scaling=1" >> /etc/sysctl.conf
+echo "net.ipv4.tcp_retries2=8" >> /etc/sysctl.conf
+sysctl -p  # Apply changes immediately
+
 sudo mkdir -p /etc/simplyblock
 sudo chmod 777 /etc/simplyblock
 
