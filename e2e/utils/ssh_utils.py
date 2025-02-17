@@ -1246,6 +1246,8 @@ class SshUtils:
         self.exec_command(node, f"sudo xfs_admin -U generate {device}")  # Generate new UUID
 
     def check_and_install_tcpdump(self, node_ip):
+        """Installs tcpdump on given node ip
+        """
         output, _ = self.exec_command(node_ip, "which tcpdump")
         if not output:
             self.logger.info("tcpdump not found, installing...")
@@ -1255,21 +1257,6 @@ class SshUtils:
             )
             output, _ = self.exec_command(node_ip, install_tcpdump_command)
             self.logger.info(f"tcpdump installed successfully: {output}")
-
-    def exec_command_no_wait(self, node_ip, command):
-        """Execute a command on a remote node without waiting for output (background process)."""
-        try:
-            client = self.ssh_connections[node_ip]
-            stdin, stdout, stderr = client.exec_command(command, timeout=5, get_pty=True)
-            
-            # Immediately close streams to prevent blocking
-            stdin.close()
-            stdout.channel.close()
-            stderr.channel.close()
-
-            self.logger.info(f"Executed command in background on {node_ip}: {command}")
-        except Exception as e:
-            self.logger.error(f"Error executing command on {node_ip}: {e}")
 
     def start_tcpdump_logging(self, node_ip, log_dir):
         """Start tcpdump logging for various TCP anomalies on a remote node with proper background handling."""
@@ -1283,25 +1270,27 @@ class SshUtils:
         conn_reset_log = f"{log_dir}/tcpdump_conn_reset_{node_ip}_{timestamp}.txt"
         ack_timeout_log = f"{log_dir}/tcpdump_ack_timeout_{node_ip}_{timestamp}.txt"
 
+
         # Create tcpdump commands with `nohup` to detach from the SSH session
         tcpdump_commands = [
-            f"nohup sudo tcpdump -i ens16 -nn '(tcp[tcpflags] == 2 and tcp[14:2] > 1)' > {syn_timeout_log} 2>&1 &",
-            f"nohup sudo tcpdump -i ens16 -nn -v '(tcp[13] & 0x10 != 0 and tcp[14:2] == 0)' > {rcv_buffer_full_log} 2>&1 &",
-            f"nohup sudo tcpdump -i ens16 -nn '(tcp[13] & 0x04 != 0)' > {conn_reset_log} 2>&1 &",
+            f"sudo tmux new-session -d -s sync_timeout_log_session \"tcpdump -i ens16 -nn '(tcp[tcpflags] == 2 and tcp[14:2] > 1)' > {syn_timeout_log} 2>&1\"",
+            f"sudo tmux new-session -d -s rcv_buffer_log_session \"tcpdump -i ens16 -nn -v '(tcp[13] & 0x10 != 0 and tcp[14:2] == 0)' > {rcv_buffer_full_log} 2>&1\"",
+            f"sudo tmux new-session -d -s conn_reset_log_session \"tcpdump -i ens16 -nn '(tcp[13] & 0x04 != 0)' > {conn_reset_log} 2>&1\"",
             (
-                "nohup sudo tcpdump -i ens16 -nn -tttt | awk '/Flags \\[.\\]/ {"
+                "sudo tmux new-session -d -s ack_timeout_log_session "
+                "\"nohup sudo tcpdump -i ens16 -nn -tttt | awk '/Flags \\[.\\]/ {"
                 " if (prev_time != \"\") {"
                 " diff = $1-prev_time;"
                 " if (diff > 0.5) print prev_time, \"->\", $1, \"ACK timeout:\", diff, \"sec\""
                 " }"
                 " prev_time = $1"
-                " }' > %s 2>&1 &"
+                " }' > %s 2>&1\""
             ) % ack_timeout_log
         ]
 
         # Execute each tcpdump command remotely
         for cmd in tcpdump_commands:
-            self.exec_command_no_wait(node_ip, cmd)
+            self.exec_command(node_ip, cmd)
 
         # Log the output filenames for reference
         self.logger.info(f"Started tcpdump for SYN timeouts on {node_ip}, saving to {syn_timeout_log}")
