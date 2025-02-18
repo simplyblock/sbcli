@@ -252,7 +252,7 @@ class SbcliUtils:
         """
         # TODO: parse and display error accordingly: {'results': True, 'status': True}
         self.logger.info(f"Shutting down node with uuid: {node_uuid}")
-        self.get_request(api_url=f"/storagenode/shutdown/{node_uuid}?force=True", expected_error_code=expected_error_code)
+        self.get_request(api_url=f"/storagenode/shutdown/{node_uuid}", expected_error_code=expected_error_code)
 
 
     def suspend_node(self, node_uuid: str, expected_error_code=None):
