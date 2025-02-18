@@ -749,6 +749,20 @@ class SshUtils:
         except Exception as e:
             self.logger.error(f"Failed to execute combined disconnect command on {node_ip}: {e}")
 
+    def check_tmux_installed(self, node_ip):
+        """Check tmux installation
+        """
+        check_tmux_command = "command -v tmux"
+        output, _ = self.exec_command(node_ip, check_tmux_command)
+        if not output.strip():
+            self.logger.info(f"'tmux' is not installed on {node_ip}. Installing...")
+            install_tmux_command = (
+                "sudo apt-get update -y && sudo apt-get install -y tmux"
+                " || sudo yum install -y tmux"
+            )
+            self.exec_command(node_ip, install_tmux_command)
+            self.logger.info(f"'tmux' installed successfully on {node_ip}.")
+
     def start_docker_logging(self, node_ip, containers, log_dir, test_name):
         """
         Start continuous Docker logs collection for all containers on a node.
@@ -761,16 +775,6 @@ class SshUtils:
             test_name (str): Name of the test for log identification.
         """
         try:
-            check_tmux_command = "command -v tmux"
-            output, _ = self.exec_command(node_ip, check_tmux_command)
-            if not output.strip():
-                self.logger.info(f"'tmux' is not installed on {node_ip}. Installing...")
-                install_tmux_command = (
-                    "sudo apt-get update -y && sudo apt-get install -y tmux"
-                    " || sudo yum install -y tmux"
-                )
-                self.exec_command(node_ip, install_tmux_command)
-                self.logger.info(f"'tmux' installed successfully on {node_ip}.")
             # Ensure the log directory exists
             command_mkdir = f"sudo mkdir -p {log_dir} && sudo chmod 777 {log_dir}"
             self.exec_command(node_ip, command_mkdir)  # Do not wait for a response
