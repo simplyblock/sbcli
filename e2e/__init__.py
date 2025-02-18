@@ -56,7 +56,7 @@ ALL_TESTS = [
 
 def get_all_tests(custom=True, ha_test=False):
     tests = [
-        # TestLvolFioNpcsCustom,
+        TestLvolFioNpcsCustom,
         TestLvolFioNpcs0,
         TestLvolFioNpcs1,
         TestLvolFioNpcs2,
