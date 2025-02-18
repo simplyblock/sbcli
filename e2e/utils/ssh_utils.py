@@ -1064,8 +1064,6 @@ class SshUtils:
         except Exception as e:
             self.logger.error(f"Failed to unblock ports on {node_ip}: {e}")
 
-
-
     def set_aio_max_nr(self, node_ip, value=1048576):
         """
         Set the aio-max-nr value on the target node.
@@ -1342,3 +1340,15 @@ class SshUtils:
                 self.logger.warning(f"Skipping malformed dmesg line: {line} ({e})")
 
         return logs_in_window
+    
+    def start_netstat_dmesg_logging(self, node_ip, log_dir):
+        """Start continuous netstat and dmesg logging without using watch."""
+        # Ensure netstat is installed
+        self.exec_command(node_ip, 'sudo apt-get update && sudo apt-get install -y net-tools || sudo yum install -y net-tools')
+
+        # Start logging netstat and dmesg by directly redirecting output to files
+        netstat_log = f"{log_dir}/netstat_segments_{node_ip}.log"
+        dmesg_log = f"{log_dir}/dmesg_tcp_{node_ip}.log"
+
+        self.exec_command(node_ip, f"sudo tmux new-session -d -s netstat_log 'netstat -s | grep \"segments dropped\" >> {netstat_log}'")
+        self.exec_command(node_ip, f"sudo tmux new-session -d -s dmesg_log 'sudo dmesg | grep -i \"tcp\" >> {dmesg_log}'")

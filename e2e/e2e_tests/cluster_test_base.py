@@ -96,7 +96,6 @@ class TestClusterBase:
                 bastion_server_address=self.bastion_server,
             )
             sleep_n_sec(2)
-            self.ssh_obj.set_aio_max_nr(self.client_machine)
 
         self.fio_node = self.client_machine if self.client_machine else self.mgmt_nodes[0]
 
@@ -145,8 +144,29 @@ class TestClusterBase:
                                               test_name=self.test_name
                                               )
             self.ssh_obj.start_tcpdump_logging(node_ip=node, log_dir=self.docker_logs_path)
+            self.ssh_obj.start_netstat_dmesg_logging(node_ip=node,
+                                                     log_dir=self.docker_logs_path)
 
         self.logger.info("Started log monitoring for all storage nodes.")
+
+    def configure_sysctl_settings(self, node):
+        """Configure TCP kernel parameters on the node."""
+        sysctl_commands = [
+            'echo "net.core.rmem_max=16777216" | sudo tee -a /etc/sysctl.conf',
+            'echo "net.core.rmem_default=87380" | sudo tee -a /etc/sysctl.conf',
+            'echo "net.ipv4.tcp_rmem=4096 87380 16777216" | sudo tee -a /etc/sysctl.conf',
+            'echo "net.core.somaxconn=1024" | sudo tee -a /etc/sysctl.conf',
+            'echo "net.ipv4.tcp_max_syn_backlog=4096" | sudo tee -a /etc/sysctl.conf',
+            'echo "net.ipv4.tcp_window_scaling=1" | sudo tee -a /etc/sysctl.conf',
+            'echo "net.ipv4.tcp_retries2=8" | sudo tee -a /etc/sysctl.conf',
+            'sudo sysctl -p'
+        ]
+        for cmd in sysctl_commands:
+            self.ssh_obj.exec_command(node, cmd)
+
+        self.ssh_obj.set_aio_max_nr(self.client_machine)
+        
+        self.logger.info(f"Configured TCP sysctl settings on {node}")
 
     def cleanup_logs(self):
         base_path = Path.home()

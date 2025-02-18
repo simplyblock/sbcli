@@ -61,6 +61,7 @@ def main():
             test_obj.setup()
             if i == 0:
                 test_obj.cleanup_logs()
+                test_obj.configure_sysctl_settings()
             test_obj.run()
             passed_cases.append(f"{test.__name__}")
         except Exception as exp:
