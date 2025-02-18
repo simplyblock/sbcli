@@ -97,29 +97,72 @@ while True:
                 node_devices_check = True
                 node_remote_devices_check = True
 
-                for dev in snode.nvme_devices:
-                    if dev.io_error:
-                        logger.debug(f"Skipping Device check because of io_error {dev.get_id()}")
-                        continue
-                    ret = health_controller.check_device(dev.get_id())
-                    set_device_health_check(cluster_id, dev, ret)
-                    if dev.status == dev.STATUS_ONLINE:
-                        node_devices_check &= ret
 
-                logger.info(f"Node remote device: {len(snode.remote_devices)}")
                 rpc_client = RPCClient(
                     snode.mgmt_ip, snode.rpc_port,
                     snode.rpc_username, snode.rpc_password,
                     timeout=3, retry=2)
                 connected_devices = []
+
+                node_bdevs = rpc_client.get_bdevs()
+                if node_bdevs:
+                    node_bdev_names = [b['name'] for b in node_bdevs]
+                else:
+                    node_bdev_names = []
+
+                subsystem_list = rpc_client.subsystem_list()
+                if subsystem_list:
+                    subsystem_list = [item['nqn'] for item in subsystem_list]
+
+                for device in snode.nvme_devices:
+                    if device.io_error:
+                        logger.debug(f"Skipping Device check because of io_error {device.get_id()}")
+                        continue
+                    # ret = health_controller.check_device(dev.get_id())
+                    passed = True
+                    if snode.enable_test_device:
+                        bdevs_stack = [device.nvme_bdev, device.testing_bdev, device.alceml_bdev, device.pt_bdev]
+                    else:
+                        bdevs_stack = [device.nvme_bdev, device.alceml_bdev, device.pt_bdev]
+
+                    logger.info(f"Checking Device: {device.get_id()}, status:{device.status}")
+                    problems = 0
+                    for bdev in bdevs_stack:
+                        if not bdev:
+                            continue
+                        # ret = rpc_client.get_bdevs(bdev)
+                        if bdev in node_bdev_names:
+                            logger.debug(f"Checking bdev: {bdev} ... ok")
+                        else:
+                            logger.error(f"Checking bdev: {bdev} ... not found")
+                            problems += 1
+                            passed = False
+                            # return False
+                    logger.info(f"Checking Device's BDevs ... ({(len(bdevs_stack) - problems)}/{len(bdevs_stack)})")
+
+                    # ret = rpc_client.subsystem_list(device.nvmf_nqn)
+                    logger.debug(f"Checking subsystem: {device.nvmf_nqn}")
+                    if device.nvmf_nqn in subsystem_list:
+                        logger.info(f"Checking subsystem ... ok")
+                    else:
+                        logger.info(f"Checking subsystem: ... not found")
+                        passed = False
+
+                    set_device_health_check(cluster_id, device, passed)
+                    if device.status == NVMeDevice.STATUS_ONLINE:
+                        node_devices_check &= passed
+
+                logger.info(f"Node remote device: {len(snode.remote_devices)}")
+
                 for remote_device in snode.remote_devices:
                     org_dev = db_controller.get_storage_device_by_id(remote_device.get_id())
                     org_node =  db_controller.get_storage_node_by_id(remote_device.node_id)
                     if org_dev.status == NVMeDevice.STATUS_ONLINE and org_node.status == StorageNode.STATUS_ONLINE:
-                        ret = rpc_client.get_bdevs(remote_device.remote_bdev)
-                        if ret:
+                        # ret = rpc_client.get_bdevs(remote_device.remote_bdev)
+                        if remote_device.remote_bdev in node_bdev_names:
                             logger.info(f"Checking bdev: {remote_device.remote_bdev} ... ok")
                             connected_devices.append(remote_device.get_id())
+                            ret = True
                         else:
                             logger.info(f"Checking bdev: {remote_device.remote_bdev} ... not found")
                             if not org_dev.alceml_bdev:
@@ -185,8 +228,7 @@ while True:
                 if snode.jm_device and snode.jm_device.get_id():
                     jm_device = snode.jm_device
                     logger.info(f"Node JM: {jm_device.get_id()}")
-                    ret = health_controller.check_jm_device(jm_device.get_id())
-                    if ret:
+                    if jm_device.jm_bdev in node_bdev_names:
                         logger.info(f"Checking jm bdev: {jm_device.jm_bdev} ... ok")
                         online_jms += 1
                     else:
@@ -197,8 +239,8 @@ while True:
                 if snode.enable_ha_jm:
                     logger.info(f"Node remote JMs: {len(snode.remote_jm_devices)}")
                     for remote_device in snode.remote_jm_devices:
-                        ret = rpc_client.get_bdevs(remote_device.remote_bdev)
-                        if ret:
+                        # ret = rpc_client.get_bdevs(remote_device.remote_bdev)
+                        if remote_device.remote_bdev in node_bdev_names:
                             logger.info(f"Checking bdev: {remote_device.remote_bdev} ... ok")
                             online_jms += 1
                         else:
