@@ -149,7 +149,7 @@ class TestClusterBase:
 
         self.logger.info("Started log monitoring for all storage nodes.")
 
-    def configure_sysctl_settings(self, node):
+    def configure_sysctl_settings(self):
         """Configure TCP kernel parameters on the node."""
         sysctl_commands = [
             'echo "net.core.rmem_max=16777216" | sudo tee -a /etc/sysctl.conf',
@@ -161,12 +161,14 @@ class TestClusterBase:
             'echo "net.ipv4.tcp_retries2=8" | sudo tee -a /etc/sysctl.conf',
             'sudo sysctl -p'
         ]
+        for node in self.storage_nodes:
+            for cmd in sysctl_commands:
+                self.ssh_obj.exec_command(node, cmd)
         for cmd in sysctl_commands:
-            self.ssh_obj.exec_command(node, cmd)
-
+            self.ssh_obj.exec_command(self.client_machine, cmd)
         self.ssh_obj.set_aio_max_nr(self.client_machine)
         
-        self.logger.info(f"Configured TCP sysctl settings on {node}")
+        self.logger.info(f"Configured TCP sysctl settings on all the nodes!!")
 
     def cleanup_logs(self):
         base_path = Path.home()
