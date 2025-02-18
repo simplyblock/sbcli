@@ -133,6 +133,7 @@ class TestClusterBase:
                 folder_path=os.path.join(Path.home(), "container-logs"),
                 days=3
             )
+            self.ssh_obj.make_directory(node=node, dir_name=self.docker_logs_path)
 
             containers = self.ssh_obj.get_running_containers(node_ip=node)
             self.container_nodes[node] = containers
@@ -153,11 +154,13 @@ class TestClusterBase:
             days=3
         )
 
+        self.ssh_obj.make_directory(node=self.fio_node, dir_name=self.docker_logs_path)
+
         self.ssh_obj.exec_command(node=self.fio_node,
                                   command="sudo tmux kill-server")
-        self.ssh_obj.start_tcpdump_logging(node=self.fio_node,
+        self.ssh_obj.start_tcpdump_logging(node_ip=self.fio_node,
                                            log_dir=self.docker_logs_path)
-        self.ssh_obj.start_netstat_dmesg_logging(node=self.fio_node,
+        self.ssh_obj.start_netstat_dmesg_logging(node_ip=self.fio_node,
                                                  log_dir=self.docker_logs_path)
 
         self.logger.info("Started log monitoring for all storage nodes.")
