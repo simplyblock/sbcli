@@ -322,7 +322,10 @@ class SshUtils:
                    f"{time_based} --runtime={runtime} --rw={rw} --bs={bs} --size={size}  "
                    f"--verify=md5 --verify_fatal=1 --numjobs={numjobs} --nrfiles={nrfiles} "
                    f"{output_format}{output_file}")
-        
+
+        if rw != "write":
+            command = f"{command} --rwmixread={rwmixread} "
+
         if kwargs.get("debug", None):
             command = f"{command} --debug=all"
         if log_file:
