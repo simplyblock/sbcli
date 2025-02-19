@@ -1,8 +1,21 @@
 version: '3.8'
 
 services:
+
+  spdk-stats-collector:
+    image: $SIMPLYBLOCK_DOCKER_IMAGE
+    command: "python simplyblock_core/services/spdk_stats_collector.py"
+    volumes:
+          - '/etc/simplyblock:/etc/simplyblock'
+          - '/var/tmp/spdk.sock:/var/tmp/spdk.sock'
+    deploy:
+      mode: global
+      placement:
+        constraints: [ node.role == worker ]
+
   fdb-server:
     image: foundationdb/foundationdb:7.3.42
+    entrypoint: "/usr/bin/fdbserver --listen-address 0.0.0.0:4500 --public-address $CLUSTER_IP:4500 --datadir /var/fdb/data --logdir /var/fdb/logs --locality-zoneid=$HOSTNAME --locality-machineid=$HOSTNAME --class unset"
     networks:
       - hostnet
     environment:
@@ -140,6 +153,7 @@ services:
     ports:
       - 80:80
       - 12202:12202
+      - 9200:9200
     networks:
       - localnet
       - monitoring-net

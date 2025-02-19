@@ -1,3 +1,4 @@
+from pathlib import Path
 import threading
 import json
 from e2e_tests.cluster_test_base import TestClusterBase
@@ -95,8 +96,10 @@ class TestDeviceNodeRestart(TestClusterBase):
                 "mount_path": None,
                 "disk": None
             }
-            connect_str = self.sbcli_utils.get_lvol_connect_str(lvol_name=lvol_name)
-            self.ssh_obj.exec_command(self.mgmt_nodes[0], connect_str)
+            connect_ls = self.sbcli_utils.get_lvol_connect_str(lvol_name=lvol_name)
+            for connect_str in connect_ls:
+                self.ssh_obj.exec_command(node=self.mgmt_nodes[0], command=connect_str)
+
             final_devices = self.ssh_obj.get_devices(node=self.mgmt_nodes[0])
             self.logger.info("Initial vs final disk:")
             self.logger.info(f"Initial: {initial_devices}")
@@ -135,12 +138,12 @@ class TestDeviceNodeRestart(TestClusterBase):
                                     "name": f"fio_{lvol_name}",
                                     "rw": rw,
                                     "ioengine": "libaio",
-                                    "iodepth": 64,
+                                    "iodepth": 1,
                                     "bs": bs,
                                     "size": "2G",
                                     "time_based": True,
                                     "runtime": 200,
-                                    "output_file": f"/home/ec2-user/{lvol_name}_log.json",
+                                    "output_file": f"{Path.home()}/{lvol_name}_log.json",
                                     "nrfiles": 5,
                                     "debug": self.fio_debug
                                 }
@@ -153,12 +156,12 @@ class TestDeviceNodeRestart(TestClusterBase):
                                     "name": f"fio_{lvol_name}",
                                     "rw": rw,
                                     "ioengine": "libaio",
-                                    "iodepth": 64,
+                                    "iodepth": 1,
                                     "bs": bs,
                                     "size": "2G",
                                     "time_based": True,
                                     "runtime": 200,
-                                    "output_file": f"/home/ec2-user/{lvol_name}_log.json",
+                                    "output_file": f"{Path.home()}/{lvol_name}_log.json",
                                     "nrfiles": 5,
                                     "debug": self.fio_debug
                                 }
@@ -216,8 +219,9 @@ class TestDeviceNodeRestart(TestClusterBase):
 
         for i in range(4):
             lvol_name = f"test_lvol_{i+1}"
-            connect_str = self.sbcli_utils.get_lvol_connect_str(lvol_name=lvol_name)
-            self.ssh_obj.exec_command(self.mgmt_nodes[0], connect_str)
+            connect_ls = self.sbcli_utils.get_lvol_connect_str(lvol_name=lvol_name)
+            for connect_str in connect_ls:
+                self.ssh_obj.exec_command(node=self.mgmt_nodes[0], command=connect_str)
             sleep_n_sec(10)
             if i < 3:
                 self.ssh_obj.mount_path(node=self.mgmt_nodes[0],
@@ -285,8 +289,9 @@ class TestDeviceNodeRestart(TestClusterBase):
         
         for i in range(4):
             lvol_name = f"test_lvol_{i+1}"
-            connect_str = self.sbcli_utils.get_lvol_connect_str(lvol_name=lvol_name)
-            self.ssh_obj.exec_command(self.mgmt_nodes[0], connect_str)
+            connect_ls = self.sbcli_utils.get_lvol_connect_str(lvol_name=lvol_name)
+            for connect_str in connect_ls:
+                self.ssh_obj.exec_command(node=self.mgmt_nodes[0], command=connect_str)
             if i < 3:
                 self.ssh_obj.mount_path(node=self.mgmt_nodes[0],
                                         device=lvol_fio_path[lvol_name]["disk"],
@@ -306,7 +311,7 @@ class TestDeviceNodeRestart(TestClusterBase):
         self.logger.info("Validating fio test results.")
         for i in range(4):
             lvol_name = f"test_lvol_{i+1}"
-            output_file = f"/home/ec2-user/{lvol_name}_log.json",
+            output_file = f"{Path.home()}/{lvol_name}_log.json",
             self.common_utils.validate_fio_test(self.mgmt_nodes[0], output_file)
         self.logger.info("Test case passed.")
     

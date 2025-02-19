@@ -13,7 +13,7 @@ from simplyblock_core import db_controller
 from simplyblock_core import storage_node_ops
 
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG)
+
 bp = Blueprint("snode", __name__)
 db_controller = db_controller.DBController()
 
@@ -34,6 +34,8 @@ def list_storage_nodes(uuid):
     for node in nodes:
         d = node.get_clean_dict()
         d['status_code'] = node.get_status_code()
+        lvs = db_controller.get_lvols_by_node_id(node.get_id()) or []
+        d['lvols'] = len(lvs)
         data.append(d)
     return utils.get_response(data)
 
@@ -60,7 +62,7 @@ def storagenode_iostats(uuid, history):
     if not node:
         return utils.get_response_error(f"node not found: {uuid}", 404)
 
-    data = storage_node_ops.get_node_iostats_history(uuid, history, parse_sizes=False)
+    data = storage_node_ops.get_node_iostats_history(uuid, history, parse_sizes=False, with_sizes=True)
     ret = {
         "object_data": node.get_clean_dict(),
         "stats": data or []
@@ -134,10 +136,10 @@ def storage_node_shutdown(uuid):
     if not node:
         return utils.get_response_error(f"node not found: {uuid}", 404)
 
-    force = False
+    force = True
     try:
         args = request.args
-        force = bool(args.get('force', False))
+        force = bool(args.get('force', True))
     except:
         pass
 

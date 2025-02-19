@@ -1,6 +1,6 @@
 # coding=utf-8
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 
 from simplyblock_core import constants, db_controller, cluster_ops, storage_node_ops, utils
 from simplyblock_core.controllers import health_controller, device_controller, tasks_controller
@@ -62,7 +62,7 @@ def get_next_cluster_status(cluster_id):
             else:
                 node_offline_devices += 1
 
-        if node_offline_devices > 0 or node_online_devices == 0:
+        if node_offline_devices > 0 or (node_online_devices == 0 and node.status != StorageNode.STATUS_REMOVED):
             affected_nodes += 1
 
         online_devices += node_online_devices
@@ -138,7 +138,7 @@ def update_cluster_status(cluster_id):
                 break
 
             if node.online_since:
-                diff = datetime.now() - datetime.fromisoformat(snode.online_since)
+                diff = datetime.now(timezone.utc) - datetime.fromisoformat(node.online_since)
                 if diff.total_seconds() < 60:
                     can_activate = False
                     break

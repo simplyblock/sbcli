@@ -1,14 +1,14 @@
 ### simplyblock e2e tests
-from datetime import datetime
-import os
-import time
+import json
 import threading
 from e2e_tests.cluster_test_base import TestClusterBase
 from utils.common_utils import sleep_n_sec
 from logger_config import setup_logger
+from datetime import datetime
+import traceback
+from requests.exceptions import HTTPError
 
-
-class TestSingleNodeOutage(TestClusterBase):
+class TestSingleNodeReboot(TestClusterBase):
     """
     Steps:
     1. Create Storage Pool and Delete Storage pool
@@ -20,9 +20,8 @@ class TestSingleNodeOutage(TestClusterBase):
     7. While FIO is running, validate this scenario:
         a. In a cluster with three nodes, select one node, which does not
            have any lvol attached.
-        b. Suspend the Node via API or CLI while the fio test is running.
-        c. Shutdown the Node via API or CLI while the fio test is running.
-        d. Check status of objects during outage:
+        b. Reboot the instance
+        c. Check status of objects during outage:
             - the node is in status “offline”
             - the devices of the node are in status “unavailable”
             - lvols remain in “online” state
@@ -33,9 +32,9 @@ class TestSingleNodeOutage(TestClusterBase):
               and verify that the status changes of the node and devices are reflected in
               the other cluster map. Other two nodes and 4 devices remain online.
             - health-check status of all nodes and devices is “true”
-        e. check that fio remains running without interruption.
+        d. check that fio remains running without interruption.
 
-    8. Restart the node again.
+    8. Wait for node to become online.
         a. check the status again:
             - the status of all nodes is “online”
             - all devices in the cluster are in status “online”
@@ -44,31 +43,18 @@ class TestSingleNodeOutage(TestClusterBase):
               and verify that all nodes and all devices appear online
         b. check that fio remains running without interruption.
     """
+
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.snapshot_name = "snapshot"
         self.logger = setup_logger(__name__)
-        self.test_name = "single_node_outage"
+        self.test_name = "single_node_reboot"
 
     def run(self):
         """ Performs each step of the testcase
         """
-        self.logger.info("Inside run function")
+        self.logger.info(f"Inside run function. Base command: {self.base_cmd}")
         initial_devices = self.ssh_obj.get_devices(node=self.mgmt_nodes[0])
-
-        self.sbcli_utils.add_storage_pool(
-            pool_name=self.pool_name
-        )
-        pools = self.sbcli_utils.list_storage_pools()
-        assert self.pool_name in list(pools.keys()), \
-            f"Pool {self.pool_name} not present in list of pools: {pools}"
-
-        self.sbcli_utils.delete_storage_pool(
-            pool_name=self.pool_name
-        )
-        pools = self.sbcli_utils.list_storage_pools()
-        assert self.pool_name not in list(pools.keys()), \
-            f"Pool {self.pool_name} present in list of pools post delete: {pools}"
 
         self.sbcli_utils.add_storage_pool(
             pool_name=self.pool_name
@@ -77,11 +63,13 @@ class TestSingleNodeOutage(TestClusterBase):
         self.sbcli_utils.add_lvol(
             lvol_name=self.lvol_name,
             pool_name=self.pool_name,
-            size="800M"
+            size="10G",
+            # distr_ndcs=2,
+            # distr_npcs=1
         )
         lvols = self.sbcli_utils.list_lvols()
         assert self.lvol_name in list(lvols.keys()), \
-            f"Lvol {self.lvol_name} present in list of lvols post add: {lvols}"
+            f"Lvol {self.lvol_name} not present in list of lvols post add: {lvols}"
 
         connect_ls = self.sbcli_utils.get_lvol_connect_str(lvol_name=self.lvol_name)
         for connect_str in connect_ls:
@@ -107,28 +95,17 @@ class TestSingleNodeOutage(TestClusterBase):
 
         fio_thread1 = threading.Thread(target=self.ssh_obj.run_fio_test, args=(self.mgmt_nodes[0], None, self.mount_path, self.log_path,),
                                        kwargs={"name": "fio_run_1",
-                                               "runtime": 150,
-                                               "debug": self.fio_debug})
+                                               "runtime": 500,
+                                               "debug": self.fio_debug,
+                                               "time_based": False,
+                                               "size": "8GiB"})
         fio_thread1.start()
 
         no_lvol_node_uuid = self.sbcli_utils.get_node_without_lvols()
-
-        self.logger.info("Getting lvol status before shutdown")
-        lvol_id = self.sbcli_utils.get_lvol_id(lvol_name=self.lvol_name)
-        lvol_details = self.sbcli_utils.get_lvol_details(lvol_id=lvol_id)
-
-        for lvol in lvol_details:
-            self.logger.info(f"LVOL STATUS: {lvol['status']}")
-            assert lvol["status"] == "online", \
-                f"Lvol {lvol['id']} is not in online state. {lvol['status']}"
-
-        self.validations(node_uuid=no_lvol_node_uuid,
-                         node_status="online",
-                         device_status="online",
-                         lvol_status="online",
-                         health_check_status=True
-                         )
-
+        no_lvol_node = self.sbcli_utils.get_storage_node_details(storage_node_id=no_lvol_node_uuid)
+        node_ip = no_lvol_node[0]["mgmt_ip"]
+        instance_id = no_lvol_node[0]["cloud_instance_id"]
+        
         self.logger.info("Taking snapshot")
         self.ssh_obj.add_snapshot(node=self.mgmt_nodes[0],
                                   lvol_id=self.sbcli_utils.get_lvol_id(self.lvol_name),
@@ -136,36 +113,8 @@ class TestSingleNodeOutage(TestClusterBase):
         snapshot_id_1 = self.ssh_obj.get_snapshot_id(node=self.mgmt_nodes[0],
                                                      snapshot_name=f"{self.snapshot_name}_1")
         
-        self.sbcli_utils.resize_lvol(lvol_id=self.sbcli_utils.get_lvol_id(self.lvol_name),
-                                     new_size="20G")
-        
-        timestamp = int(datetime.now().timestamp())
-
-        self.sbcli_utils.suspend_node(node_uuid=no_lvol_node_uuid)
-        try:
-            self.sbcli_utils.shutdown_node(node_uuid=no_lvol_node_uuid)
-        except Exception as _:
-            self.logger.info("Waiting for node shutdown")
-
-        self.sbcli_utils.wait_for_storage_node_status(node_id=no_lvol_node_uuid,
-                                                      status="offline",
-                                                      timeout=100)
-
-        self.logger.info("Sleeping for 30 seconds")
-        sleep_n_sec(30)
-
-        self.validations(node_uuid=no_lvol_node_uuid,
-                         node_status="offline",
-                         device_status="unavailable",
-                         lvol_status="online",
-                         health_check_status=False
-                         )
-
-        self.sbcli_utils.restart_node(node_uuid=no_lvol_node_uuid)
-
-        self.logger.info(f"Waiting for node to become online, {no_lvol_node_uuid}")
-        self.sbcli_utils.wait_for_storage_node_status(no_lvol_node_uuid, "online", timeout=180)
-        sleep_n_sec(10)
+        # self.sbcli_utils.resize_lvol(lvol_id=self.sbcli_utils.get_lvol_id(self.lvol_name),
+        #                              new_size="20G")
 
         self.validations(node_uuid=no_lvol_node_uuid,
                          node_status="online",
@@ -174,36 +123,114 @@ class TestSingleNodeOutage(TestClusterBase):
                          health_check_status=True
                          )
         
-        self.sbcli_utils.resize_lvol(lvol_id=self.sbcli_utils.get_lvol_id(self.lvol_name),
-                                     new_size="25G")
+        sleep_n_sec(30)
+        timestamp = int(datetime.now().timestamp())
+
+        if "i-" in instance_id[0:2]:
+            # AWS way stop
+            # self.common_utils.stop_ec2_instance(ec2_resource=self.ec2_resource,
+            #                                     instance_id=instance_id)
+            reboot_thread = threading.Thread(target=self.common_utils.reboot_ec2_instance, args=(self.ec2_resource, instance_id,),)
+            reboot_thread.start()
+        else:
+            # Perform node reboot
+            reboot_thread = threading.Thread(target=self.ssh_obj.reboot_node, args=(node_ip, 300,),)
+            reboot_thread.start()
+
+
+        try:
+            self.logger.info(f"Waiting for node to become offline/unreachable/schedulable, {no_lvol_node_uuid}")
+            self.sbcli_utils.wait_for_storage_node_status(no_lvol_node_uuid,
+                                                          ["unreachable", "offline", "schedulable", "in_shutdown"],
+                                                          timeout=500)
+            # sleep_n_sec(30)
+            # self.validations(node_uuid=no_lvol_node_uuid,
+            #                 node_status=["offline", "in_shutdown", "in_restart"],
+            #                 # The status changes between them very quickly hence
+            #                 # needed multiple checks
+            #                 device_status="unavailable",
+            #                 lvol_status="online",
+            #                 health_check_status=False
+            #                 )
+            try:
+                # expected_error_regex = r"Failed to create BDev: distr_\d+_test_lvol_fail"
+                self.sbcli_utils.add_lvol(
+                    lvol_name=f"{self.lvol_name}_fail",
+                    pool_name=self.pool_name,
+                    size="10G",
+                    # distr_ndcs=2,
+                    # distr_npcs=1,
+                    host_id=no_lvol_node_uuid,
+                    retry=2
+                )
+            except HTTPError as e:
+                error = json.loads(e.response.text)
+                self.logger.info(f"Lvol addition failed for node {no_lvol_node_uuid}. Error:{error}")
+                assert "Storage node is not online" in error["error"], f"Unexpected error: {error['error']}"
+                lvols = self.sbcli_utils.list_lvols()
+                assert f"{self.lvol_name}_fail" not in list(lvols.keys()), \
+                    (f"Lvol {self.lvol_name}_fail present in list of lvols post add: {lvols}. "
+                     "Expected: Lvol is not added")
+            
+            sleep_n_sec(10)
+            self.sbcli_utils.add_lvol(
+                    lvol_name=f"{self.lvol_name}_2",
+                    pool_name=self.pool_name,
+                    size="10G",
+                    # distr_ndcs=2,
+                    # distr_npcs=1,
+                )
+            lvols = self.sbcli_utils.list_lvols()
+            assert f"{self.lvol_name}_2" in list(lvols.keys()), \
+                (f"Lvol {self.lvol_name}_2 not present in list of lvols post add: {lvols}. "
+                 "Expected: Lvol is added")
+
+        except Exception as exp:
+            self.logger.debug(exp)
+            # self.sbcli_utils.restart_node(node_uuid=no_lvol_node_uuid)
+            reboot_thread.join()
+            self.logger.info(f"Waiting for node to become online, {no_lvol_node_uuid}")
+            self.sbcli_utils.wait_for_storage_node_status(no_lvol_node_uuid,
+                                                          "online",
+                                                          timeout=300)
+            raise exp
+
+        # self.sbcli_utils.restart_node(node_uuid=no_lvol_node_uuid)
+        reboot_thread.join()
+
+        self.logger.info(f"Waiting for node to become online, {no_lvol_node_uuid}")
+        self.sbcli_utils.wait_for_storage_node_status(no_lvol_node_uuid, "online", timeout=300)
+        sleep_n_sec(30)
+        self.validations(node_uuid=no_lvol_node_uuid,
+                         node_status="online",
+                         device_status="online",
+                         lvol_status="online",
+                         health_check_status=True
+                         )
         
-        node_details = self.sbcli_utils.get_storage_node_details(no_lvol_node_uuid)
-        node_ip = node_details[0]["mgmt_ip"]
+        # self.sbcli_utils.resize_lvol(lvol_id=self.sbcli_utils.get_lvol_id(self.lvol_name),
+        #                              new_size="25G")
+
         self.ssh_obj.restart_docker_logging(
             node_ip=node_ip,
             containers=self.container_nodes[node_ip],
             log_dir=self.docker_logs_path,
             test_name=self.test_name
         )
-
-        sleep_n_sec(120)
-        self.validate_migration_for_node(
-            timestamp=timestamp,
-            timeout=1000,
-            node_id=None
-        )
+        self.logger.info(f"Validating migration tasks for node {no_lvol_node_uuid}.")
+        self.validate_migration_for_node(timestamp, 5000, None)
 
         # Write steps in order
         steps = {
-            "Storage Node": ["suspended", "shutdown", "restart"],
+            "Storage Node": ["shutdown", "restart"],
             "Device": {"restart"}
         }
         self.common_utils.validate_event_logs(cluster_id=self.cluster_id,
                                               operations=steps)
         
-        self.common_utils.manage_fio_threads(node=self.mgmt_nodes[0],
-                                             threads=[fio_thread1],
-                                             timeout=300)
+        end_time = self.common_utils.manage_fio_threads(node=self.mgmt_nodes[0],
+                                                        threads=[fio_thread1],
+                                                        timeout=1000)
         
         self.ssh_obj.add_snapshot(node=self.mgmt_nodes[0],
                                   lvol_id=self.sbcli_utils.get_lvol_id(self.lvol_name),
@@ -241,8 +268,6 @@ class TestSingleNodeOutage(TestClusterBase):
                 break
         self.ssh_obj.unmount_path(node=self.mgmt_nodes[0],
                                   device=disk_use)
-        # self.ssh_obj.format_disk(node=self.mgmt_nodes[0],
-        #                          device=disk_use)
         self.ssh_obj.mount_path(node=self.mgmt_nodes[0],
                                 device=disk_use,
                                 mount_path=f"{clone_mount_file}_1")
@@ -264,8 +289,6 @@ class TestSingleNodeOutage(TestClusterBase):
                 break
         self.ssh_obj.unmount_path(node=self.mgmt_nodes[0],
                                   device=disk_use)
-        # self.ssh_obj.format_disk(node=self.mgmt_nodes[0],
-        #                          device=disk_use)
         self.ssh_obj.mount_path(node=self.mgmt_nodes[0],
                                 device=disk_use,
                                 mount_path=f"{clone_mount_file}_2")
@@ -273,10 +296,10 @@ class TestSingleNodeOutage(TestClusterBase):
         self.common_utils.validate_fio_test(node=self.mgmt_nodes[0],
                                             log_file=self.log_path)
         
-        self.sbcli_utils.resize_lvol(lvol_id=self.sbcli_utils.get_lvol_id(f"{self.lvol_name}_cl_1"),
-                                     new_size="30G")
-        self.sbcli_utils.resize_lvol(lvol_id=self.sbcli_utils.get_lvol_id(f"{self.lvol_name}_cl_2"),
-                                     new_size="30G")
+        # self.sbcli_utils.resize_lvol(lvol_id=self.sbcli_utils.get_lvol_id(f"{self.lvol_name}_cl_1"),
+        #                              new_size="30G")
+        # self.sbcli_utils.resize_lvol(lvol_id=self.sbcli_utils.get_lvol_id(f"{self.lvol_name}_cl_2"),
+        #                              new_size="30G")
         
         clone_files = self.ssh_obj.find_files(self.mgmt_nodes[0], directory=f"{clone_mount_file}_2")
         final_checksum = self.ssh_obj.generate_checksums(self.mgmt_nodes[0], clone_files)
@@ -291,7 +314,7 @@ class TestSingleNodeOutage(TestClusterBase):
 
         assert original_checksum == final_checksum, "Checksum mismatch for lvol and clone"
 
-        # self.sbcli_utils.resize_lvol(lvol_id=self.sbcli_utils.get_lvol_id(f"{self.lvol_name}_cl_1"),
+        # self.sbcli_utils.resize_lvol(lvol_id=self.sbcli_utils.get_lvol_id(self.lvol_name),
         #                              new_size="30G")
 
         lvol_files = self.ssh_obj.find_files(self.mgmt_nodes[0], directory=self.mount_path)
@@ -303,7 +326,7 @@ class TestSingleNodeOutage(TestClusterBase):
         self.logger.info("TEST CASE PASSED !!!")
 
 
-class TestHASingleNodeOutage(TestClusterBase):
+class TestHASingleNodeReboot(TestClusterBase):
     """
     Steps:
     1. Create Storage Pool and Delete Storage pool
@@ -343,7 +366,7 @@ class TestHASingleNodeOutage(TestClusterBase):
         self.fio_runtime = 5*60
         self.logger = setup_logger(__name__)
         self.fio_threads = []
-        self.test_name = "single_node_outage_ha"
+        self.test_name = "single_node_reboot_ha"
 
     def run(self):
         """ Performs each step of the testcase
@@ -370,40 +393,46 @@ class TestHASingleNodeOutage(TestClusterBase):
         node_ip = no_lvol_node["mgmt_ip"]
         instance_id = no_lvol_node["cloud_instance_id"]
 
+        # self.sbcli_utils.resize_lvol(lvol_id=self.sbcli_utils.get_lvol_id(self.lvol_name),
+        #                              new_size="20G")
+
         self.validations(node_uuid=no_lvol_node_uuid,
                          node_status="online",
                          device_status="online",
                          lvol_status="online",
                          health_check_status=True
                          )
-        
-        # self.sbcli_utils.resize_lvol(lvol_id=self.sbcli_utils.get_lvol_id(self.lvol_name),
-        #                              new_size="20G")
 
         for i in range(2):
             timestamp = int(datetime.now().timestamp())
             sleep_n_sec(30)
-            self.sbcli_utils.suspend_node(node_uuid=no_lvol_node_uuid)
+            if "i-" in instance_id[0:2]:
+                # AWS way stop
+                reboot_thread = threading.Thread(target=self.common_utils.reboot_ec2_instance, args=(self.ec2_resource, instance_id,),)
+                reboot_thread.start()
+            else:
+                # Perform node reboot
+                reboot_thread = threading.Thread(target=self.ssh_obj.reboot_node, args=(node_ip, 300,),)
+                reboot_thread.start()
+
             try:
-                self.sbcli_utils.shutdown_node(node_uuid=no_lvol_node_uuid)
-            except Exception as _:
-                self.logger.info("Waiting for node shutdown")
+                self.logger.info(f"Waiting for node to become offline/unreachable/schedulable, {no_lvol_node_uuid}")
+                self.sbcli_utils.wait_for_storage_node_status(no_lvol_node_uuid,
+                                                              ["unreachable", "offline", "schedulable", "in_shutdown"],
+                                                              timeout=500)
+            except Exception as exp:
+                self.logger.debug(exp)
+                
+                reboot_thread.join()
+                # self.sbcli_utils.restart_node(node_uuid=no_lvol_node_uuid)
+                self.logger.info(f"Waiting for node to become online, {no_lvol_node_uuid}")
+                self.sbcli_utils.wait_for_storage_node_status(no_lvol_node_uuid,
+                                                              "online",
+                                                              timeout=300)
+                raise exp
 
-            self.sbcli_utils.wait_for_storage_node_status(node_id=no_lvol_node_uuid,
-                                                        status="offline",
-                                                        timeout=100)
-
-            self.logger.info("Sleeping for 30 seconds")
-            sleep_n_sec(30)
-
-            self.validations(node_uuid=no_lvol_node_uuid,
-                            node_status="offline",
-                            device_status="unavailable",
-                            lvol_status="online",
-                            health_check_status=False
-                            )
-
-            self.sbcli_utils.restart_node(node_uuid=no_lvol_node_uuid)
+            # self.sbcli_utils.restart_node(node_uuid=no_lvol_node_uuid)
+            reboot_thread.join()
 
             self.logger.info(f"Waiting for node to become online, {no_lvol_node_uuid}")
             self.sbcli_utils.wait_for_storage_node_status(no_lvol_node_uuid, "online", timeout=300)
@@ -421,20 +450,17 @@ class TestHASingleNodeOutage(TestClusterBase):
                 test_name=self.test_name
             )
             self.logger.info(f"Validating migration tasks for node {no_lvol_node_uuid}.")
-            sleep_n_sec(120)
             self.validate_migration_for_node(timestamp, 5000, None)
 
 
+        # self.sbcli_utils.resize_lvol(lvol_id=self.sbcli_utils.get_lvol_id(self.lvol_name),
+        #                              new_size="30G")
         # Write steps in order
         steps = {
-            "Storage Node": ["suspended", "shutdown", "restart"],
-            "Device": {"restart"}
+            "Storage Node": ["shutdown", "restart"],
         }
         self.common_utils.validate_event_logs(cluster_id=self.cluster_id,
                                               operations=steps)
-        
-        # self.sbcli_utils.resize_lvol(lvol_id=self.sbcli_utils.get_lvol_id(self.lvol_name),
-        #                              new_size="25G")
 
         end_time = self.common_utils.manage_fio_threads(node=self.mgmt_nodes[0],
                                                         threads=self.fio_threads,

@@ -11,7 +11,7 @@ from simplyblock_web import utils
 from simplyblock_core import db_controller
 
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG)
+
 bp = Blueprint("device", __name__)
 db_controller = db_controller.DBController()
 

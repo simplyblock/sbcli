@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import time
 import uuid
+from tracemalloc import Snapshot
 
 import docker
 import requests
@@ -19,6 +20,12 @@ from simplyblock_core.controllers import cluster_events, device_controller, stor
     lvol_controller
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.cluster import Cluster
+from simplyblock_core.models.job_schedule import JobSchedule
+from simplyblock_core.models.lvol_model import LVol
+from simplyblock_core.models.mgmt_node import MgmtNode
+from simplyblock_core.models.pool import Pool
+from simplyblock_core.models.snapshot import SnapShot
+from simplyblock_core.models.stats import StatsObject
 from simplyblock_core.rpc_client import RPCClient
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
@@ -100,6 +107,37 @@ def _add_graylog_input(cluster_ip, password):
     logger.debug(response.text)
     return response.status_code == 201
 
+def _set_max_result_window(cluster_ip, max_window=100000):
+    url_existing_indices = f"http://{cluster_ip}:9200/_all/_settings"
+    payload_existing = json.dumps({
+        "settings": {
+            "index.max_result_window": max_window
+        }
+    })
+    headers = {
+        'Content-Type': 'application/json',
+    }
+    response = requests.put(url_existing_indices, headers=headers, data=payload_existing)
+    if response.status_code == 200:
+        logger.info("Settings updated for existing indices.")
+    else:
+        logger.error(f"Failed to update settings for existing indices: {response.text}")
+        return False
+    
+    url_template = f"http://{cluster_ip}:9200/_template/all_indices_template"
+    payload_template = json.dumps({
+        "index_patterns": ["*"],
+        "settings": {
+            "index.max_result_window": max_window
+        }
+    })
+    response_template = requests.put(url_template, headers=headers, data=payload_template)
+    if response_template.status_code == 200:
+        logger.info("Template created for future indices.")
+        return True
+    else:
+        logger.error(f"Failed to create template for future indices: {response_template.text}")
+        return False
 
 def create_cluster(blk_size, page_size_in_blocks, cli_pass,
                    cap_warn, cap_crit, prov_cap_warn, prov_cap_crit, ifname, log_del_interval, metrics_retention_period,
@@ -130,6 +168,10 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
         if c.swarm.attrs and "ID" in c.swarm.attrs:
             logger.info("Docker swarm found, leaving swarm now")
             c.swarm.leave(force=True)
+            try:
+                c.volumes.get("monitoring_grafana_data").remove(force=True)
+            except:
+                pass
             time.sleep(3)
 
         c.swarm.init(DEV_IP)
@@ -160,7 +202,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     if prov_cap_crit and prov_cap_crit > 0:
         c.prov_cap_crit = prov_cap_crit
     if distr_ndcs == 0 and distr_npcs == 0:
-        c.distr_ndcs = 4
+        c.distr_ndcs = 1
         c.distr_npcs = 1
     else:
         c.distr_ndcs = distr_ndcs
@@ -232,6 +274,8 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     logger.info("Configuring DB...")
     out = scripts.set_db_config_single()
     logger.info("Configuring DB > Done")
+
+    _set_max_result_window(DEV_IP)
 
     _add_graylog_input(DEV_IP, c.secret)
 
@@ -365,7 +409,7 @@ def cluster_activate(cl_id, force=False, force_lvstore_create=False):
         else:
             ret = storage_node_ops.create_lvstore(snode, cluster.distr_ndcs, cluster.distr_npcs, cluster.distr_bs,
                                               cluster.distr_chunk_bs, cluster.page_size_in_blocks, max_size, snodes)
-        if not ret:
+        if not ret and not force:
             logger.error("Failed to activate cluster")
             set_cluster_status(cl_id, ols_status)
             return False
@@ -377,7 +421,7 @@ def cluster_activate(cl_id, force=False, force_lvstore_create=False):
             continue
 
         ret = storage_node_ops.recreate_lvstore(snode)
-        if not ret:
+        if not ret and not force:
             logger.error("Failed to activate cluster")
             set_cluster_status(cl_id, ols_status)
             return False
@@ -393,7 +437,7 @@ def cluster_activate(cl_id, force=False, force_lvstore_create=False):
     return True
 
 
-def show_cluster(cl_id, is_json=False):
+def get_cluster_status(cl_id, is_json=False):
     db_controller = DBController()
     cluster = db_controller.get_cluster_by_id(cl_id)
     if not cluster:
@@ -514,9 +558,226 @@ def list():
             "tls": cl.tls,
             "mgmt nodes": len(mt),
             "storage nodes": len(st),
+            "Mod": f"{cl.distr_ndcs}x{cl.distr_npcs}",
             "Status": cl.status,
         })
     return utils.print_table(data)
+
+
+
+def list_all_info(cluster_id):
+    db_controller = DBController()
+    cl = db_controller.get_cluster_by_id(cluster_id)
+    if not cl:
+        logger.error(f"Cluster not found {cluster_id}")
+        return False
+
+    mt = db_controller.get_mgmt_nodes()
+    mt_online = [m for m in mt if m.status == MgmtNode.STATUS_ONLINE]
+
+    data = []
+
+    st = db_controller.get_storage_nodes_by_cluster_id(cl.get_id())
+    st_online = [s for s in st if s.status == StorageNode.STATUS_ONLINE]
+
+    pools = db_controller.get_pools(cluster_id)
+    p_online = [p for p in pools if p.status == Pool.STATUS_ACTIVE]
+
+    lvols = db_controller.get_lvols(cluster_id)
+    lv_online = [p for p in lvols if p.status == LVol.STATUS_ONLINE]
+
+    snaps = [sn for sn in db_controller.get_snapshots() if sn.cluster_id == cluster_id]
+
+    devs = []
+    devs_online = []
+    for n in st:
+        for dev in n.nvme_devices:
+            devs.append(dev)
+            if dev.status == NVMeDevice.STATUS_ONLINE:
+                devs_online.append(dev)
+
+    records = db_controller.get_cluster_capacity(cl, 1)
+    if records:
+        rec = records[0]
+    else:
+        rec = StatsObject()
+
+    task_total = 0
+    task_running = 0
+    task_pending = 0
+    for task in db_controller.get_job_tasks(cl.get_id()):
+        task_total += 1
+        if task.status == JobSchedule.STATUS_RUNNING:
+            task_running += 1
+        elif task.status in [JobSchedule.STATUS_NEW, JobSchedule.STATUS_SUSPENDED]:
+            task_pending += 1
+
+
+    data.append({
+        "Cluster UUID": cl.get_id(),
+        "Type": cl.ha_type.upper(),
+        "Mod": f"{cl.distr_ndcs}x{cl.distr_npcs}",
+
+        "Mgmt Nodes": f"{len(mt)}/{len(mt_online)}",
+        "Storage Nodes": f"{len(st)}/{len(st_online)}",
+        "Devices": f"{len(devs)}/{len(devs_online)}",
+        "Pools": f"{len(pools)}/{len(p_online)}",
+        "Lvols": f"{len(lvols)}/{len(lv_online)}",
+        "Snaps": f"{len(snaps)}",
+
+        "Tasks total": f"{task_total}",
+        "Tasks running": f"{task_running}",
+        "Tasks pending": f"{task_pending}",
+        #
+        # "Size total": f"{utils.humanbytes(rec.size_total)}",
+        # "Size Used": f"{utils.humanbytes(rec.size_used)}",
+        # "Size prov": f"{utils.humanbytes(rec.size_prov)}",
+        # "Size util": f"{rec.size_util}%",
+        # "Size prov util": f"{rec.size_prov_util}%",
+
+        "Status": cl.status,
+
+    })
+
+    out = utils.print_table(data, title="Cluster Info")
+    out += "\n"
+
+    data = []
+
+    data.append({
+        "Cluster UUID": cl.uuid,
+        # "Type": "Cluster Object",
+        # "Devices": f"{len(devs)}/{len(devs_online)}",
+        # "Lvols": f"{len(lvols)}/{len(lv_online)}",
+
+        "Size prov": f"{utils.humanbytes(rec.size_prov)}",
+        "Size Used": f"{utils.humanbytes(rec.size_used)}",
+        "Size free": f"{utils.humanbytes(rec.size_free)}",
+        "Size %": f"{rec.size_util}%",
+        "Size prov %": f"{rec.size_prov_util}%",
+
+        "Read BW/s": f"{utils.humanbytes(rec.read_bytes_ps)}",
+        "Write BW/s": f"{utils.humanbytes(rec.write_bytes_ps)}",
+        "Read IOP/s": f"{rec.read_io_ps}",
+        "Write IOP/s": f"{rec.write_io_ps}",
+
+        "Health": "True",
+        "Status": cl.status,
+
+    })
+
+    out += "\n"
+    out += utils.print_table(data, title="Cluster Stats")
+    out += "\n"
+
+    data = []
+
+    dev_data = []
+
+    for node in st:
+        records = db_controller.get_node_capacity(node, 1)
+        if records:
+            rec = records[0]
+        else:
+            rec = StatsObject()
+
+        lvs = db_controller.get_lvols_by_node_id(node.get_id()) or []
+        total_devices = len(node.nvme_devices)
+        online_devices = 0
+        for dev in node.nvme_devices:
+            if dev.status == NVMeDevice.STATUS_ONLINE:
+                online_devices += 1
+
+        data.append({
+            "Storage node UUID": node.uuid,
+            "Devices": f"{total_devices}/{online_devices}",
+            "LVols": f"{len(lvs)}",
+
+            "Size prov": f"{utils.humanbytes(rec.size_total)}",
+            "Size Used": f"{utils.humanbytes(rec.size_used)}",
+            "Size free": f"{utils.humanbytes(rec.size_free)}",
+            "Size %": f"{rec.size_util}%",
+            "Size prov %": f"{rec.size_prov_util}%",
+
+            "Read BW/s": f"{utils.humanbytes(rec.read_bytes_ps)}",
+            "Write BW/s": f"{utils.humanbytes(rec.write_bytes_ps)}",
+            "Read IOP/s": f"{rec.read_io_ps}",
+            "Write IOP/s": f"{rec.write_io_ps}",
+
+            "Status": node.status,
+
+        })
+
+        for dev in node.nvme_devices:
+            records = db_controller.get_device_capacity(dev)
+            if records:
+                rec = records[0]
+            else:
+                rec = StatsObject()
+
+            dev_data.append({
+                "Device UUID": dev.uuid,
+
+                "Size total": f"{utils.humanbytes(rec.size_total)}",
+                "Size Used": f"{utils.humanbytes(rec.size_used)}",
+                "Size free": f"{utils.humanbytes(rec.size_free)}",
+                "Size %": f"{rec.size_util}%",
+                # "Size prov %": f"{rec.size_prov_util}%",
+
+                "Read BW/s": f"{utils.humanbytes(rec.read_bytes_ps)}",
+                "Write BW/s": f"{utils.humanbytes(rec.write_bytes_ps)}",
+                "Read IOP/s": f"{rec.read_io_ps}",
+                "Write IOP/s": f"{rec.write_io_ps}",
+
+                "Health": dev.health_check,
+                "Status": dev.status,
+
+            })
+
+    out += "\n"
+    if data:
+        out +=  utils.print_table(data, title="Storage Nodes Stats")
+        out += "\n"
+
+    out += "\n"
+    if dev_data:
+        out +=  utils.print_table(dev_data, title="Storage Devices Stats")
+        out += "\n"
+
+    lvol_data = []
+    for lvol in db_controller.get_lvols(cluster_id):
+        records = db_controller.get_lvol_stats(lvol, 1)
+        if records:
+            rec = records[0]
+        else:
+            rec = StatsObject()
+
+        lvol_data.append({
+            "LVol UUID": lvol.uuid,
+
+            "Size prov": f"{utils.humanbytes(rec.size_total)}",
+            "Size Used": f"{utils.humanbytes(rec.size_used)}",
+            "Size free": f"{utils.humanbytes(rec.size_free)}",
+            "Size %": f"{rec.size_util}%",
+            # "Size prov %": f"{rec.size_prov_util}%",
+
+            "Read BW/s": f"{utils.humanbytes(rec.read_bytes_ps)}",
+            "Write BW/s": f"{utils.humanbytes(rec.write_bytes_ps)}",
+            "Read IOP/s": f"{rec.read_io_ps}",
+            "Write IOP/s": f"{rec.write_io_ps}",
+
+            "Connections": f"{rec.connected_clients}",
+            "Health": lvol.health_check,
+            "Status": lvol.status,
+
+        })
+
+    out += "\n"
+    if lvol_data:
+        out += utils.print_table(lvol_data, title="LVol Stats")
+        out += "\n"
+
+    return out
 
 
 def get_capacity(cluster_id, history, records_count=20, is_json=False):
@@ -536,7 +797,16 @@ def get_capacity(cluster_id, history, records_count=20, is_json=False):
 
     records = db_controller.get_cluster_capacity(cluster, records_number)
 
-    new_records = utils.process_records(records, records_count)
+    cap_stats_keys = [
+        "date",
+        "size_total",
+        "size_prov",
+        "size_used",
+        "size_free",
+        "size_util",
+        "size_prov_util",
+    ]
+    new_records = utils.process_records(records, records_count, keys=cap_stats_keys)
 
     if is_json:
         return json.dumps(new_records, indent=2)
@@ -555,7 +825,7 @@ def get_capacity(cluster_id, history, records_count=20, is_json=False):
     return out
 
 
-def get_iostats_history(cluster_id, history_string, records_count=20, parse_sizes=True):
+def get_iostats_history(cluster_id, history_string, records_count=20, parse_sizes=True, with_sizes=False):
     db_controller = DBController()
     cluster = db_controller.get_cluster_by_id(cluster_id)
     if not cluster:
@@ -577,8 +847,44 @@ def get_iostats_history(cluster_id, history_string, records_count=20, parse_size
 
     records = db_controller.get_cluster_stats(cluster, records_number)
 
+    io_stats_keys = [
+        "date",
+        "read_bytes",
+        "read_bytes_ps",
+        "read_io_ps",
+        "read_io",
+        "read_latency_ps",
+        "write_bytes",
+        "write_bytes_ps",
+        "write_io",
+        "write_io_ps",
+        "write_latency_ps",
+    ]
+    if with_sizes:
+        io_stats_keys.extend(
+            [
+                "size_total",
+                "size_prov",
+                "size_used",
+                "size_free",
+                "size_util",
+                "size_prov_util",
+                "read_latency_ticks",
+                "record_duration",
+                "record_end_time",
+                "record_start_time",
+                "unmap_bytes",
+                "unmap_bytes_ps",
+                "unmap_io",
+                "unmap_io_ps",
+                "unmap_latency_ps",
+                "unmap_latency_ticks",
+                "write_bytes_ps",
+                "write_latency_ticks",
+            ]
+        )
     # combine records
-    new_records = utils.process_records(records, records_count)
+    new_records = utils.process_records(records, records_count, keys=io_stats_keys)
 
     if not parse_sizes:
         return new_records

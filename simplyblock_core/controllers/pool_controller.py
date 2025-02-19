@@ -129,9 +129,9 @@ def delete_pool(uuid):
         logger.error(f"Pool is disabled")
         return False
 
-    if pool.lvols:
-        logger.error(f"Pool is not empty {uuid}")
-        return False
+    # if pool.lvols:
+    #     logger.error(f"Pool is not empty {uuid}")
+    #     return False
 
     logger.info(f"Deleting pool {pool.get_id()}")
     pool_events.pool_remove(pool)
@@ -144,13 +144,14 @@ def list_pools(is_json, cluster_id=None):
     pools = db_controller.get_pools(cluster_id)
     data = []
     for pool in pools:
+        lvs = db_controller.get_lvols_by_pool_id(pool.get_id()) or []
         data.append({
             "UUID": pool.get_id(),
             "Name": pool.pool_name,
             "Capacity": utils.humanbytes(get_pool_total_capacity(pool.get_id())),
             "Max size": utils.humanbytes(pool.pool_max_size),
             "LVol Max Size": utils.humanbytes(pool.lvol_max_size),
-            "LVols": f"{pool.lvols}",
+            "LVols": f"{len(lvs)}",
             "QOS": f"{pool.has_qos()}",
             "Status": pool.status,
         })
@@ -202,7 +203,7 @@ def get_capacity(pool_id):
             "util_percent": 0,
             "util": 0,
         })
-    if pool.lvols:
+    if total_size:
         out.append({
             "device name": "Total",
             "provisioned": utils.humanbytes(total_size),
@@ -281,7 +282,7 @@ def get_pool_total_capacity(pool_id):
     snaps = db_controller.get_snapshots()
     for snap in snaps:
         if snap.lvol.pool_uuid == pool_id:
-            total += snap.lvol.size
+            total += snap.used_size
     return total
 
 

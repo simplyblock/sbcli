@@ -2,10 +2,11 @@
 import logging
 import time
 import sys
+from datetime import datetime
 
-
-from simplyblock_core import constants, db_controller
+from simplyblock_core import constants, db_controller, utils
 from simplyblock_core.controllers import tasks_events, tasks_controller, device_controller
+from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
 
 
@@ -26,6 +27,14 @@ def task_runner(task):
         task.write_to_db(db_controller.kv_store)
         return True
 
+    cluster = db_controller.get_cluster_by_id(task.cluster_id)
+    if cluster.status not in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_READONLY]:
+        task.function_result = "cluster is not active, retrying"
+        task.status = JobSchedule.STATUS_SUSPENDED
+        task.retry += 1
+        task.write_to_db(db_controller.kv_store)
+        return False
+
     if task.canceled:
         task.function_result = "canceled"
         task.status = JobSchedule.STATUS_DONE
@@ -33,9 +42,22 @@ def task_runner(task):
         return True
 
     if task.status in [JobSchedule.STATUS_NEW ,JobSchedule.STATUS_SUSPENDED]:
+        if task.status == JobSchedule.STATUS_NEW:
+            for node in db_controller.get_storage_nodes_by_cluster_id(task.cluster_id):
+                if node.online_since:
+                    try:
+                        diff = datetime.now() - datetime.fromisoformat(node.online_since)
+                        if diff.total_seconds() < 60:
+                            task.function_result = "node is online < 1 min, retrying"
+                            task.status = JobSchedule.STATUS_SUSPENDED
+                            task.retry += 1
+                            task.write_to_db(db_controller.kv_store)
+                            return False
+                    except Exception as e:
+                        logger.error(f"Failed to get online since: {e}")
+
         task.status = JobSchedule.STATUS_RUNNING
         task.write_to_db(db_controller.kv_store)
-        tasks_events.task_updated(task)
 
     if snode.status != StorageNode.STATUS_ONLINE:
         task.function_result = "node is not online, retrying"
@@ -67,7 +89,10 @@ def task_runner(task):
             return True
 
 
-        rsp = rpc_client.distr_migration_failure_start(distr_name, device.cluster_device_order)
+        qos_high_priority = False
+        if db_controller.get_cluster_by_id(snode.cluster_id).enable_qos:
+            qos_high_priority = True
+        rsp = rpc_client.distr_migration_failure_start(distr_name, device.cluster_device_order, qos_high_priority)
         if not rsp:
             logger.error(f"Failed to start device migration task, storage_ID: {device.cluster_device_order}")
             task.function_result = "Failed to start device migration task"
@@ -84,43 +109,16 @@ def task_runner(task):
 
         mig_info = task.function_params["migration"]
         res = rpc_client.distr_migration_status(**mig_info)
-        if res:
-            res_data = res[0]
-            migration_status = res_data["status"]
-            if migration_status == "completed":
-                if res_data['error'] == 0:
-                    task.function_result = "Done"
-                    task.status = JobSchedule.STATUS_DONE
-                else:
-                    task.function_result = "Failed to complete migration, retrying"
-                    task.status = JobSchedule.STATUS_SUSPENDED
-                    task.retry += 1
-                    del task.function_params["migration"]
-                task.write_to_db(db_controller.kv_store)
+        out = utils.handle_task_result(task, res)
+        dev_failed_task = tasks_controller.get_failed_device_mig_task(task.cluster_id, task.device_id)
+        if not dev_failed_task:
+            device_controller.device_set_failed_and_migrated(task.device_id)
 
-                dev_failed_task = tasks_controller.get_failed_device_mig_task( task.cluster_id, task.device_id)
-                if not dev_failed_task:
-                    device_controller.device_set_failed_and_migrated(task.device_id)
-
-                return True
-
-            elif migration_status == "failed":
-                task.function_result = "Failed to complete migration, retrying"
-                task.status = JobSchedule.STATUS_SUSPENDED
-                task.retry += 1
-                del task.function_params["migration"]
-                task.write_to_db(db_controller.kv_store)
-                return True
-
-            else:
-                task.function_result = f"Status: {migration_status}, progress:{res_data['progress']}"
-                task.write_to_db(db_controller.kv_store)
-        else:
-            logger.error("Failed to get mig status")
-
-    task.retry += 1
-    task.write_to_db(db_controller.kv_store)
-    return False
+        return out
+    else:
+        task.retry += 1
+        task.write_to_db(db_controller.kv_store)
+        return False
 
 
 # configure logging

@@ -15,6 +15,8 @@ class SnapShot(BaseModel):
     mem_diff: dict = {}
     pool_uuid: str = ""
     ref_count: int = 0
+    size: int = 0
+    used_size: int = 0
     snap_bdev: str = ""
     snap_name: str = ""
     snap_ref_id: str = ""

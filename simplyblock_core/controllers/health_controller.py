@@ -1,7 +1,8 @@
 # coding=utf-8
 
-from simplyblock_core import utils, distr_controller
+from simplyblock_core import utils, distr_controller, storage_node_ops
 from simplyblock_core.db_controller import DBController
+from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.nvme_device import NVMeDevice, JMDevice
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.rpc_client import RPCClient
@@ -115,6 +116,10 @@ def _check_node_lvstore(lvstore_stack, node, auto_fix=False):
     logger.info(f"Checking distr stack on node : {node.get_id()}")
     rpc_client = RPCClient(
         node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password, timeout=3, retry=1)
+    cluster = db_controller.get_cluster_by_id(node.cluster_id)
+    if cluster.status not in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_READONLY]:
+        auto_fix = False
+
     distribs_list = []
     raid = None
     bdev_lvstore = None
@@ -126,9 +131,15 @@ def _check_node_lvstore(lvstore_stack, node, auto_fix=False):
         elif type == "bdev_lvstore":
             bdev_lvstore = bdev["name"]
 
+    node_bdevs = rpc_client.get_bdevs()
+    if node_bdevs:
+        node_bdev_names = [b['name'] for b in node_bdevs]
+    else:
+        node_bdev_names = []
+
     for distr in distribs_list:
-        ret = rpc_client.get_bdevs(distr)
-        if ret:
+        # ret = rpc_client.get_bdevs(distr)
+        if distr in node_bdev_names:
             logger.info(f"Checking distr bdev : {distr} ... ok")
             logger.info("Checking Distr map ...")
             ret = rpc_client.distr_get_cluster_map(distr)
@@ -146,6 +157,11 @@ def _check_node_lvstore(lvstore_stack, node, auto_fix=False):
                                 if result['Kind'] == "Device":
                                     if result['Reported Status']:
                                         dev = db_controller.get_storage_device_by_id(result['UUID'])
+                                        if dev.status == NVMeDevice.STATUS_ONLINE:
+                                            remote_devices = storage_node_ops._connect_to_remote_devs(node)
+                                            n = db_controller.get_storage_node_by_id(node.get_id())
+                                            n.remote_devices = remote_devices
+                                            n.write_to_db()
                                         distr_controller.send_dev_status_event(dev, dev.status, node)
                                 if result['Kind'] == "Node":
                                     n = db_controller.get_storage_node_by_id(result['UUID'])
@@ -161,8 +177,8 @@ def _check_node_lvstore(lvstore_stack, node, auto_fix=False):
             logger.info(f"Checking distr bdev : {distr} ... not found")
             lvstore_check = False
     if raid:
-        ret = rpc_client.get_bdevs(raid)
-        if ret:
+        # ret = rpc_client.get_bdevs(raid)
+        if raid in node_bdev_names:
             logger.info(f"Checking raid bdev: {raid} ... ok")
         else:
             logger.info(f"Checking raid bdev: {raid} ... not found")
@@ -278,7 +294,7 @@ def check_node(node_id, with_devices=True):
 
         if snode.is_secondary_node:
             for node in db_controller.get_storage_nodes():
-                if node.secondary_node_id == snode.get_id():
+                if node.secondary_node_id == snode.get_id() and node.status == StorageNode.STATUS_ONLINE:
                     logger.info(f"Checking stack from node : {node.get_id()}")
                     lvstore_check &= _check_node_lvstore(node.lvstore_stack, snode)
 
@@ -396,6 +412,9 @@ def check_lvol_on_node(lvol_id, node_id):
         return False
 
     snode = db_controller.get_storage_node_by_id(node_id)
+    if not snode:
+        return False
+
     rpc_client = RPCClient(
         snode.mgmt_ip, snode.rpc_port,
         snode.rpc_username, snode.rpc_password, timeout=5, retry=1)
@@ -443,7 +462,7 @@ def check_lvol(lvol_id):
         passed = True
         for nodes_id in lvol.nodes:
             node = db_controller.get_storage_node_by_id(nodes_id)
-            if node.status == StorageNode.STATUS_ONLINE:
+            if node and node.status == StorageNode.STATUS_ONLINE:
                 ret = check_lvol_on_node(lvol_id, nodes_id)
                 if not ret:
                     passed = False

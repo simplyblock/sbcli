@@ -31,7 +31,7 @@ class NVMeDevice(BaseModel):
     alceml_name: str = ""
     bdev_stack: List = []
     capacity: int = -1
-    cluster_device_order: int = 0
+    cluster_device_order: int = -1
     cluster_id: str = ""
     device_name: str = ""
     health_check: bool = True

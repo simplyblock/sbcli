@@ -2,6 +2,28 @@ import os
 
 from setuptools import setup, find_packages
 
+from setuptools.command.install import install as _install
+
+
+def _post_install():
+    from subprocess import getstatusoutput
+    _, out = getstatusoutput('activate-global-python-argcomplete --user')
+    print(out)
+
+    if os.environ.get("SHELL") and os.environ.get("HOME"):
+        if "zsh" in os.environ.get("SHELL", ""):
+            path = f"{os.environ.get('HOME')}/.zshenv"
+        else:
+            path = f"{os.environ.get('HOME')}/.bash_completion"
+        if os.path.isfile(path):
+            _, out = getstatusoutput(f'source {path}')
+
+
+class install(_install):
+    def run(self):
+        _install.run(self)
+        self.execute(_post_install, (), msg="Running post install task")
+
 
 def get_env_var(name, default=None):
     if not name:
@@ -72,5 +94,6 @@ setup(
     package_data={
         '': ["/etc/simplyblock/requirements.txt"],
         '/etc/simplyblock': ["requirements.txt"]
-    }
+    },
+    cmdclass={'install': install},
 )

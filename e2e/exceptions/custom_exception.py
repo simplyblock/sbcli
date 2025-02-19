@@ -13,3 +13,15 @@ class MultipleExceptions(Exception):
     def _create_message(self):
         messages = [f"{case}: {ex}" for case, ex in self.exceptions.items()]
         return "\n".join(messages)
+
+class LvolNotConnectException(Exception):
+    def __init__(self, message) -> None:
+        super().__init__(message)
+
+class SkippedTestsException(Exception):
+    def __init__(self, message) -> None:
+        super().__init__(message)
+
+class CoreFileFoundException(Exception):
+    def __init__(self, message) -> None:
+        super().__init__(message)

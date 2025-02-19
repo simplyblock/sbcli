@@ -27,7 +27,7 @@ class RPCClient:
     # ref: https://spdk.io/doc/jsonrpc.html
     DEFAULT_ALLOWED_METHODS = ["HEAD", "GET", "PUT", "DELETE", "OPTIONS", "TRACE", "POST"]
 
-    def __init__(self, ip_address, port, username, password, timeout=60, retry=3):
+    def __init__(self, ip_address, port, username, password, timeout=180, retry=3):
         self.ip_address = ip_address
         self.port = port
         self.url = 'http://%s:%s/' % (self.ip_address, self.port)
@@ -142,11 +142,11 @@ class RPCClient:
             "max_io_qpairs_per_ctrlr": qpair_count,
             "max_queue_depth": 512,
             "abort_timeout_sec": 5,
-            "ack_timeout": 512,
+            "ack_timeout": 2048,
             "zcopy": True,
             "in_capsule_data_size": 4096,
             "max_io_size": 131072,
-            "io_unit_size": 131072,
+            "io_unit_size": 8192,
             "max_aq_depth": 128,
             "num_shared_buffers": 8192,
             "buf_cache_size": 32,
@@ -180,7 +180,7 @@ class RPCClient:
                 "trtype": trtype,
                 "adrfam": "IPv4",
                 "traddr": traddr,
-                "trsvcid": trsvcid
+                "trsvcid": str(trsvcid)
             }
         }
         if ana_state:
@@ -372,14 +372,14 @@ class RPCClient:
         params = {"name": name}
         return self._request2("ultra21_bdev_pass_delete", params)
 
-    def qos_vbdev_create(self, qos_bdev, base_bdev_name, base_nvme_hw_name, max_queue_size,
-                         inflight_io_threshold):
+    def qos_vbdev_create(self, qos_bdev, base_bdev_name, inflight_io_threshold):
         params = {
             "base_bdev_name": base_bdev_name,
             "name": qos_bdev,
-            "base_nvme_hw_name": base_nvme_hw_name,
-            "max_queue_size": max_queue_size,
-            "inflight_io_threshold": inflight_io_threshold
+            "max_num_queues": 2,
+            "standard_queue_weight": 3,
+            "low_priority_3_queue_weight": 1,
+            "inflight_io_threshold": inflight_io_threshold or 12
         }
 
         return self._request("qos_vbdev_create", params)
@@ -404,7 +404,7 @@ class RPCClient:
             # "use_scheduling": True,
             "use_optimized": True,
             "pba_nbalign": 4096,
-            "use_map_whole_page_on_1st_write": True
+            "use_map_whole_page_on_1st_write": False
         }
         if alceml_cpu_mask:
             params["bdb_lcpu_mask"] = int(alceml_cpu_mask, 16)
@@ -482,7 +482,8 @@ class RPCClient:
             "name": name,
             "raid_level": raid_level,
             "strip_size_kb": strip_size_kb,
-            "base_bdevs": bdevs_list
+            "base_bdevs": bdevs_list,
+            "io_unmap_limit": 100
         }
         if raid_level == "1":
             params["strip_size_kb"] = 0
@@ -517,6 +518,9 @@ class RPCClient:
 
     def distr_add_nodes(self, params):
         return self._request("distr_add_nodes", params)
+
+    def distr_add_devices(self, params):
+        return self._request("distr_add_devices", params)
 
     def distr_status_events_update(self, params):
         # ultra/DISTR_v2/src_code_app_spdk/specs/message_format_rpcs__distrib__v5.txt#L396C1-L396C27
@@ -594,12 +598,12 @@ class RPCClient:
         params = {
             # "action_on_timeout": "abort",
             "bdev_retry_count": 0,
-            "transport_retry_count": 0,
+            "transport_retry_count": 3,
             "ctrlr_loss_timeout_sec": 1,
             "fast_io_fail_timeout_sec": 0,
             "reconnect_delay_sec": 1,
             "keep_alive_timeout_ms": 10000,
-            "transport_ack_timeout": 9,
+            "transport_ack_timeout": 10,
             "timeout_us": constants.NVME_TIMEOUT_US
         }
         return self._request("bdev_nvme_set_options", params)
@@ -794,28 +798,34 @@ class RPCClient:
         params = {"id": app_thread_process_id, "cpumask": app_thread_mask}
         return self._request("thread_set_cpumask", params)
 
-    def distr_migration_to_primary_start(self, storage_ID, name):
+    def distr_migration_to_primary_start(self, storage_ID, name, qos_high_priority=False):
         params = {
             "name": name,
             "storage_ID": storage_ID,
         }
+        # if qos_high_priority:
+        #     params["qos_high_priority"] = qos_high_priority
         return self._request("distr_migration_to_primary_start", params)
 
     def distr_migration_status(self, name):
         params = {"name": name}
         return self._request("distr_migration_status", params)
 
-    def distr_migration_failure_start(self, name, storage_ID):
+    def distr_migration_failure_start(self, name, storage_ID, qos_high_priority=False):
         params = {
             "name": name,
-            "storage_ID": storage_ID
+            "storage_ID": storage_ID,
         }
+        # if qos_high_priority:
+        #     params["qos_high_priority"] = qos_high_priority
         return self._request("distr_migration_failure_start", params)
 
-    def distr_migration_expansion_start(self, name):
+    def distr_migration_expansion_start(self, name, qos_high_priority=False):
         params = {
             "name": name,
         }
+        # if qos_high_priority:
+        #     params["qos_high_priority"] = qos_high_priority
         return self._request("distr_migration_expansion_start", params)
 
     def bdev_raid_add_base_bdev(self, raid_bdev, base_bdev):
@@ -889,7 +899,7 @@ class RPCClient:
                 "trtype": trtype,
                 "adrfam": "IPv4",
                 "traddr": traddr,
-                "trsvcid": trsvcid
+                "trsvcid": str(trsvcid)
             }
         }
         return self._request("nvmf_subsystem_remove_listener", params)
@@ -901,7 +911,7 @@ class RPCClient:
             params = {"jm_vuid": jm_vuid}
         return self._request("bdev_distrib_force_to_non_leader", params)
 
-    def bdev_lvol_set_leader(self, is_leader=False, uuid=None, lvs_name=None):
+    def bdev_lvol_set_leader(self, is_leader=False, uuid=None, lvs_name=None, bs_nonleadership=False):
         params = {
             "leadership": is_leader,
         }
@@ -909,6 +919,8 @@ class RPCClient:
             params["uuid"] = uuid
         elif lvs_name:
             params["lvs_name"] = lvs_name
+
+        # params["bs_nonleadership"] = bs_nonleadership
 
         return self._request("bdev_lvol_set_leader_all", params)
 
@@ -954,3 +966,24 @@ class RPCClient:
             "registered_uuid": registered_uuid,
         }
         return self._request("bdev_lvol_clone_register", params)
+
+    def distr_replace_id_in_map_prob(self, storage_ID_from, storage_ID_to):
+        params = {
+            "storage_ID_from": storage_ID_from,
+            "storage_ID_to": storage_ID_to,
+        }
+        return self._request("distr_replace_id_in_map_prob", params)
+
+    def nvmf_set_max_subsystems(self, max_subsystems):
+        params = {
+            "max_subsystems": max_subsystems,
+        }
+        return self._request("nvmf_set_max_subsystems", params)
+
+    def bdev_lvol_set_lvs_ops(self, lvs_name, groupid, subsystem_port=9090):
+        params = {
+            "groupid": groupid,
+            "lvs_name": lvs_name,
+            "subsystem_port": subsystem_port,
+        }
+        return self._request("bdev_lvol_set_lvs_op", params)

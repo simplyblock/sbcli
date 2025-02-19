@@ -54,7 +54,12 @@ class BaseModel(object):
                 dtype = value_dict['type']
                 value = data[attr]
                 if dtype in [int, float, str, bool]:
-                    value = value_dict['type'](data[attr])
+                    try:
+                        value = dtype(value)
+                    except:
+                        if type(value) == list and dtype == int:
+                            value = len(value)
+
                 elif hasattr(dtype, '__origin__'):
                     if dtype.__origin__ == list:
                         if hasattr(dtype, "__args__") and hasattr(dtype.__args__[0], "from_dict"):

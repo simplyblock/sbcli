@@ -16,7 +16,7 @@ from simplyblock_core import db_controller
 from simplyblock_core.models.deployer import Deployer
 
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG)
+
 bp = Blueprint("deployer", __name__)
 db_controller = db_controller.DBController()
 

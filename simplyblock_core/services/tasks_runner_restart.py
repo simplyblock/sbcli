@@ -98,7 +98,6 @@ def task_runner_device(task):
     if task.status != JobSchedule.STATUS_RUNNING:
         task.status = JobSchedule.STATUS_RUNNING
         task.write_to_db(db_controller.kv_store)
-        tasks_events.task_updated(task)
 
     # set device online for the first 3 retries
     if task.retry < 3:
@@ -171,7 +170,6 @@ def task_runner_node(task):
             return True
         task.status = JobSchedule.STATUS_RUNNING
         task.write_to_db(db_controller.kv_store)
-        tasks_events.task_updated(task)
 
     # is node reachable?
     ping_check = health_controller._check_node_ping(node.mgmt_ip)
@@ -192,16 +190,18 @@ def task_runner_node(task):
     ret = storage_node_ops.shutdown_storage_node(node.get_id(), force=True)
     if ret:
         logger.info(f"Node shutdown succeeded")
+
     time.sleep(3)
 
     # resetting node
     logger.info(f"Restart node {node.get_id()}")
-    ret = storage_node_ops.restart_storage_node(node.get_id())
+    ret = storage_node_ops.restart_storage_node(node.get_id(), force=True)
     if ret:
         logger.info(f"Node restart succeeded")
 
     time.sleep(3)
-    if node.status == StorageNode.STATUS_ONLINE:
+    node = db_controller.get_storage_node_by_id(task.node_id)
+    if _get_node_unavailable_devices_count(node.get_id()) == 0 and node.status == StorageNode.STATUS_ONLINE:
         logger.info(f"Node is online: {node.get_id()}")
         task.function_result = "done"
         task.status = JobSchedule.STATUS_DONE
@@ -229,8 +229,8 @@ while True:
                         task = db_controller.get_task_by_id(task.uuid)
                         res = task_runner(task)
                         if res:
-                            tasks_events.task_updated(task)
                             if task.status == JobSchedule.STATUS_DONE:
+                                tasks_events.task_updated(task)
                                 break
                         else:
                             if task.retry <= 3:

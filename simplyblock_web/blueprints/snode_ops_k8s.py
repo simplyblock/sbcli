@@ -19,7 +19,7 @@ from simplyblock_web import utils, node_utils
 from simplyblock_core import scripts, constants, shell_utils
 
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
+logger.setLevel(constants.LOG_LEVEL)
 bp = Blueprint("snode", __name__, url_prefix="/snode")
 
 cluster_id_file = "/etc/foundationdb/sbcli_cluster_id"
