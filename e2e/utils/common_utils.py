@@ -131,7 +131,7 @@ class CommonUtils:
         end_time = time.time()
 
         process_list_after = self.ssh_utils.find_process_name(node=node,
-                                                              process_name="fio")
+                                                              process_name="fio --name")
         self.logger.info(f"Process List: {process_list_after}")
 
         process_fio = [element for element in process_list_after if "grep" not in element and not element.startswith("kworker")]
