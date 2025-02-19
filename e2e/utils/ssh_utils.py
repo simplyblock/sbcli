@@ -935,7 +935,9 @@ class SshUtils:
                 if (not node_data_nic_ip) and (not nodes_check_ports_on):
                     raise ValueError("node_data_nic_ip and nodes_check_ports_on must be provided when block_all_ss_ports is True.")
                 for node in nodes_check_ports_on:
-                    for source_node in [node_ip, node_data_nic_ip]:
+                    source_node_ips = list(node_data_nic_ip)
+                    source_node_ips.append(node_ip)
+                    for source_node in source_node_ips:
                         cmd = "ss -tnp | grep %s | awk '{print $5}'" % source_node
                         ss_output, _ = self.exec_command(node, cmd)
                         ip_with_ports = ss_output.split()
@@ -946,6 +948,8 @@ class SshUtils:
             block_ports = [str(port) for port in block_ports]
             block_ports = list(dict.fromkeys(block_ports))
             block_ports = sorted(block_ports)
+
+            block_ports = [port.strip() for port in block_ports if port.strip()]
             
             if "22" in block_ports:
                 block_ports.remove("22")
