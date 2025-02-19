@@ -145,7 +145,7 @@ class TestClusterBase:
                                               log_dir=self.docker_logs_path,
                                               test_name=self.test_name
                                               )
-            self.ssh_obj.start_tshark_logging(node_ip=node, log_dir=self.docker_logs_path)
+            self.ssh_obj.start_tcpdump_logging(node_ip=node, log_dir=self.docker_logs_path)
             self.ssh_obj.start_netstat_dmesg_logging(node_ip=node,
                                                      log_dir=self.docker_logs_path)
         
@@ -161,8 +161,8 @@ class TestClusterBase:
 
         self.ssh_obj.exec_command(node=self.fio_node,
                                   command="sudo tmux kill-server")
-        self.ssh_obj.start_tshark_logging(node_ip=self.fio_node,
-                                          log_dir=self.docker_logs_path)
+        self.ssh_obj.start_tcpdump_logging(node_ip=self.fio_node,
+                                           log_dir=self.docker_logs_path)
         self.ssh_obj.start_netstat_dmesg_logging(node_ip=self.fio_node,
                                                  log_dir=self.docker_logs_path)
 
@@ -260,7 +260,7 @@ class TestClusterBase:
                                     process_name="fio")
         
         for node in self.storage_nodes:
-            self.ssh_obj.stop_all_tshark(node_ip=node)
+            self.ssh_obj.stop_all_tcpdump(node_ip=node)
 
         retry_check = 100
         while retry_check:
