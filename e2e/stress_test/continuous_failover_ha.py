@@ -83,14 +83,18 @@ class RandomFailoverTest(TestLvolHACluster):
                 self.lvol_name = f"lvl{random_char(3)}"
                 lvol_name = f"{self.lvol_name}_{i}" if not is_crypto else f"c{self.lvol_name}_{i}"
             self.logger.info(f"Creating lvol with Name: {lvol_name}, fs type: {fs_type}, crypto: {is_crypto}")
-            self.sbcli_utils.add_lvol(
-                lvol_name=lvol_name,
-                pool_name=self.pool_name,
-                size=self.lvol_size,
-                crypto=is_crypto,
-                key1=self.lvol_crypt_keys[0],
-                key2=self.lvol_crypt_keys[1],
-            )
+            try:
+                self.sbcli_utils.add_lvol(
+                    lvol_name=lvol_name,
+                    pool_name=self.pool_name,
+                    size=self.lvol_size,
+                    crypto=is_crypto,
+                    key1=self.lvol_crypt_keys[0],
+                    key2=self.lvol_crypt_keys[1],
+                )
+            except Exception as e:
+                self.logger.warning(f"Lvol creation fails with {str(e)}. Retrying with different name.")
+                self.lvol_name = f"lvl{random_char(3)}"
             self.lvol_mount_details[lvol_name] = {
                    "ID": self.sbcli_utils.get_lvol_id(lvol_name),
                    "Command": None,
