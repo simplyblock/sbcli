@@ -136,10 +136,10 @@ def storage_node_shutdown(uuid):
     if not node:
         return utils.get_response_error(f"node not found: {uuid}", 404)
 
-    force = False
+    force = True
     try:
         args = request.args
-        force = bool(args.get('force', False))
+        force = bool(args.get('force', True))
     except:
         pass
 
