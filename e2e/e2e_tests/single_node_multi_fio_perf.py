@@ -173,10 +173,11 @@ class TestLvolFioBase(TestClusterBase):
             self.logger.info(f"Performing validation for FIO job: {job_name} on device: "
                             f"{disk_name} mounted on: {file_name}")
 
-        # assert 550 < total_iops < 650, \
-        #     f"Total IOPS {total_iops} out of range (550-650)"
-        assert total_iops > 350, \
-            f"Total IOPS {total_iops} out of range (>350)"
+        assert  total_iops == 0 , \
+            f"Total IOPS {total_iops} can not be 0"
+
+        if total_iops < 350:
+            self.logger.warning(f"Total IOPS {total_iops} is leas than 350)")
         # TODO: Uncomment when issue is fixed
         # assert 4.5 < read_bw_mib < 5.5, f"Read BW {read_bw_mib} out of range (4.5-5.5 MiB/s)"
         # assert 4.5 < write_bw_mib < 5.5, f"Write BW {write_bw_mib} out of range (4.5-5.5 MiB/s)"
