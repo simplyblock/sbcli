@@ -340,9 +340,9 @@ class SshUtils:
     
     def find_process_name(self, node, process_name, return_pid=False):
         if return_pid:
-            command = "ps -ef | grep -i %s | awk '{print $2}'" % process_name
+            command = "ps -ef | grep -i '%s' | awk '{print $2}'" % process_name
         else:
-            command = "ps -ef | grep -i %s" % process_name
+            command = "ps -ef | grep -i '%s'" % process_name
         output, error = self.exec_command(node=node,
                                           command=command)
                                     
@@ -782,7 +782,7 @@ class SshUtils:
             for container in containers:
                 # Construct the log file path
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                log_file = f"{log_dir}/{container}_{test_name}_{timestamp}_before_outage.txt"
+                log_file = f"{log_dir}/{container}_{test_name}_{node_ip}_{timestamp}_before_outage.txt"
 
                 # Run the Docker log collection command with `setsid` to ensure persistence
                 # command_logs = (
@@ -825,7 +825,7 @@ class SshUtils:
             self.exec_command(node_ip, f"sudo mkdir -p {log_dir} && sudo chmod 777 {log_dir}")
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             for container in containers:
-                log_file = f"{log_dir}/{container}_{test_name}_{timestamp}_after_outage.txt"
+                log_file = f"{log_dir}/{container}_{test_name}_{node_ip}_{timestamp}_after_outage.txt"
                 random_suffix = generate_random_string()
                 tmux_session_name = f"{container}_logs_{random_suffix}"
                 command_logs = (
@@ -1176,7 +1176,7 @@ class SshUtils:
                 continue
 
             log_file_path = f"/tmp/{log_file_name}"
-            destination_path = f"{Path.home()}/{log_file_name}"
+            destination_path = f"{Path.home()}/{log_file_name}_{storage_node_ip}"
 
             # Copy log file from inside container to host machine
             copy_command = f"sudo docker cp spdk:{log_file_path} {destination_path}"

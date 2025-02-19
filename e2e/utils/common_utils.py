@@ -115,7 +115,7 @@ class CommonUtils:
         sleep_n_sec(10)
         while True:
             process = self.ssh_utils.find_process_name(node=node,
-                                                       process_name="fio")
+                                                       process_name="fio --name")
             process_fio = [element for element in process if "grep" not in element and not element.startswith("kworker")]
             self.logger.info(f"Process info: {process_fio}")
             
