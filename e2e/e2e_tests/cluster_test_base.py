@@ -255,6 +255,13 @@ class TestClusterBase:
         """Contains teradown required post test case execution
         """
         self.logger.info("Inside teardown function")
+
+        for node in self.storage_nodes:
+            self.ssh_obj.exec_command(node=node,
+                                      command="sudo tmux kill-server")
+
+        self.ssh_obj.exec_command(node=self.fio_node,
+                                  command="sudo tmux kill-server")
         
         self.ssh_obj.kill_processes(node=self.fio_node,
                                     process_name="fio")
