@@ -48,7 +48,7 @@ class RandomFailoverTest(TestLvolHACluster):
         self.node_vs_lvol = {}
         self.sn_nodes_with_sec = []
         self.test_name = "continuous_random_failover_ha"
-        self.outage_types = ["partial_nw", "network_interrupt", "container_stop", "graceful_shutdown"]
+        self.outage_types = ["partial_nw", "partial_nw_single_port", "network_interrupt", "container_stop", "graceful_shutdown"]
         # self.outage_types = ["network_interrupt", "container_stop", "graceful_shutdown"]
         self.blocked_ports = None
         self.outage_log_file = os.path.join("logs", f"outage_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
@@ -283,8 +283,21 @@ class RandomFailoverTest(TestLvolHACluster):
             for lvol in lvols:
                 self.ssh_obj.disconnect_lvol_node_device(node=self.fio_node, device=self.lvol_mount_details[lvol]["Device"])
             sleep_n_sec(60)
+        
+        elif outage_type == "partial_nw_single_port":
+            lvol_ports = node_details[0]["lvol_subsys_port"]
+            if not isinstance(lvol_ports, list):
+                lvol_ports = [lvol_ports]
+            ports_to_block = [int(port) for port in lvol_ports]
+            self.blocked_ports = self.ssh_obj.perform_nw_outage(node_ip=node_ip,
+                                                                block_ports=ports_to_block,
+                                                                block_all_ss_ports=False)
+            lvols = self.node_vs_lvol[self.current_outage_node]
+            for lvol in lvols:
+                self.ssh_obj.disconnect_lvol_node_device(node=self.fio_node, device=self.lvol_mount_details[lvol]["Device"])
+            sleep_n_sec(60)
             
-        if outage_type != "partial_nw":
+        if outage_type != "partial_nw" or outage_type != "partial_nw_single_port":
             sleep_n_sec(120)
         
         return outage_type
@@ -324,8 +337,13 @@ class RandomFailoverTest(TestLvolHACluster):
         elif outage_type == "network_interrupt":
             # self.disconnect_thread.join()
             self.ssh_obj.remove_nw_outage(node_ip=node_ip, blocked_ports=self.blocked_ports)
+            sleep_n_sec(100)
         elif outage_type == "partial_nw":
             self.ssh_obj.remove_nw_outage(node_ip=node_ip, blocked_ports=self.blocked_ports)
+            sleep_n_sec(100)
+        elif outage_type == "partial_nw_single_port":
+            self.ssh_obj.remove_nw_outage(node_ip=node_ip, blocked_ports=self.blocked_ports)
+            sleep_n_sec(100)
         self.sbcli_utils.wait_for_storage_node_status(self.current_outage_node, "online", timeout=4000)
         self.sbcli_utils.wait_for_health_status(self.current_outage_node, True, timeout=4000)
         self.outage_end_time = int(datetime.now().timestamp())
@@ -361,7 +379,7 @@ class RandomFailoverTest(TestLvolHACluster):
         else:
             self.logger.info(f"No NVMe issues found on {node_ip} between {search_start_iso} and {search_end_iso}")
 
-        if outage_type == "partial_nw":
+        if outage_type == "partial_nw" or outage_type == "partial_nw_single_port":
             sleep_n_sec(600)
             lvols = self.node_vs_lvol[self.current_outage_node]
             for lvol in lvols:
@@ -558,7 +576,7 @@ class RandomFailoverTest(TestLvolHACluster):
         self.create_lvols_with_fio(5)
         self.create_snapshots_and_clones()
 
-        if outage_type != "partial_nw":
+        if outage_type != "partial_nw" or outage_type != "partial_nw_single_port":
             sleep_n_sec(300)
 
         self.logger.info("Failover during outage completed.")
@@ -674,11 +692,11 @@ class RandomFailoverTest(TestLvolHACluster):
             self.delete_random_lvols(5)
             self.create_lvols_with_fio(5)
             self.create_snapshots_and_clones()
-            if outage_type != "partial_nw":
+            if outage_type != "partial_nw" or outage_type != "partial_nw_single_port":
                 sleep_n_sec(300)
             self.restart_nodes_after_failover(outage_type)
             self.logger.info("Waiting for fallback.")
-            if outage_type != "partial_nw":
+            if outage_type != "partial_nw" or outage_type != "partial_nw_single_port":
                 sleep_n_sec(600)
             time_duration = self.common_utils.calculate_time_duration(
                 start_timestamp=self.outage_start_time,
@@ -706,7 +724,7 @@ class RandomFailoverTest(TestLvolHACluster):
 
             # Perform failover and manage resources during outage
             self.perform_failover_during_outage()
-            if outage_type != "partial_nw":
+            if outage_type != "partial_nw" or outage_type != "partial_nw_single_port":
                 sleep_n_sec(600)
             time_duration = self.common_utils.calculate_time_duration(
                 start_timestamp=self.outage_start_time,
