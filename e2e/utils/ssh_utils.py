@@ -1219,20 +1219,15 @@ class SshUtils:
 
     def check_and_install_tshark(self, node_ip):
         """Check if tshark is installed on the remote node and install it if missing."""
-        check_command = "which tshark || echo 'not_installed'"
-        output, _ = self.exec_command(node_ip, check_command)
-
-        if "not_installed" in output:
-            self.logger.info(f"tshark not found on {node_ip}, installing it...")
-            install_command = "sudo apt update && sudo apt install -y tshark || sudo yum install -y wireshark"
-            _, install_error = self.exec_command(node_ip, install_command)
-
-            if install_error:
-                self.logger.error(f"Failed to install tshark on {node_ip}: {install_error}")
-                raise RuntimeError(f"tshark installation failed on {node_ip}")
-            self.logger.info(f"Successfully installed tshark on {node_ip}")
-        else:
-            self.logger.info(f"tshark is already installed on {node_ip}")
+        output, _ = self.exec_command(node_ip, "which tshark")
+        if not output:
+            self.logger.info("tshark not found, installing...")
+            install_tcpdump_command = (
+                "sudo apt-get update -y && sudo apt-get install -y tshark"
+                " || sudo yum install -y wireshark"
+            )
+            output, _ = self.exec_command(node_ip, install_tcpdump_command)
+            self.logger.info(f"tshark installed successfully: {output}")
 
 
     def start_tcpdump_logging(self, node_ip, log_dir):
