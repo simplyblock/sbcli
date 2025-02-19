@@ -910,14 +910,14 @@ class SshUtils:
             self.logger.error(f"Error during node reboot for {node_ip}: {e}")
             return False
         
-    def partial_nw_outage(self, node_ip, mgmt_ip=None, block_ports=None, block_all_ss_ports=False):
+    def perform_nw_outage(self, node_ip, node_port_block_ip=None, block_ports=None, block_all_ss_ports=False):
         """
         Simulate a partial network outage by blocking multiple ports at once using multiport matching.
         Optionally, block all ports listed by `ss` command for the given management IP.
 
         Args:
             node_ip (str): IP address of the target node.
-            mgmt_ip (str, optional): Management IP address to filter the `ss` command output.
+            mgmt_ip (list, optional): IP addresses used to filter the `ss` command output.
             block_ports (list): List of ports to block.
             block_all_ss_ports (bool): If True, block all ports from the `ss` command for mgmt_ip.
 
@@ -932,13 +932,14 @@ class SshUtils:
 
             # If flag is set, fetch and add all ports from the `ss` command filtered by mgmt_ip
             if block_all_ss_ports:
-                if not mgmt_ip:
-                    raise ValueError("mgmt_ip must be provided when block_all_ss_ports is True.")
-                cmd = "ss -tnp | grep %s | awk '{print $4}'" % mgmt_ip
-                ss_output, _ = self.exec_command(node_ip, cmd)
-                ip_with_ports = ss_output.split()
-                ports_to_block = [str(r.split(":")[1]) for r in ip_with_ports]
-                block_ports.extend(ports_to_block)
+                if not node_port_block_ip:
+                    raise ValueError("node_port_block_ip must be provided when block_all_ss_ports is True.")
+                for node in node_port_block_ip:
+                    cmd = "ss -tnp | grep %s | awk '{print $4}'" % node
+                    ss_output, _ = self.exec_command(node_ip, cmd)
+                    ip_with_ports = ss_output.split()
+                    ports_to_block = [str(r.split(":")[1]) for r in ip_with_ports]
+                    block_ports.extend(ports_to_block)
 
             # Remove duplicates
             block_ports = [str(port) for port in block_ports]
@@ -981,7 +982,7 @@ class SshUtils:
         return block_ports
 
 
-    def remove_partial_nw_outage(self, node_ip, blocked_ports):
+    def remove_nw_outage(self, node_ip, blocked_ports):
         """
         Remove partial network outage by unblocking multiple ports at once.
 
@@ -1018,55 +1019,6 @@ class SshUtils:
         except Exception as e:
             self.logger.error(f"Failed to unblock ports on {node_ip}: {e}")
 
-    def remove_partial_nw_outage2(self, node_ip, blocked_ports=None):
-        """
-        Remove partial network outage by unblocking multiple ports at once.
-
-        Args:
-            node_ip (str): IP address of the target node.
-            blocked_ports (list, optional): List of ports to unblock. If None, fetch from iptables.
-
-        Returns:
-            None
-        """
-        try:
-            if blocked_ports is None:
-                # Fetch existing blocked ports from iptables
-                cmd = "sudo iptables -L -v -n --line-numbers"
-                output, _ = self.exec_command(node_ip, cmd)
-
-                blocked_ports = []
-
-                for line in output.split("\n"):
-                    if "multiport dports" in line or "multiport sports" in line:
-                        parts = line.split()
-                        for part in parts:
-                            if "multiport" in part:
-                                idx = parts.index(part)
-                                if idx + 1 < len(parts):
-                                    ports = parts[idx + 1].split(",")
-                                    for port in ports:
-                                        if port not in blocked_ports:
-                                            blocked_ports.append(port)
-
-            if blocked_ports:
-                ports_str = ",".join(blocked_ports)
-                unblock_command = f"""
-                    sudo iptables -D OUTPUT -p tcp -m multiport --sports {ports_str} -j DROP;
-                    sudo iptables -D OUTPUT -p tcp -m multiport --dports {ports_str} -j DROP;
-                    sudo iptables -D INPUT -p tcp -m multiport --dports {ports_str} -j DROP;
-                    sudo iptables -D INPUT -p tcp -m multiport --sports {ports_str} -j DROP;
-                """
-
-                self.exec_command(node_ip, unblock_command)
-                self.logger.info(f"Unblocked ports {ports_str} on {node_ip}.")
-
-            time.sleep(5)
-            self.logger.info("Network outage: IPTable Rules List After Unblocking:")
-            self.exec_command(node_ip, "sudo iptables -L -v -n --line-numbers")
-
-        except Exception as e:
-            self.logger.error(f"Failed to unblock ports on {node_ip}: {e}")
 
     def set_aio_max_nr(self, node_ip, value=1048576):
         """

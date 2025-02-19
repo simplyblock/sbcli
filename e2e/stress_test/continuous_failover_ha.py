@@ -259,12 +259,22 @@ class RandomFailoverTest(TestLvolHACluster):
             # )
             # self.disconnect_thread.start()
             ports_to_block = [4420, 80, 8080, 5000, 2270, 2377, 7946]
-            self.blocked_ports = self.ssh_obj.partial_nw_outage(node_ip=node_ip, mgmt_ip=self.fio_node,
+            node_port_block_ip = []
+
+            data_nics = node_details[0]["data_nics"]
+            for data_nic in data_nics:
+                node_port_block_ip.append(data_nic["ip4_address"])
+
+            self.blocked_ports = self.ssh_obj.perform_nw_outage(node_ip=node_ip, mgmt_ip=self.fio_node,
                                                                 block_ports=ports_to_block, block_all_ss_ports=True)
         elif outage_type == "partial_nw":
-            ports_to_block = [4420]
-            self.blocked_ports = self.ssh_obj.partial_nw_outage(node_ip=node_ip, mgmt_ip=self.fio_node,
-                                                                block_ports=ports_to_block, block_all_ss_ports=False)
+            lvol_ports = node_details[0]["lvol_subsys_port"]
+            if not isinstance(lvol_ports, list):
+                lvol_ports = [lvol_ports]
+            ports_to_block = [int(port) for port in lvol_ports]
+            self.blocked_ports = self.ssh_obj.perform_nw_outage(node_ip=node_ip,
+                                                                block_ports=ports_to_block,
+                                                                block_all_ss_ports=False)
             lvols = self.node_vs_lvol[self.current_outage_node]
             for lvol in lvols:
                 self.ssh_obj.disconnect_lvol_node_device(node=self.fio_node, device=self.lvol_mount_details[lvol]["Device"])
@@ -309,9 +319,9 @@ class RandomFailoverTest(TestLvolHACluster):
                         raise  # Rethrow the last exception
         elif outage_type == "network_interrupt":
             # self.disconnect_thread.join()
-            self.ssh_obj.remove_partial_nw_outage(node_ip=node_ip, blocked_ports=self.blocked_ports)
+            self.ssh_obj.remove_nw_outage(node_ip=node_ip, blocked_ports=self.blocked_ports)
         elif outage_type == "partial_nw":
-            self.ssh_obj.remove_partial_nw_outage(node_ip=node_ip, blocked_ports=self.blocked_ports)
+            self.ssh_obj.remove_nw_outage(node_ip=node_ip, blocked_ports=self.blocked_ports)
         self.sbcli_utils.wait_for_storage_node_status(self.current_outage_node, "online", timeout=4000)
         self.sbcli_utils.wait_for_health_status(self.current_outage_node, True, timeout=4000)
         self.outage_end_time = int(datetime.now().timestamp())
