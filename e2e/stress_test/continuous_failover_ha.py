@@ -133,7 +133,9 @@ class RandomFailoverTest(TestLvolHACluster):
 
             initial_devices = self.ssh_obj.get_devices(node=self.fio_node)
             for connect_str in connect_ls:
-                self.ssh_obj.exec_command(node=self.fio_node, command=connect_str)
+                output, error = self.ssh_obj.exec_command(node=self.fio_node, command=connect_str)
+                if error:
+                    raise Exception(error)
 
             self.lvol_mount_details[lvol_name]["Command"] = connect_ls
             sleep_n_sec(3)
