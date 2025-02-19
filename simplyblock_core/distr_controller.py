@@ -51,14 +51,14 @@ def send_dev_status_event(device, status, target_node=None):
 
         dev_status = status
 
-        if node.get_id() != device.node_id:
+        if status == NVMeDevice.STATUS_ONLINE and node.get_id() != device.node_id:
             rem_dev = None
             for dev2 in node.remote_devices:
                 if dev2.get_id() == device.get_id() :
                     rem_dev = dev2
                     break
 
-            if not rem_dev and status == NVMeDevice.STATUS_ONLINE:
+            if not rem_dev or rem_dev.status != NVMeDevice.STATUS_ONLINE:
                 dev_status = NVMeDevice.STATUS_UNAVAILABLE
                 logger.warning(f"Device is not connected to node, dev: {device.get_id()}, node: {node.get_id()}")
 
