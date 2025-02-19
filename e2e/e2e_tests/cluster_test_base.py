@@ -258,15 +258,12 @@ class TestClusterBase:
         
         self.ssh_obj.kill_processes(node=self.fio_node,
                                     process_name="fio")
-        
-        for node in self.storage_nodes:
-            self.ssh_obj.stop_all_tcpdump(node_ip=node)
 
         retry_check = 100
         while retry_check:
             fio_process = self.ssh_obj.find_process_name(
                 node=self.fio_node,
-                process_name="fio"
+                process_name="fio --name"
             )
             if len(fio_process) <= 2:
                 break
