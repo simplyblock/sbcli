@@ -2284,10 +2284,10 @@ def resume_storage_node(node_id):
         logger.error("Node is not in suspended state")
         return False
 
-    task_id = tasks_controller.get_active_node_restart_task(snode.cluster_id, snode.get_id())
-    if task_id:
-        logger.error(f"Restart task found: {task_id}, can not resume storage node")
-        return False
+    # task_id = tasks_controller.get_active_node_restart_task(snode.cluster_id, snode.get_id())
+    # if task_id:
+    #     logger.error(f"Restart task found: {task_id}, can not resume storage node")
+    #     return False
 
     logger.info("Resuming node")
     for dev in snode.nvme_devices:
