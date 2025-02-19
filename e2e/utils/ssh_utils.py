@@ -1217,6 +1217,24 @@ class SshUtils:
             output, _ = self.exec_command(node_ip, install_tcpdump_command)
             self.logger.info(f"tcpdump installed successfully: {output}")
 
+    def check_and_install_tshark(self, node_ip):
+        """Check if tshark is installed on the remote node and install it if missing."""
+        check_command = "which tshark || echo 'not_installed'"
+        output, _ = self.exec_command(node_ip, check_command)
+
+        if "not_installed" in output:
+            self.logger.info(f"tshark not found on {node_ip}, installing it...")
+            install_command = "sudo apt update && sudo apt install -y tshark || sudo yum install -y wireshark"
+            _, install_error = self.exec_command(node_ip, install_command)
+
+            if install_error:
+                self.logger.error(f"Failed to install tshark on {node_ip}: {install_error}")
+                raise RuntimeError(f"tshark installation failed on {node_ip}")
+            self.logger.info(f"Successfully installed tshark on {node_ip}")
+        else:
+            self.logger.info(f"tshark is already installed on {node_ip}")
+
+
     def start_tcpdump_logging(self, node_ip, log_dir):
         """Start tcpdump logging for various TCP anomalies on a remote node with proper background handling."""
         self.check_and_install_tcpdump(node_ip=node_ip)
@@ -1258,6 +1276,37 @@ class SshUtils:
         self.logger.info(f"Started tcpdump for Connection resets on {node_ip}, saving to {conn_reset_log}")
         self.logger.info(f"Started tcpdump for ACK timeouts on {node_ip}, saving to {ack_timeout_log}")
 
+    def start_tshark_logging(self, node_ip, log_dir):
+        """Start tshark logging for various TCP anomalies on a remote node with proper UTC timestamps."""
+        self.check_and_install_tshark(node_ip=node_ip)
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+        # Define log file names for each tshark command
+        syn_timeout_log = f"{log_dir}/tshark_syn_timeout_{node_ip}_{timestamp}.log"
+        rcv_buffer_full_log = f"{log_dir}/tshark_rcv_buffer_full_{node_ip}_{timestamp}.log"
+        conn_reset_log = f"{log_dir}/tshark_conn_reset_{node_ip}_{timestamp}.log"
+        ack_timeout_log = f"{log_dir}/tshark_ack_timeout_{node_ip}_{timestamp}.log"
+
+        # Tshark commands with fixed timestamps and proper filtering
+        tshark_commands = [
+            f"sudo tmux new-session -d -s sync_timeout_log_session \"tshark -i ens16 -Y 'tcp.flags.syn == 1 && tcp.window_size_value > 1' -t ud > {syn_timeout_log} 2>&1\"",
+            f"sudo tmux new-session -d -s rcv_buffer_log_session \"tshark -i ens16 -Y 'tcp.flags.ack == 1 && tcp.window_size_value == 0' -t ud > {rcv_buffer_full_log} 2>&1\"",
+            f"sudo tmux new-session -d -s conn_reset_log_session \"tshark -i ens16 -Y 'tcp.flags.reset == 1' -t ud > {conn_reset_log} 2>&1\"",
+            f"sudo tmux new-session -d -s ack_timeout_log_session \"tshark -i ens16 -Y 'tcp.analysis.ack_rtt > 0.5' -t ud -T fields -e frame.time -e ip.src -e ip.dst -e tcp.seq -e tcp.ack -e tcp.analysis.ack_rtt > {ack_timeout_log} 2>&1\""
+        ]
+
+
+        # Execute each tshark command remotely
+        for cmd in tshark_commands:
+            self.exec_command(node_ip, cmd)
+
+        # Log the output filenames for reference
+        self.logger.info(f"Started tshark for SYN timeouts on {node_ip}, saving to {syn_timeout_log}")
+        self.logger.info(f"Started tshark for RCV buffer full on {node_ip}, saving to {rcv_buffer_full_log}")
+        self.logger.info(f"Started tshark for Connection resets on {node_ip}, saving to {conn_reset_log}")
+        self.logger.info(f"Started tshark for ACK timeouts on {node_ip}, saving to {ack_timeout_log}")
+
     def stop_all_tcpdump(self, node_ip):
         """Kill all tcpdump processes on a remote node."""
         stop_command = """
@@ -1265,6 +1314,14 @@ class SshUtils:
         """
         self.exec_command(node_ip, stop_command)
         self.logger.info(f"Stopped all tcpdump processes on {node_ip}")
+
+    def stop_all_tshark(self, node_ip):
+        """Kill all tshark processes on a remote node."""
+        stop_command = """
+        sudo pkill -f tshark && echo "All tshark processes stopped" || echo "No tshark process found"
+        """
+        self.exec_command(node_ip, stop_command)
+        self.logger.info(f"Stopped all tshark processes on {node_ip}")
 
     def get_dmesg_logs_within_iso_window(self, node_ip, start_iso, end_iso):
         """
