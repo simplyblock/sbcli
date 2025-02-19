@@ -910,7 +910,7 @@ class SshUtils:
             self.logger.error(f"Error during node reboot for {node_ip}: {e}")
             return False
         
-    def perform_nw_outage(self, node_ip, node_port_block_ip=None, block_ports=None, block_all_ss_ports=False):
+    def perform_nw_outage(self, node_ip, node_data_nic_ip=None, nodes_check_ports_on=None, block_ports=None, block_all_ss_ports=False):
         """
         Simulate a partial network outage by blocking multiple ports at once using multiport matching.
         Optionally, block all ports listed by `ss` command for the given management IP.
@@ -932,14 +932,15 @@ class SshUtils:
 
             # If flag is set, fetch and add all ports from the `ss` command filtered by mgmt_ip
             if block_all_ss_ports:
-                if not node_port_block_ip:
-                    raise ValueError("node_port_block_ip must be provided when block_all_ss_ports is True.")
-                for node in node_port_block_ip:
-                    cmd = "ss -tnp | grep %s | awk '{print $4}'" % node
-                    ss_output, _ = self.exec_command(node_ip, cmd)
-                    ip_with_ports = ss_output.split()
-                    ports_to_block = [str(r.split(":")[1]) for r in ip_with_ports]
-                    block_ports.extend(ports_to_block)
+                if (not node_data_nic_ip) and (not nodes_check_ports_on):
+                    raise ValueError("node_data_nic_ip and nodes_check_ports_on must be provided when block_all_ss_ports is True.")
+                for node in nodes_check_ports_on:
+                    for source_node in [node_ip, node_data_nic_ip]:
+                        cmd = "ss -tnp | grep %s | awk '{print $5}'" % source_node
+                        ss_output, _ = self.exec_command(node, cmd)
+                        ip_with_ports = ss_output.split()
+                        ports_to_block = [str(r.split(":")[1]) for r in ip_with_ports]
+                        block_ports.extend(ports_to_block)
 
             # Remove duplicates
             block_ports = [str(port) for port in block_ports]

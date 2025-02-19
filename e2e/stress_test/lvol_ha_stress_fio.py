@@ -460,6 +460,7 @@ class TestLvolHAClusterPartialNetworkOutage(TestLvolHACluster):
         if not isinstance(lvol_ports, list):
             lvol_ports = [lvol_ports]
         ports_to_block = [int(port) for port in lvol_ports]
+        ports_to_block.append(4420)
         
         ports_blocked = self.ssh_obj.perform_nw_outage(
             node_ip=node_ip,

@@ -259,19 +259,23 @@ class RandomFailoverTest(TestLvolHACluster):
             # )
             # self.disconnect_thread.start()
             ports_to_block = [4420, 80, 8080, 5000, 2270, 2377, 7946]
-            node_port_block_ip = []
+            node_data_nic_ip = []
 
             data_nics = node_details[0]["data_nics"]
             for data_nic in data_nics:
-                node_port_block_ip.append(data_nic["ip4_address"])
+                node_data_nic_ip.append(data_nic["ip4_address"])
 
-            self.blocked_ports = self.ssh_obj.perform_nw_outage(node_ip=node_ip, mgmt_ip=self.fio_node,
+            nodes_check_ports_on = [self.fio_node, self.mgmt_nodes[0]]
+
+            self.blocked_ports = self.ssh_obj.perform_nw_outage(node_ip=node_ip, node_data_nic_ip=node_data_nic_ip,
+                                                                nodes_check_ports_on=nodes_check_ports_on,
                                                                 block_ports=ports_to_block, block_all_ss_ports=True)
         elif outage_type == "partial_nw":
             lvol_ports = node_details[0]["lvol_subsys_port"]
             if not isinstance(lvol_ports, list):
                 lvol_ports = [lvol_ports]
             ports_to_block = [int(port) for port in lvol_ports]
+            ports_to_block.append(4420)
             self.blocked_ports = self.ssh_obj.perform_nw_outage(node_ip=node_ip,
                                                                 block_ports=ports_to_block,
                                                                 block_all_ss_ports=False)
