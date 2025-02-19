@@ -124,7 +124,7 @@ jobs:
             --distr-npcs $NPCS \
             --distr-bs $BS \
             --distr-chunk-bs $CHUNK_BS --ha-type ha \
-            --partitions 0 \
+            --partitions 0 --data-nic ens16 \
             --enable-node-affinity true
           
           echo "::set-output name=bastion_public_ip::$BASTION_IP"
