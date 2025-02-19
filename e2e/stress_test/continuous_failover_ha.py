@@ -48,7 +48,8 @@ class RandomFailoverTest(TestLvolHACluster):
         self.node_vs_lvol = {}
         self.sn_nodes_with_sec = []
         self.test_name = "continuous_random_failover_ha"
-        self.outage_types = ["partial_nw", "partial_nw_single_port", "network_interrupt", "container_stop", "graceful_shutdown"]
+        self.outage_types = ["partial_nw", "partial_nw_single_port", "network_interrupt", 
+                             "container_stop", "graceful_shutdown", "lvol_disconnect_primary"]
         # self.outage_types = ["network_interrupt", "container_stop", "graceful_shutdown"]
         self.blocked_ports = None
         self.outage_log_file = os.path.join("logs", f"outage_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
@@ -296,6 +297,11 @@ class RandomFailoverTest(TestLvolHACluster):
             for lvol in lvols:
                 self.ssh_obj.disconnect_lvol_node_device(node=self.fio_node, device=self.lvol_mount_details[lvol]["Device"])
             sleep_n_sec(60)
+        
+        elif outage_type == "lvol_disconnect_primary":
+            lvols = self.node_vs_lvol[self.current_outage_node]
+            for lvol in lvols:
+                self.ssh_obj.disconnect_lvol_node_device(node=self.fio_node, device=self.lvol_mount_details[lvol]["Device"])
             
         if outage_type != "partial_nw" or outage_type != "partial_nw_single_port":
             sleep_n_sec(120)
@@ -334,16 +340,26 @@ class RandomFailoverTest(TestLvolHACluster):
                     else:
                         self.logger.info("Max retries reached. Failed to restart node.")
                         raise  # Rethrow the last exception
+
         elif outage_type == "network_interrupt":
             # self.disconnect_thread.join()
             self.ssh_obj.remove_nw_outage(node_ip=node_ip, blocked_ports=self.blocked_ports)
             sleep_n_sec(100)
+
         elif outage_type == "partial_nw":
             self.ssh_obj.remove_nw_outage(node_ip=node_ip, blocked_ports=self.blocked_ports)
             sleep_n_sec(100)
+        
         elif outage_type == "partial_nw_single_port":
             self.ssh_obj.remove_nw_outage(node_ip=node_ip, blocked_ports=self.blocked_ports)
             sleep_n_sec(100)
+        
+        elif outage_type == "lvol_disconnect_primary":
+            lvols = self.node_vs_lvol[self.current_outage_node]
+            for lvol in lvols:
+                connect = self.sbcli_utils.get_lvol_connect_str(lvol_name=lvol)[0]
+                self.ssh_obj.exec_command(node=self.fio_node, command=connect)
+
         self.sbcli_utils.wait_for_storage_node_status(self.current_outage_node, "online", timeout=4000)
         self.sbcli_utils.wait_for_health_status(self.current_outage_node, True, timeout=4000)
         self.outage_end_time = int(datetime.now().timestamp())
