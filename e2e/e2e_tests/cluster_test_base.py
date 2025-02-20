@@ -205,7 +205,7 @@ class TestClusterBase:
         for node in self.storage_nodes:
             pids = self.ssh_obj.find_process_name(
                 node=node,
-                process_name="'docker logs --follow'",
+                process_name="docker logs --follow",
                 return_pid=True
             )
             for pid in pids:
