@@ -1368,6 +1368,34 @@ class SshUtils:
         self.exec_command(node_ip, f"sudo tmux new-session -d -s dmesg_log 'bash -c \"while true; do sudo dmesg | grep -i \\\"tcp\\\" >> {dmesg_log}; sleep 5; done\"'")
         self.exec_command(node_ip, f"sudo tmux new-session -d -s journalctl_log 'bash -c \"while true; do sudo journalctl -k | grep -i \\\"tcp\\\" >> {journalctl_log}; sleep 5; done\"'")
 
+    def reset_iptables_in_spdk(self, node_ip):
+        """
+        Resets iptables rules inside the SPDK container on a given node.
+
+        Args:
+            node_ip (str): The IP address of the target node.
+        """
+        try:
+            self.logger.info(f"Resetting iptables inside SPDK container on {node_ip}.")
+
+            # Commands to run inside the SPDK container
+            iptables_reset_cmds = [
+                "sudo docker exec spdk iptables -P INPUT ACCEPT",
+                "sudo docker exec spdk iptables -P OUTPUT ACCEPT",
+                "sudo docker exec spdk iptables -P FORWARD ACCEPT",
+                "sudo docker exec spdk iptables -F"
+            ]
+
+            # Execute each command
+            for cmd in iptables_reset_cmds:
+                self.exec_command(node_ip, cmd)
+
+            self.logger.info(f"Successfully reset iptables inside SPDK container on {node_ip}.")
+
+        except Exception as e:
+            self.logger.error(f"Failed to reset iptables in SPDK container on {node_ip}: {e}")
+
+
     # def stop_netstat_dmesg_logging(self, node_ip):
     #     """Stop continuous netstat and dmesg logging without using watch."""
     #     # Ensure netstat is installed

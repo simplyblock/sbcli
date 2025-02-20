@@ -148,6 +148,7 @@ class TestClusterBase:
             self.ssh_obj.start_tcpdump_logging(node_ip=node, log_dir=self.docker_logs_path)
             self.ssh_obj.start_netstat_dmesg_logging(node_ip=node,
                                                      log_dir=self.docker_logs_path)
+            self.ssh_obj.reset_iptables_in_spdk(node_ip=node)
         
         self.ssh_obj.delete_old_folders(
             node=self.fio_node,

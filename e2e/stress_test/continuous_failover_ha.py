@@ -98,18 +98,18 @@ class RandomFailoverTest(TestLvolHACluster):
                 self.logger.warning(f"Lvol creation fails with {str(e)}. Retrying with different name.")
                 self.lvol_name = f"lvl{random_char(3)}"
                 lvol_name = f"{self.lvol_name}_{i}" if not is_crypto else f"c{self.lvol_name}_{i}"
-                # try:
-                self.sbcli_utils.add_lvol(
-                    lvol_name=lvol_name,
-                    pool_name=self.pool_name,
-                    size=self.lvol_size,
-                    crypto=is_crypto,
-                    key1=self.lvol_crypt_keys[0],
-                    key2=self.lvol_crypt_keys[1],
-                )
-                # except Exception as exp:
-                #     self.logger.warning(f"Lvol creation fails with {str(exp)}. Retrying with different name.")
-                #     continue
+                try:
+                    self.sbcli_utils.add_lvol(
+                        lvol_name=lvol_name,
+                        pool_name=self.pool_name,
+                        size=self.lvol_size,
+                        crypto=is_crypto,
+                        key1=self.lvol_crypt_keys[0],
+                        key2=self.lvol_crypt_keys[1],
+                    )
+                except Exception as exp:
+                    self.logger.warning(f"Lvol creation fails with {str(exp)}. Retrying with different name.")
+                    continue
 
             self.lvol_mount_details[lvol_name] = {
                    "ID": self.sbcli_utils.get_lvol_id(lvol_name),
@@ -141,9 +141,9 @@ class RandomFailoverTest(TestLvolHACluster):
 
             initial_devices = self.ssh_obj.get_devices(node=self.fio_node)
             for connect_str in connect_ls:
-                output, error = self.ssh_obj.exec_command(node=self.fio_node, command=connect_str)
-                # if error:
-                #     raise Exception(error)
+                _, error = self.ssh_obj.exec_command(node=self.fio_node, command=connect_str)
+                if error:
+                    raise Exception(error)
 
             self.lvol_mount_details[lvol_name]["Command"] = connect_ls
             sleep_n_sec(3)
@@ -331,7 +331,7 @@ class RandomFailoverTest(TestLvolHACluster):
             sleep_n_sec(120)
         
         return outage_type
-
+    
     
     def restart_nodes_after_failover(self, outage_type):
         """Perform steps for node restart."""
@@ -449,22 +449,22 @@ class RandomFailoverTest(TestLvolHACluster):
             temp_name = f"{lvol}_{random_char(2)}"
             if snapshot_name in self.snapshot_names:
                 snapshot_name = f"{snapshot_name}_{temp_name}"
-            # try:
-            self.ssh_obj.add_snapshot(self.mgmt_nodes[0], self.lvol_mount_details[lvol]["ID"], snapshot_name)
-            # except Exception as e:
-                # self.logger.warning(f"Snap creation fails with {str(e)}. Retrying with different name.")
-                # continue
+            try:
+                self.ssh_obj.add_snapshot(self.mgmt_nodes[0], self.lvol_mount_details[lvol]["ID"], snapshot_name)
+            except Exception as e:
+                self.logger.warning(f"Snap creation fails with {str(e)}. Retrying with different name.")
+                continue
             self.snapshot_names.append(snapshot_name)
             self.lvol_mount_details[lvol]["snapshots"].append(snapshot_name)
             clone_name = f"clone_{lvol}"
             if clone_name in list(self.clone_mount_details):
                 clone_name = f"{clone_name}_{temp_name}"
             snapshot_id = self.ssh_obj.get_snapshot_id(self.mgmt_nodes[0], snapshot_name)
-            # try:
-            self.ssh_obj.add_clone(self.mgmt_nodes[0], snapshot_id, clone_name)
-            # except Exception as e:
-                # self.logger.warning(f"Clone creation fails with {str(e)}. Retrying with different name.")
-                # continue
+            try:
+                self.ssh_obj.add_clone(self.mgmt_nodes[0], snapshot_id, clone_name)
+            except Exception as e:
+                self.logger.warning(f"Clone creation fails with {str(e)}. Retrying with different name.")
+                continue
             fs_type = self.lvol_mount_details[lvol]["FS"]
             self.clone_mount_details[clone_name] = {
                    "ID": self.sbcli_utils.get_lvol_id(clone_name),
