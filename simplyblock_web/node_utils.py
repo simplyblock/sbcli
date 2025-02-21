@@ -197,7 +197,7 @@ def firewall_port(port_id=9090, port_type="tcp", block=True):
 
     out = ""
     for cmd in cmd_list:
-        stream = os.popen(cmd)
+        stream = os.popen("docker exec spdk "+cmd)
         ret = stream.read()
         if ret != "":
             out += ret + "\n"
@@ -207,7 +207,7 @@ def firewall_port(port_id=9090, port_type="tcp", block=True):
 
 
 def firewall_get():
-    cmd = "iptables -L -n"
+    cmd = "docker exec spdk iptables -L -n"
     stream = os.popen(cmd)
     ret = stream.read()
     return ret
