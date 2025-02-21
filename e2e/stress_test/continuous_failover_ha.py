@@ -626,7 +626,8 @@ class RandomFailoverTest(TestLvolHACluster):
                     self.ssh_obj.remove_dir(self.fio_node, dir_path=f"/mnt/{clone_name}")
                     self.disconnect_lvol(clone_details['ID'])
                     self.sbcli_utils.delete_lvol(clone_name)
-                    self.lvols_without_sec_connect.remove(clone_name)
+                    if clone_name in self.lvols_without_sec_connect:
+                        self.lvols_without_sec_connect.remove(clone_name)
                     to_delete.append(clone_name)
             for del_key in to_delete:
                 del self.clone_mount_details[del_key]
@@ -654,7 +655,8 @@ class RandomFailoverTest(TestLvolHACluster):
             self.ssh_obj.remove_dir(self.fio_node, dir_path=f"/mnt/{lvol}")
             self.disconnect_lvol(self.lvol_mount_details[lvol]['ID'])
             self.sbcli_utils.delete_lvol(lvol)
-            self.lvols_without_sec_connect.remove(lvol)
+            if lvol in self.lvols_without_sec_connect:
+                self.lvols_without_sec_connect.remove(lvol)
             del self.lvol_mount_details[lvol]
             for _, lvols in self.node_vs_lvol.items():
                 if lvol in lvols:
