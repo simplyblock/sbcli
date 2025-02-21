@@ -792,8 +792,9 @@ def delete_lvol_from_node(lvol_id, node_id, clear_data=True):
     rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
 
     # 1- remove subsystem
-    logger.info(f"Removing subsystem")
-    ret = rpc_client.subsystem_delete(lvol.nqn)
+    if rpc_client.subsystem_list(lvol.nqn):
+        logger.info(f"Removing subsystem")
+        rpc_client.subsystem_delete(lvol.nqn)
 
     # 2- remove bdevs
     logger.info(f"Removing bdev stack")
