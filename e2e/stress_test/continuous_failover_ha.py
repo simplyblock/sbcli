@@ -47,6 +47,7 @@ class RandomFailoverTest(TestLvolHACluster):
         self.outage_end_time = None
         self.node_vs_lvol = {}
         self.sn_nodes_with_sec = []
+        self.lvol_node = ""
         self.test_name = "continuous_random_failover_ha"
         # self.outage_types = ["partial_nw", "partial_nw_single_port", "network_interrupt", 
         #                      "container_stop", "graceful_shutdown", "lvol_disconnect_primary"]
@@ -108,8 +109,8 @@ class RandomFailoverTest(TestLvolHACluster):
                         key2=self.lvol_crypt_keys[1],
                     )
                 except Exception as exp:
-                    self.logger.warning(f"Lvol creation fails with {str(exp)}. Retrying with different name.")
-                    continue
+                    self.logger.warning(f"Retry Lvol creation fails with {str(exp)}.")
+                    raise exp
 
             self.lvol_mount_details[lvol_name] = {
                    "ID": self.sbcli_utils.get_lvol_id(lvol_name),
@@ -141,7 +142,7 @@ class RandomFailoverTest(TestLvolHACluster):
 
             initial_devices = self.ssh_obj.get_devices(node=self.fio_node)
             for connect_str in connect_ls:
-                output, error = self.ssh_obj.exec_command(node=self.fio_node, command=connect_str)
+                _, error = self.ssh_obj.exec_command(node=self.fio_node, command=connect_str)
                 if error:
                     raise Exception(error)
 
@@ -200,6 +201,10 @@ class RandomFailoverTest(TestLvolHACluster):
         self.outage_start_time = int(datetime.now().timestamp())
         node_details = self.sbcli_utils.get_storage_node_details(self.current_outage_node)
         node_ip = node_details[0]["mgmt_ip"]
+
+        self.lvol_node = self.current_outage_node
+        if self.sbcli_utils.is_secondary_node(self.lvol_node):
+            self.lvol_node = random.choice(list(self.node_vs_lvol.keys()))
 
         sleep_n_sec(120)
         for node in self.sn_nodes_with_sec:
@@ -304,7 +309,8 @@ class RandomFailoverTest(TestLvolHACluster):
             self.blocked_ports = self.ssh_obj.perform_nw_outage(node_ip=node_ip,
                                                                 block_ports=ports_to_block,
                                                                 block_all_ss_ports=False)
-            lvols = self.node_vs_lvol[self.current_outage_node]
+            lvols = self.node_vs_lvol.get(self.lvol_node, [])
+            self.logger.info(f"Picking lvols of node {self.lvol_node} for outage of node {self.current_outage_node}!!")
             for lvol in lvols:
                 self.ssh_obj.disconnect_lvol_node_device(node=self.fio_node, device=self.lvol_mount_details[lvol]["Device"])
             sleep_n_sec(60)
@@ -317,13 +323,15 @@ class RandomFailoverTest(TestLvolHACluster):
             self.blocked_ports = self.ssh_obj.perform_nw_outage(node_ip=node_ip,
                                                                 block_ports=ports_to_block,
                                                                 block_all_ss_ports=False)
-            lvols = self.node_vs_lvol[self.current_outage_node]
+            lvols = self.node_vs_lvol.get(self.lvol_node, [])
+            self.logger.info(f"Picking lvols of node {self.lvol_node} for outage of node {self.current_outage_node}!!")
             for lvol in lvols:
                 self.ssh_obj.disconnect_lvol_node_device(node=self.fio_node, device=self.lvol_mount_details[lvol]["Device"])
             sleep_n_sec(60)
         
         elif outage_type == "lvol_disconnect_primary":
-            lvols = self.node_vs_lvol[self.current_outage_node]
+            lvols = self.node_vs_lvol.get(self.lvol_node, [])
+            self.logger.info(f"Picking lvols of node {self.lvol_node} for outage of node {self.current_outage_node}!!")
             for lvol in lvols:
                 self.ssh_obj.disconnect_lvol_node_device(node=self.fio_node, device=self.lvol_mount_details[lvol]["Device"])
             
@@ -331,7 +339,7 @@ class RandomFailoverTest(TestLvolHACluster):
             sleep_n_sec(120)
         
         return outage_type
-
+    
     
     def restart_nodes_after_failover(self, outage_type):
         """Perform steps for node restart."""
@@ -379,7 +387,7 @@ class RandomFailoverTest(TestLvolHACluster):
             sleep_n_sec(100)
         
         elif outage_type == "lvol_disconnect_primary":
-            lvols = self.node_vs_lvol[self.current_outage_node]
+            lvols = self.node_vs_lvol[self.lvol_node]
             for lvol in lvols:
                 connect = self.sbcli_utils.get_lvol_connect_str(lvol_name=lvol)[0]
                 self.ssh_obj.exec_command(node=self.fio_node, command=connect)
@@ -421,7 +429,7 @@ class RandomFailoverTest(TestLvolHACluster):
 
         if outage_type == "partial_nw" or outage_type == "partial_nw_single_port":
             sleep_n_sec(600)
-            lvols = self.node_vs_lvol[self.current_outage_node]
+            lvols = self.node_vs_lvol[self.lvol_node]
             for lvol in lvols:
                 connect = self.sbcli_utils.get_lvol_connect_str(lvol_name=lvol)[0]
                 self.ssh_obj.exec_command(node=self.fio_node, command=connect)
@@ -437,7 +445,7 @@ class RandomFailoverTest(TestLvolHACluster):
         # Filter lvols on nodes that are not in outage
         self.int_lvol_size += 1
         available_lvols = [
-            lvol for _, lvols in self.node_vs_lvol.items() for lvol in lvols
+            lvol for node, lvols in self.node_vs_lvol.items() if node != self.current_outage_node for lvol in lvols
         ]
         if not available_lvols:
             self.logger.warning("No available lvols to create snapshots and clones.")
@@ -453,7 +461,14 @@ class RandomFailoverTest(TestLvolHACluster):
                 self.ssh_obj.add_snapshot(self.mgmt_nodes[0], self.lvol_mount_details[lvol]["ID"], snapshot_name)
             except Exception as e:
                 self.logger.warning(f"Snap creation fails with {str(e)}. Retrying with different name.")
-                continue
+                try:
+                    snapshot_name = f"snap_{lvol}"
+                    temp_name = f"{lvol}_{random_char(3)}"
+                    snapshot_name = f"{snapshot_name}_{temp_name}"
+                    self.ssh_obj.add_snapshot(self.mgmt_nodes[0], self.lvol_mount_details[lvol]["ID"], snapshot_name)
+                except Exception as exp:
+                    self.logger.warning(f"Retry Snap creation fails with {str(exp)}.")
+                
             self.snapshot_names.append(snapshot_name)
             self.lvol_mount_details[lvol]["snapshots"].append(snapshot_name)
             clone_name = f"clone_{lvol}"
@@ -464,7 +479,13 @@ class RandomFailoverTest(TestLvolHACluster):
                 self.ssh_obj.add_clone(self.mgmt_nodes[0], snapshot_id, clone_name)
             except Exception as e:
                 self.logger.warning(f"Clone creation fails with {str(e)}. Retrying with different name.")
-                continue
+                try:
+                    clone_name = f"clone_{lvol}"
+                    temp_name = f"{lvol}_{random_char(3)}"
+                    clone_name = f"{clone_name}_{temp_name}"
+                    self.ssh_obj.add_clone(self.mgmt_nodes[0], snapshot_id, clone_name)
+                except Exception as exp:
+                    self.logger.warning(f"Retry Clone creation fails with {str(exp)}.")
             fs_type = self.lvol_mount_details[lvol]["FS"]
             self.clone_mount_details[clone_name] = {
                    "ID": self.sbcli_utils.get_lvol_id(clone_name),
@@ -550,7 +571,7 @@ class RandomFailoverTest(TestLvolHACluster):
     def delete_random_lvols(self, count):
         """Delete random lvols during an outage."""
         available_lvols = [
-            lvol for _, lvols in self.node_vs_lvol.items() for lvol in lvols
+            lvol for node, lvols in self.node_vs_lvol.items() if node != self.current_outage_node for lvol in lvols
         ]
         if len(available_lvols) < count:
             self.logger.warning("Not enough lvols available to delete the requested count.")
