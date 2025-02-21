@@ -196,13 +196,13 @@ class TestSingleNodeFailure(TestClusterBase):
 
         # self.sbcli_utils.resize_lvol(lvol_id=self.sbcli_utils.get_lvol_id(self.lvol_name),
         #                              new_size="25G")
-
-        self.ssh_obj.restart_docker_logging(
-            node_ip=node_ip,
-            containers=self.container_nodes[node_ip],
-            log_dir=self.docker_logs_path,
-            test_name=self.test_name
-        )
+        if not self.k8s_test:
+            self.ssh_obj.restart_docker_logging(
+                node_ip=node_ip,
+                containers=self.container_nodes[node_ip],
+                log_dir=self.docker_logs_path,
+                test_name=self.test_name
+            )
         sleep_n_sec(120)
         self.validate_migration_for_node(
             timestamp=timestamp,
@@ -428,12 +428,13 @@ class TestHASingleNodeFailure(TestClusterBase):
                              lvol_status="online",
                              health_check_status=True
                              )
-            self.ssh_obj.restart_docker_logging(
-                node_ip=node_ip,
-                containers=self.container_nodes[node_ip],
-                log_dir=self.docker_logs_path,
-                test_name=self.test_name
-            )
+            if not self.k8s_test:
+                self.ssh_obj.restart_docker_logging(
+                    node_ip=node_ip,
+                    containers=self.container_nodes[node_ip],
+                    log_dir=self.docker_logs_path,
+                    test_name=self.test_name
+                )
             sleep_n_sec(120)
             self.validate_migration_for_node(
                 timestamp=timestamp,

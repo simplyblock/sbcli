@@ -179,12 +179,13 @@ class TestSingleNodeOutage(TestClusterBase):
         
         node_details = self.sbcli_utils.get_storage_node_details(no_lvol_node_uuid)
         node_ip = node_details[0]["mgmt_ip"]
-        self.ssh_obj.restart_docker_logging(
-            node_ip=node_ip,
-            containers=self.container_nodes[node_ip],
-            log_dir=self.docker_logs_path,
-            test_name=self.test_name
-        )
+        if not self.k8s_test:
+            self.ssh_obj.restart_docker_logging(
+                node_ip=node_ip,
+                containers=self.container_nodes[node_ip],
+                log_dir=self.docker_logs_path,
+                test_name=self.test_name
+            )
 
         sleep_n_sec(120)
         self.validate_migration_for_node(
@@ -414,12 +415,13 @@ class TestHASingleNodeOutage(TestClusterBase):
                              lvol_status="online",
                              health_check_status=True
                              )
-            self.ssh_obj.restart_docker_logging(
-                node_ip=node_ip,
-                containers=self.container_nodes[node_ip],
-                log_dir=self.docker_logs_path,
-                test_name=self.test_name
-            )
+            if not self.k8s_test:
+                self.ssh_obj.restart_docker_logging(
+                    node_ip=node_ip,
+                    containers=self.container_nodes[node_ip],
+                    log_dir=self.docker_logs_path,
+                    test_name=self.test_name
+                )
             self.logger.info(f"Validating migration tasks for node {no_lvol_node_uuid}.")
             sleep_n_sec(120)
             self.validate_migration_for_node(timestamp, 5000, None)

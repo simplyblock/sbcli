@@ -210,13 +210,13 @@ class TestSingleNodeReboot(TestClusterBase):
         
         # self.sbcli_utils.resize_lvol(lvol_id=self.sbcli_utils.get_lvol_id(self.lvol_name),
         #                              new_size="25G")
-
-        self.ssh_obj.restart_docker_logging(
-            node_ip=node_ip,
-            containers=self.container_nodes[node_ip],
-            log_dir=self.docker_logs_path,
-            test_name=self.test_name
-        )
+        if not self.k8s_test:
+            self.ssh_obj.restart_docker_logging(
+                node_ip=node_ip,
+                containers=self.container_nodes[node_ip],
+                log_dir=self.docker_logs_path,
+                test_name=self.test_name
+            )
         self.logger.info(f"Validating migration tasks for node {no_lvol_node_uuid}.")
         self.validate_migration_for_node(timestamp, 5000, None)
 
@@ -443,12 +443,13 @@ class TestHASingleNodeReboot(TestClusterBase):
                              lvol_status="online",
                              health_check_status=True
                              )
-            self.ssh_obj.restart_docker_logging(
-                node_ip=node_ip,
-                containers=self.container_nodes[node_ip],
-                log_dir=self.docker_logs_path,
-                test_name=self.test_name
-            )
+            if not self.k8s_test:
+                self.ssh_obj.restart_docker_logging(
+                    node_ip=node_ip,
+                    containers=self.container_nodes[node_ip],
+                    log_dir=self.docker_logs_path,
+                    test_name=self.test_name
+                )
             self.logger.info(f"Validating migration tasks for node {no_lvol_node_uuid}.")
             self.validate_migration_for_node(timestamp, 5000, None)
 

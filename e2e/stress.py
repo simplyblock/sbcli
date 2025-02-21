@@ -68,7 +68,8 @@ def main():
             logger.error(traceback.format_exc())
             errors[f"{test.__name__}"] = [exp]
         try:
-            test_obj.stop_docker_logs_collect()
+            if not args.run_k8s:
+                test_obj.stop_docker_logs_collect()
             test_obj.fetch_all_nodes_distrib_log()
             if i == (len(test_class_run) - 1):
                 test_obj.collect_management_details()

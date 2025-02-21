@@ -403,12 +403,13 @@ class RandomFailoverTest(TestLvolHACluster):
         # Log the restart event
         self.log_outage_event(self.current_outage_node, outage_type, "Node restarted")
         
-        self.ssh_obj.restart_docker_logging(
-            node_ip=node_ip,
-            containers=self.container_nodes[node_ip],
-            log_dir=self.docker_logs_path,
-            test_name=self.test_name
-        )
+        if not self.k8s_test:
+            self.ssh_obj.restart_docker_logging(
+                node_ip=node_ip,
+                containers=self.container_nodes[node_ip],
+                log_dir=self.docker_logs_path,
+                test_name=self.test_name
+            )
 
         search_start_iso = datetime.fromtimestamp(self.outage_start_time - 30).isoformat(timespec='microseconds')
         search_end_iso = datetime.fromtimestamp(self.outage_end_time + 10).isoformat(timespec='microseconds')

@@ -140,15 +140,17 @@ class TestClusterBase:
             self.ssh_obj.check_tmux_installed(node_ip=node)
             self.ssh_obj.exec_command(node=node,
                                       command="sudo tmux kill-server")
-            self.ssh_obj.start_docker_logging(node_ip=node,
-                                              containers=containers,
-                                              log_dir=self.docker_logs_path,
-                                              test_name=self.test_name
-                                              )
+            if not self.k8s_test:
+                self.ssh_obj.start_docker_logging(node_ip=node,
+                                                containers=containers,
+                                                log_dir=self.docker_logs_path,
+                                                test_name=self.test_name
+                                                )
             self.ssh_obj.start_tcpdump_logging(node_ip=node, log_dir=self.docker_logs_path)
             self.ssh_obj.start_netstat_dmesg_logging(node_ip=node,
                                                      log_dir=self.docker_logs_path)
-            self.ssh_obj.reset_iptables_in_spdk(node_ip=node)
+            if not self.k8s_test:
+                self.ssh_obj.reset_iptables_in_spdk(node_ip=node)
         
         self.ssh_obj.delete_old_folders(
             node=self.fio_node,
