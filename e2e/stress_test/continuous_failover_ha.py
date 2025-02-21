@@ -48,6 +48,8 @@ class RandomFailoverTest(TestLvolHACluster):
         self.node_vs_lvol = {}
         self.sn_nodes_with_sec = []
         self.lvol_node = ""
+        self.secondary_outage = False
+        self.lvols_without_sec_connect = []
         self.test_name = "continuous_random_failover_ha"
         # self.outage_types = ["partial_nw", "partial_nw_single_port", "network_interrupt", 
         #                      "container_stop", "graceful_shutdown", "lvol_disconnect_primary"]
@@ -140,13 +142,18 @@ class RandomFailoverTest(TestLvolHACluster):
 
             connect_ls = self.sbcli_utils.get_lvol_connect_str(lvol_name=lvol_name)
 
+            self.lvol_mount_details[lvol_name]["Command"] = connect_ls
+
+            if self.secondary_outage:
+                connect_ls = [connect_ls[0]]
+                self.lvols_without_sec_connect.append(lvol_name)
+
             initial_devices = self.ssh_obj.get_devices(node=self.fio_node)
             for connect_str in connect_ls:
                 _, error = self.ssh_obj.exec_command(node=self.fio_node, command=connect_str)
                 if error:
                     raise Exception(error)
 
-            self.lvol_mount_details[lvol_name]["Command"] = connect_ls
             sleep_n_sec(3)
             final_devices = self.ssh_obj.get_devices(node=self.fio_node)
             lvol_device = None
@@ -198,13 +205,15 @@ class RandomFailoverTest(TestLvolHACluster):
         outage_type = self.outage_types[0]
         self.current_outage_node = self.sn_nodes[0]
 
-        self.outage_start_time = int(datetime.now().timestamp())
-        node_details = self.sbcli_utils.get_storage_node_details(self.current_outage_node)
-        node_ip = node_details[0]["mgmt_ip"]
-
         self.lvol_node = self.current_outage_node
         if self.sbcli_utils.is_secondary_node(self.lvol_node):
             self.lvol_node = random.choice(list(self.node_vs_lvol.keys()))
+            self.secondary_outage = True
+
+
+        self.outage_start_time = int(datetime.now().timestamp())
+        node_details = self.sbcli_utils.get_storage_node_details(self.current_outage_node)
+        node_ip = node_details[0]["mgmt_ip"]
 
         sleep_n_sec(120)
         for node in self.sn_nodes_with_sec:
@@ -302,8 +311,8 @@ class RandomFailoverTest(TestLvolHACluster):
                                                                 block_ports=ports_to_block, block_all_ss_ports=True)
         elif outage_type == "partial_nw":
             lvol_ports = node_details[0]["lvol_subsys_port"]
-            if self.sbcli_utils.is_secondary_node(node_id=self.current_outage_node):
-                lvol_ports = [port for port in range(9090, 9090 + len(self.storage_nodes) - 1)]
+            if self.secondary_outage:
+                lvol_ports = list(range(9090, 9090 + len(self.storage_nodes) - 1))
             if not isinstance(lvol_ports, list):
                 lvol_ports = [lvol_ports]
             ports_to_block = [int(port) for port in lvol_ports]
@@ -319,8 +328,8 @@ class RandomFailoverTest(TestLvolHACluster):
         
         elif outage_type == "partial_nw_single_port":
             lvol_ports = node_details[0]["lvol_subsys_port"]
-            if self.sbcli_utils.is_secondary_node(node_id=self.current_outage_node):
-                lvol_ports = [port for port in range(9090, 9090 + len(self.storage_nodes) - 1)]
+            if self.secondary_outage:
+                lvol_ports = list(range(9090, 9090 + len(self.storage_nodes) - 1))
             if not isinstance(lvol_ports, list):
                 lvol_ports = [lvol_ports]
             ports_to_block = [int(port) for port in lvol_ports]
@@ -409,6 +418,13 @@ class RandomFailoverTest(TestLvolHACluster):
             log_dir=self.docker_logs_path,
             test_name=self.test_name
         )
+
+        if self.secondary_outage:
+            for lvol in self.lvols_without_sec_connect:
+                self.ssh_obj.exec_command(self.fio_node, command=self.lvol_mount_details[lvol]["Command"][1])
+        
+            self.secondary_outage = False
+            self.lvols_without_sec_connect = []
 
         search_start_iso = datetime.fromtimestamp(self.outage_start_time - 30).isoformat(timespec='microseconds')
         search_end_iso = datetime.fromtimestamp(self.outage_end_time + 10).isoformat(timespec='microseconds')
@@ -510,12 +526,16 @@ class RandomFailoverTest(TestLvolHACluster):
                                       command=f"{self.base_cmd} lvol list")
 
             connect_ls = self.sbcli_utils.get_lvol_connect_str(lvol_name=clone_name)
+            self.clone_mount_details[clone_name]["Command"] = connect_ls
+
+            if self.secondary_outage:
+                connect_ls = [connect_ls[0]]
+                self.lvols_without_sec_connect.append(clone_name)
 
             initial_devices = self.ssh_obj.get_devices(node=self.fio_node)
             for connect_str in connect_ls:
                 self.ssh_obj.exec_command(node=self.fio_node, command=connect_str)
 
-            self.clone_mount_details[clone_name]["Command"] = connect_ls
             sleep_n_sec(3)
             final_devices = self.ssh_obj.get_devices(node=self.fio_node)
             lvol_device = None
@@ -606,6 +626,7 @@ class RandomFailoverTest(TestLvolHACluster):
                     self.ssh_obj.remove_dir(self.fio_node, dir_path=f"/mnt/{clone_name}")
                     self.disconnect_lvol(clone_details['ID'])
                     self.sbcli_utils.delete_lvol(clone_name)
+                    self.lvols_without_sec_connect.remove(clone_name)
                     to_delete.append(clone_name)
             for del_key in to_delete:
                 del self.clone_mount_details[del_key]
@@ -633,6 +654,7 @@ class RandomFailoverTest(TestLvolHACluster):
             self.ssh_obj.remove_dir(self.fio_node, dir_path=f"/mnt/{lvol}")
             self.disconnect_lvol(self.lvol_mount_details[lvol]['ID'])
             self.sbcli_utils.delete_lvol(lvol)
+            self.lvols_without_sec_connect.remove(lvol)
             del self.lvol_mount_details[lvol]
             for _, lvols in self.node_vs_lvol.items():
                 if lvol in lvols:
