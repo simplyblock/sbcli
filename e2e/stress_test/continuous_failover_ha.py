@@ -302,6 +302,8 @@ class RandomFailoverTest(TestLvolHACluster):
                                                                 block_ports=ports_to_block, block_all_ss_ports=True)
         elif outage_type == "partial_nw":
             lvol_ports = node_details[0]["lvol_subsys_port"]
+            if self.sbcli_utils.is_secondary_node(node_id=self.current_outage_node):
+                lvol_ports = [port for port in range(9090, 9090 + len(self.storage_nodes) - 1)]
             if not isinstance(lvol_ports, list):
                 lvol_ports = [lvol_ports]
             ports_to_block = [int(port) for port in lvol_ports]
@@ -317,6 +319,8 @@ class RandomFailoverTest(TestLvolHACluster):
         
         elif outage_type == "partial_nw_single_port":
             lvol_ports = node_details[0]["lvol_subsys_port"]
+            if self.sbcli_utils.is_secondary_node(node_id=self.current_outage_node):
+                lvol_ports = [port for port in range(9090, 9090 + len(self.storage_nodes) - 1)]
             if not isinstance(lvol_ports, list):
                 lvol_ports = [lvol_ports]
             ports_to_block = [int(port) for port in lvol_ports]
@@ -649,7 +653,7 @@ class RandomFailoverTest(TestLvolHACluster):
         self.create_snapshots_and_clones()
 
         if outage_type != "partial_nw" or outage_type != "partial_nw_single_port":
-            sleep_n_sec(300)
+            sleep_n_sec(280)
 
         self.logger.info("Failover during outage completed.")
         self.restart_nodes_after_failover(outage_type)
@@ -765,11 +769,11 @@ class RandomFailoverTest(TestLvolHACluster):
             self.create_lvols_with_fio(5)
             self.create_snapshots_and_clones()
             if outage_type != "partial_nw" or outage_type != "partial_nw_single_port":
-                sleep_n_sec(300)
+                sleep_n_sec(280)
             self.restart_nodes_after_failover(outage_type)
             self.logger.info("Waiting for fallback.")
             if outage_type != "partial_nw" or outage_type != "partial_nw_single_port":
-                sleep_n_sec(600)
+                sleep_n_sec(100)
             time_duration = self.common_utils.calculate_time_duration(
                 start_timestamp=self.outage_start_time,
                 end_timestamp=self.outage_end_time
@@ -797,7 +801,7 @@ class RandomFailoverTest(TestLvolHACluster):
             # Perform failover and manage resources during outage
             self.perform_failover_during_outage()
             if outage_type != "partial_nw" or outage_type != "partial_nw_single_port":
-                sleep_n_sec(600)
+                sleep_n_sec(100)
             time_duration = self.common_utils.calculate_time_duration(
                 start_timestamp=self.outage_start_time,
                 end_timestamp=self.outage_end_time

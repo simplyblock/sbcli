@@ -3,6 +3,7 @@ import paramiko
 # paramiko.common.logging.basicConfig(level=paramiko.common.DEBUG)
 import os
 import json
+import paramiko.buffered_pipe
 import paramiko.ssh_exception
 from logger_config import setup_logger
 from pathlib import Path
@@ -212,6 +213,16 @@ class SshUtils:
 
             except paramiko.SSHException as e:
                 self.logger.error(f"SSH command failed: {e}. Retrying ({retry_count + 1}/{max_retries})...")
+                retry_count += 1
+                time.sleep(2)  # Short delay before retrying
+
+            except paramiko.buffered_pipe.PipeTimeout as e:
+                self.logger.error(f"SSH command failed: {e}. Retrying ({retry_count + 1}/{max_retries})...")
+                retry_count += 1
+                time.sleep(2)  # Short delay before retrying
+
+            except Exception as e:
+                self.logger.error(f"SSH command failed (General Exception): {e}. Retrying ({retry_count + 1}/{max_retries})...")
                 retry_count += 1
                 time.sleep(2)  # Short delay before retrying
 
@@ -939,7 +950,9 @@ class SshUtils:
                     source_node_ips.append(node_ip)
                     for source_node in source_node_ips:
                         cmd = "ss -tnp | grep %s | awk '{print $5}'" % source_node
+                        self.logger.info(f"Executing {cmd} on node: {node}")
                         ss_output, _ = self.exec_command(node, cmd)
+                        self.logger.info(f"Output: {ss_output}")
                         ip_with_ports = ss_output.split()
                         ports_to_block = [str(r.split(":")[1]) for r in ip_with_ports]
                         block_ports.extend(ports_to_block)
