@@ -155,7 +155,8 @@ def spdk_process_start():
     spdk_image = constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE
     if 'spdk_image' in data and data['spdk_image']:
         spdk_image = data['spdk_image']
-        # node_docker.images.pull(spdk_image)
+
+    node_docker.images.pull(spdk_image)
 
     if "cluster_ip" in data and data['cluster_ip']:
         cluster_ip = data['cluster_ip']
