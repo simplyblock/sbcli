@@ -1380,10 +1380,12 @@ class SshUtils:
 
             # Commands to run inside the SPDK container
             iptables_reset_cmds = [
+                "sudo docker exec spdk iptables -L -v -n",
                 "sudo docker exec spdk iptables -P INPUT ACCEPT",
                 "sudo docker exec spdk iptables -P OUTPUT ACCEPT",
                 "sudo docker exec spdk iptables -P FORWARD ACCEPT",
-                "sudo docker exec spdk iptables -F"
+                "sudo docker exec spdk iptables -F",
+                "sudo docker exec spdk iptables -L -v -n"
             ]
 
             # Execute each command
