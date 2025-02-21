@@ -1,4 +1,5 @@
 # coding=utf-8
+import jc
 
 from simplyblock_core import utils, distr_controller, storage_node_ops
 from simplyblock_core.db_controller import DBController
@@ -100,6 +101,25 @@ def _check_spdk_process_up(ip):
     except Exception as e:
         logger.debug(e)
     return False
+
+
+def _check_port_on_node(snode, port_id):
+    try:
+        snode_api = SNodeClient(f"{snode.mgmt_ip}:5000", timeout=3, retry=2)
+        iptables_command_output = snode_api.get_firewall()
+        result = jc.parse('iptables', iptables_command_output)
+        for chain in result:
+            if chain['chain'] in ["INPUT", "OUTPUT"]:
+                for rule in chain['rules']:
+                    if str(port_id) in rule['options']:
+                        action = rule['target']
+                        if action == "DROP":
+                            return False
+
+        return True
+    except Exception as e:
+        logger.debug(e)
+    return True
 
 
 def _check_node_ping(ip):
