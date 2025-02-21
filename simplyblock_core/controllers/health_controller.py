@@ -106,8 +106,8 @@ def _check_spdk_process_up(ip):
 def _check_port_on_node(snode, port_id):
     try:
         snode_api = SNodeClient(f"{snode.mgmt_ip}:5000", timeout=3, retry=2)
-        iptables_command_output = snode_api.get_firewall()
-        result = jc.parse('iptables', iptables_command_output.decode())
+        iptables_command_output, _ = snode_api.get_firewall()
+        result = jc.parse('iptables', iptables_command_output)
         for chain in result:
             if chain['chain'] in ["INPUT", "OUTPUT"]:
                 for rule in chain['rules']:
@@ -118,7 +118,7 @@ def _check_port_on_node(snode, port_id):
 
         return True
     except Exception as e:
-        logger.debug(e)
+        logger.error(e)
     return True
 
 
