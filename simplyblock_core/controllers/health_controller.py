@@ -246,11 +246,13 @@ def check_node(node_id, with_devices=True):
     node_docker_check = _check_node_docker_api(snode.mgmt_ip)
     logger.info(f"Check: node docker API {snode.mgmt_ip}:2375 ... {node_docker_check}")
 
-    lvol_port_check = False
-    if node_api_check:
+    if snode.is_secondary_node:
+        for n in db_controller.get_primary_storage_nodes_by_secondary_node_id(node_id):
+            lvol_port_check = _check_port_on_node(snode, n.lvol_subsys_port)
+            logger.info(f"Check: node {snode.mgmt_ip}, port: {n.lvol_subsys_port} ... {lvol_port_check}")
+    else:
         lvol_port_check = _check_port_on_node(snode, snode.lvol_subsys_port)
-        logger.info(
-            f"Check: node {snode.mgmt_ip}, port: {snode.lvol_subsys_port} ... {lvol_port_check}")
+        logger.info(f"Check: node {snode.mgmt_ip}, port: {snode.lvol_subsys_port} ... {lvol_port_check}")
 
     is_node_online = ping_check and node_api_check and node_rpc_check and node_docker_check
 
