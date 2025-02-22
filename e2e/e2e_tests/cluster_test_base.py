@@ -149,7 +149,7 @@ class TestClusterBase:
             self.ssh_obj.start_netstat_dmesg_logging(node_ip=node,
                                                      log_dir=self.docker_logs_path)
             self.ssh_obj.reset_iptables_in_spdk(node_ip=node)
-        
+
         self.ssh_obj.delete_old_folders(
             node=self.fio_node,
             folder_path=os.path.join(Path.home(), "container-logs"),
@@ -187,7 +187,7 @@ class TestClusterBase:
         for cmd in sysctl_commands:
             self.ssh_obj.exec_command(self.fio_node, cmd)
         self.ssh_obj.set_aio_max_nr(self.fio_node)
-        
+
         self.logger.info(f"Configured TCP sysctl settings on all the nodes!!")
 
     def cleanup_logs(self):
@@ -263,7 +263,7 @@ class TestClusterBase:
 
         self.ssh_obj.exec_command(node=self.fio_node,
                                   command="sudo tmux kill-server")
-        
+
         self.ssh_obj.kill_processes(node=self.fio_node,
                                     process_name="fio")
 
@@ -522,7 +522,7 @@ class TestClusterBase:
         output = None
         while output is not None:
             output, _ = self.ssh_obj.exec_command(
-                node=self.mgmt_nodes[0], 
+                node=self.mgmt_nodes[0],
                 command=f"{self.base_cmd} cluster list-tasks {self.cluster_id}"
             )
             self.logger.info(f"Data migration output: {output}")

@@ -170,3 +170,44 @@ def get_memory_details():
 def get_host_arch():
     out, err, rc = run_command("uname -m")
     return out
+
+
+def firewall_port(port_id=9090, port_type="tcp", block=True):
+
+    if block:
+        cmd_list=[
+
+            f"iptables -D INPUT -p {port_type} --dport {port_id} -j ACCEPT",
+            f"iptables -D OUTPUT -p {port_type} --dport {port_id} -j ACCEPT",
+            f"iptables -A INPUT -p {port_type} --dport {port_id} -j DROP",
+            f"iptables -A OUTPUT -p {port_type} --dport {port_id} -j DROP",
+            "iptables -L -n",
+        ]
+    else:
+        cmd_list=[
+
+            f"iptables -D INPUT -p {port_type} --dport {port_id} -j DROP",
+            f"iptables -D OUTPUT -p {port_type} --dport {port_id} -j DROP",
+
+            f"iptables -A INPUT -p {port_type} --dport {port_id} -j ACCEPT",
+            f"iptables -A OUTPUT -p {port_type} --dport {port_id} -j ACCEPT",
+            "iptables -L -n",
+
+        ]
+
+    out = ""
+    for cmd in cmd_list:
+        stream = os.popen("docker exec spdk "+cmd)
+        ret = stream.read()
+        if ret != "":
+            out += ret + "\n"
+            logger.info(ret)
+
+    return out
+
+
+def firewall_get():
+    cmd = "docker exec spdk iptables -L -n"
+    stream = os.popen(cmd)
+    ret = stream.read()
+    return ret

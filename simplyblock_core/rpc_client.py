@@ -138,7 +138,7 @@ class RPCClient:
         params = {
             "trtype": trtype,
             "max_io_qpairs_per_ctrlr": qpair_count,
-            "max_queue_depth": 2048,
+            "max_queue_depth": 512,
             "abort_timeout_sec": 5,
             "ack_timeout": 2048,
             "zcopy": True,
@@ -178,7 +178,7 @@ class RPCClient:
                 "trtype": trtype,
                 "adrfam": "IPv4",
                 "traddr": traddr,
-                "trsvcid": trsvcid
+                "trsvcid": str(trsvcid)
             }
         }
         if ana_state:
@@ -595,8 +595,8 @@ class RPCClient:
     def bdev_nvme_set_options(self):
         params = {
             # "action_on_timeout": "abort",
-            "bdev_retry_count": 3,
-            "transport_retry_count": 5,
+            "bdev_retry_count": 0,
+            "transport_retry_count": 3,
             "ctrlr_loss_timeout_sec": 1,
             "fast_io_fail_timeout_sec": 0,
             "reconnect_delay_sec": 1,
@@ -897,7 +897,7 @@ class RPCClient:
                 "trtype": trtype,
                 "adrfam": "IPv4",
                 "traddr": traddr,
-                "trsvcid": trsvcid
+                "trsvcid": str(trsvcid)
             }
         }
         return self._request("nvmf_subsystem_remove_listener", params)
@@ -909,7 +909,7 @@ class RPCClient:
             params = {"jm_vuid": jm_vuid}
         return self._request("bdev_distrib_force_to_non_leader", params)
 
-    def bdev_lvol_set_leader(self, is_leader=False, uuid=None, lvs_name=None):
+    def bdev_lvol_set_leader(self, is_leader=False, uuid=None, lvs_name=None, bs_nonleadership=False):
         params = {
             "leadership": is_leader,
         }
@@ -917,6 +917,8 @@ class RPCClient:
             params["uuid"] = uuid
         elif lvs_name:
             params["lvs_name"] = lvs_name
+
+        # params["bs_nonleadership"] = bs_nonleadership
 
         return self._request("bdev_lvol_set_leader_all", params)
 
@@ -976,7 +978,7 @@ class RPCClient:
         }
         return self._request("nvmf_set_max_subsystems", params)
 
-    def bdev_lvol_set_lvs_ops(self, lvs_name, groupid, subsystem_port=4420):
+    def bdev_lvol_set_lvs_ops(self, lvs_name, groupid, subsystem_port=9090):
         params = {
             "groupid": groupid,
             "lvs_name": lvs_name,

@@ -1,10 +1,13 @@
 # syntax=docker/dockerfile:1
 FROM python:3.9-slim
 
-RUN apt-get update; apt-get install -y \
+RUN apt-get update ; apt-get upgrade -y
+
+RUN apt-get install -y \
     wget libc6 inetutils-ping dmidecode nvme-cli open-iscsi iptables \
-    iproute2 pciutils sudo nano parted gdisk ssh ca-certificates curl; \
-    rm -rf /var/lib/apt/lists/*
+    iproute2 pciutils sudo nano parted gdisk ssh ca-certificates curl
+
+RUN rm -rf /var/lib/apt/lists/*
 
 RUN install -m 0755 -d /etc/apt/keyrings
 RUN curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc

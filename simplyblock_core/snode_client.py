@@ -134,3 +134,15 @@ class SNodeClient:
 
     def get_file_content(self, file_name):
         return self._request("GET", f"get_file_content/{file_name}")
+
+
+    def firewall_set_port(self, port_id, port_type="tcp", action="block"):
+        params = {
+            "port_id": port_id,
+            "port_type": port_type,
+            "action": action,
+        }
+        return self._request("POST", "firewall_set_port", params)
+
+    def get_firewall(self,):
+        return self._request("GET", "get_firewall")
