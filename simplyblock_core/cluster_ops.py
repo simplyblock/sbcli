@@ -1002,7 +1002,6 @@ def update_cluster(cl_id, mgmt_only=False, restart_cluster=False):
         logger.error(f"Cluster is not active")
         return False
 
-    set_cluster_status(cl_id, Cluster.STATUS_SUSPENDED)
 
     try:
         sbcli=constants.SIMPLY_BLOCK_CLI_NAME
@@ -1027,6 +1026,7 @@ def update_cluster(cl_id, mgmt_only=False, restart_cluster=False):
         print(e)
 
     if not mgmt_only:
+        set_cluster_status(cl_id, Cluster.STATUS_SUSPENDED)
         logger.info("updating storage nodes")
         for node in db_controller.get_storage_nodes_by_cluster_id(cl_id):
             if node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED]:
