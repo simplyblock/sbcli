@@ -206,7 +206,7 @@ class RandomFailoverTest(TestLvolHACluster):
         self.current_outage_node = self.sn_nodes[0]
 
         if "partial_nw" in outage_type:
-            while not self.sbcli_utils.is_secondary_node(self.current_outage_node):
+            while self.sbcli_utils.is_secondary_node(self.current_outage_node):
                 random.shuffle(self.sn_nodes)
                 self.current_outage_node = self.sn_nodes[0]
 
