@@ -53,9 +53,9 @@ class RandomFailoverTest(TestLvolHACluster):
         self.test_name = "continuous_random_failover_ha"
         # self.outage_types = ["partial_nw", "partial_nw_single_port", "network_interrupt", 
         #                      "container_stop", "graceful_shutdown", "lvol_disconnect_primary"]
-        # self.outage_types = ["partial_nw", "partial_nw_single_port", "network_interrupt", 
-        #                      "container_stop", "graceful_shutdown"]
-        self.outage_types = ["network_interrupt", "container_stop", "graceful_shutdown"]
+        self.outage_types = ["partial_nw", "partial_nw_single_port", "network_interrupt", 
+                             "container_stop", "graceful_shutdown"]
+        # self.outage_types = ["network_interrupt", "container_stop", "graceful_shutdown"]
         self.blocked_ports = None
         self.outage_log_file = os.path.join("logs", f"outage_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
         self._initialize_outage_log()
@@ -204,6 +204,11 @@ class RandomFailoverTest(TestLvolHACluster):
         random.shuffle(self.sn_nodes)
         outage_type = self.outage_types[0]
         self.current_outage_node = self.sn_nodes[0]
+
+        if "partial_nw" in outage_type:
+            while not self.sbcli_utils.is_secondary_node(self.current_outage_node):
+                random.shuffle(self.sn_nodes)
+                self.current_outage_node = self.sn_nodes[0]
 
         self.lvol_node = self.current_outage_node
         if self.sbcli_utils.is_secondary_node(self.lvol_node):
