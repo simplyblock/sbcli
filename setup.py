@@ -2,7 +2,7 @@ import os
 
 from setuptools import setup, find_packages
 
-from setuptools.command.install import install as _install
+from setuptools.command.install import install
 
 
 def _post_install():
@@ -19,12 +19,30 @@ def _post_install():
             _, out = getstatusoutput(f'source {path}')
 
 
-class install(_install):
-    def run(self):
-        _install.run(self)
+from setuptools.command.build_ext import build_ext
+
+
+class CustomInstallCommand(build_ext):
+
+    def finalize_options(self):
+        build_ext.finalize_options(self)
+        _post_install()
+        print("**"*50)
         self.execute(_post_install, (), msg="Running post install task")
 
 
+
+
+# class CustomInstallCommand(install):
+#     def run(self):
+#         _install.run(self)
+#         self.execute(_post_install, (), msg="Running post install task")
+#
+# class CustomInstallCommand(install):
+#     """Customized setuptools install command - prints a friendly greeting."""
+#     def run(self):
+#         print "Hello, developer, how are you? :)"
+#         install.run(self)
 def get_env_var(name, default=None):
     if not name:
         return False
@@ -95,5 +113,5 @@ setup(
         '': ["/etc/simplyblock/requirements.txt"],
         '/etc/simplyblock': ["requirements.txt"]
     },
-    cmdclass={'install': install},
+    cmdclass={'build_ext':CustomInstallCommand},
 )
