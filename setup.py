@@ -19,24 +19,13 @@ def _post_install():
             _, out = getstatusoutput(f'source {path}')
 
 
-from setuptools.command.build_ext import build_ext
-
-
-class CustomInstallCommand(build_ext):
-
-    def finalize_options(self):
-        build_ext.finalize_options(self)
-        _post_install()
-        print("**"*50)
+class CustomInstallCommand(install):
+    def run(self):
         self.execute(_post_install, (), msg="Running post install task")
+        print("**"*50)
+        _post_install()
+        install.run(self)
 
-
-
-
-# class CustomInstallCommand(install):
-#     def run(self):
-#         _install.run(self)
-#         self.execute(_post_install, (), msg="Running post install task")
 #
 # class CustomInstallCommand(install):
 #     """Customized setuptools install command - prints a friendly greeting."""
@@ -113,5 +102,8 @@ setup(
         '': ["/etc/simplyblock/requirements.txt"],
         '/etc/simplyblock': ["requirements.txt"]
     },
-    cmdclass={'build_ext':CustomInstallCommand},
+    cmdclass={
+        'install': CustomInstallCommand,
+        'build': CustomInstallCommand
+    },
 )
