@@ -3,6 +3,7 @@ import os
 from setuptools import setup, find_packages
 
 from setuptools.command.install import install
+from setuptools.command.build import build
 
 
 def _post_install():
@@ -25,6 +26,13 @@ class CustomInstallCommand(install):
         print("**"*50)
         _post_install()
         install.run(self)
+
+class CustomBuildCommand(build):
+    def run(self):
+        self.execute(_post_install, (), msg="Running post install task")
+        print("**"*50)
+        _post_install()
+        build.run(self)
 
 #
 # class CustomInstallCommand(install):
@@ -103,7 +111,7 @@ setup(
         '/etc/simplyblock': ["requirements.txt"]
     },
     cmdclass={
-        'install': CustomInstallCommand,
-        # 'build': CustomInstallCommand
+        # 'install': CustomInstallCommand,
+        'build': CustomBuildCommand
     },
 )
