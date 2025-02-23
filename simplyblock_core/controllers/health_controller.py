@@ -123,15 +123,6 @@ def _check_port_on_node(snode, port_id):
         logger.error(e)
     return True
 
-def port_check(host_ip, port):
-   s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-   s.settimeout(3)
-   try:
-      s.connect((host_ip, port))
-      return True
-   except:
-      return False
-
 
 def _check_node_ping(ip):
     res = utils.ping_host(ip)

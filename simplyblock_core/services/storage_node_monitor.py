@@ -244,7 +244,7 @@ while True:
                     ports = [snode.lvol_subsys_port, 4420]
 
                 for port in ports:
-                    ret = health_controller.port_check(snode.mgmt_ip, port)
+                    ret = health_controller._check_port_on_node(snode, port)
                     logger.info(f"Check: node port {snode.mgmt_ip}, {port} ... {ret}")
                     node_port_check &= ret
 
