@@ -58,16 +58,10 @@ while True:
         for snode in snodes:
             logger.info("Node: %s, status %s", snode.get_id(), snode.status)
 
-            if snode.status in [StorageNode.STATUS_RESTARTING, StorageNode.STATUS_IN_CREATION, StorageNode.STATUS_IN_SHUTDOWN]:
-                logger.info(f"Node status is: {snode.status}, skipping")
-                continue
-
-            if snode.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_UNREACHABLE, StorageNode.STATUS_SUSPENDED]:
+            if snode.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_UNREACHABLE,
+                                    StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
                 logger.info(f"Node status is: {snode.status}, skipping")
                 set_node_health_check(snode, False)
-                for dev in snode.nvme_devices:
-                    set_device_health_check(cluster_id, dev, False)
-                continue
 
             # 1- check node ping
             ping_check = health_controller._check_node_ping(snode.mgmt_ip)
