@@ -426,7 +426,11 @@ class RandomFailoverTest(TestLvolHACluster):
 
         if self.secondary_outage:
             for lvol in self.lvols_without_sec_connect:
-                self.ssh_obj.exec_command(self.fio_node, command=self.lvol_mount_details[lvol]["Command"][1])
+                command = self.lvol_mount_details.get(lvol, self.clone_mount_details.get(lvol, None))
+                if command:
+                    self.ssh_obj.exec_command(self.fio_node, command=command)
+                else:
+                    raise Exception(f"Lvol/Clone {lvol} not found to connect")
         
             self.secondary_outage = False
             self.lvols_without_sec_connect = []
