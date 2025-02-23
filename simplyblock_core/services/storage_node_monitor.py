@@ -276,7 +276,7 @@ while True:
                     if cluster.status in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_SUSPENDED]:
                         set_node_offline(snode)
                         tasks_controller.add_node_to_auto_restart(snode)
-                elif node_port_check:
+                elif not node_port_check:
                     logger.info(f"Port check failed")
                     set_node_down(snode)
                 else:
