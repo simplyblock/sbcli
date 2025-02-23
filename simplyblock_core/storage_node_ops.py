@@ -2577,18 +2577,21 @@ def deploy(ifname):
 
 def start_storage_node_api_container(node_ip):
     node_docker = docker.DockerClient(base_url=f"tcp://{node_ip}:2375", version="auto", timeout=60 * 5)
+
+
+
+    logger.info(f"Pulling image {constants.SIMPLY_BLOCK_DOCKER_IMAGE}")
     node_docker.images.pull(constants.SIMPLY_BLOCK_DOCKER_IMAGE)
+
+    logger.info("Recreating SNodeAPI container")
 
     # create the api container
     nodes = node_docker.containers.list(all=True)
     for node in nodes:
         if node.attrs["Name"] == "/SNodeAPI":
-            logger.info("SNodeAPI container found, removing...")
             node.stop(timeout=1)
             node.remove(force=True)
-            # time.sleep(1)
 
-    logger.info("Creating SNodeAPI container")
     container = node_docker.containers.run(
         constants.SIMPLY_BLOCK_DOCKER_IMAGE,
         "python simplyblock_web/node_webapp.py storage_node",
@@ -2609,9 +2612,9 @@ def start_storage_node_api_container(node_ip):
             f"DOCKER_IP={node_ip}"
         ]
     )
-    logger.info("Pulling SPDK images")
-    logger.debug(constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE)
+    logger.info(f"Pulling image {constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE}")
     node_docker.images.pull(constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE)
+    return True
 
 
 def deploy_cleaner():

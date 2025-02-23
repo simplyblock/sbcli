@@ -403,6 +403,8 @@ class CLIWrapper:
         # update cluster
         sub_command = self.add_sub_command(subparser, "update", 'Update cluster mgmt services')
         sub_command.add_argument("id", help='cluster UUID').completer = self._completer_get_cluster_list
+        sub_command.add_argument("--mgmt-only", help='Update mgmt services only', dest='mgmt_only', type=bool, default=False)
+        sub_command.add_argument("--restart", help='Update mgmt services only', dest='restart', type=bool, default=False)
 
         # graceful-shutdown storage nodes
         sub_command = self.add_sub_command(subparser, "graceful-shutdown", 'Graceful shutdown of storage nodes')
@@ -1022,7 +1024,7 @@ class CLIWrapper:
             elif sub_command == "get":
                 ret = cluster_ops.get_cluster(args.id)
             elif sub_command == "update":
-                ret = cluster_ops.update_cluster(args.id)
+                ret = cluster_ops.update_cluster(args.id, mgmt_only=args.mgmt_only, restart_cluster=args.restart)
 
             elif sub_command == "list-tasks":
                 ret = tasks_controller.list_tasks(args.cluster_id)
