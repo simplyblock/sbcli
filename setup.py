@@ -103,6 +103,7 @@ setup(
         '/etc/simplyblock': ["requirements.txt"]
     },
     cmdclass={
-        'build': CustomInstallCommand
+        'install': CustomInstallCommand,
+        # 'build': CustomInstallCommand
     },
 )
