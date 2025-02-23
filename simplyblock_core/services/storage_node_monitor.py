@@ -131,15 +131,18 @@ def update_cluster_status(cluster_id):
         can_activate = True
         for node in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
             if node.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_REMOVED]:
+                logger.error(f"can not activate cluster: node in not online {node.get_id()}: {node.status}")
                 can_activate = False
                 break
             if tasks_controller.get_active_node_restart_task(cluster_id, node.get_id()):
+                logger.error(f"can not activate cluster: restart tasks found")
                 can_activate = False
                 break
 
             if node.online_since:
                 diff = datetime.now(timezone.utc) - datetime.fromisoformat(node.online_since)
-                if diff.total_seconds() < 60:
+                if diff.total_seconds() < 30:
+                    logger.error(f"can not activate cluster: node is online less than 30 seconds: {node.get_id()}")
                     can_activate = False
                     break
 
@@ -183,9 +186,6 @@ def set_node_offline(node):
 def set_node_down(node):
     if node.status != StorageNode.STATUS_DOWN:
         storage_node_ops.set_node_status(node.get_id(), StorageNode.STATUS_DOWN)
-        for dev in node.nvme_devices:
-            if dev.status in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_READONLY]:
-                device_controller.device_set_unavailable(dev.get_id())
 
 
 logger.info("Starting node monitor")
