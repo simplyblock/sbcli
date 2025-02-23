@@ -180,6 +180,13 @@ def set_node_offline(node):
         # if node.jm_device.status != JMDevice.STATUS_UNAVAILABLE:
         #     device_controller.set_jm_device_state(node.jm_device.get_id(), JMDevice.STATUS_UNAVAILABLE)
 
+def set_node_down(node):
+    if node.status != StorageNode.STATUS_DOWN:
+        storage_node_ops.set_node_status(node.get_id(), StorageNode.STATUS_DOWN)
+        for dev in node.nvme_devices:
+            if dev.status in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_READONLY]:
+                device_controller.device_set_unavailable(dev.get_id())
+
 
 logger.info("Starting node monitor")
 while True:
@@ -193,7 +200,7 @@ while True:
         nodes = db_controller.get_storage_nodes_by_cluster_id(cluster_id)
         for snode in nodes:
             if snode.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_UNREACHABLE,
-                                    StorageNode.STATUS_SCHEDULABLE]:
+                                    StorageNode.STATUS_SCHEDULABLE, StorageNode.STATUS_DOWN]:
                 logger.info(f"Node status is: {snode.status}, skipping")
                 continue
 
@@ -227,7 +234,21 @@ while True:
                     snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
             logger.info(f"Check: node RPC {snode.mgmt_ip}:{snode.rpc_port} ... {node_rpc_check}")
 
-            is_node_online = ping_check and node_api_check and spdk_process and node_rpc_check
+            node_port_check = True
+            if spdk_process:
+                if snode.is_secondary_node:
+                    ports = [4420]
+                    for n in db_controller.get_primary_storage_nodes_by_secondary_node_id(snode.get_id()):
+                        ports.append(n.lvol_subsys_port)
+                else:
+                    ports = [snode.lvol_subsys_port, 4420]
+
+                for port in ports:
+                    ret = health_controller.port_check(snode.mgmt_ip, port)
+                    logger.info(f"Check: node port {snode.mgmt_ip}, {port} ... {ret}")
+                    node_port_check &= ret
+
+            is_node_online = ping_check and node_api_check and spdk_process and node_rpc_check and node_port_check
             if is_node_online:
                 set_node_online(snode)
 
@@ -244,9 +265,7 @@ while True:
                             if snode.jm_device.status != JMDevice.STATUS_UNAVAILABLE:
                                 device_controller.set_jm_device_state(snode.jm_device.get_id(),
                                                                       JMDevice.STATUS_UNAVAILABLE)
-
             else:
-                set_node_offline(snode)
 
                 if not ping_check and not node_api_check and not spdk_process:
                     # restart on new node
@@ -255,7 +274,13 @@ while True:
                 elif ping_check and node_api_check and (not spdk_process or not node_rpc_check):
                     # add node to auto restart
                     if cluster.status in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_SUSPENDED]:
+                        set_node_offline(snode)
                         tasks_controller.add_node_to_auto_restart(snode)
+                elif node_port_check:
+                    logger.info(f"Port check failed")
+                    set_node_down(snode)
+                else:
+                    set_node_offline(snode)
 
         update_cluster_status(cluster_id)
 

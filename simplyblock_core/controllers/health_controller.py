@@ -1,4 +1,6 @@
 # coding=utf-8
+import socket
+
 import jc
 
 from simplyblock_core import utils, distr_controller, storage_node_ops
@@ -120,6 +122,15 @@ def _check_port_on_node(snode, port_id):
     except Exception as e:
         logger.error(e)
     return True
+
+def port_check(host_ip, port):
+   s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+   s.settimeout(3)
+   try:
+      s.connect((host_ip, port))
+      return True
+   except:
+      return False
 
 
 def _check_node_ping(ip):
