@@ -32,7 +32,7 @@ def _validate_new_task_node_restart(cluster_id, node_id):
     tasks = db_controller.get_job_tasks(cluster_id)
     for task in tasks:
         if task.function_name == JobSchedule.FN_NODE_RESTART and task.node_id == node_id:
-            if task.status != JobSchedule.STATUS_DONE:
+            if task.status != JobSchedule.STATUS_DONE and task.canceled is False:
                 return task.get_id()
     return False
 
@@ -121,8 +121,12 @@ def list_tasks(cluster_id, is_json=False):
 
         upd = task.updated_at
         if upd:
-            upd = datetime.datetime.strptime(upd, "%Y-%m-%d %H:%M:%S.%f").strftime(
-                "%H:%M:%S, %d/%m/%Y")
+            try:
+                parsed = datetime.datetime.fromisoformat(upd)
+                upd = parsed.strftime("%H:%M:%S, %d/%m/%Y")
+            except Exception as e:
+                logger.error(e)
+
         data.append({
             "Task ID": task.uuid,
             "Node ID / Device ID": f"{task.node_id}\n{task.device_id}",
@@ -130,7 +134,7 @@ def list_tasks(cluster_id, is_json=False):
             "Retry": retry,
             "Status": task.status,
             "Result": task.function_result,
-            "Updated At": upd,
+            "Updated At": upd or "",
         })
     return utils.print_table(data)
 

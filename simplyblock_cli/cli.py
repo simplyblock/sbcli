@@ -265,8 +265,8 @@ class CLIWrapper:
 
         sub_command = self.add_sub_command(subparser, 'create',
                                            'Create an new cluster with this node as mgmt (local run)')
-        sub_command.add_argument(
-            "--blk_size", help='The block size in bytes', type=int, choices=[512, 4096], default=512)
+        # sub_command.add_argument(
+        #     "--blk_size", help='The block size in bytes', type=int, choices=[512, 4096], default=512)
 
         sub_command.add_argument(
             "--page_size", help='The size of a data page in bytes', type=int, default=2097152)
@@ -302,14 +302,14 @@ class CLIWrapper:
                                  default=0, choices=range(128))
         sub_command.add_argument("--max-queue-size", help='The max size the queue will grow', type=int, default=128)
         sub_command.add_argument("--inflight-io-threshold", help='The number of inflight IOs allowed before the IO queuing starts', type=int, default=4)
-        sub_command.add_argument("--enable-qos", help='Enable qos bdev for storage nodes', action='store_true', dest='enable_qos')
+        sub_command.add_argument("--enable-qos", help='Enable qos bdev for storage nodes, true by default', dest='enable_qos', type=bool, default=True)
         sub_command.add_argument("--strict-node-anti-affinity", help='Enable strict node anti affinity for storage nodes', action='store_true')
 
 
 
         # add cluster
         sub_command = self.add_sub_command(subparser, 'add', 'Add new cluster')
-        sub_command.add_argument("--blk_size", help='The block size in bytes', type=int, choices=[512, 4096], default=512)
+        # sub_command.add_argument("--blk_size", help='The block size in bytes', type=int, choices=[512, 4096], default=512)
         sub_command.add_argument("--page_size", help='The size of a data page in bytes', type=int, default=2097152)
         sub_command.add_argument("--cap-warn", help='Capacity warning level in percent, default=80',
                                  type=int, required=False, dest="cap_warn")
@@ -403,6 +403,8 @@ class CLIWrapper:
         # update cluster
         sub_command = self.add_sub_command(subparser, "update", 'Update cluster mgmt services')
         sub_command.add_argument("id", help='cluster UUID').completer = self._completer_get_cluster_list
+        sub_command.add_argument("--mgmt-only", help='Update mgmt services only', dest='mgmt_only', type=bool, default=False)
+        sub_command.add_argument("--restart", help='Update mgmt services only', dest='restart', type=bool, default=False)
 
         # graceful-shutdown storage nodes
         sub_command = self.add_sub_command(subparser, "graceful-shutdown", 'Graceful shutdown of storage nodes')
@@ -1022,7 +1024,7 @@ class CLIWrapper:
             elif sub_command == "get":
                 ret = cluster_ops.get_cluster(args.id)
             elif sub_command == "update":
-                ret = cluster_ops.update_cluster(args.id)
+                ret = cluster_ops.update_cluster(args.id, mgmt_only=args.mgmt_only, restart_cluster=args.restart)
 
             elif sub_command == "list-tasks":
                 ret = tasks_controller.list_tasks(args.cluster_id)
@@ -1294,7 +1296,7 @@ class CLIWrapper:
 
     def cluster_add(self, args):
         page_size_in_blocks = args.page_size
-        blk_size = args.blk_size
+        blk_size = 4096
         cap_warn = args.cap_warn
         cap_crit = args.cap_crit
         prov_cap_warn = args.prov_cap_warn
@@ -1321,7 +1323,7 @@ class CLIWrapper:
 
     def cluster_create(self, args):
         page_size_in_blocks = args.page_size
-        blk_size = args.blk_size
+        blk_size = 4096
         CLI_PASS = args.CLI_PASS
         cap_warn = args.cap_warn
         cap_crit = args.cap_crit
