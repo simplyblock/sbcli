@@ -183,14 +183,15 @@ class TestClusterBase:
             'echo "net.ipv4.tcp_retries2=8" | sudo tee -a /etc/sysctl.conf',
             'sudo sysctl -p'
         ]
-        for node in self.storage_nodes:
+        if not self.k8s_test:
+            for node in self.storage_nodes:
+                for cmd in sysctl_commands:
+                    self.ssh_obj.exec_command(node, cmd)
             for cmd in sysctl_commands:
-                self.ssh_obj.exec_command(node, cmd)
-        for cmd in sysctl_commands:
-            self.ssh_obj.exec_command(self.fio_node, cmd)
-        self.ssh_obj.set_aio_max_nr(self.fio_node)
+                self.ssh_obj.exec_command(self.fio_node, cmd)
+            self.ssh_obj.set_aio_max_nr(self.fio_node)
         
-        self.logger.info(f"Configured TCP sysctl settings on all the nodes!!")
+            self.logger.info(f"Configured TCP sysctl settings on all the nodes!!")
 
     def cleanup_logs(self):
         base_path = Path.home()
