@@ -55,7 +55,7 @@ class RandomFailoverTest(TestLvolHACluster):
         #                      "container_stop", "graceful_shutdown", "lvol_disconnect_primary"]
         self.outage_types = ["partial_nw", "partial_nw_single_port", "network_interrupt", 
                              "container_stop", "graceful_shutdown"]
-        self.outage_types = ["network_interrupt", "container_stop", "graceful_shutdown"]
+        # self.outage_types = ["network_interrupt", "container_stop", "graceful_shutdown"]
         self.blocked_ports = None
         self.outage_log_file = os.path.join("logs", f"outage_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
         self._initialize_outage_log()
@@ -690,6 +690,8 @@ class RandomFailoverTest(TestLvolHACluster):
 
         self.logger.info("Failover during outage completed.")
         self.restart_nodes_after_failover(outage_type)
+
+        return outage_type
     
     def validate_iostats_continuously(self):
         """Continuously validates I/O stats while FIO is running, checking every 60 seconds."""
@@ -821,7 +823,8 @@ class RandomFailoverTest(TestLvolHACluster):
                 end_timestamp=self.outage_end_time,
                 time_duration=time_duration
             )
-            self.validate_migration_for_node(self.outage_start_time, 4000, None)
+            no_task_ok = outage_type in {"partial_nw", "partial_nw_single_port", "lvol_disconnect_primary"}
+            self.validate_migration_for_node(self.outage_start_time, 4000, None, 60, no_task_ok=no_task_ok)
 
             for clone, clone_details in self.clone_mount_details.items():
                 self.common_utils.validate_fio_test(self.fio_node,
@@ -832,7 +835,7 @@ class RandomFailoverTest(TestLvolHACluster):
                                                     log_file=lvol_details["Log"])
 
             # Perform failover and manage resources during outage
-            self.perform_failover_during_outage()
+            outage_type = self.perform_failover_during_outage()
             if outage_type != "partial_nw" or outage_type != "partial_nw_single_port":
                 sleep_n_sec(100)
             time_duration = self.common_utils.calculate_time_duration(
@@ -849,7 +852,8 @@ class RandomFailoverTest(TestLvolHACluster):
                 end_timestamp=self.outage_end_time,
                 time_duration=time_duration
             )
-            self.validate_migration_for_node(self.outage_start_time, 4000, None)
+            no_task_ok = outage_type in {"partial_nw", "partial_nw_single_port", "lvol_disconnect_primary"}
+            self.validate_migration_for_node(self.outage_start_time, 4000, None, 60, no_task_ok=no_task_ok)
             self.common_utils.manage_fio_threads(self.fio_node, self.fio_threads, timeout=100000)
 
             for lvol_name, lvol_details in self.lvol_mount_details.items():

@@ -520,7 +520,7 @@ class TestClusterBase:
         end_time = start_time + timedelta(seconds=timeout)
 
         output = None
-        while output is not None:
+        while output is None:
             output, _ = self.ssh_obj.exec_command(
                 node=self.mgmt_nodes[0], 
                 command=f"{self.base_cmd} cluster list-tasks {self.cluster_id}"
