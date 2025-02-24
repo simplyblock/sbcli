@@ -80,7 +80,8 @@ class TestClusterBase:
                 bastion_server_address=self.bastion_server,
             )
             sleep_n_sec(2)
-            self.ssh_obj.set_aio_max_nr(node)
+            if not self.k8s_test:
+                self.ssh_obj.set_aio_max_nr(node)
         for node in self.storage_nodes:
             self.logger.info(f"**Connecting to storage nodes** - {node}")
             self.ssh_obj.connect(
@@ -88,7 +89,8 @@ class TestClusterBase:
                 bastion_server_address=self.bastion_server,
             )
             sleep_n_sec(2)
-            self.ssh_obj.set_aio_max_nr(node)
+            if not self.k8s_test:
+                self.ssh_obj.set_aio_max_nr(node)
         if self.client_machine:
             self.logger.info(f"**Connecting to client machine** - {self.client_machine}")
             self.ssh_obj.connect(
