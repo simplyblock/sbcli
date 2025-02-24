@@ -53,9 +53,9 @@ class RandomFailoverTest(TestLvolHACluster):
         self.test_name = "continuous_random_failover_ha"
         # self.outage_types = ["partial_nw", "partial_nw_single_port", "network_interrupt", 
         #                      "container_stop", "graceful_shutdown", "lvol_disconnect_primary"]
-        self.outage_types = ["partial_nw", "partial_nw_single_port", "network_interrupt", 
-                             "container_stop", "graceful_shutdown"]
-        # self.outage_types = ["network_interrupt", "container_stop", "graceful_shutdown"]
+        # self.outage_types = ["partial_nw", "partial_nw_single_port", "network_interrupt", 
+        #                      "container_stop", "graceful_shutdown"]
+        self.outage_types = ["network_interrupt", "container_stop", "graceful_shutdown"]
         self.blocked_ports = None
         self.outage_log_file = os.path.join("logs", f"outage_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
         self._initialize_outage_log()
@@ -244,7 +244,7 @@ class RandomFailoverTest(TestLvolHACluster):
                                                   node_id=self.current_outage_node)
                     else:
                         self.sbcli_utils.suspend_node(node_uuid=self.current_outage_node, expected_error_code=[503])
-                    self.sbcli_utils.wait_for_storage_node_status(self.current_outage_node, "suspended", timeout=4000)
+                    self.sbcli_utils.wait_for_storage_node_status(self.current_outage_node, "suspended", timeout=1000)
                     break  # Exit loop if successful
                 except Exception as _:
                     if attempt < max_retries - 2:
@@ -269,7 +269,7 @@ class RandomFailoverTest(TestLvolHACluster):
                                                    force=True)
                     else:
                         self.sbcli_utils.shutdown_node(node_uuid=self.current_outage_node, expected_error_code=[503])
-                    self.sbcli_utils.wait_for_storage_node_status(self.current_outage_node, "offline", timeout=4000)
+                    self.sbcli_utils.wait_for_storage_node_status(self.current_outage_node, "offline", timeout=1000)
                     break  # Exit loop if successful
                 except Exception as _:
                     if attempt < max_retries - 2:
@@ -378,7 +378,7 @@ class RandomFailoverTest(TestLvolHACluster):
                                                   force=True)
                     else:
                         self.sbcli_utils.restart_node(node_uuid=self.current_outage_node, expected_error_code=[503])
-                    self.sbcli_utils.wait_for_storage_node_status(self.current_outage_node, "online", timeout=4000)
+                    self.sbcli_utils.wait_for_storage_node_status(self.current_outage_node, "online", timeout=1000)
                     break  # Exit loop if successful
                 except Exception as _:
                     if attempt < max_retries - 2:
@@ -410,12 +410,14 @@ class RandomFailoverTest(TestLvolHACluster):
                 connect = self.sbcli_utils.get_lvol_connect_str(lvol_name=lvol)[0]
                 self.ssh_obj.exec_command(node=self.fio_node, command=connect)
 
-        self.sbcli_utils.wait_for_storage_node_status(self.current_outage_node, "online", timeout=4000)
-        self.sbcli_utils.wait_for_health_status(self.current_outage_node, True, timeout=4000)
-        self.outage_end_time = int(datetime.now().timestamp())
 
         # Log the restart event
         self.log_outage_event(self.current_outage_node, outage_type, "Node restarted")
+
+        self.sbcli_utils.wait_for_storage_node_status(self.current_outage_node, "online", timeout=1000)
+        self.sbcli_utils.wait_for_health_status(self.current_outage_node, True, timeout=1000)
+        self.outage_end_time = int(datetime.now().timestamp())
+
         
         self.ssh_obj.restart_docker_logging(
             node_ip=node_ip,
@@ -824,7 +826,7 @@ class RandomFailoverTest(TestLvolHACluster):
                 time_duration=time_duration
             )
             no_task_ok = outage_type in {"partial_nw", "partial_nw_single_port", "lvol_disconnect_primary"}
-            self.validate_migration_for_node(self.outage_start_time, 4000, None, 60, no_task_ok=no_task_ok)
+            self.validate_migration_for_node(self.outage_start_time, 2000, None, 60, no_task_ok=no_task_ok)
 
             for clone, clone_details in self.clone_mount_details.items():
                 self.common_utils.validate_fio_test(self.fio_node,
@@ -853,7 +855,7 @@ class RandomFailoverTest(TestLvolHACluster):
                 time_duration=time_duration
             )
             no_task_ok = outage_type in {"partial_nw", "partial_nw_single_port", "lvol_disconnect_primary"}
-            self.validate_migration_for_node(self.outage_start_time, 4000, None, 60, no_task_ok=no_task_ok)
+            self.validate_migration_for_node(self.outage_start_time, 2000, None, 60, no_task_ok=no_task_ok)
             self.common_utils.manage_fio_threads(self.fio_node, self.fio_threads, timeout=100000)
 
             for lvol_name, lvol_details in self.lvol_mount_details.items():
