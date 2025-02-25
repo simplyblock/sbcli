@@ -143,9 +143,9 @@ class RandomFailoverTest(TestLvolHACluster):
 
             self.lvol_mount_details[lvol_name]["Command"] = connect_ls
 
-            if self.secondary_outage:
-                connect_ls = [connect_ls[0]]
-                self.lvols_without_sec_connect.append(lvol_name)
+            # if self.secondary_outage:
+            #     connect_ls = [connect_ls[0]]
+            #     self.lvols_without_sec_connect.append(lvol_name)
 
             initial_devices = self.ssh_obj.get_devices(node=self.fio_node)
             for connect_str in connect_ls:
@@ -212,7 +212,7 @@ class RandomFailoverTest(TestLvolHACluster):
         self.lvol_node = self.current_outage_node
         if self.sbcli_utils.is_secondary_node(self.lvol_node):
             self.lvol_node = random.choice(list(self.node_vs_lvol.keys()))
-        #     self.secondary_outage = True
+            self.secondary_outage = True
 
 
         self.outage_start_time = int(datetime.now().timestamp())
@@ -550,9 +550,9 @@ class RandomFailoverTest(TestLvolHACluster):
             connect_ls = self.sbcli_utils.get_lvol_connect_str(lvol_name=clone_name)
             self.clone_mount_details[clone_name]["Command"] = connect_ls
 
-            if self.secondary_outage:
-                connect_ls = [connect_ls[0]]
-                self.lvols_without_sec_connect.append(clone_name)
+            # if self.secondary_outage:
+            #     connect_ls = [connect_ls[0]]
+            #     self.lvols_without_sec_connect.append(clone_name)
 
             initial_devices = self.ssh_obj.get_devices(node=self.fio_node)
             for connect_str in connect_ls:
@@ -691,14 +691,10 @@ class RandomFailoverTest(TestLvolHACluster):
 
         # Randomly select a node and outage type for failover
         outage_type = self.perform_random_outage()
-
+        
         if not self.sbcli_utils.is_secondary_node(self.current_outage_node):
             self.delete_random_lvols(5)
-        else:
-            self.logger.info(f"Current outage node: {self.current_outage_node} is secondary node. Skipping delete or create")
-
-        self.logger.info("Creating 5 new lvols, clones, and snapshots.")
-        if not self.sbcli_utils.is_secondary_node(self.current_outage_node):
+            self.logger.info("Creating 5 new lvols, clones, and snapshots.")
             self.create_lvols_with_fio(5)
             self.create_snapshots_and_clones()
         else:
