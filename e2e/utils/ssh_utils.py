@@ -735,7 +735,7 @@ class SshUtils:
             return []
         
 
-    def disconnect_all_active_interfaces(self, node_ip, interfaces):
+    def disconnect_all_active_interfaces(self, node_ip, interfaces, reconnect_time=300):
         """
         Disconnect all active network interfaces on a node in a single SSH call.
 
@@ -752,7 +752,7 @@ class SshUtils:
         reconnect_cmds = " && ".join([f"sudo nmcli dev connect {iface}" for iface in interfaces])
 
         cmd = (
-            f'nohup sh -c "{disconnect_cmds} && sleep 300 && {reconnect_cmds}" &'
+            f'nohup sh -c "{disconnect_cmds} && sleep {reconnect_time} && {reconnect_cmds}" &'
         )
         self.logger.info(f"Executing combined disconnect command on node {node_ip}: {cmd}")
         try:

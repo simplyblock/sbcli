@@ -511,7 +511,7 @@ def calculate_pool_count(alceml_count, number_of_distribs, cpu_count, poller_cou
     small_pool_count = 384 * (alceml_count + number_of_distribs + 3 + poller_count) + (6 + alceml_count + number_of_distribs) * 256 + poller_number * 127 + 384 + 128 * poller_number + constants.EXTRA_SMALL_POOL_COUNT
     #large_pool_count = (3 + alceml_count + lvol_count + 2 * snap_count + 1) * 32 + poller_number * 15 + 384 + 16 * poller_number + constants.EXTRA_LARGE_POOL_COUNT
     large_pool_count = 48 * (alceml_count + number_of_distribs + 3 + poller_count) + (6 + alceml_count + number_of_distribs) * 32 + poller_number * 15 + 384 + 16 * poller_number + constants.EXTRA_LARGE_POOL_COUNT
-    return small_pool_count, large_pool_count
+    return 2*small_pool_count, 2*large_pool_count
 
 
 def calculate_minimum_hp_memory(small_pool_count, large_pool_count, lvol_count, max_prov, cpu_count):
@@ -525,7 +525,7 @@ def calculate_minimum_hp_memory(small_pool_count, large_pool_count, lvol_count, 
     pool_consumption = (small_pool_count * 8 + large_pool_count * 128) / 1024 + 1092
     max_prov_tb = max_prov / (1024 * 1024 * 1024 * 1024)
     memory_consumption = (4 * cpu_count + 1.0277 * pool_consumption + 25 * lvol_count) * (1024 * 1024) + (250 * 1024 * 1024) * 1.1 * max_prov_tb + constants.EXTRA_HUGE_PAGE_MEMORY
-    return int(memory_consumption)
+    return int(memory_consumption*1.5)
 
 
 def calculate_minimum_sys_memory(max_prov, total):
@@ -714,3 +714,22 @@ def handle_task_result(task: JobSchedule, res: dict, allowed_error_codes = None)
 
 
 logger = get_logger(__name__)
+
+
+def get_next_port(cluster_id):
+    from simplyblock_core.db_controller import DBController
+    db_controller = DBController()
+
+    port = 9090
+    used_ports = []
+    for node in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
+        if node.lvol_subsys_port > 0 and node.lvol_subsys_port != 4420:
+            used_ports.append(node.lvol_subsys_port)
+
+    for i in range(100):
+        next_port = port + i
+
+        if next_port not in used_ports:
+            return next_port
+
+    return 0
