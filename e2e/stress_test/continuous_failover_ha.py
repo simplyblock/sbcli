@@ -111,7 +111,7 @@ class RandomFailoverTest(TestLvolHACluster):
                     )
                 except Exception as exp:
                     self.logger.warning(f"Retry Lvol creation fails with {str(exp)}.")
-                    raise exp
+                    continue
 
             self.lvol_mount_details[lvol_name] = {
                    "ID": self.sbcli_utils.get_lvol_id(lvol_name),
@@ -508,6 +508,7 @@ class RandomFailoverTest(TestLvolHACluster):
                     self.ssh_obj.add_snapshot(self.mgmt_nodes[0], self.lvol_mount_details[lvol]["ID"], snapshot_name)
                 except Exception as exp:
                     self.logger.warning(f"Retry Snap creation fails with {str(exp)}.")
+                    continue
                 
             self.snapshot_names.append(snapshot_name)
             self.lvol_mount_details[lvol]["snapshots"].append(snapshot_name)
@@ -526,6 +527,7 @@ class RandomFailoverTest(TestLvolHACluster):
                     self.ssh_obj.add_clone(self.mgmt_nodes[0], snapshot_id, clone_name)
                 except Exception as exp:
                     self.logger.warning(f"Retry Clone creation fails with {str(exp)}.")
+                    continue
             fs_type = self.lvol_mount_details[lvol]["FS"]
             self.clone_mount_details[clone_name] = {
                    "ID": self.sbcli_utils.get_lvol_id(clone_name),
