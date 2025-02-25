@@ -260,12 +260,22 @@ class TestClusterBase:
         for node in self.storage_nodes:
             self.ssh_obj.exec_command(node=node,
                                       command="sudo tmux kill-server")
+            result = self.ssh_obj.check_remote_spdk_logs_for_keyword(node_ip=node, 
+                                                                     log_dir=self.docker_logs_path, 
+                                                                     test_name=self.test_name)
+
+            for file, lines in result.items():
+                if lines:
+                    self.logger.info(f"\n{file}:")
+                    for line in lines:
+                        self.logger.info(f"  -> {line}")
 
         self.ssh_obj.exec_command(node=self.fio_node,
                                   command="sudo tmux kill-server")
         
         self.ssh_obj.kill_processes(node=self.fio_node,
                                     process_name="fio")
+        
 
         retry_check = 100
         while retry_check:
@@ -326,6 +336,7 @@ class TestClusterBase:
         except Exception as e:
             self.logger.info(f"Error while deleting instance: {e}")
             self.logger.info(traceback.format_exc())
+
 
     def validations(self, node_uuid, node_status, device_status, lvol_status,
                     health_check_status):
