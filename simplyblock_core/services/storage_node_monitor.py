@@ -252,6 +252,13 @@ while True:
                     logger.info(f"Check: node port {snode.mgmt_ip}, {port} ... {ret}")
                     node_port_check &= ret
 
+                for data_nic in snode.data_nics:
+                    if data_nic.ip4_address:
+                        data_ping_check = health_controller._check_node_ping(data_nic.ip4_address)
+                        logger.info(f"Check: ping ip {data_nic.ip4_address} ... {data_ping_check}")
+                        if not data_ping_check:
+                            node_port_check = False
+
             is_node_online = ping_check and node_api_check and spdk_process and node_rpc_check and node_port_check
             if is_node_online:
                 set_node_online(snode)
