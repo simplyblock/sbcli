@@ -19,7 +19,7 @@ sudo modprobe nbd
 
 
 echo \"net.ipv6.conf.all.disable_ipv6=1\" | sudo tee /etc/sysctl.d/disable_ipv6.conf
-echo \"vm.max_map_count=262144\" | sudo tee /etc/sysctl.d/disable_ipv6.conf
+echo \"vm.max_map_count=262144\" | sudo tee -a /etc/sysctl.d/disable_ipv6.conf
 sudo sysctl --system
 
 
