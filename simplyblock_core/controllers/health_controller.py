@@ -187,8 +187,12 @@ def _check_node_lvstore(lvstore_stack, node, auto_fix=False):
                                     n = db_controller.get_storage_node_by_id(result['UUID'])
                                     distr_controller.send_node_status_event(n, n.status, node)
                         ret = rpc_client.distr_get_cluster_map(distr)
-                        results, is_passed = distr_controller.parse_distr_cluster_map(ret)
-                        logger.info(f"Checking Distr map ... {is_passed}")
+                        if not ret:
+                            logger.error("Failed to get cluster map")
+                            lvstore_check = False
+                        else:
+                            results, is_passed = distr_controller.parse_distr_cluster_map(ret)
+                            logger.info(f"Checking Distr map ... {is_passed}")
 
                 else:
                     logger.error("Failed to parse distr cluster map")
