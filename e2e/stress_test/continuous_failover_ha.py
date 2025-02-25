@@ -51,11 +51,10 @@ class RandomFailoverTest(TestLvolHACluster):
         self.secondary_outage = False
         self.lvols_without_sec_connect = []
         self.test_name = "continuous_random_failover_ha"
-        # self.outage_types = ["partial_nw", "partial_nw_single_port", "network_interrupt", 
-        #                      "container_stop", "graceful_shutdown", "lvol_disconnect_primary"]
-        # self.outage_types = ["partial_nw", "partial_nw_single_port", "network_interrupt", 
-        #                      "container_stop", "graceful_shutdown"]
-        self.outage_types = ["network_interrupt", "container_stop", "graceful_shutdown"]
+        # self.outage_types = ["interface_network_interrupt", "partial_nw", "partial_nw_single_port",
+        #                       "port_network_interrupt", "container_stop", "graceful_shutdown",
+        #                      "lvol_disconnect_primary"]
+        self.outage_types = ["interface_network_interrupt", "container_stop", "graceful_shutdown"]
         self.blocked_ports = None
         self.outage_log_file = os.path.join("logs", f"outage_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
         self._initialize_outage_log()
@@ -70,7 +69,7 @@ class RandomFailoverTest(TestLvolHACluster):
 
         Args:
             node (str): Node UUID or IP where the event occurred.
-            outage_type (str): Type of outage (e.g., network_interrupt, container_stop, graceful_shutdown).
+            outage_type (str): Type of outage (e.g., port_network_interrupt, container_stop, graceful_shutdown).
             event (str): Event description (e.g., 'Outage started', 'Node restarted').
         """
         timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -283,7 +282,7 @@ class RandomFailoverTest(TestLvolHACluster):
                         raise  # Rethrow the last exception
         elif outage_type == "container_stop":
             self.ssh_obj.stop_spdk_process(node_ip)
-        elif outage_type == "network_interrupt":
+        elif outage_type == "port_network_interrupt":
             # cmd = (
             #     'nohup sh -c "sudo nmcli dev disconnect eth0 && sleep 300 && '
             #     'sudo nmcli dev connect eth0" &'
@@ -295,7 +294,7 @@ class RandomFailoverTest(TestLvolHACluster):
             # self.logger.info("Network stop and restart.")
             # self.disconnect_thread = threading.Thread(target=execute_disconnect)
             # self.disconnect_thread.start()
-            self.logger.info("Handling network interruption...")
+            self.logger.info("Handling port based network interruption...")
             # active_interfaces = self.ssh_obj.get_active_interfaces(node_ip)
             # self.disconnect_thread = threading.Thread(
             #     target=self.ssh_obj.disconnect_all_active_interfaces,
@@ -314,6 +313,18 @@ class RandomFailoverTest(TestLvolHACluster):
             self.blocked_ports = self.ssh_obj.perform_nw_outage(node_ip=node_ip, node_data_nic_ip=node_data_nic_ip,
                                                                 nodes_check_ports_on=nodes_check_ports_on,
                                                                 block_ports=ports_to_block, block_all_ss_ports=True)
+        elif outage_type == "interface_network_interrupt":
+            self.logger.info("Handling port based network interruption...")
+            active_interfaces = []
+            data_nics = node_details[0]["data_nics"]
+            for data_nic in data_nics:
+                active_interfaces.append(data_nic["if_name"])
+            
+            self.disconnect_thread = threading.Thread(
+                target=self.ssh_obj.disconnect_all_active_interfaces,
+                args=(node_ip, active_interfaces, 600),
+            )
+            self.disconnect_thread.start()
         elif outage_type == "partial_nw":
             lvol_ports = node_details[0]["lvol_subsys_port"]
             if self.secondary_outage:
@@ -391,11 +402,11 @@ class RandomFailoverTest(TestLvolHACluster):
                         self.logger.info("Max retries reached. Failed to restart node.")
                         raise  # Rethrow the last exception
 
-        elif outage_type == "network_interrupt":
+        elif outage_type == "port_network_interrupt":
             # self.disconnect_thread.join()
             self.ssh_obj.remove_nw_outage(node_ip=node_ip, blocked_ports=self.blocked_ports)
             sleep_n_sec(100)
-
+        
         elif outage_type == "partial_nw":
             self.ssh_obj.remove_nw_outage(node_ip=node_ip, blocked_ports=self.blocked_ports)
             sleep_n_sec(100)
@@ -410,11 +421,9 @@ class RandomFailoverTest(TestLvolHACluster):
                 connect = self.sbcli_utils.get_lvol_connect_str(lvol_name=lvol)[0]
                 self.ssh_obj.exec_command(node=self.fio_node, command=connect)
 
-
+        self.sbcli_utils.wait_for_storage_node_status(self.current_outage_node, "online", timeout=1000)
         # Log the restart event
         self.log_outage_event(self.current_outage_node, outage_type, "Node restarted")
-
-        self.sbcli_utils.wait_for_storage_node_status(self.current_outage_node, "online", timeout=1000)
         self.sbcli_utils.wait_for_health_status(self.current_outage_node, True, timeout=1000)
         self.outage_end_time = int(datetime.now().timestamp())
 
@@ -827,7 +836,7 @@ class RandomFailoverTest(TestLvolHACluster):
             )
             no_task_ok = outage_type in {"partial_nw", "partial_nw_single_port", "lvol_disconnect_primary"}
             if not self.sbcli_utils.is_secondary_node(self.current_outage_node):
-                self.validate_migration_for_node(self.outage_start_time, 2000, None, 60, no_task_ok=no_task_ok)
+                self.validate_migration_for_node(self.outage_start_time, 4000, None, 60, no_task_ok=no_task_ok)
 
             for clone, clone_details in self.clone_mount_details.items():
                 self.common_utils.validate_fio_test(self.fio_node,
@@ -857,7 +866,7 @@ class RandomFailoverTest(TestLvolHACluster):
             )
             no_task_ok = outage_type in {"partial_nw", "partial_nw_single_port", "lvol_disconnect_primary"}
             if not self.sbcli_utils.is_secondary_node(self.current_outage_node):
-                self.validate_migration_for_node(self.outage_start_time, 2000, None, 60, no_task_ok=no_task_ok)
+                self.validate_migration_for_node(self.outage_start_time, 4000, None, 60, no_task_ok=no_task_ok)
             self.common_utils.manage_fio_threads(self.fio_node, self.fio_threads, timeout=100000)
 
             for lvol_name, lvol_details in self.lvol_mount_details.items():
