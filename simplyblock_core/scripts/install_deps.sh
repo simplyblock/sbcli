@@ -17,9 +17,10 @@ sudo chmod 777 /etc/foundationdb
 sudo modprobe nvme-tcp
 sudo modprobe nbd
 
-
-echo \"net.ipv6.conf.all.disable_ipv6=1\" | sudo tee /etc/sysctl.d/disable_ipv6.conf
-echo \"vm.max_map_count=262144\" | sudo tee -a /etc/sysctl.d/disable_ipv6.conf
+echo -e "net.ipv6.conf.all.disable_ipv6 = 1\n
+net.ipv6.conf.default.disable_ipv6 = 1\n
+net.ipv6.conf.lo.disable_ipv6 = 1\n
+vm.max_map_count=262144" | sudo tee "/etc/sysctl.d/disable_ipv6.conf" > /dev/null
 sudo sysctl --system
 
 
