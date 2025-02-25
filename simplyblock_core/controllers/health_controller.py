@@ -119,7 +119,7 @@ def _check_port_on_node(snode, port_id):
         return True
     except Exception as e:
         logger.error(e)
-    return True
+    return False
 
 
 def _check_node_ping(ip):

@@ -183,13 +183,15 @@ def set_node_offline(node):
         # if node.jm_device.status != JMDevice.STATUS_UNAVAILABLE:
         #     device_controller.set_jm_device_state(node.jm_device.get_id(), JMDevice.STATUS_UNAVAILABLE)
 
-def set_node_down(node):
+def set_node_down(node, dev_status):
     if node.status != StorageNode.STATUS_DOWN:
         storage_node_ops.set_node_status(node.get_id(), StorageNode.STATUS_DOWN)
-        # set devices unavailable
-        for dev in node.nvme_devices:
-            if dev.status in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_READONLY]:
-                device_controller.device_set_unavailable(dev.get_id())
+
+        if dev_status:
+            # set devices status
+            for dev in node.nvme_devices:
+                if dev.status != dev_status:
+                    device_controller.device_set_state(dev.get_id(), dev_status)
 
 
 logger.info("Starting node monitor")
@@ -239,6 +241,7 @@ while True:
             logger.info(f"Check: node RPC {snode.mgmt_ip}:{snode.rpc_port} ... {node_rpc_check}")
 
             node_port_check = True
+            down_ports = []
             if spdk_process:
                 if snode.is_secondary_node:
                     ports = [4420]
@@ -251,13 +254,16 @@ while True:
                     ret = health_controller._check_port_on_node(snode, port)
                     logger.info(f"Check: node port {snode.mgmt_ip}, {port} ... {ret}")
                     node_port_check &= ret
+                    if not ret and port == 4420:
+                        down_ports.append(port)
 
                 for data_nic in snode.data_nics:
                     if data_nic.ip4_address:
                         data_ping_check = health_controller._check_node_ping(data_nic.ip4_address)
-                        logger.info(f"Check: ping ip {data_nic.ip4_address} ... {data_ping_check}")
+                        logger.info(f"Check: ping data nic {data_nic.ip4_address} ... {data_ping_check}")
                         if not data_ping_check:
                             node_port_check = False
+                            down_ports.append(data_nic.ip4_address)
 
             is_node_online = ping_check and node_api_check and spdk_process and node_rpc_check and node_port_check
             if is_node_online:
@@ -289,7 +295,12 @@ while True:
                         tasks_controller.add_node_to_auto_restart(snode)
                 elif not node_port_check:
                     logger.info(f"Port check failed")
-                    set_node_down(snode)
+                    if down_ports:
+                        set_node_down(snode, dev_status=NVMeDevice.STATUS_UNAVAILABLE)
+                    else:
+                        set_node_down(snode, dev_status=NVMeDevice.STATUS_ONLINE)
+
+
                 else:
                     set_node_offline(snode)
 
