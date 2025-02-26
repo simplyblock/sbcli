@@ -874,17 +874,6 @@ def delete_lvol(id_or_name, force_delete=False):
         snode.rpc_username,
         snode.rpc_password)
 
-    # # soft delete LVol if it has snapshots
-    # snaps = db_controller.get_snapshots()
-    # for snap in snaps:
-    #     if snap.deleted is False and snap.lvol.get_id() == lvol.get_id():
-    #         logger.warning(f"Soft delete LVol that has snapshots. Snapshot:{snap.get_id()}")
-    #         ret = rpc_client.subsystem_delete(lvol.nqn)
-    #         logger.debug(ret)
-    #         lvol.deleted = True
-    #         lvol.write_to_db(db_controller.kv_store)
-    #         return True
-
     # set status
     lvol.status = LVol.STATUS_IN_DELETION
     lvol.write_to_db(db_controller.kv_store)
@@ -910,6 +899,7 @@ def delete_lvol(id_or_name, force_delete=False):
     elif lvol.ha_type == "ha":
 
         sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
+        host_node = db_controller.get_storage_node_by_id(snode.get_id())
 
         sec_rpc_client = RPCClient(
             sec_node.mgmt_ip,
@@ -917,75 +907,72 @@ def delete_lvol(id_or_name, force_delete=False):
             sec_node.rpc_username,
             sec_node.rpc_password, timeout=5, retry=1)
 
-        if snode.status != StorageNode.STATUS_ONLINE:
+        primary_node = None
+        secondary_node = None
+        if host_node.status == StorageNode.STATUS_ONLINE:
 
-            if sec_node.status != StorageNode.STATUS_ONLINE:
-                logger.error(f"Secondary node status is not online or offline, node: {sec_node.get_id()}, status: {sec_node.status}")
-                if not force_delete:
-                    return False
+            if is_node_leader(host_node, lvol.lvs_name):
+                primary_node = host_node
+                if sec_node.status == StorageNode.STATUS_DOWN:
+                    msg = f"Secondary node is in down status, can not create lvol"
+                    logger.error(msg)
+                    lvol.remove(db_controller.kv_store)
+                    return False, msg
+                elif sec_node.status == StorageNode.STATUS_ONLINE:
+                    secondary_node = sec_node
+                else:
+                    secondary_node = None
 
-            ret = sec_rpc_client.bdev_lvol_set_leader(True, lvs_name=lvol.lvs_name)
-            if not ret:
-                logger.error(f"Failed to set leader for secondary node: {sec_node.get_id()}")
-                if not force_delete:
-                    return False
-            ret = delete_lvol_from_node(lvol.get_id(), sec_node.get_id())
-            if not ret:
-                logger.error(f"Failed to delete lvol from node: {sec_node.get_id()}")
-                if not force_delete:
-                    return False
+            elif sec_node.status == StorageNode.STATUS_ONLINE:
+                if is_node_leader(sec_node, lvol.lvs_name):
+                    primary_node = sec_node
+                    secondary_node = host_node
+                else:
+                    # both nodes are non leaders and online, set primary as leader
+                    primary_node = host_node
+                    secondary_node = sec_node
+
+            else:
+                # sec node is not online, set primary as leader
+                primary_node = host_node
+                secondary_node = None
+
+        elif sec_node.status == StorageNode.STATUS_ONLINE:
+            # primary is not online but secondary is, create on secondary and set leader if needed,
+            secondary_node = None
+            primary_node = sec_node
 
         else:
+            # both primary and secondary are not online
+            msg = f"Host nodes are not online"
+            logger.error(msg)
+            lvol.remove(db_controller.kv_store)
+            return False, msg
 
 
-            if sec_node.status == StorageNode.STATUS_ONLINE:
-                ret = sec_rpc_client.subsystem_delete(lvol.nqn)
+        if primary_node:
 
+            if not is_node_leader(primary_node, lvol.lvs_name):
+                rpc_client.bdev_lvol_set_leader(True, lvs_name=lvol.lvs_name)
 
-        # ret = sec_rpc_client.bdev_lvol_set_leader(False, lvs_name=lvol.lvs_name)
-        # if not ret:
-        #     logger.error(f"Failed to set leader for secondary node: {sec_node.get_id()}")
-        #     if not force_delete:
-        #         return False
-        #
-        # time.sleep(1)
-        # rpc_client.subsystem_delete(lvol.nqn)
-        # rpc_client.bdev_lvol_set_leader(True, lvs_name=lvol.lvs_name)
-        # if not ret:
-        #     logger.error(f"Failed to set leader for primary node: {snode.get_id()}")
-        #     if not force_delete:
-        #         return False
-        #
-        # time.sleep(1)
-        ret = delete_lvol_from_node(lvol.get_id(), lvol.node_id)
-        if not ret:
-            logger.error(f"Failed to delete lvol from node: {snode.get_id()}")
-            if not force_delete:
-                return False
-
-        # time.sleep(1)
-
-        if sec_node.status == StorageNode.STATUS_ONLINE:
-
-            ret = delete_lvol_from_node(lvol.get_id(), snode.secondary_node_id)
+            ret = delete_lvol_from_node(lvol.get_id(), primary_node.get_id())
             if not ret:
-                logger.error(f"Failed to delete lvol from node: {sec_node.get_id()}")
+                logger.error(f"Failed to delete lvol from node: {primary_node.get_id()}")
                 if not force_delete:
                     return False
-        #
-        # time.sleep(1)
-        # ret = sec_rpc_client.bdev_lvol_set_leader(False, lvs_name=lvol.lvs_name)
-        # if not ret:
-        #     logger.error(f"Failed to set leader for secondary node: {sec_node.get_id()}")
-        #     if not force_delete:
-        #         return False
-        #
-        # time.sleep(1)
-        # ret = rpc_client.bdev_lvol_set_leader(True, lvs_name=lvol.lvs_name)
-        # if not ret:
-        #     logger.error(f"Failed to set leader for primary node: {snode.get_id()}")
-        #     if not force_delete:
-        #         return False
+
+        if secondary_node:
+            secondary_node = db_controller.get_storage_node_by_id(secondary_node.get_id())
+            if secondary_node.status == StorageNode.STATUS_ONLINE:
+
+                if not is_node_leader(secondary_node, lvol.lvs_name):
+                    sec_rpc_client.bdev_lvol_set_leader(False, lvs_name=lvol.lvs_name)
+
+                ret = delete_lvol_from_node(lvol.get_id(), secondary_node.get_id())
+                if not ret:
+                    logger.error(f"Failed to delete lvol from node: {secondary_node.get_id()}")
+                    if not force_delete:
+                        return False
 
     lvol_events.lvol_delete(lvol)
     lvol.remove(db_controller.kv_store)
@@ -1218,61 +1205,92 @@ def resize_lvol(id, new_size):
 
     size_in_mib = int(new_size / (1000 * 1000))
 
+    rpc_client = RPCClient(
+        snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
+
     error = False
-    sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
-    if sec_node and sec_node.status == StorageNode.STATUS_ONLINE:
-        sec_node_rpc_client = RPCClient(
-            sec_node.mgmt_ip, sec_node.rpc_port, sec_node.rpc_username, sec_node.rpc_password)
-        for iface in sec_node.data_nics:
-            if iface.ip4_address:
-                ret = sec_node_rpc_client.nvmf_subsystem_listener_set_ana_state(
-                    lvol.nqn, iface.ip4_address, lvol.subsys_port, False, ana="inaccessible")
+    if lvol.ha_type == "single":
 
-    if snode.status == StorageNode.STATUS_ONLINE:
+        if not is_node_leader(snode, lvol.lvs_name):
+            rpc_client.bdev_lvol_set_leader(True, lvs_name=lvol.lvs_name)
 
-        rpc_client = RPCClient(
-            snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
-        for iface in snode.data_nics:
-            if iface.ip4_address:
-                ret = rpc_client.nvmf_subsystem_listener_set_ana_state(
-                    lvol.nqn, iface.ip4_address, lvol.subsys_port, False, ana="inaccessible")
-
-        rpc_client.bdev_lvol_set_leader(True, lvs_name=lvol.lvs_name)
         ret = rpc_client.bdev_lvol_resize(f"{lvol.lvs_name}/{lvol.lvol_bdev}", size_in_mib)
         if not ret:
             logger.error(f"Error resizing lvol on node: {snode.get_id()}")
             error = True
 
-        if lvol.ha_type == "ha":
-            sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
-            if sec_node and sec_node.status == StorageNode.STATUS_ONLINE:
-                sec_node_rpc_client = RPCClient(
-                    sec_node.mgmt_ip, sec_node.rpc_port, sec_node.rpc_username, sec_node.rpc_password)
+    else:
+        primary_node = None
+        secondary_node = None
+        host_node = db_controller.get_storage_node_by_id(snode.get_id())
+        sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
+        if host_node.status == StorageNode.STATUS_ONLINE:
 
-                logger.info(f"Resizing LVol: {lvol.get_id()} on secondary node: {sec_node.get_id()}")
-                sec_node_rpc_client.bdev_lvol_set_leader(False, lvs_name=lvol.lvs_name)
-                ret = sec_node_rpc_client.bdev_lvol_resize(f"{lvol.lvs_name}/{lvol.lvol_bdev}", size_in_mib)
-                if not ret:
-                    logger.error(f"Error resizing lvol on node: {sec_node.get_id()}")
-                    logger.info(f"Revert size on node {snode.get_id()}")
-                    size_in_mib = int(lvol.size / (1000 * 1000))
-                    ret = rpc_client.bdev_lvol_resize(f"{lvol.lvs_name}/{lvol.lvol_bdev}", size_in_mib)
-                    if not ret:
-                        logger.error(f"Failed to revert size for lvol on node {snode.get_id()}, LVol current size: {utils.humanbytes(new_size)}")
+            if is_node_leader(host_node, lvol.lvs_name):
+                primary_node = host_node
+                if sec_node.status == StorageNode.STATUS_DOWN:
+                    msg = f"Secondary node is in down status, can not create lvol"
+                    logger.error(msg)
                     error = True
 
-    else:
-        sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
-        if not sec_node or sec_node.status != StorageNode.STATUS_ONLINE:
+                elif sec_node.status == StorageNode.STATUS_ONLINE:
+                    secondary_node = sec_node
+                else:
+                    secondary_node = None
+
+            elif sec_node.status == StorageNode.STATUS_ONLINE:
+                if is_node_leader(sec_node, lvol.lvs_name):
+                    primary_node = sec_node
+                    secondary_node = host_node
+                else:
+                    # both nodes are non leaders and online, set primary as leader
+                    primary_node = host_node
+                    secondary_node = sec_node
+
+            else:
+                # sec node is not online, set primary as leader
+                primary_node = host_node
+                secondary_node = None
+
+        elif sec_node.status == StorageNode.STATUS_ONLINE:
+            # primary is not online but secondary is, create on secondary and set leader if needed,
+            secondary_node = None
+            primary_node = sec_node
+
+        else:
+            # both primary and secondary are not online
             msg = f"Host nodes are not online"
             logger.error(msg)
             error = True
-        else:
-            sec_rpc_client = RPCClient(sec_node.mgmt_ip, sec_node.rpc_port, sec_node.rpc_username, sec_node.rpc_password)
-            ret = sec_rpc_client.bdev_lvol_resize(f"{lvol.lvs_name}/{lvol.lvol_bdev}", size_in_mib)
+
+        if primary_node:
+
+            rpc_client = RPCClient(primary_node.mgmt_ip, primary_node.rpc_port, primary_node.rpc_username,
+                                       primary_node.rpc_password)
+
+            if not is_node_leader(primary_node, lvol.lvs_name):
+                rpc_client.bdev_lvol_set_leader(True, lvs_name=lvol.lvs_name)
+
+            ret = rpc_client.bdev_lvol_resize(f"{lvol.lvs_name}/{lvol.lvol_bdev}", size_in_mib)
             if not ret:
-                logger.error(f"Error resizing lvol on node: {sec_node.get_id()}")
+                logger.error(f"Error resizing lvol on node: {primary_node.get_id()}")
                 error = True
+
+        if secondary_node:
+            secondary_node = db_controller.get_storage_node_by_id(secondary_node.get_id())
+            if secondary_node.status == StorageNode.STATUS_ONLINE:
+
+                sec_rpc_client = RPCClient(secondary_node.mgmt_ip, secondary_node.rpc_port, secondary_node.rpc_username,
+                                           secondary_node.rpc_password)
+
+                if not is_node_leader(secondary_node, lvol.lvs_name):
+                    rpc_client.bdev_lvol_set_leader(False, lvs_name=lvol.lvs_name)
+
+                ret = sec_rpc_client.bdev_lvol_resize(f"{lvol.lvs_name}/{lvol.lvol_bdev}", size_in_mib)
+                if not ret:
+                    logger.error(f"Error resizing lvol on node: {sec_node.get_id()}")
+                    error = True
+
 
     if snode.status == StorageNode.STATUS_ONLINE:
         rpc_client = RPCClient(
@@ -1282,6 +1300,7 @@ def resize_lvol(id, new_size):
                 ret = rpc_client.nvmf_subsystem_listener_set_ana_state(
                     lvol.nqn, iface.ip4_address, lvol.subsys_port, True)
 
+    sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
     if sec_node and sec_node.status == StorageNode.STATUS_ONLINE:
         sec_node_rpc_client = RPCClient(
             sec_node.mgmt_ip, sec_node.rpc_port, sec_node.rpc_username, sec_node.rpc_password)

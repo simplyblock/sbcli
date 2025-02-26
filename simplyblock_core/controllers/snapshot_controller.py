@@ -257,59 +257,114 @@ def delete(snapshot_uuid, force_delete=False):
 
     logger.info(f"Removing snapshot: {snapshot_uuid}")
 
-    if snode.status == StorageNode.STATUS_ONLINE:
-
-        # creating RPCClient instance
-        rpc_client = RPCClient(
-            snode.mgmt_ip,
-            snode.rpc_port,
-            snode.rpc_username,
-            snode.rpc_password)
-
-        ret = rpc_client.bdev_lvol_set_leader(True, lvs_name=snap.lvol.lvs_name)
-        if not ret:
-            logger.error(f"Failed to set leader for primary node: {snode.get_id()}")
-            if not force_delete:
-                return False
-
-        ret = rpc_client.delete_lvol(snap.snap_bdev)
-        if not ret:
-            logger.error(f"Failed to delete snap from node: {snode.get_id()}")
-            if not force_delete:
-                return False
-
-        if snode.secondary_node_id:
-            sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
-            if sec_node.status == StorageNode.STATUS_ONLINE:
-                sec_rpc_client = RPCClient(
-                    sec_node.mgmt_ip,
-                    sec_node.rpc_port,
-                    sec_node.rpc_username,
-                    sec_node.rpc_password)
-
-                ret = sec_rpc_client.bdev_lvol_set_leader(False, lvs_name=snap.lvol.lvs_name)
+    if snap.lvol.ha_type == "single":
+        if snode.status == StorageNode.STATUS_ONLINE:
+            rpc_client = RPCClient(
+                snode.mgmt_ip,
+                snode.rpc_port,
+                snode.rpc_username,
+                snode.rpc_password)
+            if not lvol_controller.is_node_leader(snode, snap.lvol.lvs_name):
+                ret = rpc_client.bdev_lvol_set_leader(True, lvs_name=snap.lvol.lvs_name)
                 if not ret:
-                    logger.error(f"Failed to set leader for secondary node: {sec_node.get_id()}")
+                    logger.error(f"Failed to set leader for primary node: {snode.get_id()}")
                     if not force_delete:
                         return False
-                ret = sec_rpc_client.delete_lvol(snap.snap_bdev)
-                if not ret:
-                    logger.error(f"Failed to delete snap from node: {sec_node.get_id()}")
-                    if not force_delete:
-                        return False
+
+            ret = rpc_client.delete_lvol(snap.snap_bdev)
+            if not ret:
+                logger.error(f"Failed to delete snap from node: {snode.get_id()}")
+                if not force_delete:
+                    return False
+
+        else:
+            msg = f"Host node is not online {snode.get_id()}"
+            logger.error(msg)
+            return False
+
     else:
+
+        secondary_node = None
+        primary_node = None
+        host_node = db_controller.get_storage_node_by_id(snode.get_id())
         sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
-        if not sec_node or sec_node.status != StorageNode.STATUS_ONLINE:
+        if host_node.status == StorageNode.STATUS_ONLINE:
+            if lvol_controller.is_node_leader(host_node, snap.lvol.lvs_name):
+                primary_node = host_node
+                if sec_node.status == StorageNode.STATUS_DOWN:
+                    msg = f"Secondary node is in down status, can not create lvol"
+                    logger.error(msg)
+                    return False
+
+                elif sec_node.status == StorageNode.STATUS_ONLINE:
+                    secondary_node = sec_node
+                else:
+                    secondary_node = None
+
+            elif sec_node.status == StorageNode.STATUS_ONLINE:
+                if lvol_controller.is_node_leader(sec_node, snap.lvol.lvs_name):
+                    primary_node = sec_node
+                    secondary_node = host_node
+                else:
+                    # both nodes are non leaders and online, set primary as leader
+                    primary_node = host_node
+                    secondary_node = sec_node
+
+            else:
+                # sec node is not online, set primary as leader
+                primary_node = host_node
+                secondary_node = None
+
+        elif sec_node.status == StorageNode.STATUS_ONLINE:
+            # primary is not online but secondary is, create on secondary and set leader if needed,
+            secondary_node = None
+            primary_node = sec_node
+
+        else:
+            # both primary and secondary are not online
             msg = f"Host nodes are not online"
             logger.error(msg)
-            return False, msg
+            return False
 
-        sec_rpc_client = RPCClient(sec_node.mgmt_ip, sec_node.rpc_port, sec_node.rpc_username, sec_node.rpc_password)
-        ret = sec_rpc_client.delete_lvol(snap.snap_bdev)
-        if not ret:
-            logger.error(f"Failed to delete snap from node: {sec_node.get_id()}")
-            if not force_delete:
-                return False
+        if primary_node:
+
+            rpc_client = RPCClient(primary_node.mgmt_ip, primary_node.rpc_port, primary_node.rpc_username,
+                                       primary_node.rpc_password)
+
+            if not lvol_controller.is_node_leader(primary_node, snap.lvol.lvs_name):
+                ret = rpc_client.bdev_lvol_set_leader(True, lvs_name=snap.lvol.lvs_name)
+                if not ret:
+                    logger.error(f"Failed to set leader for primary node: {snode.get_id()}")
+                    if not force_delete:
+                        return False
+
+            ret = rpc_client.delete_lvol(snap.snap_bdev)
+            if not ret:
+                logger.error(f"Failed to delete snap from node: {snode.get_id()}")
+                if not force_delete:
+                    return False
+
+        if secondary_node:
+            secondary_node = db_controller.get_storage_node_by_id(secondary_node.get_id())
+            if secondary_node.status == StorageNode.STATUS_ONLINE:
+
+                sec_rpc_client = RPCClient(secondary_node.mgmt_ip, secondary_node.rpc_port, secondary_node.rpc_username,
+                                           secondary_node.rpc_password)
+
+                if lvol_controller.is_node_leader(secondary_node, snap.lvol.lvs_name):
+                    if not lvol_controller.is_node_leader(snode, snap.lvol.lvs_name):
+                        ret = sec_rpc_client.bdev_lvol_set_leader(True, lvs_name=snap.lvol.lvs_name)
+                        if not ret:
+                            logger.error(f"Failed to set leader for node: {secondary_node.get_id()}")
+                            if not force_delete:
+                                return False
+
+                ret = sec_rpc_client.delete_lvol(snap.snap_bdev)
+                if not ret:
+                    logger.error(f"Failed to delete snap from node: {secondary_node.get_id()}")
+                    if not force_delete:
+                        return False
+
 
     snap.remove(db_controller.kv_store)
 
