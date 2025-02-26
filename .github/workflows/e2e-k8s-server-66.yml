@@ -87,6 +87,14 @@ jobs:
           ref: refs/heads/${{ github.event.inputs.simplyBlockDeploy_branch || 'main'}}
           path: 'simplyBlockDeploy'
           token: ${{ secrets.GH_ACCESS_KEY_ID_HAMDI }}
+      
+      - uses: actions/checkout@master
+        name: Checkout code simplyblock_csi_branch
+        with:
+          repository: simplyblock-io/simplyblock-csi
+          ref: refs/heads/${{ github.event.inputs.simplyblock_csi_branch || 'master'}}
+          path: 'simplyblock-csi'
+          token: ${{ secrets.GH_ACCESS_KEY_ID_HAMDI }}
 
       - name: Install Helm v3.15.4
         run: |
@@ -169,14 +177,13 @@ jobs:
       - name: Retrieve Cluster Details
         id: retrieve_cluster_details
         run: |
-          export CLUSTER_ID=$(ssh -i ~/.ssh/simplyblock-us-east-2.pem root@$MNODES "$SBCLI_CMD cluster list | grep simplyblock | awk '{print $2}'")
-          export CLUSTER_SECRET=$(ssh -i ~/.ssh/simplyblock-us-east-2.pem root@$MNODES "$SBCLI_CMD cluster get-secret $CLUSTER_ID")
+          CLUSTER_ID=$(ssh -i ~/.ssh/simplyblock-us-east-2.pem -o StrictHostKeyChecking=no root@$MNODES "$SBCLI_CMD cluster list | grep simplyblock | awk '{print \$2}'")
+          CLUSTER_SECRET=$(ssh -i ~/.ssh/simplyblock-us-east-2.pem -o StrictHostKeyChecking=no root@$MNODES "$SBCLI_CMD cluster get-secret $CLUSTER_ID")
+
           echo "CLUSTER_ID=$CLUSTER_ID" >> $GITHUB_ENV
           echo "CLUSTER_SECRET=$CLUSTER_SECRET" >> $GITHUB_ENV
         env:
           SBCLI_CMD: ${{ env.SBCLI_CMD }}
-          KEY_NAME: "simplyblock-us-east-2.pem"
-          BASTION_IP: "192.168.10.66"
           MNODES: "192.168.10.66"
 
 
