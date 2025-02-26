@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from simplyblock_core import constants, db_controller, cluster_ops, storage_node_ops, utils
 from simplyblock_core.controllers import health_controller, device_controller, tasks_controller
 from simplyblock_core.models.cluster import Cluster
+from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.nvme_device import NVMeDevice, JMDevice
 from simplyblock_core.models.storage_node import StorageNode
 
@@ -118,6 +119,14 @@ def update_cluster_status(cluster_id):
 
     next_current_status = get_next_cluster_status(cluster_id)
     logger.info("cluster_new_status: %s", next_current_status)
+
+    task_pending = 0
+    for task in db_controller.get_job_tasks(cluster_id):
+        if task.status != JobSchedule.STATUS_DONE:
+            task_pending += 1
+
+    cluster.is_re_balancing = task_pending  > 0
+    cluster.write_to_db()
 
     if current_cluster_status == Cluster.STATUS_DEGRADED and next_current_status == Cluster.STATUS_ACTIVE:
     # if cluster.status not in [Cluster.STATUS_ACTIVE, Cluster.STATUS_UNREADY] and cluster_current_status == Cluster.STATUS_ACTIVE:
