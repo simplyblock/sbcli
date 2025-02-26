@@ -92,14 +92,19 @@ jobs:
         run: |
           curl -L https://get.helm.sh/helm-v3.15.4-linux-amd64.tar.gz -o helm-v3.15.4-linux-amd64.tar.gz
           tar -zxvf helm-v3.15.4-linux-amd64.tar.gz
-          mv linux-amd64/helm /usr/local/bin/helm
+          mkdir -p $HOME/bin
+          mv linux-amd64/helm $HOME/bin/helm
+          echo "export PATH=$HOME/bin:$PATH" >> ~/.bashrc
+          source ~/.bashrc
           helm version
 
       - name: Install kubectl v1.31.0
         run: |
           curl -LO "https://dl.k8s.io/release/v1.31.0/bin/linux/amd64/kubectl"
           chmod +x kubectl
-          mv kubectl /usr/local/bin/
+          mv kubectl $HOME/bin/kubectl
+          echo "export PATH=$HOME/bin:$PATH" >> ~/.bashrc
+          source ~/.bashrc
           kubectl version --client
 
       - name: Set parameters based on branch and input
