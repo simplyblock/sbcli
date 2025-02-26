@@ -246,7 +246,7 @@ while True:
 
             node_port_check = True
             down_ports = []
-            if spdk_process:
+            if spdk_process and snode.lvstore_status == "ready":
                 if snode.is_secondary_node:
                     ports = [4420]
                     for n in db_controller.get_primary_storage_nodes_by_secondary_node_id(snode.get_id()):

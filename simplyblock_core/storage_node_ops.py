@@ -1947,7 +1947,6 @@ def restart_storage_node(
                 logger.error("Failed to recreate lvstore")
                 snode.lvstore_status = "failed"
                 snode.write_to_db()
-                return False
             else:
                 snode.lvstore_status = "ready"
                 snode.write_to_db()
