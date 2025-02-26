@@ -16,7 +16,7 @@ def _port_event(node, message, caused_by, event):
         db_object=node,
         caused_by=caused_by,
         message=message,
-        node_id=node.get())
+        node_id=node.get_id())
 
 
 def port_allowed(node, port, caused_by=ec.CAUSED_BY_CLI):
