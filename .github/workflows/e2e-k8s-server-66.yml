@@ -132,6 +132,7 @@ jobs:
       - name: Bootstrap Cluster
         run: |
           cd $GITHUB_WORKSPACE/simplyBlockDeploy
+          helm uninstall -n spdk-csi spdk-csi
           ./bootstrap-cluster.sh --sbcli-cmd "$SBCLI_CMD" \
             --max-lvol 20 --max-snap 20 --max-prov 100G --number-of-devices 3 \
             --distr-ndcs $NDCS \
@@ -324,6 +325,18 @@ jobs:
           MNODES: "192.168.10.66"
           API_INVOKE_URL: "http://192.168.10.66/"
 
+      - name: Uninstall K3s agent on all nodes (if test passes)
+        if: success()
+        run: |
+          helm uninstall -n spdk-csi spdk-csi
+          for node in $K3S_MNODES $STORAGE_PRIVATE_IPS $SEC_STORAGE_PRIVATE_IPS; do
+            ssh root@${node} "k3s-agent-uninstall.sh"
+          done
+        env:
+          STORAGE_PRIVATE_IPS: "192.168.10.67 192.168.10.68 192.168.10.69"
+          SEC_STORAGE_PRIVATE_IPS: "192.168.10.70"
+          
+
       - name: Record Test End Time
         if: always()
         run: echo "TEST_END_TIME=$(date +%s)" >> $GITHUB_ENV
@@ -476,16 +489,6 @@ jobs:
           MESSAGE="Python E2E K8s tests run triggered on branch *${BRANCH_NAME}*. \nTotal Time Taken to run the tests: ${TIME_TAKEN}. \n\n${OVERALL_STATUS}\nGitHub Run: ${GITHUB_RUN_URL}\nAWS Logs: ${AWS_LOGS_URL}\n\n*Configuration*: *NDCS: ${NDCS}, NPCS: ${NPCS}, Block Size: ${BS}, Chunk Block Size: ${CHUNK_BS}*\n\nTotal Tests: *${TOTAL_TESTS}*, Passed Tests: *${PASSED_TESTS}*, Failed Tests: *${FAILED_TESTS}*\n\n-- Test Cases Passed :white_check_mark:\n${PASSED_CASES_BULLETS}\n\n-- Test Cases Failed :x:\n${FAILED_CASES_BULLETS}\n\n-- Test Cases Skipped :x:\n${SKIPPED_CASES_BULLETS}"
 
           curl -X POST -H 'Content-type: application/json' --data "{\"text\":\"${MESSAGE}\"}" $SLACK_WEBHOOK_URL
-
-      - name: Uninstall K3s agent on all nodes (if test passes)
-        if: success()
-        run: |
-          for node in $K3S_MNODES $STORAGE_PRIVATE_IPS $SEC_STORAGE_PRIVATE_IPS; do
-            ssh root@${node} "k3s-agent-uninstall.sh"
-          done
-        env:
-          STORAGE_PRIVATE_IPS: "192.168.10.67 192.168.10.68 192.168.10.69"
-          SEC_STORAGE_PRIVATE_IPS: "192.168.10.70"
 
       - name: 'Cleanup build folder'
         run: |
