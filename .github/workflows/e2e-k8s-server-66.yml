@@ -169,8 +169,8 @@ jobs:
       - name: Retrieve Cluster Details
         id: retrieve_cluster_details
         run: |
-          export CLUSTER_ID=$(ssh root@$MNODES "$SBCLI_CMD cluster list | grep simplyblock | awk '{print $2}'")
-          export CLUSTER_SECRET=$(ssh root@$MNODES "$SBCLI_CMD cluster get-secret $CLUSTER_ID")
+          export CLUSTER_ID=$(ssh -i ~/.ssh/simplyblock-us-east-2.pem root@$MNODES "$SBCLI_CMD cluster list | grep simplyblock | awk '{print $2}'")
+          export CLUSTER_SECRET=$(ssh -i ~/.ssh/simplyblock-us-east-2.pem root@$MNODES "$SBCLI_CMD cluster get-secret $CLUSTER_ID")
           echo "CLUSTER_ID=$CLUSTER_ID" >> $GITHUB_ENV
           echo "CLUSTER_SECRET=$CLUSTER_SECRET" >> $GITHUB_ENV
         env:
