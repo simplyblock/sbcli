@@ -146,6 +146,13 @@ jobs:
           echo "::set-output name=mnodes::$MNODES"
           echo "::set-output name=storage_private_ips::$STORAGE_PRIVATE_IPS"
 
+          ssh -i ~/.ssh/simplyblock-us-east-2.pem -o StrictHostKeyChecking=no root@${MNODES} <<EOF
+          iptables -P INPUT ACCEPT
+          iptables -P OUTPUT ACCEPT
+          iptables -P FORWARD ACCEPT
+          iptables -F
+          EOF
+
           ./bootstrap-k3s.sh --k8s-snode
 
         id: bootstrap_cluster
@@ -193,15 +200,15 @@ jobs:
           helm install spdk-csi ./ \
             --namespace spdk-csi \
             --create-namespace \
-            --set csiConfig.simplybk.uuid="$CLUSTER_ID" \
-            --set csiConfig.simplybk.ip="http://$MNODES/" \
-            --set csiSecret.simplybk.secret="$CLUSTER_SECRET" \
+            --set csiConfig.simplybk.uuid="${CLUSTER_ID}" \
+            --set csiConfig.simplybk.ip="${API_INVOKE_URL}" \
+            --set csiSecret.simplybk.secret="${CLUSTER_SECRET}" \
             --set image.simplyblock.tag="main" \
             --set logicalVolume.pool_name="testing1" \
             --set logicalVolume.snapshot="True" \
             --set image.spdkcsi.tag=latest \
-            --set logicalVolume.distr_ndcs="$NDCS" \
-            --set logicalVolume.distr_npcs="$NPCS" \
+            --set logicalVolume.distr_ndcs="${NDCS}" \
+            --set logicalVolume.distr_npcs="${NPCS}" \
             --set storagenode.create=true \
             --set cachingnode.create=false \
             --set logicalVolume.encryption=true \
@@ -232,8 +239,8 @@ jobs:
       - name: Check Cluster Status
         run: |
           CLUSTER_API_GATEWAY_ENDPOINT="http://192.168.10.66/"
-          CLUSTER_UUID="$CLUSTER_ID"
-          CLUSTER_SECRET="$CLUSTER_SECRET"
+          CLUSTER_UUID="${CLUSTER_ID}"
+          CLUSTER_SECRET="${CLUSTER_SECRET}"
           n=0
           until [ "$n" -ge 60 ]
           do
