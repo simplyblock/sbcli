@@ -3,7 +3,7 @@ import time
 from datetime import datetime
 
 
-from simplyblock_core.controllers import health_controller, storage_events, device_events
+from simplyblock_core.controllers import health_controller, storage_events, device_events, tcp_ports_events
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
@@ -325,6 +325,7 @@ while True:
                 if port:
                     logger.info(f"Allow port {port} on node {node_id}")
                     snode_api.firewall_set_port(port, "tcp", "allow")
+                    tcp_ports_events.port_allowed(snode, port)
 
     nodes_ports_blocked = {}
 

@@ -916,7 +916,6 @@ def delete_lvol(id_or_name, force_delete=False):
                 if sec_node.status == StorageNode.STATUS_DOWN:
                     msg = f"Secondary node is in down status, can not create lvol"
                     logger.error(msg)
-                    lvol.remove(db_controller.kv_store)
                     return False, msg
                 elif sec_node.status == StorageNode.STATUS_ONLINE:
                     secondary_node = sec_node
