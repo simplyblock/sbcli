@@ -582,7 +582,7 @@ def list():
             "#mgmt": len(mt),
             "#storage": len(st),
             "Mod": f"{cl.distr_ndcs}x{cl.distr_npcs}",
-            "Status": status.capitalize(),
+            "Status": status.upper(),
         })
     return utils.print_table(data)
 
