@@ -250,6 +250,13 @@ def check_node(node_id, with_devices=True):
     node_docker_check = _check_node_docker_api(snode.mgmt_ip)
     logger.info(f"Check: node docker API {snode.mgmt_ip}:2375 ... {node_docker_check}")
 
+    data_nics_check = True
+    for data_nic in snode.data_nics:
+        if data_nic.ip4_address:
+            ping_check = _check_node_ping(data_nic.ip4_address)
+            logger.info(f"Check: ping ip {data_nic.ip4_address} ... {ping_check}")
+            data_nics_check &= ping_check
+
     if snode.is_secondary_node:
         for n in db_controller.get_primary_storage_nodes_by_secondary_node_id(node_id):
             lvol_port_check = _check_port_on_node(snode, n.lvol_subsys_port)

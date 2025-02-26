@@ -288,6 +288,7 @@ while True:
                                                                       JMDevice.STATUS_UNAVAILABLE)
             else:
 
+                cluster = db_controller.get_cluster_by_id(cluster.get_id())
                 if not ping_check and not node_api_check and not spdk_process:
                     # restart on new node
                     storage_node_ops.set_node_status(snode.get_id(), StorageNode.STATUS_SCHEDULABLE)
@@ -298,11 +299,12 @@ while True:
                         set_node_offline(snode)
                         tasks_controller.add_node_to_auto_restart(snode)
                 elif not node_port_check:
-                    logger.info(f"Port check failed")
-                    if down_ports:
-                        set_node_down(snode, dev_status=NVMeDevice.STATUS_UNAVAILABLE)
-                    else:
-                        set_node_down(snode, dev_status=NVMeDevice.STATUS_ONLINE)
+                    if cluster.status in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_READONLY]:
+                        logger.error(f"Port check failed")
+                        if down_ports:
+                            set_node_down(snode, dev_status=NVMeDevice.STATUS_UNAVAILABLE)
+                        else:
+                            set_node_down(snode, dev_status=NVMeDevice.STATUS_ONLINE)
 
 
                 else:
