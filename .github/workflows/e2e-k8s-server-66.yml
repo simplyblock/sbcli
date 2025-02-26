@@ -160,7 +160,7 @@ jobs:
 
       - name: Configure Kubeconfig
         run: |
-          mkdir ~/.kube/config
+          mkdir -p ~/.kube/
           scp -i ~/.ssh/simplyblock-us-east-2.pem root@$K3S_MNODES:/etc/rancher/k3s/k3s.yaml ~/.kube/config
           sed -i "s/server: https:\/\/(localhost|127.0.0.1)\(:[0-9]*\)/server: https:\/\/$K3S_MNODES\2/" ~/.kube/config
         env:
