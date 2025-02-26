@@ -387,6 +387,12 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
         logger.error(mgs)
         return False, mgs
 
+    lvol_count = len(db_controller.get_lvols_by_node_id(host_node.get_id()))
+    if lvol_count > host_node.max_lvol:
+        error = f"Too many lvols on node: {host_node.get_id()}, max lvols reached: {lvol_count}"
+        logger.error(error)
+        return False, error
+
     cluster_size_prov_util = int(((cluster_size_prov+size) / cluster_size_total) * 100)
 
     if cl.prov_cap_crit and cl.prov_cap_crit < cluster_size_prov_util:
@@ -459,12 +465,14 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
         "params": {
             "name": lvol.lvol_bdev,
             "size_in_mib": int(lvol.size / (1000 * 1000)),
-            "lvs_name": lvol.lvs_name
+            "lvs_name": lvol.lvs_name,
+            "lvol_priority_class": 0
         }
     }
 
-    if cl.enable_qos and lvol.lvol_priority_class >= 0:
+    if cl.enable_qos and lvol.lvol_priority_class > 0:
         lvol_dict["params"]["lvol_priority_class"] = lvol.lvol_priority_class
+
     lvol.bdev_stack = [lvol_dict]
 
     if use_crypto:
@@ -493,61 +501,85 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
 
     lvol.write_to_db(db_controller.kv_store)
 
-    if host_node.status == StorageNode.STATUS_ONLINE:
-        if ha_type == "single":
+    if ha_type == "single":
+        if host_node.status == StorageNode.STATUS_ONLINE:
             lvol_bdev, error = add_lvol_on_node(lvol, host_node)
             if error:
                 lvol.remove(db_controller.kv_store)
                 return False, error
+
             lvol.nodes = [host_node.get_id()]
             lvol.lvol_uuid = lvol_bdev['uuid']
             lvol.blobid = lvol_bdev['driver_specific']['lvol']['blobid']
+        else:
+            msg = f"Host node in not online: {host_node.get_id()}"
+            logger.error(msg)
+            lvol.remove(db_controller.kv_store)
+            return False, msg
+
+    if ha_type == "ha":
+        lvol.nodes = [host_node.get_id(), host_node.secondary_node_id]
+        primary_node = None
+        secondary_node = None
+        sec_node = db_controller.get_storage_node_by_id(host_node.secondary_node_id)
+        if host_node.status == StorageNode.STATUS_ONLINE:
+
+            if is_node_leader(host_node):
+                primary_node = host_node
+                if sec_node.status == StorageNode.STATUS_DOWN:
+                    msg = f"Secondary node is in down status, can not create lvol"
+                    logger.error(msg)
+                    lvol.remove(db_controller.kv_store)
+                    return False, msg
+                elif sec_node.status == StorageNode.STATUS_ONLINE:
+                    secondary_node = sec_node
+
+            elif sec_node.status == StorageNode.STATUS_ONLINE:
+                if is_node_leader(sec_node):
+                    primary_node = sec_node
+                    secondary_node = host_node
+                else:
+                    # both nodes are non leaders and online, set primary as leader
+                    primary_node = host_node
+                    secondary_node = sec_node
+
+            else:
+                # sec node is not online, set primary as leader
+                primary_node = host_node
+                secondary_node = None
+
+        elif sec_node.status == StorageNode.STATUS_ONLINE:
+            # primary is not online but secondary is, create on secondary and set leader if needed,
+            secondary_node = None
+            primary_node = sec_node
 
         else:
-            sec_node = db_controller.get_storage_node_by_id(host_node.secondary_node_id)
-            if sec_node and sec_node.status == StorageNode.STATUS_DOWN:
-                msg = f"Secondary node is in down status, can not create lvol"
-                logger.error(msg)
-                lvol.remove(db_controller.kv_store)
-                return False, msg
-
-            lvol_bdev, error = add_lvol_on_node(lvol, host_node)
-            if error:
-                lvol.remove(db_controller.kv_store)
-                return False, error
-            lvol.lvol_uuid = lvol_bdev['uuid']
-            lvol.blobid = lvol_bdev['driver_specific']['lvol']['blobid']
-            lvol.nodes = [host_node.get_id(), host_node.secondary_node_id]
-            if sec_node and sec_node.status == StorageNode.STATUS_ONLINE:
-                ret, error = add_lvol_on_node(lvol, sec_node, ha_inode_self=1)
-                if error:
-                    logger.error(error)
-                    logger.error(f"Failed to add lvol on node: {sec_node.get_id()}")
-                    logger.info(f"Removing LVol from {host_node.get_id()}")
-                    lvol.status = LVol.STATUS_IN_DELETION
-                    lvol.write_to_db(db_controller.kv_store)
-                    ret=delete_lvol_from_node(lvol.get_id(), host_node.get_id())
-                    if ret:
-                        lvol.remove(db_controller.kv_store)
-                    else:
-                        logger.error(f"Failed to remove lvol from node {host_node.get_id()}, LVol status: {lvol.status}")
-                    return False, error
-
-    else:
-        sec_node = db_controller.get_storage_node_by_id(host_node.secondary_node_id)
-        if not sec_node or sec_node.status != StorageNode.STATUS_ONLINE:
+            # both primary and secondary are not online
             msg = f"Host nodes are not online"
             logger.error(msg)
             lvol.remove(db_controller.kv_store)
             return False, msg
 
-        lvol_bdev, error = add_lvol_on_node(lvol, sec_node, ha_inode_self=1, sec_is_prime=True)
-        if error:
-            lvol.remove(db_controller.kv_store)
-            return False, error
-        lvol.nodes = [host_node.get_id(), sec_node.get_id()]
-        lvol.lvol_uuid = lvol_bdev['uuid']
-        lvol.blobid = lvol_bdev['driver_specific']['lvol']['blobid']
+
+        if primary_node:
+            lvol_bdev, error = add_lvol_on_node(lvol, primary_node)
+            if error:
+                logger.error(error)
+                lvol.remove(db_controller.kv_store)
+                return False, error
+
+            lvol.lvol_uuid = lvol_bdev['uuid']
+            lvol.blobid = lvol_bdev['driver_specific']['lvol']['blobid']
+
+
+        if secondary_node:
+            secondary_node = db_controller.get_storage_node_by_id(secondary_node.get_id())
+            if secondary_node.status == StorageNode.STATUS_ONLINE:
+                lvol_bdev, error = add_lvol_on_node(lvol, secondary_node, is_primary=False)
+                if error:
+                    logger.error(error)
+                    lvol.remove(db_controller.kv_store)
+                    return False, error
 
     lvol.pool_uuid = pool.get_id()
     lvol.status = LVol.STATUS_ONLINE
@@ -560,7 +592,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
     return lvol.uuid, None
 
 
-def _create_bdev_stack(lvol, snode, sec_is_prime=False):
+def _create_bdev_stack(lvol, snode, is_primary=True):
     rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
 
     created_bdevs = []
@@ -583,18 +615,18 @@ def _create_bdev_stack(lvol, snode, sec_is_prime=False):
             ret = rpc_client.create_lvstore(**params)
 
         elif type == "bdev_lvol":
-            if snode.is_secondary_node and not sec_is_prime:
+            if is_primary:
+                ret = rpc_client.create_lvol(**params)
+            else:
                 ret = rpc_client.bdev_lvol_register(
                     lvol.lvol_bdev, lvol.lvs_name, lvol.lvol_uuid, lvol.blobid, lvol.lvol_priority_class)
-            else:
-                ret = rpc_client.create_lvol(**params)
 
         elif type == "bdev_lvol_clone":
-            if snode.is_secondary_node and not sec_is_prime:
+            if is_primary:
+                ret = rpc_client.lvol_clone(**params)
+            else:
                 ret = rpc_client.bdev_lvol_clone_register(
                     lvol.lvol_bdev, lvol.snapshot_name, lvol.lvol_uuid, lvol.blobid)
-            else:
-                ret = rpc_client.lvol_clone(**params)
 
         else:
             logger.debug(f"Unknown BDev type: {type}")
@@ -612,33 +644,29 @@ def _create_bdev_stack(lvol, snode, sec_is_prime=False):
     return True, None
 
 
-def add_lvol_on_node(lvol, snode, ha_comm_addrs=None, ha_inode_self=0, sec_is_prime=False):
+def add_lvol_on_node(lvol, snode, is_primary=True):
     rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
 
-    if snode.is_secondary_node and not sec_is_prime:
-        rpc_client.bdev_lvol_set_leader(False, lvs_name=lvol.lvs_name)
+    if is_primary:
+        if not is_node_leader(snode):
+            rpc_client.bdev_lvol_set_leader(True, lvs_name=lvol.lvs_name)
 
     else:
+        if is_node_leader(snode):
+            rpc_client.bdev_lvol_set_leader(False, lvs_name=lvol.lvs_name)
 
-        if not sec_is_prime:
-            lvol_count = len(db_controller.get_lvols_by_node_id(snode.get_id()))
-            if lvol_count >= snode.max_lvol:
-                error = f"Too many lvols on node: {snode.get_id()}, max lvols reached: {lvol_count}"
-                logger.error(error)
-                return False, error
-
-        rpc_client.bdev_lvol_set_leader(True, lvs_name=lvol.lvs_name)
-
-    ret, msg = _create_bdev_stack(lvol, snode, sec_is_prime)
+    ret, msg = _create_bdev_stack(lvol, snode, is_primary=is_primary)
     if not ret:
         return False, msg
 
-    min_cntlid = 1 + 1000*ha_inode_self
+    if is_primary:
+        min_cntlid = 1
+    else:
+        min_cntlid =  1000
     logger.info("creating subsystem %s", lvol.nqn)
     ret = rpc_client.subsystem_create(lvol.nqn, 'sbcli-cn', lvol.uuid, min_cntlid)
     logger.debug(ret)
 
-    cluster = db_controller.get_cluster_by_id(snode.cluster_id)
     # add listeners
     logger.info("adding listeners")
     for iface in snode.data_nics:
@@ -668,24 +696,18 @@ def add_lvol_on_node(lvol, snode, ha_comm_addrs=None, ha_inode_self=0, sec_is_pr
     return lvol_bdev, None
 
 
+def is_node_leader(snode):
+    rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
+    ret = rpc_client.bdev_lvol_get_lvstores(snode.lvstore)
+    if ret and len(ret) > 0 and "lvs leadership" in ret[0]:
+        is_leader = ret[0]["lvs leadership"]
+        return is_leader
+    return False
+
 def recreate_lvol_on_node(lvol, snode, ha_inode_self=0, ana_state=None):
     rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
 
     base=f"{lvol.lvs_name}/{lvol.lvol_bdev}"
-    # retry = 3
-    # while retry > 0:
-    #     lv = rpc_client.get_bdevs(base)
-    #     if lv:
-    #         break
-    #     else:
-    #         retry -= 1
-    #         msg = f"LVol bdev not found: {base} on node {snode.get_id()}, retrying"
-    #         logger.warning(msg)
-    #         time.sleep(2)
-    # else:
-    #     msg = f"LVol bdev not found: {base} on node {snode.get_id()}"
-    #     logger.error(msg)
-    #     return False, msg
 
     if "crypto" in lvol.lvol_type:
         ret = _create_crypto_lvol(
@@ -695,18 +717,6 @@ def recreate_lvol_on_node(lvol, snode, ha_inode_self=0, ana_state=None):
             logger.error(msg)
             return False, msg
 
-    # namespace_found = False
-    # subsys_found = False
-    # ret = rpc_client.subsystem_list(lvol.nqn)
-    # if ret :
-    #     subsys_found = True
-    #     if ret[0]["namespaces"]:
-    #         for ns in ret[0]["namespaces"]:
-    #             if ns['name'] == lvol.top_bdev:
-    #                 namespace_found = True
-    #                 break
-
-    # if subsys_found is False:
     min_cntlid = 1 + 1000 * ha_inode_self
     logger.info("creating subsystem %s", lvol.nqn)
     rpc_client.subsystem_create(lvol.nqn, 'sbcli-cn', lvol.uuid, min_cntlid)
@@ -1447,51 +1457,51 @@ def get_io_stats(lvol_uuid, history, records_count=20, parse_sizes=True, with_si
 
 def migrate(lvol_id, node_id):
 
-    lvol = db_controller.get_lvol_by_id(lvol_id)
-    if not lvol:
-        logger.error(f"lvol not found: {lvol_id}")
-        return False
-
-    old_node_id = lvol.node_id
-    old_node = db_controller.get_storage_node_by_id(old_node_id)
-    nodes = _get_next_3_nodes(old_node.cluster_id)
-    if not nodes:
-        logger.error(f"No nodes found with enough resources to create the LVol")
-        return False
-
-    if node_id:
-        nodes[0] = db_controller.get_storage_node_by_id(node_id)
-
-    host_node = nodes[0]
-    lvol.hostname = host_node.hostname
-    lvol.node_id = host_node.get_id()
-
-    if lvol.ha_type == 'single':
-        ret = add_lvol_on_node(lvol, host_node)
-        if not ret:
-            return ret
-
-    elif lvol.ha_type == "ha":
-        three_nodes = nodes[:3]
-        nodes_ids = []
-        nodes_ips = []
-        for node in three_nodes:
-            nodes_ids.append(node.get_id())
-            port = 10000 + int(random.random() * 60000)
-            nodes_ips.append(f"{node.mgmt_ip}:{port}")
-
-        ha_address = ",".join(nodes_ips)
-        for index, node in enumerate(three_nodes):
-            ret = add_lvol_on_node(lvol, node, ha_address, index)
-            if not ret:
-                return ret
-        lvol.nodes = nodes_ids
-
-    # host_node.lvols.append(lvol.uuid)
-    # host_node.write_to_db(db_controller.kv_store)
-    lvol.write_to_db(db_controller.kv_store)
-
-    lvol_events.lvol_migrate(lvol, old_node_id, lvol.node_id)
+    # lvol = db_controller.get_lvol_by_id(lvol_id)
+    # if not lvol:
+    #     logger.error(f"lvol not found: {lvol_id}")
+    #     return False
+    #
+    # old_node_id = lvol.node_id
+    # old_node = db_controller.get_storage_node_by_id(old_node_id)
+    # nodes = _get_next_3_nodes(old_node.cluster_id)
+    # if not nodes:
+    #     logger.error(f"No nodes found with enough resources to create the LVol")
+    #     return False
+    #
+    # if node_id:
+    #     nodes[0] = db_controller.get_storage_node_by_id(node_id)
+    #
+    # host_node = nodes[0]
+    # lvol.hostname = host_node.hostname
+    # lvol.node_id = host_node.get_id()
+    #
+    # if lvol.ha_type == 'single':
+    #     ret = add_lvol_on_node(lvol, host_node)
+    #     if not ret:
+    #         return ret
+    #
+    # elif lvol.ha_type == "ha":
+    #     three_nodes = nodes[:3]
+    #     nodes_ids = []
+    #     nodes_ips = []
+    #     for node in three_nodes:
+    #         nodes_ids.append(node.get_id())
+    #         port = 10000 + int(random.random() * 60000)
+    #         nodes_ips.append(f"{node.mgmt_ip}:{port}")
+    #
+    #     ha_address = ",".join(nodes_ips)
+    #     for index, node in enumerate(three_nodes):
+    #         ret = add_lvol_on_node(lvol, node, ha_address)
+    #         if not ret:
+    #             return ret
+    #     lvol.nodes = nodes_ids
+    #
+    # # host_node.lvols.append(lvol.uuid)
+    # # host_node.write_to_db(db_controller.kv_store)
+    # lvol.write_to_db(db_controller.kv_store)
+    #
+    # lvol_events.lvol_migrate(lvol, old_node_id, lvol.node_id)
 
     return True
 
