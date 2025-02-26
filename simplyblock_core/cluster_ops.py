@@ -408,11 +408,20 @@ def cluster_activate(cl_id, force=False, force_lvstore_create=False):
             ret = storage_node_ops.recreate_lvstore(snode)
         else:
             ret = storage_node_ops.create_lvstore(snode, cluster.distr_ndcs, cluster.distr_npcs, cluster.distr_bs,
-                                              cluster.distr_chunk_bs, cluster.page_size_in_blocks, max_size, snodes)
-        if not ret and not force:
-            logger.error("Failed to activate cluster")
-            set_cluster_status(cl_id, ols_status)
-            return False
+                                              cluster.distr_chunk_bs, cluster.page_size_in_blocks, max_size)
+        snode = db_controller.get_storage_node_by_id(snode.get_id())
+        if ret:
+            snode.lvstore_status = "ready"
+            snode.write_to_db()
+
+        else:
+            snode.lvstore_status = "failed"
+            snode.write_to_db()
+            logger.error(f"Failed to restore lvstore on node {snode.get_id()}")
+            if not force:
+                logger.error("Failed to activate cluster")
+                set_cluster_status(cl_id, ols_status)
+                return False
 
     for snode in snodes:
         if not snode.is_secondary_node:
@@ -421,10 +430,22 @@ def cluster_activate(cl_id, force=False, force_lvstore_create=False):
             continue
 
         ret = storage_node_ops.recreate_lvstore(snode)
-        if not ret and not force:
-            logger.error("Failed to activate cluster")
-            set_cluster_status(cl_id, ols_status)
-            return False
+        snode = db_controller.get_storage_node_by_id(snode.get_id())
+        if ret:
+            snode.lvstore_status = "ready"
+            snode.write_to_db()
+
+        else:
+            snode.lvstore_status = "failed"
+            snode.write_to_db()
+
+            logger.error(f"Failed to restore lvstore on node {snode.get_id()}")
+            if not force:
+                logger.error("Failed to activate cluster")
+                set_cluster_status(cl_id, ols_status)
+                return False
+
+
 
     if not cluster.cluster_max_size:
         cluster = db_controller.get_cluster_by_id(cl_id)

@@ -210,6 +210,10 @@ while True:
                 logger.info(f"Node status is: {snode.status}, skipping")
                 continue
 
+            if snode.status == StorageNode.STATUS_ONLINE and snode.lvstore_status == "in_creation":
+                logger.info(f"Node lvstore is in creation: {snode.get_id()}, skipping")
+                continue
+
             logger.info(f"Checking node {snode.hostname}")
 
             # 1- check node ping

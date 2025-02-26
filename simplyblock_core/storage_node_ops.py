@@ -1397,12 +1397,18 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
             tasks_controller.add_new_device_mig_task(dev.get_id())
 
 
-    nodes = db_controller.get_storage_nodes_by_cluster_id(cluster_id)
     # Create distribs
     max_size = cluster.cluster_max_size
     ret = create_lvstore(snode, cluster.distr_ndcs, cluster.distr_npcs, cluster.distr_bs,
-                         cluster.distr_chunk_bs, cluster.page_size_in_blocks, max_size, nodes)
-    if not ret:
+                         cluster.distr_chunk_bs, cluster.page_size_in_blocks, max_size)
+    snode = db_controller.get_storage_node_by_id(snode.get_id())
+    if ret:
+        snode.lvstore_status = "ready"
+        snode.write_to_db()
+
+    else:
+        snode.lvstore_status = "failed"
+        snode.write_to_db()
         logger.error("Failed to create lvstore")
         return False
 
@@ -1927,36 +1933,35 @@ def restart_storage_node(
         node.remote_devices = _connect_to_remote_devs(node)
         node.write_to_db(kv_store)
 
-    time.sleep(1)
+    logger.info(f"Sending device status event")
     snode = db_controller.get_storage_node_by_id(snode.get_id())
     for db_dev in snode.nvme_devices:
         distr_controller.send_dev_status_event(db_dev, db_dev.status)
 
-    time.sleep(1)
-    if snode.jm_device and snode.jm_device.status in [JMDevice.STATUS_UNAVAILABLE, JMDevice.STATUS_ONLINE]:
-        device_controller.set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_ONLINE)
-
-
-    time.sleep(1)
     cluster = db_controller.get_cluster_by_id(snode.cluster_id)
     if cluster.status in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED]:
         if snode.lvstore_stack or snode.is_secondary_node:
             ret = recreate_lvstore(snode)
+            snode = db_controller.get_storage_node_by_id(snode.get_id())
             if not ret:
                 logger.error("Failed to recreate lvstore")
+                snode.lvstore_status = "failed"
+                snode.write_to_db()
                 return False
-    #
-    # if snode.jm_device and snode.jm_device.status in [JMDevice.STATUS_UNAVAILABLE, JMDevice.STATUS_ONLINE]:
-    #     device_controller.set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_ONLINE)
+            else:
+                snode.lvstore_status = "ready"
+                snode.write_to_db()
 
-    logger.info(f"Sending device status event")
-    for dev in snode.nvme_devices:
-        # distr_controller.send_dev_status_event(dev, dev.status)
-        if dev.status != NVMeDevice.STATUS_ONLINE:
-            logger.debug(f"Device is not online: {dev.get_id()}, status: {dev.status}")
-            continue
-        logger.info(f"Starting migration task for device {dev.get_id()}")
-        tasks_controller.add_device_mig_task(dev.get_id())
+    if snode.jm_device and snode.jm_device.status in [JMDevice.STATUS_UNAVAILABLE, JMDevice.STATUS_ONLINE]:
+        device_controller.set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_ONLINE)
+
+    if snode.lvstore_status == "ready":
+        for dev in snode.nvme_devices:
+            if dev.status != NVMeDevice.STATUS_ONLINE:
+                logger.debug(f"Device is not online: {dev.get_id()}, status: {dev.status}")
+                continue
+            logger.info(f"Starting migration task for device {dev.get_id()}")
+            tasks_controller.add_device_mig_task(dev.get_id())
 
     logger.info("Done")
     return "Success"
@@ -2868,6 +2873,9 @@ def recreate_lvstore_on_sec(snode):
 def recreate_lvstore(snode):
     db_controller = DBController()
 
+    snode.lvstore_status = "in_creation"
+    snode.write_to_db()
+
     if snode.is_secondary_node:
         return recreate_lvstore_on_sec(snode)
 
@@ -2989,7 +2997,7 @@ def get_secondary_nodes(current_node):
     return nodes
 
 
-def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blocks, max_size, nodes):
+def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blocks, max_size):
     db_controller = DBController()
     lvstore_stack = []
     distrib_list = []
@@ -2999,7 +3007,7 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
     cluster_sz = ndcs * page_size_in_blocks
     strip_size_kb = int((ndcs + npcs) * 2048)
     strip_size_kb = utils.nearest_upper_power_of_2(strip_size_kb)
-    jm_vuid = 0
+    jm_vuid = 1
     jm_ids = []
     lvol_subsys_port = utils.get_next_port(snode.cluster_id)
     if snode.enable_ha_jm:
@@ -3078,6 +3086,7 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
     snode.lvstore_stack = lvstore_stack
     snode.raid = raid_device
     snode.lvol_subsys_port = lvol_subsys_port
+    snode.lvstore_status = "in_creation"
     snode.write_to_db()
 
     ret, err = _create_bdev_stack(snode, lvstore_stack)
