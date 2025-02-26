@@ -524,7 +524,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
         sec_node = db_controller.get_storage_node_by_id(host_node.secondary_node_id)
         if host_node.status == StorageNode.STATUS_ONLINE:
 
-            if is_node_leader(host_node):
+            if is_node_leader(host_node, lvol.lvs_name):
                 primary_node = host_node
                 if sec_node.status == StorageNode.STATUS_DOWN:
                     msg = f"Secondary node is in down status, can not create lvol"
@@ -535,7 +535,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
                     secondary_node = sec_node
 
             elif sec_node.status == StorageNode.STATUS_ONLINE:
-                if is_node_leader(sec_node):
+                if is_node_leader(sec_node, lvol.lvs_name):
                     primary_node = sec_node
                     secondary_node = host_node
                 else:
@@ -648,11 +648,11 @@ def add_lvol_on_node(lvol, snode, is_primary=True):
     rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
 
     if is_primary:
-        if not is_node_leader(snode):
+        if not is_node_leader(snode, lvol.lvs_name):
             rpc_client.bdev_lvol_set_leader(True, lvs_name=lvol.lvs_name)
 
     else:
-        if is_node_leader(snode):
+        if is_node_leader(snode, lvol.lvs_name):
             rpc_client.bdev_lvol_set_leader(False, lvs_name=lvol.lvs_name)
 
     ret, msg = _create_bdev_stack(lvol, snode, is_primary=is_primary)
@@ -696,9 +696,9 @@ def add_lvol_on_node(lvol, snode, is_primary=True):
     return lvol_bdev, None
 
 
-def is_node_leader(snode):
+def is_node_leader(snode, lvs_name):
     rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
-    ret = rpc_client.bdev_lvol_get_lvstores(snode.lvstore)
+    ret = rpc_client.bdev_lvol_get_lvstores(lvs_name)
     if ret and len(ret) > 0 and "lvs leadership" in ret[0]:
         is_leader = ret[0]["lvs leadership"]
         return is_leader

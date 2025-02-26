@@ -87,7 +87,7 @@ def add(lvol_id, snapshot_name):
     if lvol.ha_type == "single":
         if snode.status == StorageNode.STATUS_ONLINE:
             rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
-            if not lvol_controller.is_node_leader(snode):
+            if not lvol_controller.is_node_leader(snode, lvol.lvs_name):
                 rpc_client.bdev_lvol_set_leader(True, lvs_name=lvol.lvs_name)
             logger.info("Creating Snapshot bdev")
             ret = rpc_client.lvol_create_snapshot(f"{lvol.lvs_name}/{lvol.lvol_bdev}", snap_bdev_name)
@@ -142,7 +142,7 @@ def add(lvol_id, snapshot_name):
             rpc_client = RPCClient(
                 primary_node.mgmt_ip, primary_node.rpc_port, primary_node.rpc_username, primary_node.rpc_password)
 
-            if not lvol_controller.is_node_leader(primary_node):
+            if not lvol_controller.is_node_leader(primary_node, lvol.lvs_name):
                 rpc_client.bdev_lvol_set_leader(True, lvs_name=lvol.lvs_name)
 
             logger.info("Creating Snapshot bdev")
@@ -165,7 +165,7 @@ def add(lvol_id, snapshot_name):
             sec_rpc_client = RPCClient(
                 secondary_node.mgmt_ip, secondary_node.rpc_port, secondary_node.rpc_username, secondary_node.rpc_password)
 
-            if lvol_controller.is_node_leader(primary_node):
+            if lvol_controller.is_node_leader(primary_node, lvol.lvs_name):
                 sec_rpc_client.bdev_lvol_set_leader(False, lvs_name=lvol.lvs_name)
 
             ret = sec_rpc_client.bdev_lvol_snapshot_register(
@@ -478,7 +478,7 @@ def clone(snapshot_id, clone_name, new_size=0):
         sec_node = db_controller.get_storage_node_by_id(host_node.secondary_node_id)
         if host_node.status == StorageNode.STATUS_ONLINE:
 
-            if lvol_controller.is_node_leader(host_node):
+            if lvol_controller.is_node_leader(host_node, lvol.lvs_name):
                 primary_node = host_node
                 if sec_node.status == StorageNode.STATUS_DOWN:
                     msg = f"Secondary node is in down status, can not clone snapshot"
@@ -489,7 +489,7 @@ def clone(snapshot_id, clone_name, new_size=0):
                 secondary_node = sec_node
 
             elif sec_node.status == StorageNode.STATUS_ONLINE:
-                if lvol_controller.is_node_leader(sec_node):
+                if lvol_controller.is_node_leader(sec_node, lvol.lvs_name):
                     primary_node = sec_node
                     secondary_node = host_node
                 else:
