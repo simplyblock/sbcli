@@ -134,21 +134,23 @@ class TestClusterBase:
                 days=3
             )
             self.ssh_obj.make_directory(node=node, dir_name=self.docker_logs_path)
-
             containers = self.ssh_obj.get_running_containers(node_ip=node)
             self.container_nodes[node] = containers
             self.ssh_obj.check_tmux_installed(node_ip=node)
             self.ssh_obj.exec_command(node=node,
-                                      command="sudo tmux kill-server")
-            self.ssh_obj.start_docker_logging(node_ip=node,
-                                              containers=containers,
-                                              log_dir=self.docker_logs_path,
-                                              test_name=self.test_name
-                                              )
+                                    command="sudo tmux kill-server")
+
+            if not self.k8s_test:
+                self.ssh_obj.start_docker_logging(node_ip=node,
+                                                containers=containers,
+                                                log_dir=self.docker_logs_path,
+                                                test_name=self.test_name
+                                                )
             self.ssh_obj.start_tcpdump_logging(node_ip=node, log_dir=self.docker_logs_path)
             self.ssh_obj.start_netstat_dmesg_logging(node_ip=node,
-                                                     log_dir=self.docker_logs_path)
-            self.ssh_obj.reset_iptables_in_spdk(node_ip=node)
+                                                    log_dir=self.docker_logs_path)
+            if not self.k8s_test:
+                self.ssh_obj.reset_iptables_in_spdk(node_ip=node)
         
         self.ssh_obj.delete_old_folders(
             node=self.fio_node,
@@ -161,11 +163,11 @@ class TestClusterBase:
         self.ssh_obj.check_tmux_installed(node_ip=self.fio_node)
 
         self.ssh_obj.exec_command(node=self.fio_node,
-                                  command="sudo tmux kill-server")
+                                command="sudo tmux kill-server")
         self.ssh_obj.start_tcpdump_logging(node_ip=self.fio_node,
-                                           log_dir=self.docker_logs_path)
+                                        log_dir=self.docker_logs_path)
         self.ssh_obj.start_netstat_dmesg_logging(node_ip=self.fio_node,
-                                                 log_dir=self.docker_logs_path)
+                                                log_dir=self.docker_logs_path)
 
         self.logger.info("Started log monitoring for all storage nodes.")
 
@@ -187,17 +189,20 @@ class TestClusterBase:
         for cmd in sysctl_commands:
             self.ssh_obj.exec_command(self.fio_node, cmd)
         self.ssh_obj.set_aio_max_nr(self.fio_node)
-        
+    
         self.logger.info(f"Configured TCP sysctl settings on all the nodes!!")
 
     def cleanup_logs(self):
+        """Cleans logs
+        """
         base_path = Path.home()
         self.ssh_obj.delete_file_dir(self.fio_node, entity=f"{base_path}/*.log*", recursive=True)
         self.ssh_obj.delete_file_dir(self.fio_node, entity=f"{base_path}/*.state*", recursive=True)
         self.ssh_obj.delete_file_dir(self.mgmt_nodes[0], entity="/etc/simplyblock/*", recursive=True)
         self.ssh_obj.delete_file_dir(self.mgmt_nodes[0], entity=f"{base_path}/*.txt*", recursive=True)
         for node in self.storage_nodes:
-            self.ssh_obj.delete_file_dir(node, entity="/etc/simplyblock/*", recursive=True)
+            self.ssh_obj.delete_file_dir(node, entity="/etc/simplyblock/core*", recursive=True)
+            self.ssh_obj.delete_file_dir(node, entity="/etc/simplyblock/LVS*", recursive=True)
             self.ssh_obj.delete_file_dir(node, entity=f"{base_path}/distrib*", recursive=True)
             self.ssh_obj.delete_file_dir(node, entity=f"{base_path}/*.txt*", recursive=True)
             self.ssh_obj.delete_file_dir(node, entity=f"{base_path}/*.log*", recursive=True)

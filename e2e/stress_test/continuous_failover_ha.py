@@ -428,12 +428,13 @@ class RandomFailoverTest(TestLvolHACluster):
         self.outage_end_time = int(datetime.now().timestamp())
 
         
-        self.ssh_obj.restart_docker_logging(
-            node_ip=node_ip,
-            containers=self.container_nodes[node_ip],
-            log_dir=self.docker_logs_path,
-            test_name=self.test_name
-        )
+        if not self.k8s_test:
+            self.ssh_obj.restart_docker_logging(
+                node_ip=node_ip,
+                containers=self.container_nodes[node_ip],
+                log_dir=self.docker_logs_path,
+                test_name=self.test_name
+            )
 
         if self.secondary_outage:
             for lvol in self.lvols_without_sec_connect:
