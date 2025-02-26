@@ -88,19 +88,15 @@ jobs:
           path: 'simplyBlockDeploy'
           token: ${{ secrets.GH_ACCESS_KEY_ID_HAMDI }}
 
-#      - name: Select or Create Workspace
-#        run: |
-#          cd $GITHUB_WORKSPACE/simplyBlockDeploy
-#          terraform workspace select -or-create ghiaction-sbclie2e
-#
-      - name: Install dependencies
+      - name: Install Helm v3.15.4
         run: |
-          sudo apt-get update && sudo apt-get install -y sed openssh-client
           curl -L https://get.helm.sh/helm-v3.15.4-linux-amd64.tar.gz -o helm-v3.15.4-linux-amd64.tar.gz
           tar -zxvf helm-v3.15.4-linux-amd64.tar.gz
           sudo mv linux-amd64/helm /usr/local/bin/helm
           helm version
-          
+
+      - name: Install kubectl v1.31.0
+        run: |
           curl -LO "https://dl.k8s.io/release/v1.31.0/bin/linux/amd64/kubectl"
           chmod +x kubectl
           sudo mv kubectl /usr/local/bin/
