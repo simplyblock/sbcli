@@ -250,7 +250,8 @@ while True:
                 if snode.is_secondary_node:
                     ports = [4420]
                     for n in db_controller.get_primary_storage_nodes_by_secondary_node_id(snode.get_id()):
-                        ports.append(n.lvol_subsys_port)
+                        if n.lvstore_status == "ready":
+                            ports.append(n.lvol_subsys_port)
                 else:
                     ports = [snode.lvol_subsys_port, 4420]
 
