@@ -574,15 +574,15 @@ def list():
         st = db_controller.get_storage_nodes_by_cluster_id(cl.get_id())
         status = cl.status
         if cl.is_re_balancing and status in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED]:
-            status = f"{status}-ReBalancing"
+            status = f"{status} - ReBalancing"
         data.append({
             "UUID": cl.get_id(),
             "NQN": cl.nqn,
             "ha_type": cl.ha_type,
-            "mgmt nodes": len(mt),
-            "storage nodes": len(st),
+            "#mgmt": len(mt),
+            "#storage": len(st),
             "Mod": f"{cl.distr_ndcs}x{cl.distr_npcs}",
-            "Status": status,
+            "Status": status.capitalize(),
         })
     return utils.print_table(data)
 
