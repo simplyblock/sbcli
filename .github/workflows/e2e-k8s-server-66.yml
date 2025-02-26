@@ -27,7 +27,7 @@ on:
       ndcs:
         description: 'Value for NDCS'
         required: false
-        default: 2
+        default: 1
       npcs:
         description: 'Value for NPCS'
         required: false
@@ -53,7 +53,7 @@ on:
 
 jobs:
   e2e:
-    runs-on: self-hosted
+    runs-on: vm22
     concurrency:
       group: ${{ github.workflow }}
       cancel-in-progress: false
