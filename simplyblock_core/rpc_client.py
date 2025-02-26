@@ -280,9 +280,8 @@ class RPCClient:
             "lvs_name": lvs_name,
             "thin_provision": True,
             "clear_method": "unmap",
+            "lvol_priority_class": lvol_priority_class,
         }
-        if lvol_priority_class:
-            params["lvol_priority_class"] = lvol_priority_class
         return self._request("bdev_lvol_create", params)
 
     def delete_lvol(self, name):
