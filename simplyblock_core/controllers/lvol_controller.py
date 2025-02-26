@@ -387,12 +387,6 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
         logger.error(mgs)
         return False, mgs
 
-    lvol_count = len(db_controller.get_lvols_by_node_id(host_node.get_id()))
-    if lvol_count > host_node.max_lvol:
-        error = f"Too many lvols on node: {host_node.get_id()}, max lvols reached: {lvol_count}"
-        logger.error(error)
-        return False, error
-
     cluster_size_prov_util = int(((cluster_size_prov+size) / cluster_size_total) * 100)
 
     if cl.prov_cap_crit and cl.prov_cap_crit < cluster_size_prov_util:
@@ -458,6 +452,12 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
     lvol.subsys_port = host_node.lvol_subsys_port
     lvol.top_bdev = f"{lvol.lvs_name}/{lvol.lvol_bdev}"
     lvol.base_bdev = lvol.top_bdev
+
+    lvol_count = len(db_controller.get_lvols_by_node_id(host_node.get_id()))
+    if lvol_count > host_node.max_lvol:
+        error = f"Too many lvols on node: {host_node.get_id()}, max lvols reached: {lvol_count}"
+        logger.error(error)
+        return False, error
 
     lvol_dict = {
         "type": "bdev_lvol",
