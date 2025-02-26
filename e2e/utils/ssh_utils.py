@@ -1410,6 +1410,49 @@ class SshUtils:
         except Exception as e:
             self.logger.error(f"Failed to reset iptables in SPDK container on {node_ip}: {e}")
 
+    def check_remote_spdk_logs_for_keyword(self, node_ip, log_dir, test_name, keyword="ALCEMLD"):
+        """
+        Checks all 'spdk_{test_name}*.txt' files in log_dir on a remote node for the given keyword.
+        If found, logs the timestamp and the full line containing the keyword.
+
+        Args:
+            node_ip (str): IP address of the remote node.
+            log_dir (str): Directory where log files are stored.
+            test_name (str): Name of the test (used to identify relevant log files).
+            keyword (str, optional): The keyword to search for. Defaults to "ALCEMLD".
+
+        Returns:
+            dict: A dictionary with filenames as keys and a list of matching log lines (timestamp + error line).
+        """
+        try:
+            # Find all log files matching 'spdk_{test_name}*.txt' pattern
+            find_command = f"ls {log_dir}/spdk_{test_name}*.txt 2>/dev/null"
+            output, _ = self.exec_command(node_ip, find_command)
+
+            log_files = output.strip().split("\n") if output else []
+            keyword_matches = {}
+
+            for log_file in log_files:
+                if not log_file:
+                    continue  # Skip empty lines
+                
+                # Extract the full log line that contains the keyword, including the timestamp
+                grep_command = f"grep '{keyword}' {log_file} || true"
+                grep_output, _ = self.exec_command(node_ip, grep_command)
+
+                if grep_output:
+                    matched_lines = grep_output.strip().split("\n")
+                    keyword_matches[log_file] = matched_lines  # Store all matched lines with timestamps
+                else:
+                    keyword_matches[log_file] = []
+
+            return keyword_matches
+
+        except Exception as e:
+            self.logger.error(f"Failed to check logs for keyword '{keyword}' on node {node_ip}: {e}")
+            return {}
+
+
 
     # def stop_netstat_dmesg_logging(self, node_ip):
     #     """Stop continuous netstat and dmesg logging without using watch."""
