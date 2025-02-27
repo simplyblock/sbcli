@@ -245,6 +245,17 @@ class TestClusterBase:
         cmd = f"{self.base_cmd} sn list >& {base_path}/sn_list.txt"
         self.ssh_obj.exec_command(node=self.mgmt_nodes[0],
                                   command=cmd)
+        cmd = f"{self.base_cmd} cluster get-capacity {self.cluster_id} >& {base_path}/cluster_capacity.txt"
+        self.ssh_obj.exec_command(node=self.mgmt_nodes[0],
+                                  command=cmd)
+        
+        cmd = f"{self.base_cmd} cluster get-capacity {self.cluster_id} >& {base_path}/cluster_capacity.txt"
+        self.ssh_obj.exec_command(node=self.mgmt_nodes[0],
+                                  command=cmd)
+        
+        cmd = f"{self.base_cmd} cluster show {self.cluster_id} >& {base_path}/cluster_show.txt"
+        self.ssh_obj.exec_command(node=self.mgmt_nodes[0],
+                                  command=cmd)
         
         storage_nodes = self.sbcli_utils.get_storage_nodes()
         node=1
