@@ -132,7 +132,7 @@ jobs:
       - name: Bootstrap Cluster
         run: |
           cd $GITHUB_WORKSPACE/simplyBlockDeploy
-          helm uninstall -n spdk-csi spdk-csi
+          helm uninstall -n spdk-csi spdk-csi || echo "No helm release found. Skipping uninstall."
           ./bootstrap-cluster.sh --sbcli-cmd "$SBCLI_CMD" \
             --max-lvol 20 --max-snap 20 --max-prov 100G --number-of-devices 3 \
             --distr-ndcs $NDCS \
