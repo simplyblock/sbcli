@@ -541,7 +541,8 @@ def clone(snapshot_id, clone_name, new_size=0):
                     lvol.remove(db_controller.kv_store)
                     return False, msg
 
-                secondary_node = sec_node
+                if sec_node.status == StorageNode.STATUS_ONLINE:
+                    secondary_node = sec_node
 
             elif sec_node.status == StorageNode.STATUS_ONLINE:
                 if lvol_controller.is_node_leader(sec_node, lvol.lvs_name):
