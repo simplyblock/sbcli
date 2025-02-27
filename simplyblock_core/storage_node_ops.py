@@ -824,13 +824,14 @@ def _connect_to_remote_devs(this_node, force_conect_restarting_nodes=False):
             if bdev_name in node_bdev_names:
                 logger.info(f"bdev found {bdev_name}")
             else:
-                if rpc_client.bdev_nvme_controller_list(name):
-                    logger.info(f"detaching {name} from {this_node.get_id()}")
-                    rpc_client.bdev_nvme_detach_controller(name)
-                    time.sleep(1)
+                # if rpc_client.bdev_nvme_controller_list(name):
+                #     logger.info(f"detaching {name} from {this_node.get_id()}")
+                #     rpc_client.bdev_nvme_detach_controller(name)
+                #     time.sleep(1)
 
                 logger.info(f"Connecting {name} to {this_node.get_id()}")
-                ret = rpc_client.bdev_nvme_attach_controller_tcp(name, dev.nvmf_nqn, dev.nvmf_ip, dev.nvmf_port)
+                rpc_client.bdev_nvme_attach_controller_tcp(name, dev.nvmf_nqn, dev.nvmf_ip, dev.nvmf_port)
+                ret = rpc_client.get_bdevs(bdev_name)
                 if not ret:
                     logger.error(f"Failed to connect to device: {dev.get_id()}")
                     continue

@@ -981,3 +981,9 @@ class RPCClient:
             "subsystem_port": subsystem_port,
         }
         return self._request("bdev_lvol_set_lvs_op", params)
+
+    def bdev_lvol_get_lvol_delete_status(self, name):
+        params = {
+            "name": name
+        }
+        return self._request("bdev_lvol_get_lvol_delete_status", params)
