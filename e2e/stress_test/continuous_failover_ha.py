@@ -506,7 +506,7 @@ class RandomFailoverTest(TestLvolHACluster):
         if not available_lvols:
             self.logger.warning("No available lvols to create snapshots and clones.")
             return
-        for _ in range(3):
+        for _ in range(4):
             random.shuffle(available_lvols)
             lvol = available_lvols[0]
             snapshot_name = f"snap_{lvol}"
@@ -711,7 +711,7 @@ class RandomFailoverTest(TestLvolHACluster):
         if not self.sbcli_utils.is_secondary_node(self.current_outage_node):
             self.delete_random_lvols(3)
             self.logger.info("Creating 5 new lvols, clones, and snapshots.")
-            self.create_lvols_with_fio(3)
+            self.create_lvols_with_fio(5)
             self.create_snapshots_and_clones()
         else:
             self.logger.info(f"Current outage node: {self.current_outage_node} is secondary node. Skipping delete or create")
@@ -757,6 +757,7 @@ class RandomFailoverTest(TestLvolHACluster):
             self.ssh_obj.delete_files(self.fio_node, [f"{self.log_path}/local-{lvol}_fio*"])
 
             sleep_n_sec(5)
+            self.lvol_mount_details[lvol]["Log"] = log_file
 
             # Start FIO
             fio_thread = threading.Thread(
@@ -785,6 +786,8 @@ class RandomFailoverTest(TestLvolHACluster):
 
             self.ssh_obj.delete_files(self.fio_node, [f"{mount_point}/*fio*"])
             self.ssh_obj.delete_files(self.fio_node, [f"{self.log_path}/local-{clone}_fio*"])
+
+            self.clone_mount_details[clone]["Log"] = log_file
 
             sleep_n_sec(5)
 
