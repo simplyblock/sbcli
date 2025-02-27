@@ -8,7 +8,12 @@ sudo yum install hostname pkg-config git wget python3-pip yum-utils docker-ce do
 sudo systemctl enable docker
 sudo systemctl start docker
 
-sudo yum install -y https://github.com/apple/foundationdb/releases/download/7.3.3/foundationdb-clients-7.3.3-1.el7.x86_64.rpm -q
+
+
+if [[ 1 == $(yum info foundationdb-clients &> /dev/null ; echo $?) ]]
+then
+  sudo yum install -y https://github.com/apple/foundationdb/releases/download/7.3.3/foundationdb-clients-7.3.3-1.el7.x86_64.rpm
+fi
 
 sudo mkdir -p /etc/foundationdb/data /etc/foundationdb/logs
 sudo chown -R foundationdb:foundationdb /etc/foundationdb
@@ -17,7 +22,11 @@ sudo chmod 777 /etc/foundationdb
 sudo modprobe nvme-tcp
 sudo modprobe nbd
 
-sudo sysctl -w net.ipv6.conf.all.disable_ipv6=1
+echo -e "net.ipv6.conf.all.disable_ipv6 = 1\n
+net.ipv6.conf.default.disable_ipv6 = 1\n
+net.ipv6.conf.lo.disable_ipv6 = 1\n
+vm.max_map_count=262144" | sudo tee "/etc/sysctl.d/disable_ipv6.conf" > /dev/null
+sudo sysctl --system
 
 
 sudo mkdir -p /etc/simplyblock
