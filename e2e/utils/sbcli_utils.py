@@ -642,5 +642,11 @@ class SbcliUtils:
         }
         self.put_request(api_url=f"/lvol/resize/{lvol_id}", 
                          body=body)
-
-    
+        
+    def is_secondary_node(self, node_id):
+        sec_nodes = []
+        storage_nodes = self.get_storage_nodes()
+        for result in storage_nodes['results']:
+            if result['is_secondary_node'] is True:
+                sec_nodes.append(result["uuid"])
+        return node_id in sec_nodes

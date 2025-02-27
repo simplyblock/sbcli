@@ -3,6 +3,7 @@ import paramiko
 # paramiko.common.logging.basicConfig(level=paramiko.common.DEBUG)
 import os
 import json
+import paramiko.buffered_pipe
 import paramiko.ssh_exception
 from logger_config import setup_logger
 from pathlib import Path
@@ -215,6 +216,16 @@ class SshUtils:
                 retry_count += 1
                 time.sleep(2)  # Short delay before retrying
 
+            except paramiko.buffered_pipe.PipeTimeout as e:
+                self.logger.error(f"SSH command failed: {e}. Retrying ({retry_count + 1}/{max_retries})...")
+                retry_count += 1
+                time.sleep(2)  # Short delay before retrying
+
+            except Exception as e:
+                self.logger.error(f"SSH command failed (General Exception): {e}. Retrying ({retry_count + 1}/{max_retries})...")
+                retry_count += 1
+                time.sleep(2)  # Short delay before retrying
+
         # If we exhaust retries, return failure
         self.logger.error(f"Failed to execute command '{command}' on node {node} after {max_retries} retries.")
         return "", "Command failed after max retries"
@@ -319,13 +330,10 @@ class SshUtils:
         #           f"--verify_state_save=1 --verify_backlog=10 --group_reporting{output_format}{output_file}")
 
         command = (f"sudo fio --name={name} {location} --ioengine={ioengine} --direct=1 --iodepth={iodepth} "
-                   f"{time_based} --runtime={runtime} --rw={rw} --bs={bs} --size={size}  "
+                   f"{time_based} --runtime={runtime} --rw={rw} --bs={bs} --size={size} --rwmixread={rwmixread} "
                    f"--verify=md5 --verify_fatal=1 --numjobs={numjobs} --nrfiles={nrfiles} "
                    f"{output_format}{output_file}")
-
-        if rw != "write":
-            command = f"{command} --rwmixread={rwmixread}"
-
+        
         if kwargs.get("debug", None):
             command = f"{command} --debug=all"
         if log_file:
@@ -343,9 +351,9 @@ class SshUtils:
     
     def find_process_name(self, node, process_name, return_pid=False):
         if return_pid:
-            command = "ps -ef | grep -i %s | awk '{print $2}'" % process_name
+            command = "ps -ef | grep -i '%s' | awk '{print $2}'" % process_name
         else:
-            command = "ps -ef | grep -i %s" % process_name
+            command = "ps -ef | grep -i '%s'" % process_name
         output, error = self.exec_command(node=node,
                                           command=command)
                                     
@@ -727,7 +735,7 @@ class SshUtils:
             return []
         
 
-    def disconnect_all_active_interfaces(self, node_ip, interfaces):
+    def disconnect_all_active_interfaces(self, node_ip, interfaces, reconnect_time=300):
         """
         Disconnect all active network interfaces on a node in a single SSH call.
 
@@ -744,13 +752,27 @@ class SshUtils:
         reconnect_cmds = " && ".join([f"sudo nmcli dev connect {iface}" for iface in interfaces])
 
         cmd = (
-            f'nohup sh -c "{disconnect_cmds} && sleep 300 && {reconnect_cmds}" &'
+            f'nohup sh -c "{disconnect_cmds} && sleep {reconnect_time} && {reconnect_cmds}" &'
         )
         self.logger.info(f"Executing combined disconnect command on node {node_ip}: {cmd}")
         try:
             self.exec_command(node_ip, cmd)
         except Exception as e:
             self.logger.error(f"Failed to execute combined disconnect command on {node_ip}: {e}")
+
+    def check_tmux_installed(self, node_ip):
+        """Check tmux installation
+        """
+        check_tmux_command = "command -v tmux"
+        output, _ = self.exec_command(node_ip, check_tmux_command)
+        if not output.strip():
+            self.logger.info(f"'tmux' is not installed on {node_ip}. Installing...")
+            install_tmux_command = (
+                "sudo apt-get update -y && sudo apt-get install -y tmux"
+                " || sudo yum install -y tmux"
+            )
+            self.exec_command(node_ip, install_tmux_command)
+            self.logger.info(f"'tmux' installed successfully on {node_ip}.")
 
     def start_docker_logging(self, node_ip, containers, log_dir, test_name):
         """
@@ -764,16 +786,6 @@ class SshUtils:
             test_name (str): Name of the test for log identification.
         """
         try:
-            check_tmux_command = "command -v tmux"
-            output, _ = self.exec_command(node_ip, check_tmux_command)
-            if not output.strip():
-                self.logger.info(f"'tmux' is not installed on {node_ip}. Installing...")
-                install_tmux_command = (
-                    "sudo apt-get update -y && sudo apt-get install -y tmux"
-                    " || sudo yum install -y tmux"
-                )
-                self.exec_command(node_ip, install_tmux_command)
-                self.logger.info(f"'tmux' installed successfully on {node_ip}.")
             # Ensure the log directory exists
             command_mkdir = f"sudo mkdir -p {log_dir} && sudo chmod 777 {log_dir}"
             self.exec_command(node_ip, command_mkdir)  # Do not wait for a response
@@ -781,7 +793,7 @@ class SshUtils:
             for container in containers:
                 # Construct the log file path
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                log_file = f"{log_dir}/{container}_{test_name}_{timestamp}_before_outage.txt"
+                log_file = f"{log_dir}/{container}_{test_name}_{node_ip}_{timestamp}_before_outage.txt"
 
                 # Run the Docker log collection command with `setsid` to ensure persistence
                 # command_logs = (
@@ -824,7 +836,7 @@ class SshUtils:
             self.exec_command(node_ip, f"sudo mkdir -p {log_dir} && sudo chmod 777 {log_dir}")
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             for container in containers:
-                log_file = f"{log_dir}/{container}_{test_name}_{timestamp}_after_outage.txt"
+                log_file = f"{log_dir}/{container}_{test_name}_{node_ip}_{timestamp}_after_outage.txt"
                 random_suffix = generate_random_string()
                 tmux_session_name = f"{container}_logs_{random_suffix}"
                 command_logs = (
@@ -909,14 +921,14 @@ class SshUtils:
             self.logger.error(f"Error during node reboot for {node_ip}: {e}")
             return False
         
-    def partial_nw_outage(self, node_ip, mgmt_ip=None, block_ports=None, block_all_ss_ports=False):
+    def perform_nw_outage(self, node_ip, node_data_nic_ip=None, nodes_check_ports_on=None, block_ports=None, block_all_ss_ports=False):
         """
         Simulate a partial network outage by blocking multiple ports at once using multiport matching.
         Optionally, block all ports listed by `ss` command for the given management IP.
 
         Args:
             node_ip (str): IP address of the target node.
-            mgmt_ip (str, optional): Management IP address to filter the `ss` command output.
+            mgmt_ip (list, optional): IP addresses used to filter the `ss` command output.
             block_ports (list): List of ports to block.
             block_all_ss_ports (bool): If True, block all ports from the `ss` command for mgmt_ip.
 
@@ -931,18 +943,26 @@ class SshUtils:
 
             # If flag is set, fetch and add all ports from the `ss` command filtered by mgmt_ip
             if block_all_ss_ports:
-                if not mgmt_ip:
-                    raise ValueError("mgmt_ip must be provided when block_all_ss_ports is True.")
-                cmd = "ss -tnp | grep %s | awk '{print $4}'" % mgmt_ip
-                ss_output, _ = self.exec_command(node_ip, cmd)
-                ip_with_ports = ss_output.split()
-                ports_to_block = [str(r.split(":")[1]) for r in ip_with_ports]
-                block_ports.extend(ports_to_block)
+                if (not node_data_nic_ip) and (not nodes_check_ports_on):
+                    raise ValueError("node_data_nic_ip and nodes_check_ports_on must be provided when block_all_ss_ports is True.")
+                for node in nodes_check_ports_on:
+                    source_node_ips = list(node_data_nic_ip)
+                    source_node_ips.append(node_ip)
+                    for source_node in source_node_ips:
+                        cmd = "ss -tnp | grep %s | awk '{print $5}'" % source_node
+                        self.logger.info(f"Executing {cmd} on node: {node}")
+                        ss_output, _ = self.exec_command(node, cmd)
+                        self.logger.info(f"Output: {ss_output}")
+                        ip_with_ports = ss_output.split()
+                        ports_to_block = [str(r.split(":")[1]) for r in ip_with_ports]
+                        block_ports.extend(ports_to_block)
 
             # Remove duplicates
             block_ports = [str(port) for port in block_ports]
             block_ports = list(dict.fromkeys(block_ports))
             block_ports = sorted(block_ports)
+
+            block_ports = [port.strip() for port in block_ports if port.strip()]
             
             if "22" in block_ports:
                 block_ports.remove("22")
@@ -980,7 +1000,7 @@ class SshUtils:
         return block_ports
 
 
-    def remove_partial_nw_outage(self, node_ip, blocked_ports):
+    def remove_nw_outage(self, node_ip, blocked_ports):
         """
         Remove partial network outage by unblocking multiple ports at once.
 
@@ -1016,57 +1036,6 @@ class SshUtils:
 
         except Exception as e:
             self.logger.error(f"Failed to unblock ports on {node_ip}: {e}")
-
-    def remove_partial_nw_outage2(self, node_ip, blocked_ports=None):
-        """
-        Remove partial network outage by unblocking multiple ports at once.
-
-        Args:
-            node_ip (str): IP address of the target node.
-            blocked_ports (list, optional): List of ports to unblock. If None, fetch from iptables.
-
-        Returns:
-            None
-        """
-        try:
-            if blocked_ports is None:
-                # Fetch existing blocked ports from iptables
-                cmd = "sudo iptables -L -v -n --line-numbers"
-                output, _ = self.exec_command(node_ip, cmd)
-
-                blocked_ports = []
-
-                for line in output.split("\n"):
-                    if "multiport dports" in line or "multiport sports" in line:
-                        parts = line.split()
-                        for part in parts:
-                            if "multiport" in part:
-                                idx = parts.index(part)
-                                if idx + 1 < len(parts):
-                                    ports = parts[idx + 1].split(",")
-                                    for port in ports:
-                                        if port not in blocked_ports:
-                                            blocked_ports.append(port)
-
-            if blocked_ports:
-                ports_str = ",".join(blocked_ports)
-                unblock_command = f"""
-                    sudo iptables -D OUTPUT -p tcp -m multiport --sports {ports_str} -j DROP;
-                    sudo iptables -D OUTPUT -p tcp -m multiport --dports {ports_str} -j DROP;
-                    sudo iptables -D INPUT -p tcp -m multiport --dports {ports_str} -j DROP;
-                    sudo iptables -D INPUT -p tcp -m multiport --sports {ports_str} -j DROP;
-                """
-
-                self.exec_command(node_ip, unblock_command)
-                self.logger.info(f"Unblocked ports {ports_str} on {node_ip}.")
-
-            time.sleep(5)
-            self.logger.info("Network outage: IPTable Rules List After Unblocking:")
-            self.exec_command(node_ip, "sudo iptables -L -v -n --line-numbers")
-
-        except Exception as e:
-            self.logger.error(f"Failed to unblock ports on {node_ip}: {e}")
-
 
 
     def set_aio_max_nr(self, node_ip, value=1048576):
@@ -1220,7 +1189,7 @@ class SshUtils:
                 continue
 
             log_file_path = f"/tmp/{log_file_name}"
-            destination_path = f"{Path.home()}/{log_file_name}"
+            destination_path = f"{Path.home()}/{log_file_name}_{storage_node_ip}"
 
             # Copy log file from inside container to host machine
             copy_command = f"sudo docker cp spdk:{log_file_path} {destination_path}"
@@ -1260,6 +1229,19 @@ class SshUtils:
             )
             output, _ = self.exec_command(node_ip, install_tcpdump_command)
             self.logger.info(f"tcpdump installed successfully: {output}")
+
+    def check_and_install_tshark(self, node_ip):
+        """Check if tshark is installed on the remote node and install it if missing."""
+        output, _ = self.exec_command(node_ip, "which tshark")
+        if not output:
+            self.logger.info("tshark not found, installing...")
+            install_tcpdump_command = (
+                "sudo apt-get update -y && sudo apt-get install -y tshark"
+                " || sudo yum install -y wireshark"
+            )
+            output, _ = self.exec_command(node_ip, install_tcpdump_command)
+            self.logger.info(f"tshark installed successfully: {output}")
+
 
     def start_tcpdump_logging(self, node_ip, log_dir):
         """Start tcpdump logging for various TCP anomalies on a remote node with proper background handling."""
@@ -1302,6 +1284,37 @@ class SshUtils:
         self.logger.info(f"Started tcpdump for Connection resets on {node_ip}, saving to {conn_reset_log}")
         self.logger.info(f"Started tcpdump for ACK timeouts on {node_ip}, saving to {ack_timeout_log}")
 
+    def start_tshark_logging(self, node_ip, log_dir):
+        """Start tshark logging for various TCP anomalies on a remote node with proper UTC timestamps."""
+        self.check_and_install_tshark(node_ip=node_ip)
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+        # Define log file names for each tshark command
+        syn_timeout_log = f"{log_dir}/tshark_syn_timeout_{node_ip}_{timestamp}.log"
+        rcv_buffer_full_log = f"{log_dir}/tshark_rcv_buffer_full_{node_ip}_{timestamp}.log"
+        conn_reset_log = f"{log_dir}/tshark_conn_reset_{node_ip}_{timestamp}.log"
+        ack_timeout_log = f"{log_dir}/tshark_ack_timeout_{node_ip}_{timestamp}.log"
+
+        # Tshark commands with fixed timestamps and proper filtering
+        tshark_commands = [
+            f"sudo tmux new-session -d -s sync_timeout_log_session \"tshark -i ens16 -Y 'tcp.flags.syn == 1 && tcp.window_size_value > 1' -t ud > {syn_timeout_log} 2>&1\"",
+            f"sudo tmux new-session -d -s rcv_buffer_log_session \"tshark -i ens16 -Y 'tcp.flags.ack == 1 && tcp.window_size_value == 0' -t ud > {rcv_buffer_full_log} 2>&1\"",
+            f"sudo tmux new-session -d -s conn_reset_log_session \"tshark -i ens16 -Y 'tcp.flags.reset == 1' -t ud > {conn_reset_log} 2>&1\"",
+            f"sudo tmux new-session -d -s ack_timeout_log_session \"tshark -i ens16 -Y 'tcp.analysis.ack_rtt > 0.5' -t ud -T fields -e frame.time -e ip.src -e ip.dst -e tcp.seq -e tcp.ack -e tcp.analysis.ack_rtt > {ack_timeout_log} 2>&1\""
+        ]
+
+
+        # Execute each tshark command remotely
+        for cmd in tshark_commands:
+            self.exec_command(node_ip, cmd)
+
+        # Log the output filenames for reference
+        self.logger.info(f"Started tshark for SYN timeouts on {node_ip}, saving to {syn_timeout_log}")
+        self.logger.info(f"Started tshark for RCV buffer full on {node_ip}, saving to {rcv_buffer_full_log}")
+        self.logger.info(f"Started tshark for Connection resets on {node_ip}, saving to {conn_reset_log}")
+        self.logger.info(f"Started tshark for ACK timeouts on {node_ip}, saving to {ack_timeout_log}")
+
     def stop_all_tcpdump(self, node_ip):
         """Kill all tcpdump processes on a remote node."""
         stop_command = """
@@ -1309,6 +1322,14 @@ class SshUtils:
         """
         self.exec_command(node_ip, stop_command)
         self.logger.info(f"Stopped all tcpdump processes on {node_ip}")
+
+    def stop_all_tshark(self, node_ip):
+        """Kill all tshark processes on a remote node."""
+        stop_command = """
+        sudo pkill -f tshark && echo "All tshark processes stopped" || echo "No tshark process found"
+        """
+        self.exec_command(node_ip, stop_command)
+        self.logger.info(f"Stopped all tshark processes on {node_ip}")
 
     def get_dmesg_logs_within_iso_window(self, node_ip, start_iso, end_iso):
         """
@@ -1345,3 +1366,98 @@ class SshUtils:
                 self.logger.warning(f"Skipping malformed dmesg line: {line} ({e})")
 
         return logs_in_window
+    
+    def start_netstat_dmesg_logging(self, node_ip, log_dir):
+        """Start continuous netstat and dmesg logging without using watch."""
+        # Ensure netstat is installed
+        self.exec_command(node_ip, 'sudo apt-get update && sudo apt-get install -y net-tools || sudo yum install -y net-tools')
+
+        # Start logging netstat and dmesg by directly redirecting output to files
+        netstat_log = f"{log_dir}/netstat_segments_{node_ip}.log"
+        dmesg_log = f"{log_dir}/dmesg_tcp_{node_ip}.log"
+        journalctl_log = f"{log_dir}/journalctl_{node_ip}.log"
+
+        self.exec_command(node_ip, f"sudo tmux new-session -d -s netstat_log 'bash -c \"while true; do netstat -s | grep \\\"segments dropped\\\" >> {netstat_log}; sleep 5; done\"'")
+        self.exec_command(node_ip, f"sudo tmux new-session -d -s dmesg_log 'bash -c \"while true; do sudo dmesg | grep -i \\\"tcp\\\" >> {dmesg_log}; sleep 5; done\"'")
+        self.exec_command(node_ip, f"sudo tmux new-session -d -s journalctl_log 'bash -c \"while true; do sudo journalctl -k | grep -i \\\"tcp\\\" >> {journalctl_log}; sleep 5; done\"'")
+
+    def reset_iptables_in_spdk(self, node_ip):
+        """
+        Resets iptables rules inside the SPDK container on a given node.
+
+        Args:
+            node_ip (str): The IP address of the target node.
+        """
+        try:
+            self.logger.info(f"Resetting iptables inside SPDK container on {node_ip}.")
+
+            # Commands to run inside the SPDK container
+            iptables_reset_cmds = [
+                "sudo docker exec spdk iptables -L -v -n",
+                "sudo docker exec spdk iptables -P INPUT ACCEPT",
+                "sudo docker exec spdk iptables -P OUTPUT ACCEPT",
+                "sudo docker exec spdk iptables -P FORWARD ACCEPT",
+                "sudo docker exec spdk iptables -F",
+                "sudo docker exec spdk iptables -L -v -n"
+            ]
+
+            # Execute each command
+            for cmd in iptables_reset_cmds:
+                self.exec_command(node_ip, cmd)
+
+            self.logger.info(f"Successfully reset iptables inside SPDK container on {node_ip}.")
+
+        except Exception as e:
+            self.logger.error(f"Failed to reset iptables in SPDK container on {node_ip}: {e}")
+
+    def check_remote_spdk_logs_for_keyword(self, node_ip, log_dir, test_name, keyword="ALCEMLD"):
+        """
+        Checks all 'spdk_{test_name}*.txt' files in log_dir on a remote node for the given keyword.
+        If found, logs the timestamp and the full line containing the keyword.
+
+        Args:
+            node_ip (str): IP address of the remote node.
+            log_dir (str): Directory where log files are stored.
+            test_name (str): Name of the test (used to identify relevant log files).
+            keyword (str, optional): The keyword to search for. Defaults to "ALCEMLD".
+
+        Returns:
+            dict: A dictionary with filenames as keys and a list of matching log lines (timestamp + error line).
+        """
+        try:
+            # Find all log files matching 'spdk_{test_name}*.txt' pattern
+            find_command = f"ls {log_dir}/spdk_{test_name}*.txt 2>/dev/null"
+            output, _ = self.exec_command(node_ip, find_command)
+
+            log_files = output.strip().split("\n") if output else []
+            keyword_matches = {}
+
+            for log_file in log_files:
+                if not log_file:
+                    continue  # Skip empty lines
+                
+                # Extract the full log line that contains the keyword, including the timestamp
+                grep_command = f"grep '{keyword}' {log_file} || true"
+                grep_output, _ = self.exec_command(node_ip, grep_command)
+
+                if grep_output:
+                    matched_lines = grep_output.strip().split("\n")
+                    keyword_matches[log_file] = matched_lines  # Store all matched lines with timestamps
+                else:
+                    keyword_matches[log_file] = []
+
+            return keyword_matches
+
+        except Exception as e:
+            self.logger.error(f"Failed to check logs for keyword '{keyword}' on node {node_ip}: {e}")
+            return {}
+
+
+
+    # def stop_netstat_dmesg_logging(self, node_ip):
+    #     """Stop continuous netstat and dmesg logging without using watch."""
+    #     # Ensure netstat is installed
+
+    #     self.exec_command(node_ip, f"sudo tmux new-session -d -s netstat_log 'bash -c \"while true; do netstat -s | grep \\\"segments dropped\\\" >> {netstat_log}; sleep 5; done\"'")
+    #     self.exec_command(node_ip, f"sudo tmux new-session -d -s dmesg_log 'bash -c \"while true; do sudo dmesg | grep -i \\\"tcp\\\" >> {dmesg_log}; sleep 5; done\"'")
+

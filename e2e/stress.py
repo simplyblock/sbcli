@@ -61,13 +61,15 @@ def main():
             test_obj.setup()
             if i == 0:
                 test_obj.cleanup_logs()
+                test_obj.configure_sysctl_settings()
             test_obj.run()
             passed_cases.append(f"{test.__name__}")
         except Exception as exp:
             logger.error(traceback.format_exc())
             errors[f"{test.__name__}"] = [exp]
         try:
-            test_obj.stop_docker_logs_collect()
+            if not args.run_k8s:
+                test_obj.stop_docker_logs_collect()
             test_obj.fetch_all_nodes_distrib_log()
             if i == (len(test_class_run) - 1):
                 test_obj.collect_management_details()

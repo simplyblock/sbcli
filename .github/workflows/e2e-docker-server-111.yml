@@ -15,11 +15,11 @@ on:
       sbcli_cmd:
         description: 'Command for sbcli execution'
         required: true
-        default: 'sbcli-hmdi'
+        default: 'sbcli-dev'
       ndcs:
         description: 'Value for NDCS'
         required: false
-        default: 2
+        default: 1
       npcs:
         description: 'Value for NPCS'
         required: false

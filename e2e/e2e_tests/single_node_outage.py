@@ -136,8 +136,8 @@ class TestSingleNodeOutage(TestClusterBase):
         snapshot_id_1 = self.ssh_obj.get_snapshot_id(node=self.mgmt_nodes[0],
                                                      snapshot_name=f"{self.snapshot_name}_1")
         
-        self.sbcli_utils.resize_lvol(lvol_id=self.sbcli_utils.get_lvol_id(self.lvol_name),
-                                     new_size="20G")
+        # self.sbcli_utils.resize_lvol(lvol_id=self.sbcli_utils.get_lvol_id(self.lvol_name),
+        #                              new_size="20G")
         
         timestamp = int(datetime.now().timestamp())
 
@@ -174,17 +174,18 @@ class TestSingleNodeOutage(TestClusterBase):
                          health_check_status=True
                          )
         
-        self.sbcli_utils.resize_lvol(lvol_id=self.sbcli_utils.get_lvol_id(self.lvol_name),
-                                     new_size="25G")
+        # self.sbcli_utils.resize_lvol(lvol_id=self.sbcli_utils.get_lvol_id(self.lvol_name),
+        #                              new_size="25G")
         
         node_details = self.sbcli_utils.get_storage_node_details(no_lvol_node_uuid)
         node_ip = node_details[0]["mgmt_ip"]
-        self.ssh_obj.restart_docker_logging(
-            node_ip=node_ip,
-            containers=self.container_nodes[node_ip],
-            log_dir=self.docker_logs_path,
-            test_name=self.test_name
-        )
+        if not self.k8s_test:
+            self.ssh_obj.restart_docker_logging(
+                node_ip=node_ip,
+                containers=self.container_nodes[node_ip],
+                log_dir=self.docker_logs_path,
+                test_name=self.test_name
+            )
 
         sleep_n_sec(120)
         self.validate_migration_for_node(
@@ -273,10 +274,10 @@ class TestSingleNodeOutage(TestClusterBase):
         self.common_utils.validate_fio_test(node=self.mgmt_nodes[0],
                                             log_file=self.log_path)
         
-        self.sbcli_utils.resize_lvol(lvol_id=self.sbcli_utils.get_lvol_id(f"{self.lvol_name}_cl_1"),
-                                     new_size="30G")
-        self.sbcli_utils.resize_lvol(lvol_id=self.sbcli_utils.get_lvol_id(f"{self.lvol_name}_cl_2"),
-                                     new_size="30G")
+        # self.sbcli_utils.resize_lvol(lvol_id=self.sbcli_utils.get_lvol_id(f"{self.lvol_name}_cl_1"),
+        #                              new_size="30G")
+        # self.sbcli_utils.resize_lvol(lvol_id=self.sbcli_utils.get_lvol_id(f"{self.lvol_name}_cl_2"),
+        #                              new_size="30G")
         
         clone_files = self.ssh_obj.find_files(self.mgmt_nodes[0], directory=f"{clone_mount_file}_2")
         final_checksum = self.ssh_obj.generate_checksums(self.mgmt_nodes[0], clone_files)
@@ -414,12 +415,13 @@ class TestHASingleNodeOutage(TestClusterBase):
                              lvol_status="online",
                              health_check_status=True
                              )
-            self.ssh_obj.restart_docker_logging(
-                node_ip=node_ip,
-                containers=self.container_nodes[node_ip],
-                log_dir=self.docker_logs_path,
-                test_name=self.test_name
-            )
+            if not self.k8s_test:
+                self.ssh_obj.restart_docker_logging(
+                    node_ip=node_ip,
+                    containers=self.container_nodes[node_ip],
+                    log_dir=self.docker_logs_path,
+                    test_name=self.test_name
+                )
             self.logger.info(f"Validating migration tasks for node {no_lvol_node_uuid}.")
             sleep_n_sec(120)
             self.validate_migration_for_node(timestamp, 5000, None)
