@@ -134,7 +134,7 @@ jobs:
           cd $GITHUB_WORKSPACE/simplyBlockDeploy
           helm uninstall -n spdk-csi spdk-csi || echo "No helm release found. Skipping uninstall."
           ./bootstrap-cluster.sh --sbcli-cmd "$SBCLI_CMD" \
-            --max-lvol 20 --max-snap 20 --max-prov 100G --number-of-devices 3 \
+            --max-lvol 20 --max-snap 20 --max-prov 150G --number-of-devices 3 \
             --distr-ndcs $NDCS \
             --distr-npcs $NPCS \
             --distr-bs $BS \
@@ -211,15 +211,15 @@ jobs:
             --set storagenode.create=true \
             --set cachingnode.create=false \
             --set logicalVolume.encryption=true \
-            --set storagenode.maxLvol="10" \
-            --set storagenode.maxSnap="10" \
+            --set storagenode.maxLvol="20" \
+            --set storagenode.maxSnap="20" \
             --set storagenode.maxProv="150G" \
             --set storagenode.numDevices="3" \
             --set storagenode.dataNics=ens16 \
             --set storagenode.ifname=ens18 > helm-rendered.yaml
 
           echo "Helm template successfully generated."
-          cat helm-rendered.yaml | head -n 20  # Print the first 20 lines to verify
+          head -n 20 helm-rendered.yaml
         env:
           SBCLI_CMD: ${{ env.SBCLI_CMD }}
           NDCS: ${{ env.NDCS }}
@@ -257,8 +257,8 @@ jobs:
             --set storagenode.create=true \
             --set cachingnode.create=false \
             --set logicalVolume.encryption=true \
-            --set storagenode.maxLvol="10" \
-            --set storagenode.maxSnap="10" \
+            --set storagenode.maxLvol="20" \
+            --set storagenode.maxSnap="20" \
             --set storagenode.maxProv="150G" \
             --set storagenode.numDevices="3" \
             --set storagenode.dataNics=ens16 \
