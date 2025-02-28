@@ -874,10 +874,6 @@ def delete_lvol(id_or_name, force_delete=False):
         snode.rpc_username,
         snode.rpc_password)
 
-    # set status
-    lvol.status = LVol.STATUS_IN_DELETION
-    lvol.write_to_db(db_controller.kv_store)
-
     # disconnect from caching nodes:
     cnodes = db_controller.get_caching_nodes()
     for cnode in cnodes:
@@ -945,7 +941,6 @@ def delete_lvol(id_or_name, force_delete=False):
             # both primary and secondary are not online
             msg = f"Host nodes are not online"
             logger.error(msg)
-            lvol.remove(db_controller.kv_store)
             return False, msg
 
 
@@ -973,8 +968,10 @@ def delete_lvol(id_or_name, force_delete=False):
                     if not force_delete:
                         return False
 
-    lvol_events.lvol_delete(lvol)
-    lvol.remove(db_controller.kv_store)
+    lvol = db_controller.get_lvol_by_id(lvol.get_id())
+    # set status
+    lvol.status = LVol.STATUS_IN_DELETION
+    lvol.write_to_db()
 
     # if lvol is clone and snapshot is deleted, then delete snapshot
     if lvol.cloned_from_snap:

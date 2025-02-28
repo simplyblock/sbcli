@@ -5,8 +5,9 @@ from datetime import datetime
 
 from simplyblock_core import constants, db_controller, utils
 from simplyblock_core.models.lvol_model import LVol
-from simplyblock_core.controllers import health_controller, lvol_events
-
+from simplyblock_core.controllers import health_controller, lvol_events, lvol_controller
+from simplyblock_core.models.storage_node import StorageNode
+from simplyblock_core.rpc_client import RPCClient
 
 logger = utils.get_logger(__name__)
 
@@ -45,28 +46,50 @@ db_controller = db_controller.DBController()
 
 logger.info("Starting LVol monitor...")
 while True:
-    lvols = db_controller.get_lvols()  # pass
-    if not lvols:
-        logger.error("LVols list is empty")
 
-    for lvol in lvols:
-        if lvol.io_error:
-            logger.debug(f"Skipping LVol health check because of io_error {lvol.get_id()}")
-            continue
-        if lvol.status == lvol.STATUS_IN_DELETION:
-            logger.warning(f"LVol in deletion, id: {lvol.get_id()}, status: {lvol.status}.. skipping")
-            continue
-        ret = health_controller.check_lvol(lvol.get_id())
-        if not ret:
-            time.sleep(5)
-            ret = health_controller.check_lvol(lvol.get_id())
+    for snode in db_controller.get_storage_nodes():
 
-        logger.info(f"LVol: {lvol.get_id()}, is healthy: {ret}")
-        set_lvol_health_check(lvol, ret)
-        if ret:
-            set_lvol_status(lvol, LVol.STATUS_ONLINE)
-        else:
-            set_lvol_status(lvol, LVol.STATUS_OFFLINE)
+        if snode.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
+
+            rpc_client = RPCClient(
+                snode.mgmt_ip, snode.rpc_port,
+                snode.rpc_username, snode.rpc_password, timeout=5, retry=1)
+
+            for lvol in db_controller.get_lvols_by_node_id(snode.get_id()):
+                if lvol.io_error:
+                    logger.debug(f"Skipping LVol health check because of io_error {lvol.get_id()}")
+                    continue
+
+                if lvol.status == lvol.STATUS_IN_DELETION:
+                    ret = rpc_client.bdev_lvol_get_lvol_delete_status(lvol.base_bdev)
+                    if ret == 0: # delete complete
+                        logger.info(f"LVol deleted successfully, id: {lvol.get_id()}")
+                        lvol_events.lvol_delete(lvol)
+                        lvol.remove(db_controller.kv_store)
+
+                    elif ret == 1: # deletion is in progress.
+                        logger.info(f"LVol deletion in progress, id: {lvol.get_id()}")
+
+                    elif ret == 2: # deletion error
+                        logger.info(f"LVol deletion error, id: {lvol.get_id()}")
+                        lvol = db_controller.get_lvol_by_id(lvol.get_id())
+                        lvol.io_error = True
+                        lvol.write_to_db()
+                        set_lvol_status(lvol, LVol.STATUS_OFFLINE)
+
+                    continue
+
+                ret = health_controller.check_lvol(lvol.get_id())
+                if not ret:
+                    time.sleep(3)
+                    ret = health_controller.check_lvol(lvol.get_id())
+
+                logger.info(f"LVol: {lvol.get_id()}, is healthy: {ret}")
+                set_lvol_health_check(lvol, ret)
+                if ret:
+                    set_lvol_status(lvol, LVol.STATUS_ONLINE)
+                else:
+                    set_lvol_status(lvol, LVol.STATUS_OFFLINE)
 
     for snap in db_controller.get_snapshots():
         logger.debug("Checking Snapshot: %s", snap.get_id())

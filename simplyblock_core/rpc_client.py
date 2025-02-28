@@ -983,6 +983,13 @@ class RPCClient:
         return self._request("bdev_lvol_set_lvs_op", params)
 
     def bdev_lvol_get_lvol_delete_status(self, name):
+        """
+        Returns :-
+            0: lvol is deleted.
+            1: lvole deletion is in progress.
+            2: No delete action on lvol or the delete requets is queued or previous delete request
+               failed due to error.
+        """
         params = {
             "name": name
         }
