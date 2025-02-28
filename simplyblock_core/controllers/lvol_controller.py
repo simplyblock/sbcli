@@ -970,8 +970,10 @@ def delete_lvol(id_or_name, force_delete=False):
 
     lvol = db_controller.get_lvol_by_id(lvol.get_id())
     # set status
+    old_status = lvol.status
     lvol.status = LVol.STATUS_IN_DELETION
     lvol.write_to_db()
+    lvol_events.lvol_status_change(lvol, lvol.status, old_status)
 
     # if lvol is clone and snapshot is deleted, then delete snapshot
     if lvol.cloned_from_snap:
