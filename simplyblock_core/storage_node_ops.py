@@ -935,7 +935,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
              small_bufsize=0, large_bufsize=0, spdk_cpu_mask=None,
              num_partitions_per_dev=0, jm_percent=0, number_of_devices=0, enable_test_device=False,
              namespace=None, number_of_distribs=2, enable_ha_jm=False, is_secondary_node=False, id_device_by_nqn=False,
-             partition_size="", ha_jm_count=3):
+             partition_size="", ha_jm_count=3, spdk_hp_mem=None):
 
     db_controller = DBController()
     kv_store = db_controller.kv_store
@@ -1009,6 +1009,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
         spdk_cpu_mask = hex(int(math.pow(2, cpu_count))-2)
 
     spdk_cores = utils.hexa_to_cpu_list(spdk_cpu_mask)
+    cpu_count = len(spdk_cores)
     if cpu_count < spdk_cores[-1]:
         print(f"ERROR: The cpu mask {spdk_cpu_mask} is greater than the total cpus on the system {cpu_count}")
         return False
@@ -1066,8 +1067,10 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
         number_of_alceml_devices, number_of_distribs, cpu_count, len(poller_cpu_cores) or cpu_count)
 
     # Calculate minimum huge page memory
-    minimum_hp_memory = utils.calculate_minimum_hp_memory(small_pool_count, large_pool_count, max_lvol, max_prov,
-                                                          cpu_count)
+    if spdk_hp_mem:
+        minimum_hp_memory = utils.parse_size(spdk_hp_mem)
+    else:
+        minimum_hp_memory = utils.calculate_minimum_hp_memory(small_pool_count, large_pool_count, max_lvol, max_prov, cpu_count)
 
     # check for memory
     if "memory_details" in node_info and node_info['memory_details']:
@@ -1090,7 +1093,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
     if not satisfied:
         logger.error(
             f"Not enough memory for the provided max_lvo: {max_lvol}, max_snap: {max_snap}, max_prov: {max_prov}.. Exiting")
-        return False
+        # return False
 
     logger.info("Joining docker swarm...")
     cluster_docker = utils.get_docker_client(cluster_id)
@@ -1116,7 +1119,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
     results = None
     try:
         results, err = snode_api.spdk_process_start(
-            spdk_cpu_mask, spdk_mem, spdk_image, spdk_debug, cluster_ip, fdb_connection,
+            spdk_cpu_mask, minimum_hp_memory, spdk_image, spdk_debug, cluster_ip, fdb_connection,
             namespace, mgmt_ip, rpc_port, rpc_user, rpc_pass,
             multi_threading_enabled=constants.SPDK_PROXY_MULTI_THREADING_ENABLED, timeout=constants.SPDK_PROXY_TIMEOUT)
     except Exception as e:
@@ -1185,7 +1188,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
         snode.hugepages = node_info['hugepages']
 
     snode.spdk_cpu_mask = spdk_cpu_mask or ""
-    snode.spdk_mem = spdk_mem
+    snode.spdk_mem = minimum_hp_memory
     snode.max_lvol = max_lvol
     snode.max_snap = max_snap
     snode.max_prov = max_prov
@@ -1670,7 +1673,7 @@ def restart_storage_node(
             else:
                 logger.error("Unsupported instance type please specify --number-of-devices")
                 return False
-    snode.number_of_devices = number_of_devices
+    # snode.number_of_devices = number_of_devices
 
     number_of_split = snode.num_partitions_per_dev if snode.num_partitions_per_dev else snode.num_partitions_per_dev + 1
     number_of_alceml_devices = number_of_devices * number_of_split
@@ -1690,7 +1693,7 @@ def restart_storage_node(
         logger.info(f"Minimum required huge pages memory is : {utils.humanbytes(minimum_hp_memory)}")
     else:
         logger.error(f"Cannot get memory info from the instance.. Exiting")
-        return False
+        # return False
 
     # Calculate minimum sys memory
     minimum_sys_memory = utils.calculate_minimum_sys_memory(snode.max_prov, memory_details['total'])
@@ -1702,11 +1705,11 @@ def restart_storage_node(
     if not satisfied:
         logger.error(
             f"Not enough memory for the provided max_lvo: {snode.max_lvol}, max_snap: {snode.max_snap}, max_prov: {utils.humanbytes(snode.max_prov)}.. Exiting")
-        return False
+        # return False
 
     spdk_debug = snode.spdk_debug
     if set_spdk_debug:
-        spdk_debug = spdk_debug
+        spdk_debug = True
         snode.spdk_debug = spdk_debug
 
     cluster_docker = utils.get_docker_client(snode.cluster_id)
@@ -1717,7 +1720,7 @@ def restart_storage_node(
     try:
         fdb_connection = cluster.db_connection
         results, err = snode_api.spdk_process_start(
-            snode.spdk_cpu_mask, spdk_mem, snode.spdk_image, spdk_debug, cluster_ip, fdb_connection,
+            snode.spdk_cpu_mask, snode.spdk_mem, snode.spdk_image, spdk_debug, cluster_ip, fdb_connection,
             snode.namespace, snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password,
             multi_threading_enabled=constants.SPDK_PROXY_MULTI_THREADING_ENABLED, timeout=constants.SPDK_PROXY_TIMEOUT)
     except Exception as e:
