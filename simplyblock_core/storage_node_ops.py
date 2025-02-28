@@ -1009,7 +1009,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
         spdk_cpu_mask = hex(int(math.pow(2, cpu_count))-2)
 
     spdk_cores = utils.hexa_to_cpu_list(spdk_cpu_mask)
-    cpu_count = len(spdk_cores)
+    cpu_count = spdk_cores[-1]
     if cpu_count < spdk_cores[-1]:
         print(f"ERROR: The cpu mask {spdk_cpu_mask} is greater than the total cpus on the system {cpu_count}")
         return False
@@ -1727,7 +1727,8 @@ def restart_storage_node(
         results, err = snode_api.spdk_process_start(
             snode.spdk_cpu_mask, snode.spdk_mem, snode.spdk_image, spdk_debug, cluster_ip, fdb_connection,
             snode.namespace, snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password,
-            multi_threading_enabled=constants.SPDK_PROXY_MULTI_THREADING_ENABLED, timeout=constants.SPDK_PROXY_TIMEOUT)
+            multi_threading_enabled=constants.SPDK_PROXY_MULTI_THREADING_ENABLED, timeout=constants.SPDK_PROXY_TIMEOUT,
+            ssd_pcie=snode.ssd_pcie)
     except Exception as e:
         logger.error(e)
         return False
