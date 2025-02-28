@@ -538,6 +538,8 @@ class RPCClient:
             "multipath": multipath,
             # "reconnect_delay_sec":1
         }
+        return self._request("bdev_nvme_attach_controller", params)
+
     def bdev_nvme_attach_controller_tcp_int(self, name, nqn, ip, port, multipath="disable"):
         params = {
             "name": name,
