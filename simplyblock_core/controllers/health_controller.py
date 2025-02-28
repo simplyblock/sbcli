@@ -91,11 +91,11 @@ def _check_node_api(ip):
     return False
 
 
-def _check_spdk_process_up(ip):
+def _check_spdk_process_up(ip, rpc_port):
     try:
         snode_api = SNodeClient(f"{ip}:5000", timeout=3, retry=2)
         logger.debug(f"Node API={ip}:5000")
-        is_up, _ = snode_api.spdk_process_is_up()
+        is_up, _ = snode_api.spdk_process_is_up(rpc_port)
         logger.debug(f"SPDK is {is_up}")
         return is_up
     except Exception as e:

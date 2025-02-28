@@ -1539,7 +1539,7 @@ def remove_storage_node(node_id, force_remove=False, force_migrate=False):
     try:
         if health_controller._check_node_api(snode.mgmt_ip):
             snode_api = SNodeClient(snode.api_endpoint, timeout=20)
-            snode_api.spdk_process_kill()
+            snode_api.spdk_process_kill(snode.rpc_port)
             snode_api.leave_swarm()
             pci_address = []
             for dev in snode.nvme_devices:
@@ -2150,7 +2150,7 @@ def shutdown_storage_node(node_id, force=False):
     logger.info("Stopping SPDK")
     if health_controller._check_node_api(snode.mgmt_ip):
         snode_api = SNodeClient(snode.api_endpoint)
-        results, err = snode_api.spdk_process_kill()
+        results, err = snode_api.spdk_process_kill(snode.rpc_port)
 
     logger.info("Setting node status to offline")
     set_node_status(node_id, StorageNode.STATUS_OFFLINE)
