@@ -1247,6 +1247,11 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
         logger.error("Failed socket implement set options")
         return False
 
+    ret = rpc_client.sock_impl_set_options()
+    if not ret:
+        logger.error(f"Failed to set optimized socket options")
+        return False
+
     # 3- set nvme config
     if snode.pollers_mask:
         ret = rpc_client.nvmf_set_config(snode.pollers_mask)
@@ -1289,10 +1294,6 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
         logger.error(f"Failed to create transport TCP with qpair: {qpair}")
         return False
 
-    ret = rpc_client.sock_impl_set_options()
-    if not ret:
-        logger.error(f"Failed to set optimized socket options")
-        return False
                  
     # 7- set jc singleton mask
     if snode.jc_singleton_mask:
