@@ -1289,6 +1289,11 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
         logger.error(f"Failed to create transport TCP with qpair: {qpair}")
         return False
 
+    ret = rpc_client.sock_impl_set_options()
+    if not ret:
+        logger.error(f"Failed to set optimized socket options")
+        return False
+                 
     # 7- set jc singleton mask
     if snode.jc_singleton_mask:
         ret = rpc_client.jc_set_hint_lcpu_mask(snode.jc_singleton_mask)
