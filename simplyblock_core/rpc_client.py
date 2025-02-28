@@ -551,7 +551,7 @@ class RPCClient:
             "num_io_queues": 16384,
             "ctrlr_loss_timeout_sec": -1,
             "multipath": multipath,
-            "reconnect_delay_sec":1
+            "reconnect_delay_sec": 5
         }
         return self._request("bdev_nvme_attach_controller", params)
 
