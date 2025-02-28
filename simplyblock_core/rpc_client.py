@@ -160,8 +160,8 @@ class RPCClient:
         """
         params = {
             "impl_name": "posix",
-            "recv_buf_size": 6291456,
-            "send_buf_size": 6291456,
+            "recv_buf_size": 2097152,
+            "send_buf_size": 2097152,
             "enable_recv_pipe": True,
             "enable_quick_ack": True,
             "enable_placement_id": 1,
