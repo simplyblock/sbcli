@@ -138,7 +138,7 @@ class RPCClient:
         params = {
             "trtype": trtype,
             "max_io_qpairs_per_ctrlr": qpair_count,
-            "max_queue_depth": 2048,
+            "max_queue_depth": 512,
             "abort_timeout_sec": 5,
             "ack_timeout": 2048,
             "zcopy": True,
@@ -150,11 +150,27 @@ class RPCClient:
             "buf_cache_size": 32,
             "dif_insert_or_strip": False,
             "c2h_success": True,
-            "sock_priority": 0
-
+            "sock_priority": 255
         }
         return self._request("nvmf_create_transport", params)
 
+    def sock_impl_set_options(self):
+        """
+            optimizing sockets for high load and performance
+        """
+        params = {
+            "impl_name": "posix",
+            "recv_buf_size": 6291456,
+            "send_buf_size": 6291456,
+            "enable_recv_pipe": True,
+            "enable_quick_ack": True,
+            "enable_placement_id": 1,
+            "enable_zerocopy_send_server": True,
+            "enable_zerocopy_send_client": True    
+        }
+        return self._request("sock_impl_set_options", params)
+
+    
     def transport_create_caching(self, trtype):
         params = {
             "trtype": trtype,

@@ -1154,11 +1154,11 @@ def connect_lvol(uuid):
                 "reconnect-delay": constants.LVOL_NVME_CONNECT_RECONNECT_DELAY,
                 "ctrl-loss-tmo": constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO,
                 "nr-io-queues": constants.LVOL_NVME_CONNECT_NR_IO_QUEUES,
-                "keep-alive-tmo": constants.LVOL_NVME_CONNECT_TIMEOUT_S,
+                "keep-alive-tmo": constants.LVOL_NVME_KEEP_ALIVE_TO,
                 "connect": f"sudo nvme connect --reconnect-delay={constants.LVOL_NVME_CONNECT_RECONNECT_DELAY} "
                            f"--ctrl-loss-tmo={constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO} "
                            f"--nr-io-queues={constants.LVOL_NVME_CONNECT_NR_IO_QUEUES} "
-                           f"--keep-alive-tmo={constants.LVOL_NVME_CONNECT_TIMEOUT_S} "
+                           f"--keep-alive-tmo={constants.LVOL_NVME_KEEP_ALIVE_TO} "
                            f"--transport={transport} --traddr={ip} --trsvcid={port} --nqn={lvol.nqn}",
             })
     return out
