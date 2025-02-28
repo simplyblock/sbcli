@@ -2916,9 +2916,6 @@ def recreate_lvstore(snode):
     if not lvol_list:
         prim_node_suspend = False
 
-    if snode.jm_vuid:
-        ret = rpc_client.jc_explicit_synchronization(snode.jm_vuid)
-        logger.info(f"JM Sync res: {ret}")
 
     lvol_ana_state = "optimized"
     if prim_node_suspend:
@@ -2935,6 +2932,11 @@ def recreate_lvstore(snode):
             lvol_obj.io_error = False
             lvol_obj.health_check = True
         lvol_obj.write_to_db()
+
+    #
+    if snode.jm_vuid:
+        ret = rpc_client.jc_explicit_synchronization(snode.jm_vuid)
+        logger.info(f"JM Sync res: {ret}")
 
     if prim_node_suspend:
         if sec_node.status == StorageNode.STATUS_ONLINE:
