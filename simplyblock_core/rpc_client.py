@@ -523,7 +523,7 @@ class RPCClient:
         # ultra/DISTR_v2/src_code_app_spdk/specs/message_format_rpcs__distrib__v5.txt#L396C1-L396C27
         return self._request("distr_status_events_update", params)
 
-    def bdev_nvme_attach_controller_tcp(self, name, nqn, ip, port):
+    def bdev_nvme_attach_controller_tcp(self, name, nqn, ip, port, multipath="disable"):
         params = {
             "name": name,
             "trtype": "tcp",
@@ -535,7 +535,7 @@ class RPCClient:
             # "fast_io_fail_timeout_sec": 1,
             "num_io_queues": 16384,
             # "ctrlr_loss_timeout_sec": 1,
-            "multipath":"disable",
+            "multipath": multipath,
             # "reconnect_delay_sec":1
         }
         return self._request("bdev_nvme_attach_controller", params)

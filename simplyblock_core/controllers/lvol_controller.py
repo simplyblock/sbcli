@@ -665,7 +665,8 @@ def add_lvol_on_node(lvol, snode, is_primary=True):
         min_cntlid =  1000
     logger.info("creating subsystem %s", lvol.nqn)
     ret = rpc_client.subsystem_create(lvol.nqn, 'sbcli-cn', lvol.uuid, min_cntlid)
-    logger.debug(ret)
+    ret = rpc_client.subsystem_create(lvol.nqn+"_INT", 'sbcli-cn', lvol.uuid, min_cntlid)
+    # logger.debug(ret)
 
     # add listeners
     logger.info("adding listeners")
@@ -674,15 +675,35 @@ def add_lvol_on_node(lvol, snode, is_primary=True):
             tr_type = iface.get_transport_type()
             logger.info("adding listener for %s on IP %s" % (lvol.nqn, iface.ip4_address))
             ret = rpc_client.listeners_create(lvol.nqn, tr_type, iface.ip4_address, lvol.subsys_port)
+            ret = rpc_client.listeners_create(lvol.nqn+"_INT", tr_type, iface.ip4_address, lvol.subsys_port)
             is_optimized = False
             if lvol.node_id == snode.get_id():
                 is_optimized = True
             logger.info(f"Setting ANA state: {is_optimized}")
             ret = rpc_client.nvmf_subsystem_listener_set_ana_state(
                 lvol.nqn, iface.ip4_address, lvol.subsys_port, is_optimized)
+            ret = rpc_client.nvmf_subsystem_listener_set_ana_state(
+                lvol.nqn+"_INT", iface.ip4_address, lvol.subsys_port, is_optimized)
+
+    top_bdev = lvol.top_bdev
+    if snode.is_secondary_node and is_primary==False:
+
+        # add listeners
+
+        logger.info("Add BDev to subsystem")
+        ret = rpc_client.nvmf_subsystem_add_ns(lvol.nqn+"_INT", lvol.top_bdev, lvol.uuid, lvol.guid)
+
+
+        ret = rpc_client.bdev_nvme_attach_controller_tcp(lvol.top_bdev+"_INT", lvol.nqn+"_INT", snode.data_nics[0].ip4_address, lvol.subsys_port, multipath="multipath")
+        prim_node = db_controller.get_storage_node_by_id(lvol.node_id)
+        ret = rpc_client.bdev_nvme_attach_controller_tcp(lvol.top_bdev+"_INT", lvol.nqn+"_INT", prim_node.data_nics[0].ip4_address, lvol.subsys_port, multipath="multipath")
+        top_bdev = lvol.top_bdev+"_INTn1"
+    else:
+        ret = rpc_client.bdev_PT_NoExcl_create(top_bdev+"_PT", top_bdev)
+        ret = rpc_client.nvmf_subsystem_add_ns(lvol.nqn+"_INT", top_bdev+"_PT", lvol.uuid, lvol.guid)
 
     logger.info("Add BDev to subsystem")
-    ret = rpc_client.nvmf_subsystem_add_ns(lvol.nqn, lvol.top_bdev, lvol.uuid, lvol.guid)
+    ret = rpc_client.nvmf_subsystem_add_ns(lvol.nqn, top_bdev, lvol.uuid, lvol.guid)
     if not ret:
         return False, "Failed to add bdev to subsystem"
 
