@@ -17,6 +17,8 @@ logger.info("Starting new device discovery service...")
 while True:
     nodes = db_controller.get_storage_nodes()
     for node in nodes:
+        time.sleep(constants.DEV_DISCOVERY_INTERVAL_SEC)
+        break
         auto_restart_devices = []
         online_devices = []
         if node.status != StorageNode.STATUS_ONLINE or node.is_secondary_node:

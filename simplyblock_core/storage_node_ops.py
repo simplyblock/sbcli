@@ -1311,8 +1311,12 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
     # get new node info after starting spdk
     node_info, _ = snode_api.info()
 
+    if not snode.ssd_pcie:
+        snode = db_controller.get_storage_node_by_id(snode.get_id())
+        snode.ssd_pcie = node_info['spdk_pcie_list']
+        snode.write_to_db()
     # discover devices
-    nvme_devs = addNvmeDevices(snode, node_info['spdk_pcie_list'])
+    nvme_devs = addNvmeDevices(snode, snode.ssd_pcie)
     if nvme_devs:
 
         if not is_secondary_node:
@@ -1818,8 +1822,6 @@ def restart_storage_node(
             logger.error("Failed to set jc singleton mask")
             return False
 
-    node_info, _ = snode_api.info()
-
     if snode.is_secondary_node:
         pass
         # ret = _prepare_cluster_devices_on_restart(snode)
@@ -1829,7 +1831,7 @@ def restart_storage_node(
 
     else:
 
-        nvme_devs = addNvmeDevices(snode, node_info['spdk_pcie_list'])
+        nvme_devs = addNvmeDevices(snode, snode.ssd_pcie)
         if not nvme_devs:
             logger.error("No NVMe devices was found!")
             return False
