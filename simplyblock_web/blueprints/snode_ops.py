@@ -177,7 +177,7 @@ def spdk_process_start():
         log_config=log_config,
         volumes=[
             '/etc/simplyblock:/etc/simplyblock',
-            f'/var/tmp/spdk_{rpc_port}.sock:/var/tmp/spdk.sock',
+            f'/var/tmp/spdk_{rpc_port}:/var/tmp',
             '/dev:/dev',
             '/lib/modules/:/lib/modules/',
             '/var/lib/systemd/coredump/:/var/lib/systemd/coredump/',
@@ -195,7 +195,7 @@ def spdk_process_start():
         network_mode="host",
         log_config=log_config,
         volumes=[
-            f'/var/tmp/spdk_{rpc_port}.sock:/var/tmp/spdk.sock',
+            f'/var/tmp/spdk_{rpc_port}:/var/tmp',
         ],
         environment=[
             f"SERVER_IP={data['server_ip']}",
