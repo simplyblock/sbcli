@@ -694,9 +694,9 @@ def add_lvol_on_node(lvol, snode, is_primary=True):
         ret = rpc_client.nvmf_subsystem_add_ns(lvol.nqn+"_INT", lvol.top_bdev, lvol.uuid, lvol.guid)
 
 
-        ret = rpc_client.bdev_nvme_attach_controller_tcp(lvol.top_bdev+"_INT", lvol.nqn+"_INT", snode.data_nics[0].ip4_address, lvol.subsys_port, multipath="multipath")
+        ret = rpc_client.bdev_nvme_attach_controller_tcp_int(lvol.top_bdev+"_INT", lvol.nqn+"_INT", snode.data_nics[0].ip4_address, lvol.subsys_port, multipath="multipath")
         prim_node = db_controller.get_storage_node_by_id(lvol.node_id)
-        ret = rpc_client.bdev_nvme_attach_controller_tcp(lvol.top_bdev+"_INT", lvol.nqn+"_INT", prim_node.data_nics[0].ip4_address, lvol.subsys_port, multipath="multipath")
+        ret = rpc_client.bdev_nvme_attach_controller_tcp_int(lvol.top_bdev+"_INT", lvol.nqn+"_INT", prim_node.data_nics[0].ip4_address, lvol.subsys_port, multipath="multipath")
         top_bdev = lvol.top_bdev+"_INTn1"
     else:
         ret = rpc_client.bdev_PT_NoExcl_create(top_bdev+"_PT", top_bdev)
