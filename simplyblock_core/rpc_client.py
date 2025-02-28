@@ -150,7 +150,7 @@ class RPCClient:
             "buf_cache_size": 32,
             "dif_insert_or_strip": False,
             "c2h_success": True,
-            "sock_priority": 255
+            "sock_priority": 16
         }
         return self._request("nvmf_create_transport", params)
 
