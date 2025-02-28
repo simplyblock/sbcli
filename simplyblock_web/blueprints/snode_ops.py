@@ -115,7 +115,7 @@ def spdk_process_start():
     ssd_pcie_params = ""
     if 'ssd_pcie' in data and data['ssd_pcie']:
         ssd_pcie = data['ssd_pcie']
-        ssd_pcie_params = " -a ".join(ssd_pcie)
+        ssd_pcie_params = " -A ".join(ssd_pcie)
         ssd_pcie_list = " ".join(ssd_pcie)
 
     rpc_port = constants.RPC_HTTP_PROXY_PORT
@@ -190,9 +190,9 @@ def spdk_process_start():
             '/var/lib/systemd/coredump/:/var/lib/systemd/coredump/',
             '/sys:/sys'],
         environment=[
-            f"RPC_PORT={rpc_port}"
-            f"ssd_pcie={ssd_pcie_params}"
-            f"PCI_ALLOWED={ssd_pcie_list}"
+            f"RPC_PORT={rpc_port}",
+            f"ssd_pcie=\"{ssd_pcie_params}\"",
+            f"PCI_ALLOWED=\"{ssd_pcie_list}\"",
         ]
         # restart_policy={"Name": "on-failure", "MaximumRetryCount": 99}
     )
