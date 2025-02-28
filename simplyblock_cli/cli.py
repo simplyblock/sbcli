@@ -31,7 +31,6 @@ class CLIWrapper:
         # Add storage node
         sub_command = self.add_sub_command(subparser, "deploy", 'Deploy local services for remote ops (local run)')
         sub_command.add_argument("--ifname", help='Management interface name, default: eth0')
-        sub_command.add_argument("--ssd-pcie", help='Nvme PCIe address to use for caching', dest='ssd_pcie')
 
         self.add_sub_command(subparser, "deploy-cleaner", 'clean local deploy (local run)')
 
@@ -62,6 +61,8 @@ class CLIWrapper:
         sub_command.add_argument("--is-secondary-node", help='add as secondary node', action='store_true', dest='is_secondary_node', default=False)
         sub_command.add_argument("--namespace", help='k8s namespace to deploy on',)
         sub_command.add_argument("--id-device-by-nqn", help='Use device nqn to identify it instead of serial number', action='store_true', dest='id_device_by_nqn', default=False)
+        sub_command.add_argument("--spdk-mem", help='SPDK HB mem', dest='spdk_mem')
+        sub_command.add_argument("--ssd-pcie", help='Nvme PCIe address to use for storage device', dest='ssd_pcie',  nargs='+')
 
         # delete storage node
         sub_command = self.add_sub_command(subparser, "delete", 'Delete storage node obj')
@@ -786,6 +787,8 @@ class CLIWrapper:
                 number_of_distribs = args.number_of_distribs
                 namespace = args.namespace
                 ha_jm_count = args.ha_jm_count
+                spdk_hp_mem = args.spdk_mem
+                ssd_pcie = args.ssd_pcie
 
                 out = storage_ops.add_node(
                     cluster_id=cluster_id,
@@ -811,6 +814,8 @@ class CLIWrapper:
                     id_device_by_nqn=args.id_device_by_nqn,
                     partition_size=args.partition_size,
                     ha_jm_count=ha_jm_count,
+                    spdk_hp_mem=spdk_hp_mem,
+                    ssd_pcie=ssd_pcie,
                 )
 
                 return out

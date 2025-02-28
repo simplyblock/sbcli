@@ -935,7 +935,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
              small_bufsize=0, large_bufsize=0, spdk_cpu_mask=None,
              num_partitions_per_dev=0, jm_percent=0, number_of_devices=0, enable_test_device=False,
              namespace=None, number_of_distribs=2, enable_ha_jm=False, is_secondary_node=False, id_device_by_nqn=False,
-             partition_size="", ha_jm_count=3, spdk_hp_mem=None):
+             partition_size="", ha_jm_count=3, spdk_hp_mem=None, ssd_pcie=None):
 
     db_controller = DBController()
     kv_store = db_controller.kv_store
@@ -1121,7 +1121,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
         results, err = snode_api.spdk_process_start(
             spdk_cpu_mask, minimum_hp_memory, spdk_image, spdk_debug, cluster_ip, fdb_connection,
             namespace, mgmt_ip, rpc_port, rpc_user, rpc_pass,
-            multi_threading_enabled=constants.SPDK_PROXY_MULTI_THREADING_ENABLED, timeout=constants.SPDK_PROXY_TIMEOUT)
+            multi_threading_enabled=constants.SPDK_PROXY_MULTI_THREADING_ENABLED, timeout=constants.SPDK_PROXY_TIMEOUT, ssd_pcie=ssd_pcie)
     except Exception as e:
         logger.error(e)
         return False
@@ -1160,6 +1160,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
     snode.cloud_name = cloud_instance['cloud'] or ""
 
     snode.namespace = namespace
+    snode.ssd_pcie = ssd_pcie
     snode.hostname = hostname
     snode.host_nqn = subsystem_nqn
     snode.subsystem = subsystem_nqn

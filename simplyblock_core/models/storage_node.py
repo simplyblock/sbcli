@@ -68,6 +68,7 @@ class StorageNode(BaseNodeObject):
     online_since: str = ""
     partitions_count: int = 0
     poller_cpu_cores: List[int] = []
+    ssd_pcie: List = []
     pollers_mask: str = ""
     primary_ip: str = ""
     raid: str = ""

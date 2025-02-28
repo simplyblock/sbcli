@@ -111,6 +111,13 @@ def spdk_process_start():
     except:
         data = {}
 
+    ssd_pcie_list = ""
+    ssd_pcie_params = ""
+    if 'ssd_pcie' in data and data['ssd_pcie']:
+        ssd_pcie = data['ssd_pcie']
+        ssd_pcie_params = " -a ".join(ssd_pcie)
+        ssd_pcie_list = " ".join(ssd_pcie)
+
     rpc_port = constants.RPC_HTTP_PROXY_PORT
     if 'rpc_port' in data and data['rpc_port']:
         rpc_port = data['rpc_port']
@@ -169,7 +176,7 @@ def spdk_process_start():
 
     container = node_docker.containers.run(
         spdk_image,
-        f"/root/scripts/run_distr.sh {spdk_cpu_mask} {spdk_mem} {spdk_debug}",
+        f"/root/scripts/run_distr_with_ssd.sh {spdk_cpu_mask} {spdk_mem} {spdk_debug}",
         name=f"spdk_{rpc_port}",
         detach=True,
         privileged=True,
@@ -184,6 +191,8 @@ def spdk_process_start():
             '/sys:/sys'],
         environment=[
             f"RPC_PORT={rpc_port}"
+            f"ssd_pcie={ssd_pcie_params}"
+            f"PCI_ALLOWED={ssd_pcie_list}"
         ]
         # restart_policy={"Name": "on-failure", "MaximumRetryCount": 99}
     )
