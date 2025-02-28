@@ -726,7 +726,25 @@ def get_next_port(cluster_id):
         if node.lvol_subsys_port > 0 and node.lvol_subsys_port != 4420:
             used_ports.append(node.lvol_subsys_port)
 
-    for i in range(100):
+    for i in range(1000):
+        next_port = port + i
+
+        if next_port not in used_ports:
+            return next_port
+
+    return 0
+
+def get_next_rpc_port(cluster_id):
+    from simplyblock_core.db_controller import DBController
+    db_controller = DBController()
+
+    port = 8080
+    used_ports = []
+    for node in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
+        if node.rpc_port > 0:
+            used_ports.append(node.rpc_port)
+
+    for i in range(1000):
         next_port = port + i
 
         if next_port not in used_ports:

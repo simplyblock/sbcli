@@ -111,6 +111,10 @@ def spdk_process_start():
     except:
         data = {}
 
+    rpc_port = constants.RPC_HTTP_PROXY_PORT
+    if 'rpc_port' in data and data['rpc_port']:
+        rpc_port = data['rpc_port']
+
     set_debug = None
     if 'spdk_debug' in data and data['spdk_debug']:
         set_debug = data['spdk_debug']
@@ -142,7 +146,7 @@ def spdk_process_start():
     node_docker = get_docker_client()
     nodes = node_docker.containers.list(all=True)
     for node in nodes:
-        if node.attrs["Name"] in ["/spdk", "/spdk_proxy"]:
+        if node.attrs["Name"] in [f"/spdk_{rpc_port}", f"/spdk_proxy_{rpc_port}"]:
             logger.info(f"{node.attrs['Name']} container found, removing...")
             node.stop(timeout=3)
             node.remove(force=True)
@@ -166,29 +170,32 @@ def spdk_process_start():
     container = node_docker.containers.run(
         spdk_image,
         f"/root/scripts/run_distr.sh {spdk_cpu_mask} {spdk_mem} {spdk_debug}",
-        name="spdk",
+        name=f"spdk_{rpc_port}",
         detach=True,
         privileged=True,
         network_mode="host",
         log_config=log_config,
         volumes=[
             '/etc/simplyblock:/etc/simplyblock',
-            '/var/tmp:/var/tmp',
+            f'/var/tmp/spdk_{rpc_port}.sock:/var/tmp/spdk.sock',
             '/dev:/dev',
             '/lib/modules/:/lib/modules/',
             '/var/lib/systemd/coredump/:/var/lib/systemd/coredump/',
             '/sys:/sys'],
+        environment=[
+            f"RPC_PORT={rpc_port}"
+        ]
         # restart_policy={"Name": "on-failure", "MaximumRetryCount": 99}
     )
     container2 = node_docker.containers.run(
         constants.SIMPLY_BLOCK_DOCKER_IMAGE,
         "python simplyblock_core/services/spdk_http_proxy_server.py",
-        name="spdk_proxy",
+        name=f"spdk_proxy_{rpc_port}",
         detach=True,
         network_mode="host",
         log_config=log_config,
         volumes=[
-            '/var/tmp:/var/tmp'
+            f'/var/tmp/spdk_{rpc_port}.sock:/var/tmp/spdk.sock',
         ],
         environment=[
             f"SERVER_IP={data['server_ip']}",
@@ -219,9 +226,10 @@ def spdk_process_start():
 
 @bp.route('/spdk_process_kill', methods=['GET'])
 def spdk_process_kill():
+    rpc_port = request.args.get('rpc_port', default=f"{constants.RPC_HTTP_PROXY_PORT}", type=str)
     node_docker = get_docker_client()
     for cont in node_docker.containers.list(all=True):
-        if cont.attrs['Name'] == "/spdk" or cont.attrs['Name'] == "/spdk_proxy":
+        if cont.attrs["Name"] in [f"/spdk_{rpc_port}", f"/spdk_proxy_{rpc_port}"]:
             cont.stop(timeout=3)
             cont.remove(force=True)
     return utils.get_response(True)
@@ -229,9 +237,10 @@ def spdk_process_kill():
 
 @bp.route('/spdk_process_is_up', methods=['GET'])
 def spdk_process_is_up():
+    rpc_port = request.args.get('rpc_port', default=f"{constants.RPC_HTTP_PROXY_PORT}", type=str)
     node_docker = get_docker_client()
     for cont in node_docker.containers.list(all=True):
-        if cont.attrs['Name'] == "/spdk":
+        if cont.attrs['Name'] == f"/spdk_{rpc_port}":
             status = cont.attrs['State']["Status"]
             is_running = cont.attrs['State']["Running"]
             if is_running:
@@ -335,14 +344,14 @@ def join_swarm():
     #     time.sleep(1)
     logger.info("Joining docker swarm > Done")
 
-    try:
-        nodes = node_docker.containers.list(all=True)
-        for node in nodes:
-            if node.attrs["Name"] == "/spdk_proxy":
-                node_docker.containers.get(node.attrs["Id"]).restart()
-                break
-    except:
-        pass
+    # try:
+    #     nodes = node_docker.containers.list(all=True)
+    #     for node in nodes:
+    #         if node.attrs["Name"] == "/spdk_proxy":
+    #             node_docker.containers.get(node.attrs["Id"]).restart()
+    #             break
+    # except:
+    #     pass
 
     return utils.get_response(True)
 

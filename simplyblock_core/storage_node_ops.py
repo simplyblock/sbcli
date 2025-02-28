@@ -983,10 +983,10 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
     logger.info(f"Instance privateIp: {cloud_instance['ip']}")
     logger.info(f"Instance public_ip: {cloud_instance['public_ip']}")
 
-    for node in db_controller.get_storage_nodes():
-        if node.cloud_instance_id and node.cloud_instance_id == cloud_instance['id']:
-            logger.error(f"Node already exists, try remove it first: {cloud_instance['id']}")
-            return False
+    # for node in db_controller.get_storage_nodes():
+    #     if node.cloud_instance_id and node.cloud_instance_id == cloud_instance['id']:
+    #         logger.error(f"Node already exists, try remove it first: {cloud_instance['id']}")
+    #         return False
 
     # Tune cpu maks parameters
     cpu_count = node_info["cpu_count"]
@@ -1106,6 +1106,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
         logger.error(f"Failed to Join docker swarm: {err}")
         return False
 
+    rpc_port = utils.get_next_rpc_port(cluster_id)
     rpc_user, rpc_pass = utils.generate_rpc_user_and_pass()
     mgmt_ip = node_info['network_interface'][iface_name]['ip']
     if not spdk_image:
@@ -1116,7 +1117,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
     try:
         results, err = snode_api.spdk_process_start(
             spdk_cpu_mask, spdk_mem, spdk_image, spdk_debug, cluster_ip, fdb_connection,
-            namespace, mgmt_ip, constants.RPC_HTTP_PROXY_PORT, rpc_user, rpc_pass,
+            namespace, mgmt_ip, rpc_port, rpc_user, rpc_pass,
             multi_threading_enabled=constants.SPDK_PROXY_MULTI_THREADING_ENABLED, timeout=constants.SPDK_PROXY_TIMEOUT)
     except Exception as e:
         logger.error(e)
@@ -1139,7 +1140,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
                 'status': device['status'],
                 'net_type': device['net_type']}))
 
-    hostname = node_info['hostname']
+    hostname = node_info['hostname']+f"_{rpc_port}"
     BASE_NQN = cluster.nqn.split(":")[0]
     subsystem_nqn = f"{BASE_NQN}:{hostname}"
     # creating storage node object
@@ -1162,7 +1163,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
     snode.data_nics = data_nics
     snode.mgmt_ip = mgmt_ip
     snode.primary_ip = mgmt_ip
-    snode.rpc_port = constants.RPC_HTTP_PROXY_PORT
+    snode.rpc_port = rpc_port
     snode.rpc_username = rpc_user
     snode.rpc_password = rpc_pass
     snode.cluster_id = cluster_id
@@ -1717,7 +1718,7 @@ def restart_storage_node(
         fdb_connection = cluster.db_connection
         results, err = snode_api.spdk_process_start(
             snode.spdk_cpu_mask, spdk_mem, snode.spdk_image, spdk_debug, cluster_ip, fdb_connection,
-            snode.namespace, snode.mgmt_ip, constants.RPC_HTTP_PROXY_PORT, snode.rpc_username, snode.rpc_password,
+            snode.namespace, snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password,
             multi_threading_enabled=constants.SPDK_PROXY_MULTI_THREADING_ENABLED, timeout=constants.SPDK_PROXY_TIMEOUT)
     except Exception as e:
         logger.error(e)

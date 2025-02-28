@@ -28,15 +28,21 @@ class SNodeClient:
         self.session.mount("http://", HTTPAdapter(max_retries=retries))
         self.session.timeout = self.timeout
 
-    def _request(self, method, path, params=None):
+    def _request(self, method, path, payload=None):
         try:
-            logger.debug("Requesting path: %s, params: %s", path, params)
-            dt = None
-            if params:
-                dt = json.dumps(params)
-            response = self.session.request(method, self.url+path, data=dt, timeout=self.timeout)
+            logger.debug("Requesting path: %s, params: %s", path, payload)
+            data = None
+            params = None
+            if payload:
+                if method == "GET" :
+                    params = payload
+                else:
+                    data = json.dumps(payload)
+
+            response = self.session.request(method, self.url+path, data=data,
+                                            timeout=self.timeout, params=params)
         except Exception as e:
-            return None, str(e)
+            raise e
 
         logger.debug("Response: status_code: %s, content: %s",
                      response.status_code, response.content)
@@ -106,8 +112,9 @@ class SNodeClient:
             "db_connection": db_connection}
         return self._request("POST", "join_swarm", params)
 
-    def spdk_process_kill(self):
-        return self._request("GET", "spdk_process_kill")
+    def spdk_process_kill(self, rpc_port):
+        params = {"rpc_port": rpc_port}
+        return self._request("GET", "spdk_process_kill", params)
 
     def leave_swarm(self):
         return self._request("GET", "leave_swarm")
@@ -129,8 +136,9 @@ class SNodeClient:
         params = {"device_pci": device_pci}
         return self._request("POST", "bind_device_to_spdk", params)
 
-    def spdk_process_is_up(self):
-        return self._request("GET", "spdk_process_is_up")
+    def spdk_process_is_up(self, rpc_port):
+        params = {"rpc_port": rpc_port}
+        return self._request("GET", "spdk_process_is_up", params)
 
     def get_file_content(self, file_name):
         return self._request("GET", f"get_file_content/{file_name}")

@@ -31,6 +31,7 @@ class CLIWrapper:
         # Add storage node
         sub_command = self.add_sub_command(subparser, "deploy", 'Deploy local services for remote ops (local run)')
         sub_command.add_argument("--ifname", help='Management interface name, default: eth0')
+        sub_command.add_argument("--ssd-pcie", help='Nvme PCIe address to use for caching', dest='ssd_pcie')
 
         self.add_sub_command(subparser, "deploy-cleaner", 'clean local deploy (local run)')
 
