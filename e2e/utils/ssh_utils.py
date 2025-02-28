@@ -748,8 +748,8 @@ class SshUtils:
             return
 
         # Combine disconnect commands for all interfaces
-        disconnect_cmds = " && ".join([f"sudo nmcli dev disconnect {iface}" for iface in interfaces])
-        reconnect_cmds = " && ".join([f"sudo nmcli dev connect {iface}" for iface in interfaces])
+        disconnect_cmds = " && ".join([f"sudo nmcli connection down {iface}" for iface in interfaces])
+        reconnect_cmds = " && ".join([f"sudo nmcli connection up {iface}" for iface in interfaces])
 
         cmd = (
             f'nohup sh -c "{disconnect_cmds} && sleep {reconnect_time} && {reconnect_cmds}" &'

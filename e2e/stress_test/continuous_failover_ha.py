@@ -38,7 +38,6 @@ class RandomFailoverTest(TestLvolHACluster):
         self.fio_threads = []
         self.clone_mount_details = {}
         self.lvol_mount_details = {}
-        self.node_vs_lvol = []
         self.sn_nodes = []
         self.current_outage_node = None
         self.snapshot_names = []
@@ -154,7 +153,14 @@ class RandomFailoverTest(TestLvolHACluster):
             for connect_str in connect_ls:
                 _, error = self.ssh_obj.exec_command(node=self.fio_node, command=connect_str)
                 if error:
-                    raise Exception(error)
+                    lvol_details = self.sbcli_utils.get_lvol_details(lvol_id=self.clone_mount_details[lvol_name]["ID"])
+                    nqn = lvol_details[0]["nqn"]
+                    self.ssh_obj.disconnect_nvme(node=self.fio_node, nqn_grep=nqn)
+                    self.logger.info(f"Connecting lvol {lvol_name} has error: {error}. Disconnect all connections for that lvol and cleaning that lvol!!")
+                    self.sbcli_utils.delete_lvol(lvol_name=lvol_name)
+                    del self.lvol_mount_details[lvol_name]
+                    self.node_vs_lvol[lvol_node_id].remove(lvol_name)
+                    continue
 
             sleep_n_sec(3)
             final_devices = self.ssh_obj.get_devices(node=self.fio_node)
@@ -572,7 +578,15 @@ class RandomFailoverTest(TestLvolHACluster):
 
             initial_devices = self.ssh_obj.get_devices(node=self.fio_node)
             for connect_str in connect_ls:
-                self.ssh_obj.exec_command(node=self.fio_node, command=connect_str)
+                _, error = self.ssh_obj.exec_command(node=self.fio_node, command=connect_str)
+                if error:
+                    lvol_details = self.sbcli_utils.get_lvol_details(lvol_id=self.clone_mount_details[clone_name]["ID"])
+                    nqn = lvol_details[0]["nqn"]
+                    self.ssh_obj.disconnect_nvme(node=self.fio_node, nqn_grep=nqn)
+                    self.logger.info(f"Connecting clone {clone_name} has error: {error}. Disconnect all connections for that clone!!")
+                    self.sbcli_utils.delete_lvol(lvol_name=clone_name)
+                    del self.clone_mount_details[clone_name]
+                    continue
 
             sleep_n_sec(3)
             final_devices = self.ssh_obj.get_devices(node=self.fio_node)
