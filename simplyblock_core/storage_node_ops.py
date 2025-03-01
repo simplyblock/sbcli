@@ -324,7 +324,7 @@ def _create_jm_stack_on_raid(rpc_client, jm_nvme_bdevs, snode, after_restart):
             if iface.ip4_address:
                 tr_type = iface.get_transport_type()
                 logger.info("adding listener for %s on IP %s" % (subsystem_nqn, iface.ip4_address))
-                ret = rpc_client.listeners_create(subsystem_nqn, tr_type, iface.ip4_address, "4420")
+                ret = rpc_client.listeners_create(subsystem_nqn, tr_type, iface.ip4_address, snode.nvmf_port)
                 IP = iface.ip4_address
                 break
 
@@ -344,7 +344,7 @@ def _create_jm_stack_on_raid(rpc_client, jm_nvme_bdevs, snode, after_restart):
         'pt_bdev': pt_name,
         'nvmf_nqn': subsystem_nqn,
         'nvmf_ip': IP,
-        'nvmf_port': 4420,
+        'nvmf_port':  snode.nvmf_port,
     })
 
 
@@ -412,7 +412,7 @@ def _create_jm_stack_on_device(rpc_client, nvme, snode, after_restart):
             if iface.ip4_address:
                 tr_type = iface.get_transport_type()
                 logger.info("adding listener for %s on IP %s" % (subsystem_nqn, iface.ip4_address))
-                ret = rpc_client.listeners_create(subsystem_nqn, tr_type, iface.ip4_address, "4420")
+                ret = rpc_client.listeners_create(subsystem_nqn, tr_type, iface.ip4_address, snode.nvmf_port)
                 IP = iface.ip4_address
                 break
 
@@ -431,7 +431,7 @@ def _create_jm_stack_on_device(rpc_client, nvme, snode, after_restart):
         'pt_bdev': pt_name,
         'nvmf_nqn': subsystem_nqn,
         'nvmf_ip': IP,
-        'nvmf_port': 4420,
+        'nvmf_port': snode.nvmf_port,
     })
 
 
@@ -496,7 +496,7 @@ def _create_storage_device_stack(rpc_client, nvme, snode, after_restart):
         if iface.ip4_address:
             tr_type = iface.get_transport_type()
             logger.info("adding listener for %s on IP %s" % (subsystem_nqn, iface.ip4_address))
-            ret = rpc_client.listeners_create(subsystem_nqn, tr_type, iface.ip4_address, "4420")
+            ret = rpc_client.listeners_create(subsystem_nqn, tr_type, iface.ip4_address, snode.nvmf_port)
             IP = iface.ip4_address
             break
     logger.info(f"add {pt_name} to subsystem")
@@ -512,7 +512,7 @@ def _create_storage_device_stack(rpc_client, nvme, snode, after_restart):
     nvme.alceml_name = alceml_name
     nvme.nvmf_nqn = subsystem_nqn
     nvme.nvmf_ip = IP
-    nvme.nvmf_port = 4420
+    nvme.nvmf_port = snode.nvmf_port
     nvme.io_error = False
     # if nvme.status != NVMeDevice.STATUS_NEW:
     #     nvme.status = NVMeDevice.STATUS_ONLINE
@@ -774,7 +774,7 @@ def _prepare_cluster_devices_on_restart(snode, clear_data=False):
                 if iface.ip4_address:
                     tr_type = iface.get_transport_type()
                     logger.info("adding listener for %s on IP %s" % (subsystem_nqn, iface.ip4_address))
-                    ret = rpc_client.listeners_create(subsystem_nqn, tr_type, iface.ip4_address, "4420")
+                    ret = rpc_client.listeners_create(subsystem_nqn, tr_type, iface.ip4_address, snode.nvmf_port)
                     break
 
 
@@ -1207,7 +1207,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
     snode.alceml_worker_cpu_cores = alceml_worker_cpu_cores
     snode.distrib_cpu_cores = distrib_cpu_cores
     snode.jc_singleton_mask = jc_singleton_mask or ""
-
+    snode.nvmf_port = utils.get_next_dev_port(cluster_id)
     snode.poller_cpu_cores = poller_cpu_cores or []
 
     snode.iobuf_small_pool_count = small_pool_count or 0

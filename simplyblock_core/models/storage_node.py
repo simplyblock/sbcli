@@ -88,3 +88,4 @@ class StorageNode(BaseNodeObject):
     subsystem: str = ""
     system_uuid: str = ""
     lvstore_status: str = ""
+    nvmf_port: int = 4420
