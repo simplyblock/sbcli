@@ -275,7 +275,10 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     out = scripts.set_db_config_single()
     logger.info("Configuring DB > Done")
 
-    _set_max_result_window(DEV_IP)
+    try:
+        _set_max_result_window(DEV_IP)
+    except Exception as e:
+        logger.warning(e)
 
     _add_graylog_input(DEV_IP, c.secret)
 
