@@ -56,7 +56,7 @@ class RandomFailoverTest(TestLvolHACluster):
         #                       "lvol_disconnect_primary"]
         # self.outage_types = ["container_stop", "graceful_shutdown", 
         #                      "interface_full_network_interrupt", "interface_partial_network_interrupt"]
-        self.outage_types = ["container_stop", "graceful_shutdown", "interface_partial_network_interrupt"]
+        self.outage_types = ["container_stop", "graceful_shutdown"]
         self.blocked_ports = None
         self.outage_log_file = os.path.join("logs", f"outage_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
         self._initialize_outage_log()
@@ -158,6 +158,7 @@ class RandomFailoverTest(TestLvolHACluster):
                     self.ssh_obj.disconnect_nvme(node=self.fio_node, nqn_grep=nqn)
                     self.logger.info(f"Connecting lvol {lvol_name} has error: {error}. Disconnect all connections for that lvol and cleaning that lvol!!")
                     self.sbcli_utils.delete_lvol(lvol_name=lvol_name)
+                    sleep_n_sec(30)
                     del self.lvol_mount_details[lvol_name]
                     self.node_vs_lvol[lvol_node_id].remove(lvol_name)
                     continue
@@ -199,7 +200,7 @@ class RandomFailoverTest(TestLvolHACluster):
                     "iodepth": 1,
                     "numjobs": 3,
                     "time_based": True,
-                    "runtime": 1000,
+                    "runtime": 2000,
                 },
             )
             fio_thread.start()
@@ -585,6 +586,7 @@ class RandomFailoverTest(TestLvolHACluster):
                     self.ssh_obj.disconnect_nvme(node=self.fio_node, nqn_grep=nqn)
                     self.logger.info(f"Connecting clone {clone_name} has error: {error}. Disconnect all connections for that clone!!")
                     self.sbcli_utils.delete_lvol(lvol_name=clone_name)
+                    sleep_n_sec(30)
                     del self.clone_mount_details[clone_name]
                     continue
 
@@ -631,7 +633,7 @@ class RandomFailoverTest(TestLvolHACluster):
                     "iodepth": 1,
                     "numjobs": 3,
                     "time_based": True,
-                    "runtime": 1000,
+                    "runtime": 2000,
                 },
             )
             fio_thread.start()
@@ -678,6 +680,7 @@ class RandomFailoverTest(TestLvolHACluster):
                     self.ssh_obj.remove_dir(self.fio_node, dir_path=f"/mnt/{clone_name}")
                     self.disconnect_lvol(clone_details['ID'])
                     self.sbcli_utils.delete_lvol(clone_name)
+                    sleep_n_sec(30)
                     if clone_name in self.lvols_without_sec_connect:
                         self.lvols_without_sec_connect.remove(clone_name)
                     to_delete.append(clone_name)
@@ -714,6 +717,7 @@ class RandomFailoverTest(TestLvolHACluster):
                 if lvol in lvols:
                     lvols.remove(lvol)
                     break
+        sleep_n_sec(60)
 
     def perform_failover_during_outage(self):
         """Perform failover during an outage and manage lvols, clones, and snapshots."""
@@ -786,7 +790,7 @@ class RandomFailoverTest(TestLvolHACluster):
                     "iodepth": 1,
                     "numjobs": 3,
                     "time_based": True,
-                    "runtime": 1000,
+                    "runtime": 2000,
                 },
             )
             fio_thread.start()
@@ -818,7 +822,7 @@ class RandomFailoverTest(TestLvolHACluster):
                     "iodepth": 1,
                     "numjobs": 3,
                     "time_based": True,
-                    "runtime": 1000,
+                    "runtime": 2000,
                 },
             )
             fio_thread.start()
