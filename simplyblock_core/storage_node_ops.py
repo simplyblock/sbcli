@@ -949,10 +949,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
         return False
 
     logger.info(f"Adding Storage node: {node_ip}")
-    timeout = 90
-    if spdk_image:
-        timeout = 5 * 60
-    snode_api = SNodeClient(node_ip, timeout=timeout, retry=10)
+    snode_api = SNodeClient(node_ip)
     node_info, _ = snode_api.info()
     if not node_info:
         logger.error("SNode API is not reachable")
@@ -1248,6 +1245,11 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
         logger.error("Failed socket implement set options")
         return False
 
+    ret = rpc_client.sock_impl_set_options()
+    if not ret:
+        logger.error(f"Failed to set optimized socket options")
+        return False
+
     # 3- set nvme config
     if snode.pollers_mask:
         ret = rpc_client.nvmf_set_config(snode.pollers_mask)
@@ -1289,6 +1291,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
     if not ret:
         logger.error(f"Failed to create transport TCP with qpair: {qpair}")
         return False
+
 
     # 7- set jc singleton mask
     if snode.jc_singleton_mask:
@@ -2572,19 +2575,28 @@ def deploy(ifname, mock_port=5000, num_of_devices=2):
 
     logger.info(f"Node IP: {dev_ip}")
     ret = scripts.configure_docker(dev_ip)
-
-    node_docker = docker.DockerClient(base_url=f"tcp://{dev_ip}:2375", version="auto", timeout=60 * 5)
     cont_name = f"SNodeAPI_{mock_port}"
+
+    start_storage_node_api_container(dev_ip, mock_port, num_of_devices)
+    return f"{dev_ip}:5000"
+
+def start_storage_node_api_container(node_ip, mock_port, num_of_devices):
+    node_docker = docker.DockerClient(base_url=f"tcp://{node_ip}:2375", version="auto", timeout=60 * 5)
+
+    logger.info(f"Pulling image {constants.SIMPLY_BLOCK_DOCKER_IMAGE}")
+    node_docker.images.pull(constants.SIMPLY_BLOCK_DOCKER_IMAGE)
+
+    logger.info("Recreating SNodeAPI container")
+
+    cont_name = f"SNodeAPI_{mock_port}"
+
     # create the api container
     nodes = node_docker.containers.list(all=True)
     for node in nodes:
         if node.attrs["Name"] == f"/{cont_name}":
-            logger.info("SNodeAPI container found, removing...")
             node.stop(timeout=1)
             node.remove(force=True)
-            # time.sleep(1)
 
-    logger.info("Creating SNodeAPI container")
     container = node_docker.containers.run(
         constants.SIMPLY_BLOCK_DOCKER_IMAGE,
         f"python simplyblock_web/node_webapp.py storage_node_mock {mock_port}",
@@ -2603,11 +2615,13 @@ def deploy(ifname, mock_port=5000, num_of_devices=2):
         restart_policy={"Name": "always"},
         environment=[
             f"MOCK_PORT={mock_port}",
-            f"DOCKER_IP={dev_ip}",
+            f"DOCKER_IP={node_ip}",
             f"NUM_OF_DEVICES={num_of_devices}",
         ]
     )
-    return f"{dev_ip}:{mock_port}"
+    logger.info(f"Pulling image {constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE}")
+    node_docker.images.pull(constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE)
+    return True
 
 
 def deploy_cleaner():

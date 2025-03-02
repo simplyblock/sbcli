@@ -463,7 +463,8 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
         }
     }
 
-    if cl.enable_qos and lvol.lvol_priority_class >= 0:
+    lvol_dict["params"]["lvol_priority_class"] = 0
+    if cl.enable_qos and lvol.lvol_priority_class > 0:
         lvol_dict["params"]["lvol_priority_class"] = lvol.lvol_priority_class
     lvol.bdev_stack = [lvol_dict]
 
@@ -791,8 +792,9 @@ def delete_lvol_from_node(lvol_id, node_id, clear_data=True):
     rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
 
     # 1- remove subsystem
-    logger.info(f"Removing subsystem")
-    ret = rpc_client.subsystem_delete(lvol.nqn)
+    if rpc_client.subsystem_list(lvol.nqn):
+        logger.info(f"Removing subsystem")
+        rpc_client.subsystem_delete(lvol.nqn)
 
     # 2- remove bdevs
     logger.info(f"Removing bdev stack")
@@ -1144,9 +1146,11 @@ def connect_lvol(uuid):
                 "reconnect-delay": constants.LVOL_NVME_CONNECT_RECONNECT_DELAY,
                 "ctrl-loss-tmo": constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO,
                 "nr-io-queues": constants.LVOL_NVME_CONNECT_NR_IO_QUEUES,
+                "keep-alive-tmo": constants.LVOL_NVME_KEEP_ALIVE_TO,
                 "connect": f"sudo nvme connect --reconnect-delay={constants.LVOL_NVME_CONNECT_RECONNECT_DELAY} "
                            f"--ctrl-loss-tmo={constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO} "
                            f"--nr-io-queues={constants.LVOL_NVME_CONNECT_NR_IO_QUEUES} "
+                           f"--keep-alive-tmo={constants.LVOL_NVME_KEEP_ALIVE_TO} "
                            f"--transport={transport} --traddr={ip} --trsvcid={port} --nqn={lvol.nqn}",
             })
     return out
@@ -1191,22 +1195,37 @@ def resize_lvol(id, new_size):
 
     size_in_mib = int(new_size / (1000 * 1000))
 
+    error = False
+    sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
+    if sec_node and sec_node.status == StorageNode.STATUS_ONLINE:
+        sec_node_rpc_client = RPCClient(
+            sec_node.mgmt_ip, sec_node.rpc_port, sec_node.rpc_username, sec_node.rpc_password)
+        for iface in sec_node.data_nics:
+            if iface.ip4_address:
+                ret = sec_node_rpc_client.nvmf_subsystem_listener_set_ana_state(
+                    lvol.nqn, iface.ip4_address, lvol.subsys_port, False, ana="inaccessible")
+
     if snode.status == StorageNode.STATUS_ONLINE:
 
         rpc_client = RPCClient(
             snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
+        for iface in snode.data_nics:
+            if iface.ip4_address:
+                ret = rpc_client.nvmf_subsystem_listener_set_ana_state(
+                    lvol.nqn, iface.ip4_address, lvol.subsys_port, False, ana="inaccessible")
+
         rpc_client.bdev_lvol_set_leader(True, lvs_name=lvol.lvs_name)
         ret = rpc_client.bdev_lvol_resize(f"{lvol.lvs_name}/{lvol.lvol_bdev}", size_in_mib)
         if not ret:
             logger.error(f"Error resizing lvol on node: {snode.get_id()}")
-            return False
+            error = True
 
         if lvol.ha_type == "ha":
             sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
             if sec_node and sec_node.status == StorageNode.STATUS_ONLINE:
                 sec_node_rpc_client = RPCClient(
                     sec_node.mgmt_ip, sec_node.rpc_port, sec_node.rpc_username, sec_node.rpc_password)
-                time.sleep(3)
+
                 logger.info(f"Resizing LVol: {lvol.get_id()} on secondary node: {sec_node.get_id()}")
                 sec_node_rpc_client.bdev_lvol_set_leader(False, lvs_name=lvol.lvs_name)
                 ret = sec_node_rpc_client.bdev_lvol_resize(f"{lvol.lvs_name}/{lvol.lvol_bdev}", size_in_mib)
@@ -1217,26 +1236,45 @@ def resize_lvol(id, new_size):
                     ret = rpc_client.bdev_lvol_resize(f"{lvol.lvs_name}/{lvol.lvol_bdev}", size_in_mib)
                     if not ret:
                         logger.error(f"Failed to revert size for lvol on node {snode.get_id()}, LVol current size: {utils.humanbytes(new_size)}")
-                    return False
+                    error = True
 
     else:
         sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
         if not sec_node or sec_node.status != StorageNode.STATUS_ONLINE:
             msg = f"Host nodes are not online"
             logger.error(msg)
-            return False
+            error = True
+        else:
+            sec_rpc_client = RPCClient(sec_node.mgmt_ip, sec_node.rpc_port, sec_node.rpc_username, sec_node.rpc_password)
+            ret = sec_rpc_client.bdev_lvol_resize(f"{lvol.lvs_name}/{lvol.lvol_bdev}", size_in_mib)
+            if not ret:
+                logger.error(f"Error resizing lvol on node: {sec_node.get_id()}")
+                error = True
 
-        sec_rpc_client = RPCClient(sec_node.mgmt_ip, sec_node.rpc_port, sec_node.rpc_username, sec_node.rpc_password)
-        ret = sec_rpc_client.bdev_lvol_resize(f"{lvol.lvs_name}/{lvol.lvol_bdev}", size_in_mib)
-        if not ret:
-            logger.error(f"Error resizing lvol on node: {sec_node.get_id()}")
-            return False
+    if snode.status == StorageNode.STATUS_ONLINE:
+        rpc_client = RPCClient(
+            snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
+        for iface in snode.data_nics:
+            if iface.ip4_address:
+                ret = rpc_client.nvmf_subsystem_listener_set_ana_state(
+                    lvol.nqn, iface.ip4_address, lvol.subsys_port, True)
 
-    lvol = db_controller.get_lvol_by_id(id)
-    lvol.size = new_size
-    lvol.write_to_db(db_controller.kv_store)
-    logger.info("Done")
-    return True
+    if sec_node and sec_node.status == StorageNode.STATUS_ONLINE:
+        sec_node_rpc_client = RPCClient(
+            sec_node.mgmt_ip, sec_node.rpc_port, sec_node.rpc_username, sec_node.rpc_password)
+        for iface in sec_node.data_nics:
+            if iface.ip4_address:
+                ret = sec_node_rpc_client.nvmf_subsystem_listener_set_ana_state(
+                    lvol.nqn, iface.ip4_address, lvol.subsys_port, False)
+
+    if not error:
+        lvol = db_controller.get_lvol_by_id(id)
+        lvol.size = new_size
+        lvol.write_to_db(db_controller.kv_store)
+        logger.info("Done")
+        return True
+    else:
+        return False
 
 
 def set_read_only(id):

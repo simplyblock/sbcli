@@ -173,7 +173,7 @@ class TestLvolFioBase(TestClusterBase):
             self.logger.info(f"Performing validation for FIO job: {job_name} on device: "
                             f"{disk_name} mounted on: {file_name}")
 
-        assert  total_iops == 0 , \
+        assert  total_iops != 0 , \
             f"Total IOPS {total_iops} can not be 0"
 
         if total_iops < 350:

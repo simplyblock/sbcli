@@ -455,11 +455,16 @@ class TestLvolHAClusterPartialNetworkOutage(TestLvolHACluster):
             target=lambda: self.sbcli_utils.wait_for_storage_node_status(self.lvol_node, "unreachable", 4000)
         )
         unavailable_thread.start()
+
+        lvol_ports = node_details[0]["lvol_subsys_port"]
+        if not isinstance(lvol_ports, list):
+            lvol_ports = [lvol_ports]
+        ports_to_block = [int(port) for port in lvol_ports]
+        ports_to_block.append(4420)
         
-        ports_blocked = self.ssh_obj.partial_nw_outage(
+        ports_blocked = self.ssh_obj.perform_nw_outage(
             node_ip=node_ip,
-            mgmt_ip=self.mgmt_nodes[0],
-            block_ports=[4420],
+            block_ports=ports_to_block,
             block_all_ss_ports=False
         )
 
@@ -469,7 +474,7 @@ class TestLvolHAClusterPartialNetworkOutage(TestLvolHACluster):
         self.validate_checksums()
 
         restart_start_time = datetime.now()
-        self.ssh_obj.remove_partial_nw_outage(node_ip=node_ip, blocked_ports=ports_blocked)
+        self.ssh_obj.remove_nw_outage(node_ip=node_ip, blocked_ports=ports_blocked)
         self.sbcli_utils.wait_for_storage_node_status(self.lvol_node,
                                                       "in_restart",
                                                       timeout=4000)

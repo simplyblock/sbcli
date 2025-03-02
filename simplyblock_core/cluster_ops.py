@@ -15,7 +15,7 @@ import docker
 import requests
 from jinja2 import Environment, FileSystemLoader
 
-from simplyblock_core import utils, scripts, constants, mgmt_node_ops, storage_node_ops, distr_controller
+from simplyblock_core import utils, scripts, constants, mgmt_node_ops, storage_node_ops, distr_controller, shell_utils
 from simplyblock_core.controllers import cluster_events, device_controller, storage_events, pool_controller, \
     lvol_controller
 from simplyblock_core.db_controller import DBController
@@ -994,19 +994,25 @@ def get_cluster(cl_id):
     return json.dumps(cluster.get_clean_dict(), indent=2, sort_keys=True)
 
 
-def update_cluster(cl_id):
+def update_cluster(cl_id, mgmt_only=False, restart_cluster=False):
     db_controller = DBController()
     cluster = db_controller.get_cluster_by_id(cl_id)
     if not cluster:
         logger.error(f"Cluster not found {cl_id}")
         return False
 
-    # try:
-    #     out, _, ret_code = shell_utils.run_command("pip install sbcli-dev --upgrade")
-    #     if ret_code == 0:
-    #         logger.info("sbcli-dev is upgraded")
-    # except Exception as e:
-    #     logger.error(e)
+    if cluster.status != Cluster.STATUS_ACTIVE:
+        logger.error(f"Cluster is not active")
+        return False
+
+
+    try:
+        sbcli=constants.SIMPLY_BLOCK_CLI_NAME
+        out, _, ret_code = shell_utils.run_command(f"pip install {sbcli} --upgrade")
+        if ret_code == 0:
+            logger.info(f"{sbcli} upgraded")
+    except Exception as e:
+        logger.error(e)
 
     try:
         logger.info("Updating mgmt cluster")
@@ -1018,15 +1024,25 @@ def update_cluster(cl_id):
             if image_without_tag in service.attrs['Spec']['Labels']['com.docker.stack.image']:
                 logger.info(f"Updating service {service.name}")
                 service.update(image=constants.SIMPLY_BLOCK_DOCKER_IMAGE, force_update=True)
-        logger.info("Done")
+        logger.info("Done updating mgmt cluster")
     except Exception as e:
         print(e)
 
-    for node in db_controller.get_storage_nodes_by_cluster_id(cl_id):
-        try:
-            storage_node_ops.start_storage_node_api_container(node.mgmt_ip)
-        except:
-            pass
+    if not mgmt_only:
+        set_cluster_status(cl_id, Cluster.STATUS_SUSPENDED)
+        logger.info("updating storage nodes")
+        for node in db_controller.get_storage_nodes_by_cluster_id(cl_id):
+            if node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED]:
+                try:
+                    storage_node_ops.start_storage_node_api_container(node.mgmt_ip)
+                except Exception as e:
+                    logger.error(e)
+
+        if restart_cluster:
+            logger.info("Restarting cluster")
+            ret = cluster_grace_shutdown(cl_id)
+            if ret:
+                cluster_grace_startup(cl_id)
 
     logger.info("Done")
     return True
@@ -1062,13 +1078,12 @@ def cluster_grace_shutdown(cl_id):
 
     st = db_controller.get_storage_nodes_by_cluster_id(cl_id)
     for node in st:
-        logger.info(f"Suspending node: {node.get_id()}")
-        storage_node_ops.suspend_storage_node(node.get_id())
-        logger.info(f"Shutting down node: {node.get_id()}")
-        storage_node_ops.shutdown_storage_node(node.get_id())
+        if node.status == StorageNode.STATUS_ONLINE:
+            logger.info(f"Suspending node: {node.get_id()}")
+            storage_node_ops.suspend_storage_node(node.get_id())
+            logger.info(f"Shutting down node: {node.get_id()}")
+            storage_node_ops.shutdown_storage_node(node.get_id())
 
-    logger.info(f"Suspending cluster: {cl_id}")
-    suspend_cluster(cl_id)
     return True
 
 

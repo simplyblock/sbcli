@@ -1,4 +1,5 @@
 # coding=utf-8
+import jc
 
 from simplyblock_core import utils, distr_controller, storage_node_ops
 from simplyblock_core.db_controller import DBController
@@ -102,6 +103,25 @@ def _check_spdk_process_up(ip):
     return False
 
 
+def _check_port_on_node(snode, port_id):
+    try:
+        snode_api = SNodeClient(f"{snode.mgmt_ip}:5000", timeout=3, retry=2)
+        iptables_command_output, _ = snode_api.get_firewall()
+        result = jc.parse('iptables', iptables_command_output)
+        for chain in result:
+            if chain['chain'] in ["INPUT", "OUTPUT"]:
+                for rule in chain['rules']:
+                    if str(port_id) in rule['options']:
+                        action = rule['target']
+                        if action == "DROP":
+                            return False
+
+        return True
+    except Exception as e:
+        logger.error(e)
+    return True
+
+
 def _check_node_ping(ip):
     res = utils.ping_host(ip)
     if res:
@@ -167,8 +187,12 @@ def _check_node_lvstore(lvstore_stack, node, auto_fix=False):
                                     n = db_controller.get_storage_node_by_id(result['UUID'])
                                     distr_controller.send_node_status_event(n, n.status, node)
                         ret = rpc_client.distr_get_cluster_map(distr)
-                        results, is_passed = distr_controller.parse_distr_cluster_map(ret)
-                        logger.info(f"Checking Distr map ... {is_passed}")
+                        if not ret:
+                            logger.error("Failed to get cluster map")
+                            lvstore_check = False
+                        else:
+                            results, is_passed = distr_controller.parse_distr_cluster_map(ret)
+                            logger.info(f"Checking Distr map ... {is_passed}")
 
                 else:
                     logger.error("Failed to parse distr cluster map")
@@ -225,6 +249,14 @@ def check_node(node_id, with_devices=True):
     # 4- docker API
     node_docker_check = _check_node_docker_api(snode.mgmt_ip)
     logger.info(f"Check: node docker API {snode.mgmt_ip}:2375 ... {node_docker_check}")
+
+    if snode.is_secondary_node:
+        for n in db_controller.get_primary_storage_nodes_by_secondary_node_id(node_id):
+            lvol_port_check = _check_port_on_node(snode, n.lvol_subsys_port)
+            logger.info(f"Check: node {snode.mgmt_ip}, port: {n.lvol_subsys_port} ... {lvol_port_check}")
+    else:
+        lvol_port_check = _check_port_on_node(snode, snode.lvol_subsys_port)
+        logger.info(f"Check: node {snode.mgmt_ip}, port: {snode.lvol_subsys_port} ... {lvol_port_check}")
 
     is_node_online = ping_check and node_api_check and node_rpc_check and node_docker_check
 

@@ -5,6 +5,8 @@ import logging
 import os
 import subprocess
 
+import jc
+
 from simplyblock_web import utils
 
 logger = logging.getLogger(__name__)
@@ -173,31 +175,35 @@ def get_host_arch():
 
 
 def firewall_port(port_id=9090, port_type="tcp", block=True):
+    cmd_list = []
+    try:
+        iptables_command_output = firewall_get()
+        result = jc.parse('iptables', iptables_command_output)
+        for chain in result:
+            if chain['chain'] in ["INPUT", "OUTPUT"]:
+                for rule in chain['rules']:
+                    if str(port_id) in rule['options']:
+                        cmd_list.append(f"iptables -D {chain['chain']} -p {port_type} --dport {port_id} -j {rule['target']}")
+
+    except Exception as e:
+        logger.error(e)
 
     if block:
-        cmd_list=[
-
-            f"iptables -D INPUT -p {port_type} --dport {port_id} -j ACCEPT",
-            f"iptables -D OUTPUT -p {port_type} --dport {port_id} -j ACCEPT",
+        cmd_list.extend([
             f"iptables -A INPUT -p {port_type} --dport {port_id} -j DROP",
             f"iptables -A OUTPUT -p {port_type} --dport {port_id} -j DROP",
-            "iptables -L -n",
-        ]
+            "iptables -L -n -v",
+        ])
     else:
-        cmd_list=[
-
-            f"iptables -D INPUT -p {port_type} --dport {port_id} -j DROP",
-            f"iptables -D OUTPUT -p {port_type} --dport {port_id} -j DROP",
-
-            f"iptables -A INPUT -p {port_type} --dport {port_id} -j ACCEPT",
-            f"iptables -A OUTPUT -p {port_type} --dport {port_id} -j ACCEPT",
-            "iptables -L -n",
-
-        ]
+        cmd_list.extend([
+            # f"iptables -A INPUT -p {port_type} --dport {port_id} -j ACCEPT",
+            # f"iptables -A OUTPUT -p {port_type} --dport {port_id} -j ACCEPT",
+            "iptables -L -n -v",
+        ])
 
     out = ""
     for cmd in cmd_list:
-        stream = os.popen(cmd)
+        stream = os.popen("docker exec spdk "+cmd)
         ret = stream.read()
         if ret != "":
             out += ret + "\n"
@@ -207,7 +213,7 @@ def firewall_port(port_id=9090, port_type="tcp", block=True):
 
 
 def firewall_get():
-    cmd = "iptables -L -n"
+    cmd = "docker exec spdk iptables -L -n"
     stream = os.popen(cmd)
     ret = stream.read()
     return ret

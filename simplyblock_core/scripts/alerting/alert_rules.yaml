@@ -360,8 +360,8 @@ groups:
           execErrState: Error
           for: 1m
           annotations:
-            description: The rule alerts cluster capacity below 1 GB
-            summary: Cluster {{ $labels.cluster}} capacity is below 1GB
+            description: The rule alerts about cluster provisioned capacity reached
+            summary: Cluster {{ $labels.cluster}} provisioned capacity reached
           labels:
             app: simplyblock
           isPaused: false

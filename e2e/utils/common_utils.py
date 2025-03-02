@@ -115,7 +115,7 @@ class CommonUtils:
         sleep_n_sec(10)
         while True:
             process = self.ssh_utils.find_process_name(node=node,
-                                                       process_name="fio")
+                                                       process_name="fio --name")
             process_fio = [element for element in process if "grep" not in element and not element.startswith("kworker")]
             self.logger.info(f"Process info: {process_fio}")
             
@@ -131,7 +131,7 @@ class CommonUtils:
         end_time = time.time()
 
         process_list_after = self.ssh_utils.find_process_name(node=node,
-                                                              process_name="fio")
+                                                              process_name="fio --name")
         self.logger.info(f"Process List: {process_list_after}")
 
         process_fio = [element for element in process_list_after if "grep" not in element and not element.startswith("kworker")]
@@ -413,6 +413,7 @@ class CommonUtils:
             self.assert_non_zero_io_stat(stat, "write_bytes")
             self.assert_non_zero_io_stat(stat, "read_io")
             self.assert_non_zero_io_stat(stat, "write_io")
+            # self.assert_non_zero_io_stat(stat, ["write_io_ps", "read_io_ps"])
         self.logger.info("All I/O stats are valid and non-zero within the failover time range.")
 
     def assert_non_zero_io_stat(self, stat, key):
@@ -422,7 +423,12 @@ class CommonUtils:
             stat (dict): I/O stat record
             key (str): Key to validate
         """
-        value = stat.get(key, 0)
+        value = 0
+        if isinstance(key, list):
+            for k in key:
+                value += stat.get(k, 0)
+        else:
+            value = stat.get(key, 0)
         if value == 0:
             self.logger.error(f"{key} is 0 for record: {stat}")
             raise AssertionError(f"{key} is 0 for record: {stat}")
