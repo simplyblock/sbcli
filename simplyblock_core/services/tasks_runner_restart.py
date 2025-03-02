@@ -131,19 +131,12 @@ def task_runner_node(task):
         task.function_result = "max retry reached"
         task.status = JobSchedule.STATUS_DONE
         task.write_to_db(db_controller.kv_store)
-        storage_node_ops.set_node_status(task.node_id, StorageNode.STATUS_UNREACHABLE)
+        storage_node_ops.set_node_status(task.node_id, StorageNode.STATUS_OFFLINE)
         return True
 
-    if node.status == StorageNode.STATUS_REMOVED:
-        logger.info(f"Node is removed: {task.node_id}, stopping task")
-        task.function_result = f"Node is removed"
-        task.status = JobSchedule.STATUS_DONE
-        task.write_to_db(db_controller.kv_store)
-        return True
-
-    if node.status == StorageNode.STATUS_SCHEDULABLE:
-        logger.info(f"Node is schedulable, stopping task")
-        task.function_result = f"Node is schedulable"
+    if node.status in [StorageNode.STATUS_REMOVED, StorageNode.STATUS_SCHEDULABLE, StorageNode.STATUS_DOWN]:
+        logger.info(f"Node is {node.status}, stopping task")
+        task.function_result = f"Node is {node.status}, stopping"
         task.status = JobSchedule.STATUS_DONE
         task.write_to_db(db_controller.kv_store)
         return True

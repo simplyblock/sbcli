@@ -195,12 +195,12 @@ def set_node_offline(node):
 def set_node_down(node, dev_status):
     if node.status != StorageNode.STATUS_DOWN:
         storage_node_ops.set_node_status(node.get_id(), StorageNode.STATUS_DOWN)
-
-        if dev_status:
-            # set devices status
-            for dev in node.nvme_devices:
-                if dev.status != dev_status:
-                    device_controller.device_set_state(dev.get_id(), dev_status)
+        #
+        # if dev_status:
+        #     # set devices status
+        #     for dev in node.nvme_devices:
+        #         if dev.status != dev_status:
+        #             device_controller.device_set_state(dev.get_id(), dev_status)
 
 
 logger.info("Starting node monitor")
