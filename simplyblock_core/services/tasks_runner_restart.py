@@ -131,7 +131,7 @@ def task_runner_node(task):
         task.function_result = "max retry reached"
         task.status = JobSchedule.STATUS_DONE
         task.write_to_db(db_controller.kv_store)
-        storage_node_ops.set_node_status(task.node_id, StorageNode.STATUS_UNREACHABLE)
+        storage_node_ops.set_node_status(task.node_id, StorageNode.STATUS_OFFLINE)
         return True
 
     if node.status in [StorageNode.STATUS_REMOVED, StorageNode.STATUS_SCHEDULABLE, StorageNode.STATUS_DOWN]:
