@@ -54,9 +54,9 @@ def process_device_event(event):
             event.status = 'skipped:node_offline'
             return
 
-        if device_node_obj.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED]:
-            logger.info(f"Node is not online, skipping. status: {event_node_obj.status}")
-            event.status = 'skipped:device_node_offline'
+        if device_node_obj.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
+            logger.info(f"Node is not online, skipping. status: {device_node_obj.status}")
+            event.status = f'skipped:device_node_{device_node_obj.status}'
             return
 
         if device_node_obj.get_id() == event_node_obj.get_id():

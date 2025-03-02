@@ -786,7 +786,7 @@ def _connect_to_remote_devs(this_node, force_conect_restarting_nodes=False):
 
     rpc_client = RPCClient(
         this_node.mgmt_ip, this_node.rpc_port,
-        this_node.rpc_username, this_node.rpc_password, timeout=5, retry=2)
+        this_node.rpc_username, this_node.rpc_password, timeout=3, retry=1)
 
     node_bdevs = rpc_client.get_bdevs()
     if node_bdevs:
@@ -1917,10 +1917,11 @@ def restart_storage_node(
                 snode.remote_jm_devices.append(dev)
         snode.remote_jm_devices = _connect_to_remote_jm_devs(snode)
     snode.health_check = True
+    snode.lvstore_status = ""
     snode.write_to_db(db_controller.kv_store)
 
     logger.info("Setting node status to Online")
-    set_node_status(node_id, StorageNode.STATUS_ONLINE)
+    set_node_status(node_id, StorageNode.STATUS_ONLINE, reconnect_on_online=False)
 
     # time.sleep(1)
     snode = db_controller.get_storage_node_by_id(snode.get_id())
@@ -1961,13 +1962,11 @@ def restart_storage_node(
     if snode.jm_device and snode.jm_device.status in [JMDevice.STATUS_UNAVAILABLE, JMDevice.STATUS_ONLINE]:
         device_controller.set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_ONLINE)
 
-    if snode.lvstore_status == "ready":
+    if cluster.status in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED]:
         for dev in snode.nvme_devices:
-            if dev.status != NVMeDevice.STATUS_ONLINE:
-                logger.debug(f"Device is not online: {dev.get_id()}, status: {dev.status}")
-                continue
-            logger.info(f"Starting migration task for device {dev.get_id()}")
-            tasks_controller.add_device_mig_task(dev.get_id())
+            if dev.status == NVMeDevice.STATUS_ONLINE:
+                logger.info(f"Starting migration task for device {dev.get_id()}")
+                tasks_controller.add_device_mig_task(dev.get_id())
 
     logger.info("Done")
     return "Success"
@@ -2787,7 +2786,7 @@ def get(node_id):
     return json.dumps(data, indent=2, sort_keys=True)
 
 
-def set_node_status(node_id, status):
+def set_node_status(node_id, status, reconnect_on_online=True):
     db_controller = DBController()
     snode = db_controller.get_storage_node_by_id(node_id)
     if snode.status != status:
@@ -2802,7 +2801,7 @@ def set_node_status(node_id, status):
         storage_events.snode_status_change(snode, snode.status, old_status, caused_by="monitor")
         distr_controller.send_node_status_event(snode, status)
 
-    if snode.status == StorageNode.STATUS_ONLINE:
+    if snode.status == StorageNode.STATUS_ONLINE and reconnect_on_online:
         snode = db_controller.get_storage_node_by_id(node_id)
         logger.info("Connecting to remote devices")
         snode.remote_devices = _connect_to_remote_devs(snode)
