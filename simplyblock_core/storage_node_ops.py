@@ -1009,14 +1009,27 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
         spdk_cpu_mask = hex(int(math.pow(2, cpu_count))-2)
 
     spdk_cores = utils.hexa_to_cpu_list(spdk_cpu_mask)
-    cpu_count = spdk_cores[-1]
-    if cpu_count < spdk_cores[-1]:
-        print(f"ERROR: The cpu mask {spdk_cpu_mask} is greater than the total cpus on the system {cpu_count}")
+    req_cpu_count = len(spdk_cores)
+
+    used_cores=[]
+    #check if cpu cores are not used
+    for node in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
+        if node.mgmt_ip == node_ip:
+            if node.spdk_cpu_mask:
+                used_cores.extend(utils.hexa_to_cpu_list(node.spdk_cpu_mask))
+
+    for core_number in spdk_cores:
+        if core_number in used_cores:
+            logger.info(f"Core {core_number} already used")
+            return False
+
+    if cpu_count < req_cpu_count:
+        logger.error(f"ERROR: The cpu mask {spdk_cpu_mask} is greater than the total cpus on the system {cpu_count}")
         return False
-    if spdk_cores[-1] >= 64:
-        print(f"ERROR: The provided cpu mask {spdk_cpu_mask} has values greater than 63, which is not allowed")
+    if req_cpu_count >= 64:
+        logger.error(f"ERROR: The provided cpu mask {spdk_cpu_mask} has values greater than 63, which is not allowed")
         return False
-    if len(spdk_cores) >= 4:
+    if req_cpu_count >= 4:
         app_thread_core, jm_cpu_core, poller_cpu_cores, alceml_cpu_cores, alceml_worker_cpu_cores, distrib_cpu_cores, jc_singleton_core = utils.calculate_core_allocation(
             spdk_cores)
 
@@ -1064,13 +1077,13 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
     if is_secondary_node:
         number_of_distribs *= 5
     small_pool_count, large_pool_count = utils.calculate_pool_count(
-        number_of_alceml_devices, number_of_distribs, cpu_count, len(poller_cpu_cores) or cpu_count)
+        number_of_alceml_devices, number_of_distribs, req_cpu_count, len(poller_cpu_cores) or req_cpu_count)
 
     # Calculate minimum huge page memory
     if spdk_hp_mem:
         minimum_hp_memory = utils.parse_size(spdk_hp_mem)
     else:
-        minimum_hp_memory = utils.calculate_minimum_hp_memory(small_pool_count, large_pool_count, max_lvol, max_prov, cpu_count)
+        minimum_hp_memory = utils.calculate_minimum_hp_memory(small_pool_count, large_pool_count, max_lvol, max_prov, req_cpu_count)
 
     # check for memory
     if "memory_details" in node_info and node_info['memory_details']:
@@ -2015,8 +2028,12 @@ def list_storage_nodes(is_json, cluster_id=None):
             "Status": node.status,
             "Health": node.health_check,
             "Up time": uptime,
-            "Cloud ID": node.cloud_instance_id,
-            "Cloud Type": node.cloud_instance_type,
+            "SPDK CPU": node.spdk_cpu_mask,
+            "SPDK MEM": utils.humanbytes(node.spdk_mem),
+            "SPDK PORT": node.rpc_port,
+            "LVOL PORT": node.lvol_subsys_port,
+            # "Cloud ID": node.cloud_instance_id,
+            # "Cloud Type": node.cloud_instance_type,
             "Ext IP": node.cloud_instance_public_ip,
 
         })

@@ -635,7 +635,9 @@ def list_all_info(cluster_id):
         elif task.status in [JobSchedule.STATUS_NEW, JobSchedule.STATUS_SUSPENDED]:
             task_pending += 1
 
-
+    status = cl.status
+    if cl.is_re_balancing and status in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED]:
+        status = f"{status} - ReBalancing"
     data.append({
         "Cluster UUID": cl.get_id(),
         "Type": cl.ha_type.upper(),
@@ -657,8 +659,7 @@ def list_all_info(cluster_id):
         # "Size prov": f"{utils.humanbytes(rec.size_prov)}",
         # "Size util": f"{rec.size_util}%",
         # "Size prov util": f"{rec.size_prov_util}%",
-
-        "Status": cl.status,
+        "Status": status.upper(),
 
     })
 
@@ -685,7 +686,7 @@ def list_all_info(cluster_id):
         "Write IOP/s": f"{rec.write_io_ps}",
 
         "Health": "True",
-        "Status": cl.status,
+        "Status": status.upper(),
 
     })
 
