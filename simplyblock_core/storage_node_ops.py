@@ -1015,8 +1015,8 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
     used_ssd=[]
     #check if cpu cores are not used
     for node in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
-        used_ssd.extend(node.ssd_pcie)
         if node.api_endpoint == node_ip:
+            used_ssd.extend(node.ssd_pcie)
             if node.spdk_cpu_mask:
                 used_cores.extend(utils.hexa_to_cpu_list(node.spdk_cpu_mask))
 
