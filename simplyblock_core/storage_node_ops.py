@@ -1012,8 +1012,10 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
     req_cpu_count = len(spdk_cores)
 
     used_cores=[]
+    used_ssd=[]
     #check if cpu cores are not used
     for node in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
+        used_ssd.extend(node.ssd_pcie)
         if node.api_endpoint == node_ip:
             if node.spdk_cpu_mask:
                 used_cores.extend(utils.hexa_to_cpu_list(node.spdk_cpu_mask))
@@ -1021,6 +1023,11 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
     for core_number in spdk_cores:
         if core_number in used_cores:
             logger.info(f"Core {core_number} already used")
+            return False
+
+    for ssd in ssd_pcie:
+        if ssd in used_ssd:
+            logger.info(f"SSD {ssd} already used")
             return False
 
     if cpu_count < req_cpu_count:
