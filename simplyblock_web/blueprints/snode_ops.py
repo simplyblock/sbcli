@@ -186,7 +186,6 @@ def spdk_process_start():
             '/etc/simplyblock:/etc/simplyblock',
             f'/var/tmp/spdk_{rpc_port}:/var/tmp',
             '/dev:/dev',
-            f'/dev/hugepages/hugepages_{rpc_port}:/dev/hugepages',
             f'/tmp/shm_{rpc_port}/:/dev/shm/',
             '/lib/modules/:/lib/modules/',
             '/var/lib/systemd/coredump/:/var/lib/systemd/coredump/',
