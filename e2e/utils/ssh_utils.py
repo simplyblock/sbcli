@@ -1363,7 +1363,7 @@ class SshUtils:
                 if start_time <= log_time <= end_time:
                     logs_in_window.append(line)
             except Exception as e:
-                self.logger.warning(f"Skipping malformed dmesg line: {line} ({e})")
+                self.logger.debug(f"Skipping malformed dmesg line: {line} ({e})")
 
         return logs_in_window
     
