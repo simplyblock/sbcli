@@ -2914,7 +2914,7 @@ def recreate_lvstore(snode):
         elif sec_node.status == StorageNode.STATUS_ONLINE:
             sec_rpc_client = RPCClient(sec_node.mgmt_ip, sec_node.rpc_port, sec_node.rpc_username, sec_node.rpc_password)
 
-            sec_node_api.firewall_set_port(snode.lvol_subsys_port, "tcp", "block", snode.rpc_port)
+            sec_node_api.firewall_set_port(snode.lvol_subsys_port, "tcp", "block", sec_node.rpc_port)
             tcp_ports_events.port_deny(sec_node, snode.lvol_subsys_port)
 
             sec_rpc_client.bdev_lvol_set_leader(False, lvs_name=snode.lvstore, bs_nonleadership=True)
@@ -2952,7 +2952,7 @@ def recreate_lvstore(snode):
 
     if prim_node_suspend:
         if sec_node.status == StorageNode.STATUS_ONLINE:
-            sec_node_api.firewall_set_port(snode.lvol_subsys_port, "tcp", "allow", snode.rpc_port)
+            sec_node_api.firewall_set_port(snode.lvol_subsys_port, "tcp", "allow", sec_node.rpc_port)
             tcp_ports_events.port_allowed(sec_node, snode.lvol_subsys_port)
 
         set_node_status(snode.get_id(), StorageNode.STATUS_SUSPENDED)
@@ -2962,7 +2962,7 @@ def recreate_lvstore(snode):
 
     if sec_node.status == StorageNode.STATUS_ONLINE:
         time.sleep(10)
-        sec_node_api.firewall_set_port(snode.lvol_subsys_port, "tcp", "allow", snode.rpc_port)
+        sec_node_api.firewall_set_port(snode.lvol_subsys_port, "tcp", "allow", sec_node.rpc_port)
         tcp_ports_events.port_allowed(sec_node, snode.lvol_subsys_port)
 
     return True
