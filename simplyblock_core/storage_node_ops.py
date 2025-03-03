@@ -2902,6 +2902,7 @@ def recreate_lvstore(snode):
     rpc_client = RPCClient(
         snode.mgmt_ip, snode.rpc_port,
         snode.rpc_username, snode.rpc_password)
+    snode_api = SNodeClient(snode.api_endpoint)
 
     sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
     sec_node_api = SNodeClient(sec_node.api_endpoint)
@@ -2929,10 +2930,12 @@ def recreate_lvstore(snode):
     if not lvol_list:
         prim_node_suspend = False
 
+    snode_api.firewall_set_port(snode.lvol_subsys_port, "tcp", "block", snode.rpc_port)
+
     if snode.jm_vuid:
         ret = rpc_client.jc_explicit_synchronization(snode.jm_vuid)
         logger.info(f"JM Sync res: {ret}")
-        time.sleep(3)
+        time.sleep(1)
 
     lvol_ana_state = "optimized"
     if prim_node_suspend:
@@ -2949,6 +2952,8 @@ def recreate_lvstore(snode):
             lvol_obj.io_error = False
             lvol_obj.health_check = True
         lvol_obj.write_to_db()
+
+    snode_api.firewall_set_port(snode.lvol_subsys_port, "tcp", "allow", snode.rpc_port)
 
     if prim_node_suspend:
         if sec_node.status == StorageNode.STATUS_ONLINE:
