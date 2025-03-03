@@ -1002,8 +1002,10 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
     distrib_cpu_index = 0
     jc_singleton_mask = ""
 
-
     poller_cpu_cores = []
+
+    if ssd_pcie is None:
+        ssd_pcie = []
 
     if not spdk_cpu_mask:
         spdk_cpu_mask = hex(int(math.pow(2, cpu_count))-2)

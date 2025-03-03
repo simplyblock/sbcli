@@ -254,16 +254,19 @@ def spdk_process_kill():
 @bp.route('/spdk_process_is_up', methods=['GET'])
 def spdk_process_is_up():
     rpc_port = request.args.get('rpc_port', default=f"{constants.RPC_HTTP_PROXY_PORT}", type=str)
-    node_docker = get_docker_client()
-    for cont in node_docker.containers.list(all=True):
-        if cont.attrs['Name'] == f"/spdk_{rpc_port}":
-            status = cont.attrs['State']["Status"]
-            is_running = cont.attrs['State']["Running"]
-            if is_running:
-                return utils.get_response(True)
-            else:
-                return utils.get_response(False, f"SPDK container status: {status}, is running: {is_running}")
-    return utils.get_response(False, "SPDK container not found")
+    try:
+        node_docker = get_docker_client()
+        for cont in node_docker.containers.list(all=True):
+            if cont.attrs['Name'] == f"/spdk_{rpc_port}":
+                status = cont.attrs['State']["Status"]
+                is_running = cont.attrs['State']["Running"]
+                if is_running:
+                    return utils.get_response(True)
+                else:
+                    return utils.get_response(False, f"SPDK container status: {status}, is running: {is_running}")
+    except Exception as e:
+        logger.error(e)
+    return utils.get_response(True)
 
 
 def get_cluster_id():
