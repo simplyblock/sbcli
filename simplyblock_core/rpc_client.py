@@ -144,7 +144,7 @@ class RPCClient:
             "zcopy": True,
             "in_capsule_data_size": 8192,
             "max_io_size": 1048576,
-            "io_unit_size": 4096,
+            "io_unit_size": 8192,
             "max_aq_depth": 128,
             "num_shared_buffers": 32768,
             "buf_cache_size": 256,
