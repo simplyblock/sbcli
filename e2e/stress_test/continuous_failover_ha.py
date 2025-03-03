@@ -153,7 +153,7 @@ class RandomFailoverTest(TestLvolHACluster):
             for connect_str in connect_ls:
                 _, error = self.ssh_obj.exec_command(node=self.fio_node, command=connect_str)
                 if error:
-                    lvol_details = self.sbcli_utils.get_lvol_details(lvol_id=self.clone_mount_details[lvol_name]["ID"])
+                    lvol_details = self.sbcli_utils.get_lvol_details(lvol_id=self.lvol_mount_details[lvol_name]["ID"])
                     nqn = lvol_details[0]["nqn"]
                     self.ssh_obj.disconnect_nvme(node=self.fio_node, nqn_grep=nqn)
                     self.logger.info(f"Connecting lvol {lvol_name} has error: {error}. Disconnect all connections for that lvol and cleaning that lvol!!")
@@ -513,7 +513,7 @@ class RandomFailoverTest(TestLvolHACluster):
         if not available_lvols:
             self.logger.warning("No available lvols to create snapshots and clones.")
             return
-        for _ in range(4):
+        for _ in range(3):
             random.shuffle(available_lvols)
             lvol = available_lvols[0]
             snapshot_name = f"snap_{lvol}"
