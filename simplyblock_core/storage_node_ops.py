@@ -2930,7 +2930,7 @@ def recreate_lvstore(snode):
     if not lvol_list:
         prim_node_suspend = False
 
-    snode_api.firewall_set_port(snode.lvol_subsys_port, "tcp", "block", snode.rpc_port)
+    # snode_api.firewall_set_port(snode.lvol_subsys_port, "tcp", "block", snode.rpc_port)
 
     if snode.jm_vuid:
         ret = rpc_client.jc_explicit_synchronization(snode.jm_vuid)
@@ -2953,7 +2953,7 @@ def recreate_lvstore(snode):
             lvol_obj.health_check = True
         lvol_obj.write_to_db()
 
-    snode_api.firewall_set_port(snode.lvol_subsys_port, "tcp", "allow", snode.rpc_port)
+    # snode_api.firewall_set_port(snode.lvol_subsys_port, "tcp", "allow", snode.rpc_port)
 
     if prim_node_suspend:
         if sec_node.status == StorageNode.STATUS_ONLINE:
