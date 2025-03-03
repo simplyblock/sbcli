@@ -134,6 +134,10 @@ def spdk_process_start():
     if 'spdk_mem' in data:
         spdk_mem = data['spdk_mem']
 
+    total_mem = ""
+    if 'total_mem' in data:
+        total_mem = data['total_mem']
+
     multi_threading_enabled = False
     if 'multi_threading_enabled' in data:
         multi_threading_enabled = bool(data['multi_threading_enabled'])
@@ -194,6 +198,7 @@ def spdk_process_start():
             f"RPC_PORT={rpc_port}",
             f"ssd_pcie={ssd_pcie_params}",
             f"PCI_ALLOWED={ssd_pcie_list}",
+            f"TOTAL_HP={total_mem}",
         ]
         # restart_policy={"Name": "on-failure", "MaximumRetryCount": 99}
     )

@@ -1128,13 +1128,19 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
     if not spdk_image:
         spdk_image = constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE
 
+    total_mem = minimum_hp_memory
+    for n in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
+        if n.api_endpoint == node_ip:
+            total_mem += n.spdk_mem
+
     logger.info("Deploying SPDK")
     results = None
     try:
         results, err = snode_api.spdk_process_start(
             spdk_cpu_mask, minimum_hp_memory, spdk_image, spdk_debug, cluster_ip, fdb_connection,
             namespace, mgmt_ip, rpc_port, rpc_user, rpc_pass,
-            multi_threading_enabled=constants.SPDK_PROXY_MULTI_THREADING_ENABLED, timeout=constants.SPDK_PROXY_TIMEOUT, ssd_pcie=ssd_pcie)
+            multi_threading_enabled=constants.SPDK_PROXY_MULTI_THREADING_ENABLED, timeout=constants.SPDK_PROXY_TIMEOUT,
+            ssd_pcie=ssd_pcie, total_mem=total_mem)
     except Exception as e:
         logger.error(e)
         return False
@@ -1734,6 +1740,11 @@ def restart_storage_node(
     cluster_ip = cluster_docker.info()["Swarm"]["NodeAddr"]
     cluster = db_controller.get_cluster_by_id(snode.cluster_id)
 
+    total_mem = 0
+    for n in db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id):
+        if n.api_endpoint == snode.api_endpoint:
+            total_mem += n.spdk_mem
+
     results = None
     try:
         fdb_connection = cluster.db_connection
@@ -1741,7 +1752,7 @@ def restart_storage_node(
             snode.spdk_cpu_mask, snode.spdk_mem, snode.spdk_image, spdk_debug, cluster_ip, fdb_connection,
             snode.namespace, snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password,
             multi_threading_enabled=constants.SPDK_PROXY_MULTI_THREADING_ENABLED, timeout=constants.SPDK_PROXY_TIMEOUT,
-            ssd_pcie=snode.ssd_pcie)
+            ssd_pcie=snode.ssd_pcie, total_mem=total_mem)
     except Exception as e:
         logger.error(e)
         return False

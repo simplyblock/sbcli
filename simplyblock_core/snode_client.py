@@ -78,7 +78,8 @@ class SNodeClient:
 
     def spdk_process_start(self, spdk_cpu_mask, spdk_mem, spdk_image=None, spdk_debug=None, cluster_ip=None,
                            fdb_connection=None, namespace=None, server_ip=None, rpc_port=None,
-                           rpc_username=None, rpc_password=None, multi_threading_enabled=False, timeout=0, ssd_pcie=None):
+                           rpc_username=None, rpc_password=None, multi_threading_enabled=False, timeout=0, ssd_pcie=None,
+                           total_mem=None):
         params = {
             "cluster_ip": cluster_ip,
             "server_ip": server_ip,
@@ -104,6 +105,8 @@ class SNodeClient:
             params["timeout"] = timeout
         if ssd_pcie:
             params["ssd_pcie"] = ssd_pcie
+        if total_mem:
+            params["total_mem"] = total_mem
         return self._request("POST", "spdk_process_start", params)
 
     def join_swarm(self, cluster_ip, join_token, db_connection, cluster_id):
