@@ -513,16 +513,20 @@ def firewall_set_port():
         return utils.get_response(False, "Required parameter is missing: port_type")
     if "action" not in data:
         return utils.get_response(False, "Required parameter is missing: action")
+    if "rpc_port" not in data:
+        return utils.get_response(False, "Required parameter is missing: rpc_port")
 
     port_id = data['port_id']
     port_type = data['port_type']
     action = data['action']
+    rpc_port = data['rpc_port']
 
-    ret = node_utils.firewall_port(port_id, port_type, block=action=="block")
+    ret = node_utils.firewall_port(port_id, port_type, block=action=="block", rpc_port=rpc_port)
     return utils.get_response(ret)
 
 
 @bp.route('/get_firewall', methods=['GET'])
 def get_firewall():
-    ret = node_utils.firewall_get()
+    rpc_port = request.args.get('rpc_port', default="", type=str)
+    ret = node_utils.firewall_get(rpc_port)
     return utils.get_response(ret)

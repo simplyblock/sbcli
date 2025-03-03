@@ -325,7 +325,7 @@ while True:
             for port in nodes_ports_blocked[node_id]:
                 if port:
                     logger.info(f"Allow port {port} on node {node_id}")
-                    snode_api.firewall_set_port(port, "tcp", "allow")
+                    snode_api.firewall_set_port(port, "tcp", "allow", snode.rpc_port)
                     tcp_ports_events.port_allowed(snode, port)
 
     nodes_ports_blocked = {}
