@@ -122,7 +122,8 @@ def update_cluster_status(cluster_id):
 
     task_pending = 0
     for task in db_controller.get_job_tasks(cluster_id):
-        if task.status != JobSchedule.STATUS_DONE:
+        if task.status != JobSchedule.STATUS_DONE and task.function_name in [
+            JobSchedule.FN_DEV_MIG, JobSchedule.FN_NEW_DEV_MIG, JobSchedule.FN_FAILED_DEV_MIG]:
             task_pending += 1
 
     cluster.is_re_balancing = task_pending  > 0
