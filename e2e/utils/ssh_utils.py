@@ -541,11 +541,13 @@ class SshUtils:
 
     def add_snapshot(self, node, lvol_id, snapshot_name):
         cmd = f"{self.base_cmd} -d snapshot add {lvol_id} {snapshot_name}"
-        self.exec_command(node=node, command=cmd)
+        output, error = self.exec_command(node=node, command=cmd)
+        return output, error
     
     def add_clone(self, node, snapshot_id, clone_name):
         cmd = f"{self.base_cmd} -d snapshot clone {snapshot_id} {clone_name}"
-        self.exec_command(node=node, command=cmd)
+        output, error = self.exec_command(node=node, command=cmd)
+        return output, error
 
     def delete_snapshot(self, node, snapshot_id):
         cmd = "%s snapshot list | grep -i '%s' | awk '{print $4}'" % (self.base_cmd, snapshot_id)

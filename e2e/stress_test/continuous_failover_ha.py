@@ -86,7 +86,7 @@ class RandomFailoverTest(TestLvolHACluster):
             is_crypto = random.choice([False, False])
             lvol_name = f"{self.lvol_name}_{i}" if not is_crypto else f"c{self.lvol_name}_{i}"
             while lvol_name in self.lvol_mount_details:
-                self.lvol_name = f"lvl{random_char(3)}"
+                self.lvol_name = f"lvl{random_char(5)}"
                 lvol_name = f"{self.lvol_name}_{i}" if not is_crypto else f"c{self.lvol_name}_{i}"
             self.logger.info(f"Creating lvol with Name: {lvol_name}, fs type: {fs_type}, crypto: {is_crypto}")
             try:
@@ -517,16 +517,20 @@ class RandomFailoverTest(TestLvolHACluster):
             random.shuffle(available_lvols)
             lvol = available_lvols[0]
             snapshot_name = f"snap_{lvol}"
-            temp_name = f"{lvol}_{random_char(2)}"
+            temp_name = f"{lvol}_{random_char(4)}"
             if snapshot_name in self.snapshot_names:
                 snapshot_name = f"{snapshot_name}_{temp_name}"
             try:
-                self.ssh_obj.add_snapshot(self.mgmt_nodes[0], self.lvol_mount_details[lvol]["ID"], snapshot_name)
+                output, error = self.ssh_obj.add_snapshot(self.mgmt_nodes[0], self.lvol_mount_details[lvol]["ID"], snapshot_name)
+                if "(False," in output:
+                    raise Exception(output)
+                if "(False," in error:
+                    raise Exception(error)
             except Exception as e:
                 self.logger.warning(f"Snap creation fails with {str(e)}. Retrying with different name.")
                 try:
                     snapshot_name = f"snap_{lvol}"
-                    temp_name = f"{lvol}_{random_char(3)}"
+                    temp_name = f"{lvol}_{random_char(5)}"
                     snapshot_name = f"{snapshot_name}_{temp_name}"
                     self.ssh_obj.add_snapshot(self.mgmt_nodes[0], self.lvol_mount_details[lvol]["ID"], snapshot_name)
                 except Exception as exp:
