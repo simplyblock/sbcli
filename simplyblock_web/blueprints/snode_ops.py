@@ -137,6 +137,7 @@ def spdk_process_start():
     total_mem = ""
     if 'total_mem' in data:
         total_mem = data['total_mem']
+        total_mem = int(utils.parse_size(total_mem) / (1000 * 1000))
 
     multi_threading_enabled = False
     if 'multi_threading_enabled' in data:
