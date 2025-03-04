@@ -729,7 +729,7 @@ class RandomFailoverTest(TestLvolHACluster):
         outage_type = self.perform_random_outage()
         
         if not self.sbcli_utils.is_secondary_node(self.current_outage_node):
-            self.delete_random_lvols(3)
+            self.delete_random_lvols(5)
             self.logger.info("Creating 5 new lvols, clones, and snapshots.")
             self.create_lvols_with_fio(3)
             self.create_snapshots_and_clones()
@@ -855,7 +855,9 @@ class RandomFailoverTest(TestLvolHACluster):
                 self.restart_fio(iteration=iteration)
             outage_type = self.perform_random_outage()
             if not self.sbcli_utils.is_secondary_node(self.current_outage_node):
-                self.delete_random_lvols(3)
+                self.delete_random_lvols(5)
+                self.create_lvols_with_fio(3)
+                self.create_snapshots_and_clones()
             else:
                 self.logger.info(f"Current outage node: {self.current_outage_node} is secondary node. Skipping delete and create")
             if outage_type != "partial_nw" or outage_type != "partial_nw_single_port":
