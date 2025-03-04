@@ -215,8 +215,8 @@ jobs:
             --set storagenode.maxSnap="20" \
             --set storagenode.maxProv="150G" \
             --set storagenode.numDevices="3" \
-            --set storagenode.dataNics=ens16 \
-            --set storagenode.ifname=ens18 > helm-rendered.yaml
+            --set storagenode.dataNics=eth1 \
+            --set storagenode.ifname=eth0 > helm-rendered.yaml
 
           echo "Helm template successfully generated."
           head -n 20 helm-rendered.yaml
@@ -261,8 +261,8 @@ jobs:
             --set storagenode.maxSnap="20" \
             --set storagenode.maxProv="150G" \
             --set storagenode.numDevices="3" \
-            --set storagenode.dataNics=ens16 \
-            --set storagenode.ifname=ens18 \
+            --set storagenode.dataNics=eth1 \
+            --set storagenode.ifname=eth0 \
             --debug
         id: helm_install
         env:
@@ -305,8 +305,8 @@ jobs:
       #       --set storagenode.maxSnap="10" \
       #       --set storagenode.maxProv="150G" \
       #       --set storagenode.numDevices="3" \
-      #       --set storagenode.dataNics=ens16 \
-      #       --set storagenode.ifname=ens18
+      #       --set storagenode.dataNics=eth1 \
+      #       --set storagenode.ifname=eth0
       #   id: helm_install
       #   env:
       #     SBCLI_CMD: ${{ env.SBCLI_CMD }}
