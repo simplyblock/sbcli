@@ -69,7 +69,7 @@ while True:
                         continue
 
                     if lvol.status == lvol.STATUS_IN_DELETION:
-                        ret = rpc_client.bdev_lvol_get_lvol_delete_status(lvol.base_bdev)
+                        ret = rpc_client.bdev_lvol_get_lvol_delete_status(f"{lvol.lvs_name}/{lvol.lvol_bdev}")
                         if ret == 0: # delete complete
                             logger.info(f"LVol deleted successfully, id: {lvol.get_id()}")
                             lvol_events.lvol_delete(lvol)
