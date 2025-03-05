@@ -155,7 +155,8 @@ def spdk_process_start():
     spdk_image = constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE
     if 'spdk_image' in data and data['spdk_image']:
         spdk_image = data['spdk_image']
-        # node_docker.images.pull(spdk_image)
+
+    node_docker.images.pull(spdk_image)
 
     if "cluster_ip" in data and data['cluster_ip']:
         cluster_ip = data['cluster_ip']
@@ -257,8 +258,8 @@ def get_file_content(file_name):
 
 
 def set_cluster_id(cluster_id):
-    out, _, _ = node_utils.run_command(f"echo {cluster_id} > {cluster_id_file}")
-    return out
+    ret = os.popen(f"echo {cluster_id} > {cluster_id_file}").read().strip()
+    return ret
 
 
 def delete_cluster_id():
@@ -326,13 +327,13 @@ def join_swarm():
         node_docker.swarm.leave(force=True)
         time.sleep(2)
     node_docker.swarm.join([f"{cluster_ip}:2377"], join_token)
-    retries = 10
-    while retries > 0:
-        if node_docker.info()["Swarm"]["LocalNodeState"] == "active":
-            break
-        logger.info("Waiting for node to be active...")
-        retries -= 1
-        time.sleep(1)
+    # retries = 10
+    # while retries > 0:
+    #     if node_docker.info()["Swarm"]["LocalNodeState"] == "active":
+    #         break
+    #     logger.info("Waiting for node to be active...")
+    #     retries -= 1
+    #     time.sleep(1)
     logger.info("Joining docker swarm > Done")
 
     try:
@@ -363,11 +364,12 @@ def make_gpt_partitions_for_nbd():
     nbd_device = '/dev/nbd0'
     jm_percent = '3'
     num_partitions = 1
-
+    partition_percent = 0
     try:
         data = request.get_json()
         nbd_device = data['nbd_device']
         jm_percent = data['jm_percent']
+        partition_percent = data['partition_percent']
         num_partitions = data['num_partitions']
     except:
         pass
@@ -379,7 +381,11 @@ def make_gpt_partitions_for_nbd():
     sg_cmd_list = [
         f"sgdisk -t 1:6527994e-2c5a-4eec-9613-8f5944074e8b {nbd_device}",
     ]
-    perc_per_partition = int((100 - jm_percent) / num_partitions)
+    if partition_percent:
+        perc_per_partition = int(partition_percent)
+    else:
+        perc_per_partition = int((100 - jm_percent) / num_partitions)
+
     for i in range(num_partitions):
         st = jm_percent + (i * perc_per_partition)
         en = st + perc_per_partition
@@ -412,6 +418,9 @@ def delete_gpt_partitions_for_dev():
     cmd_list = [
         f"echo -n \"{device_pci}\" > /sys/bus/pci/drivers/uio_pci_generic/unbind",
         f"echo -n \"{device_pci}\" > /sys/bus/pci/drivers/nvme/bind",
+        f"echo \"nvme\" > /sys/bus/pci/devices/{device_pci}/driver_override",
+        f"echo -n \"{device_pci}\" > /sys/bus/pci/drivers/nvme/bind",
+
     ]
 
     for cmd in cmd_list:
@@ -421,16 +430,17 @@ def delete_gpt_partitions_for_dev():
         time.sleep(1)
 
     device_name = os.popen(f"ls /sys/devices/pci0000:00/{device_pci}/nvme/nvme*/ | grep nvme").read().strip()
-    cmd_list = [
-        f"parted -fs /dev/{device_name} mklabel gpt",
-        f"echo -n \"{device_pci}\" > /sys/bus/pci/drivers/nvme/unbind",
-    ]
+    if device_name:
+        cmd_list = [
+            f"parted -fs /dev/{device_name} mklabel gpt",
+            f"echo -n \"{device_pci}\" > /sys/bus/pci/drivers/nvme/unbind",
+        ]
 
-    for cmd in cmd_list:
-        logger.debug(cmd)
-        ret = os.popen(cmd).read().strip()
-        logger.debug(ret)
-        time.sleep(1)
+        for cmd in cmd_list:
+            logger.debug(cmd)
+            ret = os.popen(cmd).read().strip()
+            logger.debug(ret)
+            time.sleep(1)
 
     return utils.get_response(True)
 
@@ -474,3 +484,27 @@ def bind_device_to_spdk():
         time.sleep(1)
 
     return utils.get_response(True)
+
+
+@bp.route('/firewall_set_port', methods=['POST'])
+def firewall_set_port():
+    data = request.get_json()
+    if "port_id" not in data:
+        return utils.get_response(False, "Required parameter is missing: port_id")
+    if "port_type" not in data:
+        return utils.get_response(False, "Required parameter is missing: port_type")
+    if "action" not in data:
+        return utils.get_response(False, "Required parameter is missing: action")
+
+    port_id = data['port_id']
+    port_type = data['port_type']
+    action = data['action']
+
+    ret = node_utils.firewall_port(port_id, port_type, block=action=="block")
+    return utils.get_response(ret)
+
+
+@bp.route('/get_firewall', methods=['GET'])
+def get_firewall():
+    ret = node_utils.firewall_get()
+    return utils.get_response(ret)

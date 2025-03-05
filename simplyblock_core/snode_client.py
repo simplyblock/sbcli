@@ -16,7 +16,7 @@ class SNodeClientException(Exception):
 
 class SNodeClient:
 
-    def __init__(self, ip_address, timeout=120, retry=5):
+    def __init__(self, ip_address, timeout=300, retry=5):
         self.ip_address = ip_address
         self.url = 'http://%s/snode/' % self.ip_address
         self.timeout = timeout
@@ -112,11 +112,12 @@ class SNodeClient:
     def leave_swarm(self):
         return self._request("GET", "leave_swarm")
 
-    def make_gpt_partitions(self, nbd_device, jm_percent, num_partitions):
+    def make_gpt_partitions(self, nbd_device, jm_percent, num_partitions, partition_percent):
         params = {
             "nbd_device": nbd_device,
             "jm_percent": int(jm_percent),
             "num_partitions": int(num_partitions),
+            "partition_percent": int(partition_percent),
         }
         return self._request("POST", "make_gpt_partitions", params)
 
@@ -133,3 +134,15 @@ class SNodeClient:
 
     def get_file_content(self, file_name):
         return self._request("GET", f"get_file_content/{file_name}")
+
+
+    def firewall_set_port(self, port_id, port_type="tcp", action="block"):
+        params = {
+            "port_id": port_id,
+            "port_type": port_type,
+            "action": action,
+        }
+        return self._request("POST", "firewall_set_port", params)
+
+    def get_firewall(self,):
+        return self._request("GET", "get_firewall")

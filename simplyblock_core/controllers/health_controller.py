@@ -1,6 +1,7 @@
 # coding=utf-8
+import jc
 
-from simplyblock_core import utils, distr_controller
+from simplyblock_core import utils, distr_controller, storage_node_ops
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.nvme_device import NVMeDevice, JMDevice
@@ -102,6 +103,25 @@ def _check_spdk_process_up(ip):
     return False
 
 
+def _check_port_on_node(snode, port_id):
+    try:
+        snode_api = SNodeClient(f"{snode.mgmt_ip}:5000", timeout=3, retry=2)
+        iptables_command_output, _ = snode_api.get_firewall()
+        result = jc.parse('iptables', iptables_command_output)
+        for chain in result:
+            if chain['chain'] in ["INPUT", "OUTPUT"]:
+                for rule in chain['rules']:
+                    if str(port_id) in rule['options']:
+                        action = rule['target']
+                        if action == "DROP":
+                            return False
+
+        return True
+    except Exception as e:
+        logger.error(e)
+    return True
+
+
 def _check_node_ping(ip):
     res = utils.ping_host(ip)
     if res:
@@ -117,7 +137,7 @@ def _check_node_lvstore(lvstore_stack, node, auto_fix=False):
     rpc_client = RPCClient(
         node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password, timeout=3, retry=1)
     cluster = db_controller.get_cluster_by_id(node.cluster_id)
-    if cluster.status in [Cluster.STATUS_INACTIVE, Cluster.STATUS_IN_ACTIVATION]:
+    if cluster.status not in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_READONLY]:
         auto_fix = False
 
     distribs_list = []
@@ -131,9 +151,15 @@ def _check_node_lvstore(lvstore_stack, node, auto_fix=False):
         elif type == "bdev_lvstore":
             bdev_lvstore = bdev["name"]
 
+    node_bdevs = rpc_client.get_bdevs()
+    if node_bdevs:
+        node_bdev_names = [b['name'] for b in node_bdevs]
+    else:
+        node_bdev_names = []
+
     for distr in distribs_list:
-        ret = rpc_client.get_bdevs(distr)
-        if ret:
+        # ret = rpc_client.get_bdevs(distr)
+        if distr in node_bdev_names:
             logger.info(f"Checking distr bdev : {distr} ... ok")
             logger.info("Checking Distr map ...")
             ret = rpc_client.distr_get_cluster_map(distr)
@@ -151,13 +177,22 @@ def _check_node_lvstore(lvstore_stack, node, auto_fix=False):
                                 if result['Kind'] == "Device":
                                     if result['Reported Status']:
                                         dev = db_controller.get_storage_device_by_id(result['UUID'])
+                                        if dev.status == NVMeDevice.STATUS_ONLINE:
+                                            remote_devices = storage_node_ops._connect_to_remote_devs(node)
+                                            n = db_controller.get_storage_node_by_id(node.get_id())
+                                            n.remote_devices = remote_devices
+                                            n.write_to_db()
                                         distr_controller.send_dev_status_event(dev, dev.status, node)
                                 if result['Kind'] == "Node":
                                     n = db_controller.get_storage_node_by_id(result['UUID'])
                                     distr_controller.send_node_status_event(n, n.status, node)
                         ret = rpc_client.distr_get_cluster_map(distr)
-                        results, is_passed = distr_controller.parse_distr_cluster_map(ret)
-                        logger.info(f"Checking Distr map ... {is_passed}")
+                        if not ret:
+                            logger.error("Failed to get cluster map")
+                            lvstore_check = False
+                        else:
+                            results, is_passed = distr_controller.parse_distr_cluster_map(ret)
+                            logger.info(f"Checking Distr map ... {is_passed}")
 
                 else:
                     logger.error("Failed to parse distr cluster map")
@@ -166,8 +201,8 @@ def _check_node_lvstore(lvstore_stack, node, auto_fix=False):
             logger.info(f"Checking distr bdev : {distr} ... not found")
             lvstore_check = False
     if raid:
-        ret = rpc_client.get_bdevs(raid)
-        if ret:
+        # ret = rpc_client.get_bdevs(raid)
+        if raid in node_bdev_names:
             logger.info(f"Checking raid bdev: {raid} ... ok")
         else:
             logger.info(f"Checking raid bdev: {raid} ... not found")
@@ -214,6 +249,14 @@ def check_node(node_id, with_devices=True):
     # 4- docker API
     node_docker_check = _check_node_docker_api(snode.mgmt_ip)
     logger.info(f"Check: node docker API {snode.mgmt_ip}:2375 ... {node_docker_check}")
+
+    if snode.is_secondary_node:
+        for n in db_controller.get_primary_storage_nodes_by_secondary_node_id(node_id):
+            lvol_port_check = _check_port_on_node(snode, n.lvol_subsys_port)
+            logger.info(f"Check: node {snode.mgmt_ip}, port: {n.lvol_subsys_port} ... {lvol_port_check}")
+    else:
+        lvol_port_check = _check_port_on_node(snode, snode.lvol_subsys_port)
+        logger.info(f"Check: node {snode.mgmt_ip}, port: {snode.lvol_subsys_port} ... {lvol_port_check}")
 
     is_node_online = ping_check and node_api_check and node_rpc_check and node_docker_check
 
@@ -283,7 +326,7 @@ def check_node(node_id, with_devices=True):
 
         if snode.is_secondary_node:
             for node in db_controller.get_storage_nodes():
-                if node.secondary_node_id == snode.get_id():
+                if node.secondary_node_id == snode.get_id() and node.status == StorageNode.STATUS_ONLINE:
                     logger.info(f"Checking stack from node : {node.get_id()}")
                     lvstore_check &= _check_node_lvstore(node.lvstore_stack, snode)
 

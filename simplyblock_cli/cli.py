@@ -47,6 +47,7 @@ class CLIWrapper:
         sub_command.add_argument("--max-prov", help='Maximum amount of GB to be provisioned via all storage nodes', dest='max_prov')
         sub_command.add_argument("--number-of-distribs", help='The number of distirbs to be created on the node', dest='number_of_distribs', type=int, default=2)
         sub_command.add_argument("--number-of-devices", help='Number of devices per storage node if it\'s not supported EC2 instance', dest='number_of_devices', type=int)
+        sub_command.add_argument("--size-of-device", help='Size of device per storage node', dest='partition_size')
         sub_command.add_argument("--cpu-mask", help='SPDK app CPU mask, default is all cores found', dest='spdk_cpu_mask')
 
         sub_command.add_argument("--spdk-image", help='SPDK image uri', dest='spdk_image')
@@ -56,6 +57,7 @@ class CLIWrapper:
         sub_command.add_argument("--iobuf_large_bufsize", help='bdev_set_options param', dest='large_bufsize',  type=int, default=0)
         sub_command.add_argument("--enable-test-device", help='Enable creation of test device', action='store_true')
         sub_command.add_argument("--disable-ha-jm", help='Disable HA JM for distrib creation', action='store_false', dest='enable_ha_jm', default=True)
+        sub_command.add_argument("--ha-jm-count", help='HA JM count', dest='ha_jm_count', type=int, default=constants.HA_JM_COUNT)
         sub_command.add_argument("--is-secondary-node", help='add as secondary node', action='store_true', dest='is_secondary_node', default=False)
         sub_command.add_argument("--namespace", help='k8s namespace to deploy on',)
         sub_command.add_argument("--id-device-by-nqn", help='Use device nqn to identify it instead of serial number', action='store_true', dest='id_device_by_nqn', default=False)
@@ -263,8 +265,8 @@ class CLIWrapper:
 
         sub_command = self.add_sub_command(subparser, 'create',
                                            'Create an new cluster with this node as mgmt (local run)')
-        sub_command.add_argument(
-            "--blk_size", help='The block size in bytes', type=int, choices=[512, 4096], default=512)
+        # sub_command.add_argument(
+        #     "--blk_size", help='The block size in bytes', type=int, choices=[512, 4096], default=512)
 
         sub_command.add_argument(
             "--page_size", help='The size of a data page in bytes', type=int, default=2097152)
@@ -293,21 +295,21 @@ class CLIWrapper:
                                  default=4096)
         sub_command.add_argument("--distr-chunk-bs", help='(Dev) distrb bdev chunk block size, default: 4096', type=int,
                                  default=4096)
-        sub_command.add_argument("--ha-type", help='LVol HA type (single, ha), default is cluster HA type',
+        sub_command.add_argument("--ha-type", help='LVol HA type (single, ha), default is cluster single type',
                                  dest='ha_type', choices=["single", "ha"], default='single')
         sub_command.add_argument("--enable-node-affinity", help='Enable node affinity for storage nodes', action='store_true')
         sub_command.add_argument("--qpair-count", help='tcp transport qpair count', type=int, dest='qpair_count',
                                  default=0, choices=range(128))
         sub_command.add_argument("--max-queue-size", help='The max size the queue will grow', type=int, default=128)
         sub_command.add_argument("--inflight-io-threshold", help='The number of inflight IOs allowed before the IO queuing starts', type=int, default=4)
-        sub_command.add_argument("--enable-qos", help='Enable qos bdev for storage nodes', action='store_true', dest='enable_qos')
+        sub_command.add_argument("--enable-qos", help='Enable qos bdev for storage nodes, true by default', dest='enable_qos', type=bool, default=True)
         sub_command.add_argument("--strict-node-anti-affinity", help='Enable strict node anti affinity for storage nodes', action='store_true')
 
 
 
         # add cluster
         sub_command = self.add_sub_command(subparser, 'add', 'Add new cluster')
-        sub_command.add_argument("--blk_size", help='The block size in bytes', type=int, choices=[512, 4096], default=512)
+        # sub_command.add_argument("--blk_size", help='The block size in bytes', type=int, choices=[512, 4096], default=512)
         sub_command.add_argument("--page_size", help='The size of a data page in bytes', type=int, default=2097152)
         sub_command.add_argument("--cap-warn", help='Capacity warning level in percent, default=80',
                                  type=int, required=False, dest="cap_warn")
@@ -323,7 +325,7 @@ class CLIWrapper:
                                  default=4096)
         sub_command.add_argument("--distr-chunk-bs", help='(Dev) distrb bdev chunk block size, default: 4096', type=int,
                                  default=4096)
-        sub_command.add_argument("--ha-type", help='LVol HA type (single, ha), default is cluster HA type',
+        sub_command.add_argument("--ha-type", help='LVol HA type (single, ha), default is cluster single type',
                                  dest='ha_type', choices=["single", "ha"], default='single')
         sub_command.add_argument("--enable-node-affinity", help='Enable node affinity for storage nodes', action='store_true')
         sub_command.add_argument("--qpair-count", help='tcp transport qpair count', type=int, dest='qpair_count',
@@ -345,6 +347,10 @@ class CLIWrapper:
         # show cluster info
         sub_command = self.add_sub_command(
             subparser, 'status', 'Show cluster status')
+        sub_command.add_argument("cluster_id", help='the cluster UUID').completer = self._completer_get_cluster_list
+
+        sub_command = self.add_sub_command(
+            subparser, 'show', 'Show cluster info')
         sub_command.add_argument("cluster_id", help='the cluster UUID').completer = self._completer_get_cluster_list
 
         # show cluster info
@@ -397,6 +403,8 @@ class CLIWrapper:
         # update cluster
         sub_command = self.add_sub_command(subparser, "update", 'Update cluster mgmt services')
         sub_command.add_argument("id", help='cluster UUID').completer = self._completer_get_cluster_list
+        sub_command.add_argument("--mgmt-only", help='Update mgmt services only', dest='mgmt_only', type=bool, default=False)
+        sub_command.add_argument("--restart", help='Update mgmt services only', dest='restart', type=bool, default=False)
 
         # graceful-shutdown storage nodes
         sub_command = self.add_sub_command(subparser, "graceful-shutdown", 'Graceful shutdown of storage nodes')
@@ -776,6 +784,7 @@ class CLIWrapper:
                 enable_ha_jm = args.enable_ha_jm
                 number_of_distribs = args.number_of_distribs
                 namespace = args.namespace
+                ha_jm_count = args.ha_jm_count
 
                 out = storage_ops.add_node(
                     cluster_id=cluster_id,
@@ -799,6 +808,8 @@ class CLIWrapper:
                     enable_ha_jm=enable_ha_jm,
                     is_secondary_node=args.is_secondary_node,
                     id_device_by_nqn=args.id_device_by_nqn,
+                    partition_size=args.partition_size,
+                    ha_jm_count=ha_jm_count,
                 )
 
                 return out
@@ -966,7 +977,10 @@ class CLIWrapper:
                 ret = cluster_ops.cluster_activate(cluster_id, args.force, args.force_lvstore_create)
             elif sub_command == 'status':
                 cluster_id = args.cluster_id
-                ret = cluster_ops.show_cluster(cluster_id)
+                ret = cluster_ops.get_cluster_status(cluster_id)
+            elif sub_command == 'show':
+                cluster_id = args.cluster_id
+                ret = cluster_ops.list_all_info(cluster_id)
             elif sub_command == 'list':
                 ret = cluster_ops.list()
             elif sub_command == 'suspend':
@@ -1010,7 +1024,7 @@ class CLIWrapper:
             elif sub_command == "get":
                 ret = cluster_ops.get_cluster(args.id)
             elif sub_command == "update":
-                ret = cluster_ops.update_cluster(args.id)
+                ret = cluster_ops.update_cluster(args.id, mgmt_only=args.mgmt_only, restart_cluster=args.restart)
 
             elif sub_command == "list-tasks":
                 ret = tasks_controller.list_tasks(args.cluster_id)
@@ -1282,7 +1296,7 @@ class CLIWrapper:
 
     def cluster_add(self, args):
         page_size_in_blocks = args.page_size
-        blk_size = args.blk_size
+        blk_size = 4096
         cap_warn = args.cap_warn
         cap_crit = args.cap_crit
         prov_cap_warn = args.prov_cap_warn
@@ -1309,7 +1323,7 @@ class CLIWrapper:
 
     def cluster_create(self, args):
         page_size_in_blocks = args.page_size
-        blk_size = args.blk_size
+        blk_size = 4096
         CLI_PASS = args.CLI_PASS
         cap_warn = args.cap_warn
         cap_crit = args.cap_crit

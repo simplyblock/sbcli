@@ -129,9 +129,10 @@ def delete_pool(uuid):
         logger.error(f"Pool is disabled")
         return False
 
-    # if pool.lvols:
-    #     logger.error(f"Pool is not empty {uuid}")
-    #     return False
+    lvols = db_controller.get_lvols_by_pool_id(uuid)
+    if lvols and len(lvols) > 0:
+        logger.error(f"Pool {uuid} is not empty, lvols found {len(lvols)}")
+        return False
 
     logger.info(f"Deleting pool {pool.get_id()}")
     pool_events.pool_remove(pool)
@@ -282,7 +283,7 @@ def get_pool_total_capacity(pool_id):
     snaps = db_controller.get_snapshots()
     for snap in snaps:
         if snap.lvol.pool_uuid == pool_id:
-            total += snap.lvol.size
+            total += snap.used_size
     return total
 
 

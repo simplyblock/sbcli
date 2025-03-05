@@ -4,3 +4,5 @@ kubernetes
 graypy
 ec2-metadata
 prometheus-client
+jc
+setuptools>70.0.0

@@ -62,7 +62,7 @@ def storagenode_iostats(uuid, history):
     if not node:
         return utils.get_response_error(f"node not found: {uuid}", 404)
 
-    data = storage_node_ops.get_node_iostats_history(uuid, history, parse_sizes=False)
+    data = storage_node_ops.get_node_iostats_history(uuid, history, parse_sizes=False, with_sizes=True)
     ret = {
         "object_data": node.get_clean_dict(),
         "stats": data or []
@@ -136,10 +136,10 @@ def storage_node_shutdown(uuid):
     if not node:
         return utils.get_response_error(f"node not found: {uuid}", 404)
 
-    force = False
+    force = True
     try:
         args = request.args
-        force = bool(args.get('force', False))
+        force = bool(args.get('force', True))
     except:
         pass
 
@@ -204,7 +204,14 @@ def storage_node_add():
         disable_ha_jm = True
     else:
         disable_ha_jm = False
-    enable_test_device = bool(req_data.get('enable_test_device', False))
+
+    enable_test_device = False
+    param = req_data.get('enable_test_device')
+    if param:
+        if type(param) == bool:
+            enable_test_device = param
+        elif type(param) == str:
+            enable_test_device = param == "true"
 
     spdk_image = None
     if 'spdk_image' in req_data:

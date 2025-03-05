@@ -91,7 +91,7 @@ def cluster_capacity(uuid, history):
         return utils.get_response_error(f"Cluster not found: {uuid}", 404)
 
     ret = cluster_ops.get_capacity(uuid, history, is_json=True)
-    return utils.get_response(ret)
+    return utils.get_response(json.loads(ret))
 
 
 @bp.route('/cluster/iostats/<string:uuid>/history/<string:history>', methods=['GET'])
@@ -102,7 +102,7 @@ def cluster_iostats(uuid, history):
         logger.error(f"Cluster not found {uuid}")
         return utils.get_response_error(f"Cluster not found: {uuid}", 404)
 
-    data = cluster_ops.get_iostats_history(uuid, history, parse_sizes=False)
+    data = cluster_ops.get_iostats_history(uuid, history, parse_sizes=False, with_sizes=True)
     ret = {
         "object_data": cluster.get_clean_dict(),
         "stats": data or []
@@ -116,7 +116,7 @@ def cluster_status(uuid):
     if not cluster:
         logger.error(f"Cluster not found {uuid}")
         return utils.get_response_error(f"Cluster not found: {uuid}", 404)
-    data = cluster_ops.show_cluster(uuid, is_json=True)
+    data = cluster_ops.get_cluster_status(uuid, is_json=True)
     return utils.get_response(json.loads(data))
 
 

@@ -19,6 +19,7 @@ class StorageNode(BaseNodeObject):
     cloud_instance_id: str = ""
     cloud_instance_public_ip: str = ""
     cloud_instance_type: str = ""
+    cloud_name: str = ""
     cluster_id: str = ""
     cpu: int = 0
     cpu_hz: int = 0
@@ -28,6 +29,7 @@ class StorageNode(BaseNodeObject):
     distrib_cpu_index: int = 0
     distrib_cpu_mask: str = ""
     enable_ha_jm: bool = False
+    ha_jm_count: int = 3
     enable_test_device: bool = False
     health_check: bool = True
     host_nqn: str = ""
@@ -51,6 +53,7 @@ class StorageNode(BaseNodeObject):
     lvstore_stack: List[dict] = []
     lvstore_stack_secondary_1: List[dict] = []
     lvstore_stack_secondary_2: List[dict] = []
+    lvol_subsys_port: int = 0
     max_lvol: int = 0
     max_prov: int = 0
     max_snap: int = 0
@@ -80,5 +83,6 @@ class StorageNode(BaseNodeObject):
     spdk_debug: bool = False
     spdk_image: str = ""
     spdk_mem: int = 0
+    partition_size: int = 0
     subsystem: str = ""
     system_uuid: str = ""
