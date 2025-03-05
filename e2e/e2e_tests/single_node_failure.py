@@ -203,6 +203,8 @@ class TestSingleNodeFailure(TestClusterBase):
                 log_dir=self.docker_logs_path,
                 test_name=self.test_name
             )
+        else:
+            self.runner_k8s_log.restart_logging()
         sleep_n_sec(120)
         self.validate_migration_for_node(
             timestamp=timestamp,
@@ -435,6 +437,8 @@ class TestHASingleNodeFailure(TestClusterBase):
                     log_dir=self.docker_logs_path,
                     test_name=self.test_name
                 )
+            else:
+                self.runner_k8s_log.restart_logging()
             sleep_n_sec(120)
             self.validate_migration_for_node(
                 timestamp=timestamp,

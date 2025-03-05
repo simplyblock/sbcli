@@ -455,6 +455,8 @@ class RandomFailoverTest(TestLvolHACluster):
                 log_dir=self.docker_logs_path,
                 test_name=self.test_name
             )
+        else:
+            self.runner_k8s_log.restart_logging()
 
         if self.secondary_outage:
             for lvol in self.lvols_without_sec_connect:

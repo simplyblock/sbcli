@@ -1,7 +1,7 @@
 import os
 import boto3
 from utils.sbcli_utils import SbcliUtils
-from utils.ssh_utils import SshUtils
+from utils.ssh_utils import SshUtils, RunnerK8sLog
 from utils.common_utils import CommonUtils
 from logger_config import setup_logger
 from utils.common_utils import sleep_n_sec
@@ -54,6 +54,7 @@ class TestClusterBase:
         self.test_name = ""
         self.container_nodes = {}
         self.docker_logs_path = ""
+        self.runner_k8s_log = ""
 
     def setup(self):
         """Contains setup required to run the test case
@@ -146,6 +147,12 @@ class TestClusterBase:
                                                 log_dir=self.docker_logs_path,
                                                 test_name=self.test_name
                                                 )
+            else:
+                self.runner_k8s_log = RunnerK8sLog(
+                    log_dir=self.docker_logs_path,
+                    test_name=self.test_name
+                )
+                self.runner_k8s_log.start_logging()
             self.ssh_obj.start_tcpdump_logging(node_ip=node, log_dir=self.docker_logs_path)
             self.ssh_obj.start_netstat_dmesg_logging(node_ip=node,
                                                     log_dir=self.docker_logs_path)
