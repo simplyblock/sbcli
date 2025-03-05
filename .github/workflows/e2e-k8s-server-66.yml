@@ -418,7 +418,7 @@ jobs:
         run: |
           helm uninstall -n spdk-csi spdk-csi
           for node in $K3S_MNODES $STORAGE_PRIVATE_IPS $SEC_STORAGE_PRIVATE_IPS; do
-            ssh root@${node} "k3s-agent-uninstall.sh"
+            ssh -i ~/.ssh/simplyblock-us-east-2.pem  root@${node} "k3s-agent-uninstall.sh"
           done
         env:
           STORAGE_PRIVATE_IPS: "192.168.10.67 192.168.10.68 192.168.10.69"
