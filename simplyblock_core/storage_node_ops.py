@@ -982,10 +982,10 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
     logger.info(f"Instance privateIp: {cloud_instance['ip']}")
     logger.info(f"Instance public_ip: {cloud_instance['public_ip']}")
 
-    for node in db_controller.get_storage_nodes():
-        if node.cloud_instance_id and node.cloud_instance_id == cloud_instance['id']:
-            logger.error(f"Node already exists, try remove it first: {cloud_instance['id']}")
-            return False
+    # for node in db_controller.get_storage_nodes():
+    #     if node.cloud_instance_id and node.cloud_instance_id == cloud_instance['id']:
+    #         logger.error(f"Node already exists, try remove it first: {cloud_instance['id']}")
+    #         return False
 
     # Tune cpu maks parameters
     cpu_count = node_info["cpu_count"]
