@@ -261,7 +261,108 @@ class CLIWrapper:
         # ----------------- cluster -----------------
         #
 
+        
         subparser = self.add_command('cluster', 'Cluster commands')
+        
+        
+        sub_command = self.add_sub_command(subparser,'deploy',
+                                           'Deploy storage nodes')
+        sub_command.add_argument("--storage-nodes", help='comma separated ip addresses', dest="storage_nodes")
+        sub_command.add_argument("--test", help='Test Cluster', dest='test', required=False, action='store_true')
+        sub_command.add_argument("--secondary-nodes", help='comma separated ip addresses', dest="secondary_nodes")
+
+        sub_command.add_argument("--ha-type", help='LVol HA type (single, ha), default is cluster HA type',
+                                 dest='ha_type', choices=["single", "ha"], default='single')
+        sub_command.add_argument("--ha-jm-count", help='HA JM count', dest='ha_jm_count', type=int, default=constants.HA_JM_COUNT)
+        sub_command.add_argument("--distr-ndcs", help='(Dev) set ndcs manually, default: 1', type=int, default=1)
+        sub_command.add_argument("--distr-npcs", help='(Dev) set npcs manually, default: 1', type=int, default=1)
+        sub_command.add_argument("--enable-qos", help='Enable qos bdev for storage nodes', action='store_true', dest='enable_qos')
+        sub_command.add_argument("--ifname", help='Management interface name, default: eth0')
+        sub_command.add_argument(
+            "--blk_size", help='The block size in bytes', type=int, choices=[512, 4096], default=512)
+
+        sub_command.add_argument(
+            "--page_size", help='The size of a data page in bytes', type=int, default=2097152)
+
+        sub_command.add_argument("--CLI_PASS", help='Password for CLI SSH connection', required=False)
+        sub_command.add_argument("--cap-warn", help='Capacity warning level in percent, default=80',
+                                 type=int, required=False, dest="cap_warn")
+        sub_command.add_argument("--cap-crit", help='Capacity critical level in percent, default=90',
+                                 type=int, required=False, dest="cap_crit")
+        sub_command.add_argument("--prov-cap-warn", help='Capacity warning level in percent, default=180',
+                                 type=int, required=False, dest="prov_cap_warn")
+        sub_command.add_argument("--prov-cap-crit", help='Capacity critical level in percent, default=190',
+                                 type=int, required=False, dest="prov_cap_crit")
+        sub_command.add_argument("--log-del-interval", help='graylog deletion interval, default: 3d',
+                                 dest='log_del_interval', default='3d')
+        sub_command.add_argument("--metrics-retention-period", help='retention period for prometheus metrics, default: 7d',
+                                 dest='metrics_retention_period', default='7d')
+        sub_command.add_argument("--contact-point", help='the email or slack webhook url to be used for alerting',
+                                 dest='contact_point', default='')
+        sub_command.add_argument("--grafana-endpoint", help='the endpoint url for grafana',
+                                 dest='grafana_endpoint', default='')
+        sub_command.add_argument("--distr-bs", help='(Dev) distrb bdev block size, default: 4096', type=int,
+                                 default=4096)
+        sub_command.add_argument("--distr-chunk-bs", help='(Dev) distrb bdev chunk block size, default: 4096', type=int,
+                                 default=4096)
+        sub_command.add_argument("--enable-node-affinity", help='Enable node affinity for storage nodes', action='store_true')
+        sub_command.add_argument("--qpair-count", help='tcp transport qpair count', type=int, dest='qpair_count',
+                                 default=0, choices=range(128))
+        sub_command.add_argument("--max-queue-size", help='The max size the queue will grow', type=int, default=128)
+        sub_command.add_argument("--inflight-io-threshold", help='The number of inflight IOs allowed before the IO queuing starts', type=int, default=4)
+        sub_command.add_argument("--strict-node-anti-affinity", help='Enable strict node anti affinity for storage nodes', action='store_true')
+        
+        
+        sub_command.add_argument("--partitions", help='Number of partitions to create per device', type=int, default=1)
+        sub_command.add_argument("--jm-percent", help='Number in percent to use for JM from each device',
+                                 type=int, default=3, dest='jm_percent')
+        sub_command.add_argument("--data-nics", help='Data interface names', nargs='+', dest='data_nics')
+        sub_command.add_argument("--max-lvol", help='Max lvol per storage node', dest='max_lvol', type=int)
+        sub_command.add_argument("--max-snap", help='Max snapshot per storage node', dest='max_snap', type=int, default=500)
+        sub_command.add_argument("--max-prov", help='Maximum amount of GB to be provisioned via all storage nodes', dest='max_prov')
+        sub_command.add_argument("--number-of-distribs", help='The number of distirbs to be created on the node', dest='number_of_distribs', type=int, default=2)
+        sub_command.add_argument("--number-of-devices", help='Number of devices per storage node if it\'s not supported EC2 instance', dest='number_of_devices', type=int)
+        sub_command.add_argument("--size-of-device", help='Size of device per storage node', dest='partition_size')
+        sub_command.add_argument("--cpu-mask", help='SPDK app CPU mask, default is all cores found', dest='spdk_cpu_mask')
+
+        sub_command.add_argument("--spdk-image", help='SPDK image uri', dest='spdk_image')
+        sub_command.add_argument("--spdk-debug", help='Enable spdk debug logs', dest='spdk_debug', required=False, action='store_true')
+
+        sub_command.add_argument("--iobuf_small_bufsize", help='bdev_set_options param', dest='small_bufsize',  type=int, default=0)
+        sub_command.add_argument("--iobuf_large_bufsize", help='bdev_set_options param', dest='large_bufsize',  type=int, default=0)
+        sub_command.add_argument("--enable-test-device", help='Enable creation of test device', action='store_true')
+        sub_command.add_argument("--disable-ha-jm", help='Disable HA JM for distrib creation', action='store_false', dest='enable_ha_jm', default=True)
+        sub_command.add_argument("--is-secondary-node", help='add as secondary node', action='store_true', dest='is_secondary_node', default=False)
+        sub_command.add_argument("--namespace", help='k8s namespace to deploy on',)
+        sub_command.add_argument("--id-device-by-nqn", help='Use device nqn to identify it instead of serial number', action='store_true', dest='id_device_by_nqn', default=False)
+        
+
+        sub_command.add_argument("--lvol-name", help='LVol name or id', dest='lvol_name')
+        sub_command.add_argument("--lvol-size", help='LVol size: 10M, 10G, 10(bytes)', dest='lvol_size')
+        sub_command.add_argument("--pool-name", help='Pool UUID or name', dest='pool_name')
+        sub_command.add_argument("--pool-max", help='Pool maximum size: 20M, 20G, 0(default)', default="0")
+        sub_command.add_argument("--snapshot", "-s", help='Make LVol with snapshot capability, default is False',
+                                 required=False, action='store_true')
+        sub_command.add_argument("--max-size", help='LVol max size', dest='max_size', default="0")
+        sub_command.add_argument("--host-id", help='Primary storage node UUID or Hostname', dest='host_id')
+        sub_command.add_argument("--encrypt", help='Use inline data encryption and de-cryption on the logical volume',
+                                 required=False, action='store_true')
+        sub_command.add_argument("--crypto-key1", help='the hex value of key1 to be used for lvol encryption',
+                                 dest='crypto_key1', default=None)
+        sub_command.add_argument("--crypto-key2", help='the hex value of key2 to be used for lvol encryption',
+                                 dest='crypto_key2', default=None)
+        sub_command.add_argument("--max-rw-iops", help='Maximum Read Write IO Per Second', type=int)
+        sub_command.add_argument("--max-rw-mbytes", help='Maximum Read Write Mega Bytes Per Second', type=int)
+        sub_command.add_argument("--max-r-mbytes", help='Maximum Read Mega Bytes Per Second', type=int)
+        sub_command.add_argument("--max-w-mbytes", help='Maximum Write Mega Bytes Per Second', type=int)
+        sub_command.add_argument("--distr-vuid", help='(Dev) set vuid manually, default: random (1-99999)', type=int,
+                                 default=0)
+        sub_command.add_argument("--lvol-ha-type", help='LVol HA type (single, ha), default is cluster HA type',
+                                 dest='lvol_ha_type', choices=["single", "ha", "default"], default='default')
+        sub_command.add_argument("--lvol-priority-class", help='Lvol priority class', type=int, default=0)
+        sub_command.add_argument("--fstype", help='Filesystem type for testing (ext4, xfs)',
+                                choices=["ext4", "xfs"], default='xfs')
+
 
         sub_command = self.add_sub_command(subparser, 'create',
                                            'Create an new cluster with this node as mgmt (local run)')
@@ -989,6 +1090,8 @@ class CLIWrapper:
             elif sub_command == 'unsuspend':
                 cluster_id = args.cluster_id
                 ret = cluster_ops.unsuspend_cluster(cluster_id)
+            elif sub_command == 'deploy':
+                ret = self.cluster_deploy(args)
             elif sub_command == "get-capacity":
                 cluster_id = args.cluster_id
                 history = args.history
@@ -1320,6 +1423,92 @@ class CLIWrapper:
             distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, enable_node_affinity,
             qpair_count, max_queue_size, inflight_io_threshold, enable_qos, strict_node_anti_affinity)
 
+
+    def cluster_deploy(self,args):
+        
+        storage_nodes = args.storage_nodes
+        test = args.test
+        ha_type = args.ha_type
+        ha_jm_count = args.ha_jm_count
+        distr_ndcs = args.distr_ndcs
+        distr_npcs = args.distr_npcs
+        enable_qos = args.enable_qos
+        ifname = args.ifname
+        page_size_in_blocks = args.page_size
+        blk_size = args.blk_size
+        CLI_PASS = args.CLI_PASS
+        cap_warn = args.cap_warn
+        cap_crit = args.cap_crit
+        prov_cap_warn = args.prov_cap_warn
+        prov_cap_crit = args.prov_cap_crit
+        distr_bs = args.distr_bs
+        distr_chunk_bs = args.distr_chunk_bs
+        log_del_interval = args.log_del_interval
+        metrics_retention_period = args.metrics_retention_period
+        contact_point = args.contact_point
+        grafana_endpoint = args.grafana_endpoint
+        enable_node_affinity = args.enable_node_affinity
+        qpair_count = args.qpair_count
+        max_queue_size = args.max_queue_size
+        inflight_io_threshold = args.inflight_io_threshold
+        strict_node_anti_affinity = args.strict_node_anti_affinity
+        
+        data_nics = args.data_nics
+        spdk_image = args.spdk_image
+        spdk_debug = args.spdk_debug
+
+        small_bufsize = args.small_bufsize
+        large_bufsize = args.large_bufsize
+        num_partitions_per_dev = args.partitions
+        partition_size = args.partition_size
+        jm_percent = args.jm_percent
+        spdk_cpu_mask = None
+        if args.spdk_cpu_mask:
+            if self.validate_cpu_mask(args.spdk_cpu_mask):
+                spdk_cpu_mask = args.spdk_cpu_mask
+            else:
+                return f"Invalid cpu mask value: {args.spdk_cpu_mask}"
+
+        max_lvol = args.max_lvol
+        max_snap = args.max_snap
+        max_prov = args.max_prov
+        number_of_devices = args.number_of_devices
+        enable_test_device = args.enable_test_device
+        enable_ha_jm = args.enable_ha_jm
+        number_of_distribs = args.number_of_distribs
+        namespace = args.namespace
+        secondary_nodes = args.secondary_nodes
+        
+        lvol_name = args.lvol_name
+        lvol_size = self.parse_size(args.lvol_size)
+        max_size = self.parse_size(args.max_size)
+        lvol_ha_type = args.lvol_ha_type
+        pool_name = args.pool_name
+        pool_max = self.parse_size(args.pool_max)
+        host_id = args.host_id
+        comp = None
+        crypto = args.encrypt
+        distr_vuid = args.distr_vuid
+        with_snapshot = args.snapshot
+        lvol_priority_class = args.lvol_priority_class
+        max_rw_iops = args.max_rw_iops
+        max_rw_mbytes = args.max_rw_mbytes
+        max_r_mbytes = args.max_r_mbytes
+        max_w_mbytes = args.max_w_mbytes
+        crypto_key1 = args.crypto_key1
+        crypto_key2 = args.crypto_key2
+        fstype = args.fstype
+
+        return cluster_ops.deploy_cluster(
+            storage_nodes,test,ha_type,distr_ndcs,distr_npcs,enable_qos,ifname,
+            blk_size, page_size_in_blocks,CLI_PASS, cap_warn, cap_crit, prov_cap_warn, 
+            prov_cap_crit,log_del_interval, metrics_retention_period, contact_point, grafana_endpoint,
+            distr_bs, distr_chunk_bs, enable_node_affinity,
+            qpair_count, max_queue_size, inflight_io_threshold, strict_node_anti_affinity,data_nics,
+            spdk_image,spdk_debug,small_bufsize,large_bufsize,num_partitions_per_dev,jm_percent,spdk_cpu_mask,max_lvol,
+            max_snap,max_prov,number_of_devices,enable_test_device,enable_ha_jm,ha_jm_count,number_of_distribs,namespace,secondary_nodes,partition_size,
+            lvol_name, lvol_size, lvol_ha_type, pool_name, pool_max, host_id, comp, crypto, distr_vuid, max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes, 
+            with_snapshot, max_size, crypto_key1, crypto_key2, lvol_priority_class, fstype)
 
     def cluster_create(self, args):
         page_size_in_blocks = args.page_size
