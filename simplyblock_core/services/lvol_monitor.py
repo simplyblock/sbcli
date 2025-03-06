@@ -94,10 +94,12 @@ while True:
 
                     logger.info(f"LVol: {lvol.get_id()}, is healthy: {ret}")
                     set_lvol_health_check(lvol, ret)
-                    if ret:
-                        set_lvol_status(lvol, LVol.STATUS_ONLINE)
-                    else:
-                        set_lvol_status(lvol, LVol.STATUS_OFFLINE)
+                    lvol = db_controller.get_lvol_by_id(lvol.get_id())
+                    if lvol.status != lvol.STATUS_IN_DELETION:
+                        if ret:
+                            set_lvol_status(lvol, LVol.STATUS_ONLINE)
+                        else:
+                            set_lvol_status(lvol, LVol.STATUS_OFFLINE)
 
             for snap in db_controller.get_snapshots_by_node_id(snode.get_id()):
                 logger.debug("Checking Snapshot: %s", snap.get_id())
