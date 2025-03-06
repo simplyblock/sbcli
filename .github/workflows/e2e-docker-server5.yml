@@ -200,7 +200,7 @@ jobs:
           echo "TEST_TIME_MINS=$TEST_TIME_MINS" >> $GITHUB_ENV
           echo "TEST_TIME_SECS=$TEST_TIME_SECS" >> $GITHUB_ENV
 
-      - name: Upload automation and docker logs to s3
+      - name: Upload automation and docker logs to miniio
         run: |
           cd $GITHUB_WORKSPACE/e2e/
           python3 logs/upload_logs_to_miniio.py
@@ -212,7 +212,7 @@ jobs:
           BASTION_IP: "192.168.10.61"
           MNODES: "192.168.10.61"
           STORAGE_PRIVATE_IPS: "192.168.10.62 192.168.10.63 192.168.10.64"
-          SEC_STORAGE_PRIVATE_IPS: "192.168.10.65
+          SEC_STORAGE_PRIVATE_IPS: "192.168.10.65"
           USER: "ec2-user"
 
       - name: Parse test results
