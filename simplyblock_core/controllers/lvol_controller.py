@@ -910,7 +910,7 @@ def delete_lvol(id_or_name, force_delete=False):
             if is_node_leader(host_node, lvol.lvs_name):
                 primary_node = host_node
                 if sec_node.status == StorageNode.STATUS_DOWN:
-                    msg = f"Secondary node is in down status, can not create lvol"
+                    msg = f"Secondary node is in down status, can not delete lvol"
                     logger.error(msg)
                     return False, msg
                 elif sec_node.status == StorageNode.STATUS_ONLINE:
@@ -1227,7 +1227,7 @@ def resize_lvol(id, new_size):
             if is_node_leader(host_node, lvol.lvs_name):
                 primary_node = host_node
                 if sec_node.status == StorageNode.STATUS_DOWN:
-                    msg = f"Secondary node is in down status, can not create lvol"
+                    msg = f"Secondary node is in down status, can not resize lvol"
                     logger.error(msg)
                     error = True
 

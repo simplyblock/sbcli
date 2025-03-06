@@ -292,7 +292,7 @@ def delete(snapshot_uuid, force_delete=False):
             if lvol_controller.is_node_leader(host_node, snap.lvol.lvs_name):
                 primary_node = host_node
                 if sec_node.status == StorageNode.STATUS_DOWN:
-                    msg = f"Secondary node is in down status, can not create lvol"
+                    msg = f"Secondary node is in down status, can not delete snapshot"
                     logger.error(msg)
                     return False
 
