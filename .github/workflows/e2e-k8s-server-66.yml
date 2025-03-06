@@ -203,6 +203,8 @@ jobs:
             --set csiConfig.simplybk.ip="${API_INVOKE_URL}" \
             --set csiSecret.simplybk.secret="${CLUSTER_SECRET}" \
             --set image.simplyblock.repository="public.ecr.aws/simply-block/simplyblock" \
+            --set image.spdkcsi.repository="public.ecr.aws/simply-block/spdkcsi" \
+            --set image.storageNode.repository="public.ecr.aws/simply-block/storage-node-handler" \
             --set image.simplyblock.tag="main" \
             --set logicalVolume.pool_name="testing1" \
             --set logicalVolume.snapshot="True" \
@@ -250,6 +252,8 @@ jobs:
             --set csiConfig.simplybk.ip="${API_INVOKE_URL}" \
             --set csiSecret.simplybk.secret="${CLUSTER_SECRET}" \
             --set image.simplyblock.repository="public.ecr.aws/simply-block/simplyblock" \
+            --set image.spdkcsi.repository="public.ecr.aws/simply-block/spdkcsi" \
+            --set image.storageNode.repository="public.ecr.aws/simply-block/storage-node-handler" \
             --set image.simplyblock.tag="main" \
             --set logicalVolume.pool_name="testing1" \
             --set logicalVolume.snapshot="True" \
