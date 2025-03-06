@@ -1,12 +1,15 @@
 import os
 import boto3
 from utils.sbcli_utils import SbcliUtils
-from utils.ssh_utils import SshUtils
+from utils.ssh_utils import SshUtils, RunnerK8sLog
 from utils.common_utils import CommonUtils
 from logger_config import setup_logger
 from utils.common_utils import sleep_n_sec
+from exceptions.custom_exception import CoreFileFoundException
 import traceback
 import threading
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 
 class TestClusterBase:
@@ -15,6 +18,7 @@ class TestClusterBase:
         self.cluster_id = os.environ.get("CLUSTER_ID")
 
         self.api_base_url = os.environ.get("API_BASE_URL")
+        self.client_machine = os.environ.get("CLIENT_IP", "")
         self.headers = {
             "Content-Type": "application/json",
             "Authorization": f"{self.cluster_id} {self.cluster_secret}"
@@ -31,6 +35,7 @@ class TestClusterBase:
         self.common_utils = CommonUtils(self.sbcli_utils, self.ssh_obj)
         self.mgmt_nodes = None
         self.storage_nodes = None
+        self.fio_node = None
         self.ndcs = kwargs.get("ndcs", 1)
         self.npcs = kwargs.get("npcs", 1)
         self.bs = kwargs.get("bs", 4096)
@@ -38,18 +43,18 @@ class TestClusterBase:
         self.k8s_test = kwargs.get("k8s_run", False)
         self.pool_name = "test_pool"
         self.lvol_name = f"test_lvl_{self.ndcs}_{self.npcs}"
-        self.mount_path = "/home/ec2-user/test_location"
+        self.mount_path = f"{Path.home()}/test_location"
         self.log_path = f"{os.path.dirname(self.mount_path)}/log_file.log"
         self.base_cmd = os.environ.get("SBCLI_CMD", "sbcli-dev")
         self.fio_debug = kwargs.get("fio_debug", False)
         self.ec2_resource = None
         self.lvol_crypt_keys = ["7b3695268e2a6611a25ac4b1ee15f27f9bf6ea9783dada66a4a730ebf0492bfd",
                                 "78505636c8133d9be42e347f82785b81a879cd8133046f8fc0b36f17b078ad0c"]
-        self.container_log_path = f"{os.path.dirname(self.mount_path)}/container_logs"
         self.log_threads = []
         self.test_name = ""
         self.container_nodes = {}
-
+        self.docker_logs_path = ""
+        self.runner_k8s_log = ""
 
     def setup(self):
         """Contains setup required to run the test case
@@ -75,12 +80,25 @@ class TestClusterBase:
                 address=node,
                 bastion_server_address=self.bastion_server,
             )
+            sleep_n_sec(2)
+            self.ssh_obj.set_aio_max_nr(node)
         for node in self.storage_nodes:
             self.logger.info(f"**Connecting to storage nodes** - {node}")
             self.ssh_obj.connect(
                 address=node,
                 bastion_server_address=self.bastion_server,
             )
+            sleep_n_sec(2)
+            self.ssh_obj.set_aio_max_nr(node)
+        if self.client_machine:
+            self.logger.info(f"**Connecting to client machine** - {self.client_machine}")
+            self.ssh_obj.connect(
+                address=self.client_machine,
+                bastion_server_address=self.bastion_server,
+            )
+            sleep_n_sec(2)
+
+        self.fio_node = self.client_machine if self.client_machine else self.mgmt_nodes[0]
 
         # command = "python3 -c \"from importlib.metadata import version;print(f'SBCLI Version: {version('''sbcli-dev''')}')\""
         # self.ssh_obj.exec_command(
@@ -89,7 +107,7 @@ class TestClusterBase:
         sleep_n_sec(2)
         self.unmount_all(base_path=self.mount_path)
         sleep_n_sec(2)
-        self.ssh_obj.unmount_path(node=self.mgmt_nodes[0],
+        self.ssh_obj.unmount_path(node=self.fio_node,
                                   device=self.mount_path)
         sleep_n_sec(2)
         self.ssh_obj.delete_all_snapshots(node=self.mgmt_nodes[0])
@@ -106,42 +124,189 @@ class TestClusterBase:
         )
         self.ec2_resource = session.resource('ec2')
 
-        self.docker_logs_path = f"/home/container-logs/"
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        # Construct the logs path with test name and timestamp
+        self.docker_logs_path = os.path.join(Path.home(), "container-logs", f"{self.test_name}-{timestamp}")
         
         for node in self.storage_nodes:
+            self.ssh_obj.delete_old_folders(
+                node=node,
+                folder_path=os.path.join(Path.home(), "container-logs"),
+                days=3
+            )
+            self.ssh_obj.make_directory(node=node, dir_name=self.docker_logs_path)
             containers = self.ssh_obj.get_running_containers(node_ip=node)
             self.container_nodes[node] = containers
-            self.ssh_obj.start_docker_logging(node_ip=node,
-                                              containers=containers,
-                                              log_dir=self.docker_logs_path,
-                                              test_name=self.test_name
-                                              )
+            self.ssh_obj.check_tmux_installed(node_ip=node)
+            self.ssh_obj.exec_command(node=node,
+                                    command="sudo tmux kill-server")
+
+            if not self.k8s_test:
+                self.ssh_obj.start_docker_logging(node_ip=node,
+                                                containers=containers,
+                                                log_dir=self.docker_logs_path,
+                                                test_name=self.test_name
+                                                )
+
+            self.ssh_obj.start_tcpdump_logging(node_ip=node, log_dir=self.docker_logs_path)
+            self.ssh_obj.start_netstat_dmesg_logging(node_ip=node,
+                                                    log_dir=self.docker_logs_path)
+            if not self.k8s_test:
+                self.ssh_obj.reset_iptables_in_spdk(node_ip=node)
+        
+        if self.k8s_test:
+            self.runner_k8s_log = RunnerK8sLog(
+                log_dir=self.docker_logs_path,
+                test_name=self.test_name
+            )
+            self.runner_k8s_log.start_logging()
+        
+        self.ssh_obj.delete_old_folders(
+            node=self.fio_node,
+            folder_path=os.path.join(Path.home(), "container-logs"),
+            days=3
+        )
+
+        self.ssh_obj.make_directory(node=self.fio_node, dir_name=self.docker_logs_path)
+
+        self.ssh_obj.check_tmux_installed(node_ip=self.fio_node)
+
+        self.ssh_obj.exec_command(node=self.fio_node,
+                                command="sudo tmux kill-server")
+        self.ssh_obj.start_tcpdump_logging(node_ip=self.fio_node,
+                                        log_dir=self.docker_logs_path)
+        self.ssh_obj.start_netstat_dmesg_logging(node_ip=self.fio_node,
+                                                log_dir=self.docker_logs_path)
 
         self.logger.info("Started log monitoring for all storage nodes.")
+
+    def configure_sysctl_settings(self):
+        """Configure TCP kernel parameters on the node."""
+        sysctl_commands = [
+            'echo "net.core.rmem_max=16777216" | sudo tee -a /etc/sysctl.conf',
+            'echo "net.core.rmem_default=87380" | sudo tee -a /etc/sysctl.conf',
+            'echo "net.ipv4.tcp_rmem=4096 87380 16777216" | sudo tee -a /etc/sysctl.conf',
+            'echo "net.core.somaxconn=1024" | sudo tee -a /etc/sysctl.conf',
+            'echo "net.ipv4.tcp_max_syn_backlog=4096" | sudo tee -a /etc/sysctl.conf',
+            'echo "net.ipv4.tcp_window_scaling=1" | sudo tee -a /etc/sysctl.conf',
+            'echo "net.ipv4.tcp_retries2=8" | sudo tee -a /etc/sysctl.conf',
+            'sudo sysctl -p'
+        ]
+        for node in self.storage_nodes:
+            for cmd in sysctl_commands:
+                self.ssh_obj.exec_command(node, cmd)
+        for cmd in sysctl_commands:
+            self.ssh_obj.exec_command(self.fio_node, cmd)
+        self.ssh_obj.set_aio_max_nr(self.fio_node)
+    
+        self.logger.info(f"Configured TCP sysctl settings on all the nodes!!")
+
+    def cleanup_logs(self):
+        """Cleans logs
+        """
+        base_path = Path.home()
+        self.ssh_obj.delete_file_dir(self.fio_node, entity=f"{base_path}/*.log*", recursive=True)
+        self.ssh_obj.delete_file_dir(self.fio_node, entity=f"{base_path}/*.state*", recursive=True)
+        self.ssh_obj.delete_file_dir(self.mgmt_nodes[0], entity="/etc/simplyblock/*", recursive=True)
+        self.ssh_obj.delete_file_dir(self.mgmt_nodes[0], entity=f"{base_path}/*.txt*", recursive=True)
+        for node in self.storage_nodes:
+            self.ssh_obj.delete_file_dir(node, entity="/etc/simplyblock/core*", recursive=True)
+            self.ssh_obj.delete_file_dir(node, entity="/etc/simplyblock/LVS*", recursive=True)
+            self.ssh_obj.delete_file_dir(node, entity=f"{base_path}/distrib*", recursive=True)
+            self.ssh_obj.delete_file_dir(node, entity=f"{base_path}/*.txt*", recursive=True)
+            self.ssh_obj.delete_file_dir(node, entity=f"{base_path}/*.log*", recursive=True)
 
     def stop_docker_logs_collect(self):
         for node in self.storage_nodes:
             pids = self.ssh_obj.find_process_name(
                 node=node,
-                process_name="'docker logs --follow'",
+                process_name="docker logs --follow",
                 return_pid=True
             )
             for pid in pids:
                 self.ssh_obj.kill_processes(node=node, pid=pid)
         self.logger.info("All log monitoring threads stopped.")
 
+    def fetch_all_nodes_distrib_log(self):
+        storage_nodes = self.sbcli_utils.get_storage_nodes()
+        for result in storage_nodes['results']:
+            if result['is_secondary_node'] is False:
+                self.ssh_obj.fetch_distrib_logs(result["mgmt_ip"], result["uuid"])
+
+    def collect_management_details(self):
+        base_path = Path.home()
+        cmd = f"{self.base_cmd} cluster list >& {base_path}/cluster_list.txt"
+        self.ssh_obj.exec_command(node=self.mgmt_nodes[0],
+                                  command=cmd)
+        
+        cmd = f"{self.base_cmd} cluster status {self.cluster_id} >& {base_path}/cluster_status.txt"
+        self.ssh_obj.exec_command(node=self.mgmt_nodes[0],
+                                  command=cmd)
+        
+        cmd = f"{self.base_cmd} cluster get-logs {self.cluster_id} >& {base_path}/cluster_get_logs.txt"
+        self.ssh_obj.exec_command(node=self.mgmt_nodes[0],
+                                  command=cmd)
+        
+        cmd = f"{self.base_cmd} cluster list-tasks {self.cluster_id} >& {base_path}/cluster_list_tasks.txt"
+        self.ssh_obj.exec_command(node=self.mgmt_nodes[0],
+                                  command=cmd)
+        
+        cmd = f"{self.base_cmd} sn list >& {base_path}/sn_list.txt"
+        self.ssh_obj.exec_command(node=self.mgmt_nodes[0],
+                                  command=cmd)
+        cmd = f"{self.base_cmd} cluster get-capacity {self.cluster_id} >& {base_path}/cluster_capacity.txt"
+        self.ssh_obj.exec_command(node=self.mgmt_nodes[0],
+                                  command=cmd)
+        
+        cmd = f"{self.base_cmd} cluster get-capacity {self.cluster_id} >& {base_path}/cluster_capacity.txt"
+        self.ssh_obj.exec_command(node=self.mgmt_nodes[0],
+                                  command=cmd)
+        
+        cmd = f"{self.base_cmd} cluster show {self.cluster_id} >& {base_path}/cluster_show.txt"
+        self.ssh_obj.exec_command(node=self.mgmt_nodes[0],
+                                  command=cmd)
+        
+        storage_nodes = self.sbcli_utils.get_storage_nodes()
+        node=1
+        for result in storage_nodes['results']:
+            cmd = f"{self.base_cmd} sn list-devices {result['uuid']} >& {base_path}/node{node}_list_devices.txt"
+            self.ssh_obj.exec_command(self.mgmt_nodes[0], cmd)
+
+            cmd = f"{self.base_cmd} sn check {result['uuid']} >& {base_path}/node{node}_check.txt"
+            self.ssh_obj.exec_command(self.mgmt_nodes[0], cmd)
+
+            node+=1
+            
     def teardown(self):
         """Contains teradown required post test case execution
         """
         self.logger.info("Inside teardown function")
+
+        for node in self.storage_nodes:
+            self.ssh_obj.exec_command(node=node,
+                                      command="sudo tmux kill-server")
+            result = self.ssh_obj.check_remote_spdk_logs_for_keyword(node_ip=node, 
+                                                                     log_dir=self.docker_logs_path, 
+                                                                     test_name=self.test_name)
+
+            for file, lines in result.items():
+                if lines:
+                    self.logger.info(f"\n{file}:")
+                    for line in lines:
+                        self.logger.info(f"  -> {line}")
+
+        self.ssh_obj.exec_command(node=self.fio_node,
+                                  command="sudo tmux kill-server")
         
-        self.ssh_obj.kill_processes(node=self.mgmt_nodes[0],
+        self.ssh_obj.kill_processes(node=self.fio_node,
                                     process_name="fio")
+        
+
         retry_check = 100
         while retry_check:
             fio_process = self.ssh_obj.find_process_name(
-                node=self.mgmt_nodes[0],
-                process_name="fio"
+                node=self.fio_node,
+                process_name="fio --name"
             )
             if len(fio_process) <= 2:
                 break
@@ -161,17 +326,17 @@ class TestClusterBase:
             self.unmount_all(base_path=self.mount_path)
             self.unmount_all(base_path="/mnt/")
             sleep_n_sec(2)
-            self.ssh_obj.unmount_path(node=self.mgmt_nodes[0],
+            self.ssh_obj.unmount_path(node=self.fio_node,
                                     device=self.mount_path)
             sleep_n_sec(2)
             if lvols is not None:
                 for _, lvol_id in lvols.items():
                     lvol_details = self.sbcli_utils.get_lvol_details(lvol_id=lvol_id)
                     nqn = lvol_details[0]["nqn"]
-                    self.ssh_obj.unmount_path(node=self.mgmt_nodes[0],
+                    self.ssh_obj.unmount_path(node=self.fio_node,
                                               device=self.mount_path)
                     sleep_n_sec(2)
-                    self.ssh_obj.exec_command(node=self.mgmt_nodes[0],
+                    self.ssh_obj.exec_command(node=self.fio_node,
                                             command=f"sudo nvme disconnect -n {nqn}")
                     sleep_n_sec(2)
                 self.disconnect_lvols()
@@ -180,7 +345,7 @@ class TestClusterBase:
                 sleep_n_sec(2)
             self.sbcli_utils.delete_all_storage_pools()
             sleep_n_sec(2)
-            self.ssh_obj.remove_dir(self.mgmt_nodes[0], "/mnt/*")
+            self.ssh_obj.remove_dir(self.fio_node, "/mnt/*")
             for node, ssh in self.ssh_obj.ssh_connections.items():
                 self.logger.info(f"Closing node ssh connection for {node}")
                 ssh.close()
@@ -196,6 +361,7 @@ class TestClusterBase:
         except Exception as e:
             self.logger.info(f"Error while deleting instance: {e}")
             self.logger.info(traceback.format_exc())
+
 
     def validations(self, node_uuid, node_status, device_status, lvol_status,
                     health_check_status):
@@ -315,34 +481,34 @@ class TestClusterBase:
         self.logger.info("Unmounting all mount points")
         if not base_path:
             base_path = self.mount_path
-        mount_points = self.ssh_obj.get_mount_points(node=self.mgmt_nodes[0], base_path=base_path)
+        mount_points = self.ssh_obj.get_mount_points(node=self.fio_node, base_path=base_path)
         for mount_point in mount_points:
             self.logger.info(f"Unmounting {mount_point}")
-            self.ssh_obj.unmount_path(node=self.mgmt_nodes[0], device=mount_point)
+            self.ssh_obj.unmount_path(node=self.fio_node, device=mount_point)
 
     def remove_mount_dirs(self):
         """ Remove all mount point directories """
         self.logger.info("Removing all mount point directories")
-        mount_dirs = self.ssh_obj.get_mount_points(node=self.mgmt_nodes[0], base_path=self.mount_path)
+        mount_dirs = self.ssh_obj.get_mount_points(node=self.fio_node, base_path=self.mount_path)
         for mount_dir in mount_dirs:
             self.logger.info(f"Removing directory {mount_dir}")
-            self.ssh_obj.remove_dir(node=self.mgmt_nodes[0], dir_path=mount_dir)
+            self.ssh_obj.remove_dir(node=self.fio_node, dir_path=mount_dir)
     
     def disconnect_lvol(self, lvol_device):
         """Disconnects the logical volume."""
-        nqn_lvol = self.ssh_obj.get_nvme_subsystems(node=self.mgmt_nodes[0],
+        nqn_lvol = self.ssh_obj.get_nvme_subsystems(node=self.fio_node,
                                                     nqn_filter=lvol_device)
         for nqn in nqn_lvol:
             self.logger.info(f"Disconnecting NVMe subsystem: {nqn}")
-            self.ssh_obj.disconnect_nvme(node=self.mgmt_nodes[0], nqn_grep=nqn)
+            self.ssh_obj.disconnect_nvme(node=self.fio_node, nqn_grep=nqn)
 
     def disconnect_lvols(self):
         """ Disconnect all NVMe devices with NQN containing 'lvol' """
         self.logger.info("Disconnecting all NVMe devices with NQN containing 'lvol'")
-        subsystems = self.ssh_obj.get_nvme_subsystems(node=self.mgmt_nodes[0], nqn_filter="lvol")
+        subsystems = self.ssh_obj.get_nvme_subsystems(node=self.fio_node, nqn_filter="lvol")
         for subsys in subsystems:
             self.logger.info(f"Disconnecting NVMe subsystem: {subsys}")
-            self.ssh_obj.disconnect_nvme(node=self.mgmt_nodes[0], nqn_grep=subsys)
+            self.ssh_obj.disconnect_nvme(node=self.fio_node, nqn_grep=subsys)
 
     def delete_snapshots(self):
         """ Delete all snapshots """
@@ -352,8 +518,122 @@ class TestClusterBase:
             self.logger.info(f"Deleting snapshot: {snapshot}")
             delete_snapshot_command = f"sbcli-lvol snapshot delete {snapshot} --force"
             self.ssh_obj.exec_command(node=self.mgmt_nodes[0], command=delete_snapshot_command)
+
+    def filter_migration_tasks(self, tasks, node_id, timestamp):
+        """
+        Filters `device_migration` tasks for a specific node and timestamp.
+
+        Args:
+            tasks (list): List of task dictionaries from the API response.
+            node_id (str): The UUID of the node to check for migration tasks.
+            timestamp (int): The timestamp to filter tasks created after this time.
+
+        Returns:
+            list: List of `device_migration` tasks for the specific node created after the given timestamp.
+        """
+        filtered_tasks = [
+            task for task in tasks
+            if task['function_name'] == 'device_migration' and task['date'] > timestamp
+            and (node_id is None or task['node_id'] == node_id)
+        ]
+        return filtered_tasks
+
+    def validate_migration_for_node(self, timestamp, timeout, node_id=None, check_interval=60, no_task_ok=False):
+        """
+        Validate that all `device_migration` tasks for a specific node have completed successfully 
+        and check for stuck tasks until the timeout is reached.
+
+        Args:
+            timestamp (int): The timestamp to filter tasks created after this time.
+            timeout (int): Maximum time in seconds to keep checking for task completion.
+            node_id (str): The UUID of the node to check for migration tasks (or None for all nodes).
+            check_interval (int): Time interval in seconds to wait between checks.
+
+        Raises:
+            RuntimeError: If any migration task failed, is incomplete, is stuck, or if the timeout is reached.
+        """
+        start_time = datetime.now(timezone.utc)  # Aware datetime
+        end_time = start_time + timedelta(seconds=timeout)
+
+        output = None
+        while output is None:
+            output, _ = self.ssh_obj.exec_command(
+                node=self.mgmt_nodes[0], 
+                command=f"{self.base_cmd} cluster list-tasks {self.cluster_id}"
+            )
+            self.logger.info(f"Data migration output: {output}")
+            if no_task_ok:
+                break
+
+        while datetime.now(timezone.utc) < end_time:
+            tasks = self.sbcli_utils.get_cluster_tasks(self.cluster_id)
+            filtered_tasks = self.filter_migration_tasks(tasks, node_id, timestamp)
             
+            if not filtered_tasks and not no_task_ok:
+                raise RuntimeError(
+                    f"No migration tasks found for {'node ' + node_id if node_id else 'the cluster'} "
+                    f"after the specified timestamp."
+                )
+
+            self.logger.info(f"Checking migration tasks: {filtered_tasks}")
+            all_done = True
+            completed_count = 0
+
+            for task in filtered_tasks:
+                try:
+                    # Convert to aware datetime (UTC) for comparison
+                    updated_at = datetime.fromisoformat(task['updated_at']).astimezone(timezone.utc)
+                except ValueError as e:
+                    self.logger.error(f"Error parsing timestamp for task {task['id']}: {e}")
+                    continue
+
+                # Check if task is stuck (not updated for more than 65 minutes)
+                if datetime.now(timezone.utc) - updated_at > timedelta(minutes=65) and task["status"] != "done":
+                    raise RuntimeError(
+                        f"Migration task {task['id']} is stuck (last updated at {updated_at.isoformat()})."
+                    )
+
+                # Check if task is completed
+                if task['status'] == 'done':
+                    completed_count += 1
+                else:
+                    all_done = False
+
+            # Logging the counts after each check
+            total_tasks = len(filtered_tasks)
+            remaining_tasks = total_tasks - completed_count
+            self.logger.info(
+                f"Total migration tasks: {total_tasks}, Completed: {completed_count}, Remaining: {remaining_tasks}"
+            )
+
+            # If all tasks are done, break out of the loop
+            if all_done:
+                self.logger.info(
+                    f"All migration tasks for {'node ' + node_id if node_id else 'the cluster'} "
+                    f"completed successfully without any stuck tasks."
+                )
+                return
+
+            # Wait for the next check
+            sleep_n_sec(check_interval)
+
+        # If the loop exits without completing all tasks, raise a timeout error
+        raise RuntimeError(
+            f"Timeout reached: Not all migration tasks completed within the specified timeout of {timeout} seconds."
+        )
+
     
-
-
-
+    def check_core_dump(self):
+        for node in self.storage_nodes:
+            files = self.ssh_obj.list_files(node, "/etc/simplyblock/")
+            self.logger.info(f"Files in /etc/simplyblock: {files}")
+            if "core" in files:
+                cur_date = datetime.now().strftime("%Y-%m-%d")
+                self.logger.info(f"Core file found on storage node {node} at {cur_date}")
+        
+        for node in self.mgmt_nodes:
+            files = self.ssh_obj.list_files(node, "/etc/simplyblock/")
+            self.logger.info(f"Files in /etc/simplyblock: {files}")
+            if "core" in files:
+                cur_date = datetime.now().strftime("%Y-%m-%d")
+                self.logger.info(f"Core file found on management node {node} at {cur_date}")

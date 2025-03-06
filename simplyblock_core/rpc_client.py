@@ -140,7 +140,7 @@ class RPCClient:
             "max_io_qpairs_per_ctrlr": qpair_count,
             "max_queue_depth": 512,
             "abort_timeout_sec": 5,
-            "ack_timeout": 512,
+            "ack_timeout": 2048,
             "zcopy": True,
             "in_capsule_data_size": 4096,
             "max_io_size": 131072,
@@ -151,10 +151,26 @@ class RPCClient:
             "dif_insert_or_strip": False,
             "c2h_success": True,
             "sock_priority": 0
-
         }
         return self._request("nvmf_create_transport", params)
 
+    def sock_impl_set_options(self):
+        """
+            optimizing sockets for high load and performance
+        """
+        params = {
+            "impl_name": "posix",
+            "recv_buf_size": 2097152,
+            "send_buf_size": 2097152,
+            "enable_recv_pipe": True,
+            "enable_quick_ack": True,
+            "enable_placement_id": 1,
+            "enable_zerocopy_send_server": True,
+            "enable_zerocopy_send_client": True    
+        }
+        return self._request("sock_impl_set_options", params)
+
+    
     def transport_create_caching(self, trtype):
         params = {
             "trtype": trtype,
@@ -178,7 +194,7 @@ class RPCClient:
                 "trtype": trtype,
                 "adrfam": "IPv4",
                 "traddr": traddr,
-                "trsvcid": trsvcid
+                "trsvcid": str(trsvcid)
             }
         }
         if ana_state:
@@ -480,7 +496,8 @@ class RPCClient:
             "name": name,
             "raid_level": raid_level,
             "strip_size_kb": strip_size_kb,
-            "base_bdevs": bdevs_list
+            "base_bdevs": bdevs_list,
+            "io_unmap_limit": 100
         }
         if raid_level == "1":
             params["strip_size_kb"] = 0
@@ -595,12 +612,12 @@ class RPCClient:
         params = {
             # "action_on_timeout": "abort",
             "bdev_retry_count": 0,
-            "transport_retry_count": 0,
+            "transport_retry_count": 3,
             "ctrlr_loss_timeout_sec": 1,
             "fast_io_fail_timeout_sec": 0,
             "reconnect_delay_sec": 1,
             "keep_alive_timeout_ms": 10000,
-            "transport_ack_timeout": 9,
+            "transport_ack_timeout": 10,
             "timeout_us": constants.NVME_TIMEOUT_US
         }
         return self._request("bdev_nvme_set_options", params)
@@ -896,7 +913,7 @@ class RPCClient:
                 "trtype": trtype,
                 "adrfam": "IPv4",
                 "traddr": traddr,
-                "trsvcid": trsvcid
+                "trsvcid": str(trsvcid)
             }
         }
         return self._request("nvmf_subsystem_remove_listener", params)
@@ -908,7 +925,7 @@ class RPCClient:
             params = {"jm_vuid": jm_vuid}
         return self._request("bdev_distrib_force_to_non_leader", params)
 
-    def bdev_lvol_set_leader(self, is_leader=False, uuid=None, lvs_name=None):
+    def bdev_lvol_set_leader(self, is_leader=False, uuid=None, lvs_name=None, bs_nonleadership=False):
         params = {
             "leadership": is_leader,
         }
@@ -916,6 +933,8 @@ class RPCClient:
             params["uuid"] = uuid
         elif lvs_name:
             params["lvs_name"] = lvs_name
+
+        # params["bs_nonleadership"] = bs_nonleadership
 
         return self._request("bdev_lvol_set_leader_all", params)
 
@@ -975,9 +994,10 @@ class RPCClient:
         }
         return self._request("nvmf_set_max_subsystems", params)
 
-    def bdev_lvol_set_lvs_groupid(self, lvs_name, groupid):
+    def bdev_lvol_set_lvs_ops(self, lvs_name, groupid, subsystem_port=9090):
         params = {
             "groupid": groupid,
             "lvs_name": lvs_name,
+            "subsystem_port": subsystem_port,
         }
-        return self._request("bdev_lvol_set_lvs_groupid", params)
+        return self._request("bdev_lvol_set_lvs_op", params)

@@ -306,8 +306,6 @@ class DBController(metaclass=Singleton):
         ret = StorageNode().read_from_db(self.kv_store)
         nodes = []
         for node in ret:
-            if node.secondary_node_id == node_id \
-                    and node.status == StorageNode.STATUS_ONLINE \
-                    and node.lvstore:
+            if node.secondary_node_id == node_id and node.lvstore:
                 nodes.append(node)
         return sorted(nodes, key=lambda x: x.create_dt)

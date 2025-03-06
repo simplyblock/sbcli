@@ -330,7 +330,7 @@ jobs:
           
           python3 e2e.py $TESTNAME \
                   --ndcs $NDCS --npcs $NPCS --bs $BS --chunk_bs $CHUNK_BS \
-                  --run_k8s True
+                  --run_k8s True --run_ha True
         env:
           SBCLI_CMD: ${{ env.SBCLI_CMD }}
           NDCS: ${{ env.NDCS }}

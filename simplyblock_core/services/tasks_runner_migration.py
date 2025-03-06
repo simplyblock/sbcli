@@ -1,9 +1,10 @@
 # coding=utf-8
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 
 from simplyblock_core import constants, db_controller, utils
 from simplyblock_core.controllers import tasks_events, tasks_controller
+from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
 
 
@@ -36,35 +37,40 @@ def task_runner(task):
         task.write_to_db(db_controller.kv_store)
         return False
 
+    cluster = db_controller.get_cluster_by_id(task.cluster_id)
+    if cluster.status not in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_READONLY]:
+        task.function_result = "cluster is not active, retrying"
+        task.status = JobSchedule.STATUS_SUSPENDED
+        task.retry += 1
+        task.write_to_db(db_controller.kv_store)
+        return False
 
     if task.status in [JobSchedule.STATUS_NEW, JobSchedule.STATUS_SUSPENDED]:
-        all_devs_online = True
         for node in db_controller.get_storage_nodes_by_cluster_id(task.cluster_id):
+            if node.is_secondary_node:
+                continue
+
+            if node.status == StorageNode.STATUS_ONLINE and node.online_since:
+                try:
+                    diff = datetime.now(timezone.utc) - datetime.fromisoformat(node.online_since)
+                    if diff.total_seconds() < 60:
+                        task.function_result = "node is online < 1 min, retrying"
+                        task.status = JobSchedule.STATUS_SUSPENDED
+                        task.retry += 1
+                        task.write_to_db(db_controller.kv_store)
+                        return False
+                except Exception as e:
+                    logger.error(f"Failed to get online since: {e}")
+
             for dev in node.nvme_devices:
                 if dev.status not in [NVMeDevice.STATUS_ONLINE,
                                       NVMeDevice.STATUS_FAILED,
                                       NVMeDevice.STATUS_FAILED_AND_MIGRATED]:
-                    all_devs_online = False
-                    break
-
-        if not all_devs_online:
-            task.function_result = "Some devs are offline, retrying"
-            task.status = JobSchedule.STATUS_SUSPENDED
-            task.retry += 1
-            task.write_to_db(db_controller.kv_store)
-            return False
-
-        if node.online_since:
-            try:
-                diff = datetime.now() - datetime.fromisoformat(node.online_since)
-                if diff.total_seconds() < 60:
-                    task.function_result = "node is online < 1 min, retrying"
+                    task.function_result = "Some devs are offline, retrying"
                     task.status = JobSchedule.STATUS_SUSPENDED
                     task.retry += 1
                     task.write_to_db(db_controller.kv_store)
                     return False
-            except Exception as e:
-                logger.error(f"Failed to get online since: {e}")
 
         task.status = JobSchedule.STATUS_RUNNING
         task.function_result = ""
@@ -91,9 +97,9 @@ def task_runner(task):
         if not rsp:
             logger.error(f"Failed to start device migration task, storage_ID: {device.cluster_device_order}")
             task.function_result = "Failed to start device migration task"
-            task.retry += 1
+            task.status = JobSchedule.STATUS_DONE
             task.write_to_db(db_controller.kv_store)
-            return False
+            return True
         task.function_params['migration'] = {
             "name": distr_name}
         task.write_to_db(db_controller.kv_store)
