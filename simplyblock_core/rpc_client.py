@@ -270,17 +270,33 @@ class RPCClient:
         params = {"name": device_name}
         return self._request("bdev_nvme_reset_controller", params)
 
-    def create_lvstore(self, name, bdev_name, cluster_sz, clear_method, num_md_pages_per_cluster_ratio):
+    def create_lvstore(self, name, bdev_name, cluster_sz, clear_method, num_md_pages_per_cluster_ratio, not_evict_lvstore_md_pages=True):
         params = {
             "bdev_name": bdev_name,
             "lvs_name": name,
             "cluster_sz": cluster_sz,
             "clear_method": clear_method,
             "num_md_pages_per_cluster_ratio": num_md_pages_per_cluster_ratio,
+            "not_evict_lvstore_md_pages": not_evict_lvstore_md_pages
         }
         return self._request("bdev_lvol_create_lvstore", params)
+    
+    def bdev_lvol_create_lvstore_persistent(self, name, bdev_name, cluster_sz, clear_method, num_md_pages_per_cluster_ratio, not_evict_lvstore_md_pages=True):
+        params = {
+            "bdev_name": bdev_name,
+            "lvs_name": name,
+            "cluster_sz": cluster_sz,
+            "clear_method": clear_method,
+            "num_md_pages_per_cluster_ratio": num_md_pages_per_cluster_ratio,
+            "not_evict_lvstore_md_pages": not_evict_lvstore_md_pages
+        }
+        return self._request("bdev_lvol_create_lvstore_persistent", params)
 
-    def create_lvol(self, name, size_in_mib, lvs_name, lvol_priority_class=0):
+    def lvstore_not_evict_lvstore_md_pages(self, lvs_name, not_evict_lvstore_md_pages):
+        params = { 'lvs_name': lvs_name, 'not_evict_lvstore_md_pages': not_evict_lvstore_md_pages }
+        return self._request("lvstore_not_evict_lvstore_md_pages", params)
+
+    def create_lvol(self, name, size_in_mib, lvs_name, lvol_priority_class=0, is_tiered=False, force_fetch=False, sync_fetch=True, pure_flush_or_evict=False, not_evict_blob_md=0):
         params = {
             "lvol_name": name,
             "size_in_mib": size_in_mib,
@@ -288,8 +304,24 @@ class RPCClient:
             "thin_provision": True,
             "clear_method": "unmap",
             "lvol_priority_class": lvol_priority_class,
+            "is_tiered": is_tiered,
+            "force_fetch": force_fetch,
+            "sync_fetch": sync_fetch,
+            "pure_flush_or_evict": pure_flush_or_evict,
+            "not_evict_blob_md": not_evict_blob_md
         }
         return self._request("bdev_lvol_create", params)
+    
+    def bdev_lvol_set_tiering_info(self, lvol_name, is_tiered, force_fetch, sync_fetch, pure_flush_or_evict, not_evict_blob_md):
+        params = {
+            "lvol_name": lvol_name,
+            "is_tiered": is_tiered,
+            "force_fetch": force_fetch,
+            "sync_fetch": sync_fetch,
+            "pure_flush_or_evict": pure_flush_or_evict,
+            "not_evict_blob_md": not_evict_blob_md
+        }
+        return self._request("bdev_lvol_set_tiering_info", params)
 
     def delete_lvol(self, name):
         params = {"name": name}
@@ -319,16 +351,58 @@ class RPCClient:
         params = {"name": name}
         return self._request("bdev_lvol_set_read_only", params)
 
-    def lvol_create_snapshot(self, lvol_id, snapshot_name):
+    def lvol_create_snapshot(self, lvol_id, snapshot_name, is_tiered=False, force_fetch=False, sync_fetch=True, pure_flush_or_evict=False, not_evict_blob_md=0):
         params = {
             "lvol_name": lvol_id,
-            "snapshot_name": snapshot_name}
-        return self._request("bdev_lvol_snapshot", params)
+            "snapshot_name": snapshot_name,
 
-    def lvol_clone(self, snapshot_name, clone_name):
+            "is_tiered": is_tiered,
+            "force_fetch": force_fetch,
+            "sync_fetch": sync_fetch,
+            "pure_flush_or_evict": pure_flush_or_evict,
+            "not_evict_blob_md": not_evict_blob_md
+        }
+        return self._request("bdev_lvol_snapshot", params)
+    
+    def bdev_lvol_backup_snapshot(self, lvol_name, timeout_us, dev_page_size, nmax_retries=4, nmax_flush_jobs=4):
+        params = {
+            'lvol_name': lvol_name,
+            'timeout_us': timeout_us,
+            'dev_page_size': dev_page_size,
+            'nmax_retries': nmax_retries,
+            'nmax_flush_jobs': nmax_flush_jobs
+        }
+        return self._request("bdev_lvol_backup_snapshot", params)
+    
+    def bdev_lvol_get_snapshot_backup_status(self, lvol_name):
+        params = { 'lvol_name': lvol_name }
+        return self._request("bdev_lvol_get_snapshot_backup_status", params)
+    
+    def bdev_lvol_get_blobid(self, lvol_name):
+        params = { 'lvol_name': lvol_name }
+        return self._request("bdev_lvol_get_blobid", params)
+    
+    def bdev_lvol_recover(self, lvs_name, orig_name, orig_uuid, clear_method, id_of_blob_to_recover):
+        params = {
+            'lvs_name': lvs_name,
+            'orig_name': orig_name,
+            'orig_uuid': orig_uuid,
+            'clear_method': clear_method,
+            'id_of_blob_to_recover': id_of_blob_to_recover
+        }
+        return self._request("bdev_lvol_recover", params)
+
+    def lvol_clone(self, snapshot_name, clone_name, is_tiered=False, force_fetch=False, sync_fetch=True, pure_flush_or_evict=False, not_evict_blob_md=0):
         params = {
             "snapshot_name": snapshot_name,
-            "clone_name": clone_name}
+            "clone_name": clone_name,
+
+            "is_tiered": is_tiered,
+            "force_fetch": force_fetch,
+            "sync_fetch": sync_fetch,
+            "pure_flush_or_evict": pure_flush_or_evict,
+            "not_evict_blob_md": not_evict_blob_md
+        }
         return self._request("bdev_lvol_clone", params)
 
     def lvol_compress_create(self, base_bdev_name, pm_path):
@@ -421,7 +495,10 @@ class RPCClient:
 
     def bdev_distrib_create(self, name, vuid, ndcs, npcs, num_blocks, block_size, jm_names,
                             chunk_size, ha_comm_addrs=None, ha_inode_self=None, pba_page_size=2097152,
-                            distrib_cpu_mask="", ha_is_non_leader=True, jm_vuid=0, write_protection=False):
+                            distrib_cpu_mask="", ha_is_non_leader=True, jm_vuid=0, write_protection=False,
+                            support_storage_tiering=False, secondary_stg_name=None, disaster_recovery=False, 
+                            storage_tiering_id=0, secondary_io_timeout_us=0,
+                            ghost_capacity=0, fifo_main_capacity=0, fifo_small_capacity=0):
         """"
             // Optional (not specified = no HA)
             // Comma-separated communication addresses, for each node, e.g. "192.168.10.1:45001,192.168.10.1:32768".
@@ -461,7 +538,50 @@ class RPCClient:
             params["bdb_lcpu_mask"] = int(distrib_cpu_mask, 16)
         if write_protection:
             params["write_protection"] = True
+        
+        if support_storage_tiering:
+            params['support_storage_tiering'] = support_storage_tiering
+            params['secondary_stg_name'] = secondary_stg_name
+            params['secondary_io_timeout_us'] = secondary_io_timeout_us
+            params['disaster_recovery'] = disaster_recovery
+            params['storage_tiering_id'] = storage_tiering_id
+            params['ghost_capacity'] = ghost_capacity
+            params['fifo_main_capacity'] = fifo_main_capacity
+            params['fifo_small_capacity'] = fifo_small_capacity
+
         return self._request("bdev_distrib_create", params)
+
+    def distr_change_or_keep_page_cache_list_capacities(self, name, ghost_capacity, fifo_main_capacity, fifo_small_capacity):
+        params = {}
+        params['name'] = name
+        params['ghost_capacity'] = ghost_capacity
+        params['fifo_main_capacity'] = fifo_main_capacity
+        params['fifo_small_capacity'] = fifo_small_capacity
+        
+        return self._request("distr_change_or_keep_page_cache_list_capacities", params)
+    
+    def distr_change_secondary_io_timeout_us(self, name, secondary_io_timeout_us):
+        params = { 'name': name, 'secondary_io_timeout_us': secondary_io_timeout_us }
+        return self._request("distr_change_secondary_io_timeout_us", params)
+
+    def bdev_distrib_toggle_disaster_recovery_status(self, name, disaster_recovery):
+        params = { 'name': name, 'disaster_recovery': disaster_recovery }
+        return self._request("bdev_distrib_toggle_disaster_recovery_status", params)
+    
+    def bdev_s3_create(self, name, uuid=None, bdb_lcpu_mask=0, s3_lcpu_mask=0, s3_thread_pool_size=32):
+        params = { 'name': name, 'bdb_lcpu_mask': bdb_lcpu_mask, 's3_lcpu_mask': s3_lcpu_mask, 's3_thread_pool_size': s3_thread_pool_size }
+        if uuid:
+            params['uuid'] = uuid
+        
+        return self._request("bdev_s3_create", params)
+    
+    def bdev_s3_delete(self, name):
+        params = { 'name': name }
+        return self._request("bdev_s3_delete", params)
+    
+    def bdev_s3_add_bucket(self, name, bucket_name):
+        params = { 'name': name, 'bucket_name': bucket_name }
+        return self._request("bdev_s3_add_bucket_name", params)
 
     def bdev_lvol_delete_lvstore(self, name):
         params = {"lvs_name": name}
