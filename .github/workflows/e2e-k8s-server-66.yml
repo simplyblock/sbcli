@@ -206,6 +206,7 @@ jobs:
             --set image.spdkcsi.repository="public.ecr.aws/simply-block/spdkcsi" \
             --set image.storageNode.repository="public.ecr.aws/simply-block/storage-node-handler" \
             --set image.mgmtAPI.repository="public.ecr.aws/simply-block/python" \
+            --set image.mgmtAPI.tag="3.10" \
             --set image.simplyblock.tag="main" \
             --set logicalVolume.pool_name="testing1" \
             --set logicalVolume.snapshot="True" \
@@ -256,6 +257,7 @@ jobs:
             --set image.spdkcsi.repository="public.ecr.aws/simply-block/spdkcsi" \
             --set image.storageNode.repository="public.ecr.aws/simply-block/storage-node-handler" \
             --set image.mgmtAPI.repository="public.ecr.aws/simply-block/python" \
+            --set image.mgmtAPI.tag="3.10" \
             --set image.simplyblock.tag="main" \
             --set logicalVolume.pool_name="testing1" \
             --set logicalVolume.snapshot="True" \
