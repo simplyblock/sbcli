@@ -133,6 +133,10 @@ jobs:
         run: |
           cd $GITHUB_WORKSPACE/simplyBlockDeploy
           helm uninstall -n spdk-csi spdk-csi || echo "No helm release found. Skipping uninstall."
+          kubectl delete deployments --all -n spdk-csi || echo "No deployments found. Skipping delete deployment."
+          kubectl delete daemonset --all -n spdk-csi || echo "No deployments found. Skipping delete deployment."
+          kubectl delete pods --all -n spdk-csi --timeout=10s || echo "Pods not deleted within timeout."
+
           ./bootstrap-cluster.sh --sbcli-cmd "$SBCLI_CMD" \
             --max-lvol 20 --max-snap 20 --max-prov 150G --number-of-devices 3 \
             --distr-ndcs $NDCS \
@@ -423,18 +427,6 @@ jobs:
           MNODES: "192.168.10.66"
           API_INVOKE_URL: "http://192.168.10.66/"
 
-      - name: Uninstall K3s agent on all nodes (if test passes)
-        if: success()
-        run: |
-          helm uninstall -n spdk-csi spdk-csi
-          for node in $K3S_MNODES $STORAGE_PRIVATE_IPS $SEC_STORAGE_PRIVATE_IPS; do
-            ssh -i ~/.ssh/simplyblock-us-east-2.pem  root@${node} "k3s-agent-uninstall.sh"
-          done
-        env:
-          STORAGE_PRIVATE_IPS: "192.168.10.67 192.168.10.68 192.168.10.69"
-          SEC_STORAGE_PRIVATE_IPS: "192.168.10.70"
-          
-
       - name: Record Test End Time
         if: always()
         run: echo "TEST_END_TIME=$(date +%s)" >> $GITHUB_ENV
@@ -451,23 +443,20 @@ jobs:
           echo "TEST_TIME_MINS=$TEST_TIME_MINS" >> $GITHUB_ENV
           echo "TEST_TIME_SECS=$TEST_TIME_SECS" >> $GITHUB_ENV
 
-      - name: Upload automation and docker logs to s3
+      - name: Upload automation and docker logs to miniio
         run: |
-          cd $GITHUB_WORKSPACE/e2e/logs
-          ./upload_logs.sh
-          cd $GITHUB_WORKSPACE/simplyBlockDeploy
-          ./upload_docker_logs_to_s3.sh --k8s --namespace "spdk-csi"
+          cd $GITHUB_WORKSPACE/e2e/
+          python3 logs/upload_logs_to_miniio.py
         if: always()
         env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          AWS_REGION: ${{ secrets.AWS_REGION }}
-          S3_BUCKET_NAME: "simplyblock-e2e-test-logs"
-          RUN_ID: ${{ github.run_id }}
-          mnodes: "192.168.10.66"
+          GITHUB_RUN_ID: ${{ github.run_id }}
+          MINIO_ACCESS_KEY: "KxtpwblgG3AFDYJkyg8i"
+          MINIO_SECRET_KEY: "Yae4q5wJU9ZBzJhdsUGzu9wWqON8o0ERU7nGbJER"
           BASTION_IP: "192.168.10.66"
-          storage_private_ips: "192.168.10.67 192.168.10.68 192.168.10.69"
-          KEY_NAME: "simplyblock-us-east-2.pem"
+          MNODES: "192.168.10.66"
+          STORAGE_PRIVATE_IPS: "192.168.10.67 192.168.10.68 192.168.10.69"
+          SEC_STORAGE_PRIVATE_IPS: "192.168.10.70"
+          USER: "root"
 
       - name: Parse test results
         if: always() && (github.event_name == 'schedule' || env.send_slack_notification == 'true')
@@ -587,6 +576,20 @@ jobs:
           MESSAGE="Python E2E K8s tests run triggered on branch *${BRANCH_NAME}*. \nTotal Time Taken to run the tests: ${TIME_TAKEN}. \n\n${OVERALL_STATUS}\nGitHub Run: ${GITHUB_RUN_URL}\nAWS Logs: ${AWS_LOGS_URL}\n\n*Configuration*: *NDCS: ${NDCS}, NPCS: ${NPCS}, Block Size: ${BS}, Chunk Block Size: ${CHUNK_BS}*\n\nTotal Tests: *${TOTAL_TESTS}*, Passed Tests: *${PASSED_TESTS}*, Failed Tests: *${FAILED_TESTS}*\n\n-- Test Cases Passed :white_check_mark:\n${PASSED_CASES_BULLETS}\n\n-- Test Cases Failed :x:\n${FAILED_CASES_BULLETS}\n\n-- Test Cases Skipped :x:\n${SKIPPED_CASES_BULLETS}"
 
           curl -X POST -H 'Content-type: application/json' --data "{\"text\":\"${MESSAGE}\"}" $SLACK_WEBHOOK_URL
+      
+      - name: Uninstall K3s agent on all nodes (if test passes)
+        if: success() && env.FAILED_TESTS == '0'
+        run: |
+          helm uninstall -n spdk-csi spdk-csi || echo "No helm release found. Skipping uninstall."
+          kubectl delete deployments --all -n spdk-csi || echo "No deployments found. Skipping delete deployment."
+          kubectl delete daemonset --all -n spdk-csi || echo "No deployments found. Skipping delete deployment."
+          kubectl delete pods --all -n spdk-csi --timeout=10s || echo "Pods not deleted within timeout."
+          for node in $K3S_MNODES $STORAGE_PRIVATE_IPS $SEC_STORAGE_PRIVATE_IPS; do
+            ssh -i ~/.ssh/simplyblock-us-east-2.pem  root@${node} "k3s-agent-uninstall.sh"
+          done
+        env:
+          STORAGE_PRIVATE_IPS: "192.168.10.67 192.168.10.68 192.168.10.69"
+          SEC_STORAGE_PRIVATE_IPS: "192.168.10.70"
 
       - name: 'Cleanup build folder'
         run: |

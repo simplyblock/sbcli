@@ -26,11 +26,13 @@ USER = os.getenv("USER", "root")
 STORAGE_PRIVATE_IPS = os.getenv("STORAGE_PRIVATE_IPS", "").split()
 SEC_STORAGE_PRIVATE_IPS = os.getenv("SEC_STORAGE_PRIVATE_IPS", "").split()
 MNODES = os.getenv("MNODES", "").split()
+CLIENTNODES = os.getenv("CLIENTNODES", "").split()
 
-DOCKER_NODES = MNODES if args.k8s else STORAGE_PRIVATE_IPS + SEC_STORAGE_PRIVATE_IPS + MNODES
+DOCKER_NODES = MNODES + CLIENTNODES if args.k8s else STORAGE_PRIVATE_IPS + SEC_STORAGE_PRIVATE_IPS + MNODES + CLIENTNODES
 
 # Upload Folder
 UPLOAD_FOLDER = os.getenv("GITHUB_RUN_ID", time.strftime("%Y-%m-%d_%H-%M-%S"))
+HOME_DIR = os.path.expanduser("~")
 
 # Initialize MinIO Client
 s3_client = boto3.client(
@@ -116,20 +118,16 @@ def upload_from_remote(ssh, node):
 
     install_boto_on_target(ssh)  # Ensure boto3 is installed
 
-    # Get HOME directory
-    stdout, _ = exec_command(ssh, "echo $HOME")
-    home_dir = stdout.strip()
-
     # **Zip and Upload container-logs Folder**
-    container_logs_path = f"{home_dir}/container-logs/"
+    container_logs_path = f"{HOME_DIR}/container-logs/"
     stdout, _ = exec_command(ssh, f"ls -d {container_logs_path} 2>/dev/null || echo 'missing'")
     
     if "missing" in stdout:
         print(f"[WARNING] {container_logs_path} does not exist on {node}. Skipping container logs...")
     else:
-        tar_path = f"{home_dir}/container-logs.tar.gz"
+        tar_path = f"{HOME_DIR}/container-logs.tar.gz"
         print(f"[INFO] Zipping {container_logs_path} on {node}...")
-        exec_command(ssh, f"tar -czf {tar_path} -C {home_dir} container-logs")
+        exec_command(ssh, f"tar -czf {tar_path} -C {HOME_DIR} container-logs")
 
         file_key = f"{UPLOAD_FOLDER}/{node}/container-logs.tar.gz"
         print(f"[INFO] Uploading {tar_path} → MinIO as {file_key}...")
@@ -154,7 +152,7 @@ except Exception as e:
     print("[ERROR] Upload failed:", e)
 """
 
-        temp_script_path = f"{home_dir}/upload_to_minio.py"
+        temp_script_path = f"{HOME_DIR}/upload_to_minio.py"
 
         print(f"[INFO] Writing upload script to {node}...")
         exec_command(ssh, f"cat <<EOF > {temp_script_path}\n{upload_script}\nEOF")
@@ -164,9 +162,9 @@ except Exception as e:
 
     # **Upload Other Logs Separately**
     for remote_path in [
-        f"{home_dir}/*.txt*",
-        f"{home_dir}/*.log",
-        f"{home_dir}/*.state",
+        f"{HOME_DIR}/*.txt*",
+        f"{HOME_DIR}/*.log",
+        f"{HOME_DIR}/*.state",
         f"/etc/simplyblock/*"
     ]:
         print(f"[INFO] Checking if {remote_path} exists on {node}...")
@@ -184,7 +182,7 @@ except Exception as e:
             remote_file = file.strip()
 
             # Fix: Assign proper subfolders for different paths
-            if f"{home_dir}/etc/simplyblock/" in remote_file:
+            if "/etc/simplyblock/" in remote_file:
                 subfolder = "dump"
             else:
                 subfolder = "root-logs"
@@ -212,7 +210,7 @@ except Exception as e:
     print("[ERROR] Upload failed:", e)
 """
 
-            temp_script_path = f"{home_dir}/upload_to_minio.py"
+            temp_script_path = f"{HOME_DIR}/upload_to_minio.py"
 
             print(f"[INFO] Writing upload script to {node}...")
             exec_command(ssh, f"cat <<EOF > {temp_script_path}\n{upload_script}\nEOF")
@@ -221,19 +219,58 @@ except Exception as e:
             exec_command(ssh, f"python3 {temp_script_path}")
 
 
-
-
-# Upload Kubernetes logs (Directly from runner node)
 def upload_k8s_logs():
+    """Fetches Kubernetes logs from the runner node and uploads them to MinIO."""
     print("[INFO] Fetching Kubernetes logs from runner node...")
 
-    local_k8s_log_path = "/tmp/k8s_logs.txt"
-    subprocess.run(f"kubectl logs -A --timestamps > {local_k8s_log_path}", shell=True, check=True)
+    local_k8s_log_dir = "/tmp/k8s_logs"
+    os.makedirs(local_k8s_log_dir, exist_ok=True)
 
-    file_key = f"{UPLOAD_FOLDER}/runner-node/k8s_logs.txt"
-    s3_client.upload_file(local_k8s_log_path, MINIO_BUCKET, file_key)
+    # Get all namespaces
+    namespace = "spdk-csi"
 
-    print(f"[SUCCESS] Kubernetes logs uploaded: {file_key}")
+    print(f"[INFO] Processing namespace: {namespace}")
+
+    # Get all pods in the namespace
+    pods = subprocess.run(f"kubectl get pods -n {namespace} --no-headers -o custom-columns=:metadata.name",
+                            shell=True, check=True, capture_output=True, text=True).stdout.splitlines()
+
+    if not pods:
+        print(f"[WARNING] No pods found in namespace {namespace}.")
+
+    for pod in pods:
+        # Get all containers inside the pod
+        containers = subprocess.run(f"kubectl get pod {pod} -n {namespace} -o jsonpath='{{.spec.containers[*].name}}'",
+                                    shell=True, check=True, capture_output=True, text=True).stdout.split()
+
+        if not containers:
+            print(f"[WARNING] No containers found in pod {pod} (Namespace: {namespace}).")
+            continue
+
+        for container in containers:
+            log_file = f"{local_k8s_log_dir}/{namespace}_{pod}_{container}.log"
+
+            print(f"[INFO] Fetching logs for Pod: {pod}, Container: {container}, Namespace: {namespace}...")
+
+            # Fetch logs for the specific container
+            subprocess.run(f"kubectl logs {pod} -n {namespace} -c {container} --timestamps > {log_file}",
+                            shell=True, check=False)
+
+    # Upload all collected logs
+    for file in os.listdir(local_k8s_log_dir):
+        file_path = os.path.join(local_k8s_log_dir, file)
+        file_key = f"{UPLOAD_FOLDER}/runner-node/k8s_logs/{file}"
+
+        print(f"[INFO] Uploading {file_path} → MinIO as {file_key}...")
+
+        try:
+            s3_client.upload_file(file_path, MINIO_BUCKET, file_key)
+            print(f"[SUCCESS] Uploaded: {file_key}")
+        except Exception as e:
+            print(f"[ERROR] Failed to upload {file}: {e}")
+
+    print("[SUCCESS] Kubernetes logs uploaded successfully.")
+
 
 # **Upload Logs from PWD/logs Directory to MinIO**
 def upload_local_logs():
@@ -264,6 +301,38 @@ def upload_local_logs():
         except Exception as e:
             print(f"[ERROR] Failed to upload {file}: {e}")
 
+def cleanup_remote_logs(ssh, node):
+    """Deletes all uploaded logs from remote VM to free up space."""
+    print(f"[INFO] Cleaning up logs on {node}...")
+
+    # Remove uploaded logs
+    cleanup_commands = [
+        f"rm -rf {HOME_DIR}/container-logs.tar.gz",  # Remove compressed tar file
+        f"rm -rf {HOME_DIR}/container-logs/*",  # Remove container logs content
+        f"rm -rf {HOME_DIR}/*.txt {HOME_DIR}/*.log {HOME_DIR}/*.state",  # Remove uploaded logs
+        f"rm -rf /etc/simplyblock/*",  # Remove dump logs
+        f"rm -rf {HOME_DIR}/upload_to_minio.py"  # Remove temporary upload script
+    ]
+
+    for cmd in cleanup_commands:
+        exec_command(ssh, cmd)
+    
+    print(f"[SUCCESS] Cleaned up logs on {node}.")
+
+
+def cleanup_local_logs():
+    """Deletes all uploaded logs from local runner (PWD/logs/)."""
+    logs_dir = os.path.join(os.getcwd(), "logs")  # Get the full path to 'logs/'
+
+    if not os.path.exists(logs_dir):
+        print(f"[WARNING] {logs_dir} does not exist. No cleanup needed.")
+        return
+
+    print(f"[INFO] Cleaning up local logs from {logs_dir}...")
+    subprocess.run(f"rm -rf {logs_dir}/*", shell=True, check=True)
+    print(f"[SUCCESS] Local logs cleaned up.")
+
+
 # **Step 1: Process Management Node (Same for both Docker & Kubernetes mode)**
 for node in MNODES:
     try:
@@ -280,7 +349,7 @@ for node in MNODES:
             stdout, _ = exec_command(ssh, f'sudo docker inspect --format="{{{{.Name}}}}" {container_id}')
             container_name = stdout.strip().replace("/", "")
 
-            log_file = f"/root/{container_name}_{container_id}_{node}.txt"
+            log_file = f"{HOME_DIR}/{container_name}_{container_id}_{node}.txt"
             exec_command(ssh, f"sudo docker logs {container_id} &> {log_file}")
 
         upload_from_remote(ssh, node)
@@ -308,7 +377,7 @@ if not args.k8s:
                 stdout, _ = exec_command(ssh, f'sudo docker inspect --format="{{{{.Name}}}}" {container_id}')
                 container_name = stdout.strip().replace("/", "")
 
-                log_file = f"/root/{container_name}_{container_id}_{node}.txt"
+                log_file = f"{HOME_DIR}/{container_name}_{container_id}_{node}.txt"
                 exec_command(ssh, f"sudo docker logs {container_id} &> {log_file}")
 
             upload_from_remote(ssh, node)
@@ -323,3 +392,14 @@ if args.k8s:
 
 # **Step 4: Upload Local Logs After Remote Processing**
 upload_local_logs()
+
+for node in MNODES:
+    ssh = connect_ssh(node, bastion_ip=BASTION_IP)
+    cleanup_remote_logs(ssh, node)
+
+if not args.k8s:
+    for node in STORAGE_PRIVATE_IPS + SEC_STORAGE_PRIVATE_IPS:
+        ssh = connect_ssh(node, bastion_ip=BASTION_IP)
+        cleanup_remote_logs(ssh, node)
+
+cleanup_local_logs()

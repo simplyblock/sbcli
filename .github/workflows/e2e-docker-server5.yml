@@ -209,11 +209,11 @@ jobs:
           GITHUB_RUN_ID: ${{ github.run_id }}
           MINIO_ACCESS_KEY: "KxtpwblgG3AFDYJkyg8i"
           MINIO_SECRET_KEY: "Yae4q5wJU9ZBzJhdsUGzu9wWqON8o0ERU7nGbJER"
-          BASTION_IP: "192.168.10.61"
-          MNODES: "192.168.10.61"
-          STORAGE_PRIVATE_IPS: "192.168.10.62 192.168.10.63 192.168.10.64"
-          SEC_STORAGE_PRIVATE_IPS: "192.168.10.65"
-          USER: "ec2-user"
+          BASTION_IP: "192.168.10.66"
+          MNODES: "192.168.10.66"
+          STORAGE_PRIVATE_IPS: "192.168.10.67 192.168.10.68 192.168.10.69"
+          SEC_STORAGE_PRIVATE_IPS: "192.168.10.70"
+          USER: "root"
 
       - name: Parse test results
         if: always() && (github.event_name == 'schedule' || env.send_slack_notification == 'true')

@@ -30,9 +30,9 @@ class RandomFailoverTest(TestLvolHACluster):
         self.lvol_name = f"lvl{generate_random_sequence(15)}"
         self.clone_name = f"cln{generate_random_sequence(15)}"
         self.snapshot_name = f"snap{generate_random_sequence(15)}"
-        self.lvol_size = "20G"
-        self.int_lvol_size = 20
-        self.fio_size = "2G"
+        self.lvol_size = "10G"
+        self.int_lvol_size = 10
+        self.fio_size = "1G"
         self.fio_threads = []
         self.clone_mount_details = {}
         self.lvol_mount_details = {}
