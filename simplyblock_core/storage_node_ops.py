@@ -1026,7 +1026,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
 
 
     if ssd_pcie is None:
-        ssd_pcie = "none"
+        ssd_pcie = []
     else:
         for ssd in ssd_pcie:
             if ssd in used_ssd:
@@ -1142,7 +1142,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
     for n in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
         if n.api_endpoint == node_ip:
             total_mem += n.spdk_mem
-
+    total_mem += utils.parse_size("500m")
     logger.info("Deploying SPDK")
     results = None
     try:
