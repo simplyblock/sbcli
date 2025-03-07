@@ -604,7 +604,8 @@ def _create_bdev_stack(lvol, snode, sec_is_prime=False):
 
 def add_lvol_on_node(lvol, snode, ha_comm_addrs=None, ha_inode_self=0, sec_is_prime=False):
     rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
-
+    db_controller = DBController()
+    
     if snode.is_secondary_node and not sec_is_prime:
         rpc_client.bdev_lvol_set_leader(False, lvs_name=lvol.lvs_name)
 
