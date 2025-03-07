@@ -1004,9 +1004,6 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
 
     poller_cpu_cores = []
 
-    if ssd_pcie is None:
-        ssd_pcie = []
-
     if not spdk_cpu_mask:
         spdk_cpu_mask = hex(int(math.pow(2, cpu_count))-2)
 
@@ -1027,10 +1024,14 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
             logger.info(f"Core {core_number} already used")
             return False
 
-    for ssd in ssd_pcie:
-        if ssd in used_ssd:
-            logger.info(f"SSD {ssd} already used")
-            return False
+
+    if ssd_pcie is None:
+        ssd_pcie = "none"
+    else:
+        for ssd in ssd_pcie:
+            if ssd in used_ssd:
+                logger.info(f"SSD {ssd} already used")
+                return False
 
     if cpu_count < req_cpu_count:
         logger.error(f"ERROR: The cpu mask {spdk_cpu_mask} is greater than the total cpus on the system {cpu_count}")
@@ -1339,10 +1340,10 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
     # get new node info after starting spdk
     node_info, _ = snode_api.info()
 
-    if not snode.ssd_pcie:
-        snode = db_controller.get_storage_node_by_id(snode.get_id())
-        snode.ssd_pcie = node_info['spdk_pcie_list']
-        snode.write_to_db()
+    # if not snode.ssd_pcie:
+    #     snode = db_controller.get_storage_node_by_id(snode.get_id())
+    #     snode.ssd_pcie = node_info['spdk_pcie_list']
+    #     snode.write_to_db()
     # discover devices
     nvme_devs = addNvmeDevices(snode, snode.ssd_pcie)
     if nvme_devs:

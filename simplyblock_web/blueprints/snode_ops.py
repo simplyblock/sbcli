@@ -111,7 +111,7 @@ def spdk_process_start():
     except:
         data = {}
 
-    ssd_pcie_list = ""
+    ssd_pcie_list = "none"
     ssd_pcie_params = ""
     if 'ssd_pcie' in data and data['ssd_pcie']:
         ssd_pcie = data['ssd_pcie']
