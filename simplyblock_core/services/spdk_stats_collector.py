@@ -37,7 +37,7 @@ if __name__ == '__main__':
                     is_running = cont.attrs['State']["Running"]
                     logger.info(f"is_running: {is_running}")
                     if is_running:
-                        spdk_sock_path = f"/var/tmp{cont.attrs['Name']}.sock"
+                        spdk_sock_path = f"/var/tmp{cont.attrs['Name']}/spdk.sock"
                         client = spdk_client.JSONRPCClient(spdk_sock_path, 5260)
                         ret = client.call(method)
                         now = str(datetime.datetime.now()).split(".")[0]
