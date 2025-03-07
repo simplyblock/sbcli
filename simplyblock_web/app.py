@@ -6,7 +6,8 @@ from flask import Flask
 
 import utils
 from blueprints import web_api_cluster, web_api_mgmt_node, web_api_device, \
-    web_api_lvol, web_api_storage_node, web_api_pool, web_api_caching_node, web_api_snapshot, web_api_deployer
+    web_api_lvol, web_api_storage_node, web_api_pool, web_api_caching_node, \
+    web_api_snapshot, web_api_deployer, swagger_ui_blueprint
 from auth_middleware import token_required
 from simplyblock_core import constants, utils as core_utils
 from werkzeug.middleware.dispatcher import DispatcherMiddleware
@@ -31,6 +32,7 @@ app.register_blueprint(web_api_storage_node.bp)
 app.register_blueprint(web_api_pool.bp)
 app.register_blueprint(web_api_caching_node.bp)
 app.register_blueprint(web_api_deployer.bp)
+app.register_blueprint(swagger_ui_blueprint.bp, url_prefix=swagger_ui_blueprint.SWAGGER_URL)
 
 
 @app.before_request
