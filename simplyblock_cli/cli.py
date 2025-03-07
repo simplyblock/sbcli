@@ -129,6 +129,19 @@ class CLIWrapper(CLIWrapperBase):
         subcommand = self.add_sub_command(subparser, 'delete', 'Deletes a storage node object from the state database.')
         subcommand.add_argument('node_id', help='Storage node id', type=str).completer = self._completer_get_sn_list
         argument = subcommand.add_argument('--force', help='Force delete storage node from DB...Hopefully you know what you do', dest='force_remove', required=False, action='store_true')
+        sub_command.add_argument("--iobuf_small_bufsize", help='bdev_set_options param', dest='small_bufsize',  type=int, default=0)
+        sub_command.add_argument("--iobuf_large_bufsize", help='bdev_set_options param', dest='large_bufsize',  type=int, default=0)
+        sub_command.add_argument("--enable-test-device", help='Enable creation of test device', action='store_true')
+        sub_command.add_argument("--disable-ha-jm", help='Disable HA JM for distrib creation', action='store_false', dest='enable_ha_jm', default=True)
+        sub_command.add_argument("--ha-jm-count", help='HA JM count', dest='ha_jm_count', type=int, default=constants.HA_JM_COUNT)
+        sub_command.add_argument("--secondary-stg-name", help="secondary storage name", type=str, default=None)
+        sub_command.add_argument("--secondary-io-timeout-us", "secondary storage I/O timeout in us", type=int, default=0)
+        sub_command.add_argument("--ghost-capacity", "ghost queue capacity", type=int, default=0)
+        sub_command.add_argument("--fifo-main-capacity", "main fifo queue capacity", type=int, default=0)
+        sub_command.add_argument("--fifo-small-capacity", "small fifo queue capacity", type=int, default=0)
+        sub_command.add_argument("--is-secondary-node", help='add as secondary node', action='store_true', dest='is_secondary_node', default=False)
+        sub_command.add_argument("--namespace", help='k8s namespace to deploy on',)
+        sub_command.add_argument("--id-device-by-nqn", help='Use device nqn to identify it instead of serial number', action='store_true', dest='id_device_by_nqn', default=False)
 
     def init_storage_node__remove(self, subparser):
         subcommand = self.add_sub_command(subparser, 'remove', 'Removes a storage node from the cluster')
@@ -441,6 +454,35 @@ class CLIWrapper(CLIWrapperBase):
         if self.developer_mode:
             argument = subcommand.add_argument('--enable-qos', help='Enable qos bdev for storage nodes, true by default', type=bool, default=True, dest='enable_qos', required=False)
         argument = subcommand.add_argument('--strict-node-anti-affinity', help='Enable strict node anti affinity for storage nodes. Never more than one chunk is placed on a node. This requires a minimum of _data-chunks-in-stripe + parity-chunks-in-stripe + 1_ nodes in the cluster.', dest='strict_node_anti_affinity', required=False, action='store_true')
+        # add cluster
+        sub_command = self.add_sub_command(subparser, 'add', 'Add new cluster')
+        sub_command.add_argument("--blk_size", help='The block size in bytes', type=int, choices=[512, 4096], default=512)
+        sub_command.add_argument("--page_size", help='The size of a data page in bytes', type=int, default=2097152)
+        sub_command.add_argument("--cap-warn", help='Capacity warning level in percent, default=80',
+                                 type=int, required=False, dest="cap_warn")
+        sub_command.add_argument("--cap-crit", help='Capacity critical level in percent, default=90',
+                                 type=int, required=False, dest="cap_crit")
+        sub_command.add_argument("--prov-cap-warn", help='Capacity warning level in percent, default=180',
+                                 type=int, required=False, dest="prov_cap_warn")
+        sub_command.add_argument("--prov-cap-crit", help='Capacity critical level in percent, default=190',
+                                 type=int, required=False, dest="prov_cap_crit")
+        sub_command.add_argument("--distr-ndcs", help='(Dev) set ndcs manually, default: 4', type=int, default=0)
+        sub_command.add_argument("--distr-npcs", help='(Dev) set npcs manually, default: 1', type=int, default=0)
+        sub_command.add_argument("--distr-bs", help='(Dev) distrb bdev block size, default: 4096', type=int,
+                                 default=4096)
+        sub_command.add_argument("--distr-chunk-bs", help='(Dev) distrb bdev chunk block size, default: 4096', type=int,
+                                 default=4096)
+        sub_command.add_argument("--ha-type", help='LVol HA type (single, ha), default is cluster single type',
+                                 dest='ha_type', choices=["single", "ha"], default='single')
+        sub_command.add_argument("--enable-node-affinity", help='Enable node affinity for storage nodes', action='store_true')
+        sub_command.add_argument("--qpair-count", help='tcp transport qpair count', type=int, dest='qpair_count',
+                                 default=0, choices=range(128))
+        sub_command.add_argument("--max-queue-size", help='The max size the queue will grow', type=int, default=128)
+        sub_command.add_argument("--inflight-io-threshold", help='The number of inflight IOs allowed before the IO queuing starts', type=int, default=4)
+        sub_command.add_argument("--enable-qos", help='Enable qos bdev for storage nodes', action='store_true', dest='enable_qos')
+        sub_command.add_argument("--strict-node-anti-affinity", help='Enable strict node anti affinity for storage nodes', action='store_true')
+        sub_command.add_argument("--support-storage-tiering", help="Whether to support storage tiering", type=bool, default=False)
+        sub_command.add_argument("--disaster-recovery", help="AZ disaster recovery mode", type=bool, default=False)
 
     def init_cluster__add(self, subparser):
         subcommand = self.add_sub_command(subparser, 'add', 'Adds a new cluster')
@@ -575,7 +617,70 @@ class CLIWrapper(CLIWrapperBase):
         self.init_volume__get_io_stats(subparser)
         self.init_volume__check(subparser)
         self.init_volume__inflate(subparser)
+        #
+        # ----------------- lvol -----------------
+        #
 
+        subparser = self.add_command('lvol', 'LVol commands')
+        # add lvol
+        sub_command = self.add_sub_command(subparser, 'add', 'Add a new logical volume')
+        sub_command.add_argument("name", help='LVol name or id')
+        sub_command.add_argument("size", help='LVol size: 10M, 10G, 10(bytes)')
+        sub_command.add_argument("pool", help='Pool UUID or name')
+        sub_command.add_argument("--snapshot", "-s", help='Make LVol with snapshot capability, default is False',
+                                 required=False, action='store_true')
+        sub_command.add_argument("--max-size", help='LVol max size', dest='max_size', default="0")
+        sub_command.add_argument("--host-id", help='Primary storage node UUID or Hostname', dest='host_id')
+
+        #
+        # sub_command.add_argument("--compress",
+        #                          help='Use inline data compression and de-compression on the logical volume',
+        #                          required=False, action='store_true')
+        sub_command.add_argument("--encrypt", help='Use inline data encryption and de-cryption on the logical volume',
+                                 required=False, action='store_true')
+        sub_command.add_argument("--crypto-key1", help='the hex value of key1 to be used for lvol encryption',
+                                 dest='crypto_key1', default=None)
+        sub_command.add_argument("--crypto-key2", help='the hex value of key2 to be used for lvol encryption',
+                                 dest='crypto_key2', default=None)
+        sub_command.add_argument("--max-rw-iops", help='Maximum Read Write IO Per Second', type=int)
+        sub_command.add_argument("--max-rw-mbytes", help='Maximum Read Write Mega Bytes Per Second', type=int)
+        sub_command.add_argument("--max-r-mbytes", help='Maximum Read Mega Bytes Per Second', type=int)
+        sub_command.add_argument("--max-w-mbytes", help='Maximum Write Mega Bytes Per Second', type=int)
+        sub_command.add_argument("--distr-vuid", help='(Dev) set vuid manually, default: random (1-99999)', type=int,
+                                 default=0)
+        sub_command.add_argument("--ha-type", help='LVol HA type (single, ha), default is cluster HA type',
+                                 dest='ha_type', choices=["single", "ha", "default"], default='default')
+        sub_command.add_argument("--lvol-priority-class", help='Lvol priority class', type=int, default=0)
+        sub_command.add_argument("--is-tiered", help="sends tiered I/O", type=bool, default=False)
+        sub_command.add_argument("--force-fetch", help="fetches are forced", type=bool, default=False)
+        sub_command.add_argument("--sync-fetch", help="reads require synchronous fetches", type=bool, default=True)
+        sub_command.add_argument("--pure-flush-or-evict", help="pure flush or evict", type=bool, default=False)
+        sub_command.add_argumetn("--not-evict-blob-md", help="what to do with blob md", type=int, default=0)
+        sub_command.add_argument("--namespace", help='Set LVol namespace for k8s clients')
+        sub_command.add_argument("--uid", help='Set LVol UUID')
+        sub_command.add_argument("--pvc_name", help='Set LVol PVC name for k8s clients')
+
+        # snapshot backup
+        sub_command = self.add_sub_command(subparser, 'backup-snapshot', 'Asynchronously back up a snapshot')
+        sub_command.add_argument("--lvol-name", help="lvol uuid", type=str)
+        sub_command.add_argument("--timeout-us", help="secondary stg I/O timeout in us", type=int)
+        sub_command.add_argument("--dev-page-size", help="distrib page size in bytes", type=int)
+        sub_command.add_argument("--nmax-retries", help="max total retries across all flush jobs", type=int, default=4)
+        sub_command.add_argument("--nmax-flush-jobs", help="max parallel flush jobs", type=int, default=4)
+
+        # snapshot backup status
+        sub_command = self.add_sub_command(subparser, 'get-snapshot-backup-status', 'Get async snapshot backup status')
+        sub_command.add_argument("--lvol-name", help="lvol uuid", type=str)
+
+        # snapshot recovery
+        sub_command = self.add_sub_command(subparser, 'recover-snapshot', 'Restore snapshot into the new lvstore after AZ disaster')
+        sub_command.add_argument("--lvs-name", help="new lvstore name", type=str)
+        sub_command.add_argument("--orig-name", help="user-provided name of the original snapshot", type=str)
+        sub_command.add_argument("--orig-uuid", help="uuid of the original snapshot lvol", type=str)
+        sub_command.add_argument("--clear-method", help="any valid clear method", type=int)
+        sub_command.add_argument("--id-of-blob-to-recover", help="id of the original snapshot blob", type=int)
+
+        # snapshot restore
 
     def init_volume__add(self, subparser):
         subcommand = self.add_sub_command(subparser, 'add', 'Adds a new logical volume')
@@ -929,6 +1034,153 @@ class CLIWrapper(CLIWrapperBase):
                 if not self.developer_mode:
                     print("This command is private.")
                     ret = False
+
+            if sub_command == "deploy":
+                ret = storage_ops.deploy(args.ifname)
+
+            elif sub_command == "deploy-cleaner":
+                ret = storage_ops.deploy_cleaner()
+
+            elif sub_command == "add-node":
+                if not args.max_lvol:
+                    self.parser.error(f"Mandatory argument '--max-lvol' not provided for {sub_command}")
+                if not args.max_prov:
+                    self.parser.error(f"Mandatory argument '--max-prov' not provided for {sub_command}")
+                # if not args.spdk_cpu_mask:
+                #     self.parser.error(f"Mandatory argument '--cpu-mask' not provided for {sub_command}")
+                cluster_id = args.cluster_id
+                node_ip = args.node_ip
+                ifname = args.ifname
+                data_nics = args.data_nics
+                spdk_image = args.spdk_image
+                spdk_debug = args.spdk_debug
+
+                small_bufsize = args.small_bufsize
+                large_bufsize = args.large_bufsize
+                num_partitions_per_dev = args.partitions
+                jm_percent = args.jm_percent
+                spdk_cpu_mask = None
+                if args.spdk_cpu_mask:
+                    if self.validate_cpu_mask(args.spdk_cpu_mask):
+                        spdk_cpu_mask = args.spdk_cpu_mask
+                    else:
+                        return f"Invalid cpu mask value: {args.spdk_cpu_mask}"
+
+                max_lvol = args.max_lvol
+                max_snap = args.max_snap
+                max_prov = args.max_prov
+                number_of_devices = args.number_of_devices
+                enable_test_device = args.enable_test_device
+                enable_ha_jm = args.enable_ha_jm
+                number_of_distribs = args.number_of_distribs
+                namespace = args.namespace
+                ha_jm_count = args.ha_jm_count
+
+                secondary_stg_name = args.secondary_stg_name
+                secondary_io_timeout_us = args.secondary_io_timeout_us
+                ghost_capacity = args.ghost_capacity
+                fifo_small_capacity = args.fifo_small_capacity
+                fifo_main_capacity = args.fifo_main_capacity
+
+                out = storage_ops.add_node(
+                    cluster_id=cluster_id,
+                    node_ip=node_ip,
+                    iface_name=ifname,
+                    data_nics_list=data_nics,
+                    max_lvol=max_lvol,
+                    max_snap=max_snap,
+                    max_prov=max_prov,
+                    spdk_image=spdk_image,
+                    spdk_debug=spdk_debug,
+                    small_bufsize=small_bufsize,
+                    large_bufsize=large_bufsize,
+                    spdk_cpu_mask=spdk_cpu_mask,
+                    num_partitions_per_dev=num_partitions_per_dev,
+                    jm_percent=jm_percent,
+                    number_of_devices=number_of_devices,
+                    enable_test_device=enable_test_device,
+                    namespace=namespace,
+                    number_of_distribs=number_of_distribs,
+                    enable_ha_jm=enable_ha_jm,
+                    is_secondary_node=args.is_secondary_node,
+                    id_device_by_nqn=args.id_device_by_nqn,
+                    partition_size=args.partition_size,
+                    ha_jm_count=ha_jm_count,
+                    secondary_stg_name=secondary_stg_name,
+                    secondary_io_timeout_us=secondary_io_timeout_us,
+                    ghost_capacity=ghost_capacity,
+                    fifo_main_capacity=fifo_small_capacity,
+                    fifo_main_capacity=fifo_main_capacity
+                )
+
+                return out
+
+            elif sub_command == "list":
+                ret = storage_ops.list_storage_nodes(args.json, args.cluster_id)
+
+            elif sub_command == "remove":
+                ret = storage_ops.remove_storage_node(args.node_id, args.force_remove)
+
+            elif sub_command == "delete":
+                ret = storage_ops.delete_storage_node(args.node_id)
+
+            elif sub_command == "restart":
+                node_id = args.node_id
+
+                spdk_image = args.spdk_image
+                spdk_debug = args.spdk_debug
+
+                max_lvol = args.max_lvol
+                max_snap = args.max_snap
+                max_prov = args.max_prov if args.max_prov else 0
+                number_of_devices = args.number_of_devices
+
+                small_bufsize = args.small_bufsize
+                large_bufsize = args.large_bufsize
+
+                ret = storage_ops.restart_storage_node(
+                    node_id, max_lvol, max_snap, max_prov,
+                    spdk_image, spdk_debug,
+                    small_bufsize, large_bufsize, number_of_devices, node_ip=args.node_ip, force=args.force)
+
+            elif sub_command == "list-devices":
+                ret = self.storage_node_list_devices(args)
+
+            elif sub_command == "device-testing-mode":
+                ret = device_controller.set_device_testing_mode(args.device_id, args.mode)
+            # elif sub_command == "jm-device-testing-mode":
+            #     ret = device_controller.set_jm_device_testing_mode(args.device_id, args.mode)
+
+            elif sub_command == "remove-device":
+                ret = device_controller.device_remove(args.device_id, args.force)
+
+            elif sub_command == "shutdown":
+                ret = storage_ops.shutdown_storage_node(args.node_id, args.force)
+
+            elif sub_command == "suspend":
+                ret = storage_ops.suspend_storage_node(args.node_id, args.force)
+
+            elif sub_command == "resume":
+                ret = storage_ops.resume_storage_node(args.node_id)
+
+            elif sub_command == "reset-device":
+                ret = device_controller.reset_storage_device(args.device_id)
+
+            elif sub_command == "restart-device":
+                ret = device_controller.restart_device(args.id)
+
+            elif sub_command == "add-device":
+                ret = device_controller.add_device(args.id)
+
+            elif sub_command == "set-failed-device":
+                ret = device_controller.device_set_failed(args.id)
+
+            elif sub_command == "get-capacity-device":
+                device_id = args.device_id
+                history = args.history
+                data = device_controller.get_device_capacity(device_id, history)
+                if data:
+                    ret = utils.print_table(data)
                 else:
                     ret = self.storage_node__device_testing_mode(sub_command, args)
             elif sub_command in ['get-device']:
@@ -1136,6 +1388,88 @@ class CLIWrapper(CLIWrapperBase):
                 if not self.developer_mode:
                     print("This command is private.")
                     ret = False
+        elif args.command == 'lvol':
+            sub_command = args_dict[args.command]
+            if sub_command == "add":
+                name = args.name
+                size = self.parse_size(args.size)
+                max_size = self.parse_size(args.max_size)
+                host_id = args.host_id
+                ha_type = args.ha_type
+                pool = args.pool
+                comp = None
+                crypto = args.encrypt
+                distr_vuid = args.distr_vuid
+                with_snapshot = args.snapshot
+                lvol_priority_class = args.lvol_priority_class
+                results, error = lvol_controller.add_lvol_ha(
+                    name, size, host_id, ha_type, pool, comp, crypto,
+                    distr_vuid,
+                    args.max_rw_iops,
+                    args.max_rw_mbytes,
+                    args.max_r_mbytes,
+                    args.max_w_mbytes,
+                    with_snapshot=with_snapshot,
+                    max_size=max_size,
+                    crypto_key1=args.crypto_key1,
+                    crypto_key2=args.crypto_key2,
+                    lvol_priority_class=lvol_priority_class,
+                    uid=args.uid, pvc_name=args.pvc_name, namespace=args.namespace,
+                    is_tiered=args.is_tiered, force_fetch=args.force_fetch, sync_fetch=args.sync_fetch, 
+                    pure_flush_or_evict=args.pure_flush_or_evict, not_evict_blob_md=args.not_evict_blob_md)
+                if results:
+                    ret = results
+                else:
+                    ret = error
+            elif sub_command == "add-distr":
+                pass
+            elif sub_command == "backup-snapshot":
+                ret = lvol_controller.backup_snapshot(args.lvol_name, args.timeout_us, args.dev_page_size,
+                                                      args.nmax_retries, args.nmax_flush_jobs)
+            elif sub_command == 'get-snapshot-backup-status':
+                ret = lvol_controller.get_snapshot_backup_status(args.lvol_name)
+            elif sub_command == 'recover-snapshot':
+                ret = lvol_controller.restore_snapshot(args.lvs_name, args.orig_name, args.orig_uuid, 
+                                                       args.clear_method, args.id_of_blob_to_recover)
+            elif sub_command == "qos-set":
+                ret = lvol_controller.set_lvol(
+                    args.id, args.max_rw_iops, args.max_rw_mbytes,
+                    args.max_r_mbytes, args.max_w_mbytes)
+            elif sub_command == "list":
+                ret = lvol_controller.list_lvols(args.json, args.cluster_id, args.pool, args.all)
+            elif sub_command == "list-mem":
+                ret = lvol_controller.list_lvols_mem(args.json, args.csv)
+            elif sub_command == "get":
+                ret = lvol_controller.get_lvol(args.id, args.json)
+            elif sub_command == "delete":
+                for id in args.id:
+                    force = args.force
+                    ret = lvol_controller.delete_lvol(id, force)
+            elif sub_command == "connect":
+                id = args.id
+                data = lvol_controller.connect_lvol(id)
+                if data:
+                    ret = "\n".join(con['connect'] for con in data)
+            elif sub_command == "resize":
+                id = args.id
+                size = self.parse_size(args.size)
+                ret = lvol_controller.resize_lvol(id, size)
+            elif sub_command == "create-snapshot":
+                id = args.id
+                name = args.name
+                ret = lvol_controller.create_snapshot(id, name)
+            elif sub_command == "clone":
+                new_size = 0
+                if args.resize:
+                    new_size = self.parse_size(args.resize)
+                ret = snapshot_controller.clone(args.snapshot_id, args.clone_name, new_size)
+            elif sub_command == "get-io-stats":
+                id = args.id
+                history = args.history
+                records = args.records
+                data = lvol_controller.get_io_stats(id, history, records_count=records)
+                if data:
+                    ret = utils.print_table(data)
                 else:
                     ret = self.volume__move(sub_command, args)
             elif sub_command in ['get-capacity']:
@@ -1232,6 +1566,154 @@ class CLIWrapper(CLIWrapperBase):
             exit(1)
 
         print(ret)
+
+    def storage_node_list_devices(self, args):
+        node_id = args.node_id
+        sort = args.sort
+        if sort:
+            sort = sort[0]
+        is_json = args.json
+        out = storage_ops.list_storage_devices(node_id, sort, is_json)
+        return out
+
+    def cluster_add(self, args):
+        page_size_in_blocks = args.page_size
+        blk_size = args.blk_size
+        cap_warn = args.cap_warn
+        cap_crit = args.cap_crit
+        prov_cap_warn = args.prov_cap_warn
+        prov_cap_crit = args.prov_cap_crit
+        distr_ndcs = args.distr_ndcs
+        distr_npcs = args.distr_npcs
+        distr_bs = args.distr_bs
+        distr_chunk_bs = args.distr_chunk_bs
+        ha_type = args.ha_type
+
+        enable_node_affinity = args.enable_node_affinity
+        qpair_count = args.qpair_count
+        max_queue_size = args.max_queue_size
+        inflight_io_threshold = args.inflight_io_threshold
+        enable_qos = args.enable_qos
+        strict_node_anti_affinity = args.strict_node_anti_affinity
+
+        support_storage_tiering = args.support_storage_tiering
+        disaster_recovery = args.disaster_recovery
+
+        return cluster_ops.add_cluster(
+            blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
+            distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, enable_node_affinity,
+            qpair_count, max_queue_size, inflight_io_threshold, enable_qos, strict_node_anti_affinity,
+            support_storage_tiering, disaster_recovery)
+
+
+    def cluster_create(self, args):
+        page_size_in_blocks = args.page_size
+        blk_size = args.blk_size
+        CLI_PASS = args.CLI_PASS
+        cap_warn = args.cap_warn
+        cap_crit = args.cap_crit
+        prov_cap_warn = args.prov_cap_warn
+        prov_cap_crit = args.prov_cap_crit
+        ifname = args.ifname
+        distr_ndcs = args.distr_ndcs
+        distr_npcs = args.distr_npcs
+        distr_bs = args.distr_bs
+        distr_chunk_bs = args.distr_chunk_bs
+        ha_type = args.ha_type
+        log_del_interval = args.log_del_interval
+        metrics_retention_period = args.metrics_retention_period
+        contact_point = args.contact_point
+        grafana_endpoint = args.grafana_endpoint
+        enable_node_affinity = args.enable_node_affinity
+        qpair_count = args.qpair_count
+        max_queue_size = args.max_queue_size
+        inflight_io_threshold = args.inflight_io_threshold
+        enable_qos = args.enable_qos
+        strict_node_anti_affinity = args.strict_node_anti_affinity
+
+
+        return cluster_ops.create_cluster(
+            blk_size, page_size_in_blocks,
+            CLI_PASS, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
+            ifname, log_del_interval, metrics_retention_period, contact_point, grafana_endpoint,
+            distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, enable_node_affinity,
+            qpair_count, max_queue_size, inflight_io_threshold, enable_qos, strict_node_anti_affinity)
+
+
+    def query_yes_no(self, question, default="yes"):
+        """Ask a yes/no question via raw_input() and return their answer.
+
+        "question" is a string that is presented to the user.
+        "default" is the presumed answer if the user just hits <Enter>.
+                It must be "yes" (the default), "no" or None (meaning
+                an answer is required of the user).
+
+        The "answer" return value is True for "yes" or False for "no".
+        """
+        valid = {"yes": True, "y": True, "ye": True, "no": False, "n": False}
+        if default is None:
+            prompt = " [y/n] "
+        elif default == "yes":
+            prompt = " [Y/n] "
+        elif default == "no":
+            prompt = " [y/N] "
+        else:
+            raise ValueError("invalid default answer: '%s'" % default)
+
+        while True:
+            sys.stdout.write(question + prompt)
+            choice = str(input()).lower()
+            if default is not None and choice == "":
+                return valid[default]
+            elif choice in valid:
+                return valid[choice]
+            else:
+                sys.stdout.write("Please respond with 'yes' or 'no' " "(or 'y' or 'n').\n")
+
+    def parse_size(self, size_string: str):
+        try:
+            x = int(size_string)
+            return x
+        except Exception:
+            pass
+        try:
+            if size_string:
+                size_string = size_string.lower()
+                size_string = size_string.replace(" ", "")
+                size_string = size_string.replace("b", "")
+                size_number = int(size_string[:-1])
+                size_v = size_string[-1]
+                one_k = 1000
+                multi = 0
+                if size_v == "k":
+                    multi = 1
+                elif size_v == "m":
+                    multi = 2
+                elif size_v == "g":
+                    multi = 3
+                elif size_v == "t":
+                    multi = 4
+                else:
+                    print(f"Error parsing size: {size_string}")
+                    return -1
+                return size_number * math.pow(one_k, multi)
+            else:
+                return -1
+        except:
+            print(f"Error parsing size: {size_string}")
+            return -1
+
+    def validate_cpu_mask(self, spdk_cpu_mask):
+        return re.match("^(0x|0X)?[a-fA-F0-9]+$", spdk_cpu_mask)
+
+    def _completer_get_cluster_list(self, prefix, parsed_args, **kwargs):
+        db = db_controller.DBController()
+        return (cluster.get_id() for cluster in db.get_clusters() if cluster.get_id().startswith(prefix))
+
+
+    def _completer_get_sn_list(self, prefix, parsed_args, **kwargs):
+        db = db_controller.DBController()
+        return (cluster.get_id() for cluster in db.get_storage_nodes() if cluster.get_id().startswith(prefix))
 
 
 def main():

@@ -38,6 +38,11 @@ class LVol(BaseModel):
     lvol_bdev: str = ""
     lvol_name: str = ""
     lvol_priority_class: int = 0
+    is_tiered: bool = False
+    force_fetch: bool = False
+    sync_fetch: bool = True
+    pure_flush_or_evict: bool = False
+    not_evict_blob_md: int = 0
     lvol_type: str = "lvol"
     lvol_uuid: str = ""
     lvs_name: str = ""

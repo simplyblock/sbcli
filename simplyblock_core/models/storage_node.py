@@ -36,6 +36,11 @@ class StorageNode(BaseNodeObject):
     distrib_cpu_mask: str = ""
     enable_ha_jm: bool = False
     ha_jm_count: int = 3
+    secondary_io_timeout_us: int = 0
+    secondary_stg_name: str = None
+    ghost_capacity: int = 0
+    fifo_main_capacity: int = 0
+    fifo_small_capacity: int = 0
     enable_test_device: bool = False
     health_check: bool = True
     host_nqn: str = ""

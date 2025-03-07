@@ -265,7 +265,8 @@ def validate_aes_xts_keys(key1: str, key2: str) -> Tuple[bool, str]:
 def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp, use_crypto,
                 distr_vuid, max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes,
                 with_snapshot=False, max_size=0, crypto_key1=None, crypto_key2=None, lvol_priority_class=0,
-                uid=None, pvc_name=None, namespace=None):
+                uid=None, pvc_name=None, namespace=None, 
+                is_tiered=False, force_fetch=False, sync_fetch=True, pure_flush_or_evict=False, not_evict_blob_md=0):
 
     db_controller = DBController()
     logger.info(f"Adding LVol: {name}")
@@ -401,6 +402,11 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
     lvol.lvol_type = 'lvol'
     lvol.nqn = cl.nqn + ":lvol:" + lvol.uuid
     lvol.lvol_priority_class = lvol_priority_class
+    lvol.is_tiered = is_tiered
+    lvol.force_fetch = force_fetch
+    lvol.sync_fetch = sync_fetch
+    lvol.pure_flush_or_evict = pure_flush_or_evict
+    lvol.not_evict_blob_md = not_evict_blob_md
 
     nodes = []
     if host_node:
@@ -571,6 +577,7 @@ def _create_bdev_stack(lvol, snode, is_primary=True):
     for bdev in lvol.bdev_stack:
         type = bdev['type']
         name = bdev['name']
+        disaster_recovery = bdev['disaster_recovery']
         params = bdev['params']
         ret = None
 
@@ -584,7 +591,7 @@ def _create_bdev_stack(lvol, snode, is_primary=True):
             ret = _create_crypto_lvol(rpc_client, **params)
 
         elif type == "bdev_lvstore":
-            ret = rpc_client.create_lvstore(**params)
+            ret = rpc_client.create_lvstore(**params) if not disaster_recovery else rpc_client.bdev_lvol_create_lvstore_persistent(**params)
 
         elif type == "bdev_lvol":
             if is_primary:
@@ -1603,3 +1610,63 @@ def inflate_lvol(lvol_id):
     else:
         logger.error(f"Failed to inflate LVol: {lvol_id}")
     return ret
+
+def backup_snapshot(lvol_name, timeout_us, dev_page_size, nmax_retries, nmax_flush_jobs):
+    lvol = db_controller.get_lvol_by_id(lvol_name)
+    if not lvol:
+        logger.error(f"LVol not found: {lvol_name}")
+        return False
+    pool = db_controller.get_pool_by_id(lvol.pool_uuid)
+    if pool.status == Pool.STATUS_INACTIVE:
+        logger.error(f"Pool is disabled")
+        return False
+
+    snode = db_controller.get_storage_node_by_id(lvol.node_id)
+
+    rpc_client = RPCClient(
+    snode.mgmt_ip,
+    snode.rpc_port,
+    snode.rpc_username,
+    snode.rpc_password)
+
+    return rpc_client.bdev_lvol_backup_snapshot(lvol_name, timeout_us, dev_page_size, nmax_retries, nmax_flush_jobs)
+
+def get_snapshot_backup_status(lvol_name):
+    lvol = db_controller.get_lvol_by_id(lvol_name)
+    if not lvol:
+        logger.error(f"LVol not found: {lvol_name}")
+        return False
+    pool = db_controller.get_pool_by_id(lvol.pool_uuid)
+    if pool.status == Pool.STATUS_INACTIVE:
+        logger.error(f"Pool is disabled")
+        return False
+
+    snode = db_controller.get_storage_node_by_id(lvol.node_id)
+
+    rpc_client = RPCClient(
+    snode.mgmt_ip,
+    snode.rpc_port,
+    snode.rpc_username,
+    snode.rpc_password)
+
+    return rpc_client.bdev_lvol_get_snapshot_backup_status(lvol_name)
+
+def restore_snapshot(lvs_name, orig_name, orig_uuid, clear_method, id_of_blob_to_recover):
+    lvol = db_controller.get_lvol_by_id(orig_uuid)
+    if not lvol:
+        logger.error(f"LVol not found: {orig_uuid}")
+        return False
+    pool = db_controller.get_pool_by_id(lvol.pool_uuid)
+    if pool.status == Pool.STATUS_INACTIVE:
+        logger.error(f"Pool is disabled")
+        return False
+
+    snode = db_controller.get_storage_node_by_id(lvol.node_id)
+    
+    rpc_client = RPCClient(
+    snode.mgmt_ip,
+    snode.rpc_port,
+    snode.rpc_username,
+    snode.rpc_password)
+
+    return rpc_client.bdev_lvol_recover(lvs_name, orig_name, orig_uuid, clear_method, id_of_blob_to_recover)

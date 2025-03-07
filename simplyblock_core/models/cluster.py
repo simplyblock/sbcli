@@ -41,6 +41,8 @@ class Cluster(BaseModel):
     distr_npcs: int = 0
     enable_node_affinity: bool = False
     enable_qos: bool = False
+    support_storage_tiering: bool = False
+    disaster_recovery: bool = False
     grafana_endpoint: str = ""
     grafana_secret: str = ""
     ha_type: str = "single"

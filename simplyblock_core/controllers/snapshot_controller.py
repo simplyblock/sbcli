@@ -88,6 +88,14 @@ def add(lvol_id, snapshot_name):
     size = lvol.size
     blobid = 0
     snap_uuid = ""
+    rpc_client.bdev_lvol_set_leader(True, lvs_name=lvol.lvs_name)
+    logger.info("Creating Snapshot bdev")
+    ret = rpc_client.lvol_create_snapshot(f"{lvol.lvs_name}/{lvol.lvol_bdev}", snap_bdev_name, 
+                                          lvol.is_tiered, lvol.force_fetch, lvol.sync_fetch, lvol.pure_flush_or_evict, lvol.not_evict_blob_md)
+    if not ret:
+        return False, f"Failed to create snapshot on node: {snode.get_id()}"
+
+    size = lvol.size
     used_size = 0
 
     if lvol.ha_type == "single":

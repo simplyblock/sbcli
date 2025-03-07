@@ -524,7 +524,8 @@ def deploy_cluster(storage_nodes,test,ha_type,distr_ndcs,distr_npcs,enable_qos,i
                     
 def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
                 distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, enable_node_affinity, qpair_count,
-                max_queue_size, inflight_io_threshold, enable_qos, strict_node_anti_affinity):
+                max_queue_size, inflight_io_threshold, enable_qos, strict_node_anti_affinity,
+                support_storage_tiering=False, disaster_recovery=False):
     db_controller = DBController()
     clusters = db_controller.get_clusters()
     if not clusters:
@@ -561,6 +562,8 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
     cluster.max_queue_size = max_queue_size
     cluster.inflight_io_threshold = inflight_io_threshold
     cluster.enable_qos = enable_qos
+    cluster.support_storage_tiering = support_storage_tiering
+    cluster.disaster_recovery = disaster_recovery
     if cap_warn and cap_warn > 0:
         cluster.cap_warn = cap_warn
     if cap_crit and cap_crit > 0:
@@ -653,11 +656,20 @@ def cluster_activate(cl_id, force=False, force_lvstore_create=False):
             ret = storage_node_ops.recreate_lvstore(snode)
         else:
             ret = storage_node_ops.create_lvstore(snode, cluster.distr_ndcs, cluster.distr_npcs, cluster.distr_bs,
-                                              cluster.distr_chunk_bs, cluster.page_size_in_blocks, max_size)
+                                              cluster.distr_chunk_bs, cluster.page_size_in_blocks, max_size, snodes,
+                                              cluster.persistent, cluster.support_storage_tiering, snode.secondary_stg_name,
+                                              cluster.disaster_recovery, snode.secondary_io_timeout_us, snode.ghost_capacity,
+                                              snode.fifo_main_capacity, snode.fifo_small_capacity)
         snode = db_controller.get_storage_node_by_id(snode.get_id())
+        
         if ret:
             snode.lvstore_status = "ready"
             snode.write_to_db()
+
+        if not ret and not force:
+            logger.error("Failed to activate cluster")
+            set_cluster_status(cl_id, ols_status)
+            return False
 
         else:
             snode.lvstore_status = "failed"

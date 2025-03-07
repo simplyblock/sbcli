@@ -774,7 +774,8 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
              small_bufsize=0, large_bufsize=0, spdk_cpu_mask=None,
              num_partitions_per_dev=0, jm_percent=0, number_of_devices=0, enable_test_device=False,
              namespace=None, number_of_distribs=2, enable_ha_jm=False, is_secondary_node=False, id_device_by_nqn=False,
-             partition_size="", ha_jm_count=3, spdk_hp_mem=None, ssd_pcie=None, spdk_cpu_count=0):
+             partition_size="", ha_jm_count=3, spdk_hp_mem=None, ssd_pcie=None, spdk_cpu_count=0
+             secondary_stg_name=None, secondary_io_timeout_us=0, ghost_capacity=0, fifo_main_capacity=0, fifo_small_capacity=0):
 
     db_controller = DBController()
     kv_store = db_controller.kv_store
@@ -1054,6 +1055,12 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
     snode.is_secondary_node = is_secondary_node   # pass
     snode.ha_jm_count = ha_jm_count
 
+    snode.secondary_io_timeout_us = secondary_io_timeout_us
+    snode.secondary_stg_name = secondary_stg_name
+    snode.ghost_capacity = ghost_capacity
+    snode.fifo_main_capacity = fifo_main_capacity
+    snode.fifo_small_capacity = fifo_small_capacity
+
     if 'cpu_count' in node_info:
         snode.cpu = node_info['cpu_count']
     if 'cpu_hz' in node_info:
@@ -1285,17 +1292,21 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
     # Create distribs
     max_size = cluster.cluster_max_size
     ret = create_lvstore(snode, cluster.distr_ndcs, cluster.distr_npcs, cluster.distr_bs,
-                         cluster.distr_chunk_bs, cluster.page_size_in_blocks, max_size)
+                         cluster.distr_chunk_bs, cluster.page_size_in_blocks, max_size, nodes, 
+                         cluster.support_storage_tiering, snode.secondary_stg_name, 
+                         snode.secondary_io_timeout_us, cluster.disaster_recovery,
+                         snode.ghost_capacity, snode.fifo_main_capacity, snode.fifo_small_capacity)
     snode = db_controller.get_storage_node_by_id(snode.get_id())
     if ret:
         snode.lvstore_status = "ready"
         snode.write_to_db()
-
+    if not ret:
+        logger.error("Failed to create lvstore")
+        return False
     else:
         snode.lvstore_status = "failed"
         snode.write_to_db()
-        logger.error("Failed to create lvstore")
-        return False
+
 
     for dev in snode.nvme_devices:
         if dev.status == NVMeDevice.STATUS_ONLINE:
@@ -3130,7 +3141,10 @@ def get_secondary_nodes(current_node):
     return nodes
 
 
-def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blocks, max_size):
+def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blocks, max_size, nodes,
+                   support_storage_tiering=False, secondary_stg_name=None, disaster_recovery=False,
+                   secondary_io_timeout_us=0, ghost_capacity=0,
+                   fifo_main_capacity=0, fifo_small_capacity=0):
     db_controller = DBController()
     lvstore_stack = []
     distrib_list = []
@@ -3145,6 +3159,17 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
     jm_vuid = 1
     jm_ids = []
     lvol_subsys_port = utils.get_next_port(snode.cluster_id)
+    storage_tiering_params = {}
+    storage_tiering_ids = []
+    if support_storage_tiering:
+        storage_tiering_params['support_storage_tiering'] = support_storage_tiering
+        storage_tiering_params['secondary_stg_name'] = secondary_stg_name
+        storage_tiering_params['secondary_io_timeout_us'] = secondary_io_timeout_us
+        storage_tiering_params['disaster_recovery'] = disaster_recovery
+        storage_tiering_params['ghost_capacity'] = ghost_capacity
+        storage_tiering_params['fifo_main_capacity'] = fifo_main_capacity
+        storage_tiering_params['fifo_small_capacity'] = fifo_small_capacity
+
     if snode.enable_ha_jm:
         jm_vuid = utils.get_random_vuid()
         jm_ids = get_sorted_ha_jms(snode)
@@ -3161,6 +3186,12 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
         distrib_vuid = utils.get_random_vuid()
         while distrib_vuid in distrib_list:
             distrib_vuid = utils.get_random_vuid()
+
+        storage_tiering_id = 0
+        if support_storage_tiering:
+            while storage_tiering_id in storage_tiering_ids:
+                storage_tiering_id = utils.get_random_storage_tiering_id()
+            storage_tiering_params['storage_tiering_id'] = storage_tiering_id
 
         distrib_name = f"distrib_{distrib_vuid}"
         lvstore_stack.extend(
@@ -3179,12 +3210,15 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
                         "chunk_size": distr_chunk_bs,
                         "pba_page_size": distr_page_size,
                         "write_protection": write_protection,
+                        **storage_tiering_params
                     }
                 }
             ]
         )
         distrib_list.append(distrib_name)
         distrib_vuids.append(distrib_vuid)
+        if support_storage_tiering:
+            storage_tiering_ids.append(storage_tiering_id)
 
 
     if len(distrib_list) == 1:
@@ -3212,6 +3246,7 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
         {
             "type": "bdev_lvstore",
             "name": lvs_name,
+            "disaster_recovery": disaster_recovery
             "params": {
                 "name": lvs_name,
                 "bdev_name": raid_device,
@@ -3299,6 +3334,7 @@ def _create_bdev_stack(snode, lvstore_stack=None, primary_node=None):
     for bdev in stack:
         type = bdev['type']
         name = bdev['name']
+        disaster_recovery = bdev['disaster_recovery']
         params = bdev['params']
 
         if name in node_bdev_names:
@@ -3325,6 +3361,10 @@ def _create_bdev_stack(snode, lvstore_stack=None, primary_node=None):
             ret = rpc_client.create_lvstore(**params)
             # if ret and snode.jm_vuid > 0:
             #     rpc_client.bdev_lvol_set_lvs_ops(snode.lvstore, snode.jm_vuid, snode.lvol_subsys_port)
+        elif type == "bdev_lvstore" and lvstore_stack and not snode.is_secondary_node:
+            ret = rpc_client.create_lvstore(**params) if not disaster_recovery else rpc_client.bdev_lvol_create_lvstore_persistent(**params)
+            if ret and snode.jm_vuid > 0:
+                rpc_client.bdev_lvol_set_lvs_ops(snode.lvstore, snode.jm_vuid)
 
         elif type == "bdev_ptnonexcl":
             ret = rpc_client.bdev_PT_NoExcl_create(**params)
