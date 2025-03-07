@@ -17,7 +17,7 @@ bp = get_swaggerui_blueprint(
     SWAGGER_URL,
     API_URL,
     config={
-        'app_name': 'Access API',
+        'app_name': 'SimplyBlock-API',
         'spec': cnf,
     }
 )
