@@ -120,7 +120,6 @@ def add(lvol_id, snapshot_name):
             elif sec_node.status == StorageNode.STATUS_DOWN:
                 msg = f"Secondary node is in down status, can not create snapshot"
                 logger.error(msg)
-                lvol.remove(db_controller.kv_store)
                 return False, msg
             else:
                 # sec node is not online, set primary as leader
@@ -135,7 +134,6 @@ def add(lvol_id, snapshot_name):
             # both primary and secondary are not online
             msg = f"Host nodes are not online"
             logger.error(msg)
-            lvol.remove(db_controller.kv_store)
             return False, msg
 
         if primary_node:
