@@ -26,12 +26,12 @@ class RandomFailoverTest(TestLvolHACluster):
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        self.total_lvols = 10
+        self.total_lvols = 20
         self.lvol_name = f"lvl{generate_random_sequence(15)}"
         self.clone_name = f"cln{generate_random_sequence(15)}"
         self.snapshot_name = f"snap{generate_random_sequence(15)}"
-        self.lvol_size = "10G"
-        self.int_lvol_size = 10
+        self.lvol_size = "20G"
+        self.int_lvol_size = 20
         self.fio_size = "2G"
         self.fio_threads = []
         self.clone_mount_details = {}
@@ -196,7 +196,7 @@ class RandomFailoverTest(TestLvolHACluster):
                     "bs": f"{2 ** random.randint(2, 7)}K",
                     "nrfiles": 16,
                     "iodepth": 1,
-                    "numjobs": 3,
+                    "numjobs": 5,
                     "time_based": True,
                     "runtime": 2000,
                 },
@@ -635,7 +635,7 @@ class RandomFailoverTest(TestLvolHACluster):
                     "bs": f"{2 ** random.randint(2, 7)}K",
                     "nrfiles": 16,
                     "iodepth": 1,
-                    "numjobs": 3,
+                    "numjobs": 5,
                     "time_based": True,
                     "runtime": 2000,
                 },
@@ -731,9 +731,9 @@ class RandomFailoverTest(TestLvolHACluster):
         outage_type = self.perform_random_outage()
         
         if not self.sbcli_utils.is_secondary_node(self.current_outage_node):
-            self.delete_random_lvols(5)
+            self.delete_random_lvols(8)
             self.logger.info("Creating 5 new lvols, clones, and snapshots.")
-            self.create_lvols_with_fio(3)
+            self.create_lvols_with_fio(5)
             self.create_snapshots_and_clones()
         else:
             self.logger.info(f"Current outage node: {self.current_outage_node} is secondary node. Skipping delete or create")
@@ -792,7 +792,7 @@ class RandomFailoverTest(TestLvolHACluster):
                     "bs": f"{2 ** random.randint(2, 7)}K",
                     "nrfiles": 16,
                     "iodepth": 1,
-                    "numjobs": 3,
+                    "numjobs": 5,
                     "time_based": True,
                     "runtime": 2000,
                 },
@@ -824,7 +824,7 @@ class RandomFailoverTest(TestLvolHACluster):
                     "bs": f"{2 ** random.randint(2, 7)}K",
                     "nrfiles": 16,
                     "iodepth": 1,
-                    "numjobs": 3,
+                    "numjobs": 5,
                     "time_based": True,
                     "runtime": 2000,
                 },
@@ -857,8 +857,8 @@ class RandomFailoverTest(TestLvolHACluster):
                 self.restart_fio(iteration=iteration)
             outage_type = self.perform_random_outage()
             if not self.sbcli_utils.is_secondary_node(self.current_outage_node):
-                self.delete_random_lvols(5)
-                self.create_lvols_with_fio(3)
+                self.delete_random_lvols(8)
+                self.create_lvols_with_fio(5)
                 self.create_snapshots_and_clones()
             else:
                 self.logger.info(f"Current outage node: {self.current_outage_node} is secondary node. Skipping delete and create")
