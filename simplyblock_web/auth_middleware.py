@@ -10,6 +10,10 @@ from simplyblock_core.db_controller import DBController
 def token_required(f):
     @wraps(f)
     def decorated(*args, **kwargs):
+
+        if request.method == "GET" and request.path.startswith("/swagger"):
+            return f(*args, **kwargs)
+
         cluster_id = None
         cluster_secret = None
         if "Authorization" in request.headers:
