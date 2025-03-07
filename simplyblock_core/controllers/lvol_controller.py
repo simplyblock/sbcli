@@ -1261,6 +1261,9 @@ def resize_lvol(id, new_size):
             logger.error(msg)
             error = True
 
+        if error:
+            return False
+
         if primary_node:
 
             rpc_client = RPCClient(primary_node.mgmt_ip, primary_node.rpc_port, primary_node.rpc_username,
@@ -1281,31 +1284,11 @@ def resize_lvol(id, new_size):
                 sec_rpc_client = RPCClient(secondary_node.mgmt_ip, secondary_node.rpc_port, secondary_node.rpc_username,
                                            secondary_node.rpc_password)
 
-                if not is_node_leader(secondary_node, lvol.lvs_name):
-                    rpc_client.bdev_lvol_set_leader(False, lvs_name=lvol.lvs_name)
-
                 ret = sec_rpc_client.bdev_lvol_resize(f"{lvol.lvs_name}/{lvol.lvol_bdev}", size_in_mib)
                 if not ret:
                     logger.error(f"Error resizing lvol on node: {sec_node.get_id()}")
                     error = True
 
-
-    if snode.status == StorageNode.STATUS_ONLINE:
-        rpc_client = RPCClient(
-            snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
-        for iface in snode.data_nics:
-            if iface.ip4_address:
-                ret = rpc_client.nvmf_subsystem_listener_set_ana_state(
-                    lvol.nqn, iface.ip4_address, lvol.subsys_port, True)
-
-    sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
-    if sec_node and sec_node.status == StorageNode.STATUS_ONLINE:
-        sec_node_rpc_client = RPCClient(
-            sec_node.mgmt_ip, sec_node.rpc_port, sec_node.rpc_username, sec_node.rpc_password)
-        for iface in sec_node.data_nics:
-            if iface.ip4_address:
-                ret = sec_node_rpc_client.nvmf_subsystem_listener_set_ana_state(
-                    lvol.nqn, iface.ip4_address, lvol.subsys_port, False)
 
     if not error:
         lvol = db_controller.get_lvol_by_id(id)
