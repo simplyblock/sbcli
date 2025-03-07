@@ -33,6 +33,7 @@ from simplyblock_core.models.storage_node import StorageNode
 logger = logging.getLogger()
 TOP_DIR = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 
+db_controller = DBController()
 
 def _create_update_user(cluster_id, grafana_url, grafana_secret, user_secret, update_secret=False):
     session = requests.session()
@@ -294,7 +295,222 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     logger.info(c.uuid)
     return c.uuid
 
+def parse_nvme_list_output(output, target_model):
+    lines = output.splitlines()
+    for line in lines:
+        if target_model in line:
+            return line.split()[0]
+    raise Exception(f"Device with model {target_model} not found in nvme list")
 
+def cleanup_nvme(mount_point, nqn_value):
+    if not nqn_value:
+        logger.error("NQN value is empty. Skipping disconnect.")
+        return False
+    
+    logger.info(f"Starting cleanup for NVMe device with NQN: {nqn_value}")
+
+    # Unmount the filesystem
+    try:
+        subprocess.run(["sudo", "umount", mount_point], check=True)
+        logger.info(f"Unmounted {mount_point}")
+    except subprocess.CalledProcessError:
+        logger.warning(f"Failed to unmount {mount_point}, continuing...")
+        return False
+
+    # Disconnect NVMe device
+    try:
+        subprocess.run(["sudo", "nvme", "disconnect", "-n", nqn_value], check=True)
+        logger.info(f"Disconnected NVMe device: {nqn_value}")
+    except subprocess.CalledProcessError:
+        logger.error(f"Failed to disconnect NVMe device: {nqn_value}")
+        return False
+
+    # Remove the mount point directory
+    try:
+        subprocess.run(["sudo", "rm", "-rf", mount_point], check=True)
+        logger.info(f"Removed mount point: {mount_point}")
+    except subprocess.CalledProcessError:
+        logger.warning(f"Failed to remove mount point {mount_point}")
+        return False
+
+    return True
+
+def run_fio(mount_point):
+
+    if not mount_point:
+        raise ValueError("Mount point cannot be empty.")
+
+    if not os.path.exists(mount_point):
+        os.makedirs(mount_point, exist_ok=True)
+    
+    fio_config = f"""
+[test]
+ioengine=aiolib
+direct=1
+iodepth=4
+readwrite=randrw
+bs=4K
+nrfiles=4
+size=1G
+verify=md5
+numjobs=3
+directory={mount_point}
+"""
+    config_file = "fio.cfg"
+    with open(config_file, "w") as f:
+        f.write(fio_config)
+    
+    try:
+        result = subprocess.run(["sudo", "fio", config_file], check=True, text=True, capture_output=True)
+        logger.info(result.stdout)
+    except subprocess.CalledProcessError as e:
+        logger.error(f"Error running fio: {e.stderr}")
+    finally:
+        if os.path.exists(config_file):
+            os.remove(config_file)
+            logger.info("fio configuration file removed.")
+    
+
+def deploy_cluster(storage_nodes,test,ha_type,distr_ndcs,distr_npcs,enable_qos,ifname,blk_size, page_size_in_blocks, cli_pass,
+                   cap_warn, cap_crit, prov_cap_warn, prov_cap_crit, log_del_interval, metrics_retention_period,
+                   contact_point, grafana_endpoint, distr_bs, distr_chunk_bs,
+                   enable_node_affinity, qpair_count, max_queue_size, inflight_io_threshold, strict_node_anti_affinity,
+                   data_nics,spdk_image,spdk_debug,small_bufsize,large_bufsize,num_partitions_per_dev,jm_percent,
+                   spdk_cpu_mask,max_lvol,max_snap,max_prov,number_of_devices,enable_test_device,enable_ha_jm,
+                   ha_jm_count, number_of_distribs,namespace,secondary_nodes,partition_size,
+                   lvol_name, lvol_size, lvol_ha_type, pool_name, pool_max, host_id, comp, crypto, distr_vuid, max_rw_iops,
+                   max_rw_mbytes, max_r_mbytes, max_w_mbytes, with_snapshot, max_size, crypto_key1, crypto_key2,
+                   lvol_priority_class, fstype):
+    logger.info("run deploy-cleaner")
+    
+    storage_node_ops.deploy_cleaner()
+    
+    logger.info("creating cluster")
+    cluster_uuid = create_cluster(
+            blk_size, page_size_in_blocks,
+            cli_pass, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
+            ifname, log_del_interval, metrics_retention_period, contact_point, grafana_endpoint,
+            distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, enable_node_affinity,
+            qpair_count, max_queue_size, inflight_io_threshold, enable_qos, strict_node_anti_affinity)
+    
+    time.sleep(5)
+
+    storage_nodes_list=storage_nodes.split(",")
+    for node in storage_nodes_list:
+        node_ip = node.strip()
+        dev_ip=f"{node_ip}:5000"
+        add_node_status=storage_node_ops.add_node(cluster_uuid,dev_ip,ifname,data_nics,max_lvol,max_snap,max_prov,spdk_image,spdk_debug,
+                                  small_bufsize,large_bufsize,spdk_cpu_mask,num_partitions_per_dev,jm_percent,number_of_devices,
+                                  enable_test_device,namespace,number_of_distribs,enable_ha_jm,False,False,partition_size,ha_jm_count)
+        
+        
+        if not add_node_status:
+            logger.error("Could not add storage node successfully")
+            return False
+
+        time.sleep(5)
+    
+    if secondary_nodes:
+        secondary_nodes_list = secondary_nodes.split(",")
+        for node in secondary_nodes_list:
+            node_ip = node.strip()
+            dev_ip=f"{node_ip}:5000"
+            add_node_status=storage_node_ops.add_node(cluster_uuid,dev_ip,ifname,data_nics,max_lvol,max_snap,max_prov,spdk_image,spdk_debug,
+                                    small_bufsize,large_bufsize,spdk_cpu_mask,num_partitions_per_dev,jm_percent,number_of_devices,
+                                    enable_test_device,namespace,number_of_distribs,enable_ha_jm,True,False,partition_size,ha_jm_count)
+                    
+            if not add_node_status:
+                logger.error("Could not add storage node successfully")
+                return False
+
+        time.sleep(5)
+    
+    activated = cluster_activate(cluster_uuid)
+    if not activated:
+        logger.error("cluster failed to activate")
+    
+    if test:
+        if not pool_name:
+            logger.error("Pool name is empty!")
+            return False        
+        pool_id=pool_controller.add_pool(pool_name,pool_max,max_size,
+                            max_rw_iops,max_rw_mbytes,max_r_mbytes,max_w_mbytes,None,cluster_uuid)
+        
+        if not pool_id:
+            logger.error("pool did not create successfully")
+            return False 
+
+        if not lvol_name or lvol_size:
+            logger.error("lvol name or size is empty!")
+            return False   
+            
+        lvol_uuid, msg = lvol_controller.add_lvol_ha(
+                    lvol_name, lvol_size, host_id, lvol_ha_type, pool_id, comp, crypto,
+                    distr_vuid,
+                    max_rw_iops=max_rw_iops,
+                    max_rw_mbytes=max_rw_mbytes,
+                    max_r_mbytes=max_r_mbytes,
+                    max_w_mbytes=max_w_mbytes,
+                    with_snapshot=with_snapshot,
+                    max_size=max_size,
+                    crypto_key1=crypto_key1,
+                    crypto_key2=crypto_key2,
+                    lvol_priority_class=lvol_priority_class,
+                    uid=None, pvc_name=None, namespace=None)
+
+        if not lvol_uuid:
+            logger.error(f"lvol creation failed {msg}")
+        
+        
+        time.sleep(5)
+        
+        subprocess.run("sudo modprobe nvme-tcp", shell=True, check=True)
+
+        connect=lvol_controller.connect_lvol(lvol_uuid)
+        
+        if not connect:
+            logger.error("connect command generation failed")
+
+        for entry in connect:
+            connect_string = entry.get("connect")
+                
+            subprocess.run(connect_string, shell=True, check=True)
+        
+        nvme_list_command = "sudo nvme list"
+        logger.info(f"Executing NVMe list command: {nvme_list_command}")
+        result = subprocess.run(nvme_list_command, shell=True, check=True, capture_output=True, text=True)
+
+        nvme_output = result.stdout
+        device_name = parse_nvme_list_output(nvme_output, lvol_uuid)
+        
+        mkfs_command = f"sudo mkfs.{fstype} {device_name}"
+        subprocess.run(mkfs_command, shell=True, check=True)
+        
+        
+        mount_point = os.path.join(os.path.expanduser("~"), lvol_uuid)
+        os.makedirs(mount_point, exist_ok=True)
+        mount_command = f"sudo mount {device_name} {mount_point}"
+        
+        subprocess.run(mount_command, shell=True, check=True)
+
+        logger.info(f"running fio on mount point {mount_point}")
+
+        run_fio(mount_point)
+        
+        match = re.search(r'--nqn=([^\s]+)', connect_string)
+        nqn_value = match.group(1)
+        
+        cleaned = cleanup_nvme(mount_point, nqn_value)
+        if not cleaned:
+            return False
+
+        status=lvol_controller.delete_lvol(lvol_uuid)
+        
+        pool_controller.delete_pool(pool_id)
+        return True
+    else:
+        return True
+                    
 def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
                 distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, enable_node_affinity, qpair_count,
                 max_queue_size, inflight_io_threshold, enable_qos, strict_node_anti_affinity):

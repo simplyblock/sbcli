@@ -5,10 +5,10 @@ from simplyblock_core.controllers import events_controller as ec
 from simplyblock_core.db_controller import DBController
 
 logger = logging.getLogger()
-db_controller = DBController()
 
 
 def _lvol_event(lvol, message, caused_by, event):
+    db_controller = DBController()
     snode = db_controller.get_storage_node_by_id(lvol.node_id)
     ec.log_event_cluster(
         cluster_id=snode.cluster_id,

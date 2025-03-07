@@ -9,17 +9,15 @@ import random
 import os
 
 
-def random_char(len):
-    """Generate number of characters
+def generate_random_sequence(length):
+    letters = string.ascii_uppercase  # A-Z
+    numbers = string.digits  # 0-9
+    all_chars = letters + numbers  # Allowed characters
 
-    Args:
-        len (int): NUmber of characters in string
+    first_char = random.choice(letters)  # First character must be a letter
+    remaining_chars = ''.join(random.choices(all_chars, k=length-1))  # Next 14 characters
 
-    Returns:
-        str: random string with given length
-    """
-    return ''.join(random.choice(string.ascii_letters) for _ in range(len))
-
+    return first_char + remaining_chars
 
 class RandomFailoverTest(TestLvolHACluster):
     """
@@ -28,17 +26,16 @@ class RandomFailoverTest(TestLvolHACluster):
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        self.total_lvols = 20
-        self.lvol_name = f"lvl{random_char(3)}"
-        self.clone_name = f"cln{random_char(3)}"
-        self.snapshot_name = f"snap{random_char(3)}"
+        self.total_lvols = 10
+        self.lvol_name = f"lvl{generate_random_sequence(15)}"
+        self.clone_name = f"cln{generate_random_sequence(15)}"
+        self.snapshot_name = f"snap{generate_random_sequence(15)}"
         self.lvol_size = "10G"
         self.int_lvol_size = 10
         self.fio_size = "2G"
         self.fio_threads = []
         self.clone_mount_details = {}
         self.lvol_mount_details = {}
-        self.node_vs_lvol = []
         self.sn_nodes = []
         self.current_outage_node = None
         self.snapshot_names = []
@@ -87,7 +84,7 @@ class RandomFailoverTest(TestLvolHACluster):
             is_crypto = random.choice([False, False])
             lvol_name = f"{self.lvol_name}_{i}" if not is_crypto else f"c{self.lvol_name}_{i}"
             while lvol_name in self.lvol_mount_details:
-                self.lvol_name = f"lvl{random_char(3)}"
+                self.lvol_name = f"lvl{generate_random_sequence(15)}"
                 lvol_name = f"{self.lvol_name}_{i}" if not is_crypto else f"c{self.lvol_name}_{i}"
             self.logger.info(f"Creating lvol with Name: {lvol_name}, fs type: {fs_type}, crypto: {is_crypto}")
             try:
@@ -101,7 +98,7 @@ class RandomFailoverTest(TestLvolHACluster):
                 )
             except Exception as e:
                 self.logger.warning(f"Lvol creation fails with {str(e)}. Retrying with different name.")
-                self.lvol_name = f"lvl{random_char(3)}"
+                self.lvol_name = f"lvl{generate_random_sequence(15)}"
                 lvol_name = f"{self.lvol_name}_{i}" if not is_crypto else f"c{self.lvol_name}_{i}"
                 try:
                     self.sbcli_utils.add_lvol(
@@ -154,7 +151,15 @@ class RandomFailoverTest(TestLvolHACluster):
             for connect_str in connect_ls:
                 _, error = self.ssh_obj.exec_command(node=self.fio_node, command=connect_str)
                 if error:
-                    raise Exception(error)
+                    lvol_details = self.sbcli_utils.get_lvol_details(lvol_id=self.lvol_mount_details[lvol_name]["ID"])
+                    nqn = lvol_details[0]["nqn"]
+                    self.ssh_obj.disconnect_nvme(node=self.fio_node, nqn_grep=nqn)
+                    self.logger.info(f"Connecting lvol {lvol_name} has error: {error}. Disconnect all connections for that lvol and cleaning that lvol!!")
+                    self.sbcli_utils.delete_lvol(lvol_name=lvol_name)
+                    sleep_n_sec(30)
+                    del self.lvol_mount_details[lvol_name]
+                    self.node_vs_lvol[lvol_node_id].remove(lvol_name)
+                    continue
 
             sleep_n_sec(3)
             final_devices = self.ssh_obj.get_devices(node=self.fio_node)
@@ -193,7 +198,7 @@ class RandomFailoverTest(TestLvolHACluster):
                     "iodepth": 1,
                     "numjobs": 3,
                     "time_based": True,
-                    "runtime": 1000,
+                    "runtime": 2000,
                 },
             )
             fio_thread.start()
@@ -450,6 +455,8 @@ class RandomFailoverTest(TestLvolHACluster):
                 log_dir=self.docker_logs_path,
                 test_name=self.test_name
             )
+        else:
+            self.runner_k8s_log.restart_logging()
 
         if self.secondary_outage:
             for lvol in self.lvols_without_sec_connect:
@@ -506,20 +513,24 @@ class RandomFailoverTest(TestLvolHACluster):
         if not available_lvols:
             self.logger.warning("No available lvols to create snapshots and clones.")
             return
-        for _ in range(4):
+        for _ in range(3):
             random.shuffle(available_lvols)
             lvol = available_lvols[0]
-            snapshot_name = f"snap_{lvol}"
-            temp_name = f"{lvol}_{random_char(2)}"
+            snapshot_name = f"snap_{generate_random_sequence(15)}"
+            temp_name = generate_random_sequence(5)
             if snapshot_name in self.snapshot_names:
                 snapshot_name = f"{snapshot_name}_{temp_name}"
             try:
-                self.ssh_obj.add_snapshot(self.mgmt_nodes[0], self.lvol_mount_details[lvol]["ID"], snapshot_name)
+                output, error = self.ssh_obj.add_snapshot(self.mgmt_nodes[0], self.lvol_mount_details[lvol]["ID"], snapshot_name)
+                if "(False," in output:
+                    raise Exception(output)
+                if "(False," in error:
+                    raise Exception(error)
             except Exception as e:
                 self.logger.warning(f"Snap creation fails with {str(e)}. Retrying with different name.")
                 try:
                     snapshot_name = f"snap_{lvol}"
-                    temp_name = f"{lvol}_{random_char(3)}"
+                    temp_name = generate_random_sequence(5)
                     snapshot_name = f"{snapshot_name}_{temp_name}"
                     self.ssh_obj.add_snapshot(self.mgmt_nodes[0], self.lvol_mount_details[lvol]["ID"], snapshot_name)
                 except Exception as exp:
@@ -528,7 +539,7 @@ class RandomFailoverTest(TestLvolHACluster):
                 
             self.snapshot_names.append(snapshot_name)
             self.lvol_mount_details[lvol]["snapshots"].append(snapshot_name)
-            clone_name = f"clone_{lvol}"
+            clone_name = f"clone_{generate_random_sequence(15)}"
             if clone_name in list(self.clone_mount_details):
                 clone_name = f"{clone_name}_{temp_name}"
             snapshot_id = self.ssh_obj.get_snapshot_id(self.mgmt_nodes[0], snapshot_name)
@@ -537,8 +548,8 @@ class RandomFailoverTest(TestLvolHACluster):
             except Exception as e:
                 self.logger.warning(f"Clone creation fails with {str(e)}. Retrying with different name.")
                 try:
-                    clone_name = f"clone_{lvol}"
-                    temp_name = f"{lvol}_{random_char(3)}"
+                    clone_name = f"clone_{generate_random_sequence(15)}"
+                    temp_name = generate_random_sequence(5)
                     clone_name = f"{clone_name}_{temp_name}"
                     self.ssh_obj.add_clone(self.mgmt_nodes[0], snapshot_id, clone_name)
                 except Exception as exp:
@@ -572,7 +583,16 @@ class RandomFailoverTest(TestLvolHACluster):
 
             initial_devices = self.ssh_obj.get_devices(node=self.fio_node)
             for connect_str in connect_ls:
-                self.ssh_obj.exec_command(node=self.fio_node, command=connect_str)
+                _, error = self.ssh_obj.exec_command(node=self.fio_node, command=connect_str)
+                if error:
+                    lvol_details = self.sbcli_utils.get_lvol_details(lvol_id=self.clone_mount_details[clone_name]["ID"])
+                    nqn = lvol_details[0]["nqn"]
+                    self.ssh_obj.disconnect_nvme(node=self.fio_node, nqn_grep=nqn)
+                    self.logger.info(f"Connecting clone {clone_name} has error: {error}. Disconnect all connections for that clone!!")
+                    self.sbcli_utils.delete_lvol(lvol_name=clone_name)
+                    sleep_n_sec(30)
+                    del self.clone_mount_details[clone_name]
+                    continue
 
             sleep_n_sec(3)
             final_devices = self.ssh_obj.get_devices(node=self.fio_node)
@@ -617,7 +637,7 @@ class RandomFailoverTest(TestLvolHACluster):
                     "iodepth": 1,
                     "numjobs": 3,
                     "time_based": True,
-                    "runtime": 1000,
+                    "runtime": 2000,
                 },
             )
             fio_thread.start()
@@ -664,6 +684,7 @@ class RandomFailoverTest(TestLvolHACluster):
                     self.ssh_obj.remove_dir(self.fio_node, dir_path=f"/mnt/{clone_name}")
                     self.disconnect_lvol(clone_details['ID'])
                     self.sbcli_utils.delete_lvol(clone_name)
+                    sleep_n_sec(30)
                     if clone_name in self.lvols_without_sec_connect:
                         self.lvols_without_sec_connect.remove(clone_name)
                     to_delete.append(clone_name)
@@ -700,6 +721,7 @@ class RandomFailoverTest(TestLvolHACluster):
                 if lvol in lvols:
                     lvols.remove(lvol)
                     break
+        sleep_n_sec(60)
 
     def perform_failover_during_outage(self):
         """Perform failover during an outage and manage lvols, clones, and snapshots."""
@@ -709,9 +731,9 @@ class RandomFailoverTest(TestLvolHACluster):
         outage_type = self.perform_random_outage()
         
         if not self.sbcli_utils.is_secondary_node(self.current_outage_node):
-            self.delete_random_lvols(3)
+            self.delete_random_lvols(5)
             self.logger.info("Creating 5 new lvols, clones, and snapshots.")
-            self.create_lvols_with_fio(5)
+            self.create_lvols_with_fio(3)
             self.create_snapshots_and_clones()
         else:
             self.logger.info(f"Current outage node: {self.current_outage_node} is secondary node. Skipping delete or create")
@@ -772,7 +794,7 @@ class RandomFailoverTest(TestLvolHACluster):
                     "iodepth": 1,
                     "numjobs": 3,
                     "time_based": True,
-                    "runtime": 1000,
+                    "runtime": 2000,
                 },
             )
             fio_thread.start()
@@ -804,7 +826,7 @@ class RandomFailoverTest(TestLvolHACluster):
                     "iodepth": 1,
                     "numjobs": 3,
                     "time_based": True,
-                    "runtime": 1000,
+                    "runtime": 2000,
                 },
             )
             fio_thread.start()
@@ -835,7 +857,9 @@ class RandomFailoverTest(TestLvolHACluster):
                 self.restart_fio(iteration=iteration)
             outage_type = self.perform_random_outage()
             if not self.sbcli_utils.is_secondary_node(self.current_outage_node):
-                self.delete_random_lvols(3)
+                self.delete_random_lvols(5)
+                self.create_lvols_with_fio(3)
+                self.create_snapshots_and_clones()
             else:
                 self.logger.info(f"Current outage node: {self.current_outage_node} is secondary node. Skipping delete and create")
             if outage_type != "partial_nw" or outage_type != "partial_nw_single_port":

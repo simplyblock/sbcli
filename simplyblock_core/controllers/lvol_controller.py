@@ -21,7 +21,6 @@ from simplyblock_core.rpc_client import RPCClient
 from simplyblock_core.snode_client import SNodeClient
 
 logger = lg.getLogger()
-db_controller = DBController()
 
 
 def _generate_hex_string(length):
@@ -85,6 +84,7 @@ def validate_add_lvol_func(name, size, host_id_or_name, pool_id_or_name,
                            max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes):
     #  Validation
     #  name validation
+    db_controller = DBController()
     if not name or name == "":
         return False, "Name can not be empty"
 
@@ -168,6 +168,7 @@ def validate_add_lvol_func(name, size, host_id_or_name, pool_id_or_name,
 
 
 def _get_next_3_nodes(cluster_id, lvol_size=0):
+    db_controller = DBController()
     snodes = db_controller.get_storage_nodes_by_cluster_id(cluster_id)
     online_nodes = []
     node_stats = {}
@@ -303,6 +304,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
                 with_snapshot=False, max_size=0, crypto_key1=None, crypto_key2=None, lvol_priority_class=0,
                 uid=None, pvc_name=None, namespace=None):
 
+    db_controller = DBController()
     logger.info(f"Adding LVol: {name}")
     host_node = None
     if host_id_or_name:
@@ -744,6 +746,7 @@ def recreate_lvol_on_node(lvol, snode, ha_inode_self=0, ana_state=None):
 
 
 def recreate_lvol(lvol_id):
+    db_controller = DBController()
     lvol = db_controller.get_lvol_by_id(lvol_id)
     if not lvol:
         logger.error(f"lvol not found: {lvol_id}")
@@ -806,6 +809,7 @@ def _remove_bdev_stack(bdev_stack, rpc_client):
 
 
 def delete_lvol_from_node(lvol_id, node_id, clear_data=True):
+    db_controller = DBController()
     lvol = db_controller.get_lvol_by_id(lvol_id)
     snode = db_controller.get_storage_node_by_id(node_id)
     if not lvol or not snode:
@@ -831,6 +835,7 @@ def delete_lvol_from_node(lvol_id, node_id, clear_data=True):
 
 
 def delete_lvol(id_or_name, force_delete=False):
+    db_controller = DBController()
     lvol = db_controller.get_lvol_by_id(id_or_name)
     if not lvol:
         lvol = db_controller.get_lvol_by_name(id_or_name)
@@ -991,6 +996,7 @@ def delete_lvol(id_or_name, force_delete=False):
 
 
 def set_lvol(uuid, max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes, name=None):
+    db_controller = DBController()
     lvol = db_controller.get_lvol_by_id(uuid)
     if not lvol:
         logger.error(f"lvol not found: {uuid}")
@@ -1042,6 +1048,7 @@ def set_lvol(uuid, max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes, name=
 
 
 def list_lvols(is_json, cluster_id, pool_id_or_name, all=False):
+    db_controller = DBController()
     lvols = []
     if cluster_id:
         lvols = db_controller.get_lvols(cluster_id)
@@ -1081,6 +1088,7 @@ def list_lvols(is_json, cluster_id, pool_id_or_name, all=False):
 
 
 def list_lvols_mem(is_json, is_csv):
+    db_controller = DBController()
     lvols = db_controller.get_lvols()
     data = []
     for lvol in lvols:
@@ -1105,6 +1113,7 @@ def list_lvols_mem(is_json, is_csv):
 
 
 def get_lvol(lvol_id_or_name, is_json):
+    db_controller = DBController()
     lvol = None
     for lv in db_controller.get_lvols():  # pass
         if lv.get_id() == lvol_id_or_name or lv.lvol_name == lvol_id_or_name:
@@ -1127,6 +1136,7 @@ def get_lvol(lvol_id_or_name, is_json):
 
 
 def connect_lvol(uuid):
+    db_controller = DBController()
     lvol = db_controller.get_lvol_by_id(uuid)
     if not lvol:
         logger.error(f"lvol not found: {uuid}")
@@ -1165,6 +1175,7 @@ def connect_lvol(uuid):
 
 
 def resize_lvol(id, new_size):
+    db_controller = DBController()
     lvol = db_controller.get_lvol_by_id(id)
     if not lvol:
         logger.error(f"LVol not found: {id}")
@@ -1301,6 +1312,7 @@ def resize_lvol(id, new_size):
 
 
 def set_read_only(id):
+    db_controller = DBController()
     lvol = db_controller.get_lvol_by_id(id)
     if not lvol:
         logger.error(f"LVol not found: {id}")
@@ -1340,6 +1352,7 @@ def create_snapshot(lvol_id, snapshot_name):
 
 
 def get_capacity(lvol_uuid, history, records_count=20, parse_sizes=True):
+    db_controller = DBController()
     lvol = db_controller.get_lvol_by_id(lvol_uuid)
     if not lvol:
         logger.error(f"LVol not found: {lvol_uuid}")
@@ -1381,6 +1394,7 @@ def get_capacity(lvol_uuid, history, records_count=20, parse_sizes=True):
 
 
 def get_io_stats(lvol_uuid, history, records_count=20, parse_sizes=True, with_sizes=False):
+    db_controller = DBController()
     lvol = db_controller.get_lvol_by_id(lvol_uuid)
     if not lvol:
         logger.error(f"LVol not found: {lvol_uuid}")
@@ -1507,6 +1521,7 @@ def migrate(lvol_id, node_id):
 
 
 def move(lvol_id, node_id, force=False):
+    db_controller = DBController()
     lvol = db_controller.get_lvol_by_id(lvol_id)
     if not lvol:
         logger.error(f"lvol not found: {lvol_id}")
@@ -1551,6 +1566,7 @@ def move(lvol_id, node_id, force=False):
 
 def inflate_lvol(lvol_id):
 
+    db_controller = DBController()
     lvol = db_controller.get_lvol_by_id(lvol_id)
     if not lvol:
         logger.error(f"LVol not found: {lvol_id}")
