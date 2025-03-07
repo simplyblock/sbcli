@@ -1209,7 +1209,7 @@ def resize_lvol(id, new_size):
 
     snode = db_controller.get_storage_node_by_id(lvol.node_id)
 
-    logger.info(f"Resizing LVol: {lvol.get_id()} on primary node: {snode.get_id()}")
+    logger.info(f"Resizing LVol: {lvol.get_id()}")
     logger.info(f"Current size: {utils.humanbytes(lvol.size)}, new size: {utils.humanbytes(new_size)}")
 
     size_in_mib = int(new_size / (1000 * 1000))
@@ -1276,6 +1276,7 @@ def resize_lvol(id, new_size):
             return False
 
         if primary_node:
+            logger.info(f"Resizing LVol: {lvol.get_id()} on node: {primary_node.get_id()}")
 
             rpc_client = RPCClient(primary_node.mgmt_ip, primary_node.rpc_port, primary_node.rpc_username,
                                        primary_node.rpc_password)
@@ -1289,6 +1290,7 @@ def resize_lvol(id, new_size):
                 error = True
 
         if secondary_node:
+            logger.info(f"Resizing LVol: {lvol.get_id()} on node: {secondary_node.get_id()}")
             secondary_node = db_controller.get_storage_node_by_id(secondary_node.get_id())
             if secondary_node.status == StorageNode.STATUS_ONLINE:
 
