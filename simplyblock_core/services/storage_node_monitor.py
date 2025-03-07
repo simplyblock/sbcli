@@ -305,7 +305,8 @@ while True:
 
                 elif ping_check and node_api_check and (not spdk_process or not node_rpc_check):
                     # add node to auto restart
-                    if cluster.status in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_SUSPENDED]:
+                    if cluster.status in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED,
+                                          Cluster.STATUS_SUSPENDED, Cluster.STATUS_READONLY]:
                         set_node_offline(snode)
                         tasks_controller.add_node_to_auto_restart(snode)
                 elif not node_port_check:
@@ -315,7 +316,6 @@ while True:
                             set_node_down(snode, dev_status=NVMeDevice.STATUS_UNAVAILABLE)
                         else:
                             set_node_down(snode, dev_status=NVMeDevice.STATUS_ONLINE)
-
 
                 else:
                     set_node_offline(snode)
