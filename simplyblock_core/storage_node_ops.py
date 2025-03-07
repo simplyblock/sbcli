@@ -2951,6 +2951,9 @@ def recreate_lvstore(snode):
             prim_node_suspend = True
         elif sec_node.status == StorageNode.STATUS_ONLINE:
             sec_rpc_client = RPCClient(sec_node.mgmt_ip, sec_node.rpc_port, sec_node.rpc_username, sec_node.rpc_password)
+            sec_node.lvstore_status = "in_creation"
+            sec_node.write_to_db()
+            time.sleep(3)
 
             sec_node_api.firewall_set_port(snode.lvol_subsys_port, "tcp", "block", sec_node.rpc_port)
             tcp_ports_events.port_deny(sec_node, snode.lvol_subsys_port)
@@ -3006,6 +3009,9 @@ def recreate_lvstore(snode):
         time.sleep(10)
         sec_node_api.firewall_set_port(snode.lvol_subsys_port, "tcp", "allow", sec_node.rpc_port)
         tcp_ports_events.port_allowed(sec_node, snode.lvol_subsys_port)
+        sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
+        sec_node.lvstore_status = "ready"
+        sec_node.write_to_db()
 
     return True
 

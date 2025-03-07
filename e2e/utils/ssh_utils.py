@@ -9,7 +9,7 @@ from logger_config import setup_logger
 from pathlib import Path
 from datetime import datetime
 import random, string, re
-
+import subprocess
 
 
 SSH_KEY_LOCATION = os.path.join(Path.home(), ".ssh", os.environ.get("KEY_NAME"))
@@ -541,11 +541,13 @@ class SshUtils:
 
     def add_snapshot(self, node, lvol_id, snapshot_name):
         cmd = f"{self.base_cmd} -d snapshot add {lvol_id} {snapshot_name}"
-        self.exec_command(node=node, command=cmd)
+        output, error = self.exec_command(node=node, command=cmd)
+        return output, error
     
     def add_clone(self, node, snapshot_id, clone_name):
         cmd = f"{self.base_cmd} -d snapshot clone {snapshot_id} {clone_name}"
-        self.exec_command(node=node, command=cmd)
+        output, error = self.exec_command(node=node, command=cmd)
+        return output, error
 
     def delete_snapshot(self, node, snapshot_id):
         cmd = "%s snapshot list | grep -i '%s' | awk '{print $4}'" % (self.base_cmd, snapshot_id)
@@ -748,8 +750,8 @@ class SshUtils:
             return
 
         # Combine disconnect commands for all interfaces
-        disconnect_cmds = " && ".join([f"sudo nmcli dev disconnect {iface}" for iface in interfaces])
-        reconnect_cmds = " && ".join([f"sudo nmcli dev connect {iface}" for iface in interfaces])
+        disconnect_cmds = " && ".join([f"sudo nmcli connection down {iface}" for iface in interfaces])
+        reconnect_cmds = " && ".join([f"sudo nmcli connection up {iface}" for iface in interfaces])
 
         cmd = (
             f'nohup sh -c "{disconnect_cmds} && sleep {reconnect_time} && {reconnect_cmds}" &'
@@ -1363,7 +1365,7 @@ class SshUtils:
                 if start_time <= log_time <= end_time:
                     logs_in_window.append(line)
             except Exception as e:
-                self.logger.warning(f"Skipping malformed dmesg line: {line} ({e})")
+                self.logger.debug(f"Skipping malformed dmesg line: {line} ({e})")
 
         return logs_in_window
     
@@ -1461,3 +1463,145 @@ class SshUtils:
     #     self.exec_command(node_ip, f"sudo tmux new-session -d -s netstat_log 'bash -c \"while true; do netstat -s | grep \\\"segments dropped\\\" >> {netstat_log}; sleep 5; done\"'")
     #     self.exec_command(node_ip, f"sudo tmux new-session -d -s dmesg_log 'bash -c \"while true; do sudo dmesg | grep -i \\\"tcp\\\" >> {dmesg_log}; sleep 5; done\"'")
 
+
+class RunnerK8sLog:
+    """
+    RunnerLog: A utility class for managing Kubernetes pod logging and debugging.
+
+    Methods:
+        - start_logging(): Starts continuous logging for running Kubernetes pods.
+        - restart_logging(): Restarts logging after an outage.
+        - stop_logging(): Stops all running log sessions.
+        - store_pod_descriptions(): Saves 'kubectl describe' outputs for all running pods.
+        - get_running_pods(): Fetches all currently running pods in a namespace.
+    """
+
+    def __init__(self, namespace="spdk-csi", log_dir="/var/logs", test_name="test_run"):
+        """
+        Initialize the RunnerLog class.
+
+        Args:
+            namespace (str): Kubernetes namespace.
+            log_dir (str): Directory to store log files.
+            test_name (str): Name of the test or session.
+        """
+        self.namespace = namespace
+        self.log_dir = log_dir
+        self.test_name = test_name
+
+        # Ensure log directory exists
+        os.makedirs(self.log_dir, exist_ok=True)
+
+        self._check_and_install_tmux()
+
+    def _check_and_install_tmux(self):
+        """
+        Check if tmux is installed on the runner. If not, install it.
+        """
+        try:
+            subprocess.run(["tmux", "-V"], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            print("tmux is already installed.")
+        except subprocess.CalledProcessError:
+            print("tmux is not installed. Installing now...")
+            install_cmd = "sudo apt-get update -y && sudo apt-get install -y tmux || sudo yum install -y tmux"
+            subprocess.run(install_cmd, shell=True, check=True)
+            print("tmux installed successfully.")
+
+    def generate_random_string(self, length=6):
+        """Generate a random string of uppercase letters and digits."""
+        return ''.join(random.choices(string.ascii_uppercase + string.digits, k=length))
+
+    def get_running_pods(self):
+        """
+        Fetch running pods in the specified namespace.
+
+        Returns:
+            list: A list of running pod names.
+        """
+        try:
+            cmd = ["kubectl", "get", "pods", "-n", self.namespace, "--no-headers", "-o", "custom-columns=:metadata.name"]
+            output = subprocess.check_output(cmd, universal_newlines=True).strip()
+            return output.split("\n") if output else []
+        except subprocess.CalledProcessError as e:
+            print(f"Error fetching running pods: {e}")
+            return []
+
+    def start_logging(self):
+        """
+        Start continuous logging for all running Kubernetes pods (before outage).
+        """
+        self._log_pods("before_outage")
+
+    def restart_logging(self):
+        """
+        Restart Kubernetes logging after an outage (after outage).
+        """
+        self._log_pods("after_outage")
+
+    def _log_pods(self, outage_type):
+        """
+        Internal method to start logging for Kubernetes pods and all their containers.
+
+        Args:
+            outage_type (str): "before_outage" or "after_outage".
+        """
+        pods = self.get_running_pods()
+        if not pods:
+            print(f"No running pods found for logging ({outage_type}).")
+            return
+
+        for pod in pods:
+            # Filter pods based on prefixes
+            if not (pod.startswith("storage-node-ds") or pod.startswith("snode-spdk-deployment") or pod.startswith("storage-node-handler-")):
+                continue
+
+            # Get all containers in the pod
+            container_list_cmd = ["kubectl", "get", "pod", pod, "-n", self.namespace, "-o", "jsonpath={.spec.containers[*].name}"]
+            try:
+                containers = subprocess.check_output(container_list_cmd, universal_newlines=True).strip().split()
+            except subprocess.CalledProcessError as e:
+                print(f"Error fetching containers for pod {pod}: {e}")
+                continue
+
+            for container in containers:
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                log_file = f"{self.log_dir}/{pod}_{container}_{self.test_name}_{timestamp}_{outage_type}.log"
+                session_name = f"{pod}_{container}_logs_{self.generate_random_string()}"
+
+                command_logs = [
+                    "tmux", "new-session", "-d", "-s", session_name,
+                    "bash", "-c",
+                    f"kubectl logs --follow {pod} -c {container} -n {self.namespace} > {log_file} 2>&1"
+                ]
+
+                subprocess.Popen(command_logs)
+                print(f"Started logging for pod '{pod}', container '{container}' ({outage_type}), logs stored at {log_file}.")
+
+
+    def stop_logging(self):
+        """
+        Stop all Kubernetes logging processes.
+        """
+        stop_command = ["tmux", "kill-server"]
+        subprocess.run(stop_command)
+        print("Stopped all Kubernetes logging processes.")
+
+    def store_pod_descriptions(self):
+        """
+        Store 'kubectl describe' outputs for all running pods.
+        """
+        pods = self.get_running_pods()
+        if not pods:
+            print("No running pods found for descriptions.")
+            return
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+        for pod in pods:
+            describe_file = f"{self.log_dir}/{pod}_{self.test_name}_{timestamp}_describe.log"
+            describe_command = ["kubectl", "describe", "pod", pod, "-n", self.namespace]
+
+            with open(describe_file, "w") as f:
+                subprocess.run(describe_command, stdout=f, stderr=subprocess.STDOUT)
+
+            print(f"Stored pod description for '{pod}' at {describe_file}.")

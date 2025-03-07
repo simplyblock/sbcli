@@ -5,10 +5,10 @@ from simplyblock_core.controllers import events_controller as ec
 from simplyblock_core.db_controller import DBController
 
 logger = logging.getLogger()
-db_controller = DBController()
 
 
 def _lvol_event(lvol, message, caused_by, event):
+    db_controller = DBController()
     snode = db_controller.get_storage_node_by_id(lvol.node_id)
     ec.log_event_cluster(
         cluster_id=snode.cluster_id,
@@ -29,17 +29,17 @@ def lvol_delete(lvol, caused_by=ec.CAUSED_BY_CLI):
 
 
 def lvol_status_change(lvol, new_state, old_status, caused_by=ec.CAUSED_BY_CLI):
-    _lvol_event(lvol, f"LVol status changed from: {old_status} to: {new_state}", caused_by, ec.EVENT_STATUS_CHANGE)
+    _lvol_event(lvol, f"LVol {lvol.get_id()} status changed from: {old_status} to: {new_state}", caused_by, ec.EVENT_STATUS_CHANGE)
 
 
 def lvol_migrate(lvol, old_node, new_node, caused_by=ec.CAUSED_BY_CLI):
-    _lvol_event(lvol, f"LVol migrated from: {old_node}, \nto {new_node}", caused_by, ec.EVENT_STATUS_CHANGE)
+    _lvol_event(lvol, f"LVol {lvol.get_id()} migrated from: {old_node}, \nto {new_node}", caused_by, ec.EVENT_STATUS_CHANGE)
 
 
 def lvol_health_check_change(lvol, new_state, old_status, caused_by=ec.CAUSED_BY_CLI):
-    _lvol_event(lvol, f"LVol health check changed from: {old_status} to: {new_state}", caused_by, ec.EVENT_STATUS_CHANGE)
+    _lvol_event(lvol, f"LVol {lvol.get_id()} health check changed from: {old_status} to: {new_state}", caused_by, ec.EVENT_STATUS_CHANGE)
 
 
 def lvol_io_error_change(lvol, new_state, old_status, caused_by=ec.CAUSED_BY_CLI):
-    _lvol_event(lvol, f"LVol IO Error changed from: {old_status} to: {new_state}", caused_by, ec.EVENT_STATUS_CHANGE)
+    _lvol_event(lvol, f"LVol {lvol.get_id()} IO Error changed from: {old_status} to: {new_state}", caused_by, ec.EVENT_STATUS_CHANGE)
 

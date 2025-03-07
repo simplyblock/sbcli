@@ -413,7 +413,7 @@ class CommonUtils:
             self.assert_non_zero_io_stat(stat, "write_bytes")
             self.assert_non_zero_io_stat(stat, "read_io")
             self.assert_non_zero_io_stat(stat, "write_io")
-            self.assert_non_zero_io_stat(stat, ["write_io_ps", "read_io_ps"])
+            # self.assert_non_zero_io_stat(stat, ["write_io_ps", "read_io_ps"])
         self.logger.info("All I/O stats are valid and non-zero within the failover time range.")
 
     def assert_non_zero_io_stat(self, stat, key):

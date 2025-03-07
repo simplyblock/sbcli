@@ -61,7 +61,7 @@ spec:
 
       initContainers:
         - name: copy-script
-          image: busybox
+          image: public.ecr.aws/simply-block/busybox
           command: ["sh", "-c", "echo \"{{ FDB_CONNECTION }}\" > /etc/foundationdb/fdb.cluster"]
           volumeMounts:
             - name: foundationdb
