@@ -657,7 +657,7 @@ def cluster_activate(cl_id, force=False, force_lvstore_create=False):
         else:
             ret = storage_node_ops.create_lvstore(snode, cluster.distr_ndcs, cluster.distr_npcs, cluster.distr_bs,
                                               cluster.distr_chunk_bs, cluster.page_size_in_blocks, max_size, snodes,
-                                              cluster.persistent, cluster.support_storage_tiering, snode.secondary_stg_name,
+                                              cluster.support_storage_tiering, snode.secondary_stg_name,
                                               cluster.disaster_recovery, snode.secondary_io_timeout_us, snode.ghost_capacity,
                                               snode.fifo_main_capacity, snode.fifo_small_capacity)
         snode = db_controller.get_storage_node_by_id(snode.get_id())
