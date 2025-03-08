@@ -133,9 +133,32 @@ jobs:
         run: |
           cd $GITHUB_WORKSPACE/simplyBlockDeploy
           helm uninstall -n spdk-csi spdk-csi || echo "No helm release found. Skipping uninstall."
+          
+          echo "[INFO] Deleting deployments..."
           kubectl delete deployments --all -n spdk-csi || echo "No deployments found. Skipping delete deployment."
-          kubectl delete daemonset --all -n spdk-csi || echo "No deployments found. Skipping delete deployment."
+          
+          echo "[INFO] Deleting daemonsets..."
+          kubectl delete daemonset --all -n spdk-csi || echo "No daemonsets found. Skipping delete."
+          
+          echo "[INFO] Deleting all pods..."
           kubectl delete pods --all -n spdk-csi --timeout=10s || echo "Pods not deleted within timeout."
+
+          echo "[INFO] Waiting for all resources to be deleted..."
+          timeout=120  # Max wait time (in seconds)
+          interval=5  # Check every 5 seconds
+          elapsed=0
+
+          while [[ $(kubectl get all -n spdk-csi --no-headers 2>/dev/null | wc -l) -gt 0 && $elapsed -lt $timeout ]]; do
+            echo "[INFO] Waiting for resources to be deleted... Elapsed: ${elapsed}s"
+            sleep $interval
+            elapsed=$((elapsed + interval))
+          done
+
+          if [[ $(kubectl get all -n spdk-csi --no-headers 2>/dev/null | wc -l) -eq 0 ]]; then
+            echo "[SUCCESS] All resources deleted successfully."
+          else
+            echo "[WARNING] Resources were not deleted within the timeout of ${timeout}s."
+          fi
 
           ./bootstrap-cluster.sh --sbcli-cmd "$SBCLI_CMD" \
             --max-lvol 20 --max-snap 20 --max-prov 150G --number-of-devices 3 \
@@ -581,9 +604,33 @@ jobs:
         if: success() && env.FAILED_TESTS == '0'
         run: |
           helm uninstall -n spdk-csi spdk-csi || echo "No helm release found. Skipping uninstall."
+          
+          echo "[INFO] Deleting deployments..."
           kubectl delete deployments --all -n spdk-csi || echo "No deployments found. Skipping delete deployment."
-          kubectl delete daemonset --all -n spdk-csi || echo "No deployments found. Skipping delete deployment."
+          
+          echo "[INFO] Deleting daemonsets..."
+          kubectl delete daemonset --all -n spdk-csi || echo "No daemonsets found. Skipping delete."
+          
+          echo "[INFO] Deleting all pods..."
           kubectl delete pods --all -n spdk-csi --timeout=10s || echo "Pods not deleted within timeout."
+
+          echo "[INFO] Waiting for all resources to be deleted..."
+          timeout=120  # Max wait time (in seconds)
+          interval=5  # Check every 5 seconds
+          elapsed=0
+
+          while [[ $(kubectl get all -n spdk-csi --no-headers 2>/dev/null | wc -l) -gt 0 && $elapsed -lt $timeout ]]; do
+            echo "[INFO] Waiting for resources to be deleted... Elapsed: ${elapsed}s"
+            sleep $interval
+            elapsed=$((elapsed + interval))
+          done
+
+          if [[ $(kubectl get all -n spdk-csi --no-headers 2>/dev/null | wc -l) -eq 0 ]]; then
+            echo "[SUCCESS] All resources deleted successfully."
+          else
+            echo "[WARNING] Resources were not deleted within the timeout of ${timeout}s."
+          fi
+
           for node in $K3S_MNODES $STORAGE_PRIVATE_IPS $SEC_STORAGE_PRIVATE_IPS; do
             ssh -i ~/.ssh/simplyblock-us-east-2.pem  root@${node} "k3s-agent-uninstall.sh"
           done
