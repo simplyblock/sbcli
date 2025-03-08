@@ -589,8 +589,16 @@ def cluster_toggle_disaster_recovery_status(cl_id, disaster_recovery):
     
     snodes = db_controller.get_storage_nodes_by_cluster_id(cl_id)
 
-    # TODO: get distribs of each snode
-    return False
+    for node in snodes:
+        rpc_client = RPCClient(
+        node.mgmt_ip, node.rpc_port,
+        node.rpc_username, node.rpc_password, timeout=5, retry=2)
+
+        for bdev in node.lvstore_stack:
+            if bdev['type'] == "bdev_distr":
+                rpc_client.bdev_distrib_toggle_disaster_recovery_status(bdev['name'], disaster_recovery)
+    
+    return True
 
 
 def cluster_activate(cl_id, force=False, force_lvstore_create=False):
