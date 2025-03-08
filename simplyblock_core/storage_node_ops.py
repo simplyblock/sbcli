@@ -2782,6 +2782,41 @@ def get_spdk_info(node_id):
         })
     return utils.print_table(data)
 
+def s3_bdev_create(node_id, name, bdb_lcpu_mask, s3_lcpu_mask, s3_thread_pool_size):
+    db_controller = DBController()
+
+    snode = db_controller.get_storage_node_by_id(node_id)
+    if not snode:
+        logger.error(f"Can not find storage node: {node_id}")
+        return False
+    
+    rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
+
+    return rpc_client.bdev_s3_create(name, bdb_lcpu_mask, s3_lcpu_mask, s3_thread_pool_size)
+
+def s3_bdev_delete(node_id, name):
+    db_controller = DBController()
+
+    snode = db_controller.get_storage_node_by_id(node_id)
+    if not snode:
+        logger.error(f"Can not find storage node: {node_id}")
+        return False
+
+    rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
+
+    return rpc_client.bdev_s3_delete(name)
+
+def s3_bdev_add_bucket_name(node_id, name, bucket_name):
+    db_controller = DBController()
+
+    snode = db_controller.get_storage_node_by_id(node_id)
+    if not snode:
+        logger.error(f"Can not find storage node: {node_id}")
+        return False
+
+    rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
+
+    return rpc_client.bdev_s3_add_bucket(name, bucket_name)
 
 def get(node_id):
     db_controller = DBController()

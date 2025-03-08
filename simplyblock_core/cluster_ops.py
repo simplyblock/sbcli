@@ -580,6 +580,18 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
 
     return cluster.get_id()
 
+def cluster_toggle_disaster_recovery_status(cl_id, disaster_recovery):
+    db_controller = DBController()
+    cluster = db_controller.get_cluster_by_id(cl_id)
+    if not cluster:
+        logger.error(f"Cluster not found {cl_id}")
+        return False
+    
+    snodes = db_controller.get_storage_nodes_by_cluster_id(cl_id)
+
+    # TODO: get distribs of each snode
+    return False
+
 
 def cluster_activate(cl_id, force=False, force_lvstore_create=False):
     db_controller = DBController()

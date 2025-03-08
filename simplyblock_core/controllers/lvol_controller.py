@@ -1699,3 +1699,63 @@ def restore_snapshot(lvs_name, orig_name, orig_uuid, clear_method, id_of_blob_to
     snode.rpc_password)
 
     return rpc_client.bdev_lvol_recover(lvs_name, orig_name, orig_uuid, clear_method, id_of_blob_to_recover)
+
+def set_tiering_modes(lvol_uuid, is_tiered, force_fetch, sync_fetch, pure_flush_or_evict, not_evict_blob_md):
+    lvol = db_controller.get_lvol_by_id(lvol_uuid)
+    if not lvol:
+        logger.error(f"LVol not found: {lvol_uuid}")
+        return False
+    pool = db_controller.get_pool_by_id(lvol.pool_uuid)
+    if pool.status == Pool.STATUS_INACTIVE:
+        logger.error(f"Pool is disabled")
+        return False
+
+    snode = db_controller.get_storage_node_by_id(lvol.node_id)
+
+    rpc_client = RPCClient(
+    snode.mgmt_ip,
+    snode.rpc_port,
+    snode.rpc_username,
+    snode.rpc_password)
+
+    return rpc_client.bdev_lvol_set_tiering_info(lvol_uuid, is_tiered, force_fetch, sync_fetch, pure_flush_or_evict, not_evict_blob_md)
+
+def set_distr_cache_capacities(lvol_uuid, distr_name, ghost_capacity, fifo_main_capacity, fifo_small_capacity):
+    lvol = db_controller.get_lvol_by_id(lvol_uuid)
+    if not lvol:
+        logger.error(f"LVol not found: {lvol_uuid}")
+        return False
+    pool = db_controller.get_pool_by_id(lvol.pool_uuid)
+    if pool.status == Pool.STATUS_INACTIVE:
+        logger.error(f"Pool is disabled")
+        return False
+
+    snode = db_controller.get_storage_node_by_id(lvol.node_id)
+
+    rpc_client = RPCClient(
+    snode.mgmt_ip,
+    snode.rpc_port,
+    snode.rpc_username,
+    snode.rpc_password)
+
+    return rpc_client.distr_change_or_keep_page_cache_list_capacities(distr_name, ghost_capacity, fifo_main_capacity, fifo_small_capacity)
+
+def set_distr_timeout_us(lvol_uuid, distr_name, secondary_io_timeout_us):
+    lvol = db_controller.get_lvol_by_id(lvol_uuid)
+    if not lvol:
+        logger.error(f"LVol not found: {lvol_uuid}")
+        return False
+    pool = db_controller.get_pool_by_id(lvol.pool_uuid)
+    if pool.status == Pool.STATUS_INACTIVE:
+        logger.error(f"Pool is disabled")
+        return False
+
+    snode = db_controller.get_storage_node_by_id(lvol.node_id)
+
+    rpc_client = RPCClient(
+    snode.mgmt_ip,
+    snode.rpc_port,
+    snode.rpc_username,
+    snode.rpc_password)
+
+    return rpc_client.distr_change_secondary_io_timeout_us(distr_name, secondary_io_timeout_us)
