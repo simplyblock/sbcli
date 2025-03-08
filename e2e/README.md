@@ -1,7 +1,7 @@
 # Running Stress Tests
 
 ## 1. Login to the Test Machine
-- SSH into the **192.168.10.72** machine as `root` using the **us-east-2** key.
+- SSH into the **192.168.10.72** machine as `root` using the **simplyblock-us-east-2.pem** key.
 - Navigate to the stress test directory:
   ```sh
   cd raunak/sbcli-client-stress-node-affinity/e2e
