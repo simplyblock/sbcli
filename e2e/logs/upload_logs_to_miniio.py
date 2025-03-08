@@ -273,33 +273,69 @@ def upload_k8s_logs():
 
 
 # **Upload Logs from PWD/logs Directory to MinIO**
-def upload_local_logs():
-    """Uploads log files from the local 'logs/' directory to MinIO."""
-    logs_dir = os.path.join(os.getcwd(), "logs")  # Get the full path to 'logs/'
+def upload_local_logs(k8s=False):
+    """Uploads log files from the local 'logs/' directory to MinIO.
     
+    If k8s=True, it creates and uploads a tar archive of the 'container-logs/' directory in $HOME.
+    """
+    logs_dir = os.path.join(os.getcwd(), "logs")  # Get the full path to 'logs/'
+
     if not os.path.exists(logs_dir):
         print(f"[WARNING] {logs_dir} does not exist. Skipping local log upload.")
-        return
-    
-    print(f"[INFO] Uploading local logs from {logs_dir} to MinIO...")
+    else:
+        print(f"[INFO] Uploading local logs from {logs_dir} to MinIO...")
 
-    # Iterate over all files in the logs directory
-    for file in os.listdir(logs_dir):
-        local_file_path = os.path.join(logs_dir, file)
-        
-        # Skip directories, only upload files
-        if os.path.isdir(local_file_path):
-            continue
+        # Iterate over all files in the logs directory
+        for file in os.listdir(logs_dir):
+            local_file_path = os.path.join(logs_dir, file)
 
-        # Define MinIO file path
-        file_key = f"{UPLOAD_FOLDER}/runner-node/logs/{file}"
-        
-        try:
-            # Upload to MinIO
-            s3_client.upload_file(local_file_path, MINIO_BUCKET, file_key)
-            print(f"[SUCCESS] Uploaded: {file_key}")
-        except Exception as e:
-            print(f"[ERROR] Failed to upload {file}: {e}")
+            # Skip directories, only upload files
+            if os.path.isdir(local_file_path):
+                continue
+
+            # Define MinIO file path
+            file_key = f"{UPLOAD_FOLDER}/runner-node/logs/{file}"
+
+            try:
+                # Upload to MinIO
+                s3_client.upload_file(local_file_path, MINIO_BUCKET, file_key)
+                print(f"[SUCCESS] Uploaded: {file_key}")
+            except Exception as e:
+                print(f"[ERROR] Failed to upload {file}: {e}")
+
+    # **Kubernetes-Specific Handling**
+    if k8s:
+        home_dir = os.path.expanduser("~")  # Get $HOME
+        container_logs_dir = os.path.join(home_dir, "container-logs")
+        tar_file_path = os.path.join(home_dir, "container-logs.tar.gz")
+
+        if os.path.exists(container_logs_dir):
+            print(f"[INFO] Creating tar archive of {container_logs_dir}...")
+            
+            # Run tar command to compress the directory
+            tar_command = f"tar -czf {tar_file_path} -C {home_dir} container-logs"
+            result = subprocess.run(tar_command, shell=True, capture_output=True, text=True)
+
+            if result.returncode == 0:
+                print(f"[SUCCESS] Created tar file: {tar_file_path}")
+
+                # Define MinIO path for tar file
+                file_key = f"{UPLOAD_FOLDER}/runner-node/container-logs.tar.gz"
+
+                try:
+                    # Upload tar file to MinIO
+                    s3_client.upload_file(tar_file_path, MINIO_BUCKET, file_key)
+                    print(f"[SUCCESS] Uploaded: {file_key}")
+
+                    # Cleanup the tar file after upload
+                    os.remove(tar_file_path)
+                    print(f"[INFO] Removed local tar file: {tar_file_path}")
+                except Exception as e:
+                    print(f"[ERROR] Failed to upload tar file: {e}")
+            else:
+                print(f"[ERROR] Failed to create tar archive: {result.stderr}")
+        else:
+            print(f"[WARNING] {container_logs_dir} does not exist. Skipping tar creation.")
 
 def cleanup_remote_logs(ssh, node):
     """Deletes all uploaded logs from remote VM to free up space."""
@@ -310,7 +346,7 @@ def cleanup_remote_logs(ssh, node):
         f"rm -rf {HOME_DIR}/container-logs.tar.gz",  # Remove compressed tar file
         f"rm -rf {HOME_DIR}/container-logs/*",  # Remove container logs content
         f"rm -rf {HOME_DIR}/*.txt {HOME_DIR}/*.log {HOME_DIR}/*.state",  # Remove uploaded logs
-        f"rm -rf /etc/simplyblock/*",  # Remove dump logs
+        "rm -rf /etc/simplyblock/*",  # Remove dump logs
         f"rm -rf {HOME_DIR}/upload_to_minio.py"  # Remove temporary upload script
     ]
 
@@ -391,7 +427,10 @@ if args.k8s:
     upload_k8s_logs()
 
 # **Step 4: Upload Local Logs After Remote Processing**
-upload_local_logs()
+if args.k8s:
+    upload_local_logs(k8s=True)
+else:
+    upload_local_logs()
 
 for node in MNODES:
     ssh = connect_ssh(node, bastion_ip=BASTION_IP)

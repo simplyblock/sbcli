@@ -469,7 +469,7 @@ jobs:
       - name: Upload automation and docker logs to miniio
         run: |
           cd $GITHUB_WORKSPACE/e2e/
-          python3 logs/upload_logs_to_miniio.py
+          python3 logs/upload_logs_to_miniio.py --k8s
         if: always()
         env:
           GITHUB_RUN_ID: ${{ github.run_id }}
@@ -634,9 +634,21 @@ jobs:
           for node in $K3S_MNODES $STORAGE_PRIVATE_IPS $SEC_STORAGE_PRIVATE_IPS; do
             ssh -i ~/.ssh/simplyblock-us-east-2.pem  root@${node} "k3s-agent-uninstall.sh"
           done
+          
+          for node in $MNODES; do
+            if ssh -i ~/.ssh/simplyblock-us-east-2.pem root@${node} "command -v $SBCLI_CMD" &>/dev/null; then
+              ssh -i ~/.ssh/simplyblock-us-east-2.pem root@${node} "$SBCLI_CMD sn deploy-cleaner" || echo "[WARNING] Failed to run deploy-cleaner on $node"
+            else
+              echo "[WARNING] SBCLI_CMD not found on $node. Skipping deploy-cleaner."
+            fi
+
+            ssh -i ~/.ssh/simplyblock-us-east-2.pem root@${node} "rm -rf /etc/foundationdb/* || true" || echo "[WARNING] Failed to clean foundationdb on $node"
+          done
         env:
           STORAGE_PRIVATE_IPS: "192.168.10.67 192.168.10.68 192.168.10.69"
           SEC_STORAGE_PRIVATE_IPS: "192.168.10.70"
+          MNODES: "192.168.10.66"
+          SBCLI_CMD: ${{ env.SBCLI_CMD }}
 
       - name: 'Cleanup build folder'
         run: |
