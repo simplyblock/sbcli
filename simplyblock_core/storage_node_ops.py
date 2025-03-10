@@ -3226,8 +3226,8 @@ def _create_bdev_stack(snode, lvstore_stack=None, primary_node=None):
 
         elif type == "bdev_lvstore" and lvstore_stack and not snode.is_secondary_node:
             ret = rpc_client.create_lvstore(**params)
-            if ret and snode.jm_vuid > 0:
-                rpc_client.bdev_lvol_set_lvs_ops(snode.lvstore, snode.jm_vuid, snode.lvol_subsys_port)
+            # if ret and snode.jm_vuid > 0:
+            #     rpc_client.bdev_lvol_set_lvs_ops(snode.lvstore, snode.jm_vuid, snode.lvol_subsys_port)
 
         elif type == "bdev_ptnonexcl":
             ret = rpc_client.bdev_PT_NoExcl_create(**params)
