@@ -122,7 +122,7 @@ class RPCClient:
             params = {"trtype": trtype}
         return self._request("nvmf_get_transports", params)
 
-    def transport_create(self, trtype, qpair_count=256):
+    def transport_create(self, trtype, qpair_count=6):
         """
             [{'trtype': 'TCP', 'max_queue_depth': 128,
                'max_io_qpairs_per_ctrlr': 127, 'in_capsule_data_size': 4096,
@@ -138,16 +138,16 @@ class RPCClient:
         params = {
             "trtype": trtype,
             "max_io_qpairs_per_ctrlr": qpair_count,
-            "max_queue_depth": 512,
+            "max_queue_depth": 64,
             "abort_timeout_sec": 5,
             "ack_timeout": 2048,
             "zcopy": True,
-            "in_capsule_data_size": 4096,
+            "in_capsule_data_size": 8192,
             "max_io_size": 131072,
             "io_unit_size": 8192,
             "max_aq_depth": 128,
             "num_shared_buffers": 8192,
-            "buf_cache_size": 32,
+            "buf_cache_size": 256,
             "dif_insert_or_strip": False,
             "c2h_success": True,
             "sock_priority": 0
@@ -296,9 +296,8 @@ class RPCClient:
             "lvs_name": lvs_name,
             "thin_provision": True,
             "clear_method": "unmap",
+            "lvol_priority_class": lvol_priority_class,
         }
-        if lvol_priority_class:
-            params["lvol_priority_class"] = lvol_priority_class
         return self._request("bdev_lvol_create", params)
 
     def delete_lvol(self, name):
@@ -858,10 +857,7 @@ class RPCClient:
 
     def bdev_lvol_get_lvstores(self, name):
         params = {"lvs_name": name}
-        _, err = self._request2("bdev_lvol_get_lvstores", params)
-        if err:
-            return False
-        return True
+        return self._request("bdev_lvol_get_lvstores", params)
 
     def bdev_lvol_resize(self, name, size_in_mib):
         params = {
@@ -1021,3 +1017,4 @@ class RPCClient:
             "read_only ": read_only,
         }
         return self._request("bdev_lvol_set_lvs_read_only", params)
+
