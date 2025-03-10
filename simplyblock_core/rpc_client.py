@@ -1001,3 +1001,23 @@ class RPCClient:
             "subsystem_port": subsystem_port,
         }
         return self._request("bdev_lvol_set_lvs_op", params)
+
+    def bdev_lvol_get_lvol_delete_status(self, name):
+        """
+        Returns :-
+            0: lvol is deleted.
+            1: lvole deletion is in progress.
+            2: No delete action on lvol or the delete requets is queued or previous delete request
+               failed due to error.
+        """
+        params = {
+            "name": name
+        }
+        return self._request("bdev_lvol_get_lvol_delete_status", params)
+
+    def bdev_lvol_set_lvs_read_only(self, lvs_name, read_only=False):
+        params = {
+            "lvs_name ": lvs_name,
+            "read_only ": read_only,
+        }
+        return self._request("bdev_lvol_set_lvs_read_only", params)
