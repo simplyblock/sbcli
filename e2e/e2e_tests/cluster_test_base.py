@@ -104,6 +104,7 @@ class TestClusterBase:
         # self.ssh_obj.exec_command(
         #     self.mgmt_nodes[0], command=command
         # )
+        self.disconnect_lvols()
         sleep_n_sec(2)
         self.unmount_all(base_path=self.mount_path)
         sleep_n_sec(2)
