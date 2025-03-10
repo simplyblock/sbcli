@@ -100,7 +100,7 @@ def get_description(item):
 
 
 base_path = sys.argv[1]
-with open("%s/scripts/cli-reference.yaml" % base_path) as stream:
+with open("%s/cli-reference.yaml" % base_path) as stream:
     try:
         reference = yaml.safe_load(stream)
 
@@ -114,7 +114,7 @@ with open("%s/scripts/cli-reference.yaml" % base_path) as stream:
                     subcommand["arguments"] = arguments
                     subcommand["parameters"] = parameters
 
-        templateLoader = jinja2.FileSystemLoader(searchpath="%s/scripts/templates/" % base_path)
+        templateLoader = jinja2.FileSystemLoader(searchpath="%s/scripts/" % base_path)
         environment = jinja2.Environment(loader=templateLoader)
 
         environment.filters["no_newline"] = no_newline
@@ -129,7 +129,7 @@ with open("%s/scripts/cli-reference.yaml" % base_path) as stream:
 
         template = environment.get_template("cli-wrapper.jinja2")
         output = template.render({"commands": reference["commands"]})
-        with open("%s/cli.py" % base_path, "t+w") as target:
+        with open("%s/simplyblock_cli/cli.py" % base_path, "t+w") as target:
             target.write(output)
 
     except yaml.YAMLError as exc:
