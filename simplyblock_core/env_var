@@ -1,5 +1,5 @@
-SIMPLY_BLOCK_COMMAND_NAME=sbcli-down
-SIMPLY_BLOCK_VERSION=0.5.0
+SIMPLY_BLOCK_COMMAND_NAME=sbcli-dev
+SIMPLY_BLOCK_VERSION=13.0.19
 
-SIMPLY_BLOCK_DOCKER_IMAGE=public.ecr.aws/simply-block/simplyblock:down
+SIMPLY_BLOCK_DOCKER_IMAGE=public.ecr.aws/simply-block/simplyblock:main
 DOCKER_USER=hamdysimplyblock
