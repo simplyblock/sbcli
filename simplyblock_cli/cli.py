@@ -571,7 +571,7 @@ class CLIWrapper(CLIWrapperBase):
 
     def init_volume__qos_set(self, subparser):
         subcommand = self.add_sub_command(subparser, 'qos-set', 'Changes QoS settings for an active logical volume')
-        subcommand.add_argument('id', help='Logical volume id', type=str)
+        subcommand.add_argument('volume_id', help='Logical volume id', type=str)
         argument = subcommand.add_argument('--max-rw-iops', help='Maximum Read Write IO Per Second', type=int, dest='max-rw-iops', required=True)
         argument = subcommand.add_argument('--max-rw-mbytes', help='Maximum Read Write Megabytes Per Second', type=int, dest='max-rw-mbytes', required=True)
         argument = subcommand.add_argument('--max-r-mbytes', help='Maximum Read Megabytes Per Second', type=int, dest='max-r-mbytes', required=True)
@@ -591,26 +591,26 @@ class CLIWrapper(CLIWrapperBase):
 
     def init_volume__get(self, subparser):
         subcommand = self.add_sub_command(subparser, 'get', 'Gets the logical volume details')
-        subcommand.add_argument('id', help='Logical volume id or name', type=str)
+        subcommand.add_argument('volume_id', help='Logical volume id or name', type=str)
         argument = subcommand.add_argument('--json', help='Print outputs in json format', dest='json', required=False, action='store_true')
 
     def init_volume__delete(self, subparser):
         subcommand = self.add_sub_command(subparser, 'delete', 'Deletes a logical volume')
-        subcommand.add_argument('id', help='Logical volumes id or ids', type=str)
+        subcommand.add_argument('volume_id', help='Logical volumes id or ids', type=str)
         argument = subcommand.add_argument('--force', help='Force delete logical volume from the cluster', dest='force', required=False, action='store_true')
 
     def init_volume__connect(self, subparser):
         subcommand = self.add_sub_command(subparser, 'connect', 'Gets the logical volume\'s NVMe/TCP connection string(s)')
-        subcommand.add_argument('id', help='Logical volume id', type=str)
+        subcommand.add_argument('volume_id', help='Logical volume id', type=str)
 
     def init_volume__resize(self, subparser):
         subcommand = self.add_sub_command(subparser, 'resize', 'Resizes a logical volume')
-        subcommand.add_argument('id', help='Logical volume id', type=str)
+        subcommand.add_argument('volume_id', help='Logical volume id', type=str)
         subcommand.add_argument('size', help='New logical volume size size: 10M, 10G, 10(bytes)', type=str)
 
     def init_volume__create_snapshot(self, subparser):
         subcommand = self.add_sub_command(subparser, 'create-snapshot', 'Creates a snapshot from a logical volume')
-        subcommand.add_argument('id', help='Logical volume id', type=str)
+        subcommand.add_argument('volume_id', help='Logical volume id', type=str)
         subcommand.add_argument('name', help='Snapshot name', type=str)
 
     def init_volume__clone(self, subparser):
@@ -621,28 +621,28 @@ class CLIWrapper(CLIWrapperBase):
 
     def init_volume__move(self, subparser):
         subcommand = self.add_sub_command(subparser, 'move', 'Moves a full copy of the logical volume between nodes')
-        subcommand.add_argument('id', help='Logical volume id', type=str)
+        subcommand.add_argument('volume_id', help='Logical volume id', type=str)
         subcommand.add_argument('node_id', help='Destination node id', type=str)
         argument = subcommand.add_argument('--force', help='Force logical volume delete from source node', dest='force', required=False, action='store_true')
 
     def init_volume__get_capacity(self, subparser):
         subcommand = self.add_sub_command(subparser, 'get-capacity', 'Gets a logical volume\'s capacity')
-        subcommand.add_argument('id', help='Logical volume id', type=str)
+        subcommand.add_argument('volume_id', help='Logical volume id', type=str)
         argument = subcommand.add_argument('--history', help='(XXdYYh), list history records (one for every 15 minutes) for XX days and YY hours (up to 10 days in total).', type=str, dest='history', required=True)
 
     def init_volume__get_io_stats(self, subparser):
         subcommand = self.add_sub_command(subparser, 'get-io-stats', 'Gets a logical volume\'s I/O statistics')
-        subcommand.add_argument('id', help='Logical volume id', type=str)
+        subcommand.add_argument('volume_id', help='Logical volume id', type=str)
         argument = subcommand.add_argument('--history', help='(XXdYYh), list history records (one for every 15 minutes) for XX days and YY hours (up to 10 days in total).', type=str, dest='history', required=True)
         argument = subcommand.add_argument('--records', help='Number of records, default: 20', type=int, default=20, dest='records', required=False)
 
     def init_volume__check(self, subparser):
         subcommand = self.add_sub_command(subparser, 'check', 'Checks a logical volume\'s health')
-        subcommand.add_argument('id', help='Logical volume id', type=str)
+        subcommand.add_argument('volume_id', help='Logical volume id', type=str)
 
     def init_volume__inflate(self, subparser):
         subcommand = self.add_sub_command(subparser, 'inflate', 'Inflate a logical volume')
-        subcommand.add_argument('lvol_id', help='Cloned logical volume id', type=str)
+        subcommand.add_argument('volume_id', help='Cloned logical volume id', type=str)
 
 
     def init_control_plane(self):
@@ -665,7 +665,7 @@ class CLIWrapper(CLIWrapperBase):
 
     def init_control_plane__remove(self, subparser):
         subcommand = self.add_sub_command(subparser, 'remove', 'Removes a control plane node')
-        subcommand.add_argument('id', help='Control plane node id', type=str)
+        subcommand.add_argument('node_id', help='Control plane node id', type=str)
 
 
     def init_storage_pool(self):
@@ -759,7 +759,7 @@ class CLIWrapper(CLIWrapperBase):
 
     def init_snapshot__add(self, subparser):
         subcommand = self.add_sub_command(subparser, 'add', 'Creates a new snapshot')
-        subcommand.add_argument('id', help='Logical volume id', type=str)
+        subcommand.add_argument('snapshot_id', help='Logical volume id', type=str)
         subcommand.add_argument('name', help='New snapshot name', type=str)
 
     def init_snapshot__list(self, subparser):
@@ -768,12 +768,12 @@ class CLIWrapper(CLIWrapperBase):
 
     def init_snapshot__delete(self, subparser):
         subcommand = self.add_sub_command(subparser, 'delete', 'Deletes a snapshot')
-        subcommand.add_argument('id', help='Snapshot id', type=str)
+        subcommand.add_argument('snapshot_id', help='Snapshot id', type=str)
         argument = subcommand.add_argument('--force', help='Force remove', dest='force', required=False, action='store_true')
 
     def init_snapshot__clone(self, subparser):
         subcommand = self.add_sub_command(subparser, 'clone', 'Provisions a new logical volume from an existing snapshot')
-        subcommand.add_argument('id', help='Snapshot id', type=str)
+        subcommand.add_argument('snapshot_id', help='Snapshot id', type=str)
         subcommand.add_argument('lvol_name', help='Logical volume name', type=str)
         argument = subcommand.add_argument('--resize', help='New logical volume size: 10M, 10G, 10(bytes)', type=str, dest='resize', required=True)
 
@@ -814,11 +814,11 @@ class CLIWrapper(CLIWrapperBase):
 
     def init_caching_node__list_lvols(self, subparser):
         subcommand = self.add_sub_command(subparser, 'list-lvols', 'Lists all connected logical volumes')
-        subcommand.add_argument('id', help='Caching node id', type=str)
+        subcommand.add_argument('node_id', help='Caching node id', type=str)
 
     def init_caching_node__remove(self, subparser):
         subcommand = self.add_sub_command(subparser, 'remove', 'Removes a caching node from the cluster')
-        subcommand.add_argument('id', help='Caching node id', type=str)
+        subcommand.add_argument('node_id', help='Caching node id', type=str)
         argument = subcommand.add_argument('--force', help='Force remove', dest='force', required=False, action='store_true')
 
     def init_caching_node__connect(self, subparser):
