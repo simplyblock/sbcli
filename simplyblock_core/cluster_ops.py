@@ -744,13 +744,15 @@ def cluster_set_read_only(cl_id):
     if ret:
         st = db_controller.get_storage_nodes_by_cluster_id(cl_id)
         for node in st:
+            if node.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
+                continue
+
             rpc_client = RPCClient(
                 node.mgmt_ip, node.rpc_port,
                 node.rpc_username, node.rpc_password, timeout=5, retry=2)
 
-            for bdev in node.lvstore_stack:
-                if bdev['type'] == "bdev_distr":
-                    rpc_client.bdev_distrib_toggle_cluster_full(bdev['name'], cluster_full=True)
+            if node.lvstore:
+                rpc_client.bdev_lvol_set_lvs_read_only(node.lvstore, True)
 
     return True
 
@@ -769,13 +771,15 @@ def cluster_set_active(cl_id):
     if ret:
         st = db_controller.get_storage_nodes_by_cluster_id(cl_id)
         for node in st:
+            if node.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
+                continue
+
             rpc_client = RPCClient(
                 node.mgmt_ip, node.rpc_port,
                 node.rpc_username, node.rpc_password, timeout=5, retry=2)
 
-            for bdev in node.lvstore_stack:
-                if bdev['type'] == "bdev_distr":
-                    rpc_client.bdev_distrib_toggle_cluster_full(bdev['name'], cluster_full=False)
+            if node.lvstore:
+                rpc_client.bdev_lvol_set_lvs_read_only(node.lvstore, False)
 
     return True
 
