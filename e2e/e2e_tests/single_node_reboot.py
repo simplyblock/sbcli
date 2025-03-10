@@ -113,8 +113,8 @@ class TestSingleNodeReboot(TestClusterBase):
         snapshot_id_1 = self.ssh_obj.get_snapshot_id(node=self.mgmt_nodes[0],
                                                      snapshot_name=f"{self.snapshot_name}_1")
         
-        # self.sbcli_utils.resize_lvol(lvol_id=self.sbcli_utils.get_lvol_id(self.lvol_name),
-        #                              new_size="20G")
+        self.sbcli_utils.resize_lvol(lvol_id=self.sbcli_utils.get_lvol_id(self.lvol_name),
+                                     new_size="20G")
 
         self.validations(node_uuid=no_lvol_node_uuid,
                          node_status="online",
@@ -208,8 +208,8 @@ class TestSingleNodeReboot(TestClusterBase):
                          health_check_status=True
                          )
         
-        # self.sbcli_utils.resize_lvol(lvol_id=self.sbcli_utils.get_lvol_id(self.lvol_name),
-        #                              new_size="25G")
+        self.sbcli_utils.resize_lvol(lvol_id=self.sbcli_utils.get_lvol_id(self.lvol_name),
+                                     new_size="25G")
         if not self.k8s_test:
             self.ssh_obj.restart_docker_logging(
                 node_ip=node_ip,
@@ -298,10 +298,10 @@ class TestSingleNodeReboot(TestClusterBase):
         self.common_utils.validate_fio_test(node=self.mgmt_nodes[0],
                                             log_file=self.log_path)
         
-        # self.sbcli_utils.resize_lvol(lvol_id=self.sbcli_utils.get_lvol_id(f"{self.lvol_name}_cl_1"),
-        #                              new_size="30G")
-        # self.sbcli_utils.resize_lvol(lvol_id=self.sbcli_utils.get_lvol_id(f"{self.lvol_name}_cl_2"),
-        #                              new_size="30G")
+        self.sbcli_utils.resize_lvol(lvol_id=self.sbcli_utils.get_lvol_id(f"{self.lvol_name}_cl_1"),
+                                     new_size="30G")
+        self.sbcli_utils.resize_lvol(lvol_id=self.sbcli_utils.get_lvol_id(f"{self.lvol_name}_cl_2"),
+                                     new_size="30G")
         
         clone_files = self.ssh_obj.find_files(self.mgmt_nodes[0], directory=f"{clone_mount_file}_2")
         final_checksum = self.ssh_obj.generate_checksums(self.mgmt_nodes[0], clone_files)
@@ -316,8 +316,8 @@ class TestSingleNodeReboot(TestClusterBase):
 
         assert original_checksum == final_checksum, "Checksum mismatch for lvol and clone"
 
-        # self.sbcli_utils.resize_lvol(lvol_id=self.sbcli_utils.get_lvol_id(self.lvol_name),
-        #                              new_size="30G")
+        self.sbcli_utils.resize_lvol(lvol_id=self.sbcli_utils.get_lvol_id(self.lvol_name),
+                                     new_size="30G")
 
         lvol_files = self.ssh_obj.find_files(self.mgmt_nodes[0], directory=self.mount_path)
         final_lvl_checksum = self.ssh_obj.generate_checksums(self.mgmt_nodes[0], lvol_files)
@@ -395,8 +395,8 @@ class TestHASingleNodeReboot(TestClusterBase):
         node_ip = no_lvol_node["mgmt_ip"]
         instance_id = no_lvol_node["cloud_instance_id"]
 
-        # self.sbcli_utils.resize_lvol(lvol_id=self.sbcli_utils.get_lvol_id(self.lvol_name),
-        #                              new_size="20G")
+        self.sbcli_utils.resize_lvol(lvol_id=self.sbcli_utils.get_lvol_id(self.lvol_name),
+                                     new_size="20G")
 
         self.validations(node_uuid=no_lvol_node_uuid,
                          node_status="online",
@@ -458,8 +458,8 @@ class TestHASingleNodeReboot(TestClusterBase):
             self.validate_migration_for_node(timestamp, 5000, None)
 
 
-        # self.sbcli_utils.resize_lvol(lvol_id=self.sbcli_utils.get_lvol_id(self.lvol_name),
-        #                              new_size="30G")
+        self.sbcli_utils.resize_lvol(lvol_id=self.sbcli_utils.get_lvol_id(self.lvol_name),
+                                     new_size="30G")
         # Write steps in order
         steps = {
             "Storage Node": ["shutdown", "restart"],

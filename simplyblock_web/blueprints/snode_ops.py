@@ -144,9 +144,8 @@ def spdk_process_start():
     for node in nodes:
         if node.attrs["Name"] in ["/spdk", "/spdk_proxy"]:
             logger.info(f"{node.attrs['Name']} container found, removing...")
-            node.stop()
+            node.stop(timeout=3)
             node.remove(force=True)
-            time.sleep(2)
 
     spdk_debug = ""
     if set_debug:

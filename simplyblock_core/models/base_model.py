@@ -178,18 +178,17 @@ class BaseNodeObject(BaseModel):
     STATUS_IN_CREATION = 'in_creation'
     STATUS_UNREACHABLE = 'unreachable'
     STATUS_SCHEDULABLE = 'schedulable'
+    STATUS_DOWN = 'down'
 
     _STATUS_CODE_MAP = {
         STATUS_ONLINE: 0,
         STATUS_OFFLINE: 1,
         STATUS_SUSPENDED: 2,
         STATUS_REMOVED: 3,
-
         STATUS_IN_CREATION: 10,
         STATUS_IN_SHUTDOWN: 11,
         STATUS_RESTARTING: 12,
-
         STATUS_UNREACHABLE: 20,
-
         STATUS_SCHEDULABLE: 30,
+        STATUS_DOWN: 40,
     }

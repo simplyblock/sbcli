@@ -624,11 +624,20 @@ def cluster_activate(cl_id, force=False, force_lvstore_create=False):
             ret = storage_node_ops.recreate_lvstore(snode)
         else:
             ret = storage_node_ops.create_lvstore(snode, cluster.distr_ndcs, cluster.distr_npcs, cluster.distr_bs,
-                                              cluster.distr_chunk_bs, cluster.page_size_in_blocks, max_size, snodes)
-        if not ret and not force:
-            logger.error("Failed to activate cluster")
-            set_cluster_status(cl_id, ols_status)
-            return False
+                                              cluster.distr_chunk_bs, cluster.page_size_in_blocks, max_size)
+        snode = db_controller.get_storage_node_by_id(snode.get_id())
+        if ret:
+            snode.lvstore_status = "ready"
+            snode.write_to_db()
+
+        else:
+            snode.lvstore_status = "failed"
+            snode.write_to_db()
+            logger.error(f"Failed to restore lvstore on node {snode.get_id()}")
+            if not force:
+                logger.error("Failed to activate cluster")
+                set_cluster_status(cl_id, ols_status)
+                return False
 
     for snode in snodes:
         if not snode.is_secondary_node:
@@ -637,10 +646,22 @@ def cluster_activate(cl_id, force=False, force_lvstore_create=False):
             continue
 
         ret = storage_node_ops.recreate_lvstore(snode)
-        if not ret and not force:
-            logger.error("Failed to activate cluster")
-            set_cluster_status(cl_id, ols_status)
-            return False
+        snode = db_controller.get_storage_node_by_id(snode.get_id())
+        if ret:
+            snode.lvstore_status = "ready"
+            snode.write_to_db()
+
+        else:
+            snode.lvstore_status = "failed"
+            snode.write_to_db()
+
+            logger.error(f"Failed to restore lvstore on node {snode.get_id()}")
+            if not force:
+                logger.error("Failed to activate cluster")
+                set_cluster_status(cl_id, ols_status)
+                return False
+
+
 
     if not cluster.cluster_max_size:
         cluster = db_controller.get_cluster_by_id(cl_id)
@@ -723,13 +744,15 @@ def cluster_set_read_only(cl_id):
     if ret:
         st = db_controller.get_storage_nodes_by_cluster_id(cl_id)
         for node in st:
+            if node.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
+                continue
+
             rpc_client = RPCClient(
                 node.mgmt_ip, node.rpc_port,
                 node.rpc_username, node.rpc_password, timeout=5, retry=2)
 
-            for bdev in node.lvstore_stack:
-                if bdev['type'] == "bdev_distr":
-                    rpc_client.bdev_distrib_toggle_cluster_full(bdev['name'], cluster_full=True)
+            if node.lvstore:
+                rpc_client.bdev_lvol_set_lvs_read_only(node.lvstore, True)
 
     return True
 
@@ -748,13 +771,15 @@ def cluster_set_active(cl_id):
     if ret:
         st = db_controller.get_storage_nodes_by_cluster_id(cl_id)
         for node in st:
+            if node.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
+                continue
+
             rpc_client = RPCClient(
                 node.mgmt_ip, node.rpc_port,
                 node.rpc_username, node.rpc_password, timeout=5, retry=2)
 
-            for bdev in node.lvstore_stack:
-                if bdev['type'] == "bdev_distr":
-                    rpc_client.bdev_distrib_toggle_cluster_full(bdev['name'], cluster_full=False)
+            if node.lvstore:
+                rpc_client.bdev_lvol_set_lvs_read_only(node.lvstore, False)
 
     return True
 
@@ -767,15 +792,17 @@ def list():
     data = []
     for cl in cls:
         st = db_controller.get_storage_nodes_by_cluster_id(cl.get_id())
+        status = cl.status
+        if cl.is_re_balancing and status in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED]:
+            status = f"{status} - ReBalancing"
         data.append({
             "UUID": cl.get_id(),
             "NQN": cl.nqn,
             "ha_type": cl.ha_type,
-            "tls": cl.tls,
-            "mgmt nodes": len(mt),
-            "storage nodes": len(st),
+            "#mgmt": len(mt),
+            "#storage": len(st),
             "Mod": f"{cl.distr_ndcs}x{cl.distr_npcs}",
-            "Status": cl.status,
+            "Status": status.upper(),
         })
     return utils.print_table(data)
 

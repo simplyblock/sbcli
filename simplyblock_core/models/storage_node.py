@@ -86,3 +86,4 @@ class StorageNode(BaseNodeObject):
     partition_size: int = 0
     subsystem: str = ""
     system_uuid: str = ""
+    lvstore_status: str = ""
