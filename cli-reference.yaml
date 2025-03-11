@@ -124,7 +124,7 @@ commands:
             private: true
           - name: "--enable-test-device"
             help: "Enable creation of test device"
-            dest: enable-test-device
+            dest: enable_test_device
             type: bool
             action: store_true
             private: true
@@ -632,12 +632,12 @@ commands:
             private: true
           - name: "--data-chunks-per-stripe"
             help: "Erasure coding schema parameter k (distributed raid), default: 1"
-            dest: distr-ndcs
+            dest: distr_ndcs
             type: int
             default: 1
           - name: "--parity-chunks-per-stripe"
             help: "Erasure coding schema parameter n (distributed raid), default: 1"
-            dest: distr-npcs
+            dest: distr_npcs
             type: int
             default: 1
           - name: "--enable-qos"
@@ -713,18 +713,18 @@ commands:
             private: true
           - name: "--distr-bs"
             help: "(Dev) distrb bdev block size, default: 4096"
-            dest: distr-bs
+            dest: distr_bs
             type: str
             default: 4096
             private: true
           - name: "--chunk-size-in-bytes"
             help: "(Dev) distrb bdev chunk block size, default: 4096"
-            dest: distr-chunk-bs
+            dest: distr_chunk_bs
             type: str
             default: 4096
           - name: "--enable-node-affinity"
             help: "Enable node affinity for storage nodes"
-            dest: enable-node-affinity
+            dest: enable_node_affinity
             type: bool
             action: store_true
           - name: "--qpair-count"
@@ -738,13 +738,13 @@ commands:
             default: 3
           - name: "--max-queue-size"
             help: "The max size the queue will grow"
-            dest: max-queue-size
+            dest: max_queue_size
             type: str
             default: 128
             private: true
           - name: "--inflight-io-threshold"
             help: "The number of inflight IOs allowed before the IO queuing starts"
-            dest: inflight-io-threshold
+            dest: inflight_io_threshold
             type: str
             default: 4
             private: true
@@ -752,7 +752,7 @@ commands:
             help: >
               Enable strict node anti affinity for storage nodes. Never more than one chunk is placed on a node.
               This requires a minimum of _data-chunks-in-stripe + parity-chunks-in-stripe + 1_ nodes in the cluster."
-            dest: strict-node-anti-affinity
+            dest: strict_node_anti_affinity
             type: bool
             action: store_true
           - name: "--journal-partition"
@@ -844,7 +844,7 @@ commands:
             private: true
           - name: "--enable-test-device"
             help: "Enable creation of test device"
-            dest: enable-test-device
+            dest: enable_test_device
             type: bool
             action: store_true
             private: true
@@ -893,9 +893,8 @@ commands:
             private: true
           - name: "--pool-max"
             help: "Pool maximum size: 20M, 20G, 0(default)"
-            dest: pool-max
+            dest: pool_max
             type: str
-            default: 0
             default: 25G
             private: true
           - name: "--snapshot"
@@ -934,27 +933,27 @@ commands:
             private: true
           - name: "--max-rw-iops"
             help: "Maximum Read Write IO Per Second"
-            dest: max-rw-iops
+            dest: max_rw_iops
             type: int
             private: true
           - name: "--max-rw-mbytes"
             help: "Maximum Read Write Megabytes Per Second"
-            dest: max-rw-mbytes
+            dest: max_rw_mbytes
             type: int
             private: true
           - name: "--max-r-mbytes"
             help: "Maximum Read Megabytes Per Second"
-            dest: max-r-mbytes
+            dest: max_r_mbytes
             type: int
             private: true
           - name: "--max-w-mbytes"
             help: "Maximum Write Megabytes Per Second"
-            dest: max-w-mbytes
+            dest: max_w_mbytes
             type: int
             private: true
           - name: "--distr-vuid"
             help: "(Dev) set vuid manually, default: random (1-99999)"
-            dest: distr-vuid
+            dest: distr_vuid
             type: str
             default: 0
             private: true
@@ -970,7 +969,7 @@ commands:
             private: true
           - name: "--lvol-priority-class"
             help: "Logical volume priority class"
-            dest: lvol-priority-class
+            dest: lvol_priority_class
             type: int
             default: 0
             private: false
@@ -1045,23 +1044,23 @@ commands:
             default: 
           - name: "--data-chunks-per-stripe"
             help: "Erasure coding schema parameter k (distributed raid), default: 1"
-            dest: distr-ndcs
+            dest: distr_ndcs
             type: int
             default: 1
           - name: "--parity-chunks-per-stripe"
             help: "Erasure coding schema parameter n (distributed raid), default: 1"
-            dest: distr-npcs
+            dest: distr_npcs
             type: int
             default: 1
           - name: "--distr-bs"
             help: "(Dev) distrb bdev block size, default: 4096"
-            dest: distr-bs
+            dest: distr_bs
             type: str
             default: 4096
             private: true
           - name: "--distr-chunk-bs"
             help: "(Dev) distrb bdev chunk block size, default: 4096"
-            dest: distr-chunk-bs
+            dest: distr_chunk_bs
             type: str
             default: 4096
             private: true
@@ -1076,7 +1075,7 @@ commands:
             private: true
           - name: "--enable-node-affinity"
             help: "Enable node affinity for storage nodes"
-            dest: enable-node-affinity
+            dest: enable_node_affinity
             type: bool
             action: store_true
           - name: "--qpair-count"
@@ -1090,13 +1089,13 @@ commands:
             default: 0
           - name: "--max-queue-size"
             help: "The max size the queue will grow"
-            dest: max-queue-size
+            dest: max_queue_size
             type: str
             default: 128
             private: true
           - name: "--inflight-io-threshold"
             help: "The number of inflight IOs allowed before the IO queuing starts"
-            dest: inflight-io-threshold
+            dest: inflight_io_threshold
             type: str
             default: 4
             private: true
@@ -1110,7 +1109,7 @@ commands:
             help: >
               Enable strict node anti affinity for storage nodes. Never more than one chunk is placed on a node. This
               requires a minimum of _data-chunks-in-stripe + parity-chunks-in-stripe + 1_ nodes in the cluster.
-            dest: strict-node-anti-affinity
+            dest: strict_node_anti_affinity
             type: bool
             action: store_true
       - name: add
@@ -1144,23 +1143,23 @@ commands:
             default: 500
           - name: "--data-chunks-per-stripe"
             help: "Erasure coding schema parameter k (distributed raid), default: 1"
-            dest: distr-ndcs
+            dest: distr_ndcs
             type: int
             default: 0
           - name: "--parity-chunks-per-stripe"
             help: "Erasure coding schema parameter n (distributed raid), default: 1"
-            dest: distr-npcs
+            dest: distr_npcs
             type: int
             default: 0
           - name: "--distr-bs"
             help: "(Dev) distrb bdev block size, default: 4096"
-            dest: distr-bs
+            dest: distr_bs
             type: str
             default: 4096
             private: true
           - name: "--distr-chunk-bs"
             help: "(Dev) distrb bdev chunk block size, default: 4096"
-            dest: distr-chunk-bs
+            dest: distr_chunk_bs
             type: str
             default: 4096
             private: true
@@ -1175,7 +1174,7 @@ commands:
             private: true
           - name: "--enable-node-affinity"
             help: "Enables node affinity for storage nodes"
-            dest: enable-node-affinity
+            dest: enable_node_affinity
             type: bool
             action: store_true
           - name: "--qpair-count"
@@ -1189,13 +1188,13 @@ commands:
             default: 0
           - name: "--max-queue-size"
             help: "The max size the queue will grow"
-            dest: max-queue-size
+            dest: max_queue_size
             type: str
             default: 128
             private: true
           - name: "--inflight-io-threshold"
             help: "The number of inflight IOs allowed before the IO queuing starts"
-            dest: inflight-io-threshold
+            dest: inflight_io_threshold
             type: str
             default: 4
             private: true
@@ -1209,7 +1208,7 @@ commands:
             help: >
               Enable strict node anti affinity for storage nodes. Never more than one chunk is placed on a node.
               This requires a minimum of _data-chunks-in-stripe + parity-chunks-in-stripe + 1_ nodes in the cluster."
-            dest: strict-node-anti-affinity
+            dest: strict_node_anti_affinity
             type: bool
             action: store_true
       - name: activate
@@ -1449,23 +1448,23 @@ commands:
             type: str
           - name: "--max-rw-iops"
             help: "Maximum Read Write IO Per Second"
-            dest: max-rw-iops
+            dest: max_rw_iops
             type: int
           - name: "--max-rw-mbytes"
             help: "Maximum Read Write Megabytes Per Second"
-            dest: max-rw-mbytes
+            dest: max_rw_mbytes
             type: int
           - name: "--max-r-mbytes"
             help: "Maximum Read Megabytes Per Second"
-            dest: max-r-mbytes
+            dest: max_r_mbytes
             type: int
           - name: "--max-w-mbytes"
             help: "Maximum Write Megabytes Per Second"
-            dest: max-w-mbytes
+            dest: max_w_mbytes
             type: int
           - name: "--distr-vuid"
             help: "(Dev) set vuid manually, default: random (1-99999)"
-            dest: distr-vuid
+            dest: distr_vuid
             type: str
             default: 0
             private: true
@@ -1481,7 +1480,7 @@ commands:
             private: true
           - name: "--lvol-priority-class"
             help: "Logical volume priority class"
-            dest: lvol-priority-class
+            dest: lvol_priority_class
             type: int
             default: 0
           - name: "--namespace"
@@ -1506,19 +1505,19 @@ commands:
             type: str
           - name: "--max-rw-iops"
             help: "Maximum Read Write IO Per Second"
-            dest: max-rw-iops
+            dest: max_rw_iops
             type: int
           - name: "--max-rw-mbytes"
             help: "Maximum Read Write Megabytes Per Second"
-            dest: max-rw-mbytes
+            dest: max_rw_mbytes
             type: int
           - name: "--max-r-mbytes"
             help: "Maximum Read Megabytes Per Second"
-            dest: max-r-mbytes
+            dest: max_r_mbytes
             type: int
           - name: "--max-w-mbytes"
             help: "Maximum Write Megabytes Per Second"
-            dest: max-w-mbytes
+            dest: max_w_mbytes
             type: int
       - name: list
         help: "Lists logical volumes"
@@ -1753,33 +1752,33 @@ commands:
             type: str
           - name: "--pool-max"
             help: "Pool maximum size: 20M, 20G, 0. Default: 0"
-            dest: pool-max
+            dest: pool_max
             type: str
             default: 0
           - name: "--lvol-max"
             help: "Logical volume maximum size: 20M, 20G, 0. Default: 0"
-            dest: lvol-max
+            dest: lvol_max
             type: str
             default: 0
           - name: "--max-rw-iops"
             help: "Maximum Read Write IO Per Second"
-            dest: max-rw-iops
+            dest: max_rw_iops
             type: int
           - name: "--max-rw-mbytes"
             help: "Maximum Read Write Megabytes Per Second"
-            dest: max-rw-mbytes
+            dest: max_rw_mbytes
             type: int
           - name: "--max-r-mbytes"
             help: "Maximum Read Megabytes Per Second"
-            dest: max-r-mbytes
+            dest: max_r_mbytes
             type: int
           - name: "--max-w-mbytes"
             help: "Maximum Write Megabytes Per Second"
-            dest: max-w-mbytes
+            dest: max_w_mbytes
             type: int
           - name: "--has-secret"
             help: "Pool is created with a secret (all further API interactions with the pool and logical volumes in the pool require this secret)"
-            dest: has-secret
+            dest: has_secret
             type: bool
             action: store_true
             private: true
@@ -1792,27 +1791,27 @@ commands:
             type: str
           - name: "--pool-max"
             help: "Pool maximum size: 20M, 20G"
-            dest: pool-max
+            dest: pool_max
             type: str
           - name: "--lvol-max"
             help: "Logical volume maximum size: 20M, 20G"
-            dest: lvol-max
+            dest: lvol_max
             type: str
           - name: "--max-rw-iops"
             help: "Maximum Read Write IO Per Second"
-            dest: max-rw-iops
+            dest: max_rw_iops
             type: int
           - name: "--max-rw-mbytes"
             help: "Maximum Read Write Megabytes Per Second"
-            dest: max-rw-mbytes
+            dest: max_rw_mbytes
             type: int
           - name: "--max-r-mbytes"
             help: "Maximum Read Megabytes Per Second"
-            dest: max-r-mbytes
+            dest: max_r_mbytes
             type: int
           - name: "--max-w-mbytes"
             help: "Maximum Write Megabytes Per Second"
-            dest: max-w-mbytes
+            dest: max_w_mbytes
             type: int
       - name: list
         help: "Lists all storage pools"
