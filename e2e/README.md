@@ -11,8 +11,8 @@
 Before running the stress test, set up the necessary environment variables:
 ```sh
 export AWS_REGION=us-east-2
-export AWS_ACCESS_KEY_ID=AKIAYHRYFLI6WTW2HDA4
-export AWS_SECRET_ACCESS_KEY=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
+export AWS_ACCESS_KEY_ID=<AWS_ACCESS_KEY_ID>
+export AWS_SECRET_ACCESS_KEY=<AWS_SECRET_ACCESS_KEY>
 export SSH_USER=root
 export KEY_NAME=simplyblock-us-east-2.pem
 export BASTION_SERVER=192.168.10.61
