@@ -17,7 +17,6 @@ commands:
               The network interface to be used for communication between the control plane
               and the storage node.
             dest: ifname
-            required: true
             type: str
       - name: deploy-cleaner
         help: "Cleans a previous simplyblock deploy (local run)"
@@ -30,28 +29,23 @@ commands:
           - name: "cluster_id"
             help: "Cluster id"
             dest: cluster_id
-            required: true
             type: str
           - name: "node_ip"
             help: "IP of storage node to add"
             dest: node_ip
-            required: true
             type: str
           - name: "ifname"
             help: "Management interface name"
             dest: ifname
-            required: true
             type: str
           - name: "--journal-partition"
             help: "1: auto-create small partitions for journal on nvme devices. 0: use a separate (the smallest) nvme device of the node for journal. The journal needs a maximum of 3 percent of total available raw disk space."
             dest: partitions
-            required: true
             type: int
             default: 1
           - name: "--jm-percent"
             help: "Number in percent to use for JM from each device"
             dest: jm_percent
-            required: true
             type: str
             default: 3
             private: true
@@ -60,13 +54,11 @@ commands:
             description: >
               Storage network interface name(s). Can be more than one. Comma-separated list: e.g. eth0,eth1
             dest: data_nics
-            required: true
             type: str
             nargs: +
           - name: "--max-lvol"
             help: "Max logical volume per storage node"
             dest: max_lvol
-            required: true
             type: int
           - name: "--max-size"
             help: "Maximum amount of GB to be utilized on this storage node"
@@ -77,26 +69,22 @@ commands:
               (two replicas), the effective cluster capacity is _100 TiB * 3 / 2 = 150 TiB_. Setting this parameter to
               _150 TiB / 3 * 2 = 100TiB_ would be a safe choice.
             dest: max_prov
-            required: true
             type: str
             default: ""
           - name: "--number-of-distribs"
             help: "The number of distirbs to be created on the node"
             dest: number_of_distribs
-            required: false
             type: int
             default: 4
             private: true
           - name: "--number-of-devices"
             help: "Number of devices per storage node if it's not supported EC2 instance"
             dest: number_of_devices
-            required: true
             type: str
             private: true
           - name: "--size-of-device"
             help: "Size of device per storage node"
             dest: partition_size
-            required: true
             type: str
             private: true
           - name: "--vcpu-count"
@@ -104,53 +92,45 @@ commands:
               Number of vCPUs used for SPDK. Remaining CPUs will be used for Linux system, TCP/IP processing, and
               other workloads. The default on non-Kubernetes hosts is 80%.
             dest: vcpu_count
-            required: true
             type: int
           - name: "--cpu-mask"
             help: >
               SPDK app CPU mask, default is all cores found
             dest: spdk_cpu_mask
-            required: true
             type: str
             private: true
           - name: "--spdk-image"
             help: "SPDK image uri"
             dest: spdk_image
-            required: true
             type: str
             private: true
           - name: "--spdk-debug"
             help: "Enable spdk debug logs"
             dest: spdk_debug
-            required: true
             type: bool
             action: store_true
             private: true
           - name: "--iobuf_small_bufsize"
             help: "bdev_set_options param"
             dest: small_bufsize
-            required: true
             type: str
             default: 0
             private: true
           - name: "--iobuf_large_bufsize"
             help: "bdev_set_options param"
             dest: large_bufsize
-            required: true
             type: str
             default: 0
             private: true
           - name: "--enable-test-device"
             help: "Enable creation of test device"
             dest: enable-test-device
-            required: true
             type: bool
             action: store_true
             private: true
           - name: "--disable-ha-jm"
             help: "Disable HA JM for distrib creation"
             dest: enable_ha_jm
-            required: true
             type: bool
             default: true
             action: store_false
@@ -158,7 +138,6 @@ commands:
           - name: "--ha-jm-count"
             help: "HA JM count"
             dest: ha_jm_count
-            required: true
             type: str
             default: 3
             private: true
@@ -167,19 +146,16 @@ commands:
               Adds as secondary node. A secondary node does not have any disks attached. It is only used for I/O
               processing in case a primary goes down.
             dest: is_secondary_node
-            required: true
             type: bool
             default: false
             action: store_true
           - name: "--namespace"
             help: "Kubernetes namespace to deploy on"
             dest: namespace
-            required: true
             type: str
           - name: "--id-device-by-nqn"
             help: "Use device nqn to identify it instead of serial number"
             dest: id_device_by_nqn
-            required: true
             type: bool
             default: false
             action: store_true
@@ -194,7 +170,6 @@ commands:
             help: Storage node id
             completer: _completer_get_sn_list
             type: str
-            required: true
       - name: remove
         help: "Removes a storage node from the cluster"
         description: >
@@ -209,11 +184,9 @@ commands:
             help: Storage node id
             completer: _completer_get_sn_list
             type: str
-            required: true
           - name: "--force-remove"
             help: "Force remove all logical volumes and snapshots"
             dest: force_remove
-            required: true
             type: bool
             action: store_true
       - name: list
@@ -222,12 +195,10 @@ commands:
           - name: "--cluster-id"
             help: "Cluster id"
             dest: cluster_id
-            required: true
             type: str
           - name: "--json"
             help: "Print outputs in json format"
             dest: json
-            required: true
             type: bool
             action: store_true
       - name: get
@@ -237,7 +208,6 @@ commands:
             help: Storage node id
             completer: _completer_get_sn_list
             type: str
-            required: true
       - name: restart
         help: "Restarts a storage node"
         description: >
@@ -249,17 +219,14 @@ commands:
             help: Storage node id
             completer: _completer_get_sn_list
             type: str
-            required: true
           - name: "--max-lvol"
             help: "Max logical volume per storage node"
             dest: max_lvol
-            required: true
             type: int
             default: 0
           - name: "--max-snap"
             help: "Max snapshot per storage node"
             dest: max_snap
-            required: true
             type: str
             default: 0
             private: true
@@ -272,7 +239,6 @@ commands:
               (two replicas), the effective cluster capacity is _100 TiB * 3 / 2 = 150 TiB_. Setting this parameter to
               _150 TiB / 3 * 2 = 100TiB_ would be a safe choice.
             dest: max_prov
-            required: true
             type: str
             default:
             private: true
@@ -283,46 +249,39 @@ commands:
               have to be attached to new hosts. Otherwise, they have to be marked as failed and removed from cluster.
               Triggers a pro-active migration of data from those devices onto other storage nodes.
             dest: node_ip
-            required: true
             type: str
           - name: "--number-of-devices"
             help: "Number of devices per storage node if it's not supported EC2 instance"
             dest: number_of_devices
-            required: true
             type: str
             default: 0
             private: true
           - name: "--spdk-image"
             help: "SPDK image uri"
             dest: spdk_image
-            required: true
             type: str
             private: true
           - name: "--spdk-debug"
             help: "Enable spdk debug logs"
             dest: spdk_debug
-            required: true
             type: bool
             action: store_true
             private: true
           - name: "--iobuf_small_bufsize"
             help: "bdev_set_options param"
             dest: small_bufsize
-            required: true
             type: str
             default: 0
             private: true
           - name: "--iobuf_large_bufsize"
             help: "bdev_set_options param"
             dest: large_bufsize
-            required: true
             type: str
             default: 0
             private: true
           - name: "--force"
             help: "Force restart"
             dest: force
-            required: true
             type: bool
             action: store_true
       - name: shutdown
@@ -333,11 +292,9 @@ commands:
             help: Storage node id
             completer: _completer_get_sn_list
             type: str
-            required: true
           - name: "--force"
             help: "Force node shutdown"
             dest: force
-            required: true
             type: bool
             action: store_true
       - name: suspend
@@ -348,11 +305,9 @@ commands:
             help: Storage node id
             completer: _completer_get_sn_list
             type: str
-            required: true
           - name: "--force"
             help: "Force node suspend"
             dest: force
-            required: true
             type: bool
             action: store_true
       - name: resume
@@ -362,7 +317,6 @@ commands:
             help: Storage node id
             completer: _completer_get_sn_list
             type: str
-            required: true
       - name: get-io-stats
         help: "Get node IO statistics"
         arguments:
@@ -370,16 +324,13 @@ commands:
             help: Storage node id
             completer: _completer_get_sn_list
             type: str
-            required: true
           - name: "--history"
             help: "list history records -one for every 15 minutes- for XX days and YY hours -up to 10 days in total-, format: XXdYYh"
             dest: history
-            required: true
             type: str
           - name: "--records"
             help: "Number of records, default: 20"
             dest: records
-            required: true
             type: str
             default: 20
       - name: get-capacity
@@ -389,11 +340,9 @@ commands:
             help: Storage node id
             completer: _completer_get_sn_list
             type: str
-            required: true
           - name: "--history"
             help: "list history records -one for every 15 minutes- for XX days and YY hours -up to 10 days in total-, format: XXdYYh"
             dest: history
-            required: true
             type: str
       - name: list-devices
         help: "Lists storage devices"
@@ -402,11 +351,9 @@ commands:
             help: Storage node id
             completer: _completer_get_sn_list
             type: str
-            required: true
           - name: "-s"
             help: "Sort the outputs"
             dest: -s
-            required: true
             type: str
             choices:
               - node-seq
@@ -417,7 +364,6 @@ commands:
           - name: "--json"
             help: "Print outputs in json format"
             dest: json
-            required: true
             type: bool
             action: store_true
       - name: device-testing-mode
@@ -427,12 +373,10 @@ commands:
           - name: "device_id"
             help: "Device id"
             dest: device_id
-            required: true
             type: str
           - name: "mode"
             help: "Testing mode"
             dest: mode
-            required: true
             type: str
             choices:
               - full_pass_through
@@ -449,7 +393,6 @@ commands:
           - name: "device_id"
             help: "Device id"
             dest: device_id
-            required: true
             type: str
       - name: reset-device
         help: "Resets a storage device"
@@ -460,7 +403,6 @@ commands:
           - name: "device_id"
             help: "Device id"
             dest: device_id
-            required: true
             type: str
       - name: restart-device
         help: "Restarts a storage device"
@@ -472,7 +414,6 @@ commands:
           - name: "device_id"
             help: "Device id"
             dest: id
-            required: true
             type: str
       - name: add-device
         help: "Adds a new storage device"
@@ -484,7 +425,6 @@ commands:
           - name: "device_id"
             help: "Device id"
             dest: id
-            required: true
             type: str
       - name: remove-device
         help: "Logically removes a storage device"
@@ -496,12 +436,10 @@ commands:
           - name: "device_id"
             help: "Device id"
             dest: device_id
-            required: true
             type: str
           - name: "--force"
             help: "Force device remove"
             dest: force
-            required: true
             type: bool
             action: store_true
       - name: set-failed-device
@@ -514,7 +452,6 @@ commands:
           - name: "device_id"
             help: "Device ID"
             dest: id
-            required: true
             type: str
       - name: get-capacity-device
         help: "Gets a device's capacity"
@@ -522,12 +459,10 @@ commands:
           - name: "device_id"
             help: "Device id"
             dest: device_id
-            required: true
             type: str
           - name: "--history"
             help: "list history records -one for every 15 minutes- for XX days and YY hours -up to 10 days in total-, format: XXdYYh"
             dest: history
-            required: true
             type: str
       - name: get-io-stats-device
         help: "Gets a device's IO statistics"
@@ -535,17 +470,14 @@ commands:
           - name: "device_id"
             help: "Device id"
             dest: device_id
-            required: true
             type: str
           - name: "--history"
             help: "list history records -one for every 15 minutes- for XX days and YY hours -up to 10 days in total-, format: XXdYYh"
             dest: history
-            required: true
             type: str
           - name: "--records"
             help: "Number of records, default: 20"
             dest: records
-            required: true
             type: str
             default: 20
       - name: port-list
@@ -554,7 +486,6 @@ commands:
           - name: "node_id"
             help: "Storage node id"
             dest: node_id
-            required: true
             type: str
             completer: _completer_get_sn_list
       - name: port-io-stats
@@ -563,12 +494,10 @@ commands:
           - name: "port_id"
             help: "Data port id"
             dest: port_id
-            required: true
             type: str
           - name: "--history"
             help: "list history records -one for every 15 minutes- for XX days and YY hours -up to 10 days in total, format: XXdYYh"
             dest: history
-            required: true
             type: str
       - name: check
         help: "Checks the health status of a storage node"
@@ -580,7 +509,6 @@ commands:
           - name: "node_id"
             help: "Storage node id"
             dest: node_id
-            required: true
             type: str
             completer: _completer_get_sn_list
       - name: check-device
@@ -589,7 +517,6 @@ commands:
           - name: "device_id"
             help: "Device id"
             dest: id
-            required: true
             type: str
       - name: info
         help: "Gets the node's information"
@@ -597,7 +524,6 @@ commands:
           - name: "node_id"
             help: "Storage node id"
             dest: node_id
-            required: true
             type: str
             completer: _completer_get_sn_list
       - name: info-spdk
@@ -607,7 +533,6 @@ commands:
           - name: "node_id"
             help: "Storage node id"
             dest: node_id
-            required: true
             type: str
             completer: _completer_get_sn_list
       - name: remove-jm-device
@@ -617,12 +542,10 @@ commands:
           - name: "jm_device_id"
             help: "Journaling device id"
             dest: jm_device_id
-            required: true
             type: str
           - name: "--force"
             help: "Force device remove"
             dest: force
-            required: true
             type: bool
             action: store_true
       - name: restart-jm-device
@@ -631,12 +554,10 @@ commands:
           - name: "jm_device_id"
             help: "Journaling device id"
             dest: jm_device_id
-            required: true
             type: str
           - name: "--force"
             help: "Force device remove"
             dest: force
-            required: true
             type: bool
             action: store_true
       - name: send-cluster-map
@@ -646,7 +567,6 @@ commands:
           - name: "node_id"
             help: "Storage node id"
             dest: node_id
-            required: true
             type: str
             completer: _completer_get_sn_list
       - name: get-cluster-map
@@ -656,7 +576,6 @@ commands:
           - name: "node_id"
             help: "Storage node id"
             dest: node_id
-            required: true
             type: str
             completer: _completer_get_sn_list
       - name: make-primary
@@ -666,7 +585,6 @@ commands:
           - name: "node_id"
             help: "Storage node id"
             dest: node_id
-            required: true
             type: str
             completer: _completer_get_sn_list
       - name: dump-lvstore
@@ -676,7 +594,6 @@ commands:
           - name: "node_id"
             help: "Storage node id"
             dest: node_id
-            required: true
             type: str
             completer: _completer_get_sn_list
   - name: "cluster"
@@ -689,23 +606,19 @@ commands:
           - name: "--storage-nodes"
             help: "comma separated ip addresses"
             dest: storage_nodes
-            required: true
             type: str
           - name: "--test"
             help: "Test Cluster"
             dest: test
-            required: true
             type: bool
             action: store_true
           - name: "--secondary-nodes"
             help: "comma separated ip addresses"
             dest: secondary_nodes
-            required: true
             type: str
           - name: "--ha-type"
             help: "Logical volume HA type (single, ha), default is cluster HA type"
             dest: ha_type
-            required: true
             type: str
             choices:
               - single
@@ -714,38 +627,32 @@ commands:
           - name: "--ha-jm-count"
             help: "HA JM count"
             dest: ha_jm_count
-            required: false
             type: str
             default: 3
             private: true
           - name: "--data-chunks-per-stripe"
             help: "Erasure coding schema parameter k (distributed raid), default: 1"
             dest: distr-ndcs
-            required: true
             type: int
             default: 1
           - name: "--parity-chunks-per-stripe"
             help: "Erasure coding schema parameter n (distributed raid), default: 1"
             dest: distr-npcs
-            required: true
             type: int
             default: 1
           - name: "--enable-qos"
             help: "Enable qos bdev for storage nodes"
             dest: enable_qos
-            required: false
             type: bool
             action: store_true
             private: true
           - name: "--ifname"
             help: "Management interface name, e.g. eth0"
             dest: ifname
-            required: true
             type: str
           - name: "--blk_size"
             help: "The block size in bytes"
             dest: blk_size
-            required: false
             type: str
             choices:
               - 512
@@ -755,82 +662,69 @@ commands:
           - name: "--page_size"
             help: "The size of a data page in bytes"
             dest: page_size
-            required: false
             type: str
             default: 2097152
             private: true
           - name: "--CLI_PASS"
             help: "Password for CLI SSH connection"
             dest: CLI_PASS
-            required: false
             type: str
             private: true
           - name: "--cap-warn"
             help: "Capacity warning level in percent, default: 89"
             dest: cap_warn
-            required: false
             type: int
             default: 89
           - name: "--cap-crit"
             help: "Capacity critical level in percent, default: 99"
             dest: cap_crit
-            required: false
             type: int
             default: 99
           - name: "--prov-cap-warn"
             help: "Capacity warning level in percent, default: 250"
             dest: prov_cap_warn
-            required: false
             type: int
             default: 250
           - name: "--prov-cap-crit"
             help: "Capacity critical level in percent, default: 500"
             dest: prov_cap_crit
-            required: false
             type: int
             default: 500
           - name: "--log-del-interval"
             help: "Logging retention period, default: 3d"
             dest: log_del_interval
-            required: false
             type: str
             default: 3d
           - name: "--metrics-retention-period"
             help: "Retention period for I/O statistics (Prometheus), default: 7d"
             dest: metrics_retention_period
-            required: false
             type: str
             default: 7d
           - name: "--contact-point"
             help: "Email or slack webhook url to be used for alerting"
             dest: contact_point
-            required: false
             type: str
             default: 
           - name: "--grafana-endpoint"
             help: "Endpoint url for Grafana"
             dest: grafana_endpoint
-            required: false
             type: str
             default: 
             private: true
           - name: "--distr-bs"
             help: "(Dev) distrb bdev block size, default: 4096"
             dest: distr-bs
-            required: false
             type: str
             default: 4096
             private: true
           - name: "--chunk-size-in-bytes"
             help: "(Dev) distrb bdev chunk block size, default: 4096"
             dest: distr-chunk-bs
-            required: false
             type: str
             default: 4096
           - name: "--enable-node-affinity"
             help: "Enable node affinity for storage nodes"
             dest: enable-node-affinity
-            required: false
             type: bool
             action: store_true
           - name: "--qpair-count"
@@ -839,21 +733,18 @@ commands:
               Increase for clusters with few but very large logical volumes or decrease for clusters with a large number
               of very small logical volumes.
             dest: qpair_count
-            required: false
             type: int
             value_range: 1..128
             default: 3
           - name: "--max-queue-size"
             help: "The max size the queue will grow"
             dest: max-queue-size
-            required: false
             type: str
             default: 128
             private: true
           - name: "--inflight-io-threshold"
             help: "The number of inflight IOs allowed before the IO queuing starts"
             dest: inflight-io-threshold
-            required: false
             type: str
             default: 4
             private: true
@@ -862,7 +753,6 @@ commands:
               Enable strict node anti affinity for storage nodes. Never more than one chunk is placed on a node.
               This requires a minimum of _data-chunks-in-stripe + parity-chunks-in-stripe + 1_ nodes in the cluster."
             dest: strict-node-anti-affinity
-            required: false
             type: bool
             action: store_true
           - name: "--journal-partition"
@@ -872,13 +762,11 @@ commands:
               the entire node’s NVMe capacity. If set to false, partitions on other devices will be auto-created to
               store the journal.
             dest: partitions
-            required: false
             type: str
             default: true
           - name: "--jm-percent"
             help: "Number in percent to use for JM from each device"
             dest: jm_percent
-            required: false
             type: str
             default: 3
             private: true
@@ -887,44 +775,37 @@ commands:
             description: >
               Storage network interface name(s). Can be more than one. Comma-separated list: e.g. eth0,eth1
             dest: data_nics
-            required: true
             type: str
             nargs: +
           - name: "--max-lvol"
             help: "Max logical volume per storage node"
             dest: max_lvol
-            required: true
             type: int
           - name: "--max-snap"
             help: "Max snapshot per storage node"
             dest: max_snap
-            required: false
             type: str
             default: 500
             private: true
           - name: "--max-size"
             help: "Maximum amount of GB to be provisioned via all storage nodes"
             dest: max_prov
-            required: true
             type: str
             default: ""
           - name: "--number-of-distribs"
             help: "The number of distirbs to be created on the node"
             dest: number_of_distribs
-            required: false
             type: str
             default: 4
             private: true
           - name: "--number-of-devices"
             help: "Number of devices per storage node if it's not supported EC2 instance"
             dest: number_of_devices
-            required: true
             type: str
             private: true
           - name: "--size-of-device"
             help: "Size of device per storage node"
             dest: partition_size
-            required: true
             type: str
             private: true
           - name: "--vcpu-count"
@@ -932,52 +813,44 @@ commands:
               Number of vCPUs used for SPDK. Remaining CPUs will be used for Linux system, TCP/IP processing, and
               other workloads. The default on non-Kubernetes hosts is 80%.
             dest: vcpu_count
-            required: true
             type: int
           - name: "--cpu-mask"
             help: "SPDK app CPU mask, default is all cores found"
             dest: spdk_cpu_mask
-            required: false
             type: str
             private: true
           - name: "--spdk-image"
             help: "SPDK image uri"
             dest: spdk_image
-            required: true
             type: str
             private: true
           - name: "--spdk-debug"
             help: "Enable spdk debug logs"
             dest: spdk_debug
-            required: false
             type: bool
             action: store_true
             private: true
           - name: "--iobuf_small_bufsize"
             help: "bdev_set_options param"
             dest: small_bufsize
-            required: false
             type: str
             default: 0
             private: true
           - name: "--iobuf_large_bufsize"
             help: "bdev_set_options param"
             dest: large_bufsize
-            required: false
             type: str
             default: 0
             private: true
           - name: "--enable-test-device"
             help: "Enable creation of test device"
             dest: enable-test-device
-            required: false
             type: bool
             action: store_true
             private: true
           - name: "--disable-ha-jm"
             help: "Disable HA JM for distrib creation"
             dest: enable_ha_jm
-            required: false
             type: bool
             default: true
             action: store_false
@@ -987,47 +860,40 @@ commands:
               Adds as secondary node. A secondary node does not have any disks attached. It is only used for I/O
               processing in case a primary goes down.
             dest: is_secondary_node
-            required: true
             type: bool
             default: false
             action: store_true
           - name: "--namespace"
             help: "k8s namespace to deploy on"
             dest: namespace
-            required: true
             type: str
           - name: "--id-device-by-nqn"
             help: "Use device nqn to identify it instead of serial number"
             dest: id_device_by_nqn
-            required: true
             type: bool
             default: false
             action: store_true
           - name: "--lvol-name"
             help: "Logical volume name or id"
             dest: lvol_name
-            required: false
             type: str
             default: lvol01
             private: true
           - name: "--lvol-size"
             help: "Logical volume size: 10M, 10G, 10(bytes)"
             dest: lvol_size
-            required: false
             type: str
             default: 10G
             private: true
           - name: "--pool-name"
             help: "Pool id or name"
             dest: pool_name
-            required: false
             type: str
             default: pool01
             private: true
           - name: "--pool-max"
             help: "Pool maximum size: 20M, 20G, 0(default)"
             dest: pool-max
-            required: false
             type: str
             default: 0
             default: 25G
@@ -1035,7 +901,6 @@ commands:
           - name: "--snapshot"
             help: "Make logical volume with snapshot capability, default: false"
             dest: snapshot
-            required: false
             type: bool
             action: store_true
             default: false
@@ -1043,19 +908,16 @@ commands:
           - name: "--max-volume-size"
             help: "Logical volume max size"
             dest: max_size
-            required: false
             type: str
             default: 1000G
             private: true
           - name: "--host-id"
             help: "Primary storage node id or hostname"
             dest: host_id
-            required: false
             type: str
           - name: "--encrypt"
             help: "Use inline data encryption and decryption on the logical volume"
             dest: encrypt
-            required: false
             type: bool
             action: store_true
             default: false
@@ -1063,50 +925,42 @@ commands:
           - name: "--crypto-key1"
             help: "Hex value of key1 to be used for logical volume encryption"
             dest: crypto_key1
-            required: false
             type: str
             private: true
           - name: "--crypto-key2"
             help: "Hex value of key2 to be used for logical volume encryption"
             dest: crypto_key2
-            required: false
             type: str
             private: true
           - name: "--max-rw-iops"
             help: "Maximum Read Write IO Per Second"
             dest: max-rw-iops
-            required: false
             type: int
             private: true
           - name: "--max-rw-mbytes"
             help: "Maximum Read Write Megabytes Per Second"
             dest: max-rw-mbytes
-            required: false
             type: int
             private: true
           - name: "--max-r-mbytes"
             help: "Maximum Read Megabytes Per Second"
             dest: max-r-mbytes
-            required: false
             type: int
             private: true
           - name: "--max-w-mbytes"
             help: "Maximum Write Megabytes Per Second"
             dest: max-w-mbytes
-            required: false
             type: int
             private: true
           - name: "--distr-vuid"
             help: "(Dev) set vuid manually, default: random (1-99999)"
             dest: distr-vuid
-            required: false
             type: str
             default: 0
             private: true
           - name: "--lvol-ha-type"
             help: "Logical volume HA type (single, ha), default is cluster HA type"
             dest: lvol_ha_type
-            required: true
             type: str
             choices:
               - single
@@ -1117,14 +971,12 @@ commands:
           - name: "--lvol-priority-class"
             help: "Logical volume priority class"
             dest: lvol-priority-class
-            required: true
             type: int
             default: 0
             private: false
           - name: "--fstype"
             help: "Filesystem type for testing (ext4, xfs)"
             dest: fstype
-            required: true
             type: str
             choices:
               - ext4
@@ -1139,99 +991,83 @@ commands:
           - name: "--page_size"
             help: "The size of a data page in bytes"
             dest: page_size
-            required: true
             type: str
             default: 2097152
             private: true
           - name: "--CLI_PASS"
             help: "Password for CLI SSH connection"
             dest: CLI_PASS
-            required: true
             type: str
             private: true
           - name: "--cap-warn"
             help: "Capacity warning level in percent, default: 89"
             dest: cap_warn
-            required: true
             type: int
             default: 89
           - name: "--cap-crit"
             help: "Capacity critical level in percent, default: 99"
             dest: cap_crit
-            required: true
             type: int
             default: 99
           - name: "--prov-cap-warn"
             help: "Capacity warning level in percent, default: 250"
             dest: prov_cap_warn
-            required: true
             type: int
             default: 250
           - name: "--prov-cap-crit"
             help: "Capacity critical level in percent, default: 500"
             dest: prov_cap_crit
-            required: true
             type: int
             default: 500
           - name: "--ifname"
             help: "Management interface name, e.g. eth0"
             dest: ifname
-            required: true
             type: str
           - name: "--log-del-interval"
             help: "Logging retention policy, default: 3d"
             dest: log_del_interval
-            required: true
             type: str
             default: 3d
           - name: "--metrics-retention-period"
             help: "Retention period for I/O statistics (Prometheus), default: 7d"
             dest: metrics_retention_period
-            required: true
             type: str
             default: 7d
           - name: "--contact-point"
             help: "Email or slack webhook url to be used for alerting"
             dest: contact_point
-            required: true
             type: str
             default: 
           - name: "--grafana-endpoint"
             help: "Endpoint url for Grafana"
             dest: grafana_endpoint
-            required: true
             type: str
             default: 
           - name: "--data-chunks-per-stripe"
             help: "Erasure coding schema parameter k (distributed raid), default: 1"
             dest: distr-ndcs
-            required: true
             type: int
             default: 1
           - name: "--parity-chunks-per-stripe"
             help: "Erasure coding schema parameter n (distributed raid), default: 1"
             dest: distr-npcs
-            required: true
             type: int
             default: 1
           - name: "--distr-bs"
             help: "(Dev) distrb bdev block size, default: 4096"
             dest: distr-bs
-            required: true
             type: str
             default: 4096
             private: true
           - name: "--distr-chunk-bs"
             help: "(Dev) distrb bdev chunk block size, default: 4096"
             dest: distr-chunk-bs
-            required: true
             type: str
             default: 4096
             private: true
           - name: "--ha-type"
             help: "Logical volume HA type (single, ha), default is cluster single type"
             dest: ha_type
-            required: true
             type: str
             choices:
               - single
@@ -1241,7 +1077,6 @@ commands:
           - name: "--enable-node-affinity"
             help: "Enable node affinity for storage nodes"
             dest: enable-node-affinity
-            required: true
             type: bool
             action: store_true
           - name: "--qpair-count"
@@ -1250,28 +1085,24 @@ commands:
               Increase for clusters with few but very large logical volumes or decrease for clusters with a large number
               of very small logical volumes.
             dest: qpair_count
-            required: true
             type: int
             value_range: 0..128
             default: 0
           - name: "--max-queue-size"
             help: "The max size the queue will grow"
             dest: max-queue-size
-            required: true
             type: str
             default: 128
             private: true
           - name: "--inflight-io-threshold"
             help: "The number of inflight IOs allowed before the IO queuing starts"
             dest: inflight-io-threshold
-            required: true
             type: str
             default: 4
             private: true
           - name: "--enable-qos"
             help: "Enable qos bdev for storage nodes, true by default"
             dest: enable_qos
-            required: true
             type: bool
             default: true
             private: true
@@ -1280,7 +1111,6 @@ commands:
               Enable strict node anti affinity for storage nodes. Never more than one chunk is placed on a node. This
               requires a minimum of _data-chunks-in-stripe + parity-chunks-in-stripe + 1_ nodes in the cluster.
             dest: strict-node-anti-affinity
-            required: true
             type: bool
             action: store_true
       - name: add
@@ -1289,64 +1119,54 @@ commands:
           - name: "--page_size"
             help: "The size of a data page in bytes"
             dest: page_size
-            required: true
             type: str
             default: 2097152
             private: true
           - name: "--cap-warn"
             help: "Capacity warning level in percent, default: 89"
             dest: cap_warn
-            required: true
             type: int
             default: 89
           - name: "--cap-crit"
             help: "Capacity critical level in percent, default: 99"
             dest: cap_crit
-            required: true
             type: int
             default: 99
           - name: "--prov-cap-warn"
             help: "Capacity warning level in percent, default: 250"
             dest: prov_cap_warn
-            required: true
             type: int
             default: 250
           - name: "--prov-cap-crit"
             help: "Capacity critical level in percent, default: 500"
             dest: prov_cap_crit
-            required: true
             type: int
             default: 500
           - name: "--data-chunks-per-stripe"
             help: "Erasure coding schema parameter k (distributed raid), default: 1"
             dest: distr-ndcs
-            required: true
             type: int
             default: 0
           - name: "--parity-chunks-per-stripe"
             help: "Erasure coding schema parameter n (distributed raid), default: 1"
             dest: distr-npcs
-            required: true
             type: int
             default: 0
           - name: "--distr-bs"
             help: "(Dev) distrb bdev block size, default: 4096"
             dest: distr-bs
-            required: true
             type: str
             default: 4096
             private: true
           - name: "--distr-chunk-bs"
             help: "(Dev) distrb bdev chunk block size, default: 4096"
             dest: distr-chunk-bs
-            required: true
             type: str
             default: 4096
             private: true
           - name: "--ha-type"
             help: "Logical volume HA type (single, ha), default is cluster single type"
             dest: ha_type
-            required: true
             type: str
             choices:
               - single
@@ -1356,7 +1176,6 @@ commands:
           - name: "--enable-node-affinity"
             help: "Enables node affinity for storage nodes"
             dest: enable-node-affinity
-            required: true
             type: bool
             action: store_true
           - name: "--qpair-count"
@@ -1365,28 +1184,24 @@ commands:
               Increase for clusters with few but very large logical volumes or decrease for clusters with a large number
               of very small logical volumes.
             dest: qpair_count
-            required: true
             type: int
             value_range: 0..128
             default: 0
           - name: "--max-queue-size"
             help: "The max size the queue will grow"
             dest: max-queue-size
-            required: true
             type: str
             default: 128
             private: true
           - name: "--inflight-io-threshold"
             help: "The number of inflight IOs allowed before the IO queuing starts"
             dest: inflight-io-threshold
-            required: true
             type: str
             default: 4
             private: true
           - name: "--enable-qos"
             help: "Enable qos bdev for storage nodes, default: true"
             dest: enable_qos
-            required: true
             type: bool
             default: true
             private: true
@@ -1395,7 +1210,6 @@ commands:
               Enable strict node anti affinity for storage nodes. Never more than one chunk is placed on a node.
               This requires a minimum of _data-chunks-in-stripe + parity-chunks-in-stripe + 1_ nodes in the cluster."
             dest: strict-node-anti-affinity
-            required: true
             type: bool
             action: store_true
       - name: activate
@@ -1407,13 +1221,11 @@ commands:
           - name: "--force"
             help: "Force recreate distr and lv stores"
             dest: force
-            required: true
             type: bool
             action: store_true
           - name: "--force-lvstore-create"
             help: "Force recreate lv stores"
             dest: force_lvstore_create
-            required: true
             type: bool
             action: store_true
             completer: _completer_get_cluster_list
@@ -1425,7 +1237,6 @@ commands:
           - name: "cluster_id"
             help: "Cluster id"
             dest: cluster_id
-            required: true
             type: str
             completer: _completer_get_cluster_list
       - name: show
@@ -1434,7 +1245,6 @@ commands:
           - name: "cluster_id"
             help: "Cluster id"
             dest: cluster_id
-            required: true
             type: str
             completer: _completer_get_cluster_list
       - name: get
@@ -1443,7 +1253,6 @@ commands:
           - name: "cluster_id"
             help: "Cluster id"
             dest: cluster_id
-            required: true
             type: str
             completer: _completer_get_cluster_list
       - name: get-capacity
@@ -1452,19 +1261,16 @@ commands:
           - name: "cluster_id"
             help: "Cluster id"
             dest: cluster_id
-            required: true
             type: str
             completer: _completer_get_cluster_list
           - name: "--json"
             help: "Print json output"
             dest: json
-            required: true
             type: bool
             action: store_true
           - name: "--history"
             help: "(XXdYYh), list history records (one for every 15 minutes) for XX days and YY hours (up to 10 days in total)."
             dest: history
-            required: true
             type: str
       - name: get-io-stats
         help: "Gets a cluster's I/O statistics"
@@ -1472,19 +1278,16 @@ commands:
           - name: "cluster_id"
             help: "Cluster id"
             dest: cluster_id
-            required: true
             type: str
             completer: _completer_get_cluster_list
           - name: "--records"
             help: "Number of records, default: 20"
             dest: records
-            required: true
             type: str
             default: 20
           - name: "--history"
             help: "(XXdYYh), list history records (one for every 15 minutes) for XX days and YY hours (up to 10 days in total)."
             dest: history
-            required: true
             type: str
       - name: get-logs
         help: "Returns a cluster's status logs"
@@ -1492,7 +1295,6 @@ commands:
           - name: "cluster_id"
             help: "Cluster id"
             dest: cluster_id
-            required: true
             type: str
             completer: _completer_get_cluster_list
       - name: get-secret
@@ -1501,7 +1303,6 @@ commands:
           - name: "cluster_id"
             help: "Cluster id"
             dest: cluster_id
-            required: true
             type: str
             completer: _completer_get_cluster_list
       - name: update-secret
@@ -1510,13 +1311,11 @@ commands:
           - name: "cluster_id"
             help: "Cluster id"
             dest: cluster_id
-            required: true
             type: str
             completer: _completer_get_cluster_list
           - name: "secret"
             help: "new 20 characters password"
             dest: secret
-            required: true
             type: str
       - name: check
         help: "Checks a cluster's health"
@@ -1524,7 +1323,6 @@ commands:
           - name: "cluster_id"
             help: "Cluster id"
             dest: cluster_id
-            required: true
             type: str
             completer: _completer_get_cluster_list
       - name: update
@@ -1537,19 +1335,16 @@ commands:
           - name: "cluster_id"
             help: "Cluster id"
             dest: cluster_id
-            required: true
             type: str
             completer: _completer_get_cluster_list
           - name: "--cp-only"
             help: "Update the control plane only"
             dest: mgmt_only
-            required: true
             type: bool
             default: false
           - name: "--restart"
             help: "Restart the management services"
             dest: restart
-            required: true
             type: bool
             default: false
       - name: graceful-shutdown
@@ -1559,7 +1354,6 @@ commands:
           - name: "cluster_id"
             help: "Cluster id"
             dest: cluster_id
-            required: true
             type: str
             completer: _completer_get_cluster_list
       - name: graceful-startup
@@ -1569,19 +1363,16 @@ commands:
           - name: "cluster_id"
             help: "Cluster id"
             dest: cluster_id
-            required: true
             type: str
             completer: _completer_get_cluster_list
           - name: "--clear-data"
             help: "clear Alceml data"
             dest: clear_data
-            required: true
             type: bool
             action: store_true
           - name: "--spdk-image"
             help: "SPDK image uri"
             dest: spdk_image
-            required: true
             type: str
       - name: list-tasks
         help: "Lists tasks of a cluster"
@@ -1589,7 +1380,6 @@ commands:
           - name: "cluster_id"
             help: "Cluster id"
             dest: cluster_id
-            required: true
             type: str
             completer: _completer_get_cluster_list
       - name: cancel-task
@@ -1598,7 +1388,6 @@ commands:
           - name: "task_id"
             help: "Task id"
             dest: id
-            required: true
             type: str
       - name: delete
         help: "Deletes a cluster"
@@ -1607,7 +1396,6 @@ commands:
           - name: "cluster_id"
             help: "Cluster id"
             dest: cluster_id
-            required: true
             type: str
             completer: _completer_get_cluster_list
   - name: "volume"
@@ -1622,83 +1410,68 @@ commands:
           - name: "name"
             help: "New logical volume name"
             dest: name
-            required: true
             type: str
           - name: "size"
             help: "Logical volume size: 10M, 10G, 10(bytes)"
             dest: size
-            required: true
             type: str
           - name: "pool"
             help: "Pool id or name"
             dest: pool
-            required: true
             type: str
           - name: "--snapshot"
             help: "Make logical volume with snapshot capability, default: false"
             dest: snapshot
-            required: true
             type: bool
             action: store_true
             default: false
           - name: "--max-size"
             help: "Logical volume max size"
             dest: max_size
-            required: true
             type: str
             default: ""
           - name: "--host-id"
             help: "Primary storage node id or Hostname"
             dest: host_id
-            required: true
             type: str
           - name: "--encrypt"
             help: "Use inline data encryption and decryption on the logical volume"
             dest: encrypt
-            required: true
             type: bool
             action: store_true
           - name: "--crypto-key1"
             help: "Hex value of key1 to be used for logical volume encryption"
             dest: crypto_key1
-            required: true
             type: str
           - name: "--crypto-key2"
             help: "Hex value of key2 to be used for logical volume encryption"
             dest: crypto_key2
-            required: true
             type: str
           - name: "--max-rw-iops"
             help: "Maximum Read Write IO Per Second"
             dest: max-rw-iops
-            required: true
             type: int
           - name: "--max-rw-mbytes"
             help: "Maximum Read Write Megabytes Per Second"
             dest: max-rw-mbytes
-            required: true
             type: int
           - name: "--max-r-mbytes"
             help: "Maximum Read Megabytes Per Second"
             dest: max-r-mbytes
-            required: true
             type: int
           - name: "--max-w-mbytes"
             help: "Maximum Write Megabytes Per Second"
             dest: max-w-mbytes
-            required: true
             type: int
           - name: "--distr-vuid"
             help: "(Dev) set vuid manually, default: random (1-99999)"
             dest: distr-vuid
-            required: true
             type: str
             default: 0
             private: true
           - name: "--ha-type"
             help: "Logical volume HA type (single, ha), default is cluster HA type"
             dest: ha_type
-            required: true
             type: str
             choices:
               - single
@@ -1709,24 +1482,20 @@ commands:
           - name: "--lvol-priority-class"
             help: "Logical volume priority class"
             dest: lvol-priority-class
-            required: true
             type: int
             default: 0
           - name: "--namespace"
             help: "Set logical volume namespace for k8s clients"
             dest: namespace
-            required: true
             type: str
           - name: "--uid"
             help: "Set logical volume id"
             dest: uid
-            required: true
             type: str
             private: true
           - name: "--pvc_name"
             help: "Set logical volume PVC name for k8s clients"
             dest: pvc_name
-            required: true
             type: str
       - name: qos-set
         help: "Changes QoS settings for an active logical volume"
@@ -1734,27 +1503,22 @@ commands:
           - name: "volume_id"
             help: "Logical volume id"
             dest: volume_id
-            required: true
             type: str
           - name: "--max-rw-iops"
             help: "Maximum Read Write IO Per Second"
             dest: max-rw-iops
-            required: true
             type: int
           - name: "--max-rw-mbytes"
             help: "Maximum Read Write Megabytes Per Second"
             dest: max-rw-mbytes
-            required: true
             type: int
           - name: "--max-r-mbytes"
             help: "Maximum Read Megabytes Per Second"
             dest: max-r-mbytes
-            required: true
             type: int
           - name: "--max-w-mbytes"
             help: "Maximum Write Megabytes Per Second"
             dest: max-w-mbytes
-            required: true
             type: int
       - name: list
         help: "Lists logical volumes"
@@ -1762,23 +1526,19 @@ commands:
           - name: "--cluster-id"
             help: "List logical volumes in particular cluster"
             dest: cluster_id
-            required: true
             type: str
           - name: "--pool"
             help: "List logical volumes in particular pool id or name"
             dest: pool
-            required: true
             type: str
           - name: "--json"
             help: "Print outputs in json format"
             dest: json
-            required: true
             type: bool
             action: store_true
           - name: "--all"
             help: "List soft deleted logical volumes"
             dest: all
-            required: true
             type: bool
             action: store_true
       - name: list-mem
@@ -1788,13 +1548,11 @@ commands:
           - name: "--json"
             help: "Print outputs in json format"
             dest: json
-            required: true
             type: bool
             action: store_true
           - name: "--csv"
             help: "Print outputs in csv format"
             dest: csv
-            required: true
             type: bool
             action: store_true
       - name: get
@@ -1803,12 +1561,10 @@ commands:
           - name: "volume_id"
             help: "Logical volume id or name"
             dest: volume_id
-            required: true
             type: str
           - name: "--json"
             help: "Print outputs in json format"
             dest: json
-            required: true
             type: bool
             action: store_true
       - name: delete
@@ -1821,13 +1577,11 @@ commands:
           - name: "volume_id"
             help: "Logical volumes id or ids"
             dest: volume_id
-            required: true
             type: str
             nargs: +
           - name: "--force"
             help: "Force delete logical volume from the cluster"
             dest: force
-            required: true
             type: bool
             action: store_true
       - name: connect
@@ -1837,7 +1591,6 @@ commands:
           - name: "volume_id"
             help: "Logical volume id"
             dest: volume_id
-            required: true
             type: str
       - name: resize
         help: "Resizes a logical volume"
@@ -1848,12 +1601,10 @@ commands:
           - name: "volume_id"
             help: "Logical volume id"
             dest: volume_id
-            required: true
             type: str
           - name: "size"
             help: "New logical volume size size: 10M, 10G, 10(bytes)"
             dest: size
-            required: true
             type: str
       - name: create-snapshot
         help: "Creates a snapshot from a logical volume"
@@ -1861,12 +1612,10 @@ commands:
           - name: "volume_id"
             help: "Logical volume id"
             dest: volume_id
-            required: true
             type: str
           - name: "name"
             help: "Snapshot name"
             dest: name
-            required: true
             type: str
       - name: clone
         help: "Provisions a logical volumes from an existing snapshot"
@@ -1874,17 +1623,14 @@ commands:
           - name: "snapshot_id"
             help: "Snapshot id"
             dest: snapshot_id
-            required: true
             type: str
           - name: "clone_name"
             help: "Clone name"
             dest: clone_name
-            required: true
             type: str
           - name: "--resize"
             help: "New logical volume size: 10M, 10G, 10(bytes). Can only increase."
             dest: resize
-            required: true
             type: str
       - name: move
         help: "Moves a full copy of the logical volume between nodes"
@@ -1893,17 +1639,14 @@ commands:
           - name: "volume_id"
             help: "Logical volume id"
             dest: volume_id
-            required: true
             type: str
           - name: "node_id"
             help: "Destination node id"
             dest: node_id
-            required: true
             type: str
           - name: "--force"
             help: "Force logical volume delete from source node"
             dest: force
-            required: true
             type: bool
             action: store_true
       - name: get-capacity
@@ -1912,12 +1655,10 @@ commands:
           - name: "volume_id"
             help: "Logical volume id"
             dest: volume_id
-            required: true
             type: str
           - name: "--history"
             help: "(XXdYYh), list history records (one for every 15 minutes) for XX days and YY hours (up to 10 days in total)."
             dest: history
-            required: true
             type: str
       - name: get-io-stats
         help: "Gets a logical volume's I/O statistics"
@@ -1925,17 +1666,14 @@ commands:
           - name: "volume_id"
             help: "Logical volume id"
             dest: volume_id
-            required: true
             type: str
           - name: "--history"
             help: "(XXdYYh), list history records (one for every 15 minutes) for XX days and YY hours (up to 10 days in total)."
             dest: history
-            required: true
             type: str
           - name: "--records"
             help: "Number of records, default: 20"
             dest: records
-            required: true
             type: int
             default: 20
       - name: check
@@ -1944,7 +1682,6 @@ commands:
           - name: "volume_id"
             help: "Logical volume id"
             dest: volume_id
-            required: true
             type: str
       - name: inflate
         help: "Inflate a logical volume"
@@ -1955,7 +1692,6 @@ commands:
           - name: "volume_id"
             help: "Cloned logical volume id"
             dest: volume_id
-            required: true
             type: str
   - name: "control-plane"
     help: "Control plane commands"
@@ -1970,22 +1706,18 @@ commands:
           - name: "cluster_ip"
             help: "Cluster IP address"
             dest: cluster_ip
-            required: true
             type: str
           - name: "cluster_id"
             help: "Cluster id"
             dest: cluster_id
-            required: true
             type: str
           - name: "cluster_secret"
             help: "Cluster secret"
             dest: cluster_secret
-            required: true
             type: str
           - name: "ifname"
             help: "Management interface name"
             dest: ifname
-            required: true
             type: str
       - name: list
         help: "Lists all control plane nodes"
@@ -1993,7 +1725,6 @@ commands:
           - name: "--json"
             help: "Print outputs in json format"
             dest: json
-            required: true
             type: bool
             action: store_true
       - name: remove
@@ -2002,7 +1733,6 @@ commands:
           - name: "node_id"
             help: "Control plane node id"
             dest: node_id
-            required: true
             type: str
   - name: "storage-pool"
     help: "Storage pool commands"
@@ -2016,49 +1746,40 @@ commands:
           - name: "name"
             help: "New pool name"
             dest: name
-            required: true
             type: str
           - name: "cluster_id"
             help: "Cluster id"
             dest: cluster_id
-            required: true
             type: str
           - name: "--pool-max"
             help: "Pool maximum size: 20M, 20G, 0. Default: 0"
             dest: pool-max
-            required: true
             type: str
             default: 0
           - name: "--lvol-max"
             help: "Logical volume maximum size: 20M, 20G, 0. Default: 0"
             dest: lvol-max
-            required: true
             type: str
             default: 0
           - name: "--max-rw-iops"
             help: "Maximum Read Write IO Per Second"
             dest: max-rw-iops
-            required: true
             type: int
           - name: "--max-rw-mbytes"
             help: "Maximum Read Write Megabytes Per Second"
             dest: max-rw-mbytes
-            required: true
             type: int
           - name: "--max-r-mbytes"
             help: "Maximum Read Megabytes Per Second"
             dest: max-r-mbytes
-            required: true
             type: int
           - name: "--max-w-mbytes"
             help: "Maximum Write Megabytes Per Second"
             dest: max-w-mbytes
-            required: true
             type: int
           - name: "--has-secret"
             help: "Pool is created with a secret (all further API interactions with the pool and logical volumes in the pool require this secret)"
             dest: has-secret
-            required: true
             type: bool
             action: store_true
             private: true
@@ -2068,37 +1789,30 @@ commands:
           - name: "pool_id"
             help: "Pool id"
             dest: pool_id
-            required: true
             type: str
           - name: "--pool-max"
             help: "Pool maximum size: 20M, 20G"
             dest: pool-max
-            required: true
             type: str
           - name: "--lvol-max"
             help: "Logical volume maximum size: 20M, 20G"
             dest: lvol-max
-            required: true
             type: str
           - name: "--max-rw-iops"
             help: "Maximum Read Write IO Per Second"
             dest: max-rw-iops
-            required: true
             type: int
           - name: "--max-rw-mbytes"
             help: "Maximum Read Write Megabytes Per Second"
             dest: max-rw-mbytes
-            required: true
             type: int
           - name: "--max-r-mbytes"
             help: "Maximum Read Megabytes Per Second"
             dest: max-r-mbytes
-            required: true
             type: int
           - name: "--max-w-mbytes"
             help: "Maximum Write Megabytes Per Second"
             dest: max-w-mbytes
-            required: true
             type: int
       - name: list
         help: "Lists all storage pools"
@@ -2106,13 +1820,11 @@ commands:
           - name: "--json"
             help: "Print outputs in json format"
             dest: json
-            required: true
             type: bool
             action: store_true
           - name: "--cluster-id"
             help: "Cluster id"
             dest: cluster_id
-            required: true
             type: str
       - name: get
         help: "Gets a storage pool's details"
@@ -2120,12 +1832,10 @@ commands:
           - name: "pool_id"
             help: "Pool id"
             dest: pool_id
-            required: true
             type: str
           - name: "--json"
             help: "Print outputs in json format"
             dest: json
-            required: true
             type: bool
             action: store_true
       - name: delete
@@ -2135,7 +1845,6 @@ commands:
           - name: "pool_id"
             help: "Pool id"
             dest: pool_id
-            required: true
             type: str
       - name: enable
         help: "Set a storage pool's status to Active"
@@ -2143,7 +1852,6 @@ commands:
           - name: "pool_id"
             help: "Pool id"
             dest: pool_id
-            required: true
             type: str
       - name: disable
         help: "Sets a storage pool's status to Inactive."
@@ -2151,7 +1859,6 @@ commands:
           - name: "pool_id"
             help: "Pool id"
             dest: pool_id
-            required: true
             type: str
       - name: get-capacity
         help: "Gets a storage pool's capacity"
@@ -2159,7 +1866,6 @@ commands:
           - name: "pool_id"
             help: "Pool id"
             dest: pool_id
-            required: true
             type: str
       - name: get-io-stats
         help: "Gets a storage pool's I/O statistics"
@@ -2167,17 +1873,14 @@ commands:
           - name: "pool_id"
             help: "Pool id"
             dest: pool_id
-            required: true
             type: str
           - name: "--history"
             help: "(XXdYYh), list history records (one for every 15 minutes) for XX days and YY hours (up to 10 days in total)."
             dest: history
-            required: true
             type: str
           - name: "--records"
             help: "Number of records, default: 20"
             dest: records
-            required: true
             type: str
             default: 20
   - name: "snapshot"
@@ -2190,12 +1893,10 @@ commands:
           - name: "snapshot_id"
             help: "Logical volume id"
             dest: snapshot_id
-            required: true
             type: str
           - name: "name"
             help: "New snapshot name"
             dest: name
-            required: true
             type: str
       - name: list
         help: "Lists all snapshots"
@@ -2203,7 +1904,6 @@ commands:
           - name: "--all"
             help: "List soft deleted snapshots"
             dest: all
-            required: true
             type: bool
             action: store_true
       - name: delete
@@ -2212,12 +1912,10 @@ commands:
           - name: "snapshot_id"
             help: "Snapshot id"
             dest: snapshot_id
-            required: true
             type: str
           - name: "--force"
             help: "Force remove"
             dest: force
-            required: true
             type: bool
             action: store_true
       - name: clone
@@ -2226,17 +1924,14 @@ commands:
           - name: "snapshot_id"
             help: "Snapshot id"
             dest: snapshot_id
-            required: true
             type: str
           - name: "lvol_name"
             help: "Logical volume name"
             dest: lvol_name
-            required: true
             type: str
           - name: "--resize"
             help: "New logical volume size: 10M, 10G, 10(bytes)"
             dest: resize
-            required: true
             type: str
   - name: "caching-node"
     help: "Caching node commands"
@@ -2250,7 +1945,6 @@ commands:
           - name: "--ifname"
             help: "Management interface name, e.g. eth0"
             dest: ifname
-            required: true
             type: str
       - name: add-node
         help: "Adds a new caching node to the cluster"
@@ -2258,52 +1952,43 @@ commands:
           - name: "cluster_id"
             help: "Cluster id"
             dest: cluster_id
-            required: true
             type: str
           - name: "node_ip"
             help: "Node IP address"
             dest: node_ip
-            required: true
             type: str
           - name: "ifname"
             help: "Management interface name"
             dest: ifname
-            required: true
             type: str
           - name: "--vcpu-count"
             help: >
               Number of vCPUs used for SPDK. Remaining CPUs will be used for Linux system, TCP/IP processing, and
               other workloads. The default on non-Kubernetes hosts is 80%.
             dest: vcpu_count
-            required: true
             type: int
           - name: "--cpu-mask"
             help: "SPDK app CPU mask, default is all cores found"
             dest: spdk_cpu_mask
-            required: true
             type: str
             private: true
           - name: "--memory"
             help: "SPDK huge memory allocation. By default it will acquire all available huge pages."
             dest: spdk_mem
-            required: true
             type: int
             private: true
           - name: "--spdk-image"
             help: "SPDK image uri"
             dest: spdk_image
-            required: true
             type: str
             private: true
           - name: "--namespace"
             help: "k8s namespace to deploy on"
             dest: namespace
-            required: true
             type: str
           - name: "--multipathing"
             help: "Enable multipathing for logical volume connection, default: on"
             dest: multipathing
-            required: true
             type: str
             choices:
               - "on"
@@ -2317,7 +2002,6 @@ commands:
           - name: "node_id"
             help: "Caching node id"
             dest: node_id
-            required: true
             type: str
       - name: remove
         help: "Removes a caching node from the cluster"
@@ -2325,12 +2009,10 @@ commands:
           - name: "node_id"
             help: "Caching node id"
             dest: node_id
-            required: true
             type: str
           - name: "--force"
             help: "Force remove"
             dest: force
-            required: true
             type: bool
             action: store_true
       - name: connect
@@ -2339,12 +2021,10 @@ commands:
           - name: "node_id"
             help: "Caching node id"
             dest: node_id
-            required: true
             type: str
           - name: "lvol_id"
             help: "Logical volume id"
             dest: lvol_id
-            required: true
             type: str
       - name: disconnect
         help: "Disconnects a logical volume from the caching node"
@@ -2352,12 +2032,10 @@ commands:
           - name: "node_id"
             help: "Caching node id"
             dest: node_id
-            required: true
             type: str
           - name: "lvol_id"
             help: "Logical volume id"
             dest: lvol_id
-            required: true
             type: str
       - name: recreate
         help: "Recreate a caching node's bdevs"
@@ -2365,7 +2043,6 @@ commands:
           - name: "node_id"
             help: "Caching node id"
             dest: node_id
-            required: true
             type: str
       - name: get-lvol-stats
         help: "Gets a logical volume's statistics"
@@ -2373,10 +2050,8 @@ commands:
           - name: "lvol_id"
             help: "Logical volume id"
             dest: lvol_id
-            required: true
             type: str
           - name: "--history"
             help: "(XXdYYh), list history records (one for every 15 minutes) for XX days and YY hours (up to 10 days in total)."
             dest: history
-            required: true
             type: str
