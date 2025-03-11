@@ -28,7 +28,13 @@ def required(item):
         return False
     elif "default" in item:
         return False
-    return True
+    elif "private" in item and item["private"]:
+        return False
+    elif "required" in item and item["required"]:
+        return True
+    elif not item["name"].startswith("--"):
+        return True
+    return False
 
 
 def data_type_name(item):
@@ -131,6 +137,8 @@ with open("%s/cli-reference.yaml" % base_path) as stream:
         output = template.render({"commands": reference["commands"]})
         with open("%s/simplyblock_cli/cli.py" % base_path, "t+w") as target:
             target.write(output)
+
+        print("Successfully generated cli.py")
 
     except yaml.YAMLError as exc:
         print(exc)
