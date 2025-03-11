@@ -25,6 +25,7 @@ class CLIWrapperBase:
     def init_parser(self):
         self.parser = argparse.ArgumentParser(prog=constants.SIMPLY_BLOCK_CLI_NAME, description='SimplyBlock management CLI')
         self.parser.add_argument("-d", '--debug', help='Print debug messages', required=False, action='store_true')
+        self.parser.add_argument('--dev', help='Enable developer options', required=False, action='store_true')
         self.subparser = self.parser.add_subparsers(dest='command')
 
     def add_command(self, command, help, aliases=None):
