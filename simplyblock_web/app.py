@@ -22,6 +22,8 @@ sentry_sdk.init(
     # Add data like request headers and IP for users,
     # see https://docs.sentry.io/platforms/python/data-management/data-collected/ for more info
     send_default_pii=True,
+    traces_sample_rate=1.0,
+
 )
 
 app = Flask(__name__)
