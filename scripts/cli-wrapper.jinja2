@@ -2,6 +2,7 @@ from simplyblock_cli.clibase import CLIWrapperBase
 from simplyblock_core import utils
 import logging
 import sys
+import sentry_sdk
 
 class CLIWrapper(CLIWrapperBase):
 
@@ -83,10 +84,10 @@ class CLIWrapper(CLIWrapperBase):
         args_dict = args.__dict__
 
 {%- for command in commands %}
-        if args.command in ['{{ command.name }}'{% if command.aliases is defined %}{% for alias in command.aliases %}, '{{ alias }}'{% endfor %}{% endif %}]:
+        {% if loop.first %}if{% else %}elif{% endif %} args.command in ['{{ command.name }}'{% if command.aliases is defined %}{% for alias in command.aliases %}, '{{ alias }}'{% endfor %}{% endif %}]:
             sub_command = args_dict['{{ command.name }}']
 {%- for subcommand in command.subcommands %}
-            if sub_command in ['{{ subcommand.name }}'{% if subcommand.aliases is defined %}{% for alias in subcommand.aliases %}, '{{ alias }}'{% endfor %}{% endif %}]:
+            {% if loop.first %}if{% else %}elif{% endif %} sub_command in ['{{ subcommand.name }}'{% if subcommand.aliases is defined %}{% for alias in subcommand.aliases %}, '{{ alias }}'{% endfor %}{% endif %}]:
 {%- if subcommand.private %}
                 if not developer_mode:
                     print("This command is private.")
@@ -110,5 +111,16 @@ class CLIWrapper(CLIWrapperBase):
 
 
 def main():
+    sentry_sdk.init(
+        dsn="https://e86fb6365033e6c5a54e4443c3571e73@o4508953941311488.ingest.de.sentry.io/4508953948520528",
+        max_breadcrumbs=50,
+        debug=False,
+        # Set traces_sample_rate to 1.0 to capture 100%
+        # of transactions for tracing.
+        traces_sample_rate=1.0,
+        # Add request headers and IP for users,
+        # see https://docs.sentry.io/platforms/python/data-management/data-collected/ for more info
+        send_default_pii=True,
+    )
     cli = CLIWrapper()
     cli.run()
