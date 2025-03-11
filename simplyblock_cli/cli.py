@@ -2,6 +2,7 @@ from simplyblock_cli.clibase import CLIWrapperBase
 from simplyblock_core import utils
 import logging
 import sys
+import sentry_sdk
 
 class CLIWrapper(CLIWrapperBase):
 
@@ -1143,5 +1144,17 @@ class CLIWrapper(CLIWrapperBase):
 
 
 def main():
+    sentry_sdk.init(
+        dsn="https://e86fb6365033e6c5a54e4443c3571e73@o4508953941311488.ingest.de.sentry.io/4508953948520528",
+        max_breadcrumbs=50,
+        debug=True,
+        # Set traces_sample_rate to 1.0 to capture 100%
+        # of transactions for tracing.
+        traces_sample_rate=1.0,
+        # Add request headers and IP for users,
+        # see https://docs.sentry.io/platforms/python/data-management/data-collected/ for more info
+        send_default_pii=True,
+    )
+
     cli = CLIWrapper()
     cli.run()

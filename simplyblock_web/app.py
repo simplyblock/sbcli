@@ -12,10 +12,17 @@ from auth_middleware import token_required
 from simplyblock_core import constants, utils as core_utils
 from werkzeug.middleware.dispatcher import DispatcherMiddleware
 from prometheus_client import make_wsgi_app
+import sentry_sdk
 
 logger = core_utils.get_logger(__name__)
 
 
+sentry_sdk.init(
+    dsn="https://e86fb6365033e6c5a54e4443c3571e73@o4508953941311488.ingest.de.sentry.io/4508953948520528",
+    # Add data like request headers and IP for users,
+    # see https://docs.sentry.io/platforms/python/data-management/data-collected/ for more info
+    send_default_pii=True,
+)
 
 app = Flask(__name__)
 app.logger.setLevel(constants.LOG_WEB_LEVEL)

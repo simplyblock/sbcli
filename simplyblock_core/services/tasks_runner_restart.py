@@ -1,6 +1,7 @@
 # coding=utf-8
 import time
 
+import sentry_sdk
 
 from simplyblock_core import constants, db_controller, storage_node_ops, utils
 from simplyblock_core.controllers import device_controller, tasks_events, health_controller, tasks_controller
@@ -13,6 +14,19 @@ logger = utils.get_logger(__name__)
 
 # get DB controller
 db_controller = db_controller.DBController()
+
+
+sentry_sdk.init(
+    dsn="https://e86fb6365033e6c5a54e4443c3571e73@o4508953941311488.ingest.de.sentry.io/4508953948520528",
+    max_breadcrumbs=50,
+    debug=True,
+    # Set traces_sample_rate to 1.0 to capture 100%
+    # of transactions for tracing.
+    traces_sample_rate=1.0,
+    # Add request headers and IP for users,
+    # see https://docs.sentry.io/platforms/python/data-management/data-collected/ for more info
+    send_default_pii=True,
+)
 
 
 def _get_node_unavailable_devices_count(node_id):
