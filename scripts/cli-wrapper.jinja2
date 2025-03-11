@@ -77,8 +77,6 @@ class CLIWrapper(CLIWrapperBase):
 
         logging.getLogger("urllib3.connectionpool").setLevel(logging.WARNING)
 
-        developer_mode = True if args.dev else False
-
         ret = ""
         args_dict = args.__dict__
 
@@ -87,8 +85,13 @@ class CLIWrapper(CLIWrapperBase):
             sub_command = args_dict['{{ command.name }}']
 {%- for subcommand in command.subcommands %}
             if sub_command in ['{{ subcommand.name }}'{% if subcommand.aliases is defined %}{% for alias in subcommand.aliases %}, '{{ alias }}'{% endfor %}{% endif %}]:
+{%- for argument in subcommand.arguments -%}
+{%- if argument.dest is defined and argument.dest != argument.name %}
+                args.{{ argument.dest }} = args.{{ argument.name }}
+{%- endif -%}
+{%- endfor -%}
 {%- if subcommand.private %}
-                if not developer_mode:
+                if not self.developer_mode:
                     print("This command is private.")
                     ret = False
                 else:

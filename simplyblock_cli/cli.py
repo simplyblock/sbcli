@@ -857,8 +857,6 @@ class CLIWrapper(CLIWrapperBase):
 
         logging.getLogger("urllib3.connectionpool").setLevel(logging.WARNING)
 
-        developer_mode = True if args.dev else False
-
         ret = ""
         args_dict = args.__dict__
         if args.command in ['storage-node', 'sn']:
@@ -892,7 +890,7 @@ class CLIWrapper(CLIWrapperBase):
             if sub_command in ['list-devices']:
                 ret = self.storage_node__list_devices(sub_command, args)
             if sub_command in ['device-testing-mode']:
-                if not developer_mode:
+                if not self.developer_mode:
                     print("This command is private.")
                     ret = False
                 else:
@@ -924,13 +922,13 @@ class CLIWrapper(CLIWrapperBase):
             if sub_command in ['info']:
                 ret = self.storage_node__info(sub_command, args)
             if sub_command in ['info-spdk']:
-                if not developer_mode:
+                if not self.developer_mode:
                     print("This command is private.")
                     ret = False
                 else:
                     ret = self.storage_node__info_spdk(sub_command, args)
             if sub_command in ['remove-jm-device']:
-                if not developer_mode:
+                if not self.developer_mode:
                     print("This command is private.")
                     ret = False
                 else:
@@ -938,25 +936,25 @@ class CLIWrapper(CLIWrapperBase):
             if sub_command in ['restart-jm-device']:
                 ret = self.storage_node__restart_jm_device(sub_command, args)
             if sub_command in ['send-cluster-map']:
-                if not developer_mode:
+                if not self.developer_mode:
                     print("This command is private.")
                     ret = False
                 else:
                     ret = self.storage_node__send_cluster_map(sub_command, args)
             if sub_command in ['get-cluster-map']:
-                if not developer_mode:
+                if not self.developer_mode:
                     print("This command is private.")
                     ret = False
                 else:
                     ret = self.storage_node__get_cluster_map(sub_command, args)
             if sub_command in ['make-primary']:
-                if not developer_mode:
+                if not self.developer_mode:
                     print("This command is private.")
                     ret = False
                 else:
                     ret = self.storage_node__make_primary(sub_command, args)
             if sub_command in ['dump-lvstore']:
-                if not developer_mode:
+                if not self.developer_mode:
                     print("This command is private.")
                     ret = False
                 else:
@@ -997,13 +995,13 @@ class CLIWrapper(CLIWrapperBase):
             if sub_command in ['update']:
                 ret = self.cluster__update(sub_command, args)
             if sub_command in ['graceful-shutdown']:
-                if not developer_mode:
+                if not self.developer_mode:
                     print("This command is private.")
                     ret = False
                 else:
                     ret = self.cluster__graceful_shutdown(sub_command, args)
             if sub_command in ['graceful-startup']:
-                if not developer_mode:
+                if not self.developer_mode:
                     print("This command is private.")
                     ret = False
                 else:
@@ -1026,7 +1024,7 @@ class CLIWrapper(CLIWrapperBase):
             if sub_command in ['list']:
                 ret = self.volume__list(sub_command, args)
             if sub_command in ['list-mem']:
-                if not developer_mode:
+                if not self.developer_mode:
                     print("This command is private.")
                     ret = False
                 else:
@@ -1044,7 +1042,7 @@ class CLIWrapper(CLIWrapperBase):
             if sub_command in ['clone']:
                 ret = self.volume__clone(sub_command, args)
             if sub_command in ['move']:
-                if not developer_mode:
+                if not self.developer_mode:
                     print("This command is private.")
                     ret = False
                 else:

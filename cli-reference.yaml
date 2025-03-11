@@ -412,7 +412,7 @@ commands:
         arguments:
           - name: "device_id"
             help: "Device id"
-            dest: id
+            dest: device_id
             type: str
       - name: add-device
         help: "Adds a new storage device"
@@ -423,7 +423,7 @@ commands:
         arguments:
           - name: "device_id"
             help: "Device id"
-            dest: id
+            dest: device_id
             type: str
       - name: remove-device
         help: "Logically removes a storage device"
@@ -450,7 +450,7 @@ commands:
         arguments:
           - name: "device_id"
             help: "Device ID"
-            dest: id
+            dest: device_id
             type: str
       - name: get-capacity-device
         help: "Gets a device's capacity"
@@ -515,7 +515,7 @@ commands:
         arguments:
           - name: "device_id"
             help: "Device id"
-            dest: id
+            dest: device_id
             type: str
       - name: info
         help: "Gets the node's information"
@@ -1381,7 +1381,7 @@ commands:
         arguments:
           - name: "task_id"
             help: "Task id"
-            dest: id
+            dest: task_id
             type: str
       - name: delete
         help: "Deletes a cluster"
