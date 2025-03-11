@@ -108,6 +108,8 @@ class CLIWrapper(CLIWrapperBase):
         argument = subcommand.add_argument('--namespace', help='Kubernetes namespace to deploy on', type=str, dest='namespace', required=True)
         if self.developer_mode:
             argument = subcommand.add_argument('--id-device-by-nqn', help='Use device nqn to identify it instead of serial number', dest='id_device_by_nqn', required=False, action='store_true')
+        argument = subcommand.add_argument('--spdk-mem', help='Set spdk hugepage size limitation', type=str, default='', dest='spdk_mem', required=False)
+        argument = subcommand.add_argument('--ssd-pcie', help='Nvme PCIe address to use for storage device. Can be more than one.', type=str, default='', dest='ssd_pcie', required=False, nargs='+')
 
     def init_storage_node__delete(self, subparser):
         subcommand = self.add_sub_command(subparser, 'delete', 'Deletes a storage node object from the state database.')

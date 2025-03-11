@@ -183,6 +183,20 @@ commands:
             default: false
             action: store_true
             private: true
+          - name: "--spdk-mem"
+            help: "Set spdk hugepage size limitation"
+            dest: spdk_mem
+            required: false
+            type: str
+            default: ""
+          - name: "--ssd-pcie"
+            help: "Nvme PCIe address to use for storage device. Can be more than one."
+            dest: ssd_pcie
+            required: false
+            type: str
+            nargs: +
+            default: ""
+
       - name: delete
         help: "Deletes a storage node object from the state database."
         usage: >

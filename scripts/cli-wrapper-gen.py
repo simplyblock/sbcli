@@ -75,7 +75,7 @@ def default_value(item):
 
 
 def split_value_range(value):
-    return re.sub("\.\.", ', ', value)
+    return re.sub("\\.\\.", ', ', value)
 
 
 def arg_value(item):
