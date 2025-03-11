@@ -42,8 +42,8 @@ commands:
             dest: ifname
             required: true
             type: str
-          - name: "--partitions"
-            help: "Number of partitions to create per device"
+          - name: "--journal-partition"
+            help: "1: auto-create small partitions for journal on nvme devices. 0: use a separate (the smallest) nvme device of the node for journal. The journal needs a maximum of 3 percent of total available raw disk space."
             dest: partitions
             required: true
             type: int
@@ -55,7 +55,7 @@ commands:
             type: str
             default: 3
             private: true
-          - name: "--storage-nics"
+          - name: "--data-nics"
             help: "Storage network interface name(s). Can be more than one."
             description: >
               Storage network interface name(s). Can be more than one. Comma-separated list: e.g. eth0,eth1
@@ -83,9 +83,10 @@ commands:
           - name: "--number-of-distribs"
             help: "The number of distirbs to be created on the node"
             dest: number_of_distribs
-            required: true
+            required: false
             type: int
-            default: 2
+            default: 4
+            private: true
           - name: "--number-of-devices"
             help: "Number of devices per storage node if it's not supported EC2 instance"
             dest: number_of_devices
@@ -98,7 +99,7 @@ commands:
             required: true
             type: str
             private: true
-          - name: "--number-of-vcpus"
+          - name: "--vcpu-count"
             help: >
               Number of vCPUs used for SPDK. Remaining CPUs will be used for Linux system, TCP/IP processing, and
               other workloads. The default on non-Kubernetes hosts is 80%.
@@ -273,7 +274,8 @@ commands:
             dest: max_prov
             required: true
             type: str
-            default: 
+            default:
+            private: true
           - name: "--node-ip"
             help: "Restart Node on new node"
             description: >
@@ -712,7 +714,7 @@ commands:
           - name: "--ha-jm-count"
             help: "HA JM count"
             dest: ha_jm_count
-            required: true
+            required: false
             type: str
             default: 3
             private: true
@@ -731,7 +733,7 @@ commands:
           - name: "--enable-qos"
             help: "Enable qos bdev for storage nodes"
             dest: enable_qos
-            required: true
+            required: false
             type: bool
             action: store_true
             private: true
@@ -743,7 +745,7 @@ commands:
           - name: "--blk_size"
             help: "The block size in bytes"
             dest: blk_size
-            required: true
+            required: false
             type: str
             choices:
               - 512
@@ -753,82 +755,82 @@ commands:
           - name: "--page_size"
             help: "The size of a data page in bytes"
             dest: page_size
-            required: true
+            required: false
             type: str
             default: 2097152
             private: true
           - name: "--CLI_PASS"
             help: "Password for CLI SSH connection"
             dest: CLI_PASS
-            required: true
+            required: false
             type: str
             private: true
           - name: "--cap-warn"
             help: "Capacity warning level in percent, default: 89"
             dest: cap_warn
-            required: true
+            required: false
             type: int
             default: 89
           - name: "--cap-crit"
             help: "Capacity critical level in percent, default: 99"
             dest: cap_crit
-            required: true
+            required: false
             type: int
             default: 99
           - name: "--prov-cap-warn"
             help: "Capacity warning level in percent, default: 250"
             dest: prov_cap_warn
-            required: true
+            required: false
             type: int
             default: 250
           - name: "--prov-cap-crit"
             help: "Capacity critical level in percent, default: 500"
             dest: prov_cap_crit
-            required: true
+            required: false
             type: int
             default: 500
           - name: "--log-del-interval"
             help: "Logging retention period, default: 3d"
             dest: log_del_interval
-            required: true
+            required: false
             type: str
             default: 3d
           - name: "--metrics-retention-period"
             help: "Retention period for I/O statistics (Prometheus), default: 7d"
             dest: metrics_retention_period
-            required: true
+            required: false
             type: str
             default: 7d
           - name: "--contact-point"
             help: "Email or slack webhook url to be used for alerting"
             dest: contact_point
-            required: true
+            required: false
             type: str
             default: 
           - name: "--grafana-endpoint"
             help: "Endpoint url for Grafana"
             dest: grafana_endpoint
-            required: true
+            required: false
             type: str
             default: 
+            private: true
           - name: "--distr-bs"
             help: "(Dev) distrb bdev block size, default: 4096"
             dest: distr-bs
-            required: true
+            required: false
             type: str
             default: 4096
             private: true
-          - name: "--distr-chunk-bs"
+          - name: "--chunk-size-in-bytes"
             help: "(Dev) distrb bdev chunk block size, default: 4096"
             dest: distr-chunk-bs
-            required: true
+            required: false
             type: str
             default: 4096
-            private: true
           - name: "--enable-node-affinity"
             help: "Enable node affinity for storage nodes"
             dest: enable-node-affinity
-            required: true
+            required: false
             type: bool
             action: store_true
           - name: "--qpair-count"
@@ -837,21 +839,21 @@ commands:
               Increase for clusters with few but very large logical volumes or decrease for clusters with a large number
               of very small logical volumes.
             dest: qpair_count
-            required: true
+            required: false
             type: int
-            value_range: 0..128
-            default: 0
+            value_range: 1..128
+            default: 3
           - name: "--max-queue-size"
             help: "The max size the queue will grow"
             dest: max-queue-size
-            required: true
+            required: false
             type: str
             default: 128
             private: true
           - name: "--inflight-io-threshold"
             help: "The number of inflight IOs allowed before the IO queuing starts"
             dest: inflight-io-threshold
-            required: true
+            required: false
             type: str
             default: 4
             private: true
@@ -860,27 +862,27 @@ commands:
               Enable strict node anti affinity for storage nodes. Never more than one chunk is placed on a node.
               This requires a minimum of _data-chunks-in-stripe + parity-chunks-in-stripe + 1_ nodes in the cluster."
             dest: strict-node-anti-affinity
-            required: true
+            required: false
             type: bool
             action: store_true
-          - name: "--separate-journal-device"
+          - name: "--journal-partition"
             help: >
-              Enables a separate journaling devices. Set to true, if separate NVMe device is available to store journal.
+              1: auto-partition nvme devices for journal. 0: use a separate nvme device for journal.
               The smallest NVMe device available on the host will be chosen as a journal. It should provide about 3% of
               the entire node’s NVMe capacity. If set to false, partitions on other devices will be auto-created to
               store the journal.
             dest: partitions
-            required: true
-            type: bool
+            required: false
+            type: str
             default: true
           - name: "--jm-percent"
             help: "Number in percent to use for JM from each device"
             dest: jm_percent
-            required: true
+            required: false
             type: str
             default: 3
             private: true
-          - name: "--storage-nics"
+          - name: "--data-nics"
             help: "Storage network interface name(s). Can be more than one."
             description: >
               Storage network interface name(s). Can be more than one. Comma-separated list: e.g. eth0,eth1
@@ -896,7 +898,7 @@ commands:
           - name: "--max-snap"
             help: "Max snapshot per storage node"
             dest: max_snap
-            required: true
+            required: false
             type: str
             default: 500
             private: true
@@ -909,9 +911,9 @@ commands:
           - name: "--number-of-distribs"
             help: "The number of distirbs to be created on the node"
             dest: number_of_distribs
-            required: true
+            required: false
             type: str
-            default: 2
+            default: 4
             private: true
           - name: "--number-of-devices"
             help: "Number of devices per storage node if it's not supported EC2 instance"
@@ -925,7 +927,7 @@ commands:
             required: true
             type: str
             private: true
-          - name: "--number-of-vcpus"
+          - name: "--vcpu-count"
             help: >
               Number of vCPUs used for SPDK. Remaining CPUs will be used for Linux system, TCP/IP processing, and
               other workloads. The default on non-Kubernetes hosts is 80%.
@@ -935,7 +937,7 @@ commands:
           - name: "--cpu-mask"
             help: "SPDK app CPU mask, default is all cores found"
             dest: spdk_cpu_mask
-            required: true
+            required: false
             type: str
             private: true
           - name: "--spdk-image"
@@ -947,35 +949,35 @@ commands:
           - name: "--spdk-debug"
             help: "Enable spdk debug logs"
             dest: spdk_debug
-            required: true
+            required: false
             type: bool
             action: store_true
             private: true
           - name: "--iobuf_small_bufsize"
             help: "bdev_set_options param"
             dest: small_bufsize
-            required: true
+            required: false
             type: str
             default: 0
             private: true
           - name: "--iobuf_large_bufsize"
             help: "bdev_set_options param"
             dest: large_bufsize
-            required: true
+            required: false
             type: str
             default: 0
             private: true
           - name: "--enable-test-device"
             help: "Enable creation of test device"
             dest: enable-test-device
-            required: true
+            required: false
             type: bool
             action: store_true
             private: true
           - name: "--disable-ha-jm"
             help: "Disable HA JM for distrib creation"
             dest: enable_ha_jm
-            required: true
+            required: false
             type: bool
             default: true
             action: store_false
@@ -1004,82 +1006,100 @@ commands:
           - name: "--lvol-name"
             help: "Logical volume name or id"
             dest: lvol_name
-            required: true
+            required: false
             type: str
+            default: lvol01
+            private: true
           - name: "--lvol-size"
             help: "Logical volume size: 10M, 10G, 10(bytes)"
             dest: lvol_size
-            required: true
+            required: false
             type: str
+            default: 10G
+            private: true
           - name: "--pool-name"
             help: "Pool id or name"
             dest: pool_name
-            required: true
+            required: false
             type: str
+            default: pool01
+            private: true
           - name: "--pool-max"
             help: "Pool maximum size: 20M, 20G, 0(default)"
             dest: pool-max
-            required: true
+            required: false
             type: str
             default: 0
+            default: 25G
+            private: true
           - name: "--snapshot"
             help: "Make logical volume with snapshot capability, default: false"
             dest: snapshot
-            required: true
+            required: false
             type: bool
             action: store_true
             default: false
+            private: true
           - name: "--max-volume-size"
             help: "Logical volume max size"
             dest: max_size
-            required: true
+            required: false
             type: str
-            default: ""
+            default: 1000G
+            private: true
           - name: "--host-id"
             help: "Primary storage node id or hostname"
             dest: host_id
-            required: true
+            required: false
             type: str
           - name: "--encrypt"
             help: "Use inline data encryption and decryption on the logical volume"
             dest: encrypt
-            required: true
+            required: false
             type: bool
             action: store_true
+            default: false
+            private: true
           - name: "--crypto-key1"
             help: "Hex value of key1 to be used for logical volume encryption"
             dest: crypto_key1
-            required: true
+            required: false
             type: str
+            private: true
           - name: "--crypto-key2"
             help: "Hex value of key2 to be used for logical volume encryption"
             dest: crypto_key2
-            required: true
+            required: false
             type: str
+            private: true
           - name: "--max-rw-iops"
             help: "Maximum Read Write IO Per Second"
             dest: max-rw-iops
-            required: true
+            required: false
             type: int
+            private: true
           - name: "--max-rw-mbytes"
             help: "Maximum Read Write Megabytes Per Second"
             dest: max-rw-mbytes
-            required: true
+            required: false
             type: int
+            private: true
           - name: "--max-r-mbytes"
             help: "Maximum Read Megabytes Per Second"
             dest: max-r-mbytes
-            required: true
+            required: false
             type: int
+            private: true
           - name: "--max-w-mbytes"
             help: "Maximum Write Megabytes Per Second"
             dest: max-w-mbytes
-            required: true
+            required: false
             type: int
+            private: true
           - name: "--distr-vuid"
             help: "(Dev) set vuid manually, default: random (1-99999)"
             dest: distr-vuid
-            required: true
+            required: false
             type: str
             default: 0
             private: true
@@ -1100,6 +1120,7 @@ commands:
             required: true
             type: int
             default: 0
+            private: false
           - name: "--fstype"
             help: "Filesystem type for testing (ext4, xfs)"
             dest: fstype
@@ -1109,6 +1130,7 @@ commands:
               - ext4
               - xfs
             default: xfs
+            private: true
       - name: create
         help: "Creates a new cluster"
         usage: >
@@ -1252,6 +1274,7 @@ commands:
             required: true
             type: bool
             default: true
+            private: true
           - name: "--strict-node-anti-affinity"
             help: >
               Enable strict node anti affinity for storage nodes. Never more than one chunk is placed on a node. This
@@ -1366,6 +1389,7 @@ commands:
             required: true
             type: bool
             default: true
+            private: true
           - name: "--strict-node-anti-affinity"
             help: >
               Enable strict node anti affinity for storage nodes. Never more than one chunk is placed on a node.
@@ -2129,28 +2153,6 @@ commands:
             dest: pool_id
             required: true
             type: str
-      - name: get-secret
-        help: "Gets a storage pool's secret"
-        arguments:
-          - name: "pool_id"
-            help: "Pool id"
-            dest: pool_id
-            required: true
-            type: str
-      - name: update-secret
-        help: "Updates a storage pool's secret"
-        private: true
-        arguments:
-          - name: "pool_id"
-            help: "Pool id"
-            dest: pool_id
-            required: true
-            type: str
-          - name: "secret"
-            help: "New 20 characters password"
-            dest: secret
-            required: true
-            type: str
       - name: get-capacity
         help: "Gets a storage pool's capacity"
         arguments:
@@ -2268,7 +2270,7 @@ commands:
             dest: ifname
             required: true
             type: str
-          - name: "--number-of-vcpus"
+          - name: "--vcpu-count"
             help: >
               Number of vCPUs used for SPDK. Remaining CPUs will be used for Linux system, TCP/IP processing, and
               other workloads. The default on non-Kubernetes hosts is 80%.
@@ -2286,6 +2288,7 @@ commands:
             dest: spdk_mem
             required: true
             type: int
+            private: true
           - name: "--spdk-image"
             help: "SPDK image uri"
             dest: spdk_image
