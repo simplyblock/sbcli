@@ -7,6 +7,13 @@ class CLIWrapper(CLIWrapperBase):
 
     def __init__(self):
         self.developer_mode = True if "--dev" in sys.argv else False
+        if self.developer_mode:
+            idx = sys.argv.index("--dev")
+            args = sys.argv[0:idx]
+            for i in range(idx + 1, len(sys.argv)):
+                args.append(sys.argv[i])
+            sys.argv = args
+
         self.logger = utils.get_logger()
         self.init_parser()
 

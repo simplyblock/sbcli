@@ -7,6 +7,13 @@ class CLIWrapper(CLIWrapperBase):
 
     def __init__(self):
         self.developer_mode = True if "--dev" in sys.argv else False
+        if self.developer_mode:
+            idx = sys.argv.index("--dev")
+            args = sys.argv[0:idx]
+            for i in range(idx + 1, len(sys.argv)):
+                args.append(sys.argv[i])
+            sys.argv = args
+
         self.logger = utils.get_logger()
         self.init_parser()
         self.init_storage_node()
@@ -135,7 +142,7 @@ class CLIWrapper(CLIWrapperBase):
         if self.developer_mode:
             argument = subcommand.add_argument('--max-snap', help='Max snapshot per storage node', type=str, default='0', dest='max_snap', required=False)
         if self.developer_mode:
-            argument = subcommand.add_argument('--max-size', help='Maximum amount of GB to be utilized on this storage node', type=str, default='None', dest='max_prov', required=False)
+            argument = subcommand.add_argument('--max-size', help='Maximum amount of GB to be utilized on this storage node', type=str, dest='max_prov', required=False)
         argument = subcommand.add_argument('--node-ip', help='Restart Node on new node', type=str, dest='node_ip', required=False)
         if self.developer_mode:
             argument = subcommand.add_argument('--number-of-devices', help='Number of devices per storage node if it\'s not supported EC2 instance', type=str, default='0', dest='number_of_devices', required=False)
