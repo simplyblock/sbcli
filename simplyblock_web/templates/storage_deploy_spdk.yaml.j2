@@ -62,14 +62,7 @@ spec:
       initContainers:
         - name: copy-script
           image: public.ecr.aws/simply-block/busybox
-          command:
-            - sh
-            - -c
-            - |
-              if [ ! -e /dev/fd ]; then
-                ln -s /proc/self/fd /dev/fd
-              fi
-              echo "{{ FDB_CONNECTION }}" > /etc/foundationdb/fdb.cluster
+          command: ["sh", "-c", "echo \"{{ FDB_CONNECTION }}\" > /etc/foundationdb/fdb.cluster"]
           volumeMounts:
             - name: foundationdb
               mountPath: /etc/foundationdb
@@ -79,7 +72,14 @@ spec:
       - name: spdk-container
         image: {{ SPDK_IMAGE }}
         imagePullPolicy: "Always"
-        command: ["/root/scripts/run_distr.sh", "{{ SPDK_CPU_MASK }}", "{{ SPDK_MEM }}"]
+        command:
+          - sh
+          - -c
+          - |
+            if [ ! -e /dev/fd ]; then
+              ln -s /proc/self/fd /dev/fd
+            fi
+            exec /root/scripts/run_distr.sh "{{ SPDK_CPU_MASK }}" "{{ SPDK_MEM }}"
         env:
           - name: SPDKCSI_SECRET
             valueFrom:
