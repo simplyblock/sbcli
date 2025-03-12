@@ -1044,6 +1044,7 @@ commands:
             help: "Email or slack webhook url to be used for alerting"
             dest: contact_point
             type: str
+            default: ""
           - name: "--grafana-endpoint"
             help: "Endpoint url for Grafana"
             dest: grafana_endpoint
