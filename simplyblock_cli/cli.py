@@ -164,7 +164,7 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('node_id', help='Storage node id', type=str).completer = self._completer_get_sn_list
 
     def init_storage_node__get_io_stats(self, subparser):
-        subcommand = self.add_sub_command(subparser, 'get-io-stats', 'Get node IO statistics')
+        subcommand = self.add_sub_command(subparser, 'get-io-stats', 'Gets storage node IO statistics')
         subcommand.add_argument('node_id', help='Storage node id', type=str).completer = self._completer_get_sn_list
         argument = subcommand.add_argument('--history', help='list history records -one for every 15 minutes- for XX days and YY hours -up to 10 days in total-, format: XXdYYh', type=str, dest='history', required=False)
         argument = subcommand.add_argument('--records', help='Number of records, default: 20', type=str, default='20', dest='records', required=False)
