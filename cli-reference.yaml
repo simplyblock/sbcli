@@ -364,7 +364,7 @@ commands:
             type: str
             required: true
       - name: get-io-stats
-        help: "Get node IO statistics"
+        help: "Get storage node IO statistics"
         arguments:
           - name: node_id
             help: Storage node id
