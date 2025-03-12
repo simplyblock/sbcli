@@ -1,4 +1,5 @@
 # $schema: ./cli-reference-schema.yaml
+# yaml-language-server: $schema=./cli-reference-schema.yaml
 commands:
   - name: "storage-node"
     help: "Storage node commands"
@@ -56,7 +57,7 @@ commands:
               Storage network interface name(s). Can be more than one. Comma-separated list: e.g. eth0,eth1
             dest: data_nics
             type: str
-            nargs: +
+            nargs: "+"
           - name: "--max-lvol"
             help: "Max logical volume per storage node"
             dest: max_lvol
@@ -168,6 +169,7 @@ commands:
         arguments:
           - name: node_id
             help: Storage node id
+            dest: node_id
             completer: _completer_get_sn_list
             type: str
       - name: remove
@@ -182,6 +184,7 @@ commands:
         arguments:
           - name: node_id
             help: Storage node id
+            dest: node_id
             completer: _completer_get_sn_list
             type: str
           - name: "--force-remove"
@@ -206,6 +209,7 @@ commands:
         arguments:
           - name: node_id
             help: Storage node id
+            dest: node_id
             completer: _completer_get_sn_list
             type: str
       - name: restart
@@ -217,6 +221,7 @@ commands:
         arguments:
           - name: node_id
             help: Storage node id
+            dest: node_id
             completer: _completer_get_sn_list
             type: str
           - name: "--max-lvol"
@@ -240,7 +245,6 @@ commands:
               _150 TiB / 3 * 2 = 100TiB_ would be a safe choice.
             dest: max_prov
             type: str
-            default:
             private: true
           - name: "--node-ip"
             help: "Restart Node on new node"
@@ -290,6 +294,7 @@ commands:
         arguments:
           - name: node_id
             help: Storage node id
+            dest: node_id
             completer: _completer_get_sn_list
             type: str
           - name: "--force"
@@ -303,6 +308,7 @@ commands:
         arguments:
           - name: node_id
             help: Storage node id
+            dest: node_id
             completer: _completer_get_sn_list
             type: str
           - name: "--force"
@@ -315,6 +321,7 @@ commands:
         arguments:
           - name: node_id
             help: Storage node id
+            dest: node_id
             completer: _completer_get_sn_list
             type: str
       - name: get-io-stats
@@ -322,6 +329,7 @@ commands:
         arguments:
           - name: node_id
             help: Storage node id
+            dest: node_id
             completer: _completer_get_sn_list
             type: str
           - name: "--history"
@@ -338,6 +346,7 @@ commands:
         arguments:
           - name: node_id
             help: Storage node id
+            dest: node_id
             completer: _completer_get_sn_list
             type: str
           - name: "--history"
@@ -349,6 +358,7 @@ commands:
         arguments:
           - name: node_id
             help: Storage node id
+            dest: node_id
             completer: _completer_get_sn_list
             type: str
           - name: "-s"
@@ -359,7 +369,7 @@ commands:
               - node-seq
               - serial
               - dev-seq
-            nargs: 1
+            nargs: "1"
             private: true
           - name: "--json"
             help: "Print outputs in json format"
@@ -774,7 +784,7 @@ commands:
               Storage network interface name(s). Can be more than one. Comma-separated list: e.g. eth0,eth1
             dest: data_nics
             type: str
-            nargs: +
+            nargs: "+"
           - name: "--max-lvol"
             help: "Max logical volume per storage node"
             dest: max_lvol
@@ -1572,7 +1582,7 @@ commands:
             help: "Logical volumes id or ids"
             dest: volume_id
             type: str
-            nargs: +
+            nargs: "+"
           - name: "--force"
             help: "Force delete logical volume from the cluster"
             dest: force
