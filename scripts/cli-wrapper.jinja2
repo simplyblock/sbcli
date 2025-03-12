@@ -104,6 +104,16 @@ class CLIWrapper(CLIWrapperBase):
 {%- if argument.dest is defined and argument.dest != argument.name %}
                 args.{{ argument.dest }} = args.{{ argument.name }}
 {%- endif -%}
+{%- endfor %}
+{%- set ns = namespace(if_opened = False) %}
+{%- for parameter in subcommand.parameters -%}
+{%- if parameter.private is defined and parameter.private and parameter.default is defined %}
+{%- if not ns.if_opened %}
+                if not self.developer_mode:
+{%- set ns.if_opened = True %}
+{%- endif %}
+                    args.{{ parameter.dest }} = {{ parameter | default_value }}
+{%- endif -%}
 {%- endfor -%}
 {%- if subcommand.private %}
                 if not self.developer_mode:
