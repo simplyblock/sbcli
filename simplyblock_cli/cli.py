@@ -424,7 +424,7 @@ class CLIWrapper(CLIWrapperBase):
         argument = subcommand.add_argument('--ifname', help='Management interface name, e.g. eth0', type=str, dest='ifname', required=False)
         argument = subcommand.add_argument('--log-del-interval', help='Logging retention policy, default: 3d', type=str, default='3d', dest='log_del_interval', required=False)
         argument = subcommand.add_argument('--metrics-retention-period', help='Retention period for I/O statistics (Prometheus), default: 7d', type=str, default='7d', dest='metrics_retention_period', required=False)
-        argument = subcommand.add_argument('--contact-point', help='Email or slack webhook url to be used for alerting', type=str, dest='contact_point', required=False)
+        argument = subcommand.add_argument('--contact-point', help='Email or slack webhook url to be used for alerting', type=str, default='', dest='contact_point', required=False)
         argument = subcommand.add_argument('--grafana-endpoint', help='Endpoint url for Grafana', type=str, dest='grafana_endpoint', required=False)
         argument = subcommand.add_argument('--data-chunks-per-stripe', help='Erasure coding schema parameter k (distributed raid), default: 1', type=int, default=1, dest='distr_ndcs', required=False)
         argument = subcommand.add_argument('--parity-chunks-per-stripe', help='Erasure coding schema parameter n (distributed raid), default: 1', type=int, default=1, dest='distr_npcs', required=False)
