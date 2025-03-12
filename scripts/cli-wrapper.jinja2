@@ -84,7 +84,11 @@ class CLIWrapper(CLIWrapperBase):
         if args.command in ['{{ command.name }}'{% if command.aliases is defined %}{% for alias in command.aliases %}, '{{ alias }}'{% endfor %}{% endif %}]:
             sub_command = args_dict['{{ command.name }}']
 {%- for subcommand in command.subcommands %}
+{%- if loop.index == 1 %}
             if sub_command in ['{{ subcommand.name }}'{% if subcommand.aliases is defined %}{% for alias in subcommand.aliases %}, '{{ alias }}'{% endfor %}{% endif %}]:
+{%- else %}
+            elif sub_command in ['{{ subcommand.name }}'{% if subcommand.aliases is defined %}{% for alias in subcommand.aliases %}, '{{ alias }}'{% endfor %}{% endif %}]:
+{%- endif -%}
 {%- for argument in subcommand.arguments -%}
 {%- if argument.dest is defined and argument.dest != argument.name %}
                 args.{{ argument.dest }} = args.{{ argument.name }}
