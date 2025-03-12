@@ -962,7 +962,7 @@ class CLIWrapper(CLIWrapperBase):
             else:
                 self.parser.print_help()
 
-        if args.command in ['cluster']:
+        elif args.command in ['cluster']:
             sub_command = args_dict['cluster']
             if sub_command in ['deploy']:
                 ret = self.cluster__deploy(sub_command, args)
@@ -1015,7 +1015,7 @@ class CLIWrapper(CLIWrapperBase):
             else:
                 self.parser.print_help()
 
-        if args.command in ['volume', 'lvol']:
+        elif args.command in ['volume', 'lvol']:
             sub_command = args_dict['volume']
             if sub_command in ['add']:
                 ret = self.volume__add(sub_command, args)
@@ -1058,7 +1058,7 @@ class CLIWrapper(CLIWrapperBase):
             else:
                 self.parser.print_help()
 
-        if args.command in ['control-plane', 'cp', 'mgmt']:
+        elif args.command in ['control-plane', 'cp', 'mgmt']:
             sub_command = args_dict['control-plane']
             if sub_command in ['add']:
                 ret = self.control_plane__add(sub_command, args)
@@ -1069,7 +1069,7 @@ class CLIWrapper(CLIWrapperBase):
             else:
                 self.parser.print_help()
 
-        if args.command in ['storage-pool', 'pool']:
+        elif args.command in ['storage-pool', 'pool']:
             sub_command = args_dict['storage-pool']
             if sub_command in ['add']:
                 ret = self.storage_pool__add(sub_command, args)
@@ -1092,7 +1092,7 @@ class CLIWrapper(CLIWrapperBase):
             else:
                 self.parser.print_help()
 
-        if args.command in ['snapshot']:
+        elif args.command in ['snapshot']:
             sub_command = args_dict['snapshot']
             if sub_command in ['add']:
                 ret = self.snapshot__add(sub_command, args)
@@ -1105,7 +1105,7 @@ class CLIWrapper(CLIWrapperBase):
             else:
                 self.parser.print_help()
 
-        if args.command in ['caching-node', 'cn']:
+        elif args.command in ['caching-node', 'cn']:
             sub_command = args_dict['caching-node']
             if sub_command in ['deploy']:
                 ret = self.caching_node__deploy(sub_command, args)
