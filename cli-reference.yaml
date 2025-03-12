@@ -245,6 +245,7 @@ commands:
               _150 TiB / 3 * 2 = 100TiB_ would be a safe choice.
             dest: max_prov
             type: str
+            default: ""
             private: true
           - name: "--node-ip"
             help: "Restart Node on new node"
@@ -714,10 +715,12 @@ commands:
             help: "Email or slack webhook url to be used for alerting"
             dest: contact_point
             type: str
+            default: ""
           - name: "--grafana-endpoint"
             help: "Endpoint url for Grafana"
             dest: grafana_endpoint
             type: str
+            default: ""
             private: true
           - name: "--distr-bs"
             help: "(Dev) distrb bdev block size, default: 4096"
@@ -1049,6 +1052,7 @@ commands:
             help: "Endpoint url for Grafana"
             dest: grafana_endpoint
             type: str
+            default: ""
           - name: "--data-chunks-per-stripe"
             help: "Erasure coding schema parameter k (distributed raid), default: 1"
             dest: distr_ndcs
