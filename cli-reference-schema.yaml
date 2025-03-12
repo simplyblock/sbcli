@@ -1,0 +1,93 @@
+$schema: "http://json-schema.org/draft-04/schema"
+$id: "https://www.simplyblock.io/schemas/cli-reference-1.0.0"
+title: Schema for cli-reference.yaml
+type: object
+additionalProperties: false
+properties:
+  commands:
+    type: array
+    minItems: 1
+    items:
+      - oneOf:
+        - type: object
+          additionalProperties: false
+          required:
+            - name
+            - help
+            - subcommands
+          properties:
+            name:
+              type: string
+            help:
+              type: string
+            weight:
+              type: integer
+            description:
+              type: string
+            aliases:
+              type: array
+              minItems: 1
+              items:
+                - oneOf:
+                  - type: string
+            subcommands:
+              type: array
+              minItems: 1
+              items:
+                - oneOf:
+                  - type: object
+                    additionalProperties: false
+                    required:
+                      - name
+                      - help
+                    properties:
+                      name:
+                        type: string
+                      help:
+                        type: string
+                      usage:
+                        type: string
+                      description:
+                        type: string
+                      arguments:
+                        type: array
+                        minItems: 1
+                        items:
+                          - oneOf:
+                            - type: object
+                              additionalProperties: false
+                              required:
+                                - name
+                                - help
+                                - type
+                                - dest
+                              properties:
+                                name:
+                                  type: string
+                                help:
+                                  type: string
+                                description:
+                                  type: string
+                                dest:
+                                  type: string
+                                required:
+                                  type: boolean
+                                  default: false
+                                type:
+                                  type: string
+                                  enum:
+                                    - str
+                                    - bool
+                                    - int
+                                completer:
+                                  type: string
+                                default:
+                                  oneOf:
+                                    - type: string
+                                    - type: integer
+                                    - type: boolean
+                                nargs:
+                                  type: string
+                                private:
+                                  type: boolean
+                                  default: false

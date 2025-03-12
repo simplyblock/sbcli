@@ -1,3 +1,4 @@
+# $schema: ./cli-reference-schema.yaml
 commands:
   - name: "storage-node"
     help: "Storage node commands"
