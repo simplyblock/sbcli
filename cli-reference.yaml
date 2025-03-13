@@ -1084,8 +1084,7 @@ commands:
             choices:
               - single
               - ha
-            default: single
-            private: true
+            default: ha
           - name: "--enable-node-affinity"
             help: "Enable node affinity for storage nodes"
             dest: enable_node_affinity
