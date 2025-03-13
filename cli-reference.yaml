@@ -161,6 +161,12 @@ commands:
             default: false
             action: store_true
             private: true
+          - name: "--max-snap"
+            help: "Max snapshot per storage node"
+            dest: max_snap
+            type: str
+            default: 0
+            private: true
       - name: delete
         help: "Deletes a storage node object from the state database."
         usage: >

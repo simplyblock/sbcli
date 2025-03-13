@@ -116,6 +116,8 @@ class CLIWrapper(CLIWrapperBase):
         argument = subcommand.add_argument('--namespace', help='Kubernetes namespace to deploy on', type=str, dest='namespace', required=False)
         if self.developer_mode:
             argument = subcommand.add_argument('--id-device-by-nqn', help='Use device nqn to identify it instead of serial number', dest='id_device_by_nqn', required=False, action='store_true')
+        if self.developer_mode:
+            argument = subcommand.add_argument('--max-snap', help='Max snapshot per storage node', type=str, default='0', dest='max_snap', required=False)
 
     def init_storage_node__delete(self, subparser):
         subcommand = self.add_sub_command(subparser, 'delete', 'Deletes a storage node object from the state database.')
@@ -887,6 +889,7 @@ class CLIWrapper(CLIWrapperBase):
                     args.enable_ha_jm = False
                     args.ha_jm_count = '3'
                     args.id_device_by_nqn = False
+                    args.max_snap = '0'
                 ret = self.storage_node__add_node(sub_command, args)
             elif sub_command in ['delete']:
                 ret = self.storage_node__delete(sub_command, args)
