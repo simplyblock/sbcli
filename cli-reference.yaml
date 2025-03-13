@@ -637,7 +637,7 @@ commands:
             choices:
               - single
               - ha
-            default: single
+            default: ha
           - name: "--ha-jm-count"
             help: "HA JM count"
             dest: ha_jm_count
