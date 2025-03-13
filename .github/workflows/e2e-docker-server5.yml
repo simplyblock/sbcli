@@ -166,9 +166,6 @@ jobs:
           export API_BASE_URL=${{ steps.bootstrap_cluster.outputs.cluster_api_gateway_endpoint }}
           export BASTION_SERVER=${{ steps.bootstrap_cluster.outputs.bastion_public_ip }}
           export KEY_NAME=${{ steps.bootstrap_cluster.outputs.key_name }} 
-          export AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }}
-          export AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          export AWS_REGION=${{ secrets.AWS_REGION }}
           export SBCLI_CMD=${SBCLI_CMD}
           export SSH_USER=root
           TESTNAME=""
