@@ -470,6 +470,7 @@ class CLIWrapper(CLIWrapperBase):
 
     def init_cluster__activate(self, subparser):
         subcommand = self.add_sub_command(subparser, 'activate', 'Activates a cluster.')
+        subcommand.add_argument('cluster_id', help='Cluster id', type=str).completer = self._completer_get_cluster_list
         argument = subcommand.add_argument('--force', help='Force recreate distr and lv stores', dest='force', required=False, action='store_true')
         argument = subcommand.add_argument('--force-lvstore-create', help='Force recreate lv stores', dest='force_lvstore_create', required=False, action='store_true').completer = self._completer_get_cluster_list
 

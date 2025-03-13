@@ -1229,6 +1229,11 @@ commands:
         usage: Once a cluster has sufficient nodes added, it needs to be activated. Can also be used to
           re-activate a suspended cluster.
         arguments:
+          - name: "cluster_id"
+            help: "Cluster id"
+            dest: cluster_id
+            type: str
+            completer: _completer_get_cluster_list
           - name: "--force"
             help: "Force recreate distr and lv stores"
             dest: force
