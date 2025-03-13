@@ -48,7 +48,7 @@ commands:
           - name: "--jm-percent"
             help: "Number in percent to use for JM from each device"
             dest: jm_percent
-            type: str
+            type: int
             default: 3
             private: true
           - name: "--data-nics"
@@ -138,7 +138,7 @@ commands:
           - name: "--ha-jm-count"
             help: "HA JM count"
             dest: ha_jm_count
-            type: str
+            type: int
             default: 3
             private: true
           - name: "--is-secondary-node"
@@ -163,7 +163,7 @@ commands:
           - name: "--max-snap"
             help: "Max snapshot per storage node"
             dest: max_snap
-            type: str
+            type: int
             default: 5000
             private: true
       - name: delete
@@ -237,7 +237,7 @@ commands:
           - name: "--max-snap"
             help: "Max snapshot per storage node"
             dest: max_snap
-            type: str
+            type: int
             default: 5000
             private: true
           - name: "--max-size"
@@ -343,7 +343,7 @@ commands:
           - name: "--records"
             help: "Number of records, default: 20"
             dest: records
-            type: str
+            type: int
             default: 20
       - name: get-capacity
         help: "Gets a storage node's capacity statistics"
@@ -492,7 +492,7 @@ commands:
           - name: "--records"
             help: "Number of records, default: 20"
             dest: records
-            type: str
+            type: int
             default: 20
       - name: port-list
         help: "Gets the data interfaces list of a storage node"
@@ -641,7 +641,7 @@ commands:
           - name: "--ha-jm-count"
             help: "HA JM count"
             dest: ha_jm_count
-            type: str
+            type: int
             default: 3
             private: true
           - name: "--data-chunks-per-stripe"
@@ -667,7 +667,7 @@ commands:
           - name: "--blk_size"
             help: "The block size in bytes"
             dest: blk_size
-            type: str
+            type: int
             choices:
               - 512
               - 4096
@@ -676,7 +676,7 @@ commands:
           - name: "--page_size"
             help: "The size of a data page in bytes"
             dest: page_size
-            type: str
+            type: int
             default: 2097152
             private: true
           - name: "--CLI_PASS"
@@ -728,13 +728,13 @@ commands:
           - name: "--distr-bs"
             help: "(Dev) distrb bdev block size, default: 4096"
             dest: distr_bs
-            type: str
+            type: int
             default: 4096
             private: true
           - name: "--chunk-size-in-bytes"
             help: "(Dev) distrb bdev chunk block size, default: 4096"
             dest: distr_chunk_bs
-            type: str
+            type: int
             default: 4096
           - name: "--enable-node-affinity"
             help: "Enable node affinity for storage nodes"
@@ -753,13 +753,13 @@ commands:
           - name: "--max-queue-size"
             help: "The max size the queue will grow"
             dest: max_queue_size
-            type: str
+            type: int
             default: 128
             private: true
           - name: "--inflight-io-threshold"
             help: "The number of inflight IOs allowed before the IO queuing starts"
             dest: inflight_io_threshold
-            type: str
+            type: int
             default: 4
             private: true
           - name: "--strict-node-anti-affinity"
@@ -781,7 +781,7 @@ commands:
           - name: "--jm-percent"
             help: "Number in percent to use for JM from each device"
             dest: jm_percent
-            type: str
+            type: int
             default: 3
             private: true
           - name: "--data-nics"
@@ -798,7 +798,7 @@ commands:
           - name: "--max-snap"
             help: "Max snapshot per storage node"
             dest: max_snap
-            type: str
+            type: int
             default: 5000
             private: true
           - name: "--max-size"
@@ -809,7 +809,7 @@ commands:
           - name: "--number-of-distribs"
             help: "The number of distirbs to be created on the node"
             dest: number_of_distribs
-            type: str
+            type: int
             default: 4
             private: true
           - name: "--number-of-devices"
@@ -968,8 +968,7 @@ commands:
           - name: "--distr-vuid"
             help: "(Dev) set vuid manually, default: random (1-99999)"
             dest: distr_vuid
-            type: str
-            default: 0
+            type: int
             private: true
           - name: "--lvol-ha-type"
             help: "Logical volume HA type (single, ha), default is cluster HA type"
@@ -1004,7 +1003,7 @@ commands:
           - name: "--page_size"
             help: "The size of a data page in bytes"
             dest: page_size
-            type: str
+            type: int
             default: 2097152
             private: true
           - name: "--CLI_PASS"
@@ -1069,13 +1068,13 @@ commands:
           - name: "--distr-bs"
             help: "(Dev) distrb bdev block size, default: 4096"
             dest: distr_bs
-            type: str
+            type: int
             default: 4096
             private: true
           - name: "--distr-chunk-bs"
             help: "(Dev) distrb bdev chunk block size, default: 4096"
             dest: distr_chunk_bs
-            type: str
+            type: int
             default: 4096
             private: true
           - name: "--ha-type"
@@ -1104,13 +1103,13 @@ commands:
           - name: "--max-queue-size"
             help: "The max size the queue will grow"
             dest: max_queue_size
-            type: str
+            type: int
             default: 128
             private: true
           - name: "--inflight-io-threshold"
             help: "The number of inflight IOs allowed before the IO queuing starts"
             dest: inflight_io_threshold
-            type: str
+            type: int
             default: 4
             private: true
           - name: "--enable-qos"
@@ -1132,7 +1131,7 @@ commands:
           - name: "--page_size"
             help: "The size of a data page in bytes"
             dest: page_size
-            type: str
+            type: int
             default: 2097152
             private: true
           - name: "--cap-warn"
@@ -1168,13 +1167,13 @@ commands:
           - name: "--distr-bs"
             help: "(Dev) distrb bdev block size, default: 4096"
             dest: distr_bs
-            type: str
+            type: int
             default: 4096
             private: true
           - name: "--distr-chunk-bs"
             help: "(Dev) distrb bdev chunk block size, default: 4096"
             dest: distr_chunk_bs
-            type: str
+            type: int
             default: 4096
             private: true
           - name: "--ha-type"
@@ -1203,13 +1202,13 @@ commands:
           - name: "--max-queue-size"
             help: "The max size the queue will grow"
             dest: max_queue_size
-            type: str
+            type: int
             default: 128
             private: true
           - name: "--inflight-io-threshold"
             help: "The number of inflight IOs allowed before the IO queuing starts"
             dest: inflight_io_threshold
-            type: str
+            type: int
             default: 4
             private: true
           - name: "--enable-qos"
@@ -1296,7 +1295,7 @@ commands:
           - name: "--records"
             help: "Number of records, default: 20"
             dest: records
-            type: str
+            type: int
             default: 20
           - name: "--history"
             help: "(XXdYYh), list history records (one for every 15 minutes) for XX days and YY hours (up to 10 days in total)."
@@ -1441,7 +1440,7 @@ commands:
           - name: "--max-size"
             help: "Logical volume max size"
             dest: max_size
-            type: str
+            type: int
           - name: "--host-id"
             help: "Primary storage node id or Hostname"
             dest: host_id
@@ -1478,8 +1477,7 @@ commands:
           - name: "--distr-vuid"
             help: "(Dev) set vuid manually, default: random (1-99999)"
             dest: distr_vuid
-            type: str
-            default: 0
+            type: int
             private: true
           - name: "--ha-type"
             help: "Logical volume HA type (single, ha), default is cluster HA type"
@@ -1893,7 +1891,7 @@ commands:
           - name: "--records"
             help: "Number of records, default: 20"
             dest: records
-            type: str
+            type: int
             default: 20
   - name: "snapshot"
     help: "Snapshot commands"
