@@ -411,14 +411,14 @@ class CLIWrapper(CLIWrapperBase):
         if self.developer_mode:
             argument = subcommand.add_argument('--fstype', help='Filesystem type for testing (ext4, xfs)', type=str, default='xfs', dest='fstype', required=False, choices=['ext4','xfs',])
         if self.developer_mode:
-            argument = subcommand.add_argument('--CLI_PASS', help='Password for CLI SSH connection', type=str, default='', dest='CLI_PASS', required=False)
+            argument = subcommand.add_argument('--CLI_PASS', help='Password for CLI SSH connection', type=str, dest='CLI_PASS', required=False)
 
     def init_cluster__create(self, subparser):
         subcommand = self.add_sub_command(subparser, 'create', 'Creates a new cluster')
         if self.developer_mode:
             argument = subcommand.add_argument('--page_size', help='The size of a data page in bytes', type=str, default='2097152', dest='page_size', required=False)
         if self.developer_mode:
-            argument = subcommand.add_argument('--CLI_PASS', help='Password for CLI SSH connection', type=str, default='', dest='CLI_PASS', required=False)
+            argument = subcommand.add_argument('--CLI_PASS', help='Password for CLI SSH connection', type=str, dest='CLI_PASS', required=False)
         argument = subcommand.add_argument('--cap-warn', help='Capacity warning level in percent, default: 89', type=int, default=89, dest='cap_warn', required=False)
         argument = subcommand.add_argument('--cap-crit', help='Capacity critical level in percent, default: 99', type=int, default=99, dest='cap_crit', required=False)
         argument = subcommand.add_argument('--prov-cap-warn', help='Capacity warning level in percent, default: 250', type=int, default=250, dest='prov_cap_warn', required=False)
@@ -878,8 +878,14 @@ class CLIWrapper(CLIWrapperBase):
                 if not self.developer_mode:
                     args.jm_percent = '3'
                     args.number_of_distribs = 4
+                    args.number_of_devices = None
+                    args.partition_size = None
+                    args.spdk_cpu_mask = None
+                    args.spdk_image = None
+                    args.spdk_debug = None
                     args.small_bufsize = '0'
                     args.large_bufsize = '0'
+                    args.enable_test_device = None
                     args.enable_ha_jm = False
                     args.ha_jm_count = '3'
                     args.id_device_by_nqn = False
@@ -897,6 +903,8 @@ class CLIWrapper(CLIWrapperBase):
                     args.max_snap = '0'
                     args.max_prov = ''
                     args.number_of_devices = '0'
+                    args.spdk_image = None
+                    args.spdk_debug = None
                     args.small_bufsize = '0'
                     args.large_bufsize = '0'
                 ret = self.storage_node__restart(sub_command, args)
@@ -990,8 +998,10 @@ class CLIWrapper(CLIWrapperBase):
             if sub_command in ['deploy']:
                 if not self.developer_mode:
                     args.ha_jm_count = '3'
+                    args.enable_qos = None
                     args.blk_size = '512'
                     args.page_size = '2097152'
+                    args.CLI_PASS = None
                     args.grafana_endpoint = ''
                     args.distr_bs = '4096'
                     args.max_queue_size = '128'
@@ -999,8 +1009,14 @@ class CLIWrapper(CLIWrapperBase):
                     args.jm_percent = '3'
                     args.max_snap = '500'
                     args.number_of_distribs = '4'
+                    args.number_of_devices = None
+                    args.partition_size = None
+                    args.spdk_cpu_mask = None
+                    args.spdk_image = None
+                    args.spdk_debug = None
                     args.small_bufsize = '0'
                     args.large_bufsize = '0'
+                    args.enable_test_device = None
                     args.enable_ha_jm = False
                     args.lvol_name = 'lvol01'
                     args.lvol_size = '10G'
@@ -1009,15 +1025,21 @@ class CLIWrapper(CLIWrapperBase):
                     args.snapshot = False
                     args.max_size = '1000G'
                     args.encrypt = False
+                    args.crypto_key1 = None
+                    args.crypto_key2 = None
+                    args.max_rw_iops = None
+                    args.max_rw_mbytes = None
+                    args.max_r_mbytes = None
+                    args.max_w_mbytes = None
                     args.distr_vuid = '0'
                     args.lvol_ha_type = 'default'
                     args.fstype = 'xfs'
-                    args.CLI_PASS = ''
+                    args.CLI_PASS = None
                 ret = self.cluster__deploy(sub_command, args)
             elif sub_command in ['create']:
                 if not self.developer_mode:
                     args.page_size = '2097152'
-                    args.CLI_PASS = ''
+                    args.CLI_PASS = None
                     args.distr_bs = '4096'
                     args.distr_chunk_bs = '4096'
                     args.ha_type = 'single'
@@ -1086,6 +1108,7 @@ class CLIWrapper(CLIWrapperBase):
                 if not self.developer_mode:
                     args.distr_vuid = '0'
                     args.ha_type = 'default'
+                    args.uid = None
                 ret = self.volume__add(sub_command, args)
             elif sub_command in ['qos-set']:
                 ret = self.volume__qos_set(sub_command, args)
@@ -1140,6 +1163,8 @@ class CLIWrapper(CLIWrapperBase):
         elif args.command in ['storage-pool', 'pool']:
             sub_command = args_dict['storage-pool']
             if sub_command in ['add']:
+                if not self.developer_mode:
+                    args.has_secret = None
                 ret = self.storage_pool__add(sub_command, args)
             elif sub_command in ['set']:
                 ret = self.storage_pool__set(sub_command, args)
@@ -1178,6 +1203,10 @@ class CLIWrapper(CLIWrapperBase):
             if sub_command in ['deploy']:
                 ret = self.caching_node__deploy(sub_command, args)
             elif sub_command in ['add-node']:
+                if not self.developer_mode:
+                    args.spdk_cpu_mask = None
+                    args.spdk_mem = None
+                    args.spdk_image = None
                 ret = self.caching_node__add_node(sub_command, args)
             elif sub_command in ['list']:
                 ret = self.caching_node__list(sub_command, args)

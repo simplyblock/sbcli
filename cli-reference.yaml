@@ -997,7 +997,6 @@ commands:
             help: "Password for CLI SSH connection"
             dest: CLI_PASS
             type: str
-            default: ""
             private: true
       - name: create
         help: "Creates a new cluster"
@@ -1014,7 +1013,6 @@ commands:
             help: "Password for CLI SSH connection"
             dest: CLI_PASS
             type: str
-            default: ""
             private: true
           - name: "--cap-warn"
             help: "Capacity warning level in percent, default: 89"

@@ -107,7 +107,7 @@ class CLIWrapper(CLIWrapperBase):
 {%- endfor %}
 {%- set ns = namespace(if_opened = False) %}
 {%- for parameter in subcommand.parameters -%}
-{%- if parameter.private is defined and parameter.private and parameter.default is defined %}
+{%- if parameter.private is defined and parameter.private %}
 {%- if not ns.if_opened %}
                 if not self.developer_mode:
 {%- set ns.if_opened = True %}

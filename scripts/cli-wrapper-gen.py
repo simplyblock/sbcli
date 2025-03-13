@@ -69,6 +69,8 @@ def bool_value(value):
 
 def default_value(item):
     type = item["type"]
+    if not "default" in item:
+        return "None"
     value = item["default"]
     if type == "str":
         return "'%s'" % value
