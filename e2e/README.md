@@ -55,8 +55,8 @@ python3 logs/upload_logs_to_miniio.py
 ## 5. Downloading Logs from MinIO
 To download logs, export MinIO credentials:
 ```sh
-export MINIO_ACCESS_KEY="KxtpwblgG3AFDYJkyg8i"
-export MINIO_SECRET_KEY="Yae4q5wJU9ZBzJhdsUGzu9wWqON8o0ERU7nGbJER"
+export MINIO_ACCESS_KEY="<MinIOAccessKey>"
+export MINIO_SECRET_KEY="MinIOSecretKey"
 ```
 
 Then navigate to the directory where you want to download the logs and run:
