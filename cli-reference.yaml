@@ -132,7 +132,8 @@ commands:
             help: "Disable HA JM for distrib creation"
             dest: enable_ha_jm
             type: bool
-            action: store_false
+            default: true
+            action: store_true
             private: true
           - name: "--ha-jm-count"
             help: "HA JM count"
