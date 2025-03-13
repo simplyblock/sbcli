@@ -132,7 +132,7 @@ commands:
             help: "Disable HA JM for distrib creation"
             dest: enable_ha_jm
             type: bool
-            default: false
+            default: true
             action: store_false
             private: true
           - name: "--ha-jm-count"
@@ -865,7 +865,7 @@ commands:
             help: "Disable HA JM for distrib creation"
             dest: enable_ha_jm
             type: bool
-            default: true
+            default: false
             action: store_false
             private: true
           - name: "--is-secondary-node"
