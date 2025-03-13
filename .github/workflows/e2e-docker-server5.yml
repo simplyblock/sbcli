@@ -147,7 +147,8 @@ jobs:
           STORAGE_PRIVATE_IPS: "192.168.10.67 192.168.10.68 192.168.10.69"
           SEC_STORAGE_PRIVATE_IPS: "192.168.10.70"
           API_INVOKE_URL: "http://192.168.10.66/"
-          
+          NR_HUGEPAGES: "2048"
+
 
       - name: Record Test Start Time
         run: echo "TEST_START_TIME=$(date +%s)" >> $GITHUB_ENV
