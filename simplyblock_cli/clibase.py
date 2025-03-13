@@ -77,6 +77,8 @@ class CLIWrapperBase:
         number_of_distribs = args.number_of_distribs
         namespace = args.namespace
         ha_jm_count = args.ha_jm_count
+        spdk_mem = args.spdk_mem
+        ssd_pcie = args.ssd_pcie
 
         out = storage_ops.add_node(
             cluster_id=cluster_id,
@@ -102,6 +104,8 @@ class CLIWrapperBase:
             id_device_by_nqn=args.id_device_by_nqn,
             partition_size=args.partition_size,
             ha_jm_count=ha_jm_count,
+            spdk_hp_mem=spdk_mem,
+            ssd_pcie=ssd_pcie,
         )
 
         return out
