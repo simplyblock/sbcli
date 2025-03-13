@@ -351,26 +351,18 @@ def join_swarm():
     node_docker = get_docker_client()
     if node_docker.info()["Swarm"]["LocalNodeState"] in ["active", "pending"]:
         logger.info("Node is part of another swarm, leaving swarm")
-        node_docker.swarm.leave(force=True)
-        time.sleep(2)
-    node_docker.swarm.join([f"{cluster_ip}:2377"], join_token)
-    # retries = 10
-    # while retries > 0:
-    #     if node_docker.info()["Swarm"]["LocalNodeState"] == "active":
-    #         break
-    #     logger.info("Waiting for node to be active...")
-    #     retries -= 1
-    #     time.sleep(1)
-    logger.info("Joining docker swarm > Done")
+        try:
+            node_docker.swarm.leave(force=True)
+            time.sleep(2)
+        except Exception as e:
+            logger.error(e)
 
-    # try:
-    #     nodes = node_docker.containers.list(all=True)
-    #     for node in nodes:
-    #         if node.attrs["Name"] == "/spdk_proxy":
-    #             node_docker.containers.get(node.attrs["Id"]).restart()
-    #             break
-    # except:
-    #     pass
+    try:
+        node_docker.swarm.join([f"{cluster_ip}:2377"], join_token)
+        logger.info("Joining docker swarm > Done")
+    except Exception as e:
+        logger.error(e)
+        return utils.get_response(False, str(e))
 
     return utils.get_response(True)
 
