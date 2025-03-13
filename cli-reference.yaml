@@ -993,11 +993,6 @@ commands:
               - xfs
             default: xfs
             private: true
-          - name: "--CLI_PASS"
-            help: "Password for CLI SSH connection"
-            dest: CLI_PASS
-            type: str
-            private: true
       - name: create
         help: "Creates a new cluster"
         usage: >
