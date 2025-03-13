@@ -1078,7 +1078,7 @@ commands:
             default: 4096
             private: true
           - name: "--ha-type"
-            help: "Logical volume HA type (single, ha), default is cluster single type"
+            help: "Logical volume HA type (single, ha), default is cluster ha type"
             dest: ha_type
             type: str
             choices:
