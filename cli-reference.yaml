@@ -113,13 +113,13 @@ commands:
           - name: "--iobuf_small_bufsize"
             help: "bdev_set_options param"
             dest: small_bufsize
-            type: str
+            type: int
             default: 0
             private: true
           - name: "--iobuf_large_bufsize"
             help: "bdev_set_options param"
             dest: large_bufsize
-            type: str
+            type: int
             default: 0
             private: true
           - name: "--enable-test-device"
@@ -278,13 +278,13 @@ commands:
           - name: "--iobuf_small_bufsize"
             help: "bdev_set_options param"
             dest: small_bufsize
-            type: str
+            type: int
             default: 0
             private: true
           - name: "--iobuf_large_bufsize"
             help: "bdev_set_options param"
             dest: large_bufsize
-            type: str
+            type: int
             default: 0
             private: true
           - name: "--force"
@@ -847,13 +847,13 @@ commands:
           - name: "--iobuf_small_bufsize"
             help: "bdev_set_options param"
             dest: small_bufsize
-            type: str
+            type: int
             default: 0
             private: true
           - name: "--iobuf_large_bufsize"
             help: "bdev_set_options param"
             dest: large_bufsize
-            type: str
+            type: int
             default: 0
             private: true
           - name: "--enable-test-device"

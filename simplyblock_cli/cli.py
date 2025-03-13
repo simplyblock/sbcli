@@ -102,9 +102,9 @@ class CLIWrapper(CLIWrapperBase):
         if self.developer_mode:
             argument = subcommand.add_argument('--spdk-debug', help='Enable spdk debug logs', dest='spdk_debug', required=False, action='store_true')
         if self.developer_mode:
-            argument = subcommand.add_argument('--iobuf_small_bufsize', help='bdev_set_options param', type=str, default='0', dest='small_bufsize', required=False)
+            argument = subcommand.add_argument('--iobuf_small_bufsize', help='bdev_set_options param', type=int, default=0, dest='small_bufsize', required=False)
         if self.developer_mode:
-            argument = subcommand.add_argument('--iobuf_large_bufsize', help='bdev_set_options param', type=str, default='0', dest='large_bufsize', required=False)
+            argument = subcommand.add_argument('--iobuf_large_bufsize', help='bdev_set_options param', type=int, default=0, dest='large_bufsize', required=False)
         if self.developer_mode:
             argument = subcommand.add_argument('--enable-test-device', help='Enable creation of test device', dest='enable_test_device', required=False, action='store_true')
         if self.developer_mode:
@@ -151,9 +151,9 @@ class CLIWrapper(CLIWrapperBase):
         if self.developer_mode:
             argument = subcommand.add_argument('--spdk-debug', help='Enable spdk debug logs', dest='spdk_debug', required=False, action='store_true')
         if self.developer_mode:
-            argument = subcommand.add_argument('--iobuf_small_bufsize', help='bdev_set_options param', type=str, default='0', dest='small_bufsize', required=False)
+            argument = subcommand.add_argument('--iobuf_small_bufsize', help='bdev_set_options param', type=int, default=0, dest='small_bufsize', required=False)
         if self.developer_mode:
-            argument = subcommand.add_argument('--iobuf_large_bufsize', help='bdev_set_options param', type=str, default='0', dest='large_bufsize', required=False)
+            argument = subcommand.add_argument('--iobuf_large_bufsize', help='bdev_set_options param', type=int, default=0, dest='large_bufsize', required=False)
         argument = subcommand.add_argument('--force', help='Force restart', dest='force', required=False, action='store_true')
 
     def init_storage_node__shutdown(self, subparser):
@@ -365,9 +365,9 @@ class CLIWrapper(CLIWrapperBase):
         if self.developer_mode:
             argument = subcommand.add_argument('--spdk-debug', help='Enable spdk debug logs', dest='spdk_debug', required=False, action='store_true')
         if self.developer_mode:
-            argument = subcommand.add_argument('--iobuf_small_bufsize', help='bdev_set_options param', type=str, default='0', dest='small_bufsize', required=False)
+            argument = subcommand.add_argument('--iobuf_small_bufsize', help='bdev_set_options param', type=int, default=0, dest='small_bufsize', required=False)
         if self.developer_mode:
-            argument = subcommand.add_argument('--iobuf_large_bufsize', help='bdev_set_options param', type=str, default='0', dest='large_bufsize', required=False)
+            argument = subcommand.add_argument('--iobuf_large_bufsize', help='bdev_set_options param', type=int, default=0, dest='large_bufsize', required=False)
         if self.developer_mode:
             argument = subcommand.add_argument('--enable-test-device', help='Enable creation of test device', dest='enable_test_device', required=False, action='store_true')
         if self.developer_mode:
@@ -879,8 +879,8 @@ class CLIWrapper(CLIWrapperBase):
                     args.spdk_cpu_mask = None
                     args.spdk_image = None
                     args.spdk_debug = None
-                    args.small_bufsize = '0'
-                    args.large_bufsize = '0'
+                    args.small_bufsize = 0
+                    args.large_bufsize = 0
                     args.enable_test_device = None
                     args.enable_ha_jm = False
                     args.ha_jm_count = '3'
@@ -901,8 +901,8 @@ class CLIWrapper(CLIWrapperBase):
                     args.max_prov = ''
                     args.spdk_image = None
                     args.spdk_debug = None
-                    args.small_bufsize = '0'
-                    args.large_bufsize = '0'
+                    args.small_bufsize = 0
+                    args.large_bufsize = 0
                 ret = self.storage_node__restart(sub_command, args)
             elif sub_command in ['shutdown']:
                 ret = self.storage_node__shutdown(sub_command, args)
@@ -1009,8 +1009,8 @@ class CLIWrapper(CLIWrapperBase):
                     args.spdk_cpu_mask = None
                     args.spdk_image = None
                     args.spdk_debug = None
-                    args.small_bufsize = '0'
-                    args.large_bufsize = '0'
+                    args.small_bufsize = 0
+                    args.large_bufsize = 0
                     args.enable_test_device = None
                     args.enable_ha_jm = False
                     args.lvol_name = 'lvol01'
