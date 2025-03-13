@@ -96,7 +96,7 @@ def addNvmeDevices(snode, devs):
     except:
         pass
 
-    next_physical_label = get_next_physical_device_order(snode)
+    next_physical_label = snode.physical_label
     for pcie in devs:
 
         if pcie in ctr_map:
@@ -227,10 +227,12 @@ def get_next_cluster_device_order(db_controller, cluster_id):
 def get_next_physical_device_order(snode):
     db_controller = DBController()
     used_labels = []
-    for index, node in enumerate(db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id)):
-        for dev in node.nvme_devices:
-            used_labels.append(dev.physical_label)
-            break
+    for node in db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id):
+        if node.physical_label > 0:
+            if node.mgmt_ip == snode.mgmt_ip:
+                return node.physical_label
+            else:
+                used_labels.append(node.physical_label)
 
     next_label = 1
     while next_label in used_labels:
@@ -1152,11 +1154,12 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
             namespace, mgmt_ip, rpc_port, rpc_user, rpc_pass,
             multi_threading_enabled=constants.SPDK_PROXY_MULTI_THREADING_ENABLED, timeout=constants.SPDK_PROXY_TIMEOUT,
             ssd_pcie=ssd_pcie, total_mem=total_mem)
+        time.sleep(5)
+
     except Exception as e:
         logger.error(e)
         return False
 
-    # time.sleep(5)
     if not results:
         logger.error(f"Failed to start spdk: {err}")
         return False
@@ -1245,14 +1248,13 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
     snode.iobuf_small_bufsize = small_bufsize or 0
     snode.iobuf_large_bufsize = large_bufsize or 0
     snode.enable_test_device = enable_test_device
+    snode.physical_label = get_next_physical_device_order(snode)
 
     snode.num_partitions_per_dev = num_partitions_per_dev
     snode.jm_percent = jm_percent
     snode.id_device_by_nqn = id_device_by_nqn
     if partition_size:
         snode.partition_size = utils.parse_size(partition_size)
-
-    time.sleep(5)
 
     # creating RPCClient instance
     rpc_client = RPCClient(
@@ -1339,7 +1341,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
             return False
 
     # get new node info after starting spdk
-    node_info, _ = snode_api.info()
+    # node_info, _ = snode_api.info()
 
     # if not snode.ssd_pcie:
     #     snode = db_controller.get_storage_node_by_id(snode.get_id())
