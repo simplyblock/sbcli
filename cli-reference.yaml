@@ -81,8 +81,7 @@ commands:
           - name: "--number-of-devices"
             help: "Number of devices per storage node if it's not supported EC2 instance"
             dest: number_of_devices
-            type: str
-            private: true
+            type: int
           - name: "--size-of-device"
             help: "Size of device per storage node"
             dest: partition_size
@@ -264,9 +263,7 @@ commands:
           - name: "--number-of-devices"
             help: "Number of devices per storage node if it's not supported EC2 instance"
             dest: number_of_devices
-            type: str
-            default: 0
-            private: true
+            type: int
           - name: "--spdk-image"
             help: "SPDK image uri"
             dest: spdk_image
@@ -818,8 +815,8 @@ commands:
           - name: "--number-of-devices"
             help: "Number of devices per storage node if it's not supported EC2 instance"
             dest: number_of_devices
-            type: str
-            private: true
+            type: int
+            default: 0
           - name: "--size-of-device"
             help: "Size of device per storage node"
             dest: partition_size

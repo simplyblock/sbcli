@@ -91,8 +91,7 @@ class CLIWrapper(CLIWrapperBase):
         argument = subcommand.add_argument('--max-size', help='Maximum amount of GB to be utilized on this storage node', type=str, dest='max_prov', required=False)
         if self.developer_mode:
             argument = subcommand.add_argument('--number-of-distribs', help='The number of distirbs to be created on the node', type=int, default=4, dest='number_of_distribs', required=False)
-        if self.developer_mode:
-            argument = subcommand.add_argument('--number-of-devices', help='Number of devices per storage node if it\'s not supported EC2 instance', type=str, dest='number_of_devices', required=False)
+        argument = subcommand.add_argument('--number-of-devices', help='Number of devices per storage node if it\'s not supported EC2 instance', type=int, dest='number_of_devices', required=False)
         if self.developer_mode:
             argument = subcommand.add_argument('--size-of-device', help='Size of device per storage node', type=str, dest='partition_size', required=False)
         argument = subcommand.add_argument('--vcpu-count', help='Number of vCPUs used for SPDK. Remaining CPUs will be used for Linux system, TCP/IP processing, and other workloads. The default on non-Kubernetes hosts is 80%%.', type=int, dest='vcpu_count', required=False)
@@ -146,8 +145,7 @@ class CLIWrapper(CLIWrapperBase):
         if self.developer_mode:
             argument = subcommand.add_argument('--max-size', help='Maximum amount of GB to be utilized on this storage node', type=str, default='', dest='max_prov', required=False)
         argument = subcommand.add_argument('--node-ip', help='Restart Node on new node', type=str, dest='node_ip', required=False)
-        if self.developer_mode:
-            argument = subcommand.add_argument('--number-of-devices', help='Number of devices per storage node if it\'s not supported EC2 instance', type=str, default='0', dest='number_of_devices', required=False)
+        argument = subcommand.add_argument('--number-of-devices', help='Number of devices per storage node if it\'s not supported EC2 instance', type=int, dest='number_of_devices', required=False)
         if self.developer_mode:
             argument = subcommand.add_argument('--spdk-image', help='SPDK image uri', type=str, dest='spdk_image', required=False)
         if self.developer_mode:
@@ -356,8 +354,7 @@ class CLIWrapper(CLIWrapperBase):
         argument = subcommand.add_argument('--max-size', help='Maximum amount of GB to be provisioned via all storage nodes', type=str, default='', dest='max_prov', required=False)
         if self.developer_mode:
             argument = subcommand.add_argument('--number-of-distribs', help='The number of distirbs to be created on the node', type=str, default='4', dest='number_of_distribs', required=False)
-        if self.developer_mode:
-            argument = subcommand.add_argument('--number-of-devices', help='Number of devices per storage node if it\'s not supported EC2 instance', type=str, dest='number_of_devices', required=False)
+        argument = subcommand.add_argument('--number-of-devices', help='Number of devices per storage node if it\'s not supported EC2 instance', type=int, default=0, dest='number_of_devices', required=False)
         if self.developer_mode:
             argument = subcommand.add_argument('--size-of-device', help='Size of device per storage node', type=str, dest='partition_size', required=False)
         argument = subcommand.add_argument('--vcpu-count', help='Number of vCPUs used for SPDK. Remaining CPUs will be used for Linux system, TCP/IP processing, and other workloads. The default on non-Kubernetes hosts is 80%%.', type=int, dest='vcpu_count', required=False)
@@ -878,7 +875,6 @@ class CLIWrapper(CLIWrapperBase):
                 if not self.developer_mode:
                     args.jm_percent = '3'
                     args.number_of_distribs = 4
-                    args.number_of_devices = None
                     args.partition_size = None
                     args.spdk_cpu_mask = None
                     args.spdk_image = None
@@ -903,7 +899,6 @@ class CLIWrapper(CLIWrapperBase):
                 if not self.developer_mode:
                     args.max_snap = '5000'
                     args.max_prov = ''
-                    args.number_of_devices = '0'
                     args.spdk_image = None
                     args.spdk_debug = None
                     args.small_bufsize = '0'
@@ -1010,7 +1005,6 @@ class CLIWrapper(CLIWrapperBase):
                     args.jm_percent = '3'
                     args.max_snap = '5000'
                     args.number_of_distribs = '4'
-                    args.number_of_devices = None
                     args.partition_size = None
                     args.spdk_cpu_mask = None
                     args.spdk_image = None
