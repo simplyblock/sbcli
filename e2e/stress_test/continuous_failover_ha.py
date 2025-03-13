@@ -54,7 +54,7 @@ class RandomFailoverTest(TestLvolHACluster):
         #                       "lvol_disconnect_primary"]
         # self.outage_types = ["container_stop", "graceful_shutdown", 
         #                      "interface_full_network_interrupt", "interface_partial_network_interrupt"]
-        self.outage_types = ["container_stop", "graceful_shutdown", "interface_partial_network_interrupt"]
+        self.outage_types = ["container_stop", "graceful_shutdown", "interface_partial_network_interrupt", "interface_full_network_interrupt"]
         self.blocked_ports = None
         self.outage_log_file = os.path.join("logs", f"outage_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
         self._initialize_outage_log()
@@ -81,7 +81,7 @@ class RandomFailoverTest(TestLvolHACluster):
         """Create lvols and start FIO with random configurations."""
         for i in range(count):
             fs_type = random.choice(["ext4", "xfs"])
-            is_crypto = random.choice([False, False])
+            is_crypto = random.choice([True, False])
             lvol_name = f"{self.lvol_name}_{i}" if not is_crypto else f"c{self.lvol_name}_{i}"
             while lvol_name in self.lvol_mount_details:
                 self.lvol_name = f"lvl{generate_random_sequence(15)}"
@@ -644,10 +644,10 @@ class RandomFailoverTest(TestLvolHACluster):
             self.fio_threads.append(fio_thread)
             self.logger.info(f"Created snapshot {snapshot_name} and clone {clone_name}.")
 
-            # self.sbcli_utils.resize_lvol(lvol_id=self.lvol_mount_details[lvol]["ID"],
-            #                              new_size=f"{self.int_lvol_size}G")
-            # self.sbcli_utils.resize_lvol(lvol_id=self.clone_mount_details[clone_name]["ID"],
-            #                              new_size=f"{self.int_lvol_size}G")
+            self.sbcli_utils.resize_lvol(lvol_id=self.lvol_mount_details[lvol]["ID"],
+                                         new_size=f"{self.int_lvol_size}G")
+            self.sbcli_utils.resize_lvol(lvol_id=self.clone_mount_details[clone_name]["ID"],
+                                         new_size=f"{self.int_lvol_size}G")
             
 
     def delete_random_lvols(self, count):
