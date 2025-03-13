@@ -380,7 +380,7 @@ commands:
             type: str
           - name: "-s"
             help: "Sort the outputs"
-            dest: -s
+            dest: sort
             type: str
             choices:
               - node-seq

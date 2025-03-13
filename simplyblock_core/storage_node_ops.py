@@ -226,10 +226,16 @@ def get_next_cluster_device_order(db_controller, cluster_id):
 
 def get_next_physical_device_order(snode):
     db_controller = DBController()
+    used_labels = []
     for index, node in enumerate(db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id)):
-        if snode.mgmt_ip == node.mgmt_ip:
-            return index + 1
-    return 1
+        for dev in node.nvme_devices:
+            used_labels.append(dev.physical_label)
+            break
+
+    next_label = 1
+    while next_label in used_labels:
+        next_label += 1
+    return next_label
 
 
 def _search_for_partitions(rpc_client, nvme_device):
