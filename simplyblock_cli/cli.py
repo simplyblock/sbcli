@@ -879,7 +879,7 @@ class CLIWrapper(CLIWrapperBase):
                     args.small_bufsize = 0
                     args.large_bufsize = 0
                     args.enable_test_device = None
-                    args.enable_ha_jm = False
+                    args.enable_ha_jm = True
                     args.id_device_by_nqn = False
                     args.max_snap = 5000
                 ret = self.storage_node__add_node(sub_command, args)
