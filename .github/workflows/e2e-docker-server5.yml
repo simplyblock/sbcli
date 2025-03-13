@@ -124,7 +124,7 @@ jobs:
             --distr-npcs $NPCS \
             --distr-bs $BS \
             --distr-chunk-bs $CHUNK_BS --ha-type ha \
-            --partitions 0 --data-nic ens16 \
+            --partitions 0 \
             --enable-node-affinity true
           
           echo "::set-output name=bastion_public_ip::$BASTION_IP"
@@ -143,10 +143,12 @@ jobs:
           SECRET_VALUE: ${{ secrets.simplyblock_us_east_2_pem }}
           BASTION_IP: "192.168.10.66"
           GRAFANA_ENDPOINT: "http://192.168.10.66/grafana"
-          mnodes: "192.168.10.66"
-          storage_private_ips: "192.168.10.67 192.168.10.68 192.168.10.69"
-          sec_storage_private_ips: "192.168.10.70"
+          MNODES: "192.168.10.66"
+          STORAGE_PRIVATE_IPS: "192.168.10.67 192.168.10.68 192.168.10.69"
+          SEC_STORAGE_PRIVATE_IPS: "192.168.10.70"
           API_INVOKE_URL: "http://192.168.10.66/"
+          NR_HUGEPAGES: "2048"
+
 
       - name: Record Test Start Time
         run: echo "TEST_START_TIME=$(date +%s)" >> $GITHUB_ENV
@@ -166,9 +168,6 @@ jobs:
           export API_BASE_URL=${{ steps.bootstrap_cluster.outputs.cluster_api_gateway_endpoint }}
           export BASTION_SERVER=${{ steps.bootstrap_cluster.outputs.bastion_public_ip }}
           export KEY_NAME=${{ steps.bootstrap_cluster.outputs.key_name }} 
-          export AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }}
-          export AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          export AWS_REGION=${{ secrets.AWS_REGION }}
           export SBCLI_CMD=${SBCLI_CMD}
           export SSH_USER=root
           TESTNAME=""

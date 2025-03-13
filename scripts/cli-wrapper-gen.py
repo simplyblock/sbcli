@@ -28,7 +28,13 @@ def required(item):
         return False
     elif "default" in item:
         return False
-    return True
+    elif "private" in item and item["private"]:
+        return False
+    elif "required" in item and item["required"]:
+        return True
+    elif not item["name"].startswith("--"):
+        return True
+    return False
 
 
 def data_type_name(item):
@@ -43,6 +49,9 @@ def data_type_name(item):
         return "boolean"
     else:
         return "unknown"
+
+def escape_python_string(text):
+    return text.replace('%', '%%')
 
 
 def escape_strings(text):
@@ -63,6 +72,8 @@ def bool_value(value):
 
 def default_value(item):
     type = item["type"]
+    if not "default" in item:
+        return "None"
     value = item["default"]
     if type == "str":
         return "'%s'" % value
@@ -126,11 +137,14 @@ with open("%s/cli-reference.yaml" % base_path) as stream:
         environment.filters["make_identifier"] = make_identifier
         environment.filters["bool_value"] = bool_value
         environment.filters["split_value_range"] = split_value_range
+        environment.filters["escape_python_string"] = escape_python_string
 
         template = environment.get_template("cli-wrapper.jinja2")
         output = template.render({"commands": reference["commands"]})
         with open("%s/simplyblock_cli/cli.py" % base_path, "t+w") as target:
             target.write(output)
+
+        print("Successfully generated cli.py")
 
     except yaml.YAMLError as exc:
         print(exc)

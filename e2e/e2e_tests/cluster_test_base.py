@@ -118,12 +118,15 @@ class TestClusterBase:
         self.sbcli_utils.delete_all_lvols()
         sleep_n_sec(2)
         self.sbcli_utils.delete_all_storage_pools()
-        session = boto3.Session(
-            aws_access_key_id=os.environ.get("AWS_ACCESS_KEY_ID"),
-            aws_secret_access_key=os.environ.get("AWS_SECRET_ACCESS_KEY"),
-            region_name=os.environ.get("AWS_REGION")
-        )
-        self.ec2_resource = session.resource('ec2')
+        aws_access_key = os.environ.get("AWS_ACCESS_KEY_ID", None)
+        aws_secret_key = os.environ.get("AWS_SECRET_ACCESS_KEY", None)
+        if aws_access_key and aws_secret_key:
+            session = boto3.Session(
+                aws_access_key_id=aws_access_key,
+                aws_secret_access_key=aws_secret_key,
+                region_name=os.environ.get("AWS_REGION")
+            )
+            self.ec2_resource = session.resource('ec2')
 
         timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
         # Construct the logs path with test name and timestamp

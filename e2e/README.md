@@ -11,8 +11,8 @@
 Before running the stress test, set up the necessary environment variables:
 ```sh
 export AWS_REGION=us-east-2
-export AWS_ACCESS_KEY_ID=AKIAYHRYFLI6WTW2HDA4
-export AWS_SECRET_ACCESS_KEY=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
+export AWS_ACCESS_KEY_ID=<AWS_ACCESS_KEY_ID>
+export AWS_SECRET_ACCESS_KEY=<AWS_SECRET_ACCESS_KEY>
 export SSH_USER=root
 export KEY_NAME=simplyblock-us-east-2.pem
 export BASTION_SERVER=192.168.10.61
@@ -55,8 +55,8 @@ python3 logs/upload_logs_to_miniio.py
 ## 5. Downloading Logs from MinIO
 To download logs, export MinIO credentials:
 ```sh
-export MINIO_ACCESS_KEY="KxtpwblgG3AFDYJkyg8i"
-export MINIO_SECRET_KEY="Yae4q5wJU9ZBzJhdsUGzu9wWqON8o0ERU7nGbJER"
+export MINIO_ACCESS_KEY="<MinIOAccessKey>"
+export MINIO_SECRET_KEY="MinIOSecretKey"
 ```
 
 Then navigate to the directory where you want to download the logs and run:
