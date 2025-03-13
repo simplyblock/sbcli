@@ -311,7 +311,7 @@ class CLIWrapper(CLIWrapperBase):
         argument = subcommand.add_argument('--storage-nodes', help='comma separated ip addresses', type=str, dest='storage_nodes', required=False)
         argument = subcommand.add_argument('--test', help='Test Cluster', dest='test', required=False, action='store_true')
         argument = subcommand.add_argument('--secondary-nodes', help='comma separated ip addresses', type=str, dest='secondary_nodes', required=False)
-        argument = subcommand.add_argument('--ha-type', help='Logical volume HA type (single, ha), default is cluster HA type', type=str, default='single', dest='ha_type', required=False, choices=['single','ha',])
+        argument = subcommand.add_argument('--ha-type', help='Logical volume HA type (single, ha), default is cluster HA type', type=str, default='ha', dest='ha_type', required=False, choices=['single','ha',])
         if self.developer_mode:
             argument = subcommand.add_argument('--ha-jm-count', help='HA JM count', type=int, default=3, dest='ha_jm_count', required=False)
         argument = subcommand.add_argument('--data-chunks-per-stripe', help='Erasure coding schema parameter k (distributed raid), default: 1', type=int, default=1, dest='distr_ndcs', required=False)
@@ -431,8 +431,7 @@ class CLIWrapper(CLIWrapperBase):
             argument = subcommand.add_argument('--distr-bs', help='(Dev) distrb bdev block size, default: 4096', type=int, default=4096, dest='distr_bs', required=False)
         if self.developer_mode:
             argument = subcommand.add_argument('--distr-chunk-bs', help='(Dev) distrb bdev chunk block size, default: 4096', type=int, default=4096, dest='distr_chunk_bs', required=False)
-        if self.developer_mode:
-            argument = subcommand.add_argument('--ha-type', help='Logical volume HA type (single, ha), default is cluster single type', type=str, default='single', dest='ha_type', required=False, choices=['single','ha',])
+        argument = subcommand.add_argument('--ha-type', help='Logical volume HA type (single, ha), default is cluster single type', type=str, default='ha', dest='ha_type', required=False, choices=['single','ha',])
         argument = subcommand.add_argument('--enable-node-affinity', help='Enable node affinity for storage nodes', dest='enable_node_affinity', required=False, action='store_true')
         argument = subcommand.add_argument('--qpair-count', help='NVMe/TCP transport qpair count per logical volume', type=int, default=0, dest='qpair_count', required=False, choices=range(0, 128))
         if self.developer_mode:
@@ -1036,7 +1035,6 @@ class CLIWrapper(CLIWrapperBase):
                     args.CLI_PASS = None
                     args.distr_bs = 4096
                     args.distr_chunk_bs = 4096
-                    args.ha_type = 'single'
                     args.max_queue_size = 128
                     args.inflight_io_threshold = 4
                     args.enable_qos = False
