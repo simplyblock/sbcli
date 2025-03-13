@@ -993,6 +993,12 @@ commands:
               - xfs
             default: xfs
             private: true
+          - name: "--CLI_PASS"
+            help: "Password for CLI SSH connection"
+            dest: CLI_PASS
+            type: str
+            default: ""
+            private: true
       - name: create
         help: "Creates a new cluster"
         usage: >
@@ -1008,6 +1014,7 @@ commands:
             help: "Password for CLI SSH connection"
             dest: CLI_PASS
             type: str
+            default: ""
             private: true
           - name: "--cap-warn"
             help: "Capacity warning level in percent, default: 89"

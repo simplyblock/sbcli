@@ -410,13 +410,15 @@ class CLIWrapper(CLIWrapperBase):
         argument = subcommand.add_argument('--lvol-priority-class', help='Logical volume priority class', type=int, default=0, dest='lvol_priority_class', required=False)
         if self.developer_mode:
             argument = subcommand.add_argument('--fstype', help='Filesystem type for testing (ext4, xfs)', type=str, default='xfs', dest='fstype', required=False, choices=['ext4','xfs',])
+        if self.developer_mode:
+            argument = subcommand.add_argument('--CLI_PASS', help='Password for CLI SSH connection', type=str, default='', dest='CLI_PASS', required=False)
 
     def init_cluster__create(self, subparser):
         subcommand = self.add_sub_command(subparser, 'create', 'Creates a new cluster')
         if self.developer_mode:
             argument = subcommand.add_argument('--page_size', help='The size of a data page in bytes', type=str, default='2097152', dest='page_size', required=False)
         if self.developer_mode:
-            argument = subcommand.add_argument('--CLI_PASS', help='Password for CLI SSH connection', type=str, dest='CLI_PASS', required=False)
+            argument = subcommand.add_argument('--CLI_PASS', help='Password for CLI SSH connection', type=str, default='', dest='CLI_PASS', required=False)
         argument = subcommand.add_argument('--cap-warn', help='Capacity warning level in percent, default: 89', type=int, default=89, dest='cap_warn', required=False)
         argument = subcommand.add_argument('--cap-crit', help='Capacity critical level in percent, default: 99', type=int, default=99, dest='cap_crit', required=False)
         argument = subcommand.add_argument('--prov-cap-warn', help='Capacity warning level in percent, default: 250', type=int, default=250, dest='prov_cap_warn', required=False)
@@ -1010,10 +1012,12 @@ class CLIWrapper(CLIWrapperBase):
                     args.distr_vuid = '0'
                     args.lvol_ha_type = 'default'
                     args.fstype = 'xfs'
+                    args.CLI_PASS = ''
                 ret = self.cluster__deploy(sub_command, args)
             elif sub_command in ['create']:
                 if not self.developer_mode:
                     args.page_size = '2097152'
+                    args.CLI_PASS = ''
                     args.distr_bs = '4096'
                     args.distr_chunk_bs = '4096'
                     args.ha_type = 'single'
