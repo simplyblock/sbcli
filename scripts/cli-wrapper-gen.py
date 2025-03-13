@@ -50,6 +50,9 @@ def data_type_name(item):
     else:
         return "unknown"
 
+def escape_python_string(text):
+    return text.replace('%', '%%')
+
 
 def escape_strings(text):
     text = re.sub("'", "\\'", text)
@@ -134,6 +137,7 @@ with open("%s/cli-reference.yaml" % base_path) as stream:
         environment.filters["make_identifier"] = make_identifier
         environment.filters["bool_value"] = bool_value
         environment.filters["split_value_range"] = split_value_range
+        environment.filters["escape_python_string"] = escape_python_string
 
         template = environment.get_template("cli-wrapper.jinja2")
         output = template.render({"commands": reference["commands"]})

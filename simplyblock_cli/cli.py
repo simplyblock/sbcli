@@ -95,7 +95,7 @@ class CLIWrapper(CLIWrapperBase):
             argument = subcommand.add_argument('--number-of-devices', help='Number of devices per storage node if it\'s not supported EC2 instance', type=str, dest='number_of_devices', required=False)
         if self.developer_mode:
             argument = subcommand.add_argument('--size-of-device', help='Size of device per storage node', type=str, dest='partition_size', required=False)
-        argument = subcommand.add_argument('--vcpu-count', help='Number of vCPUs used for SPDK. Remaining CPUs will be used for Linux system, TCP/IP processing, and other workloads. The default on non-Kubernetes hosts is 80%.', type=int, dest='vcpu_count', required=False)
+        argument = subcommand.add_argument('--vcpu-count', help='Number of vCPUs used for SPDK. Remaining CPUs will be used for Linux system, TCP/IP processing, and other workloads. The default on non-Kubernetes hosts is 80%%.', type=int, dest='vcpu_count', required=False)
         if self.developer_mode:
             argument = subcommand.add_argument('--cpu-mask', help='SPDK app CPU mask, default is all cores found', type=str, dest='spdk_cpu_mask', required=False)
         if self.developer_mode:
@@ -344,7 +344,7 @@ class CLIWrapper(CLIWrapperBase):
         if self.developer_mode:
             argument = subcommand.add_argument('--inflight-io-threshold', help='The number of inflight IOs allowed before the IO queuing starts', type=str, default='4', dest='inflight_io_threshold', required=False)
         argument = subcommand.add_argument('--strict-node-anti-affinity', help='Enable strict node anti affinity for storage nodes. Never more than one chunk is placed on a node. This requires a minimum of _data-chunks-in-stripe + parity-chunks-in-stripe + 1_ nodes in the cluster."', dest='strict_node_anti_affinity', required=False, action='store_true')
-        argument = subcommand.add_argument('--journal-partition', help='1: auto-partition nvme devices for journal. 0: use a separate nvme device for journal. The smallest NVMe device available on the host will be chosen as a journal. It should provide about 3% of the entire node’s NVMe capacity. If set to false, partitions on other devices will be auto-created to store the journal.', type=str, default='True', dest='partitions', required=False)
+        argument = subcommand.add_argument('--journal-partition', help='1: auto-partition nvme devices for journal. 0: use a separate nvme device for journal. The smallest NVMe device available on the host will be chosen as a journal. It should provide about 3%% of the entire node’s NVMe capacity. If set to false, partitions on other devices will be auto-created to store the journal.', type=str, default='True', dest='partitions', required=False)
         if self.developer_mode:
             argument = subcommand.add_argument('--jm-percent', help='Number in percent to use for JM from each device', type=str, default='3', dest='jm_percent', required=False)
         argument = subcommand.add_argument('--data-nics', help='Storage network interface name(s). Can be more than one.', type=str, dest='data_nics', required=False, nargs='+')
@@ -358,7 +358,7 @@ class CLIWrapper(CLIWrapperBase):
             argument = subcommand.add_argument('--number-of-devices', help='Number of devices per storage node if it\'s not supported EC2 instance', type=str, dest='number_of_devices', required=False)
         if self.developer_mode:
             argument = subcommand.add_argument('--size-of-device', help='Size of device per storage node', type=str, dest='partition_size', required=False)
-        argument = subcommand.add_argument('--vcpu-count', help='Number of vCPUs used for SPDK. Remaining CPUs will be used for Linux system, TCP/IP processing, and other workloads. The default on non-Kubernetes hosts is 80%.', type=int, dest='vcpu_count', required=False)
+        argument = subcommand.add_argument('--vcpu-count', help='Number of vCPUs used for SPDK. Remaining CPUs will be used for Linux system, TCP/IP processing, and other workloads. The default on non-Kubernetes hosts is 80%%.', type=int, dest='vcpu_count', required=False)
         if self.developer_mode:
             argument = subcommand.add_argument('--cpu-mask', help='SPDK app CPU mask, default is all cores found', type=str, dest='spdk_cpu_mask', required=False)
         if self.developer_mode:
@@ -813,7 +813,7 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('cluster_id', help='Cluster id', type=str)
         subcommand.add_argument('node_ip', help='Node IP address', type=str)
         subcommand.add_argument('ifname', help='Management interface name', type=str)
-        argument = subcommand.add_argument('--vcpu-count', help='Number of vCPUs used for SPDK. Remaining CPUs will be used for Linux system, TCP/IP processing, and other workloads. The default on non-Kubernetes hosts is 80%.', type=int, dest='vcpu_count', required=False)
+        argument = subcommand.add_argument('--vcpu-count', help='Number of vCPUs used for SPDK. Remaining CPUs will be used for Linux system, TCP/IP processing, and other workloads. The default on non-Kubernetes hosts is 80%%.', type=int, dest='vcpu_count', required=False)
         if self.developer_mode:
             argument = subcommand.add_argument('--cpu-mask', help='SPDK app CPU mask, default is all cores found', type=str, dest='spdk_cpu_mask', required=False)
         if self.developer_mode:
