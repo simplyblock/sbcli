@@ -109,8 +109,7 @@ class CLIWrapper(CLIWrapperBase):
             argument = subcommand.add_argument('--enable-test-device', help='Enable creation of test device', dest='enable_test_device', required=False, action='store_true')
         if self.developer_mode:
             argument = subcommand.add_argument('--disable-ha-jm', help='Disable HA JM for distrib creation', dest='enable_ha_jm', required=False, action='store_false')
-        if self.developer_mode:
-            argument = subcommand.add_argument('--ha-jm-count', help='HA JM count', type=int, default=3, dest='ha_jm_count', required=False)
+        argument = subcommand.add_argument('--ha-jm-count', help='HA JM count', type=int, default=3, dest='ha_jm_count', required=False)
         argument = subcommand.add_argument('--is-secondary-node', help='Adds as secondary node. A secondary node does not have any disks attached. It is only used for I/O processing in case a primary goes down.', dest='is_secondary_node', required=False, action='store_true')
         argument = subcommand.add_argument('--namespace', help='Kubernetes namespace to deploy on', type=str, dest='namespace', required=False)
         if self.developer_mode:
@@ -184,7 +183,7 @@ class CLIWrapper(CLIWrapperBase):
     def init_storage_node__list_devices(self, subparser):
         subcommand = self.add_sub_command(subparser, 'list-devices', 'Lists storage devices')
         subcommand.add_argument('node_id', help='Storage node id', type=str).completer = self._completer_get_sn_list
-        subcommand.add_argument('-s', '--sort', help='Sort the outputs', type=str)
+        subcommand.add_argument('-s', help='Sort the outputs', type=str)
         argument = subcommand.add_argument('--json', help='Print outputs in json format', dest='json', required=False, action='store_true')
 
     def init_storage_node__device_testing_mode(self, subparser):
@@ -881,7 +880,6 @@ class CLIWrapper(CLIWrapperBase):
                     args.large_bufsize = 0
                     args.enable_test_device = None
                     args.enable_ha_jm = False
-                    args.ha_jm_count = 3
                     args.id_device_by_nqn = False
                     args.max_snap = 5000
                 ret = self.storage_node__add_node(sub_command, args)
