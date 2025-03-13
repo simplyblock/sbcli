@@ -165,7 +165,7 @@ commands:
             help: "Max snapshot per storage node"
             dest: max_snap
             type: str
-            default: 0
+            default: 5000
             private: true
       - name: delete
         help: "Deletes a storage node object from the state database."
@@ -239,7 +239,7 @@ commands:
             help: "Max snapshot per storage node"
             dest: max_snap
             type: str
-            default: 0
+            default: 5000
             private: true
           - name: "--max-size"
             help: "Maximum amount of GB to be utilized on this storage node"
@@ -802,7 +802,7 @@ commands:
             help: "Max snapshot per storage node"
             dest: max_snap
             type: str
-            default: 500
+            default: 5000
             private: true
           - name: "--max-size"
             help: "Maximum amount of GB to be provisioned via all storage nodes"

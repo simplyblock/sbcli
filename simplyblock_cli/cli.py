@@ -117,7 +117,7 @@ class CLIWrapper(CLIWrapperBase):
         if self.developer_mode:
             argument = subcommand.add_argument('--id-device-by-nqn', help='Use device nqn to identify it instead of serial number', dest='id_device_by_nqn', required=False, action='store_true')
         if self.developer_mode:
-            argument = subcommand.add_argument('--max-snap', help='Max snapshot per storage node', type=str, default='0', dest='max_snap', required=False)
+            argument = subcommand.add_argument('--max-snap', help='Max snapshot per storage node', type=str, default='5000', dest='max_snap', required=False)
 
     def init_storage_node__delete(self, subparser):
         subcommand = self.add_sub_command(subparser, 'delete', 'Deletes a storage node object from the state database.')
@@ -142,7 +142,7 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('node_id', help='Storage node id', type=str).completer = self._completer_get_sn_list
         argument = subcommand.add_argument('--max-lvol', help='Max logical volume per storage node', type=int, default=0, dest='max_lvol', required=False)
         if self.developer_mode:
-            argument = subcommand.add_argument('--max-snap', help='Max snapshot per storage node', type=str, default='0', dest='max_snap', required=False)
+            argument = subcommand.add_argument('--max-snap', help='Max snapshot per storage node', type=str, default='5000', dest='max_snap', required=False)
         if self.developer_mode:
             argument = subcommand.add_argument('--max-size', help='Maximum amount of GB to be utilized on this storage node', type=str, default='', dest='max_prov', required=False)
         argument = subcommand.add_argument('--node-ip', help='Restart Node on new node', type=str, dest='node_ip', required=False)
@@ -352,7 +352,7 @@ class CLIWrapper(CLIWrapperBase):
         argument = subcommand.add_argument('--data-nics', help='Storage network interface name(s). Can be more than one.', type=str, dest='data_nics', required=False, nargs='+')
         argument = subcommand.add_argument('--max-lvol', help='Max logical volume per storage node', type=int, dest='max_lvol', required=False)
         if self.developer_mode:
-            argument = subcommand.add_argument('--max-snap', help='Max snapshot per storage node', type=str, default='500', dest='max_snap', required=False)
+            argument = subcommand.add_argument('--max-snap', help='Max snapshot per storage node', type=str, default='5000', dest='max_snap', required=False)
         argument = subcommand.add_argument('--max-size', help='Maximum amount of GB to be provisioned via all storage nodes', type=str, default='', dest='max_prov', required=False)
         if self.developer_mode:
             argument = subcommand.add_argument('--number-of-distribs', help='The number of distirbs to be created on the node', type=str, default='4', dest='number_of_distribs', required=False)
@@ -889,7 +889,7 @@ class CLIWrapper(CLIWrapperBase):
                     args.enable_ha_jm = False
                     args.ha_jm_count = '3'
                     args.id_device_by_nqn = False
-                    args.max_snap = '0'
+                    args.max_snap = '5000'
                 ret = self.storage_node__add_node(sub_command, args)
             elif sub_command in ['delete']:
                 ret = self.storage_node__delete(sub_command, args)
@@ -901,7 +901,7 @@ class CLIWrapper(CLIWrapperBase):
                 ret = self.storage_node__get(sub_command, args)
             elif sub_command in ['restart']:
                 if not self.developer_mode:
-                    args.max_snap = '0'
+                    args.max_snap = '5000'
                     args.max_prov = ''
                     args.number_of_devices = '0'
                     args.spdk_image = None
@@ -1008,7 +1008,7 @@ class CLIWrapper(CLIWrapperBase):
                     args.max_queue_size = '128'
                     args.inflight_io_threshold = '4'
                     args.jm_percent = '3'
-                    args.max_snap = '500'
+                    args.max_snap = '5000'
                     args.number_of_distribs = '4'
                     args.number_of_devices = None
                     args.partition_size = None
