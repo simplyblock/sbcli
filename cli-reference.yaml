@@ -1182,8 +1182,7 @@ commands:
             choices:
               - single
               - ha
-            default: single
-            private: true
+            default: ha
           - name: "--enable-node-affinity"
             help: "Enables node affinity for storage nodes"
             dest: enable_node_affinity
@@ -1491,8 +1490,7 @@ commands:
               - single
               - default
               - ha
-            default: default
-            private: true
+            default: ha
           - name: "--lvol-priority-class"
             help: "Logical volume priority class"
             dest: lvol_priority_class

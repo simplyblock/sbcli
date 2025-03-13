@@ -431,7 +431,7 @@ class CLIWrapper(CLIWrapperBase):
             argument = subcommand.add_argument('--distr-bs', help='(Dev) distrb bdev block size, default: 4096', type=int, default=4096, dest='distr_bs', required=False)
         if self.developer_mode:
             argument = subcommand.add_argument('--distr-chunk-bs', help='(Dev) distrb bdev chunk block size, default: 4096', type=int, default=4096, dest='distr_chunk_bs', required=False)
-        argument = subcommand.add_argument('--ha-type', help='Logical volume HA type (single, ha), default is cluster single type', type=str, default='ha', dest='ha_type', required=False, choices=['single','ha',])
+        argument = subcommand.add_argument('--ha-type', help='Logical volume HA type (single, ha), default is cluster ha type', type=str, default='ha', dest='ha_type', required=False, choices=['single','ha',])
         argument = subcommand.add_argument('--enable-node-affinity', help='Enable node affinity for storage nodes', dest='enable_node_affinity', required=False, action='store_true')
         argument = subcommand.add_argument('--qpair-count', help='NVMe/TCP transport qpair count per logical volume', type=int, default=0, dest='qpair_count', required=False, choices=range(0, 128))
         if self.developer_mode:
@@ -456,8 +456,7 @@ class CLIWrapper(CLIWrapperBase):
             argument = subcommand.add_argument('--distr-bs', help='(Dev) distrb bdev block size, default: 4096', type=int, default=4096, dest='distr_bs', required=False)
         if self.developer_mode:
             argument = subcommand.add_argument('--distr-chunk-bs', help='(Dev) distrb bdev chunk block size, default: 4096', type=int, default=4096, dest='distr_chunk_bs', required=False)
-        if self.developer_mode:
-            argument = subcommand.add_argument('--ha-type', help='Logical volume HA type (single, ha), default is cluster single type', type=str, default='single', dest='ha_type', required=False, choices=['single','ha',])
+        argument = subcommand.add_argument('--ha-type', help='Logical volume HA type (single, ha), default is cluster single type', type=str, default='ha', dest='ha_type', required=False, choices=['single','ha',])
         argument = subcommand.add_argument('--enable-node-affinity', help='Enables node affinity for storage nodes', dest='enable_node_affinity', required=False, action='store_true')
         argument = subcommand.add_argument('--qpair-count', help='NVMe/TCP transport qpair count per logical volume', type=int, default=0, dest='qpair_count', required=False, choices=range(0, 128))
         if self.developer_mode:
@@ -585,8 +584,7 @@ class CLIWrapper(CLIWrapperBase):
         argument = subcommand.add_argument('--max-w-mbytes', help='Maximum Write Megabytes Per Second', type=int, dest='max_w_mbytes', required=False)
         if self.developer_mode:
             argument = subcommand.add_argument('--distr-vuid', help='(Dev) set vuid manually, default: random (1-99999)', type=int, dest='distr_vuid', required=False)
-        if self.developer_mode:
-            argument = subcommand.add_argument('--ha-type', help='Logical volume HA type (single, ha), default is cluster HA type', type=str, default='default', dest='ha_type', required=False, choices=['single','default','ha',])
+        argument = subcommand.add_argument('--ha-type', help='Logical volume HA type (single, ha), default is cluster HA type', type=str, default='ha', dest='ha_type', required=False, choices=['single','default','ha',])
         argument = subcommand.add_argument('--lvol-priority-class', help='Logical volume priority class', type=int, default=0, dest='lvol_priority_class', required=False)
         argument = subcommand.add_argument('--namespace', help='Set logical volume namespace for k8s clients', type=str, dest='namespace', required=False)
         if self.developer_mode:
@@ -1045,7 +1043,6 @@ class CLIWrapper(CLIWrapperBase):
                     args.page_size = 2097152
                     args.distr_bs = 4096
                     args.distr_chunk_bs = 4096
-                    args.ha_type = 'single'
                     args.max_queue_size = 128
                     args.inflight_io_threshold = 4
                     args.enable_qos = False
@@ -1100,7 +1097,6 @@ class CLIWrapper(CLIWrapperBase):
             if sub_command in ['add']:
                 if not self.developer_mode:
                     args.distr_vuid = None
-                    args.ha_type = 'default'
                     args.uid = None
                 ret = self.volume__add(sub_command, args)
             elif sub_command in ['qos-set']:
