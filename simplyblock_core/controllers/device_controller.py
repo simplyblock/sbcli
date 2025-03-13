@@ -530,12 +530,12 @@ def reset_storage_device(dev_id):
     logger.info("Setting devices to unavailable")
     device_set_unavailable(dev_id)
     devs = []
-    for dev in snode.nvme_devices:
-        if dev.get_id() == device.get_id():
-            continue
-        if dev.status == NVMeDevice.STATUS_ONLINE and dev.physical_label == device.physical_label:
-            devs.append(dev)
-            device_set_unavailable(dev.get_id())
+    # for dev in snode.nvme_devices:
+    #     if dev.get_id() == device.get_id():
+    #         continue
+    #     if dev.status == NVMeDevice.STATUS_ONLINE and dev.physical_label == device.physical_label:
+    #         devs.append(dev)
+    #         device_set_unavailable(dev.get_id())
 
     logger.info("Resetting device")
     rpc_client = RPCClient(

@@ -96,7 +96,7 @@ def addNvmeDevices(snode, devs):
     except:
         pass
 
-    next_physical_label = get_next_physical_device_order()
+    next_physical_label = get_next_physical_device_order(snode)
     for pcie in devs:
 
         if pcie in ctr_map:
@@ -144,7 +144,7 @@ def addNvmeDevices(snode, devs):
                     'cluster_id': snode.cluster_id,
                     'status': NVMeDevice.STATUS_ONLINE
             }))
-        next_physical_label += 1
+        # next_physical_label += 1
     return devices
 
 
@@ -224,17 +224,12 @@ def get_next_cluster_device_order(db_controller, cluster_id):
     return 0
 
 
-def get_next_physical_device_order():
+def get_next_physical_device_order(snode):
     db_controller = DBController()
-    max_order = 0
-    found = False
-    for node in db_controller.get_storage_nodes():
-        for dev in node.nvme_devices:
-            found = True
-            max_order = max(max_order, dev.physical_label)
-    if found:
-        return max_order + 1
-    return 0
+    for index, node in enumerate(db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id)):
+        if snode.mgmt_ip == node.mgmt_ip:
+            return index + 1
+    return 1
 
 
 def _search_for_partitions(rpc_client, nvme_device):
