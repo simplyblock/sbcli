@@ -613,6 +613,9 @@ def cluster_activate(cl_id, force=False, force_lvstore_create=False):
                 return False
             snode.secondary_node_id = secondary_nodes[0]
             snode.write_to_db()
+            sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
+            sec_node.lvstore_stack_secondary_1 = snode.get_id()
+            sec_node.write_to_db()
 
     for snode in snodes:
         if snode.is_secondary_node:

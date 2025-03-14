@@ -1427,8 +1427,11 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
         if secondary_nodes:
             snode.secondary_node_id = secondary_nodes[0]
             snode.write_to_db()
+            sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
+            sec_node.lvstore_stack_secondary_1 = snode.get_id()
+            sec_node.write_to_db()
 
-    if cluster.status not in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED]:
+    if cluster.status not in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_READONLY]:
         logger.warning(f"The cluster status is not active ({cluster.status}), adding the node without distribs and lvstore")
         logger.info("Done")
         return "Success"
@@ -3053,7 +3056,8 @@ def get_secondary_nodes(current_node):
     db_controller = DBController()
     nodes = []
     for node in db_controller.get_storage_nodes_by_cluster_id(current_node.cluster_id):
-        if node.get_id() != current_node.get_id() and node.is_secondary_node:
+        if node.get_id() != current_node.get_id() and not node.lvstore_stack_secondary_1 \
+                and node.status == StorageNode.STATUS_ONLINE:
             nodes.append(node.get_id())
     return nodes
 
