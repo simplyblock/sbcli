@@ -365,7 +365,8 @@ def cleanup_local_logs():
         return
 
     print(f"[INFO] Cleaning up local logs from {logs_dir}...")
-    subprocess.run(f"rm -rf {logs_dir}/*", shell=True, check=True)
+    subprocess.run(f"rm -rf {logs_dir}/*.log", shell=True, check=True)
+    subprocess.run(f"rm -rf {logs_dir}/*.txt", shell=True, check=True)
     print(f"[SUCCESS] Local logs cleaned up.")
 
 
