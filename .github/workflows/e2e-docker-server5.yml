@@ -165,7 +165,7 @@ jobs:
           export CLUSTER_ID=${{ steps.bootstrap_cluster.outputs.cluster_id }}
           export CLUSTER_SECRET=${{ steps.bootstrap_cluster.outputs.cluster_secret }}
           export CLUSTER_IP=${{ steps.bootstrap_cluster.outputs.cluster_ip }}
-          export API_BASE_URL=${{ steps.bootstrap_cluster.outputs.cluster_api_gateway_endpoint }}
+          export API_BASE_URL=${{ steps.bootstrap_cluster.outputs.cluster_ip }}
           export BASTION_SERVER=${{ steps.bootstrap_cluster.outputs.bastion_public_ip }}
           export KEY_NAME=${{ steps.bootstrap_cluster.outputs.key_name }} 
           export SBCLI_CMD=${SBCLI_CMD}
