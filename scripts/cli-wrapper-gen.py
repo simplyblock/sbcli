@@ -83,7 +83,7 @@ def default_value(item):
     elif type == "int":
         return value
     elif type == "bool":
-        return value if isinstance(value, bool) else f"{value.lower()}" == "true"
+        return value if isinstance(value, bool) else value.lower() == "true"
     else:
         raise "unknown data type %s" % type
 
