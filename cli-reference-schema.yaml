@@ -90,8 +90,21 @@ properties:
                   <pre>description -> usage -> help</pre>
               private:
                 type: boolean
-                description: The private status of the subcommand.
-                x-intellij-html-description: The private status of the subcommand.
+                description: |
+                  The private status of the subcommand.
+                  Private subcommands will only be enabled in sbcli if --dev is provided.
+                x-intellij-html-description: |
+                  The private status of the subcommand.<br>
+                  Private subcommands will only be enabled in sbcli if --dev is provided.
+                default: false
+              experimental:
+                type: boolean
+                description: |
+                  The experimental status of the subcommand.
+                  Experimental subcommands will only be enabled in sbcli if --experimental is provided.
+                x-intellij-html-description: |
+                  The experimental status of the subcommand.<br>
+                  Experimental subcommands will only be enabled in sbcli if --experimental is provided.
                 default: false
               arguments:
                 type: array
@@ -202,6 +215,15 @@ properties:
                       x-intellij-html-description: |
                         The private status of the parameter. <b>Positional arguments cannot be private.</b><br>
                         Private parameters will only be enabled in sbcli if --dev is provided.
+                      default: false
+                    experimental:
+                      type: boolean
+                      description: |
+                        The experimental status of the parameter. Positional arguments cannot be experimental.
+                        Experimental parameters will only be enabled in sbcli if --experimental is provided.
+                      x-intellij-html-description: |
+                        The experimental status of the parameter. <b>Positional arguments cannot be experimental.</b><br>
+                        Experimental parameters will only be enabled in sbcli if --experimental is provided.
                       default: false
                     action:
                       type: string
