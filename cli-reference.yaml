@@ -374,7 +374,7 @@ commands:
               - node-seq
               - serial
               - dev-seq
-            nargs: "1"
+            nargs: 1
           - name: "--json"
             help: "Print outputs in json format"
             dest: json

@@ -109,6 +109,17 @@ def get_description(item):
     else:
         return "<missing documentation>"
 
+def nargs(value):
+    if isinstance(value, int):
+        return value
+    try:
+        v = int(value)
+        if f"{v}" == value:
+            return v
+    except ValueError:
+        pass
+    return f"'{value}'"
+
 
 base_path = sys.argv[1]
 with open("%s/cli-reference.yaml" % base_path) as stream:
@@ -138,6 +149,7 @@ with open("%s/cli-reference.yaml" % base_path) as stream:
         environment.filters["bool_value"] = bool_value
         environment.filters["split_value_range"] = split_value_range
         environment.filters["escape_python_string"] = escape_python_string
+        environment.filters["nargs"] = nargs
 
         template = environment.get_template("cli-wrapper.jinja2")
         output = template.render({"commands": reference["commands"]})
