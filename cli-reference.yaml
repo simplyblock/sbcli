@@ -1447,7 +1447,8 @@ commands:
           - name: "--max-size"
             help: "Logical volume max size"
             dest: max_size
-            type: int
+            type: str
+            default: "1000T"
           - name: "--host-id"
             help: "Primary storage node id or Hostname"
             dest: host_id

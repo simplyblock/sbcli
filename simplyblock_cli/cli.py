@@ -572,7 +572,7 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('size', help='Logical volume size: 10M, 10G, 10(bytes)', type=str)
         subcommand.add_argument('pool', help='Pool id or name', type=str)
         argument = subcommand.add_argument('--snapshot', '-s', help='Make logical volume with snapshot capability, default: false', dest='snapshot', required=False, action='store_true')
-        argument = subcommand.add_argument('--max-size', help='Logical volume max size', type=int, dest='max_size', required=False)
+        argument = subcommand.add_argument('--max-size', help='Logical volume max size', type=str, default='1000T', dest='max_size', required=False)
         argument = subcommand.add_argument('--host-id', help='Primary storage node id or Hostname', type=str, dest='host_id', required=False)
         argument = subcommand.add_argument('--encrypt', help='Use inline data encryption and decryption on the logical volume', dest='encrypt', required=False, action='store_true')
         argument = subcommand.add_argument('--crypto-key1', help='Hex value of key1 to be used for logical volume encryption', type=str, dest='crypto_key1', required=False)
