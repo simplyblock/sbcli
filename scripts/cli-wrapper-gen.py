@@ -114,6 +114,7 @@ def get_description(item):
     else:
         return "<missing documentation>"
 
+
 def nargs(value):
     if not isinstance(value, int) and value not in ('?', '*', '+'):
         raise ValueError(f"Invalid nargs parameters: '{value}'")
