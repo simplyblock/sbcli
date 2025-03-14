@@ -3,10 +3,13 @@ import yaml
 import sys
 import re
 
+def is_parameter(item):
+    return item["name"].startswith("--") or item["name"].startswith("-")
+
 def select_arguments(items):
     arguments = []
     for item in items:
-        if not item["name"].startswith("--") and not item["name"].startswith("-"):
+        if not is_parameter(item):
             arguments.append(item)
     return arguments
 
@@ -14,7 +17,7 @@ def select_arguments(items):
 def select_parameters(items):
     parameters = []
     for item in items:
-        if item["name"].startswith("--") or item["name"].startswith("-"):
+        if is_parameter(item):
             parameters.append(item)
     return parameters
 
@@ -110,15 +113,9 @@ def get_description(item):
         return "<missing documentation>"
 
 def nargs(value):
-    if isinstance(value, int):
-        return value
-    try:
-        v = int(value)
-        if f"{v}" == value:
-            return v
-    except ValueError:
-        pass
-    return f"'{value}'"
+    if not isinstance(value, int) and value not in ('?', '*', '+'):
+        raise ValueError(f"Invalid nargs parameters: '{value}'")
+    return value if isinstance(value, int) else f"'{value}'"
 
 
 base_path = sys.argv[1]
