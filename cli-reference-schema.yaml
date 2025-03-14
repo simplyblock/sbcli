@@ -201,7 +201,10 @@ properties:
                         The default value of the positional argument or parameter.<br>
                         Can be of type string, integer, boolean
                     nargs:
-                      type: string
+                      oneOf:
+                        - type: string
+                          pattern: '\+|\?|\*'
+                        - type: integer
                       description: The nargs value of the positional argument or parameter.
                       x-intellij-html-description: The nargs value of the positional argument or parameter.
                     private:

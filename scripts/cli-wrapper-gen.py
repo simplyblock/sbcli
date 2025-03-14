@@ -6,6 +6,7 @@ import re
 def is_parameter(item):
     return item["name"].startswith("--") or item["name"].startswith("-")
 
+
 def select_arguments(items):
     arguments = []
     for item in items:
@@ -52,6 +53,7 @@ def data_type_name(item):
         return "boolean"
     else:
         return "unknown"
+
 
 def escape_python_string(text):
     return text.replace('%', '%%')
