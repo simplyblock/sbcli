@@ -183,7 +183,7 @@ class CLIWrapper(CLIWrapperBase):
     def init_storage_node__list_devices(self, subparser):
         subcommand = self.add_sub_command(subparser, 'list-devices', 'Lists storage devices')
         subcommand.add_argument('node_id', help='Storage node id', type=str).completer = self._completer_get_sn_list
-        subcommand.add_argument('-s', help='Sort the outputs', type=str)
+        argument = subcommand.add_argument('-s', '--sort', help='Sort the outputs', type=str, dest='s', required=True, nargs='1', choices=['node-seq','serial','dev-seq',])
         argument = subcommand.add_argument('--json', help='Print outputs in json format', dest='json', required=False, action='store_true')
 
     def init_storage_node__device_testing_mode(self, subparser):
@@ -370,7 +370,7 @@ class CLIWrapper(CLIWrapperBase):
         if self.developer_mode:
             argument = subcommand.add_argument('--enable-test-device', help='Enable creation of test device', dest='enable_test_device', required=False, action='store_true')
         if self.developer_mode:
-            argument = subcommand.add_argument('--disable-ha-jm', help='Disable HA JM for distrib creation', dest='enable_ha_jm', required=False, action='store_false')
+            argument = subcommand.add_argument('--disable-ha-jm', help='Disable HA JM for distrib creation', dest='enable_ha_jm', required=False, action='store_true')
         argument = subcommand.add_argument('--is-secondary-node', help='Adds as secondary node. A secondary node does not have any disks attached. It is only used for I/O processing in case a primary goes down.', dest='is_secondary_node', required=False, action='store_true')
         argument = subcommand.add_argument('--namespace', help='k8s namespace to deploy on', type=str, dest='namespace', required=False)
         argument = subcommand.add_argument('--id-device-by-nqn', help='Use device nqn to identify it instead of serial number', dest='id_device_by_nqn', required=False, action='store_true')
@@ -383,7 +383,7 @@ class CLIWrapper(CLIWrapperBase):
         if self.developer_mode:
             argument = subcommand.add_argument('--pool-max', help='Pool maximum size: 20M, 20G, 0(default)', type=str, default='25G', dest='pool_max', required=False)
         if self.developer_mode:
-            argument = subcommand.add_argument('--snapshot', help='Make logical volume with snapshot capability, default: false', dest='snapshot', required=False, action='store_true')
+            argument = subcommand.add_argument('--snapshot', '-s', help='Make logical volume with snapshot capability, default: false', dest='snapshot', required=False, action='store_true')
         if self.developer_mode:
             argument = subcommand.add_argument('--max-volume-size', help='Logical volume max size', type=str, default='1000G', dest='max_size', required=False)
         argument = subcommand.add_argument('--host-id', help='Primary storage node id or hostname', type=str, dest='host_id', required=False)
@@ -438,7 +438,7 @@ class CLIWrapper(CLIWrapperBase):
         if self.developer_mode:
             argument = subcommand.add_argument('--inflight-io-threshold', help='The number of inflight IOs allowed before the IO queuing starts', type=int, default=4, dest='inflight_io_threshold', required=False)
         if self.developer_mode:
-            argument = subcommand.add_argument('--enable-qos', help='Enable qos bdev for storage nodes, true by default', type=bool, default=False, dest='enable_qos', required=False)
+            argument = subcommand.add_argument('--enable-qos', help='Enable qos bdev for storage nodes, true by default', type=bool, default=True, dest='enable_qos', required=False)
         argument = subcommand.add_argument('--strict-node-anti-affinity', help='Enable strict node anti affinity for storage nodes. Never more than one chunk is placed on a node. This requires a minimum of _data-chunks-in-stripe + parity-chunks-in-stripe + 1_ nodes in the cluster.', dest='strict_node_anti_affinity', required=False, action='store_true')
 
     def init_cluster__add(self, subparser):
@@ -463,7 +463,7 @@ class CLIWrapper(CLIWrapperBase):
         if self.developer_mode:
             argument = subcommand.add_argument('--inflight-io-threshold', help='The number of inflight IOs allowed before the IO queuing starts', type=int, default=4, dest='inflight_io_threshold', required=False)
         if self.developer_mode:
-            argument = subcommand.add_argument('--enable-qos', help='Enable qos bdev for storage nodes, default: true', type=bool, default=False, dest='enable_qos', required=False)
+            argument = subcommand.add_argument('--enable-qos', help='Enable qos bdev for storage nodes, default: true', type=bool, default=True, dest='enable_qos', required=False)
         argument = subcommand.add_argument('--strict-node-anti-affinity', help='Enable strict node anti affinity for storage nodes. Never more than one chunk is placed on a node. This requires a minimum of _data-chunks-in-stripe + parity-chunks-in-stripe + 1_ nodes in the cluster."', dest='strict_node_anti_affinity', required=False, action='store_true')
 
     def init_cluster__activate(self, subparser):
@@ -571,7 +571,7 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('name', help='New logical volume name', type=str)
         subcommand.add_argument('size', help='Logical volume size: 10M, 10G, 10(bytes)', type=str)
         subcommand.add_argument('pool', help='Pool id or name', type=str)
-        argument = subcommand.add_argument('--snapshot', help='Make logical volume with snapshot capability, default: false', dest='snapshot', required=False, action='store_true')
+        argument = subcommand.add_argument('--snapshot', '-s', help='Make logical volume with snapshot capability, default: false', dest='snapshot', required=False, action='store_true')
         argument = subcommand.add_argument('--max-size', help='Logical volume max size', type=int, dest='max_size', required=False)
         argument = subcommand.add_argument('--host-id', help='Primary storage node id or Hostname', type=str, dest='host_id', required=False)
         argument = subcommand.add_argument('--encrypt', help='Use inline data encryption and decryption on the logical volume', dest='encrypt', required=False, action='store_true')
@@ -1034,7 +1034,7 @@ class CLIWrapper(CLIWrapperBase):
                     args.distr_chunk_bs = 4096
                     args.max_queue_size = 128
                     args.inflight_io_threshold = 4
-                    args.enable_qos = False
+                    args.enable_qos = True
                 ret = self.cluster__create(sub_command, args)
             elif sub_command in ['add']:
                 if not self.developer_mode:
@@ -1043,7 +1043,7 @@ class CLIWrapper(CLIWrapperBase):
                     args.distr_chunk_bs = 4096
                     args.max_queue_size = 128
                     args.inflight_io_threshold = 4
-                    args.enable_qos = False
+                    args.enable_qos = True
                 ret = self.cluster__add(sub_command, args)
             elif sub_command in ['activate']:
                 ret = self.cluster__activate(sub_command, args)

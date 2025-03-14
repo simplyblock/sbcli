@@ -133,7 +133,7 @@ commands:
             dest: enable_ha_jm
             type: bool
             default: true
-            action: store_true
+            action: store_false
             private: true
           - name: "--ha-jm-count"
             help: "HA JM count"
@@ -365,15 +365,16 @@ commands:
             completer: _completer_get_sn_list
             type: str
           - name: "-s"
+            aliases:
+              - "--sort"
             help: "Sort the outputs"
-            dest: -s
+            dest: s
             type: str
             choices:
               - node-seq
               - serial
               - dev-seq
             nargs: "1"
-            private: true
           - name: "--json"
             help: "Print outputs in json format"
             dest: json
@@ -866,7 +867,7 @@ commands:
             dest: enable_ha_jm
             type: bool
             default: false
-            action: store_false
+            action: store_true
             private: true
           - name: "--is-secondary-node"
             help: >
@@ -911,6 +912,8 @@ commands:
             default: 25G
             private: true
           - name: "--snapshot"
+            aliases:
+              - "-s"
             help: "Make logical volume with snapshot capability, default: false"
             dest: snapshot
             type: bool
@@ -1434,6 +1437,8 @@ commands:
             dest: pool
             type: str
           - name: "--snapshot"
+            aliases:
+              - "-s"
             help: "Make logical volume with snapshot capability, default: false"
             dest: snapshot
             type: bool

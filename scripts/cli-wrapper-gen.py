@@ -6,7 +6,7 @@ import re
 def select_arguments(items):
     arguments = []
     for item in items:
-        if not item["name"].startswith("--"):
+        if not item["name"].startswith("--") and not item["name"].startswith("-"):
             arguments.append(item)
     return arguments
 
@@ -14,7 +14,7 @@ def select_arguments(items):
 def select_parameters(items):
     parameters = []
     for item in items:
-        if item["name"].startswith("--"):
+        if item["name"].startswith("--") or item["name"].startswith("-"):
             parameters.append(item)
     return parameters
 
@@ -80,7 +80,7 @@ def default_value(item):
     elif type == "int":
         return value
     elif type == "bool":
-        return bool_value(value)
+        return value if isinstance(value, bool) else f"{value.lower()}" == "true"
     else:
         raise "unknown data type %s" % type
 
