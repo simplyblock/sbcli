@@ -838,6 +838,7 @@ class RandomFailoverTest(TestLvolHACluster):
         """Main execution loop for the random failover test."""
         self.logger.info("Starting random failover test.")
         iteration = 1
+        self.fio_node = self.fio_node[0]
 
         self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
 

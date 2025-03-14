@@ -101,7 +101,8 @@ def cleanup_local_logs():
         return
 
     print(f"[INFO] Cleaning up local logs from {logs_dir}...")
-    os.system(f"rm -rf {logs_dir}/*")
+    os.system(f"rm -rf {logs_dir}/*.log")
+    os.system(f"rm -rf {logs_dir}/*.txt")
 
     print("[SUCCESS] Local logs cleaned up.")
 

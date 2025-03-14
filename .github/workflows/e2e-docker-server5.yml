@@ -213,6 +213,18 @@ jobs:
           STORAGE_PRIVATE_IPS: "192.168.10.67 192.168.10.68 192.168.10.69"
           SEC_STORAGE_PRIVATE_IPS: "192.168.10.70"
           USER: "root"
+      
+      - name: Cleanup logs
+        run: |
+          cd $GITHUB_WORKSPACE/e2e/
+          python3 logs/cleanup.py
+        if: always()
+        env:
+          BASTION_IP: "192.168.10.66"
+          MNODES: "192.168.10.66"
+          STORAGE_PRIVATE_IPS: "192.168.10.67 192.168.10.68 192.168.10.69"
+          SEC_STORAGE_PRIVATE_IPS: "192.168.10.70"
+          USER: "root"
 
       - name: Parse test results
         if: always() && (github.event_name == 'schedule' || env.send_slack_notification == 'true')
