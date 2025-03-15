@@ -453,6 +453,19 @@ class SbcliUtils:
         data = self.delete_request(api_url=f"/lvol/{lvol_id}")
         self.logger.info(f"Delete lvol resp: {data}")
 
+        lvols = self.list_lvols()
+        attempt = 0
+        while True:
+            if lvol_name not in list(lvols.keys()):
+                self.logger.info(f"Lvol {lvol_name} deleted successfully!!")
+                break
+            if attempt > 30:
+                raise Exception(f"Lvol {lvol_name} is not getting deleted!!")
+            attempt += 1
+            self.logger.info(f"Lvol {lvol_name} is in_deletion. Checking again!")
+            sleep_n_sec(2)
+            lvols = self.list_lvols()
+
     def delete_all_lvols(self):
         """Deletes all lvols
         """
