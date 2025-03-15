@@ -19,7 +19,7 @@ def generate_random_sequence(length):
 
     return first_char + remaining_chars
 
-class RandomFailoverTestMultiClient(TestLvolHACluster):
+class RandomMultiClientFailoverTest(TestLvolHACluster):
     """
     Extends the TestLvolHAClusterWithClones class to add a random failover and stress testing scenario.
     """
