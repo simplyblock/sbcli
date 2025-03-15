@@ -113,13 +113,18 @@ class CommonUtils:
         """
         self.logger.info("Waiting for FIO processes to complete!")
         sleep_n_sec(10)
+        if not isinstance(node, list):
+                node = [node]
         while True:
-            process = self.ssh_utils.find_process_name(node=node,
-                                                       process_name="fio --name")
-            process_fio = [element for element in process if "grep" not in element and not element.startswith("kworker")]
-            self.logger.info(f"Process info: {process_fio}")
+            fio_count = 0
+            for n in node:
+                process = self.ssh_utils.find_process_name(node=n,
+                                                           process_name="fio --name")
+                process_fio = [element for element in process if "grep" not in element and not element.startswith("kworker")]
+                fio_count += len(process_fio)
+                self.logger.info(f"Process info: {process_fio}")
             
-            if len(process_fio) == 0:
+            if fio_count == 0:
                 break
             if timeout <= 0:
                 break
@@ -129,14 +134,16 @@ class CommonUtils:
         for thread in threads:
             thread.join(timeout=30)
         end_time = time.time()
+        fio_count = 0
+        for n in node:
+            process_list_after = self.ssh_utils.find_process_name(node=node,
+                                                                process_name="fio --name")
+            self.logger.info(f"Process List: {process_list_after}")
 
-        process_list_after = self.ssh_utils.find_process_name(node=node,
-                                                              process_name="fio --name")
-        self.logger.info(f"Process List: {process_list_after}")
+            process_fio = [element for element in process_list_after if "grep" not in element and not element.startswith("kworker")]
+            fio_count += len(process_fio)
 
-        process_fio = [element for element in process_list_after if "grep" not in element and not element.startswith("kworker")]
-
-        assert len(process_fio) == 0, f"FIO process list not empty: {process_list_after}"
+        assert fio_count == 0, f"FIO process list not empty: {process_list_after}"
         self.logger.info(f"FIO Running: {process_fio}")
 
         return end_time
