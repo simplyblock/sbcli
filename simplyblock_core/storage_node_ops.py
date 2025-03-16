@@ -857,28 +857,28 @@ def _connect_to_remote_jm_devs(this_node, jm_ids=[]):
     else:
         node_bdev_names = []
     remote_devices = []
-    if this_node.is_secondary_node:
-        for node in db_controller.get_storage_nodes_by_cluster_id(this_node.cluster_id):
-            if node.get_id() == this_node.get_id() or node.is_secondary_node:
-                continue
-            if node.jm_device and node.jm_device.status in [JMDevice.STATUS_ONLINE, JMDevice.STATUS_UNAVAILABLE]:
-                remote_devices.append(node.jm_device)
-    else:
-        if jm_ids:
-            for jm_id in jm_ids:
-                jm_dev = db_controller.get_jm_device_by_id(jm_id)
-                if jm_dev:
-                    remote_devices.append(jm_dev)
-        elif len(this_node.remote_jm_devices) > 0:
-            remote_devices = this_node.remote_jm_devices
-        else:
-            for node in db_controller.get_storage_nodes_by_cluster_id(this_node.cluster_id):
-                if node.get_id() == this_node.get_id() or node.is_secondary_node:
-                    continue
-                if node.jm_device and node.jm_device.status == JMDevice.STATUS_ONLINE:
-                    remote_devices.append(node.jm_device)
-                    if len(remote_devices) >= 3 :
-                        break
+    # if this_node.is_secondary_node:
+    for node in db_controller.get_storage_nodes_by_cluster_id(this_node.cluster_id):
+        if node.get_id() == this_node.get_id() or node.is_secondary_node:
+            continue
+        if node.jm_device and node.jm_device.status in [JMDevice.STATUS_ONLINE, JMDevice.STATUS_UNAVAILABLE]:
+            remote_devices.append(node.jm_device)
+    # else:
+    #     if jm_ids:
+    #         for jm_id in jm_ids:
+    #             jm_dev = db_controller.get_jm_device_by_id(jm_id)
+    #             if jm_dev:
+    #                 remote_devices.append(jm_dev)
+    #     elif len(this_node.remote_jm_devices) > 0:
+    #         remote_devices = this_node.remote_jm_devices
+    #     else:
+    #         for node in db_controller.get_storage_nodes_by_cluster_id(this_node.cluster_id):
+    #             if node.get_id() == this_node.get_id() or node.is_secondary_node:
+    #                 continue
+    #             if node.jm_device and node.jm_device.status == JMDevice.STATUS_ONLINE:
+    #                 remote_devices.append(node.jm_device)
+    #                 if len(remote_devices) >= 3 :
+    #                     break
 
     new_devs = []
     for jm_dev in remote_devices:
@@ -2880,15 +2880,15 @@ def recreate_lvstore_on_sec(snode):
 
         lvol_list = db_controller.get_lvols_by_node_id(node.get_id())
 
-        if node.status == StorageNode.STATUS_ONLINE:
-            for lvol in lvol_list:
-                for iface in node.data_nics:
-                    if iface.ip4_address:
-                        ret = remote_rpc_client.nvmf_subsystem_listener_set_ana_state(
-                            lvol.nqn, iface.ip4_address, lvol.subsys_port, False, "inaccessible")
-
-            remote_rpc_client.bdev_lvol_set_leader(False, lvs_name=node.lvstore)
-            remote_rpc_client.bdev_distrib_force_to_non_leader(node.jm_vuid)
+        # if node.status == StorageNode.STATUS_ONLINE:
+            # for lvol in lvol_list:
+            #     for iface in node.data_nics:
+            #         if iface.ip4_address:
+            #             ret = remote_rpc_client.nvmf_subsystem_listener_set_ana_state(
+            #                 lvol.nqn, iface.ip4_address, lvol.subsys_port, False, "inaccessible")
+            #
+            # remote_rpc_client.bdev_lvol_set_leader(False, lvs_name=node.lvstore)
+            # remote_rpc_client.bdev_distrib_force_to_non_leader(node.jm_vuid)
 
         ret, err = _create_bdev_stack(snode, node.lvstore_stack, primary_node=node)
         ret = rpc_client.bdev_examine(node.raid)
@@ -2897,7 +2897,7 @@ def recreate_lvstore_on_sec(snode):
 
         for lvol in lvol_list:
             is_created, error = lvol_controller.recreate_lvol_on_node(
-                lvol, snode, 1, ana_state="inaccessible")
+                lvol, snode, 1, False)
             if error:
                 logger.error(f"Failed to recreate LVol: {lvol.get_id()} on node: {snode.get_id()}")
                 lvol.status = LVol.STATUS_OFFLINE
@@ -2910,20 +2910,20 @@ def recreate_lvstore_on_sec(snode):
         # rpc_client.bdev_lvol_set_leader(False, lvs_name=node.lvstore)
         # rpc_client.bdev_distrib_force_to_non_leader(node.jm_vuid)
 
-        if node.status == StorageNode.STATUS_ONLINE:
-            for lvol in lvol_list:
-                for iface in node.data_nics:
-                    if iface.ip4_address:
-                        ret = remote_rpc_client.nvmf_subsystem_listener_set_ana_state(
-                            lvol.nqn, iface.ip4_address, lvol.subsys_port, True)
+        # if node.status == StorageNode.STATUS_ONLINE:
+        #     for lvol in lvol_list:
+        #         for iface in node.data_nics:
+        #             if iface.ip4_address:
+        #                 ret = remote_rpc_client.nvmf_subsystem_listener_set_ana_state(
+        #                     lvol.nqn, iface.ip4_address, lvol.subsys_port, True)
+        #
+        #     time.sleep(5)
 
-            time.sleep(5)
-
-        for lvol in lvol_list:
-            for iface in snode.data_nics:
-                if iface.ip4_address:
-                    ret = rpc_client.nvmf_subsystem_listener_set_ana_state(
-                        lvol.nqn, iface.ip4_address, lvol.subsys_port, False)
+        # for lvol in lvol_list:
+        #     for iface in snode.data_nics:
+        #         if iface.ip4_address:
+        #             ret = rpc_client.nvmf_subsystem_listener_set_ana_state(
+        #                 lvol.nqn, iface.ip4_address, lvol.subsys_port, False)
 
     return True
 
@@ -2937,7 +2937,7 @@ def recreate_lvstore(snode):
     if snode.is_secondary_node:
         return recreate_lvstore_on_sec(snode)
 
-    ret, err = _create_bdev_stack(snode, [], primary_node=snode)
+    ret, err = _create_bdev_stack(snode, [])
 
     if err:
         logger.error(f"Failed to recreate lvstore on node {snode.get_id()}")
@@ -3042,11 +3042,13 @@ def get_sorted_ha_jms(current_node):
     return list(jm_count.keys())[:3]
 
 
-def get_node_jm_names(current_node):
-    db_controller = DBController()
+def get_node_jm_names(current_node, remote=False):
     jm_list = []
     if current_node.jm_device:
-        jm_list.append(current_node.jm_device.jm_bdev)
+        if remote:
+            jm_list.append(f"remote_{current_node.jm_device.jm_bdev}n1")
+        else:
+            jm_list.append(current_node.jm_device.jm_bdev)
     else:
         jm_list.append("JM_LOCAL")
 
@@ -3211,16 +3213,8 @@ def _create_bdev_stack(snode, lvstore_stack=None, primary_node=None):
             continue
 
         elif type == "bdev_distr":
-            if snode.is_secondary_node and primary_node:
-                jm_list = []
-                if primary_node.jm_device and primary_node.jm_device.status == JMDevice.STATUS_ONLINE:
-                    bdev_name = f"remote_{primary_node.jm_device.jm_bdev}n1"
-                    jm_list.append(bdev_name)
-                else:
-                    jm_list.append("JM_LOCAL")
-                for jm_dev in primary_node.remote_jm_devices[:primary_node.ha_jm_count-1]:
-                    jm_list.append(jm_dev.remote_bdev)
-                params['jm_names'] = jm_list
+            if primary_node:
+                params['jm_names'] = get_node_jm_names(primary_node, remote=True)
             else:
                 params['jm_names'] = get_node_jm_names(snode)
 
@@ -3233,9 +3227,9 @@ def _create_bdev_stack(snode, lvstore_stack=None, primary_node=None):
                 ret = distr_controller.send_cluster_map_to_distr(snode, name)
                 if not ret:
                     return False, "Failed to send cluster map"
-                time.sleep(1)
+                # time.sleep(1)
 
-        elif type == "bdev_lvstore" and lvstore_stack and not snode.is_secondary_node:
+        elif type == "bdev_lvstore" and lvstore_stack and not primary_node:
             ret = rpc_client.create_lvstore(**params)
             # if ret and snode.jm_vuid > 0:
             #     rpc_client.bdev_lvol_set_lvs_ops(snode.lvstore, snode.jm_vuid, snode.lvol_subsys_port)

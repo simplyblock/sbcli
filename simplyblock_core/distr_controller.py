@@ -153,12 +153,12 @@ def get_distr_cluster_map(snodes, target_node, distr_name=""):
         "map_prob": [d for k, d in map_prob.items()]
     }
     if cluster.enable_node_affinity:
-        if target_node.is_secondary_node and distr_name:
-            for index, snode in enumerate(snodes):
-                for bdev in snode.lvstore_stack:
-                    if bdev['type'] == "bdev_distr" and bdev['name'] == distr_name:
-                        local_node_index = index
-                        break
+        # if target_node.is_secondary_node and distr_name:
+        #     for index, snode in enumerate(snodes):
+        #         for bdev in snode.lvstore_stack:
+        #             if bdev['type'] == "bdev_distr" and bdev['name'] == distr_name:
+        #                 local_node_index = index
+        #                 break
         cl_map['ppln1'] = local_node_index
     return cl_map
 
