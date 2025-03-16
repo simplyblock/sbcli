@@ -316,13 +316,16 @@ class TestClusterBase:
 
         retry_check = 100
         while retry_check:
+            exit_while = True
             for node in self.fio_node:
                 fio_process = self.ssh_obj.find_process_name(
                     node=node,
                     process_name="fio --name"
                 )
-                if len(fio_process) <= 2:
-                    break
+                exit_while = exit_while and len(fio_process) <= 2
+            if exit_while:
+                break
+            else:
                 self.logger.info(f"Fio process should exit after kill. Still waiting: {fio_process}")
                 retry_check -= 1
                 sleep_n_sec(10)

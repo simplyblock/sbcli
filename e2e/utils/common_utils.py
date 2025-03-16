@@ -114,7 +114,7 @@ class CommonUtils:
         self.logger.info("Waiting for FIO processes to complete!")
         sleep_n_sec(10)
         if not isinstance(node, list):
-                node = [node]
+            node = [node]
         while True:
             fio_count = 0
             for n in node:
@@ -136,8 +136,8 @@ class CommonUtils:
         end_time = time.time()
         fio_count = 0
         for n in node:
-            process_list_after = self.ssh_utils.find_process_name(node=node,
-                                                                process_name="fio --name")
+            process_list_after = self.ssh_utils.find_process_name(node=n,
+                                                                  process_name="fio --name")
             self.logger.info(f"Process List: {process_list_after}")
 
             process_fio = [element for element in process_list_after if "grep" not in element and not element.startswith("kworker")]
