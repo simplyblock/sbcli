@@ -459,11 +459,11 @@ class SbcliUtils:
             if lvol_name not in list(lvols.keys()):
                 self.logger.info(f"Lvol {lvol_name} deleted successfully!!")
                 break
-            if attempt > 30:
+            if attempt > 120:
                 raise Exception(f"Lvol {lvol_name} is not getting deleted!!")
             attempt += 1
             self.logger.info(f"Lvol {lvol_name} is in_deletion. Checking again!")
-            sleep_n_sec(2)
+            sleep_n_sec(5)
             lvols = self.list_lvols()
 
     def delete_all_lvols(self):
