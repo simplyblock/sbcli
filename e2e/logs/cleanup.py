@@ -12,7 +12,7 @@ USER = os.getenv("USER", "root")
 STORAGE_PRIVATE_IPS = os.getenv("STORAGE_PRIVATE_IPS", "").split()
 SEC_STORAGE_PRIVATE_IPS = os.getenv("SEC_STORAGE_PRIVATE_IPS", "").split()
 MNODES = os.getenv("MNODES", "").split()
-CLIENTNODES = os.getenv("CLIENTNODES", "").split()
+CLIENTNODES = os.getenv("CLIENTNODES", os.getenv("MNODES", "")).split()
 ALL_NODES = MNODES + STORAGE_PRIVATE_IPS + SEC_STORAGE_PRIVATE_IPS + CLIENTNODES
 HOME_DIR = os.path.expanduser("~")
 
