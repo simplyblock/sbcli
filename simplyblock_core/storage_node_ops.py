@@ -2050,18 +2050,19 @@ def list_storage_nodes(is_json, cluster_id=None):
             "UUID": node.uuid,
             "Hostname": node.hostname,
             "Management IP": node.mgmt_ip,
-            "Devices": f"{total_devices}/{online_devices}",
+            "Dev": f"{total_devices}/{online_devices}",
             "LVols": f"{len(lvs)}",
             "Status": node.status,
             "Health": node.health_check,
             "Up time": uptime,
-            "SPDK CPU": node.spdk_cpu_mask,
-            "SPDK MEM": utils.humanbytes(node.spdk_mem),
-            "SPDK PORT": node.rpc_port,
-            "LVOL PORT": node.lvol_subsys_port,
+            "CPU": node.spdk_cpu_mask,
+            "MEM": utils.humanbytes(node.spdk_mem),
+            "SPDK P": node.rpc_port,
+            "LVOL P": node.lvol_subsys_port,
             # "Cloud ID": node.cloud_instance_id,
             # "Cloud Type": node.cloud_instance_type,
-            "Ext IP": node.cloud_instance_public_ip,
+            # "Ext IP": node.cloud_instance_public_ip,
+            "Secondary node ID": node.secondary_node_id,
 
         })
 
@@ -3014,6 +3015,9 @@ def recreate_lvstore(snode):
         sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
         sec_node.lvstore_status = "ready"
         sec_node.write_to_db()
+
+    if snode.lvstore_stack_secondary_1:
+        ret = recreate_lvstore_on_sec(snode)
 
     return True
 

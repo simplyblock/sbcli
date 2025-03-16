@@ -474,6 +474,17 @@ def check_lvol_on_node(lvol_id, node_id):
         ret = rpc_client.subsystem_list(lvol.nqn)
         if ret:
             logger.info(f"Checking subsystem ... ok")
+            if ret[0]["listen_addresses"]:
+                logger.info(f"Checking listener ... ok")
+            else:
+                logger.info(f"Checking listener ... not found")
+                passed = False
+
+            if ret[0]["namespaces"]:
+                logger.info(f"Checking namespaces ... ok")
+            else:
+                logger.info(f"Checking namespaces ... not found")
+                passed = False
         else:
             logger.info(f"Checking subsystem ... not found")
             passed = False
