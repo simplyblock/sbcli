@@ -11,7 +11,7 @@ on:
       simplyBlockDeploy_branch:
         description: 'Branch for simplyBlockDeploy'
         required: true
-        default: 'run-on-server1'
+        default: 'vmware'
       spdk_csi_branch:
         description: 'Branch for spdk-csi'
         required: true
@@ -27,7 +27,7 @@ on:
       ndcs:
         description: 'Value for NDCS'
         required: false
-        default: 2
+        default: 1
       npcs:
         description: 'Value for NPCS'
         required: false

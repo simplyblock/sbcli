@@ -336,8 +336,6 @@ class TestClusterBase:
                              "Needs manual cleanup.")
 
         try:
-            self.ssh_obj.delete_all_snapshots(node=self.mgmt_nodes[0])
-            sleep_n_sec(2)
             lvols = self.sbcli_utils.list_lvols()
             self.unmount_all(base_path=self.mount_path)
             self.unmount_all(base_path="/mnt/")
@@ -361,6 +359,8 @@ class TestClusterBase:
                 sleep_n_sec(2)
                 self.sbcli_utils.delete_all_lvols()
                 sleep_n_sec(2)
+            self.ssh_obj.delete_all_snapshots(node=self.mgmt_nodes[0])
+            sleep_n_sec(2)
             self.sbcli_utils.delete_all_storage_pools()
             sleep_n_sec(2)
             for node in self.fio_node:
