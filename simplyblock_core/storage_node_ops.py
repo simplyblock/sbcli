@@ -1494,7 +1494,7 @@ def get_number_of_online_devices(cluster_id):
                     dev_count += 1
 
 
-def delete_storage_node(node_id):
+def delete_storage_node(node_id, force=False):
     db_controller = DBController()
     snode = db_controller.get_storage_node_by_id(node_id)
     if not snode:
@@ -1505,10 +1505,14 @@ def delete_storage_node(node_id):
         logger.error(f"Node must be in removed status")
         return False
 
-    task_id = tasks_controller.get_active_node_task(snode.cluster_id, snode.get_id())
-    if task_id:
-        logger.error(f"Task found: {task_id}, can not delete storage node")
-        return False
+    tasks = tasks_controller.get_active_node_tasks(snode.cluster_id, snode.get_id())
+    if tasks:
+        logger.error(f"Tasks found: {len(tasks)}, can not delete storage node, or use --force")
+        if not force:
+            return False
+        for task in tasks:
+            tasks_controller.cancel_task(task.get_id())
+        time.sleep(1)
 
     snode.remove(db_controller.kv_store)
 
@@ -1533,17 +1537,13 @@ def remove_storage_node(node_id, force_remove=False, force_migrate=False):
         logger.error(f"Can not remove online node: {node_id}")
         return False
 
-    task_id = tasks_controller.get_active_node_task(snode.cluster_id, snode.get_id())
-    if task_id:
-        logger.error(f"Task found: {task_id}, can not remove storage node")
+    tasks = tasks_controller.get_active_node_tasks(snode.cluster_id, snode.get_id())
+    if tasks:
+        logger.error(f"Task found: {len(tasks)}, can not remove storage node, or use --force")
         if force_remove is False:
             return False
-
-        tasks = db_controller.get_job_tasks(snode.cluster_id)
         for task in tasks:
-            if task.node_id == node_id:
-                if task.status != JobSchedule.STATUS_DONE and task.canceled is False:
-                    tasks_controller.cancel_task(task.get_id())
+            tasks_controller.cancel_task(task.get_id())
 
     lvols = db_controller.get_lvols_by_node_id(node_id)
     if lvols:
@@ -1584,7 +1584,7 @@ def remove_storage_node(node_id, force_remove=False, force_migrate=False):
         logger.info("Removing JM")
         device_controller.remove_jm_device(snode.jm_device.get_id(), force=True)
 
-    logger.debug("Leaving swarm...")
+    logger.info("Leaving swarm...")
     try:
         node_docker = docker.DockerClient(base_url=f"tcp://{snode.mgmt_ip}:2375", version="auto")
         cluster_docker = utils.get_docker_client(snode.cluster_id)
@@ -1594,6 +1594,7 @@ def remove_storage_node(node_id, force_remove=False, force_migrate=False):
 
     try:
         if health_controller._check_node_api(snode.mgmt_ip):
+            logger.info("Stopping SPDK container")
             snode_api = SNodeClient(snode.api_endpoint, timeout=20)
             snode_api.spdk_process_kill(snode.rpc_port)
             snode_api.leave_swarm()
@@ -2193,11 +2194,13 @@ def shutdown_storage_node(node_id, force=False):
         if force is False:
             return False
 
-    task_id = tasks_controller.get_active_node_task(snode.cluster_id, snode.get_id())
-    if task_id:
-        logger.error(f"Migration task found: {task_id}, can not shutdown storage node")
+    tasks = tasks_controller.get_active_node_tasks(snode.cluster_id, snode.get_id())
+    if tasks:
+        logger.error(f"Migration task found: {len(tasks)}, can not shutdown storage node or use --force")
         if force is False:
             return False
+        for task in tasks:
+            tasks_controller.cancel_task(task.get_id())
 
     logger.info("Shutting down node")
     set_node_status(node_id, StorageNode.STATUS_IN_SHUTDOWN)
@@ -2254,11 +2257,13 @@ def suspend_storage_node(node_id, force=False):
         if force is False:
             return False
 
-    task_id = tasks_controller.get_active_node_task(snode.cluster_id, snode.get_id())
+    tasks = tasks_controller.get_active_node_tasks(snode.cluster_id, snode.get_id())
     if task_id:
-        logger.error(f"Migration task found: {task_id}, can not suspend storage node")
+        logger.error(f"Migration task found: {len(tasks)}, can not suspend storage node, use --force")
         if force is False:
             return False
+        for task in tasks:
+            tasks_controller.cancel_task(task.get_id())
 
     cluster = db_controller.get_cluster_by_id(snode.cluster_id)
     snodes = db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id)
