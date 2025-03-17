@@ -25,13 +25,15 @@ db_controller = DBController()
 def add(lvol_id, snapshot_name):
     lvol = db_controller.get_lvol_by_id(lvol_id)
     if not lvol:
-        logger.error(f"LVol not found: {lvol_id}")
-        return False
+        msg = f"LVol not found: {lvol_id}"
+        logger.error(msg)
+        return False, msg
 
     pool = db_controller.get_pool_by_id(lvol.pool_uuid)
     if pool.status == Pool.STATUS_INACTIVE:
-        logger.error(f"Pool is disabled")
-        return False
+        msg = f"Pool is disabled"
+        logger.error(msg)
+        return False, msg
 
     if lvol.cloned_from_snap:
         snap = db_controller.get_snapshot_by_id(lvol.cloned_from_snap)
@@ -60,15 +62,16 @@ def add(lvol_id, snapshot_name):
         size = lvol.size
 
     if 0 < pool.lvol_max_size < size:
-        logger.error(f"Pool Max LVol size is: {utils.humanbytes(pool.lvol_max_size)}, LVol size: {utils.humanbytes(size)} must be below this limit")
-        return False
+        msg = f"Pool Max LVol size is: {utils.humanbytes(pool.lvol_max_size)}, LVol size: {utils.humanbytes(size)} must be below this limit"
+        logger.error(msg)
+        return False, msg
 
     if pool.pool_max_size > 0:
         total = pool_controller.get_pool_total_capacity(pool.get_id())
         if total + size > pool.pool_max_size:
-            logger.error( f"Invalid LVol size: {utils.humanbytes(size)} " 
-                          f"Pool max size has reached {utils.humanbytes(total+size)} of {utils.humanbytes(pool.pool_max_size)}")
-            return False
+            msg =  f"Invalid LVol size: {utils.humanbytes(size)}. pool max size has reached {utils.humanbytes(total+size)} of {utils.humanbytes(pool.pool_max_size)}"
+            logger.error(msg)
+            return False, msg
 
     if pool.pool_max_size > 0:
         total = pool_controller.get_pool_total_capacity(pool.get_id())

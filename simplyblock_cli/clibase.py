@@ -417,7 +417,8 @@ class CLIWrapperBase:
     def volume__create_snapshot(self, sub_command, args):
         volume_id = args.volume_id
         name = args.name
-        return lvol_controller.create_snapshot(volume_id, name)
+        snapshot_id, error = lvol_controller.create_snapshot(volume_id, name)
+        return snapshot_id if not error else error
 
     def volume__clone(self, sub_command, args):
         new_size = 0
@@ -527,7 +528,8 @@ class CLIWrapperBase:
         return pool_controller.get_io_stats(args.pool_id, args.history, args.records)
 
     def snapshot__add(self, sub_command, args):
-        return snapshot_controller.add(args.volume_id, args.name)
+        snapshot_id, error = snapshot_controller.add(args.volume_id, args.name)
+        return snapshot_id if not error else error
 
     def snapshot__list(self, sub_command, args):
         return snapshot_controller.list(args.all)
