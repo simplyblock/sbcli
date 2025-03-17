@@ -332,11 +332,11 @@ def check_node(node_id, with_devices=True):
                 if second_node_1.status == StorageNode.STATUS_ONLINE:
                     lvstore_check &= _check_node_lvstore(lvstore_stack, second_node_1)
 
-        if snode.lvstore_stack_secondary_1:
-            for node in db_controller.get_storage_nodes():
-                if node.secondary_node_id == snode.get_id() and node.status == StorageNode.STATUS_ONLINE:
-                    logger.info(f"Checking stack from node : {node.get_id()}")
-                    lvstore_check &= _check_node_lvstore(node.lvstore_stack, snode)
+        # if snode.lvstore_stack_secondary_1:
+        #     for node in db_controller.get_storage_nodes():
+        #         if node.secondary_node_id == snode.get_id() and node.status == StorageNode.STATUS_ONLINE:
+        #             logger.info(f"Checking stack from node : {node.get_id()}")
+        #             lvstore_check &= _check_node_lvstore(node.lvstore_stack, snode)
 
     return is_node_online and node_devices_check and node_remote_devices_check and lvstore_check
 

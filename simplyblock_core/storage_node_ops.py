@@ -2994,7 +2994,7 @@ def recreate_lvstore(snode):
 
     if prim_node_suspend:
         if sec_node.status == StorageNode.STATUS_ONLINE:
-            ret = recreate_lvstore_on_sec(sec_node)
+            ret = recreate_lvstore_on_sec(snode)
             if not ret:
                 logger.error(f"Failed to recreate secondary node: {sec_node.get_id()}")
 
@@ -3007,7 +3007,7 @@ def recreate_lvstore(snode):
         return False
 
     if sec_node.status == StorageNode.STATUS_ONLINE:
-        ret = recreate_lvstore_on_sec(sec_node)
+        ret = recreate_lvstore_on_sec(snode)
         if not ret:
             logger.error(f"Failed to recreate secondary node: {sec_node.get_id()}")
 
