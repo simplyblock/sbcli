@@ -140,4 +140,10 @@ while True:
                         if res:
                             tasks_events.task_updated(task)
 
+                    elif task.status == JobSchedule.STATUS_RUNNING:
+
+                        res = task_runner(task)
+                        if res:
+                            tasks_events.task_updated(task)
+
     time.sleep(3)
