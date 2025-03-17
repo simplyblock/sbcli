@@ -459,6 +459,12 @@ class SbcliUtils:
             if lvol_name not in list(lvols.keys()):
                 self.logger.info(f"Lvol {lvol_name} deleted successfully!!")
                 break
+            if attempt % 12 == 0:
+                cur_state = self.get_lvol_details(lvol_id=lvol_id)[0]["status"]
+                if cur_state == "online":
+                    self.logger.info(f"Lvol {lvol_name} in online state. Retrying Delete!")
+                    data = self.delete_request(api_url=f"/lvol/{lvol_id}")
+                    self.logger.info(f"Delete lvol resp: {data}")
             if attempt > 120:
                 raise Exception(f"Lvol {lvol_name} is not getting deleted!!")
             attempt += 1
