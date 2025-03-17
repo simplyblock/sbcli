@@ -1084,13 +1084,13 @@ class SshUtils:
             str: The extracted LVS dump file path, or None if not found.
         """
         try:
-            command = f"{self.base_cmd} -d sn dump-lvstore {storage_node_id} | grep 'LVS dump file will be here'"
-            self.logger.info(f"Executing '{self.base_cmd} -d sn dump-lvstore' on {node_ip} for Storage Node ID: {storage_node_id}")
+            command = f"{self.base_cmd} --dev -d sn dump-lvstore {storage_node_id} | grep 'LVS dump file will be here'"
+            self.logger.info(f"Executing '{self.base_cmd} --dev -d sn dump-lvstore' on {node_ip} for Storage Node ID: {storage_node_id}")
             
             output, error = self.exec_command(node_ip, command)
 
             if error:
-                self.logger.error(f"Error executing '{self.base_cmd} -d sn dump-lvstore' on {node_ip}: {error}")
+                self.logger.error(f"Error executing '{self.base_cmd} --dev -d sn dump-lvstore' on {node_ip}: {error}")
                 return None
 
             # Extract only the LVS dump file path
