@@ -21,7 +21,7 @@ while True:
         break
         auto_restart_devices = []
         online_devices = []
-        if node.status != StorageNode.STATUS_ONLINE or node.is_secondary_node:
+        if node.status != StorageNode.STATUS_ONLINE or node.is_secondary_node:  # pass
             logger.warning(f"Skipping node, id: {node.get_id()}, status: {node.status}")
             continue
 

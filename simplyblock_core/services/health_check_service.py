@@ -289,7 +289,7 @@ while True:
 
                 lvstore_check = True
                 if snode.lvstore_status == "ready":
-                    if snode.is_secondary_node:
+                    if snode.lvstore_stack_secondary_1:
                         for node in db_controller.get_primary_storage_nodes_by_secondary_node_id(snode.get_id()):
                             if node and node.status == StorageNode.STATUS_ONLINE and node.lvstore_status == "ready":
                                 logger.info(f"Checking stack from node : {node.get_id()}")
@@ -305,7 +305,7 @@ while True:
                                         else:
                                             nodes_ports_blocked[snode.get_id()] = [node.lvol_subsys_port]
 
-                    else:
+                    if not snode.is_secondary_node:
                         lvstore_stack = snode.lvstore_stack
                         lvstore_check &= health_controller._check_node_lvstore(lvstore_stack, snode, auto_fix=True)
                         if snode.secondary_node_id:

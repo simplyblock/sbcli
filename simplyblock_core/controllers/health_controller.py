@@ -257,11 +257,11 @@ def check_node(node_id, with_devices=True):
             logger.info(f"Check: ping ip {data_nic.ip4_address} ... {ping_check}")
             data_nics_check &= ping_check
 
-    if snode.is_secondary_node:
+    if snode.lvstore_stack_secondary_1:
         for n in db_controller.get_primary_storage_nodes_by_secondary_node_id(node_id):
             lvol_port_check = _check_port_on_node(snode, n.lvol_subsys_port)
             logger.info(f"Check: node {snode.mgmt_ip}, port: {n.lvol_subsys_port} ... {lvol_port_check}")
-    else:
+    if not snode.is_secondary_node:
         lvol_port_check = _check_port_on_node(snode, snode.lvol_subsys_port)
         logger.info(f"Check: node {snode.mgmt_ip}, port: {snode.lvol_subsys_port} ... {lvol_port_check}")
 
@@ -331,7 +331,7 @@ def check_node(node_id, with_devices=True):
                 if second_node_1.status == StorageNode.STATUS_ONLINE:
                     lvstore_check &= _check_node_lvstore(lvstore_stack, second_node_1)
 
-        if snode.is_secondary_node:
+        if snode.lvstore_stack_secondary_1:
             for node in db_controller.get_storage_nodes():
                 if node.secondary_node_id == snode.get_id() and node.status == StorageNode.STATUS_ONLINE:
                     logger.info(f"Checking stack from node : {node.get_id()}")

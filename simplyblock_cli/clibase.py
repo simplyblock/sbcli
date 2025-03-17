@@ -100,7 +100,7 @@ class CLIWrapperBase:
             namespace=namespace,
             number_of_distribs=number_of_distribs,
             enable_ha_jm=enable_ha_jm,
-            is_secondary_node=args.is_secondary_node,
+            is_secondary_node=args.is_secondary_node,   # pass
             id_device_by_nqn=args.id_device_by_nqn,
             partition_size=args.partition_size,
             ha_jm_count=ha_jm_count,

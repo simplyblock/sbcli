@@ -586,7 +586,7 @@ def cluster_activate(cl_id, force=False, force_lvstore_create=False):
     dev_count = 0
 
     for node in snodes:
-        if node.is_secondary_node:
+        if node.is_secondary_node:  # pass
             continue
         if node.status == node.STATUS_ONLINE:
             online_nodes.append(node)
@@ -604,7 +604,7 @@ def cluster_activate(cl_id, force=False, force_lvstore_create=False):
 
     if cluster.ha_type == "ha":
         for snode in snodes:
-            if snode.is_secondary_node or snode.secondary_node_id:
+            if snode.is_secondary_node or snode.secondary_node_id:  # pass
                 continue
             secondary_nodes = storage_node_ops.get_secondary_nodes(snode)
             if not secondary_nodes:
@@ -618,7 +618,7 @@ def cluster_activate(cl_id, force=False, force_lvstore_create=False):
             sec_node.write_to_db()
 
     for snode in snodes:
-        if snode.is_secondary_node:
+        if snode.is_secondary_node:  # pass
             continue
         if snode.status != StorageNode.STATUS_ONLINE:
             continue
@@ -642,27 +642,27 @@ def cluster_activate(cl_id, force=False, force_lvstore_create=False):
                 set_cluster_status(cl_id, ols_status)
                 return False
 
-    for snode in snodes:
-        if not snode.is_secondary_node:
-            continue
-        if snode.status != StorageNode.STATUS_ONLINE:
-            continue
-
-        ret = storage_node_ops.recreate_lvstore(snode)
-        snode = db_controller.get_storage_node_by_id(snode.get_id())
-        if ret:
-            snode.lvstore_status = "ready"
-            snode.write_to_db()
-
-        else:
-            snode.lvstore_status = "failed"
-            snode.write_to_db()
-
-            logger.error(f"Failed to restore lvstore on node {snode.get_id()}")
-            if not force:
-                logger.error("Failed to activate cluster")
-                set_cluster_status(cl_id, ols_status)
-                return False
+    # for snode in snodes:
+    #     if not snode.is_secondary_node:
+    #         continue
+    #     if snode.status != StorageNode.STATUS_ONLINE:
+    #         continue
+    #
+    #     ret = storage_node_ops.recreate_lvstore(snode)
+    #     snode = db_controller.get_storage_node_by_id(snode.get_id())
+    #     if ret:
+    #         snode.lvstore_status = "ready"
+    #         snode.write_to_db()
+    #
+    #     else:
+    #         snode.lvstore_status = "failed"
+    #         snode.write_to_db()
+    #
+    #         logger.error(f"Failed to restore lvstore on node {snode.get_id()}")
+    #         if not force:
+    #             logger.error("Failed to activate cluster")
+    #             set_cluster_status(cl_id, ols_status)
+    #             return False
 
 
 

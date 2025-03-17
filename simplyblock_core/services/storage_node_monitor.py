@@ -272,19 +272,19 @@ while True:
             node_port_check = True
             down_ports = []
             if spdk_process and snode.lvstore_status == "ready":
-                if snode.is_secondary_node:
-                    ports = [4420]
+                ports = [snode.nvmf_port]
+                if snode.lvstore_stack_secondary_1:
                     for n in db_controller.get_primary_storage_nodes_by_secondary_node_id(snode.get_id()):
                         if n.lvstore_status == "ready":
                             ports.append(n.lvol_subsys_port)
-                else:
-                    ports = [snode.lvol_subsys_port, 4420]
+                if not snode.is_secondary_node:
+                    ports.append(snode.lvol_subsys_port)
 
                 for port in ports:
                     ret = health_controller._check_port_on_node(snode, port)
                     logger.info(f"Check: node port {snode.mgmt_ip}, {port} ... {ret}")
                     node_port_check &= ret
-                    if not ret and port == 4420:
+                    if not ret and port == snode.nvmf_port:
                         down_ports.append(port)
 
                 for data_nic in snode.data_nics:
