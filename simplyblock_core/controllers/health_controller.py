@@ -443,6 +443,7 @@ def check_remote_device(device_id):
 
 
 def check_lvol_on_node(lvol_id, node_id):
+    logger.info(f"Checking lvol on node: {node_id}")
 
     db_controller = DBController()
     lvol = db_controller.get_lvol_by_id(lvol_id)

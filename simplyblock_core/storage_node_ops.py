@@ -1435,15 +1435,6 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
 
     snode = db_controller.get_storage_node_by_id(snode.get_id())
 
-    if cluster.ha_type == "ha":
-        secondary_nodes = get_secondary_nodes(snode)
-        if secondary_nodes:
-            snode.secondary_node_id = secondary_nodes[0]
-            snode.write_to_db()
-            sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
-            sec_node.lvstore_stack_secondary_1 = snode.get_id()
-            sec_node.write_to_db()
-
     if cluster.status not in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_READONLY]:
         logger.warning(f"The cluster status is not active ({cluster.status}), adding the node without distribs and lvstore")
         logger.info("Done")
@@ -1456,10 +1447,15 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
             continue
         ret = distr_controller.send_cluster_map_add_node(snode, node)
 
-    for dev in snode.nvme_devices:
-        if dev.status == NVMeDevice.STATUS_ONLINE:
-            tasks_controller.add_new_device_mig_task(dev.get_id())
-
+    if cluster.ha_type == "ha":
+        secondary_nodes = get_secondary_nodes(snode)
+        if secondary_nodes:
+            snode = db_controller.get_storage_node_by_id(snode.get_id())
+            snode.secondary_node_id = secondary_nodes[0]
+            snode.write_to_db()
+            sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
+            sec_node.lvstore_stack_secondary_1 = snode.get_id()
+            sec_node.write_to_db()
 
     # Create distribs
     max_size = cluster.cluster_max_size
@@ -1475,6 +1471,10 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
         snode.write_to_db()
         logger.error("Failed to create lvstore")
         return False
+
+    for dev in snode.nvme_devices:
+        if dev.status == NVMeDevice.STATUS_ONLINE:
+            tasks_controller.add_new_device_mig_task(dev.get_id())
 
     storage_events.snode_add(snode)
     logger.info("Done")
@@ -3018,6 +3018,10 @@ def recreate_lvstore(snode):
 
     if prim_node_suspend:
         if sec_node.status == StorageNode.STATUS_ONLINE:
+            ret = recreate_lvstore_on_sec(sec_node)
+            if not ret:
+                logger.error(f"Failed to recreate secondary node: {sec_node.get_id()}")
+
             sec_node_api.firewall_set_port(snode.lvol_subsys_port, "tcp", "allow", sec_node.rpc_port)
             tcp_ports_events.port_allowed(sec_node, snode.lvol_subsys_port)
 
@@ -3027,15 +3031,16 @@ def recreate_lvstore(snode):
         return False
 
     if sec_node.status == StorageNode.STATUS_ONLINE:
+        ret = recreate_lvstore_on_sec(sec_node)
+        if not ret:
+            logger.error(f"Failed to recreate secondary node: {sec_node.get_id()}")
+
         time.sleep(10)
         sec_node_api.firewall_set_port(snode.lvol_subsys_port, "tcp", "allow", sec_node.rpc_port)
         tcp_ports_events.port_allowed(sec_node, snode.lvol_subsys_port)
         sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
         sec_node.lvstore_status = "ready"
         sec_node.write_to_db()
-
-    if snode.lvstore_stack_secondary_1:
-        ret = recreate_lvstore_on_sec(snode)
 
     return True
 
