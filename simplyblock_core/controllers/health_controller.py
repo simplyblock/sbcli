@@ -258,7 +258,8 @@ def check_node(node_id, with_devices=True):
             data_nics_check &= ping_check
 
     if snode.lvstore_stack_secondary_1:
-        for n in db_controller.get_primary_storage_nodes_by_secondary_node_id(node_id):
+        n = db_controller.get_storage_node_by_id(snode.lvstore_stack_secondary_1)
+        if n:
             lvol_port_check = _check_port_on_node(snode, n.lvol_subsys_port)
             logger.info(f"Check: node {snode.mgmt_ip}, port: {n.lvol_subsys_port} ... {lvol_port_check}")
     if not snode.is_secondary_node:

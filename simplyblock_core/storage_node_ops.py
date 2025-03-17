@@ -2890,24 +2890,18 @@ def recreate_lvstore_on_sec(snode):
         snode.mgmt_ip, snode.rpc_port,
         snode.rpc_username, snode.rpc_password)
 
-    nodes = db_controller.get_primary_storage_nodes_by_secondary_node_id(snode.get_id())
+    node = None
+    if snode.lvstore_stack_secondary_1:
+        node = db_controller.get_storage_node_by_id(snode.lvstore_stack_secondary_1)
+    else:
+        for nd in db_controller.get_storage_nodes():
+            if nd.secondary_node_id == snode.get_id():
+                snode.lvstore_stack_secondary_1 = nd.get_id()
+                node = nd
+                break
 
-    for node in nodes:
-        remote_rpc_client = RPCClient(
-            node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password)
-
+    if node:
         lvol_list = db_controller.get_lvols_by_node_id(node.get_id())
-
-        # if node.status == StorageNode.STATUS_ONLINE:
-            # for lvol in lvol_list:
-            #     for iface in node.data_nics:
-            #         if iface.ip4_address:
-            #             ret = remote_rpc_client.nvmf_subsystem_listener_set_ana_state(
-            #                 lvol.nqn, iface.ip4_address, lvol.subsys_port, False, "inaccessible")
-            #
-            # remote_rpc_client.bdev_lvol_set_leader(False, lvs_name=node.lvstore)
-            # remote_rpc_client.bdev_distrib_force_to_non_leader(node.jm_vuid)
-
         ret, err = _create_bdev_stack(snode, node.lvstore_stack, primary_node=node)
         ret = rpc_client.bdev_examine(node.raid)
         ret = rpc_client.bdev_wait_for_examine()
@@ -2924,24 +2918,6 @@ def recreate_lvstore_on_sec(snode):
                 lvol.io_error = False
                 lvol.health_check = True
             lvol.write_to_db(db_controller.kv_store)
-
-        # rpc_client.bdev_lvol_set_leader(False, lvs_name=node.lvstore)
-        # rpc_client.bdev_distrib_force_to_non_leader(node.jm_vuid)
-
-        # if node.status == StorageNode.STATUS_ONLINE:
-        #     for lvol in lvol_list:
-        #         for iface in node.data_nics:
-        #             if iface.ip4_address:
-        #                 ret = remote_rpc_client.nvmf_subsystem_listener_set_ana_state(
-        #                     lvol.nqn, iface.ip4_address, lvol.subsys_port, True)
-        #
-        #     time.sleep(5)
-
-        # for lvol in lvol_list:
-        #     for iface in snode.data_nics:
-        #         if iface.ip4_address:
-        #             ret = rpc_client.nvmf_subsystem_listener_set_ana_state(
-        #                 lvol.nqn, iface.ip4_address, lvol.subsys_port, False)
 
     return True
 
