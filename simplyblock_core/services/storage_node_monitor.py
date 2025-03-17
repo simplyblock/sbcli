@@ -155,10 +155,10 @@ def update_cluster_status(cluster_id):
         # check node statuss, check auto restart for nodes
         can_activate = True
         for node in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
-            if node.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_REMOVED]:
-                logger.error(f"can not activate cluster: node in not online {node.get_id()}: {node.status}")
-                can_activate = False
-                break
+            # if node.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_REMOVED]:
+            #     logger.error(f"can not activate cluster: node in not online {node.get_id()}: {node.status}")
+            #     can_activate = False
+            #     break
             if tasks_controller.get_active_node_restart_task(cluster_id, node.get_id()):
                 logger.error(f"can not activate cluster: restart tasks found")
                 can_activate = False

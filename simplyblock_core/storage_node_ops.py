@@ -858,27 +858,40 @@ def _connect_to_remote_jm_devs(this_node, jm_ids=[]):
         node_bdev_names = []
     remote_devices = []
     # if this_node.is_secondary_node:
-    for node in db_controller.get_storage_nodes_by_cluster_id(this_node.cluster_id):
-        if node.get_id() == this_node.get_id() or node.is_secondary_node:  # pass
-            continue
-        if node.jm_device and node.jm_device.status in [JMDevice.STATUS_ONLINE, JMDevice.STATUS_UNAVAILABLE]:
-            remote_devices.append(node.jm_device)
+    # for node in db_controller.get_storage_nodes_by_cluster_id(this_node.cluster_id):
+    #     if node.get_id() == this_node.get_id() or node.is_secondary_node:  # pass
+    #         continue
+    #     if node.jm_device and node.jm_device.status in [JMDevice.STATUS_ONLINE, JMDevice.STATUS_UNAVAILABLE]:
+    #         remote_devices.append(node.jm_device)
     # else:
-    #     if jm_ids:
-    #         for jm_id in jm_ids:
-    #             jm_dev = db_controller.get_jm_device_by_id(jm_id)
-    #             if jm_dev:
-    #                 remote_devices.append(jm_dev)
-    #     elif len(this_node.remote_jm_devices) > 0:
-    #         remote_devices = this_node.remote_jm_devices
-    #     else:
-    #         for node in db_controller.get_storage_nodes_by_cluster_id(this_node.cluster_id):
-    #             if node.get_id() == this_node.get_id() or node.is_secondary_node:
-    #                 continue
-    #             if node.jm_device and node.jm_device.status == JMDevice.STATUS_ONLINE:
-    #                 remote_devices.append(node.jm_device)
-    #                 if len(remote_devices) >= 3 :
-    #                     break
+    if jm_ids:
+        for jm_id in jm_ids:
+            jm_dev = db_controller.get_jm_device_by_id(jm_id)
+            if jm_dev:
+                remote_devices.append(jm_dev)
+
+    if this_node.jm_ids:
+        for jm_id in this_node.jm_ids:
+            jm_dev = db_controller.get_jm_device_by_id(jm_id)
+            if jm_dev and jm_dev not in remote_devices:
+                remote_devices.append(jm_dev)
+
+
+    if this_node.lvstore_stack_secondary_1:
+        org_node = db_controller.get_storage_node_by_id(this_node.lvstore_stack_secondary_1)
+        if org_node.jm_device and org_node.jm_device.status == JMDevice.STATUS_ONLINE:
+            remote_devices.append(org_node.jm_device)
+        for jm_id in org_node.jm_ids:
+            jm_dev = db_controller.get_jm_device_by_id(jm_id)
+            if jm_dev and jm_dev not in remote_devices:
+                remote_devices.append(jm_dev)
+
+    if len(remote_devices) < 2:
+        for node in db_controller.get_storage_nodes_by_cluster_id(this_node.cluster_id):
+            if node.get_id() == this_node.get_id() or node.status != StorageNode.STATUS_ONLINE or node.is_secondary_node:
+                continue
+            if node.jm_device and node.jm_device.status == JMDevice.STATUS_ONLINE:
+                remote_devices.append(node.jm_device)
 
     new_devs = []
     for jm_dev in remote_devices:
@@ -893,7 +906,7 @@ def _connect_to_remote_jm_devs(this_node, jm_ids=[]):
                 org_dev_node = node
                 break
 
-        if not org_dev or org_dev in new_devs:
+        if not org_dev or org_dev in new_devs or org_dev_node.get_id() == this_node.get_id():
             continue
 
         name = f"remote_{org_dev.jm_bdev}"
@@ -2102,6 +2115,19 @@ def list_storage_devices(node_id, sort, is_json):
             "Health": snode.jm_device.health_check
         })
 
+    for jm_id in snode.jm_ids:
+        jm_device = db_controller.get_jm_device_by_id(jm_id)
+        if not jm_device:
+            continue
+        jm_devices.append({
+            "UUID": jm_device.uuid,
+            "Name": jm_device.device_name,
+            "Size": utils.humanbytes(jm_device.size),
+            "Status": jm_device.status,
+            "IO Err": jm_device.io_error,
+            "Health": jm_device.health_check
+        })
+
     for device in snode.remote_devices:
         logger.debug(device)
         logger.debug("*" * 20)
@@ -3040,8 +3066,11 @@ def get_node_jm_names(current_node, remote=False):
         jm_list.append("JM_LOCAL")
 
     if current_node.enable_ha_jm:
-        for jm_dev in current_node.remote_jm_devices[:current_node.ha_jm_count-1]:
-            jm_list.append(jm_dev.remote_bdev)
+        for jm_id in current_node.jm_ids:
+            for jm_dev in current_node.remote_jm_devices:
+                if jm_dev.get_id() == jm_id:
+                    jm_list.append(jm_dev.remote_bdev)
+                    break
     return jm_list
 
 
@@ -3073,6 +3102,7 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
         jm_ids = get_sorted_ha_jms(snode)
         logger.debug(f"online_jms: {str(jm_ids)}")
         snode.remote_jm_devices = _connect_to_remote_jm_devs(snode, jm_ids)
+        snode.jm_ids = jm_ids
         snode.jm_vuid = jm_vuid
         snode.write_to_db()
 

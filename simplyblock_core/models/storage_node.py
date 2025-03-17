@@ -79,7 +79,7 @@ class StorageNode(BaseNodeObject):
     rpc_username: str = ""
     secondary_node_id: str = ""
     sequential_number: int = 0
-    services: List[str] = []
+    jm_ids: List[str] = []
     spdk_cpu_mask: str = ""
     spdk_debug: bool = False
     spdk_image: str = ""
