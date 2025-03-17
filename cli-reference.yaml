@@ -1901,9 +1901,9 @@ commands:
       - name: add
         help: "Creates a new snapshot"
         arguments:
-          - name: "snapshot_id"
+          - name: "volume_id"
             help: "Logical volume id"
-            dest: snapshot_id
+            dest: volume_id
             type: str
           - name: "name"
             help: "New snapshot name"

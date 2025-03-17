@@ -520,7 +520,7 @@ class CLIWrapperBase:
         return pool_controller.get_io_stats(args.pool_id, args.history, args.records)
 
     def snapshot__add(self, sub_command, args):
-        return snapshot_controller.add(args.snapshot_id, args.name)
+        return snapshot_controller.add(args.volume_id, args.name)
 
     def snapshot__list(self, sub_command, args):
         return snapshot_controller.list(args.all)
