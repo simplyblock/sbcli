@@ -40,6 +40,10 @@ on:
         description: 'Value for Chunk block size'
         required: false
         default: 4096
+      num_iterations:
+        description: 'Number of iterations to run the test'
+        required: false
+        default: 1
       send_slack_notification:
         description: 'Send Slack notification?'
         required: false
@@ -174,8 +178,14 @@ jobs:
           if [ -n "${{ github.event.inputs.testname }}" ]; then
             TESTNAME="--testname ${{ github.event.inputs.testname }}"
           fi
-          python3 e2e.py $TESTNAME \
-                  --ndcs $NDCS --npcs $NPCS --bs $BS --chunk_bs $CHUNK_BS --run_ha ${{ github.event.inputs.run_ha_test }}
+          NUM_ITERATIONS=${{ github.event.inputs.num_iterations || 1 }}
+          echo "Running tests for $NUM_ITERATIONS iterations"
+
+          for i in $(seq 1 $NUM_ITERATIONS); do
+            echo "Iteration $i"
+            python3 e2e.py $TESTNAME \
+                    --ndcs $NDCS --npcs $NPCS --bs $BS --chunk_bs $CHUNK_BS --run_ha ${{ github.event.inputs.run_ha_test }}
+          done
         env:
           SBCLI_CMD: ${{ env.SBCLI_CMD }}
           NDCS: ${{ env.NDCS }}
