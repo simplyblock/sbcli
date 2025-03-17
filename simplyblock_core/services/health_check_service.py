@@ -9,7 +9,7 @@ from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.rpc_client import RPCClient
-from simplyblock_core import constants, db_controller, utils, distr_controller
+from simplyblock_core import constants, db_controller, utils, distr_controller, storage_node_ops
 from simplyblock_core.snode_client import SNodeClient
 
 logger = utils.get_logger(__name__)
@@ -234,13 +234,13 @@ while True:
                 #                 else:
                 #                     logger.error(f"Failed to connect to device: {dev.get_id()}")
 
-                online_jms = 0
+                connected_jms = []
                 if snode.jm_device and snode.jm_device.get_id():
                     jm_device = snode.jm_device
                     logger.info(f"Node JM: {jm_device.get_id()}")
                     if jm_device.jm_bdev in node_bdev_names:
                         logger.info(f"Checking jm bdev: {jm_device.jm_bdev} ... ok")
-                        online_jms += 1
+                        connected_jms.append(jm_device.get_id())
                     else:
                         logger.info(f"Checking jm bdev: {jm_device.jm_bdev} ... not found")
 
@@ -252,40 +252,25 @@ while True:
                         # ret = rpc_client.get_bdevs(remote_device.remote_bdev)
                         if remote_device.remote_bdev in node_bdev_names:
                             logger.info(f"Checking bdev: {remote_device.remote_bdev} ... ok")
-                            online_jms += 1
+                            connected_jms.append(remote_device.get_id())
                         else:
                             logger.info(f"Checking bdev: {remote_device.remote_bdev} ... not found")
 
-                            if cluster.status not in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_READONLY]:
-                                continue
-                            org_dev = None
-                            org_dev_node = None
-                            for node in db_controller.get_storage_nodes():
-                                if node.jm_device and node.jm_device.get_id() == remote_device.get_id():
-                                    org_dev = node.jm_device
-                                    org_dev_node = node
+                    for jm_id in snode.jm_ids:
+                        if jm_id not in connected_jms:
+                            node_remote_devices_check = False
+                            break
+                    if snode.lvstore_stack_secondary_1:
+                        primary_node = db_controller.get_storage_node_by_id(snode.lvstore_stack_secondary_1)
+                        if primary_node:
+                            for jm_id in primary_node.jm_ids:
+                                if jm_id not in connected_jms:
+                                    node_remote_devices_check = False
                                     break
 
-                            if org_dev and org_dev.status == NVMeDevice.STATUS_ONLINE and \
-                                    org_dev_node.status == StorageNode.STATUS_ONLINE:
-                                name = f"remote_{remote_device.jm_bdev}"
-                                ret = rpc_client.bdev_nvme_attach_controller_tcp(
-                                    name, remote_device.nvmf_nqn, remote_device.nvmf_ip,
-                                    remote_device.nvmf_port)
-                                if ret:
-                                    logger.info(f"Successfully connected to jm device: {remote_device.get_id()}")
-                                    online_jms += 1
-                                else:
-                                    logger.error(f"Failed to connect to jm device: {remote_device.get_id()}")
-                            else:
-                                continue
-
-                    if online_jms < 2:
-                        node_remote_devices_check = False
-                else:
-                    if online_jms == 0:
-                        node_remote_devices_check = False
-
+                    if not node_remote_devices_check and cluster.status in [
+                        Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_READONLY]:
+                        storage_node_ops._connect_to_remote_jm_devs(snode)
 
                 lvstore_check = True
                 if snode.lvstore_status == "ready":

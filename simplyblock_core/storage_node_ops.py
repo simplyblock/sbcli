@@ -3060,10 +3060,10 @@ def get_sorted_ha_jms(current_node):
     return list(jm_count.keys())[:3]
 
 
-def get_node_jm_names(current_node, remote=False):
+def get_node_jm_names(current_node, remote_node=None):
     jm_list = []
     if current_node.jm_device:
-        if remote:
+        if remote_node:
             jm_list.append(f"remote_{current_node.jm_device.jm_bdev}n1")
         else:
             jm_list.append(current_node.jm_device.jm_bdev)
@@ -3072,10 +3072,19 @@ def get_node_jm_names(current_node, remote=False):
 
     if current_node.enable_ha_jm:
         for jm_id in current_node.jm_ids:
-            for jm_dev in current_node.remote_jm_devices:
-                if jm_dev.get_id() == jm_id:
-                    jm_list.append(jm_dev.remote_bdev)
-                    break
+            if remote_node:
+                if remote_node.jm_device.get_id() == jm_id:
+                    jm_list.append(remote_node.jm_device.jm_bdev)
+                    continue
+                for jm_dev in remote_node.remote_jm_devices:
+                    if jm_dev.get_id() == jm_id:
+                        jm_list.append(jm_dev.remote_bdev)
+                        break
+            else:
+                for jm_dev in current_node.remote_jm_devices:
+                    if jm_dev.get_id() == jm_id:
+                        jm_list.append(jm_dev.remote_bdev)
+                        break
     return jm_list
 
 
@@ -3238,7 +3247,7 @@ def _create_bdev_stack(snode, lvstore_stack=None, primary_node=None):
 
         elif type == "bdev_distr":
             if primary_node:
-                params['jm_names'] = get_node_jm_names(primary_node, remote=True)
+                params['jm_names'] = get_node_jm_names(primary_node, remote_node=snode)
             else:
                 params['jm_names'] = get_node_jm_names(snode)
 
