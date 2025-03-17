@@ -123,6 +123,8 @@ def delete_pool(uuid):
     db_controller = DBController()
     pool = db_controller.get_pool_by_id(uuid)
     if not pool:
+        pool = db_controller.get_pool_by_name(uuid)
+    if not pool:
         logger.error(f"Pool not found {uuid}")
         return False
     if pool.status == Pool.STATUS_INACTIVE:
