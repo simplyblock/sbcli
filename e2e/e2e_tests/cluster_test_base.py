@@ -10,7 +10,18 @@ import traceback
 import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+import string, random
 
+
+def generate_random_sequence(length):
+    letters = string.ascii_uppercase  # A-Z
+    numbers = string.digits  # 0-9
+    all_chars = letters + numbers  # Allowed characters
+
+    first_char = random.choice(letters)  # First character must be a letter
+    remaining_chars = ''.join(random.choices(all_chars, k=length-1))  # Next 14 characters
+
+    return first_char + remaining_chars
 
 class TestClusterBase:
     def __init__(self, **kwargs):
@@ -42,7 +53,7 @@ class TestClusterBase:
         self.chunk_bs = kwargs.get("chunk_bs", 4096)
         self.k8s_test = kwargs.get("k8s_run", False)
         self.pool_name = "test_pool"
-        self.lvol_name = f"test_lvl_{self.ndcs}_{self.npcs}"
+        self.lvol_name = f"test_lvl_{generate_random_sequence(4)}"
         self.mount_path = f"{Path.home()}/test_location"
         self.log_path = f"{os.path.dirname(self.mount_path)}/log_file.log"
         self.base_cmd = os.environ.get("SBCLI_CMD", "sbcli-dev")
