@@ -197,7 +197,7 @@ jobs:
           STORAGE_PRIVATE_IPS: "192.168.10.67 192.168.10.68 192.168.10.69"
           SEC_STORAGE_PRIVATE_IPS: "192.168.10.70"
           API_INVOKE_URL: "http://192.168.10.66/"
-          K3S_MNODES: "192.168.10.103"
+          K3S_MNODES: "192.168.10.135"
           NR_HUGEPAGES: "2048"
 
       - name: Configure Kubeconfig
@@ -206,7 +206,7 @@ jobs:
           scp -i ~/.ssh/simplyblock-us-east-2.pem root@$K3S_MNODES:/etc/rancher/k3s/k3s.yaml $HOME/.kube/config
           sed -i "s/server: https:\/\/\(localhost\|127.0.0.1\)\(:[0-9]*\)/server: https:\/\/${K3S_MNODES}\2/" $HOME/.kube/config
         env:
-          K3S_MNODES: "192.168.10.103"
+          K3S_MNODES: "192.168.10.135"
 
       - name: Retrieve Cluster Details
         id: retrieve_cluster_details
@@ -266,7 +266,7 @@ jobs:
           STORAGE_PRIVATE_IPS: "192.168.10.67 192.168.10.68 192.168.10.69"
           SEC_STORAGE_PRIVATE_IPS: "192.168.10.70"
           API_INVOKE_URL: "http://192.168.10.66/"
-          K3S_MNODES: "192.168.10.103"
+          K3S_MNODES: "192.168.10.135"
           NR_HUGEPAGES: "2048"
 
       - name: Deploy SPDK-CSI with Helm
@@ -316,7 +316,7 @@ jobs:
           STORAGE_PRIVATE_IPS: "192.168.10.67 192.168.10.68 192.168.10.69"
           SEC_STORAGE_PRIVATE_IPS: "192.168.10.70"
           API_INVOKE_URL: "http://192.168.10.66/"
-          K3S_MNODES: "192.168.10.103"
+          K3S_MNODES: "192.168.10.135"
           NR_HUGEPAGES: "2048"
 
 
@@ -359,7 +359,7 @@ jobs:
       #     STORAGE_PRIVATE_IPS: "192.168.10.67 192.168.10.68 192.168.10.69"
       #     SEC_STORAGE_PRIVATE_IPS: "192.168.10.70"
       #     API_INVOKE_URL: "http://192.168.10.66/"
-      #     K3S_MNODES: "192.168.10.103"
+      #     K3S_MNODES: "192.168.10.135"
       #     NR_HUGEPAGES: "2048"
 
       - name: Check Cluster Status
