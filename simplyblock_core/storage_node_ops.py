@@ -3191,6 +3191,8 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
     if snode.secondary_node_id:
         # creating lvstore on secondary
         sec_node_1 = db_controller.get_storage_node_by_id(snode.secondary_node_id)
+        sec_node_1.remote_jm_devices = _connect_to_remote_jm_devs(sec_node_1)
+        sec_node_1.write_to_db()
         ret, err = _create_bdev_stack(sec_node_1, lvstore_stack, primary_node=snode)
         if err:
             logger.error(f"Failed to create lvstore on node {sec_node_1.get_id()}")

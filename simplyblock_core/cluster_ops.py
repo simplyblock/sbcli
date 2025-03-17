@@ -1247,8 +1247,8 @@ def update_cluster(cl_id, mgmt_only=False, restart_cluster=False):
 
     if cluster.status != Cluster.STATUS_ACTIVE:
         logger.error(f"Cluster is not active")
-        return False
-
+        if restart_cluster:
+            return False
 
     try:
         sbcli=constants.SIMPLY_BLOCK_CLI_NAME
