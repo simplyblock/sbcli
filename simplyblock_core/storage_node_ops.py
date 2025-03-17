@@ -1511,7 +1511,7 @@ def delete_storage_node(node_id, force=False):
         if not force:
             return False
         for task in tasks:
-            tasks_controller.cancel_task(task.get_id())
+            tasks_controller.cancel_task(task.uuid)
         time.sleep(1)
 
     snode.remove(db_controller.kv_store)
@@ -1543,7 +1543,7 @@ def remove_storage_node(node_id, force_remove=False, force_migrate=False):
         if force_remove is False:
             return False
         for task in tasks:
-            tasks_controller.cancel_task(task.get_id())
+            tasks_controller.cancel_task(task.uuid)
 
     lvols = db_controller.get_lvols_by_node_id(node_id)
     if lvols:
@@ -2200,7 +2200,7 @@ def shutdown_storage_node(node_id, force=False):
         if force is False:
             return False
         for task in tasks:
-            tasks_controller.cancel_task(task.get_id())
+            tasks_controller.cancel_task(task.uuid)
 
     logger.info("Shutting down node")
     set_node_status(node_id, StorageNode.STATUS_IN_SHUTDOWN)
@@ -2263,7 +2263,7 @@ def suspend_storage_node(node_id, force=False):
         if force is False:
             return False
         for task in tasks:
-            tasks_controller.cancel_task(task.get_id())
+            tasks_controller.cancel_task(task.uuid)
 
     cluster = db_controller.get_cluster_by_id(snode.cluster_id)
     snodes = db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id)
