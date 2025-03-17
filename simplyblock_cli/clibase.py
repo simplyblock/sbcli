@@ -424,7 +424,9 @@ class CLIWrapperBase:
         new_size = 0
         if args.resize:
             new_size = self.parse_size(args.resize)
-        return snapshot_controller.clone(args.snapshot_id, args.clone_name, new_size)
+
+        clone_id, error = snapshot_controller.clone(args.snapshot_id, args.clone_name, new_size)
+        return clone_id if not error else error
 
     def volume__move(self, sub_command, args):
         return lvol_controller.move(args.volume_id, args.node_id, args.force)
@@ -541,7 +543,9 @@ class CLIWrapperBase:
         new_size = 0
         if args.resize:
             new_size = self.parse_size(args.resize)
-        return snapshot_controller.clone(args.snapshot_id, args.lvol_name, new_size)
+
+        success, details = snapshot_controller.clone(args.snapshot_id, args.lvol_name, new_size)
+        return details
 
     def caching_node__deploy(self, sub_command, args):
         return caching_node_controller.deploy(args.ifname)
