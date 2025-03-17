@@ -36,10 +36,6 @@ on:
         description: 'Value for Block size'
         required: false
         default: 4096
-      chunk_bs:
-        description: 'Value for Chunk block size'
-        required: false
-        default: 4096
       num_iterations:
         description: 'Number of iterations to run the test'
         required: false
@@ -114,7 +110,7 @@ jobs:
           echo "NDCS=${{ github.event.inputs.ndcs || 2 }}" >> $GITHUB_ENV
           echo "NPCS=${{ github.event.inputs.npcs || 1 }}" >> $GITHUB_ENV
           echo "BS=${{ github.event.inputs.bs || 4096 }}" >> $GITHUB_ENV
-          echo "CHUNK_BS=${{ github.event.inputs.chunk_bs || 4096 }}" >> $GITHUB_ENV
+          echo "CHUNK_BS=4096" >> $GITHUB_ENV
         shell: bash
 
 
@@ -127,7 +123,8 @@ jobs:
             --distr-ndcs $NDCS \
             --distr-npcs $NPCS \
             --distr-bs $BS \
-            --distr-chunk-bs $CHUNK_BS --ha-type ha \
+            --distr-chunk-bs $CHUNK_BS \
+            --ha-type ha \
             --partitions 0 \
             --enable-node-affinity true
           
