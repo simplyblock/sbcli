@@ -437,7 +437,7 @@ groups:
               model:
                 disableTextWrap: false
                 editorMode: builder
-                expr: cluster_size_free
+                expr: cluster_prov_cap_critical
                 fullMetaSearch: false
                 includeNullMetadata: true
                 instant: true
@@ -446,6 +446,24 @@ groups:
                 maxDataPoints: 43200
                 range: false
                 refId: A
+                useBackend: false
+            - refId: B
+              relativeTimeRange:
+                from: 600
+                to: 0
+              datasourceUid: PBFA97CFB590B2093
+              model:
+                disableTextWrap: false
+                editorMode: builder
+                expr: cluster_size_prov_util
+                fullMetaSearch: false
+                includeNullMetadata: true
+                instant: true
+                intervalMs: 1000
+                legendFormat: __auto
+                maxDataPoints: 43200
+                range: false
+                refId: B
                 useBackend: false
             - refId: C
               relativeTimeRange:
@@ -456,8 +474,8 @@ groups:
                 conditions:
                     - evaluator:
                         params:
-                            - 1.073741822e+09
-                        type: lt
+                            - 0
+                        type: lte
                       operator:
                         type: and
                       query:
@@ -470,7 +488,7 @@ groups:
                 datasource:
                     type: __expr__
                     uid: __expr__
-                expression: A
+                expression:  A - B
                 intervalMs: 1000
                 maxDataPoints: 43200
                 refId: C
@@ -496,7 +514,7 @@ groups:
               model:
                 disableTextWrap: false
                 editorMode: builder
-                expr: cluster_size_free
+                expr: cluster_cap_critical
                 fullMetaSearch: false
                 includeNullMetadata: true
                 instant: true
@@ -505,6 +523,24 @@ groups:
                 maxDataPoints: 43200
                 range: false
                 refId: A
+                useBackend: false
+            - refId: B
+              relativeTimeRange:
+                from: 600
+                to: 0
+              datasourceUid: PBFA97CFB590B2093
+              model:
+                disableTextWrap: false
+                editorMode: builder
+                expr: cluster_size_util
+                fullMetaSearch: false
+                includeNullMetadata: true
+                instant: true
+                intervalMs: 1000
+                legendFormat: __auto
+                maxDataPoints: 43200
+                range: false
+                refId: B
                 useBackend: false
             - refId: C
               relativeTimeRange:
@@ -515,8 +551,8 @@ groups:
                 conditions:
                     - evaluator:
                         params:
-                            - 10000
-                        type: lt
+                            - 0
+                        type: lte
                       operator:
                         type: and
                       query:
@@ -529,7 +565,7 @@ groups:
                 datasource:
                     type: __expr__
                     uid: __expr__
-                expression: A
+                expression: A - B
                 intervalMs: 1000
                 maxDataPoints: 43200
                 refId: C
