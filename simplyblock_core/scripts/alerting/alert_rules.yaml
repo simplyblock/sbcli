@@ -466,6 +466,17 @@ groups:
                 range: false
                 refId: B
                 useBackend: false
+            - refId: D  
+              relativeTimeRange:
+                from: 600
+                to: 0
+              datasourceUid: __expr__
+              model:
+                expression: A - B
+                intervalMs: 1000
+                maxDataPoints: 43200
+                refId: D
+                type: math
             - refId: C
               relativeTimeRange:
                 from: 600
@@ -481,7 +492,7 @@ groups:
                         type: and
                       query:
                         params:
-                            - C
+                            - D
                       reducer:
                         params: []
                         type: last
@@ -489,7 +500,6 @@ groups:
                 datasource:
                     type: __expr__
                     uid: __expr__
-                expression:  A - B
                 intervalMs: 1000
                 maxDataPoints: 43200
                 refId: C
@@ -543,6 +553,17 @@ groups:
                 range: false
                 refId: B
                 useBackend: false
+            - refId: D  
+              relativeTimeRange:
+                from: 600
+                to: 0
+              datasourceUid: __expr__
+              model:
+                expression: A - B
+                intervalMs: 1000
+                maxDataPoints: 43200
+                refId: D
+                type: math
             - refId: C
               relativeTimeRange:
                 from: 600
@@ -558,7 +579,7 @@ groups:
                         type: and
                       query:
                         params:
-                            - C
+                            - D
                       reducer:
                         params: []
                         type: last
@@ -566,7 +587,6 @@ groups:
                 datasource:
                     type: __expr__
                     uid: __expr__
-                expression: A - B
                 intervalMs: 1000
                 maxDataPoints: 43200
                 refId: C
