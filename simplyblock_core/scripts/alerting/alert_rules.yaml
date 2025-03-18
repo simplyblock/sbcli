@@ -500,6 +500,7 @@ groups:
                 datasource:
                     type: __expr__
                     uid: __expr__
+                expression: D
                 intervalMs: 1000
                 maxDataPoints: 43200
                 refId: C
@@ -587,6 +588,7 @@ groups:
                 datasource:
                     type: __expr__
                     uid: __expr__
+                expression: D
                 intervalMs: 1000
                 maxDataPoints: 43200
                 refId: C
