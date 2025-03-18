@@ -295,7 +295,8 @@ while True:
                         if snode.secondary_node_id:
                             second_node_1 = db_controller.get_storage_node_by_id(snode.secondary_node_id)
                             if second_node_1 and second_node_1.status == StorageNode.STATUS_ONLINE:
-                                lvstore_check &= health_controller._check_node_lvstore(lvstore_stack, second_node_1, auto_fix=True)
+                                lvstore_check &= health_controller._check_node_lvstore(lvstore_stack, second_node_1,
+                                                                                       auto_fix=True, stack_src_node=snode)
 
                         lvol_port_check = False
                         if node_api_check:

@@ -130,7 +130,7 @@ def _check_node_ping(ip):
         return False
 
 
-def _check_node_lvstore(lvstore_stack, node, auto_fix=False):
+def _check_node_lvstore(lvstore_stack, node, auto_fix=False, stack_src_node=None):
     db_controller = DBController()
     lvstore_check = True
     logger.info(f"Checking distr stack on node : {node.get_id()}")
@@ -151,6 +151,12 @@ def _check_node_lvstore(lvstore_stack, node, auto_fix=False):
         elif type == "bdev_lvstore":
             bdev_lvstore = bdev["name"]
 
+    node_distribs_list = []
+    for bdev in node.lvstore_stack:
+        type = bdev['type']
+        if type == "bdev_raid":
+            node_distribs_list = bdev["distribs_list"]
+
     node_bdevs = rpc_client.get_bdevs()
     if node_bdevs:
         node_bdev_names = [b['name'] for b in node_bdevs]
@@ -161,6 +167,15 @@ def _check_node_lvstore(lvstore_stack, node, auto_fix=False):
         # ret = rpc_client.get_bdevs(distr)
         if distr in node_bdev_names:
             logger.info(f"Checking distr bdev : {distr} ... ok")
+            logger.info(f"Checking distr JM names:")
+            if distr in node_distribs_list:
+                jm_names = storage_node_ops.get_node_jm_names(node)
+            elif stack_src_node:
+                jm_names = storage_node_ops.get_node_jm_names(stack_src_node, remote_node=node)
+            else:
+                jm_names = node.jm_ids
+            for jm in jm_names:
+                logger.info(jm)
             logger.info("Checking Distr map ...")
             ret = rpc_client.distr_get_cluster_map(distr)
             if not ret:
@@ -330,7 +345,7 @@ def check_node(node_id, with_devices=True):
             if snode.secondary_node_id:
                 second_node_1 = db_controller.get_storage_node_by_id(snode.secondary_node_id)
                 if second_node_1.status == StorageNode.STATUS_ONLINE:
-                    lvstore_check &= _check_node_lvstore(lvstore_stack, second_node_1)
+                    lvstore_check &= _check_node_lvstore(lvstore_stack, second_node_1, stack_src_node=snode)
 
         # if snode.lvstore_stack_secondary_1:
         #     for node in db_controller.get_storage_nodes():
