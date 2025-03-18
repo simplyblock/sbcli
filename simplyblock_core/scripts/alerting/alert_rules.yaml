@@ -472,7 +472,7 @@ groups:
                 to: 0
               datasourceUid: __expr__
               model:
-                expression: A - B
+                expression: $A - $B
                 intervalMs: 1000
                 maxDataPoints: 43200
                 refId: D
@@ -559,7 +559,7 @@ groups:
                 to: 0
               datasourceUid: __expr__
               model:
-                expression: A - B
+                expression: $A - $B
                 intervalMs: 1000
                 maxDataPoints: 43200
                 refId: D
