@@ -397,8 +397,9 @@ groups:
                 conditions:
                     - evaluator:
                         params:
-                            - 0
-                        type: equal
+                            - -1
+                            - 1 
+                        type: within_range
                       operator:
                         type: and
                       query:
@@ -475,7 +476,7 @@ groups:
                     - evaluator:
                         params:
                             - 0
-                        type: lte
+                        type: lt
                       operator:
                         type: and
                       query:
@@ -552,7 +553,7 @@ groups:
                     - evaluator:
                         params:
                             - 0
-                        type: lte
+                        type: lt
                       operator:
                         type: and
                       query:
