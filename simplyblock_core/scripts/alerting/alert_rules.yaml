@@ -598,7 +598,7 @@ groups:
           execErrState: Error
           for: 2m
           annotations:
-            description: The rule alerts for offline lvol.
+            description: The rule alerts for offline lvols.
             summary: lvol {{ $labels.lvol }} in storage node {{$labels.snode }} is offline
           labels:
             app: simplyblock
