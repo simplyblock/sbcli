@@ -1,8 +1,6 @@
-import math
 import random
 import re
 import string
-import requests
 
 from flask import jsonify
 
@@ -38,37 +36,8 @@ def generate_string(length):
 
 
 def parse_size(size_string: str):
-    try:
-        x = int(size_string)
-        return x
-    except Exception:
-        pass
-    try:
-        if size_string:
-            size_string = size_string.lower()
-            size_string = size_string.replace(" ", "")
-            size_string = size_string.replace("b", "")
-            size_number = int(size_string[:-1])
-            size_v = size_string[-1]
-            one_k = 1000
-            multi = 0
-            if size_v == "k":
-                multi = 1
-            elif size_v == "m":
-                multi = 2
-            elif size_v == "g":
-                multi = 3
-            elif size_v == "t":
-                multi = 4
-            else:
-                print(f"Error parsing size: {size_string}")
-                return -1
-            return int(size_number * math.pow(one_k, multi))
-        else:
-            return -1
-    except:
-        print(f"Error parsing size: {size_string}")
-        return -1
+    from simplyblock_core import utils as core_utils
+    return core_utils.parse_size(size_string)
 
 
 def validate_cpu_mask(spdk_cpu_mask):

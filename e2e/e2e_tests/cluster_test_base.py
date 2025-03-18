@@ -10,7 +10,18 @@ import traceback
 import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+import string, random
 
+
+def generate_random_sequence(length):
+    letters = string.ascii_uppercase  # A-Z
+    numbers = string.digits  # 0-9
+    all_chars = letters + numbers  # Allowed characters
+
+    first_char = random.choice(letters)  # First character must be a letter
+    remaining_chars = ''.join(random.choices(all_chars, k=length-1))  # Next 14 characters
+
+    return first_char + remaining_chars
 
 class TestClusterBase:
     def __init__(self, **kwargs):
@@ -18,7 +29,7 @@ class TestClusterBase:
         self.cluster_id = os.environ.get("CLUSTER_ID")
 
         self.api_base_url = os.environ.get("API_BASE_URL")
-        self.client_machine = os.environ.get("CLIENT_IP", "")
+        self.client_machines = os.environ.get("CLIENT_IP", "")
         self.headers = {
             "Content-Type": "application/json",
             "Authorization": f"{self.cluster_id} {self.cluster_secret}"
@@ -42,7 +53,7 @@ class TestClusterBase:
         self.chunk_bs = kwargs.get("chunk_bs", 4096)
         self.k8s_test = kwargs.get("k8s_run", False)
         self.pool_name = "test_pool"
-        self.lvol_name = f"test_lvl_{self.ndcs}_{self.npcs}"
+        self.lvol_name = f"test_lvl_{generate_random_sequence(4)}"
         self.mount_path = f"{Path.home()}/test_location"
         self.log_path = f"{os.path.dirname(self.mount_path)}/log_file.log"
         self.base_cmd = os.environ.get("SBCLI_CMD", "sbcli-dev")
@@ -90,15 +101,17 @@ class TestClusterBase:
             )
             sleep_n_sec(2)
             self.ssh_obj.set_aio_max_nr(node)
-        if self.client_machine:
-            self.logger.info(f"**Connecting to client machine** - {self.client_machine}")
-            self.ssh_obj.connect(
-                address=self.client_machine,
-                bastion_server_address=self.bastion_server,
-            )
-            sleep_n_sec(2)
+        if self.client_machines:
+            self.client_machines = self.client_machines.strip().split(" ")
+            for client in self.client_machines:
+                self.logger.info(f"**Connecting to client machine** - {client}")
+                self.ssh_obj.connect(
+                    address=client,
+                    bastion_server_address=self.bastion_server,
+                )
+                sleep_n_sec(2)
 
-        self.fio_node = self.client_machine if self.client_machine else self.mgmt_nodes[0]
+        self.fio_node = self.client_machines if self.client_machines else [self.mgmt_nodes[0]]
 
         # command = "python3 -c \"from importlib.metadata import version;print(f'SBCLI Version: {version('''sbcli-dev''')}')\""
         # self.ssh_obj.exec_command(
@@ -108,22 +121,26 @@ class TestClusterBase:
         sleep_n_sec(2)
         self.unmount_all(base_path=self.mount_path)
         sleep_n_sec(2)
-        self.ssh_obj.unmount_path(node=self.fio_node,
-                                  device=self.mount_path)
-        sleep_n_sec(2)
-        self.ssh_obj.delete_all_snapshots(node=self.mgmt_nodes[0])
-        sleep_n_sec(2)
+        for node in self.fio_node:
+            self.ssh_obj.unmount_path(node=node,
+                                      device=self.mount_path)
+            sleep_n_sec(2)
         self.disconnect_lvols()
         sleep_n_sec(2)
         self.sbcli_utils.delete_all_lvols()
         sleep_n_sec(2)
+        self.ssh_obj.delete_all_snapshots(node=self.mgmt_nodes[0])
+        sleep_n_sec(2)
         self.sbcli_utils.delete_all_storage_pools()
-        session = boto3.Session(
-            aws_access_key_id=os.environ.get("AWS_ACCESS_KEY_ID"),
-            aws_secret_access_key=os.environ.get("AWS_SECRET_ACCESS_KEY"),
-            region_name=os.environ.get("AWS_REGION")
-        )
-        self.ec2_resource = session.resource('ec2')
+        aws_access_key = os.environ.get("AWS_ACCESS_KEY_ID", None)
+        aws_secret_key = os.environ.get("AWS_SECRET_ACCESS_KEY", None)
+        if aws_access_key and aws_secret_key:
+            session = boto3.Session(
+                aws_access_key_id=aws_access_key,
+                aws_secret_access_key=aws_secret_key,
+                region_name=os.environ.get("AWS_REGION")
+            )
+            self.ec2_resource = session.resource('ec2')
 
         timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
         # Construct the logs path with test name and timestamp
@@ -162,22 +179,23 @@ class TestClusterBase:
             )
             self.runner_k8s_log.start_logging()
         
-        self.ssh_obj.delete_old_folders(
-            node=self.fio_node,
-            folder_path=os.path.join(Path.home(), "container-logs"),
-            days=3
-        )
+        for node in self.fio_node:
+            self.ssh_obj.delete_old_folders(
+                node=node,
+                folder_path=os.path.join(Path.home(), "container-logs"),
+                days=3
+            )
 
-        self.ssh_obj.make_directory(node=self.fio_node, dir_name=self.docker_logs_path)
+            self.ssh_obj.make_directory(node=node, dir_name=self.docker_logs_path)
 
-        self.ssh_obj.check_tmux_installed(node_ip=self.fio_node)
+            self.ssh_obj.check_tmux_installed(node_ip=node)
 
-        self.ssh_obj.exec_command(node=self.fio_node,
-                                command="sudo tmux kill-server")
-        self.ssh_obj.start_tcpdump_logging(node_ip=self.fio_node,
-                                        log_dir=self.docker_logs_path)
-        self.ssh_obj.start_netstat_dmesg_logging(node_ip=self.fio_node,
-                                                log_dir=self.docker_logs_path)
+            self.ssh_obj.exec_command(node=node,
+                                      command="sudo tmux kill-server")
+            self.ssh_obj.start_tcpdump_logging(node_ip=node,
+                                               log_dir=self.docker_logs_path)
+            self.ssh_obj.start_netstat_dmesg_logging(node_ip=node,
+                                                     log_dir=self.docker_logs_path)
 
         self.logger.info("Started log monitoring for all storage nodes.")
 
@@ -197,17 +215,20 @@ class TestClusterBase:
             for cmd in sysctl_commands:
                 self.ssh_obj.exec_command(node, cmd)
         for cmd in sysctl_commands:
-            self.ssh_obj.exec_command(self.fio_node, cmd)
-        self.ssh_obj.set_aio_max_nr(self.fio_node)
+            for node in self.fio_node:
+                self.ssh_obj.exec_command(node, cmd)
+        for node in self.fio_node:
+            self.ssh_obj.set_aio_max_nr(node)
     
-        self.logger.info(f"Configured TCP sysctl settings on all the nodes!!")
+        self.logger.info("Configured TCP sysctl settings on all the nodes!!")
 
     def cleanup_logs(self):
         """Cleans logs
         """
         base_path = Path.home()
-        self.ssh_obj.delete_file_dir(self.fio_node, entity=f"{base_path}/*.log*", recursive=True)
-        self.ssh_obj.delete_file_dir(self.fio_node, entity=f"{base_path}/*.state*", recursive=True)
+        for node in self.fio_node:
+            self.ssh_obj.delete_file_dir(node, entity=f"{base_path}/*.log*", recursive=True)
+            self.ssh_obj.delete_file_dir(node, entity=f"{base_path}/*.state*", recursive=True)
         self.ssh_obj.delete_file_dir(self.mgmt_nodes[0], entity="/etc/simplyblock/*", recursive=True)
         self.ssh_obj.delete_file_dir(self.mgmt_nodes[0], entity=f"{base_path}/*.txt*", recursive=True)
         for node in self.storage_nodes:
@@ -296,24 +317,29 @@ class TestClusterBase:
                     for line in lines:
                         self.logger.info(f"  -> {line}")
 
-        self.ssh_obj.exec_command(node=self.fio_node,
-                                  command="sudo tmux kill-server")
+        for node in self.fio_node:
+            self.ssh_obj.exec_command(node=node,
+                                      command="sudo tmux kill-server")
         
-        self.ssh_obj.kill_processes(node=self.fio_node,
-                                    process_name="fio")
+            self.ssh_obj.kill_processes(node=node,
+                                        process_name="fio")
         
 
         retry_check = 100
         while retry_check:
-            fio_process = self.ssh_obj.find_process_name(
-                node=self.fio_node,
-                process_name="fio --name"
-            )
-            if len(fio_process) <= 2:
+            exit_while = True
+            for node in self.fio_node:
+                fio_process = self.ssh_obj.find_process_name(
+                    node=node,
+                    process_name="fio --name"
+                )
+                exit_while = exit_while and len(fio_process) <= 2
+            if exit_while:
                 break
-            self.logger.info(f"Fio process should exit after kill. Still waiting: {fio_process}")
-            retry_check -= 1
-            sleep_n_sec(10)
+            else:
+                self.logger.info(f"Fio process should exit after kill. Still waiting: {fio_process}")
+                retry_check -= 1
+                sleep_n_sec(10)
 
         if retry_check <=0:
             self.logger.info("FIO did not exit completely after kill and wait. "
@@ -321,32 +347,35 @@ class TestClusterBase:
                              "Needs manual cleanup.")
 
         try:
-            self.ssh_obj.delete_all_snapshots(node=self.mgmt_nodes[0])
-            sleep_n_sec(2)
             lvols = self.sbcli_utils.list_lvols()
             self.unmount_all(base_path=self.mount_path)
             self.unmount_all(base_path="/mnt/")
             sleep_n_sec(2)
-            self.ssh_obj.unmount_path(node=self.fio_node,
-                                    device=self.mount_path)
+            for node in self.fio_node:
+                self.ssh_obj.unmount_path(node=node,
+                                          device=self.mount_path)
             sleep_n_sec(2)
             if lvols is not None:
                 for _, lvol_id in lvols.items():
                     lvol_details = self.sbcli_utils.get_lvol_details(lvol_id=lvol_id)
                     nqn = lvol_details[0]["nqn"]
-                    self.ssh_obj.unmount_path(node=self.fio_node,
-                                              device=self.mount_path)
-                    sleep_n_sec(2)
-                    self.ssh_obj.exec_command(node=self.fio_node,
-                                            command=f"sudo nvme disconnect -n {nqn}")
-                    sleep_n_sec(2)
+                    for node in self.fio_node:
+                        self.ssh_obj.unmount_path(node=node,
+                                                  device=self.mount_path)
+                        sleep_n_sec(2)
+                        self.ssh_obj.exec_command(node=node,
+                                                  command=f"sudo nvme disconnect -n {nqn}")
+                        sleep_n_sec(2)
                 self.disconnect_lvols()
                 sleep_n_sec(2)
                 self.sbcli_utils.delete_all_lvols()
                 sleep_n_sec(2)
+            self.ssh_obj.delete_all_snapshots(node=self.mgmt_nodes[0])
+            sleep_n_sec(2)
             self.sbcli_utils.delete_all_storage_pools()
             sleep_n_sec(2)
-            self.ssh_obj.remove_dir(self.fio_node, "/mnt/*")
+            for node in self.fio_node:
+                self.ssh_obj.remove_dir(node, "/mnt/*")
             for node, ssh in self.ssh_obj.ssh_connections.items():
                 self.logger.info(f"Closing node ssh connection for {node}")
                 ssh.close()
@@ -482,34 +511,51 @@ class TestClusterBase:
         self.logger.info("Unmounting all mount points")
         if not base_path:
             base_path = self.mount_path
-        mount_points = self.ssh_obj.get_mount_points(node=self.fio_node, base_path=base_path)
-        for mount_point in mount_points:
-            self.logger.info(f"Unmounting {mount_point}")
-            self.ssh_obj.unmount_path(node=self.fio_node, device=mount_point)
+        for node in self.fio_node:
+            mount_points = self.ssh_obj.get_mount_points(node=node, base_path=base_path)
+            for mount_point in mount_points:
+                self.logger.info(f"Unmounting {mount_point}")
+                self.ssh_obj.unmount_path(node=node, device=mount_point)
 
     def remove_mount_dirs(self):
         """ Remove all mount point directories """
         self.logger.info("Removing all mount point directories")
-        mount_dirs = self.ssh_obj.get_mount_points(node=self.fio_node, base_path=self.mount_path)
-        for mount_dir in mount_dirs:
-            self.logger.info(f"Removing directory {mount_dir}")
-            self.ssh_obj.remove_dir(node=self.fio_node, dir_path=mount_dir)
+        for node in self.fio_node:
+            mount_dirs = self.ssh_obj.get_mount_points(node=node, base_path=self.mount_path)
+            for mount_dir in mount_dirs:
+                self.logger.info(f"Removing directory {mount_dir}")
+                self.ssh_obj.remove_dir(node=node, dir_path=mount_dir)
     
     def disconnect_lvol(self, lvol_device):
         """Disconnects the logical volume."""
-        nqn_lvol = self.ssh_obj.get_nvme_subsystems(node=self.fio_node,
-                                                    nqn_filter=lvol_device)
-        for nqn in nqn_lvol:
-            self.logger.info(f"Disconnecting NVMe subsystem: {nqn}")
-            self.ssh_obj.disconnect_nvme(node=self.fio_node, nqn_grep=nqn)
+        if isinstance(self.fio_node, list):
+            for node in self.fio_node:
+                nqn_lvol = self.ssh_obj.get_nvme_subsystems(node=node,
+                                                            nqn_filter=lvol_device)
+                for nqn in nqn_lvol:
+                    self.logger.info(f"Disconnecting NVMe subsystem: {nqn}")
+                    self.ssh_obj.disconnect_nvme(node=node, nqn_grep=nqn)
+        else:
+            nqn_lvol = self.ssh_obj.get_nvme_subsystems(node=self.fio_node,
+                                                        nqn_filter=lvol_device)
+            for nqn in nqn_lvol:
+                self.logger.info(f"Disconnecting NVMe subsystem: {nqn}")
+                self.ssh_obj.disconnect_nvme(node=self.fio_node, nqn_grep=nqn)
 
     def disconnect_lvols(self):
         """ Disconnect all NVMe devices with NQN containing 'lvol' """
         self.logger.info("Disconnecting all NVMe devices with NQN containing 'lvol'")
-        subsystems = self.ssh_obj.get_nvme_subsystems(node=self.fio_node, nqn_filter="lvol")
-        for subsys in subsystems:
-            self.logger.info(f"Disconnecting NVMe subsystem: {subsys}")
-            self.ssh_obj.disconnect_nvme(node=self.fio_node, nqn_grep=subsys)
+        if isinstance(self.fio_node, list):  
+            for node in self.fio_node:
+                subsystems = self.ssh_obj.get_nvme_subsystems(node=node, nqn_filter="lvol")
+                for subsys in subsystems:
+                    self.logger.info(f"Disconnecting NVMe subsystem: {subsys}")
+                    self.ssh_obj.disconnect_nvme(node=node, nqn_grep=subsys)
+        else:
+            subsystems = self.ssh_obj.get_nvme_subsystems(node=self.fio_node, nqn_filter="lvol")
+            for subsys in subsystems:
+                self.logger.info(f"Disconnecting NVMe subsystem: {subsys}")
+                self.ssh_obj.disconnect_nvme(node=self.fio_node, nqn_grep=subsys)
 
     def delete_snapshots(self):
         """ Delete all snapshots """

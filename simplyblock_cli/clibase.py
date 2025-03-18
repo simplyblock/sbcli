@@ -461,6 +461,9 @@ class CLIWrapperBase:
         return mgmt_ops.remove_mgmt_node(args.node_id)
 
     def storage_pool__add(self, sub_command, args):
+        has_secret = args.has_secret
+        if has_secret is None:
+            has_secret = False
         return pool_controller.add_pool(
             args.name,
             self.parse_size(args.pool_max),
@@ -469,7 +472,7 @@ class CLIWrapperBase:
             args.max_rw_mbytes,
             args.max_r_mbytes,
             args.max_w_mbytes,
-            args.has_secret,
+            has_secret,
             args.cluster_id
         )
 
@@ -783,7 +786,7 @@ class CLIWrapperBase:
                 size_string = size_string.replace("b", "")
                 size_number = int(size_string[:-1])
                 size_v = size_string[-1]
-                one_k = 1000
+                one_k = constants.ONE_KB
                 multi = 0
                 if size_v == "k":
                     multi = 1
