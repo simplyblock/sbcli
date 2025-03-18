@@ -2952,16 +2952,17 @@ def recreate_lvstore(snode):
                 return False, msg
 
         lvol_obj = db_controller.get_lvol_by_id(lvol.get_id())
-        logger.info("Add BDev to subsystem")
-        ret = rpc_client.nvmf_subsystem_add_ns(lvol.nqn, lvol.top_bdev, lvol.uuid, lvol.guid)
-        if ret:
-            if not prim_node_suspend:
-                for iface in snode.data_nics:
-                    if iface.ip4_address:
-                        tr_type = iface.get_transport_type()
-                        logger.info("adding listener for %s on IP %s" % (lvol.nqn, iface.ip4_address))
-                        ret = rpc_client.listeners_create(
-                            lvol.nqn, tr_type, iface.ip4_address, lvol.subsys_port,"optimized")
+
+        if not prim_node_suspend:
+            for iface in snode.data_nics:
+                if iface.ip4_address:
+                    tr_type = iface.get_transport_type()
+                    logger.info("adding listener for %s on IP %s" % (lvol.nqn, iface.ip4_address))
+                    ret = rpc_client.listeners_create(
+                        lvol.nqn, tr_type, iface.ip4_address, lvol.subsys_port,"optimized")
+                    logger.info("Add BDev to subsystem")
+                    ret = rpc_client.nvmf_subsystem_add_ns(lvol.nqn, lvol.top_bdev, lvol.uuid, lvol.guid)
+
         if not ret:
             logger.error(f"Failed to recreate LVol: {lvol_obj.get_id()} on node: {snode.get_id()}")
             lvol_obj.status = LVol.STATUS_OFFLINE
