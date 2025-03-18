@@ -1053,7 +1053,11 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
 
                 logger.debug(f"Free cores {cores}")
                 if len(cores) >= spdk_cpu_count:
-                    spdk_cpu_mask = hex(sum(cores[:spdk_cpu_count]) << 1)
+                    core_int = 0
+                    for index in range(spdk_cpu_count):
+                        core_int += int(math.pow(2, cores[index]))
+                    spdk_cpu_mask = hex(core_int)
+
                     logger.info(f"SPDK CPU cores mask: {spdk_cpu_mask}")
                 else:
                     spdk_cpu_mask = hex(int(math.pow(2, cpu_count)) - 2)
