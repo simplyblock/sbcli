@@ -25,10 +25,10 @@ def create_snapshot():
     if 'snapshot_name' not in cl_data:
         return utils.get_response(None, "missing required param: snapshot_name", 400)
 
-    snapID = snapshot_controller.add(
+    snapID, err = snapshot_controller.add(
         cl_data['lvol_id'],
         cl_data['snapshot_name'])
-    return utils.get_response(snapID)
+    return utils.get_response(snapID, err)
 
 
 @bp.route('/snapshot/<string:uuid>', methods=['DELETE'])
