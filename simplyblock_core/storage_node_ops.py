@@ -1437,7 +1437,7 @@ def get_number_of_online_devices(cluster_id):
                     dev_count += 1
 
 
-def delete_storage_node(node_id):
+def delete_storage_node(node_id, force=False):
     db_controller = DBController()
     snode = db_controller.get_storage_node_by_id(node_id)
     if not snode:
@@ -1448,10 +1448,14 @@ def delete_storage_node(node_id):
         logger.error(f"Node must be in removed status")
         return False
 
-    task_id = tasks_controller.get_active_node_task(snode.cluster_id, snode.get_id())
-    if task_id:
-        logger.error(f"Task found: {task_id}, can not delete storage node")
-        return False
+    tasks = tasks_controller.get_active_node_tasks(snode.cluster_id, snode.get_id())
+    if tasks:
+        logger.error(f"Tasks found: {len(tasks)}, can not delete storage node, or use --force")
+        if not force:
+            return False
+        for task in tasks:
+            tasks_controller.cancel_task(task.uuid)
+        time.sleep(1)
 
     snode.remove(db_controller.kv_store)
 
@@ -1473,20 +1477,16 @@ def remove_storage_node(node_id, force_remove=False, force_migrate=False):
         return False
 
     if snode.status == StorageNode.STATUS_ONLINE:
-        logger.error(f"Can not remove online node: {node_id}")
+        logger.warning(f"Can not remove online node: {node_id}")
         return False
 
-    task_id = tasks_controller.get_active_node_task(snode.cluster_id, snode.get_id())
-    if task_id:
-        logger.error(f"Task found: {task_id}, can not remove storage node")
+    tasks = tasks_controller.get_active_node_tasks(snode.cluster_id, snode.get_id())
+    if tasks:
+        logger.warning(f"Task found: {len(tasks)}, can not remove storage node, or use --force")
         if force_remove is False:
             return False
-
-        tasks = db_controller.get_job_tasks(snode.cluster_id)
         for task in tasks:
-            if task.node_id == node_id:
-                if task.status != JobSchedule.STATUS_DONE and task.canceled is False:
-                    tasks_controller.cancel_task(task.get_id())
+            tasks_controller.cancel_task(task.uuid)
 
     lvols = db_controller.get_lvols_by_node_id(node_id)
     if lvols:
@@ -1498,7 +1498,7 @@ def remove_storage_node(node_id, force_remove=False, force_migrate=False):
             for lvol in lvols:
                 lvol_controller.delete_lvol(lvol.get_id(), True)
         else:
-            logger.error("LVols found on the storage node, use --force-remove or --force-migrate")
+            logger.warning("LVols found on the storage node, use --force-remove or --force-migrate")
             return False
 
     snaps = db_controller.get_snapshots()
@@ -1527,7 +1527,7 @@ def remove_storage_node(node_id, force_remove=False, force_migrate=False):
         logger.info("Removing JM")
         device_controller.remove_jm_device(snode.jm_device.get_id(), force=True)
 
-    logger.debug("Leaving swarm...")
+    logger.info("Leaving swarm...")
     try:
         node_docker = docker.DockerClient(base_url=f"tcp://{snode.mgmt_ip}:2375", version="auto")
         cluster_docker = utils.get_docker_client(snode.cluster_id)
@@ -2898,8 +2898,18 @@ def recreate_lvstore(snode):
     sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
     sec_node_api = SNodeClient(sec_node.api_endpoint)
 
-    prim_node_suspend = False
     lvol_list = db_controller.get_lvols_by_node_id(snode.get_id())
+    for lvol in lvol_list:
+        logger.info("creating subsystem %s", lvol.nqn)
+        rpc_client.subsystem_create(lvol.nqn, 'sbcli-cn', lvol.uuid, 1)
+        # add listeners
+        for iface in snode.data_nics:
+            if iface.ip4_address:
+                tr_type = iface.get_transport_type()
+                logger.info("adding listener for %s on IP %s" % (lvol.nqn, iface.ip4_address))
+                ret = rpc_client.listeners_create(lvol.nqn, tr_type, iface.ip4_address, lvol.subsys_port, "inaccessible")
+
+    prim_node_suspend = False
     if sec_node:
         if sec_node.status == StorageNode.STATUS_UNREACHABLE:
             prim_node_suspend = True
@@ -2907,7 +2917,7 @@ def recreate_lvstore(snode):
             sec_rpc_client = RPCClient(sec_node.mgmt_ip, sec_node.rpc_port, sec_node.rpc_username, sec_node.rpc_password)
             sec_node.lvstore_status = "in_creation"
             sec_node.write_to_db()
-            time.sleep(3)
+            time.sleep(1)
 
             sec_node_api.firewall_set_port(snode.lvol_subsys_port, "tcp", "block")
             tcp_ports_events.port_deny(sec_node, snode.lvol_subsys_port)
@@ -2928,14 +2938,35 @@ def recreate_lvstore(snode):
         ret = rpc_client.jc_explicit_synchronization(snode.jm_vuid)
         logger.info(f"JM Sync res: {ret}")
 
-    lvol_ana_state = "optimized"
-    if prim_node_suspend:
-        lvol_ana_state = "inaccessible"
+    # lvol_ana_state = "optimized"
+    # if prim_node_suspend:
+    #     lvol_ana_state = "inaccessible"
 
     for lvol in lvol_list:
+        # is_created, error = lvol_controller.recreate_lvol_on_node(lvol_obj, snode, ana_state=lvol_ana_state)
+        # rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
+
+        base = f"{lvol.lvs_name}/{lvol.lvol_bdev}"
+
+        if "crypto" in lvol.lvol_type:
+            ret = lvol_controller._create_crypto_lvol(
+                rpc_client, lvol.crypto_bdev, base, lvol.crypto_key1, lvol.crypto_key2)
+            if not ret:
+                msg = f"Failed to create crypto lvol on node {snode.get_id()}"
+                logger.error(msg)
+                return False, msg
+
         lvol_obj = db_controller.get_lvol_by_id(lvol.get_id())
-        is_created, error = lvol_controller.recreate_lvol_on_node(lvol_obj, snode, ana_state=lvol_ana_state)
-        if error:
+        logger.info("Add BDev to subsystem")
+        ret = rpc_client.nvmf_subsystem_add_ns(lvol.nqn, lvol.top_bdev, lvol.uuid, lvol.guid)
+        if ret:
+            if not prim_node_suspend:
+                for iface in snode.data_nics:
+                    if iface.ip4_address:
+                        ret = rpc_client.nvmf_subsystem_listener_set_ana_state(
+                            lvol.nqn, iface.ip4_address, lvol.subsys_port, True)
+
+        if not ret:
             logger.error(f"Failed to recreate LVol: {lvol_obj.get_id()} on node: {snode.get_id()}")
             lvol_obj.status = LVol.STATUS_OFFLINE
         else:
