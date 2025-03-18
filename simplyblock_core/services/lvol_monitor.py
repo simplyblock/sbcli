@@ -12,7 +12,7 @@ from simplyblock_core.rpc_client import RPCClient
 
 logger = utils.get_logger(__name__)
 
-utils.init_sentry_sdk()
+utils.init_sentry_sdk(__name__)
 
 def set_lvol_status(lvol, status):
     if lvol.status != status:
