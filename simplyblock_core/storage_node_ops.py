@@ -2902,12 +2902,6 @@ def recreate_lvstore(snode):
     for lvol in lvol_list:
         logger.info("creating subsystem %s", lvol.nqn)
         rpc_client.subsystem_create(lvol.nqn, 'sbcli-cn', lvol.uuid, 1)
-        # add listeners
-        for iface in snode.data_nics:
-            if iface.ip4_address:
-                tr_type = iface.get_transport_type()
-                logger.info("adding listener for %s on IP %s" % (lvol.nqn, iface.ip4_address))
-                ret = rpc_client.listeners_create(lvol.nqn, tr_type, iface.ip4_address, lvol.subsys_port, "inaccessible")
 
     prim_node_suspend = False
     if sec_node:
@@ -2945,6 +2939,7 @@ def recreate_lvstore(snode):
     for lvol in lvol_list:
         # is_created, error = lvol_controller.recreate_lvol_on_node(lvol_obj, snode, ana_state=lvol_ana_state)
         # rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
+        # add listeners
 
         base = f"{lvol.lvs_name}/{lvol.lvol_bdev}"
 
@@ -2963,9 +2958,10 @@ def recreate_lvstore(snode):
             if not prim_node_suspend:
                 for iface in snode.data_nics:
                     if iface.ip4_address:
-                        ret = rpc_client.nvmf_subsystem_listener_set_ana_state(
-                            lvol.nqn, iface.ip4_address, lvol.subsys_port, True)
-
+                        tr_type = iface.get_transport_type()
+                        logger.info("adding listener for %s on IP %s" % (lvol.nqn, iface.ip4_address))
+                        ret = rpc_client.listeners_create(
+                            lvol.nqn, tr_type, iface.ip4_address, lvol.subsys_port,"optimized")
         if not ret:
             logger.error(f"Failed to recreate LVol: {lvol_obj.get_id()} on node: {snode.get_id()}")
             lvol_obj.status = LVol.STATUS_OFFLINE
