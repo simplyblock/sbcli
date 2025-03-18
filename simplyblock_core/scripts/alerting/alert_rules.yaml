@@ -658,7 +658,7 @@ groups:
           for: 2m
           annotations:
             description: The rule alerts for offline lvols.
-            summary: lvol {{ $labels.lvol }} in storage node {{$labels.snode }} is offline
+            summary: lvol {{ $labels.lvol }} in cluster {{$labels.cluster }} is offline
           labels:
             app: simplyblock
           isPaused: false
