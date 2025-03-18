@@ -1062,7 +1062,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
                 else:
                     spdk_cpu_mask = hex(int(math.pow(2, cpu_count)) - 2)
             else:
-                logger.error("SPDK CPU count is too low")
+                logger.error(f"Free CPU cores: {cpu_count - 1 - len(used_cores)} less than required: {spdk_cpu_count}")
                 return False
         else:
             spdk_cpu_mask = hex(int(math.pow(2, cpu_count))-2)
