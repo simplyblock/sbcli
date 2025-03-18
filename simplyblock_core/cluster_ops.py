@@ -605,6 +605,7 @@ def cluster_activate(cl_id, force=False, force_lvstore_create=False):
     records = db_controller.get_cluster_capacity(cluster)
     max_size = records[0]['size_total']
 
+    used_nodes_as_sec = []
     snodes = db_controller.get_storage_nodes_by_cluster_id(cl_id)
     if cluster.ha_type == "ha":
         for snode in snodes:
@@ -614,6 +615,7 @@ def cluster_activate(cl_id, force=False, force_lvstore_create=False):
                 sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
                 sec_node.lvstore_stack_secondary_1 = snode.get_id()
                 sec_node.write_to_db()
+                used_nodes_as_sec.append(snode.secondary_node_id)
                 continue
             secondary_nodes = storage_node_ops.get_secondary_nodes(snode)
             if not secondary_nodes:
@@ -626,6 +628,7 @@ def cluster_activate(cl_id, force=False, force_lvstore_create=False):
             sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
             sec_node.lvstore_stack_secondary_1 = snode.get_id()
             sec_node.write_to_db()
+            used_nodes_as_sec.append(snode.secondary_node_id)
 
     snodes = db_controller.get_storage_nodes_by_cluster_id(cl_id)
     for snode in snodes:
@@ -1087,12 +1090,12 @@ def get_iostats_history(cluster_id, history_string, records_count=20, parse_size
     db_controller = DBController()
     cluster = db_controller.get_cluster_by_id(cluster_id)
     if not cluster:
-        logger.error(f"Cluster not found {cluster_id}")
+        logger.warning(f"Cluster not found {cluster_id}")
         return False
 
     nodes = db_controller.get_storage_nodes_by_cluster_id(cluster_id)
     if not nodes:
-        logger.error("no nodes found")
+        logger.warning("no nodes found")
         return False
 
     if history_string:

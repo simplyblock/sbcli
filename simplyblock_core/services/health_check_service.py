@@ -66,7 +66,7 @@ while True:
         cluster_id = cluster.get_id()
         snodes = db_controller.get_storage_nodes_by_cluster_id(cluster_id)
         if not snodes:
-            logger.error("storage nodes list is empty")
+            logger.warning("storage nodes list is empty")
 
         for snode in snodes:
             logger.info("Node: %s, status %s", snode.get_id(), snode.status)
