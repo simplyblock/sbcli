@@ -1129,7 +1129,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
     # for jm
     number_of_alceml_devices += 1
     # if is_secondary_node:
-    number_of_distribs *= 2
+    # number_of_distribs *= 2
     small_pool_count, large_pool_count = utils.calculate_pool_count(
         number_of_alceml_devices, number_of_distribs, req_cpu_count, len(poller_cpu_cores) or req_cpu_count)
 
@@ -2091,7 +2091,7 @@ def list_storage_nodes(is_json, cluster_id=None):
             "Status": node.status,
             "Health": node.health_check,
             "Up time": uptime,
-            "CPU": f"{len(utils.hexa_to_cpu_list(node.spdk_cpu_mask))}-{node.spdk_cpu_mask}",
+            "CPU": f"{len(utils.hexa_to_cpu_list(node.spdk_cpu_mask))} {format(int(node.spdk_cpu_mask, 16), f'#0{node.cpu+2}b')}",
             "MEM": utils.humanbytes(node.spdk_mem),
             "SPDK P": node.rpc_port,
             "LVOL P": node.lvol_subsys_port,
