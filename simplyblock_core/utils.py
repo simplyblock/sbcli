@@ -783,4 +783,7 @@ def init_sentry_sdk(name=None):
     if name:
         params["server_name"] = name
     sentry_sdk.init(**params)
+    # from sentry_sdk import set_level
+    # set_level("critical")
+
     return True

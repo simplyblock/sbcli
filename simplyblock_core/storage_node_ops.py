@@ -951,7 +951,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
              small_bufsize=0, large_bufsize=0, spdk_cpu_mask=None,
              num_partitions_per_dev=0, jm_percent=0, number_of_devices=0, enable_test_device=False,
              namespace=None, number_of_distribs=2, enable_ha_jm=False, is_secondary_node=False, id_device_by_nqn=False,
-             partition_size="", ha_jm_count=3, spdk_hp_mem=None, ssd_pcie=None):
+             partition_size="", ha_jm_count=3, spdk_hp_mem=None, ssd_pcie=None, spdk_cpu_count=0):
 
     db_controller = DBController()
     kv_store = db_controller.kv_store
@@ -1020,12 +1020,6 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
 
     poller_cpu_cores = []
 
-    if not spdk_cpu_mask:
-        spdk_cpu_mask = hex(int(math.pow(2, cpu_count))-2)
-
-    spdk_cores = utils.hexa_to_cpu_list(spdk_cpu_mask)
-    req_cpu_count = len(spdk_cores)
-
     used_cores=[]
     used_ssd=[]
     #check if cpu cores are not used
@@ -1035,11 +1029,41 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
             if node.spdk_cpu_mask:
                 used_cores.extend(utils.hexa_to_cpu_list(node.spdk_cpu_mask))
 
-    for core_number in spdk_cores:
-        if core_number in used_cores:
-            logger.info(f"Core {core_number} already used")
-            return False
 
+    if spdk_cpu_mask:
+        spdk_cores = utils.hexa_to_cpu_list(spdk_cpu_mask)
+        req_cpu_count = len(spdk_cores)
+
+        for core_number in spdk_cores:
+            if core_number in used_cores:
+                logger.error(f"Core {core_number} already used")
+                return False
+    else:
+        if spdk_cpu_count and spdk_cpu_count > 0:
+            logger.info(f"SPDK required CPU count is {spdk_cpu_count}")
+            logger.info(f"Total server CPU cores are {cpu_count - 1}")
+
+            if cpu_count - 1 - len(used_cores) > spdk_cpu_count:
+                logger.info(f"Free server CPU cores {cpu_count - 1 - len(used_cores)}")
+
+                cores = []
+                for index in range(spdk_cpu_count):
+                    for c in range(cpu_count - 1):
+                        if c + 1 not in used_cores:
+                            cores.append(c + 1)
+                            continue
+                if len(cores) == spdk_cpu_count:
+                    spdk_cpu_mask = hex(sum(cores) << 1)
+                    logger.info(f"SPDK CPU cores mask: {spdk_cpu_mask}")
+                else:
+                    spdk_cpu_mask = hex(int(math.pow(2, cpu_count)) - 2)
+            else:
+                logger.error("SPDK CPU count is too low")
+                return False
+        else:
+            spdk_cpu_mask = hex(int(math.pow(2, cpu_count))-2)
+        spdk_cores = utils.hexa_to_cpu_list(spdk_cpu_mask)
+        req_cpu_count = len(spdk_cores)
 
     if ssd_pcie is None:
         ssd_pcie = []
@@ -1100,8 +1124,8 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
     number_of_alceml_devices = number_of_devices * number_of_split
     # for jm
     number_of_alceml_devices += 1
-    if is_secondary_node:
-        number_of_distribs *= 5
+    # if is_secondary_node:
+    number_of_distribs *= 2
     small_pool_count, large_pool_count = utils.calculate_pool_count(
         number_of_alceml_devices, number_of_distribs, req_cpu_count, len(poller_cpu_cores) or req_cpu_count)
 
@@ -1117,6 +1141,8 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
         logger.info("Node Memory info")
         logger.info(f"Total: {utils.humanbytes(memory_details['total'])}")
         logger.info(f"Free: {utils.humanbytes(memory_details['free'])}")
+        logger.info(f"huge_total: {utils.humanbytes(memory_details['huge_total'])}")
+        logger.info(f"huge_free: {utils.humanbytes(memory_details['huge_free'])}")
         logger.info(f"Minimum required huge pages memory is : {utils.humanbytes(minimum_hp_memory)}")
     else:
         logger.error(f"Cannot get memory info from the instance.. Exiting")
@@ -2061,7 +2087,7 @@ def list_storage_nodes(is_json, cluster_id=None):
             "Status": node.status,
             "Health": node.health_check,
             "Up time": uptime,
-            "CPU": node.spdk_cpu_mask,
+            "CPU": f"{len(utils.hexa_to_cpu_list(node.spdk_cpu_mask))} - {node.spdk_cpu_mask}",
             "MEM": utils.humanbytes(node.spdk_mem),
             "SPDK P": node.rpc_port,
             "LVOL P": node.lvol_subsys_port,

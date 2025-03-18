@@ -79,6 +79,7 @@ class CLIWrapperBase:
         ha_jm_count = args.ha_jm_count
         spdk_mem = args.spdk_mem
         ssd_pcie = args.ssd_pcie
+        spdk_cpu_count = args.vcpu_count
 
         out = storage_ops.add_node(
             cluster_id=cluster_id,
@@ -106,6 +107,7 @@ class CLIWrapperBase:
             ha_jm_count=ha_jm_count,
             spdk_hp_mem=spdk_mem,
             ssd_pcie=ssd_pcie,
+            spdk_cpu_count=spdk_cpu_count,
         )
 
         return out
