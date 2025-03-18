@@ -786,7 +786,7 @@ class CLIWrapperBase:
                 size_string = size_string.replace("b", "")
                 size_number = int(size_string[:-1])
                 size_v = size_string[-1]
-                one_k = 1000
+                one_k = constants.ONE_KB
                 multi = 0
                 if size_v == "k":
                     multi = 1

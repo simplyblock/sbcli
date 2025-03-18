@@ -101,7 +101,7 @@ def humanbytes(B):
     if not B:
         return "0"
     B = float(B)
-    KB = float(1000)
+    KB = float(constants.ONE_KB)
     MB = float(KB ** 2) # 1,048,576
     GB = float(KB ** 3) # 1,073,741,824
     TB = float(KB ** 4) # 1,099,511,627,776
@@ -623,7 +623,7 @@ def parse_size(size_string: str):
             size_string = size_string.replace("b", "")
             size_number = int(size_string[:-1])
             size_v = size_string[-1]
-            one_k = 1000
+            one_k = constants.ONE_KB
             multi = 0
             if size_v == "k":
                 multi = 1
