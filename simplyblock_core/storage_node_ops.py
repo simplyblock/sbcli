@@ -2911,7 +2911,7 @@ def recreate_lvstore(snode):
             sec_rpc_client = RPCClient(sec_node.mgmt_ip, sec_node.rpc_port, sec_node.rpc_username, sec_node.rpc_password)
             sec_node.lvstore_status = "in_creation"
             sec_node.write_to_db()
-            time.sleep(1)
+            time.sleep(3)
 
             sec_node_api.firewall_set_port(snode.lvol_subsys_port, "tcp", "block")
             tcp_ports_events.port_deny(sec_node, snode.lvol_subsys_port)
