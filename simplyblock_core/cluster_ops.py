@@ -705,6 +705,7 @@ def get_cluster_status(cl_id, is_json=False):
             data.append({
                 "UUID": dev.get_id(),
                 "Storage ID": dev.cluster_device_order,
+                "Physical label": dev.physical_label,
                 "Size": utils.humanbytes(dev.size),
                 "Hostname": node.hostname,
                 "Status": dev.status,
