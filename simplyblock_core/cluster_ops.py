@@ -580,7 +580,10 @@ def cluster_activate(cl_id, force=False, force_lvstore_create=False):
             return False
 
     ols_status = cluster.status
-    set_cluster_status(cl_id, Cluster.STATUS_IN_ACTIVATION)
+    if ols_status == Cluster.STATUS_IN_ACTIVATION:
+        ols_status = Cluster.STATUS_UNREADY
+    else:
+        set_cluster_status(cl_id, Cluster.STATUS_IN_ACTIVATION)
     snodes = db_controller.get_storage_nodes_by_cluster_id(cl_id)
     online_nodes = []
     dev_count = 0
@@ -602,21 +605,29 @@ def cluster_activate(cl_id, force=False, force_lvstore_create=False):
     records = db_controller.get_cluster_capacity(cluster)
     max_size = records[0]['size_total']
 
+    snodes = db_controller.get_storage_nodes_by_cluster_id(cl_id)
     if cluster.ha_type == "ha":
         for snode in snodes:
-            if snode.is_secondary_node or snode.secondary_node_id:  # pass
+            if snode.is_secondary_node:  # pass
+                continue
+            if snode.secondary_node_id:
+                sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
+                sec_node.lvstore_stack_secondary_1 = snode.get_id()
+                sec_node.write_to_db()
                 continue
             secondary_nodes = storage_node_ops.get_secondary_nodes(snode)
             if not secondary_nodes:
                 logger.error(f"Failed to activate cluster, No enough secondary nodes")
                 set_cluster_status(cl_id, ols_status)
                 return False
+            snode = db_controller.get_storage_node_by_id(snode.get_id())
             snode.secondary_node_id = secondary_nodes[0]
             snode.write_to_db()
             sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
             sec_node.lvstore_stack_secondary_1 = snode.get_id()
             sec_node.write_to_db()
 
+    snodes = db_controller.get_storage_nodes_by_cluster_id(cl_id)
     for snode in snodes:
         if snode.is_secondary_node:  # pass
             continue

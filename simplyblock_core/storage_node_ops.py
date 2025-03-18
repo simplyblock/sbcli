@@ -2901,12 +2901,15 @@ def recreate_lvstore_on_sec(snode):
                 break
 
     if node:
-        lvol_list = db_controller.get_lvols_by_node_id(node.get_id())
+        snode = db_controller.get_storage_node_by_id(snode.get_id())
+        snode.remote_jm_devices = _connect_to_remote_jm_devs(snode)
+        snode.write_to_db()
         ret, err = _create_bdev_stack(snode, node.lvstore_stack, primary_node=node)
         ret = rpc_client.bdev_examine(node.raid)
         ret = rpc_client.bdev_wait_for_examine()
         ret = rpc_client.bdev_lvol_set_lvs_ops(node.lvstore, node.jm_vuid, node.lvol_subsys_port)
 
+        lvol_list = db_controller.get_lvols_by_node_id(node.get_id())
         for lvol in lvol_list:
             is_created, error = lvol_controller.recreate_lvol_on_node(
                 lvol, snode, 1, False)
@@ -2930,6 +2933,10 @@ def recreate_lvstore(snode):
 
     if snode.is_secondary_node:  # pass
         return recreate_lvstore_on_sec(snode)
+
+    snode = db_controller.get_storage_node_by_id(snode.get_id())
+    snode.remote_jm_devices = _connect_to_remote_jm_devs(snode)
+    snode.write_to_db()
 
     ret, err = _create_bdev_stack(snode, [])
 
