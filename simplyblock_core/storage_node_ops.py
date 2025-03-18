@@ -1042,18 +1042,17 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
         if spdk_cpu_count and spdk_cpu_count > 0:
             logger.info(f"SPDK required CPU count is {spdk_cpu_count}")
             logger.info(f"Total server CPU cores are {cpu_count - 1}")
+            logger.info(f"Free server CPU cores {cpu_count - 1 - len(used_cores)}")
 
             if cpu_count - 1 - len(used_cores) > spdk_cpu_count:
-                logger.info(f"Free server CPU cores {cpu_count - 1 - len(used_cores)}")
-
                 cores = []
                 for index in range(spdk_cpu_count):
                     for c in range(cpu_count - 1):
                         if c + 1 not in used_cores:
                             cores.append(c + 1)
                             continue
-                if len(cores) == spdk_cpu_count:
-                    spdk_cpu_mask = hex(sum(cores) << 1)
+                if len(cores) >= spdk_cpu_count:
+                    spdk_cpu_mask = hex(sum(cores[:spdk_cpu_count]) << 1)
                     logger.info(f"SPDK CPU cores mask: {spdk_cpu_mask}")
                 else:
                     spdk_cpu_mask = hex(int(math.pow(2, cpu_count)) - 2)
@@ -2087,7 +2086,7 @@ def list_storage_nodes(is_json, cluster_id=None):
             "Status": node.status,
             "Health": node.health_check,
             "Up time": uptime,
-            "CPU": f"{len(utils.hexa_to_cpu_list(node.spdk_cpu_mask))} - {node.spdk_cpu_mask}",
+            "CPU": f"{len(utils.hexa_to_cpu_list(node.spdk_cpu_mask))}-{node.spdk_cpu_mask}",
             "MEM": utils.humanbytes(node.spdk_mem),
             "SPDK P": node.rpc_port,
             "LVOL P": node.lvol_subsys_port,
