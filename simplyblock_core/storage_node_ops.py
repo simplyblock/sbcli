@@ -3018,6 +3018,14 @@ def recreate_lvstore(snode):
         sec_node.lvstore_status = "ready"
         sec_node.write_to_db()
 
+    if snode.lvstore_stack_secondary_1:
+        node = db_controller.get_storage_node_by_id(snode.lvstore_stack_secondary_1)
+        if node:
+            ret = recreate_lvstore_on_sec(snode)
+
+            if not ret:
+                logger.error(f"Failed to recreate secondary on node: {snode.get_id()}")
+
     return True
 
 
