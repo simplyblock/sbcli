@@ -767,3 +767,18 @@ def get_next_dev_port(cluster_id):
             return next_port
 
     return 0
+
+
+def init_sentry_sdk():
+    import sentry_sdk
+    sentry_sdk.init(
+        dsn=constants.SENTRY_SDK_DNS,
+
+        # Set traces_sample_rate to 1.0 to capture 100%
+        # of transactions for tracing.
+        traces_sample_rate=1.0,
+        # Add request headers and IP for users,
+        # see https://docs.sentry.io/platforms/python/data-management/data-collected/ for more info
+        send_default_pii=True,
+    )
+    return None

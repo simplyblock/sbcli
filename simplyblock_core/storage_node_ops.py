@@ -3081,7 +3081,7 @@ def get_node_jm_names(current_node, remote_node=None):
                     if jm_dev.get_id() == jm_id:
                         jm_list.append(jm_dev.remote_bdev)
                         break
-    return jm_list
+    return jm_list[:constants.HA_JM_COUNT]
 
 
 def get_secondary_nodes(current_node):

@@ -2,7 +2,6 @@
 import time
 from datetime import datetime, timezone
 
-import sentry_sdk
 
 from simplyblock_core import constants, db_controller, cluster_ops, storage_node_ops, utils
 from simplyblock_core.controllers import health_controller, device_controller, tasks_controller
@@ -18,17 +17,7 @@ logger = utils.get_logger(__name__)
 # get DB controller
 db_controller = db_controller.DBController()
 
-sentry_sdk.init(
-    dsn="https://e86fb6365033e6c5a54e4443c3571e73@o4508953941311488.ingest.de.sentry.io/4508953948520528",
-    max_breadcrumbs=50,
-    debug=False,
-    # Set traces_sample_rate to 1.0 to capture 100%
-    # of transactions for tracing.
-    traces_sample_rate=1.0,
-    # Add request headers and IP for users,
-    # see https://docs.sentry.io/platforms/python/data-management/data-collected/ for more info
-    send_default_pii=True,
-)
+utils.init_sentry_sdk()
 
 
 def is_new_migrated_node(cluster_id, node):
