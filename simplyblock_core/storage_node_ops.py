@@ -2827,6 +2827,11 @@ def recreate_lvstore_on_sec(snode):
         remote_rpc_client = RPCClient(
             node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password)
 
+        node.lvstore_status = "in_creation"
+        node.write_to_db()
+
+        time.sleep(3)
+
         lvol_list = db_controller.get_lvols_by_node_id(node.get_id())
         node_api = SNodeClient(node.api_endpoint)
         ret, err = _create_bdev_stack(snode, node.lvstore_stack, primary_node=node)
@@ -2881,6 +2886,10 @@ def recreate_lvstore_on_sec(snode):
             tcp_ports_events.port_allowed(node, node.lvol_subsys_port)
             # time.sleep(5)
 
+        node = db_controller.get_storage_node_by_id(node.get_id())
+        node.lvstore_status = "ready"
+        node.write_to_db()
+        # time.sleep(3)
             # snode_api.firewall_set_port(node.lvol_subsys_port, "tcp", "allow")
             # tcp_ports_events.port_allowed(node, node.lvol_subsys_port)
         #     for lvol in lvol_list:
