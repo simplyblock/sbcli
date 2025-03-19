@@ -110,10 +110,10 @@ def humanbytes(B):
     if not B:
         return "0"
     B = float(B)
-    KB = float(constants.ONE_KB)
-    MB = float(KB ** 2) # 1,048,576
-    GB = float(KB ** 3) # 1,073,741,824
-    TB = float(KB ** 4) # 1,099,511,627,776
+    KB = 1e3
+    MB = 1e6
+    GB = 1e9
+    TB = 1e12
 
     if B < KB:
         return '{0} {1}'.format(B, 'Byte' if B == 1 else 'Bytes')
