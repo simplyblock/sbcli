@@ -2833,7 +2833,7 @@ def recreate_lvstore_on_sec(snode):
 
         for lvol in lvol_list:
             logger.info("creating subsystem %s", lvol.nqn)
-            rpc_client.subsystem_create(lvol.nqn, 'sbcli-cn', lvol.uuid, 1)
+            rpc_client.subsystem_create(lvol.nqn, 'sbcli-cn', lvol.uuid, 1000)
 
         if node.status == StorageNode.STATUS_ONLINE:
             # for lvol in lvol_list:
