@@ -178,6 +178,28 @@ class TestClusterBase:
                 test_name=self.test_name
             )
             self.runner_k8s_log.start_logging()
+
+        for node in self.mgmt_nodes:
+            self.ssh_obj.delete_old_folders(
+                node=node,
+                folder_path=os.path.join(Path.home(), "container-logs"),
+                days=3
+            )
+            self.ssh_obj.make_directory(node=node, dir_name=self.docker_logs_path)
+            containers = self.ssh_obj.get_running_containers(node_ip=node)
+            self.container_nodes[node] = containers
+            self.ssh_obj.check_tmux_installed(node_ip=node)
+            self.ssh_obj.exec_command(node=node,
+                                    command="sudo tmux kill-server")
+            self.ssh_obj.start_docker_logging(node_ip=node,
+                                              containers=containers,
+                                              log_dir=self.docker_logs_path,
+                                              test_name=self.test_name
+                                              )
+
+            self.ssh_obj.start_tcpdump_logging(node_ip=node, log_dir=self.docker_logs_path)
+            self.ssh_obj.start_netstat_dmesg_logging(node_ip=node,
+                                                     log_dir=self.docker_logs_path)
         
         for node in self.fio_node:
             self.ssh_obj.delete_old_folders(
