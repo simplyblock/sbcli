@@ -2852,7 +2852,7 @@ def recreate_lvstore_on_sec(snode):
         ret = rpc_client.bdev_lvol_set_lvs_ops(node.lvstore, node.jm_vuid, node.lvol_subsys_port)
 
         for lvol in lvol_list:
-            is_created, error = add_lvol_thread(lvol, snode, "non-optimize")
+            is_created, error = add_lvol_thread(lvol, snode, "non_optimized")
 
             # is_created, error = lvol_controller.recreate_lvol_on_node(
             #     lvol, snode, 1, "non-optimize")
