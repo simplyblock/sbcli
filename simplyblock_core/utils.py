@@ -628,38 +628,57 @@ def get_logger(name=""):
     return logg
 
 
-def parse_size(size_string: str):
+def _parse_unit(unit: str, strict: bool = True) -> tuple[int, int]:
+    """Parse the given unit, returning the associated base and exponent
+
+    If `strict`, only proper decimal (SI)/binary (IEC) units are parsed.
+    Otherwise, parsing is case-insensitive and the 'B' suffix is optional.
+    """
+    regex = r'^((?P<prefix>[kKMGTPEZ])(?P<binary>i)?)?' + ('B$' if strict else 'B?$')
+
+    m = re.match(regex, unit, flags=re.IGNORECASE if not strict else 0)
+    if m is None:
+        raise ValueError("Invalid unit")
+
+    binary = m.group('binary') is not None
+    prefix = m.group('prefix') or ''
+
+    if strict and (binary and (prefix == 'k')) or ((not binary) and (prefix == 'K')):
+        raise ValueError("Invalid unit")
+
+    exponent_multipliers = ['', 'K', 'M', 'G', 'T', 'P', 'E', 'Z']
+    return (
+        2 if binary else 10,
+        (10 if binary else 3) * exponent_multipliers.index(prefix.upper())
+    )
+
+
+def parse_size(size_string: str, strict: bool = False) -> int:
+    """Parse the given data size, returning bytes
+
+    If `strict`, only proper decimal (SI)/binary (IEC) units are parsed.
+    Otherwise, parsing is case-insensitive and the 'B' suffix is optional.
+    """
     try:
-        x = int(size_string)
-        return x
-    except Exception:
-        pass
-    try:
-        if size_string:
-            size_string = size_string.lower()
-            size_string = size_string.replace(" ", "")
-            size_string = size_string.replace("b", "")
-            size_number = int(size_string[:-1])
-            size_v = size_string[-1]
-            one_k = constants.ONE_KB
-            multi = 0
-            if size_v == "k":
-                multi = 1
-            elif size_v == "m":
-                multi = 2
-            elif size_v == "g":
-                multi = 3
-            elif size_v == "t":
-                multi = 4
-            else:
-                print(f"Error parsing size: {size_string}")
-                return -1
-            return size_number * math.pow(one_k, multi)
-        else:
-            return -1
-    except:
-        print(f"Error parsing size: {size_string}")
+        m = re.match(r'^(?P<size_in_unit>\d+) ?(?P<unit>\w*)$', size_string.strip())
+        if m is None:
+            raise ValueError(f"Invalid size: {size_string}")
+
+        size_in_unit = int(m.group('size_in_unit'))
+        base, exponent = _parse_unit(m.group('unit'), strict=strict)
+        return size_in_unit * (base ** exponent)
+    except ValueError:
         return -1
+
+
+def convert_size(size: int, unit: str) -> int:
+    """Convert the given number of bytes to target unit
+
+    Accepts both decimal (kB, MB, ...) and binary (KiB, MiB, ...) units.
+    Note that the result will be cast to int, i.e. rounded down.
+    """
+    base, exponent = _parse_unit(unit)
+    return int(size / (base ** exponent))
 
 
 def nearest_upper_power_of_2(n):
