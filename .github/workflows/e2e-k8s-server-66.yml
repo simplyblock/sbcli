@@ -600,8 +600,8 @@ jobs:
 
           curl -X POST -H 'Content-type: application/json' --data "{\"text\":\"${MESSAGE}\"}" $SLACK_WEBHOOK_URL
       
-      - name: Uninstall K3s agent on all nodes (if test passes)
-        if: success() && env.FAILED_TESTS == '0'
+      - name: Uninstall K3s agent on all nodes
+        if: always()
         run: |
           helm uninstall -n spdk-csi spdk-csi || echo "No helm release found. Skipping uninstall."
           
