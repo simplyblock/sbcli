@@ -108,7 +108,7 @@ class CLIWrapper(CLIWrapperBase):
         if self.developer_mode:
             argument = subcommand.add_argument('--enable-test-device', help='Enable creation of test device', dest='enable_test_device', required=False, action='store_true')
         if self.developer_mode:
-            argument = subcommand.add_argument('--disable-ha-jm', help='Disable HA JM for distrib creation', dest='enable_ha_jm', required=False, action='store_false')
+            argument = subcommand.add_argument('--disable-ha-jm', help='Disable HA JM for distrib creation', dest='enable_ha_jm', required=False, action='store_true')
         argument = subcommand.add_argument('--ha-jm-count', help='HA JM count', type=int, default=3, dest='ha_jm_count', required=False)
         argument = subcommand.add_argument('--is-secondary-node', help='Adds as secondary node. A secondary node does not have any disks attached. It is only used for I/O processing in case a primary goes down.', dest='is_secondary_node', required=False, action='store_true')
         argument = subcommand.add_argument('--namespace', help='Kubernetes namespace to deploy on', type=str, dest='namespace', required=False)
@@ -183,7 +183,8 @@ class CLIWrapper(CLIWrapperBase):
     def init_storage_node__list_devices(self, subparser):
         subcommand = self.add_sub_command(subparser, 'list-devices', 'Lists storage devices')
         subcommand.add_argument('node_id', help='Storage node id', type=str).completer = self._completer_get_sn_list
-        subcommand.add_argument('--sort', help='Sort the outputs', type=str)
+        if self.developer_mode:
+            argument = subcommand.add_argument('--sort', help='Sort the outputs', type=str, dest='sort', required=False, nargs='1', choices=['node-seq','serial','dev-seq',])
         argument = subcommand.add_argument('--json', help='Print outputs in json format', dest='json', required=False, action='store_true')
 
     def init_storage_node__device_testing_mode(self, subparser):
@@ -331,7 +332,6 @@ class CLIWrapper(CLIWrapperBase):
         argument = subcommand.add_argument('--log-del-interval', help='Logging retention period, default: 3d', type=str, default='3d', dest='log_del_interval', required=False)
         argument = subcommand.add_argument('--metrics-retention-period', help='Retention period for I/O statistics (Prometheus), default: 7d', type=str, default='7d', dest='metrics_retention_period', required=False)
         argument = subcommand.add_argument('--contact-point', help='Email or slack webhook url to be used for alerting', type=str, default='', dest='contact_point', required=False)
-
         if self.developer_mode:
             argument = subcommand.add_argument('--distr-bs', help='(Dev) distrb bdev block size, default: 4096', type=int, default=4096, dest='distr_bs', required=False)
         argument = subcommand.add_argument('--chunk-size-in-bytes', help='(Dev) distrb bdev chunk block size, default: 4096', type=int, default=4096, dest='distr_chunk_bs', required=False)
@@ -346,9 +346,9 @@ class CLIWrapper(CLIWrapperBase):
         if self.developer_mode:
             argument = subcommand.add_argument('--jm-percent', help='Number in percent to use for JM from each device', type=int, default=3, dest='jm_percent', required=False)
         argument = subcommand.add_argument('--data-nics', help='Storage network interface name(s). Can be more than one.', type=str, dest='data_nics', required=False, nargs='+')
+        argument = subcommand.add_argument('--max-lvol', help='Max logical volume per storage node', type=int, dest='max_lvol', required=False)
         if self.developer_mode:
             argument = subcommand.add_argument('--max-snap', help='Max snapshot per storage node', type=int, default=5000, dest='max_snap', required=False)
-        argument = subcommand.add_argument('--max-lvol', help='Max logical volume per storage node', type=int, dest='max_lvol', required=False)
         argument = subcommand.add_argument('--max-size', help='Maximum amount of GB to be provisioned via all storage nodes', type=str, default='', dest='max_prov', required=False)
         if self.developer_mode:
             argument = subcommand.add_argument('--number-of-distribs', help='The number of distirbs to be created on the node', type=int, default=4, dest='number_of_distribs', required=False)
@@ -841,7 +841,7 @@ class CLIWrapper(CLIWrapperBase):
                     args.small_bufsize = 0
                     args.large_bufsize = 0
                     args.enable_test_device = None
-                    args.enable_ha_jm = True
+                    args.enable_ha_jm = False
                     args.id_device_by_nqn = False
                     args.max_snap = 5000
                 ret = self.storage_node__add_node(sub_command, args)
@@ -873,6 +873,8 @@ class CLIWrapper(CLIWrapperBase):
             elif sub_command in ['get-capacity']:
                 ret = self.storage_node__get_capacity(sub_command, args)
             elif sub_command in ['list-devices']:
+                if not self.developer_mode:
+                    args.sort = None
                 ret = self.storage_node__list_devices(sub_command, args)
             elif sub_command in ['device-testing-mode']:
                 if not self.developer_mode:
@@ -950,31 +952,13 @@ class CLIWrapper(CLIWrapperBase):
         elif args.command in ['cluster']:
             sub_command = args_dict['cluster']
             if sub_command in ['deploy']:
-                args.grafana_endpoint = ''
-                args.namespace = None
-                args.lvol_name = 'lvol01'
-                args.lvol_size = '10G'
-                args.pool_name = 'pool01'
-                args.pool_max = '25G'
-                args.snapshot = False
-                args.max_size = '1000G'
-                args.encrypt = False
-                args.crypto_key1 = None
-                args.crypto_key2 = None
-                args.max_rw_iops = None
-                args.max_rw_mbytes = None
-                args.max_r_mbytes = None
-                args.max_w_mbytes = None
-                args.distr_vuid = None
-                args.lvol_ha_type = 'single'
-                args.lvol_priority_class = 0
-                args.fstype = 'xfs'
                 if not self.developer_mode:
                     args.ha_jm_count = 3
                     args.enable_qos = None
                     args.blk_size = 512
                     args.page_size = 2097152
                     args.CLI_PASS = None
+                    args.grafana_endpoint = ''
                     args.distr_bs = 4096
                     args.max_queue_size = 128
                     args.inflight_io_threshold = 4
@@ -989,6 +973,22 @@ class CLIWrapper(CLIWrapperBase):
                     args.large_bufsize = 0
                     args.enable_test_device = None
                     args.enable_ha_jm = False
+                    args.lvol_name = 'lvol01'
+                    args.lvol_size = '10G'
+                    args.pool_name = 'pool01'
+                    args.pool_max = '25G'
+                    args.snapshot = False
+                    args.max_size = '1000G'
+                    args.encrypt = False
+                    args.crypto_key1 = None
+                    args.crypto_key2 = None
+                    args.max_rw_iops = None
+                    args.max_rw_mbytes = None
+                    args.max_r_mbytes = None
+                    args.max_w_mbytes = None
+                    args.distr_vuid = None
+                    args.lvol_ha_type = 'default'
+                    args.fstype = 'xfs'
                 ret = self.cluster__deploy(sub_command, args)
             elif sub_command in ['create']:
                 if not self.developer_mode:

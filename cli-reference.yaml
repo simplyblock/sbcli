@@ -724,6 +724,7 @@ commands:
             type: str
             default: ""
             private: true
+            blacklist: true
           - name: "--distr-bs"
             help: "(Dev) distrb bdev block size, default: 4096"
             dest: distr_bs
@@ -876,40 +877,47 @@ commands:
             type: bool
             default: false
             action: store_true
+            blacklist: true
           - name: "--namespace"
             help: "k8s namespace to deploy on"
             dest: namespace
             type: str
+            blacklist: true
           - name: "--id-device-by-nqn"
             help: "Use device nqn to identify it instead of serial number"
             dest: id_device_by_nqn
             type: bool
             default: false
             action: store_true
+            blacklist: true
           - name: "--lvol-name"
             help: "Logical volume name or id"
             dest: lvol_name
             type: str
             default: lvol01
             private: true
+            blacklist: true
           - name: "--lvol-size"
             help: "Logical volume size: 10M, 10G, 10(bytes)"
             dest: lvol_size
             type: str
             default: 10G
             private: true
+            blacklist: true
           - name: "--pool-name"
             help: "Pool id or name"
             dest: pool_name
             type: str
             default: pool01
             private: true
+            blacklist: true
           - name: "--pool-max"
             help: "Pool maximum size: 20M, 20G, 0(default)"
             dest: pool_max
             type: str
             default: 25G
             private: true
+            blacklist: true
           - name: "--snapshot"
             help: "Make logical volume with snapshot capability, default: false"
             dest: snapshot
@@ -917,16 +925,19 @@ commands:
             action: store_true
             default: false
             private: true
+            blacklist: true
           - name: "--max-volume-size"
             help: "Logical volume max size"
             dest: max_size
             type: str
             default: 1000G
             private: true
+            blacklist: true
           - name: "--host-id"
             help: "Primary storage node id or hostname"
             dest: host_id
             type: str
+            blacklist: true
           - name: "--encrypt"
             help: "Use inline data encryption and decryption on the logical volume"
             dest: encrypt
@@ -934,41 +945,49 @@ commands:
             action: store_true
             default: false
             private: true
+            blacklist: true
           - name: "--crypto-key1"
             help: "Hex value of key1 to be used for logical volume encryption"
             dest: crypto_key1
             type: str
             private: true
+            blacklist: true
           - name: "--crypto-key2"
             help: "Hex value of key2 to be used for logical volume encryption"
             dest: crypto_key2
             type: str
             private: true
+            blacklist: true
           - name: "--max-rw-iops"
             help: "Maximum Read Write IO Per Second"
             dest: max_rw_iops
             type: int
             private: true
+            blacklist: true
           - name: "--max-rw-mbytes"
             help: "Maximum Read Write Megabytes Per Second"
             dest: max_rw_mbytes
             type: int
             private: true
+            blacklist: true
           - name: "--max-r-mbytes"
             help: "Maximum Read Megabytes Per Second"
             dest: max_r_mbytes
             type: int
             private: true
+            blacklist: true
           - name: "--max-w-mbytes"
             help: "Maximum Write Megabytes Per Second"
             dest: max_w_mbytes
             type: int
             private: true
+            blacklist: true
           - name: "--distr-vuid"
             help: "(Dev) set vuid manually, default: random (1-99999)"
             dest: distr_vuid
             type: int
             private: true
+            blacklist: true
           - name: "--lvol-ha-type"
             help: "Logical volume HA type (single, ha), default is cluster HA type"
             dest: lvol_ha_type
@@ -979,12 +998,14 @@ commands:
               - ha
             default: default
             private: true
+            blacklist: true
           - name: "--lvol-priority-class"
             help: "Logical volume priority class"
             dest: lvol_priority_class
             type: int
             default: 0
             private: false
+            blacklist: true
           - name: "--fstype"
             help: "Filesystem type for testing (ext4, xfs)"
             dest: fstype
@@ -994,6 +1015,7 @@ commands:
               - xfs
             default: xfs
             private: true
+            blacklist: true
       - name: create
         help: "Creates a new cluster"
         usage: >

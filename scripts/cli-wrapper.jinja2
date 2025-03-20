@@ -48,6 +48,7 @@ class CLIWrapper(CLIWrapperBase):
 {%- endfor -%}
 {%- for parameter in subcommand.parameters %}
 {%- if parameter.private %}
+{%- if not parameter.blacklist  %}
         if self.developer_mode:
             argument = subcommand.add_argument('{{ parameter.name }}', help='{{ parameter.help | escape_strings | escape_python_string }}'
 {%- if parameter.type is defined and parameter.action is undefined %}, type={{ parameter.type }}{% endif %}
@@ -59,7 +60,9 @@ class CLIWrapper(CLIWrapperBase):
 {%- if parameter.value_range %}, choices=range({{ parameter.value_range | split_value_range }}){% endif %}
 {%- if parameter.action is defined %}, action='{{ parameter.action }}'{% endif %})
 {%- if parameter.completer is defined %}.completer = self.{{ parameter.completer }}{% endif %}
+{%- endif %}
 {%- else %}
+{%- if not parameter.blacklist  %}
         argument = subcommand.add_argument('{{ parameter.name }}', help='{{ parameter.help | escape_strings | escape_python_string }}'
 {%- if parameter.type is defined and parameter.action is undefined %}, type={{ parameter.type }}{% endif %}
 {%- if parameter.default is defined and parameter.action is undefined %}, default={{ parameter | default_value }}{% endif %}
@@ -70,6 +73,7 @@ class CLIWrapper(CLIWrapperBase):
 {%- if parameter.value_range %}, choices=range({{ parameter.value_range | split_value_range }}){% endif %}
 {%- if parameter.action is defined %}, action='{{ parameter.action }}'{% endif %})
 {%- if parameter.completer is defined %}.completer = self.{{ parameter.completer }}{% endif %}
+{%- endif %}
 {%- endif %}
 {%- endfor %}
 {% endfor -%}
