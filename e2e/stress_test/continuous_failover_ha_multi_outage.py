@@ -19,9 +19,9 @@ def generate_random_sequence(length):
 
     return first_char + remaining_chars
 
-class RandomMultiClientFailoverTest(TestLvolHACluster):
+class RandomMultiClientMultiFailoverTest(TestLvolHACluster):
     """
-    Extends the TestLvolHAClusterWithClones class to add a random failover and stress testing scenario.
+    Extends the TestLvolHACluster class to add a random failover and stress testing scenario.
     """
 
     def __init__(self, **kwargs):
@@ -37,7 +37,7 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
         self.clone_mount_details = {}
         self.lvol_mount_details = {}
         self.sn_nodes = []
-        self.current_outage_node = None
+        self.current_outage_node = []
         self.snapshot_names = []
         self.disconnect_thread = None
         self.outage_start_time = None
@@ -47,7 +47,7 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
         self.lvol_node = ""
         self.secondary_outage = False
         self.lvols_without_sec_connect = []
-        self.test_name = "continuous_random_failover_multi_client_ha"
+        self.test_name = "continuous_random_failover_multi_outage_ha"
         # self.outage_types = ["interface_full_network_interrupt", interface_partial_network_interrupt,
         #                       "partial_nw", "partial_nw_single_port",
         #                       "port_network_interrupt", "container_stop", "graceful_shutdown",
