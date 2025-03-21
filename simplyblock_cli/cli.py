@@ -768,7 +768,7 @@ class CLIWrapper(CLIWrapperBase):
 
     def init_snapshot__add(self, subparser):
         subcommand = self.add_sub_command(subparser, 'add', 'Creates a new snapshot')
-        subcommand.add_argument('snapshot_id', help='Logical volume id', type=str)
+        subcommand.add_argument('volume_id', help='Logical volume id', type=str)
         subcommand.add_argument('name', help='New snapshot name', type=str)
 
     def init_snapshot__list(self, subparser):
