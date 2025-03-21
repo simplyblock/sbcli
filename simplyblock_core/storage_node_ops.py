@@ -1947,7 +1947,7 @@ def restart_storage_node(
         distr_controller.send_dev_status_event(db_dev, db_dev.status)
 
     cluster = db_controller.get_cluster_by_id(snode.cluster_id)
-    if cluster.status in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED]:
+    if cluster.status in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_READONLY]:
         if snode.lvstore_stack or snode.is_secondary_node:
             ret = recreate_lvstore(snode)
             snode = db_controller.get_storage_node_by_id(snode.get_id())
