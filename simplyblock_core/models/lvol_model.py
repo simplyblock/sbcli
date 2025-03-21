@@ -3,7 +3,7 @@
 from typing import List
 
 from simplyblock_core.models.base_model import BaseModel
-from simplyblock_core.models.nvme_device import NVMeDevice
+from simplyblock_core.models.device import NVMeDevice
 
 
 class LVol(BaseModel):

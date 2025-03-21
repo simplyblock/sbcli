@@ -10,7 +10,7 @@ from simplyblock_core.models.job_schedule import JobSchedule
 
 logger = utils.get_logger(__name__)
 
-from simplyblock_core.models.nvme_device import NVMeDevice
+from simplyblock_core.models.device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.rpc_client import RPCClient
 

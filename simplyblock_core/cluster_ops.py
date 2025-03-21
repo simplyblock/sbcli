@@ -27,7 +27,7 @@ from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.stats import StatsObject
 from simplyblock_core.rpc_client import RPCClient
-from simplyblock_core.models.nvme_device import NVMeDevice
+from simplyblock_core.models.device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
 
 logger = logging.getLogger()

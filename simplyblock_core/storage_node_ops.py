@@ -21,7 +21,7 @@ from simplyblock_core import shell_utils
 from simplyblock_core.models.iface import IFace
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lvol_model import LVol
-from simplyblock_core.models.nvme_device import NVMeDevice, JMDevice
+from simplyblock_core.models.device import NVMeDevice, JMDevice
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.rpc_client import RPCClient

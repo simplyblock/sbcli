@@ -14,7 +14,7 @@ from simplyblock_core.cnode_client import CNodeClient
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.caching_node import CachingNode, CachedLVol
 from simplyblock_core.models.iface import IFace
-from simplyblock_core.models.nvme_device import NVMeDevice
+from simplyblock_core.models.device import NVMeDevice
 from simplyblock_core.models.pool import Pool
 from simplyblock_core.rpc_client import RPCClient
 

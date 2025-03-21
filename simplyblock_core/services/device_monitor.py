@@ -3,7 +3,7 @@ import time
 
 from simplyblock_core import constants, db_controller, utils
 from simplyblock_core.controllers import tasks_controller
-from simplyblock_core.models.nvme_device import NVMeDevice
+from simplyblock_core.models.device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
 
 

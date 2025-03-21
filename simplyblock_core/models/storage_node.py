@@ -4,7 +4,7 @@ from typing import List
 
 from simplyblock_core.models.base_model import BaseNodeObject
 from simplyblock_core.models.iface import IFace
-from simplyblock_core.models.nvme_device import NVMeDevice, JMDevice
+from simplyblock_core.models.device import NVMeDevice, JMDevice
 
 
 class StorageNode(BaseNodeObject):
@@ -64,7 +64,7 @@ class StorageNode(BaseNodeObject):
     num_partitions_per_dev: int = 1
     number_of_devices: int = 0
     number_of_distribs: int = 4
-    nvme_devices: List[NVMeDevice] = []
+    devices: List[NVMeDevice] = []
     online_since: str = ""
     partitions_count: int = 0
     poller_cpu_cores: List[int] = []

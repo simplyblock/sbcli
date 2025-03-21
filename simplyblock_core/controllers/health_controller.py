@@ -6,7 +6,7 @@ import jc
 from simplyblock_core import utils, distr_controller, storage_node_ops
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.cluster import Cluster
-from simplyblock_core.models.nvme_device import NVMeDevice, JMDevice
+from simplyblock_core.models.device import NVMeDevice, JMDevice
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.rpc_client import RPCClient
 from simplyblock_core.snode_client import SNodeClient

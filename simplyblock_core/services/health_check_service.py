@@ -5,7 +5,7 @@ from datetime import datetime
 
 from simplyblock_core.controllers import health_controller, storage_events, device_events, tcp_ports_events
 from simplyblock_core.models.cluster import Cluster
-from simplyblock_core.models.nvme_device import NVMeDevice
+from simplyblock_core.models.device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.rpc_client import RPCClient
 from simplyblock_core import constants, db_controller, utils, distr_controller

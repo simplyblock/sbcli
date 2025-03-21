@@ -9,7 +9,7 @@ from simplyblock_core.controllers import events_controller, device_controller, l
 from simplyblock_core.models.lvol_model import LVol
 
 
-from simplyblock_core.models.nvme_device import NVMeDevice
+from simplyblock_core.models.device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.rpc_client import RPCClient
 

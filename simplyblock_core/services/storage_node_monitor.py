@@ -6,7 +6,7 @@ from simplyblock_core import constants, db_controller, cluster_ops, storage_node
 from simplyblock_core.controllers import health_controller, device_controller, tasks_controller
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
-from simplyblock_core.models.nvme_device import NVMeDevice, JMDevice
+from simplyblock_core.models.device import NVMeDevice, JMDevice
 from simplyblock_core.models.storage_node import StorageNode
 
 

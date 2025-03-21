@@ -5,7 +5,7 @@ from typing import List
 from simplyblock_core.models.base_model import BaseModel, BaseNodeObject
 from simplyblock_core.models.iface import IFace
 from simplyblock_core.models.lvol_model import LVol
-from simplyblock_core.models.nvme_device import NVMeDevice
+from simplyblock_core.models.device import NVMeDevice
 
 
 class CachedLVol(BaseModel):
