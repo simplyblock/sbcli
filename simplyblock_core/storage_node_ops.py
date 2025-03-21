@@ -646,7 +646,7 @@ def _prepare_cluster_devices_jm_on_dev(snode, devices):
             continue
 
         new_devices.append(nvme)
-        if nvme.status not in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_NEW]:
+        if nvme.status not in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_NEW, NVMeDevice.STATUS_READONLY]:
             logger.debug(f"Device is not online : {nvme.get_id()}, status: {nvme.status}")
         else:
             ret = _create_storage_device_stack(rpc_client, nvme, snode, after_restart=False)
@@ -798,10 +798,10 @@ def _connect_to_remote_devs(this_node, force_conect_restarting_nodes=False):
 
     if force_conect_restarting_nodes:
         allowed_node_statuses = [StorageNode.STATUS_ONLINE, StorageNode.STATUS_RESTARTING]
-        allowed_dev_statuses = [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_UNAVAILABLE]
+        allowed_dev_statuses = [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_UNAVAILABLE, NVMeDevice.STATUS_READONLY]
     else:
         allowed_node_statuses = [StorageNode.STATUS_ONLINE]
-        allowed_dev_statuses = [NVMeDevice.STATUS_ONLINE]
+        allowed_dev_statuses = [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_READONLY]
 
 
     nodes = db_controller.get_storage_nodes_by_cluster_id(this_node.cluster_id)
@@ -1854,8 +1854,8 @@ def restart_storage_node(
                     db_dev.nvme_controller =found_dev.nvme_controller
                     db_dev.pcie_address = found_dev.pcie_address
 
-                if db_dev.status in [NVMeDevice.STATUS_READONLY, NVMeDevice.STATUS_ONLINE]:
-                    db_dev.status = NVMeDevice.STATUS_UNAVAILABLE
+                # if db_dev.status in [ NVMeDevice.STATUS_ONLINE]:
+                #     db_dev.status = NVMeDevice.STATUS_UNAVAILABLE
                 active_devices.append(db_dev)
             else:
                 logger.info(f"Device not found: {db_dev.get_id()}")
@@ -1926,7 +1926,7 @@ def restart_storage_node(
     # time.sleep(1)
     snode = db_controller.get_storage_node_by_id(snode.get_id())
     for db_dev in snode.nvme_devices:
-        if db_dev.status in [NVMeDevice.STATUS_UNAVAILABLE, NVMeDevice.STATUS_READONLY, NVMeDevice.STATUS_ONLINE]:
+        if db_dev.status in [NVMeDevice.STATUS_UNAVAILABLE, NVMeDevice.STATUS_ONLINE]:
             db_dev.status = NVMeDevice.STATUS_ONLINE
             db_dev.health_check = True
             device_events.device_restarted(db_dev)
@@ -1946,8 +1946,11 @@ def restart_storage_node(
     for db_dev in snode.nvme_devices:
         distr_controller.send_dev_status_event(db_dev, db_dev.status)
 
+    if snode.jm_device and snode.jm_device.status in [JMDevice.STATUS_UNAVAILABLE, JMDevice.STATUS_ONLINE]:
+        device_controller.set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_ONLINE)
+
     cluster = db_controller.get_cluster_by_id(snode.cluster_id)
-    if cluster.status in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED]:
+    if cluster.status in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_READONLY]:
         if snode.lvstore_stack or snode.is_secondary_node:
             ret = recreate_lvstore(snode)
             snode = db_controller.get_storage_node_by_id(snode.get_id())
@@ -1959,10 +1962,7 @@ def restart_storage_node(
                 snode.lvstore_status = "ready"
                 snode.write_to_db()
 
-    if snode.jm_device and snode.jm_device.status in [JMDevice.STATUS_UNAVAILABLE, JMDevice.STATUS_ONLINE]:
-        device_controller.set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_ONLINE)
-
-    if cluster.status in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED]:
+    if cluster.status in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_READONLY]:
         for dev in snode.nvme_devices:
             if dev.status == NVMeDevice.STATUS_ONLINE:
                 logger.info(f"Starting migration task for device {dev.get_id()}")
@@ -2137,7 +2137,7 @@ def shutdown_storage_node(node_id, force=False):
         device_controller.set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_UNAVAILABLE)
 
     for dev in snode.nvme_devices:
-        if dev.status in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_READONLY]:
+        if dev.status in [NVMeDevice.STATUS_ONLINE]:
             device_controller.device_set_unavailable(dev.get_id())
 
     # # make other nodes disconnect from this node

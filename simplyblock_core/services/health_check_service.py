@@ -275,7 +275,7 @@ while True:
 
 
                 lvstore_check = True
-                if snode.lvstore_status == "ready":
+                if snode.lvstore_status != "in_creation":
                     if snode.is_secondary_node:
                         for node in db_controller.get_primary_storage_nodes_by_secondary_node_id(snode.get_id()):
                             if node and node.status == StorageNode.STATUS_ONLINE and node.lvstore_status == "ready":
