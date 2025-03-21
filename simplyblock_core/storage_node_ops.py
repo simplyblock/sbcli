@@ -646,7 +646,7 @@ def _prepare_cluster_devices_jm_on_dev(snode, devices):
             continue
 
         new_devices.append(nvme)
-        if nvme.status not in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_NEW]:
+        if nvme.status not in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_NEW, NVMeDevice.STATUS_READONLY]:
             logger.debug(f"Device is not online : {nvme.get_id()}, status: {nvme.status}")
         else:
             ret = _create_storage_device_stack(rpc_client, nvme, snode, after_restart=False)
@@ -1854,8 +1854,8 @@ def restart_storage_node(
                     db_dev.nvme_controller =found_dev.nvme_controller
                     db_dev.pcie_address = found_dev.pcie_address
 
-                if db_dev.status in [NVMeDevice.STATUS_READONLY, NVMeDevice.STATUS_ONLINE]:
-                    db_dev.status = NVMeDevice.STATUS_UNAVAILABLE
+                # if db_dev.status in [ NVMeDevice.STATUS_ONLINE]:
+                #     db_dev.status = NVMeDevice.STATUS_UNAVAILABLE
                 active_devices.append(db_dev)
             else:
                 logger.info(f"Device not found: {db_dev.get_id()}")
@@ -1926,7 +1926,7 @@ def restart_storage_node(
     # time.sleep(1)
     snode = db_controller.get_storage_node_by_id(snode.get_id())
     for db_dev in snode.nvme_devices:
-        if db_dev.status in [NVMeDevice.STATUS_UNAVAILABLE, NVMeDevice.STATUS_READONLY, NVMeDevice.STATUS_ONLINE]:
+        if db_dev.status in [NVMeDevice.STATUS_UNAVAILABLE, NVMeDevice.STATUS_ONLINE]:
             db_dev.status = NVMeDevice.STATUS_ONLINE
             db_dev.health_check = True
             device_events.device_restarted(db_dev)
@@ -2137,7 +2137,7 @@ def shutdown_storage_node(node_id, force=False):
         device_controller.set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_UNAVAILABLE)
 
     for dev in snode.nvme_devices:
-        if dev.status in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_READONLY]:
+        if dev.status in [NVMeDevice.STATUS_ONLINE]:
             device_controller.device_set_unavailable(dev.get_id())
 
     # # make other nodes disconnect from this node
