@@ -12,10 +12,6 @@ on:
         description: 'Branch for simplyBlockDeploy'
         required: true
         default: 'vmware'
-      spdk_csi_branch:
-        description: 'Branch for spdk-csi'
-        required: true
-        default: 'master'
       sbcli_cmd:
         description: 'Command for sbcli execution'
         required: true
@@ -45,6 +41,11 @@ on:
         required: false
         default: false
         type: boolean
+      cleanup_cluster:
+        description: 'Cleanup Cluster'
+        required: false
+        default: true
+        type: boolean
       run_ha_test:
         description: 'Run HA tests or not'
         required: false
@@ -67,7 +68,15 @@ jobs:
 
       - name: Set send_slack_notification for manual workflow_dispatch
         if: github.event_name == 'workflow_dispatch'
-        run: echo "send_slack_notification=${{ github.event.inputs.send_slack_notification }}" >> $GITHUB_ENV
+        run: echo "send_slack_notification=${{ github.event.inputs.cleanup_cluster }}" >> $GITHUB_ENV
+
+      - name: Set cleanup_cluster for scheduled and push events
+        if: github.event_name == 'schedule' || github.event_name == 'push'
+        run: echo "cleanup_cluster=true" >> $GITHUB_ENV
+
+      - name: Set cleanup_cluster for manual workflow_dispatch
+        if: github.event_name == 'workflow_dispatch'
+        run: echo "cleanup_cluster=${{ github.event.inputs.cleanup_cluster }}" >> $GITHUB_ENV
 
       - uses: actions/setup-go@v5
         with:
@@ -197,7 +206,7 @@ jobs:
           STORAGE_PRIVATE_IPS: "192.168.10.67 192.168.10.68 192.168.10.69"
           SEC_STORAGE_PRIVATE_IPS: "192.168.10.70"
           API_INVOKE_URL: "http://192.168.10.66/"
-          K3S_MNODES: "192.168.10.103"
+          K3S_MNODES: "192.168.10.135"
           NR_HUGEPAGES: "2048"
 
       - name: Configure Kubeconfig
@@ -206,7 +215,7 @@ jobs:
           scp -i ~/.ssh/simplyblock-us-east-2.pem root@$K3S_MNODES:/etc/rancher/k3s/k3s.yaml $HOME/.kube/config
           sed -i "s/server: https:\/\/\(localhost\|127.0.0.1\)\(:[0-9]*\)/server: https:\/\/${K3S_MNODES}\2/" $HOME/.kube/config
         env:
-          K3S_MNODES: "192.168.10.103"
+          K3S_MNODES: "192.168.10.135"
 
       - name: Retrieve Cluster Details
         id: retrieve_cluster_details
@@ -266,7 +275,7 @@ jobs:
           STORAGE_PRIVATE_IPS: "192.168.10.67 192.168.10.68 192.168.10.69"
           SEC_STORAGE_PRIVATE_IPS: "192.168.10.70"
           API_INVOKE_URL: "http://192.168.10.66/"
-          K3S_MNODES: "192.168.10.103"
+          K3S_MNODES: "192.168.10.135"
           NR_HUGEPAGES: "2048"
 
       - name: Deploy SPDK-CSI with Helm
@@ -316,7 +325,7 @@ jobs:
           STORAGE_PRIVATE_IPS: "192.168.10.67 192.168.10.68 192.168.10.69"
           SEC_STORAGE_PRIVATE_IPS: "192.168.10.70"
           API_INVOKE_URL: "http://192.168.10.66/"
-          K3S_MNODES: "192.168.10.103"
+          K3S_MNODES: "192.168.10.135"
           NR_HUGEPAGES: "2048"
 
 
@@ -359,7 +368,7 @@ jobs:
       #     STORAGE_PRIVATE_IPS: "192.168.10.67 192.168.10.68 192.168.10.69"
       #     SEC_STORAGE_PRIVATE_IPS: "192.168.10.70"
       #     API_INVOKE_URL: "http://192.168.10.66/"
-      #     K3S_MNODES: "192.168.10.103"
+      #     K3S_MNODES: "192.168.10.135"
       #     NR_HUGEPAGES: "2048"
 
       - name: Check Cluster Status
@@ -600,8 +609,8 @@ jobs:
 
           curl -X POST -H 'Content-type: application/json' --data "{\"text\":\"${MESSAGE}\"}" $SLACK_WEBHOOK_URL
       
-      - name: Uninstall K3s agent on all nodes (if test passes)
-        if: success() && env.FAILED_TESTS == '0'
+      - name: Uninstall K3s agent on all nodes
+        if: always() && (github.event_name == 'schedule' || env.cleanup_cluster == 'true')
         run: |
           helm uninstall -n spdk-csi spdk-csi || echo "No helm release found. Skipping uninstall."
           

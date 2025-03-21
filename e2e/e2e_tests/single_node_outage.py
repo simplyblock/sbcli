@@ -62,7 +62,7 @@ class TestSingleNodeOutage(TestClusterBase):
         pools = self.sbcli_utils.list_storage_pools()
         assert self.pool_name in list(pools.keys()), \
             f"Pool {self.pool_name} not present in list of pools: {pools}"
-
+        sleep_n_sec(10)
         self.sbcli_utils.delete_storage_pool(
             pool_name=self.pool_name
         )

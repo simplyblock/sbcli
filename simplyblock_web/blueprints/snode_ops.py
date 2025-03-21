@@ -135,7 +135,7 @@ def spdk_process_start():
             pass
 
     if spdk_mem:
-        spdk_mem = int(utils.parse_size(spdk_mem) / (1000 * 1000))
+        spdk_mem = int(utils.parse_size(spdk_mem) / (constants.ONE_KB * constants.ONE_KB))
     else:
         spdk_mem = 4000
 

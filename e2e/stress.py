@@ -1,6 +1,9 @@
 ### simplyblock Stress tests
 import argparse
 import traceback
+import os
+import time
+import subprocess
 from __init__ import get_stress_tests
 from logger_config import setup_logger
 from exceptions.custom_exception import (
@@ -12,6 +15,7 @@ from e2e_tests.cluster_test_base import TestClusterBase
 from utils.sbcli_utils import SbcliUtils
 from utils.ssh_utils import SshUtils
 from utils.common_utils import CommonUtils
+
 
 
 def main():
@@ -28,6 +32,7 @@ def main():
     parser.add_argument('--run_k8s', type=bool, help="Run K8s tests", default=False)
     parser.add_argument('--run_ha', type=bool, help="Run HA tests", default=False)
     parser.add_argument('--send_debug_notification', type=bool, help="Send notification for debug", default=False)
+    parser.add_argument('--upload_logs', type=bool, help="Upload Logs", default=False)
     
 
     args = parser.parse_args()
@@ -125,10 +130,58 @@ def main():
         common_utils = CommonUtils(sbcli_utils, ssh_obj)
         common_utils.send_slack_summary("Stress Test Summary Report", summary)
 
+    if args.upload_logs:
+        upload_logs()
+
     if errors:
         raise MultipleExceptions(errors)
     if skipped_cases:
         raise SkippedTestsException("There are SKIPPED Tests. Please check!!")
+
+
+def upload_logs():
+    """Runs upload logs script on runner node."""
+    logger.info("Setting environment variables for log upload...")
+
+    cluster_base = TestClusterBase()
+    sbcli_utils = SbcliUtils(
+        cluster_api_url=cluster_base.api_base_url,
+        cluster_id=cluster_base.cluster_id,
+        cluster_secret=cluster_base.cluster_secret
+    )
+    mgmt_nodes, _ = sbcli_utils.get_all_nodes_ip()
+    storage_nodes_id = sbcli_utils.get_storage_nodes()
+    sec_node = []
+    primary_node = []
+    for node in storage_nodes_id["results"]:
+        if node['is_secondary_node']:
+            sec_node.append(node["mgmt_ip"])
+        else:
+            primary_node.append(node["mgmt_ip"])
+
+    os.environ["MINIO_ACCESS_KEY"] = os.getenv("MINIO_ACCESS_KEY", "admin")
+    os.environ["MINIO_SECRET_KEY"] = os.getenv("MINIO_SECRET_KEY", "password")
+    os.environ["BASTION_IP"] = os.getenv("BASTION_Server", mgmt_nodes[0])
+    os.environ["USER"] = os.getenv("USER", "root")
+
+    os.environ["STORAGE_PRIVATE_IPS"] = " ".join(primary_node)
+    os.environ["SEC_STORAGE_PRIVATE_IPS"] = " ".join(sec_node)
+    os.environ["MNODES"] = " ".join(mgmt_nodes)
+    os.environ["CLIENTNODES"] = os.getenv("CLIENT_IP", os.getenv("MNODES", " ".join(mgmt_nodes)))
+    suffix = time.strftime("%Y-%m-%d_%H-%M-%S")
+    os.environ["GITHUB_RUN_ID"] = os.getenv("GITHUB_RUN_ID", f"Stress-Run-{suffix}")
+
+    script_path = os.path.join(os.getcwd(), "logs", "upload_logs_to_miniio.py")
+
+    if os.path.exists(script_path):
+        logger.info(f"Running upload script: {script_path}")
+        try:
+            subprocess.run(["python3", script_path], check=True)
+            logger.info("Logs uploaded successfully to MinIO.")
+        except subprocess.CalledProcessError as e:
+            logger.error(f"Failed to upload logs: {e}")
+    else:
+        logger.error(f"Upload script not found at {script_path}")
 
 
 def check_for_dumps():

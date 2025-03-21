@@ -20,7 +20,7 @@ export API_BASE_URL=http://192.168.10.61/
 export SBCLI_CMD=sbcli-down
 export CLUSTER_SECRET=pPnq6A01X6sJPa0Hfo9X
 export CLUSTER_ID=4c9dd051-c9ba-4297-8c5c-c97652403041
-export SLACK_WEBHOOK_URL="https://hooks.slack.com/services/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"
+export SLACK_WEBHOOK_URL="SLACK_HOOK"
 export CLIENT_IP=192.168.10.93
 ```
 
@@ -35,8 +35,8 @@ nohup python3 stress.py --testname RandomFailoverTest --send_debug_notification 
 ## 4. Uploading Logs to MinIO
 Once the test is completed, export the following variables before uploading logs:
 ```sh
-export MINIO_ACCESS_KEY="KxtpwblgG3AFDYJkyg8i"
-export MINIO_SECRET_KEY="Yae4q5wJU9ZBzJhdsUGzu9wWqON8o0ERU7nGbJER"
+export MINIO_ACCESS_KEY="MinIOAccessKey"
+export MINIO_SECRET_KEY="MinIOSecretKey"
 export BASTION_IP="192.168.10.61"
 export MNODES="192.168.10.61"
 export STORAGE_PRIVATE_IPS="192.168.10.62 192.168.10.63 192.168.10.64"
@@ -55,7 +55,7 @@ python3 logs/upload_logs_to_miniio.py
 ## 5. Downloading Logs from MinIO
 To download logs, export MinIO credentials:
 ```sh
-export MINIO_ACCESS_KEY="<MinIOAccessKey>"
+export MINIO_ACCESS_KEY="MinIOAccessKey"
 export MINIO_SECRET_KEY="MinIOSecretKey"
 ```
 

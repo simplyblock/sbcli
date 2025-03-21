@@ -207,7 +207,7 @@ def add(lvol_id, snapshot_name):
 
     logger.info("Done")
     snapshot_events.snapshot_create(snap)
-    return snap.uuid
+    return snap.uuid, False
 
 
 def list(all=False):

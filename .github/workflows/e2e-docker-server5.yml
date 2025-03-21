@@ -11,7 +11,7 @@ on:
       simplyBlockDeploy_branch:
         description: 'Branch for simplyBlockDeploy'
         required: true
-        default: 'run-on-server1'
+        default: 'vmware'
       spdk_csi_branch:
         description: 'Branch for spdk-csi'
         required: true
@@ -27,7 +27,7 @@ on:
       ndcs:
         description: 'Value for NDCS'
         required: false
-        default: 2
+        default: 1
       npcs:
         description: 'Value for NPCS'
         required: false
@@ -36,10 +36,10 @@ on:
         description: 'Value for Block size'
         required: false
         default: 4096
-      chunk_bs:
-        description: 'Value for Chunk block size'
+      num_iterations:
+        description: 'Number of iterations to run the test'
         required: false
-        default: 4096
+        default: 1
       send_slack_notification:
         description: 'Send Slack notification?'
         required: false
@@ -110,7 +110,7 @@ jobs:
           echo "NDCS=${{ github.event.inputs.ndcs || 2 }}" >> $GITHUB_ENV
           echo "NPCS=${{ github.event.inputs.npcs || 1 }}" >> $GITHUB_ENV
           echo "BS=${{ github.event.inputs.bs || 4096 }}" >> $GITHUB_ENV
-          echo "CHUNK_BS=${{ github.event.inputs.chunk_bs || 4096 }}" >> $GITHUB_ENV
+          echo "CHUNK_BS=4096" >> $GITHUB_ENV
         shell: bash
 
 
@@ -123,7 +123,8 @@ jobs:
             --distr-ndcs $NDCS \
             --distr-npcs $NPCS \
             --distr-bs $BS \
-            --distr-chunk-bs $CHUNK_BS --ha-type ha \
+            --distr-chunk-bs $CHUNK_BS \
+            --ha-type ha \
             --partitions 0 \
             --enable-node-affinity true
           
@@ -174,8 +175,19 @@ jobs:
           if [ -n "${{ github.event.inputs.testname }}" ]; then
             TESTNAME="--testname ${{ github.event.inputs.testname }}"
           fi
-          python3 e2e.py $TESTNAME \
-                  --ndcs $NDCS --npcs $NPCS --bs $BS --chunk_bs $CHUNK_BS --run_ha ${{ github.event.inputs.run_ha_test }}
+          NUM_ITERATIONS=${{ github.event.inputs.num_iterations || 1 }}
+          echo "Running tests for $NUM_ITERATIONS iterations"
+
+          for i in $(seq 1 $NUM_ITERATIONS); do
+            echo "Iteration $i"
+            python3 e2e.py $TESTNAME \
+                    --ndcs $NDCS --npcs $NPCS --bs $BS --chunk_bs $CHUNK_BS --run_ha ${{ github.event.inputs.run_ha_test }}
+            
+            if [[ $? -ne 0 ]]; then
+              echo "Test failed in iteration $i. Exiting..."
+              exit 1
+            fi
+          done
         env:
           SBCLI_CMD: ${{ env.SBCLI_CMD }}
           NDCS: ${{ env.NDCS }}
@@ -208,6 +220,18 @@ jobs:
           GITHUB_RUN_ID: ${{ github.run_id }}
           MINIO_ACCESS_KEY: "KxtpwblgG3AFDYJkyg8i"
           MINIO_SECRET_KEY: "Yae4q5wJU9ZBzJhdsUGzu9wWqON8o0ERU7nGbJER"
+          BASTION_IP: "192.168.10.66"
+          MNODES: "192.168.10.66"
+          STORAGE_PRIVATE_IPS: "192.168.10.67 192.168.10.68 192.168.10.69"
+          SEC_STORAGE_PRIVATE_IPS: "192.168.10.70"
+          USER: "root"
+      
+      - name: Cleanup logs
+        run: |
+          cd $GITHUB_WORKSPACE/e2e/
+          python3 logs/cleanup.py
+        if: always()
+        env:
           BASTION_IP: "192.168.10.66"
           MNODES: "192.168.10.66"
           STORAGE_PRIVATE_IPS: "192.168.10.67 192.168.10.68 192.168.10.69"

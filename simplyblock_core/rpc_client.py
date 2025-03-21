@@ -142,12 +142,12 @@ class RPCClient:
             "abort_timeout_sec": 5,
             "ack_timeout": 2048,
             "zcopy": True,
-            "in_capsule_data_size": 8192,
+            "in_capsule_data_size": 24500,
             "max_io_size": 131072,
             "io_unit_size": 8192,
             "max_aq_depth": 128,
-            "num_shared_buffers": 8192,
-            "buf_cache_size": 256,
+            "num_shared_buffers": 24576,
+            "buf_cache_size": 512,
             "dif_insert_or_strip": False,
             "c2h_success": True,
             "sock_priority": 0
@@ -1013,8 +1013,8 @@ class RPCClient:
 
     def bdev_lvol_set_lvs_read_only(self, lvs_name, read_only=False):
         params = {
-            "lvs_name ": lvs_name,
-            "read_only ": read_only,
+            "lvs_name": lvs_name,
+            "read_only": read_only,
         }
         return self._request("bdev_lvol_set_lvs_read_only", params)
 
