@@ -93,11 +93,6 @@ properties:
                 description: The private status of the subcommand.
                 x-intellij-html-description: The private status of the subcommand.
                 default: false
-              blacklist:
-                type: boolean
-                description: The blacklist status of the subcommand.
-                x-intellij-html-description: The blacklist status of the subcommand.
-                default: false
               arguments:
                 type: array
                 description: The list of positional arguments and parameters of the subcommand.
@@ -207,13 +202,6 @@ properties:
                       x-intellij-html-description: |
                         The private status of the parameter. <b>Positional arguments cannot be private.</b><br>
                         Private parameters will only be enabled in sbcli if --dev is provided.
-                      default: false
-                    blacklist:
-                      type: boolean
-                      description: |
-                        The blacklist status of the parameter. Positional arguments cannot be blacklisted.
-                      x-intellij-html-description: |
-                        The blacklist status of the parameter. <b>Positional arguments cannot be blacklisted.</b><br>
                       default: false
                     action:
                       type: string

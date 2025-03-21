@@ -370,6 +370,10 @@ class CLIWrapper(CLIWrapperBase):
             argument = subcommand.add_argument('--enable-test-device', help='Enable creation of test device', dest='enable_test_device', required=False, action='store_true')
         if self.developer_mode:
             argument = subcommand.add_argument('--disable-ha-jm', help='Disable HA JM for distrib creation', dest='enable_ha_jm', required=False, action='store_false')
+        if self.developer_mode:
+            argument = subcommand.add_argument('--distr-vuid', help='(Dev) set vuid manually, default: random (1-99999)', type=int, dest='distr_vuid', required=False)
+        if self.developer_mode:
+            argument = subcommand.add_argument('--lvol-ha-type', help='Logical volume HA type (single, ha), default is cluster HA type', type=str, default='default', dest='lvol_ha_type', required=False, choices=['single','default','ha',])
 
     def init_cluster__create(self, subparser):
         subcommand = self.add_sub_command(subparser, 'create', 'Creates a new cluster')
@@ -958,7 +962,6 @@ class CLIWrapper(CLIWrapperBase):
                     args.blk_size = 512
                     args.page_size = 2097152
                     args.CLI_PASS = None
-                    args.grafana_endpoint = ''
                     args.distr_bs = 4096
                     args.max_queue_size = 128
                     args.inflight_io_threshold = 4
@@ -973,22 +976,8 @@ class CLIWrapper(CLIWrapperBase):
                     args.large_bufsize = 0
                     args.enable_test_device = None
                     args.enable_ha_jm = False
-                    args.lvol_name = 'lvol01'
-                    args.lvol_size = '10G'
-                    args.pool_name = 'pool01'
-                    args.pool_max = '25G'
-                    args.snapshot = False
-                    args.max_size = '1000G'
-                    args.encrypt = False
-                    args.crypto_key1 = None
-                    args.crypto_key2 = None
-                    args.max_rw_iops = None
-                    args.max_rw_mbytes = None
-                    args.max_r_mbytes = None
-                    args.max_w_mbytes = None
                     args.distr_vuid = None
                     args.lvol_ha_type = 'default'
-                    args.fstype = 'xfs'
                 ret = self.cluster__deploy(sub_command, args)
             elif sub_command in ['create']:
                 if not self.developer_mode:
