@@ -108,7 +108,7 @@ class CLIWrapper(CLIWrapperBase):
         if self.developer_mode:
             argument = subcommand.add_argument('--enable-test-device', help='Enable creation of test device', dest='enable_test_device', required=False, action='store_true')
         if self.developer_mode:
-            argument = subcommand.add_argument('--disable-ha-jm', help='Disable HA JM for distrib creation', dest='enable_ha_jm', required=False, action='store_true')
+            argument = subcommand.add_argument('--disable-ha-jm', help='Disable HA JM for distrib creation', dest='enable_ha_jm', required=False, action='store_false')
         argument = subcommand.add_argument('--ha-jm-count', help='HA JM count', type=int, default=3, dest='ha_jm_count', required=False)
         argument = subcommand.add_argument('--is-secondary-node', help='Adds as secondary node. A secondary node does not have any disks attached. It is only used for I/O processing in case a primary goes down.', dest='is_secondary_node', required=False, action='store_true')
         argument = subcommand.add_argument('--namespace', help='Kubernetes namespace to deploy on', type=str, dest='namespace', required=False)
@@ -369,7 +369,7 @@ class CLIWrapper(CLIWrapperBase):
         if self.developer_mode:
             argument = subcommand.add_argument('--enable-test-device', help='Enable creation of test device', dest='enable_test_device', required=False, action='store_true')
         if self.developer_mode:
-            argument = subcommand.add_argument('--disable-ha-jm', help='Disable HA JM for distrib creation', dest='enable_ha_jm', required=False, action='store_false')
+            argument = subcommand.add_argument('--disable-ha-jm', help='Disable HA JM for distrib creation', dest='enable_ha_jm', required=False, action='store_true')
         if self.developer_mode:
             argument = subcommand.add_argument('--distr-vuid', help='(Dev) set vuid manually, default: random (1-99999)', type=int, dest='distr_vuid', required=False)
         if self.developer_mode:

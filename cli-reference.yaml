@@ -133,7 +133,7 @@ commands:
             dest: enable_ha_jm
             type: bool
             default: true
-            action: store_true
+            action: store_false
             private: true
           - name: "--ha-jm-count"
             help: "HA JM count"
@@ -860,7 +860,7 @@ commands:
             dest: enable_ha_jm
             type: bool
             default: false
-            action: store_false
+            action: store_true
             private: true
           - name: "--distr-vuid"
             help: "(Dev) set vuid manually, default: random (1-99999)"
