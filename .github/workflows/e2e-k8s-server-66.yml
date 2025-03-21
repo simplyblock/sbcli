@@ -445,7 +445,7 @@ jobs:
         run: echo "TEST_START_TIME=$(date +%s)" >> $GITHUB_ENV
 
       - name: Setup Tests & Run Tests
-        timeout-minutes: 120
+        timeout-minutes: 200
         run: |
           cd $GITHUB_WORKSPACE/e2e
           pip install virtualenv
@@ -497,21 +497,6 @@ jobs:
           echo "TEST_TIME_HOURS=$TEST_TIME_HOURS" >> $GITHUB_ENV
           echo "TEST_TIME_MINS=$TEST_TIME_MINS" >> $GITHUB_ENV
           echo "TEST_TIME_SECS=$TEST_TIME_SECS" >> $GITHUB_ENV
-
-      - name: Upload automation and docker logs to miniio
-        run: |
-          cd $GITHUB_WORKSPACE/e2e/
-          python3 logs/upload_logs_to_miniio.py --k8s
-        if: always()
-        env:
-          GITHUB_RUN_ID: ${{ github.run_id }}
-          MINIO_ACCESS_KEY: "KxtpwblgG3AFDYJkyg8i"
-          MINIO_SECRET_KEY: "Yae4q5wJU9ZBzJhdsUGzu9wWqON8o0ERU7nGbJER"
-          BASTION_IP: "192.168.10.66"
-          MNODES: "192.168.10.66"
-          STORAGE_PRIVATE_IPS: "192.168.10.67 192.168.10.68 192.168.10.69"
-          SEC_STORAGE_PRIVATE_IPS: "192.168.10.70"
-          USER: "root"
 
       - name: Parse test results
         if: always() && (github.event_name == 'schedule' || env.send_slack_notification == 'true')
@@ -619,7 +604,7 @@ jobs:
           BS: ${{ env.BS }}
         run: |
           GITHUB_RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}"
-          AWS_LOGS_URL="https://s3.console.aws.amazon.com/s3/buckets/${S3_BUCKET_NAME}?prefix=${RUN_ID}/&region=us-east-2"
+          AWS_LOGS_URL="http://192.168.10.164:9001/browser/e2e-run-logs/${RUN_ID}%2F"
           if [[ ${{ job.status }} == 'success' ]]; then
             OVERALL_STATUS=":white_check_mark: Overall Status: SUCCESS"
           else
@@ -631,6 +616,21 @@ jobs:
           MESSAGE="Python E2E K8s tests run triggered on branch *${BRANCH_NAME}*. \nTotal Time Taken to run the tests: ${TIME_TAKEN}. \n\n${OVERALL_STATUS}\nGitHub Run: ${GITHUB_RUN_URL}\nAWS Logs: ${AWS_LOGS_URL}\n\n*Configuration*: *NDCS: ${NDCS}, NPCS: ${NPCS}, Block Size: ${BS}, Chunk Block Size: ${CHUNK_BS}*\n\nTotal Tests: *${TOTAL_TESTS}*, Passed Tests: *${PASSED_TESTS}*, Failed Tests: *${FAILED_TESTS}*\n\n-- Test Cases Passed :white_check_mark:\n${PASSED_CASES_BULLETS}\n\n-- Test Cases Failed :x:\n${FAILED_CASES_BULLETS}\n\n-- Test Cases Skipped :x:\n${SKIPPED_CASES_BULLETS}"
 
           curl -X POST -H 'Content-type: application/json' --data "{\"text\":\"${MESSAGE}\"}" $SLACK_WEBHOOK_URL
+
+      - name: Upload automation and docker logs to miniio
+        run: |
+          cd $GITHUB_WORKSPACE/e2e/
+          python3 logs/upload_logs_to_miniio.py --k8s
+        if: always()
+        env:
+          GITHUB_RUN_ID: ${{ github.run_id }}
+          MINIO_ACCESS_KEY: "KxtpwblgG3AFDYJkyg8i"
+          MINIO_SECRET_KEY: "Yae4q5wJU9ZBzJhdsUGzu9wWqON8o0ERU7nGbJER"
+          BASTION_IP: "192.168.10.66"
+          MNODES: "192.168.10.66"
+          STORAGE_PRIVATE_IPS: "192.168.10.67 192.168.10.68 192.168.10.69"
+          SEC_STORAGE_PRIVATE_IPS: "192.168.10.70"
+          USER: "root"
       
       - name: Uninstall K3s agent on all nodes
         if: always() && (github.event_name == 'schedule' || env.cleanup_cluster == 'true')
