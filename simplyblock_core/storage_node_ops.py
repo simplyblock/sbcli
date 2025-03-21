@@ -168,7 +168,6 @@ def _get_nvme_list(cluster):
                 size += ns['PhysicalSize']
         return size
 
-    sequential_number = 0
     devices = []
     if data and 'Devices' in data:
         for dev in data['Devices'][0]['Subsystems']:
@@ -182,12 +181,9 @@ def _get_nvme_list(cluster):
                 continue
 
             size = _get_size_from_namespaces(controller['Namespaces'])
-            device_partitions_count = int(size / (cluster.blk_size * cluster.page_size_in_blocks))
             devices.append(
                 NVMeDevice({
                     'device_name': controller['Controller'],
-                    'sequential_number': sequential_number,
-                    'partitions_count': device_partitions_count,
                     'capacity': size,
                     'size': size,
                     'pcie_address': controller['Address'],
@@ -195,7 +191,6 @@ def _get_nvme_list(cluster):
                     'serial_number': controller['SerialNumber'],
                     # 'status': controller['State']
                 }))
-            sequential_number += device_partitions_count
     return devices
 
 
