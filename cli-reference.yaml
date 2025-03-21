@@ -364,9 +364,9 @@ commands:
             dest: node_id
             completer: _completer_get_sn_list
             type: str
-          - name: "-s"
+          - name: "--sort"
             help: "Sort the outputs"
-            dest: -s
+            dest: sort
             type: str
             choices:
               - node-seq

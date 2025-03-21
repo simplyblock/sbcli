@@ -1013,8 +1013,8 @@ class RPCClient:
 
     def bdev_lvol_set_lvs_read_only(self, lvs_name, read_only=False):
         params = {
-            "lvs_name ": lvs_name,
-            "read_only ": read_only,
+            "lvs_name": lvs_name,
+            "read_only": read_only,
         }
         return self._request("bdev_lvol_set_lvs_read_only", params)
 
