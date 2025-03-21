@@ -529,13 +529,6 @@ def reset_storage_device(dev_id):
 
     logger.info("Setting devices to unavailable")
     device_set_unavailable(dev_id)
-    devs = []
-    for dev in snode.nvme_devices:
-        if dev.get_id() == device.get_id():
-            continue
-        if dev.status == NVMeDevice.STATUS_ONLINE and dev.physical_label == device.physical_label:
-            devs.append(dev)
-            device_set_unavailable(dev.get_id())
 
     logger.info("Resetting device")
     rpc_client = RPCClient(
@@ -548,10 +541,6 @@ def reset_storage_device(dev_id):
         logger.error(f"Failed to reset NVMe BDev {controller_name}")
         return False
     time.sleep(3)
-
-    logger.info("Setting devices online")
-    for dev in devs:
-        device_set_online(dev.get_id())
 
     # set io_error flag False
     device_set_io_error(dev_id, False)
@@ -886,32 +875,32 @@ def restart_jm_device(device_id, force=False, format_alceml=False):
                     snode.write_to_db(db_controller.kv_store)
                     set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_ONLINE)
         else:
-            # nvme_bdev = jm_device.nvme_bdev
+            nvme_bdev = jm_device.nvme_bdev
             # if snode.enable_test_device:
             #     ret = rpc_client.bdev_passtest_create(jm_device.testing_bdev, jm_device.nvme_bdev)
             #     if not ret:
             #         logger.error(f"Failed to create passtest bdev {jm_device.testing_bdev}")
             #         # return False
             #     nvme_bdev = jm_device.testing_bdev
-            # alceml_cpu_mask = ""
-            # alceml_worker_cpu_mask = ""
+            alceml_cpu_mask = ""
+            alceml_worker_cpu_mask = ""
             #
-            # if snode.alceml_cpu_cores:
-            #     alceml_cpu_mask = utils.decimal_to_hex_power_of_2(snode.alceml_cpu_cores[snode.alceml_cpu_index])
-            #     snode.alceml_cpu_index = (snode.alceml_cpu_index + 1) % len(snode.alceml_cpu_cores)
-            #
-            # if snode.alceml_worker_cpu_cores:
-            #     alceml_worker_cpu_mask = utils.decimal_to_hex_power_of_2(
-            #         snode.alceml_worker_cpu_cores[snode.alceml_worker_cpu_index])
-            #     snode.alceml_worker_cpu_index = (snode.alceml_worker_cpu_index + 1) % len(snode.alceml_worker_cpu_cores)
-            #
-            # ret = rpc_client.bdev_alceml_create(jm_device.alceml_bdev, nvme_bdev, jm_device.get_id(),
-            #                                     pba_init_mode=1, alceml_cpu_mask=alceml_cpu_mask,
-            #                                     alceml_worker_cpu_mask=alceml_worker_cpu_mask)
-            #
-            # if not ret:
-            #     logger.error(f"Failed to create alceml bdev: {jm_device.alceml_bdev}")
-            #     return False
+            if snode.alceml_cpu_cores:
+                alceml_cpu_mask = utils.decimal_to_hex_power_of_2(snode.alceml_cpu_cores[snode.alceml_cpu_index])
+                snode.alceml_cpu_index = (snode.alceml_cpu_index + 1) % len(snode.alceml_cpu_cores)
+
+            if snode.alceml_worker_cpu_cores:
+                alceml_worker_cpu_mask = utils.decimal_to_hex_power_of_2(
+                    snode.alceml_worker_cpu_cores[snode.alceml_worker_cpu_index])
+                snode.alceml_worker_cpu_index = (snode.alceml_worker_cpu_index + 1) % len(snode.alceml_worker_cpu_cores)
+
+            ret = rpc_client.bdev_alceml_create(jm_device.alceml_bdev, nvme_bdev, jm_device.get_id(),
+                                                pba_init_mode=1, alceml_cpu_mask=alceml_cpu_mask,
+                                                alceml_worker_cpu_mask=alceml_worker_cpu_mask)
+
+            if not ret:
+                logger.error(f"Failed to create alceml bdev: {jm_device.alceml_bdev}")
+                return False
 
             jm_bdev = f"jm_{snode.get_id()}"
             ret = rpc_client.bdev_jm_create(jm_bdev, jm_device.alceml_bdev, jm_cpu_mask=snode.jm_cpu_mask)
