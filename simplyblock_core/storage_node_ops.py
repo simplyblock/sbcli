@@ -35,54 +35,6 @@ class StorageOpsException(Exception):
         self.message = message
 
 
-def _get_data_nics(data_nics):
-    if not data_nics:
-        return
-    out, _, _ = shell_utils.run_command("ip -j address show")
-    data = json.loads(out)
-    logger.debug("ifaces")
-    logger.debug(pprint.pformat(data))
-
-    def _get_ip4_address(list_of_addr):
-        if list_of_addr:
-            for data in list_of_addr:
-                if data['family'] == 'inet':
-                    return data['local']
-        return ""
-
-    devices = {i["ifname"]: i for i in data}
-    iface_list = []
-    for nic in data_nics:
-        if nic not in devices:
-            continue
-        device = devices[nic]
-        iface = IFace({
-            'uuid': str(uuid.uuid4()),
-            'if_name': device['ifname'],
-            'ip4_address': _get_ip4_address(device['addr_info']),
-            'port_number': 1,  # TODO: check this value
-            'status': device['operstate'],
-            'net_type': device['link_type']})
-        iface_list.append(iface)
-
-    return iface_list
-
-
-def _get_if_ip_address(ifname):
-    out, _, _ = shell_utils.run_command("ip -j address show %s" % ifname)
-    data = json.loads(out)
-    logger.debug(pprint.pformat(data))
-    if data:
-        data = data[0]
-        if 'addr_info' in data and data['addr_info']:
-            address_info = data['addr_info']
-            for adr in address_info:
-                if adr['family'] == 'inet':
-                    return adr['local']
-    logger.error("IP not found for interface %s", ifname)
-    exit(1)
-
-
 def addNvmeDevices(snode, devs):
     rpc_client = RPCClient(
         snode.mgmt_ip, snode.rpc_port,
@@ -147,65 +99,6 @@ def addNvmeDevices(snode, devs):
             }))
         # next_physical_label += 1
     return devices
-
-
-def _get_nvme_list(cluster):
-    out, err, _ = shell_utils.run_command("sudo nvme list -v -o json")
-    data = json.loads(out)
-    logger.debug("nvme list:")
-    logger.debug(pprint.pformat(data))
-
-    def _get_pcie_controller(ctrl_list):
-        if ctrl_list:
-            for item in ctrl_list:
-                if 'Transport' in item and item['Transport'] == 'pcie':
-                    return item
-
-    def _get_size_from_namespaces(namespaces):
-        size = 0
-        if namespaces:
-            for ns in namespaces:
-                size += ns['PhysicalSize']
-        return size
-
-    devices = []
-    if data and 'Devices' in data:
-        for dev in data['Devices'][0]['Subsystems']:
-            controller = _get_pcie_controller(dev['Controllers'])
-            if not controller:
-                continue
-
-            if controller['ModelNumber'] not in cluster.model_ids:
-                logger.info("Device model ID is not recognized: %s, skipping device: %s",
-                            controller['ModelNumber'], controller['Controller'])
-                continue
-
-            size = _get_size_from_namespaces(controller['Namespaces'])
-            devices.append(
-                NVMeDevice({
-                    'device_name': controller['Controller'],
-                    'capacity': size,
-                    'size': size,
-                    'pcie_address': controller['Address'],
-                    'model_id': controller['ModelNumber'],
-                    'serial_number': controller['SerialNumber'],
-                    # 'status': controller['State']
-                }))
-    return devices
-
-
-def _run_nvme_smart_log(dev_name):
-    out, _, _ = shell_utils.run_command("sudo nvme smart-log /dev/%s -o json" % dev_name)
-    data = json.loads(out)
-    logger.debug(out)
-    return data
-
-
-def _run_nvme_smart_log_add(dev_name):
-    out, _, _ = shell_utils.run_command("sudo nvme intel smart-log-add /dev/%s --json" % dev_name)
-    data = json.loads(out)
-    logger.debug(out)
-    return data
 
 
 def get_next_cluster_device_order(db_controller, cluster_id):
