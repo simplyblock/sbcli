@@ -642,6 +642,7 @@ class CLIWrapperBase:
         max_r_mbytes = None
         max_w_mbytes = None
         lvol_priority_class = 0
+        id_device_by_nqn = False
         fstype = "xfs"
 
         storage_nodes = args.storage_nodes
@@ -707,7 +708,7 @@ class CLIWrapperBase:
             spdk_image,spdk_debug,small_bufsize,large_bufsize,num_partitions_per_dev,jm_percent,spdk_cpu_mask,max_lvol,
             max_snap,max_prov,number_of_devices,enable_test_device,enable_ha_jm,ha_jm_count,number_of_distribs,namespace,secondary_nodes,partition_size,
             lvol_name, lvol_size, lvol_ha_type, pool_name, pool_max, host_id, comp, crypto, distr_vuid, max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes,
-            with_snapshot, max_size, crypto_key1, crypto_key2, lvol_priority_class, fstype)
+            with_snapshot, max_size, crypto_key1, crypto_key2, lvol_priority_class, id_device_by_nqn, fstype)
 
     def cluster_create(self, args):
         page_size_in_blocks = args.page_size
