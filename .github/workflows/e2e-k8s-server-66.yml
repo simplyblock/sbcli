@@ -137,10 +137,9 @@ jobs:
           echo "CHUNK_BS=${{ github.event.inputs.chunk_bs || 4096 }}" >> $GITHUB_ENV
         shell: bash
 
-
-      - name: Bootstrap Cluster
+      - name: Uninstall K3s agent on all nodes
+        if: always() && (github.event_name == 'schedule' || env.cleanup_cluster == 'true')
         run: |
-          cd $GITHUB_WORKSPACE/simplyBlockDeploy
           helm uninstall -n spdk-csi spdk-csi || echo "No helm release found. Skipping uninstall."
           
           echo "[INFO] Deleting deployments..."
@@ -150,7 +149,7 @@ jobs:
           kubectl delete daemonset --all -n spdk-csi || echo "No daemonsets found. Skipping delete."
           
           echo "[INFO] Deleting all pods..."
-          kubectl delete pods --all -n spdk-csi --timeout=10s || echo "Pods not deleted within timeout."
+          kubectl delete pods --all -n spdk-csi --force --timeout=10s || echo "Pods not deleted within timeout."
 
           echo "[INFO] Waiting for all resources to be deleted..."
           timeout=120  # Max wait time (in seconds)
@@ -168,6 +167,30 @@ jobs:
           else
             echo "[WARNING] Resources were not deleted within the timeout of ${timeout}s."
           fi
+
+          for node in $K3S_MNODES $STORAGE_PRIVATE_IPS $SEC_STORAGE_PRIVATE_IPS; do
+            ssh -i ~/.ssh/simplyblock-us-east-2.pem  root@${node} "k3s-agent-uninstall.sh"
+          done
+          
+          for node in $MNODES; do
+            if ssh -i ~/.ssh/simplyblock-us-east-2.pem root@${node} "command -v $SBCLI_CMD" &>/dev/null; then
+              ssh -i ~/.ssh/simplyblock-us-east-2.pem root@${node} "$SBCLI_CMD sn deploy-cleaner" || echo "[WARNING] Failed to run deploy-cleaner on $node"
+            else
+              echo "[WARNING] SBCLI_CMD not found on $node. Skipping deploy-cleaner."
+            fi
+
+            ssh -i ~/.ssh/simplyblock-us-east-2.pem root@${node} "rm -rf /etc/foundationdb/* || true" || echo "[WARNING] Failed to clean foundationdb on $node"
+          done
+        env:
+          STORAGE_PRIVATE_IPS: "192.168.10.67 192.168.10.68 192.168.10.69"
+          SEC_STORAGE_PRIVATE_IPS: "192.168.10.70"
+          MNODES: "192.168.10.66"
+          SBCLI_CMD: ${{ env.SBCLI_CMD }}
+
+
+      - name: Bootstrap Cluster
+        run: |
+          cd $GITHUB_WORKSPACE/simplyBlockDeploy
 
           ./bootstrap-cluster.sh --sbcli-cmd "$SBCLI_CMD" \
             --max-lvol 20 --max-snap 20 --max-prov 150G --number-of-devices 3 \
@@ -621,7 +644,7 @@ jobs:
           kubectl delete daemonset --all -n spdk-csi || echo "No daemonsets found. Skipping delete."
           
           echo "[INFO] Deleting all pods..."
-          kubectl delete pods --all -n spdk-csi --timeout=10s || echo "Pods not deleted within timeout."
+          kubectl delete pods --all -n spdk-csi --force --timeout=10s || echo "Pods not deleted within timeout."
 
           echo "[INFO] Waiting for all resources to be deleted..."
           timeout=120  # Max wait time (in seconds)
