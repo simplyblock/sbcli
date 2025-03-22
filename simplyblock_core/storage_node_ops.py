@@ -2862,6 +2862,7 @@ def recreate_lvstore_on_sec(snode):
 
             remote_rpc_client.bdev_lvol_set_leader(False, lvs_name=node.lvstore)
             remote_rpc_client.bdev_distrib_force_to_non_leader(node.jm_vuid)
+            time.sleep(1)
 
         # ret, err = _create_bdev_stack(snode, node.lvstore_stack, primary_node=node)
         ret = rpc_client.bdev_examine(node.raid)
@@ -2970,7 +2971,7 @@ def recreate_lvstore(snode):
             sec_node_api.firewall_set_port(snode.lvol_subsys_port, "tcp", "block")
             tcp_ports_events.port_deny(sec_node, snode.lvol_subsys_port)
 
-            # time.sleep(1)
+            time.sleep(1)
 
             sec_rpc_client.bdev_lvol_set_leader(False, lvs_name=snode.lvstore, bs_nonleadership=True)
             sec_rpc_client.bdev_distrib_force_to_non_leader(snode.jm_vuid)
