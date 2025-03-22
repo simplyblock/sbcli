@@ -176,9 +176,9 @@ class DBController(metaclass=Singleton):
             return ret[0]
 
     def get_lvol_by_id(self, id) -> LVol:
-        ret = LVol().read_from_db(self.kv_store, id)
-        if ret:
-            return ret[0]
+        for lvol in self.get_lvols():
+            if lvol.get_id() == id:
+                return lvol
 
     def get_lvol_by_name(self, lvol_name) -> LVol:
         for lvol in self.get_lvols():

@@ -316,7 +316,7 @@ class CLIWrapper(CLIWrapperBase):
         argument = subcommand.add_argument('--data-chunks-per-stripe', help='Erasure coding schema parameter k (distributed raid), default: 1', type=int, default=1, dest='distr_ndcs', required=False)
         argument = subcommand.add_argument('--parity-chunks-per-stripe', help='Erasure coding schema parameter n (distributed raid), default: 1', type=int, default=1, dest='distr_npcs', required=False)
         if self.developer_mode:
-            argument = subcommand.add_argument('--enable-qos', help='Enable qos bdev for storage nodes', dest='enable_qos', required=False, action='store_true')
+            argument = subcommand.add_argument('--enable-qos', help='Enable qos bdev for storage nodes', type=bool, default=True, dest='enable_qos', required=False)
         argument = subcommand.add_argument('--ifname', help='Management interface name, e.g. eth0', type=str, dest='ifname', required=False)
         if self.developer_mode:
             argument = subcommand.add_argument('--blk_size', help='The block size in bytes', type=int, default=512, dest='blk_size', required=False, choices=['512','4096',])
@@ -617,7 +617,7 @@ class CLIWrapper(CLIWrapperBase):
 
     def init_volume__delete(self, subparser):
         subcommand = self.add_sub_command(subparser, 'delete', 'Deletes a logical volume')
-        subcommand.add_argument('volume_id', help='Logical volumes id or ids', type=str)
+        subcommand.add_argument('volume_id', help='Logical volumes id or ids', type=str, nargs='+')
         argument = subcommand.add_argument('--force', help='Force delete logical volume from the cluster', dest='force', required=False, action='store_true')
 
     def init_volume__connect(self, subparser):
@@ -990,7 +990,7 @@ class CLIWrapper(CLIWrapperBase):
             if sub_command in ['deploy']:
                 if not self.developer_mode:
                     args.ha_jm_count = 3
-                    args.enable_qos = None
+                    args.enable_qos = True
                     args.blk_size = 512
                     args.page_size = 2097152
                     args.CLI_PASS = None

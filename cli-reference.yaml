@@ -658,7 +658,7 @@ commands:
             help: "Enable qos bdev for storage nodes"
             dest: enable_qos
             type: bool
-            action: store_true
+            default: true
             private: true
           - name: "--ifname"
             help: "Management interface name, e.g. eth0"
