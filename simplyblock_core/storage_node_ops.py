@@ -8,6 +8,7 @@ import pprint
 
 import time
 import uuid
+from concurrent.futures.thread import ThreadPoolExecutor
 
 import docker
 
@@ -2825,6 +2826,11 @@ def recreate_lvstore_on_sec(snode):
         remote_rpc_client = RPCClient(
             node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password)
 
+        node.lvstore_status = "in_creation"
+        node.write_to_db()
+
+        time.sleep(3)
+
         lvol_list = db_controller.get_lvols_by_node_id(node.get_id())
 
         node_api = SNodeClient(node.api_endpoint)
@@ -2835,18 +2841,22 @@ def recreate_lvstore_on_sec(snode):
 
         ret, err = _create_bdev_stack(snode, node.lvstore_stack, primary_node=node)
 
+        for lvol in lvol_list:
+            logger.info("creating subsystem %s", lvol.nqn)
+            rpc_client.subsystem_create(lvol.nqn, 'sbcli-cn', lvol.uuid, 1000)
+            for iface in snode.data_nics:
+                if iface.ip4_address:
+                    tr_type = iface.get_transport_type()
+                    logger.info("adding listener for %s on IP %s" % (lvol.nqn, iface.ip4_address))
+                    ret = rpc_client.listeners_create(
+                        lvol.nqn, tr_type, iface.ip4_address, lvol.subsys_port, "non_optimized")
+
         if node.status == StorageNode.STATUS_ONLINE:
             # for lvol in lvol_list:
             #     for iface in node.data_nics:
             #         if iface.ip4_address:
             #             ret = remote_rpc_client.nvmf_subsystem_listener_set_ana_state(
             #                 lvol.nqn, iface.ip4_address, lvol.subsys_port, False, "inaccessible")
-
-            # time.sleep(3)
-            node.lvstore_status = "in_creation"
-            node.write_to_db()
-            time.sleep(3)
-
             node_api.firewall_set_port(node.lvol_subsys_port, "tcp", "block")
             tcp_ports_events.port_deny(node, node.lvol_subsys_port)
 
@@ -2869,18 +2879,20 @@ def recreate_lvstore_on_sec(snode):
 
         time.sleep(1)
         for lvol in lvol_list:
-            is_created, error = lvol_controller.recreate_lvol_on_node(
-                lvol, snode, 1, ana_state="non_optimized")
-            if error:
-                logger.error(f"Failed to recreate LVol: {lvol.get_id()} on node: {snode.get_id()}")
-                lvol.status = LVol.STATUS_OFFLINE
-            else:
-                lvol.status = LVol.STATUS_ONLINE
-                lvol.io_error = False
-                lvol.health_check = True
-            lvol.write_to_db(db_controller.kv_store)
+            is_created, error = add_lvol_thread(lvol, snode)
 
-        time.sleep(5)
+            # is_created, error = lvol_controller.recreate_lvol_on_node(
+            #     lvol, snode, 1, "non-optimize")
+            # if error:
+            #     logger.error(f"Failed to recreate LVol: {lvol.get_id()} on node: {snode.get_id()}")
+            #     lvol.status = LVol.STATUS_OFFLINE
+            # else:
+            #     lvol.status = LVol.STATUS_ONLINE
+            #     lvol.io_error = False
+            #     lvol.health_check = True
+            # lvol.write_to_db(db_controller.kv_store)
+
+        time.sleep(10)
         sec_node_api.firewall_set_port(node.lvol_subsys_port, "tcp", "allow")
         tcp_ports_events.port_allowed(snode, node.lvol_subsys_port)
 
@@ -2913,15 +2925,43 @@ def recreate_lvstore(snode):
         snode.mgmt_ip, snode.rpc_port,
         snode.rpc_username, snode.rpc_password)
 
+    snode_api = SNodeClient(snode.api_endpoint)
+
     sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
     sec_node_api = SNodeClient(sec_node.api_endpoint)
 
-    prim_node_suspend = False
     lvol_list = db_controller.get_lvols_by_node_id(snode.get_id())
+
+    snode_api.firewall_set_port(snode.lvol_subsys_port, "tcp", "block")
+    tcp_ports_events.port_deny(snode, snode.lvol_subsys_port)
+
+
+    prim_node_suspend = False
     if sec_node:
         if sec_node.status == StorageNode.STATUS_UNREACHABLE:
             prim_node_suspend = True
-        elif sec_node.status == StorageNode.STATUS_ONLINE:
+    if not lvol_list:
+        prim_node_suspend = False
+
+    lvol_ana_state = "optimized"
+    if prim_node_suspend:
+        lvol_ana_state = "inaccessible"
+
+    for lvol in lvol_list:
+        logger.info("creating subsystem %s", lvol.nqn)
+        rpc_client.subsystem_create(lvol.nqn, 'sbcli-cn', lvol.uuid, 1)
+        for iface in snode.data_nics:
+            if iface.ip4_address:
+                tr_type = iface.get_transport_type()
+                logger.info("adding listener for %s on IP %s" % (lvol.nqn, iface.ip4_address))
+                ret = rpc_client.listeners_create(
+                    lvol.nqn, tr_type, iface.ip4_address, lvol.subsys_port,lvol_ana_state)
+                # logger.info("Add BDev to subsystem")
+                # ret = rpc_client.nvmf_subsystem_add_ns(lvol.nqn, lvol.top_bdev, lvol.uuid, lvol.guid)
+
+    if sec_node:
+
+        if sec_node.status == StorageNode.STATUS_ONLINE:
             sec_rpc_client = RPCClient(sec_node.mgmt_ip, sec_node.rpc_port, sec_node.rpc_username, sec_node.rpc_password)
             sec_node.lvstore_status = "in_creation"
             sec_node.write_to_db()
@@ -2939,38 +2979,29 @@ def recreate_lvstore(snode):
     ret = rpc_client.bdev_lvol_set_lvs_ops(snode.lvstore, snode.jm_vuid, snode.lvol_subsys_port)
     ret = rpc_client.bdev_lvol_set_leader(True, lvs_name=snode.lvstore)
 
-    if not lvol_list:
-        prim_node_suspend = False
+    # if not lvol_list:
+    #     prim_node_suspend = False
 
     if snode.jm_vuid:
         ret = rpc_client.jc_explicit_synchronization(snode.jm_vuid)
         logger.info(f"JM Sync res: {ret}")
 
-    lvol_ana_state = "optimized"
-    if prim_node_suspend:
-        lvol_ana_state = "inaccessible"
+    executor = ThreadPoolExecutor(max_workers=100)
 
     for lvol in lvol_list:
-        lvol_obj = db_controller.get_lvol_by_id(lvol.get_id())
-        is_created, error = lvol_controller.recreate_lvol_on_node(lvol_obj, snode, ana_state=lvol_ana_state)
-        if error:
-            logger.error(f"Failed to recreate LVol: {lvol_obj.get_id()} on node: {snode.get_id()}")
-            lvol_obj.status = LVol.STATUS_OFFLINE
-        else:
-            lvol_obj.status = LVol.STATUS_ONLINE
-            lvol_obj.io_error = False
-            lvol_obj.health_check = True
-        lvol_obj.write_to_db()
+        a = executor.submit(add_lvol_thread, lvol, snode)
+
+    time.sleep(1)
+
+    snode_api.firewall_set_port(snode.lvol_subsys_port, "tcp", "allow")
+    tcp_ports_events.port_allowed(snode, snode.lvol_subsys_port)
 
     if prim_node_suspend:
-        if sec_node.status == StorageNode.STATUS_ONLINE:
-            sec_node_api.firewall_set_port(snode.lvol_subsys_port, "tcp", "allow")
-            tcp_ports_events.port_allowed(sec_node, snode.lvol_subsys_port)
-
         set_node_status(snode.get_id(), StorageNode.STATUS_SUSPENDED)
         logger.info("Node restart interrupted because secondary node is unreachable")
         logger.info("Node status changed to suspended")
         return False
+
 
     if sec_node.status == StorageNode.STATUS_ONLINE:
         time.sleep(10)
@@ -2981,6 +3012,46 @@ def recreate_lvstore(snode):
         sec_node.write_to_db()
 
     return True
+
+
+
+def add_lvol_thread(lvol, snode):
+    db_controller = DBController()
+
+    rpc_client = RPCClient(
+        snode.mgmt_ip, snode.rpc_port,
+        snode.rpc_username, snode.rpc_password)
+
+
+    base = f"{lvol.lvs_name}/{lvol.lvol_bdev}"
+
+    if "crypto" in lvol.lvol_type:
+        ret = lvol_controller._create_crypto_lvol(
+            rpc_client, lvol.crypto_bdev, base, lvol.crypto_key1, lvol.crypto_key2)
+        if not ret:
+            msg = f"Failed to create crypto lvol on node {snode.get_id()}"
+            logger.error(msg)
+            return False, msg
+
+
+    ret = rpc_client.nvmf_subsystem_add_ns(lvol.nqn, lvol.top_bdev, lvol.uuid, lvol.guid)
+    logger.info("Add BDev to subsystem")
+    logger.info(ret)
+
+    lvol_obj = db_controller.get_lvol_by_id(lvol.get_id())
+    if ret:
+
+        lvol_obj.status = LVol.STATUS_ONLINE
+        lvol_obj.io_error = False
+        lvol_obj.health_check = True
+
+    else:
+
+        logger.error(f"Failed to recreate LVol: {lvol_obj.get_id()} on node: {snode.get_id()}")
+        lvol_obj.status = LVol.STATUS_OFFLINE
+
+    lvol_obj.write_to_db()
+    return True, None
 
 
 def get_sorted_ha_jms(current_node):
