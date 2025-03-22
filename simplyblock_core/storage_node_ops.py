@@ -2932,8 +2932,8 @@ def recreate_lvstore(snode):
 
     lvol_list = db_controller.get_lvols_by_node_id(snode.get_id())
 
-    snode_api.firewall_set_port(snode.lvol_subsys_port, "tcp", "block")
-    tcp_ports_events.port_deny(snode, snode.lvol_subsys_port)
+    # snode_api.firewall_set_port(snode.lvol_subsys_port, "tcp", "block")
+    # tcp_ports_events.port_deny(snode, snode.lvol_subsys_port)
 
 
     prim_node_suspend = False
@@ -2950,12 +2950,12 @@ def recreate_lvstore(snode):
     for lvol in lvol_list:
         logger.info("creating subsystem %s", lvol.nqn)
         rpc_client.subsystem_create(lvol.nqn, 'sbcli-cn', lvol.uuid, 1)
-        for iface in snode.data_nics:
-            if iface.ip4_address:
-                tr_type = iface.get_transport_type()
-                logger.info("adding listener for %s on IP %s" % (lvol.nqn, iface.ip4_address))
-                ret = rpc_client.listeners_create(
-                    lvol.nqn, tr_type, iface.ip4_address, lvol.subsys_port,lvol_ana_state)
+        # for iface in snode.data_nics:
+        #     if iface.ip4_address:
+        #         tr_type = iface.get_transport_type()
+        #         logger.info("adding listener for %s on IP %s" % (lvol.nqn, iface.ip4_address))
+        #         ret = rpc_client.listeners_create(
+        #             lvol.nqn, tr_type, iface.ip4_address, lvol.subsys_port,lvol_ana_state)
                 # logger.info("Add BDev to subsystem")
                 # ret = rpc_client.nvmf_subsystem_add_ns(lvol.nqn, lvol.top_bdev, lvol.uuid, lvol.guid)
 
@@ -3002,12 +3002,12 @@ def recreate_lvstore(snode):
     executor = ThreadPoolExecutor(max_workers=100)
 
     for lvol in lvol_list:
-        a = executor.submit(add_lvol_thread, lvol, snode)
+        a = executor.submit(add_lvol_thread, lvol, snode, lvol_ana_state)
 
     time.sleep(1)
 
-    snode_api.firewall_set_port(snode.lvol_subsys_port, "tcp", "allow")
-    tcp_ports_events.port_allowed(snode, snode.lvol_subsys_port)
+    # snode_api.firewall_set_port(snode.lvol_subsys_port, "tcp", "allow")
+    # tcp_ports_events.port_allowed(snode, snode.lvol_subsys_port)
 
     if prim_node_suspend:
         set_node_status(snode.get_id(), StorageNode.STATUS_SUSPENDED)
@@ -3028,7 +3028,7 @@ def recreate_lvstore(snode):
 
 
 
-def add_lvol_thread(lvol, snode):
+def add_lvol_thread(lvol, snode, lvol_ana_state="optimized"):
     db_controller = DBController()
 
     rpc_client = RPCClient(
@@ -3050,6 +3050,13 @@ def add_lvol_thread(lvol, snode):
     ret = rpc_client.nvmf_subsystem_add_ns(lvol.nqn, lvol.top_bdev, lvol.uuid, lvol.guid)
     logger.info("Add BDev to subsystem")
     logger.info(ret)
+
+    for iface in snode.data_nics:
+        if iface.ip4_address:
+            tr_type = iface.get_transport_type()
+            logger.info("adding listener for %s on IP %s" % (lvol.nqn, iface.ip4_address))
+            ret = rpc_client.listeners_create(
+                lvol.nqn, tr_type, iface.ip4_address, lvol.subsys_port, lvol_ana_state)
 
     lvol_obj = db_controller.get_lvol_by_id(lvol.get_id())
     if ret:
