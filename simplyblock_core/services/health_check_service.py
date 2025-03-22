@@ -62,6 +62,7 @@ while True:
                                     StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
                 logger.info(f"Node status is: {snode.status}, skipping")
                 set_node_health_check(snode, False)
+                continue
 
             # 1- check node ping
             ping_check = health_controller._check_node_ping(snode.mgmt_ip)
@@ -76,11 +77,11 @@ while True:
                 snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
             logger.info(f"Check: node RPC {snode.mgmt_ip}:{snode.rpc_port} ... {node_rpc_check}")
 
-            # 4- docker API
-            node_docker_check = health_controller._check_node_docker_api(snode.mgmt_ip)
-            logger.info(f"Check: node docker API {snode.mgmt_ip}:2375 ... {node_docker_check}")
+            # # 4- docker API
+            # node_docker_check = health_controller._check_node_docker_api(snode.mgmt_ip)
+            # logger.info(f"Check: node docker API {snode.mgmt_ip}:2375 ... {node_docker_check}")
 
-            is_node_online = ping_check and node_api_check and node_rpc_check and node_docker_check
+            is_node_online = ping_check and node_api_check and node_rpc_check
 
             health_check_status = is_node_online
             if not node_rpc_check:
@@ -127,7 +128,7 @@ while True:
                     for bdev in bdevs_stack:
                         if not bdev:
                             continue
-                        # ret = rpc_client.get_bdevs(bdev)
+
                         if bdev in node_bdev_names:
                             logger.debug(f"Checking bdev: {bdev} ... ok")
                         else:
@@ -137,7 +138,6 @@ while True:
                             # return False
                     logger.info(f"Checking Device's BDevs ... ({(len(bdevs_stack) - problems)}/{len(bdevs_stack)})")
 
-                    # ret = rpc_client.subsystem_list(device.nvmf_nqn)
                     logger.debug(f"Checking subsystem: {device.nvmf_nqn}")
                     if device.nvmf_nqn in subsystem_list:
                         logger.info(f"Checking subsystem ... ok")
@@ -155,7 +155,6 @@ while True:
                     org_dev = db_controller.get_storage_device_by_id(remote_device.get_id())
                     org_node =  db_controller.get_storage_node_by_id(remote_device.node_id)
                     if org_dev.status == NVMeDevice.STATUS_ONLINE and org_node.status == StorageNode.STATUS_ONLINE:
-                        # ret = rpc_client.get_bdevs(remote_device.remote_bdev)
                         if remote_device.remote_bdev in node_bdev_names:
                             logger.info(f"Checking bdev: {remote_device.remote_bdev} ... ok")
                             connected_devices.append(remote_device.get_id())
@@ -166,11 +165,6 @@ while True:
                                 logger.error(f"device alceml bdev not found!, {org_dev.get_id()}")
                                 continue
                             name = f"remote_{org_dev.alceml_bdev}"
-                            # if rpc_client.bdev_nvme_controller_list(name):
-                            #     logger.info(f"detaching {name} from {snode.get_id()}")
-                            #     rpc_client.bdev_nvme_detach_controller(name)
-                            #     time.sleep(1)
-
                             logger.info(f"Connecting {name} to {snode.get_id()}")
                             ret = rpc_client.bdev_nvme_attach_controller_tcp(
                                 name, org_dev.nvmf_nqn, org_dev.nvmf_ip, org_dev.nvmf_port)
@@ -236,7 +230,6 @@ while True:
                 if snode.enable_ha_jm:
                     logger.info(f"Node remote JMs: {len(snode.remote_jm_devices)}")
                     for remote_device in snode.remote_jm_devices:
-                        # ret = rpc_client.get_bdevs(remote_device.remote_bdev)
                         if remote_device.remote_bdev in node_bdev_names:
                             logger.info(f"Checking bdev: {remote_device.remote_bdev} ... ok")
                             online_jms += 1
@@ -280,7 +273,8 @@ while True:
                         for node in db_controller.get_primary_storage_nodes_by_secondary_node_id(snode.get_id()):
                             if node and node.status == StorageNode.STATUS_ONLINE and node.lvstore_status == "ready":
                                 logger.info(f"Checking stack from node : {node.get_id()}")
-                                lvstore_check &= health_controller._check_node_lvstore(node.lvstore_stack, snode, auto_fix=True)
+                                lvstore_check &= health_controller._check_node_lvstore(
+                                    node.lvstore_stack, snode, auto_fix=True, node_bdev_names=node_bdev_names)
                                 lvol_port_check = False
                                 if node_api_check:
                                     lvol_port_check = health_controller._check_port_on_node(snode, node.lvol_subsys_port)
@@ -294,7 +288,8 @@ while True:
 
                     else:
                         lvstore_stack = snode.lvstore_stack
-                        lvstore_check &= health_controller._check_node_lvstore(lvstore_stack, snode, auto_fix=True)
+                        lvstore_check &= health_controller._check_node_lvstore(
+                            lvstore_stack, snode, auto_fix=True, node_bdev_names=node_bdev_names)
                         if snode.secondary_node_id:
                             second_node_1 = db_controller.get_storage_node_by_id(snode.secondary_node_id)
                             if second_node_1 and second_node_1.status == StorageNode.STATUS_ONLINE:

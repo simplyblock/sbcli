@@ -130,7 +130,7 @@ def _check_node_ping(ip):
         return False
 
 
-def _check_node_lvstore(lvstore_stack, node, auto_fix=False):
+def _check_node_lvstore(lvstore_stack, node, auto_fix=False, node_bdev_names=None):
     db_controller = DBController()
     lvstore_check = True
     logger.info(f"Checking distr stack on node : {node.get_id()}")
@@ -151,14 +151,11 @@ def _check_node_lvstore(lvstore_stack, node, auto_fix=False):
         elif type == "bdev_lvstore":
             bdev_lvstore = bdev["name"]
 
-    node_bdevs = rpc_client.get_bdevs()
-    if node_bdevs:
+    if not node_bdev_names:
+        node_bdevs = rpc_client.get_bdevs()
         node_bdev_names = [b['name'] for b in node_bdevs]
-    else:
-        node_bdev_names = []
 
     for distr in distribs_list:
-        # ret = rpc_client.get_bdevs(distr)
         if distr in node_bdev_names:
             logger.info(f"Checking distr bdev : {distr} ... ok")
             logger.info("Checking Distr map ...")
@@ -201,7 +198,6 @@ def _check_node_lvstore(lvstore_stack, node, auto_fix=False):
             logger.info(f"Checking distr bdev : {distr} ... not found")
             lvstore_check = False
     if raid:
-        # ret = rpc_client.get_bdevs(raid)
         if raid in node_bdev_names:
             logger.info(f"Checking raid bdev: {raid} ... ok")
         else:
