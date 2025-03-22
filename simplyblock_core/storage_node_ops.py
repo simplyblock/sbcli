@@ -2827,24 +2827,50 @@ def recreate_lvstore_on_sec(snode):
 
         lvol_list = db_controller.get_lvols_by_node_id(node.get_id())
 
+        node_api = SNodeClient(node.api_endpoint)
+        sec_node_api = SNodeClient(snode.api_endpoint)
+
+        sec_node_api.firewall_set_port(node.lvol_subsys_port, "tcp", "block")
+        tcp_ports_events.port_deny(snode, node.lvol_subsys_port)
+
+        ret, err = _create_bdev_stack(snode, node.lvstore_stack, primary_node=node)
+
         if node.status == StorageNode.STATUS_ONLINE:
-            for lvol in lvol_list:
-                for iface in node.data_nics:
-                    if iface.ip4_address:
-                        ret = remote_rpc_client.nvmf_subsystem_listener_set_ana_state(
-                            lvol.nqn, iface.ip4_address, lvol.subsys_port, False, "inaccessible")
+            # for lvol in lvol_list:
+            #     for iface in node.data_nics:
+            #         if iface.ip4_address:
+            #             ret = remote_rpc_client.nvmf_subsystem_listener_set_ana_state(
+            #                 lvol.nqn, iface.ip4_address, lvol.subsys_port, False, "inaccessible")
+
+            # time.sleep(3)
+            node.lvstore_status = "in_creation"
+            node.write_to_db()
+            time.sleep(3)
+
+            node_api.firewall_set_port(node.lvol_subsys_port, "tcp", "block")
+            tcp_ports_events.port_deny(node, node.lvol_subsys_port)
 
             remote_rpc_client.bdev_lvol_set_leader(False, lvs_name=node.lvstore)
             remote_rpc_client.bdev_distrib_force_to_non_leader(node.jm_vuid)
 
-        ret, err = _create_bdev_stack(snode, node.lvstore_stack, primary_node=node)
+        # ret, err = _create_bdev_stack(snode, node.lvstore_stack, primary_node=node)
         ret = rpc_client.bdev_examine(node.raid)
         ret = rpc_client.bdev_wait_for_examine()
         ret = rpc_client.bdev_lvol_set_lvs_ops(node.lvstore, node.jm_vuid, node.lvol_subsys_port)
 
+        if node.status == StorageNode.STATUS_ONLINE:
+
+            node_api.firewall_set_port(node.lvol_subsys_port, "tcp", "allow")
+            tcp_ports_events.port_allowed(node, node.lvol_subsys_port)
+
+            node = db_controller.get_storage_node_by_id(node.get_id())
+            node.lvstore_status = "ready"
+            node.write_to_db()
+
+        time.sleep(1)
         for lvol in lvol_list:
             is_created, error = lvol_controller.recreate_lvol_on_node(
-                lvol, snode, 1, ana_state="inaccessible")
+                lvol, snode, 1, ana_state="non_optimized")
             if error:
                 logger.error(f"Failed to recreate LVol: {lvol.get_id()} on node: {snode.get_id()}")
                 lvol.status = LVol.STATUS_OFFLINE
@@ -2854,23 +2880,15 @@ def recreate_lvstore_on_sec(snode):
                 lvol.health_check = True
             lvol.write_to_db(db_controller.kv_store)
 
-        # rpc_client.bdev_lvol_set_leader(False, lvs_name=node.lvstore)
-        # rpc_client.bdev_distrib_force_to_non_leader(node.jm_vuid)
+        time.sleep(5)
+        sec_node_api.firewall_set_port(node.lvol_subsys_port, "tcp", "allow")
+        tcp_ports_events.port_allowed(snode, node.lvol_subsys_port)
 
-        if node.status == StorageNode.STATUS_ONLINE:
-            for lvol in lvol_list:
-                for iface in node.data_nics:
-                    if iface.ip4_address:
-                        ret = remote_rpc_client.nvmf_subsystem_listener_set_ana_state(
-                            lvol.nqn, iface.ip4_address, lvol.subsys_port, True)
-
-            time.sleep(5)
-
-        for lvol in lvol_list:
-            for iface in snode.data_nics:
-                if iface.ip4_address:
-                    ret = rpc_client.nvmf_subsystem_listener_set_ana_state(
-                        lvol.nqn, iface.ip4_address, lvol.subsys_port, False)
+        # for lvol in lvol_list:
+        #     for iface in snode.data_nics:
+        #         if iface.ip4_address:
+        #             ret = rpc_client.nvmf_subsystem_listener_set_ana_state(
+        #                 lvol.nqn, iface.ip4_address, lvol.subsys_port, False)
 
     return True
 
