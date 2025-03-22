@@ -442,7 +442,7 @@ def check_remote_device(device_id):
     return result
 
 
-def check_lvol_on_node(lvol_id, node_id):
+def check_lvol_on_node(lvol_id, node_id, node_bdev_names=None, node_lvols_nqns=None):
 
     db_controller = DBController()
     lvol = db_controller.get_lvol_by_id(lvol_id)
@@ -458,29 +458,38 @@ def check_lvol_on_node(lvol_id, node_id):
         snode.mgmt_ip, snode.rpc_port,
         snode.rpc_username, snode.rpc_password, timeout=5, retry=1)
 
+    if not node_bdev_names:
+        ret = rpc_client.get_bdevs()
+        for bdev in ret:
+            node_bdev_names[bdev['name']] = bdev
+
+    if not node_lvols_nqns:
+        ret = rpc_client.subsystem_list()
+        for sub in ret:
+            node_lvols_nqns[sub['nqn']] = sub
+
     passed = True
     try:
         for bdev_info in lvol.bdev_stack:
             bdev_name = bdev_info['name']
             if bdev_info['type'] == "bdev_lvol":
-                bdev_name = bdev_info['params']["lvs_name"] + "/" + bdev_info['params']["name"]
-            ret = rpc_client.get_bdevs(bdev_name)
-            if ret:
+                bdev_name = lvol.lvol_uuid
+
+            if bdev_name in node_bdev_names:
                 logger.info(f"Checking bdev: {bdev_name} ... ok")
             else:
                 logger.error(f"Checking bdev: {bdev_name} ... failed")
                 passed = False
 
-        ret = rpc_client.subsystem_list(lvol.nqn)
-        if ret:
+        if lvol.nqn in node_lvols_nqns:
             logger.info(f"Checking subsystem ... ok")
-            if ret[0]["listen_addresses"]:
+            if node_lvols_nqns[lvol.nqn]["listen_addresses"]:
                 logger.info(f"Checking listener ... ok")
             else:
                 logger.info(f"Checking listener ... not found")
                 passed = False
 
-            if ret[0]["namespaces"]:
+            if node_lvols_nqns[lvol.nqn]["namespaces"]:
                 logger.info(f"Checking namespaces ... ok")
             else:
                 logger.info(f"Checking namespaces ... not found")
