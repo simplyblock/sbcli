@@ -2970,21 +2970,34 @@ def recreate_lvstore(snode):
             sec_node_api.firewall_set_port(snode.lvol_subsys_port, "tcp", "block")
             tcp_ports_events.port_deny(sec_node, snode.lvol_subsys_port)
 
+            time.sleep(1)
+
             sec_rpc_client.bdev_lvol_set_leader(False, lvs_name=snode.lvstore, bs_nonleadership=True)
             sec_rpc_client.bdev_distrib_force_to_non_leader(snode.jm_vuid)
             time.sleep(1)
 
-    ret = rpc_client.bdev_examine(snode.raid)
-    ret = rpc_client.bdev_wait_for_examine()
-    ret = rpc_client.bdev_lvol_set_lvs_ops(snode.lvstore, snode.jm_vuid, snode.lvol_subsys_port)
-    ret = rpc_client.bdev_lvol_set_leader(True, lvs_name=snode.lvstore)
 
-    # if not lvol_list:
-    #     prim_node_suspend = False
+
 
     if snode.jm_vuid:
         ret = rpc_client.jc_explicit_synchronization(snode.jm_vuid)
         logger.info(f"JM Sync res: {ret}")
+        time.sleep(1)
+
+    ret = rpc_client.bdev_examine(snode.raid)
+    time.sleep(1)
+
+    ret = rpc_client.bdev_wait_for_examine()
+    ret = rpc_client.bdev_lvol_set_lvs_ops(snode.lvstore, snode.jm_vuid, snode.lvol_subsys_port)
+    # ret = rpc_client.bdev_lvol_set_leader(True, lvs_name=snode.lvstore)
+
+    # if not lvol_list:
+    #     prim_node_suspend = False
+
+    # if snode.jm_vuid:
+    #     ret = rpc_client.jc_explicit_synchronization(snode.jm_vuid)
+    #     logger.info(f"JM Sync res: {ret}")
+    #     time.sleep(1)
 
     executor = ThreadPoolExecutor(max_workers=100)
 
