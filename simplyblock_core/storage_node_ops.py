@@ -2979,17 +2979,17 @@ def recreate_lvstore(snode):
 
 
 
-    if snode.jm_vuid:
-        ret = rpc_client.jc_explicit_synchronization(snode.jm_vuid)
-        logger.info(f"JM Sync res: {ret}")
-        time.sleep(1)
+    # if snode.jm_vuid:
+    #     ret = rpc_client.jc_explicit_synchronization(snode.jm_vuid)
+    #     logger.info(f"JM Sync res: {ret}")
+    #     time.sleep(1)
 
     ret = rpc_client.bdev_examine(snode.raid)
     time.sleep(1)
 
     ret = rpc_client.bdev_wait_for_examine()
     ret = rpc_client.bdev_lvol_set_lvs_ops(snode.lvstore, snode.jm_vuid, snode.lvol_subsys_port)
-    # ret = rpc_client.bdev_lvol_set_leader(True, lvs_name=snode.lvstore)
+    ret = rpc_client.bdev_lvol_set_leader(True, lvs_name=snode.lvstore)
 
     # if not lvol_list:
     #     prim_node_suspend = False
