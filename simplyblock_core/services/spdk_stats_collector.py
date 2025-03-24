@@ -15,16 +15,6 @@ cluster_id_file = "/etc/foundationdb/sbcli_cluster_id"
 
 db_controller = db_controller.DBController()
 
-def get_node_ip(ifname):
-    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    return socket.inet_ntoa(fcntl.ioctl(
-        s.fileno(),
-        0x8915,
-        struct.pack('256s', ifname[:15].encode('utf-8'))
-    )[20:24])
-
-NODE_IP = get_node_ip('eth0')
-
 def run_command(cmd):
     try:
         process = subprocess.Popen(
@@ -34,16 +24,18 @@ def run_command(cmd):
     except Exception as e:
         return str(e)
 
-def push_metrics(ret,cluster_id,snode_id):
+def push_metrics(ret,cluster_id,snode):
     """Formats and pushes SPDK metrics to Prometheus Pushgateway."""
     registry = CollectorRegistry()
     tick_rate_gauge = Gauge('tick_rate', 'SPDK Tick Rate', ['cluster', 'snode', 'node_ip'], registry=registry)
     cpu_busy_gauge = Gauge('cpu_busy_percentage', 'CPU Busy Percentage', ['cluster', 'snode', 'node_ip', 'thread_name'], registry=registry)
     pollers_count_gauge = Gauge('pollers_count', 'Number of pollers', ['cluster', 'snode', 'node_ip', 'poller_type', 'thread_name'], registry=registry)
 
+    snode_id = snode.id
+    snode_ip = snode.mgmt_ip
     tick_rate = ret.get("tick_rate")
     if tick_rate is not None:
-        tick_rate_gauge.labels(cluster=cluster_id, snode=snode_id, node_ip=NODE_IP).set(tick_rate)
+        tick_rate_gauge.labels(cluster=cluster_id, snode=snode_id, node_ip=snode_ip).set(tick_rate)
     for thread in ret.get("threads", []):
         thread_name = thread.get("name")
         busy = thread.get("busy", 0)
@@ -51,11 +43,11 @@ def push_metrics(ret,cluster_id,snode_id):
 
         total_cycles = busy + idle
         cpu_usage_percent = (busy / total_cycles) * 100 if total_cycles > 0 else 0
-        cpu_busy_gauge.labels(cluster=cluster_id, snode=snode_id, node_ip=NODE_IP, thread_name=thread_name).set(cpu_usage_percent)
+        cpu_busy_gauge.labels(cluster=cluster_id, snode=snode_id, node_ip=snode_ip, thread_name=thread_name).set(cpu_usage_percent)
 
-        pollers_count_gauge.labels(cluster=cluster_id, snode=snode_id, node_ip=NODE_IP, poller_type="active", thread_name=thread_name).set(thread.get("active_pollers_count", 0))
-        pollers_count_gauge.labels(cluster=cluster_id, snode=snode_id, node_ip=NODE_IP, poller_type="timed", thread_name=thread_name).set(thread.get("timed_pollers_count", 0))
-        pollers_count_gauge.labels(cluster=cluster_id, snode=snode_id, node_ip=NODE_IP, poller_type="paused", thread_name=thread_name).set(thread.get("paused_pollers_count", 0))
+        pollers_count_gauge.labels(cluster=cluster_id, snode=snode_id, node_ip=snode_ip, poller_type="active", thread_name=thread_name).set(thread.get("active_pollers_count", 0))
+        pollers_count_gauge.labels(cluster=cluster_id, snode=snode_id, node_ip=snode_ip, poller_type="timed", thread_name=thread_name).set(thread.get("timed_pollers_count", 0))
+        pollers_count_gauge.labels(cluster=cluster_id, snode=snode_id, node_ip=snode_ip, poller_type="paused", thread_name=thread_name).set(thread.get("paused_pollers_count", 0))
     
     push_to_gateway(PUSHGATEWAY_URL, job='metricsgateway', registry=registry)
     print("Metrics pushed successfully")
@@ -74,7 +66,7 @@ if __name__ == "__main__":
                     ret = rpc_client.thread_get_stats()
                     print(f"spdk thread_get_stats return: {ret}")
                     if ret and "threads" in ret:
-                        push_metrics(ret, cluster_id, snode.id)
+                        push_metrics(ret, cluster_id, snode)
         except Exception as e:
             print(f"SPDK query failed: {e}")
         
