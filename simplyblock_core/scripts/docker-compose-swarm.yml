@@ -12,6 +12,8 @@ services:
       mode: global
       placement:
         constraints: [ node.role == worker ]
+    networks:
+      - monitoring-net
 
   fdb-server:
     image: foundationdb/foundationdb:7.3.42

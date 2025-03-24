@@ -2,15 +2,21 @@ from prometheus_client import CollectorRegistry, Gauge, push_to_gateway
 import time
 from simplyblock_core.services.spdk import client as spdk_client
 import socket
+import fcntl
+import struct
 
 PUSHGATEWAY_URL = "http://pushgateway:9091"
 SPDK_SOCK_PATH = "/var/tmp/spdk.sock"
 
-def get_mgmt_ip():
-    return socket.gethostbyname(socket.gethostname())
+def get_mgmt_ip(ifname):
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    return socket.inet_ntoa(fcntl.ioctl(
+        s.fileno(),
+        0x8915,
+        struct.pack('256s', ifname[:15])
+    )[20:24])
 
-MGMT_IP = get_mgmt_ip()
-client = spdk_client.JSONRPCClient(SPDK_SOCK_PATH, 5260)
+MGMT_IP = get_mgmt_ip('eth0')
 
 def push_metrics(ret):
     """Formats and pushes SPDK metrics to Prometheus Pushgateway."""
@@ -21,8 +27,7 @@ def push_metrics(ret):
     tick_rate = ret.get("tick_rate")
     if tick_rate is not None:
         tick_rate_gauge.labels(mgmt_ip=MGMT_IP).set(tick_rate)
-    
-    for thread in ret.get("threads", []):
+    for thread in ret.get("threads"):
         thread_name = thread.get("name")
         print(f"thread_name: {thread_name}")
         cpu_busy = thread.get("busy")
@@ -34,10 +39,11 @@ def push_metrics(ret):
     print("Metrics pushed successfully")
 
 if __name__ == "__main__":
+    client = spdk_client.JSONRPCClient(SPDK_SOCK_PATH, 5260)
     while True:
         try:
             ret = client.call("thread_get_stats")
-            if ret:
+            if ret and "threads" in ret:
                 push_metrics(ret)
         except Exception as e:
             print(f"SPDK query failed: {e}")
