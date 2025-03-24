@@ -18,7 +18,7 @@ def generate_random_sequence(length):
     return first_char + remaining_chars
 
 
-class RandomMultiClientFailoverTest(RandomMultiClientFailoverTest):
+class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
     """
     Extended for N+K configuration: performs K parallel outages (K=self.npcs),
     skipping secondary outages. All existing logic for lvols, clones, fio continues as-is.
