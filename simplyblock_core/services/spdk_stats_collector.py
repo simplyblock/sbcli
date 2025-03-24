@@ -35,7 +35,7 @@ def push_metrics(ret):
             print(f"cpu_busy: {cpu_busy}")
             cpu_busy_gauge.labels(mgmt_ip=MGMT_IP, thread_name=thread_name).set(cpu_busy)
     
-    push_to_gateway(PUSHGATEWAY_URL, job='spdk_metrics', registry=registry)
+    push_to_gateway(PUSHGATEWAY_URL, job='metricsgateway', registry=registry)
     print("Metrics pushed successfully")
 
 if __name__ == "__main__":
