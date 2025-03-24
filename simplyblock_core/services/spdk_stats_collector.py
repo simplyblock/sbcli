@@ -13,7 +13,7 @@ def get_mgmt_ip(ifname):
     return socket.inet_ntoa(fcntl.ioctl(
         s.fileno(),
         0x8915,
-        struct.pack('256s', ifname[:15])
+        struct.pack('256s', ifname[:15].encode('utf-8'))
     )[20:24])
 
 MGMT_IP = get_mgmt_ip('eth0')
