@@ -1,5 +1,6 @@
 #!/usr/bin/env python
 # encoding: utf-8
+import json
 import logging
 import math
 import os
@@ -142,6 +143,23 @@ def delete_cluster_id():
     return out
 
 
+def get_cores_config(cpu_count):
+
+    try:
+        spdk_cpu_mask = hex(int(math.pow(2, cpu_count)) - 2)
+        cores_config = {
+            "cpu_mask": spdk_cpu_mask
+        }
+        return cores_config
+
+    except FileNotFoundError:
+        logger.error(f"The file '{file_path}' does not exist.")
+        return {}
+    except json.JSONDecodeError as e:
+        logger.error(f"Error decoding JSON: {e}")
+        return {}
+
+
 @bp.route('/info', methods=['GET'])
 def get_info():
 
@@ -167,6 +185,7 @@ def get_info():
         "network_interface": node_utils.get_nics_data(),
 
         "cloud_instance": CLOUD_INFO,
+        "cores_config": get_cores_config(CPU_INFO['count']),
     }
     return utils.get_response(out)
 

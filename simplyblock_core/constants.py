@@ -131,3 +131,4 @@ NVMF_MAX_SUBSYSTEMS=50000
 HA_JM_COUNT=3
 
 ONE_KB = 1024
+TEMP_CORES_FILE = "/etc/simplyblock/tmp_cores_config"
