@@ -375,17 +375,6 @@ commands:
             dest: node_id
             completer: _completer_get_sn_list
             type: str
-          - name: "-s"
-            aliases:
-              - "--sort"
-            help: "Sort the outputs"
-            dest: s
-            type: str
-            choices:
-              - node-seq
-              - serial
-              - dev-seq
-            nargs: 1
           - name: "--json"
             help: "Print outputs in json format"
             dest: json

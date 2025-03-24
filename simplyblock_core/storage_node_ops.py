@@ -2021,7 +2021,7 @@ def list_storage_nodes(is_json, cluster_id=None):
     return output
 
 
-def list_storage_devices(node_id, sort, is_json):
+def list_storage_devices(node_id, is_json):
     db_controller = DBController()
     snode = db_controller.get_storage_node_by_id(node_id)
     if not snode:
@@ -2076,16 +2076,6 @@ def list_storage_devices(node_id, sort, is_json):
             "Node ID": device.node_id,
             "Status": device.status,
         })
-
-    if sort and sort in ['node-seq', 'dev-seq', 'serial']:
-        if sort == 'serial':
-            sort_key = "Serial Number"
-        elif sort == 'dev-seq':
-            sort_key = "Sequential Number"
-        elif sort == 'node-seq':
-            # TODO: check this key
-            sort_key = "Sequential Number"
-        storage_devices = sorted(storage_devices, key=lambda d: d[sort_key])
 
     data = {
         "Storage Devices": storage_devices,
