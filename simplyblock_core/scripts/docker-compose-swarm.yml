@@ -9,9 +9,8 @@ services:
           - '/etc/foundationdb:/etc/foundationdb'
           - '/var/tmp/spdk.sock:/var/tmp/spdk.sock'
     deploy:
-      mode: global
       placement:
-        constraints: [ node.role == worker ]
+        constraints: [ node.role == manager ]
     networks:
       - monitoring-net
 
