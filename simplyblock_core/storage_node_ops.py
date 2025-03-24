@@ -3117,17 +3117,9 @@ def get_node_jm_names(current_node, remote_node=None):
 def get_secondary_nodes(current_node):
     db_controller = DBController()
     nodes = []
-    used_hosts = []
-    for node in db_controller.get_storage_nodes_by_cluster_id(current_node.cluster_id):
-        if node.get_id() != current_node.get_id() and node.secondary_node_id and node.mgmt_ip == current_node.mgmt_ip:
-            n = db_controller.get_storage_node_by_id(node.secondary_node_id)
-            if n:
-                used_hosts.append(n.mgmt_ip)
-
     for node in db_controller.get_storage_nodes_by_cluster_id(current_node.cluster_id):
         if node.get_id() != current_node.get_id() and not node.lvstore_stack_secondary_1 \
-                and node.status == StorageNode.STATUS_ONLINE and node.mgmt_ip != current_node.mgmt_ip \
-                and node.mgmt_ip not in used_hosts:
+                and node.status == StorageNode.STATUS_ONLINE and node.mgmt_ip != current_node.mgmt_ip:
             nodes.append(node.get_id())
     return nodes
 
