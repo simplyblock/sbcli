@@ -417,13 +417,16 @@ class CLIWrapperBase:
     def volume__create_snapshot(self, sub_command, args):
         volume_id = args.volume_id
         name = args.name
-        return lvol_controller.create_snapshot(volume_id, name)
+        snapshot_id, error = lvol_controller.create_snapshot(volume_id, name)
+        return snapshot_id if not error else error
 
     def volume__clone(self, sub_command, args):
         new_size = 0
         if args.resize:
             new_size = self.parse_size(args.resize)
-        return snapshot_controller.clone(args.snapshot_id, args.clone_name, new_size)
+
+        clone_id, error = snapshot_controller.clone(args.snapshot_id, args.clone_name, new_size)
+        return clone_id if not error else error
 
     def volume__move(self, sub_command, args):
         return lvol_controller.move(args.volume_id, args.node_id, args.force)
@@ -527,7 +530,8 @@ class CLIWrapperBase:
         return pool_controller.get_io_stats(args.pool_id, args.history, args.records)
 
     def snapshot__add(self, sub_command, args):
-        return snapshot_controller.add(args.volume_id, args.name)
+        snapshot_id, error = snapshot_controller.add(args.volume_id, args.name)
+        return snapshot_id if not error else error
 
     def snapshot__list(self, sub_command, args):
         return snapshot_controller.list(args.all)
@@ -539,7 +543,9 @@ class CLIWrapperBase:
         new_size = 0
         if args.resize:
             new_size = self.parse_size(args.resize)
-        return snapshot_controller.clone(args.snapshot_id, args.lvol_name, new_size)
+
+        success, details = snapshot_controller.clone(args.snapshot_id, args.lvol_name, new_size)
+        return details
 
     def caching_node__deploy(self, sub_command, args):
         return caching_node_controller.deploy(args.ifname)
