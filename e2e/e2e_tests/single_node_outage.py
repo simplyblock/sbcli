@@ -430,7 +430,7 @@ class TestHASingleNodeOutage(TestClusterBase):
                 self.runner_k8s_log.restart_logging()
             self.logger.info(f"Validating migration tasks for node {no_lvol_node_uuid}.")
             sleep_n_sec(120)
-            self.validate_migration_for_node(timestamp, 5000, None)
+            self.validate_migration_for_node(timestamp, 1000, None)
 
 
         # Write steps in order

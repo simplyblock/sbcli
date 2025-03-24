@@ -339,7 +339,7 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
             no_task_ok = outage_type in {"partial_nw", "partial_nw_single_port", "lvol_disconnect_primary"}
             # for node, outage_type in outage_events:
             #     if not self.sbcli_utils.is_secondary_node(node):
-            self.validate_migration_for_node(self.outage_start_time, 4000, None, 60, no_task_ok=no_task_ok)
+            self.validate_migration_for_node(self.outage_start_time, 2000, None, 60, no_task_ok=no_task_ok)
 
             for clone, clone_details in self.clone_mount_details.items():
                 self.common_utils.validate_fio_test(clone_details["Client"], clone_details["Log"])

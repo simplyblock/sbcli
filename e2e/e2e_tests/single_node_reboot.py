@@ -221,7 +221,7 @@ class TestSingleNodeReboot(TestClusterBase):
         else:
             self.runner_k8s_log.restart_logging()
         self.logger.info(f"Validating migration tasks for node {no_lvol_node_uuid}.")
-        self.validate_migration_for_node(timestamp, 5000, None)
+        self.validate_migration_for_node(timestamp, 1000, None)
 
         # Write steps in order
         steps = {
@@ -457,7 +457,7 @@ class TestHASingleNodeReboot(TestClusterBase):
             else:
                 self.runner_k8s_log.restart_logging()
             self.logger.info(f"Validating migration tasks for node {no_lvol_node_uuid}.")
-            self.validate_migration_for_node(timestamp, 5000, None)
+            self.validate_migration_for_node(timestamp, 1000, None)
 
 
         self.sbcli_utils.resize_lvol(lvol_id=self.sbcli_utils.get_lvol_id(self.lvol_name),

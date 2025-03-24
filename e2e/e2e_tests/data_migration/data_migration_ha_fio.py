@@ -118,7 +118,7 @@ class FioWorkloadTest(TestClusterBase):
         self.logger.info(f"Fetching migration tasks for cluster {self.cluster_id}.")
 
         self.logger.info(f"Validating migration tasks for node {affected_node}.")
-        self.validate_migration_for_node(timestamp, 5000, None)
+        self.validate_migration_for_node(timestamp, 1000, None)
 
         sleep_n_sec(30)
 
@@ -165,7 +165,7 @@ class FioWorkloadTest(TestClusterBase):
         sleep_n_sec(300)
 
         self.logger.info(f"Validating migration tasks for node {affected_node}.")
-        self.validate_migration_for_node(timestamp, 5000, None)
+        self.validate_migration_for_node(timestamp, 1000, None)
 
         sleep_n_sec(30)
 
