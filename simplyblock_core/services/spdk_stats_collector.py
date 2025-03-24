@@ -1,7 +1,7 @@
 from prometheus_client import CollectorRegistry, Gauge, push_to_gateway
 import time
 from simplyblock_core.services.spdk import client as spdk_client
-from simplyblock_core import db_controller,utils
+from simplyblock_core import constants, db_controller,utils
 from simplyblock_core.rpc_client import RPCClient
 
 logger = utils.get_logger(__name__)
@@ -46,12 +46,14 @@ while True:
         cluster_id = cluster.get_id()
         nodes = db_controller.get_storage_nodes_by_cluster_id(cluster_id)
         for snode in nodes:
-            rpc_client = RPCClient(
-            snode.mgmt_ip, snode.rpc_port,
-            snode.rpc_username, snode.rpc_password, timeout=3*60, retry=10)
-            ret = rpc_client.thread_get_stats()
-            logger.info(f"spdk thread_get_stats return: {ret}")
-            if ret and "threads" in ret:
-                push_metrics(ret, cluster_id, snode)
+            if snode.nvme_devices > 0:
+                rpc_client = RPCClient(
+                snode.mgmt_ip, snode.rpc_port,
+                snode.rpc_username, snode.rpc_password, timeout=3*60, retry=10)
+                ret = rpc_client.thread_get_stats()
+                if ret and "threads" in ret:
+                    push_metrics(ret, cluster_id, snode)
+            else:
+                logger.info(f"Skipping snode {snode.mgmt_ip} as it has no NVMe devices.")
 
-    time.sleep(10)
+    time.sleep(constants.SPDK_STAT_COLLECTOR_INTERVAL_SEC)
