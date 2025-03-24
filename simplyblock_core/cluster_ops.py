@@ -656,29 +656,6 @@ def cluster_activate(cl_id, force=False, force_lvstore_create=False):
                 set_cluster_status(cl_id, ols_status)
                 return False
 
-    # for snode in snodes:
-    #     if not snode.is_secondary_node:
-    #         continue
-    #     if snode.status != StorageNode.STATUS_ONLINE:
-    #         continue
-    #
-    #     ret = storage_node_ops.recreate_lvstore(snode)
-    #     snode = db_controller.get_storage_node_by_id(snode.get_id())
-    #     if ret:
-    #         snode.lvstore_status = "ready"
-    #         snode.write_to_db()
-    #
-    #     else:
-    #         snode.lvstore_status = "failed"
-    #         snode.write_to_db()
-    #
-    #         logger.error(f"Failed to restore lvstore on node {snode.get_id()}")
-    #         if not force:
-    #             logger.error("Failed to activate cluster")
-    #             set_cluster_status(cl_id, ols_status)
-    #             return False
-
-
 
     if not cluster.cluster_max_size:
         cluster = db_controller.get_cluster_by_id(cl_id)
@@ -767,10 +744,17 @@ def cluster_set_read_only(cl_id):
 
             rpc_client = RPCClient(
                 node.mgmt_ip, node.rpc_port,
-                node.rpc_username, node.rpc_password, timeout=5, retry=2)
+                node.rpc_username, node.rpc_password, timeout=3, retry=2)
 
             if node.lvstore:
                 rpc_client.bdev_lvol_set_lvs_read_only(node.lvstore, True)
+                if node.secondary_node_id:
+                    sec_node = db_controller.get_storage_node_by_id(node.secondary_node_id)
+                    if sec_node:
+                        sec_rpc_client = RPCClient(
+                            sec_node.mgmt_ip, sec_node.rpc_port,
+                            sec_node.rpc_username, sec_node.rpc_password, timeout=3, retry=2)
+                        sec_rpc_client.bdev_lvol_set_lvs_read_only(node.lvstore, True)
 
     return True
 
@@ -794,11 +778,17 @@ def cluster_set_active(cl_id):
 
             rpc_client = RPCClient(
                 node.mgmt_ip, node.rpc_port,
-                node.rpc_username, node.rpc_password, timeout=5, retry=2)
+                node.rpc_username, node.rpc_password, timeout=3, retry=2)
 
             if node.lvstore:
                 rpc_client.bdev_lvol_set_lvs_read_only(node.lvstore, False)
-
+                if node.secondary_node_id:
+                    sec_node = db_controller.get_storage_node_by_id(node.secondary_node_id)
+                    if sec_node:
+                        sec_rpc_client = RPCClient(
+                            sec_node.mgmt_ip, sec_node.rpc_port,
+                            sec_node.rpc_username, sec_node.rpc_password, timeout=3, retry=2)
+                        sec_rpc_client.bdev_lvol_set_lvs_read_only(node.lvstore, False)
     return True
 
 

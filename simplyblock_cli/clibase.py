@@ -38,8 +38,15 @@ class CLIWrapperBase:
         return parent_parser.add_parser(command, description=help, help=help, usage=usage)
 
     def storage_node__deploy(self, sub_command, args):
-        return storage_ops.deploy(args.ifname)
-    
+        spdk_cpu_mask = None
+        if args.spdk_cpu_mask:
+            if self.validate_cpu_mask(args.spdk_cpu_mask):
+                spdk_cpu_mask = args.spdk_cpu_mask
+            else:
+                return f"Invalid cpu mask value: {args.spdk_cpu_mask}"
+        isolate_cores = args.isolate_cores
+        return storage_ops.deploy(args.ifname, spdk_cpu_mask, isolate_cores)
+
     def storage_node__deploy_cleaner(self, sub_command, args):
         return storage_ops.deploy_cleaner()
 
@@ -527,7 +534,7 @@ class CLIWrapperBase:
         return pool_controller.get_io_stats(args.pool_id, args.history, args.records)
 
     def snapshot__add(self, sub_command, args):
-        return snapshot_controller.add(args.snapshot_id, args.name)
+        return snapshot_controller.add(args.volume_id, args.name)
 
     def snapshot__list(self, sub_command, args):
         return snapshot_controller.list(args.all)
@@ -793,7 +800,7 @@ class CLIWrapperBase:
                 size_string = size_string.replace("b", "")
                 size_number = int(size_string[:-1])
                 size_v = size_string[-1]
-                one_k = 1000
+                one_k = constants.ONE_KB
                 multi = 0
                 if size_v == "k":
                     multi = 1

@@ -12,7 +12,7 @@ USER = os.getenv("USER", "root")
 STORAGE_PRIVATE_IPS = os.getenv("STORAGE_PRIVATE_IPS", "").split()
 SEC_STORAGE_PRIVATE_IPS = os.getenv("SEC_STORAGE_PRIVATE_IPS", "").split()
 MNODES = os.getenv("MNODES", "").split()
-CLIENTNODES = os.getenv("CLIENTNODES", "").split()
+CLIENTNODES = os.getenv("CLIENTNODES", os.getenv("MNODES", "")).split()
 ALL_NODES = MNODES + STORAGE_PRIVATE_IPS + SEC_STORAGE_PRIVATE_IPS + CLIENTNODES
 HOME_DIR = os.path.expanduser("~")
 
@@ -101,7 +101,8 @@ def cleanup_local_logs():
         return
 
     print(f"[INFO] Cleaning up local logs from {logs_dir}...")
-    os.system(f"rm -rf {logs_dir}/*")
+    os.system(f"rm -rf {logs_dir}/*.log")
+    os.system(f"rm -rf {logs_dir}/*.txt")
 
     print("[SUCCESS] Local logs cleaned up.")
 

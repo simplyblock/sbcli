@@ -26,9 +26,7 @@ USER = os.getenv("USER", "root")
 STORAGE_PRIVATE_IPS = os.getenv("STORAGE_PRIVATE_IPS", "").split()
 SEC_STORAGE_PRIVATE_IPS = os.getenv("SEC_STORAGE_PRIVATE_IPS", "").split()
 MNODES = os.getenv("MNODES", "").split()
-CLIENTNODES = os.getenv("CLIENTNODES", "").split()
-
-DOCKER_NODES = MNODES + CLIENTNODES if args.k8s else STORAGE_PRIVATE_IPS + SEC_STORAGE_PRIVATE_IPS + MNODES + CLIENTNODES
+CLIENTNODES = os.getenv("CLIENTNODES", os.getenv("MNODES", "")).split()
 
 # Upload Folder
 UPLOAD_FOLDER = os.getenv("GITHUB_RUN_ID", time.strftime("%Y-%m-%d_%H-%M-%S"))
@@ -113,7 +111,7 @@ def install_boto_on_target(ssh):
         exec_command(ssh, install_boto_cmd)
 
 # Upload Files from Remote VMs
-def upload_from_remote(ssh, node):
+def upload_from_remote(ssh, node, node_type):
     print(f"[INFO] Uploading logs from {node} to MinIO...")
 
     install_boto_on_target(ssh)  # Ensure boto3 is installed
@@ -129,7 +127,7 @@ def upload_from_remote(ssh, node):
         print(f"[INFO] Zipping {container_logs_path} on {node}...")
         exec_command(ssh, f"tar -czf {tar_path} -C {HOME_DIR} container-logs")
 
-        file_key = f"{UPLOAD_FOLDER}/{node}/container-logs.tar.gz"
+        file_key = f"{UPLOAD_FOLDER}/{node}-{node_type}/container-logs.tar.gz"
         print(f"[INFO] Uploading {tar_path} → MinIO as {file_key}...")
 
         # Generate the MinIO upload script on the remote VM
@@ -187,7 +185,7 @@ except Exception as e:
             else:
                 subfolder = "root-logs"
 
-            file_key = f"{UPLOAD_FOLDER}/{node}/{subfolder}/{os.path.basename(remote_file)}"
+            file_key = f"{UPLOAD_FOLDER}/{node}-{node_type}/{subfolder}/{os.path.basename(remote_file)}"
             print(f"[INFO] Preparing to upload {remote_file} → MinIO as {file_key}...")
 
             # Generate the MinIO upload script on the remote VM
@@ -365,7 +363,8 @@ def cleanup_local_logs():
         return
 
     print(f"[INFO] Cleaning up local logs from {logs_dir}...")
-    subprocess.run(f"rm -rf {logs_dir}/*", shell=True, check=True)
+    subprocess.run(f"rm -rf {logs_dir}/*.log", shell=True, check=True)
+    subprocess.run(f"rm -rf {logs_dir}/*.txt", shell=True, check=True)
     print(f"[SUCCESS] Local logs cleaned up.")
 
 
@@ -388,7 +387,7 @@ for node in MNODES:
             log_file = f"{HOME_DIR}/{container_name}_{container_id}_{node}.txt"
             exec_command(ssh, f"sudo docker logs {container_id} &> {log_file}")
 
-        upload_from_remote(ssh, node)
+        upload_from_remote(ssh, node, node_type="mgmt")
 
         ssh.close()
         print(f"[SUCCESS] Successfully processed Management Node {node}")
@@ -415,12 +414,27 @@ if not args.k8s:
 
                 log_file = f"{HOME_DIR}/{container_name}_{container_id}_{node}.txt"
                 exec_command(ssh, f"sudo docker logs {container_id} &> {log_file}")
-
-            upload_from_remote(ssh, node)
+            if node in SEC_STORAGE_PRIVATE_IPS:
+                upload_from_remote(ssh, node, node_type="sec-storage")
+            else:
+                upload_from_remote(ssh, node, node_type="storage")
             ssh.close()
             print(f"[SUCCESS] Successfully processed Storage Node {node}")
         except Exception as e:
             print(f"[ERROR] Error processing Storage Node {node}: {e}")
+
+for node in CLIENTNODES:
+    try:
+        ssh = connect_ssh(node, bastion_ip=BASTION_IP)
+        print(f"[INFO] Processing Client Node {node}...")
+
+        upload_from_remote(ssh, node, node_type="client")
+
+        ssh.close()
+        print(f"[SUCCESS] Successfully processed Management Node {node}")
+
+    except Exception as e:
+        print(f"[ERROR] Error processing Management Node {node}: {e}")
 
 # **Step 3: Process Kubernetes Nodes (Upload logs directly from runner)**
 if args.k8s:
@@ -433,6 +447,10 @@ else:
     upload_local_logs()
 
 for node in MNODES:
+    ssh = connect_ssh(node, bastion_ip=BASTION_IP)
+    cleanup_remote_logs(ssh, node)
+
+for node in CLIENTNODES:
     ssh = connect_ssh(node, bastion_ip=BASTION_IP)
     cleanup_remote_logs(ssh, node)
 

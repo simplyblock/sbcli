@@ -20,6 +20,17 @@ commands:
               and the storage node.
             dest: ifname
             type: str
+          - name: "--cpu-mask"
+            help: "SPDK app CPU mask, default is all cores found"
+            dest: "spdk_cpu_mask"
+            required: false
+            type: str
+          - name: "--isolate-cores"
+            help: "Isolate cores in kernel args for provided cpu mask"
+            dest: isolate_cores
+            type: bool
+            default: false
+            action: store_true
       - name: deploy-cleaner
         help: "Cleans a previous simplyblock deploy (local run)"
         description: >
@@ -133,7 +144,7 @@ commands:
             dest: enable_ha_jm
             type: bool
             default: true
-            action: store_true
+            action: store_false
             private: true
           - name: "--ha-jm-count"
             help: "HA JM count"
@@ -384,15 +395,16 @@ commands:
             completer: _completer_get_sn_list
             type: str
           - name: "-s"
+            aliases:
+              - "--sort"
             help: "Sort the outputs"
-            dest: sort
+            dest: s
             type: str
             choices:
               - node-seq
               - serial
               - dev-seq
-            nargs: "1"
-            private: true
+            nargs: 1
           - name: "--json"
             help: "Print outputs in json format"
             dest: json
@@ -676,7 +688,7 @@ commands:
             help: "Enable qos bdev for storage nodes"
             dest: enable_qos
             type: bool
-            action: store_true
+            default: true
             private: true
           - name: "--ifname"
             help: "Management interface name, e.g. eth0"
@@ -885,7 +897,7 @@ commands:
             dest: enable_ha_jm
             type: bool
             default: false
-            action: store_false
+            action: store_true
             private: true
           - name: "--is-secondary-node"
             help: >
@@ -930,6 +942,8 @@ commands:
             default: 25G
             private: true
           - name: "--snapshot"
+            aliases:
+              - "-s"
             help: "Make logical volume with snapshot capability, default: false"
             dest: snapshot
             type: bool
@@ -1453,6 +1467,8 @@ commands:
             dest: pool
             type: str
           - name: "--snapshot"
+            aliases:
+              - "-s"
             help: "Make logical volume with snapshot capability, default: false"
             dest: snapshot
             type: bool
@@ -1461,7 +1477,8 @@ commands:
           - name: "--max-size"
             help: "Logical volume max size"
             dest: max_size
-            type: int
+            type: str
+            default: "1000T"
           - name: "--host-id"
             help: "Primary storage node id or Hostname"
             dest: host_id
@@ -1920,9 +1937,9 @@ commands:
       - name: add
         help: "Creates a new snapshot"
         arguments:
-          - name: "snapshot_id"
+          - name: "volume_id"
             help: "Logical volume id"
-            dest: snapshot_id
+            dest: volume_id
             type: str
           - name: "name"
             help: "New snapshot name"

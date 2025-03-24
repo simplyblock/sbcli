@@ -19,14 +19,14 @@ def generate_random_sequence(length):
 
     return first_char + remaining_chars
 
-class RandomFailoverTest(TestLvolHACluster):
+class RandomMultiClientFailoverTest(TestLvolHACluster):
     """
     Extends the TestLvolHAClusterWithClones class to add a random failover and stress testing scenario.
     """
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        self.total_lvols = 20
+        self.total_lvols = 30
         self.lvol_name = f"lvl{generate_random_sequence(15)}"
         self.clone_name = f"cln{generate_random_sequence(15)}"
         self.snapshot_name = f"snap{generate_random_sequence(15)}"
@@ -47,7 +47,7 @@ class RandomFailoverTest(TestLvolHACluster):
         self.lvol_node = ""
         self.secondary_outage = False
         self.lvols_without_sec_connect = []
-        self.test_name = "continuous_random_failover_ha"
+        self.test_name = "continuous_random_failover_multi_client_ha"
         # self.outage_types = ["interface_full_network_interrupt", interface_partial_network_interrupt,
         #                       "partial_nw", "partial_nw_single_port",
         #                       "port_network_interrupt", "container_stop", "graceful_shutdown",
@@ -81,7 +81,7 @@ class RandomFailoverTest(TestLvolHACluster):
         """Create lvols and start FIO with random configurations."""
         for i in range(count):
             fs_type = random.choice(["ext4", "xfs"])
-            is_crypto = random.choice([True, False])
+            is_crypto = random.choice([False, False])
             lvol_name = f"{self.lvol_name}_{i}" if not is_crypto else f"c{self.lvol_name}_{i}"
             while lvol_name in self.lvol_mount_details:
                 self.lvol_name = f"lvl{generate_random_sequence(15)}"
@@ -143,17 +143,20 @@ class RandomFailoverTest(TestLvolHACluster):
 
             self.lvol_mount_details[lvol_name]["Command"] = connect_ls
 
+            client_node = random.choice(self.fio_node)
+            self.lvol_mount_details[lvol_name]["Client"] = client_node
+
             # if self.secondary_outage:
             #     connect_ls = [connect_ls[0]]
             #     self.lvols_without_sec_connect.append(lvol_name)
 
-            initial_devices = self.ssh_obj.get_devices(node=self.fio_node)
+            initial_devices = self.ssh_obj.get_devices(node=client_node)
             for connect_str in connect_ls:
-                _, error = self.ssh_obj.exec_command(node=self.fio_node, command=connect_str)
+                _, error = self.ssh_obj.exec_command(node=client_node, command=connect_str)
                 if error:
                     lvol_details = self.sbcli_utils.get_lvol_details(lvol_id=self.lvol_mount_details[lvol_name]["ID"])
                     nqn = lvol_details[0]["nqn"]
-                    self.ssh_obj.disconnect_nvme(node=self.fio_node, nqn_grep=nqn)
+                    self.ssh_obj.disconnect_nvme(node=client_node, nqn_grep=nqn)
                     self.logger.info(f"Connecting lvol {lvol_name} has error: {error}. Disconnect all connections for that lvol and cleaning that lvol!!")
                     self.sbcli_utils.delete_lvol(lvol_name=lvol_name)
                     sleep_n_sec(30)
@@ -162,7 +165,7 @@ class RandomFailoverTest(TestLvolHACluster):
                     continue
 
             sleep_n_sec(3)
-            final_devices = self.ssh_obj.get_devices(node=self.fio_node)
+            final_devices = self.ssh_obj.get_devices(node=client_node)
             lvol_device = None
             for device in final_devices:
                 if device not in initial_devices:
@@ -171,24 +174,24 @@ class RandomFailoverTest(TestLvolHACluster):
             if not lvol_device:
                 raise LvolNotConnectException("LVOL did not connect")
             self.lvol_mount_details[lvol_name]["Device"] = lvol_device
-            self.ssh_obj.format_disk(node=self.fio_node, device=lvol_device, fs_type=fs_type)
+            self.ssh_obj.format_disk(node=client_node, device=lvol_device, fs_type=fs_type)
 
             # Mount and Run FIO
             mount_point = f"{self.mount_path}/{lvol_name}"
-            self.ssh_obj.mount_path(node=self.fio_node, device=lvol_device, mount_path=mount_point)
+            self.ssh_obj.mount_path(node=client_node, device=lvol_device, mount_path=mount_point)
             self.lvol_mount_details[lvol_name]["Mount"] = mount_point
 
             sleep_n_sec(10)
 
-            self.ssh_obj.delete_files(self.fio_node, [f"{mount_point}/*fio*"])
-            self.ssh_obj.delete_files(self.fio_node, [f"{self.log_path}/local-{lvol_name}_fio*"])
+            self.ssh_obj.delete_files(client_node, [f"{mount_point}/*fio*"])
+            self.ssh_obj.delete_files(client_node, [f"{self.log_path}/local-{lvol_name}_fio*"])
 
             sleep_n_sec(5)
 
             # Start FIO
             fio_thread = threading.Thread(
                 target=self.ssh_obj.run_fio_test,
-                args=(self.fio_node, None, self.lvol_mount_details[lvol_name]["Mount"], self.lvol_mount_details[lvol_name]["Log"]),
+                args=(client_node, None, self.lvol_mount_details[lvol_name]["Mount"], self.lvol_mount_details[lvol_name]["Log"]),
                 kwargs={
                     "size": self.fio_size,
                     "name": f"{lvol_name}_fio",
@@ -316,17 +319,15 @@ class RandomFailoverTest(TestLvolHACluster):
             for data_nic in data_nics:
                 node_data_nic_ip.append(data_nic["ip4_address"])
 
-            nodes_check_ports_on = [self.fio_node, self.mgmt_nodes[0]]
+            nodes_check_ports_on = self.fio_node
+            nodes_check_ports_on.append(self.mgmt_nodes[0])
 
             self.blocked_ports = self.ssh_obj.perform_nw_outage(node_ip=node_ip, node_data_nic_ip=node_data_nic_ip,
                                                                 nodes_check_ports_on=nodes_check_ports_on,
                                                                 block_ports=ports_to_block, block_all_ss_ports=True)
         elif outage_type == "interface_full_network_interrupt":
             self.logger.info("Handling full interface based network interruption...")
-            active_interfaces = []
-            data_nics = node_details[0]["data_nics"]
-            for data_nic in data_nics:
-                active_interfaces.append(data_nic["if_name"])
+            active_interfaces = self.ssh_obj.get_active_interfaces(node_ip)
             
             self.disconnect_thread = threading.Thread(
                 target=self.ssh_obj.disconnect_all_active_interfaces,
@@ -382,7 +383,7 @@ class RandomFailoverTest(TestLvolHACluster):
             lvols = self.node_vs_lvol.get(self.lvol_node, [])
             self.logger.info(f"Picking lvols of node {self.lvol_node} for outage of node {self.current_outage_node}!!")
             for lvol in lvols:
-                self.ssh_obj.disconnect_lvol_node_device(node=self.fio_node, device=self.lvol_mount_details[lvol]["Device"])
+                self.ssh_obj.disconnect_lvol_node_device(node=self.lvol_mount_details[lvol]["Client"], device=self.lvol_mount_details[lvol]["Device"])
             
         if outage_type != "partial_nw" or outage_type != "partial_nw_single_port":
             sleep_n_sec(120)
@@ -439,7 +440,7 @@ class RandomFailoverTest(TestLvolHACluster):
             lvols = self.node_vs_lvol[self.lvol_node]
             for lvol in lvols:
                 connect = self.sbcli_utils.get_lvol_connect_str(lvol_name=lvol)[0]
-                self.ssh_obj.exec_command(node=self.fio_node, command=connect)
+                self.ssh_obj.exec_command(node=self.lvol_mount_details[lvol]["Client"], command=connect)
 
         self.sbcli_utils.wait_for_storage_node_status(self.current_outage_node, "online", timeout=1000)
         # Log the restart event
@@ -450,7 +451,7 @@ class RandomFailoverTest(TestLvolHACluster):
             for node in self.storage_nodes:
                 self.ssh_obj.restart_docker_logging(
                     node_ip=node,
-                    containers=self.container_nodes[node_ip],
+                    containers=self.container_nodes[node],
                     log_dir=self.docker_logs_path,
                     test_name=self.test_name
                 )
@@ -462,9 +463,9 @@ class RandomFailoverTest(TestLvolHACluster):
 
         if self.secondary_outage:
             for lvol in self.lvols_without_sec_connect:
-                command = self.lvol_mount_details.get(lvol, self.clone_mount_details.get(lvol, None))
+                command = self.lvol_mount_details.get(lvol, self.clone_mount_details.get(lvol, None))["Command"][1]
                 if command:
-                    self.ssh_obj.exec_command(self.fio_node, command=command)
+                    self.ssh_obj.exec_command(self.lvol_mount_details[lvol], command=command)
                 else:
                     raise Exception(f"Lvol/Clone {lvol} not found to connect")
         
@@ -477,9 +478,10 @@ class RandomFailoverTest(TestLvolHACluster):
         self.logger.info(f"Fetching dmesg logs on {node_ip} from {search_start_iso} to {search_end_iso}")
 
         # Get dmesg logs with ISO timestamps
-        dmesg_logs = self.ssh_obj.get_dmesg_logs_within_iso_window(
-            self.fio_node, search_start_iso, search_end_iso
-        )
+        for node in self.fio_node:
+            dmesg_logs = self.ssh_obj.get_dmesg_logs_within_iso_window(
+                node, search_start_iso, search_end_iso
+            )
 
         nvme_issues = [
             line for line in dmesg_logs if "nvme" in line.lower() or "connection" in line.lower()
@@ -558,6 +560,7 @@ class RandomFailoverTest(TestLvolHACluster):
                     self.logger.warning(f"Retry Clone creation fails with {str(exp)}.")
                     continue
             fs_type = self.lvol_mount_details[lvol]["FS"]
+            client = self.lvol_mount_details[lvol]["Client"]
             self.clone_mount_details[clone_name] = {
                    "ID": self.sbcli_utils.get_lvol_id(clone_name),
                    "Command": None,
@@ -566,7 +569,8 @@ class RandomFailoverTest(TestLvolHACluster):
                    "MD5": None,
                    "FS": fs_type,
                    "Log": f"{self.log_path}/{clone_name}.log",
-                   "snapshot": snapshot_name
+                   "snapshot": snapshot_name,
+                   "Client": client
             }
 
             self.logger.info(f"Created clone {clone_name}.")
@@ -583,13 +587,13 @@ class RandomFailoverTest(TestLvolHACluster):
             #     connect_ls = [connect_ls[0]]
             #     self.lvols_without_sec_connect.append(clone_name)
 
-            initial_devices = self.ssh_obj.get_devices(node=self.fio_node)
+            initial_devices = self.ssh_obj.get_devices(node=client)
             for connect_str in connect_ls:
-                _, error = self.ssh_obj.exec_command(node=self.fio_node, command=connect_str)
+                _, error = self.ssh_obj.exec_command(node=client, command=connect_str)
                 if error:
                     lvol_details = self.sbcli_utils.get_lvol_details(lvol_id=self.clone_mount_details[clone_name]["ID"])
                     nqn = lvol_details[0]["nqn"]
-                    self.ssh_obj.disconnect_nvme(node=self.fio_node, nqn_grep=nqn)
+                    self.ssh_obj.disconnect_nvme(node=client, nqn_grep=nqn)
                     self.logger.info(f"Connecting clone {clone_name} has error: {error}. Disconnect all connections for that clone!!")
                     self.sbcli_utils.delete_lvol(lvol_name=clone_name)
                     sleep_n_sec(30)
@@ -597,7 +601,7 @@ class RandomFailoverTest(TestLvolHACluster):
                     continue
 
             sleep_n_sec(3)
-            final_devices = self.ssh_obj.get_devices(node=self.fio_node)
+            final_devices = self.ssh_obj.get_devices(node=client)
             lvol_device = None
             for device in final_devices:
                 if device not in initial_devices:
@@ -609,9 +613,9 @@ class RandomFailoverTest(TestLvolHACluster):
 
             # Mount and Run FIO
             if fs_type == "xfs":
-                self.ssh_obj.clone_mount_gen_uuid(self.fio_node, lvol_device)
+                self.ssh_obj.clone_mount_gen_uuid(client, lvol_device)
             mount_point = f"{self.mount_path}/{clone_name}"
-            self.ssh_obj.mount_path(node=self.fio_node, device=lvol_device, mount_path=mount_point)
+            self.ssh_obj.mount_path(node=client, device=lvol_device, mount_path=mount_point)
             self.clone_mount_details[clone_name]["Mount"] = mount_point
 
             # clone_node_id = self.sbcli_utils.get_lvol_details(
@@ -621,15 +625,15 @@ class RandomFailoverTest(TestLvolHACluster):
 
             sleep_n_sec(10)
 
-            self.ssh_obj.delete_files(self.fio_node, [f"{mount_point}/*fio*"])
-            self.ssh_obj.delete_files(self.fio_node, [f"{self.log_path}/local-{clone_name}_fio*"])
+            self.ssh_obj.delete_files(client, [f"{mount_point}/*fio*"])
+            self.ssh_obj.delete_files(client, [f"{self.log_path}/local-{clone_name}_fio*"])
 
             sleep_n_sec(5)
 
             # Start FIO
             fio_thread = threading.Thread(
                 target=self.ssh_obj.run_fio_test,
-                args=(self.fio_node, None, self.clone_mount_details[clone_name]["Mount"], self.clone_mount_details[clone_name]["Log"]),
+                args=(client, None, self.clone_mount_details[clone_name]["Mount"], self.clone_mount_details[clone_name]["Log"]),
                 kwargs={
                     "size": self.fio_size,
                     "name": f"{clone_name}_fio",
@@ -667,23 +671,23 @@ class RandomFailoverTest(TestLvolHACluster):
             to_delete = []
             for clone_name, clone_details in self.clone_mount_details.items():
                 if clone_details["snapshot"] in snapshots:
-                    self.common_utils.validate_fio_test(self.fio_node,
+                    self.common_utils.validate_fio_test(clone_details["Client"],
                                                         log_file=clone_details["Log"])
-                    self.ssh_obj.find_process_name(self.fio_node, f"{clone_name}_fio", return_pid=False)
-                    fio_pids = self.ssh_obj.find_process_name(self.fio_node, f"{clone_name}_fio", return_pid=True)
+                    self.ssh_obj.find_process_name(clone_details["Client"], f"{clone_name}_fio", return_pid=False)
+                    fio_pids = self.ssh_obj.find_process_name(clone_details["Client"], f"{clone_name}_fio", return_pid=True)
                     for pid in fio_pids:
-                        self.ssh_obj.kill_processes(self.fio_node, pid=pid)
+                        self.ssh_obj.kill_processes(clone_details["Client"], pid=pid)
                     attempt = 1
                     while len(fio_pids) > 2:
-                        self.ssh_obj.find_process_name(self.fio_node, f"{clone_name}_fio", return_pid=False)
-                        fio_pids = self.ssh_obj.find_process_name(self.fio_node, f"{clone_name}_fio", return_pid=True)
+                        self.ssh_obj.find_process_name(clone_details["Client"], f"{clone_name}_fio", return_pid=False)
+                        fio_pids = self.ssh_obj.find_process_name(clone_details["Client"], f"{clone_name}_fio", return_pid=True)
                         if attempt >= 30:
                             raise Exception("FIO not killed on clone")
                         attempt += 1
                         sleep_n_sec(10)
                         
-                    self.ssh_obj.unmount_path(self.fio_node, f"/mnt/{clone_name}")
-                    self.ssh_obj.remove_dir(self.fio_node, dir_path=f"/mnt/{clone_name}")
+                    self.ssh_obj.unmount_path(clone_details["Client"], f"/mnt/{clone_name}")
+                    self.ssh_obj.remove_dir(clone_details["Client"], dir_path=f"/mnt/{clone_name}")
                     self.disconnect_lvol(clone_details['ID'])
                     self.sbcli_utils.delete_lvol(clone_name)
                     sleep_n_sec(30)
@@ -697,23 +701,23 @@ class RandomFailoverTest(TestLvolHACluster):
                 self.ssh_obj.delete_snapshot(self.mgmt_nodes[0], snapshot_id=snapshot_id)
                 self.snapshot_names.remove(snapshot)
 
-            self.common_utils.validate_fio_test(self.fio_node,
+            self.common_utils.validate_fio_test(self.lvol_mount_details[lvol]["Client"],
                                                 log_file=self.lvol_mount_details[lvol]["Log"])
-            self.ssh_obj.find_process_name(self.fio_node, f"{lvol}_fio", return_pid=False)
-            fio_pids = self.ssh_obj.find_process_name(self.fio_node, f"{lvol}_fio", return_pid=True)
+            self.ssh_obj.find_process_name(self.lvol_mount_details[lvol]["Client"], f"{lvol}_fio", return_pid=False)
+            fio_pids = self.ssh_obj.find_process_name(self.lvol_mount_details[lvol]["Client"], f"{lvol}_fio", return_pid=True)
             for pid in fio_pids:
-                self.ssh_obj.kill_processes(self.fio_node, pid=pid)
+                self.ssh_obj.kill_processes(self.lvol_mount_details[lvol]["Client"], pid=pid)
             attempt = 1
             while len(fio_pids) > 2:
-                self.ssh_obj.find_process_name(self.fio_node, f"{lvol}_fio", return_pid=False)
-                fio_pids = self.ssh_obj.find_process_name(self.fio_node, f"{lvol}_fio", return_pid=True)
+                self.ssh_obj.find_process_name(self.lvol_mount_details[lvol]["Client"], f"{lvol}_fio", return_pid=False)
+                fio_pids = self.ssh_obj.find_process_name(self.lvol_mount_details[lvol]["Client"], f"{lvol}_fio", return_pid=True)
                 if attempt >= 30:
                     raise Exception("FIO not killed on lvols")
                 attempt += 1
                 sleep_n_sec(10)
 
-            self.ssh_obj.unmount_path(self.fio_node, f"/mnt/{lvol}")
-            self.ssh_obj.remove_dir(self.fio_node, dir_path=f"/mnt/{lvol}")
+            self.ssh_obj.unmount_path(self.lvol_mount_details[lvol]["Client"], f"/mnt/{lvol}")
+            self.ssh_obj.remove_dir(self.lvol_mount_details[lvol]["Client"], dir_path=f"/mnt/{lvol}")
             self.disconnect_lvol(self.lvol_mount_details[lvol]['ID'])
             self.sbcli_utils.delete_lvol(lvol)
             if lvol in self.lvols_without_sec_connect:
@@ -777,8 +781,8 @@ class RandomFailoverTest(TestLvolHACluster):
             mount_point = lvol_details["Mount"]
             log_file = f"{self.log_path}/{lvol}-{iteration}.log"
 
-            self.ssh_obj.delete_files(self.fio_node, [f"{mount_point}/*fio*"])
-            self.ssh_obj.delete_files(self.fio_node, [f"{self.log_path}/local-{lvol}_fio*"])
+            self.ssh_obj.delete_files(lvol_details["Client"], [f"{mount_point}/*fio*"])
+            self.ssh_obj.delete_files(lvol_details["Client"], [f"{self.log_path}/local-{lvol}*"])
 
             sleep_n_sec(5)
             self.lvol_mount_details[lvol]["Log"] = log_file
@@ -786,7 +790,7 @@ class RandomFailoverTest(TestLvolHACluster):
             # Start FIO
             fio_thread = threading.Thread(
                 target=self.ssh_obj.run_fio_test,
-                args=(self.fio_node, None, mount_point, log_file),
+                args=(lvol_details["Client"], None, mount_point, log_file),
                 kwargs={
                     "size": self.fio_size,
                     "name": f"{lvol}_fio",
@@ -808,8 +812,8 @@ class RandomFailoverTest(TestLvolHACluster):
             mount_point = clone_details["Mount"]
             log_file = f"{self.log_path}/{clone}-{iteration}.log"
 
-            self.ssh_obj.delete_files(self.fio_node, [f"{mount_point}/*fio*"])
-            self.ssh_obj.delete_files(self.fio_node, [f"{self.log_path}/local-{clone}_fio*"])
+            self.ssh_obj.delete_files(clone_details["Client"], [f"{mount_point}/*fio*"])
+            self.ssh_obj.delete_files(clone_details["Client"], [f"{self.log_path}/local-{clone}_fio*"])
 
             self.clone_mount_details[clone]["Log"] = log_file
 
@@ -818,7 +822,7 @@ class RandomFailoverTest(TestLvolHACluster):
             # Start FIO
             fio_thread = threading.Thread(
                 target=self.ssh_obj.run_fio_test,
-                args=(self.fio_node, None, mount_point, log_file),
+                args=(clone_details["Client"], None, mount_point, log_file),
                 kwargs={
                     "size": self.fio_size,
                     "name": f"{clone}_fio",
@@ -840,7 +844,6 @@ class RandomFailoverTest(TestLvolHACluster):
         """Main execution loop for the random failover test."""
         self.logger.info("Starting random failover test.")
         iteration = 1
-        self.fio_node = self.fio_node[0]
 
         self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
 
@@ -890,11 +893,11 @@ class RandomFailoverTest(TestLvolHACluster):
                 self.validate_migration_for_node(self.outage_start_time, 2000, None, 60, no_task_ok=no_task_ok)
 
             for clone, clone_details in self.clone_mount_details.items():
-                self.common_utils.validate_fio_test(self.fio_node,
+                self.common_utils.validate_fio_test(clone_details["Client"],
                                                     log_file=clone_details["Log"])
             
             for lvol, lvol_details in self.lvol_mount_details.items():
-                self.common_utils.validate_fio_test(self.fio_node,
+                self.common_utils.validate_fio_test(lvol_details["Client"],
                                                     log_file=lvol_details["Log"])
 
             # Perform failover and manage resources during outage
@@ -918,16 +921,17 @@ class RandomFailoverTest(TestLvolHACluster):
             no_task_ok = outage_type in {"partial_nw", "partial_nw_single_port", "lvol_disconnect_primary"}
             if not self.sbcli_utils.is_secondary_node(self.current_outage_node):
                 self.validate_migration_for_node(self.outage_start_time, 2000, None, 60, no_task_ok=no_task_ok)
+            
             self.common_utils.manage_fio_threads(self.fio_node, self.fio_threads, timeout=100000)
 
             for lvol_name, lvol_details in self.lvol_mount_details.items():
                 self.common_utils.validate_fio_test(
-                    self.fio_node,
+                    lvol_details["Client"],
                     lvol_details["Log"]
                 )
             for clone_name, clone_details in self.clone_mount_details.items():
                 self.common_utils.validate_fio_test(
-                    self.fio_node,
+                    clone_details["Client"],
                     clone_details["Log"]
                 )
 

@@ -130,7 +130,8 @@ def _check_node_ping(ip):
         return False
 
 
-def _check_node_lvstore(lvstore_stack, node, auto_fix=False, stack_src_node=None):
+def _check_node_lvstore(
+        lvstore_stack, node, auto_fix=False, node_bdev_names=None, stack_src_node=None):
     db_controller = DBController()
     lvstore_check = True
     logger.info(f"Checking distr stack on node : {node.get_id()}")
@@ -157,14 +158,11 @@ def _check_node_lvstore(lvstore_stack, node, auto_fix=False, stack_src_node=None
         if type == "bdev_raid":
             node_distribs_list = bdev["distribs_list"]
 
-    node_bdevs = rpc_client.get_bdevs()
-    if node_bdevs:
+    if not node_bdev_names:
+        node_bdevs = rpc_client.get_bdevs()
         node_bdev_names = [b['name'] for b in node_bdevs]
-    else:
-        node_bdev_names = []
 
     for distr in distribs_list:
-        # ret = rpc_client.get_bdevs(distr)
         if distr in node_bdev_names:
             logger.info(f"Checking distr bdev : {distr} ... ok")
             logger.info(f"Checking distr JM names:")
@@ -216,7 +214,6 @@ def _check_node_lvstore(lvstore_stack, node, auto_fix=False, stack_src_node=None
             logger.info(f"Checking distr bdev : {distr} ... not found")
             lvstore_check = False
     if raid:
-        # ret = rpc_client.get_bdevs(raid)
         if raid in node_bdev_names:
             logger.info(f"Checking raid bdev: {raid} ... ok")
         else:
@@ -458,7 +455,7 @@ def check_remote_device(device_id):
     return result
 
 
-def check_lvol_on_node(lvol_id, node_id):
+def check_lvol_on_node(lvol_id, node_id, node_bdev_names=None, node_lvols_nqns=None):
     logger.info(f"Checking lvol on node: {node_id}")
 
     db_controller = DBController()
@@ -475,29 +472,38 @@ def check_lvol_on_node(lvol_id, node_id):
         snode.mgmt_ip, snode.rpc_port,
         snode.rpc_username, snode.rpc_password, timeout=5, retry=1)
 
+    if not node_bdev_names:
+        ret = rpc_client.get_bdevs()
+        for bdev in ret:
+            node_bdev_names[bdev['name']] = bdev
+
+    if not node_lvols_nqns:
+        ret = rpc_client.subsystem_list()
+        for sub in ret:
+            node_lvols_nqns[sub['nqn']] = sub
+
     passed = True
     try:
         for bdev_info in lvol.bdev_stack:
             bdev_name = bdev_info['name']
             if bdev_info['type'] == "bdev_lvol":
-                bdev_name = bdev_info['params']["lvs_name"] + "/" + bdev_info['params']["name"]
-            ret = rpc_client.get_bdevs(bdev_name)
-            if ret:
+                bdev_name = lvol.lvol_uuid
+
+            if bdev_name in node_bdev_names:
                 logger.info(f"Checking bdev: {bdev_name} ... ok")
             else:
                 logger.error(f"Checking bdev: {bdev_name} ... failed")
                 passed = False
 
-        ret = rpc_client.subsystem_list(lvol.nqn)
-        if ret:
+        if lvol.nqn in node_lvols_nqns:
             logger.info(f"Checking subsystem ... ok")
-            if ret[0]["listen_addresses"]:
+            if node_lvols_nqns[lvol.nqn]["listen_addresses"]:
                 logger.info(f"Checking listener ... ok")
             else:
                 logger.info(f"Checking listener ... not found")
                 passed = False
 
-            if ret[0]["namespaces"]:
+            if node_lvols_nqns[lvol.nqn]["namespaces"]:
                 logger.info(f"Checking namespaces ... ok")
             else:
                 logger.info(f"Checking namespaces ... not found")
