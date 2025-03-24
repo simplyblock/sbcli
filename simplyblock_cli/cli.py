@@ -110,7 +110,7 @@ class CLIWrapper(CLIWrapperBase):
         if self.developer_mode:
             argument = subcommand.add_argument('--disable-ha-jm', help='Disable HA JM for distrib creation', dest='enable_ha_jm', required=False, action='store_false')
         argument = subcommand.add_argument('--ha-jm-count', help='HA JM count', type=int, default=3, dest='ha_jm_count', required=False)
-        argument = subcommand.add_argument('--is-secondary-node', help='Adds as secondary node. A secondary node does not have any disks attached. It is only used for I/O processing in case a primary goes down.', dest='is_secondary_node', required=False, action='store_true')
+        argument = subcommand.add_argument('--is-secondary-node', help='Adds as secondary node. A secondary node does not have any disks attached. It is only used for I/O processing in case a primary goes down.', default=False, dest='is_secondary_node', required=False, action='store_true')
         argument = subcommand.add_argument('--namespace', help='Kubernetes namespace to deploy on', type=str, dest='namespace', required=False)
         if self.developer_mode:
             argument = subcommand.add_argument('--id-device-by-nqn', help='Use device nqn to identify it instead of serial number', dest='id_device_by_nqn', required=False, action='store_true')
@@ -371,9 +371,9 @@ class CLIWrapper(CLIWrapperBase):
             argument = subcommand.add_argument('--enable-test-device', help='Enable creation of test device', dest='enable_test_device', required=False, action='store_true')
         if self.developer_mode:
             argument = subcommand.add_argument('--disable-ha-jm', help='Disable HA JM for distrib creation', dest='enable_ha_jm', required=False, action='store_true')
-        argument = subcommand.add_argument('--is-secondary-node', help='Adds as secondary node. A secondary node does not have any disks attached. It is only used for I/O processing in case a primary goes down.', dest='is_secondary_node', required=False, action='store_true')
+        argument = subcommand.add_argument('--is-secondary-node', help='Adds as secondary node. A secondary node does not have any disks attached. It is only used for I/O processing in case a primary goes down.', default=False, dest='is_secondary_node', required=False, action='store_true')
         argument = subcommand.add_argument('--namespace', help='k8s namespace to deploy on', type=str, dest='namespace', required=False)
-        argument = subcommand.add_argument('--id-device-by-nqn', help='Use device nqn to identify it instead of serial number', dest='id_device_by_nqn', required=False, action='store_true')
+        argument = subcommand.add_argument('--id-device-by-nqn', help='Use device nqn to identify it instead of serial number', default=False, dest='id_device_by_nqn', required=False, action='store_true')
         if self.developer_mode:
             argument = subcommand.add_argument('--lvol-name', help='Logical volume name or id', type=str, default='lvol01', dest='lvol_name', required=False)
         if self.developer_mode:
@@ -571,7 +571,7 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('name', help='New logical volume name', type=str)
         subcommand.add_argument('size', help='Logical volume size: 10M, 10G, 10(bytes)', type=str)
         subcommand.add_argument('pool', help='Pool id or name', type=str)
-        argument = subcommand.add_argument('--snapshot', '-s', help='Make logical volume with snapshot capability, default: false', dest='snapshot', required=False, action='store_true')
+        argument = subcommand.add_argument('--snapshot', '-s', help='Make logical volume with snapshot capability, default: false', default=False, dest='snapshot', required=False, action='store_true')
         argument = subcommand.add_argument('--max-size', help='Logical volume max size', type=str, default='1000T', dest='max_size', required=False)
         argument = subcommand.add_argument('--host-id', help='Primary storage node id or Hostname', type=str, dest='host_id', required=False)
         argument = subcommand.add_argument('--encrypt', help='Use inline data encryption and decryption on the logical volume', dest='encrypt', required=False, action='store_true')
@@ -617,7 +617,7 @@ class CLIWrapper(CLIWrapperBase):
 
     def init_volume__delete(self, subparser):
         subcommand = self.add_sub_command(subparser, 'delete', 'Deletes a logical volume')
-        subcommand.add_argument('volume_id', help='Logical volumes id or ids', type=str, nargs='+')
+        subcommand.add_argument('volume_id', help='Logical volumes id or ids', type=str)
         argument = subcommand.add_argument('--force', help='Force delete logical volume from the cluster', dest='force', required=False, action='store_true')
 
     def init_volume__connect(self, subparser):
