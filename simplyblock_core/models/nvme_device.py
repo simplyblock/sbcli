@@ -15,6 +15,7 @@ class NVMeDevice(BaseModel):
     STATUS_FAILED = 'failed'
     STATUS_FAILED_AND_MIGRATED = 'failed_and_migrated'
     STATUS_READONLY = 'read_only'
+    STATUS_CANNOT_ALLOCATE = 'cannot_allocate'
 
     _STATUS_CODE_MAP = {
         STATUS_ONLINE: 1,
@@ -23,7 +24,8 @@ class NVMeDevice(BaseModel):
         STATUS_REMOVED: 4,
         STATUS_FAILED: 5,
         STATUS_READONLY: 6,
-        STATUS_JM: 7
+        STATUS_JM: 7,
+        STATUS_CANNOT_ALLOCATE: 8
 
     }
 

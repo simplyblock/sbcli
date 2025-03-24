@@ -723,20 +723,9 @@ def cluster_set_read_only(cl_id):
         for node in st:
             if node.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
                 continue
-
-            rpc_client = RPCClient(
-                node.mgmt_ip, node.rpc_port,
-                node.rpc_username, node.rpc_password, timeout=3, retry=2)
-
-            if node.lvstore:
-                rpc_client.bdev_lvol_set_lvs_read_only(node.lvstore, True)
-                if node.secondary_node_id:
-                    sec_node = db_controller.get_storage_node_by_id(node.secondary_node_id)
-                    if sec_node:
-                        sec_rpc_client = RPCClient(
-                            sec_node.mgmt_ip, sec_node.rpc_port,
-                            sec_node.rpc_username, sec_node.rpc_password, timeout=3, retry=2)
-                        sec_rpc_client.bdev_lvol_set_lvs_read_only(node.lvstore, True)
+            for dev in node.nvme_devices:
+                if dev.status == NVMeDevice.STATUS_ONLINE:
+                    device_controller.device_set_state(dev.get_id(), NVMeDevice.STATUS_CANNOT_ALLOCATE)
 
     return True
 
@@ -758,19 +747,12 @@ def cluster_set_active(cl_id):
             if node.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
                 continue
 
-            rpc_client = RPCClient(
-                node.mgmt_ip, node.rpc_port,
-                node.rpc_username, node.rpc_password, timeout=3, retry=2)
+            for dev in node.nvme_devices:
+                if dev.status in [NVMeDevice.STATUS_CANNOT_ALLOCATE, NVMeDevice.STATUS_READONLY]:
+                    dev_stat = db_controller.get_device_stats(dev, 1)
+                    if dev_stat and dev_stat[0].size_util < cluster.cap_crit:
+                        device_controller.device_set_online(dev.get_id())
 
-            if node.lvstore:
-                rpc_client.bdev_lvol_set_lvs_read_only(node.lvstore, False)
-                if node.secondary_node_id:
-                    sec_node = db_controller.get_storage_node_by_id(node.secondary_node_id)
-                    if sec_node:
-                        sec_rpc_client = RPCClient(
-                            sec_node.mgmt_ip, sec_node.rpc_port,
-                            sec_node.rpc_username, sec_node.rpc_password, timeout=3, retry=2)
-                        sec_rpc_client.bdev_lvol_set_lvs_read_only(node.lvstore, False)
     return True
 
 

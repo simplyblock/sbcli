@@ -65,18 +65,16 @@ GRAYLOG_CHECK_INTERVAL_SEC = 60
 
 FDB_CHECK_INTERVAL_SEC = 60
 
+TASK_EXEC_INTERVAL_SEC = 10
+TASK_EXEC_RETRY_COUNT = 8
 
-
+SIMPLY_BLOCK_SPDK_CORE_IMAGE = "simplyblock/spdk-core:v24.05-tag-latest"
 SIMPLY_BLOCK_DOCKER_IMAGE = get_from_env_var_file(
         "SIMPLY_BLOCK_DOCKER_IMAGE","simplyblock/simplyblock:main")
 SIMPLY_BLOCK_CLI_NAME = get_from_env_var_file(
         "SIMPLY_BLOCK_COMMAND_NAME", "sbcli")
-TASK_EXEC_INTERVAL_SEC = 10
-TASK_EXEC_RETRY_COUNT = 8
-SIMPLY_BLOCK_SPDK_CORE_IMAGE = "simplyblock/spdk-core:v24.05-tag-latest"
-
-
-SIMPLY_BLOCK_SPDK_ULTRA_IMAGE = "public.ecr.aws/simply-block/ultra:main-latest"
+SIMPLY_BLOCK_SPDK_ULTRA_IMAGE = get_from_env_var_file(
+        "SIMPLY_BLOCK_SPDK_ULTRA_IMAGE", "public.ecr.aws/simply-block/ultra:main-latest")
 
 GELF_PORT = 12202
 
