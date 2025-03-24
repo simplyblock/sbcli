@@ -24,8 +24,10 @@ def push_metrics(ret):
     
     for thread in ret.get("threads", []):
         thread_name = thread.get("name")
+        print(f"thread_name: {thread_name}")
         cpu_busy = thread.get("busy")
         if cpu_busy is not None:
+            print(f"cpu_busy: {cpu_busy}")
             cpu_busy_gauge.labels(mgmt_ip=MGMT_IP, thread_name=thread_name).set(cpu_busy)
     
     push_to_gateway(PUSHGATEWAY_URL, job='spdk_metrics', registry=registry)
