@@ -1,12 +1,15 @@
 from prometheus_client import CollectorRegistry, Gauge, push_to_gateway
 import time
 from simplyblock_core.services.spdk import client as spdk_client
-from simplyblock_core import db_controller
+from simplyblock_core import db_controller,utils
 from simplyblock_core.rpc_client import RPCClient
 import socket
 import fcntl
 import struct
 import subprocess
+
+
+logger = utils.get_logger(__name__)
 
 
 PUSHGATEWAY_URL = "http://pushgateway:9091"
@@ -50,24 +53,21 @@ def push_metrics(ret,cluster_id,snode):
         pollers_count_gauge.labels(cluster=cluster_id, snode=snode_id, node_ip=snode_ip, poller_type="paused", thread_name=thread_name).set(thread.get("paused_pollers_count", 0))
     
     push_to_gateway(PUSHGATEWAY_URL, job='metricsgateway', registry=registry)
-    print("Metrics pushed successfully")
+    logger.info("Metrics pushed successfully")
 
-if __name__ == "__main__":
-    while True:
-        try:
-            clusters = db_controller.get_clusters()
-            for cluster in clusters:
-                cluster_id = cluster.get_id()
-                nodes = db_controller.get_storage_nodes_by_cluster_id(cluster_id)
-                for snode in nodes:
-                    rpc_client = RPCClient(
-                    snode.mgmt_ip, snode.rpc_port,
-                    snode.rpc_username, snode.rpc_password, timeout=3*60, retry=10)
-                    ret = rpc_client.thread_get_stats()
-                    print(f"spdk thread_get_stats return: {ret}")
-                    if ret and "threads" in ret:
-                        push_metrics(ret, cluster_id, snode)
-        except Exception as e:
-            print(f"SPDK query failed: {e}")
-        
-        time.sleep(10)
+
+while True:
+    clusters = db_controller.get_clusters()
+    for cluster in clusters:
+        cluster_id = cluster.get_id()
+        nodes = db_controller.get_storage_nodes_by_cluster_id(cluster_id)
+        for snode in nodes:
+            rpc_client = RPCClient(
+            snode.mgmt_ip, snode.rpc_port,
+            snode.rpc_username, snode.rpc_password, timeout=3*60, retry=10)
+            ret = rpc_client.thread_get_stats()
+            logger.info(f"spdk thread_get_stats return: {ret}")
+            if ret and "threads" in ret:
+                push_metrics(ret, cluster_id, snode)
+
+    time.sleep(10)
