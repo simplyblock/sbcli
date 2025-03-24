@@ -3,29 +3,13 @@ import time
 from simplyblock_core.services.spdk import client as spdk_client
 from simplyblock_core import db_controller,utils
 from simplyblock_core.rpc_client import RPCClient
-import socket
-import fcntl
-import struct
-import subprocess
-
 
 logger = utils.get_logger(__name__)
 
 
 PUSHGATEWAY_URL = "http://pushgateway:9091"
-SPDK_SOCK_PATH = "/var/tmp/spdk.sock"
-cluster_id_file = "/etc/foundationdb/sbcli_cluster_id"
 
 db_controller = db_controller.DBController()
-
-def run_command(cmd):
-    try:
-        process = subprocess.Popen(
-            cmd.split(), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        stdout, _ = process.communicate()
-        return stdout.strip().decode("utf-8")
-    except Exception as e:
-        return str(e)
 
 def push_metrics(ret,cluster_id,snode):
     """Formats and pushes SPDK metrics to Prometheus Pushgateway."""

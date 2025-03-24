@@ -6,7 +6,7 @@ services:
     image: $SIMPLYBLOCK_DOCKER_IMAGE
     command: "python simplyblock_core/services/spdk_stats_collector.py"
     volumes:
-          - '/etc/foundationdb:/etc/foundationdb'
+      - '/etc/foundationdb:/etc/foundationdb'
     deploy:
       placement:
         constraints: [ node.role == manager ]
