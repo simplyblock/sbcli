@@ -30,11 +30,6 @@ from simplyblock_core.snode_client import SNodeClient
 logger = utils.get_logger(__name__)
 
 
-class StorageOpsException(Exception):
-    def __init__(self, message):
-        self.message = message
-
-
 def addNvmeDevices(snode, devs):
     rpc_client = RPCClient(
         snode.mgmt_ip, snode.rpc_port,
