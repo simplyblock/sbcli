@@ -55,7 +55,7 @@ def push_metrics(ret,cluster_id,snode):
     push_to_gateway(PUSHGATEWAY_URL, job='metricsgateway', registry=registry)
     logger.info("Metrics pushed successfully")
 
-
+logger.info("Starting spdk stats collector...")
 while True:
     clusters = db_controller.get_clusters()
     for cluster in clusters:
