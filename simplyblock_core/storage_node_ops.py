@@ -1024,14 +1024,15 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
     if not spdk_cpu_mask:
         spdk_cpu_mask = cores_config["cpu_mask"]
     spdk_cores = utils.hexa_to_cpu_list(spdk_cpu_mask)
-    if cpu_count < spdk_cores[-1]:
+    req_cpu_count = len(spdk_cores)
+    if cpu_count < req_cpu_count:
         print(f"ERROR: The cpu mask {spdk_cpu_mask} is greater than the total cpus on the system {cpu_count}")
         return False
-    if spdk_cores[-1] >= 64:
+    if req_cpu_count >= 64:
         logger.error(f"ERROR: The provided cpu mask {spdk_cpu_mask} has values greater than 63, which is not allowed")
         return False
 
-    if len(spdk_cores) >= 4:
+    if req_cpu_count >= 4:
         app_thread_core, jm_cpu_core, poller_cpu_cores, alceml_cpu_cores, alceml_worker_cpu_cores, distrib_cpu_cores, jc_singleton_core = utils.calculate_core_allocation(
             spdk_cores)
 
@@ -2058,7 +2059,7 @@ def list_storage_nodes(is_json, cluster_id=None):
     return output
 
 
-def list_storage_devices(node_id, sort, is_json):
+def list_storage_devices(node_id, is_json):
     db_controller = DBController()
     snode = db_controller.get_storage_node_by_id(node_id)
     if not snode:
@@ -2126,16 +2127,6 @@ def list_storage_devices(node_id, sort, is_json):
             "Node ID": device.node_id,
             "Status": device.status,
         })
-
-    if sort and sort in ['node-seq', 'dev-seq', 'serial']:
-        if sort == 'serial':
-            sort_key = "Serial Number"
-        elif sort == 'dev-seq':
-            sort_key = "Sequential Number"
-        elif sort == 'node-seq':
-            # TODO: check this key
-            sort_key = "Sequential Number"
-        storage_devices = sorted(storage_devices, key=lambda d: d[sort_key])
 
     data = {
         "Storage Devices": storage_devices,

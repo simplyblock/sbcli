@@ -603,11 +603,8 @@ class CLIWrapperBase:
 
     def storage_node_list_devices(self, args):
         node_id = args.node_id
-        sort = args.sort
-        if sort:
-            sort = sort[0]
         is_json = args.json
-        out = storage_ops.list_storage_devices(node_id, sort, is_json)
+        out = storage_ops.list_storage_devices(node_id, is_json)
         return out
 
     def cluster_add(self, args):

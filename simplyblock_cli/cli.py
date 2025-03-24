@@ -191,7 +191,6 @@ class CLIWrapper(CLIWrapperBase):
     def init_storage_node__list_devices(self, subparser):
         subcommand = self.add_sub_command(subparser, 'list-devices', 'Lists storage devices')
         subcommand.add_argument('node_id', help='Storage node id', type=str).completer = self._completer_get_sn_list
-        argument = subcommand.add_argument('--sort', '--sort', help='Sort the outputs', type=str, dest='s', required=True, nargs=1, choices=['node-seq','serial','dev-seq',])
         argument = subcommand.add_argument('--json', help='Print outputs in json format', dest='json', required=False, action='store_true')
 
     def init_storage_node__device_testing_mode(self, subparser):
