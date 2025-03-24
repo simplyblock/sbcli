@@ -6,7 +6,7 @@ services:
     image: $SIMPLYBLOCK_DOCKER_IMAGE
     command: "python simplyblock_core/services/spdk_stats_collector.py"
     volumes:
-          - '/etc/simplyblock:/etc/simplyblock'
+          - '/etc/foundationdb:/etc/foundationdb'
           - '/var/tmp/spdk.sock:/var/tmp/spdk.sock'
     deploy:
       mode: global
