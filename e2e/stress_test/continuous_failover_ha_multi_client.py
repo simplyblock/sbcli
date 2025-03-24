@@ -327,10 +327,7 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                                                                 block_ports=ports_to_block, block_all_ss_ports=True)
         elif outage_type == "interface_full_network_interrupt":
             self.logger.info("Handling full interface based network interruption...")
-            active_interfaces = []
-            data_nics = node_details[0]["data_nics"]
-            for data_nic in data_nics:
-                active_interfaces.append(data_nic["if_name"])
+            active_interfaces = self.ssh_obj.get_active_interfaces(node_ip)
             
             self.disconnect_thread = threading.Thread(
                 target=self.ssh_obj.disconnect_all_active_interfaces,

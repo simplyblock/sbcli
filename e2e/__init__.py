@@ -34,6 +34,7 @@ from stress_test.lvol_snap_clone_fio_failover import(
 )
 from stress_test.continuous_failover_ha import RandomFailoverTest
 from stress_test.continuous_failover_ha_multi_client import RandomMultiClientFailoverTest
+from stress_test.continuous_failover_ha_multi_outage import RandomMultiClientMultiFailoverTest
 
 
 ALL_TESTS = [
@@ -102,5 +103,6 @@ def get_stress_tests():
         TestFailoverScenariosStorageNodes,
         RandomFailoverTest,
         RandomMultiClientFailoverTest,
+        RandomMultiClientMultiFailoverTest,
     ]
     return tests
