@@ -445,19 +445,21 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
         self.sbcli_utils.wait_for_storage_node_status(self.current_outage_node, "online", timeout=1000)
         # Log the restart event
         self.log_outage_event(self.current_outage_node, outage_type, "Node restarted")
-        self.sbcli_utils.wait_for_health_status(self.current_outage_node, True, timeout=1000)
-        self.outage_end_time = int(datetime.now().timestamp())
 
         
         if not self.k8s_test:
-            self.ssh_obj.restart_docker_logging(
-                node_ip=node_ip,
-                containers=self.container_nodes[node_ip],
-                log_dir=self.docker_logs_path,
-                test_name=self.test_name
-            )
+            for node in self.storage_nodes:
+                self.ssh_obj.restart_docker_logging(
+                    node_ip=node,
+                    containers=self.container_nodes[node],
+                    log_dir=self.docker_logs_path,
+                    test_name=self.test_name
+                )
         else:
             self.runner_k8s_log.restart_logging()
+
+        self.sbcli_utils.wait_for_health_status(self.current_outage_node, True, timeout=1000)
+        self.outage_end_time = int(datetime.now().timestamp())
 
         if self.secondary_outage:
             for lvol in self.lvols_without_sec_connect:
