@@ -329,7 +329,7 @@ class CLIWrapper(CLIWrapperBase):
         if self.developer_mode:
             argument = subcommand.add_argument('--CLI_PASS', help='Password for CLI SSH connection', type=str, dest='CLI_PASS', required=False)
         argument = subcommand.add_argument('--cap-warn', help='Capacity warning level in percent, default: 89', type=int, default=89, dest='cap_warn', required=False)
-        argument = subcommand.add_argument('--cap-crit', help='Capacity critical level in percent, default: 99', type=int, default=99, dest='cap_crit', required=False)
+        argument = subcommand.add_argument('--cap-crit', help='Capacity critical level in percent, default: 99', type=int, default=95, dest='cap_crit', required=False)
         argument = subcommand.add_argument('--prov-cap-warn', help='Capacity warning level in percent, default: 250', type=int, default=250, dest='prov_cap_warn', required=False)
         argument = subcommand.add_argument('--prov-cap-crit', help='Capacity critical level in percent, default: 500', type=int, default=500, dest='prov_cap_crit', required=False)
         argument = subcommand.add_argument('--log-del-interval', help='Logging retention period, default: 3d', type=str, default='3d', dest='log_del_interval', required=False)
