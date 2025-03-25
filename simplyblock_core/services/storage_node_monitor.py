@@ -134,6 +134,8 @@ def update_cluster_status(cluster_id):
         # cluster_ops.cluster_activate(cluster_id, True)
         cluster_ops.set_cluster_status(cluster_id, Cluster.STATUS_ACTIVE)
         return
+    elif current_cluster_status == Cluster.STATUS_READONLY and next_current_status == Cluster.STATUS_ACTIVE:
+        return
     elif current_cluster_status == Cluster.STATUS_SUSPENDED and next_current_status \
             in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED]:
         # needs activation
