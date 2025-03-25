@@ -1,3 +1,6 @@
+#!/usr/bin/env python
+# PYTHON_ARGCOMPLETE_OK
+
 from simplyblock_cli.clibase import CLIWrapperBase
 from simplyblock_core import utils
 import logging
