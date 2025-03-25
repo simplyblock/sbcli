@@ -591,7 +591,8 @@ def cluster_activate(cl_id, force=False, force_lvstore_create=False):
         if node.status == node.STATUS_ONLINE:
             online_nodes.append(node)
             for dev in node.nvme_devices:
-                if dev.status == dev.STATUS_ONLINE:
+                if dev.status in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_READONLY,
+                                  NVMeDevice.STATUS_CANNOT_ALLOCATE]:
                     dev_count += 1
     minimum_devices = cluster.distr_ndcs + cluster.distr_npcs + 1
     if dev_count < minimum_devices:
