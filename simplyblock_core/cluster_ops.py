@@ -726,7 +726,9 @@ def cluster_set_read_only(cl_id):
                 continue
             for dev in node.nvme_devices:
                 if dev.status == NVMeDevice.STATUS_ONLINE:
-                    device_controller.device_set_state(dev.get_id(), NVMeDevice.STATUS_CANNOT_ALLOCATE)
+                    dev_stat = db_controller.get_device_stats(dev, 1)
+                    if dev_stat and dev_stat[0].size_util >= cluster.cap_crit:
+                        device_controller.device_set_state(dev.get_id(), NVMeDevice.STATUS_CANNOT_ALLOCATE)
 
     return True
 
@@ -1213,11 +1215,6 @@ def update_cluster(cl_id, mgmt_only=False, restart_cluster=False):
     if not cluster:
         logger.error(f"Cluster not found {cl_id}")
         return False
-
-    if cluster.status != Cluster.STATUS_ACTIVE:
-        logger.error(f"Cluster is not active")
-        return False
-
 
     try:
         sbcli=constants.SIMPLY_BLOCK_CLI_NAME
