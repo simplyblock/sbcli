@@ -29,7 +29,7 @@ def push_metrics(ret, cluster_id, snode):
         idle = reactor.get("idle", 0)
         total_elapsed = 0 
 
-        thread_names = ",".join(thread["name"] for thread in reactor.get("lw_threads", []))
+        thread_names = ", ".join(thread["name"] for thread in reactor.get("lw_threads", []))
 
         for thread in reactor.get("lw_threads", []):
             thread_name = thread.get("name")
