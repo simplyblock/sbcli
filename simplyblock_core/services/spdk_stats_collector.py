@@ -16,7 +16,7 @@ def push_metrics(ret, cluster_id, snode):
     tick_rate_gauge = Gauge('tick_rate', 'SPDK Tick Rate', ['cluster', 'snode', 'node_ip'], registry=registry)
     cpu_busy_gauge = Gauge('cpu_busy_percentage', 'Per-thread CPU Busy Percentage', ['cluster', 'snode', 'node_ip', 'thread_name'], registry=registry)
     pollers_count_gauge = Gauge('pollers_count', 'Number of pollers', ['cluster', 'snode', 'node_ip', 'poller_type', 'thread_name'], registry=registry)
-    cpu_utilization_gauge = Gauge('cpu_core_utilization', 'Per-core CPU Utilization', ['cluster', 'snode', 'node_ip', 'core_id'], registry=registry)
+    cpu_utilization_gauge = Gauge('cpu_core_utilization', 'Per-core CPU Utilization', ['cluster', 'snode', 'node_ip', 'core_id', 'thread_names'], registry=registry)
 
     snode_id = snode.id
     snode_ip = snode.mgmt_ip
@@ -28,6 +28,9 @@ def push_metrics(ret, cluster_id, snode):
         lcore = reactor.get("lcore")
         idle = reactor.get("idle", 0)
         total_elapsed = 0 
+
+        thread_names = ",".join(thread["name"] for thread in reactor.get("lw_threads", []))
+
         for thread in reactor.get("lw_threads", []):
             thread_name = thread.get("name")
             elapsed = thread.get("elapsed", 0)
@@ -45,7 +48,7 @@ def push_metrics(ret, cluster_id, snode):
         total_cycle = total_elapsed + idle
         core_utilization_percent = (total_elapsed / total_cycle) * 100 if total_cycle > 0 else 0
 
-        cpu_utilization_gauge.labels(cluster=cluster_id, snode=snode_id, node_ip=snode_ip, core_id=str(lcore)).set(core_utilization_percent)
+        cpu_utilization_gauge.labels(cluster=cluster_id, snode=snode_id, node_ip=snode_ip, core_id=str(lcore), thread_names=thread_names).set(core_utilization_percent)
 
     push_to_gateway(PUSHGATEWAY_URL, job='metricsgateway', registry=registry)
     logger.info("Metrics pushed successfully")
