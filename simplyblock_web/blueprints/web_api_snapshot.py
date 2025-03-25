@@ -61,8 +61,6 @@ def clone_snapshot():
     if 'new_size' in cl_data:
         new_size = utils.parse_size(cl_data['new_size'])
 
-    res, msg = snapshot_controller.clone(
+    clone_id, error = snapshot_controller.clone(
         cl_data['snapshot_id'], cl_data['clone_name'], new_size)
-    if res:
-        return utils.get_response(msg)
-    return utils.get_response(None, msg)
+    return utils.get_response(clone_id, error, http_code=400)

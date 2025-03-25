@@ -621,7 +621,7 @@ class CLIWrapper(CLIWrapperBase):
 
     def init_volume__delete(self, subparser):
         subcommand = self.add_sub_command(subparser, 'delete', 'Deletes a logical volume')
-        subcommand.add_argument('volume_id', help='Logical volumes id or ids', type=str)
+        subcommand.add_argument('volume_id', help='Logical volumes id or ids', type=str,  nargs='+')
         argument = subcommand.add_argument('--force', help='Force delete logical volume from the cluster', dest='force', required=False, action='store_true')
 
     def init_volume__connect(self, subparser):
