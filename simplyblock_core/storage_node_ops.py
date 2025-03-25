@@ -2126,7 +2126,8 @@ def shutdown_storage_node(node_id, force=False):
         device_controller.set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_UNAVAILABLE)
 
     for dev in snode.nvme_devices:
-        if dev.status in [NVMeDevice.STATUS_ONLINE]:
+        if dev.status in [NVMeDevice.STATUS_UNAVAILABLE, NVMeDevice.STATUS_ONLINE,
+                          NVMeDevice.STATUS_CANNOT_ALLOCATE, NVMeDevice.STATUS_READONLY]:
             device_controller.device_set_unavailable(dev.get_id())
 
     # # make other nodes disconnect from this node
