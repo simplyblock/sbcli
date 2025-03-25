@@ -165,6 +165,13 @@ class TestClusterBase:
                                                 log_dir=self.docker_logs_path,
                                                 test_name=self.test_name
                                                 )
+                self.ssh_obj.monitor_container_logs(
+                    node_ip=node,
+                    containers=containers,
+                    log_dir=self.docker_logs_path,
+                    test_name=self.test_name
+                )
+
 
             self.ssh_obj.start_tcpdump_logging(node_ip=node, log_dir=self.docker_logs_path)
             self.ssh_obj.start_netstat_dmesg_logging(node_ip=node,
@@ -178,6 +185,7 @@ class TestClusterBase:
                 test_name=self.test_name
             )
             self.runner_k8s_log.start_logging()
+            self.runner_k8s_log.monitor_pod_logs()
 
         for node in self.mgmt_nodes:
             self.ssh_obj.delete_old_folders(
@@ -196,6 +204,12 @@ class TestClusterBase:
                                               log_dir=self.docker_logs_path,
                                               test_name=self.test_name
                                               )
+            self.ssh_obj.monitor_container_logs(
+                    node_ip=node,
+                    containers=containers,
+                    log_dir=self.docker_logs_path,
+                    test_name=self.test_name
+                )
 
             self.ssh_obj.start_tcpdump_logging(node_ip=node, log_dir=self.docker_logs_path)
             self.ssh_obj.start_netstat_dmesg_logging(node_ip=node,
@@ -262,6 +276,17 @@ class TestClusterBase:
 
     def stop_docker_logs_collect(self):
         for node in self.storage_nodes:
+            self.ssh_obj.stop_container_log_monitor(node)
+            pids = self.ssh_obj.find_process_name(
+                node=node,
+                process_name="docker logs --follow",
+                return_pid=True
+            )
+            for pid in pids:
+                self.ssh_obj.kill_processes(node=node, pid=pid)
+        
+        for node in self.mgmt_nodes:
+            self.ssh_obj.stop_container_log_monitor(node)
             pids = self.ssh_obj.find_process_name(
                 node=node,
                 process_name="docker logs --follow",
@@ -270,6 +295,10 @@ class TestClusterBase:
             for pid in pids:
                 self.ssh_obj.kill_processes(node=node, pid=pid)
         self.logger.info("All log monitoring threads stopped.")
+    
+    def stop_k8s_log_collect(self):
+        self.runner_k8s_log.stop_log_monitor()
+        self.runner_k8s_log.stop_logging()
 
     def fetch_all_nodes_distrib_log(self):
         storage_nodes = self.sbcli_utils.get_storage_nodes()

@@ -8,12 +8,12 @@ import paramiko.ssh_exception
 from logger_config import setup_logger
 from pathlib import Path
 from datetime import datetime
+import threading
 import random, string, re
 import subprocess
 
 
 SSH_KEY_LOCATION = os.path.join(Path.home(), ".ssh", os.environ.get("KEY_NAME"))
-
 
 def generate_random_string(length=6):
     """Generate a random string of uppercase letters and digits."""
@@ -42,6 +42,8 @@ class SshUtils:
         self.logger = setup_logger(__name__)
         self.fio_runtime = {}
         self.ssh_user = os.environ.get("SSH_USER", None)
+        self.log_monitor_threads = {}
+        self.log_monitor_stop_flags = {}
 
     def connect(self, address: str, port: int = 22,
                 bastion_server_address: str = None,
@@ -1454,6 +1456,60 @@ class SshUtils:
             self.logger.error(f"Failed to check logs for keyword '{keyword}' on node {node_ip}: {e}")
             return {}
 
+    def get_container_id(self, node_ip, container):
+        """Fetch container ID by name"""
+        cmd = f"docker inspect --format='{{{{.Id}}}}' {container}"
+        output, error = self.exec_command(node_ip, cmd)
+        return output.strip() if output else None
+
+
+    def monitor_container_logs(self, node_ip, containers, log_dir, test_name, poll_interval=10):
+        """Monitoring containers for logging
+        """
+        container_ids = {}
+        stop_flag = threading.Event()  # NEW
+
+        def _monitor():
+            while not stop_flag.is_set():
+                for container in containers:
+                    try:
+                        new_id = self.get_container_id(node_ip, container)
+                        old_id = container_ids.get(container)
+
+                        if not new_id:
+                            continue
+
+                        if new_id != old_id:
+                            container_ids[container] = new_id
+                            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                            log_file = f"{log_dir}/{container}_{test_name}_{node_ip}_{timestamp}_restart.log"
+                            session = f"{container}_restart_{generate_random_string()}"
+                            self.logger.info(f"[{node_ip}] Detected container restart for {container}. Starting new logs.")
+                            cmd = (
+                                f"sudo tmux new-session -d -s {session} "
+                                f"\"docker logs --follow {container} > {log_file} 2>&1\""
+                            )
+                            self.exec_command(node_ip, cmd)
+
+                    except Exception as e:
+                        self.logger.error(f"Error monitoring container {container} on {node_ip}: {e}")
+
+                time.sleep(poll_interval)
+
+        thread = threading.Thread(target=_monitor, daemon=True)
+        thread.start()
+
+        self.log_monitor_threads[node_ip] = thread
+        self.log_monitor_stop_flags[node_ip] = stop_flag
+        self.logger.info(f"Started background log monitor on {node_ip} for containers: {containers}")
+
+    def stop_container_log_monitor(self, node_ip):
+        """Stop Monitoring thread in teardown"""
+        if node_ip in self.log_monitor_stop_flags:
+            self.log_monitor_stop_flags[node_ip].set()
+            self.logger.info(f"Stopping container log monitor thread for {node_ip}")
+
+
 
 
     # def stop_netstat_dmesg_logging(self, node_ip):
@@ -1488,6 +1544,9 @@ class RunnerK8sLog:
         self.namespace = namespace
         self.log_dir = log_dir
         self.test_name = test_name
+        self._monitor_thread = None
+        self._monitor_stop_flag = threading.Event()
+        self._pod_container_map = {}
 
         # Ensure log directory exists
         os.makedirs(self.log_dir, exist_ok=True)
@@ -1567,6 +1626,9 @@ class RunnerK8sLog:
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                 log_file = f"{self.log_dir}/{pod}_{container}_{self.test_name}_{timestamp}_{outage_type}.log"
                 session_name = f"{pod}_{container}_logs_{self.generate_random_string()}"
+                container_id = self._get_container_id(pod, container)
+                key = f"{pod}:{container}"
+                self._pod_container_map[key] = container_id
 
                 command_logs = [
                     "tmux", "new-session", "-d", "-s", session_name,
@@ -1605,3 +1667,70 @@ class RunnerK8sLog:
                 subprocess.run(describe_command, stdout=f, stderr=subprocess.STDOUT)
 
             print(f"Stored pod description for '{pod}' at {describe_file}.")
+
+    def _get_container_id(self, pod, container):
+        try:
+            cmd = [
+                "kubectl", "get", "pod", pod, "-n", self.namespace,
+                "-o", f"jsonpath={{.status.containerStatuses[?(@.name=='{container}')].containerID}}"
+            ]
+            output = subprocess.check_output(cmd, universal_newlines=True).strip()
+            return output.split("//")[-1] if output else None
+        except subprocess.CalledProcessError:
+            return None
+
+    def monitor_pod_logs(self, poll_interval=10):
+        """
+        Continuously monitor running pods and their containers for restarts.
+        Starts new kubectl log sessions if containers change.
+        """
+
+        def _monitor():
+            while not self._monitor_stop_flag.is_set():
+                pods = self.get_running_pods()
+                for pod in pods:
+                    if not (pod.startswith("storage-node-ds") or pod.startswith("snode-spdk-deployment") or pod.startswith("storage-node-handler-")):
+                        continue
+
+                    cmd = ["kubectl", "get", "pod", pod, "-n", self.namespace,
+                        "-o", "jsonpath={.spec.containers[*].name}"]
+                    try:
+                        containers = subprocess.check_output(cmd, universal_newlines=True).strip().split()
+                    except subprocess.CalledProcessError:
+                        continue
+
+                    for container in containers:
+                        key = f"{pod}:{container}"
+                        current_id = self._get_container_id(pod, container)
+                        prev_id = self._pod_container_map.get(key)
+
+                        if not current_id:
+                            continue
+
+                        if current_id != prev_id:
+                            self._pod_container_map[key] = current_id
+                            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                            log_file = f"{self.log_dir}/{pod}_{container}_{self.test_name}_{timestamp}_restart.log"
+                            session_name = f"{pod}_{container}_restart_{self.generate_random_string()}"
+
+                            cmd = [
+                                "tmux", "new-session", "-d", "-s", session_name,
+                                "bash", "-c",
+                                f"kubectl logs --follow {pod} -c {container} -n {self.namespace} > {log_file} 2>&1"
+                            ]
+                            subprocess.Popen(cmd)
+                            print(f"[K8s] Restarted log collection for {pod}:{container} due to new container instance.")
+
+                time.sleep(poll_interval)
+
+        self._monitor_thread = threading.Thread(target=_monitor, daemon=True)
+        self._monitor_thread.start()
+        print("Started background K8s log monitor.")
+
+    def stop_log_monitor(self):
+        if self._monitor_thread and self._monitor_thread.is_alive():
+            self._monitor_stop_flag.set()
+            self._monitor_thread.join(timeout=10)
+            print("K8s log monitor thread stopped.")
+
+
