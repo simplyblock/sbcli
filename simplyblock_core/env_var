@@ -1,5 +1,5 @@
 SIMPLY_BLOCK_COMMAND_NAME=sbcli-mig
-SIMPLY_BLOCK_VERSION=1.0.437
+SIMPLY_BLOCK_VERSION=1.0.438
 
 SIMPLY_BLOCK_DOCKER_IMAGE=public.ecr.aws/simply-block/simplyblock:pull_thread_spdk_prometheus
 DOCKER_USER=hamdysimplyblock

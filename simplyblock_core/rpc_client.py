@@ -806,6 +806,9 @@ class RPCClient:
 
     def thread_get_stats(self):
         return self._request("thread_get_stats")
+    
+    def framework_get_reactors(self):
+        return self._request("framework_get_reactors")
 
     def thread_set_cpumask(self, app_thread_process_id, app_thread_mask):
         params = {"id": app_thread_process_id, "cpumask": app_thread_mask}
