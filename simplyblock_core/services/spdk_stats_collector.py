@@ -70,7 +70,7 @@ while True:
         cluster_id = cluster.get_id()
         nodes = db_controller.get_storage_nodes_by_cluster_id(cluster_id)
         for snode in nodes:
-            if snode.nvme_devices > 0:
+            if  len(snode.nvme_devices) > 0:
                 rpc_client = RPCClient(
                 snode.mgmt_ip, snode.rpc_port,
                 snode.rpc_username, snode.rpc_password, timeout=3*60, retry=10)
