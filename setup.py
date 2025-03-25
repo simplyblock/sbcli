@@ -1,8 +1,11 @@
 import os
+import subprocess
+from pathlib import Path
 
 from setuptools import setup, find_packages
 
 from setuptools.command.install import install as _install
+from setuptools.command.build_py import build_py
 
 
 def _post_install():
@@ -23,6 +26,19 @@ class install(_install):
     def run(self):
         _install.run(self)
         self.execute(_post_install, (), msg="Running post install task")
+
+
+class GenerateCLICommand(build_py):
+    def get_source_files(self) -> list[str]:
+        return ['scripts/cli-wrapper-gen.py', 'scripts/cli-wrapper.jinja2'] + super().get_source_files()
+
+    def get_outputs(self) -> list[str]:
+        return ['simplyblock_cli/cli.py'] + super().get_outputs()
+
+    def run(self):
+        super().run()
+        subprocess.check_call(['python3', Path('scripts/cli-wrapper-gen.py').absolute(), Path('.').absolute()])
+        self.copy_file('simplyblock_cli/cli.py', Path(self.build_lib, 'simplyblock_cli'))
 
 
 def get_env_var(name, default=None):
@@ -95,5 +111,8 @@ setup(
         '': ["/etc/simplyblock/requirements.txt"],
         '/etc/simplyblock': ["requirements.txt"]
     },
-    cmdclass={'install': install},
+    cmdclass={
+        'install': install,
+        'build_py': GenerateCLICommand,
+    },
 )

@@ -2,3 +2,6 @@
 *.pyc
 e2e/logs/*.log!
 .DS_Store
+
+# Auto-generated, not tracked in git
+simplyblock_cli/cli.py
