@@ -3,6 +3,7 @@ import time
 
 from simplyblock_core import constants, db_controller, utils
 from simplyblock_core.controllers import tasks_controller, device_controller
+from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
 
@@ -28,11 +29,11 @@ while True:
                                       NVMeDevice.STATUS_READONLY, NVMeDevice.STATUS_CANNOT_ALLOCATE]:
                     logger.warning(f"Device status is not recognised, id: {dev.get_id()}, status: {dev.status}")
                     continue
-
-                if dev.status in [NVMeDevice.STATUS_READONLY, NVMeDevice.STATUS_CANNOT_ALLOCATE]:
-                    dev_stat = db_controller.get_device_stats(dev, 1)
-                    if dev_stat and dev_stat[0].size_util < cluster.cap_crit:
-                        device_controller.device_set_online(dev.get_id())
+                if cluster.status == Cluster.STATUS_ACTIVE:
+                    if dev.status in [NVMeDevice.STATUS_READONLY, NVMeDevice.STATUS_CANNOT_ALLOCATE]:
+                        dev_stat = db_controller.get_device_stats(dev, 1)
+                        if dev_stat and dev_stat[0].size_util < cluster.cap_crit:
+                            device_controller.device_set_online(dev.get_id())
 
                 elif dev.io_error and dev.status == NVMeDevice.STATUS_UNAVAILABLE and not dev.retries_exhausted:
                     logger.info("Adding device to auto restart")
