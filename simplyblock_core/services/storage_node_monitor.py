@@ -56,7 +56,8 @@ def get_next_cluster_status(cluster_id):
         else:
             offline_nodes += 1
         for dev in node.nvme_devices:
-            if dev.status in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_JM, NVMeDevice.STATUS_READONLY]:
+            if dev.status in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_JM,
+                              NVMeDevice.STATUS_READONLY, NVMeDevice.STATUS_CANNOT_ALLOCATE]:
                 node_online_devices += 1
             elif dev.status == NVMeDevice.STATUS_FAILED_AND_MIGRATED:
                 pass

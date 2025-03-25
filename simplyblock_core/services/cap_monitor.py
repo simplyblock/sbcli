@@ -31,7 +31,8 @@ while True:
                 logger.warning(f"Cluster absolute cap critical, util: {size_util}% of cluster util: {cl.cap_crit}, "
                                f"putting the cluster in read_only mode")
                 cluster_events.cluster_cap_crit(cl, size_util)
-                cluster_ops.cluster_set_read_only(cl.get_id())
+                if cl.status in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED]:
+                    cluster_ops.cluster_set_read_only(cl.get_id())
             else:
                 if cl.status == Cluster.STATUS_READONLY:
                     cluster_ops.cluster_set_active(cl.get_id())
