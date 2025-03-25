@@ -455,11 +455,13 @@ def check_lvol_on_node(lvol_id, node_id, node_bdev_names=None, node_lvols_nqns=N
         snode.rpc_username, snode.rpc_password, timeout=5, retry=1)
 
     if not node_bdev_names:
+        node_bdev_names = {}
         ret = rpc_client.get_bdevs()
         for bdev in ret:
             node_bdev_names[bdev['name']] = bdev
 
     if not node_lvols_nqns:
+        node_lvols_nqns = {}
         ret = rpc_client.subsystem_list()
         for sub in ret:
             node_lvols_nqns[sub['nqn']] = sub
