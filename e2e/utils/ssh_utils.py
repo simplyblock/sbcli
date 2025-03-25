@@ -129,7 +129,7 @@ class SshUtils:
         self.ssh_connections[address] = target_ssh
 
 
-    def exec_command(self, node, command, timeout=360, max_retries=3, stream_callback=None):
+    def exec_command(self, node, command, timeout=360, max_retries=3, stream_callback=None, supress_logs=False):
         """Executes a command on a given machine with streaming output and retry mechanism.
 
         Args:
@@ -154,8 +154,9 @@ class SshUtils:
                         is_bastion_server=True if node == self.bastion_server else False
                     )
                     ssh_connection = self.ssh_connections[node]
-
-                self.logger.info(f"Executing command: {command}")
+                
+                if not supress_logs:
+                    self.logger.info(f"Executing command: {command}")
                 stdin, stdout, stderr = ssh_connection.exec_command(command, timeout=timeout)
 
                 output = []
@@ -199,12 +200,15 @@ class SshUtils:
 
                 # Log the results
                 if output:
-                    self.logger.info(f"Command output: {output}")
+                    if not supress_logs:
+                        self.logger.info(f"Command output: {output}")
                 if error:
-                    self.logger.error(f"Command error: {error}")
+                    if not supress_logs:
+                        self.logger.error(f"Command error: {error}")
 
                 if not output and not error:
-                    self.logger.warning(f"Command '{command}' executed but returned no output or error.")
+                    if not supress_logs:
+                        self.logger.warning(f"Command '{command}' executed but returned no output or error.")
 
                 return output, error
 
@@ -1459,7 +1463,7 @@ class SshUtils:
     def get_container_id(self, node_ip, container):
         """Fetch container ID by name"""
         cmd = f"docker inspect --format='{{{{.Id}}}}' {container}"
-        output, error = self.exec_command(node_ip, cmd)
+        output, error = self.exec_command(node_ip, cmd, supress_logs=True)
         return output.strip() if output else None
 
 
@@ -1489,7 +1493,7 @@ class SshUtils:
                                 f"sudo tmux new-session -d -s {session} "
                                 f"\"docker logs --follow {container} > {log_file} 2>&1\""
                             )
-                            self.exec_command(node_ip, cmd)
+                            self.exec_command(node_ip, cmd, supress_logs=True)
 
                     except Exception as e:
                         self.logger.error(f"Error monitoring container {container} on {node_ip}: {e}")

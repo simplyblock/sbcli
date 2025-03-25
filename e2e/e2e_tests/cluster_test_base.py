@@ -165,13 +165,6 @@ class TestClusterBase:
                                                 log_dir=self.docker_logs_path,
                                                 test_name=self.test_name
                                                 )
-                self.ssh_obj.monitor_container_logs(
-                    node_ip=node,
-                    containers=containers,
-                    log_dir=self.docker_logs_path,
-                    test_name=self.test_name
-                )
-
 
             self.ssh_obj.start_tcpdump_logging(node_ip=node, log_dir=self.docker_logs_path)
             self.ssh_obj.start_netstat_dmesg_logging(node_ip=node,
@@ -186,6 +179,13 @@ class TestClusterBase:
             )
             self.runner_k8s_log.start_logging()
             self.runner_k8s_log.monitor_pod_logs()
+        for node in self.storage_nodes:
+            self.ssh_obj.monitor_container_logs(
+                node_ip=node,
+                containers=self.container_nodes[node],
+                log_dir=self.docker_logs_path,
+                test_name=self.test_name
+            )
 
         for node in self.mgmt_nodes:
             self.ssh_obj.delete_old_folders(
@@ -204,16 +204,17 @@ class TestClusterBase:
                                               log_dir=self.docker_logs_path,
                                               test_name=self.test_name
                                               )
-            self.ssh_obj.monitor_container_logs(
-                    node_ip=node,
-                    containers=containers,
-                    log_dir=self.docker_logs_path,
-                    test_name=self.test_name
-                )
 
             self.ssh_obj.start_tcpdump_logging(node_ip=node, log_dir=self.docker_logs_path)
             self.ssh_obj.start_netstat_dmesg_logging(node_ip=node,
                                                      log_dir=self.docker_logs_path)
+        for node in self.mgmt_nodes:
+            self.ssh_obj.monitor_container_logs(
+                node_ip=node,
+                containers=self.container_nodes[node],
+                log_dir=self.docker_logs_path,
+                test_name=self.test_name
+            )
         
         for node in self.fio_node:
             self.ssh_obj.delete_old_folders(
