@@ -134,6 +134,8 @@ while True:
 
                     logger.info(f"LVol: {lvol.get_id()}, is healthy: {passed}")
                     set_lvol_health_check(lvol, passed)
+                    if lvol.status == LVol.STATUS_OFFLINE and passed:
+                        set_lvol_status(lvol, LVol.STATUS_ONLINE)
 
                 for snap in db_controller.get_snapshots_by_node_id(snode.get_id()):
                     if snap.snap_bdev in node_bdev_names:
