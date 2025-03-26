@@ -185,25 +185,17 @@ properties:
                         </ul>
                       default: false
                     type:
-                      type: string
-                      description: |
-                        The parameter type of the positional argument or parameter.
-                        Valid options are:
-                        - str
-                        - bool
-                        - int
-                      x-intellij-html-description: |
-                        The parameter type of the positional argument or parameter.<br>
-                        Valid options are:<br>
-                        <ul>
-                        <li>str</li>
-                        <li>bool</li>
-                        <li>int</li>
-                        </ul>
-                      enum:
-                        - str
-                        - bool
-                        - int
+                      oneOf:
+                        - type: string
+                          enum:
+                            - int
+                            - str
+                            - bool
+                        - type: object
+                          additionalProperties: false
+                          properties:
+                            regex:
+                              type: string
                     completer:
                       type: string
                       description: The completer value of the positional argument or parameter.

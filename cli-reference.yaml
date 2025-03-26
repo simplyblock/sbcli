@@ -1999,7 +1999,8 @@ commands:
           - name: "--cpu-mask"
             help: "SPDK app CPU mask, default is all cores found"
             dest: spdk_cpu_mask
-            type: str
+            type:
+              regex: "^(0x|0X)?[a-fA-F0-9]+$"
             private: true
           - name: "--memory"
             help: "SPDK huge memory allocation. By default it will acquire all available huge pages."
