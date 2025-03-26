@@ -27,8 +27,8 @@ def push_metrics(reactor_data, thread_data, cluster_id, snode):
 
     for reactor in reactor_data.get("reactors", []):
         lcore = reactor.get("lcore")
-        idle = reactor.get("idle", 0)
-        busy = reactor.get("busy", 0)
+        core_idle = reactor.get("idle", 0)
+        core_busy = reactor.get("busy", 0)
         irq = reactor.get("irq", 0)
         sys = reactor.get("sys", 0)
 
@@ -39,12 +39,12 @@ def push_metrics(reactor_data, thread_data, cluster_id, snode):
             thread_id = thread.get("id")
             thread_busy = thread_busy_map.get(thread_id, 0)
             
-            cpu_usage_percent = (thread_busy / (busy + idle)) * 100 if (busy + idle) > 0 else 0
+            cpu_usage_percent = (thread_busy / (core_busy + core_idle)) * 100 if (core_busy + core_idle) > 0 else 0
 
             cpu_busy_gauge.labels(cluster=cluster_id, snode=snode_id, node_ip=snode_ip, thread_name=thread_name).set(cpu_usage_percent)
 
-        total_cycle = busy + irq + sys
-        core_utilization_percent = (total_cycle / total_cycle + idle) * 100 if (total_cycle + idle)  > 0 else 0
+        total_cycle = core_busy + irq + sys
+        core_utilization_percent = (total_cycle / total_cycle + core_idle) * 100 if (total_cycle + core_idle)  > 0 else 0
 
         cpu_utilization_gauge.labels(cluster=cluster_id, snode=snode_id, node_ip=snode_ip, core_id=str(lcore), thread_names=thread_names).set(core_utilization_percent)
 
