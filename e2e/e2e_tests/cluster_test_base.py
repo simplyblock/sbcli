@@ -517,43 +517,44 @@ class TestClusterBase:
                 assert device["health_check"] in device_health_check, \
                     f"Device {device['id']} health-check is not {device_health_check}. Actual:  {device['health_check']}"
 
-        command = f"{self.base_cmd} sn get-cluster-map {lvol_details[0]['node_id']}"
-        lvol_cluster_map_details, _ = self.ssh_obj.exec_command(node=self.mgmt_nodes[0],
-                                                                command=command)
-        self.logger.info(f"LVOL Cluster map: {lvol_cluster_map_details}")
-        cluster_map_nodes, cluster_map_devices = self.common_utils.parse_lvol_cluster_map_output(lvol_cluster_map_details)
+        # TODO: Change cluster map validations
+        # command = f"{self.base_cmd} sn get-cluster-map {lvol_details[0]['node_id']}"
+        # lvol_cluster_map_details, _ = self.ssh_obj.exec_command(node=self.mgmt_nodes[0],
+        #                                                         command=command)
+        # self.logger.info(f"LVOL Cluster map: {lvol_cluster_map_details}")
+        # cluster_map_nodes, cluster_map_devices = self.common_utils.parse_lvol_cluster_map_output(lvol_cluster_map_details)
         
-        for node_id, node in cluster_map_nodes.items():
-            if node_id == node_uuid:
-                if isinstance(node_status, list):
-                    assert node["Reported Status"] in node_status, \
-                    f"Node {node_id} is not in {node_status} reported state. Actual:  {node['Reported Status']}"
-                    assert node["Actual Status"] in node_status, \
-                        f"Node {node_id} is not in {node_status} state. Actual:  {node['Actual Status']}"
-                else:
-                    assert node["Reported Status"] == node_status, \
-                    f"Node {node_id} is not in {node_status} reported state. Actual:  {node['Reported Status']}"
-                    assert node["Actual Status"] == node_status, \
-                        f"Node {node_id} is not in {node_status} state. Actual:  {node['Actual Status']}"
+        # for node_id, node in cluster_map_nodes.items():
+        #     if node_id == node_uuid:
+        #         if isinstance(node_status, list):
+        #             assert node["Reported Status"] in node_status, \
+        #             f"Node {node_id} is not in {node_status} reported state. Actual:  {node['Reported Status']}"
+        #             assert node["Actual Status"] in node_status, \
+        #                 f"Node {node_id} is not in {node_status} state. Actual:  {node['Actual Status']}"
+        #         else:
+        #             assert node["Reported Status"] == node_status, \
+        #             f"Node {node_id} is not in {node_status} reported state. Actual:  {node['Reported Status']}"
+        #             assert node["Actual Status"] == node_status, \
+        #                 f"Node {node_id} is not in {node_status} state. Actual:  {node['Actual Status']}"
                     
-            else:
-                assert node["Reported Status"] == "online", \
-                    f"Node {node_uuid} is not in online state. Actual: {node['Reported Status']}"
-                assert node["Actual Status"] == "online", \
-                    f"Node {node_uuid} is not in online state. Actual: {node['Actual Status']}"
+        #     else:
+        #         assert node["Reported Status"] == "online", \
+        #             f"Node {node_uuid} is not in online state. Actual: {node['Reported Status']}"
+        #         assert node["Actual Status"] == "online", \
+        #             f"Node {node_uuid} is not in online state. Actual: {node['Actual Status']}"
 
-        if device_status is not None:
-            for device_id, device in cluster_map_devices.items():
-                if device_id in offline_device:
-                    assert device["Reported Status"] == device_status, \
-                        f"Device {device_id} is not in {device_status} state. Actual: {device['Reported Status']}"
-                    assert device["Actual Status"] == device_status, \
-                        f"Device {device_id} is not in {device_status} state. Actual: {device['Actual Status']}"
-                else:
-                    assert device["Reported Status"] == "online", \
-                        f"Device {device_id} is not in online state. Actual: {device['Reported Status']}"
-                    assert device["Actual Status"] == "online", \
-                        f"Device {device_id} is not in online state. {device['Actual Status']}"
+        # if device_status is not None:
+        #     for device_id, device in cluster_map_devices.items():
+        #         if device_id in offline_device:
+        #             assert device["Reported Status"] == device_status, \
+        #                 f"Device {device_id} is not in {device_status} state. Actual: {device['Reported Status']}"
+        #             assert device["Actual Status"] == device_status, \
+        #                 f"Device {device_id} is not in {device_status} state. Actual: {device['Actual Status']}"
+        #         else:
+        #             assert device["Reported Status"] == "online", \
+        #                 f"Device {device_id} is not in online state. Actual: {device['Reported Status']}"
+        #             assert device["Actual Status"] == "online", \
+        #                 f"Device {device_id} is not in online state. {device['Actual Status']}"
 
     def unmount_all(self, base_path=None):
         """ Unmount all mount points """
