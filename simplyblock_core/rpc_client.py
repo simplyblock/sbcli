@@ -141,7 +141,7 @@ class RPCClient:
             "max_queue_depth": 64,
             "abort_timeout_sec": 5,
             "ack_timeout": 2048,
-            "zcopy": True,
+            "zcopy": False,
             "in_capsule_data_size": 24500,
             "max_io_size": 131072,
             "io_unit_size": 8192,
@@ -165,7 +165,7 @@ class RPCClient:
             "enable_recv_pipe": True,
             "enable_quick_ack": True,
             "enable_placement_id": 1,
-            "enable_zerocopy_send_server": True,
+            "enable_zerocopy_send_server": False,
             "enable_zerocopy_send_client": True    
         }
         return self._request("sock_impl_set_options", params)
@@ -791,7 +791,7 @@ class RPCClient:
     def sock_impl_set_options(self):
         method = "sock_impl_set_options"
         params = {"impl_name": "posix", "enable_quickack": True,
-                  "enable_zerocopy_send_server": True,
+                  "enable_zerocopy_send_server": False,
                   "enable_zerocopy_send_client": True}
         return self._request(method, params)
 
