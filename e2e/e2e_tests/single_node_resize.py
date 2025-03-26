@@ -32,7 +32,6 @@ class TestSingleNodeResizeLvolCone(TestClusterBase):
         """ Performs each step of the testcase
         """
         self.logger.info("Inside run function")
-        initial_devices = self.ssh_obj.get_devices(node=self.mgmt_nodes[0])
 
         self.sbcli_utils.add_storage_pool(
             pool_name=self.pool_name
@@ -68,6 +67,8 @@ class TestSingleNodeResizeLvolCone(TestClusterBase):
             assert lvol_name in list(lvols.keys()), \
                 f"Lvol {lvol_name} is not present in list of lvols post add: {lvols}"
 
+            initial_devices = self.ssh_obj.get_devices(node=self.mgmt_nodes[0])
+            
             connect_ls = self.sbcli_utils.get_lvol_connect_str(lvol_name=lvol_name)
             for connect_str in connect_ls:
                 self.ssh_obj.exec_command(node=self.mgmt_nodes[0], command=connect_str)
