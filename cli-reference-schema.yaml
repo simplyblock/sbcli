@@ -195,6 +195,19 @@ properties:
                         - type: object
                           additionalProperties: false
                           properties:
+                            range:
+                              type: object
+                              required:
+                                - min
+                                - max
+                              properties:
+                                min:
+                                  type: integer
+                                max:
+                                  type: integer
+                        - type: object
+                          additionalProperties: false
+                          properties:
                             regex:
                               type: string
                         - type: object
@@ -260,11 +273,3 @@ properties:
                           oneOf:
                             - type: string
                             - type: integer
-                    value_range:
-                        type: string
-                        description: |
-                          The value range of the positional argument or parameter.
-                          Value ranges are defined as <min_inclusive>..<max_exclusive>: 0..128
-                        x-intellij-html-description: |
-                          The value range of the positional argument or parameter.<br>
-                          Value ranges are defined as <pre><min_inclusive>..<max_exclusive></pre>: <pre>0..128</pre>
