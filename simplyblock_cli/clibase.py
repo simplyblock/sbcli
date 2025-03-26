@@ -576,13 +576,7 @@ class CLIWrapperBase:
         spdk_image = args.spdk_image
         namespace = args.namespace
         multipathing = args.multipathing == "on"
-
-        spdk_cpu_mask = None
-        if args.spdk_cpu_mask:
-            if self.validate_cpu_mask(args.spdk_cpu_mask):
-                spdk_cpu_mask = args.spdk_cpu_mask
-            else:
-                return f"Invalid cpu mask value: {args.spdk_cpu_mask}"
+        spdk_cpu_mask = args.spdk_cpu_mask
 
         spdk_mem = None
         if args.spdk_mem:
@@ -706,13 +700,7 @@ class CLIWrapperBase:
         num_partitions_per_dev = args.partitions
         partition_size = args.partition_size
         jm_percent = args.jm_percent
-        spdk_cpu_mask = None
-        if args.spdk_cpu_mask:
-            if self.validate_cpu_mask(args.spdk_cpu_mask):
-                spdk_cpu_mask = args.spdk_cpu_mask
-            else:
-                return f"Invalid cpu mask value: {args.spdk_cpu_mask}"
-
+        spdk_cpu_mask = args.spdk_cpu_mask
         max_lvol = args.max_lvol
         max_snap = args.max_snap
         max_prov = utils.parse_size(args.max_prov, assume_unit='G')
@@ -808,9 +796,6 @@ class CLIWrapperBase:
                 return valid[choice]
             else:
                 sys.stdout.write("Please respond with 'yes' or 'no' " "(or 'y' or 'n').\n")
-
-    def validate_cpu_mask(self, spdk_cpu_mask):
-        return re.match("^(0x|0X)?[a-fA-F0-9]+$", spdk_cpu_mask)
 
     def _completer_get_cluster_list(self, prefix, parsed_args, **kwargs):
         db = db_controller.DBController()
