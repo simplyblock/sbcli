@@ -13,9 +13,8 @@ from docker.types import LogConfig
 from flask import Blueprint
 from flask import request
 
-from simplyblock_web import utils, node_utils
 from simplyblock_core import scripts, constants, shell_utils, utils as core_utils
-from simplyblock_core.utils import pull_docker_image_with_retry
+from simplyblock_web import utils, node_utils
 
 logger = logging.getLogger(__name__)
 
@@ -177,7 +176,7 @@ def spdk_process_start():
 
     if 'spdk_image' in data and data['spdk_image']:
         spdk_image = data['spdk_image']
-        pull_docker_image_with_retry(node_docker, spdk_image)
+        core_utils.pull_docker_image_with_retry(node_docker, spdk_image)
 
     container = node_docker.containers.run(
         spdk_image,

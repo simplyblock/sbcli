@@ -20,7 +20,7 @@ from simplyblock_web import utils
 logger = logging.getLogger(__name__)
 
 
-def _get_spdk_pcie_list():  # return: ['0000:00:1e.0', '0000:00:1f.0']
+def get_spdk_pcie_list():  # return: ['0000:00:1e.0', '0000:00:1f.0']
     out, err, _ = shell_utils.run_command("ls /sys/bus/pci/drivers/uio_pci_generic")
     spdk_pcie_list = [line for line in out.split() if line.startswith("0000")]
     if not spdk_pcie_list:
@@ -30,7 +30,7 @@ def _get_spdk_pcie_list():  # return: ['0000:00:1e.0', '0000:00:1f.0']
     return spdk_pcie_list
 
 
-def _get_nvme_pcie_list():  # return: ['0000:00:1e.0', '0000:00:1f.0']
+def get_nvme_pcie_list():  # return: ['0000:00:1e.0', '0000:00:1f.0']
     out, err, _ = shell_utils.run_command("ls /sys/bus/pci/drivers/nvme")
     spdk_pcie_list = [line for line in out.split() if line.startswith("0000")]
     logger.debug(spdk_pcie_list)
@@ -49,7 +49,7 @@ def get_nvme_pcie():
     return devs
 
 
-def _get_nvme_devices():
+def get_nvme_devices():
     out, err, rc = shell_utils.run_command("nvme list -v -o json")
     if rc != 0:
         logger.error("Error getting nvme list")
@@ -111,7 +111,7 @@ def get_nics_data():
     return iface_list
 
 
-def _get_spdk_devices():
+def get_spdk_devices():
     return []
 
 

@@ -15,7 +15,6 @@ from kubernetes.client import ApiException
 from jinja2 import Environment, FileSystemLoader
 
 from simplyblock_core import constants, shell_utils, utils as core_utils
-
 from simplyblock_web import utils, node_utils
 
 logger = logging.getLogger(__name__)
@@ -70,10 +69,10 @@ def set_namespace(namespace):
 def scan_devices():
     run_health_check = request.args.get('run_health_check', default=False, type=bool)
     out = {
-        "nvme_devices": node_utils._get_nvme_devices(),
-        "nvme_pcie_list": node_utils._get_nvme_pcie_list(),
-        "spdk_devices": node_utils._get_spdk_devices(),
-        "spdk_pcie_list": node_utils._get_spdk_pcie_list(),
+        "nvme_devices": node_utils.get_nvme_devices(),
+        "nvme_pcie_list": node_utils.get_nvme_pcie_list(),
+        "spdk_devices": node_utils.get_spdk_devices(),
+        "spdk_pcie_list": node_utils.get_spdk_pcie_list(),
     }
     return utils.get_response(out)
 
@@ -204,11 +203,11 @@ def get_info():
         "hugepages": node_utils.get_huge_memory(),
         "memory_details": node_utils.get_memory_details(),
 
-        "nvme_devices": node_utils._get_nvme_devices(),
-        "nvme_pcie_list": node_utils._get_nvme_pcie_list(),
+        "nvme_devices": node_utils.get_nvme_devices(),
+        "nvme_pcie_list": node_utils.get_nvme_pcie_list(),
 
-        "spdk_devices": node_utils._get_spdk_devices(),
-        "spdk_pcie_list": node_utils._get_spdk_pcie_list(),
+        "spdk_devices": node_utils.get_spdk_devices(),
+        "spdk_pcie_list": node_utils.get_spdk_pcie_list(),
 
         "network_interface": node_utils.get_nics_data()
     }
