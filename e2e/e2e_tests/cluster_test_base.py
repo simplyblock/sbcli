@@ -446,7 +446,7 @@ class TestClusterBase:
 
 
     def validations(self, node_uuid, node_status, device_status, lvol_status,
-                    health_check_status):
+                    health_check_status, device_health_check):
         """Validates node, devices, lvol status with expected status
 
         Args:
@@ -489,6 +489,10 @@ class TestClusterBase:
         storage_nodes = self.sbcli_utils.get_storage_nodes()["results"]
         health_check_status = health_check_status if isinstance(health_check_status, list)\
               else [health_check_status]
+        if not device_health_check:
+            device_health_check = [True, False]
+        device_health_check = device_health_check if isinstance(device_health_check, list)\
+              else [device_health_check]
         for node in storage_nodes:
             node_details = self.sbcli_utils.get_storage_node_details(storage_node_id=node['id'])
             if node["id"] == node_uuid and node_details[0]['status'] == "offline":
@@ -507,18 +511,11 @@ class TestClusterBase:
                 device_details = self.sbcli_utils.get_device_details(storage_node_id=node['id'])
             node_details = self.sbcli_utils.get_storage_node_details(storage_node_id=node['id'])
             for device in device_details:
-                if device['id'] in offline_device and node_details[0]['status'] == "offline":
-                    device = self.sbcli_utils.wait_for_health_status(node['id'], status=health_check_status,
-                                                                     device_id=device['id'],
-                                                                     timeout=300)
-                    assert device["health_check"] in health_check_status, \
-                        f"Device {device['id']} health-check is not {health_check_status}. Actual:  {device['health_check']}"
-                else:
-                    device = self.sbcli_utils.wait_for_health_status(node['id'], status=True,
-                                                                     device_id=device['id'],
-                                                                     timeout=300)
-                    assert device["health_check"] is True, \
-                        f"Device {device['id']} health-check is not True. Actual:  {device['health_check']}"
+                device = self.sbcli_utils.wait_for_health_status(node['id'], status=device_health_check,
+                                                                    device_id=device['id'],
+                                                                    timeout=300)
+                assert device["health_check"] in device_health_check, \
+                    f"Device {device['id']} health-check is not {device_health_check}. Actual:  {device['health_check']}"
 
         command = f"{self.base_cmd} sn get-cluster-map {lvol_details[0]['node_id']}"
         lvol_cluster_map_details, _ = self.ssh_obj.exec_command(node=self.mgmt_nodes[0],
