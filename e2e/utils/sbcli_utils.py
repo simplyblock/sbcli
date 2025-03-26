@@ -122,7 +122,7 @@ class SbcliUtils:
         Returns:
             dict: response returned
         """
-        request_url = self.cluster_api_url + a
+        request_url = self.cluster_api_url + api_url
         headers = headers if headers else self.headers
         self.logger.info(f"Calling DELETE for {api_url} with headers: {headers}")
         retry = 10
