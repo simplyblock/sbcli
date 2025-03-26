@@ -30,7 +30,7 @@ class install(_install):
 
 class GenerateCLICommand(build_py):
     def get_source_files(self) -> list[str]:
-        return ['scripts/cli-wrapper-gen.py', 'scripts/cli-wrapper.jinja2'] + super().get_source_files()
+        return ['cli-reference.yaml', 'scripts/cli-wrapper-gen.py', 'scripts/cli-wrapper.jinja2'] + super().get_source_files()
 
     def get_outputs(self) -> list[str]:
         return ['simplyblock_cli/cli.py'] + super().get_outputs()
