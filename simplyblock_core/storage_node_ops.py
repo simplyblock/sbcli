@@ -1243,11 +1243,6 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
     # 2- set socket implementation options
     ret = rpc_client.sock_impl_set_options()
     if not ret:
-        logger.error("Failed socket implement set options")
-        return False
-
-    ret = rpc_client.sock_impl_set_options()
-    if not ret:
         logger.error(f"Failed to set optimized socket options")
         return False
 
