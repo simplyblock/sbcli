@@ -672,7 +672,7 @@ class CLIWrapper(CLIWrapperBase):
 
     def init_volume__inflate(self, subparser):
         subcommand = self.add_sub_command(subparser, 'inflate', 'Inflate a logical volume')
-        subcommand.add_argument('volume_id', help='Cloned logical volume id', type=str)
+        subcommand.add_argument('volume_id', help='Logical volume id', type=str)
 
 
     def init_control_plane(self):
@@ -793,7 +793,7 @@ class CLIWrapper(CLIWrapperBase):
         subcommand = self.add_sub_command(subparser, 'clone', 'Provisions a new logical volume from an existing snapshot')
         subcommand.add_argument('snapshot_id', help='Snapshot id', type=str)
         subcommand.add_argument('lvol_name', help='Logical volume name', type=str)
-        argument = subcommand.add_argument('--resize', help='New logical volume size: 10M, 10G, 10(bytes)', type=size_type(), default='0', dest='resize')
+        argument = subcommand.add_argument('--resize', help='New logical volume size: 10M, 10G, 10(bytes). Can only increase.', type=size_type(), default='0', dest='resize')
 
 
     def init_caching_node(self):

@@ -1720,7 +1720,7 @@ commands:
           parent. Then all dependencies on the parent are removed.
         arguments:
           - name: "volume_id"
-            help: "Cloned logical volume id"
+            help: "Logical volume id"
             dest: volume_id
             type: str
   - name: "control-plane"
@@ -1960,7 +1960,7 @@ commands:
             dest: lvol_name
             type: str
           - name: "--resize"
-            help: "New logical volume size: 10M, 10G, 10(bytes)"
+            help: "New logical volume size: 10M, 10G, 10(bytes). Can only increase."
             dest: resize
             type: size
             default: "0"
