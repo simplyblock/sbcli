@@ -10,7 +10,7 @@ PUSHGATEWAY_URL = "http://pushgateway:9091"
 
 db_controller = db_controller.DBController()
 
-def push_metrics(ret, cluster_id, snode):
+def push_metrics(reactor_data, thread_data, cluster_id, snode):
     """Formats and pushes SPDK metrics to Prometheus Pushgateway."""
     registry = CollectorRegistry()
     tick_rate_gauge = Gauge('tick_rate', 'SPDK Tick Rate', ['cluster', 'snode', 'node_ip'], registry=registry)
@@ -19,29 +19,32 @@ def push_metrics(ret, cluster_id, snode):
 
     snode_id = snode.id
     snode_ip = snode.mgmt_ip
-    tick_rate = ret.get("tick_rate")
+    tick_rate = reactor_data.get("tick_rate")
     if tick_rate is not None:
         tick_rate_gauge.labels(cluster=cluster_id, snode=snode_id, node_ip=snode_ip).set(tick_rate)
-    
-    for reactor in ret.get("reactors", []):
+
+    thread_busy_map = {t["id"]: t["busy"] for t in thread_data.get("threads", [])}
+
+    for reactor in reactor_data.get("reactors", []):
         lcore = reactor.get("lcore")
         idle = reactor.get("idle", 0)
-        total_elapsed = 0 
+        busy = reactor.get("busy", 0)
+        irq = reactor.get("irq", 0)
+        sys = reactor.get("sys", 0)
 
         thread_names = ", ".join(thread["name"] for thread in reactor.get("lw_threads", []))
 
         for thread in reactor.get("lw_threads", []):
             thread_name = thread.get("name")
-            elapsed = thread.get("elapsed", 0)
-
-            total_elapsed += elapsed 
-
-            cpu_usage_percent = (elapsed / (elapsed + idle)) * 100 if (elapsed + idle) > 0 else 0
+            thread_id = thread.get("id")
+            thread_busy = thread_busy_map.get(thread_id, 0)
+            
+            cpu_usage_percent = (thread_busy / (busy + idle)) * 100 if (busy + idle) > 0 else 0
 
             cpu_busy_gauge.labels(cluster=cluster_id, snode=snode_id, node_ip=snode_ip, thread_name=thread_name).set(cpu_usage_percent)
 
-        total_cycle = total_elapsed + idle
-        core_utilization_percent = (total_elapsed / total_cycle) * 100 if total_cycle > 0 else 0
+        total_cycle = busy + irq + sys
+        core_utilization_percent = (total_cycle / total_cycle + idle) * 100 if (total_cycle + idle)  > 0 else 0
 
         cpu_utilization_gauge.labels(cluster=cluster_id, snode=snode_id, node_ip=snode_ip, core_id=str(lcore), thread_names=thread_names).set(core_utilization_percent)
 
@@ -59,9 +62,11 @@ while True:
                 rpc_client = RPCClient(
                     snode.mgmt_ip, snode.rpc_port,
                     snode.rpc_username, snode.rpc_password, timeout=3*60, retry=10)
-                ret = rpc_client.framework_get_reactors()
-                if ret and "reactors" in ret:
-                    push_metrics(ret, cluster_id, snode)
+
+                reactor_data = rpc_client.framework_get_reactors()
+                thread_data = rpc_client.thread_get_stats()  
+                if reactor_data and "reactors" in reactor_data and "threads" in thread_data:
+                    push_metrics(reactor_data, thread_data, cluster_id, snode)
             else:
                 logger.info(f"Skipping snode {snode.mgmt_ip} with NO NVMe devices.")
     
