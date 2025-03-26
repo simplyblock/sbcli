@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # PYTHON_ARGCOMPLETE_OK
 
-from simplyblock_cli.clibase import CLIWrapperBase, regex_type, size_type
+from simplyblock_cli.clibase import CLIWrapperBase, range_type, regex_type, size_type
 from simplyblock_core import utils
 import logging
 import sys
@@ -66,7 +66,6 @@ class CLIWrapper(CLIWrapperBase):
 {%- if parameter | required %}, required=True{% endif %}
 {%- if parameter.nargs is defined %}, nargs={{ parameter | nargs }}{% endif %}
 {%- if parameter.choices %}, choices=[{% for choice in parameter.choices %}'{{ choice }}',{% endfor %}]{% endif %}
-{%- if parameter.value_range %}, choices=range({{ parameter.value_range | split_value_range }}){% endif %}
 {%- if parameter.action is defined %}, action='{{ parameter.action }}'{% endif %})
 {%- if parameter.completer is defined %}.completer = self.{{ parameter.completer }}{% endif %}
 {%- else %}
@@ -83,7 +82,6 @@ class CLIWrapper(CLIWrapperBase):
 {%- if parameter | required %}, required=True{% endif %}
 {%- if parameter.nargs is defined %}, nargs={{ parameter | nargs }}{% endif %}
 {%- if parameter.choices %}, choices=[{% for choice in parameter.choices %}'{{ choice }}',{% endfor %}]{% endif %}
-{%- if parameter.value_range %}, choices=range({{ parameter.value_range | split_value_range }}){% endif %}
 {%- if parameter.action is defined %}, action='{{ parameter.action }}'{% endif %})
 {%- if parameter.completer is defined %}.completer = self.{{ parameter.completer }}{% endif %}
 {%- endif %}

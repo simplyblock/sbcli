@@ -44,6 +44,9 @@ def argument_type(spec):
         max = "utils.parse_size('{}')".format(size['max']) if 'max' in size else None
         return f"size_type(min={min}, max={max})"
 
+    if isinstance(spec, dict) and ((range := spec.get('range')) is not None):
+        return f"range_type({range['min']}, {range['max']})"
+
     return spec
 
 
@@ -94,12 +97,10 @@ def default_value(item):
         return value if isinstance(value, bool) else value.lower() == "true"
     elif type == "size" or (isinstance(type, dict) and 'size' in type):
         return f"'{value}'"
+    elif isinstance(type, dict) and 'range' in type:
+        return f"{value}"
     else:
         raise "unknown data type %s" % type
-
-
-def split_value_range(value):
-    return re.sub("\\.\\.", ', ', value)
 
 
 def arg_value(item):
@@ -166,7 +167,6 @@ with open("%s/cli-reference.yaml" % base_path) as stream:
         environment.filters["escape_strings"] = escape_strings
         environment.filters["make_identifier"] = make_identifier
         environment.filters["bool_value"] = bool_value
-        environment.filters["split_value_range"] = split_value_range
         environment.filters["escape_python_string"] = escape_python_string
         environment.filters["nargs"] = nargs
 

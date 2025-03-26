@@ -16,6 +16,18 @@ from simplyblock_core.controllers import caching_node_controller, health_control
 from simplyblock_core.models.pool import Pool
 
 
+def range_type(min, max):
+    def f(arg):
+        arg = int(arg)
+
+        if not (min <= arg < max):
+            raise argparse.ArgumentTypeError(f"Value '{arg}' must be in the interval [{min} {max})")
+
+        return arg
+
+    return f
+
+
 def size_type(min=None, max=None):
     def f(arg):
         size = utils.parse_size(arg)
