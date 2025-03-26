@@ -109,6 +109,7 @@ class TestSingleNodeResizeLvolCone(TestClusterBase):
             self.ssh_obj.add_snapshot(node=self.mgmt_nodes[0],
                                     lvol_id=self.sbcli_utils.get_lvol_id(lvol_name),
                                     snapshot_name=snap_name)
+            sleep_n_sec(5)
             snapshot_id = self.ssh_obj.get_snapshot_id(node=self.mgmt_nodes[0],
                                                        snapshot_name=snap_name)
             
