@@ -35,20 +35,6 @@ def required(item):
     return item.get("required", False)
 
 
-def data_type_name(item):
-    if "action" in item:
-        return "marker"
-    text = item["type"]
-    if text == "str":
-        return "string"
-    elif text == "int":
-        return "integer"
-    elif text == "bool":
-        return "boolean"
-    else:
-        return "unknown"
-
-
 def escape_python_string(text):
     return text.replace('%', '%%')
 
@@ -143,7 +129,6 @@ with open("%s/cli-reference.yaml" % base_path) as stream:
         environment = jinja2.Environment(loader=templateLoader)
 
         environment.filters["no_newline"] = no_newline
-        environment.filters["data_type_name"] = data_type_name
         environment.filters["default_value"] = default_value
         environment.filters["required"] = required
         environment.filters["get_description"] = get_description
