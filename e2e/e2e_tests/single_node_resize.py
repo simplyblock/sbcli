@@ -68,7 +68,7 @@ class TestSingleNodeResizeLvolCone(TestClusterBase):
                 f"Lvol {lvol_name} is not present in list of lvols post add: {lvols}"
 
             initial_devices = self.ssh_obj.get_devices(node=self.mgmt_nodes[0])
-            
+
             connect_ls = self.sbcli_utils.get_lvol_connect_str(lvol_name=lvol_name)
             for connect_str in connect_ls:
                 self.ssh_obj.exec_command(node=self.mgmt_nodes[0], command=connect_str)
@@ -107,7 +107,7 @@ class TestSingleNodeResizeLvolCone(TestClusterBase):
             log_path = f"{self.log_path}_cl_{i}"
             self.logger.info("Taking snapshot")
             self.ssh_obj.add_snapshot(node=self.mgmt_nodes[0],
-                                    lvol_id=self.sbcli_utils.get_lvol_id(self.lvol_name),
+                                    lvol_id=self.sbcli_utils.get_lvol_id(lvol_name),
                                     snapshot_name=snap_name)
             snapshot_id = self.ssh_obj.get_snapshot_id(node=self.mgmt_nodes[0],
                                                        snapshot_name=snap_name)
