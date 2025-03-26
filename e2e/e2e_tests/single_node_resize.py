@@ -106,19 +106,17 @@ class TestSingleNodeResizeLvolCone(TestClusterBase):
             mount_path = f"{self.mount_path}_cl_{i}"
             log_path = f"{self.log_path}_cl_{i}"
             self.logger.info("Taking snapshot")
-            self.ssh_obj.add_snapshot(node=self.mgmt_nodes[0],
-                                    lvol_id=self.sbcli_utils.get_lvol_id(lvol_name),
-                                    snapshot_name=snap_name)
+            self.sbcli_utils.add_snapshot(
+                lvol_id=self.sbcli_utils.get_lvol_id(lvol_name),
+                snapshot_name=snap_name
+            )
             sleep_n_sec(5)
-            snapshot_id = self.ssh_obj.get_snapshot_id(node=self.mgmt_nodes[0],
-                                                       snapshot_name=snap_name)
+            snapshot_id = self.sbcli_utils.get_snapshot_id(snap_name=snap_name)
             
-            self.ssh_obj.add_clone(node=self.mgmt_nodes[0],
-                                   snapshot_id=snapshot_id,
-                                   clone_name=clone_name)
+            self.sbcli_utils.add_clone(snapshot_id=snapshot_id, clone_name=clone_name)
             
-            lvols = self.sbcli_utils.list_lvols()
-            assert clone_name in list(lvols.keys()), \
+            clone = self.sbcli_utils.list_lvols()
+            assert clone_name in list(clone.keys()), \
                 f"Clone {clone_name} is not present in list of lvols post add: {lvols}"
             
             initial_devices = self.ssh_obj.get_devices(node=self.mgmt_nodes[0])
