@@ -15,7 +15,6 @@ def push_metrics(ret, cluster_id, snode):
     registry = CollectorRegistry()
     tick_rate_gauge = Gauge('tick_rate', 'SPDK Tick Rate', ['cluster', 'snode', 'node_ip'], registry=registry)
     cpu_busy_gauge = Gauge('cpu_busy_percentage', 'Per-thread CPU Busy Percentage', ['cluster', 'snode', 'node_ip', 'thread_name'], registry=registry)
-    pollers_count_gauge = Gauge('pollers_count', 'Number of pollers', ['cluster', 'snode', 'node_ip', 'poller_type', 'thread_name'], registry=registry)
     cpu_utilization_gauge = Gauge('cpu_core_utilization', 'Per-core CPU Utilization', ['cluster', 'snode', 'node_ip', 'core_id', 'thread_names'], registry=registry)
 
     snode_id = snode.id
@@ -40,10 +39,6 @@ def push_metrics(ret, cluster_id, snode):
             cpu_usage_percent = (elapsed / (elapsed + idle)) * 100 if (elapsed + idle) > 0 else 0
 
             cpu_busy_gauge.labels(cluster=cluster_id, snode=snode_id, node_ip=snode_ip, thread_name=thread_name).set(cpu_usage_percent)
-
-            pollers_count_gauge.labels(cluster=cluster_id, snode=snode_id, node_ip=snode_ip, poller_type="active", thread_name=thread_name).set(thread.get("active_pollers_count", 0))
-            pollers_count_gauge.labels(cluster=cluster_id, snode=snode_id, node_ip=snode_ip, poller_type="timed", thread_name=thread_name).set(thread.get("timed_pollers_count", 0))
-            pollers_count_gauge.labels(cluster=cluster_id, snode=snode_id, node_ip=snode_ip, poller_type="paused", thread_name=thread_name).set(thread.get("paused_pollers_count", 0))
 
         total_cycle = total_elapsed + idle
         core_utilization_percent = (total_elapsed / total_cycle) * 100 if total_cycle > 0 else 0
