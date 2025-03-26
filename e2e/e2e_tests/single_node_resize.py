@@ -147,6 +147,12 @@ class TestSingleNodeResizeLvolCone(TestClusterBase):
             fio_thread.start()
             fio_threads.append(fio_thread)
 
+        for node in self.storage_nodes:
+            files = self.ssh_obj.list_files(node, "/etc/simplyblock/")
+            self.logger.info(f"Files in /etc/simplyblock: {files}")
+            if "core" in files and "tmp_cores" not in files:
+                raise Exception("Core file present! Not starting resize!!")
+            
         for i in range(1, 11):
             for j in range(1, 6):
                 lvol_name = f"{self.lvol_name}_{j}"
@@ -155,7 +161,13 @@ class TestSingleNodeResizeLvolCone(TestClusterBase):
                                             new_size=f"{lvol_size + i}G")
                 self.sbcli_utils.resize_lvol(lvol_id=self.sbcli_utils.get_lvol_id(clone_name),
                                             new_size=f"{lvol_size + i}G")
-        
+                
+                for node in self.storage_nodes:
+                    files = self.ssh_obj.list_files(node, "/etc/simplyblock/")
+                    self.logger.info(f"Files in /etc/simplyblock: {files}")
+                    if "core" in files and "tmp_cores" not in files:
+                        raise Exception("Core file present! Not continuing resize!!")
+            
         lvol_size = lvol_size + 20
         
         self.common_utils.manage_fio_threads(node=self.mgmt_nodes[0],
