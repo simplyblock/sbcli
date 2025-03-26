@@ -12,6 +12,7 @@ import jc
 from kubernetes.stream import stream
 from kubernetes import client, config
 
+from simplyblock_core import shell_utils
 from simplyblock_web import utils
 
 
@@ -19,28 +20,18 @@ from simplyblock_web import utils
 logger = logging.getLogger(__name__)
 
 
-def run_command(cmd):
-    try:
-        process = subprocess.Popen(
-            cmd.split(), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        stdout, stderr = process.communicate()
-        return stdout.strip().decode("utf-8"), stderr.strip(), process.returncode
-    except Exception as e:
-        return "", str(e), 1
-
-
 def _get_spdk_pcie_list():  # return: ['0000:00:1e.0', '0000:00:1f.0']
-    out, err, _ = run_command("ls /sys/bus/pci/drivers/uio_pci_generic")
+    out, err, _ = shell_utils.run_command("ls /sys/bus/pci/drivers/uio_pci_generic")
     spdk_pcie_list = [line for line in out.split() if line.startswith("0000")]
     if not spdk_pcie_list:
-        out, err, _ = run_command("ls /sys/bus/pci/drivers/vfio-pci")
+        out, err, _ = shell_utils.run_command("ls /sys/bus/pci/drivers/vfio-pci")
         spdk_pcie_list = [line for line in out.split() if line.startswith("0000")]
     logger.debug(spdk_pcie_list)
     return spdk_pcie_list
 
 
 def _get_nvme_pcie_list():  # return: ['0000:00:1e.0', '0000:00:1f.0']
-    out, err, _ = run_command("ls /sys/bus/pci/drivers/nvme")
+    out, err, _ = shell_utils.run_command("ls /sys/bus/pci/drivers/nvme")
     spdk_pcie_list = [line for line in out.split() if line.startswith("0000")]
     logger.debug(spdk_pcie_list)
     return spdk_pcie_list
@@ -59,7 +50,7 @@ def get_nvme_pcie():
 
 
 def _get_nvme_devices():
-    out, err, rc = run_command("nvme list -v -o json")
+    out, err, rc = shell_utils.run_command("nvme list -v -o json")
     if rc != 0:
         logger.error("Error getting nvme list")
         logger.error(err)
@@ -94,7 +85,7 @@ def _get_nvme_devices():
 
 
 def get_nics_data():
-    out, err, rc = run_command("ip -j address show")
+    out, err, rc = shell_utils.run_command("ip -j address show")
     if rc != 0:
         logger.error(err)
         return []
@@ -125,7 +116,7 @@ def _get_spdk_devices():
 
 
 def _get_mem_info():
-    out, err, rc = run_command("cat /proc/meminfo")
+    out, err, rc = shell_utils.run_command("cat /proc/meminfo")
 
     if rc != 0:
         raise ValueError('Failed to get memory info')
@@ -167,7 +158,7 @@ def get_memory_details():
 
 
 def get_host_arch():
-    out, err, rc = run_command("uname -m")
+    out, err, rc = shell_utils.run_command("uname -m")
     return out
 
 def get_region():

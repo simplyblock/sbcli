@@ -294,12 +294,12 @@ def spdk_proxy_restart():
 
 
 def get_cluster_id():
-    out, _, _ = node_utils.run_command(f"cat {cluster_id_file}")
+    out, _, _ = shell_utils.run_command(f"cat {cluster_id_file}")
     return out
 
 @bp.route('/get_file_content/<string:file_name>', methods=['GET'])
 def get_file_content(file_name):
-    out, err, _ = node_utils.run_command(f"cat /etc/simplyblock/{file_name}")
+    out, err, _ = shell_utils.run_command(f"cat /etc/simplyblock/{file_name}")
     if out:
         return utils.get_response(out)
     elif err:
@@ -314,12 +314,12 @@ def set_cluster_id(cluster_id):
 
 
 def delete_cluster_id():
-    out, _, _ = node_utils.run_command(f"rm -f {cluster_id_file}")
+    out, _, _ = shell_utils.run_command(f"rm -f {cluster_id_file}")
     return out
 
 
 def get_node_lsblk():
-    out, err, rc = node_utils.run_command("lsblk -J")
+    out, err, rc = shell_utils.run_command("lsblk -J")
     if rc != 0:
         logger.error(err)
         return []
@@ -510,8 +510,8 @@ def delete_gpt_partitions_for_dev():
 
 
 CPU_INFO = cpuinfo.get_cpu_info()
-HOSTNAME, _, _ = node_utils.run_command("hostname -s")
-SYSTEM_ID, _, _ = node_utils.run_command("dmidecode -s system-uuid")
+HOSTNAME, _, _ = shell_utils.run_command("hostname -s")
+SYSTEM_ID, _, _ = shell_utils.run_command("dmidecode -s system-uuid")
 CLOUD_INFO = {}
 if not os.environ.get("WITHOUT_CLOUD_INFO"):
     CLOUD_INFO = get_amazon_cloud_info()

@@ -32,13 +32,6 @@ def get_docker_client():
     return docker.DockerClient(base_url=f"tcp://{ip}:2375", version="auto", timeout=60 * 5)
 
 
-def run_command(cmd):
-    process = subprocess.Popen(
-        cmd.split(), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    stdout, stderr = process.communicate()
-    return stdout.strip().decode("utf-8"), stderr.strip().decode("utf-8"), process.returncode
-
-
 def _get_spdk_pcie_list():  # return: ['0000:00:1e.0', '0000:00:1f.0']
     out, err, _ = run_command("ls /sys/bus/pci/drivers/uio_pci_generic")
     spdk_pcie_list = [line for line in out.split() if line.startswith("0000")]
@@ -267,8 +260,8 @@ def spdk_process_is_up():
 
 
 CPU_INFO = cpuinfo.get_cpu_info()
-HOSTNAME, _, _ = node_utils.run_command("hostname -s")
-SYSTEM_ID, _, _ = node_utils.run_command("dmidecode -s system-uuid")
+HOSTNAME, _, _ = shell_utils.run_command("hostname -s")
+SYSTEM_ID, _, _ = shell_utils.run_command("dmidecode -s system-uuid")
 
 
 @bp.route('/info', methods=['GET'])
@@ -327,7 +320,7 @@ def connect_to_nvme():
     nqn = data['nqn']
     st = f"nvme connect --transport=tcp --traddr={ip} --trsvcid={port} --nqn={nqn}"
     logger.debug(st)
-    out, err, ret_code = run_command(st)
+    out, err, ret_code = shell_utils.run_command(st)
     logger.debug(ret_code)
     logger.debug(out)
     logger.debug(err)
@@ -342,7 +335,7 @@ def disconnect_device():
     data = request.get_json()
     dev_path = data['dev_path']
     st = f"nvme disconnect --device={dev_path}"
-    out, err, ret_code = run_command(st)
+    out, err, ret_code = shell_utils.run_command(st)
     logger.debug(ret_code)
     logger.debug(out)
     logger.debug(err)
@@ -354,7 +347,7 @@ def disconnect_nqn():
     data = request.get_json()
     nqn = data['nqn']
     st = f"nvme disconnect --nqn={nqn}"
-    out, err, ret_code = run_command(st)
+    out, err, ret_code = shell_utils.run_command(st)
     logger.debug(ret_code)
     logger.debug(out)
     logger.debug(err)
@@ -364,7 +357,7 @@ def disconnect_nqn():
 @bp.route('/disconnect_all', methods=['POST'])
 def disconnect_all():
     st = "nvme disconnect-all"
-    out, err, ret_code = run_command(st)
+    out, err, ret_code = shell_utils.run_command(st)
     logger.debug(ret_code)
     logger.debug(out)
     logger.debug(err)

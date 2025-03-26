@@ -6,6 +6,7 @@ import cpuinfo
 from flask import Blueprint
 from flask import request
 
+from simplyblock_core import shell_utils
 from simplyblock_web import utils, node_utils
 
 logger = logging.getLogger(__name__)
@@ -13,10 +14,10 @@ logger = logging.getLogger(__name__)
 bp = Blueprint("node_api_basic", __name__, url_prefix="/")
 
 cpu_info = cpuinfo.get_cpu_info()
-hostname, _, _ = node_utils.run_command("hostname -s")
+hostname, _, _ = shell_utils.run_command("hostname -s")
 system_id = ""
 try:
-    system_id, _, _ = node_utils.run_command("dmidecode -s system-uuid")
+    system_id, _, _ = shell_utils.run_command("dmidecode -s system-uuid")
 except:
     pass
 
@@ -66,7 +67,7 @@ def connect_to_nvme():
     nqn = data['nqn']
     st = f"nvme connect --transport=tcp --traddr={ip} --trsvcid={port} --nqn={nqn}"
     logger.debug(st)
-    out, err, ret_code = node_utils.run_command(st)
+    out, err, ret_code = shell_utils.run_command(st)
     logger.debug(ret_code)
     logger.debug(out)
     logger.debug(err)
@@ -81,7 +82,7 @@ def disconnect_device():
     data = request.get_json()
     dev_path = data['dev_path']
     st = f"nvme disconnect --device={dev_path}"
-    out, err, ret_code = node_utils.run_command(st)
+    out, err, ret_code = shell_utils.run_command(st)
     logger.debug(ret_code)
     logger.debug(out)
     logger.debug(err)
@@ -93,7 +94,7 @@ def disconnect_nqn():
     data = request.get_json()
     nqn = data['nqn']
     st = f"nvme disconnect --nqn={nqn}"
-    out, err, ret_code = node_utils.run_command(st)
+    out, err, ret_code = shell_utils.run_command(st)
     logger.debug(ret_code)
     logger.debug(out)
     logger.debug(err)
@@ -103,7 +104,7 @@ def disconnect_nqn():
 @bp.route('/disconnect_all', methods=['POST'])
 def disconnect_all():
     st = "nvme disconnect-all"
-    out, err, ret_code = node_utils.run_command(st)
+    out, err, ret_code = shell_utils.run_command(st)
     logger.debug(ret_code)
     logger.debug(out)
     logger.debug(err)
