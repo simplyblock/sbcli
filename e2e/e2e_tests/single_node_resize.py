@@ -65,8 +65,8 @@ class TestSingleNodeResizeLvolCone(TestClusterBase):
                 size="5G"
             )
             lvols = self.sbcli_utils.list_lvols()
-            assert self.lvol_name in list(lvols.keys()), \
-                f"Lvol {self.lvol_name} present in list of lvols post add: {lvols}"
+            assert lvol_name in list(lvols.keys()), \
+                f"Lvol {lvol_name} is not present in list of lvols post add: {lvols}"
 
             connect_ls = self.sbcli_utils.get_lvol_connect_str(lvol_name=lvol_name)
             for connect_str in connect_ls:
@@ -114,6 +114,10 @@ class TestSingleNodeResizeLvolCone(TestClusterBase):
             self.ssh_obj.add_clone(node=self.mgmt_nodes[0],
                                    snapshot_id=snapshot_id,
                                    clone_name=clone_name)
+            
+            lvols = self.sbcli_utils.list_lvols()
+            assert clone_name in list(lvols.keys()), \
+                f"Clone {clone_name} is not present in list of lvols post add: {lvols}"
             
             initial_devices = self.ssh_obj.get_devices(node=self.mgmt_nodes[0])
             connect_ls = self.sbcli_utils.get_lvol_connect_str(lvol_name=clone_name)
