@@ -79,13 +79,13 @@ class CLIWrapper(CLIWrapperBase):
 
     def init_storage_node__deploy(self, subparser):
         subcommand = self.add_sub_command(subparser, 'deploy', 'Prepares a host to be used as a storage node')
-        argument = subcommand.add_argument('--ifname', help='Management interface name, e.g. eth0', type=str, dest='ifname')
+        argument = subcommand.add_argument('--ifname', help='Management interface name, e.g. eth0', type=str, dest='ifname', required=True)
         argument = subcommand.add_argument('--isolate-cores', help='Isolate cores in kernel args for provided cpu mask', default=False, dest='isolate_cores', action='store_true')
 
     def init_storage_node__configure(self, subparser):
         subcommand = self.add_sub_command(subparser, 'configure', 'Prepare a configuration file to be used when adding the storage node')
-        argument = subcommand.add_argument('--max-lvol', help='Max logical volume per storage node', type=int, dest='max_lvol')
-        argument = subcommand.add_argument('--max-size', help='Maximum amount of GB to be utilized on this storage node', type=str, dest='max_prov')
+        argument = subcommand.add_argument('--max-lvol', help='Max logical volume per storage node', type=int, dest='max_lvol', required=True)
+        argument = subcommand.add_argument('--max-size', help='Maximum amount of GB to be utilized on this storage node', type=str, dest='max_prov', required=True)
         argument = subcommand.add_argument('--nodes-per-socket', help='number of each node to be added per each socket.', type=int, default=1, dest='nodes_per_socket')
         argument = subcommand.add_argument('--sockets-to-use', help='The system socket to use when adding the storage nodes', type=str, default='0', dest='sockets_to_use')
         argument = subcommand.add_argument('--pci-allowed', help='Comma separated list of PCI addresses of Nvme devices to use for storage devices.', type=str, default='', dest='pci_allowed')
@@ -105,7 +105,7 @@ class CLIWrapper(CLIWrapperBase):
         argument = subcommand.add_argument('--journal-partition', help='1: auto-create small partitions for journal on nvme devices. 0: use a separate (the smallest) nvme device of the node for journal. The journal needs a maximum of 3 percent of total available raw disk space.', type=int, default=1, dest='partitions')
         if self.developer_mode:
             argument = subcommand.add_argument('--jm-percent', help='Number in percent to use for JM from each device', type=int, default=3, dest='jm_percent')
-        argument = subcommand.add_argument('--data-nics', help='Storage network interface name(s). Can be more than one.', type=str, dest='data_nics', nargs='+')
+        argument = subcommand.add_argument('--data-nics', help='Storage network interface name(s). Can be more than one.', type=str, dest='data_nics', required=True, nargs='+')
         if self.developer_mode:
             argument = subcommand.add_argument('--size-of-device', help='Size of device per storage node', type=str, dest='partition_size')
         if self.developer_mode:
@@ -123,7 +123,7 @@ class CLIWrapper(CLIWrapperBase):
         if self.developer_mode:
             argument = subcommand.add_argument('--disable-ha-jm', help='Disable HA JM for distrib creation', dest='enable_ha_jm', action='store_false')
         argument = subcommand.add_argument('--ha-jm-count', help='HA JM count', type=int, default=3, dest='ha_jm_count')
-        argument = subcommand.add_argument('--namespace', help='Kubernetes namespace to deploy on', type=str, dest='namespace')
+        argument = subcommand.add_argument('--namespace', help='Kubernetes namespace to deploy on', type=str, dest='namespace', required=True)
         if self.developer_mode:
             argument = subcommand.add_argument('--id-device-by-nqn', help='Use device nqn to identify it instead of serial number', dest='id_device_by_nqn', action='store_true')
         if self.developer_mode:
@@ -141,7 +141,7 @@ class CLIWrapper(CLIWrapperBase):
 
     def init_storage_node__list(self, subparser):
         subcommand = self.add_sub_command(subparser, 'list', 'Lists all storage nodes')
-        argument = subcommand.add_argument('--cluster-id', help='Cluster id', type=str, dest='cluster_id')
+        argument = subcommand.add_argument('--cluster-id', help='Cluster id', type=str, dest='cluster_id', required=True)
         argument = subcommand.add_argument('--json', help='Print outputs in json format', dest='json', action='store_true')
 
     def init_storage_node__get(self, subparser):
@@ -156,7 +156,7 @@ class CLIWrapper(CLIWrapperBase):
             argument = subcommand.add_argument('--max-snap', help='Max snapshot per storage node', type=int, default=5000, dest='max_snap')
         if self.developer_mode:
             argument = subcommand.add_argument('--max-size', help='Maximum amount of GB to be utilized on this storage node', type=str, default='0', dest='max_prov')
-        argument = subcommand.add_argument('--node-addr', '--node-ip', help='Restart Node on new node', type=str, dest='node_ip')
+        argument = subcommand.add_argument('--node-addr', '--node-ip', help='Restart Node on new node', type=str, dest='node_ip', required=True)
         if self.developer_mode:
             argument = subcommand.add_argument('--spdk-image', help='SPDK image uri', type=str, dest='spdk_image')
         if self.developer_mode:
@@ -187,13 +187,13 @@ class CLIWrapper(CLIWrapperBase):
     def init_storage_node__get_io_stats(self, subparser):
         subcommand = self.add_sub_command(subparser, 'get-io-stats', 'Gets storage node IO statistics')
         subcommand.add_argument('node_id', help='Storage node id', type=str).completer = self._completer_get_sn_list
-        argument = subcommand.add_argument('--history', help='list history records -one for every 15 minutes- for XX days and YY hours -up to 10 days in total-, format: XXdYYh', type=str, dest='history')
+        argument = subcommand.add_argument('--history', help='list history records -one for every 15 minutes- for XX days and YY hours -up to 10 days in total-, format: XXdYYh', type=str, dest='history', required=True)
         argument = subcommand.add_argument('--records', help='Number of records, default: 20', type=int, default=20, dest='records')
 
     def init_storage_node__get_capacity(self, subparser):
         subcommand = self.add_sub_command(subparser, 'get-capacity', 'Gets a storage node\'s capacity statistics')
         subcommand.add_argument('node_id', help='Storage node id', type=str).completer = self._completer_get_sn_list
-        argument = subcommand.add_argument('--history', help='list history records -one for every 15 minutes- for XX days and YY hours -up to 10 days in total-, format: XXdYYh', type=str, dest='history')
+        argument = subcommand.add_argument('--history', help='list history records -one for every 15 minutes- for XX days and YY hours -up to 10 days in total-, format: XXdYYh', type=str, dest='history', required=True)
 
     def init_storage_node__list_devices(self, subparser):
         subcommand = self.add_sub_command(subparser, 'list-devices', 'Lists storage devices')
@@ -233,12 +233,12 @@ class CLIWrapper(CLIWrapperBase):
     def init_storage_node__get_capacity_device(self, subparser):
         subcommand = self.add_sub_command(subparser, 'get-capacity-device', 'Gets a device\'s capacity')
         subcommand.add_argument('device_id', help='Device id', type=str)
-        argument = subcommand.add_argument('--history', help='list history records -one for every 15 minutes- for XX days and YY hours -up to 10 days in total-, format: XXdYYh', type=str, dest='history')
+        argument = subcommand.add_argument('--history', help='list history records -one for every 15 minutes- for XX days and YY hours -up to 10 days in total-, format: XXdYYh', type=str, dest='history', required=True)
 
     def init_storage_node__get_io_stats_device(self, subparser):
         subcommand = self.add_sub_command(subparser, 'get-io-stats-device', 'Gets a device\'s IO statistics')
         subcommand.add_argument('device_id', help='Device id', type=str)
-        argument = subcommand.add_argument('--history', help='list history records -one for every 15 minutes- for XX days and YY hours -up to 10 days in total-, format: XXdYYh', type=str, dest='history')
+        argument = subcommand.add_argument('--history', help='list history records -one for every 15 minutes- for XX days and YY hours -up to 10 days in total-, format: XXdYYh', type=str, dest='history', required=True)
         argument = subcommand.add_argument('--records', help='Number of records, default: 20', type=int, default=20, dest='records')
 
     def init_storage_node__port_list(self, subparser):
@@ -248,7 +248,7 @@ class CLIWrapper(CLIWrapperBase):
     def init_storage_node__port_io_stats(self, subparser):
         subcommand = self.add_sub_command(subparser, 'port-io-stats', 'Gets the data interfaces\' IO stats')
         subcommand.add_argument('port_id', help='Data port id', type=str)
-        argument = subcommand.add_argument('--history', help='list history records -one for every 15 minutes- for XX days and YY hours -up to 10 days in total, format: XXdYYh', type=str, dest='history')
+        argument = subcommand.add_argument('--history', help='list history records -one for every 15 minutes- for XX days and YY hours -up to 10 days in total, format: XXdYYh', type=str, dest='history', required=True)
 
     def init_storage_node__check(self, subparser):
         subcommand = self.add_sub_command(subparser, 'check', 'Checks the health status of a storage node')
@@ -329,7 +329,7 @@ class CLIWrapper(CLIWrapperBase):
 
     def init_cluster__deploy(self, subparser):
         subcommand = self.add_sub_command(subparser, 'deploy', 'Deploys a storage nodes')
-        argument = subcommand.add_argument('--storage-nodes', help='comma separated ip addresses', type=str, dest='storage_nodes')
+        argument = subcommand.add_argument('--storage-nodes', help='comma separated ip addresses', type=str, dest='storage_nodes', required=True)
         argument = subcommand.add_argument('--test', help='Test Cluster', dest='test', action='store_true')
         argument = subcommand.add_argument('--ha-type', help='Logical volume HA type (single, ha), default is cluster HA type', type=str, default='ha', dest='ha_type', choices=['single','ha',])
         if self.developer_mode:
@@ -338,7 +338,7 @@ class CLIWrapper(CLIWrapperBase):
         argument = subcommand.add_argument('--parity-chunks-per-stripe', help='Erasure coding schema parameter n (distributed raid), default: 1', type=int, default=1, dest='distr_npcs')
         if self.developer_mode:
             argument = subcommand.add_argument('--enable-qos', help='Enable qos bdev for storage nodes', type=bool, default=False, dest='enable_qos')
-        argument = subcommand.add_argument('--ifname', help='Management interface name, e.g. eth0', type=str, dest='ifname')
+        argument = subcommand.add_argument('--ifname', help='Management interface name, e.g. eth0', type=str, dest='ifname', required=True)
         if self.developer_mode:
             argument = subcommand.add_argument('--blk_size', help='The block size in bytes', type=int, default=512, dest='blk_size', choices=['512','4096',])
         if self.developer_mode:
@@ -365,8 +365,8 @@ class CLIWrapper(CLIWrapperBase):
         argument = subcommand.add_argument('--journal-partition', help='1: auto-partition nvme devices for journal. 0: use a separate nvme device for journal. The smallest NVMe device available on the host will be chosen as a journal. It should provide about 3%% of the entire node’s NVMe capacity. If set to false, partitions on other devices will be auto-created to store the journal.', type=str, default='True', dest='partitions')
         if self.developer_mode:
             argument = subcommand.add_argument('--jm-percent', help='Number in percent to use for JM from each device', type=int, default=3, dest='jm_percent')
-        argument = subcommand.add_argument('--data-nics', help='Storage network interface name(s). Can be more than one.', type=str, dest='data_nics', nargs='+')
-        argument = subcommand.add_argument('--max-lvol', help='Max logical volume per storage node', type=int, dest='max_lvol')
+        argument = subcommand.add_argument('--data-nics', help='Storage network interface name(s). Can be more than one.', type=str, dest='data_nics', required=True, nargs='+')
+        argument = subcommand.add_argument('--max-lvol', help='Max logical volume per storage node', type=int, dest='max_lvol', required=True)
         if self.developer_mode:
             argument = subcommand.add_argument('--max-snap', help='Max snapshot per storage node', type=int, default=5000, dest='max_snap')
         argument = subcommand.add_argument('--max-size', help='Maximum amount of GB to be provisioned via all storage nodes', type=str, default='', dest='max_prov')
@@ -384,7 +384,7 @@ class CLIWrapper(CLIWrapperBase):
             argument = subcommand.add_argument('--enable-test-device', help='Enable creation of test device', dest='enable_test_device', action='store_true')
         if self.developer_mode:
             argument = subcommand.add_argument('--disable-ha-jm', help='Disable HA JM for distrib creation', dest='enable_ha_jm', action='store_true')
-        argument = subcommand.add_argument('--namespace', help='k8s namespace to deploy on', type=str, dest='namespace')
+        argument = subcommand.add_argument('--namespace', help='k8s namespace to deploy on', type=str, dest='namespace', required=True)
         argument = subcommand.add_argument('--id-device-by-nqn', help='Use device nqn to identify it instead of serial number', default=False, dest='id_device_by_nqn', action='store_true')
         if self.developer_mode:
             argument = subcommand.add_argument('--lvol-name', help='Logical volume name or id', type=str, default='lvol01', dest='lvol_name')
@@ -398,7 +398,7 @@ class CLIWrapper(CLIWrapperBase):
             argument = subcommand.add_argument('--snapshot', '-s', help='Make logical volume with snapshot capability, default: false', dest='snapshot', action='store_true')
         if self.developer_mode:
             argument = subcommand.add_argument('--max-volume-size', help='Logical volume max size', type=str, default='1000G', dest='max_size')
-        argument = subcommand.add_argument('--host-id', help='Primary storage node id or hostname', type=str, dest='host_id')
+        argument = subcommand.add_argument('--host-id', help='Primary storage node id or hostname', type=str, dest='host_id', required=True)
         if self.developer_mode:
             argument = subcommand.add_argument('--encrypt', help='Use inline data encryption and decryption on the logical volume', dest='encrypt', action='store_true')
         if self.developer_mode:
@@ -416,7 +416,7 @@ class CLIWrapper(CLIWrapperBase):
         argument = subcommand.add_argument('--cap-crit', help='Capacity critical level in percent, default: 99', type=int, default=99, dest='cap_crit')
         argument = subcommand.add_argument('--prov-cap-warn', help='Capacity warning level in percent, default: 250', type=int, default=250, dest='prov_cap_warn')
         argument = subcommand.add_argument('--prov-cap-crit', help='Capacity critical level in percent, default: 500', type=int, default=500, dest='prov_cap_crit')
-        argument = subcommand.add_argument('--ifname', help='Management interface name, e.g. eth0', type=str, dest='ifname')
+        argument = subcommand.add_argument('--ifname', help='Management interface name, e.g. eth0', type=str, dest='ifname', required=True)
         argument = subcommand.add_argument('--log-del-interval', help='Logging retention policy, default: 3d', type=str, default='3d', dest='log_del_interval')
         argument = subcommand.add_argument('--metrics-retention-period', help='Retention period for I/O statistics (Prometheus), default: 7d', type=str, default='7d', dest='metrics_retention_period')
         argument = subcommand.add_argument('--contact-point', help='Email or slack webhook url to be used for alerting', type=str, default='', dest='contact_point')
@@ -489,13 +489,13 @@ class CLIWrapper(CLIWrapperBase):
         subcommand = self.add_sub_command(subparser, 'get-capacity', 'Gets a cluster\'s capacity')
         subcommand.add_argument('cluster_id', help='Cluster id', type=str).completer = self._completer_get_cluster_list
         argument = subcommand.add_argument('--json', help='Print json output', dest='json', action='store_true')
-        argument = subcommand.add_argument('--history', help='(XXdYYh), list history records (one for every 15 minutes) for XX days and YY hours (up to 10 days in total).', type=str, dest='history')
+        argument = subcommand.add_argument('--history', help='(XXdYYh), list history records (one for every 15 minutes) for XX days and YY hours (up to 10 days in total).', type=str, dest='history', required=True)
 
     def init_cluster__get_io_stats(self, subparser):
         subcommand = self.add_sub_command(subparser, 'get-io-stats', 'Gets a cluster\'s I/O statistics')
         subcommand.add_argument('cluster_id', help='Cluster id', type=str).completer = self._completer_get_cluster_list
         argument = subcommand.add_argument('--records', help='Number of records, default: 20', type=int, default=20, dest='records')
-        argument = subcommand.add_argument('--history', help='(XXdYYh), list history records (one for every 15 minutes) for XX days and YY hours (up to 10 days in total).', type=str, dest='history')
+        argument = subcommand.add_argument('--history', help='(XXdYYh), list history records (one for every 15 minutes) for XX days and YY hours (up to 10 days in total).', type=str, dest='history', required=True)
 
     def init_cluster__get_logs(self, subparser):
         subcommand = self.add_sub_command(subparser, 'get-logs', 'Returns a cluster\'s status logs')
@@ -520,8 +520,8 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('cluster_id', help='Cluster id', type=str).completer = self._completer_get_cluster_list
         argument = subcommand.add_argument('--cp-only', help='Update the control plane only', type=bool, default=False, dest='mgmt_only')
         argument = subcommand.add_argument('--restart', help='Restart the management services', type=bool, default=False, dest='restart')
-        argument = subcommand.add_argument('--spdk-image', help='Restart the storage nodes using the provided image', type=str, dest='spdk_image')
-        argument = subcommand.add_argument('--mgmt-image', help='Restart the management services using the provided image', type=str, dest='mgmt_image')
+        argument = subcommand.add_argument('--spdk-image', help='Restart the storage nodes using the provided image', type=str, dest='spdk_image', required=True)
+        argument = subcommand.add_argument('--mgmt-image', help='Restart the management services using the provided image', type=str, dest='mgmt_image', required=True)
 
     def init_cluster__graceful_shutdown(self, subparser):
         subcommand = self.add_sub_command(subparser, 'graceful-shutdown', 'Initiates a graceful shutdown of a cluster\'s storage nodes')
@@ -531,7 +531,7 @@ class CLIWrapper(CLIWrapperBase):
         subcommand = self.add_sub_command(subparser, 'graceful-startup', 'Initiates a graceful startup of a cluster\'s storage nodes')
         subcommand.add_argument('cluster_id', help='Cluster id', type=str).completer = self._completer_get_cluster_list
         argument = subcommand.add_argument('--clear-data', help='clear Alceml data', dest='clear_data', action='store_true')
-        argument = subcommand.add_argument('--spdk-image', help='SPDK image uri', type=str, dest='spdk_image')
+        argument = subcommand.add_argument('--spdk-image', help='SPDK image uri', type=str, dest='spdk_image', required=True)
 
     def init_cluster__list_tasks(self, subparser):
         subcommand = self.add_sub_command(subparser, 'list-tasks', 'Lists tasks of a cluster')
@@ -581,35 +581,35 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('pool', help='Pool id or name', type=str)
         argument = subcommand.add_argument('--snapshot', '-s', help='Make logical volume with snapshot capability, default: false', default=False, dest='snapshot', action='store_true')
         argument = subcommand.add_argument('--max-size', help='Logical volume max size', type=str, default='1000T', dest='max_size')
-        argument = subcommand.add_argument('--host-id', help='Primary storage node id or Hostname', type=str, dest='host_id')
+        argument = subcommand.add_argument('--host-id', help='Primary storage node id or Hostname', type=str, dest='host_id', required=True)
         argument = subcommand.add_argument('--encrypt', help='Use inline data encryption and decryption on the logical volume', dest='encrypt', action='store_true')
-        argument = subcommand.add_argument('--crypto-key1', help='Hex value of key1 to be used for logical volume encryption', type=str, dest='crypto_key1')
-        argument = subcommand.add_argument('--crypto-key2', help='Hex value of key2 to be used for logical volume encryption', type=str, dest='crypto_key2')
-        argument = subcommand.add_argument('--max-rw-iops', help='Maximum Read Write IO Per Second', type=int, dest='max_rw_iops')
-        argument = subcommand.add_argument('--max-rw-mbytes', help='Maximum Read Write Megabytes Per Second', type=int, dest='max_rw_mbytes')
-        argument = subcommand.add_argument('--max-r-mbytes', help='Maximum Read Megabytes Per Second', type=int, dest='max_r_mbytes')
-        argument = subcommand.add_argument('--max-w-mbytes', help='Maximum Write Megabytes Per Second', type=int, dest='max_w_mbytes')
+        argument = subcommand.add_argument('--crypto-key1', help='Hex value of key1 to be used for logical volume encryption', type=str, dest='crypto_key1', required=True)
+        argument = subcommand.add_argument('--crypto-key2', help='Hex value of key2 to be used for logical volume encryption', type=str, dest='crypto_key2', required=True)
+        argument = subcommand.add_argument('--max-rw-iops', help='Maximum Read Write IO Per Second', type=int, dest='max_rw_iops', required=True)
+        argument = subcommand.add_argument('--max-rw-mbytes', help='Maximum Read Write Megabytes Per Second', type=int, dest='max_rw_mbytes', required=True)
+        argument = subcommand.add_argument('--max-r-mbytes', help='Maximum Read Megabytes Per Second', type=int, dest='max_r_mbytes', required=True)
+        argument = subcommand.add_argument('--max-w-mbytes', help='Maximum Write Megabytes Per Second', type=int, dest='max_w_mbytes', required=True)
         if self.developer_mode:
             argument = subcommand.add_argument('--distr-vuid', help='(Dev) set vuid manually, default: random (1-99999)', type=int, dest='distr_vuid')
         argument = subcommand.add_argument('--ha-type', help='Logical volume HA type (single, ha), default is cluster HA type', type=str, default='default', dest='ha_type', choices=['single','default','ha',])
         argument = subcommand.add_argument('--lvol-priority-class', help='Logical volume priority class', type=int, default=0, dest='lvol_priority_class')
-        argument = subcommand.add_argument('--namespace', help='Set logical volume namespace for k8s clients', type=str, dest='namespace')
+        argument = subcommand.add_argument('--namespace', help='Set logical volume namespace for k8s clients', type=str, dest='namespace', required=True)
         if self.developer_mode:
             argument = subcommand.add_argument('--uid', help='Set logical volume id', type=str, dest='uid')
-        argument = subcommand.add_argument('--pvc-name', '--pvc_name', help='Set logical volume PVC name for k8s clients', type=str, dest='pvc_name')
+        argument = subcommand.add_argument('--pvc-name', '--pvc_name', help='Set logical volume PVC name for k8s clients', type=str, dest='pvc_name', required=True)
 
     def init_volume__qos_set(self, subparser):
         subcommand = self.add_sub_command(subparser, 'qos-set', 'Changes QoS settings for an active logical volume')
         subcommand.add_argument('volume_id', help='Logical volume id', type=str)
-        argument = subcommand.add_argument('--max-rw-iops', help='Maximum Read Write IO Per Second', type=int, dest='max_rw_iops')
-        argument = subcommand.add_argument('--max-rw-mbytes', help='Maximum Read Write Megabytes Per Second', type=int, dest='max_rw_mbytes')
-        argument = subcommand.add_argument('--max-r-mbytes', help='Maximum Read Megabytes Per Second', type=int, dest='max_r_mbytes')
-        argument = subcommand.add_argument('--max-w-mbytes', help='Maximum Write Megabytes Per Second', type=int, dest='max_w_mbytes')
+        argument = subcommand.add_argument('--max-rw-iops', help='Maximum Read Write IO Per Second', type=int, dest='max_rw_iops', required=True)
+        argument = subcommand.add_argument('--max-rw-mbytes', help='Maximum Read Write Megabytes Per Second', type=int, dest='max_rw_mbytes', required=True)
+        argument = subcommand.add_argument('--max-r-mbytes', help='Maximum Read Megabytes Per Second', type=int, dest='max_r_mbytes', required=True)
+        argument = subcommand.add_argument('--max-w-mbytes', help='Maximum Write Megabytes Per Second', type=int, dest='max_w_mbytes', required=True)
 
     def init_volume__list(self, subparser):
         subcommand = self.add_sub_command(subparser, 'list', 'Lists logical volumes')
-        argument = subcommand.add_argument('--cluster-id', help='List logical volumes in particular cluster', type=str, dest='cluster_id')
-        argument = subcommand.add_argument('--pool', help='List logical volumes in particular pool id or name', type=str, dest='pool')
+        argument = subcommand.add_argument('--cluster-id', help='List logical volumes in particular cluster', type=str, dest='cluster_id', required=True)
+        argument = subcommand.add_argument('--pool', help='List logical volumes in particular pool id or name', type=str, dest='pool', required=True)
         argument = subcommand.add_argument('--json', help='Print outputs in json format', dest='json', action='store_true')
         argument = subcommand.add_argument('--all', help='List soft deleted logical volumes', dest='all', action='store_true')
 
@@ -631,7 +631,7 @@ class CLIWrapper(CLIWrapperBase):
     def init_volume__connect(self, subparser):
         subcommand = self.add_sub_command(subparser, 'connect', 'Gets the logical volume\'s NVMe/TCP connection string(s)')
         subcommand.add_argument('volume_id', help='Logical volume id', type=str)
-        argument = subcommand.add_argument('--ctrl-loss-tmo', help='Control loss timeout for this volume', type=int, dest='ctrl_loss_tmo')
+        argument = subcommand.add_argument('--ctrl-loss-tmo', help='Control loss timeout for this volume', type=int, dest='ctrl_loss_tmo', required=True)
 
     def init_volume__resize(self, subparser):
         subcommand = self.add_sub_command(subparser, 'resize', 'Resizes a logical volume')
@@ -647,7 +647,7 @@ class CLIWrapper(CLIWrapperBase):
         subcommand = self.add_sub_command(subparser, 'clone', 'Provisions a logical volumes from an existing snapshot')
         subcommand.add_argument('snapshot_id', help='Snapshot id', type=str)
         subcommand.add_argument('clone_name', help='Clone name', type=str)
-        argument = subcommand.add_argument('--resize', help='New logical volume size: 10M, 10G, 10(bytes). Can only increase.', type=str, dest='resize')
+        argument = subcommand.add_argument('--resize', help='New logical volume size: 10M, 10G, 10(bytes). Can only increase.', type=str, dest='resize', required=True)
 
     def init_volume__move(self, subparser):
         subcommand = self.add_sub_command(subparser, 'move', 'Moves a full copy of the logical volume between nodes')
@@ -658,12 +658,12 @@ class CLIWrapper(CLIWrapperBase):
     def init_volume__get_capacity(self, subparser):
         subcommand = self.add_sub_command(subparser, 'get-capacity', 'Gets a logical volume\'s capacity')
         subcommand.add_argument('volume_id', help='Logical volume id', type=str)
-        argument = subcommand.add_argument('--history', help='(XXdYYh), list history records (one for every 15 minutes) for XX days and YY hours (up to 10 days in total).', type=str, dest='history')
+        argument = subcommand.add_argument('--history', help='(XXdYYh), list history records (one for every 15 minutes) for XX days and YY hours (up to 10 days in total).', type=str, dest='history', required=True)
 
     def init_volume__get_io_stats(self, subparser):
         subcommand = self.add_sub_command(subparser, 'get-io-stats', 'Gets a logical volume\'s I/O statistics')
         subcommand.add_argument('volume_id', help='Logical volume id', type=str)
-        argument = subcommand.add_argument('--history', help='(XXdYYh), list history records (one for every 15 minutes) for XX days and YY hours (up to 10 days in total).', type=str, dest='history')
+        argument = subcommand.add_argument('--history', help='(XXdYYh), list history records (one for every 15 minutes) for XX days and YY hours (up to 10 days in total).', type=str, dest='history', required=True)
         argument = subcommand.add_argument('--records', help='Number of records, default: 20', type=int, default=20, dest='records')
 
     def init_volume__check(self, subparser):
@@ -717,27 +717,27 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('cluster_id', help='Cluster id', type=str)
         argument = subcommand.add_argument('--pool-max', help='Pool maximum size: 20M, 20G, 0. Default: 0', type=str, default='0', dest='pool_max')
         argument = subcommand.add_argument('--lvol-max', help='Logical volume maximum size: 20M, 20G, 0. Default: 0', type=str, default='0', dest='lvol_max')
-        argument = subcommand.add_argument('--max-rw-iops', help='Maximum Read Write IO Per Second', type=int, dest='max_rw_iops')
-        argument = subcommand.add_argument('--max-rw-mbytes', help='Maximum Read Write Megabytes Per Second', type=int, dest='max_rw_mbytes')
-        argument = subcommand.add_argument('--max-r-mbytes', help='Maximum Read Megabytes Per Second', type=int, dest='max_r_mbytes')
-        argument = subcommand.add_argument('--max-w-mbytes', help='Maximum Write Megabytes Per Second', type=int, dest='max_w_mbytes')
+        argument = subcommand.add_argument('--max-rw-iops', help='Maximum Read Write IO Per Second', type=int, dest='max_rw_iops', required=True)
+        argument = subcommand.add_argument('--max-rw-mbytes', help='Maximum Read Write Megabytes Per Second', type=int, dest='max_rw_mbytes', required=True)
+        argument = subcommand.add_argument('--max-r-mbytes', help='Maximum Read Megabytes Per Second', type=int, dest='max_r_mbytes', required=True)
+        argument = subcommand.add_argument('--max-w-mbytes', help='Maximum Write Megabytes Per Second', type=int, dest='max_w_mbytes', required=True)
         if self.developer_mode:
             argument = subcommand.add_argument('--has-secret', help='Pool is created with a secret (all further API interactions with the pool and logical volumes in the pool require this secret)', dest='has_secret', action='store_true')
 
     def init_storage_pool__set(self, subparser):
         subcommand = self.add_sub_command(subparser, 'set', 'Sets a storage pool\'s attributes')
         subcommand.add_argument('pool_id', help='Pool id', type=str)
-        argument = subcommand.add_argument('--pool-max', help='Pool maximum size: 20M, 20G', type=str, dest='pool_max')
-        argument = subcommand.add_argument('--lvol-max', help='Logical volume maximum size: 20M, 20G', type=str, dest='lvol_max')
-        argument = subcommand.add_argument('--max-rw-iops', help='Maximum Read Write IO Per Second', type=int, dest='max_rw_iops')
-        argument = subcommand.add_argument('--max-rw-mbytes', help='Maximum Read Write Megabytes Per Second', type=int, dest='max_rw_mbytes')
-        argument = subcommand.add_argument('--max-r-mbytes', help='Maximum Read Megabytes Per Second', type=int, dest='max_r_mbytes')
-        argument = subcommand.add_argument('--max-w-mbytes', help='Maximum Write Megabytes Per Second', type=int, dest='max_w_mbytes')
+        argument = subcommand.add_argument('--pool-max', help='Pool maximum size: 20M, 20G', type=str, dest='pool_max', required=True)
+        argument = subcommand.add_argument('--lvol-max', help='Logical volume maximum size: 20M, 20G', type=str, dest='lvol_max', required=True)
+        argument = subcommand.add_argument('--max-rw-iops', help='Maximum Read Write IO Per Second', type=int, dest='max_rw_iops', required=True)
+        argument = subcommand.add_argument('--max-rw-mbytes', help='Maximum Read Write Megabytes Per Second', type=int, dest='max_rw_mbytes', required=True)
+        argument = subcommand.add_argument('--max-r-mbytes', help='Maximum Read Megabytes Per Second', type=int, dest='max_r_mbytes', required=True)
+        argument = subcommand.add_argument('--max-w-mbytes', help='Maximum Write Megabytes Per Second', type=int, dest='max_w_mbytes', required=True)
 
     def init_storage_pool__list(self, subparser):
         subcommand = self.add_sub_command(subparser, 'list', 'Lists all storage pools')
         argument = subcommand.add_argument('--json', help='Print outputs in json format', dest='json', action='store_true')
-        argument = subcommand.add_argument('--cluster-id', help='Cluster id', type=str, dest='cluster_id')
+        argument = subcommand.add_argument('--cluster-id', help='Cluster id', type=str, dest='cluster_id', required=True)
 
     def init_storage_pool__get(self, subparser):
         subcommand = self.add_sub_command(subparser, 'get', 'Gets a storage pool\'s details')
@@ -763,7 +763,7 @@ class CLIWrapper(CLIWrapperBase):
     def init_storage_pool__get_io_stats(self, subparser):
         subcommand = self.add_sub_command(subparser, 'get-io-stats', 'Gets a storage pool\'s I/O statistics')
         subcommand.add_argument('pool_id', help='Pool id', type=str)
-        argument = subcommand.add_argument('--history', help='(XXdYYh), list history records (one for every 15 minutes) for XX days and YY hours (up to 10 days in total).', type=str, dest='history')
+        argument = subcommand.add_argument('--history', help='(XXdYYh), list history records (one for every 15 minutes) for XX days and YY hours (up to 10 days in total).', type=str, dest='history', required=True)
         argument = subcommand.add_argument('--records', help='Number of records, default: 20', type=int, default=20, dest='records')
 
 
@@ -793,7 +793,7 @@ class CLIWrapper(CLIWrapperBase):
         subcommand = self.add_sub_command(subparser, 'clone', 'Provisions a new logical volume from an existing snapshot')
         subcommand.add_argument('snapshot_id', help='Snapshot id', type=str)
         subcommand.add_argument('lvol_name', help='Logical volume name', type=str)
-        argument = subcommand.add_argument('--resize', help='New logical volume size: 10M, 10G, 10(bytes)', type=str, dest='resize')
+        argument = subcommand.add_argument('--resize', help='New logical volume size: 10M, 10G, 10(bytes)', type=str, dest='resize', required=True)
 
 
     def init_caching_node(self):
@@ -811,21 +811,21 @@ class CLIWrapper(CLIWrapperBase):
 
     def init_caching_node__deploy(self, subparser):
         subcommand = self.add_sub_command(subparser, 'deploy', 'Deploys a caching node on this machine (local run)')
-        argument = subcommand.add_argument('--ifname', help='Management interface name, e.g. eth0', type=str, dest='ifname')
+        argument = subcommand.add_argument('--ifname', help='Management interface name, e.g. eth0', type=str, dest='ifname', required=True)
 
     def init_caching_node__add_node(self, subparser):
         subcommand = self.add_sub_command(subparser, 'add-node', 'Adds a new caching node to the cluster')
         subcommand.add_argument('cluster_id', help='Cluster id', type=str)
         subcommand.add_argument('node_ip', help='Node IP address', type=str)
         subcommand.add_argument('ifname', help='Management interface name', type=str)
-        argument = subcommand.add_argument('--vcpu-count', help='Number of vCPUs used for SPDK. Remaining CPUs will be used for Linux system, TCP/IP processing, and other workloads. The default on non-Kubernetes hosts is 80%%.', type=int, dest='vcpu_count')
+        argument = subcommand.add_argument('--vcpu-count', help='Number of vCPUs used for SPDK. Remaining CPUs will be used for Linux system, TCP/IP processing, and other workloads. The default on non-Kubernetes hosts is 80%%.', type=int, dest='vcpu_count', required=True)
         if self.developer_mode:
             argument = subcommand.add_argument('--cpu-mask', help='SPDK app CPU mask, default is all cores found', type=str, dest='spdk_cpu_mask')
         if self.developer_mode:
             argument = subcommand.add_argument('--memory', help='SPDK huge memory allocation. By default it will acquire all available huge pages.', type=int, dest='spdk_mem')
         if self.developer_mode:
             argument = subcommand.add_argument('--spdk-image', help='SPDK image uri', type=str, dest='spdk_image')
-        argument = subcommand.add_argument('--namespace', help='k8s namespace to deploy on', type=str, dest='namespace')
+        argument = subcommand.add_argument('--namespace', help='k8s namespace to deploy on', type=str, dest='namespace', required=True)
         argument = subcommand.add_argument('--multipathing', help='Enable multipathing for logical volume connection, default: on', type=str, default='True', dest='multipathing', choices=['on','off',])
 
     def init_caching_node__list(self, subparser):
@@ -857,7 +857,7 @@ class CLIWrapper(CLIWrapperBase):
     def init_caching_node__get_lvol_stats(self, subparser):
         subcommand = self.add_sub_command(subparser, 'get-lvol-stats', 'Gets a logical volume\'s statistics')
         subcommand.add_argument('lvol_id', help='Logical volume id', type=str)
-        argument = subcommand.add_argument('--history', help='(XXdYYh), list history records (one for every 15 minutes) for XX days and YY hours (up to 10 days in total).', type=str, dest='history')
+        argument = subcommand.add_argument('--history', help='(XXdYYh), list history records (one for every 15 minutes) for XX days and YY hours (up to 10 days in total).', type=str, dest='history', required=True)
 
 
     def run(self):

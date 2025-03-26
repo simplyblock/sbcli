@@ -32,7 +32,17 @@ def no_newline(text):
 
 
 def required(item):
-    return item.get("required", False)
+    if "action" in item:
+        return False
+    elif "default" in item:
+        return False
+    elif "private" in item and item["private"]:
+        return False
+    elif "required" in item and item["required"]:
+        return True
+    elif not item["name"].startswith("--"):
+        return True
+    return False
 
 
 def escape_python_string(text):
@@ -120,6 +130,8 @@ with open("%s/cli-reference.yaml" % base_path) as stream:
         for command in reference["commands"]:
             for subcommand in command["subcommands"]:
                 if "arguments" in subcommand:
+                    for argument in subcommand["arguments"]:
+                        argument["required"] = argument["required"] if 'required' in argument else ("default" not in argument)
                     arguments = select_arguments(subcommand["arguments"])
                     parameters = select_parameters(subcommand["arguments"])
                     subcommand["arguments"] = arguments

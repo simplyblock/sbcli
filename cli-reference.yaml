@@ -36,6 +36,7 @@ commands:
             help: "Max logical volume per storage node"
             dest: max_lvol
             type: int
+            required: true
           - name: "--max-size"
             help: "Maximum amount of GB to be utilized on this storage node"
             description: >
@@ -46,6 +47,7 @@ commands:
               _150 TiB / 3 * 2 = 100TiB_ would be a safe choice.
             dest: max_prov
             type: str
+            required: true
           - name: "--nodes-per-socket"
             help: "number of each node to be added per each socket."
             dest: nodes_per_socket
