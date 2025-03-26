@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # PYTHON_ARGCOMPLETE_OK
 
-from simplyblock_cli.clibase import CLIWrapperBase, regex_type
+from simplyblock_cli.clibase import CLIWrapperBase, regex_type, size_type
 from simplyblock_core import utils
 import logging
 import sys
@@ -389,15 +389,15 @@ class CLIWrapper(CLIWrapperBase):
         if self.developer_mode:
             argument = subcommand.add_argument('--lvol-name', help='Logical volume name or id', type=str, default='lvol01', dest='lvol_name')
         if self.developer_mode:
-            argument = subcommand.add_argument('--lvol-size', help='Logical volume size: 10M, 10G, 10(bytes)', type=str, default='10G', dest='lvol_size')
+            argument = subcommand.add_argument('--lvol-size', help='Logical volume size: 10M, 10G, 10(bytes)', type=size_type(), default='10G', dest='lvol_size')
         if self.developer_mode:
             argument = subcommand.add_argument('--pool-name', help='Pool id or name', type=str, default='pool01', dest='pool_name')
         if self.developer_mode:
-            argument = subcommand.add_argument('--pool-max', help='Pool maximum size: 20M, 20G, 0(default)', type=str, default='25G', dest='pool_max')
+            argument = subcommand.add_argument('--pool-max', help='Pool maximum size: 20M, 20G, 0(default)', type=size_type(), default='25G', dest='pool_max')
         if self.developer_mode:
             argument = subcommand.add_argument('--snapshot', '-s', help='Make logical volume with snapshot capability, default: false', dest='snapshot', action='store_true')
         if self.developer_mode:
-            argument = subcommand.add_argument('--max-volume-size', help='Logical volume max size', type=str, default='1000G', dest='max_size')
+            argument = subcommand.add_argument('--max-volume-size', help='Logical volume max size', type=size_type(), default='1000G', dest='max_size')
         argument = subcommand.add_argument('--host-id', help='Primary storage node id or hostname', type=str, dest='host_id', required=True)
         if self.developer_mode:
             argument = subcommand.add_argument('--encrypt', help='Use inline data encryption and decryption on the logical volume', dest='encrypt', action='store_true')
@@ -577,10 +577,10 @@ class CLIWrapper(CLIWrapperBase):
     def init_volume__add(self, subparser):
         subcommand = self.add_sub_command(subparser, 'add', 'Adds a new logical volume')
         subcommand.add_argument('name', help='New logical volume name', type=str)
-        subcommand.add_argument('size', help='Logical volume size: 10M, 10G, 10(bytes)', type=str)
+        subcommand.add_argument('size', help='Logical volume size: 10M, 10G, 10(bytes)', type=size_type())
         subcommand.add_argument('pool', help='Pool id or name', type=str)
         argument = subcommand.add_argument('--snapshot', '-s', help='Make logical volume with snapshot capability, default: false', default=False, dest='snapshot', action='store_true')
-        argument = subcommand.add_argument('--max-size', help='Logical volume max size', type=str, default='1000T', dest='max_size')
+        argument = subcommand.add_argument('--max-size', help='Logical volume max size', type=size_type(), default='1000T', dest='max_size')
         argument = subcommand.add_argument('--host-id', help='Primary storage node id or Hostname', type=str, dest='host_id', required=True)
         argument = subcommand.add_argument('--encrypt', help='Use inline data encryption and decryption on the logical volume', dest='encrypt', action='store_true')
         argument = subcommand.add_argument('--crypto-key1', help='Hex value of key1 to be used for logical volume encryption', type=str, dest='crypto_key1', required=True)
@@ -636,7 +636,7 @@ class CLIWrapper(CLIWrapperBase):
     def init_volume__resize(self, subparser):
         subcommand = self.add_sub_command(subparser, 'resize', 'Resizes a logical volume')
         subcommand.add_argument('volume_id', help='Logical volume id', type=str)
-        subcommand.add_argument('size', help='New logical volume size size: 10M, 10G, 10(bytes)', type=str)
+        subcommand.add_argument('size', help='New logical volume size size: 10M, 10G, 10(bytes)', type=size_type())
 
     def init_volume__create_snapshot(self, subparser):
         subcommand = self.add_sub_command(subparser, 'create-snapshot', 'Creates a snapshot from a logical volume')
@@ -647,7 +647,7 @@ class CLIWrapper(CLIWrapperBase):
         subcommand = self.add_sub_command(subparser, 'clone', 'Provisions a logical volumes from an existing snapshot')
         subcommand.add_argument('snapshot_id', help='Snapshot id', type=str)
         subcommand.add_argument('clone_name', help='Clone name', type=str)
-        argument = subcommand.add_argument('--resize', help='New logical volume size: 10M, 10G, 10(bytes). Can only increase.', type=str, dest='resize', required=True)
+        argument = subcommand.add_argument('--resize', help='New logical volume size: 10M, 10G, 10(bytes). Can only increase.', type=size_type(), default='0', dest='resize')
 
     def init_volume__move(self, subparser):
         subcommand = self.add_sub_command(subparser, 'move', 'Moves a full copy of the logical volume between nodes')
@@ -715,8 +715,8 @@ class CLIWrapper(CLIWrapperBase):
         subcommand = self.add_sub_command(subparser, 'add', 'Adds a new storage pool')
         subcommand.add_argument('name', help='New pool name', type=str)
         subcommand.add_argument('cluster_id', help='Cluster id', type=str)
-        argument = subcommand.add_argument('--pool-max', help='Pool maximum size: 20M, 20G, 0. Default: 0', type=str, default='0', dest='pool_max')
-        argument = subcommand.add_argument('--lvol-max', help='Logical volume maximum size: 20M, 20G, 0. Default: 0', type=str, default='0', dest='lvol_max')
+        argument = subcommand.add_argument('--pool-max', help='Pool maximum size: 20M, 20G, 0. Default: 0', type=size_type(), default='0', dest='pool_max')
+        argument = subcommand.add_argument('--lvol-max', help='Logical volume maximum size: 20M, 20G, 0. Default: 0', type=size_type(), default='0', dest='lvol_max')
         argument = subcommand.add_argument('--max-rw-iops', help='Maximum Read Write IO Per Second', type=int, dest='max_rw_iops', required=True)
         argument = subcommand.add_argument('--max-rw-mbytes', help='Maximum Read Write Megabytes Per Second', type=int, dest='max_rw_mbytes', required=True)
         argument = subcommand.add_argument('--max-r-mbytes', help='Maximum Read Megabytes Per Second', type=int, dest='max_r_mbytes', required=True)
@@ -727,8 +727,8 @@ class CLIWrapper(CLIWrapperBase):
     def init_storage_pool__set(self, subparser):
         subcommand = self.add_sub_command(subparser, 'set', 'Sets a storage pool\'s attributes')
         subcommand.add_argument('pool_id', help='Pool id', type=str)
-        argument = subcommand.add_argument('--pool-max', help='Pool maximum size: 20M, 20G', type=str, dest='pool_max', required=True)
-        argument = subcommand.add_argument('--lvol-max', help='Logical volume maximum size: 20M, 20G', type=str, dest='lvol_max', required=True)
+        argument = subcommand.add_argument('--pool-max', help='Pool maximum size: 20M, 20G', type=size_type(), dest='pool_max', required=True)
+        argument = subcommand.add_argument('--lvol-max', help='Logical volume maximum size: 20M, 20G', type=size_type(), dest='lvol_max', required=True)
         argument = subcommand.add_argument('--max-rw-iops', help='Maximum Read Write IO Per Second', type=int, dest='max_rw_iops', required=True)
         argument = subcommand.add_argument('--max-rw-mbytes', help='Maximum Read Write Megabytes Per Second', type=int, dest='max_rw_mbytes', required=True)
         argument = subcommand.add_argument('--max-r-mbytes', help='Maximum Read Megabytes Per Second', type=int, dest='max_r_mbytes', required=True)
@@ -793,7 +793,7 @@ class CLIWrapper(CLIWrapperBase):
         subcommand = self.add_sub_command(subparser, 'clone', 'Provisions a new logical volume from an existing snapshot')
         subcommand.add_argument('snapshot_id', help='Snapshot id', type=str)
         subcommand.add_argument('lvol_name', help='Logical volume name', type=str)
-        argument = subcommand.add_argument('--resize', help='New logical volume size: 10M, 10G, 10(bytes)', type=str, dest='resize', required=True)
+        argument = subcommand.add_argument('--resize', help='New logical volume size: 10M, 10G, 10(bytes)', type=size_type(), default='0', dest='resize')
 
 
     def init_caching_node(self):
@@ -822,7 +822,7 @@ class CLIWrapper(CLIWrapperBase):
         if self.developer_mode:
             argument = subcommand.add_argument('--cpu-mask', help='SPDK app CPU mask, default is all cores found', type=regex_type(r'^(0x|0X)?[a-fA-F0-9]+$'), dest='spdk_cpu_mask')
         if self.developer_mode:
-            argument = subcommand.add_argument('--memory', help='SPDK huge memory allocation. By default it will acquire all available huge pages.', type=int, dest='spdk_mem')
+            argument = subcommand.add_argument('--memory', help='SPDK huge memory allocation. By default it will acquire all available huge pages.', type=size_type(min=utils.parse_size('1G'), max=None), dest='spdk_mem')
         if self.developer_mode:
             argument = subcommand.add_argument('--spdk-image', help='SPDK image uri', type=str, dest='spdk_image')
         argument = subcommand.add_argument('--namespace', help='k8s namespace to deploy on', type=str, dest='namespace', required=True)

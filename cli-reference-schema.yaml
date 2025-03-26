@@ -191,11 +191,29 @@ properties:
                             - int
                             - str
                             - bool
+                            - size
                         - type: object
                           additionalProperties: false
                           properties:
                             regex:
                               type: string
+                        - type: object
+                          additionalProperties: false
+                          minProperties: 1
+                          properties:
+                            size:
+                              type: object
+                              properties:
+                                min:
+                                  oneOf:
+                                    - type: integer
+                                    - type: string
+                                      pattern: '^\d+([kKMGTPEZ]i?)?B?$'
+                                max:
+                                  oneOf:
+                                    - type: integer
+                                    - type: string
+                                      pattern: '^\d+([kKMGTPEZ]i?)?B?$'
                     completer:
                       type: string
                       description: The completer value of the positional argument or parameter.
