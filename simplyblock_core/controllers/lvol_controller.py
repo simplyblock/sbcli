@@ -650,14 +650,6 @@ def add_lvol_on_node(lvol, snode, is_primary=True):
     rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
     db_controller = DBController()
 
-    if is_primary:
-        if not is_node_leader(snode, lvol.lvs_name):
-            rpc_client.bdev_lvol_set_leader(True, lvs_name=lvol.lvs_name)
-
-    else:
-        if is_node_leader(snode, lvol.lvs_name):
-            rpc_client.bdev_lvol_set_leader(False, lvs_name=lvol.lvs_name)
-
     ret, msg = _create_bdev_stack(lvol, snode, is_primary=is_primary)
     if not ret:
         return False, msg
@@ -953,11 +945,7 @@ def delete_lvol(id_or_name, force_delete=False):
             logger.error(msg)
             return False, msg
 
-
         if primary_node:
-
-            if not is_node_leader(primary_node, lvol.lvs_name):
-                rpc_client.bdev_lvol_set_leader(True, lvs_name=lvol.lvs_name)
 
             ret = delete_lvol_from_node(lvol.get_id(), primary_node.get_id())
             if not ret:
@@ -968,9 +956,6 @@ def delete_lvol(id_or_name, force_delete=False):
         if secondary_node:
             secondary_node = db_controller.get_storage_node_by_id(secondary_node.get_id())
             if secondary_node.status == StorageNode.STATUS_ONLINE:
-
-                if not is_node_leader(secondary_node, lvol.lvs_name):
-                    sec_rpc_client.bdev_lvol_set_leader(False, lvs_name=lvol.lvs_name)
 
                 ret = delete_lvol_from_node(lvol.get_id(), secondary_node.get_id())
                 if not ret:
@@ -1225,9 +1210,6 @@ def resize_lvol(id, new_size):
     error = False
     if lvol.ha_type == "single":
 
-        if not is_node_leader(snode, lvol.lvs_name):
-            rpc_client.bdev_lvol_set_leader(True, lvs_name=lvol.lvs_name)
-
         ret = rpc_client.bdev_lvol_resize(f"{lvol.lvs_name}/{lvol.lvol_bdev}", size_in_mib)
         if not ret:
             logger.error(f"Error resizing lvol on node: {snode.get_id()}")
@@ -1285,9 +1267,6 @@ def resize_lvol(id, new_size):
 
             rpc_client = RPCClient(primary_node.mgmt_ip, primary_node.rpc_port, primary_node.rpc_username,
                                        primary_node.rpc_password)
-
-            if not is_node_leader(primary_node, lvol.lvs_name):
-                rpc_client.bdev_lvol_set_leader(True, lvs_name=lvol.lvs_name)
 
             ret = rpc_client.bdev_lvol_resize(f"{lvol.lvs_name}/{lvol.lvol_bdev}", size_in_mib)
             if not ret:

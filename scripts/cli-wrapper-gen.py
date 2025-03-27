@@ -3,10 +3,14 @@ import yaml
 import sys
 import re
 
+def is_parameter(item):
+    return item["name"].startswith("--") or item["name"].startswith("-")
+
+
 def select_arguments(items):
     arguments = []
     for item in items:
-        if not item["name"].startswith("--"):
+        if not is_parameter(item):
             arguments.append(item)
     return arguments
 
@@ -14,7 +18,7 @@ def select_arguments(items):
 def select_parameters(items):
     parameters = []
     for item in items:
-        if item["name"].startswith("--"):
+        if is_parameter(item):
             parameters.append(item)
     return parameters
 
@@ -50,6 +54,7 @@ def data_type_name(item):
     else:
         return "unknown"
 
+
 def escape_python_string(text):
     return text.replace('%', '%%')
 
@@ -80,7 +85,7 @@ def default_value(item):
     elif type == "int":
         return value
     elif type == "bool":
-        return bool_value(value)
+        return value if isinstance(value, bool) else value.lower() == "true"
     else:
         raise "unknown data type %s" % type
 
@@ -108,6 +113,13 @@ def get_description(item):
         return no_newline(item["help"])
     else:
         return "<missing documentation>"
+
+
+def nargs(item):
+    value = item["nargs"]
+    if not isinstance(value, int) and value not in ('?', '*', '+'):
+        raise ValueError(f"Invalid nargs parameters: '{value}'")
+    return value if isinstance(value, int) else f"'{value}'"
 
 
 base_path = sys.argv[1]
@@ -138,6 +150,7 @@ with open("%s/cli-reference.yaml" % base_path) as stream:
         environment.filters["bool_value"] = bool_value
         environment.filters["split_value_range"] = split_value_range
         environment.filters["escape_python_string"] = escape_python_string
+        environment.filters["nargs"] = nargs
 
         template = environment.get_template("cli-wrapper.jinja2")
         output = template.render({"commands": reference["commands"]})

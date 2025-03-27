@@ -113,6 +113,16 @@ properties:
                       type: string
                       description: The name of the positional argument or parameter.
                       x-intellij-html-description: The name of the positional argument or parameter.
+                    aliases:
+                      type: array
+                      items:
+                        type: string
+                        description: |
+                          The aliases (e.g. long or short form) of the parameter. Aliases are ignored for positional
+                          arguments.
+                        x-intellij-html-description: |
+                          The aliases (e.g. long or short form) of the parameter. Aliases are ignored for positional
+                          arguments.
                     help:
                       type: string
                       description: The inline help of the positional argument or parameter.
@@ -191,7 +201,10 @@ properties:
                         The default value of the positional argument or parameter.<br>
                         Can be of type string, integer, boolean
                     nargs:
-                      type: string
+                      oneOf:
+                        - type: string
+                          pattern: '\+|\?|\*'
+                        - type: integer
                       description: The nargs value of the positional argument or parameter.
                       x-intellij-html-description: The nargs value of the positional argument or parameter.
                     private:

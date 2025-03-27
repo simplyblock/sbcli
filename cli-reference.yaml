@@ -20,6 +20,17 @@ commands:
               and the storage node.
             dest: ifname
             type: str
+          - name: "--cpu-mask"
+            help: "SPDK app CPU mask, default is all cores found"
+            dest: "spdk_cpu_mask"
+            required: false
+            type: str
+          - name: "--isolate-cores"
+            help: "Isolate cores in kernel args for provided cpu mask"
+            dest: isolate_cores
+            type: bool
+            default: false
+            action: store_true
       - name: deploy-cleaner
         help: "Cleans a previous simplyblock deploy (local run)"
         description: >
@@ -133,7 +144,7 @@ commands:
             dest: enable_ha_jm
             type: bool
             default: true
-            action: store_true
+            action: store_false
             private: true
           - name: "--ha-jm-count"
             help: "HA JM count"
@@ -364,16 +375,6 @@ commands:
             dest: node_id
             completer: _completer_get_sn_list
             type: str
-          - name: "-s"
-            help: "Sort the outputs"
-            dest: -s
-            type: str
-            choices:
-              - node-seq
-              - serial
-              - dev-seq
-            nargs: "1"
-            private: true
           - name: "--json"
             help: "Print outputs in json format"
             dest: json
@@ -609,6 +610,22 @@ commands:
             dest: node_id
             type: str
             completer: _completer_get_sn_list
+      - name: set
+        help: "set storage node db value"
+        private: true
+        arguments:
+          - name: "node_id"
+            help: "Storage node id"
+            dest: node_id
+            type: str
+          - name: "attr_name"
+            help: "attr_name"
+            dest: attr_name
+            type: str
+          - name: "attr_value"
+            help: "attr_value"
+            dest: attr_value
+            type: str
   - name: "cluster"
     help: "Cluster commands"
     weight: 200
@@ -657,7 +674,7 @@ commands:
             help: "Enable qos bdev for storage nodes"
             dest: enable_qos
             type: bool
-            action: store_true
+            default: true
             private: true
           - name: "--ifname"
             help: "Management interface name, e.g. eth0"
@@ -866,7 +883,7 @@ commands:
             dest: enable_ha_jm
             type: bool
             default: false
-            action: store_false
+            action: store_true
             private: true
           - name: "--is-secondary-node"
             help: >
@@ -911,6 +928,8 @@ commands:
             default: 25G
             private: true
           - name: "--snapshot"
+            aliases:
+              - "-s"
             help: "Make logical volume with snapshot capability, default: false"
             dest: snapshot
             type: bool
@@ -977,7 +996,7 @@ commands:
               - single
               - default
               - ha
-            default: default
+            default: ha
             private: true
           - name: "--lvol-priority-class"
             help: "Logical volume priority class"
@@ -1434,6 +1453,8 @@ commands:
             dest: pool
             type: str
           - name: "--snapshot"
+            aliases:
+              - "-s"
             help: "Make logical volume with snapshot capability, default: false"
             dest: snapshot
             type: bool
@@ -1442,7 +1463,8 @@ commands:
           - name: "--max-size"
             help: "Logical volume max size"
             dest: max_size
-            type: int
+            type: str
+            default: "1000T"
           - name: "--host-id"
             help: "Primary storage node id or Hostname"
             dest: host_id
@@ -1489,7 +1511,7 @@ commands:
               - single
               - default
               - ha
-            default: ha
+            default: default
           - name: "--lvol-priority-class"
             help: "Logical volume priority class"
             dest: lvol_priority_class
@@ -1901,9 +1923,9 @@ commands:
       - name: add
         help: "Creates a new snapshot"
         arguments:
-          - name: "snapshot_id"
+          - name: "volume_id"
             help: "Logical volume id"
-            dest: snapshot_id
+            dest: volume_id
             type: str
           - name: "name"
             help: "New snapshot name"

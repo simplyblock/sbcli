@@ -37,8 +37,15 @@ class CLIWrapperBase:
         return parent_parser.add_parser(command, description=help, help=help, usage=usage)
 
     def storage_node__deploy(self, sub_command, args):
-        return storage_ops.deploy(args.ifname)
-    
+        spdk_cpu_mask = None
+        if args.spdk_cpu_mask:
+            if self.validate_cpu_mask(args.spdk_cpu_mask):
+                spdk_cpu_mask = args.spdk_cpu_mask
+            else:
+                return f"Invalid cpu mask value: {args.spdk_cpu_mask}"
+        isolate_cores = args.isolate_cores
+        return storage_ops.deploy(args.ifname, spdk_cpu_mask, isolate_cores)
+
     def storage_node__deploy_cleaner(self, sub_command, args):
         return storage_ops.deploy_cleaner()
 
@@ -256,6 +263,9 @@ class CLIWrapperBase:
         node_id = args.node_id
         return storage_ops.dump_lvstore(node_id)
 
+    def storage_node__set(self, sub_command, args):
+        return storage_ops.set(args.node_id, args.attr_name, args.attr_value)
+
     def cluster__deploy(self, sub_command, args):
         return self.cluster_deploy(args)
 
@@ -410,13 +420,16 @@ class CLIWrapperBase:
     def volume__create_snapshot(self, sub_command, args):
         volume_id = args.volume_id
         name = args.name
-        return lvol_controller.create_snapshot(volume_id, name)
+        snapshot_id, error = lvol_controller.create_snapshot(volume_id, name)
+        return snapshot_id if not error else error
 
     def volume__clone(self, sub_command, args):
         new_size = 0
         if args.resize:
             new_size = self.parse_size(args.resize)
-        return snapshot_controller.clone(args.snapshot_id, args.clone_name, new_size)
+
+        clone_id, error = snapshot_controller.clone(args.snapshot_id, args.clone_name, new_size)
+        return clone_id if not error else error
 
     def volume__move(self, sub_command, args):
         return lvol_controller.move(args.volume_id, args.node_id, args.force)
@@ -520,7 +533,8 @@ class CLIWrapperBase:
         return pool_controller.get_io_stats(args.pool_id, args.history, args.records)
 
     def snapshot__add(self, sub_command, args):
-        return snapshot_controller.add(args.snapshot_id, args.name)
+        snapshot_id, error = snapshot_controller.add(args.volume_id, args.name)
+        return snapshot_id if not error else error
 
     def snapshot__list(self, sub_command, args):
         return snapshot_controller.list(args.all)
@@ -532,7 +546,9 @@ class CLIWrapperBase:
         new_size = 0
         if args.resize:
             new_size = self.parse_size(args.resize)
-        return snapshot_controller.clone(args.snapshot_id, args.lvol_name, new_size)
+
+        success, details = snapshot_controller.clone(args.snapshot_id, args.lvol_name, new_size)
+        return details
 
     def caching_node__deploy(self, sub_command, args):
         return caching_node_controller.deploy(args.ifname)
@@ -589,11 +605,8 @@ class CLIWrapperBase:
 
     def storage_node_list_devices(self, args):
         node_id = args.node_id
-        sort = args.sort
-        if sort:
-            sort = sort[0]
         is_json = args.json
-        out = storage_ops.list_storage_devices(node_id, sort, is_json)
+        out = storage_ops.list_storage_devices(node_id, is_json)
         return out
 
     def cluster_add(self, args):

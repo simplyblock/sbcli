@@ -639,29 +639,6 @@ def cluster_activate(cl_id, force=False, force_lvstore_create=False):
                 set_cluster_status(cl_id, ols_status)
                 return False
 
-    for snode in snodes:
-        if not snode.is_secondary_node:
-            continue
-        if snode.status != StorageNode.STATUS_ONLINE:
-            continue
-
-        ret = storage_node_ops.recreate_lvstore(snode)
-        snode = db_controller.get_storage_node_by_id(snode.get_id())
-        if ret:
-            snode.lvstore_status = "ready"
-            snode.write_to_db()
-
-        else:
-            snode.lvstore_status = "failed"
-            snode.write_to_db()
-
-            logger.error(f"Failed to restore lvstore on node {snode.get_id()}")
-            if not force:
-                logger.error("Failed to activate cluster")
-                set_cluster_status(cl_id, ols_status)
-                return False
-
-
 
     if not cluster.cluster_max_size:
         cluster = db_controller.get_cluster_by_id(cl_id)
@@ -1254,11 +1231,6 @@ def update_cluster(cl_id, mgmt_only=False, restart_cluster=False):
         logger.error(f"Cluster not found {cl_id}")
         return False
 
-    if cluster.status != Cluster.STATUS_ACTIVE:
-        logger.error(f"Cluster is not active")
-        return False
-
-
     try:
         sbcli=constants.SIMPLY_BLOCK_CLI_NAME
         out, _, ret_code = shell_utils.run_command(f"pip install {sbcli} --upgrade")
@@ -1273,6 +1245,7 @@ def update_cluster(cl_id, mgmt_only=False, restart_cluster=False):
         logger.info(f"Pulling image {constants.SIMPLY_BLOCK_DOCKER_IMAGE}")
         cluster_docker.images.pull(constants.SIMPLY_BLOCK_DOCKER_IMAGE)
         image_without_tag = constants.SIMPLY_BLOCK_DOCKER_IMAGE.split(":")[0]
+        image_without_tag = image_without_tag.split("/")[-1]
         for service in cluster_docker.services.list():
             if image_without_tag in service.attrs['Spec']['Labels']['com.docker.stack.image']:
                 logger.info(f"Updating service {service.name}")

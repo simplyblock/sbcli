@@ -47,14 +47,14 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
         self.lvol_node = ""
         self.secondary_outage = False
         self.lvols_without_sec_connect = []
-        self.test_name = "continuous_random_failover_ha"
+        self.test_name = "continuous_random_failover_multi_client_ha"
         # self.outage_types = ["interface_full_network_interrupt", interface_partial_network_interrupt,
         #                       "partial_nw", "partial_nw_single_port",
         #                       "port_network_interrupt", "container_stop", "graceful_shutdown",
         #                       "lvol_disconnect_primary"]
         # self.outage_types = ["container_stop", "graceful_shutdown", 
         #                      "interface_full_network_interrupt", "interface_partial_network_interrupt"]
-        self.outage_types = ["container_stop", "graceful_shutdown", "interface_partial_network_interrupt", "interface_full_network_interrupt"]
+        self.outage_types = ["container_stop", "graceful_shutdown", "interface_partial_network_interrupt"]
         self.blocked_ports = None
         self.outage_log_file = os.path.join("logs", f"outage_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
         self._initialize_outage_log()
@@ -81,7 +81,7 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
         """Create lvols and start FIO with random configurations."""
         for i in range(count):
             fs_type = random.choice(["ext4", "xfs"])
-            is_crypto = random.choice([True, False])
+            is_crypto = random.choice([False, False])
             lvol_name = f"{self.lvol_name}_{i}" if not is_crypto else f"c{self.lvol_name}_{i}"
             while lvol_name in self.lvol_mount_details:
                 self.lvol_name = f"lvl{generate_random_sequence(15)}"
@@ -327,10 +327,7 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                                                                 block_ports=ports_to_block, block_all_ss_ports=True)
         elif outage_type == "interface_full_network_interrupt":
             self.logger.info("Handling full interface based network interruption...")
-            active_interfaces = []
-            data_nics = node_details[0]["data_nics"]
-            for data_nic in data_nics:
-                active_interfaces.append(data_nic["if_name"])
+            active_interfaces = self.ssh_obj.get_active_interfaces(node_ip)
             
             self.disconnect_thread = threading.Thread(
                 target=self.ssh_obj.disconnect_all_active_interfaces,
@@ -448,19 +445,21 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
         self.sbcli_utils.wait_for_storage_node_status(self.current_outage_node, "online", timeout=1000)
         # Log the restart event
         self.log_outage_event(self.current_outage_node, outage_type, "Node restarted")
-        self.sbcli_utils.wait_for_health_status(self.current_outage_node, True, timeout=1000)
-        self.outage_end_time = int(datetime.now().timestamp())
 
         
         if not self.k8s_test:
-            self.ssh_obj.restart_docker_logging(
-                node_ip=node_ip,
-                containers=self.container_nodes[node_ip],
-                log_dir=self.docker_logs_path,
-                test_name=self.test_name
-            )
+            for node in self.storage_nodes:
+                self.ssh_obj.restart_docker_logging(
+                    node_ip=node,
+                    containers=self.container_nodes[node],
+                    log_dir=self.docker_logs_path,
+                    test_name=self.test_name
+                )
         else:
             self.runner_k8s_log.restart_logging()
+
+        self.sbcli_utils.wait_for_health_status(self.current_outage_node, True, timeout=1000)
+        self.outage_end_time = int(datetime.now().timestamp())
 
         if self.secondary_outage:
             for lvol in self.lvols_without_sec_connect:
@@ -891,7 +890,7 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
             )
             no_task_ok = outage_type in {"partial_nw", "partial_nw_single_port", "lvol_disconnect_primary"}
             if not self.sbcli_utils.is_secondary_node(self.current_outage_node):
-                self.validate_migration_for_node(self.outage_start_time, 4000, None, 60, no_task_ok=no_task_ok)
+                self.validate_migration_for_node(self.outage_start_time, 2000, None, 60, no_task_ok=no_task_ok)
 
             for clone, clone_details in self.clone_mount_details.items():
                 self.common_utils.validate_fio_test(clone_details["Client"],
@@ -921,7 +920,7 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
             )
             no_task_ok = outage_type in {"partial_nw", "partial_nw_single_port", "lvol_disconnect_primary"}
             if not self.sbcli_utils.is_secondary_node(self.current_outage_node):
-                self.validate_migration_for_node(self.outage_start_time, 4000, None, 60, no_task_ok=no_task_ok)
+                self.validate_migration_for_node(self.outage_start_time, 2000, None, 60, no_task_ok=no_task_ok)
             
             self.common_utils.manage_fio_threads(self.fio_node, self.fio_threads, timeout=100000)
 

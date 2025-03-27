@@ -396,32 +396,31 @@ for node in MNODES:
         print(f"[ERROR] Error processing Management Node {node}: {e}")
 
 # **Step 2: Process Storage Nodes (Only for Docker mode)**
-if not args.k8s:
-    for node in STORAGE_PRIVATE_IPS + SEC_STORAGE_PRIVATE_IPS:
-        try:
-            ssh = connect_ssh(node, bastion_ip=BASTION_IP)
-            print(f"[INFO] Processing Storage Node {node}...")
+for node in STORAGE_PRIVATE_IPS + SEC_STORAGE_PRIVATE_IPS:
+    try:
+        ssh = connect_ssh(node, bastion_ip=BASTION_IP)
+        print(f"[INFO] Processing Storage Node {node}...")
 
-            stdout, _ = exec_command(ssh, "sudo docker ps -aq")
-            container_ids = stdout.strip().split("\n")
+        stdout, _ = exec_command(ssh, "sudo docker ps -aq")
+        container_ids = stdout.strip().split("\n")
 
-            for container_id in container_ids:
-                if not container_id:
-                    continue
+        for container_id in container_ids:
+            if not container_id:
+                continue
 
-                stdout, _ = exec_command(ssh, f'sudo docker inspect --format="{{{{.Name}}}}" {container_id}')
-                container_name = stdout.strip().replace("/", "")
+            stdout, _ = exec_command(ssh, f'sudo docker inspect --format="{{{{.Name}}}}" {container_id}')
+            container_name = stdout.strip().replace("/", "")
 
-                log_file = f"{HOME_DIR}/{container_name}_{container_id}_{node}.txt"
-                exec_command(ssh, f"sudo docker logs {container_id} &> {log_file}")
-            if node in SEC_STORAGE_PRIVATE_IPS:
-                upload_from_remote(ssh, node, node_type="sec-storage")
-            else:
-                upload_from_remote(ssh, node, node_type="storage")
-            ssh.close()
-            print(f"[SUCCESS] Successfully processed Storage Node {node}")
-        except Exception as e:
-            print(f"[ERROR] Error processing Storage Node {node}: {e}")
+            log_file = f"{HOME_DIR}/{container_name}_{container_id}_{node}.txt"
+            exec_command(ssh, f"sudo docker logs {container_id} &> {log_file}")
+        if node in SEC_STORAGE_PRIVATE_IPS:
+            upload_from_remote(ssh, node, node_type="sec-storage")
+        else:
+            upload_from_remote(ssh, node, node_type="storage")
+        ssh.close()
+        print(f"[SUCCESS] Successfully processed Storage Node {node}")
+    except Exception as e:
+        print(f"[ERROR] Error processing Storage Node {node}: {e}")
 
 for node in CLIENTNODES:
     try:
@@ -431,10 +430,10 @@ for node in CLIENTNODES:
         upload_from_remote(ssh, node, node_type="client")
 
         ssh.close()
-        print(f"[SUCCESS] Successfully processed Management Node {node}")
+        print(f"[SUCCESS] Successfully processed Client Node {node}")
 
     except Exception as e:
-        print(f"[ERROR] Error processing Management Node {node}: {e}")
+        print(f"[ERROR] Error processing Client Node {node}: {e}")
 
 # **Step 3: Process Kubernetes Nodes (Upload logs directly from runner)**
 if args.k8s:
