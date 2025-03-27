@@ -108,6 +108,8 @@ class CLIWrapperBase:
             id_device_by_nqn=args.id_device_by_nqn,
             partition_size=args.partition_size,
             ha_jm_count=ha_jm_count,
+            storage_block_devices=args.storage_block_devices,
+            journal_block_device=args.journal_block_device,
         )
 
         return out

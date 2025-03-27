@@ -64,7 +64,7 @@ class StorageNode(BaseNodeObject):
     num_partitions_per_dev: int = 1
     number_of_devices: int = 0
     number_of_distribs: int = 4
-    devices: List[NVMeDevice] = []
+    nvme_devices: List[NVMeDevice] = []
     online_since: str = ""
     partitions_count: int = 0
     poller_cpu_cores: List[int] = []

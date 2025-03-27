@@ -3,6 +3,7 @@ import datetime
 import json
 import math
 import os
+from pathlib import Path
 
 import pprint
 
@@ -236,6 +237,43 @@ def get_next_physical_device_order():
     if found:
         return max_order + 1
     return 0
+
+
+def _storage_block_device(db_controller, rpc_client, snode, block_device):
+    bdev = utils.ensure_one(rpc_client.get_bdevs(
+            rpc_client.bdev_aio_create('aio_' + Path(block_device).name, block_device)
+    ))
+
+    device = NVMeDevice({
+            'uuid': str(uuid.uuid4()),
+            'device_name': bdev['name'],
+            'size': bdev['num_blocks'] * bdev['block_size'],
+            'nvme_bdev': bdev['name'],
+            'node_id': snode.get_id(),
+            'cluster_id': snode.cluster_id,
+            'cluster_device_order': get_next_cluster_device_order(db_controller, snode.cluster_id),
+            'status': NVMeDevice.STATUS_ONLINE
+    })
+    _create_storage_device_stack(rpc_client, device, snode, after_restart=False)
+    device_events.device_create(device)
+    return device
+
+
+def _journal_block_device(db_controller, rpc_client, snode, block_device):
+    bdev = utils.ensure_one(rpc_client.get_bdevs(
+            rpc_client.bdev_aio_create('aio_' + Path(block_device).name, block_device)
+    ))
+
+    return _create_jm_stack_on_device(rpc_client, NVMeDevice({
+            'uuid': str(uuid.uuid4()),
+            'device_name': bdev['name'],
+            'size': bdev['num_blocks'] * bdev['block_size'],
+            'nvme_bdev': bdev['name'],
+            'node_id': snode.get_id(),
+            'cluster_id': snode.cluster_id,
+            'cluster_device_order': get_next_cluster_device_order(db_controller, snode.cluster_id),
+            'status': NVMeDevice.STATUS_ONLINE
+    }), snode, after_restart=False)
 
 
 def _search_for_partitions(rpc_client, nvme_device):
@@ -936,7 +974,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
              small_bufsize=0, large_bufsize=0, spdk_cpu_mask=None,
              num_partitions_per_dev=0, jm_percent=0, number_of_devices=0, enable_test_device=False,
              namespace=None, number_of_distribs=2, enable_ha_jm=False, is_secondary_node=False, id_device_by_nqn=False,
-             partition_size="", ha_jm_count=3):
+             partition_size="", ha_jm_count=3, storage_block_devices=[], journal_block_device=None):
 
     db_controller = DBController()
     kv_store = db_controller.kv_store
@@ -1027,6 +1065,10 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
         if jc_singleton_core:
             jc_singleton_mask = utils.decimal_to_hex_power_of_2(jc_singleton_core[0])
         jm_cpu_mask = utils.generate_mask(jm_cpu_core)
+
+
+    if len(storage_block_devices) > 0:
+        number_of_devices = len(storage_block_devices)
 
     # Calculate pool count
     if cloud_instance['type']:
@@ -1300,29 +1342,41 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
     node_info, _ = snode_api.info()
 
     # discover devices
-    nvme_devs = addNvmeDevices(snode, node_info['spdk_pcie_list'])
-    if nvme_devs:
+    use_block_storage = len(storage_block_devices) > 0 and journal_block_device is not None
+    if not use_block_storage:
+        nvme_devs = addNvmeDevices(snode, node_info['spdk_pcie_list'])
+        if nvme_devs:
 
-        if not is_secondary_node:
+            if not is_secondary_node:
 
-            for nvme in nvme_devs:
-                nvme.status = NVMeDevice.STATUS_ONLINE
+                for nvme in nvme_devs:
+                    nvme.status = NVMeDevice.STATUS_ONLINE
 
-            # prepare devices
-            if snode.num_partitions_per_dev == 0 or snode.jm_percent == 0:
+                # prepare devices
+                if snode.num_partitions_per_dev == 0 or snode.jm_percent == 0:
 
-                jm_device = nvme_devs[0]
-                for index, nvme in enumerate(nvme_devs):
-                    if nvme.size < jm_device.size:
-                        jm_device = nvme
-                jm_device.status = NVMeDevice.STATUS_JM
+                    jm_device = nvme_devs[0]
+                    for index, nvme in enumerate(nvme_devs):
+                        if nvme.size < jm_device.size:
+                            jm_device = nvme
+                    jm_device.status = NVMeDevice.STATUS_JM
 
-                ret = _prepare_cluster_devices_jm_on_dev(snode, nvme_devs)
-            else:
-                ret = _prepare_cluster_devices_partitions(snode, nvme_devs)
-            if not ret:
-                logger.error("Failed to prepare cluster devices")
-                return False
+                    ret = _prepare_cluster_devices_jm_on_dev(snode, nvme_devs)
+                else:
+                    ret = _prepare_cluster_devices_partitions(snode, nvme_devs)
+                if not ret:
+                    logger.error("Failed to prepare cluster devices")
+                    return False
+    else:
+        if snode.num_partitions_per_dev != 0 or snode.jm_percent != 0:
+            logger.error("Block devices only allowed with dedicated journal device")
+            return False
+
+        snode.nvme_devices = [
+            _storage_block_device(db_controller, rpc_client, snode, block_device)
+            for block_device in storage_block_devices
+        ]
+        snode.jm_device = _journal_block_device(db_controller, rpc_client, snode, journal_block_device)
 
     logger.info("Connecting to remote devices")
     remote_devices = _connect_to_remote_devs(snode)
@@ -1641,6 +1695,9 @@ def restart_storage_node(
         return False
     if spdk_image:
         snode.spdk_image = spdk_image
+
+    if len(storage_block_devices) > 0:
+        number_of_devices = len(storage_block_devices)
 
     # Calculate pool count
     if snode.cloud_instance_type:

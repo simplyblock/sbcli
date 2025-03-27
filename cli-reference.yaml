@@ -176,6 +176,16 @@ commands:
             type: int
             default: 5000
             private: true
+          - name: "--storage-block-devices"
+            dest: "storage_block_devices"
+            help: "Block devices to use for storage. Used in conjunction with --journal_block_device."
+            type: str
+            nargs: "+"
+          - name: "--journal-block-device"
+            dest: "journal_block_device"
+            help: "Block device to use for the journal. Used in conjunction with --storage_block_devices."
+            type: str
+
       - name: delete
         help: "Deletes a storage node object from the state database."
         usage: >

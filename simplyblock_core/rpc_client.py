@@ -694,6 +694,17 @@ class RPCClient:
         }
         return self._request("bdev_malloc_create", params)
 
+    def bdev_aio_create(self, name, device):
+        response, error =  self._request2("bdev_aio_create", {
+            "name": name,
+            "filename": device,
+        })
+
+        if error:
+            raise ValueError(f"Failed to create AIO device: {error}")
+
+        return response
+
     def ultra21_lvol_bmap_init(self, bdev_name, num_blocks, block_len, page_len, max_num_blocks):
         params = {
             "base_bdev": bdev_name,

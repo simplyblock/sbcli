@@ -27,6 +27,12 @@ CONFIG_KEYS = [
     "jc_singleton_core",
 ]
 
+def ensure_one(xs):
+    if len(xs) != 1:
+        raise ValueError("Argument does not contain a signle element")
+
+    return xs[0]
+
 def get_env_var(name, default=None, is_required=False):
     if not name:
         logger.warning("Invalid env var name %s", name)

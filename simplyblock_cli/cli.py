@@ -123,6 +123,8 @@ class CLIWrapper(CLIWrapperBase):
             argument = subcommand.add_argument('--id-device-by-nqn', help='Use device nqn to identify it instead of serial number', dest='id_device_by_nqn', required=False, action='store_true')
         if self.developer_mode:
             argument = subcommand.add_argument('--max-snap', help='Max snapshot per storage node', type=int, default=5000, dest='max_snap', required=False)
+        argument = subcommand.add_argument('--storage-block-devices', help='Block devices to use for storage. Used in conjunction with --journal_block_device.', type=str, dest='storage_block_devices', required=False, nargs='+')
+        argument = subcommand.add_argument('--journal-block-device', help='Block device to use for the journal. Used in conjunction with --storage_block_devices.', type=str, dest='journal_block_device', required=False)
 
     def init_storage_node__delete(self, subparser):
         subcommand = self.add_sub_command(subparser, 'delete', 'Deletes a storage node object from the state database.')
