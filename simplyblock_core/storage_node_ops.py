@@ -1694,7 +1694,6 @@ def restart_storage_node(
     if not satisfied:
         logger.error(
             f"Not enough memory for the provided max_lvo: {snode.max_lvol}, max_snap: {snode.max_snap}, max_prov: {utils.humanbytes(snode.max_prov)}.. Exiting")
-        return False
 
     spdk_debug = snode.spdk_debug
     if set_spdk_debug:
