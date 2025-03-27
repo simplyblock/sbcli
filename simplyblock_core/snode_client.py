@@ -107,7 +107,10 @@ class SNodeClient:
         return self._request("POST", "join_swarm", params)
 
     def spdk_process_kill(self):
-        return self._request("GET", "spdk_process_kill")
+        try:
+            return self._request("GET", "spdk_process_kill")
+        except Exception as e:
+            return False
 
     def leave_swarm(self):
         return self._request("GET", "leave_swarm")
