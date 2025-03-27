@@ -81,6 +81,9 @@ def add(lvol_id, snapshot_name):
             return False, msg
 
     cluster = db_controller.get_cluster_by_id(pool.cluster_id)
+    if cluster.status not in [cluster.STATUS_ACTIVE, cluster.STATUS_DEGRADED]:
+        return False, f"Cluster is not active, status: {cluster.status}"
+
     snap_bdev_name = f"SNAP_{utils.get_random_vuid()}"
     size = lvol.size
     blobid = 0
@@ -90,8 +93,6 @@ def add(lvol_id, snapshot_name):
     if lvol.ha_type == "single":
         if snode.status == StorageNode.STATUS_ONLINE:
             rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
-            if not lvol_controller.is_node_leader(snode, lvol.lvs_name):
-                rpc_client.bdev_lvol_set_leader(True, lvs_name=lvol.lvs_name)
             logger.info("Creating Snapshot bdev")
             ret = rpc_client.lvol_create_snapshot(f"{lvol.lvs_name}/{lvol.lvol_bdev}", snap_bdev_name)
             if not ret:
@@ -143,9 +144,6 @@ def add(lvol_id, snapshot_name):
             rpc_client = RPCClient(
                 primary_node.mgmt_ip, primary_node.rpc_port, primary_node.rpc_username, primary_node.rpc_password)
 
-            if not lvol_controller.is_node_leader(primary_node, lvol.lvs_name):
-                rpc_client.bdev_lvol_set_leader(True, lvs_name=lvol.lvs_name)
-
             logger.info("Creating Snapshot bdev")
             ret = rpc_client.lvol_create_snapshot(f"{lvol.lvs_name}/{lvol.lvol_bdev}", snap_bdev_name)
             if not ret:
@@ -165,9 +163,6 @@ def add(lvol_id, snapshot_name):
         if secondary_node:
             sec_rpc_client = RPCClient(
                 secondary_node.mgmt_ip, secondary_node.rpc_port, secondary_node.rpc_username, secondary_node.rpc_password)
-
-            if lvol_controller.is_node_leader(primary_node, lvol.lvs_name):
-                sec_rpc_client.bdev_lvol_set_leader(False, lvs_name=lvol.lvs_name)
 
             ret = sec_rpc_client.bdev_lvol_snapshot_register(
                 f"{lvol.lvs_name}/{lvol.lvol_bdev}", snap_bdev_name, snap_uuid, blobid)
@@ -265,12 +260,6 @@ def delete(snapshot_uuid, force_delete=False):
                 snode.rpc_port,
                 snode.rpc_username,
                 snode.rpc_password)
-            if not lvol_controller.is_node_leader(snode, snap.lvol.lvs_name):
-                ret = rpc_client.bdev_lvol_set_leader(True, lvs_name=snap.lvol.lvs_name)
-                if not ret:
-                    logger.error(f"Failed to set leader for primary node: {snode.get_id()}")
-                    if not force_delete:
-                        return False
 
             ret = rpc_client.delete_lvol(snap.snap_bdev)
             if not ret:
@@ -332,13 +321,6 @@ def delete(snapshot_uuid, force_delete=False):
             rpc_client = RPCClient(primary_node.mgmt_ip, primary_node.rpc_port, primary_node.rpc_username,
                                        primary_node.rpc_password)
 
-            if not lvol_controller.is_node_leader(primary_node, snap.lvol.lvs_name):
-                ret = rpc_client.bdev_lvol_set_leader(True, lvs_name=snap.lvol.lvs_name)
-                if not ret:
-                    logger.error(f"Failed to set leader for primary node: {snode.get_id()}")
-                    if not force_delete:
-                        return False
-
             ret = rpc_client.delete_lvol(snap.snap_bdev)
             if not ret:
                 logger.error(f"Failed to delete snap from node: {snode.get_id()}")
@@ -348,18 +330,8 @@ def delete(snapshot_uuid, force_delete=False):
         if secondary_node:
             secondary_node = db_controller.get_storage_node_by_id(secondary_node.get_id())
             if secondary_node.status == StorageNode.STATUS_ONLINE:
-
                 sec_rpc_client = RPCClient(secondary_node.mgmt_ip, secondary_node.rpc_port, secondary_node.rpc_username,
                                            secondary_node.rpc_password)
-
-                if lvol_controller.is_node_leader(secondary_node, snap.lvol.lvs_name):
-                    if not lvol_controller.is_node_leader(snode, snap.lvol.lvs_name):
-                        ret = sec_rpc_client.bdev_lvol_set_leader(True, lvs_name=snap.lvol.lvs_name)
-                        if not ret:
-                            logger.error(f"Failed to set leader for node: {secondary_node.get_id()}")
-                            if not force_delete:
-                                return False
-
                 ret = sec_rpc_client.delete_lvol(snap.snap_bdev)
                 if not ret:
                     logger.error(f"Failed to delete snap from node: {secondary_node.get_id()}")
@@ -402,10 +374,9 @@ def clone(snapshot_id, clone_name, new_size=0):
         logger.error(msg)
         return False, msg
 
-    # if snode.status != snode.STATUS_ONLINE:
-    #     msg = "Storage node in not Online"
-    #     logger.error(msg)
-    #     return False, msg
+    cluster = db_controller.get_cluster_by_id(pool.cluster_id)
+    if cluster.status not in [cluster.STATUS_ACTIVE, cluster.STATUS_DEGRADED]:
+        return False, f"Cluster is not active, status: {cluster.status}"
 
     ref_count = snap.ref_count
     if snap.snap_ref_id:
@@ -449,9 +420,6 @@ def clone(snapshot_id, clone_name, new_size=0):
             msg = f"Pool max size has reached {utils.humanbytes(total)} of {utils.humanbytes(pool.pool_max_size)}"
             logger.error(msg)
             return False, msg
-
-
-    cluster = db_controller.get_cluster_by_id(snode.cluster_id)
 
     lvol = LVol()
     lvol.uuid = str(uuid.uuid4())
