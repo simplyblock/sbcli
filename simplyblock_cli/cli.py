@@ -587,7 +587,7 @@ class CLIWrapper(CLIWrapperBase):
         argument = subcommand.add_argument('--max-w-mbytes', help='Maximum Write Megabytes Per Second', type=int, dest='max_w_mbytes', required=False)
         if self.developer_mode:
             argument = subcommand.add_argument('--distr-vuid', help='(Dev) set vuid manually, default: random (1-99999)', type=int, dest='distr_vuid', required=False)
-        argument = subcommand.add_argument('--ha-type', help='Logical volume HA type (single, ha), default is cluster HA type', type=str, default='ha', dest='ha_type', required=False, choices=['single','default','ha',])
+        argument = subcommand.add_argument('--ha-type', help='Logical volume HA type (single, ha), default is cluster HA type', type=str, default='default', dest='ha_type', required=False, choices=['single','default','ha',])
         argument = subcommand.add_argument('--lvol-priority-class', help='Logical volume priority class', type=int, default=0, dest='lvol_priority_class', required=False)
         argument = subcommand.add_argument('--namespace', help='Set logical volume namespace for k8s clients', type=str, dest='namespace', required=False)
         if self.developer_mode:
