@@ -2857,7 +2857,7 @@ def recreate_lvstore_on_sec(snode):
 
             remote_rpc_client.bdev_lvol_set_leader(False, lvs_name=node.lvstore)
             remote_rpc_client.bdev_distrib_force_to_non_leader(node.jm_vuid)
-            time.sleep(1)
+            # time.sleep(1)
 
         # ret, err = _create_bdev_stack(snode, node.lvstore_stack, primary_node=node)
         ret = rpc_client.bdev_examine(node.raid)
@@ -2873,7 +2873,7 @@ def recreate_lvstore_on_sec(snode):
             node.lvstore_status = "ready"
             node.write_to_db()
 
-        time.sleep(1)
+        # time.sleep(1)
         for lvol in lvol_list:
             is_created, error = add_lvol_thread(lvol, snode)
 
@@ -2959,7 +2959,7 @@ def recreate_lvstore(snode):
 
             sec_rpc_client.bdev_lvol_set_leader(False, lvs_name=snode.lvstore, bs_nonleadership=True)
             sec_rpc_client.bdev_distrib_force_to_non_leader(snode.jm_vuid)
-            time.sleep(1)
+            # time.sleep(1)
 
 
     ret = rpc_client.bdev_examine(snode.raid)
