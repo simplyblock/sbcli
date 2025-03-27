@@ -48,7 +48,7 @@ def push_metrics(reactor_data, thread_data, cluster_id, snode):
 
         cpu_utilization_gauge.labels(cluster=cluster_id, snode=snode_id, node_ip=snode_ip, core_id=str(lcore), thread_names=thread_names).set(core_utilization_percent)
 
-    push_to_gateway(PUSHGATEWAY_URL, job='metricsgateway', registry=registry)
+    push_to_gateway(PUSHGATEWAY_URL, job='metricsgateway', grouping_key={'cluster': str(cluster_id), 'snode': str(snode_id)}, registry=registry)
     logger.info("Metrics pushed successfully")
 
 logger.info("Starting spdk stats collector...")
