@@ -5,7 +5,6 @@ import json
 import logging
 import os
 import socket
-import ssl
 import sys
 
 from http.server import HTTPServer
@@ -64,7 +63,7 @@ def rpc_call(req):
     sock.close()
 
     if not response and len(buf) > 0:
-        raise
+        raise ValueError('Invalid response')
 
     logger.debug(f"Response data: {buf}")
 
@@ -132,7 +131,7 @@ class ServerHandler(BaseHTTPRequestHandler):
                 self.do_INTERNALERROR()
 
 
-def run_server(host, port, user, password, cert=None, is_threading_enabled=False):
+def run_server(host, port, user, password, is_threading_enabled=False):
     # encoding user and password
     key = base64.b64encode((user+':'+password).encode(encoding='ascii')).decode('ascii')
 
@@ -143,8 +142,6 @@ def run_server(host, port, user, password, cert=None, is_threading_enabled=False
         else:
             httpd = HTTPServer((host, port), ServerHandler)
         httpd.timeout = TIMEOUT
-        if cert is not None:
-            httpd.socket = ssl.wrap_socket(httpd.socket, certfile=cert, server_side=True)
         logger.info('Started RPC http proxy server')
         httpd.serve_forever()
     except KeyboardInterrupt:
