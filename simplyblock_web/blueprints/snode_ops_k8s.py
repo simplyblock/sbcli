@@ -144,20 +144,11 @@ def delete_cluster_id():
 
 
 def get_cores_config(cpu_count):
-
-    try:
-        spdk_cpu_mask = hex(int(math.pow(2, cpu_count)) - 2)
-        cores_config = {
-            "cpu_mask": spdk_cpu_mask
-        }
-        return cores_config
-
-    except FileNotFoundError:
-        logger.error(f"The file '{file_path}' does not exist.")
-        return {}
-    except json.JSONDecodeError as e:
-        logger.error(f"Error decoding JSON: {e}")
-        return {}
+    spdk_cpu_mask = hex(int(math.pow(2, cpu_count)) - 2)
+    cores_config = {
+        "cpu_mask": spdk_cpu_mask
+    }
+    return cores_config
 
 
 @bp.route('/info', methods=['GET'])
