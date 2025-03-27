@@ -522,31 +522,27 @@ def calculate_pool_count(alceml_count, number_of_distribs, cpu_count, poller_cou
 
     '''
     poller_number = poller_count if poller_count else cpu_count
-    #small_pool_count = (3 + alceml_count + lvol_count + 2 * snap_count + 1) * 256 + poller_number * 127 + 384 + 128 * poller_number + constants.EXTRA_SMALL_POOL_COUNT
-
+    
     small_pool_count = 384 * (alceml_count + number_of_distribs + 3 + poller_count) + (6 + alceml_count + number_of_distribs) * 256 + poller_number * 127 + 384 + 128 * poller_number + constants.EXTRA_SMALL_POOL_COUNT
-    #large_pool_count = (3 + alceml_count + lvol_count + 2 * snap_count + 1) * 32 + poller_number * 15 + 384 + 16 * poller_number + constants.EXTRA_LARGE_POOL_COUNT
     large_pool_count = 48 * (alceml_count + number_of_distribs + 3 + poller_count) + (6 + alceml_count + number_of_distribs) * 32 + poller_number * 15 + 384 + 16 * poller_number + constants.EXTRA_LARGE_POOL_COUNT
-    return 2*small_pool_count, 2*large_pool_count
-
-
-def calculate_minimum_hp_memory(small_pool_count, large_pool_count, lvol_count, max_prov, cpu_count):
+    
     '''
-    1092 (initial consumption) + 4 * CPU + 1.0277 * POOL_COUNT(Sum in MB) + (25) * lvol_count
-    then you can amend the expected memory need for the creation of lvols (6MB),
-    connection number over lvols (7MB per connection), creation of snaps (12MB),
-    extra buffer 2GB
-    return: minimum_hp_memory in bytes
+    50% contingency
+    '''
+    
+    return 1.5*small_pool_count, 1.5*large_pool_count
+
+    '''
+    return: minimum_hp_memory in bytes +50% contingency)
     '''
     pool_consumption = (small_pool_count * 8 + large_pool_count * 128) / 1024 + 1092
-    max_prov_tb = max_prov / (1024 * 1024 * 1024 * 1024)
-    memory_consumption = (4 * cpu_count + 1.0277 * pool_consumption + 25 * lvol_count) * (1024 * 1024) + (250 * 1024 * 1024) * 1.1 * max_prov_tb + constants.EXTRA_HUGE_PAGE_MEMORY
+    memory_consumption = (4 * cpu_count + 1.0277 * pool_consumption + 18 * lvol_count) * (1024 * 1024) + constants.EXTRA_HUGE_PAGE_MEMORY
     return int(memory_consumption*1.5)
 
 
 def calculate_minimum_sys_memory(max_prov, total):
     max_prov_tb = max_prov / (1024 * 1024 * 1024 * 1024)
-    minimum_sys_memory = (250 * 1024 * 1024) * 1.1 * max_prov_tb + (constants.EXTRA_SYS_MEMORY * total)
+    minimum_sys_memory = (250 * 1024 * 1024) * 1.5 * max_prov_tb + (constants.EXTRA_SYS_MEMORY * total)
     logger.debug(f"Minimum system memory is {humanbytes(minimum_sys_memory)}")
     return int(minimum_sys_memory)
 
