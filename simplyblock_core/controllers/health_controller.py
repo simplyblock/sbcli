@@ -470,7 +470,7 @@ def check_lvol_on_node(lvol_id, node_id, node_bdev_names=None, node_lvols_nqns=N
     try:
         for bdev_info in lvol.bdev_stack:
             bdev_name = bdev_info['name']
-            if bdev_info['type'] == "bdev_lvol":
+            if bdev_info['type'] in ["bdev_lvol", "bdev_lvol_clone"]:
                 bdev_name = lvol.lvol_uuid
 
             if bdev_name in node_bdev_names:
