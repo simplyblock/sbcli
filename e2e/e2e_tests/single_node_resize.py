@@ -32,7 +32,6 @@ class TestSingleNodeResizeLvolCone(TestClusterBase):
         """ Performs each step of the testcase
         """
         self.logger.info("Inside run function")
-        initial_devices = self.ssh_obj.get_devices(node=self.mgmt_nodes[0])
 
         self.sbcli_utils.add_storage_pool(
             pool_name=self.pool_name
@@ -65,8 +64,10 @@ class TestSingleNodeResizeLvolCone(TestClusterBase):
                 size="5G"
             )
             lvols = self.sbcli_utils.list_lvols()
-            assert self.lvol_name in list(lvols.keys()), \
-                f"Lvol {self.lvol_name} present in list of lvols post add: {lvols}"
+            assert lvol_name in list(lvols.keys()), \
+                f"Lvol {lvol_name} is not present in list of lvols post add: {lvols}"
+
+            initial_devices = self.ssh_obj.get_devices(node=self.mgmt_nodes[0])
 
             connect_ls = self.sbcli_utils.get_lvol_connect_str(lvol_name=lvol_name)
             for connect_str in connect_ls:
@@ -105,15 +106,18 @@ class TestSingleNodeResizeLvolCone(TestClusterBase):
             mount_path = f"{self.mount_path}_cl_{i}"
             log_path = f"{self.log_path}_cl_{i}"
             self.logger.info("Taking snapshot")
-            self.ssh_obj.add_snapshot(node=self.mgmt_nodes[0],
-                                    lvol_id=self.sbcli_utils.get_lvol_id(self.lvol_name),
-                                    snapshot_name=snap_name)
-            snapshot_id = self.ssh_obj.get_snapshot_id(node=self.mgmt_nodes[0],
-                                                       snapshot_name=snap_name)
+            self.sbcli_utils.add_snapshot(
+                lvol_id=self.sbcli_utils.get_lvol_id(lvol_name),
+                snapshot_name=snap_name
+            )
+            sleep_n_sec(5)
+            snapshot_id = self.sbcli_utils.get_snapshot_id(snap_name=snap_name)
             
-            self.ssh_obj.add_clone(node=self.mgmt_nodes[0],
-                                   snapshot_id=snapshot_id,
-                                   clone_name=clone_name)
+            self.sbcli_utils.add_clone(snapshot_id=snapshot_id, clone_name=clone_name)
+            
+            clone = self.sbcli_utils.list_lvols()
+            assert clone_name in list(clone.keys()), \
+                f"Clone {clone_name} is not present in list of lvols post add: {lvols}"
             
             initial_devices = self.ssh_obj.get_devices(node=self.mgmt_nodes[0])
             connect_ls = self.sbcli_utils.get_lvol_connect_str(lvol_name=clone_name)
@@ -143,6 +147,12 @@ class TestSingleNodeResizeLvolCone(TestClusterBase):
             fio_thread.start()
             fio_threads.append(fio_thread)
 
+        for node in self.storage_nodes:
+            files = self.ssh_obj.list_files(node, "/etc/simplyblock/")
+            self.logger.info(f"Files in /etc/simplyblock: {files}")
+            if "core" in files and "tmp_cores" not in files:
+                raise Exception("Core file present! Not starting resize!!")
+            
         for i in range(1, 11):
             for j in range(1, 6):
                 lvol_name = f"{self.lvol_name}_{j}"
@@ -151,7 +161,13 @@ class TestSingleNodeResizeLvolCone(TestClusterBase):
                                             new_size=f"{lvol_size + i}G")
                 self.sbcli_utils.resize_lvol(lvol_id=self.sbcli_utils.get_lvol_id(clone_name),
                                             new_size=f"{lvol_size + i}G")
-        
+                
+                for node in self.storage_nodes:
+                    files = self.ssh_obj.list_files(node, "/etc/simplyblock/")
+                    self.logger.info(f"Files in /etc/simplyblock: {files}")
+                    if "core" in files and "tmp_cores" not in files:
+                        raise Exception("Core file present! Not continuing resize!!")
+            
         lvol_size = lvol_size + 20
         
         self.common_utils.manage_fio_threads(node=self.mgmt_nodes[0],

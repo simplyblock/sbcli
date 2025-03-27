@@ -669,3 +669,54 @@ class SbcliUtils:
             if result['is_secondary_node'] is True:
                 sec_nodes.append(result["uuid"])
         return node_id in sec_nodes
+    
+    def add_snapshot(self, lvol_id, snapshot_name, retry=3):
+        """Adds snapshot with given params
+        """
+        
+        body = {
+            "lvol_id": lvol_id,
+            "snapshot_name": snapshot_name,
+        }
+        
+        self.post_request(api_url="/snapshot", body=body, retry=retry)
+
+    def add_clone(self, snapshot_id, clone_name, retry=3):
+        """Adds clone with given params
+        """
+        
+        body = {
+            "snapshot_id": snapshot_id,
+            "clone_name": clone_name,
+        }
+        
+        self.post_request(api_url="/snapshot/clone", body=body, retry=retry)
+
+    def list_snapshot(self):
+        """Return all snapshots
+        """
+        snap_data = dict()
+        data = self.get_request(api_url="/snapshot")
+        for snap_info in data["results"]:
+            snap_data[snap_info["snap_name"]] = snap_info["id"]
+        self.logger.info(f"Snap List: {snap_data}")
+        return snap_data
+
+    def get_snapshot_id(self, snap_name):
+        """Get snapshot id
+        """
+        snap_list = self.list_snapshot()
+        return snap_list.get(snap_name, None)
+
+
+    def delete_snapshot(self, snap_name):
+        """Deletes lvol with given name
+        """
+        snap_id = self.get_snapshot_id(snap_name=snap_name)
+
+        if not snap_id:
+            self.logger.info("Snap does not exist. Exiting")
+            return
+
+        data = self.delete_request(api_url=f"/snapshot/{snap_id}")
+        self.logger.info(f"Delete snap resp: {data}")

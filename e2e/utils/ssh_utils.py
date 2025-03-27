@@ -44,6 +44,7 @@ class SshUtils:
         self.ssh_user = os.environ.get("SSH_USER", None)
         self.log_monitor_threads = {}
         self.log_monitor_stop_flags = {}
+        self.ssh_semaphore = threading.Semaphore(10)  # Max 10 SSH calls in parallel (tune as needed)
 
     def connect(self, address: str, port: int = 22,
                 bastion_server_address: str = None,
@@ -144,93 +145,94 @@ class SshUtils:
         """
         retry_count = 0
         while retry_count < max_retries:
-            ssh_connection = self.ssh_connections.get(node)
-            try:
-                # Ensure the SSH connection is active, otherwise reconnect
-                if not ssh_connection or not ssh_connection.get_transport().is_active() or retry_count > 0:
-                    self.logger.info(f"Reconnecting SSH to node {node}")
-                    self.connect(
-                        address=node,
-                        is_bastion_server=True if node == self.bastion_server else False
-                    )
-                    ssh_connection = self.ssh_connections[node]
-                
-                if not supress_logs:
-                    self.logger.info(f"Executing command: {command}")
-                stdin, stdout, stderr = ssh_connection.exec_command(command, timeout=timeout)
+            with self.ssh_semaphore:
+                ssh_connection = self.ssh_connections.get(node)
+                try:
+                    # Ensure the SSH connection is active, otherwise reconnect
+                    if not ssh_connection or not ssh_connection.get_transport().is_active() or retry_count > 0:
+                        self.logger.info(f"Reconnecting SSH to node {node}")
+                        self.connect(
+                            address=node,
+                            is_bastion_server=True if node == self.bastion_server else False
+                        )
+                        ssh_connection = self.ssh_connections[node]
+                    
+                    if not supress_logs:
+                        self.logger.info(f"Executing command: {command}")
+                    stdin, stdout, stderr = ssh_connection.exec_command(command, timeout=timeout)
 
-                output = []
-                error = []
+                    output = []
+                    error = []
 
-                # Read stdout and stderr dynamically if stream_callback is provided
-                if stream_callback:
-                    while not stdout.channel.exit_status_ready():
-                        # Process stdout
+                    # Read stdout and stderr dynamically if stream_callback is provided
+                    if stream_callback:
+                        while not stdout.channel.exit_status_ready():
+                            # Process stdout
+                            if stdout.channel.recv_ready():
+                                chunk = stdout.channel.recv(1024).decode()
+                                output.append(chunk)
+                                stream_callback(chunk, is_error=False)  # Callback for stdout
+
+                            # Process stderr
+                            if stderr.channel.recv_stderr_ready():
+                                chunk = stderr.channel.recv_stderr(1024).decode()
+                                error.append(chunk)
+                                stream_callback(chunk, is_error=True)  # Callback for stderr
+
+                            time.sleep(0.1)
+
+                        # Finalize any remaining output
                         if stdout.channel.recv_ready():
                             chunk = stdout.channel.recv(1024).decode()
                             output.append(chunk)
-                            stream_callback(chunk, is_error=False)  # Callback for stdout
+                            stream_callback(chunk, is_error=False)
 
-                        # Process stderr
                         if stderr.channel.recv_stderr_ready():
                             chunk = stderr.channel.recv_stderr(1024).decode()
                             error.append(chunk)
-                            stream_callback(chunk, is_error=True)  # Callback for stderr
+                            stream_callback(chunk, is_error=True)
+                    else:
+                        # Default behavior: Read the entire output at once
+                        output = stdout.read().decode()
+                        error = stderr.read().decode()
 
-                        time.sleep(0.1)
+                    # Combine the output into strings
+                    output = "".join(output) if isinstance(output, list) else output
+                    error = "".join(error) if isinstance(error, list) else error
 
-                    # Finalize any remaining output
-                    if stdout.channel.recv_ready():
-                        chunk = stdout.channel.recv(1024).decode()
-                        output.append(chunk)
-                        stream_callback(chunk, is_error=False)
+                    # Log the results
+                    if output:
+                        if not supress_logs:
+                            self.logger.info(f"Command output: {output}")
+                    if error:
+                        if not supress_logs:
+                            self.logger.error(f"Command error: {error}")
 
-                    if stderr.channel.recv_stderr_ready():
-                        chunk = stderr.channel.recv_stderr(1024).decode()
-                        error.append(chunk)
-                        stream_callback(chunk, is_error=True)
-                else:
-                    # Default behavior: Read the entire output at once
-                    output = stdout.read().decode()
-                    error = stderr.read().decode()
+                    if not output and not error:
+                        if not supress_logs:
+                            self.logger.warning(f"Command '{command}' executed but returned no output or error.")
 
-                # Combine the output into strings
-                output = "".join(output) if isinstance(output, list) else output
-                error = "".join(error) if isinstance(error, list) else error
+                    return output, error
 
-                # Log the results
-                if output:
-                    if not supress_logs:
-                        self.logger.info(f"Command output: {output}")
-                if error:
-                    if not supress_logs:
-                        self.logger.error(f"Command error: {error}")
+                except EOFError as e:
+                    self.logger.error(f"EOFError occurred while executing command '{command}': {e}. Retrying ({retry_count + 1}/{max_retries})...")
+                    retry_count += 1
+                    time.sleep(2)  # Short delay before retrying
 
-                if not output and not error:
-                    if not supress_logs:
-                        self.logger.warning(f"Command '{command}' executed but returned no output or error.")
+                except paramiko.SSHException as e:
+                    self.logger.error(f"SSH command failed: {e}. Retrying ({retry_count + 1}/{max_retries})...")
+                    retry_count += 1
+                    time.sleep(2)  # Short delay before retrying
 
-                return output, error
+                except paramiko.buffered_pipe.PipeTimeout as e:
+                    self.logger.error(f"SSH command failed: {e}. Retrying ({retry_count + 1}/{max_retries})...")
+                    retry_count += 1
+                    time.sleep(2)  # Short delay before retrying
 
-            except EOFError as e:
-                self.logger.error(f"EOFError occurred while executing command '{command}': {e}. Retrying ({retry_count + 1}/{max_retries})...")
-                retry_count += 1
-                time.sleep(2)  # Short delay before retrying
-
-            except paramiko.SSHException as e:
-                self.logger.error(f"SSH command failed: {e}. Retrying ({retry_count + 1}/{max_retries})...")
-                retry_count += 1
-                time.sleep(2)  # Short delay before retrying
-
-            except paramiko.buffered_pipe.PipeTimeout as e:
-                self.logger.error(f"SSH command failed: {e}. Retrying ({retry_count + 1}/{max_retries})...")
-                retry_count += 1
-                time.sleep(2)  # Short delay before retrying
-
-            except Exception as e:
-                self.logger.error(f"SSH command failed (General Exception): {e}. Retrying ({retry_count + 1}/{max_retries})...")
-                retry_count += 1
-                time.sleep(2)  # Short delay before retrying
+                except Exception as e:
+                    self.logger.error(f"SSH command failed (General Exception): {e}. Retrying ({retry_count + 1}/{max_retries})...")
+                    retry_count += 1
+                    time.sleep(2)  # Short delay before retrying
 
         # If we exhaust retries, return failure
         self.logger.error(f"Failed to execute command '{command}' on node {node} after {max_retries} retries.")
