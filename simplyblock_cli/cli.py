@@ -72,6 +72,8 @@ class CLIWrapper(CLIWrapperBase):
             self.init_storage_node__make_primary(subparser)
         if self.developer_mode:
             self.init_storage_node__dump_lvstore(subparser)
+        if self.developer_mode:
+            self.init_storage_node__set_failed_device(subparser)
 
 
     def init_storage_node__deploy(self, subparser):
