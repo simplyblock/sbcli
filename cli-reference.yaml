@@ -1495,7 +1495,7 @@ commands:
               - single
               - default
               - ha
-            default: ha
+            default: default
           - name: "--lvol-priority-class"
             help: "Logical volume priority class"
             dest: lvol_priority_class
