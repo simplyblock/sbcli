@@ -34,7 +34,7 @@ then
   sudo systemctl restart docker
 fi
 
-if [[ -z $(grep "source  /etc/bash_completion.d/python-argcomplete" $HOME/.bashrc) ]]
+if [[ -z $(grep "source  $HOME/.bash_completion" $HOME/.bashrc) ]]
 then
-  echo "source  /etc/bash_completion.d/python-argcomplete" >> $HOME/.bashrc
+  echo "source  $HOME/.bash_completion" >> $HOME/.bashrc
 fi
