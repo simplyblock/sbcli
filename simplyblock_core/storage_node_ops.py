@@ -3429,14 +3429,12 @@ def set(node_id, attr, value):
         return False
 
     if attr in snode.get_attrs_map():
+        try:
+            value = snode.get_attrs_map()[attr]['type'](value)
+            logger.info(f"Setting {attr} to {value}")
+            setattr(snode, attr, value)
+            snode.write_to_db()
+        except:
+            pass
 
-        if snode.get_attrs_map()[attr]['type'] != str:
-            try:
-                value = snode.get_attrs_map()[attr]['type'](value)
-                setattr(snode, attr, value)
-                snode.write_to_db()
-            except:
-                pass
-
-    data = snode.get_clean_dict()
-    return json.dumps(data, indent=2, sort_keys=True)
+    return True
