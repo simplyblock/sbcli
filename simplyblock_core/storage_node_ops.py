@@ -3418,3 +3418,25 @@ def dump_lvstore(node_id):
 
     logger.info(f"LVS dump file will be here: {file_path}")
     return True
+
+
+def set(node_id, attr, value):
+    db_controller = DBController()
+
+    snode = db_controller.get_storage_node_by_id(node_id)
+    if not snode:
+        logger.error(f"Can not find storage node: {node_id}")
+        return False
+
+    if attr in snode.get_attrs_map():
+
+        if snode.get_attrs_map()[attr]['type'] != str:
+            try:
+                value = snode.get_attrs_map()[attr]['type'](value)
+                setattr(snode, attr, value)
+                snode.write_to_db()
+            except:
+                pass
+
+    data = snode.get_clean_dict()
+    return json.dumps(data, indent=2, sort_keys=True)

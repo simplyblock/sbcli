@@ -610,6 +610,22 @@ commands:
             dest: node_id
             type: str
             completer: _completer_get_sn_list
+      - name: set
+        help: "set storage node db value"
+        private: true
+        arguments:
+          - name: "node_id"
+            help: "Storage node id"
+            dest: node_id
+            type: str
+          - name: "attr"
+            help: "attr"
+            dest: attr
+            type: str
+          - name: "value"
+            help: "value"
+            dest: attr
+            type: str
   - name: "cluster"
     help: "Cluster commands"
     weight: 200
