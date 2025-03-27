@@ -287,8 +287,8 @@ class CLIWrapper(CLIWrapperBase):
     def init_storage_node__set(self, subparser):
         subcommand = self.add_sub_command(subparser, 'set', 'set storage node db value')
         subcommand.add_argument('node_id', help='Storage node id', type=str)
-        subcommand.add_argument('attr', help='attr', type=str)
-        subcommand.add_argument('value', help='value', type=str)
+        subcommand.add_argument('attr_name', help='attr_name', type=str)
+        subcommand.add_argument('attr_value', help='attr_value', type=str)
 
 
     def init_cluster(self):
