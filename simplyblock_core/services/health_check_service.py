@@ -256,8 +256,8 @@ while True:
                             else:
                                 continue
 
-                    if online_jms < 2:
-                        node_remote_devices_check = False
+                    # if online_jms < 2:
+                    #     node_remote_devices_check = False
                 else:
                     if online_jms == 0:
                         node_remote_devices_check = False

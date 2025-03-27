@@ -986,6 +986,12 @@ class CLIWrapper(CLIWrapperBase):
                     ret = False
                 else:
                     ret = self.storage_node__dump_lvstore(sub_command, args)
+            elif sub_command in ['set']:
+                if not self.developer_mode:
+                    print("This command is private.")
+                    ret = False
+                else:
+                    ret = self.storage_node__set(sub_command, args)
             else:
                 self.parser.print_help()
 
