@@ -180,6 +180,9 @@ def start_event_collector_on_node(node_id):
                                 sid = event_dict['storage_ID']
                             elif "vuid" in event_dict:
                                 sid = event_dict['vuid']
+                            else:
+                                raise ValueError(f'Invalid event_dict: {event_dict}')
+
                             et = event_dict['event_type']
                             msg = event_dict['status']
                             if sid not in events_groups:
