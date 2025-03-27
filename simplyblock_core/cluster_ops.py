@@ -1231,11 +1231,6 @@ def update_cluster(cl_id, mgmt_only=False, restart_cluster=False):
         logger.error(f"Cluster not found {cl_id}")
         return False
 
-    if cluster.status != Cluster.STATUS_ACTIVE:
-        logger.error(f"Cluster is not active")
-        return False
-
-
     try:
         sbcli=constants.SIMPLY_BLOCK_CLI_NAME
         out, _, ret_code = shell_utils.run_command(f"pip install {sbcli} --upgrade")
