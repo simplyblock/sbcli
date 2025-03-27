@@ -282,6 +282,11 @@ class CLIWrapper(CLIWrapperBase):
         subcommand = self.add_sub_command(subparser, 'dump-lvstore', 'Dump lvstore data')
         subcommand.add_argument('node_id', help='Storage node id', type=str).completer = self._completer_get_sn_list
 
+    def init_storage_node__set(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'set', "set storage node db value")
+        subcommand.add_argument('node_id', help='Storage node id', type=str)
+        subcommand.add_argument('attr', help='attr', type=str)
+        subcommand.add_argument('value', help='value', type=str)
 
     def init_cluster(self):
         subparser = self.add_command('cluster', 'Cluster commands')
