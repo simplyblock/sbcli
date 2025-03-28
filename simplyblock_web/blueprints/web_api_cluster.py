@@ -234,8 +234,8 @@ def cluster_allstats(uuid, history):
     for lvol in db_controller.get_lvols():
         records_list = db_controller.get_lvol_stats(lvol, limit=1)
         data = []
-        if records_list:
-            data = records_list
+        for r in records_list:
+            data.append(r.get_clean_dict())
 
         ret = {
             "object_data": lvol.get_clean_dict(),
