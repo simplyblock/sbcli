@@ -221,9 +221,9 @@ def cluster_allstats(uuid, history):
 
     list_pools = []
     for pool in db_controller.get_pools(uuid):
-        out = db_controller.get_pool_stats(pool, 20)
+        o = db_controller.get_pool_stats(pool, 20)
         records_count = 20
-        new_records = core_utils.process_records(out, records_count)
+        new_records = core_utils.process_records(o, records_count)
         ret = {
             "object_data": pool.get_clean_dict(),
             "stats": new_records or []
