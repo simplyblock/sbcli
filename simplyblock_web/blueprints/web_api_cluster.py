@@ -186,7 +186,7 @@ def cluster_activate(uuid):
 
 @bp.route('/cluster/allstats/<string:uuid>/history/<string:history>', methods=['GET'])
 @bp.route('/cluster/allstats/<string:uuid>', methods=['GET'], defaults={'history': None})
-def cluster_iostats(uuid, history):
+def cluster_allstats(uuid, history):
     out = {}
     cluster = db_controller.get_cluster_by_id(uuid)
     if not cluster:
