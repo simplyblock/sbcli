@@ -1522,9 +1522,10 @@ def remove_storage_node(node_id, force_remove=False, force_migrate=False):
 
     logger.debug("Leaving swarm...")
     try:
-        node_docker = docker.DockerClient(base_url=f"tcp://{snode.mgmt_ip}:2375", version="auto")
         cluster_docker = utils.get_docker_client(snode.cluster_id)
-        cluster_docker.nodes.get(node_docker.info()["Swarm"]["NodeID"]).remove(force=True)
+        for node in cluster_docker.nodes.list():
+            if node.attrs["Status"] and snode.mgmt_ip in node.attrs["Status"]["Addr"] :
+                node.remove(force=True)
     except:
         pass
 
@@ -2663,22 +2664,22 @@ def health_check(node_id):
         else:
             logger.error(f"Ping host: {snode.mgmt_ip}... Failed")
 
-        node_docker = docker.DockerClient(base_url=f"tcp://{snode.mgmt_ip}:2375", version="auto")
-        containers_list = node_docker.containers.list(all=True)
-        for cont in containers_list:
-            name = cont.attrs['Name']
-            state = cont.attrs['State']
-
-            if name in ['/spdk', '/spdk_proxy', '/SNodeAPI'] or name.startswith("/app_"):
-                logger.debug(state)
-                since = ""
-                try:
-                    start = datetime.datetime.fromisoformat(state['StartedAt'].split('.')[0])
-                    since = str(datetime.datetime.now() - start).split('.')[0]
-                except:
-                    pass
-                clean_name = name.split(".")[0].replace("/", "")
-                logger.info(f"Container: {clean_name}, Status: {state['Status']}, Since: {since}")
+        # node_docker = docker.DockerClient(base_url=f"tcp://{snode.mgmt_ip}:2375", version="auto")
+        # containers_list = node_docker.containers.list(all=True)
+        # for cont in containers_list:
+        #     name = cont.attrs['Name']
+        #     state = cont.attrs['State']
+        #
+        #     if name in ['/spdk', '/spdk_proxy', '/SNodeAPI'] or name.startswith("/app_"):
+        #         logger.debug(state)
+        #         since = ""
+        #         try:
+        #             start = datetime.datetime.fromisoformat(state['StartedAt'].split('.')[0])
+        #             since = str(datetime.datetime.now() - start).split('.')[0]
+        #         except:
+        #             pass
+        #         clean_name = name.split(".")[0].replace("/", "")
+        #         logger.info(f"Container: {clean_name}, Status: {state['Status']}, Since: {since}")
 
     except Exception as e:
         logger.error(f"Failed to connect to node's docker: {e}")
