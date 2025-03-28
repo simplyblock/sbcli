@@ -30,7 +30,7 @@ def cluster_status_change(cluster, new_state, old_status):
 
 
 def _cluster_cap_event(cluster, msg, event_level):
-    ec.log_event_cluster(
+    return ec.log_event_cluster(
         cluster_id=cluster.get_id(),
         node_id=cluster.get_id(),
         domain=ec.DOMAIN_CLUSTER,
@@ -43,26 +43,26 @@ def _cluster_cap_event(cluster, msg, event_level):
 
 def cluster_cap_warn(cluster, util):
     msg = f"Cluster absolute capacity reached: {util}%"
-    _cluster_cap_event(cluster, msg, event_level=EventObj.LEVEL_WARN)
+    return _cluster_cap_event(cluster, msg, event_level=EventObj.LEVEL_WARN)
 
 
 def cluster_cap_crit(cluster, util):
     msg = f"Cluster absolute capacity reached: {util}%"
-    _cluster_cap_event(cluster, msg, event_level=EventObj.LEVEL_CRITICAL)
+    return _cluster_cap_event(cluster, msg, event_level=EventObj.LEVEL_CRITICAL)
 
 
 def cluster_prov_cap_warn(cluster, util):
     msg = f"Cluster provisioned capacity reached: {util}%"
-    _cluster_cap_event(cluster, msg, event_level=EventObj.LEVEL_WARN)
+    return _cluster_cap_event(cluster, msg, event_level=EventObj.LEVEL_WARN)
 
 
 def cluster_prov_cap_crit(cluster, util):
     msg = f"Cluster provisioned capacity reached: {util}%"
-    _cluster_cap_event(cluster, msg, event_level=EventObj.LEVEL_CRITICAL)
+    return _cluster_cap_event(cluster, msg, event_level=EventObj.LEVEL_CRITICAL)
 
 
 def cluster_delete(cluster):
-    ec.log_event_cluster(
+    return ec.log_event_cluster(
         cluster_id=cluster.get_id(),
         domain=ec.DOMAIN_CLUSTER,
         event=ec.EVENT_OBJ_DELETED,

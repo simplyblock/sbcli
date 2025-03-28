@@ -101,6 +101,7 @@ def log_event_cluster(cluster_id, domain, event, db_object, caused_by, message,
 
     db_controller = DBController()
     ds.write_to_db(db_controller.kv_store)
+    return ds.to_dict()
 
 
 def log_event_based_on_level(cluster_id, event, db_object, message, caused_by, event_level):
