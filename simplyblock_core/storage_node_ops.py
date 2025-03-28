@@ -2075,15 +2075,19 @@ def list_storage_devices(node_id, is_json):
         logger.debug(device)
         logger.debug("*" * 20)
         name = device.alceml_name
+        status = device.status
         if device.remote_bdev:
             name = device.remote_bdev
+            org_dev = db_controller.get_storage_device_by_id(device.get_id())
+            if org_dev:
+                status = org_dev.status
 
         remote_devices.append({
             "UUID": device.uuid,
             "Name": name,
             "Size": utils.humanbytes(device.size),
             "Node ID": device.node_id,
-            "Status": device.status,
+            "Status": status,
         })
 
     for device in snode.remote_jm_devices:
