@@ -1190,6 +1190,9 @@ def get_logs(cluster_id, is_json=False):
         if 'storage_ID' in record.object_dict:
             Storage_ID = record.object_dict['storage_ID']
 
+        elif 'cluster_device_order' in record.object_dict:
+            Storage_ID = record.object_dict['cluster_device_order']
+
         vuid = None
         if 'vuid' in record.object_dict:
             vuid = record.object_dict['vuid']
