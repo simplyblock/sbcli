@@ -120,7 +120,8 @@ class TestSingleNodeReboot(TestClusterBase):
                          node_status="online",
                          device_status="online",
                          lvol_status="online",
-                         health_check_status=True
+                         health_check_status=True,
+                         device_health_check=None
                          )
         
         sleep_n_sec(30)
@@ -205,7 +206,8 @@ class TestSingleNodeReboot(TestClusterBase):
                          node_status="online",
                          device_status="online",
                          lvol_status="online",
-                         health_check_status=True
+                         health_check_status=True,
+                         device_health_check=None
                          )
         
         self.sbcli_utils.resize_lvol(lvol_id=self.sbcli_utils.get_lvol_id(self.lvol_name),
@@ -403,7 +405,8 @@ class TestHASingleNodeReboot(TestClusterBase):
                          node_status="online",
                          device_status="online",
                          lvol_status="online",
-                         health_check_status=True
+                         health_check_status=True,
+                         device_health_check=None
                          )
 
         for i in range(2):
@@ -444,7 +447,8 @@ class TestHASingleNodeReboot(TestClusterBase):
                              node_status="online",
                              device_status="online",
                              lvol_status="online",
-                             health_check_status=True
+                             health_check_status=True,
+                             device_health_check=None
                              )
             if not self.k8s_test:
                 for node in self.storage_nodes:

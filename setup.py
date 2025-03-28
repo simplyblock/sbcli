@@ -18,6 +18,18 @@ def _post_install():
         if os.path.isfile(path):
             _, out = getstatusoutput(f'source {path}')
 
+        found = False
+        if os.path.exists(os.environ.get("HOME")+"/.bashrc"):
+            with open(os.environ.get("HOME")+"/.bashrc", "r") as bashrc:
+                for line in bashrc.readlines():
+                    line = line.strip()
+                    if not line.startswith("#") and f"source {path}" in line:
+                        found = True
+                        break
+        if not found:
+            with open(os.environ.get("HOME")+"/.bashrc", "w") as bashrc:
+                bashrc.writelines([f"source {path}"])
+
 
 class install(_install):
     def run(self):

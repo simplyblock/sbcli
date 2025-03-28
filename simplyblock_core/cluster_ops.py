@@ -164,7 +164,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     ret = scripts.set_db_config(db_connection)
 
     logger.info("Configuring docker swarm...")
-    c = docker.DockerClient(base_url=f"tcp://{DEV_IP}:2375", version="auto")
+    c = docker.DockerClient(base_url="unix://var/run/docker.sock", version="auto")
     try:
         if c.swarm.attrs and "ID" in c.swarm.attrs:
             logger.info("Docker swarm found, leaving swarm now")
@@ -935,6 +935,7 @@ def list_all_info(cluster_id):
 
             dev_data.append({
                 "Device UUID": dev.uuid,
+                "StorgeID": dev.cluster_device_order,
 
                 "Size total": f"{utils.humanbytes(rec.size_total)}",
                 "Size Used": f"{utils.humanbytes(rec.size_used)}",
@@ -1175,6 +1176,9 @@ def get_logs(cluster_id, is_json=False):
         if 'storage_ID' in record.object_dict:
             Storage_ID = record.object_dict['storage_ID']
 
+        elif 'cluster_device_order' in record.object_dict:
+            Storage_ID = record.object_dict['cluster_device_order']
+
         vuid = None
         if 'vuid' in record.object_dict:
             vuid = record.object_dict['vuid']
@@ -1230,6 +1234,7 @@ def update_cluster(cl_id, mgmt_only=False, restart_cluster=False):
         logger.info(f"Pulling image {constants.SIMPLY_BLOCK_DOCKER_IMAGE}")
         cluster_docker.images.pull(constants.SIMPLY_BLOCK_DOCKER_IMAGE)
         image_without_tag = constants.SIMPLY_BLOCK_DOCKER_IMAGE.split(":")[0]
+        image_without_tag = image_without_tag.split("/")[-1]
         for service in cluster_docker.services.list():
             if image_without_tag in service.attrs['Spec']['Labels']['com.docker.stack.image']:
                 logger.info(f"Updating service {service.name}")

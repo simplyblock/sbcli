@@ -73,6 +73,8 @@ def main():
         try:
             if not args.run_k8s:
                 test_obj.stop_docker_logs_collect()
+            else:
+                test_obj.stop_k8s_log_collect()
             test_obj.fetch_all_nodes_distrib_log()
             if i == (len(test_class_run) - 1) or check_for_dumps():
                 test_obj.collect_management_details()
@@ -157,7 +159,7 @@ def check_for_dumps():
     for node in storage_nodes:
         files = ssh_obj.list_files(node, "/etc/simplyblock/")
         logger.info(f"Files in /etc/simplyblock: {files}")
-        if "core" in files:
+        if "core" in files and "tmp_cores" not in files:
             core_exist = True
             break
 

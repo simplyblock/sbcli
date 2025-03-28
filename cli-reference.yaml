@@ -610,6 +610,22 @@ commands:
             dest: node_id
             type: str
             completer: _completer_get_sn_list
+      - name: set
+        help: "set storage node db value"
+        private: true
+        arguments:
+          - name: "node_id"
+            help: "Storage node id"
+            dest: node_id
+            type: str
+          - name: "attr_name"
+            help: "attr_name"
+            dest: attr_name
+            type: str
+          - name: "attr_value"
+            help: "attr_value"
+            dest: attr_value
+            type: str
   - name: "cluster"
     help: "Cluster commands"
     weight: 200
@@ -980,7 +996,7 @@ commands:
               - single
               - default
               - ha
-            default: default
+            default: ha
             private: true
           - name: "--lvol-priority-class"
             help: "Logical volume priority class"
@@ -1495,7 +1511,7 @@ commands:
               - single
               - default
               - ha
-            default: ha
+            default: default
           - name: "--lvol-priority-class"
             help: "Logical volume priority class"
             dest: lvol_priority_class
