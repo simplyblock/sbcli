@@ -2001,7 +2001,7 @@ def list_storage_nodes(is_json, cluster_id=None):
             "Health": node.health_check,
             "Up time": uptime,
             "Cloud ID": node.cloud_instance_id,
-            "Cloud Type": node.cloud_instance_type,
+            "JM VUID": node.jm_vuid,
             "Ext IP": node.cloud_instance_public_ip,
 
         })
@@ -2024,6 +2024,7 @@ def list_storage_devices(node_id, is_json):
         return False
 
     storage_devices = []
+    bdev_devices = []
     jm_devices = []
     remote_devices = []
     for device in snode.nvme_devices:
@@ -2038,6 +2039,24 @@ def list_storage_devices(node_id, is_json):
             "Status": device.status,
             "IO Err": device.io_error,
             "Health": device.health_check
+        })
+
+    for bdev in snode.lvstore_stack:
+        if bdev['type'] != "bdev_distr":
+            continue
+        logger.debug("*" * 20)
+        distrib_params =  bdev['params']
+        bdev_devices.append({
+            "VUID": distrib_params['vuid'],
+            "Name": distrib_params['name'],
+            "Size": utils.humanbytes(distrib_params['num_blocks']*distrib_params['block_size']),
+            "Block Size": distrib_params['block_size'],
+            "Num Blocks": distrib_params['num_blocks'],
+            "NDCS": f"{distrib_params['ndcs']}",
+            "NPCS": f"{distrib_params['npcs']}",
+            "Chunk": distrib_params['chunk_size'],
+            "Page Size": distrib_params['pba_page_size'],
+            "JM_VUID": distrib_params['jm_vuid'],
         })
 
     if snode.jm_device:
@@ -2074,6 +2093,7 @@ def list_storage_devices(node_id, is_json):
 
     data = {
         "Storage Devices": storage_devices,
+        "Distrib Block Devices": bdev_devices,
         "JM Devices": jm_devices,
         "Remote Devices": remote_devices,
     }
