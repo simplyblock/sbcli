@@ -478,3 +478,27 @@ def get_file_content(file_name):
         err = err.decode("utf-8")
         logger.debug(err)
         return utils.get_response(None, err)
+
+
+@bp.route('/firewall_set_port', methods=['POST'])
+def firewall_set_port():
+    data = request.get_json()
+    if "port_id" not in data:
+        return utils.get_response(False, "Required parameter is missing: port_id")
+    if "port_type" not in data:
+        return utils.get_response(False, "Required parameter is missing: port_type")
+    if "action" not in data:
+        return utils.get_response(False, "Required parameter is missing: action")
+
+    port_id = data['port_id']
+    port_type = data['port_type']
+    action = data['action']
+
+    ret = node_utils.firewall_port(port_id, port_type, block=action=="block")
+    return utils.get_response(ret)
+
+
+@bp.route('/get_firewall', methods=['GET'])
+def get_firewall():
+    ret = node_utils.firewall_get()
+    return utils.get_response(ret)
