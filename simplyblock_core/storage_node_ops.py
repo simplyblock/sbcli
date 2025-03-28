@@ -2867,12 +2867,12 @@ def recreate_lvstore_on_sec(snode):
         for lvol in lvol_list:
             logger.info("creating subsystem %s", lvol.nqn)
             rpc_client.subsystem_create(lvol.nqn, 'sbcli-cn', lvol.uuid, 1000)
-            for iface in snode.data_nics:
-                if iface.ip4_address:
-                    tr_type = iface.get_transport_type()
-                    logger.info("adding listener for %s on IP %s" % (lvol.nqn, iface.ip4_address))
-                    ret = rpc_client.listeners_create(
-                        lvol.nqn, tr_type, iface.ip4_address, lvol.subsys_port, "non_optimized")
+            # for iface in snode.data_nics:
+            #     if iface.ip4_address:
+            #         tr_type = iface.get_transport_type()
+            #         logger.info("adding listener for %s on IP %s" % (lvol.nqn, iface.ip4_address))
+            #         ret = rpc_client.listeners_create(
+            #             lvol.nqn, tr_type, iface.ip4_address, lvol.subsys_port, "non_optimized")
 
         if node.status == StorageNode.STATUS_ONLINE:
             # for lvol in lvol_list:
@@ -2903,7 +2903,11 @@ def recreate_lvstore_on_sec(snode):
 
         # time.sleep(1)
         for lvol in lvol_list:
-            is_created, error = add_lvol_thread(lvol, snode)
+            is_created, error = add_lvol_thread(lvol, snode, lvol_ana_state="non_optimized")
+            for iface in node.data_nics:
+                if iface.ip4_address:
+                    ret = remote_rpc_client.nvmf_subsystem_listener_set_ana_state(
+                        lvol.nqn, iface.ip4_address, lvol.subsys_port, True)
 
             # is_created, error = lvol_controller.recreate_lvol_on_node(
             #     lvol, snode, 1, "non-optimize")
