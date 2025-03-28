@@ -726,9 +726,9 @@ def cluster_set_read_only(cl_id):
                 continue
             for dev in node.nvme_devices:
                 if dev.status == NVMeDevice.STATUS_ONLINE:
-                    dev_stat = db_controller.get_device_stats(dev, 1)
-                    if dev_stat and dev_stat[0].size_util >= cluster.cap_crit:
-                        device_controller.device_set_state(dev.get_id(), NVMeDevice.STATUS_CANNOT_ALLOCATE)
+                    # dev_stat = db_controller.get_device_stats(dev, 1)
+                    # if dev_stat and dev_stat[0].size_util >= cluster.cap_crit:
+                    device_controller.device_set_state(dev.get_id(), NVMeDevice.STATUS_CANNOT_ALLOCATE)
 
     return True
 
