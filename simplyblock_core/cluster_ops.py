@@ -1369,48 +1369,20 @@ def open_db_from_zip(fip_path):
 
 
 
-def cluster_reset():
-    """
+def set(cl_id, attr, value):
+    db_controller = DBController()
+    cluster = db_controller.get_cluster_by_id(cl_id)
+    if not cluster:
+        logger.error(f"Cluster not found {cl_id}")
+        return False
 
+    if attr in cluster.get_attrs_map():
+        try:
+            value = cluster.get_attrs_map()[attr]['type'](value)
+            logger.info(f"Setting {attr} to {value}")
+            setattr(cluster, attr, value)
+            cluster.write_to_db()
+        except:
+            pass
 
-set -x
-
-CMD=$(ls ~/.local/bin/sbcli-* | awk '{n=split($0,a,"/"); print a[n]}')
-cl=$($CMD cluster list | tail -n -3 | awk '{print $2}')
-
-#$CMD cluster graceful-shutdown $cl
-
-for sn_id in $($CMD sn list | grep / | awk '{print $2}'); do
-  $CMD -d sn shutdown --force $sn_id
-done
-
-sudo mv /etc/foundationdb/fdb.cluster /etc/foundationdb/fdb.cluster.bck
-for service_id in $(docker service ls | grep / | awk '{print $1}'); do
-  docker service update "$service_id" --force --detach
-done
-
-# restore
-fdb_cont=$(sudo docker ps | grep "app_fdb-server" | awk '{print $1}')
-sudo docker rm --force $fdb_cont
-sudo rm -rf /etc/foundationdb/data/*
-fdbcli --exec "configure new single ssd ; writemode on ; clearrange \"\" \\xff" -C /etc/foundationdb/fdb.cluster.bck
-BF=$(fdbbackup list -b file:///etc/foundationdb/backup/)
-fdbrestore start -r "$BF" --dest-cluster-file /etc/foundationdb/fdb.cluster.bck -t fresh_deploy
-
-sudo mv /etc/foundationdb/fdb.cluster.bck /etc/foundationdb/fdb.cluster
-
-for service_id in $(docker service ls | grep / | awk '{print $1}'); do
-  docker service update "$service_id" --force --detach
-done
-
-sleep 30
-for sn_id in $($CMD sn list | grep / | awk '{print $2}'); do
-  $CMD -d sn shutdown --force $sn_id
-done
-
-sleep 5
-$CMD -d cluster graceful-startup $cl  --clear-data
-
-$CMD -d cluster activate $cl
-
-    """
+    return True

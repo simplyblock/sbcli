@@ -315,6 +315,8 @@ class CLIWrapper(CLIWrapperBase):
         self.init_cluster__list_tasks(subparser)
         self.init_cluster__cancel_task(subparser)
         self.init_cluster__delete(subparser)
+        if self.developer_mode:
+            self.init_cluster__set(subparser)
 
 
     def init_cluster__deploy(self, subparser):
@@ -337,7 +339,7 @@ class CLIWrapper(CLIWrapperBase):
         if self.developer_mode:
             argument = subcommand.add_argument('--CLI_PASS', help='Password for CLI SSH connection', type=str, dest='CLI_PASS', required=False)
         argument = subcommand.add_argument('--cap-warn', help='Capacity warning level in percent, default: 89', type=int, default=89, dest='cap_warn', required=False)
-        argument = subcommand.add_argument('--cap-crit', help='Capacity critical level in percent, default: 99', type=int, default=95, dest='cap_crit', required=False)
+        argument = subcommand.add_argument('--cap-crit', help='Capacity critical level in percent, default: 99', type=int, default=99, dest='cap_crit', required=False)
         argument = subcommand.add_argument('--prov-cap-warn', help='Capacity warning level in percent, default: 250', type=int, default=250, dest='prov_cap_warn', required=False)
         argument = subcommand.add_argument('--prov-cap-crit', help='Capacity critical level in percent, default: 500', type=int, default=500, dest='prov_cap_crit', required=False)
         argument = subcommand.add_argument('--log-del-interval', help='Logging retention period, default: 3d', type=str, default='3d', dest='log_del_interval', required=False)
@@ -556,6 +558,12 @@ class CLIWrapper(CLIWrapperBase):
         subcommand = self.add_sub_command(subparser, 'delete', 'Deletes a cluster')
         subcommand.add_argument('cluster_id', help='Cluster id', type=str).completer = self._completer_get_cluster_list
 
+    def init_cluster__set(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'set', 'set cluster db value')
+        subcommand.add_argument('cluster_id', help='cluster id', type=str)
+        subcommand.add_argument('attr_name', help='attr_name', type=str)
+        subcommand.add_argument('attr_value', help='attr_value', type=str)
+
 
     def init_volume(self):
         subparser = self.add_command('volume', 'Logical volume commands', aliases=['lvol',])
@@ -629,7 +637,7 @@ class CLIWrapper(CLIWrapperBase):
 
     def init_volume__delete(self, subparser):
         subcommand = self.add_sub_command(subparser, 'delete', 'Deletes a logical volume')
-        subcommand.add_argument('volume_id', help='Logical volumes id or ids', type=str,  nargs='+')
+        subcommand.add_argument('volume_id', help='Logical volumes id or ids', type=str, nargs='+')
         argument = subcommand.add_argument('--force', help='Force delete logical volume from the cluster', dest='force', required=False, action='store_true')
 
     def init_volume__connect(self, subparser):
@@ -1105,6 +1113,12 @@ class CLIWrapper(CLIWrapperBase):
                 ret = self.cluster__cancel_task(sub_command, args)
             elif sub_command in ['delete']:
                 ret = self.cluster__delete(sub_command, args)
+            elif sub_command in ['set']:
+                if not self.developer_mode:
+                    print("This command is private.")
+                    ret = False
+                else:
+                    ret = self.cluster__set(sub_command, args)
             else:
                 self.parser.print_help()
 
