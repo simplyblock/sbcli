@@ -68,7 +68,7 @@ jobs:
 
       - name: Set send_slack_notification for manual workflow_dispatch
         if: github.event_name == 'workflow_dispatch'
-        run: echo "send_slack_notification=${{ github.event.inputs.cleanup_cluster }}" >> $GITHUB_ENV
+        run: echo "send_slack_notification=${{ github.event.inputs.send_slack_notification }}" >> $GITHUB_ENV
 
       - name: Set cleanup_cluster for scheduled and push events
         if: github.event_name == 'schedule' || github.event_name == 'push'
@@ -169,7 +169,7 @@ jobs:
           fi
 
           for node in $K3S_MNODES $STORAGE_PRIVATE_IPS $SEC_STORAGE_PRIVATE_IPS; do
-            ssh -i ~/.ssh/simplyblock-us-east-2.pem  root@${node} "k3s-agent-uninstall.sh"
+            ssh -i ~/.ssh/simplyblock-us-east-2.pem  root@${node} "k3s-agent-uninstall.sh" || echo "[WARNING] K3s-agent-uninstall failed on $node"
           done
           
           for node in $MNODES; do

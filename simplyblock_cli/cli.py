@@ -72,6 +72,8 @@ class CLIWrapper(CLIWrapperBase):
             self.init_storage_node__make_primary(subparser)
         if self.developer_mode:
             self.init_storage_node__dump_lvstore(subparser)
+        if self.developer_mode:
+            self.init_storage_node__set(subparser)
 
 
     def init_storage_node__deploy(self, subparser):
@@ -285,6 +287,12 @@ class CLIWrapper(CLIWrapperBase):
         subcommand = self.add_sub_command(subparser, 'dump-lvstore', 'Dump lvstore data')
         subcommand.add_argument('node_id', help='Storage node id', type=str).completer = self._completer_get_sn_list
 
+    def init_storage_node__set(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'set', 'set storage node db value')
+        subcommand.add_argument('node_id', help='Storage node id', type=str)
+        subcommand.add_argument('attr_name', help='attr_name', type=str)
+        subcommand.add_argument('attr_value', help='attr_value', type=str)
+
 
     def init_cluster(self):
         subparser = self.add_command('cluster', 'Cluster commands')
@@ -411,7 +419,7 @@ class CLIWrapper(CLIWrapperBase):
         if self.developer_mode:
             argument = subcommand.add_argument('--distr-vuid', help='(Dev) set vuid manually, default: random (1-99999)', type=int, dest='distr_vuid', required=False)
         if self.developer_mode:
-            argument = subcommand.add_argument('--lvol-ha-type', help='Logical volume HA type (single, ha), default is cluster HA type', type=str, default='default', dest='lvol_ha_type', required=False, choices=['single','default','ha',])
+            argument = subcommand.add_argument('--lvol-ha-type', help='Logical volume HA type (single, ha), default is cluster HA type', type=str, default='ha', dest='lvol_ha_type', required=False, choices=['single','default','ha',])
         argument = subcommand.add_argument('--lvol-priority-class', help='Logical volume priority class', type=int, default=0, dest='lvol_priority_class', required=False)
         if self.developer_mode:
             argument = subcommand.add_argument('--fstype', help='Filesystem type for testing (ext4, xfs)', type=str, default='xfs', dest='fstype', required=False, choices=['ext4','xfs',])
@@ -590,7 +598,7 @@ class CLIWrapper(CLIWrapperBase):
         argument = subcommand.add_argument('--max-w-mbytes', help='Maximum Write Megabytes Per Second', type=int, dest='max_w_mbytes', required=False)
         if self.developer_mode:
             argument = subcommand.add_argument('--distr-vuid', help='(Dev) set vuid manually, default: random (1-99999)', type=int, dest='distr_vuid', required=False)
-        argument = subcommand.add_argument('--ha-type', help='Logical volume HA type (single, ha), default is cluster HA type', type=str, default='ha', dest='ha_type', required=False, choices=['single','default','ha',])
+        argument = subcommand.add_argument('--ha-type', help='Logical volume HA type (single, ha), default is cluster HA type', type=str, default='default', dest='ha_type', required=False, choices=['single','default','ha',])
         argument = subcommand.add_argument('--lvol-priority-class', help='Logical volume priority class', type=int, default=0, dest='lvol_priority_class', required=False)
         argument = subcommand.add_argument('--namespace', help='Set logical volume namespace for k8s clients', type=str, dest='namespace', required=False)
         if self.developer_mode:
@@ -624,7 +632,7 @@ class CLIWrapper(CLIWrapperBase):
 
     def init_volume__delete(self, subparser):
         subcommand = self.add_sub_command(subparser, 'delete', 'Deletes a logical volume')
-        subcommand.add_argument('volume_id', help='Logical volumes id or ids', type=str)
+        subcommand.add_argument('volume_id', help='Logical volumes id or ids', type=str, nargs='+')
         argument = subcommand.add_argument('--force', help='Force delete logical volume from the cluster', dest='force', required=False, action='store_true')
 
     def init_volume__connect(self, subparser):
@@ -989,6 +997,12 @@ class CLIWrapper(CLIWrapperBase):
                     ret = False
                 else:
                     ret = self.storage_node__dump_lvstore(sub_command, args)
+            elif sub_command in ['set']:
+                if not self.developer_mode:
+                    print("This command is private.")
+                    ret = False
+                else:
+                    ret = self.storage_node__set(sub_command, args)
             else:
                 self.parser.print_help()
 
@@ -1030,7 +1044,7 @@ class CLIWrapper(CLIWrapperBase):
                     args.max_r_mbytes = None
                     args.max_w_mbytes = None
                     args.distr_vuid = None
-                    args.lvol_ha_type = 'default'
+                    args.lvol_ha_type = 'ha'
                     args.fstype = 'xfs'
                 ret = self.cluster__deploy(sub_command, args)
             elif sub_command in ['create']:

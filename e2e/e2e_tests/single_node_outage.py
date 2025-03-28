@@ -126,7 +126,8 @@ class TestSingleNodeOutage(TestClusterBase):
                          node_status="online",
                          device_status="online",
                          lvol_status="online",
-                         health_check_status=True
+                         health_check_status=True,
+                         device_health_check=None
                          )
 
         self.logger.info("Taking snapshot")
@@ -158,7 +159,8 @@ class TestSingleNodeOutage(TestClusterBase):
                          node_status="offline",
                          device_status="unavailable",
                          lvol_status="online",
-                         health_check_status=False
+                         health_check_status=False,
+                         device_health_check=None
                          )
 
         self.sbcli_utils.restart_node(node_uuid=no_lvol_node_uuid)
@@ -171,7 +173,8 @@ class TestSingleNodeOutage(TestClusterBase):
                          node_status="online",
                          device_status="online",
                          lvol_status="online",
-                         health_check_status=True
+                         health_check_status=True,
+                         device_health_check=None
                          )
         
         self.sbcli_utils.resize_lvol(lvol_id=self.sbcli_utils.get_lvol_id(self.lvol_name),
@@ -378,7 +381,8 @@ class TestHASingleNodeOutage(TestClusterBase):
                          node_status="online",
                          device_status="online",
                          lvol_status="online",
-                         health_check_status=True
+                         health_check_status=True,
+                         device_health_check=None
                          )
         
         self.sbcli_utils.resize_lvol(lvol_id=self.sbcli_utils.get_lvol_id(self.lvol_name),
@@ -404,7 +408,8 @@ class TestHASingleNodeOutage(TestClusterBase):
                             node_status="offline",
                             device_status="unavailable",
                             lvol_status="online",
-                            health_check_status=False
+                            health_check_status=False,
+                            device_health_check=None
                             )
 
             self.sbcli_utils.restart_node(node_uuid=no_lvol_node_uuid)
@@ -416,7 +421,8 @@ class TestHASingleNodeOutage(TestClusterBase):
                              node_status="online",
                              device_status="online",
                              lvol_status="online",
-                             health_check_status=True
+                             health_check_status=True,
+                             device_health_check=None
                              )
             if not self.k8s_test:
                 for node in self.storage_nodes:
