@@ -2093,10 +2093,12 @@ def list_storage_devices(node_id, is_json):
 
     data = {
         "Storage Devices": storage_devices,
-        "Distrib Block Devices": bdev_devices,
         "JM Devices": jm_devices,
         "Remote Devices": remote_devices,
     }
+    if bdev_devices:
+        data["Distrib Block Devices"] = bdev_devices
+
     if is_json:
         return json.dumps(data, indent=2)
     else:
