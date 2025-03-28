@@ -950,6 +950,7 @@ def list_all_info(cluster_id):
 
             dev_data.append({
                 "Device UUID": dev.uuid,
+                "StorgeID": dev.cluster_device_order,
 
                 "Size total": f"{utils.humanbytes(rec.size_total)}",
                 "Size Used": f"{utils.humanbytes(rec.size_used)}",

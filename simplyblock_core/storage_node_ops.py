@@ -2032,7 +2032,8 @@ def list_storage_devices(node_id, is_json):
         logger.debug("*" * 20)
         storage_devices.append({
             "UUID": device.uuid,
-            "Name": device.device_name,
+            "StorgeID": device.cluster_device_order,
+            "Name": device.alceml_name,
             "Size": utils.humanbytes(device.size),
             "Serial Number": device.serial_number,
             "PCIe": device.pcie_address,
@@ -2062,7 +2063,7 @@ def list_storage_devices(node_id, is_json):
     if snode.jm_device:
         jm_devices.append({
             "UUID": snode.jm_device.uuid,
-            "Name": snode.jm_device.device_name,
+            "Name": snode.jm_device.alceml_name,
             "Size": utils.humanbytes(snode.jm_device.size),
             "Status": snode.jm_device.status,
             "IO Err": snode.jm_device.io_error,
@@ -2072,9 +2073,13 @@ def list_storage_devices(node_id, is_json):
     for device in snode.remote_devices:
         logger.debug(device)
         logger.debug("*" * 20)
+        name = device.alceml_name
+        if device.remote_bdev:
+            name = device.remote_bdev
+
         remote_devices.append({
             "UUID": device.uuid,
-            "Name": device.device_name,
+            "Name": name,
             "Size": utils.humanbytes(device.size),
             "Node ID": device.node_id,
             "Status": device.status,
