@@ -350,6 +350,11 @@ class TestClusterBase:
             self.ssh_obj.exec_command(self.mgmt_nodes[0], cmd)
 
             node+=1
+        for node in self.fio_node:
+            cmd = f"journalctl -k >& {base_path}/jounalctl_{node}.txt"
+            self.ssh_obj.exec_command(node, cmd)
+            cmd = f"dmesg -T >& {base_path}/dmesg_{node}.txt"
+            self.ssh_obj.exec_command(node, cmd)
             
     def teardown(self):
         """Contains teradown required post test case execution
