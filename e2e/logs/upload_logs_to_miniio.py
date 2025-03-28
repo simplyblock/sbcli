@@ -395,7 +395,7 @@ for node in MNODES:
     except Exception as e:
         print(f"[ERROR] Error processing Management Node {node}: {e}")
 
-# **Step 2: Process Storage Nodes (Only for Docker mode)**
+# **Step 2: Process Storage Node**
 for node in STORAGE_PRIVATE_IPS + SEC_STORAGE_PRIVATE_IPS:
     try:
         ssh = connect_ssh(node, bastion_ip=BASTION_IP)
@@ -453,9 +453,8 @@ for node in CLIENTNODES:
     ssh = connect_ssh(node, bastion_ip=BASTION_IP)
     cleanup_remote_logs(ssh, node)
 
-if not args.k8s:
-    for node in STORAGE_PRIVATE_IPS + SEC_STORAGE_PRIVATE_IPS:
-        ssh = connect_ssh(node, bastion_ip=BASTION_IP)
-        cleanup_remote_logs(ssh, node)
+for node in STORAGE_PRIVATE_IPS + SEC_STORAGE_PRIVATE_IPS:
+    ssh = connect_ssh(node, bastion_ip=BASTION_IP)
+    cleanup_remote_logs(ssh, node)
 
 cleanup_local_logs()
