@@ -221,12 +221,10 @@ def cluster_allstats(uuid, history):
 
     list_pools = []
     for pool in db_controller.get_pools(uuid):
-        o = db_controller.get_pool_stats(pool, 20)
-        records_count = 20
-        new_records = core_utils.process_records(o, records_count)
+        records = db_controller.get_pool_stats(pool, 1)
         ret = {
             "object_data": pool.get_clean_dict(),
-            "stats": new_records or []
+            "stats": records or []
         }
         list_pools.append(ret)
 
@@ -234,10 +232,14 @@ def cluster_allstats(uuid, history):
 
     list_lvols = []
     for lvol in db_controller.get_lvols():
-        data = lvol_controller.get_io_stats(uuid, history, parse_sizes=False, with_sizes=True)
+        records_list = db_controller.get_lvol_stats(lvol, limit=1)
+        data = []
+        if records_list:
+            data = records_list
+
         ret = {
             "object_data": lvol.get_clean_dict(),
-            "stats": data or []
+            "stats": data
         }
         list_lvols.append(ret)
 
