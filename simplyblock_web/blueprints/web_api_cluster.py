@@ -7,11 +7,12 @@ import threading
 from flask import Blueprint
 from flask import request
 
-from simplyblock_core.controllers import tasks_controller
+from simplyblock_core.controllers import tasks_controller, device_controller, lvol_controller
 from simplyblock_web import utils
 
-from simplyblock_core import db_controller, cluster_ops
+from simplyblock_core import db_controller, cluster_ops, storage_node_ops
 from simplyblock_core.models.cluster import Cluster
+from simplyblock_core import utils as core_utils
 
 logger = logging.getLogger(__name__)
 
@@ -181,3 +182,65 @@ def cluster_activate(uuid):
     t.start()
     # FIXME: Any failure within the thread are not handled
     return utils.get_response(True)
+
+
+@bp.route('/cluster/allstats/<string:uuid>/history/<string:history>', methods=['GET'])
+@bp.route('/cluster/allstats/<string:uuid>', methods=['GET'], defaults={'history': None})
+def cluster_iostats(uuid, history):
+    out = {}
+    cluster = db_controller.get_cluster_by_id(uuid)
+    if not cluster:
+        logger.error(f"Cluster not found {uuid}")
+        return utils.get_response_error(f"Cluster not found: {uuid}", 404)
+
+    data = cluster_ops.get_iostats_history(uuid, history, parse_sizes=False, with_sizes=True)
+    ret = {
+        "object_data": cluster.get_clean_dict(),
+        "stats": data or []
+    }
+    out["cluster"] = ret
+
+    list_nodes = []
+    list_devices = []
+    for node in db_controller.get_storage_nodes_by_cluster_id(uuid):
+        data = storage_node_ops.get_node_iostats_history(node.get_id(), history, parse_sizes=False, with_sizes=True)
+        list_nodes.append( {
+            "object_data": node.get_clean_dict(),
+            "stats": data or [] })
+        for dev in node.nvme_devices:
+            data = device_controller.get_device_iostats(uuid, history, parse_sizes=False)
+            ret = {
+                "object_data": dev.get_clean_dict(),
+                "stats": data or []
+            }
+            list_devices.append(ret)
+
+    out["storage_nodes"] = list_nodes
+
+    out["devices"] = list_devices
+
+    list_pools = []
+    for pool in db_controller.get_pools(uuid):
+        out = db_controller.get_pool_stats(pool, 20)
+        records_count = 20
+        new_records = core_utils.process_records(out, records_count)
+        ret = {
+            "object_data": pool.get_clean_dict(),
+            "stats": new_records or []
+        }
+        list_pools.append(ret)
+
+    out["pools"] = list_pools
+
+    list_lvols = []
+    for lvol in db_controller.get_lvols():
+        data = lvol_controller.get_io_stats(uuid, history, parse_sizes=False, with_sizes=True)
+        ret = {
+            "object_data": lvol.get_clean_dict(),
+            "stats": data or []
+        }
+        list_lvols.append(ret)
+
+    out["lvols"] = list_lvols
+
+    return utils.get_response(out)
