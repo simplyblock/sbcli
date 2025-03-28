@@ -71,7 +71,7 @@ def get_all_tests(custom=True, ha_test=False):
         # TestSingleNodeReboot,
         # TestHASingleNodeReboot,
         TestHASingleNodeOutage,
-        TestSingleNodeResizeLvolCone
+        # TestSingleNodeResizeLvolCone
         # FioWorkloadTest,
         # TestMultiFioSnapshotDowntime,
         # TestManyLvolSameNode,

@@ -950,6 +950,7 @@ def list_all_info(cluster_id):
 
             dev_data.append({
                 "Device UUID": dev.uuid,
+                "StorgeID": dev.cluster_device_order,
 
                 "Size total": f"{utils.humanbytes(rec.size_total)}",
                 "Size Used": f"{utils.humanbytes(rec.size_used)}",
@@ -1189,6 +1190,9 @@ def get_logs(cluster_id, is_json=False):
         Storage_ID = None
         if 'storage_ID' in record.object_dict:
             Storage_ID = record.object_dict['storage_ID']
+
+        elif 'cluster_device_order' in record.object_dict:
+            Storage_ID = record.object_dict['cluster_device_order']
 
         vuid = None
         if 'vuid' in record.object_dict:

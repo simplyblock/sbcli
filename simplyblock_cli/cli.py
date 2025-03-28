@@ -72,6 +72,8 @@ class CLIWrapper(CLIWrapperBase):
             self.init_storage_node__make_primary(subparser)
         if self.developer_mode:
             self.init_storage_node__dump_lvstore(subparser)
+        if self.developer_mode:
+            self.init_storage_node__set(subparser)
 
 
     def init_storage_node__deploy(self, subparser):
@@ -283,10 +285,11 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('node_id', help='Storage node id', type=str).completer = self._completer_get_sn_list
 
     def init_storage_node__set(self, subparser):
-        subcommand = self.add_sub_command(subparser, 'set', "set storage node db value")
+        subcommand = self.add_sub_command(subparser, 'set', 'set storage node db value')
         subcommand.add_argument('node_id', help='Storage node id', type=str)
-        subcommand.add_argument('attr', help='attr', type=str)
-        subcommand.add_argument('value', help='value', type=str)
+        subcommand.add_argument('attr_name', help='attr_name', type=str)
+        subcommand.add_argument('attr_value', help='attr_value', type=str)
+
 
     def init_cluster(self):
         subparser = self.add_command('cluster', 'Cluster commands')
@@ -413,7 +416,7 @@ class CLIWrapper(CLIWrapperBase):
         if self.developer_mode:
             argument = subcommand.add_argument('--distr-vuid', help='(Dev) set vuid manually, default: random (1-99999)', type=int, dest='distr_vuid', required=False)
         if self.developer_mode:
-            argument = subcommand.add_argument('--lvol-ha-type', help='Logical volume HA type (single, ha), default is cluster HA type', type=str, default='default', dest='lvol_ha_type', required=False, choices=['single','default','ha',])
+            argument = subcommand.add_argument('--lvol-ha-type', help='Logical volume HA type (single, ha), default is cluster HA type', type=str, default='ha', dest='lvol_ha_type', required=False, choices=['single','default','ha',])
         argument = subcommand.add_argument('--lvol-priority-class', help='Logical volume priority class', type=int, default=0, dest='lvol_priority_class', required=False)
         if self.developer_mode:
             argument = subcommand.add_argument('--fstype', help='Filesystem type for testing (ext4, xfs)', type=str, default='xfs', dest='fstype', required=False, choices=['ext4','xfs',])
@@ -439,7 +442,7 @@ class CLIWrapper(CLIWrapperBase):
             argument = subcommand.add_argument('--distr-bs', help='(Dev) distrb bdev block size, default: 4096', type=int, default=4096, dest='distr_bs', required=False)
         if self.developer_mode:
             argument = subcommand.add_argument('--distr-chunk-bs', help='(Dev) distrb bdev chunk block size, default: 4096', type=int, default=4096, dest='distr_chunk_bs', required=False)
-        argument = subcommand.add_argument('--ha-type', help='Logical volume HA type (single, ha), default is cluster ha type', type=str, default='default', dest='ha_type', required=False, choices=['single','ha','default'])
+        argument = subcommand.add_argument('--ha-type', help='Logical volume HA type (single, ha), default is cluster ha type', type=str, default='ha', dest='ha_type', required=False, choices=['single','ha',])
         argument = subcommand.add_argument('--enable-node-affinity', help='Enable node affinity for storage nodes', dest='enable_node_affinity', required=False, action='store_true')
         argument = subcommand.add_argument('--qpair-count', help='NVMe/TCP transport qpair count per logical volume', type=int, default=0, dest='qpair_count', required=False, choices=range(0, 128))
         if self.developer_mode:
@@ -1038,7 +1041,7 @@ class CLIWrapper(CLIWrapperBase):
                     args.max_r_mbytes = None
                     args.max_w_mbytes = None
                     args.distr_vuid = None
-                    args.lvol_ha_type = 'default'
+                    args.lvol_ha_type = 'ha'
                     args.fstype = 'xfs'
                 ret = self.cluster__deploy(sub_command, args)
             elif sub_command in ['create']:

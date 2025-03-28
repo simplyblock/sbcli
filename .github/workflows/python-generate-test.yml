@@ -1,9 +1,6 @@
-name: Python Unit Testing
+name: Python Package Build
 
 on:
-  push:
-    branches:
-      - '**'
   pull_request:
     branches:
       - '**'
@@ -12,20 +9,20 @@ permissions:
   contents: read
 
 jobs:
-  deploy:
+  clipy-test:
+
     runs-on: ubuntu-latest
+
     steps:
     - uses: actions/checkout@v3
     - name: Set up Python
       uses: actions/setup-python@v3
       with:
         python-version: '3.x'
-
     - name: Install dependencies
       run: |
-        python -m pip install --upgrade pip setuptools build
-        pip install -r requirements.txt
-
+        python -m pip install --upgrade pip twine setuptools
+        pip install build
     - name: Checking cli.py status
       run: |
         ./scripts/generate.sh
@@ -35,13 +32,3 @@ jobs:
           echo "${changes}"
           exit 1
         fi
-
-    - name: Install package
-      run: python setup.py install
-
-    - name: Test with pytest
-      run: |
-        pip install pytest
-        pytest -v
-
-

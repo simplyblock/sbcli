@@ -618,13 +618,13 @@ commands:
             help: "Storage node id"
             dest: node_id
             type: str
-          - name: "attr"
-            help: "attr"
-            dest: attr
+          - name: "attr_name"
+            help: "attr_name"
+            dest: attr_name
             type: str
-          - name: "value"
-            help: "value"
-            dest: attr
+          - name: "attr_value"
+            help: "attr_value"
+            dest: attr_value
             type: str
   - name: "cluster"
     help: "Cluster commands"
@@ -996,7 +996,7 @@ commands:
               - single
               - default
               - ha
-            default: default
+            default: ha
             private: true
           - name: "--lvol-priority-class"
             help: "Logical volume priority class"

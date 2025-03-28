@@ -83,14 +83,23 @@ def get_amazon_cloud_info():
 
 
 def get_docker_client():
-    ip = os.getenv("DOCKER_IP")
-    if not ip:
-        for ifname in node_utils.get_nics_data():
-            if ifname in ["eth0", "ens0"]:
-                ip = node_utils.get_nics_data()[ifname]['ip']
-                break
-    return docker.DockerClient(base_url=f"tcp://{ip}:2375", version="auto", timeout=60 * 5)
-
+    try:
+        cl = docker.DockerClient(base_url='unix://var/run/docker.sock', version="auto", timeout=60 * 5)
+        cl.info()
+        return cl
+    except:
+        ip = os.getenv("DOCKER_IP")
+        if not ip:
+            for ifname in node_utils.get_nics_data():
+                if ifname in ["eth0", "ens0"]:
+                    ip = node_utils.get_nics_data()[ifname]['ip']
+                    break
+        cl = docker.DockerClient(base_url=f"tcp://{ip}:2375", version="auto", timeout=60 * 5)
+        try:
+            cl.info()
+            return cl
+        except:
+            pass
 
 @bp.route('/scan_devices', methods=['GET'])
 def scan_devices():

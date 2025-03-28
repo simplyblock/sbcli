@@ -1522,9 +1522,10 @@ def remove_storage_node(node_id, force_remove=False, force_migrate=False):
 
     logger.debug("Leaving swarm...")
     try:
-        node_docker = docker.DockerClient(base_url=f"tcp://{snode.mgmt_ip}:2375", version="auto")
         cluster_docker = utils.get_docker_client(snode.cluster_id)
-        cluster_docker.nodes.get(node_docker.info()["Swarm"]["NodeID"]).remove(force=True)
+        for node in cluster_docker.nodes.list():
+            if node.attrs["Status"] and snode.mgmt_ip in node.attrs["Status"]["Addr"] :
+                node.remove(force=True)
     except:
         pass
 
@@ -1694,7 +1695,6 @@ def restart_storage_node(
     if not satisfied:
         logger.error(
             f"Not enough memory for the provided max_lvo: {snode.max_lvol}, max_snap: {snode.max_snap}, max_prov: {utils.humanbytes(snode.max_prov)}.. Exiting")
-        return False
 
     spdk_debug = snode.spdk_debug
     if set_spdk_debug:
@@ -1919,7 +1919,7 @@ def restart_storage_node(
     # time.sleep(1)
     snode = db_controller.get_storage_node_by_id(snode.get_id())
     for db_dev in snode.nvme_devices:
-        if db_dev.status in [NVMeDevice.STATUS_UNAVAILABLE, NVMeDevice.STATUS_ONLINE]:
+        if db_dev.status in [NVMeDevice.STATUS_UNAVAILABLE, NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_READONLY]:
             db_dev.status = NVMeDevice.STATUS_ONLINE
             db_dev.health_check = True
             device_events.device_restarted(db_dev)
@@ -2001,7 +2001,7 @@ def list_storage_nodes(is_json, cluster_id=None):
             "Health": node.health_check,
             "Up time": uptime,
             "Cloud ID": node.cloud_instance_id,
-            "Cloud Type": node.cloud_instance_type,
+            "JM VUID": node.jm_vuid,
             "Ext IP": node.cloud_instance_public_ip,
 
         })
@@ -2024,6 +2024,7 @@ def list_storage_devices(node_id, is_json):
         return False
 
     storage_devices = []
+    bdev_devices = []
     jm_devices = []
     remote_devices = []
     for device in snode.nvme_devices:
@@ -2031,7 +2032,8 @@ def list_storage_devices(node_id, is_json):
         logger.debug("*" * 20)
         storage_devices.append({
             "UUID": device.uuid,
-            "Name": device.device_name,
+            "StorgeID": device.cluster_device_order,
+            "Name": device.alceml_name,
             "Size": utils.humanbytes(device.size),
             "Serial Number": device.serial_number,
             "PCIe": device.pcie_address,
@@ -2040,10 +2042,28 @@ def list_storage_devices(node_id, is_json):
             "Health": device.health_check
         })
 
+    for bdev in snode.lvstore_stack:
+        if bdev['type'] != "bdev_distr":
+            continue
+        logger.debug("*" * 20)
+        distrib_params =  bdev['params']
+        bdev_devices.append({
+            "VUID": distrib_params['vuid'],
+            "Name": distrib_params['name'],
+            "Size": utils.humanbytes(distrib_params['num_blocks']*distrib_params['block_size']),
+            "Block Size": distrib_params['block_size'],
+            "Num Blocks": distrib_params['num_blocks'],
+            "NDCS": f"{distrib_params['ndcs']}",
+            "NPCS": f"{distrib_params['npcs']}",
+            "Chunk": distrib_params['chunk_size'],
+            "Page Size": distrib_params['pba_page_size'],
+            "JM_VUID": distrib_params['jm_vuid'],
+        })
+
     if snode.jm_device:
         jm_devices.append({
             "UUID": snode.jm_device.uuid,
-            "Name": snode.jm_device.device_name,
+            "Name": snode.jm_device.alceml_name,
             "Size": utils.humanbytes(snode.jm_device.size),
             "Status": snode.jm_device.status,
             "IO Err": snode.jm_device.io_error,
@@ -2053,9 +2073,13 @@ def list_storage_devices(node_id, is_json):
     for device in snode.remote_devices:
         logger.debug(device)
         logger.debug("*" * 20)
+        name = device.alceml_name
+        if device.remote_bdev:
+            name = device.remote_bdev
+
         remote_devices.append({
             "UUID": device.uuid,
-            "Name": device.device_name,
+            "Name": name,
             "Size": utils.humanbytes(device.size),
             "Node ID": device.node_id,
             "Status": device.status,
@@ -2068,7 +2092,7 @@ def list_storage_devices(node_id, is_json):
             "UUID": device.uuid,
             "Name": device.remote_bdev,
             "Size": utils.humanbytes(device.size),
-            "Node ID": device.node_id,
+            "Node ID": device.device_data_dict["node_id"],
             "Status": device.status,
         })
 
@@ -2077,6 +2101,9 @@ def list_storage_devices(node_id, is_json):
         "JM Devices": jm_devices,
         "Remote Devices": remote_devices,
     }
+    if bdev_devices:
+        data["Distrib Block Devices"] = bdev_devices
+
     if is_json:
         return json.dumps(data, indent=2)
     else:
@@ -2584,9 +2611,8 @@ def deploy(ifname, spdk_cpu_mask="", isolate_cores=False):
     return f"{dev_ip}:5000"
 
 def start_storage_node_api_container(node_ip):
-    node_docker = docker.DockerClient(base_url=f"tcp://{node_ip}:2375", version="auto", timeout=60 * 5)
-
-
+    # node_docker = docker.DockerClient(base_url=f"tcp://{node_ip}:2375", version="auto", timeout=60 * 5)
+    node_docker = docker.DockerClient(base_url='unix://var/run/docker.sock', version="auto", timeout=60 * 5)
 
     logger.info(f"Pulling image {constants.SIMPLY_BLOCK_DOCKER_IMAGE}")
     node_docker.images.pull(constants.SIMPLY_BLOCK_DOCKER_IMAGE)
@@ -2665,22 +2691,22 @@ def health_check(node_id):
         else:
             logger.error(f"Ping host: {snode.mgmt_ip}... Failed")
 
-        node_docker = docker.DockerClient(base_url=f"tcp://{snode.mgmt_ip}:2375", version="auto")
-        containers_list = node_docker.containers.list(all=True)
-        for cont in containers_list:
-            name = cont.attrs['Name']
-            state = cont.attrs['State']
-
-            if name in ['/spdk', '/spdk_proxy', '/SNodeAPI'] or name.startswith("/app_"):
-                logger.debug(state)
-                since = ""
-                try:
-                    start = datetime.datetime.fromisoformat(state['StartedAt'].split('.')[0])
-                    since = str(datetime.datetime.now() - start).split('.')[0]
-                except:
-                    pass
-                clean_name = name.split(".")[0].replace("/", "")
-                logger.info(f"Container: {clean_name}, Status: {state['Status']}, Since: {since}")
+        # node_docker = docker.DockerClient(base_url=f"tcp://{snode.mgmt_ip}:2375", version="auto")
+        # containers_list = node_docker.containers.list(all=True)
+        # for cont in containers_list:
+        #     name = cont.attrs['Name']
+        #     state = cont.attrs['State']
+        #
+        #     if name in ['/spdk', '/spdk_proxy', '/SNodeAPI'] or name.startswith("/app_"):
+        #         logger.debug(state)
+        #         since = ""
+        #         try:
+        #             start = datetime.datetime.fromisoformat(state['StartedAt'].split('.')[0])
+        #             since = str(datetime.datetime.now() - start).split('.')[0]
+        #         except:
+        #             pass
+        #         clean_name = name.split(".")[0].replace("/", "")
+        #         logger.info(f"Container: {clean_name}, Status: {state['Status']}, Since: {since}")
 
     except Exception as e:
         logger.error(f"Failed to connect to node's docker: {e}")
@@ -2841,12 +2867,12 @@ def recreate_lvstore_on_sec(snode):
         for lvol in lvol_list:
             logger.info("creating subsystem %s", lvol.nqn)
             rpc_client.subsystem_create(lvol.nqn, 'sbcli-cn', lvol.uuid, 1000)
-            for iface in snode.data_nics:
-                if iface.ip4_address:
-                    tr_type = iface.get_transport_type()
-                    logger.info("adding listener for %s on IP %s" % (lvol.nqn, iface.ip4_address))
-                    ret = rpc_client.listeners_create(
-                        lvol.nqn, tr_type, iface.ip4_address, lvol.subsys_port, "non_optimized")
+            # for iface in snode.data_nics:
+            #     if iface.ip4_address:
+            #         tr_type = iface.get_transport_type()
+            #         logger.info("adding listener for %s on IP %s" % (lvol.nqn, iface.ip4_address))
+            #         ret = rpc_client.listeners_create(
+            #             lvol.nqn, tr_type, iface.ip4_address, lvol.subsys_port, "non_optimized")
 
         if node.status == StorageNode.STATUS_ONLINE:
             # for lvol in lvol_list:
@@ -2859,7 +2885,7 @@ def recreate_lvstore_on_sec(snode):
 
             remote_rpc_client.bdev_lvol_set_leader(False, lvs_name=node.lvstore)
             remote_rpc_client.bdev_distrib_force_to_non_leader(node.jm_vuid)
-            time.sleep(1)
+            # time.sleep(1)
 
         # ret, err = _create_bdev_stack(snode, node.lvstore_stack, primary_node=node)
         ret = rpc_client.bdev_examine(node.raid)
@@ -2875,9 +2901,13 @@ def recreate_lvstore_on_sec(snode):
             node.lvstore_status = "ready"
             node.write_to_db()
 
-        time.sleep(1)
+        # time.sleep(1)
         for lvol in lvol_list:
-            is_created, error = add_lvol_thread(lvol, snode)
+            is_created, error = add_lvol_thread(lvol, snode, lvol_ana_state="non_optimized")
+            for iface in node.data_nics:
+                if iface.ip4_address:
+                    ret = remote_rpc_client.nvmf_subsystem_listener_set_ana_state(
+                        lvol.nqn, iface.ip4_address, lvol.subsys_port, True)
 
             # is_created, error = lvol_controller.recreate_lvol_on_node(
             #     lvol, snode, 1, "non-optimize")
@@ -2961,7 +2991,7 @@ def recreate_lvstore(snode):
 
             sec_rpc_client.bdev_lvol_set_leader(False, lvs_name=snode.lvstore, bs_nonleadership=True)
             sec_rpc_client.bdev_distrib_force_to_non_leader(snode.jm_vuid)
-            time.sleep(1)
+            # time.sleep(1)
 
 
     ret = rpc_client.bdev_examine(snode.raid)
@@ -3429,14 +3459,12 @@ def set(node_id, attr, value):
         return False
 
     if attr in snode.get_attrs_map():
+        try:
+            value = snode.get_attrs_map()[attr]['type'](value)
+            logger.info(f"Setting {attr} to {value}")
+            setattr(snode, attr, value)
+            snode.write_to_db()
+        except:
+            pass
 
-        if snode.get_attrs_map()[attr]['type'] != str:
-            try:
-                value = snode.get_attrs_map()[attr]['type'](value)
-                setattr(snode, attr, value)
-                snode.write_to_db()
-            except:
-                pass
-
-    data = snode.get_clean_dict()
-    return json.dumps(data, indent=2, sort_keys=True)
+    return True
