@@ -11,6 +11,13 @@ from ping3 import ping
 logging = setup_logger(__name__)
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
+class InvalidIPError(Exception):
+    """Custom exception for invalid IP addresses."""
+    def __init__(self, ip):
+        self.ip = ip
+        super().__init__(f"Ivalid IP '{ip}' not found. Must be of the form 192.168.10.X")
+
+
 # Constants
 EXCLUDED_IPS = ["192.168.10.132", "192.168.10.171", "192.168.10.173", "192.168.10.174"]
 
@@ -76,6 +83,9 @@ def get_proxmox(ip) -> Tuple[int, int]:
     """
     Check if the last octet of the IP is in the valid range.
     """
+    if not is_valid_ip(ip):
+        raise InvalidIPError(ip)
+
     last_octet = int(ip.split('.')[-1])
 
     if 20 <= last_octet <= 49:
@@ -99,7 +109,7 @@ def get_proxmox(ip) -> Tuple[int, int]:
 
     return proxmox_id, vm_id
 
-def stop_vm(proxmox_id, vm_id):
+def stop_vm(proxmox_id, vm_id, timeout_seconds=300):
     """
     stops a VM on the proxmox server
     """
@@ -110,9 +120,9 @@ def stop_vm(proxmox_id, vm_id):
     headers = {"Authorization": api_token}
     stop_url = f"http://{proxmox_ip}:8006/api2/json/nodes/{node}/qemu/{vm_id}/status/stop"
     requests.post(stop_url, headers=headers, verify=False)
-    wait_for_status(proxmox_ip, node, vm_id, "stopped", api_token)
+    wait_for_status(proxmox_ip, node, vm_id, "stopped", api_token, timeout_seconds)
 
-def start_vm(proxmox_id, vm_id):
+def start_vm(proxmox_id, vm_id, timeout_seconds=300):
     """
     starts a VM on a Proxmox server
     """
@@ -123,7 +133,7 @@ def start_vm(proxmox_id, vm_id):
     headers = {"Authorization": api_token}
     start_url = f"https://{proxmox_ip}:8006/api2/json/nodes/{node}/qemu/{vm_id}/status/start"
     requests.post(start_url, headers=headers, verify=False)
-    wait_for_status(proxmox_ip, node, vm_id, "running", api_token)
+    wait_for_status(proxmox_ip, node, vm_id, "running", api_token, timeout_seconds)
 
 def is_vm_reachable(ip, timeout_seconds=300):
     """
