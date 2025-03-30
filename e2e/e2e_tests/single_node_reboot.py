@@ -5,7 +5,7 @@ from e2e_tests.cluster_test_base import TestClusterBase
 from utils.common_utils import sleep_n_sec
 from logger_config import setup_logger
 from datetime import datetime
-from utils.proxmox import proxmox
+from utils import proxmox
 from requests.exceptions import HTTPError
 
 class TestSingleNodeReboot(TestClusterBase):
@@ -424,7 +424,7 @@ class TestHASingleNodeReboot(TestClusterBase):
                 reboot_thread = threading.Thread(target=self.common_utils.reboot_ec2_instance, args=(self.ec2_resource, instance_id,),)
                 reboot_thread.start()
             elif proxmox.is_valid_ip(node_ip):
-                reboot_thread = threading.Thread(target=self.common_utils.reboot_proxmox_node, args=(node_ip),)
+                reboot_thread = threading.Thread(target=self.common_utils.reboot_proxmox_node, args=(node_ip,),)
                 reboot_thread.start()
             else:
                 # Perform node reboot

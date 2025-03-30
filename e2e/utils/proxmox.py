@@ -118,8 +118,9 @@ def stop_vm(proxmox_id, vm_id, timeout_seconds=300):
     api_token = get_api_token(proxmox_id)
 
     headers = {"Authorization": api_token}
-    stop_url = f"http://{proxmox_ip}:8006/api2/json/nodes/{node}/qemu/{vm_id}/status/stop"
-    requests.post(stop_url, headers=headers, verify=False)
+    stop_url = f"https://{proxmox_ip}:8006/api2/json/nodes/{node}/qemu/{vm_id}/status/stop"
+    resp = requests.post(stop_url, headers=headers, verify=False)
+    logging.info(f"received response status {resp.status_code}")
     wait_for_status(proxmox_ip, node, vm_id, "stopped", api_token, timeout_seconds)
 
 def start_vm(proxmox_id, vm_id, timeout_seconds=300):
@@ -132,7 +133,8 @@ def start_vm(proxmox_id, vm_id, timeout_seconds=300):
 
     headers = {"Authorization": api_token}
     start_url = f"https://{proxmox_ip}:8006/api2/json/nodes/{node}/qemu/{vm_id}/status/start"
-    requests.post(start_url, headers=headers, verify=False)
+    resp = requests.post(start_url, headers=headers, verify=False)
+    logging.info(f"received response status {resp.status_code}")
     wait_for_status(proxmox_ip, node, vm_id, "running", api_token, timeout_seconds)
 
 def is_vm_reachable(ip, timeout_seconds=300):

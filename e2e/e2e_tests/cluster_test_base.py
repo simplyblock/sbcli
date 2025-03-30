@@ -74,6 +74,7 @@ class TestClusterBase:
         retry = 30
         while retry > 0:
             try:
+                print("getting all storage nodes")
                 self.mgmt_nodes, self.storage_nodes = self.sbcli_utils.get_all_nodes_ip()
                 self.sbcli_utils.list_lvols()
                 self.sbcli_utils.list_storage_pools()
