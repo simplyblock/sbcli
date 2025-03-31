@@ -15,7 +15,7 @@ from flask import request
 
 from simplyblock_web import utils, node_utils
 
-from simplyblock_core import scripts, constants, shell_utils
+from simplyblock_core import scripts, constants, shell_utils, utils as core_utils
 
 logger = logging.getLogger(__name__)
 
@@ -144,7 +144,7 @@ def spdk_process_start():
             pass
 
     if spdk_mem:
-        spdk_mem = int(utils.parse_size(spdk_mem) / (1024 * 1024))
+        spdk_mem = int(core_utils.parse_size(spdk_mem) / (1024 * 1024))
     else:
         spdk_mem = 4000
 

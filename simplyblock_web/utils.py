@@ -35,11 +35,6 @@ def generate_string(length):
         string.ascii_letters + string.digits) for _ in range(length))
 
 
-def parse_size(size_string: str):
-    from simplyblock_core import utils as core_utils
-    return core_utils.parse_size(size_string)
-
-
 def validate_cpu_mask(spdk_cpu_mask):
     return re.match("^(0x|0X)?[a-fA-F0-9]+$", spdk_cpu_mask)
 
