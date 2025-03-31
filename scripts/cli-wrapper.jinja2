@@ -63,7 +63,7 @@ class CLIWrapper(CLIWrapperBase):
 {%- if parameter.type is defined and parameter.action is undefined %}, type={{ parameter.type }}{% endif %}
 {%- if parameter.default is defined and parameter.action is undefined %}, default={{ parameter | default_value }}{% endif %}
 {%- if parameter.dest is defined %}, dest='{{ parameter.dest }}'{% endif %}
-{%- if parameter.required is defined %}, required={{ parameter | required }}{% endif %}
+{%- if parameter | required %}, required=True{% endif %}
 {%- if parameter.nargs is defined %}, nargs={{ parameter | nargs }}{% endif %}
 {%- if parameter.choices %}, choices=[{% for choice in parameter.choices %}'{{ choice }}',{% endfor %}]{% endif %}
 {%- if parameter.value_range %}, choices=range({{ parameter.value_range | split_value_range }}){% endif %}
@@ -80,7 +80,7 @@ class CLIWrapper(CLIWrapperBase):
 {%- if parameter.type is defined and parameter.action is undefined %}, type={{ parameter.type }}{% endif %}
 {%- if parameter.default is defined %}, default={{ parameter | default_value }}{% endif %}
 {%- if parameter.dest is defined %}, dest='{{ parameter.dest }}'{% endif %}
-{%- if parameter.required is defined %}, required={{ parameter | required }}{% endif %}
+{%- if parameter | required %}, required=True{% endif %}
 {%- if parameter.nargs is defined %}, nargs={{ parameter | nargs }}{% endif %}
 {%- if parameter.choices %}, choices=[{% for choice in parameter.choices %}'{{ choice }}',{% endfor %}]{% endif %}
 {%- if parameter.value_range %}, choices=range({{ parameter.value_range | split_value_range }}){% endif %}

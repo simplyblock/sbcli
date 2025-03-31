@@ -108,6 +108,26 @@ properties:
                     - help
                     - type
                     - dest
+                  not:
+                    anyOf:
+                      - properties:  # private arguments cannot be required
+                          private:
+                            enum:
+                              - true
+                          required:
+                            enum:
+                              - true
+                        required: ["private", "required"]
+                      - properties:  # arguments with actions cannot be required
+                          required:
+                            enum:
+                              - true
+                        required: ["action", "required"]
+                      - properties:  # arguments with default values cannot be required
+                          required:
+                            enum:
+                              - true
+                        required: ["default", "required"]
                   properties:
                     name:
                       type: string
