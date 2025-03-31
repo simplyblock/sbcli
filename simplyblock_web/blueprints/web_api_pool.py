@@ -72,10 +72,10 @@ def add_pool():
     pool_max_size = 0
     lvol_max_size = 0
     if 'pool_max' in pool_data:
-        pool_max_size = utils.parse_size(pool_data['pool_max'])
+        pool_max_size = core_utils.parse_size(pool_data['pool_max'])
 
     if 'lvol_max' in pool_data:
-        lvol_max_size = utils.parse_size(pool_data['lvol_max'])
+        lvol_max_size = core_utils.parse_size(pool_data['lvol_max'])
 
     max_rw_iops = utils.get_int_value_or_default(pool_data, "max_rw_iops", 0)
     max_rw_mbytes = utils.get_int_value_or_default(pool_data, "max_rw_mbytes", 0)
@@ -132,22 +132,22 @@ def update_pool(uuid):
     pool.pool_name = pool_data.get('name') or pool.pool_name
 
     if 'pool_max' in pool_data:
-        pool.pool_max_size = utils.parse_size(pool_data['pool_max'])
+        pool.pool_max_size = core_utils.parse_size(pool_data['pool_max'])
 
     if 'lvol_max' in pool_data:
-        pool.lvol_max_size = utils.parse_size(pool_data['lvol_max'])
+        pool.lvol_max_size = core_utils.parse_size(pool_data['lvol_max'])
 
     if 'max_r_iops' in pool_data:
-        pool.max_r_iops = utils.parse_size(pool_data['max_r_iops'])
+        pool.max_r_iops = core_utils.parse_size(pool_data['max_r_iops'])
 
     if 'max_w_iops' in pool_data:
-        pool.max_w_iops = utils.parse_size(pool_data['max_w_iops'])
+        pool.max_w_iops = core_utils.parse_size(pool_data['max_w_iops'])
 
     if 'max_r_mbytes' in pool_data:
-        pool.max_r_mbytes_per_sec = utils.parse_size(pool_data['max_r_mbytes'])
+        pool.max_r_mbytes_per_sec = core_utils.parse_size(pool_data['max_r_mbytes'])
 
     if 'max_w_mbytes' in pool_data:
-        pool.max_w_mbytes_per_sec = utils.parse_size(pool_data['max_w_mbytes'])
+        pool.max_w_mbytes_per_sec = core_utils.parse_size(pool_data['max_w_mbytes'])
 
     pool.write_to_db(db_controller.kv_store)
     return utils.get_response(pool.to_dict())

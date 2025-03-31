@@ -8,7 +8,7 @@ from flask import Blueprint, request
 
 
 from simplyblock_web import utils
-from simplyblock_core import db_controller
+from simplyblock_core import db_controller, utils as core_utils
 from simplyblock_core.controllers import caching_node_controller
 
 logger = logging.getLogger(__name__)
@@ -43,7 +43,7 @@ def add_node_to_cluster():
 
     if 'spdk_mem' in cl_data:
         mem = cl_data['spdk_mem']
-        spdk_mem = utils.parse_size(mem)
+        spdk_mem = core_utils.parse_size(mem)
         if spdk_mem < 1 * 1024 * 1024:
             return utils.get_response_error(f"SPDK memory:{mem} must be larger than 1G", 400)
 
