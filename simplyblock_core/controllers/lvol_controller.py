@@ -89,7 +89,7 @@ def validate_add_lvol_func(name, size, host_id_or_name, pool_id_or_name,
         return False, "Name can not be empty"
 
     #  size validation
-    if size < 100 * 1024 * 1024:
+    if size < utils.parse_size('100MiB'):
         return False, "Size must be larger than 100M"
 
     #  host validation

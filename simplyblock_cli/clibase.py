@@ -572,8 +572,8 @@ class CLIWrapperBase:
         spdk_mem = None
         if args.spdk_mem:
             spdk_mem = utils.parse_size(args.spdk_mem)
-            if spdk_mem < 1 * 1024 * 1024:
-                return f"SPDK memory:{args.spdk_mem} must be larger than 1G"
+            if spdk_mem < utils.parse_size('1GiB'):
+                return f"SPDK memory:{args.spdk_mem} must be larger than 1GiB"
 
         return caching_node_controller.add_node(
             cluster_id, node_ip, ifname, data_nics, spdk_cpu_mask, spdk_mem, spdk_image, namespace, multipathing)
