@@ -27,8 +27,8 @@ def _post_install():
                         found = True
                         break
         if not found:
-            with open(os.environ.get("HOME")+"/.bashrc", "w") as bashrc:
-                bashrc.writelines([f"source {path}"])
+            with open(os.environ.get("HOME") + "/.bashrc", "a") as bashrc:
+                bashrc.writelines([f"\nsource {path}\n"])
 
 
 class install(_install):
