@@ -185,14 +185,28 @@ properties:
                         </ul>
                       default: false
                     type:
+                      description: |
+                        The data type of the argument. If applicable, conversion from the textual representation
+                        is done automatically when parsing.
+                      x-intellij-html-description: |
+                        The data type of the argument. If applicable, conversion from the textual representation
+                        is done automatically when parsing.
                       oneOf:
                         - type: string
+                          description: |
+                            Simple data types representing either integer, string, boolean, or data size.
+                          x-intellij-html-description: |
+                            Simple data types representing either integer, string, boolean, or data size.
                           enum:
                             - int
                             - str
                             - bool
                             - size
                         - type: object
+                          description: |
+                            Valid arguments are integers within a specific range. Minimum is inclusive and maximum is exclusive.
+                          x-intellij-html-description: |
+                            Valid arguments are integers within a specific range. Minimum is inclusive and maximum is exclusive.
                           additionalProperties: false
                           properties:
                             range:
@@ -206,11 +220,21 @@ properties:
                                 max:
                                   type: integer
                         - type: object
+                          description: |
+                            Valid arguments are strings matched against the given regex.
+                          x-intellij-html-description: |
+                            Valid arguments are strings matched against the given regex.
                           additionalProperties: false
                           properties:
                             regex:
                               type: string
                         - type: object
+                          description: |
+                            A data size. Minimum and maximum are optional. If neither is given, use the string version
+                            instead.
+                          x-intellij-html-description: |
+                            A data size. Minimum and maximum are optional. If neither is given, use the string version
+                            instead.
                           additionalProperties: false
                           minProperties: 1
                           properties:
