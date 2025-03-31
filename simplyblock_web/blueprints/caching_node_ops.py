@@ -266,35 +266,6 @@ def spdk_process_is_up():
     return utils.get_response(False, "SPDK container not found")
 
 
-def _get_mem_info():
-    out, err, _ = run_command("cat /proc/meminfo")
-    data = {}
-    for line in out.split('\n'):
-        tm = line.split(":")
-        data[tm[0].strip()] = tm[1].strip()
-    return data
-
-
-def get_memory():
-    try:
-        mem_kb = _get_mem_info()['MemTotal']
-        mem_kb = mem_kb.replace(" ", "").lower()
-        mem_kb = mem_kb.replace("b", "")
-        return utils.parse_size(mem_kb)
-    except:
-        return 0
-
-
-def get_huge_memory():
-    try:
-        mem_kb = _get_mem_info()['Hugetlb']
-        mem_kb = mem_kb.replace(" ", "").lower()
-        mem_kb = mem_kb.replace("b", "")
-        return utils.parse_size(mem_kb)
-    except:
-        return 0
-
-
 CPU_INFO = cpuinfo.get_cpu_info()
 HOSTNAME, _, _ = node_utils.run_command("hostname -s")
 SYSTEM_ID, _, _ = node_utils.run_command("dmidecode -s system-uuid")
@@ -310,8 +281,8 @@ def get_info():
         "cpu_count": CPU_INFO['count'],
         "cpu_hz": CPU_INFO['hz_advertised'][0] if 'hz_advertised' in CPU_INFO else 1,
 
-        "memory": get_memory(),
-        "hugepages": get_huge_memory(),
+        "memory": node_utils.get_memory(),
+        "hugepages": node_utils.get_huge_memory(),
         "memory_details": node_utils.get_memory_details(),
 
         "nvme_devices": _get_nvme_devices(),
