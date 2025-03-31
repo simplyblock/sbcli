@@ -50,20 +50,6 @@ def argument_type(spec):
     return spec
 
 
-def required(item):
-    if "action" in item:
-        return False
-    elif "default" in item:
-        return False
-    elif "private" in item and item["private"]:
-        return False
-    elif "required" in item and item["required"]:
-        return True
-    elif not item["name"].startswith("--"):
-        return True
-    return False
-
-
 def escape_python_string(text):
     return text.replace('%', '%%')
 
@@ -149,8 +135,6 @@ with open("%s/cli-reference.yaml" % base_path) as stream:
         for command in reference["commands"]:
             for subcommand in command["subcommands"]:
                 if "arguments" in subcommand:
-                    for argument in subcommand["arguments"]:
-                        argument["required"] = argument["required"] if 'required' in argument else ("default" not in argument)
                     arguments = select_arguments(subcommand["arguments"])
                     parameters = select_parameters(subcommand["arguments"])
                     subcommand["arguments"] = arguments
@@ -162,7 +146,6 @@ with open("%s/cli-reference.yaml" % base_path) as stream:
         environment.filters["no_newline"] = no_newline
         environment.filters["argument_type"] = argument_type
         environment.filters["default_value"] = default_value
-        environment.filters["required"] = required
         environment.filters["get_description"] = get_description
         environment.filters["escape_strings"] = escape_strings
         environment.filters["make_identifier"] = make_identifier

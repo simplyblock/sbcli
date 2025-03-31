@@ -110,7 +110,9 @@ properties:
                     - dest
                   not:
                     anyOf:
-                      - properties:  # private arguments cannot be required
+                      - description: Private arguments cannot be required
+                        x-intellij-html-description: Private arguments cannot be required
+                        properties:
                           private:
                             enum:
                               - true
@@ -118,12 +120,16 @@ properties:
                             enum:
                               - true
                         required: ["private", "required"]
-                      - properties:  # arguments with actions cannot be required
+                      - description: Arguments with actions cannot be required
+                        x-intellij-html-description: Arguments with actions cannot be required
+                        properties:
                           required:
                             enum:
                               - true
                         required: ["action", "required"]
-                      - properties:  # arguments with default values cannot be required
+                      - description: Arguments with default values cannot be required
+                        x-intellij-html-description: Arguments with default values cannot be required
+                        properties:
                           required:
                             enum:
                               - true
