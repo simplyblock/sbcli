@@ -237,6 +237,8 @@ class TestClusterBase:
 
         self.logger.info("Started log monitoring for all storage nodes.")
 
+        sleep_n_sec(120)
+
     def configure_sysctl_settings(self):
         """Configure TCP kernel parameters on the node."""
         sysctl_commands = [
