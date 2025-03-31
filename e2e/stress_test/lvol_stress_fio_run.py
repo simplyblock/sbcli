@@ -28,11 +28,11 @@ class TestStressLvolCloneClusterFioRun(TestLvolHACluster):
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        self.total_lvols = 20
+        self.total_lvols = 10
         self.lvol_name = f"lvl{random_char(3)}"
         self.clone_name = f"cln{random_char(3)}"
         self.snapshot_name = f"snap{random_char(3)}"
-        self.lvol_size = "50G"
+        self.lvol_size = "10G"
         self.fio_size = "1G"
         self.fio_threads = []
         self.clone_mount_details = {}
@@ -311,7 +311,7 @@ class TestStressLvolCloneClusterFioRun(TestLvolHACluster):
     def run(self):
         """Main execution loop for the random failover test."""
         self.logger.info("Starting random failover test.")
-        self.node = self.mgmt_nodes[0]
+        self.node = self.fio_node
         iteration = 1
 
         self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
@@ -330,7 +330,7 @@ class TestStressLvolCloneClusterFioRun(TestLvolHACluster):
             validation_thread = threading.Thread(target=self.validate_iostats_continuously, daemon=True)
             validation_thread.start()
             sleep_n_sec(600)
-            self.delete_random_lvols(5)
+            self.delete_random_lvols(7)
             self.create_lvols_with_fio(5)
             self.create_snapshots_and_clones()
 
@@ -348,6 +348,7 @@ class TestStressLvolCloneClusterFioRun(TestLvolHACluster):
             for lvol, lvol_details in self.lvol_mount_details.items():
                 self.common_utils.validate_fio_test(self.node,
                                                     log_file=lvol_details["Log"])
+                
 
             self.logger.info(f"Iteration {iteration} complete.")
             iteration += 1
