@@ -114,6 +114,14 @@ class TestClusterBase:
 
         self.fio_node = self.client_machines if self.client_machines else [self.mgmt_nodes[0]]
 
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        # Construct the logs path with test name and timestamp
+        self.docker_logs_path = os.path.join(Path.home(), "container-logs", f"{self.test_name}-{timestamp}")
+        self.runner_k8s_log = RunnerK8sLog(
+                log_dir=self.docker_logs_path,
+                test_name=self.test_name
+            )
+
         # command = "python3 -c \"from importlib.metadata import version;print(f'SBCLI Version: {version('''sbcli-dev''')}')\""
         # self.ssh_obj.exec_command(
         #     self.mgmt_nodes[0], command=command
@@ -143,10 +151,6 @@ class TestClusterBase:
             )
             self.ec2_resource = session.resource('ec2')
 
-        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-        # Construct the logs path with test name and timestamp
-        self.docker_logs_path = os.path.join(Path.home(), "container-logs", f"{self.test_name}-{timestamp}")
-        
         for node in self.storage_nodes:
             self.ssh_obj.delete_old_folders(
                 node=node,
@@ -174,10 +178,6 @@ class TestClusterBase:
                 self.ssh_obj.reset_iptables_in_spdk(node_ip=node)
         
         if self.k8s_test:
-            self.runner_k8s_log = RunnerK8sLog(
-                log_dir=self.docker_logs_path,
-                test_name=self.test_name
-            )
             self.runner_k8s_log.start_logging()
             self.runner_k8s_log.monitor_pod_logs()
         # for node in self.storage_nodes:
