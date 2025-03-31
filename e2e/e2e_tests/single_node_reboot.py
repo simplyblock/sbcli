@@ -5,7 +5,7 @@ from e2e_tests.cluster_test_base import TestClusterBase
 from utils.common_utils import sleep_n_sec
 from logger_config import setup_logger
 from datetime import datetime
-import traceback
+from utils import proxmox
 from requests.exceptions import HTTPError
 
 class TestSingleNodeReboot(TestClusterBase):
@@ -20,7 +20,9 @@ class TestSingleNodeReboot(TestClusterBase):
     7. While FIO is running, validate this scenario:
         a. In a cluster with three nodes, select one node, which does not
            have any lvol attached.
-        b. Reboot the instance
+        b. Reboot the instance (EC2 or Proxmox)
+            i. If EC2, use boto3 to stop the instance
+            ii. If Proxmox, use the Proxmox API to stop the instance
         c. Check status of objects during outage:
             - the node is in status “offline”
             - the devices of the node are in status “unavailable”
@@ -132,6 +134,9 @@ class TestSingleNodeReboot(TestClusterBase):
             # self.common_utils.stop_ec2_instance(ec2_resource=self.ec2_resource,
             #                                     instance_id=instance_id)
             reboot_thread = threading.Thread(target=self.common_utils.reboot_ec2_instance, args=(self.ec2_resource, instance_id,),)
+            reboot_thread.start()
+        elif proxmox.is_valid_ip(node_ip):
+            reboot_thread = threading.Thread(target=self.common_utils.reboot_proxmox_node, args=(node_ip),)
             reboot_thread.start()
         else:
             # Perform node reboot
@@ -342,7 +347,9 @@ class TestHASingleNodeReboot(TestClusterBase):
     6. Start FIO tests
     7. While FIO is running, validate this scenario:
         a. In a cluster with three nodes, select one node, which has the lvol
-        b. Reboot the node
+        b. Reboot the node (EC2 or Proxmox)
+            i. If EC2, use boto3 to stop the instance
+            ii. If Proxmox, use the Proxmox API to stop the instance
         c. Check status of objects during outage:
             - the node is in status “offline”
             - the devices of the node are in status “unavailable”
@@ -415,6 +422,9 @@ class TestHASingleNodeReboot(TestClusterBase):
             if "i-" in instance_id[0:2]:
                 # AWS way stop
                 reboot_thread = threading.Thread(target=self.common_utils.reboot_ec2_instance, args=(self.ec2_resource, instance_id,),)
+                reboot_thread.start()
+            elif proxmox.is_valid_ip(node_ip):
+                reboot_thread = threading.Thread(target=self.common_utils.reboot_proxmox_node, args=(node_ip,),)
                 reboot_thread.start()
             else:
                 # Perform node reboot
