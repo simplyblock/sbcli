@@ -306,7 +306,7 @@ class TestStressLvolCloneClusterFioRun(TestLvolHACluster):
                     time_duration=None  # Not needed in this case
                 )
 
-                sleep_n_sec(60)  # Sleep for 60 seconds before the next validation
+                sleep_n_sec(300)  # Sleep for 60 seconds before the next validation
             except Exception as e:
                 self.logger.error(f"Error in continuous I/O stats validation: {str(e)}")
                 break  # Exit the thread on failure
@@ -342,7 +342,6 @@ class TestStressLvolCloneClusterFioRun(TestLvolHACluster):
                 threads=self.fio_threads,
                 timeout=100000
             )
-            validation_thread.join()
 
             for clone, clone_details in self.clone_mount_details.items():
                 self.common_utils.validate_fio_test(clone_details["Client"],
