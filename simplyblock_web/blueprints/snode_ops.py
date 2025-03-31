@@ -128,10 +128,6 @@ def spdk_process_start():
     if 'spdk_cpu_mask' in data:
         spdk_cpu_mask = data['spdk_cpu_mask']
 
-    spdk_mem = None
-    if 'spdk_mem' in data:
-        spdk_mem = data['spdk_mem']
-
     multi_threading_enabled = False
     if 'multi_threading_enabled' in data:
         multi_threading_enabled = bool(data['multi_threading_enabled'])
@@ -143,10 +139,8 @@ def spdk_process_start():
         except:
             pass
 
-    if spdk_mem:
-        spdk_mem = int(core_utils.parse_size(spdk_mem) / (1024 * 1024))
-    else:
-        spdk_mem = 4000
+    spdk_mem_mib = core_utils.convert_size(
+            data.get('spdk_mem', core_utils.parse_size('4GiB')), 'MiB')
 
     node_docker = get_docker_client()
     nodes = node_docker.containers.list(all=True)
@@ -174,7 +168,7 @@ def spdk_process_start():
 
     container = node_docker.containers.run(
         spdk_image,
-        f"/root/scripts/run_distr.sh {spdk_cpu_mask} {spdk_mem} {spdk_debug}",
+        f"/root/scripts/run_distr.sh {spdk_cpu_mask} {spdk_mem_mib} {spdk_debug}",
         name="spdk",
         detach=True,
         privileged=True,

@@ -17,7 +17,7 @@ from jinja2 import Environment, FileSystemLoader
 import yaml
 
 from simplyblock_web import utils, node_utils, node_utils_k8s
-from simplyblock_core import scripts, constants, shell_utils
+from simplyblock_core import scripts, constants, shell_utils, utils as core_utils
 from simplyblock_web.node_utils_k8s import deployment_name, namespace_id_file, pod_name
 
 logger = logging.getLogger(__name__)
@@ -276,9 +276,6 @@ def spdk_process_start():
     spdk_cpu_mask = None
     if 'spdk_cpu_mask' in data:
         spdk_cpu_mask = data['spdk_cpu_mask']
-    spdk_mem = None
-    if 'spdk_mem' in data:
-        spdk_mem = data['spdk_mem']
     node_cpu_count = os.cpu_count()
 
     namespace = node_utils_k8s.get_namespace()
@@ -296,12 +293,7 @@ def spdk_process_start():
     else:
         spdk_cpu_mask = hex(int(math.pow(2, node_cpu_count)) - 1)
 
-    if spdk_mem:
-        spdk_mem = int(spdk_mem / (1024 * 1024))
-    else:
-        spdk_mem = 64096
-
-    spdk_mem_gega = int(spdk_mem / 1024)
+    spdk_mem = data.get('spdk_mem', core_utils.parse_size('64GiB'))
 
     spdk_image = constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE
     # if node_utils.get_host_arch() == "aarch64":
@@ -327,8 +319,8 @@ def spdk_process_start():
         values = {
             'SPDK_IMAGE': spdk_image,
             'SPDK_CPU_MASK': spdk_cpu_mask,
-            'SPDK_MEM': spdk_mem,
-            'MEM_GEGA': spdk_mem_gega,
+            'SPDK_MEM': core_utils.convert_size(spdk_mem, 'MiB'),
+            'MEM_GEGA': core_utils.convert_size(spdk_mem, 'GiB'),
             'MEM2_GEGA': 2,
             'SERVER_IP': data['server_ip'],
             'RPC_PORT': data['rpc_port'],
