@@ -400,7 +400,7 @@ jobs:
           CLUSTER_UUID="${CLUSTER_ID}"
           CLUSTER_SECRET="${CLUSTER_SECRET}"
           n=0
-          until [ "$n" -ge 60 ]
+          until [ "$n" -ge 100 ]
           do
             response=$(curl -s -X GET "$CLUSTER_API_GATEWAY_ENDPOINT/cluster/$CLUSTER_UUID" \
               -H "Content-Type: application/json" \
@@ -415,7 +415,7 @@ jobs:
             
             echo "Cluster status is not active, current status: $status, retrying"
             n=$((n+1)) 
-            sleep 10
+            sleep 20
           done
           
           if [ "$status" != "active" ]; then
