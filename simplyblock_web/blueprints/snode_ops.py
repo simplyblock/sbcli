@@ -188,6 +188,7 @@ def spdk_process_start():
             '/var/lib/systemd/coredump/:/var/lib/systemd/coredump/',
             '/sys:/sys'],
         # restart_policy={"Name": "on-failure", "MaximumRetryCount": 99}
+        environment=data.get('env', {}),
     )
     container2 = node_docker.containers.run(
         constants.SIMPLY_BLOCK_DOCKER_IMAGE,

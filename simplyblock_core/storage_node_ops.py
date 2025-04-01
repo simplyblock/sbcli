@@ -1151,13 +1151,17 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
     if not spdk_image:
         spdk_image = constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE
 
+    use_block_storage = len(storage_block_devices) > 0 and journal_block_device is not None
+
     logger.info("Deploying SPDK")
     results = None
     try:
         results, err = snode_api.spdk_process_start(
             spdk_cpu_mask, spdk_mem, spdk_image, spdk_debug, cluster_ip, fdb_connection,
             namespace, mgmt_ip, constants.RPC_HTTP_PROXY_PORT, rpc_user, rpc_pass,
-            multi_threading_enabled=constants.SPDK_PROXY_MULTI_THREADING_ENABLED, timeout=constants.SPDK_PROXY_TIMEOUT)
+            multi_threading_enabled=constants.SPDK_PROXY_MULTI_THREADING_ENABLED, timeout=constants.SPDK_PROXY_TIMEOUT,
+            env={'PCI_BLOCKED': ' '.join(node_info['nvme_pcie_list'])} if use_block_storage else {},
+        )
     except Exception as e:
         logger.error(e)
         return False
@@ -1342,7 +1346,6 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
     node_info, _ = snode_api.info()
 
     # discover devices
-    use_block_storage = len(storage_block_devices) > 0 and journal_block_device is not None
     if not use_block_storage:
         nvme_devs = addNvmeDevices(snode, node_info['spdk_pcie_list'])
         if nvme_devs:
