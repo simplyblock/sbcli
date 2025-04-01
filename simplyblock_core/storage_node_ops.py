@@ -1477,7 +1477,7 @@ def remove_storage_node(node_id, force_remove=False, force_migrate=False):
         for task in tasks:
             if task.node_id == node_id:
                 if task.status != JobSchedule.STATUS_DONE and task.canceled is False:
-                    tasks_controller.cancel_task(task.get_id())
+                    tasks_controller.cancel_task(task.uuid)
 
     lvols = db_controller.get_lvols_by_node_id(node_id)
     if lvols:
