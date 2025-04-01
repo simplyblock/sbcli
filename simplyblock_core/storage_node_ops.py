@@ -1151,7 +1151,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
     if not spdk_image:
         spdk_image = constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE
 
-    use_block_storage = len(storage_block_devices) > 0 and journal_block_device is not None
+    use_block_storage = (len(storage_block_devices) > 0) and (journal_block_device is not None)
 
     logger.info("Deploying SPDK")
     results = None
