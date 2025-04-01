@@ -320,4 +320,5 @@ while True:
                     tcp_ports_events.port_allowed(snode, port)
 
     nodes_ports_blocked = {}
+    time.sleep(3)
 
