@@ -411,6 +411,7 @@ class SshUtils:
         """
         rec = "r" if recursive else ""
         cmd = f'sudo rm -{rec}f {entity}'
+        self.logger.info(f"Delete command: {cmd}")
         output, _ = self.exec_command(node=node, command=cmd)
         return output
     
