@@ -488,7 +488,7 @@ def firewall_set_port():
     resp = k8s_core_v1.list_namespaced_pod(get_namespace())
     for pod in resp.items:
         if pod.metadata.name.startswith(pod_name):
-            ret = node_utils.firewall_port_k8s(port_id, port_type, action=="block", k8s_core_v1, get_namespace(), pod.metadata.name)
+            ret = node_utils.firewall_port_k8s(port_id, port_type, action=="block", k8s_core_v1, get_namespace(), pod.metadata.name, "spdk-container")
             return utils.get_response(ret)
     return utils.get_response(False)
 
@@ -498,7 +498,7 @@ def get_firewall():
     resp = k8s_core_v1.list_namespaced_pod(get_namespace())
     for pod in resp.items:
         if pod.metadata.name.startswith(pod_name):
-            ret = node_utils.pod_exec(pod.metadata.name, get_namespace(), "iptables -L -n", k8s_core_v1)
+            ret = node_utils.pod_exec(pod.metadata.name, get_namespace(), "spdk-container", "iptables -L -n", k8s_core_v1)
             return utils.get_response(ret)
 
     return utils.get_response(False)
