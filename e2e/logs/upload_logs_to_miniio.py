@@ -163,7 +163,8 @@ except Exception as e:
         f"{HOME_DIR}/*.txt*",
         f"{HOME_DIR}/*.log",
         f"{HOME_DIR}/*.state",
-        f"/etc/simplyblock/*"
+        "/etc/simplyblock/*",
+        "/var/simplyblock/*"
     ]:
         print(f"[INFO] Checking if {remote_path} exists on {node}...")
         stdout, _ = exec_command(ssh, f"ls -1 {remote_path} 2>/dev/null")
@@ -447,16 +448,16 @@ if args.k8s:
 else:
     upload_local_logs()
 
-for node in MNODES:
-    ssh = connect_ssh(node, bastion_ip=BASTION_IP)
-    cleanup_remote_logs(ssh, node)
+# for node in MNODES:
+#     ssh = connect_ssh(node, bastion_ip=BASTION_IP)
+#     cleanup_remote_logs(ssh, node)
 
-for node in CLIENTNODES:
-    ssh = connect_ssh(node, bastion_ip=BASTION_IP)
-    cleanup_remote_logs(ssh, node)
+# for node in CLIENTNODES:
+#     ssh = connect_ssh(node, bastion_ip=BASTION_IP)
+#     cleanup_remote_logs(ssh, node)
 
-for node in STORAGE_PRIVATE_IPS + SEC_STORAGE_PRIVATE_IPS:
-    ssh = connect_ssh(node, bastion_ip=BASTION_IP)
-    cleanup_remote_logs(ssh, node)
+# for node in STORAGE_PRIVATE_IPS + SEC_STORAGE_PRIVATE_IPS:
+#     ssh = connect_ssh(node, bastion_ip=BASTION_IP)
+#     cleanup_remote_logs(ssh, node)
 
-cleanup_local_logs()
+# cleanup_local_logs()
