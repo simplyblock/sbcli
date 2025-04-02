@@ -307,10 +307,13 @@ while True:
                     storage_node_ops.set_node_status(snode.get_id(), StorageNode.STATUS_SCHEDULABLE)
 
                 elif ping_check and node_api_check and (not spdk_process or not node_rpc_check):
-                    # add node to auto restart
-                    if cluster.status in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED,
-                                          Cluster.STATUS_SUSPENDED, Cluster.STATUS_READONLY]:
+
+                    if cluster.status !=  Cluster.STATUS_IN_ACTIVATION:
                         set_node_offline(snode)
+
+                    # add node to auto restart
+                    if cluster.status in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_UNREADY,
+                                          Cluster.STATUS_SUSPENDED, Cluster.STATUS_READONLY]:
                         tasks_controller.add_node_to_auto_restart(snode)
                 elif not node_port_check:
                     if cluster.status in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_READONLY]:
