@@ -106,28 +106,27 @@ def print_table(data: list, title=None):
         return x.__str__()
 
 
-def humanbytes(B):
-    """Return the given bytes as a human friendly KB, MB, GB, or TB string."""
-    if not B:
-        return "0"
-    B = float(B)
-    KB = 1e3
-    MB = 1e6
-    GB = 1e9
-    TB = 1e12
+_humanbytes_parameter = {
+    'si': (10, 3, math.log10, ''),
+    'iec': (2, 10, math.log2, 'i'),
+    'jedec': (2, 10, math.log2, ''),
+}
 
-    if B < KB:
-        return '{0} {1}'.format(B, 'Byte' if B == 1 else 'Bytes')
-    elif KB <= B < MB:
-        return '{0:.1f} KB'.format(B / KB)
-    elif MB <= B < GB:
-        return '{0:.1f} MB'.format(B / MB)
-    elif GB <= B < TB:
-        return '{0:.1f} GB'.format(B / GB)
-    elif TB <= B:
-        return '{0:.1f} TB'.format(B / TB)
-    else:
-        raise ValueError("Size representation failed")
+
+def humanbytes(size: int, mode: str = 'si') -> str:
+    """Return the given bytes as a human friendly including the appropriate unit."""
+    if not size:
+        return '0 B'
+
+    base, exponent, log, infix = _humanbytes_parameter[mode]
+
+    prefixes = ['', 'k' if mode == 'si' else 'K', 'M', 'G', 'T', 'P', 'E', 'Z']
+    exponent_multiplier = min(int(log(size) / exponent), len(prefixes) - 1)
+
+    size_in_unit = size / (base ** (exponent * exponent_multiplier))
+    prefix = prefixes[exponent_multiplier]
+
+    return f"{size_in_unit:.1f} {prefix}{infix if prefix else ''}B"
 
 
 def generate_string(length):

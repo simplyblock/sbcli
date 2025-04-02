@@ -36,27 +36,49 @@ def test_parse_size(args, expected):
     assert utils.parse_size(*args) == expected
 
 
-@pytest.mark.parametrize('size,expected', [
-    (0, '0'),
-    (1, '1.0 Byte'),
-    (2, '2.0 Bytes'),
-    (1e3, '1.0 KB'),
-    (1e6, '1.0 MB'),
-    (1e9, '1.0 GB'),
-    (1e12, '1.0 TB'),
-    (1e15, '1000.0 TB'),
-    (2 ** 10, '1.0 KB'),
-    (2 ** 20, '1.0 MB'),
-    (2 ** 30, '1.1 GB'),
-    (2 ** 40, '1.1 TB'),
-    (999e3, '999.0 KB'),
+@pytest.mark.parametrize('args,expected', [
+    ((0, 'si'), '0 B'),
+    ((1, 'si'), '1.0 B'),
+    ((2, 'si'), '2.0 B'),
+    ((1e3, 'si'), '1.0 kB'),
+    ((1e6, 'si'), '1.0 MB'),
+    ((1e9, 'si'), '1.0 GB'),
+    ((1e12, 'si'), '1.0 TB'),
+    ((1e15, 'si'), '1.0 PB'),
+    ((2 ** 10, 'si'), '1.0 kB'),
+    ((2 ** 20, 'si'), '1.0 MB'),
+    ((2 ** 30, 'si'), '1.1 GB'),
+    ((2 ** 40, 'si'), '1.1 TB'),
+    ((2 ** 50, 'si'), '1.1 PB'),
+    ((0, 'iec'), '0 B'),
+    ((1, 'iec'), '1.0 B'),
+    ((2, 'iec'), '2.0 B'),
+    ((1e3, 'iec'), '1000.0 B'),
+    ((1e6, 'iec'), '976.6 KiB'),
+    ((1e9, 'iec'), '953.7 MiB'),
+    ((1e12, 'iec'), '931.3 GiB'),
+    ((1e15, 'iec'), '909.5 TiB'),
+    ((2 ** 10, 'iec'), '1.0 KiB'),
+    ((2 ** 20, 'iec'), '1.0 MiB'),
+    ((2 ** 30, 'iec'), '1.0 GiB'),
+    ((2 ** 40, 'iec'), '1.0 TiB'),
+    ((2 ** 50, 'iec'), '1.0 PiB'),
+    ((0, 'jedec'), '0 B'),
+    ((1, 'jedec'), '1.0 B'),
+    ((2, 'jedec'), '2.0 B'),
+    ((1e3, 'jedec'), '1000.0 B'),
+    ((1e6, 'jedec'), '976.6 KB'),
+    ((1e9, 'jedec'), '953.7 MB'),
+    ((1e12, 'jedec'), '931.3 GB'),
+    ((1e15, 'jedec'), '909.5 TB'),
+    ((2 ** 10, 'jedec'), '1.0 KB'),
+    ((2 ** 20, 'jedec'), '1.0 MB'),
+    ((2 ** 30, 'jedec'), '1.0 GB'),
+    ((2 ** 40, 'jedec'), '1.0 TB'),
+    ((2 ** 50, 'jedec'), '1.0 PB'),
 ])
-def test_humanbytes(size, expected):
-    if isinstance(expected, ContextManager):
-        with expected:
-            utils.humanbytes(size)
-    else:
-        assert utils.humanbytes(size) == expected
+def test_humanbytes(args, expected):
+    assert utils.humanbytes(*args) == expected
 
 
 @pytest.mark.parametrize('size,unit,expected', [
