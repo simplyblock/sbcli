@@ -445,11 +445,7 @@ def _is_pod_up():
         resp = k8s_core_v1.list_namespaced_pod(get_namespace())
         for pod in resp.items:
             if pod.metadata.name.startswith(pod_name):
-                status = pod.status.phase
-                if status == "Running":
-                    return True
-                else:
-                    return False
+                return pod.status.phase == "Running"
     except ApiException as e:
         logger.error(f"API error: {e}")
         return False
