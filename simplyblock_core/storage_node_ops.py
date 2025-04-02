@@ -1074,7 +1074,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
     # for jm
     number_of_alceml_devices += 1
     # if is_secondary_node:
-    # number_of_distribs *= 2
+    number_of_distribs *= 2
     small_pool_count, large_pool_count = utils.calculate_pool_count(
         number_of_alceml_devices, number_of_distribs, req_cpu_count, len(poller_cpu_cores) or req_cpu_count)
 
@@ -1703,7 +1703,7 @@ def restart_storage_node(
     number_of_split = snode.num_partitions_per_dev if snode.num_partitions_per_dev else snode.num_partitions_per_dev + 1
     number_of_alceml_devices = number_of_devices * number_of_split
     small_pool_count, large_pool_count = utils.calculate_pool_count(
-        number_of_alceml_devices, snode.number_of_distribs, snode.cpu, len(snode.poller_cpu_cores) or snode.cpu)
+        number_of_alceml_devices, snode.number_of_distribs*2, snode.cpu, len(snode.poller_cpu_cores) or snode.cpu)
 
     # Calculate minimum huge page memory
     minimum_hp_memory = utils.calculate_minimum_hp_memory(small_pool_count, large_pool_count, snode.max_lvol, snode.max_prov,
