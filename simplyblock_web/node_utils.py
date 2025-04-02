@@ -270,10 +270,12 @@ def pod_exec(name, namespace, container, command, k8s_core_v1):
                   stdout=True, tty=False,
                   _preload_content=False)
 
+    result = ""
     while resp.is_open():
         resp.update(timeout=1)
         if resp.peek_stdout():
-            print(f"STDOUT: \n{resp.read_stdout()}")
+            result = resp.read_stdout()
+            print(f"STDOUT: \n{result}")
         if resp.peek_stderr():
             print(f"STDERR: \n{resp.read_stderr()}")
 
@@ -282,4 +284,4 @@ def pod_exec(name, namespace, container, command, k8s_core_v1):
     if resp.returncode != 0:
         raise Exception(resp.readline_stderr())
 
-    return resp.readline_stdout()
+    return result
