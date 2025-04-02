@@ -149,7 +149,7 @@ class CLIWrapper(CLIWrapperBase):
         if self.developer_mode:
             argument = subcommand.add_argument('--max-snap', help='Max snapshot per storage node', type=int, default=5000, dest='max_snap', required=False)
         if self.developer_mode:
-            argument = subcommand.add_argument('--max-size', help='Maximum amount of GB to be utilized on this storage node', type=str, default='', dest='max_prov', required=False)
+            argument = subcommand.add_argument('--max-size', help='Maximum amount of GB to be utilized on this storage node', type=str, default='0', dest='max_prov', required=False)
         argument = subcommand.add_argument('--node-ip', help='Restart Node on new node', type=str, dest='node_ip', required=False)
         argument = subcommand.add_argument('--number-of-devices', help='Number of devices per storage node if it\'s not supported EC2 instance', type=int, dest='number_of_devices', required=False)
         if self.developer_mode:
@@ -906,7 +906,7 @@ class CLIWrapper(CLIWrapperBase):
             elif sub_command in ['restart']:
                 if not self.developer_mode:
                     args.max_snap = 5000
-                    args.max_prov = ''
+                    args.max_prov = '0'
                     args.spdk_image = None
                     args.spdk_debug = None
                     args.small_bufsize = 0

@@ -6,6 +6,7 @@ from simplyblock_core import utils
 
 @pytest.mark.parametrize('args,expected', [
     (('0',), 0),
+    (('1000',), 1000),
     (('1 kB',), 1e3),
     (('1M',), 1e6),
     (('1g',), 1e9),
@@ -28,6 +29,8 @@ from simplyblock_core import utils
     (('1P', 'jedec'), 2 ** 50),
     (('foo',), -1),
     (('1byte',), -1),
+    (('1', 'jedec', 'G',), 2 ** 30),
+    (('1M', 'jedec', 'G',), 2 ** 20),
 ])
 def test_parse_size(args, expected):
     assert utils.parse_size(*args) == expected

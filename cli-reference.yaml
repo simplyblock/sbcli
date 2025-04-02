@@ -260,7 +260,7 @@ commands:
               _150 TiB / 3 * 2 = 100TiB_ would be a safe choice.
             dest: max_prov
             type: str
-            default: ""
+            default: "0"
             private: true
           - name: "--node-ip"
             help: "Restart Node on new node"
