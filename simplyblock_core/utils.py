@@ -8,6 +8,7 @@ import re
 import string
 import subprocess
 import sys
+from typing import Union
 
 import docker
 from prettytable import PrettyTable
@@ -655,20 +656,22 @@ def _parse_unit(unit: str, mode: str = 'si/iec', strict: bool = True) -> tuple[i
     )
 
 
-def parse_size(size_string: str, mode: str = 'si/iec', strict: bool = False) -> int:
-    """Parse the given data size, returning bytes
+def parse_size(size_string: str, mode: str = 'si/iec', unit: str = '', strict: bool = False) -> int:
+    """Parse the given data size
 
+    If passed and not explicitly given, 'unit' will be assumed.
     Mode can be either 'si/iec' to parse decimal (SI) and binary (IEC) units, or 
     'jedec' for binary only units. If `strict`, parsing will be case-sensitive and
     expect the 'B' suffix.
     """
     try:
-        m = re.match(r'^(?P<size_in_unit>\d+) ?(?P<unit>\w*)$', size_string.strip())
+        m = re.match(r'^(?P<size_in_unit>\d+) ?(?P<unit>\w+)?$', size_string.strip())
         if m is None:
             raise ValueError(f"Invalid size: {size_string}")
 
         size_in_unit = int(m.group('size_in_unit'))
-        base, exponent = _parse_unit(m.group('unit'), mode, strict=strict)
+        unit = m.group('unit') if m.group('unit') else unit
+        base, exponent = _parse_unit(unit, mode, strict=strict)
         return size_in_unit * (base ** exponent)
     except ValueError:
         return -1

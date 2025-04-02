@@ -76,7 +76,7 @@ class CLIWrapperBase:
 
         max_lvol = args.max_lvol
         max_snap = args.max_snap
-        max_prov = args.max_prov
+        max_prov = utils.parse_size(args.max_prov, unit='G')
         number_of_devices = args.number_of_devices
         enable_test_device = args.enable_test_device
         enable_ha_jm = args.enable_ha_jm
@@ -132,7 +132,7 @@ class CLIWrapperBase:
 
         max_lvol = args.max_lvol
         max_snap = args.max_snap
-        max_prov = args.max_prov if args.max_prov else 0
+        max_prov = utils.parse_size(args.max_prov, unit='G')
         number_of_devices = args.number_of_devices
 
         small_bufsize = args.small_bufsize
@@ -681,9 +681,11 @@ class CLIWrapperBase:
             else:
                 return f"Invalid cpu mask value: {args.spdk_cpu_mask}"
 
+        
+
         max_lvol = args.max_lvol
         max_snap = args.max_snap
-        max_prov = args.max_prov
+        max_prov = utils.parse_size(args.max_prov, unit='G')
         number_of_devices = args.number_of_devices
         enable_test_device = args.enable_test_device
         enable_ha_jm = args.enable_ha_jm
