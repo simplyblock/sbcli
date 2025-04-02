@@ -626,19 +626,23 @@ def get_logger(name=""):
     return logg
 
 
-def _parse_unit(unit: str, strict: bool = True) -> tuple[int, int]:
+def _parse_unit(unit: str, mode: str = 'si/iec', strict: bool = True) -> tuple[int, int]:
     """Parse the given unit, returning the associated base and exponent
 
-    If `strict`, only proper decimal (SI)/binary (IEC) units are parsed.
-    Otherwise, parsing is case-insensitive and the 'B' suffix is optional.
+    Mode can be either 'si/iec' to parse decimal (SI) and binary (IEC) units, or 
+    'jedec' for binary only units. If `strict`, parsing will be case-sensitive and
+    expect the 'B' suffix.
     """
-    regex = r'^((?P<prefix>[kKMGTPEZ])(?P<binary>i)?)?' + ('B$' if strict else 'B?$')
+    regexes = {
+        'si/iec': r'^((?P<prefix>[kKMGTPEZ])(?P<binary>i)?)?' + ('B$' if strict else 'B?$'),
+        'jedec': r'^(?P<prefix>[KMGTPEZ])?' + ('B$' if strict else 'B?$'),
+    }
 
-    m = re.match(regex, unit, flags=re.IGNORECASE if not strict else 0)
+    m = re.match(regexes[mode], unit, flags=re.IGNORECASE if not strict else 0)
     if m is None:
         raise ValueError("Invalid unit")
 
-    binary = m.group('binary') is not None
+    binary = (mode == 'jedec') or (m.group('binary') is not None)
     prefix = m.group('prefix') or ''
 
     if strict and (binary and (prefix == 'k')) or ((not binary) and (prefix == 'K')):
@@ -651,11 +655,12 @@ def _parse_unit(unit: str, strict: bool = True) -> tuple[int, int]:
     )
 
 
-def parse_size(size_string: str, strict: bool = False) -> int:
+def parse_size(size_string: str, mode: str = 'si/iec', strict: bool = False) -> int:
     """Parse the given data size, returning bytes
 
-    If `strict`, only proper decimal (SI)/binary (IEC) units are parsed.
-    Otherwise, parsing is case-insensitive and the 'B' suffix is optional.
+    Mode can be either 'si/iec' to parse decimal (SI) and binary (IEC) units, or 
+    'jedec' for binary only units. If `strict`, parsing will be case-sensitive and
+    expect the 'B' suffix.
     """
     try:
         m = re.match(r'^(?P<size_in_unit>\d+) ?(?P<unit>\w*)$', size_string.strip())
@@ -663,7 +668,7 @@ def parse_size(size_string: str, strict: bool = False) -> int:
             raise ValueError(f"Invalid size: {size_string}")
 
         size_in_unit = int(m.group('size_in_unit'))
-        base, exponent = _parse_unit(m.group('unit'), strict=strict)
+        base, exponent = _parse_unit(m.group('unit'), mode, strict=strict)
         return size_in_unit * (base ** exponent)
     except ValueError:
         return -1
@@ -675,7 +680,7 @@ def convert_size(size: int, unit: str) -> int:
     Accepts both decimal (kB, MB, ...) and binary (KiB, MiB, ...) units.
     Note that the result will be cast to int, i.e. rounded down.
     """
-    base, exponent = _parse_unit(unit)
+    base, exponent = _parse_unit(unit, 'si/iec')
     return int(size / (base ** exponent))
 
 
