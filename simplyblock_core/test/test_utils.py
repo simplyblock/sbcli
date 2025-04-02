@@ -4,28 +4,33 @@ import pytest
 
 from simplyblock_core import utils
 
-@pytest.mark.parametrize('size_string,expected', [
-    ('0', 0),
-    ('1 kB', 1e3),
-    ('1M', 1e6),
-    ('1g', 1e9),
-    ('1MB', 1e6),
-    ('1GB', 1e9),
-    ('1TB', 1e12),
-    ('1PB', 1e15),
-    ('1KiB', 2 ** 10),
-    ('1MiB', 2 ** 20),
-    ('1GiB', 2 ** 30),
-    ('1TiB', 2 ** 40),
-    ('1PiB', 2 ** 50),
-    ('1kib', 2 ** 10),
-    ('1mi', 2 ** 20),
-    ('1Gi', 2 ** 30),
-    ('foo', -1),
-    ('1byte', -1),
+@pytest.mark.parametrize('args,expected', [
+    (('0',), 0),
+    (('1 kB',), 1e3),
+    (('1M',), 1e6),
+    (('1g',), 1e9),
+    (('1MB',), 1e6),
+    (('1GB',), 1e9),
+    (('1TB',), 1e12),
+    (('1PB',), 1e15),
+    (('1KiB',), 2 ** 10),
+    (('1MiB',), 2 ** 20),
+    (('1GiB',), 2 ** 30),
+    (('1TiB',), 2 ** 40),
+    (('1PiB',), 2 ** 50),
+    (('1kib',), 2 ** 10),
+    (('1mi',), 2 ** 20),
+    (('1Gi',), 2 ** 30),
+    (('1K', 'jedec'), 2 ** 10),
+    (('1M', 'jedec'), 2 ** 20),
+    (('1G', 'jedec'), 2 ** 30),
+    (('1T', 'jedec'), 2 ** 40),
+    (('1P', 'jedec'), 2 ** 50),
+    (('foo',), -1),
+    (('1byte',), -1),
 ])
-def test_parse_size(size_string, expected):
-    assert utils.parse_size(size_string) == expected
+def test_parse_size(args, expected):
+    assert utils.parse_size(*args) == expected
 
 
 @pytest.mark.parametrize('size,expected', [
