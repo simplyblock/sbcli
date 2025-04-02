@@ -1175,8 +1175,6 @@ def resize_lvol(id, new_size):
         logger.error(f"Pool is disabled")
         return False
 
-    new_size = utils.parse_size(new_size)
-
     if lvol.size >= new_size:
         logger.error(f"New size {new_size} must be higher than the original size {lvol.size}")
         return False
