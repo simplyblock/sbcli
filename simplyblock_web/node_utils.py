@@ -175,7 +175,6 @@ def get_host_arch():
     return out
 
 
-def firewall_port(port_id=9090, port_type="tcp", block=True, rpc_port=None):
 def firewall_port_k8s(port_id=9090, port_type="tcp", block=True, k8s_core_v1=None, namespace=None, pod_name=None):
     cmd_list = []
     try:
