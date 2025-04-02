@@ -120,7 +120,7 @@ class CLIWrapperBase:
         return out
 
     def storage_node__delete(self, sub_command, args):
-        return storage_ops.delete_storage_node(args.node_id, args.force)
+        return storage_ops.delete_storage_node(args.node_id, args.force_remove)
 
     def storage_node__remove(self, sub_command, args):
         return storage_ops.remove_storage_node(args.node_id, args.force_remove)
