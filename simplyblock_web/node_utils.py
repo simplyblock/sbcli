@@ -175,7 +175,7 @@ def get_host_arch():
     return out
 
 
-def firewall_port_k8s(port_id=9090, port_type="tcp", block=True, k8s_core_v1=None, namespace=None, pod_name=None):
+def firewall_port_k8s(port_id=9090, port_type="tcp", block=True, k8s_core_v1=None, namespace=None, pod_name=None, container=None):
     cmd_list = []
     try:
         iptables_command_output = firewall_get()
@@ -204,7 +204,7 @@ def firewall_port_k8s(port_id=9090, port_type="tcp", block=True, k8s_core_v1=Non
 
     for cmd in cmd_list:
         try:
-            ret = pod_exec(pod_name, namespace, cmd, k8s_core_v1)
+            ret = pod_exec(pod_name, namespace, container, cmd, k8s_core_v1)
             logger.info(ret)
         except Exception as e:
             logger.error(e)
@@ -264,21 +264,24 @@ def firewall_get(rpc_port=None):
     return ret
 
 
-def pod_exec(name, namespace, command, k8s_core_v1):
+def pod_exec(name, namespace, container, command, k8s_core_v1):
     exec_command = ["/bin/sh", "-c", command]
 
     resp = stream(k8s_core_v1.connect_get_namespaced_pod_exec,
                   name,
                   namespace,
                   command=exec_command,
+                  container=container,
                   stderr=True, stdin=False,
                   stdout=True, tty=False,
                   _preload_content=False)
 
+    result = ""
     while resp.is_open():
         resp.update(timeout=1)
         if resp.peek_stdout():
-            print(f"STDOUT: \n{resp.read_stdout()}")
+            result = resp.read_stdout()
+            print(f"STDOUT: \n{result}")
         if resp.peek_stderr():
             print(f"STDERR: \n{resp.read_stderr()}")
 
@@ -287,4 +290,4 @@ def pod_exec(name, namespace, command, k8s_core_v1):
     if resp.returncode != 0:
         raise Exception(resp.readline_stderr())
 
-    return resp.readline_stdout()
+    return result
