@@ -456,16 +456,18 @@ def _create_storage_device_stack(rpc_client, nvme, snode, after_restart):
     if snode.alceml_worker_cpu_cores:
         alceml_worker_cpu_mask = utils.decimal_to_hex_power_of_2(snode.alceml_worker_cpu_cores[snode.alceml_worker_cpu_index])
         snode.alceml_worker_cpu_index = (snode.alceml_worker_cpu_index + 1) % len(snode.alceml_worker_cpu_cores)
+
     cluster = db_controller.get_cluster_by_id(snode.cluster_id)
+    write_protection = False
+    if cluster.distr_ndcs > 1:
+        write_protection = True
     ret = rpc_client.bdev_alceml_create(alceml_name, nvme_bdev, alceml_id, pba_init_mode=pba_init_mode,
                                         alceml_cpu_mask=alceml_cpu_mask, alceml_worker_cpu_mask=alceml_worker_cpu_mask,
-                                        pba_page_size=cluster.page_size_in_blocks)
+                                        pba_page_size=cluster.page_size_in_blocks, write_protection=write_protection)
     if not ret:
         logger.error(f"Failed to create alceml bdev: {alceml_name}")
         return False
     alceml_bdev = alceml_name
-    db_controller = DBController()
-    cluster = db_controller.get_cluster_by_id(snode.cluster_id)
     qos_bdev = ""
     # Add qos bdev device
     if cluster.enable_qos:
@@ -3146,6 +3148,9 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
         snode.jm_vuid = jm_vuid
         snode.write_to_db()
 
+    write_protection = False
+    if ndcs > 1:
+        write_protection = True
     for _ in range(snode.number_of_distribs):
         distrib_vuid = utils.get_random_vuid()
         while distrib_vuid in distrib_list:
@@ -3167,6 +3172,7 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
                         "block_size": distr_bs,
                         "chunk_size": distr_chunk_bs,
                         "pba_page_size": distr_page_size,
+                        "write_protection": write_protection,
                     }
                 }
             ]
