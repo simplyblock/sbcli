@@ -402,7 +402,7 @@ class RPCClient:
         return self._request2("qos_vbdev_delete", params)
 
     def bdev_alceml_create(self, alceml_name, nvme_name, uuid, pba_init_mode=3,
-                           alceml_cpu_mask="", alceml_worker_cpu_mask=""):
+                           alceml_cpu_mask="", alceml_worker_cpu_mask="", pba_page_size=2097152):
         params = {
             "name": alceml_name,
             "cntr_path": nvme_name,
@@ -412,7 +412,7 @@ class RPCClient:
             "md_size": 0,
             "use_ram": False,
             "pba_init_mode": pba_init_mode,
-            "pba_page_size": 2097152,
+            "pba_page_size": pba_page_size,
             "uuid": uuid,
             # "use_scheduling": True,
             "use_optimized": True,
@@ -806,6 +806,9 @@ class RPCClient:
 
     def thread_get_stats(self):
         return self._request("thread_get_stats")
+    
+    def framework_get_reactors(self):
+        return self._request("framework_get_reactors")
 
     def thread_set_cpumask(self, app_thread_process_id, app_thread_mask):
         params = {"id": app_thread_process_id, "cpumask": app_thread_mask}

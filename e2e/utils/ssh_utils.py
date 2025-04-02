@@ -411,6 +411,7 @@ class SshUtils:
         """
         rec = "r" if recursive else ""
         cmd = f'sudo rm -{rec}f {entity}'
+        self.logger.info(f"Delete command: {cmd}")
         output, _ = self.exec_command(node=node, command=cmd)
         return output
     
@@ -1566,7 +1567,7 @@ class RunnerK8sLog:
         try:
             subprocess.run(["tmux", "-V"], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             print("tmux is already installed.")
-        except subprocess.CalledProcessError:
+        except (subprocess.CalledProcessError, FileNotFoundError):
             print("tmux is not installed. Installing now...")
             install_cmd = "sudo apt-get update -y && sudo apt-get install -y tmux || sudo yum install -y tmux"
             subprocess.run(install_cmd, shell=True, check=True)

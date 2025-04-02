@@ -4,19 +4,14 @@ services:
 
   spdk-stats-collector:
     image: $SIMPLYBLOCK_DOCKER_IMAGE
-    networks:
-      - hostnet
     command: "python simplyblock_core/services/spdk_stats_collector.py"
     volumes:
-          - '/etc/simplyblock:/etc/simplyblock'
-          - '/var/tmp:/var/tmp'
-          - '/var/run:/var/run'
+      - "/etc/foundationdb:/etc/foundationdb"
     deploy:
-      mode: global
       placement:
-        constraints: [ node.role == worker ]
-    environment:
-      SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
+        constraints: [ node.role == manager ]
+    networks:
+      - monitoring-net
 
   fdb-server:
     image: foundationdb/foundationdb:7.3.42
