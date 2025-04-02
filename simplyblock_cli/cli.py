@@ -129,7 +129,7 @@ class CLIWrapper(CLIWrapperBase):
     def init_storage_node__delete(self, subparser):
         subcommand = self.add_sub_command(subparser, 'delete', 'Deletes a storage node object from the state database.')
         subcommand.add_argument('node_id', help='Storage node id', type=str).completer = self._completer_get_sn_list
-        argument = subcommand.add_argument('--force', help="Force delete storage node from DB...Hopefully you know what you do", dest='force', required=False, action='store_true')
+        subcommand.add_argument('--force', help="Force delete storage node from DB...Hopefully you know what you do", dest='force', required=False, action='store_true')
 
     def init_storage_node__remove(self, subparser):
         subcommand = self.add_sub_command(subparser, 'remove', 'Removes a storage node from the cluster')
