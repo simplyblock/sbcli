@@ -9,7 +9,7 @@ import jc
 from kubernetes.stream import stream
 from kubernetes import client, config
 
-from simplyblock_web import utils, node_utils
+from simplyblock_web import utils
 from simplyblock_web.blueprints.snode_ops_k8s import get_namespace
 
 node_name = os.environ.get("HOSTNAME")
@@ -188,7 +188,7 @@ def get_host_arch():
 def firewall_port_k8s(port_id=9090, port_type="tcp", block=True, k8s_core_v1=None, namespace=None, pod_name=None, container=None):
     cmd_list = []
     try:
-        iptables_command_output = node_utils.firewall_get_k8s()
+        iptables_command_output = firewall_get_k8s()
         result = jc.parse('iptables', iptables_command_output)
         for chain in result:
             if chain['chain'] in ["INPUT", "OUTPUT"]:
