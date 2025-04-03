@@ -852,7 +852,6 @@ def delete_lvol(id_or_name, force_delete=False):
         logger.error(f"lvol node id not found: {lvol.node_id}")
         if not force_delete:
             return False
-        lvol_events.lvol_delete(lvol)
         lvol.remove(db_controller.kv_store)
 
         # if lvol is clone and snapshot is deleted, then delete snapshot

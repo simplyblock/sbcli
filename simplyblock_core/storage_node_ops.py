@@ -265,16 +265,7 @@ def _create_jm_stack_on_raid(rpc_client, jm_nvme_bdevs, snode, after_restart):
         raid_bdev = jm_nvme_bdevs[0]
 
     alceml_name = f"alceml_jm_{snode.get_id()}"
-
     nvme_bdev = raid_bdev
-    test_name = ""
-    # if snode.enable_test_device:
-    #     test_name = f"{raid_bdev}_test"
-    #     ret = rpc_client.bdev_passtest_create(test_name, raid_bdev)
-    #     if not ret:
-    #         logger.error(f"Failed to create passtest bdev {test_name}")
-    #         return False
-    #     nvme_bdev = test_name
     pba_init_mode = 3
     if after_restart:
         pba_init_mode = 1
@@ -287,8 +278,11 @@ def _create_jm_stack_on_raid(rpc_client, jm_nvme_bdevs, snode, after_restart):
         alceml_worker_cpu_mask = utils.decimal_to_hex_power_of_2(snode.alceml_worker_cpu_cores[snode.alceml_worker_cpu_index])
         snode.alceml_worker_cpu_index = (snode.alceml_worker_cpu_index + 1) % len(snode.alceml_worker_cpu_cores)
 
+    db_controller = DBController()
+    cluster = db_controller.get_cluster_by_id(snode.cluster_id)
     ret = rpc_client.bdev_alceml_create(alceml_name, nvme_bdev, str(uuid.uuid4()), pba_init_mode=pba_init_mode,
-                                        alceml_cpu_mask=alceml_cpu_mask, alceml_worker_cpu_mask=alceml_worker_cpu_mask)
+                                        alceml_cpu_mask=alceml_cpu_mask, alceml_worker_cpu_mask=alceml_worker_cpu_mask,
+                                        pba_page_size=cluster.page_size_in_blocks)
     if not ret:
         logger.error(f"Failed to create alceml bdev: {alceml_name}")
         return False
@@ -340,7 +334,6 @@ def _create_jm_stack_on_raid(rpc_client, jm_nvme_bdevs, snode, after_restart):
         'raid_bdev': raid_bdev,
         'alceml_bdev': alceml_name,
         'alceml_name': alceml_name,
-        'testing_bdev': test_name,
         'jm_bdev': jm_bdev,
         'pt_bdev': pt_name,
         'nvmf_nqn': subsystem_nqn,
@@ -353,7 +346,7 @@ def _create_jm_stack_on_device(rpc_client, nvme, snode, after_restart):
     alceml_id = nvme.get_id()
     alceml_name = device_controller.get_alceml_name(alceml_id)
     logger.info(f"adding {alceml_name}")
-
+    db_controller = DBController()
     nvme_bdev = nvme.nvme_bdev
     test_name = ""
     if snode.enable_test_device:
@@ -375,8 +368,10 @@ def _create_jm_stack_on_device(rpc_client, nvme, snode, after_restart):
         alceml_worker_cpu_mask = utils.decimal_to_hex_power_of_2(snode.alceml_worker_cpu_cores[snode.alceml_worker_cpu_index])
         snode.alceml_worker_cpu_index = (snode.alceml_worker_cpu_index + 1) % len(snode.alceml_worker_cpu_cores)
 
-    ret = rpc_client.bdev_alceml_create(alceml_name, nvme_bdev, alceml_id, pba_init_mode=pba_init_mode,
-                                            alceml_cpu_mask=alceml_cpu_mask, alceml_worker_cpu_mask=alceml_worker_cpu_mask)
+    cluster = db_controller.get_cluster_by_id(snode.cluster_id)
+    ret = rpc_client.bdev_alceml_create(
+        alceml_name, nvme_bdev, alceml_id, pba_init_mode=pba_init_mode, alceml_cpu_mask=alceml_cpu_mask,
+        alceml_worker_cpu_mask=alceml_worker_cpu_mask, pba_page_size=cluster.page_size_in_blocks)
 
     if not ret:
         logger.error(f"Failed to create alceml bdev: {alceml_name}")
@@ -462,14 +457,17 @@ def _create_storage_device_stack(rpc_client, nvme, snode, after_restart):
         alceml_worker_cpu_mask = utils.decimal_to_hex_power_of_2(snode.alceml_worker_cpu_cores[snode.alceml_worker_cpu_index])
         snode.alceml_worker_cpu_index = (snode.alceml_worker_cpu_index + 1) % len(snode.alceml_worker_cpu_cores)
 
+    cluster = db_controller.get_cluster_by_id(snode.cluster_id)
+    write_protection = False
+    if cluster.distr_ndcs > 1:
+        write_protection = True
     ret = rpc_client.bdev_alceml_create(alceml_name, nvme_bdev, alceml_id, pba_init_mode=pba_init_mode,
-                                        alceml_cpu_mask=alceml_cpu_mask, alceml_worker_cpu_mask=alceml_worker_cpu_mask)
+                                        alceml_cpu_mask=alceml_cpu_mask, alceml_worker_cpu_mask=alceml_worker_cpu_mask,
+                                        pba_page_size=cluster.page_size_in_blocks, write_protection=write_protection)
     if not ret:
         logger.error(f"Failed to create alceml bdev: {alceml_name}")
         return False
     alceml_bdev = alceml_name
-    db_controller = DBController()
-    cluster = db_controller.get_cluster_by_id(snode.cluster_id)
     qos_bdev = ""
     # Add qos bdev device
     if cluster.enable_qos:
@@ -740,8 +738,10 @@ def _prepare_cluster_devices_on_restart(snode, clear_data=False):
         pba_init_mode = 3
         if not clear_data:
             pba_init_mode = 1
-        ret = rpc_client.bdev_alceml_create(jm_device.alceml_bdev, nvme_bdev, jm_device.get_id(),
-                                                pba_init_mode=pba_init_mode, alceml_cpu_mask=alceml_cpu_mask, alceml_worker_cpu_mask=alceml_worker_cpu_mask)
+        cluster = db_controller.get_cluster_by_id(snode.cluster_id)
+        ret = rpc_client.bdev_alceml_create(
+            jm_device.alceml_bdev, nvme_bdev, jm_device.get_id(), pba_init_mode=pba_init_mode,
+            alceml_cpu_mask=alceml_cpu_mask, alceml_worker_cpu_mask=alceml_worker_cpu_mask, pba_page_size=cluster.page_size_in_blocks)
 
         if not ret:
             logger.error(f"Failed to create alceml bdev: {jm_device.alceml_bdev}")
@@ -2873,12 +2873,12 @@ def recreate_lvstore_on_sec(snode):
         for lvol in lvol_list:
             logger.info("creating subsystem %s", lvol.nqn)
             rpc_client.subsystem_create(lvol.nqn, 'sbcli-cn', lvol.uuid, 1000)
-            for iface in snode.data_nics:
-                if iface.ip4_address:
-                    tr_type = iface.get_transport_type()
-                    logger.info("adding listener for %s on IP %s" % (lvol.nqn, iface.ip4_address))
-                    ret = rpc_client.listeners_create(
-                        lvol.nqn, tr_type, iface.ip4_address, lvol.subsys_port, "non_optimized")
+            # for iface in snode.data_nics:
+            #     if iface.ip4_address:
+            #         tr_type = iface.get_transport_type()
+            #         logger.info("adding listener for %s on IP %s" % (lvol.nqn, iface.ip4_address))
+            #         ret = rpc_client.listeners_create(
+            #             lvol.nqn, tr_type, iface.ip4_address, lvol.subsys_port, "non_optimized")
 
         if node.status == StorageNode.STATUS_ONLINE:
             # for lvol in lvol_list:
@@ -2909,7 +2909,11 @@ def recreate_lvstore_on_sec(snode):
 
         # time.sleep(1)
         for lvol in lvol_list:
-            is_created, error = add_lvol_thread(lvol, snode)
+            is_created, error = add_lvol_thread(lvol, snode, lvol_ana_state="non_optimized")
+            for iface in node.data_nics:
+                if iface.ip4_address:
+                    ret = remote_rpc_client.nvmf_subsystem_listener_set_ana_state(
+                        lvol.nqn, iface.ip4_address, lvol.subsys_port, True)
 
             # is_created, error = lvol_controller.recreate_lvol_on_node(
             #     lvol, snode, 1, "non-optimize")
@@ -3027,7 +3031,7 @@ def recreate_lvstore(snode):
 
 
     if sec_node.status == StorageNode.STATUS_ONLINE:
-        time.sleep(10)
+        time.sleep(1)
         sec_node_api.firewall_set_port(snode.lvol_subsys_port, "tcp", "allow")
         tcp_ports_events.port_allowed(sec_node, snode.lvol_subsys_port)
         sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
@@ -3133,8 +3137,10 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
     distrib_list = []
     distrib_vuids = []
     size = max_size // snode.number_of_distribs
-    distr_page_size = (ndcs + npcs) * page_size_in_blocks
-    cluster_sz = ndcs * page_size_in_blocks
+    distr_page_size = page_size_in_blocks
+    # distr_page_size = (ndcs + npcs) * page_size_in_blocks
+    # cluster_sz = ndcs * page_size_in_blocks
+    cluster_sz = page_size_in_blocks
     strip_size_kb = int((ndcs + npcs) * 2048)
     strip_size_kb = utils.nearest_upper_power_of_2(strip_size_kb)
     jm_vuid = 1
@@ -3148,6 +3154,9 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
         snode.jm_vuid = jm_vuid
         snode.write_to_db()
 
+    write_protection = False
+    if ndcs > 1:
+        write_protection = True
     for _ in range(snode.number_of_distribs):
         distrib_vuid = utils.get_random_vuid()
         while distrib_vuid in distrib_list:
@@ -3169,6 +3178,7 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
                         "block_size": distr_bs,
                         "chunk_size": distr_chunk_bs,
                         "pba_page_size": distr_page_size,
+                        "write_protection": write_protection,
                     }
                 }
             ]
@@ -3424,6 +3434,11 @@ def make_sec_new_primary(node_id):
     snode = db_controller.get_storage_node_by_id(node_id)
     snode.primary_ip = snode.mgmt_ip
     snode.write_to_db(db_controller.kv_store)
+
+    for lvol in db_controller.get_lvols_by_node_id(node_id):
+        lvol.hostname = snode.hostname
+        lvol.write_to_db()
+
     return True
 
 

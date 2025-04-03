@@ -163,7 +163,8 @@ except Exception as e:
         f"{HOME_DIR}/*.txt*",
         f"{HOME_DIR}/*.log",
         f"{HOME_DIR}/*.state",
-        f"/etc/simplyblock/*"
+        "/etc/simplyblock/*",
+        "/var/simplyblock/*"
     ]:
         print(f"[INFO] Checking if {remote_path} exists on {node}...")
         stdout, _ = exec_command(ssh, f"ls -1 {remote_path} 2>/dev/null")
@@ -344,7 +345,9 @@ def cleanup_remote_logs(ssh, node):
         f"rm -rf {HOME_DIR}/container-logs.tar.gz",  # Remove compressed tar file
         f"rm -rf {HOME_DIR}/container-logs/*",  # Remove container logs content
         f"rm -rf {HOME_DIR}/*.txt {HOME_DIR}/*.log {HOME_DIR}/*.state",  # Remove uploaded logs
-        "rm -rf /etc/simplyblock/*",  # Remove dump logs
+        "rm -rf /etc/simplyblock/[0-9]*",  # Remove dump logs
+        "rm -rf /etc/simplyblock/*core*",  # Remove dump logs
+        "rm -rf /etc/simplyblock/LVS*",  # Remove dump logs
         f"rm -rf {HOME_DIR}/upload_to_minio.py"  # Remove temporary upload script
     ]
 
@@ -395,7 +398,7 @@ for node in MNODES:
     except Exception as e:
         print(f"[ERROR] Error processing Management Node {node}: {e}")
 
-# **Step 2: Process Storage Nodes (Only for Docker mode)**
+# **Step 2: Process Storage Node**
 for node in STORAGE_PRIVATE_IPS + SEC_STORAGE_PRIVATE_IPS:
     try:
         ssh = connect_ssh(node, bastion_ip=BASTION_IP)
@@ -445,17 +448,16 @@ if args.k8s:
 else:
     upload_local_logs()
 
-for node in MNODES:
-    ssh = connect_ssh(node, bastion_ip=BASTION_IP)
-    cleanup_remote_logs(ssh, node)
+# for node in MNODES:
+#     ssh = connect_ssh(node, bastion_ip=BASTION_IP)
+#     cleanup_remote_logs(ssh, node)
 
-for node in CLIENTNODES:
-    ssh = connect_ssh(node, bastion_ip=BASTION_IP)
-    cleanup_remote_logs(ssh, node)
+# for node in CLIENTNODES:
+#     ssh = connect_ssh(node, bastion_ip=BASTION_IP)
+#     cleanup_remote_logs(ssh, node)
 
-if not args.k8s:
-    for node in STORAGE_PRIVATE_IPS + SEC_STORAGE_PRIVATE_IPS:
-        ssh = connect_ssh(node, bastion_ip=BASTION_IP)
-        cleanup_remote_logs(ssh, node)
+# for node in STORAGE_PRIVATE_IPS + SEC_STORAGE_PRIVATE_IPS:
+#     ssh = connect_ssh(node, bastion_ip=BASTION_IP)
+#     cleanup_remote_logs(ssh, node)
 
-cleanup_local_logs()
+# cleanup_local_logs()

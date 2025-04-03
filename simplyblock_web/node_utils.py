@@ -6,6 +6,7 @@ import os
 import subprocess
 
 import jc
+from kubernetes.stream import stream
 
 from simplyblock_web import utils
 
@@ -174,6 +175,44 @@ def get_host_arch():
     return out
 
 
+def firewall_port_k8s(port_id=9090, port_type="tcp", block=True, k8s_core_v1=None, namespace=None, pod_name=None, container=None):
+    cmd_list = []
+    try:
+        iptables_command_output = firewall_get()
+        result = jc.parse('iptables', iptables_command_output)
+        for chain in result:
+            if chain['chain'] in ["INPUT", "OUTPUT"]:
+                for rule in chain['rules']:
+                    if str(port_id) in rule['options']:
+                        cmd_list.append(f"iptables -D {chain['chain']} -p {port_type} --dport {port_id} -j {rule['target']}")
+
+    except Exception as e:
+        logger.error(e)
+
+    if block:
+        cmd_list.extend([
+            f"iptables -A INPUT -p {port_type} --dport {port_id} -j DROP",
+            f"iptables -A OUTPUT -p {port_type} --dport {port_id} -j DROP",
+            "iptables -L -n -v",
+        ])
+    else:
+        cmd_list.extend([
+            # f"iptables -A INPUT -p {port_type} --dport {port_id} -j ACCEPT",
+            # f"iptables -A OUTPUT -p {port_type} --dport {port_id} -j ACCEPT",
+            "iptables -L -n -v",
+        ])
+
+    for cmd in cmd_list:
+        try:
+            ret = pod_exec(pod_name, namespace, container, cmd, k8s_core_v1)
+            logger.info(ret)
+        except Exception as e:
+            logger.error(e)
+            return False
+
+    return True
+
+
 def firewall_port(port_id=9090, port_type="tcp", block=True):
     cmd_list = []
     try:
@@ -217,3 +256,32 @@ def firewall_get():
     stream = os.popen(cmd)
     ret = stream.read()
     return ret
+
+
+def pod_exec(name, namespace, container, command, k8s_core_v1):
+    exec_command = ["/bin/sh", "-c", command]
+
+    resp = stream(k8s_core_v1.connect_get_namespaced_pod_exec,
+                  name,
+                  namespace,
+                  command=exec_command,
+                  container=container,
+                  stderr=True, stdin=False,
+                  stdout=True, tty=False,
+                  _preload_content=False)
+
+    result = ""
+    while resp.is_open():
+        resp.update(timeout=1)
+        if resp.peek_stdout():
+            result = resp.read_stdout()
+            print(f"STDOUT: \n{result}")
+        if resp.peek_stderr():
+            print(f"STDERR: \n{resp.read_stderr()}")
+
+    resp.close()
+
+    if resp.returncode != 0:
+        raise Exception(resp.readline_stderr())
+
+    return result

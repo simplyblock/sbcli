@@ -30,8 +30,12 @@ class SbcliUtils:
         Returns:
             dict: response returned
         """
+        print(self.cluster_api_url)
+        print(api_url)
         request_url = self.cluster_api_url + api_url
+        print(request_url)
         headers = headers if headers else self.headers
+        print(headers)
         self.logger.info(f"Calling GET for {api_url} with headers: {headers}")
         retry = 10
         data = None
@@ -287,6 +291,7 @@ class SbcliUtils:
         management_nodes = []
         storage_nodes = []
 
+        print("get_all_nodes_ip")
         data = self.get_management_nodes()
 
         for nodes in data["results"]:
@@ -302,6 +307,7 @@ class SbcliUtils:
     def get_management_nodes(self):
         """Return management nodes part of cluster
         """
+        print("get_management_nodes")
         data = self.get_request(api_url="/mgmtnode/")
         return data
 

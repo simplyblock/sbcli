@@ -164,7 +164,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     ret = scripts.set_db_config(db_connection)
 
     logger.info("Configuring docker swarm...")
-    c = docker.DockerClient(base_url="unix://var/run/docker.sock", version="auto")
+    c = docker.DockerClient(base_url=f"tcp://{DEV_IP}:2375", version="auto")
     try:
         if c.swarm.attrs and "ID" in c.swarm.attrs:
             logger.info("Docker swarm found, leaving swarm now")

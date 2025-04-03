@@ -213,3 +213,26 @@ def pool_iostats(uuid, history):
         "stats": new_records or []
     }
     return utils.get_response(ret)
+
+
+
+@bp.route('/pool/iostats-all-lvols/<string:pool_uuid>', methods=['GET'])
+def lvol_iostats(pool_uuid):
+    pool = db_controller.get_pool_by_id(pool_uuid)
+    if not pool:
+        return utils.get_response_error(f"Pool not found: {pool_uuid}", 404)
+
+    ret = []
+    for lvol in db_controller.get_lvols_by_pool_id(pool_uuid):
+
+        records_list = db_controller.get_lvol_stats(lvol, limit=1)
+
+        if records_list:
+            data = records_list[0].get_clean_dict()
+        else:
+            data = {}
+        ret.append({
+            "object_data": lvol.get_clean_dict(),
+            "stats": data
+        })
+    return utils.get_response(ret)

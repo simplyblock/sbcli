@@ -74,6 +74,7 @@ class TestClusterBase:
         retry = 30
         while retry > 0:
             try:
+                print("getting all storage nodes")
                 self.mgmt_nodes, self.storage_nodes = self.sbcli_utils.get_all_nodes_ip()
                 self.sbcli_utils.list_lvols()
                 self.sbcli_utils.list_storage_pools()
@@ -113,6 +114,14 @@ class TestClusterBase:
 
         self.fio_node = self.client_machines if self.client_machines else [self.mgmt_nodes[0]]
 
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        # Construct the logs path with test name and timestamp
+        self.docker_logs_path = os.path.join(Path.home(), "container-logs", f"{self.test_name}-{timestamp}")
+        self.runner_k8s_log = RunnerK8sLog(
+                log_dir=self.docker_logs_path,
+                test_name=self.test_name
+            )
+
         # command = "python3 -c \"from importlib.metadata import version;print(f'SBCLI Version: {version('''sbcli-dev''')}')\""
         # self.ssh_obj.exec_command(
         #     self.mgmt_nodes[0], command=command
@@ -142,10 +151,6 @@ class TestClusterBase:
             )
             self.ec2_resource = session.resource('ec2')
 
-        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-        # Construct the logs path with test name and timestamp
-        self.docker_logs_path = os.path.join(Path.home(), "container-logs", f"{self.test_name}-{timestamp}")
-        
         for node in self.storage_nodes:
             self.ssh_obj.delete_old_folders(
                 node=node,
@@ -173,19 +178,15 @@ class TestClusterBase:
                 self.ssh_obj.reset_iptables_in_spdk(node_ip=node)
         
         if self.k8s_test:
-            self.runner_k8s_log = RunnerK8sLog(
-                log_dir=self.docker_logs_path,
-                test_name=self.test_name
-            )
             self.runner_k8s_log.start_logging()
             self.runner_k8s_log.monitor_pod_logs()
-        for node in self.storage_nodes:
-            self.ssh_obj.monitor_container_logs(
-                node_ip=node,
-                containers=self.container_nodes[node],
-                log_dir=self.docker_logs_path,
-                test_name=self.test_name
-            )
+        # for node in self.storage_nodes:
+        #     self.ssh_obj.monitor_container_logs(
+        #         node_ip=node,
+        #         containers=self.container_nodes[node],
+        #         log_dir=self.docker_logs_path,
+        #         test_name=self.test_name
+        #     )
 
         for node in self.mgmt_nodes:
             self.ssh_obj.delete_old_folders(
@@ -208,13 +209,13 @@ class TestClusterBase:
             self.ssh_obj.start_tcpdump_logging(node_ip=node, log_dir=self.docker_logs_path)
             self.ssh_obj.start_netstat_dmesg_logging(node_ip=node,
                                                      log_dir=self.docker_logs_path)
-        for node in self.mgmt_nodes:
-            self.ssh_obj.monitor_container_logs(
-                node_ip=node,
-                containers=self.container_nodes[node],
-                log_dir=self.docker_logs_path,
-                test_name=self.test_name
-            )
+        # for node in self.mgmt_nodes:
+        #     self.ssh_obj.monitor_container_logs(
+        #         node_ip=node,
+        #         containers=self.container_nodes[node],
+        #         log_dir=self.docker_logs_path,
+        #         test_name=self.test_name
+        #     )
         
         for node in self.fio_node:
             self.ssh_obj.delete_old_folders(
@@ -235,6 +236,8 @@ class TestClusterBase:
                                                      log_dir=self.docker_logs_path)
 
         self.logger.info("Started log monitoring for all storage nodes.")
+
+        sleep_n_sec(120)
 
     def configure_sysctl_settings(self):
         """Configure TCP kernel parameters on the node."""
@@ -266,9 +269,10 @@ class TestClusterBase:
         for node in self.fio_node:
             self.ssh_obj.delete_file_dir(node, entity=f"{base_path}/*.log*", recursive=True)
             self.ssh_obj.delete_file_dir(node, entity=f"{base_path}/*.state*", recursive=True)
-        self.ssh_obj.delete_file_dir(self.mgmt_nodes[0], entity="/etc/simplyblock/*", recursive=True)
+        # self.ssh_obj.delete_file_dir(self.mgmt_nodes[0], entity="/etc/simplyblock/*", recursive=True)
         self.ssh_obj.delete_file_dir(self.mgmt_nodes[0], entity=f"{base_path}/*.txt*", recursive=True)
         for node in self.storage_nodes:
+            self.ssh_obj.delete_file_dir(node, entity="/etc/simplyblock/[0-9]*", recursive=True)
             self.ssh_obj.delete_file_dir(node, entity="/etc/simplyblock/core*", recursive=True)
             self.ssh_obj.delete_file_dir(node, entity="/etc/simplyblock/LVS*", recursive=True)
             self.ssh_obj.delete_file_dir(node, entity=f"{base_path}/distrib*", recursive=True)
@@ -350,6 +354,11 @@ class TestClusterBase:
             self.ssh_obj.exec_command(self.mgmt_nodes[0], cmd)
 
             node+=1
+        for node in self.fio_node:
+            cmd = f"journalctl -k >& {base_path}/jounalctl_{node}.txt"
+            self.ssh_obj.exec_command(node, cmd)
+            cmd = f"dmesg -T >& {base_path}/dmesg_{node}.txt"
+            self.ssh_obj.exec_command(node, cmd)
             
     def teardown(self):
         """Contains teradown required post test case execution
@@ -724,13 +733,13 @@ class TestClusterBase:
         for node in self.storage_nodes:
             files = self.ssh_obj.list_files(node, "/etc/simplyblock/")
             self.logger.info(f"Files in /etc/simplyblock: {files}")
-            if "core" in files:
+            if "core" in files and "tmp_cores" not in files:
                 cur_date = datetime.now().strftime("%Y-%m-%d")
                 self.logger.info(f"Core file found on storage node {node} at {cur_date}")
         
         for node in self.mgmt_nodes:
             files = self.ssh_obj.list_files(node, "/etc/simplyblock/")
             self.logger.info(f"Files in /etc/simplyblock: {files}")
-            if "core" in files:
+            if "core" in files and "tmp_cores" not in files:
                 cur_date = datetime.now().strftime("%Y-%m-%d")
                 self.logger.info(f"Core file found on management node {node} at {cur_date}")

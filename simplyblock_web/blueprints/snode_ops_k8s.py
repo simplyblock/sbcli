@@ -144,20 +144,11 @@ def delete_cluster_id():
 
 
 def get_cores_config(cpu_count):
-
-    try:
-        spdk_cpu_mask = hex(int(math.pow(2, cpu_count)) - 2)
-        cores_config = {
-            "cpu_mask": spdk_cpu_mask
-        }
-        return cores_config
-
-    except FileNotFoundError:
-        logger.error(f"The file '{file_path}' does not exist.")
-        return {}
-    except json.JSONDecodeError as e:
-        logger.error(f"Error decoding JSON: {e}")
-        return {}
+    spdk_cpu_mask = hex(int(math.pow(2, cpu_count)) - 2)
+    cores_config = {
+        "cpu_mask": spdk_cpu_mask
+    }
+    return cores_config
 
 
 @bp.route('/info', methods=['GET'])
@@ -478,3 +469,38 @@ def get_file_content(file_name):
         err = err.decode("utf-8")
         logger.debug(err)
         return utils.get_response(None, err)
+
+
+@bp.route('/firewall_set_port', methods=['POST'])
+def firewall_set_port():
+    data = request.get_json()
+    if "port_id" not in data:
+        return utils.get_response(False, "Required parameter is missing: port_id")
+    if "port_type" not in data:
+        return utils.get_response(False, "Required parameter is missing: port_type")
+    if "action" not in data:
+        return utils.get_response(False, "Required parameter is missing: action")
+
+    port_id = data['port_id']
+    port_type = data['port_type']
+    action = data['action']
+    container = "spdk-container"
+
+    resp = k8s_core_v1.list_namespaced_pod(get_namespace())
+    for pod in resp.items:
+        if pod.metadata.name.startswith(pod_name):
+            ret = node_utils.firewall_port_k8s(port_id, port_type, action=="block", k8s_core_v1, get_namespace(), pod.metadata.name, container)
+            return utils.get_response(ret)
+    return utils.get_response(False)
+
+
+@bp.route('/get_firewall', methods=['GET'])
+def get_firewall():
+    resp = k8s_core_v1.list_namespaced_pod(get_namespace())
+    for pod in resp.items:
+        if pod.metadata.name.startswith(pod_name):
+            container = "spdk-container"
+            ret = node_utils.pod_exec(pod.metadata.name, get_namespace(), container, "iptables -L -n", k8s_core_v1)
+            return utils.get_response(ret)
+
+    return utils.get_response(False)
