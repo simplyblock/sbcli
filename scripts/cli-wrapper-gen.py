@@ -135,13 +135,10 @@ with open("%s/cli-reference.yaml" % base_path) as stream:
             schema = yaml.safe_load(schema)
             validator_type = validators.validator_for(schema)
             validator = validator_type(schema)
-            iterator = iter(validator.iter_errors(reference))
-            error = next(iterator, None)
-            if error:
+            errors = list(validator.iter_errors(reference))
+            if errors:
                 print("Generator failed on schema validation. Found the following errors:", file=sys.stderr)
-                while error:
-                    print(f" - {error.json_path}: {error.message}", file=sys.stderr)
-                    error = next(iterator, None)
+                print('\n'.join(f" - {error.json_path}: {error.message}" for error in errors), file=sys.stderr)
                 sys.exit(1)
 
         for command in reference["commands"]:
