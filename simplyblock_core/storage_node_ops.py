@@ -3428,6 +3428,11 @@ def make_sec_new_primary(node_id):
     snode = db_controller.get_storage_node_by_id(node_id)
     snode.primary_ip = snode.mgmt_ip
     snode.write_to_db(db_controller.kv_store)
+
+    for lvol in db_controller.get_lvols_by_node_id(node_id):
+        lvol.hostname = snode.hostname
+        lvol.write_to_db()
+
     return True
 
 
