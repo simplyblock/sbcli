@@ -40,14 +40,6 @@ TOP_DIR = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 # spdk_deploy_yaml = os.path.join(TOP_DIR, 'static/deploy_spdk.yaml')
 
 
-def get_namespace():
-    if os.path.exists(namespace_id_file):
-        with open(namespace_id_file, 'r') as f:
-            out = f.read()
-            return out
-    return default_namespace
-
-
 def set_namespace(namespace):
     if not os.path.exists(namespace_id_file):
         try:
@@ -343,7 +335,7 @@ def spdk_process_start():
         spdk_mem = data['spdk_mem']
     node_cpu_count = os.cpu_count()
 
-    namespace = get_namespace()
+    namespace = node_utils.get_namespace()
     if 'namespace' in data:
         namespace = data['namespace']
         set_namespace(namespace)
@@ -417,7 +409,7 @@ def spdk_process_start():
 def spdk_process_kill():
 
     try:
-        namespace = get_namespace()
+        namespace = node_utils.get_namespace()
         resp = k8s_apps_v1.delete_namespaced_deployment(deployment_name, namespace)
         retries = 10
         while retries > 0:
@@ -442,7 +434,7 @@ def spdk_process_kill():
 
 def _is_pod_up():
     try:
-        resp = k8s_core_v1.list_namespaced_pod(get_namespace())
+        resp = k8s_core_v1.list_namespaced_pod(node_utils.get_namespace())
         for pod in resp.items:
             if pod.metadata.name.startswith(pod_name):
                 return pod.status.phase == "Running"
@@ -489,10 +481,10 @@ def firewall_set_port():
     action = data['action']
     container = "spdk-container"
 
-    resp = k8s_core_v1.list_namespaced_pod(get_namespace())
+    resp = k8s_core_v1.list_namespaced_pod(node_utils.get_namespace())
     for pod in resp.items:
         if pod.metadata.name.startswith(pod_name):
-            ret = node_utils.firewall_port_k8s(port_id, port_type, action=="block", k8s_core_v1, get_namespace(), pod.metadata.name, container)
+            ret = node_utils.firewall_port_k8s(port_id, port_type, action=="block", k8s_core_v1, node_utils.get_namespace(), pod.metadata.name, container)
             return utils.get_response(ret)
     return utils.get_response(False)
 

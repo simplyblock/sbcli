@@ -10,11 +10,12 @@ from kubernetes.stream import stream
 from kubernetes import client, config
 
 from simplyblock_web import utils
-from simplyblock_web.blueprints.snode_ops_k8s import get_namespace
 
 node_name = os.environ.get("HOSTNAME")
 deployment_name = f"snode-spdk-deployment-{node_name}"
 pod_name = deployment_name[:50]
+namespace_id_file = '/etc/simplyblock/namespace'
+default_namespace = 'default'
 
 config.load_incluster_config()
 k8s_apps_v1 = client.AppsV1Api()
@@ -305,3 +306,10 @@ def pod_exec(name, namespace, container, command, k8s_core_v1):
         raise Exception(resp.readline_stderr())
 
     return result
+
+def get_namespace():
+    if os.path.exists(namespace_id_file):
+        with open(namespace_id_file, 'r') as f:
+            out = f.read()
+            return out
+    return default_namespace
