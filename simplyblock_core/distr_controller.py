@@ -305,25 +305,20 @@ def send_cluster_map_add_device(device: NVMeDevice, target_node):
     dnode = db_controller.get_storage_node_by_id(device.node_id)
     dev_w = int(device.size / (1024 * 1024 * 1024)) or 1
     if target_node.status == StorageNode.STATUS_ONLINE:
-        rpc_client = RPCClient(target_node.mgmt_ip, target_node.rpc_port, target_node.rpc_username, target_node.rpc_password, timeout=3)
-        name = "not_connected"
-        dev_status = NVMeDevice.STATUS_UNAVAILABLE
-        if target_node.get_id() == dnode.get_id():
+        rpc_client = RPCClient(
+            target_node.mgmt_ip, target_node.rpc_port, target_node.rpc_username, target_node.rpc_password, timeout=3)
+
+        if target_node.get_id() != dnode.get_id():
             name = device.alceml_bdev
-            dev_status = device.status
         else:
-            for dev2 in target_node.remote_devices:
-                if dev2.get_id() == device.get_id():
-                    name = dev2.remote_bdev
-                    dev_status = device.status
-                    break
+            name = f"remote_{device.alceml_bdev}n1"
 
         cl_map = {
             "UUID_node": dnode.get_id(),
             "devices" : {device.cluster_device_order: {
                 "UUID": device.get_id(),
                 "bdev_name": name,
-                "status": dev_status,
+                "status": device.status,
                 "weight": dev_w
             }}
         }
