@@ -1469,37 +1469,49 @@ class SshUtils:
         output, error = self.exec_command(node_ip, cmd, supress_logs=True)
         return output.strip() if output else None
 
-
     def monitor_container_logs(self, node_ip, containers, log_dir, test_name, poll_interval=10):
-        """Monitoring containers for logging
-        """
+        """Monitor container logs and auto-detect new containers."""
         container_ids = {}
-        stop_flag = threading.Event()  # NEW
+        known_containers = set(containers)
+        stop_flag = threading.Event()
 
         def _monitor():
             while not stop_flag.is_set():
-                for container in containers:
-                    try:
-                        new_id = self.get_container_id(node_ip, container)
-                        old_id = container_ids.get(container)
+                try:
+                    # Get current list of running containers
+                    current_containers = self.get_running_containers(node_ip)
 
-                        if not new_id:
-                            continue
+                    # Start logging for newly found containers
+                    for container in current_containers:
+                        if container not in known_containers:
+                            self.logger.info(f"[{node_ip}] New container detected: {container}")
+                            known_containers.add(container)
 
-                        if new_id != old_id:
-                            container_ids[container] = new_id
-                            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                            log_file = f"{log_dir}/{container}_{test_name}_{node_ip}_{timestamp}_restart.log"
-                            session = f"{container}_restart_{generate_random_string()}"
-                            self.logger.info(f"[{node_ip}] Detected container restart for {container}. Starting new logs.")
-                            cmd = (
-                                f"sudo tmux new-session -d -s {session} "
-                                f"\"docker logs --follow {container} > {log_file} 2>&1\""
-                            )
-                            self.exec_command(node_ip, cmd, supress_logs=True)
+                    # Now monitor for restarts of all known containers
+                    for container in list(known_containers):
+                        try:
+                            new_id = self.get_container_id(node_ip, container)
+                            old_id = container_ids.get(container)
 
-                    except Exception as e:
-                        self.logger.error(f"Error monitoring container {container} on {node_ip}: {e}")
+                            if not new_id:
+                                continue  # container might have exited
+
+                            if new_id != old_id:
+                                container_ids[container] = new_id
+                                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                                log_file = f"{log_dir}/{container}_{test_name}_{node_ip}_{timestamp}_restart.log"
+                                session = f"{container}_restart_{generate_random_string()}"
+                                self.logger.info(f"[{node_ip}] Logging for container: {container}")
+                                cmd = (
+                                    f"sudo tmux new-session -d -s {session} "
+                                    f"\"docker logs --follow {container} > {log_file} 2>&1\""
+                                )
+                                self.exec_command(node_ip, cmd, supress_logs=True)
+                        except Exception as e:
+                            self.logger.error(f"Error monitoring container {container} on {node_ip}: {e}")
+
+                except Exception as outer_e:
+                    self.logger.error(f"[{node_ip}] Error during container polling: {outer_e}")
 
                 time.sleep(poll_interval)
 
@@ -1508,7 +1520,8 @@ class SshUtils:
 
         self.log_monitor_threads[node_ip] = thread
         self.log_monitor_stop_flags[node_ip] = stop_flag
-        self.logger.info(f"Started background log monitor on {node_ip} for containers: {containers}")
+        self.logger.info(f"Started background log monitor on {node_ip} with poll interval {poll_interval}s")
+
 
     def stop_container_log_monitor(self, node_ip):
         """Stop Monitoring thread in teardown"""
