@@ -593,8 +593,10 @@ commands:
             type: str
             completer: _completer_get_sn_list
       - name: make-primary
-        help: "In case of HA SNode, makes the current node as primary"
-        private: true
+        help: "Forces to make the provided node id primary"
+        description: |
+          Makes the storage node the primary node. This is required after certain storage cluster operations, such
+          as a storage node migration.
         arguments:
           - name: "node_id"
             help: "Storage node id"

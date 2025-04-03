@@ -68,8 +68,7 @@ class CLIWrapper(CLIWrapperBase):
             self.init_storage_node__send_cluster_map(subparser)
         if self.developer_mode:
             self.init_storage_node__get_cluster_map(subparser)
-        if self.developer_mode:
-            self.init_storage_node__make_primary(subparser)
+        self.init_storage_node__make_primary(subparser)
         if self.developer_mode:
             self.init_storage_node__dump_lvstore(subparser)
         if self.developer_mode:
@@ -277,7 +276,7 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('node_id', help='Storage node id', type=str).completer = self._completer_get_sn_list
 
     def init_storage_node__make_primary(self, subparser):
-        subcommand = self.add_sub_command(subparser, 'make-primary', 'In case of HA SNode, makes the current node as primary')
+        subcommand = self.add_sub_command(subparser, 'make-primary', 'Forces to make the provided node id primary')
         subcommand.add_argument('node_id', help='Storage node id', type=str).completer = self._completer_get_sn_list
 
     def init_storage_node__dump_lvstore(self, subparser):
@@ -983,11 +982,7 @@ class CLIWrapper(CLIWrapperBase):
                 else:
                     ret = self.storage_node__get_cluster_map(sub_command, args)
             elif sub_command in ['make-primary']:
-                if not self.developer_mode:
-                    print("This command is private.")
-                    ret = False
-                else:
-                    ret = self.storage_node__make_primary(sub_command, args)
+                ret = self.storage_node__make_primary(sub_command, args)
             elif sub_command in ['dump-lvstore']:
                 if not self.developer_mode:
                     print("This command is private.")
