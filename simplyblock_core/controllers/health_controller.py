@@ -1,4 +1,6 @@
 # coding=utf-8
+import time
+
 import jc
 
 from simplyblock_core import utils, distr_controller, storage_node_ops
@@ -162,6 +164,10 @@ def _check_node_lvstore(lvstore_stack, node, auto_fix=False, node_bdev_names=Non
                                     if result['Reported Status']:
                                         dev = db_controller.get_storage_device_by_id(result['UUID'])
                                         if dev.status == NVMeDevice.STATUS_ONLINE:
+                                            name = f"remote_{dev.alceml_bdev}"
+                                            logger.info(f"detaching {name} from {node.get_id()}")
+                                            rpc_client.bdev_nvme_detach_controller(name)
+                                            time.sleep(1)
                                             remote_devices = storage_node_ops._connect_to_remote_devs(node)
                                             n = db_controller.get_storage_node_by_id(node.get_id())
                                             n.remote_devices = remote_devices

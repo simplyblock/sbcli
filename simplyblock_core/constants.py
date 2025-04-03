@@ -77,7 +77,7 @@ TASK_EXEC_RETRY_COUNT = 8
 SIMPLY_BLOCK_SPDK_CORE_IMAGE = "simplyblock/spdk-core:v24.05-tag-latest"
 
 
-SIMPLY_BLOCK_SPDK_ULTRA_IMAGE = "public.ecr.aws/simply-block/ultra:main-latest"
+SIMPLY_BLOCK_SPDK_ULTRA_IMAGE = "simplyblock/spdk:main-latest"
 
 GELF_PORT = 12202
 
