@@ -380,7 +380,7 @@ def spdk_process_kill():
 
 def _is_pod_up():
     try:
-        resp = k8s_core_v1.list_namespaced_pod(node_utils.get_namespace())
+        resp = k8s_core_v1.list_namespaced_pod(node_utils_k8s.get_namespace())
         for pod in resp.items:
             if pod.metadata.name.startswith(pod_name):
                 return pod.status.phase == "Running"
