@@ -974,7 +974,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
              small_bufsize=0, large_bufsize=0, spdk_cpu_mask=None,
              num_partitions_per_dev=0, jm_percent=0, number_of_devices=0, enable_test_device=False,
              namespace=None, number_of_distribs=2, enable_ha_jm=False, is_secondary_node=False, id_device_by_nqn=False,
-             partition_size="", ha_jm_count=3, storage_block_devices=[], journal_block_device=None):
+             partition_size="", ha_jm_count=3, storage_block_devices=None, journal_block_device=None):
 
     db_controller = DBController()
     kv_store = db_controller.kv_store
@@ -1066,7 +1066,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
             jc_singleton_mask = utils.decimal_to_hex_power_of_2(jc_singleton_core[0])
         jm_cpu_mask = utils.generate_mask(jm_cpu_core)
 
-
+    storage_block_devices = storage_block_devices if storage_block_devices is not None else []
     if len(storage_block_devices) > 0:
         number_of_devices = len(storage_block_devices)
 
