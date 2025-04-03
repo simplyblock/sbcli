@@ -250,3 +250,27 @@ def cluster_allstats(uuid, history):
     out["lvols"] = list_lvols
 
     return utils.get_response(out)
+
+
+@bp.route('/cluster/activate/<string:uuid>', methods=['DELETE'])
+def cluster_delete(uuid):
+    cluster = db_controller.get_cluster_by_id(uuid)
+    if not cluster:
+        return utils.get_response_error(f"Cluster not found: {uuid}", 404)
+
+    ret = cluster_ops.delete_cluster(uuid)
+    return utils.get_response(ret)
+
+
+@bp.route('/cluster/show/<string:uuid>', methods=['GET'])
+def show_cluster(uuid):
+    cluster = db_controller.get_cluster_by_id(uuid)
+    if not cluster:
+        return utils.get_response_error(f"Cluster not found: {uuid}", 404)
+
+    if cluster.status == Cluster.STATUS_INACTIVE:
+        return utils.get_response("Cluster is inactive")
+
+    data = cluster_ops.list_all_info(uuid)
+    return utils.get_response(json.loads(data))
+
