@@ -281,7 +281,7 @@ def spdk_process_start():
         spdk_mem = data['spdk_mem']
     node_cpu_count = os.cpu_count()
 
-    namespace = node_utils.get_namespace()
+    namespace = node_utils_k8s.get_namespace()
     if 'namespace' in data:
         namespace = data['namespace']
         set_namespace(namespace)
@@ -355,7 +355,7 @@ def spdk_process_start():
 def spdk_process_kill():
 
     try:
-        namespace = node_utils.get_namespace()
+        namespace = node_utils_k8s.get_namespace()
         resp = k8s_apps_v1.delete_namespaced_deployment(deployment_name, namespace)
         retries = 10
         while retries > 0:
