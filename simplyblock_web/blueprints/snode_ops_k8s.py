@@ -499,11 +499,5 @@ def firewall_set_port():
 
 @bp.route('/get_firewall', methods=['GET'])
 def get_firewall():
-    resp = k8s_core_v1.list_namespaced_pod(get_namespace())
-    for pod in resp.items:
-        if pod.metadata.name.startswith(pod_name):
-            container = "spdk-container"
-            ret = node_utils.pod_exec(pod.metadata.name, get_namespace(), container, "iptables -L -n", k8s_core_v1)
-            return utils.get_response(ret)
-
-    return utils.get_response(False)
+    ret = node_utils.firewall_get_k8s()
+    return utils.get_response(ret)
