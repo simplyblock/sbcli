@@ -1635,16 +1635,17 @@ def restart_storage_node(
     if max_snap:
         snode.max_snap = max_snap
 
-    if not isinstance(max_prov, int):
-        try:
-            max_prov = int(max_prov)
-            max_prov = f"{max_prov}g"
-            max_prov = int(utils.parse_size(max_prov))
-        except Exception:
-            logger.error(f"Invalid max_prov value: {max_prov}")
-            return False
+    if max_prov:    
+        if not isinstance(max_prov, int):
+            try:
+                max_prov = int(max_prov)
+                max_prov = f"{max_prov}g"
+                max_prov = int(utils.parse_size(max_prov))
+            except Exception:
+                logger.error(f"Invalid max_prov value: {max_prov}")
+                return False
 
-    snode.max_prov = max_prov
+        snode.max_prov = max_prov
     if snode.max_prov <= 0:
         logger.error(f"Incorrect max-prov value {snode.max_prov}")
         return False
