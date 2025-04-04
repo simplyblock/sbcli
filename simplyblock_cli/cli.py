@@ -599,7 +599,7 @@ class CLIWrapper(CLIWrapperBase):
         argument = subcommand.add_argument('--namespace', help='Set logical volume namespace for k8s clients', type=str, dest='namespace', required=False)
         if self.developer_mode:
             argument = subcommand.add_argument('--uid', help='Set logical volume id', type=str, dest='uid', required=False)
-        argument = subcommand.add_argument('--pvc_name', help='Set logical volume PVC name for k8s clients', type=str, dest='pvc_name', required=False)
+        argument = subcommand.add_argument('--pvc-name', '--pvc_name', help='Set logical volume PVC name for k8s clients', type=str, dest='pvc_name', required=False)
 
     def init_volume__qos_set(self, subparser):
         subcommand = self.add_sub_command(subparser, 'qos-set', 'Changes QoS settings for an active logical volume')
