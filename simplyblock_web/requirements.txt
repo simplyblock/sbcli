@@ -3,3 +3,10 @@ py-cpuinfo
 kubernetes
 graypy
 ec2-metadata
+prometheus-client
+jc
+setuptools>70.0.0
+prometheus-client
+botocore
+flask-swagger-ui
+sentry-sdk[flask]

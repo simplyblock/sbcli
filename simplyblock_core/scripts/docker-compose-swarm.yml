@@ -1,11 +1,24 @@
 version: '3.8'
 
 services:
+
+  spdk-stats-collector:
+    image: $SIMPLYBLOCK_DOCKER_IMAGE
+    command: "python simplyblock_core/services/spdk_stats_collector.py"
+    volumes:
+      - "/etc/foundationdb:/etc/foundationdb"
+    deploy:
+      placement:
+        constraints: [ node.role == manager ]
+    networks:
+      - monitoring-net
+
   fdb-server:
-    image: foundationdb/foundationdb:7.3.2
+    image: foundationdb/foundationdb:7.3.42
     networks:
       - hostnet
     environment:
+      SIMPLYBLOCK_LOG_LEVEL: '$LOG_LEVEL'
       FDB_CLUSTER_FILE_CONTENTS: '$FDB_CLUSTER_FILE_CONTENTS'
       FDB_NETWORKING_MODE: 'container'
       FDB_CLUSTER_FILE: '/etc/foundationdb/fdb.cluster'
@@ -16,6 +29,22 @@ services:
 
     deploy:
       mode: global
+      placement:
+        constraints: [ node.role == manager ]
+      resources:
+        limits:
+          memory: 4g
+
+  fdb-backup-agent:
+    image: foundationdb/foundationdb:7.3.42
+    entrypoint: "/usr/bin/backup_agent -C  /etc/foundationdb/fdb.cluster"
+    networks:
+      - hostnet
+    environment:
+      FDB_CLUSTER_FILE: '/etc/foundationdb/fdb.cluster'
+    volumes:
+      - "/etc/foundationdb:/etc/foundationdb"
+    deploy:
       placement:
         constraints: [ node.role == manager ]
 
@@ -32,8 +61,9 @@ services:
     volumes:
       - "/etc/foundationdb:/etc/foundationdb"
     environment:
-      - FLASK_DEBUG=False
-      - FLASK_ENV=production
+      SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
+      FLASK_DEBUG: "False"
+      FLASK_ENV: "production"
 
   StorageNodeMonitor:
     image: $SIMPLYBLOCK_DOCKER_IMAGE
@@ -45,6 +75,8 @@ services:
       - "/etc/foundationdb:/etc/foundationdb"
     networks:
       - hostnet
+    environment:
+      SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
 
   MgmtNodeMonitor:
     image: $SIMPLYBLOCK_DOCKER_IMAGE
@@ -56,6 +88,8 @@ services:
       - "/etc/foundationdb:/etc/foundationdb"
     networks:
       - hostnet
+    environment:
+      SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
 
   CachingNodeMonitor:
     image: $SIMPLYBLOCK_DOCKER_IMAGE
@@ -67,6 +101,8 @@ services:
       - "/etc/foundationdb:/etc/foundationdb"
     networks:
       - hostnet
+    environment:
+      SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
 
   LVolStatsCollector:
     image: $SIMPLYBLOCK_DOCKER_IMAGE
@@ -78,30 +114,34 @@ services:
       - "/etc/foundationdb:/etc/foundationdb"
     networks:
       - hostnet
+    environment:
+      SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
 
-  PortStatsCollector:
+  CachedLVolStatsCollector:
     image: $SIMPLYBLOCK_DOCKER_IMAGE
-    command: "python simplyblock_core/services/port_stat_collector.py"
+    command: "python simplyblock_core/services/cached_lvol_stat_collector.py"
+    deploy:
+      placement:
+        constraints: [node.role == manager]
+    volumes:
+      - "/etc/foundationdb:/etc/foundationdb"
+    networks:
+      - hostnet
+    environment:
+      SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
+
+  MainDistrEventCollector:
+    image: $SIMPLYBLOCK_DOCKER_IMAGE
+    command: "python simplyblock_core/services/main_distr_event_collector.py"
     networks:
       - hostnet
     deploy:
-      mode: global
       placement:
-        constraints: [node.role == worker]
+        constraints: [node.role == manager]
     volumes:
       - "/etc/foundationdb:/etc/foundationdb"
-
-  DistrEventCollector:
-    image: $SIMPLYBLOCK_DOCKER_IMAGE
-    command: "python simplyblock_core/services/distr_event_collector.py"
-    networks:
-      - hostnet
-    deploy:
-      mode: global
-      placement:
-        constraints: [node.role == worker]
-    volumes:
-      - "/etc/foundationdb:/etc/foundationdb"
+    environment:
+      SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
 
   HAProxy:
     image: haproxytech/haproxy-debian:latest
@@ -111,12 +151,15 @@ services:
         constraints: [node.role == manager]
     ports:
       - 80:80
-      - 8404:8404
+      - 12202:12202
+      - 9200:9200
     networks:
       - localnet
       - monitoring-net
     volumes:
       - "$DIR/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg"
+    environment:
+      SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
 
   CapacityAndStatsCollector:
     image: $SIMPLYBLOCK_DOCKER_IMAGE
@@ -128,6 +171,8 @@ services:
       - "/etc/foundationdb:/etc/foundationdb"
     networks:
       - hostnet
+    environment:
+      SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
 
   CapacityMonitor:
     image: $SIMPLYBLOCK_DOCKER_IMAGE
@@ -139,6 +184,8 @@ services:
       - "/etc/foundationdb:/etc/foundationdb"
     networks:
       - hostnet
+    environment:
+      SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
 
   HealthCheck:
     image: $SIMPLYBLOCK_DOCKER_IMAGE
@@ -150,6 +197,8 @@ services:
       - "/etc/foundationdb:/etc/foundationdb"
     networks:
       - hostnet
+    environment:
+      SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
 
   DeviceMonitor:
     image: $SIMPLYBLOCK_DOCKER_IMAGE
@@ -161,6 +210,8 @@ services:
       - "/etc/foundationdb:/etc/foundationdb"
     networks:
       - hostnet
+    environment:
+      SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
 
   LVolMonitor:
     image: $SIMPLYBLOCK_DOCKER_IMAGE
@@ -172,10 +223,13 @@ services:
       - "/etc/foundationdb:/etc/foundationdb"
     networks:
       - hostnet
+    environment:
+      SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
 
   CleanupFDB:
     image: $SIMPLYBLOCK_DOCKER_IMAGE
     environment:
+      SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
       LOG_DELETION_INTERVAL: "${LOG_DELETION_INTERVAL}"
     command: "python simplyblock_core/workers/cleanup_foundationdb.py"
     deploy:
@@ -196,6 +250,8 @@ services:
       - "/etc/foundationdb:/etc/foundationdb"
     networks:
       - hostnet
+    environment:
+      SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
 
   TasksRunnerMigration:
     image: $SIMPLYBLOCK_DOCKER_IMAGE
@@ -207,6 +263,61 @@ services:
       - "/etc/foundationdb:/etc/foundationdb"
     networks:
       - hostnet
+    environment:
+      SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
+
+  TasksRunnerFailedMigration:
+    image: $SIMPLYBLOCK_DOCKER_IMAGE
+    command: "python simplyblock_core/services/tasks_runner_failed_migration.py"
+    deploy:
+      placement:
+        constraints: [node.role == manager]
+    volumes:
+      - "/etc/foundationdb:/etc/foundationdb"
+    networks:
+      - hostnet
+    environment:
+      SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
+
+  TasksRunnerNewDeviceMigration:
+    image: $SIMPLYBLOCK_DOCKER_IMAGE
+    command: "python simplyblock_core/services/tasks_runner_new_dev_migration.py"
+    deploy:
+      placement:
+        constraints: [node.role == manager]
+    volumes:
+      - "/etc/foundationdb:/etc/foundationdb"
+    networks:
+      - hostnet
+    environment:
+      SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
+
+  NewDeviceDiscovery:
+    image: $SIMPLYBLOCK_DOCKER_IMAGE
+    command: "python simplyblock_core/services/new_device_discovery.py"
+    deploy:
+      placement:
+        constraints: [node.role == manager]
+    volumes:
+      - "/etc/foundationdb:/etc/foundationdb"
+    networks:
+      - hostnet
+    environment:
+      SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
+
+  TasksNodeAddRunner:
+    image: $SIMPLYBLOCK_DOCKER_IMAGE
+    command: "python simplyblock_core/services/tasks_runner_node_add.py"
+    deploy:
+      placement:
+        constraints: [node.role == manager]
+    volumes:
+      - "/etc/foundationdb:/etc/foundationdb"
+    networks:
+      - hostnet
+    environment:
+      SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
+
 
 volumes:
   os_data:

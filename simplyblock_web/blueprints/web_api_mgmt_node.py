@@ -7,12 +7,12 @@ from flask import Blueprint
 
 from simplyblock_web import utils
 
-from simplyblock_core import kv_store
+from simplyblock_core import db_controller
 
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG)
+
 bp = Blueprint("mgmt", __name__)
-db_controller = kv_store.DBController()
+db_controller = db_controller.DBController()
 
 
 @bp.route('/mgmtnode', methods=['GET'], defaults={'uuid': None})

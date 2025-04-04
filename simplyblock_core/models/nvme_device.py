@@ -13,87 +13,61 @@ class NVMeDevice(BaseModel):
     STATUS_UNAVAILABLE = 'unavailable'
     STATUS_REMOVED = 'removed'
     STATUS_FAILED = 'failed'
+    STATUS_FAILED_AND_MIGRATED = 'failed_and_migrated'
     STATUS_READONLY = 'read_only'
+    STATUS_CANNOT_ALLOCATE = 'cannot_allocate'
 
-    attributes = {
-        "uuid": {"type": str, 'default': ""},
-        "device_name": {"type": str, 'default': ""},
-        "status": {"type": str, 'default': ""},
-        "sequential_number": {"type": int, 'default': 0},
-        "partitions_count": {"type": int, 'default': 0},
-        "capacity": {"type": int, 'default': -1},
-        "size": {"type": int, 'default': -1},
-        "pcie_address": {"type": str, 'default': ""},
-        "model_id": {"type": str, 'default': ""},
-        "serial_number": {"type": str, 'default': ""},
-        "overload_percentage": {"type": int, 'default': 0},
-        "nvme_bdev": {"type": str, 'default': ""},
-        "nvme_controller": {"type": str, 'default': ""},
-        "alceml_bdev": {"type": str, 'default': ""},
-        "node_id": {"type": str, 'default': ""},
-        "pt_bdev": {"type": str, 'default': ""},
-        "nvmf_nqn": {"type": str, 'default': ""},
-        "nvmf_ip": {"type": str, 'default': ""},
-        "nvmf_port": {"type": int, 'default': 0},
-        "remote_bdev": {"type": str, 'default': ""},
-        "testing_bdev": {"type": str, 'default': ""},
-        "cluster_device_order": {"type": int, 'default': 0},
-        "health_check": {"type": bool, "default": True},
-        "cluster_id": {"type": str, 'default': ""},
-
-        "bdev_stack": {"type": List, 'default': []},
-
-        "io_error": {"type": bool, 'default': False},
-        "retries_exhausted": {"type": bool, 'default': False},
-
-        "partition_main_bdev": {"type": str, 'default': ""},
-        "partition_main_size": {"type": int, 'default': 0},
-        "partition_jm_bdev": {"type": str, 'default': ""},
-        "partition_jm_size": {"type": int, 'default': 0},
-
-        "physical_label": {"type": int, 'default': 0},
+    _STATUS_CODE_MAP = {
+        STATUS_ONLINE: 1,
+        STATUS_NEW: 2,
+        STATUS_UNAVAILABLE: 3,
+        STATUS_REMOVED: 4,
+        STATUS_FAILED: 5,
+        STATUS_READONLY: 6,
+        STATUS_JM: 7,
+        STATUS_CANNOT_ALLOCATE: 8
 
     }
 
-    def __init__(self, data=None):
-        super(NVMeDevice, self).__init__()
-        self.set_attrs(self.attributes, data)
-        self.object_type = "object"
+    alceml_bdev: str = ""
+    alceml_name: str = ""
+    bdev_stack: List = []
+    capacity: int = -1
+    cluster_device_order: int = -1
+    cluster_id: str = ""
+    device_name: str = ""
+    health_check: bool = True
+    io_error: bool = False
+    is_partition: bool = False
+    model_id: str = ""
+    node_id: str = ""
+    nvme_bdev: str = ""
+    nvme_controller: str = ""
+    nvmf_ip: str = ""
+    nvmf_nqn: str = ""
+    nvmf_port: int = 0
+    overload_percentage: int = 0
+    partition_jm_bdev: str = ""
+    partition_jm_size: int = 0
+    partition_main_bdev: str = ""
+    partition_main_size: int = 0
+    partitions_count: int = 0
+    pcie_address: str = ""
+    physical_label: int = 0
+    pt_bdev: str = ""
+    qos_bdev: str = ""
+    remote_bdev: str = ""
+    retries_exhausted: bool = False
+    sequential_number: int = 0
+    serial_number: str = ""
+    size: int = -1
+    testing_bdev: str = ""
 
-    def get_id(self):
-        return self.uuid
 
+class JMDevice(NVMeDevice):
 
-class JMDevice(BaseModel):
-
-    STATUS_ONLINE = 'online'
-    STATUS_UNAVAILABLE = 'unavailable'
-    STATUS_REMOVED = 'removed'
-    STATUS_FAILED = 'failed'
-    STATUS_READONLY = 'read_only'
-
-    attributes = {
-        "uuid": {"type": str, 'default': ""},
-        "device_name": {"type": str, 'default': ""},
-        "status": {"type": str, 'default': ""},
-        "size": {"type": int, 'default': -1},
-
-        "jm_nvme_bdev_list": {"type": List[str], 'default': []},
-        "raid_bdev": {"type": str, 'default': ""},
-        "nvme_bdev": {"type": str, 'default': ""},
-        "alceml_bdev": {"type": str, 'default': ""},
-        "jm_bdev": {"type": str, 'default': ""},
-
-
-        "health_check": {"type": bool, "default": True},
-        "io_error": {"type": bool, 'default': False},
-    }
-
-    def __init__(self, data=None):
-        super(JMDevice, self).__init__()
-        self.set_attrs(self.attributes, data)
-        self.object_type = "object"
-
-    def get_id(self):
-        return self.uuid
+    device_data_dict: dict = {}
+    jm_bdev: str = ""
+    jm_nvme_bdev_list: List[str] = []
+    raid_bdev: str = ""
 

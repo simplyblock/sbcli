@@ -1,16 +1,14 @@
 # coding=utf-8
-import logging
-
 import time
-import sys
 
-from simplyblock_core import constants, kv_store, utils
+from simplyblock_core import constants, db_controller, utils
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.rpc_client import RPCClient
 from simplyblock_core.models.stats import DeviceStatObject, NodeStatObject, ClusterStatObject
 
-# Import the GELF logger
-from graypy import GELFUDPHandler
+
+logger = utils.get_logger(__name__)
+
 
 last_object_record = {}
 
@@ -98,10 +96,8 @@ def add_node_stats(node, records):
         data.update(records_sum.get_clean_dict())
 
     size_prov = 0
-    for lvol_id in node.lvols:
-        lvol = db_controller.get_lvol_by_id(lvol_id)
-        if lvol:
-            size_prov += lvol.size
+    for lvol in db_controller.get_lvols_by_node_id(node.get_id()):
+        size_prov += lvol.size
 
     size_util = 0
     size_prov_util = 0
@@ -150,17 +146,9 @@ def add_cluster_stats(cl, records):
     return stat_obj
 
 
-# configure logging
-logger_handler = logging.StreamHandler(stream=sys.stdout)
-logger_handler.setFormatter(logging.Formatter('%(asctime)s: %(levelname)s: %(message)s'))
-gelf_handler = GELFUDPHandler('0.0.0.0', constants.GELF_PORT)
-logger = logging.getLogger()
-logger.addHandler(gelf_handler)
-logger.addHandler(logger_handler)
-logger.setLevel(logging.DEBUG)
 
 # get DB controller
-db_controller = kv_store.DBController()
+db_controller = db_controller.DBController()
 
 logger.info("Starting capacity and stats collector...")
 while True:
@@ -184,15 +172,15 @@ while True:
             rpc_client = RPCClient(
                 node.mgmt_ip, node.rpc_port,
                 node.rpc_username, node.rpc_password,
-                timeout=3, retry=2)
+                timeout=2, retry=2)
 
             devices_records = []
             for device in node.nvme_devices:
                 logger.info("Getting device stats: %s", device.uuid)
-                if device.status not in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_READONLY]:
+                if device.status not in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_READONLY, NVMeDevice.STATUS_CANNOT_ALLOCATE]:
                     logger.info(f"Device is skipped: {device.get_id()} status: {device.status}")
                     continue
-                capacity_dict = rpc_client.alceml_get_capacity(device.alceml_bdev)
+                capacity_dict = rpc_client.alceml_get_capacity(device.alceml_name)
                 stats_dict = rpc_client.get_device_stats(device.nvme_bdev)
                 record = add_device_stats(cl, device, capacity_dict, stats_dict)
                 if record:

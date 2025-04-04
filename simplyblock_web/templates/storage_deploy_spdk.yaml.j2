@@ -1,0 +1,168 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: snode-spdk-deployment-{{ HOSTNAME }}
+  namespace: {{ NAMESPACE }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: spdk-app-{{ HOSTNAME }}
+  template:
+    metadata:
+      labels:
+        app: spdk-app-{{ HOSTNAME }}
+    spec:
+      serviceAccountName: storage-node-sa
+      nodeSelector:
+        kubernetes.io/hostname: {{ HOSTNAME }}
+      hostNetwork: true
+      volumes:
+        - name: socket-dir
+          emptyDir:
+            medium: "Memory"
+        - name: host-sys
+          hostPath:
+            path: /sys
+        - name: host-proc
+          hostPath:
+            path: /proc
+        - name: host-rootfs
+          hostPath:
+            path: /
+        - name: foundationdb
+          hostPath:
+            path: /var/foundationdb
+        - name: etc-simplyblock
+          hostPath:
+            path: /var/simplyblock
+        - name: host-modules
+          hostPath:
+            path: /lib/modules
+        - name: dev-vol
+          hostPath:
+            path: /dev
+        - name: hugepage
+          emptyDir:
+            medium: HugePages
+        - name: script-volume
+          emptyDir: {}
+        - name: varlog
+          hostPath:
+            path: /var/log
+        - name: dockercontainerlogdirectory
+          hostPath:
+            path: /var/log/pods
+      tolerations:
+        - effect: NoSchedule
+          key: dedicated
+          operator: Equal
+          value: simplyblock-storage-plane
+
+      initContainers:
+        - name: copy-script
+          image: public.ecr.aws/simply-block/busybox
+          command: ["sh", "-c", "echo \"{{ FDB_CONNECTION }}\" > /etc/foundationdb/fdb.cluster"]
+          volumeMounts:
+            - name: foundationdb
+              mountPath: /etc/foundationdb
+
+      containers:
+
+      - name: spdk-container
+        image: {{ SPDK_IMAGE }}
+        imagePullPolicy: "Always"
+        command:
+          - sh
+          - -c
+          - |
+            if [ ! -e /dev/fd ]; then
+              ln -s /proc/self/fd /dev/fd
+            fi
+            /root/scripts/run_distr.sh "{{ SPDK_CPU_MASK }}" "{{ SPDK_MEM }}"
+        env:
+          - name: SPDKCSI_SECRET
+            valueFrom:
+              secretKeyRef:
+                name: spdkcsi-secret
+                key: secret.json
+          - name: CLUSTER_CONFIG
+            valueFrom:
+              configMapKeyRef:
+                name: spdkcsi-cm
+                key: config.json
+        securityContext:
+          privileged: true
+        volumeMounts:
+        - name: socket-dir
+          mountPath: /var/tmp
+        - name: host-sys
+          mountPath: /sys
+        - name: host-modules
+          mountPath: /lib/modules
+        - name: dev-vol
+          mountPath: /dev
+        - name: script-volume
+          mountPath: /script
+        - name: etc-simplyblock
+          mountPath: /etc/simplyblock
+        resources:
+          limits:
+            hugepages-2Mi: {{ MEM_GEGA }}Gi
+            memory: {{ MEM2_GEGA }}Gi
+          requests:
+            hugepages-2Mi: {{ MEM_GEGA }}Gi
+
+      - name: spdk-proxy-container
+        image: {{ SIMPLYBLOCK_DOCKER_IMAGE }}
+        imagePullPolicy: "Always"
+        command: ["python", "simplyblock_core/services/spdk_http_proxy_server.py"]
+        volumeMounts:
+        - name: socket-dir
+          mountPath: /var/tmp
+        env:
+        - name: SERVER_IP
+          value: "{{ SERVER_IP }}"
+        - name: RPC_PORT
+          value: "{{ RPC_PORT }}"
+        - name: RPC_USERNAME
+          value: "{{ RPC_USERNAME }}"
+        - name: RPC_PASSWORD
+          value: "{{ RPC_PASSWORD }}"
+        - name: MULTI_THREADING_ENABLED
+          value: "True"
+        - name: TIMEOUT
+          value: "300"
+      - name: fluentd
+        image: public.ecr.aws/simply-block/fluentd-kubernetes-daemonset:v1.17.1-debian-graylog-1.2
+        imagePullPolicy: "Always"
+        env:
+        - name: K8S_NODE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
+        - name:  FLUENT_GRAYLOG_HOST
+          value: "{{ GRAYLOG_SERVER_IP }}"
+        - name:  FLUENT_GRAYLOG_PORT
+          value: "12202"
+        - name:  FLUENT_GRAYLOG_PROTOCOL
+          value: "tcp"
+        - name:  FLUENTD_SYSTEMD_CONF
+          value: "disable"
+        - name: FLUENT_CONTAINER_TAIL_EXCLUDE_PATH
+          value: /var/log/pods/fluent*
+        - name: FLUENT_CONTAINER_TAIL_PARSER_TYPE
+          value: /^(?<time>.+) (?<stream>stdout|stderr)( (?<logtag>.))? (?<log>.*)$/
+        resources:
+          requests:
+            cpu: 200m
+            memory: 0.5Gi
+          limits:
+            cpu: 1000m
+            memory: 1Gi
+        volumeMounts:
+        - name: varlog
+          mountPath: /var/log
+        - name: dockercontainerlogdirectory
+          mountPath: /var/log/pods
+          readOnly: true

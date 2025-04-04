@@ -1,31 +1,18 @@
 # coding=utf-8
-import logging
 import time
-import sys
 
 
-from simplyblock_core import constants, kv_store, storage_node_ops
-from simplyblock_core.controllers import device_controller, tasks_events
+from simplyblock_core import constants, db_controller, storage_node_ops, utils
+from simplyblock_core.controllers import device_controller, tasks_events, health_controller, tasks_controller
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.nvme_device import NVMeDevice
-
-# Import the GELF logger
-from graypy import GELFUDPHandler
-
 from simplyblock_core.models.storage_node import StorageNode
 
 
-# configure logging
-logger_handler = logging.StreamHandler(stream=sys.stdout)
-logger_handler.setFormatter(logging.Formatter('%(asctime)s: %(levelname)s: %(message)s'))
-gelf_handler = GELFUDPHandler('0.0.0.0', constants.GELF_PORT)
-logger = logging.getLogger()
-logger.addHandler(gelf_handler)
-logger.addHandler(logger_handler)
-logger.setLevel(logging.DEBUG)
+logger = utils.get_logger(__name__)
 
 # get DB controller
-db_controller = kv_store.DBController()
+db_controller = db_controller.DBController()
 
 
 def _get_node_unavailable_devices_count(node_id):
@@ -83,6 +70,7 @@ def task_runner_device(task):
         task.function_result = "canceled"
         task.status = JobSchedule.STATUS_DONE
         task.write_to_db(db_controller.kv_store)
+        device_controller.device_set_retries_exhausted(device.get_id(), True)
         return True
 
     node = db_controller.get_storage_node_by_id(task.node_id)
@@ -110,12 +98,12 @@ def task_runner_device(task):
     if task.status != JobSchedule.STATUS_RUNNING:
         task.status = JobSchedule.STATUS_RUNNING
         task.write_to_db(db_controller.kv_store)
-        tasks_events.task_updated(task)
 
     # set device online for the first 3 retries
     if task.retry < 3:
         logger.info(f"Set device online {device.get_id()}")
-        device_controller.device_set_online(device.get_id())
+        device_controller.device_set_io_error(device.get_id(), False)
+        device_controller.device_set_state(device.get_id(), NVMeDevice.STATUS_ONLINE)
     else:
         logger.info(f"Restarting device {device.get_id()}")
         device_controller.restart_device(device.get_id(), force=True)
@@ -128,6 +116,8 @@ def task_runner_device(task):
         task.function_result = "done"
         task.status = JobSchedule.STATUS_DONE
         task.write_to_db(db_controller.kv_store)
+
+        tasks_controller.add_device_mig_task(device.get_id())
         return True
 
     task.retry += 1
@@ -137,16 +127,22 @@ def task_runner_device(task):
 
 def task_runner_node(task):
     node = db_controller.get_storage_node_by_id(task.node_id)
-    if task.retry >= constants.TASK_EXEC_RETRY_COUNT:
+    if task.retry >= task.max_retry:
         task.function_result = "max retry reached"
         task.status = JobSchedule.STATUS_DONE
         task.write_to_db(db_controller.kv_store)
-        storage_node_ops.set_node_status(task.node_id, StorageNode.STATUS_UNREACHABLE)
+        storage_node_ops.set_node_status(task.node_id, StorageNode.STATUS_OFFLINE)
         return True
 
-    if node.status == StorageNode.STATUS_REMOVED:
-        logger.info(f"Node is removed: {task.node_id}, stopping task")
-        task.function_result = f"Node is removed"
+    if not node:
+        task.function_result = "node not found"
+        task.status = JobSchedule.STATUS_DONE
+        task.write_to_db(db_controller.kv_store)
+        return True
+
+    if node.status in [StorageNode.STATUS_REMOVED, StorageNode.STATUS_SCHEDULABLE, StorageNode.STATUS_DOWN]:
+        logger.info(f"Node is {node.status}, stopping task")
+        task.function_result = f"Node is {node.status}, stopping"
         task.status = JobSchedule.STATUS_DONE
         task.write_to_db(db_controller.kv_store)
         return True
@@ -165,24 +161,45 @@ def task_runner_node(task):
         return True
 
     if task.status != JobSchedule.STATUS_RUNNING:
+        if node.status == StorageNode.STATUS_RESTARTING:
+            logger.info(f"Node is restarting, stopping task")
+            task.function_result = f"Node is restarting"
+            task.status = JobSchedule.STATUS_DONE
+            task.write_to_db(db_controller.kv_store)
+            return True
         task.status = JobSchedule.STATUS_RUNNING
         task.write_to_db(db_controller.kv_store)
-        tasks_events.task_updated(task)
+
+    # is node reachable?
+    ping_check = health_controller._check_node_ping(node.mgmt_ip)
+    logger.info(f"Check: ping mgmt ip {node.mgmt_ip} ... {ping_check}")
+    node_api_check = health_controller._check_node_api(node.mgmt_ip)
+    logger.info(f"Check: node API {node.mgmt_ip}:5000 ... {node_api_check}")
+    if not ping_check or not node_api_check:
+        # node is unreachable, retry
+        logger.info(f"Node is not reachable: {task.node_id}, retry")
+        task.function_result = f"Node is unreachable, retry"
+        task.retry += 1
+        task.write_to_db(db_controller.kv_store)
+        return False
+
 
     # shutting down node
     logger.info(f"Shutdown node {node.get_id()}")
     ret = storage_node_ops.shutdown_storage_node(node.get_id(), force=True)
     if ret:
         logger.info(f"Node shutdown succeeded")
+
     time.sleep(3)
 
     # resetting node
     logger.info(f"Restart node {node.get_id()}")
-    ret = storage_node_ops.restart_storage_node(node.get_id())
+    ret = storage_node_ops.restart_storage_node(node.get_id(), force=True)
     if ret:
         logger.info(f"Node restart succeeded")
 
-    time.sleep(5)
+    time.sleep(3)
+    node = db_controller.get_storage_node_by_id(task.node_id)
     if _get_node_unavailable_devices_count(node.get_id()) == 0 and node.status == StorageNode.STATUS_ONLINE:
         logger.info(f"Node is online: {node.get_id()}")
         task.function_result = "done"
@@ -197,7 +214,6 @@ def task_runner_node(task):
 
 logger.info("Starting Tasks runner...")
 while True:
-    time.sleep(3)
     clusters = db_controller.get_clusters()
     if not clusters:
         logger.error("No clusters found!")
@@ -212,7 +228,14 @@ while True:
                         task = db_controller.get_task_by_id(task.uuid)
                         res = task_runner(task)
                         if res:
-                            tasks_events.task_updated(task)
+                            if task.status == JobSchedule.STATUS_DONE:
+                                tasks_events.task_updated(task)
+                                break
                         else:
-                            time.sleep(delay_seconds)
-                            delay_seconds *= 2
+                            if task.retry <= 3:
+                                delay_seconds *= 1
+                            else:
+                                delay_seconds *= 2
+                        time.sleep(delay_seconds)
+
+    time.sleep(constants.TASK_EXEC_INTERVAL_SEC)

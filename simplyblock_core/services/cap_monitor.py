@@ -1,30 +1,18 @@
 # coding=utf-8
-import logging
 
 import time
-import sys
+from datetime import datetime, timezone
 
-
-
-from simplyblock_core import kv_store, constants, cluster_ops
+from simplyblock_core import db_controller, constants, cluster_ops, utils
 from simplyblock_core.controllers import cluster_events
 from simplyblock_core.models.cluster import Cluster
 
-# Import the GELF logger
-from graypy import GELFUDPHandler
 
-# configure logging
-logger_handler = logging.StreamHandler(stream=sys.stdout)
-logger_handler.setFormatter(logging.Formatter('%(asctime)s: %(levelname)s: %(message)s'))
-gelf_handler = GELFUDPHandler('0.0.0.0', constants.GELF_PORT)
-logger = logging.getLogger()
-logger.addHandler(gelf_handler)
-logger.addHandler(logger_handler)
-logger.setLevel(logging.DEBUG)
+logger = utils.get_logger(__name__)
 
-### script to test connection once connection is ascertain
 # get DB controller
-db_controller = kv_store.DBController()
+db_controller = db_controller.DBController()
+last_event = {}
 
 logger.info("Starting capacity monitoring service...")
 while True:
@@ -40,11 +28,21 @@ while True:
         size_prov = records[0].size_prov_util
         logger.debug(f"cluster abs util: {size_util}, prov util: {size_prov}")
         if cl.cap_crit:
-            if cl.cap_crit < size_util:
+            if cl.cap_crit <= size_util:
                 logger.warning(f"Cluster absolute cap critical, util: {size_util}% of cluster util: {cl.cap_crit}, "
                                f"putting the cluster in read_only mode")
-                cluster_events.cluster_cap_crit(cl, size_util)
-                cluster_ops.cluster_set_read_only(cl.get_id())
+                if cl.id in last_event:
+                    diff = datetime.now(timezone.utc) - datetime.fromisoformat(last_event[cl.id]["date"])
+                    if diff and diff.total_seconds() > 60 * 15:
+                        ev = cluster_events.cluster_cap_crit(cl, size_util)
+                        if ev:
+                            last_event[cl.id] = ev
+                else:
+                    ev = cluster_events.cluster_cap_crit(cl, size_util)
+                    if ev:
+                        last_event[cl.id] = ev
+                if cl.status in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED]:
+                    cluster_ops.cluster_set_read_only(cl.get_id())
             else:
                 if cl.status == Cluster.STATUS_READONLY:
                     cluster_ops.cluster_set_active(cl.get_id())

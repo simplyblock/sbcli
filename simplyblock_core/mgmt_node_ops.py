@@ -1,4 +1,5 @@
 # coding=utf-8
+import datetime
 import json
 import logging
 import uuid
@@ -9,20 +10,21 @@ import docker
 
 from simplyblock_core import utils, scripts
 from simplyblock_core.controllers import mgmt_events
-from simplyblock_core.kv_store import DBController
+from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.mgmt_node import MgmtNode
 
 
 logger = logging.getLogger()
 
 
-def deploy_mgmt_node(cluster_ip, cluster_id, ifname):
+def deploy_mgmt_node(cluster_ip, cluster_id, ifname, cluster_secret):
 
     try:
-        resp = requests.get(f"http://{cluster_ip}/cluster/{cluster_id}")
+        headers = {'Authorization': f'{cluster_id} {cluster_secret}'}
+        resp = requests.get(f"http://{cluster_ip}/cluster/{cluster_id}", headers=headers)
         resp_json = resp.json()
         cluster_data = resp_json['results'][0]
-        logger.info(f"Cluster found! NQN:{cluster_data['nqn']}")
+        logger.info(f"Cluster found, NQN:{cluster_data['nqn']}")
         logger.debug(cluster_data)
     except Exception as e:
         logger.error("Error getting cluster data!")
@@ -49,7 +51,7 @@ def deploy_mgmt_node(cluster_ip, cluster_id, ifname):
     time.sleep(1)
     hostname = utils.get_hostname()
     db_controller = DBController()
-    nodes = db_controller.get_mgmt_nodes(cluster_id=cluster_id)
+    nodes = db_controller.get_mgmt_nodes()
     if not nodes:
         logger.error("No mgmt nodes was found in the cluster!")
         return False
@@ -92,7 +94,7 @@ def deploy_mgmt_node(cluster_ip, cluster_id, ifname):
     node_id = add_mgmt_node(DEV_IP, cluster_id)
 
     # check if ha setting is required
-    nodes = db_controller.get_mgmt_nodes(cluster_id=cluster_id)
+    nodes = db_controller.get_mgmt_nodes()
     if len(nodes) >= 3:
         logger.info("Waiting for FDB container to be active...")
         fdb_cont = None
@@ -130,9 +132,6 @@ def deploy_mgmt_node(cluster_ip, cluster_id, ifname):
         logger.info("Configuring Double DB...")
         time.sleep(3)
         scripts.set_db_config_double()
-        for cl in db_controller.get_clusters():
-            cl.ha_type = "ha"
-            cl.write_to_db(db_controller.kv_store)
 
     logger.info("Node joined the cluster")
     return node_id
@@ -153,6 +152,8 @@ def add_mgmt_node(mgmt_ip, cluster_id=None):
     node.cluster_id = cluster_id
     node.mgmt_ip = mgmt_ip
     node.status = MgmtNode.STATUS_ONLINE
+    node.create_dt = str(datetime.datetime.now())
+
     node.write_to_db(db_controller.kv_store)
 
     mgmt_events.mgmt_add(node)

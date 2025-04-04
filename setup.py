@@ -1,12 +1,45 @@
 import os
 
-from setuptools import setup
+from setuptools import setup, find_packages
+
+from setuptools.command.install import install as _install
+
+
+def _post_install():
+    from subprocess import getstatusoutput
+    _, out = getstatusoutput('activate-global-python-argcomplete --user')
+    print(out)
+
+    if os.environ.get("SHELL") and os.environ.get("HOME"):
+        if "zsh" in os.environ.get("SHELL", ""):
+            path = f"{os.environ.get('HOME')}/.zshenv"
+        else:
+            path = f"{os.environ.get('HOME')}/.bash_completion"
+        if os.path.isfile(path):
+            _, out = getstatusoutput(f'source {path}')
+            found = False
+            if os.path.exists(os.environ.get("HOME")+"/.bashrc"):
+                with open(os.environ.get("HOME")+"/.bashrc", "r") as bashrc:
+                    for line in bashrc.readlines():
+                        line = line.strip()
+                        if not line.startswith("#") and f"source {path}" in line:
+                            found = True
+                            break
+            if not found:
+                with open(os.environ.get("HOME") + "/.bashrc", "a") as bashrc:
+                    bashrc.writelines([f"\nsource {path}\n"])
+
+
+class install(_install):
+    def run(self):
+        _install.run(self)
+        self.execute(_post_install, (), msg="Running post install task")
 
 
 def get_env_var(name, default=None):
     if not name:
         return False
-    with open("env_var", "r", encoding="utf-8") as fh:
+    with open("simplyblock_core/env_var", "r", encoding="utf-8") as fh:
         lines = fh.readlines()
     data = {}
     for line in lines:
@@ -23,8 +56,13 @@ def get_env_var(name, default=None):
 def gen_data_files(*dirs):
     results = []
     for src_dir in dirs:
-        files = [f for f in os.listdir(src_dir) if os.path.isfile(f"{src_dir}/{f}")]
+        files = [f for f in os.listdir(src_dir) if os.path.isfile(f"{src_dir}/{f}") and f != ".DS_Store"]
+        if not files:
+            return []
         results.append((src_dir, [f"{src_dir}/{f}" for f in files]))
+        dirs = [f for f in os.listdir(src_dir) if os.path.isdir(f"{src_dir}/{f}")]
+        for dir in dirs:
+            results.extend(gen_data_files(os.path.join(src_dir, dir)))
     return results
 
 
@@ -33,48 +71,30 @@ def get_long_description():
         return fh.read()
 
 
+def get_requirements():
+    with open("requirements.txt", "r", encoding="utf-8") as fh:
+        return fh.readlines()
+
+
 COMMAND_NAME = get_env_var("SIMPLY_BLOCK_COMMAND_NAME", "sbcli")
 VERSION = get_env_var("SIMPLY_BLOCK_VERSION", "1")
 
-data_files = gen_data_files(
-        "simplyblock_core/controllers",
-        "simplyblock_core/models",
-        "simplyblock_core/scripts",
-        "simplyblock_core/scripts/alerting",
-        "simplyblock_core/scripts/dashboards",
-        "simplyblock_core/services",
-        "simplyblock_web/blueprints",
-        "simplyblock_web/static",
-        "simplyblock_web/templates")
+data_files = gen_data_files("simplyblock_core","simplyblock_web")
+data_files.append(('', ["requirements.txt"]))
+# data_files.append(('/etc/simplyblock', ["requirements.txt"]))
 
-data_files.append(('', ['env_var']))
 
 setup(
     name=COMMAND_NAME,
     version=VERSION,
-    packages=[
-        'simplyblock_core',
-        'simplyblock_core.controllers',
-        'simplyblock_core.models',
-        'simplyblock_core.scripts',
-        'simplyblock_core.services',
-        'simplyblock_cli', 'simplyblock_web', ],
+    packages=find_packages(exclude=["e2e*"]),
     url='https://www.simplyblock.io/',
     author='Hamdy',
     author_email='hamdy@simplyblock.io',
     description='CLI for managing SimplyBlock cluster',
     long_description=get_long_description(),
     long_description_content_type="text/markdown",
-    install_requires=[
-        "foundationdb",
-        "requests",
-        "typing",
-        "prettytable",
-        "docker",
-        "psutil",
-        "py-cpuinfo",
-        "graypy",
-    ],
+    install_requires=get_requirements(),
     entry_points={
         'console_scripts': [
             f'{COMMAND_NAME}=simplyblock_cli.cli:main',
@@ -82,4 +102,9 @@ setup(
     },
     include_package_data=True,
     data_files=data_files,
+    package_data={
+        '': ["/etc/simplyblock/requirements.txt"],
+        '/etc/simplyblock': ["requirements.txt"]
+    },
+    cmdclass={'install': install},
 )

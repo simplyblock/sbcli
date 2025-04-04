@@ -8,52 +8,98 @@ import time
 
 import cpuinfo
 import docker
+import requests
 from docker.types import LogConfig
 from flask import Blueprint
 from flask import request
 
 from simplyblock_web import utils, node_utils
 
-from simplyblock_core import scripts, constants, shell_utils
-from ec2_metadata import ec2_metadata
+from simplyblock_core import scripts, constants, shell_utils, utils as core_utils
 
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG)
+
 bp = Blueprint("snode", __name__, url_prefix="/snode")
 
 cluster_id_file = "/etc/foundationdb/sbcli_cluster_id"
 
-CPU_INFO = cpuinfo.get_cpu_info()
-HOSTNAME, _, _ = node_utils.run_command("hostname -s")
-SYSTEM_ID = ""
-EC2_PUBLIC_IP = ""
-EC2_MD = ""
 
-try:
-    SYSTEM_ID = ec2_metadata.instance_id
-except:
-    SYSTEM_ID, _, _ = node_utils.run_command("dmidecode -s system-uuid")
+def get_google_cloud_info():
+    try:
+        headers = {'Metadata-Flavor': 'Google'}
+        response = requests.get("http://169.254.169.254/computeMetadata/v1/instance/?recursive=true",
+                                headers=headers, timeout=3)
+        data = response.json()
+        return {
+            "id": str(data["id"]),
+            "type": data["machineType"].split("/")[-1],
+            "cloud": "google",
+            "ip": data["networkInterfaces"][0]["ip"],
+            "public_ip": data["networkInterfaces"][0]["accessConfigs"][0]["externalIp"],
+        }
+    except:
+        pass
 
-try:
-    EC2_PUBLIC_IP = ec2_metadata.public_ipv4
-except:
-    pass
 
-try:
-    EC2_MD = ec2_metadata.instance_identity_document
-except:
-    pass
+def get_equinix_cloud_info():
+    try:
+        response = requests.get("https://metadata.platformequinix.com/metadata", timeout=3)
+        data = response.json()
+        public_ip = ""
+        ip = ""
+        for interface in data["network"]["addresses"]:
+            if interface["address_family"] == 4:
+                if interface["enabled"] and interface["public"]:
+                    public_ip = interface["address"]
+                elif interface["enabled"] and not interface["public"]:
+                    public_ip = interface["address"]
+        return {
+            "id": str(data["id"]),
+            "type": data["class"],
+            "cloud": "equinix",
+            "ip": public_ip,
+            "public_ip": ip
+        }
+    except:
+        pass
+
+
+def get_amazon_cloud_info():
+    try:
+        import ec2_metadata
+        import requests
+        session = requests.session()
+        session.timeout = 3
+        data = ec2_metadata.EC2Metadata(session=session).instance_identity_document
+        return {
+            "id": data["instanceId"],
+            "type": data["instanceType"],
+            "cloud": "amazon",
+            "ip": data["privateIp"],
+            "public_ip":  "",
+        }
+    except:
+        pass
 
 
 def get_docker_client():
-    ip = os.getenv("DOCKER_IP")
-    if not ip:
-        for ifname in node_utils.get_nics_data():
-            if ifname in ["eth0", "ens0"]:
-                ip = node_utils.get_nics_data()[ifname]['ip']
-                break
-    return docker.DockerClient(base_url=f"tcp://{ip}:2375", version="auto", timeout=60 * 5)
-
+    try:
+        cl = docker.DockerClient(base_url='unix://var/run/docker.sock', version="auto", timeout=60 * 5)
+        cl.info()
+        return cl
+    except:
+        ip = os.getenv("DOCKER_IP")
+        if not ip:
+            for ifname in node_utils.get_nics_data():
+                if ifname in ["eth0", "ens0"]:
+                    ip = node_utils.get_nics_data()[ifname]['ip']
+                    break
+        cl = docker.DockerClient(base_url=f"tcp://{ip}:2375", version="auto", timeout=60 * 5)
+        try:
+            cl.info()
+            return cl
+        except:
+            pass
 
 @bp.route('/scan_devices', methods=['GET'])
 def scan_devices():
@@ -82,42 +128,47 @@ def spdk_process_start():
     if 'spdk_cpu_mask' in data:
         spdk_cpu_mask = data['spdk_cpu_mask']
 
-    spdk_mem = None
-    if 'spdk_mem' in data:
-        spdk_mem = data['spdk_mem']
+    multi_threading_enabled = False
+    if 'multi_threading_enabled' in data:
+        multi_threading_enabled = bool(data['multi_threading_enabled'])
 
-    if spdk_mem:
-        spdk_mem = int(utils.parse_size(spdk_mem) / (1000 * 1000))
-    else:
-        spdk_mem = 4000
+    timeout = 60*5
+    if 'timeout' in data:
+        try:
+            timeout = int(data['timeout'])
+        except:
+            pass
+
+    spdk_mem_mib = core_utils.convert_size(
+            data.get('spdk_mem', core_utils.parse_size('4GiB')), 'MiB')
 
     node_docker = get_docker_client()
     nodes = node_docker.containers.list(all=True)
     for node in nodes:
         if node.attrs["Name"] in ["/spdk", "/spdk_proxy"]:
             logger.info(f"{node.attrs['Name']} container found, removing...")
-            node.stop()
+            node.stop(timeout=3)
             node.remove(force=True)
-            time.sleep(2)
 
-    spdk_debug = 0
+    spdk_debug = ""
     if set_debug:
-        spdk_debug = 1
+        spdk_debug = "1"
 
     spdk_image = constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE
     if 'spdk_image' in data and data['spdk_image']:
         spdk_image = data['spdk_image']
-        # node_docker.images.pull(spdk_image)
+
+    node_docker.images.pull(spdk_image)
 
     if "cluster_ip" in data and data['cluster_ip']:
         cluster_ip = data['cluster_ip']
-        log_config = LogConfig(type=LogConfig.types.GELF, config={"gelf-address": f"udp://{cluster_ip}:12201"})
+        log_config = LogConfig(type=LogConfig.types.GELF, config={"gelf-address": f"tcp://{cluster_ip}:12202"})
     else:
         log_config = LogConfig(type=LogConfig.types.JOURNALD)
 
     container = node_docker.containers.run(
         spdk_image,
-        f"/root/scripts/run_distr.sh {spdk_cpu_mask} {spdk_mem} {spdk_debug}",
+        f"/root/scripts/run_distr.sh {spdk_cpu_mask} {spdk_mem_mib} {spdk_debug}",
         name="spdk",
         detach=True,
         privileged=True,
@@ -133,16 +184,24 @@ def spdk_process_start():
         # restart_policy={"Name": "on-failure", "MaximumRetryCount": 99}
     )
     container2 = node_docker.containers.run(
-        constants.SIMPLY_BLOCK_SPDK_CORE_IMAGE,
-        "python /root/scripts/spdk_http_proxy.py",
+        constants.SIMPLY_BLOCK_DOCKER_IMAGE,
+        "python simplyblock_core/services/spdk_http_proxy_server.py",
         name="spdk_proxy",
         detach=True,
         network_mode="host",
         log_config=log_config,
         volumes=[
-            '/var/tmp:/var/tmp',
-            '/etc/foundationdb:/etc/foundationdb'],
-        restart_policy={"Name": "always"}
+            '/var/tmp:/var/tmp'
+        ],
+        environment=[
+            f"SERVER_IP={data['server_ip']}",
+            f"RPC_PORT={data['rpc_port']}",
+            f"RPC_USERNAME={data['rpc_username']}",
+            f"RPC_PASSWORD={data['rpc_password']}",
+            f"MULTI_THREADING_ENABLED={multi_threading_enabled}",
+            f"TIMEOUT={timeout}",
+        ]
+        # restart_policy={"Name": "always"}
     )
     retries = 10
     while retries > 0:
@@ -163,13 +222,11 @@ def spdk_process_start():
 
 @bp.route('/spdk_process_kill', methods=['GET'])
 def spdk_process_kill():
-    force = request.args.get('force', default=False, type=bool)
     node_docker = get_docker_client()
     for cont in node_docker.containers.list(all=True):
-        logger.debug(cont.attrs)
         if cont.attrs['Name'] == "/spdk" or cont.attrs['Name'] == "/spdk_proxy":
-            cont.stop()
-            cont.remove(force=force)
+            cont.stop(timeout=3)
+            cont.remove(force=True)
     return utils.get_response(True)
 
 
@@ -177,7 +234,6 @@ def spdk_process_kill():
 def spdk_process_is_up():
     node_docker = get_docker_client()
     for cont in node_docker.containers.list(all=True):
-        logger.debug(cont.attrs)
         if cont.attrs['Name'] == "/spdk":
             status = cont.attrs['State']["Status"]
             is_running = cont.attrs['State']["Running"]
@@ -192,10 +248,20 @@ def get_cluster_id():
     out, _, _ = node_utils.run_command(f"cat {cluster_id_file}")
     return out
 
+@bp.route('/get_file_content/<string:file_name>', methods=['GET'])
+def get_file_content(file_name):
+    out, err, _ = node_utils.run_command(f"cat /etc/simplyblock/{file_name}")
+    if out:
+        return utils.get_response(out)
+    elif err:
+        err = err.decode("utf-8")
+        logger.debug(err)
+        return utils.get_response(None, err)
+
 
 def set_cluster_id(cluster_id):
-    out, _, _ = node_utils.run_command(f"echo {cluster_id} > {cluster_id_file}")
-    return out
+    ret = os.popen(f"echo {cluster_id} > {cluster_id_file}").read().strip()
+    return ret
 
 
 def delete_cluster_id():
@@ -203,25 +269,34 @@ def delete_cluster_id():
     return out
 
 
-def get_ec2_meta():
-    stream = os.popen('curl -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 1"')
-    token = stream.read()
-    stream = os.popen(f"curl -H \"X-aws-ec2-metadata-token: {token}\" http://169.254.169.254/latest/dynamic/instance-identity/document")
-    out = stream.read()
+def get_node_lsblk():
+    out, err, rc = node_utils.run_command("lsblk -J")
+    if rc != 0:
+        logger.error(err)
+        return []
+    data = json.loads(out)
+    return data
+
+
+def get_cores_config():
+    file_path = constants.TEMP_CORES_FILE
     try:
-        data = json.loads(out)
-        return data
-    except:
+        # Open and read the JSON file
+        with open(file_path, "r") as file:
+            cores_config = json.load(file)
+
+        # Output the parsed data
+        logger.info("Parsed Core Configuration:")
+        for key, value in cores_config.items():
+            logger.info(f"{key}: {value}")
+        return cores_config
+
+    except FileNotFoundError:
+        logger.error(f"The file '{file_path}' does not exist.")
         return {}
-
-
-def get_ec2_public_ip():
-    stream = os.popen('curl -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 1"')
-    token = stream.read()
-    stream = os.popen(f"curl -H \"X-aws-ec2-metadata-token: {token}\" http://169.254.169.254/latest/meta-data/public-ipv4")
-    response = stream.read()
-    out = response if "404" not in response else None
-    return out
+    except json.JSONDecodeError as e:
+        logger.error(f"Error decoding JSON: {e}")
+        return {}
 
 
 @bp.route('/info', methods=['GET'])
@@ -234,7 +309,7 @@ def get_info():
         "system_id": SYSTEM_ID,
 
         "cpu_count": CPU_INFO['count'],
-        "cpu_hz": CPU_INFO['hz_advertised'][0],
+        "cpu_hz": CPU_INFO['hz_advertised'][0] if 'hz_advertised' in CPU_INFO else 1,
 
         "memory": node_utils.get_memory(),
         "hugepages": node_utils.get_huge_memory(),
@@ -248,9 +323,10 @@ def get_info():
 
         "network_interface": node_utils.get_nics_data(),
 
-        "ec2_metadata": EC2_MD,
+        "cloud_instance": CLOUD_INFO,
 
-        "ec2_public_ip": EC2_PUBLIC_IP,
+        "lsblk": get_node_lsblk(),
+        "cores_config": get_cores_config(),
     }
     return utils.get_response(out)
 
@@ -269,18 +345,18 @@ def join_swarm():
 
     logger.info("Joining Swarm")
     node_docker = get_docker_client()
-    if node_docker.info()["Swarm"]["LocalNodeState"] == "active":
+    if node_docker.info()["Swarm"]["LocalNodeState"] in ["active", "pending"]:
         logger.info("Node is part of another swarm, leaving swarm")
         node_docker.swarm.leave(force=True)
         time.sleep(2)
     node_docker.swarm.join([f"{cluster_ip}:2377"], join_token)
-    retries = 10
-    while retries > 0:
-        if node_docker.info()["Swarm"]["LocalNodeState"] == "active":
-            break
-        logger.info("Waiting for node to be active...")
-        retries -= 1
-        time.sleep(1)
+    # retries = 10
+    # while retries > 0:
+    #     if node_docker.info()["Swarm"]["LocalNodeState"] == "active":
+    #         break
+    #     logger.info("Waiting for node to be active...")
+    #     retries -= 1
+    #     time.sleep(1)
     logger.info("Joining docker swarm > Done")
 
     try:
@@ -311,11 +387,12 @@ def make_gpt_partitions_for_nbd():
     nbd_device = '/dev/nbd0'
     jm_percent = '3'
     num_partitions = 1
-
+    partition_percent = 0
     try:
         data = request.get_json()
         nbd_device = data['nbd_device']
         jm_percent = data['jm_percent']
+        partition_percent = data['partition_percent']
         num_partitions = data['num_partitions']
     except:
         pass
@@ -327,7 +404,11 @@ def make_gpt_partitions_for_nbd():
     sg_cmd_list = [
         f"sgdisk -t 1:6527994e-2c5a-4eec-9613-8f5944074e8b {nbd_device}",
     ]
-    perc_per_partition = int((100 - jm_percent) / num_partitions)
+    if partition_percent:
+        perc_per_partition = int(partition_percent)
+    else:
+        perc_per_partition = int((100 - jm_percent) / num_partitions)
+
     for i in range(num_partitions):
         st = jm_percent + (i * perc_per_partition)
         en = st + perc_per_partition
@@ -360,6 +441,9 @@ def delete_gpt_partitions_for_dev():
     cmd_list = [
         f"echo -n \"{device_pci}\" > /sys/bus/pci/drivers/uio_pci_generic/unbind",
         f"echo -n \"{device_pci}\" > /sys/bus/pci/drivers/nvme/bind",
+        f"echo \"nvme\" > /sys/bus/pci/devices/{device_pci}/driver_override",
+        f"echo -n \"{device_pci}\" > /sys/bus/pci/drivers/nvme/bind",
+
     ]
 
     for cmd in cmd_list:
@@ -369,9 +453,51 @@ def delete_gpt_partitions_for_dev():
         time.sleep(1)
 
     device_name = os.popen(f"ls /sys/devices/pci0000:00/{device_pci}/nvme/nvme*/ | grep nvme").read().strip()
+    if device_name:
+        cmd_list = [
+            f"parted -fs /dev/{device_name} mklabel gpt",
+            f"echo -n \"{device_pci}\" > /sys/bus/pci/drivers/nvme/unbind",
+        ]
+
+        for cmd in cmd_list:
+            logger.debug(cmd)
+            ret = os.popen(cmd).read().strip()
+            logger.debug(ret)
+            time.sleep(1)
+
+    return utils.get_response(True)
+
+
+CPU_INFO = cpuinfo.get_cpu_info()
+HOSTNAME, _, _ = node_utils.run_command("hostname -s")
+SYSTEM_ID = ""
+CLOUD_INFO = get_amazon_cloud_info()
+if not CLOUD_INFO:
+    CLOUD_INFO = get_google_cloud_info()
+
+if not CLOUD_INFO:
+    CLOUD_INFO = get_equinix_cloud_info()
+
+if CLOUD_INFO:
+    SYSTEM_ID = CLOUD_INFO["id"]
+else:
+    SYSTEM_ID, _, _ = node_utils.run_command("dmidecode -s system-uuid")
+
+
+@bp.route('/bind_device_to_spdk', methods=['POST'])
+def bind_device_to_spdk():
+    data = request.get_json()
+    if "device_pci" not in data:
+        return utils.get_response(False, "Required parameter is missing: device_pci")
+
+    device_pci = data['device_pci']
+
     cmd_list = [
-        f"parted -fs /dev/{device_name} mklabel gpt",
         f"echo -n \"{device_pci}\" > /sys/bus/pci/drivers/nvme/unbind",
+        f"echo \"\" > /sys/bus/pci/devices/{device_pci}/driver_override",
+        f"echo -n \"{device_pci}\" > /sys/bus/pci/drivers/uio_pci_generic/bind",
+        f"echo \"uio_pci_generic\" > /sys/bus/pci/devices/{device_pci}/driver_override",
+        f"echo -n \"{device_pci}\" > /sys/bus/pci/drivers_probe",
     ]
 
     for cmd in cmd_list:
@@ -381,3 +507,27 @@ def delete_gpt_partitions_for_dev():
         time.sleep(1)
 
     return utils.get_response(True)
+
+
+@bp.route('/firewall_set_port', methods=['POST'])
+def firewall_set_port():
+    data = request.get_json()
+    if "port_id" not in data:
+        return utils.get_response(False, "Required parameter is missing: port_id")
+    if "port_type" not in data:
+        return utils.get_response(False, "Required parameter is missing: port_type")
+    if "action" not in data:
+        return utils.get_response(False, "Required parameter is missing: action")
+
+    port_id = data['port_id']
+    port_type = data['port_type']
+    action = data['action']
+
+    ret = node_utils.firewall_port(port_id, port_type, block=action=="block")
+    return utils.get_response(ret)
+
+
+@bp.route('/get_firewall', methods=['GET'])
+def get_firewall():
+    ret = node_utils.firewall_get()
+    return utils.get_response(ret)

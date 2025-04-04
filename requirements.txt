@@ -1,7 +1,6 @@
 foundationdb
 requests
 numpy
-typing
 prettytable>=3.10.0
 docker
 psutil
@@ -15,3 +14,7 @@ PyYAML
 urllib3
 graypy==2.1.0
 boto3
+jinja2
+argcomplete
+jc
+prometheus_client

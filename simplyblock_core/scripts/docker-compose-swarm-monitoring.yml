@@ -42,6 +42,12 @@ services:
       GRAYLOG_ELASTICSEARCH_HOSTS: "http://opensearch:9200"
       GRAYLOG_MONGODB_URI: "mongodb://mongodb:27017/graylog"
       GRAYLOG_SKIP_PREFLIGHT_CHECKS: "true"
+      GRAYLOG_ROTATION_STRATEGY: "time"
+      GRAYLOG_RETENTION_STRATEGY: "delete"
+      GRAYLOG_ELASTICSEARCH_MAX_NUMBER_OF_INDICES: "${MAX_NUMBER_OF_INDICES}"
+      GRAYLOG_ELASTICSEARCH_MAX_TIME_PER_INDEX: "1d"
+      GRAYLOG_RING_SIZE: "4096"
+      GRAYLOG_INPUTBUFFER_RING_SIZE: "8192"
     ports:
     - "5044:5044/tcp"   # Beats
     - "5140:5140/udp"   # Syslog
@@ -68,6 +74,7 @@ services:
       ClusterIP: "HAProxy"
       ClusterSecret: "${CLUSTER_SECRET}"
     deploy:
+      mode: global
       placement:
         constraints: [node.role == manager]
     networks:
@@ -76,6 +83,7 @@ services:
   pushgateway:
     image: prom/pushgateway
     deploy:
+      mode: global
       placement:
         constraints: [node.role == manager]
     networks:
@@ -90,9 +98,82 @@ services:
     command:
       - "--config.file=/etc/prometheus/prometheus.yml"
       - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.no-lockfile"
       - "--storage.tsdb.retention.time=${RETENTION_PERIOD}"
+      - "--storage.tsdb.min-block-duration=2h"
+      - "--storage.tsdb.max-block-duration=2h"
     restart: "always"
     deploy:
+      mode: global
+      placement:
+        constraints: [node.role == manager]
+    networks:
+      - monitoring-net
+
+  thanos-sidecar:
+    image: thanosio/thanos:v0.31.0
+    user: root
+    command:
+      - sidecar
+      - --tsdb.path=/prometheus
+      - --prometheus.url=http://prometheus:9090
+      - --objstore.config-file=/etc/thanos/objstore.yml
+    volumes:
+      - prometheus_data:/prometheus
+      - ./objstore.yml:/etc/thanos/objstore.yml
+    deploy:
+      mode: global
+      placement:
+        constraints: [node.role == manager]
+    networks:
+      - monitoring-net
+
+  thanos-store:
+    image: thanosio/thanos:v0.31.0
+    command:
+      - store
+      - --objstore.config-file=/etc/thanos/objstore.yml
+      - --index-cache-size=500MB
+      - --chunk-pool-size=500MB
+    volumes:
+      - ./objstore.yml:/etc/thanos/objstore.yml
+    deploy:
+      mode: global
+      placement:
+        constraints: [node.role == manager]
+    networks:
+      - monitoring-net
+
+  thanos-query:
+    image: thanosio/thanos:v0.31.0
+    command:
+      - query
+      - --http-address=0.0.0.0:9091
+      - --store=thanos-store:10901
+      - --store=thanos-sidecar:10901
+    deploy:
+      mode: global
+      placement:
+        constraints: [node.role == manager]
+    networks:
+      - monitoring-net
+
+  thanos-compactor:
+    image: thanosio/thanos:v0.31.0
+    command:
+      - compact
+      - --data-dir=/data
+      - --objstore.config-file=/etc/thanos/objstore.yml
+      - --retention.resolution-raw=30d
+      - --retention.resolution-5m=60d
+      - --retention.resolution-1h=90d
+      - --compact.concurrency=1
+      - --wait
+    volumes:
+      - ./objstore.yml:/etc/thanos/objstore.yml
+      - thanos_compactor_data:/data
+    deploy:
+      mode: global
       placement:
         constraints: [node.role == manager]
     networks:
@@ -115,8 +196,6 @@ services:
     restart: "always"
     deploy:
       mode: global
-      placement:
-        constraints: [node.role == worker]
     networks:
       - monitoring-net
 
@@ -128,22 +207,13 @@ services:
       GF_ALERTING_ENABLED: "true"
       GF_PATHS_PROVISIONING: "/etc/grafana/provisioning"
       GF_INSTALL_PLUGINS: "grafana-opensearch-datasource"
-      GF_SERVER_ROOT_URL: "http://localhost/grafana/"
+      GF_SERVER_ROOT_URL: "${GRAFANA_ENDPOINT}"
     volumes:
       - ./datasource.yml:/etc/grafana/provisioning/datasources/datasource.yaml
       - grafana_data:/var/lib/grafana
       - ./alerting:/etc/grafana/provisioning/alerting
-    deploy:
-      placement:
-        constraints: [node.role == manager]
-    networks:
-      - monitoring-net
-
-  CleanupGraylog:
-    image: $SIMPLYBLOCK_DOCKER_IMAGE
-    environment:
-      LOG_DELETION_INTERVAL: "${LOG_DELETION_INTERVAL}"
-    command: "python simplyblock_core/workers/cleanup_graylog.py"
+      - ./dashboard.yml:/etc/grafana/provisioning/dashboards/main.yaml
+      - ./dashboards:/var/lib/grafana/dashboards
     deploy:
       placement:
         constraints: [node.role == manager]
@@ -152,19 +222,13 @@ services:
 
 volumes:
   mongodb_data:
-    driver: ${USE_EFS:-local}
   os_data:
-    driver: ${USE_EFS:-local}
   graylog_data:
-    driver: ${USE_EFS:-local}
   graylog_journal:
-    driver: ${USE_EFS:-local}
   grafana_data:
-    driver: ${USE_EFS:-local}
   graylog_config:
-    driver: ${USE_EFS:-local}  
   prometheus_data:
-    driver: ${USE_EFS:-local}
+  thanos_compactor_data:
 
 networks:
   monitoring-net:

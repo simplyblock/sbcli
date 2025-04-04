@@ -1,0 +1,109 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cnode-spdk-deployment-{{ HOSTNAME }}
+  namespace: {{ NAMESPACE }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: spdk-app-{{ HOSTNAME }}
+  template:
+    metadata:
+      labels:
+        app: spdk-app-{{ HOSTNAME }}
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: {{ HOSTNAME }}
+      hostNetwork: true
+      volumes:
+        - name: socket-dir
+          emptyDir:
+            medium: "Memory"
+        - name: host-sys
+          hostPath:
+            path: /sys
+        - name: host-modules
+          hostPath:
+            path: /lib/modules
+        - name: dev-vol
+          hostPath:
+            path: /dev
+        - name: hugepage
+          emptyDir:
+            medium: HugePages
+        - name: script-volume
+          emptyDir: {}
+        - name: script-config
+          configMap:
+            name: caching-node-restart-script-cm
+      tolerations:
+        - effect: NoSchedule
+          key: dedicated
+          operator: Equal
+          value: simplyblock-cache 
+      initContainers:
+        - name: copy-script
+          image: public.ecr.aws/simply-block/busybox
+          command: ["sh", "-c", "cp /config/restart_script.py /script/restart_script.py"]
+          volumeMounts:
+            - name: script-volume
+              mountPath: /script
+            - name: script-config
+              mountPath: /config
+      containers:
+      - name: spdk-container
+        image: {{ SPDK_IMAGE }}
+        imagePullPolicy: "Always"
+        command: ["/root/spdk/scripts/run_spdk_tgt.sh", "{{ SPDK_CPU_MASK }}", "{{ SPDK_MEM }}"]
+        lifecycle:
+          postStart:
+            exec:
+              command: ["/usr/bin/python3", "/script/restart_script.py"]
+        env:
+          - name: SPDKCSI_SECRET
+            valueFrom:
+              secretKeyRef:
+                name: spdkcsi-secret
+                key: secret.json
+          - name: CLUSTER_CONFIG
+            valueFrom:
+              configMapKeyRef:
+                name: spdkcsi-cm
+                key: config.json
+        securityContext:
+          privileged: true
+        volumeMounts:
+        - name: socket-dir
+          mountPath: /var/tmp
+        - name: host-sys
+          mountPath: /sys
+        - name: host-modules
+          mountPath: /lib/modules
+        - name: dev-vol
+          mountPath: /dev
+        - name: script-volume
+          mountPath: /script
+        resources:
+          limits:
+            hugepages-2Mi: {{ MEM_GEGA }}Gi
+            memory: 4096Mi
+          requests:
+            memory: 4096Mi
+
+      - name: spdk-proxy-container
+        image: {{ SIMPLYBLOCK_DOCKER_IMAGE }}
+        imagePullPolicy: "Always"
+        command: ["python", "simplyblock_core/services/spdk_http_proxy_server.py"]
+        volumeMounts:
+        - name: socket-dir
+          mountPath: /var/tmp
+        env:
+        - name: SERVER_IP
+          value: "{{ SERVER_IP }}"
+        - name: RPC_PORT
+          value: "{{ RPC_PORT }}"
+        - name: RPC_USERNAME
+          value: "{{ RPC_USERNAME }}"
+        - name: RPC_PASSWORD
+          value: "{{ RPC_PASSWORD }}"

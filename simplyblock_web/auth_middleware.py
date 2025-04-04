@@ -1,16 +1,18 @@
 #!/usr/bin/env python
 # encoding: utf-8
 
+import base64
 from functools import wraps
 from flask import request
 
-from simplyblock_core import kv_store
+from simplyblock_core.db_controller import DBController
 
 
 def token_required(f):
     @wraps(f)
     def decorated(*args, **kwargs):
-        if request.method == "GET" and request.path.startswith("/cluster"):
+
+        if request.method == "GET" and request.path.startswith("/swagger"):
             return f(*args, **kwargs)
 
         cluster_id = None
@@ -20,6 +22,14 @@ def token_required(f):
             if len(au.split()) == 2:
                 cluster_id = au.split()[0]
                 cluster_secret = au.split()[1]
+            if cluster_id and cluster_id == "Basic":
+                try:
+                    tkn = base64.b64decode(cluster_secret).decode('utf-8')
+                    if tkn:
+                        cluster_id = tkn.split(":")[0]
+                        cluster_secret = tkn.split(":")[1]
+                except Exception as e:
+                    print(e)
 
         if not cluster_id or not cluster_secret:
             return {
@@ -28,7 +38,7 @@ def token_required(f):
                 "error": "Unauthorized"
             }, 401
         try:
-            db_controller = kv_store.DBController()
+            db_controller = DBController()
             cluster = db_controller.get_cluster_by_id(cluster_id)
             if not cluster:
                 return {

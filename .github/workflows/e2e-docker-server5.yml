@@ -1,0 +1,373 @@
+name: E2E Test docker on 192.168.10.66
+
+on:
+  push:
+    branches:
+      - pre-release
+      - sbcli
+
+  workflow_dispatch:
+    inputs:
+      simplyBlockDeploy_branch:
+        description: 'Branch for simplyBlockDeploy'
+        required: true
+        default: 'vmware'
+      spdk_csi_branch:
+        description: 'Branch for spdk-csi'
+        required: true
+        default: 'master'
+      sbcli_cmd:
+        description: 'Command for sbcli execution'
+        required: true
+        default: 'sbcli-dev'
+      testname:
+        description: 'Name of test to run. Empty to run all'
+        required: false
+        default: ''
+      ndcs:
+        description: 'Value for NDCS'
+        required: false
+        default: 1
+      npcs:
+        description: 'Value for NPCS'
+        required: false
+        default: 1
+      bs:
+        description: 'Value for Block size'
+        required: false
+        default: 4096
+      num_iterations:
+        description: 'Number of iterations to run the test'
+        required: false
+        default: 1
+      send_slack_notification:
+        description: 'Send Slack notification?'
+        required: false
+        default: false
+        type: boolean
+      run_ha_test:
+        description: 'Run HA tests or not'
+        required: false
+        default: true
+        type: boolean
+
+jobs:
+  e2e:
+    runs-on: self-hosted
+    concurrency:
+      group: ${{ github.workflow }}
+      cancel-in-progress: false
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set send_slack_notification for scheduled and push events
+        if: github.event_name == 'schedule' || github.event_name == 'push'
+        run: echo "send_slack_notification=true" >> $GITHUB_ENV
+
+      - name: Set send_slack_notification for manual workflow_dispatch
+        if: github.event_name == 'workflow_dispatch'
+        run: echo "send_slack_notification=${{ github.event.inputs.send_slack_notification }}" >> $GITHUB_ENV
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+      - run: go version
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+      - uses: actions/checkout@master
+        name: Checkout code simplyBlockDeploy
+        with:
+          repository: simplyblock-io/simplyBlockDeploy
+          ref: refs/heads/${{ github.event.inputs.simplyBlockDeploy_branch || 'main'}}
+          path: 'simplyBlockDeploy'
+          token: ${{ secrets.GH_ACCESS_KEY_ID_RAUNAK }}
+
+#      - name: Select or Create Workspace
+#        run: |
+#          cd $GITHUB_WORKSPACE/simplyBlockDeploy
+#          terraform workspace select -or-create ghiaction-sbclie2e
+#
+
+
+      - name: Set parameters based on branch and input
+        run: |
+          if [[ "${GITHUB_REF##*/}" == *"pre-release"* ]]; then
+            echo "Branch is pre-release. Setting SBCLI_CMD to sbcli-pre."
+            echo "SBCLI_CMD=sbcli-pre" >> $GITHUB_ENV
+          elif [[ "${GITHUB_REF##*/}" == "sbcli" ]]; then
+            echo "Branch is sbcli. Setting SBCLI_CMD to sbcli."
+            echo "SBCLI_CMD=sbcli" >> $GITHUB_ENV
+          else
+            echo "Setting SBCLI_CMD to input or default to sbcli-dev."
+            echo "SBCLI_CMD=${{ github.event.inputs.sbcli_cmd || 'sbcli-dev' }}" >> $GITHUB_ENV
+          fi
+          echo "NDCS=${{ github.event.inputs.ndcs || 2 }}" >> $GITHUB_ENV
+          echo "NPCS=${{ github.event.inputs.npcs || 1 }}" >> $GITHUB_ENV
+          echo "BS=${{ github.event.inputs.bs || 4096 }}" >> $GITHUB_ENV
+          echo "CHUNK_BS=4096" >> $GITHUB_ENV
+        shell: bash
+
+
+
+      - name: Bootstrap Cluster
+        run: |
+          cd $GITHUB_WORKSPACE/simplyBlockDeploy
+          ./bootstrap-cluster.sh --sbcli-cmd "$SBCLI_CMD" \
+            --max-lvol 20 --max-snap 20 --max-prov 600G --number-of-devices 3 \
+            --distr-ndcs $NDCS \
+            --distr-npcs $NPCS \
+            --distr-bs $BS \
+            --distr-chunk-bs $CHUNK_BS \
+            --ha-type ha \
+            --partitions 0 \
+            --enable-node-affinity true
+          
+          echo "::set-output name=bastion_public_ip::$BASTION_IP"
+          echo "::set-output name=key_name::$KEY_NAME"
+          echo "::set-output name=mnodes::$mnodes"
+          echo "::set-output name=storage_private_ips::$storage_private_ips"
+
+        id: bootstrap_cluster
+        env:
+          SBCLI_CMD: ${{ env.SBCLI_CMD }}
+          NDCS: ${{ env.NDCS }}
+          NPCS: ${{ env.NPCS }}
+          BS: ${{ env.BS }}
+          CHUNK_BS: ${{ env.CHUNK_BS }}
+          KEY_NAME: "simplyblock-us-east-2.pem"
+          SECRET_VALUE: ${{ secrets.simplyblock_us_east_2_pem }}
+          BASTION_IP: "192.168.10.66"
+          GRAFANA_ENDPOINT: "http://192.168.10.66/grafana"
+          MNODES: "192.168.10.66"
+          STORAGE_PRIVATE_IPS: "192.168.10.67 192.168.10.68 192.168.10.69"
+          SEC_STORAGE_PRIVATE_IPS: "192.168.10.70"
+          API_INVOKE_URL: "http://192.168.10.66/"
+          NR_HUGEPAGES: "2048"
+
+
+      - name: Record Test Start Time
+        run: echo "TEST_START_TIME=$(date +%s)" >> $GITHUB_ENV
+
+      - name: Setup Tests & Run Tests
+        timeout-minutes: 120
+        run: |
+          cd $GITHUB_WORKSPACE/e2e
+          pip install virtualenv
+          python3 -m venv myenv
+          source myenv/bin/activate
+          python3 -m pip install -r requirements.txt
+          echo "Running tests in namespace default"
+          export CLUSTER_ID=${{ steps.bootstrap_cluster.outputs.cluster_id }}
+          export CLUSTER_SECRET=${{ steps.bootstrap_cluster.outputs.cluster_secret }}
+          export CLUSTER_IP=${{ steps.bootstrap_cluster.outputs.cluster_ip }}
+          export API_BASE_URL=${{ steps.bootstrap_cluster.outputs.cluster_ip }}
+          export BASTION_SERVER=${{ steps.bootstrap_cluster.outputs.bastion_public_ip }}
+          export KEY_NAME=${{ steps.bootstrap_cluster.outputs.key_name }} 
+          export SBCLI_CMD=${SBCLI_CMD}
+          export SSH_USER=root
+          TESTNAME=""
+          if [ -n "${{ github.event.inputs.testname }}" ]; then
+            TESTNAME="--testname ${{ github.event.inputs.testname }}"
+          fi
+          NUM_ITERATIONS=${{ github.event.inputs.num_iterations || 1 }}
+          echo "Running tests for $NUM_ITERATIONS iterations"
+
+          for i in $(seq 1 $NUM_ITERATIONS); do
+            echo "Iteration $i"
+            python3 e2e.py $TESTNAME \
+                    --ndcs $NDCS --npcs $NPCS --bs $BS --chunk_bs $CHUNK_BS --run_ha ${{ github.event.inputs.run_ha_test }}
+            
+            if [[ $? -ne 0 ]]; then
+              echo "Test failed in iteration $i. Exiting..."
+              exit 1
+            fi
+          done
+        env:
+          SBCLI_CMD: ${{ env.SBCLI_CMD }}
+          NDCS: ${{ env.NDCS }}
+          NPCS: ${{ env.NPCS }}
+          BS: ${{ env.BS }}
+          CHUNK_BS: ${{ env.CHUNK_BS }}
+
+      - name: Record Test End Time
+        if: always()
+        run: echo "TEST_END_TIME=$(date +%s)" >> $GITHUB_ENV
+
+      - name: Calculate Total Time Taken
+        if: always()
+        run: |
+          TEST_TIME=$(($TEST_END_TIME - $TEST_START_TIME))
+          TEST_TIME_HOURS=$(($TEST_TIME / 3600))
+          TEST_TIME_MINS=$((($TEST_TIME % 3600) / 60))
+          TEST_TIME_SECS=$(($TEST_TIME % 60))
+          echo "Test runtime: ${TEST_TIME_HOURS}h ${TEST_TIME_MINS}m ${TEST_TIME_SECS}s"
+          echo "TEST_TIME_HOURS=$TEST_TIME_HOURS" >> $GITHUB_ENV
+          echo "TEST_TIME_MINS=$TEST_TIME_MINS" >> $GITHUB_ENV
+          echo "TEST_TIME_SECS=$TEST_TIME_SECS" >> $GITHUB_ENV
+
+      - name: Upload automation and docker logs to miniio
+        run: |
+          cd $GITHUB_WORKSPACE/e2e/
+          python3 logs/upload_logs_to_miniio.py
+        if: always()
+        env:
+          GITHUB_RUN_ID: ${{ github.run_id }}
+          MINIO_ACCESS_KEY: "KxtpwblgG3AFDYJkyg8i"
+          MINIO_SECRET_KEY: "Yae4q5wJU9ZBzJhdsUGzu9wWqON8o0ERU7nGbJER"
+          BASTION_IP: "192.168.10.66"
+          MNODES: "192.168.10.66"
+          STORAGE_PRIVATE_IPS: "192.168.10.67 192.168.10.68 192.168.10.69"
+          SEC_STORAGE_PRIVATE_IPS: "192.168.10.70"
+          USER: "root"
+      
+      - name: Cleanup logs
+        run: |
+          cd $GITHUB_WORKSPACE/e2e/
+          python3 logs/cleanup.py
+        if: always()
+        env:
+          BASTION_IP: "192.168.10.66"
+          MNODES: "192.168.10.66"
+          STORAGE_PRIVATE_IPS: "192.168.10.67 192.168.10.68 192.168.10.69"
+          SEC_STORAGE_PRIVATE_IPS: "192.168.10.70"
+          USER: "root"
+
+      - name: Parse test results
+        if: always() && (github.event_name == 'schedule' || env.send_slack_notification == 'true')
+        id: parse_results
+        run: |
+          cd $GITHUB_WORKSPACE/e2e/logs
+          echo "Looking for the latest non-empty log file..."
+          # Find the latest non-empty log file
+          COUNTER=0
+          MAX_ATTEMPTS=10
+          while [ $COUNTER -lt $MAX_ATTEMPTS ]; do
+            LATEST_LOG=$(ls -t *.log | head -n 1)
+            if [ -s "$LATEST_LOG" ]; then
+              echo "Found non-empty log file: $LATEST_LOG"
+              break
+            fi
+            echo "Attempt $((COUNTER + 1)): No non-empty log file found. Retrying..."
+            COUNTER=$((COUNTER + 1))
+            sleep 1  # Add a small delay to avoid rapid looping
+          done
+          if [ ! -s "$LATEST_LOG" ]; then
+            echo "No non-empty log file found after $MAX_ATTEMPTS attempts"
+            exit 1
+          fi
+          echo "Parsing the identified log file: $LATEST_LOG"
+          # Parse the identified log file
+          echo "Total tests"
+          TOTAL_TESTS=$(grep -i "Number of Total Cases" "$LATEST_LOG" | awk '{print $NF}')
+          echo "number Passed tests"
+          PASSED_TESTS=$(grep -i "Number of Passed Cases" "$LATEST_LOG" | awk '{print $NF}')
+          echo "number Failed tests"
+          FAILED_TESTS=$(grep -i "Number of Failed Cases" "$LATEST_LOG" | awk '{print $NF}')
+          echo "number Skipped tests"
+          SKIPPED_TESTS=$(grep -i "Number of Skipped Cases" "$LATEST_LOG" | awk '{print $NF}')
+          echo "List Passed tests"
+          PASSED_CASES=$(grep "PASSED CASE" "$LATEST_LOG" | awk -F 'INFO - | FAILED CASE' '{print $2}')
+          echo "List Failed tests"
+          FAILED_CASES=$(grep "FAILED CASE" "$LATEST_LOG" | awk -F 'INFO - | SKIPPED CASE' '{print $2}')
+          echo "List Skipped tests"
+          SKIPPED_CASES=$(grep "SKIPPED CASE" "$LATEST_LOG" | awk -F 'INFO - | SKIPPED CASE' '{print $2}')
+          # Format passed and failed cases as bullet points
+          echo "Adding PASSED cases with bullets: $PASSED_CASES"
+          echo "Adding FAILED cases with bullets: $FAILED_CASES"
+          echo "Adding SKIPPED cases with bullets: $SKIPPED_CASES"
+          PASSED_CASES_BULLETS=$(echo "$PASSED_CASES" | awk '{printf "    • %s\n", $0}')
+          FAILED_CASES_BULLETS=$(echo "$FAILED_CASES" | awk '{printf "    • %s\n", $0}')
+          SKIPPED_CASES_BULLETS=$(echo "$SKIPPED_CASES" | awk '{printf "    • %s\n", $0}')
+          echo "PASSED cases with bullets: $PASSED_CASES_BULLETS"
+          echo "FAILED cases with bullets: $FAILED_CASES_BULLETS"
+          echo "SKIPPED cases with bullets: $SKIPPED_CASES_BULLETS"
+          echo "TOTAL_TESTS=${TOTAL_TESTS}"
+          echo "PASSED_TESTS=${PASSED_TESTS}"
+          echo "FAILED_TESTS=${FAILED_TESTS}"
+          echo "SKIPPED_TESTS=${SKIPPED_TESTS}"
+          echo "PASSED_CASES=${PASSED_CASES}"
+          echo "FAILED_CASES=${FAILED_CASES}"
+          echo "SKIPPED_CASES=${SKIPPED_CASES}"
+          echo "PASSED_TESTS=${PASSED_TESTS}" >> $GITHUB_ENV
+          echo "FAILED_TESTS=${FAILED_TESTS}" >> $GITHUB_ENV
+          echo "SKIPPED_TESTS=${SKIPPED_TESTS}" >> $GITHUB_ENV
+          echo "TOTAL_TESTS=${TOTAL_TESTS}" >> $GITHUB_ENV
+          echo "PASSED_CASES<<EOF" >> $GITHUB_ENV
+          echo "${PASSED_CASES}" >> $GITHUB_ENV
+          echo "EOF" >> $GITHUB_ENV
+          echo "FAILED_CASES<<EOF" >> $GITHUB_ENV
+          echo "${FAILED_CASES}" >> $GITHUB_ENV
+          echo "EOF" >> $GITHUB_ENV
+          echo "SKIPPED_CASES<<EOF" >> $GITHUB_ENV
+          echo "${SKIPPED_CASES}" >> $GITHUB_ENV
+          echo "EOF" >> $GITHUB_ENV
+          echo "PASSED_CASES_BULLETS<<EOF" >> $GITHUB_ENV
+          echo "${PASSED_CASES_BULLETS}" >> $GITHUB_ENV
+          echo "EOF" >> $GITHUB_ENV
+          echo "FAILED_CASES_BULLETS<<EOF" >> $GITHUB_ENV
+          echo "${FAILED_CASES_BULLETS}" >> $GITHUB_ENV
+          echo "EOF" >> $GITHUB_ENV
+          echo "SKIPPED_CASES_BULLETS<<EOF" >> $GITHUB_ENV
+          echo "${SKIPPED_CASES_BULLETS}" >> $GITHUB_ENV
+          echo "EOF" >> $GITHUB_ENV
+
+      - name: Send Slack Notification
+        if: always() && (github.event_name == 'schedule' || env.send_slack_notification == 'true')
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          GITHUB_SERVER_URL: ${{ github.server_url }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          S3_BUCKET_NAME: "simplyblock-e2e-test-logs"
+          RUN_ID: ${{ github.run_id }}
+          PASSED_TESTS: ${{ env.PASSED_TESTS }}
+          FAILED_TESTS: ${{ env.FAILED_TESTS }}
+          TOTAL_TESTS: ${{ env.TOTAL_TESTS }}
+          PASSED_CASES: ${{ env.PASSED_CASES }}
+          FAILED_CASES: ${{ env.FAILED_CASES }}
+          SKIPPED_CASES: ${{ env.SKIPPED_CASES }}
+          PASSED_CASES_BULLETS: ${{ env.PASSED_CASES_BULLETS }}
+          FAILED_CASES_BULLETS: ${{ env.FAILED_CASES_BULLETS }}
+          SKIPPED_CASES_BULLETS: ${{ env.SKIPPED_CASES_BULLETS }}
+          BRANCH_NAME: ${{ github.ref_name }}
+          TEST_TIME_HOURS: ${{ env.TEST_TIME_HOURS }}
+          TEST_TIME_MINS: ${{ env.TEST_TIME_MINS }}
+          TEST_TIME_SECS: ${{ env.TEST_TIME_SECS }}
+          NDCS: ${{ env.NDCS }}
+          NPCS: ${{ env.NPCS }}
+          CHUNK_BS: ${{ env.CHUNK_BS }}
+          BS: ${{ env.BS }}
+        run: |
+          GITHUB_RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}"
+          AWS_LOGS_URL="https://s3.console.aws.amazon.com/s3/buckets/${S3_BUCKET_NAME}?prefix=${RUN_ID}/&region=us-east-2"
+          if [[ ${{ job.status }} == 'success' ]]; then
+            OVERALL_STATUS=":white_check_mark: Overall Status: SUCCESS"
+          else
+            OVERALL_STATUS=":x: Overall Status: FAILURE <!channel>"
+          fi
+
+          TIME_TAKEN="${TEST_TIME_HOURS}h ${TEST_TIME_MINS}m ${TEST_TIME_SECS}s"
+
+          MESSAGE="Python E2E tests run triggered on branch *${BRANCH_NAME}*. \nTotal Time Taken to run the tests: ${TIME_TAKEN}. \n\n${OVERALL_STATUS}\nGitHub Run: ${GITHUB_RUN_URL}\nAWS Logs: ${AWS_LOGS_URL}\n\n*Configuration*: *NDCS: ${NDCS}, NPCS: ${NPCS}, Block Size: ${BS}, Chunk Block Size: ${CHUNK_BS}*\n\nTotal Tests: *${TOTAL_TESTS}*, Passed Tests: *${PASSED_TESTS}*, Failed Tests: *${FAILED_TESTS}*\n\n-- Test Cases Passed :white_check_mark:\n${PASSED_CASES_BULLETS}\n\n-- Test Cases Failed :x:\n${FAILED_CASES_BULLETS}\n\n-- Test Cases Skipped :x:\n${SKIPPED_CASES_BULLETS}"
+
+          curl -X POST -H 'Content-type: application/json' --data "{\"text\":\"${MESSAGE}\"}" $SLACK_WEBHOOK_URL
+
+#      - name: Destroy Cluster
+#        if: always()
+#        run: |
+#          ${SBCLI_CMD} sn deploy-cleaner
+#          pip uninstall ${SBCLI_CMD} -y
+#          rm -rf /etc/foundationdb/* || true
+
+
+      - name: 'Cleanup build folder'
+        run: |
+          ls -la ./
+          rm -rf ./* || true
+          rm -rf ./.??* || true
+          ls -la ./

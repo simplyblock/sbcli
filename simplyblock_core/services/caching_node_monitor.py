@@ -1,32 +1,19 @@
 # coding=utf-8
-import logging
 import os
 
 import time
-import sys
 from datetime import datetime
 
 
-from simplyblock_core import constants, kv_store
+from simplyblock_core import constants, db_controller, utils
 from simplyblock_core.rpc_client import RPCClient
 from simplyblock_core.models.caching_node import CachingNode
 
-# Import the GELF logger
-from graypy import GELFUDPHandler
 
-# configure logging
-logger_handler = logging.StreamHandler(stream=sys.stdout)
-logger_handler.setFormatter(logging.Formatter('%(asctime)s: %(levelname)s: %(message)s'))
-gelf_handler = GELFUDPHandler('0.0.0.0', constants.GELF_PORT)
-logger = logging.getLogger()
-logger.addHandler(gelf_handler)
-logger.addHandler(logger_handler)
-logger.setLevel(logging.DEBUG)
-
+logger = utils.get_logger(__name__)
 
 # get DB controller
-db_store = kv_store.KVStore()
-db_controller = kv_store.DBController(kv_store=db_store)
+db_controller = db_controller.DBController()
 
 
 def set_node_online(node):
@@ -35,7 +22,7 @@ def set_node_online(node):
         old_status = snode.status
         snode.status = CachingNode.STATUS_ONLINE
         snode.updated_at = str(datetime.now())
-        snode.write_to_db(db_store)
+        snode.write_to_db()
         # mgmt_events.status_change(snode, snode.status, old_status, caused_by="monitor")
 
 
@@ -45,7 +32,7 @@ def set_node_offline(node):
         old_status = snode.status
         snode.status = CachingNode.STATUS_UNREACHABLE
         snode.updated_at = str(datetime.now())
-        snode.write_to_db(db_store)
+        snode.write_to_db()
         # mgmt_events.status_change(snode, snode.status, old_status, caused_by="monitor")
 
 

@@ -11,6 +11,8 @@ export CLUSTER_SECRET=$5
 export CLUSTER_ID=$6
 export LOG_DELETION_INTERVAL=$7
 export RETENTION_PERIOD=$8
+export LOG_LEVEL=$9
+export GRAFANA_ENDPOINT=${10}
 export DIR="$(dirname "$(realpath "$0")")"
 
 if [ -s "/etc/foundationdb/fdb.cluster" ]
@@ -19,14 +21,16 @@ then
    export FDB_CLUSTER_FILE_CONTENTS=$FDB_CLUSTER_FILE_CONTENTS
 fi
 
+if [[ "$LOG_DELETION_INTERVAL" == *d ]]; then
+   export MAX_NUMBER_OF_INDICES=${LOG_DELETION_INTERVAL%d}
+elif [[ "$LOG_DELETION_INTERVAL" == *h || "$LOG_DELETION_INTERVAL" == *m ]]; then
+   export MAX_NUMBER_OF_INDICES=1
+else
+    echo "Invalid LOG_DELETION_INTERVAL format. Please use a value ending in 'd', 'h', or 'm'."
+    exit 1
+fi
+
 docker network create monitoring-net -d overlay --attachable
-
-INSTANCE_ID=$(curl -s http://169.254.169.254/latest/meta-data/instance-id)
-
-#if [ -n "$INSTANCE_ID" ]
-#then
-#  export USE_EFS="rexray/efs"
-#fi
 
 docker stack deploy --compose-file="$DIR"/docker-compose-swarm-monitoring.yml monitoring
 
@@ -37,3 +41,4 @@ docker stack deploy --compose-file="$DIR"/docker-compose-swarm.yml app
 
 # wait for the services to become online
 bash "$DIR"/stack_deploy_wait.sh app
+exit $?

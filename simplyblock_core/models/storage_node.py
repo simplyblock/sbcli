@@ -1,114 +1,89 @@
 # coding=utf-8
 
-from datetime import datetime
 from typing import List
 
-from simplyblock_core.models.base_model import BaseModel
+from simplyblock_core.models.base_model import BaseNodeObject
 from simplyblock_core.models.iface import IFace
 from simplyblock_core.models.nvme_device import NVMeDevice, JMDevice
 
 
-class StorageNode(BaseModel):
+class StorageNode(BaseNodeObject):
 
-    STATUS_ONLINE = 'online'
-    STATUS_OFFLINE = 'offline'
-    STATUS_SUSPENDED = 'suspended'
-    STATUS_IN_SHUTDOWN = 'in_shutdown'
-    STATUS_REMOVED = 'removed'
-    STATUS_RESTARTING = 'in_restart'
-
-    STATUS_IN_CREATION = 'in_restart'  # 'in_creation'
-    STATUS_UNREACHABLE = 'offline'  # 'unreachable'
-
-    STATUS_CODE_MAP = {
-        STATUS_ONLINE: 0,
-        STATUS_OFFLINE: 1,
-        STATUS_SUSPENDED: 2,
-        STATUS_REMOVED: 3,
-
-        STATUS_IN_CREATION: 10,
-        STATUS_IN_SHUTDOWN: 11,
-        STATUS_RESTARTING: 12,
-
-        STATUS_UNREACHABLE: 20,
-    }
-
-    attributes = {
-        "uuid": {"type": str, 'default': ""},
-        "baseboard_sn": {"type": str, 'default': ""},
-        "system_uuid": {"type": str, 'default': ""},
-        "hostname": {"type": str, 'default': ""},
-        "host_nqn": {"type": str, 'default': ""},
-        "subsystem": {"type": str, 'default': ""},
-        "nvme_devices": {"type": List[NVMeDevice], 'default': []},
-        "sequential_number": {"type": int, 'default': 0},
-        "partitions_count": {"type": int, 'default': 0},
-        "ib_devices": {"type": List[IFace], 'default': []},
-        "status": {"type": str, 'default': "in_creation"},
-        "updated_at": {"type": str, 'default': str(datetime.now())},
-        "create_dt": {"type": str, 'default': str(datetime.now())},
-        "remove_dt": {"type": str, 'default': str(datetime.now())},
-        "mgmt_ip": {"type": str, 'default': ""},
-        "rpc_port": {"type": int, 'default': -1},
-        "rpc_username": {"type": str, 'default': ""},
-        "rpc_password": {"type": str, 'default': ""},
-        "data_nics": {"type": List[IFace], 'default': []},
-        "lvols": {"type": List[str], 'default': []},
-        "node_lvs": {"type": str, 'default': "lvs"},
-        "services": {"type": List[str], 'default': []},
-        "cluster_id": {"type": str, 'default': ""},
-        "api_endpoint": {"type": str, 'default': ""},
-        "remote_devices": {"type": List[NVMeDevice], 'default': []},
-        "host_secret": {"type": str, "default": ""},
-        "ctrl_secret": {"type": str, "default": ""},
-        "max_lvol": {"type": int, "default": 0},
-        "max_snap": {"type": int, "default": 0},
-        "max_prov": {"type": int, "default": 0},
-        "number_of_devices": {"type": int, "default": 0},
-        "cpu": {"type": int, "default": 0},
-        "cpu_hz": {"type": int, "default": 0},
-        "memory": {"type": int, "default": 0},
-        "hugepages": {"type": int, "default": 0},
-        "health_check": {"type": bool, "default": True},
-
-        # spdk params
-        "spdk_cpu_mask": {"type": str, "default": ""},
-        "app_thread_mask": {"type": str, "default": ""},
-        "pollers_mask": {"type": str, "default": ""},
-        "os_cores": {"type": str, "default": []},
-        "nvme_pollers_cores": {"type": str, "default": ""},
-        "dev_cpu_mask": {"type": str, "default": ""},
-        "spdk_mem": {"type": int, "default": 0},
-        "spdk_image": {"type": str, "default": ""},
-        "spdk_debug": {"type": bool, "default": False},
-
-
-        "ec2_metadata": {"type": dict, "default": {}},
-        "ec2_instance_id": {"type": str, "default": ""},
-        "ec2_public_ip": {"type": str, "default": ""},
-
-        # IO buffer options
-        "iobuf_small_pool_count": {"type": int, "default": 0},
-        "iobuf_large_pool_count": {"type": int, "default": 0},
-        "iobuf_small_bufsize": {"type": int, "default": 0},
-        "iobuf_large_bufsize": {"type": int, "default": 0},
-
-        "num_partitions_per_dev": {"type": int, "default": 1},
-        "jm_percent": {"type": int, "default": 3},
-        "jm_device": {"type": JMDevice, "default": None},
-
-    }
-
-    def __init__(self, data=None):
-        super(StorageNode, self).__init__()
-        self.set_attrs(self.attributes, data)
-        self.object_type = "object"
-
-    def get_id(self):
-        return self.uuid
-
-    def get_status_code(self):
-        if self.status in self.STATUS_CODE_MAP:
-            return self.STATUS_CODE_MAP[self.status]
-        else:
-            return -1
+    alceml_cpu_cores: List[int] = []
+    alceml_cpu_index: int = 0
+    alceml_worker_cpu_cores: List[int] = []
+    alceml_worker_cpu_index: int = 0
+    api_endpoint: str = ""
+    app_thread_mask: str = ""
+    baseboard_sn: str = ""
+    cloud_instance_id: str = ""
+    cloud_instance_public_ip: str = ""
+    cloud_instance_type: str = ""
+    cloud_name: str = ""
+    cluster_id: str = ""
+    cpu: int = 0
+    cpu_hz: int = 0
+    ctrl_secret: str = ""
+    data_nics: List[IFace] = []
+    distrib_cpu_cores: List[int] = []
+    distrib_cpu_index: int = 0
+    distrib_cpu_mask: str = ""
+    enable_ha_jm: bool = False
+    ha_jm_count: int = 3
+    enable_test_device: bool = False
+    health_check: bool = True
+    host_nqn: str = ""
+    host_secret: str = ""
+    hostname: str = ""
+    hugepages: int = 0
+    ib_devices: List[IFace] = []
+    id_device_by_nqn: bool = False
+    iobuf_large_bufsize: int = 0
+    iobuf_large_pool_count: int = 0
+    iobuf_small_bufsize: int = 0
+    iobuf_small_pool_count: int = 0
+    is_secondary_node: bool = False
+    jc_singleton_mask: str = ""
+    jm_cpu_mask: str = ""
+    jm_device: JMDevice = None
+    jm_percent: int = 3
+    jm_vuid: int = 0
+    lvols: int = 0
+    lvstore: str = ""
+    lvstore_stack: List[dict] = []
+    lvstore_stack_secondary_1: List[dict] = []
+    lvstore_stack_secondary_2: List[dict] = []
+    lvol_subsys_port: int = 9090
+    max_lvol: int = 0
+    max_prov: int = 0
+    max_snap: int = 0
+    memory: int = 0
+    mgmt_ip: str = ""
+    namespace: str = ""
+    node_lvs: str = "lvs"
+    num_partitions_per_dev: int = 1
+    number_of_devices: int = 0
+    number_of_distribs: int = 4
+    nvme_devices: List[NVMeDevice] = []
+    online_since: str = ""
+    partitions_count: int = 0
+    poller_cpu_cores: List[int] = []
+    pollers_mask: str = ""
+    primary_ip: str = ""
+    raid: str = ""
+    remote_devices: List[NVMeDevice] = []
+    remote_jm_devices: List[JMDevice] = []
+    rpc_password: str = ""
+    rpc_port: int = -1
+    rpc_username: str = ""
+    secondary_node_id: str = ""
+    sequential_number: int = 0
+    services: List[str] = []
+    spdk_cpu_mask: str = ""
+    spdk_debug: bool = False
+    spdk_image: str = ""
+    spdk_mem: int = 0
+    partition_size: int = 0
+    subsystem: str = ""
+    system_uuid: str = ""
+    lvstore_status: str = ""

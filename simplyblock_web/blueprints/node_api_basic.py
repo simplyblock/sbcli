@@ -9,7 +9,7 @@ from flask import request
 from simplyblock_web import utils, node_utils
 
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG)
+
 bp = Blueprint("node_api_basic", __name__, url_prefix="/")
 
 cpu_info = cpuinfo.get_cpu_info()

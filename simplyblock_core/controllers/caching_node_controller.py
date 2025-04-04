@@ -11,7 +11,7 @@ import docker
 
 from simplyblock_core import utils, scripts, constants
 from simplyblock_core.cnode_client import CNodeClient
-from simplyblock_core.kv_store import DBController
+from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.caching_node import CachingNode, CachedLVol
 from simplyblock_core.models.iface import IFace
 from simplyblock_core.models.nvme_device import NVMeDevice
@@ -23,58 +23,56 @@ logger = lg.getLogger()
 db_controller = DBController()
 
 
-def addNvmeDevices(cluster, rpc_client, devs, snode):
-    sequential_number = 0
+def addNvmeDevices(rpc_client, devs, snode):
     devices = []
     ret = rpc_client.bdev_nvme_controller_list()
     ctr_map = {}
     try:
-        ctr_map = {i["ctrlrs"][0]['trid']['traddr']: i["name"] for i in ret}
+        if ret:
+            ctr_map = {i["ctrlrs"][0]['trid']['traddr']: i["name"] for i in ret}
     except:
         pass
 
     for index, pcie in enumerate(devs):
-
         if pcie in ctr_map:
-            nvme_bdev = ctr_map[pcie] + "n1"
+            nvme_controller = ctr_map[pcie]
+            nvme_bdevs = []
+            for bdev in rpc_client.get_bdevs():
+                if bdev['name'].startswith(nvme_controller):
+                    nvme_bdevs.append(bdev['name'])
         else:
-            name = "nvme_%s" % pcie.split(":")[2].split(".")[0]
-            ret, err = rpc_client.bdev_nvme_controller_attach(name, pcie)
+            pci_st = str(pcie).replace("0", "").replace(":", "").replace(".", "")
+            nvme_controller = "nvme_%s" % pci_st
+            nvme_bdevs, err = rpc_client.bdev_nvme_controller_attach(nvme_controller, pcie)
             time.sleep(2)
-            nvme_bdev = f"{name}n1"
 
-        ret = rpc_client.get_bdevs(nvme_bdev)
-        if ret:
+        for nvme_bdev in nvme_bdevs:
+            rpc_client.bdev_examine(nvme_bdev)
+            time.sleep(3)
+            ret = rpc_client.get_bdevs(nvme_bdev)
             nvme_dict = ret[0]
             nvme_driver_data = nvme_dict['driver_specific']['nvme'][0]
             model_number = nvme_driver_data['ctrlr_data']['model_number']
-            # if model_number not in cluster.model_ids:
-            #     logger.warning("Device model ID is not recognized: %s, "
-            #                    "skipping device: %s", model_number)
-            #     continue
-            size = nvme_dict['block_size'] * nvme_dict['num_blocks']
-            device_partitions_count = int(size / (cluster.blk_size * cluster.page_size_in_blocks))
+            total_size = nvme_dict['block_size'] * nvme_dict['num_blocks']
+
             devices.append(
                 NVMeDevice({
                     'uuid': str(uuid.uuid4()),
                     'device_name': nvme_dict['name'],
-                    'sequential_number': sequential_number,
-                    'partitions_count': device_partitions_count,
-                    'capacity': size,
-                    'size': size,
+                    'size': total_size,
                     'pcie_address': nvme_driver_data['pci_address'],
                     'model_id': model_number,
                     'serial_number': nvme_driver_data['ctrlr_data']['serial_number'],
                     'nvme_bdev': nvme_bdev,
+                    'nvme_controller': nvme_controller,
                     'node_id': snode.get_id(),
                     'cluster_id': snode.cluster_id,
-                    'status': 'online'
+                    'status': NVMeDevice.STATUS_ONLINE
                 }))
-            sequential_number += device_partitions_count
     return devices
 
 
-def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spdk_mem, spdk_image=None, namespace=None):
+def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spdk_mem, spdk_image=None, namespace=None, multipathing=True):
     db_controller = DBController()
     kv_store = db_controller.kv_store
 
@@ -84,9 +82,9 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spd
         return False
 
     logger.info(f"Add Caching node: {node_ip}")
-    snode_api = CNodeClient(node_ip)
+    cnode_api = CNodeClient(node_ip)
 
-    node_info, _ = snode_api.info()
+    node_info, _ = cnode_api.info()
     system_id = node_info['system_id']
     hostname = node_info['hostname']
     logger.info(f"Node found: {node_info['hostname']}")
@@ -95,8 +93,8 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spd
         logger.error("Node already exists, try remove it first.")
         return False
 
-    node_info, _ = snode_api.info()
-    results, err = snode_api.join_db(db_connection=cluster.db_connection)
+    node_info, _ = cnode_api.info()
+    results, err = cnode_api.join_db(db_connection=cluster.db_connection)
 
     data_nics = []
     names = data_nics_list or [iface_name]
@@ -134,25 +132,28 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spd
     snode.cpu = node_info['cpu_count']
     snode.cpu_hz = node_info['cpu_hz']
     snode.memory = node_info['memory']
-    # snode.hugepages = node_info['hugepages']
+    snode.multipathing = multipathing
 
     # check for memory
+    spdk_mem_min = utils.parse_size('1GiB')
     if "memory_details" in node_info and node_info['memory_details']:
         memory_details = node_info['memory_details']
         logger.info("Node Memory info")
-        logger.info(f"Total: {utils.humanbytes(memory_details['total'])}")
-        logger.info(f"Free: {utils.humanbytes(memory_details['free'])}")
-        # logger.info(f"Hugepages Total: {utils.humanbytes(memory_details['huge_total'])}")
-        # huge_free = memory_details['huge_free']
-        # logger.info(f"Hugepages Free: {utils.humanbytes(huge_free)}")
-        # if huge_free < 1 * 1024 * 1024:
-        #     logger.warning(f"Free hugepages are less than 1G: {utils.humanbytes(huge_free)}")
+        logger.info(f"RAM Total: {utils.humanbytes(memory_details['total'])}")
+        logger.info(f"RAM Free: {utils.humanbytes(memory_details['free'])}")
+        huge_total = memory_details['huge_total']
+        logger.info(f"HP Total: {utils.humanbytes(huge_total)}")
+        huge_free = memory_details['huge_free']
+        logger.info(f"HP Free: {utils.humanbytes(huge_free)}")
         if not spdk_mem:
-            spdk_mem = memory_details['free']
+            if huge_total > spdk_mem_min:
+                spdk_mem = huge_total
+            else:
+                logger.error(f"Free hugepages are less than {utils.humanbytes(spdk_mem_min)}: {utils.humanbytes(huge_total)}")
+                return False
 
-    logger.info(f"Trying to set hugepages for: {utils.humanbytes(spdk_mem)}")
-    logger.info("Deploying SPDK")
-    results, err = snode_api.spdk_process_start(
+    logger.info(f"Deploying SPDK with HP: {utils.humanbytes(spdk_mem)}")
+    results, err = cnode_api.spdk_process_start(
         spdk_cpu_mask, spdk_mem, spdk_image, snode.mgmt_ip,
         snode.rpc_port, snode.rpc_username, snode.rpc_password, namespace)
     if not results:
@@ -161,7 +162,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spd
 
     retries = 20
     while retries > 0:
-        resp, _ = snode_api.spdk_process_is_up()
+        resp, _ = cnode_api.spdk_process_is_up()
         if resp:
             logger.info(f"Pod is up")
             break
@@ -174,19 +175,26 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spd
         logger.error("Pod is not running, exiting")
         return False
 
+    time.sleep(3)
+
+    snode.namespace = namespace
+    snode.spdk_cpu_mask = spdk_cpu_mask
+    snode.spdk_mem = spdk_mem
+    snode.spdk_image = spdk_image
+
     # creating RPCClient instance
     rpc_client = RPCClient(
         snode.mgmt_ip, snode.rpc_port,
         snode.rpc_username, snode.rpc_password,
         timeout=60*5, retry=5)
 
-    # get new node info after starting spdk
-    node_info, _ = snode_api.info()
-    mem = node_info['memory_details']['huge_free']
-    logger.info(f"Free Hugepages detected: {utils.humanbytes(mem)}")
+    # # get new node info after starting spdk
+    node_info, _ = cnode_api.info()
+    # mem = node_info['memory_details']['huge_free']
+    # logger.info(f"Free Hugepages detected: {utils.humanbytes(mem)}")
 
     # adding devices
-    nvme_devs = addNvmeDevices(cluster, rpc_client, node_info['spdk_pcie_list'], snode)
+    nvme_devs = addNvmeDevices(rpc_client, node_info['spdk_pcie_list'], snode)
     if not nvme_devs:
         logger.error("No NVMe devices was found!")
         return False
@@ -195,16 +203,16 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spd
     snode.write_to_db(db_controller.kv_store)
     ssd_dev = nvme_devs[0]
 
-    if mem < 1024*1024:
-        logger.error("Hugepages must be larger than 1G")
+    if spdk_mem < spdk_mem_min:
+        logger.error(f"Hugepages must be larger than {utils.humanbytes(spdk_mem_min)}")
         return False
 
-    mem = int(mem*constants.CACHING_NODE_MEMORY_FACTOR)
+    mem = spdk_mem - spdk_mem_min
     snode.hugepages = mem
     logger.info(f"Hugepages to be used: {utils.humanbytes(mem)}")
 
     ssd_size = ssd_dev.size
-    supported_ssd_size = mem * 100 / 2
+    supported_ssd_size = mem * 100 / 2.25
     split_factor = math.ceil(ssd_size/supported_ssd_size)
 
     logger.info(f"Supported SSD size: {utils.humanbytes(supported_ssd_size)}")
@@ -212,14 +220,47 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spd
 
     cache_size = 0
     cache_bdev = None
+    # if supported_ssd_size < ssd_size:
+    #     logger.info(f"SSD size is bigger than the supported size, will use split bdev: {split_factor}")
+    #     ret = rpc_client.bdev_split(ssd_dev.nvme_bdev, split_factor)
+    #     cache_bdev = ret[0]
+    #     cache_size = int(ssd_dev.size/split_factor)
+    #     snode.cache_split_factor = split_factor
+    # else:
+    #     snode.cache_split_factor = 0
+    #     cache_bdev = ssd_dev.nvme_bdev
+    #     cache_size = ssd_dev.size
+
     if supported_ssd_size < ssd_size:
-        logger.info(f"SSD size is bigger than the supported size, will use split bdev: {split_factor}")
-        ret = rpc_client.bdev_split(ssd_dev.nvme_bdev, split_factor)
-        cache_bdev = ret[0]
-        cache_size = int(ssd_dev.size/split_factor)
-        snode.cache_split_factor = split_factor
+        logger.info(f"SSD size is bigger than the supported size, creating partition")
+
+        nbd_device = rpc_client.nbd_start_disk(ssd_dev.nvme_bdev)
+        time.sleep(3)
+        if not nbd_device:
+            logger.error(f"Failed to start nbd dev")
+            return False
+
+        jm_percent = int((supported_ssd_size/ssd_size) * 100)
+        result, error = cnode_api.make_gpt_partitions(nbd_device, jm_percent)
+        if error:
+            logger.error(f"Failed to make partitions")
+            logger.error(error)
+            return False
+        time.sleep(3)
+        rpc_client.nbd_stop_disk(nbd_device)
+        time.sleep(1)
+        rpc_client.bdev_nvme_detach_controller(ssd_dev.nvme_controller)
+        time.sleep(1)
+        rpc_client.bdev_nvme_controller_attach(ssd_dev.nvme_controller, ssd_dev.pcie_address)
+        time.sleep(1)
+        rpc_client.bdev_examine(ssd_dev.nvme_bdev)
+        time.sleep(1)
+
+        cache_bdev = f"{ssd_dev.nvme_bdev}p1"
+        cache_size = int(supported_ssd_size)
+
     else:
-        snode.cache_split_factor = 0
+
         cache_bdev = ssd_dev.nvme_bdev
         cache_size = ssd_dev.size
 
@@ -231,7 +272,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spd
     # create tmp ocf
     logger.info(f"Creating first ocf bdev...")
 
-    ret = rpc_client.bdev_malloc_create("malloc_tmp", 512, int((100*1024*1024)/512))
+    ret = rpc_client.bdev_malloc_create("malloc_tmp", 512, int(utils.parse_size('100MiB')/512))
     if not ret:
         logger.error("Failed ot create tmp malloc")
         return False
@@ -260,7 +301,32 @@ def recreate(node_id):
         return False
 
     logger.info(f"Recreating caching node: {node_id}, status: {snode.status}")
-    snode_api = CNodeClient(f"{snode.mgmt_ip}:5000")
+    cnode_api = CNodeClient(f"{snode.mgmt_ip}:5000")
+
+    if not cnode_api.spdk_process_is_up():
+        results, err = cnode_api.spdk_process_start(
+            snode.spdk_cpu_mask, snode.spdk_mem, snode.spdk_image, snode.mgmt_ip,
+            snode.rpc_port, snode.rpc_username, snode.rpc_password, snode.namespace)
+        if not results:
+            logger.error(f"Failed to start spdk: {err}")
+            return False
+
+        retries = 20
+        while retries > 0:
+            resp, _ = cnode_api.spdk_process_is_up()
+            if resp:
+                logger.info(f"Pod is up")
+                break
+            else:
+                logger.info("Pod is not running, waiting...")
+                time.sleep(3)
+                retries -= 1
+
+        if retries == 0:
+            logger.error("Pod is not running, exiting")
+            return False
+
+        time.sleep(5)
 
     # creating RPCClient instance
     rpc_client = RPCClient(
@@ -269,27 +335,27 @@ def recreate(node_id):
         timeout=60*5, retry=5)
 
     # get new node info after starting spdk
-    node_info, _ = snode_api.info()
+    node_info, _ = cnode_api.info()
     # adding devices
-    nvme_devs = addNvmeDevices(cluster, rpc_client, node_info['spdk_pcie_list'], snode)
+    nvme_devs = addNvmeDevices(rpc_client, node_info['spdk_pcie_list'], snode)
     if not nvme_devs:
         logger.error("No NVMe devices was found!")
         return False
 
-    snode.nvme_devices = nvme_devs
+    # snode.nvme_devices = nvme_devs
     # snode.write_to_db(db_controller.kv_store)
 
-    ssd_dev = nvme_devs[0]
+    # ssd_dev = nvme_devs[0]
 
-    if snode.cache_split_factor > 1:
-        ret = rpc_client.bdev_split(ssd_dev.nvme_bdev, snode.cache_split_factor)
+    # if snode.cache_split_factor > 1:
+    #     ret = rpc_client.bdev_split(ssd_dev.nvme_bdev, snode.cache_split_factor)
 
     logger.info(f"Cache size: {utils.humanbytes(snode.cache_size)}")
 
     # create tmp ocf
     logger.info(f"Creating first ocf bdev...")
 
-    ret = rpc_client.bdev_malloc_create("malloc_tmp", 512, int((100 * 1024 * 1024) / 512))
+    ret = rpc_client.bdev_malloc_create("malloc_tmp", 512, int(utils.parse_size('100MiB') / 512))
     if not ret:
         logger.error("Failed ot create tmp malloc")
         return False
@@ -300,7 +366,7 @@ def recreate(node_id):
 
     if snode.lvols:
         for lvol in snode.lvols:
-            ret = connect(snode.get_id(), lvol.lvol_id)
+            ret = connect(snode.get_id(), lvol.lvol_id, force=True)
             if ret:
                 logger.info(f"connecting lvol {lvol.lvol_id} ... ok")
             else:
@@ -314,7 +380,7 @@ def recreate(node_id):
     return True
 
 
-def connect(caching_node_id, lvol_id):
+def connect(caching_node_id, lvol_id, force=False):
     lvol = db_controller.get_lvol_by_id(lvol_id)
     if not lvol:
         logger.error(f"LVol not found: {lvol_id}")
@@ -346,7 +412,8 @@ def connect(caching_node_id, lvol_id):
     for clvol in cnode.lvols:
         if clvol.lvol_id == lvol_id:
             logger.info(f"Already connected, dev path: {clvol.device_path}")
-            return False
+            if not force:
+                return False
 
     if cnode.cluster_id != pool.cluster_id:
         logger.error("Caching node and LVol are in different clusters")
@@ -365,8 +432,8 @@ def connect(caching_node_id, lvol_id):
             ret = rpc_client.bdev_nvme_attach_controller_tcp_caching(rem_name, lvol.nqn, nic.ip4_address, "4420")
             logger.debug(ret)
             if not ret:
-                logger.error("Failed to connect to LVol")
-                return False
+                logger.warning("Failed to connect to LVol")
+                # return False
 
     elif lvol.ha_type == "ha":
         for nodes_id in lvol.nodes:
@@ -386,7 +453,8 @@ def connect(caching_node_id, lvol_id):
     logger.debug(ret)
     if not ret:
         logger.error("Failed to create OCF bdev")
-        return False
+        if not force:
+            return False
 
     # logger.info("Creating local subsystem")
     # create subsystem (local)
@@ -395,7 +463,7 @@ def connect(caching_node_id, lvol_id):
     ret = rpc_client.subsystem_create(subsystem_nqn, 'sbcli-cn', lvol.get_id())
     ret = rpc_client.transport_list("TCP")
     if not ret:
-        ret = rpc_client.transport_create("TCP")
+        ret = rpc_client.transport_create_caching("TCP")
     ret = rpc_client.listeners_create(subsystem_nqn, "TCP", '127.0.0.1', "4420")
     ret = rpc_client.nvmf_subsystem_listener_set_ana_state(subsystem_nqn, '127.0.0.1', "4420", is_optimized=True)
 
@@ -406,7 +474,8 @@ def connect(caching_node_id, lvol_id):
 
     if not ret:
         logger.error(f"Failed to add: {cach_bdev} to the subsystem: {subsystem_nqn}")
-        return False
+        if not force:
+            return False
 
     logger.info("Connecting to local subsystem")
     # make nvme connect to nqn
@@ -414,15 +483,17 @@ def connect(caching_node_id, lvol_id):
     ret, _ = cnode_client.connect_nvme('127.0.0.1', "4420", subsystem_nqn)
     if not ret:
         logger.error("Failed to connect to local subsystem")
-        return False
+        if not force:
+            return False
 
-    snode = db_controller.get_storage_node_by_id(lvol.node_id)
-    for nic in snode.data_nics:
-        ip = nic.ip4_address
-        ret, _ = cnode_client.connect_nvme(ip, "4420", subsystem_nqn)
-        break
+    if cnode.multipathing:
+        snode = db_controller.get_storage_node_by_id(lvol.node_id)
+        for nic in snode.data_nics:
+            ip = nic.ip4_address
+            ret, _ = cnode_client.connect_nvme(ip, "4420", subsystem_nqn)
+            break
 
-    time.sleep(5)
+    time.sleep(3)
     cnode_info, _ = cnode_client.info()
     nvme_devs = cnode_info['nvme_devices']
     dev_path = None
@@ -438,7 +509,7 @@ def connect(caching_node_id, lvol_id):
     logger.info(f"Device path: {dev_path}")
 
     cached_lvol = CachedLVol()
-    cached_lvol.uuid = str(uuid.uuid4())
+    cached_lvol.uuid = lvol.get_id()
     cached_lvol.lvol_id = lvol.get_id()
     cached_lvol.lvol = lvol
     cached_lvol.hostname = cnode.hostname
@@ -568,8 +639,6 @@ def deploy(ifname):
 
     logger.info("Creating CachingNodeAPI container")
     cont_image = constants.SIMPLY_BLOCK_DOCKER_IMAGE
-    if utils.get_host_arch() == "aarch64":
-        cont_image = constants.SIMPLY_BLOCK_DOCKER_IMAGE_ARM64
     container = node_docker.containers.run(
         cont_image,
         "python simplyblock_web/caching_node_app.py",
@@ -589,11 +658,8 @@ def deploy(ifname):
             f"DOCKER_IP={dev_ip}"
         ]
     )
-    logger.info("Pulling SPDK images")
-    spdk_core = constants.SIMPLY_BLOCK_SPDK_CORE_IMAGE
-    if utils.get_host_arch() == "aarch64":
-        spdk_core = constants.SIMPLY_BLOCK_SPDK_CORE_IMAGE_ARM64
-    node_docker.images.pull(spdk_core)
+    logger.info(f"Pulling SPDK image {constants.SIMPLY_BLOCK_SPDK_CORE_IMAGE}")
+    node_docker.images.pull(constants.SIMPLY_BLOCK_SPDK_CORE_IMAGE)
     return f"{dev_ip}:5000"
 
 
@@ -683,13 +749,52 @@ def remove_node(node_id, force=False):
 
     logger.info("Removing node")
 
-
     try:
         snode_api = CNodeClient(snode.api_endpoint)
         results, err = snode_api.spdk_process_kill()
+        ret = snode_api.delete_dev_gpt_partitions(snode.nvme_devices[0].pcie_address)
+
     except:
         pass
-    snode.remove(db_controller.kv_store)
 
-    # storage_events.snode_remove(snode)
+    snode.remove(db_controller.kv_store)
     logger.info("done")
+
+
+def get_io_stats(lvol_uuid, history, records_count=20, parse_sizes=True):
+    lvol = db_controller.get_lvol_by_id(lvol_uuid)
+    if not lvol:
+        logger.error(f"LVol not found: {lvol_uuid}")
+        return False
+
+    if history:
+        records_number = utils.parse_history_param(history)
+        if not records_number:
+            logger.error(f"Error parsing history string: {history}")
+            return False
+    else:
+        records_number = 20
+
+    records_list = db_controller.get_cached_lvol_stats(lvol.get_id(), limit=records_number)
+    if not records_list:
+        return False
+    new_records = utils.process_records(records_list, min(records_count, len(records_list)))
+
+    if not parse_sizes:
+        return new_records
+
+    out = []
+    for record in new_records:
+        out.append({
+            "Date": time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(record['date'])),
+            "Read bytes": utils.humanbytes(record["read_bytes"]),
+            "Read speed": utils.humanbytes(record['read_bytes_ps']),
+            "Read IOPS": record['read_io_ps'],
+            "Read lat": record['read_latency_ps'],
+            "Write bytes": utils.humanbytes(record["write_bytes"]),
+            "Write speed": utils.humanbytes(record['write_bytes_ps']),
+            "Write IOPS": record['write_io_ps'],
+            "Write lat": record['write_latency_ps'],
+        })
+    return out
+

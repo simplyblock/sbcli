@@ -8,13 +8,13 @@ from flask import Blueprint, request
 
 
 from simplyblock_web import utils
-from simplyblock_core import kv_store
+from simplyblock_core import db_controller, utils as core_utils
 from simplyblock_core.controllers import caching_node_controller
 
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG)
+
 bp = Blueprint("cnode", __name__)
-db_controller = kv_store.DBController()
+db_controller = db_controller.DBController()
 
 
 @bp.route('/cachingnode', methods=['POST'])
@@ -33,18 +33,16 @@ def add_node_to_cluster():
 
     data_nics_list = []
     spdk_cpu_mask = None
-    spdk_mem = None
     spdk_image = None
     namespace = None
+    multipathing = True
 
     if 'spdk_cpu_mask' in cl_data:
         spdk_cpu_mask = cl_data['spdk_cpu_mask']
 
-    if 'spdk_mem' in cl_data:
-        mem = cl_data['spdk_mem']
-        spdk_mem = utils.parse_size(mem)
-        if spdk_mem < 1 * 1024 * 1024:
-            return utils.get_response_error(f"SPDK memory:{mem} must be larger than 1G", 400)
+    spdk_mem = core_utils.parse_size(cl_data['spdk_mem']) if 'spdk_mem' in cl_data else None
+    if spdk_mem is not None and spdk_mem < core_utils.parse_size('1GiB'):
+        return utils.get_response_error(f"SPDK memory:{spdk_mem} must be larger than 1G", 400)
 
     if 'spdk_image' in cl_data:
         spdk_image = cl_data['spdk_image']
@@ -52,9 +50,12 @@ def add_node_to_cluster():
     if 'namespace' in cl_data:
         namespace = cl_data['namespace']
 
+    if 'multipathing' in cl_data:
+        multipathing = bool(cl_data['multipathing'])
+
     t = threading.Thread(
         target=caching_node_controller.add_node,
-        args=(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spdk_mem, spdk_image, namespace))
+        args=(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spdk_mem, spdk_image, namespace, multipathing))
     t.start()
 
     return utils.get_response(True)
@@ -165,12 +166,11 @@ def caching_node_list_lvols(uuid):
     return utils.get_response(data)
 
 
-@bp.route('/cachingnode/recreate/<string:hostname>', methods=['GET'])
-def recreate_caching_node(hostname):
-    cnode = db_controller.get_caching_node_by_hostname(hostname)
+@bp.route('/cachingnode/recreate/<string:uuid>', methods=['GET'])
+def recreate_caching_node(uuid):
+    cnode = db_controller.get_caching_node_by_id(uuid)
     if not cnode:
-        return utils.get_response_error(f"Caching node not found: {hostname}", 404)
+        return utils.get_response_error(f"Caching node not found: {uuid}", 404)
 
     data = caching_node_controller.recreate(cnode.get_id())
-
     return utils.get_response(data)

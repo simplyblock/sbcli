@@ -1,32 +1,21 @@
 # coding=utf-8
-import logging
 import os
 
 import time
-import sys
 from datetime import datetime
 
 
-from simplyblock_core import constants, kv_store, utils
+from simplyblock_core import constants, db_controller, utils
 from simplyblock_core.controllers import mgmt_events
 from simplyblock_core.models.mgmt_node import MgmtNode
 
-# Import the GELF logger
-from graypy import GELFUDPHandler
 
-# configure logging
-logger_handler = logging.StreamHandler(stream=sys.stdout)
-logger_handler.setFormatter(logging.Formatter('%(asctime)s: %(levelname)s: %(message)s'))
-gelf_handler = GELFUDPHandler('0.0.0.0', constants.GELF_PORT)
-logger = logging.getLogger()
-logger.addHandler(gelf_handler)
-logger.addHandler(logger_handler)
-logger.setLevel(logging.DEBUG)
+logger = utils.get_logger(__name__)
 
 
 # get DB controller
-db_store = kv_store.KVStore()
-db_controller = kv_store.DBController(kv_store=db_store)
+db_controller = db_controller.DBController()
+
 
 def set_node_online(node):
     if node.status == MgmtNode.STATUS_UNREACHABLE:
@@ -34,7 +23,7 @@ def set_node_online(node):
         old_status = snode.status
         snode.status = MgmtNode.STATUS_ONLINE
         snode.updated_at = str(datetime.now())
-        snode.write_to_db(db_store)
+        snode.write_to_db()
         mgmt_events.status_change(snode, snode.status, old_status, caused_by="monitor")
 
 
@@ -44,7 +33,7 @@ def set_node_offline(node):
         old_status = snode.status
         snode.status = MgmtNode.STATUS_UNREACHABLE
         snode.updated_at = str(datetime.now())
-        snode.write_to_db(db_store)
+        snode.write_to_db()
         mgmt_events.status_change(snode, snode.status, old_status, caused_by="monitor")
 
 
@@ -80,17 +69,18 @@ while True:
         nl = c.nodes.list(filters={'role': 'manager'})
         docker_node = None
         for n in nl:
-            if n.attrs['Description']['Hostname'] == node.hostname:
+            if n.attrs['ManagerStatus']['Addr'].startswith(node.mgmt_ip):
                 docker_node = n
                 break
-        if docker_node:
+        if not docker_node:
             logger.error("Node is not part of the docker swarm!")
+            set_node_offline(node)
             continue
 
-        if n.attrs['Spec']['Availability'] == 'active':
+        if docker_node.attrs['ManagerStatus']['Reachability'] == 'reachable':
             set_node_online(node)
         else:
-            set_node_online(node)
+            set_node_offline(node)
 
     logger.info(f"Sleeping for {constants.NODE_MONITOR_INTERVAL_SEC} seconds")
     time.sleep(constants.NODE_MONITOR_INTERVAL_SEC)

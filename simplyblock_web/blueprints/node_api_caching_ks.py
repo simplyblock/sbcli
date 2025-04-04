@@ -11,12 +11,12 @@ from flask import request
 from kubernetes import client, config
 from kubernetes.client import ApiException
 
-from simplyblock_core import constants
+from simplyblock_core import constants, utils as core_utils
 from simplyblock_web import utils
 
 
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG)
+
 bp = Blueprint("caching_node_k", __name__, url_prefix="/cnode")
 
 
@@ -39,9 +39,6 @@ def spdk_process_start():
     spdk_cpu_mask = None
     if 'spdk_cpu_mask' in data:
         spdk_cpu_mask = data['spdk_cpu_mask']
-    spdk_mem = None
-    if 'spdk_mem' in data:
-        spdk_mem = data['spdk_mem']
     node_cpu_count = os.cpu_count()
 
     global namespace
@@ -58,10 +55,7 @@ def spdk_process_start():
     else:
         spdk_cpu_mask = hex(int(math.pow(2, node_cpu_count)) - 1)
 
-    if spdk_mem:
-        spdk_mem = int(spdk_mem / (1024 * 1024))
-    else:
-        spdk_mem = 64096
+    spdk_mem = data.get('spdk_mem', core_utils.parse_size('64GiB'))
 
     spdk_image = constants.SIMPLY_BLOCK_SPDK_CORE_IMAGE
     if 'spdk_image' in data and data['spdk_image']:
@@ -73,15 +67,16 @@ def spdk_process_start():
 
     from jinja2 import Environment, FileSystemLoader
     env = Environment(loader=FileSystemLoader(os.path.join(TOP_DIR, 'templates')), trim_blocks=True, lstrip_blocks=True)
-    template = env.get_template('deploy_spdk.yaml.j2')
+    template = env.get_template('caching_deploy_spdk.yaml.j2')
     values = {
         'SPDK_IMAGE': spdk_image,
         'SPDK_CPU_MASK': spdk_cpu_mask,
-        'SPDK_MEM': spdk_mem,
+        'SPDK_MEM': core_utils.convert_size(spdk_mem, 'MiB'),
         'SERVER_IP': data['server_ip'],
         'RPC_PORT': data['rpc_port'],
         'RPC_USERNAME': data['rpc_username'],
         'RPC_PASSWORD': data['rpc_password'],
+        'SIMPLYBLOCK_DOCKER_IMAGE': constants.SIMPLY_BLOCK_DOCKER_IMAGE,
     }
     dep = yaml.safe_load(template.render(values))
     resp = k8s_apps_v1.create_namespaced_deployment(body=dep, namespace=namespace)

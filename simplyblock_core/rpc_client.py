@@ -1,13 +1,12 @@
-
 import json
 
 import requests
-import logging
 
+from simplyblock_core import constants, utils
 from requests.adapters import HTTPAdapter
 from urllib3 import Retry
 
-logger = logging.getLogger()
+logger = utils.get_logger()
 
 
 def print_dict(d):
@@ -26,8 +25,9 @@ class RPCException(Exception):
 class RPCClient:
 
     # ref: https://spdk.io/doc/jsonrpc.html
+    DEFAULT_ALLOWED_METHODS = ["HEAD", "GET", "PUT", "DELETE", "OPTIONS", "TRACE", "POST"]
 
-    def __init__(self, ip_address, port, username, password, timeout=60, retry=10):
+    def __init__(self, ip_address, port, username, password, timeout=180, retry=3):
         self.ip_address = ip_address
         self.port = port
         self.url = 'http://%s:%s/' % (self.ip_address, self.port)
@@ -37,7 +37,8 @@ class RPCClient:
         self.session = requests.session()
         self.session.auth = (self.username, self.password)
         self.session.verify = False
-        retries = Retry(total=retry, backoff_factor=1, connect=retry, read=retry)
+        retries = Retry(total=retry, backoff_factor=1, connect=retry, read=retry,
+                        allowed_methods=self.DEFAULT_ALLOWED_METHODS)
         self.session.mount("http://", HTTPAdapter(max_retries=retries))
         self.session.timeout = self.timeout
 
@@ -56,17 +57,20 @@ class RPCClient:
             logger.error(e)
             return False, str(e)
 
-        logger.debug("Response: status_code: %s, content: %s",
-                     response.status_code, response.content)
         ret_code = response.status_code
+        ret_content = response.content
+        logger.debug("Response: status_code: %s", ret_code)
 
         result = None
         error = None
         if ret_code == 200:
             try:
                 data = response.json()
+                if method != "bdev_get_bdevs":
+                    logger.debug("Response json: %s", json.dumps(data))
             except Exception:
-                return response.content, None
+                logger.debug("Response ret_content: %s", ret_content)
+                return ret_content, None
 
             if 'result' in data:
                 result = data['result']
@@ -77,9 +81,9 @@ class RPCClient:
             else:
                 return data, None
 
-        if ret_code in [500, 400]:
-            raise RPCException("Invalid http status: %s" % ret_code)
-        logger.error("Unknown http status: %s", ret_code)
+        else:
+            logger.error("Invalid http status : %s", ret_code)
+
         return None, None
 
     def get_version(self):
@@ -98,11 +102,12 @@ class RPCClient:
     def subsystem_delete(self, nqn):
         return self._request("nvmf_delete_subsystem", params={'nqn': nqn})
 
-    def subsystem_create(self, nqn, serial_number, model_number):
+    def subsystem_create(self, nqn, serial_number, model_number, min_cntlid=1):
         params = {
             "nqn": nqn,
             "serial_number": serial_number,
             "allow_any_host": True,
+            "min_cntlid": min_cntlid,
             "ana_reporting": True,
             "model_number": model_number}
         return self._request("nvmf_create_subsystem", params)
@@ -117,9 +122,58 @@ class RPCClient:
             params = {"trtype": trtype}
         return self._request("nvmf_get_transports", params)
 
-    def transport_create(self, trtype):
+    def transport_create(self, trtype, qpair_count=6):
+        """
+            [{'trtype': 'TCP', 'max_queue_depth': 128,
+               'max_io_qpairs_per_ctrlr': 127, 'in_capsule_data_size': 4096,
+               'max_io_size': 131072, 'io_unit_size': 131072, 'max_aq_depth': 128,
+               'num_shared_buffers': 511, 'buf_cache_size': 4294967295,
+               'dif_insert_or_strip': False, 'zcopy': False, 'c2h_success': True,
+               'sock_priority': 0, 'abort_timeout_sec': 1}]
+            The output above is the default values of nvmf_get_transports
+            Failing of creating more than 127 lvols is because of max_io_qpairs_per_ctrlr
+            Currently, we set it to 256 and the max now is 246 lvols, because of bdev_io_pool_size
+            TODO, investigate what is the best configuration for the parameters above and bdev_io_pool_size
+        """
         params = {
-            "trtype": trtype
+            "trtype": trtype,
+            "max_io_qpairs_per_ctrlr": qpair_count,
+            "max_queue_depth": 64,
+            "abort_timeout_sec": 5,
+            "ack_timeout": 2048,
+            "zcopy": True,
+            "in_capsule_data_size": 24500,
+            "max_io_size": 131072,
+            "io_unit_size": 8192,
+            "max_aq_depth": 128,
+            "num_shared_buffers": 24576,
+            "buf_cache_size": 512,
+            "dif_insert_or_strip": False,
+            "c2h_success": True,
+            "sock_priority": 0
+        }
+        return self._request("nvmf_create_transport", params)
+
+    def sock_impl_set_options(self):
+        """
+            optimizing sockets for high load and performance
+        """
+        params = {
+            "impl_name": "posix",
+            "recv_buf_size": 2097152,
+            "send_buf_size": 2097152,
+            "enable_recv_pipe": True,
+            "enable_quick_ack": True,
+            "enable_placement_id": 1,
+            "enable_zerocopy_send_server": True,
+            "enable_zerocopy_send_client": True    
+        }
+        return self._request("sock_impl_set_options", params)
+
+    
+    def transport_create_caching(self, trtype):
+        params = {
+            "trtype": trtype,
         }
         return self._request("nvmf_create_transport", params)
 
@@ -127,7 +181,7 @@ class RPCClient:
         params = {"nqn": nqn}
         return self._request("nvmf_subsystem_get_listeners", params)
 
-    def listeners_create(self, nqn, trtype, traddr, trsvcid):
+    def listeners_create(self, nqn, trtype, traddr, trsvcid, ana_state=None):
         """"
             nqn: Subsystem NQN.
             trtype: Transport type ("RDMA").
@@ -140,9 +194,11 @@ class RPCClient:
                 "trtype": trtype,
                 "adrfam": "IPv4",
                 "traddr": traddr,
-                "trsvcid": trsvcid
+                "trsvcid": str(trsvcid)
             }
         }
+        if ana_state:
+            params["ana_state"] = ana_state
         return self._request("nvmf_subsystem_add_listener", params)
 
     def bdev_nvme_controller_list(self, name=None):
@@ -195,7 +251,7 @@ class RPCClient:
             "nsid": nsid}
         return self._request("nvmf_subsystem_remove_ns", params)
 
-    def nvmf_subsystem_listener_set_ana_state(self, nqn, ip, port, is_optimized=True):
+    def nvmf_subsystem_listener_set_ana_state(self, nqn, ip, port, is_optimized=True, ana=None):
         params = {
             "nqn": nqn,
             "listen_address": {
@@ -210,6 +266,9 @@ class RPCClient:
         else:
             params['ana_state'] = "non_optimized"
 
+        if ana:
+            params['ana_state'] = ana
+
         return self._request("nvmf_subsystem_listener_set_ana_state", params)
 
     def get_device_stats(self, uuid):
@@ -220,16 +279,24 @@ class RPCClient:
         params = {"name": device_name}
         return self._request("bdev_nvme_reset_controller", params)
 
-    def create_lvstore(self, name, bdev_name):
-        params = {"bdev_name": bdev_name, "lvs_name": name}
+    def create_lvstore(self, name, bdev_name, cluster_sz, clear_method, num_md_pages_per_cluster_ratio):
+        params = {
+            "bdev_name": bdev_name,
+            "lvs_name": name,
+            "cluster_sz": cluster_sz,
+            "clear_method": clear_method,
+            "num_md_pages_per_cluster_ratio": num_md_pages_per_cluster_ratio,
+        }
         return self._request("bdev_lvol_create_lvstore", params)
 
-    def create_lvol(self, name, size, lvs_name):
+    def create_lvol(self, name, size_in_mib, lvs_name, lvol_priority_class=0):
         params = {
             "lvol_name": name,
-            "size": size,
+            "size_in_mib": size_in_mib,
             "lvs_name": lvs_name,
             "thin_provision": True,
+            "clear_method": "unmap",
+            "lvol_priority_class": lvol_priority_class,
         }
         return self._request("bdev_lvol_create", params)
 
@@ -318,8 +385,25 @@ class RPCClient:
         params = {"name": name}
         return self._request2("ultra21_bdev_pass_delete", params)
 
+    def qos_vbdev_create(self, qos_bdev, base_bdev_name, inflight_io_threshold):
+        params = {
+            "base_bdev_name": base_bdev_name,
+            "name": qos_bdev,
+            "max_num_queues": 2,
+            "standard_queue_weight": 3,
+            "low_priority_3_queue_weight": 1,
+            "inflight_io_threshold": inflight_io_threshold or 12
+        }
+
+        return self._request("qos_vbdev_create", params)
+
+    def qos_vbdev_delete(self, name):
+        params = {"name": name}
+        return self._request2("qos_vbdev_delete", params)
+
     def bdev_alceml_create(self, alceml_name, nvme_name, uuid, pba_init_mode=3,
-                           dev_cpu_mask=""):
+                           alceml_cpu_mask="", alceml_worker_cpu_mask="", pba_page_size=2097152,
+                           write_protection=False):
         params = {
             "name": alceml_name,
             "cntr_path": nvme_name,
@@ -329,19 +413,24 @@ class RPCClient:
             "md_size": 0,
             "use_ram": False,
             "pba_init_mode": pba_init_mode,
-            "pba_page_size": 2097152,
+            "pba_page_size": pba_page_size,
             "uuid": uuid,
             # "use_scheduling": True,
             "use_optimized": True,
-            "pba_nbalign": 4096
+            "pba_nbalign": 4096,
+            "use_map_whole_page_on_1st_write": False
         }
-        if dev_cpu_mask:
-            params["bdb_lcpu_mask"] = int(dev_cpu_mask,16)
+        if alceml_cpu_mask:
+            params["bdb_lcpu_mask"] = int(alceml_cpu_mask, 16)
+        if alceml_worker_cpu_mask:
+            params["bdb_lcpu_mask_alt_workers"] = int(alceml_worker_cpu_mask, 16)
+        if write_protection:
+            params["write_protection"] = True
         return self._request("bdev_alceml_create", params)
 
     def bdev_distrib_create(self, name, vuid, ndcs, npcs, num_blocks, block_size, jm_names,
                             chunk_size, ha_comm_addrs=None, ha_inode_self=None, pba_page_size=2097152,
-                            dev_cpu_mask=""):
+                            distrib_cpu_mask="", ha_is_non_leader=True, jm_vuid=0, write_protection=False):
         """"
             // Optional (not specified = no HA)
             // Comma-separated communication addresses, for each node, e.g. "192.168.10.1:45001,192.168.10.1:32768".
@@ -353,6 +442,12 @@ class RPCClient:
             //  This node (device) number, in the group, defined by ha_comm_addrs.
           "ha_inode_self": 1
         """
+        try:
+            ret = self.get_bdevs(name)
+            if ret:
+                return ret
+        except:
+            pass
         params = {
             "name": name,
             "jm_names": ",".join(jm_names),
@@ -362,14 +457,19 @@ class RPCClient:
             "num_blocks": num_blocks,
             "block_size": block_size,
             "chunk_size": chunk_size,
-            "pba_page_size": pba_page_size
+            "pba_page_size": pba_page_size,
         }
+        if jm_vuid > 0:
+            params["jm_vuid"] = jm_vuid
+            params["ha_is_non_leader"] = ha_is_non_leader
+
         if ha_comm_addrs:
             params['ha_comm_addrs'] = ha_comm_addrs
             params['ha_inode_self'] = ha_inode_self
-        if dev_cpu_mask:
-            params["bdb_lcpu_mask"] = int(dev_cpu_mask, 16)
-
+        if distrib_cpu_mask:
+            params["bdb_lcpu_mask"] = int(distrib_cpu_mask, 16)
+        if write_protection:
+            params["write_protection"] = True
         return self._request("bdev_distrib_create", params)
 
     def bdev_lvol_delete_lvstore(self, name):
@@ -388,14 +488,29 @@ class RPCClient:
         params = {"name": uuid}
         return self._request("bdev_get_iostat", params)
 
-    def bdev_raid_create(self, name, bdevs_list):
+    def bdev_raid_create(self, name, bdevs_list, raid_level="0", strip_size_kb=4):
+        try:
+            ret = self.get_bdevs(name)
+            if ret:
+                return ret
+        except:
+            pass
         params = {
             "name": name,
-            "raid_level": "0",
-            "strip_size_kb": 4,
-            "base_bdevs": bdevs_list
+            "raid_level": raid_level,
+            "strip_size_kb": strip_size_kb,
+            "base_bdevs": bdevs_list,
+            "io_unmap_limit": 100
         }
+        if raid_level == "1":
+            params["strip_size_kb"] = 0
         return self._request("bdev_raid_create", params)
+
+    def bdev_raid_delete(self, name):
+        params = {
+            "name": name
+        }
+        return self._request("bdev_raid_delete", params)
 
     def bdev_set_qos_limit(self, name, rw_ios_per_sec, rw_mbytes_per_sec, r_mbytes_per_sec, w_mbytes_per_sec):
         params = {
@@ -421,6 +536,9 @@ class RPCClient:
     def distr_add_nodes(self, params):
         return self._request("distr_add_nodes", params)
 
+    def distr_add_devices(self, params):
+        return self._request("distr_add_devices", params)
+
     def distr_status_events_update(self, params):
         # ultra/DISTR_v2/src_code_app_spdk/specs/message_format_rpcs__distrib__v5.txt#L396C1-L396C27
         return self._request("distr_status_events_update", params)
@@ -434,9 +552,11 @@ class RPCClient:
             "trsvcid": str(port),
             "subnqn": nqn,
             "fabrics_connect_timeout_us": 100000,
-            "fast_io_fail_timeout_sec": 1,
+            # "fast_io_fail_timeout_sec": 1,
             "num_io_queues": 16384,
-            "ctrlr_loss_timeout_sec": 2,
+            # "ctrlr_loss_timeout_sec": 1,
+            "multipath":"disable",
+            # "reconnect_delay_sec":1
         }
         return self._request("bdev_nvme_attach_controller", params)
 
@@ -493,19 +613,20 @@ class RPCClient:
 
     def bdev_nvme_set_options(self):
         params = {
+            # "action_on_timeout": "abort",
             "bdev_retry_count": 0,
-            "transport_retry_count": 0,
-            "ctrlr_loss_timeout_sec": 2,
-            "fast_io_fail_timeout_sec": 1,
+            "transport_retry_count": 3,
+            "ctrlr_loss_timeout_sec": 1,
+            "fast_io_fail_timeout_sec": 0,
             "reconnect_delay_sec": 1,
-            "keep_alive_timeout_ms": 200,
-            "transport_ack_timeout": 7,
-            "timeout_us": 100000
+            "keep_alive_timeout_ms": 10000,
+            "transport_ack_timeout": 10,
+            "timeout_us": constants.NVME_TIMEOUT_US
         }
         return self._request("bdev_nvme_set_options", params)
 
     def bdev_set_options(self, bdev_io_pool_size, bdev_io_cache_size, iobuf_small_cache_size, iobuf_large_cache_size):
-        params = {}
+        params = {"bdev_auto_examine": False}
         if bdev_io_pool_size > 0:
             params['bdev_io_pool_size'] = bdev_io_pool_size
         if bdev_io_cache_size > 0:
@@ -533,6 +654,11 @@ class RPCClient:
             return self._request("iobuf_set_options", params)
         else:
             return False
+
+    def accel_set_options(self):
+        params = {"small_cache_size": 512,
+                   "large_cache_size": 64}
+        return self._request("accel_set_options", params)
 
     def distr_status_events_get(self):
         return self._request("distr_status_events_get")
@@ -601,18 +727,20 @@ class RPCClient:
         }
         return self._request("ultra21_lvol_dismount", params)
 
-    def bdev_jm_create(self, name, name_storage1, block_size=4096, dev_cpu_mask=""):
+    def bdev_jm_create(self, name, name_storage1, block_size=4096, jm_cpu_mask=""):
         params = {
             "name": name,
             "name_storage1": name_storage1,
             "block_size": block_size
         }
-        if dev_cpu_mask:
-            params["bdb_lcpu_mask"] = int(dev_cpu_mask, 16)
+        if jm_cpu_mask:
+            params["bdb_lcpu_mask"] = int(jm_cpu_mask, 16)
         return self._request("bdev_jm_create", params)
 
-    def bdev_jm_delete(self, name):
+    def bdev_jm_delete(self, name, safe_removal=False):
         params = {"name": name}
+        if safe_removal is True:
+            params["safe_removal"] = True
         return self._request("bdev_jm_delete", params)
 
     def ultra21_util_get_malloc_stats(self):
@@ -644,6 +772,9 @@ class RPCClient:
         params = {"name": name}
         return self._request("bdev_examine", params)
 
+    def bdev_wait_for_examine(self):
+        return self._request("bdev_wait_for_examine")
+
     def nbd_start_disk(self, bdev_name, nbd_device="/dev/nbd0"):
         params = {
             "bdev_name": bdev_name,
@@ -656,7 +787,6 @@ class RPCClient:
             "nbd_device": nbd_device
         }
         return self._request("nbd_stop_disk", params)
-
 
     def bdev_jm_unmap_vuid(self, name, vuid):
         params = {"name": name, "vuid": vuid}
@@ -673,9 +803,225 @@ class RPCClient:
         params = {"poll_groups_mask": poll_groups_mask}
         return self._request("nvmf_set_config", params)
 
+    def jc_set_hint_lcpu_mask(self, jc_singleton_mask):
+        params = {"hint_lcpu_mask": int(jc_singleton_mask, 16)}
+        return self._request("jc_set_hint_lcpu_mask", params)
+
+
     def thread_get_stats(self):
         return self._request("thread_get_stats")
+
+    def framework_get_reactors(self):
+        return self._request("framework_get_reactors")
 
     def thread_set_cpumask(self, app_thread_process_id, app_thread_mask):
         params = {"id": app_thread_process_id, "cpumask": app_thread_mask}
         return self._request("thread_set_cpumask", params)
+
+    def distr_migration_to_primary_start(self, storage_ID, name, qos_high_priority=False):
+        params = {
+            "name": name,
+            "storage_ID": storage_ID,
+        }
+        # if qos_high_priority:
+        #     params["qos_high_priority"] = qos_high_priority
+        return self._request("distr_migration_to_primary_start", params)
+
+    def distr_migration_status(self, name):
+        params = {"name": name}
+        return self._request("distr_migration_status", params)
+
+    def distr_migration_failure_start(self, name, storage_ID, qos_high_priority=False):
+        params = {
+            "name": name,
+            "storage_ID": storage_ID,
+        }
+        # if qos_high_priority:
+        #     params["qos_high_priority"] = qos_high_priority
+        return self._request("distr_migration_failure_start", params)
+
+    def distr_migration_expansion_start(self, name, qos_high_priority=False):
+        params = {
+            "name": name,
+        }
+        # if qos_high_priority:
+        #     params["qos_high_priority"] = qos_high_priority
+        return self._request("distr_migration_expansion_start", params)
+
+    def bdev_raid_add_base_bdev(self, raid_bdev, base_bdev):
+        params = {
+            "raid_bdev": raid_bdev,
+            "base_bdev": base_bdev,
+        }
+        return self._request("bdev_raid_add_base_bdev", params)
+
+    def bdev_raid_remove_base_bdev(self, raid_bdev, base_bdev):
+        params = {
+            "raid_bdev": raid_bdev,
+            "base_bdev": base_bdev,
+        }
+        return self._request("bdev_raid_remove_base_bdev", params)
+
+    def bdev_lvol_get_lvstores(self, name):
+        params = {"lvs_name": name}
+        return self._request("bdev_lvol_get_lvstores", params)
+
+    def bdev_lvol_resize(self, name, size_in_mib):
+        params = {
+            "name": name,
+            "size_in_mib": size_in_mib
+        }
+        return self._request("bdev_lvol_resize", params)
+
+    def bdev_lvol_inflate(self, name):
+        params = {"name": name}
+        return self._request("bdev_lvol_inflate", params)
+
+    def bdev_distrib_toggle_cluster_full(self, name, cluster_full=False):
+        params = {
+            "name": name,
+            "cluster_full": cluster_full,
+        }
+        return self._request("bdev_distrib_toggle_cluster_full", params)
+
+    def log_set_print_level(self, level):
+        params = {
+            "level": level
+        }
+        return self._request("log_set_print_level", params)
+
+    def bdev_lvs_dump(self, lvs_name, file):
+        params = {
+            "lvs_name": lvs_name,
+            "file": file,
+        }
+        return self._request("bdev_lvs_dump", params)
+
+    def jc_explicit_synchronization(self, jm_vuid):
+        params = {
+            "jm_vuid": jm_vuid
+        }
+        return self._request("jc_explicit_synchronization", params)
+
+    def listeners_del(self, nqn, trtype, traddr, trsvcid):
+        """"
+            nqn: Subsystem NQN.
+            trtype: Transport type ("RDMA").
+            traddr: Transport address.
+            trsvcid: Transport service ID (required for RDMA or TCP).
+        """
+        params = {
+            "nqn": nqn,
+            "listen_address": {
+                "trtype": trtype,
+                "adrfam": "IPv4",
+                "traddr": traddr,
+                "trsvcid": str(trsvcid)
+            }
+        }
+        return self._request("nvmf_subsystem_remove_listener", params)
+
+
+    def bdev_distrib_force_to_non_leader(self, jm_vuid=0):
+        params = None
+        if jm_vuid:
+            params = {"jm_vuid": jm_vuid}
+        return self._request("bdev_distrib_force_to_non_leader", params)
+
+    def bdev_lvol_set_leader(self, is_leader=False, uuid=None, lvs_name=None, bs_nonleadership=False):
+        params = {
+            "lvs_leadership": is_leader,
+        }
+        if uuid:
+            params["uuid"] = uuid
+        elif lvs_name:
+            params["lvs_name"] = lvs_name
+
+        params["bs_nonleadership"] = bs_nonleadership
+
+        return self._request("bdev_lvol_set_leader_all", params)
+
+    def bdev_lvol_register(self, name, lvs_name, registered_uuid, blobid, priority_class=0):
+        params = {
+            "lvol_name": name,
+            "lvs_name": lvs_name,
+            "thin_provision": True,
+            "clear_method": "unmap",
+            "blobid": blobid,
+            "registered_uuid": registered_uuid,
+        }
+        if priority_class:
+            params["lvol_priority_class"] = priority_class
+        return self._request("bdev_lvol_register", params)
+
+    def nvmf_subsystem_get_controllers(self, nqn):
+        params = {
+            "nqn": nqn
+        }
+        return self._request("nvmf_subsystem_get_controllers", params)
+
+    def lvol_crypto_key_delete(self, name):
+        params = {
+            "key_name": name
+        }
+        return self._request("accel_crypto_key_destroy", params)
+
+    def bdev_lvol_snapshot_register(self, lvol_name, snapshot_name, registered_uuid, blobid):
+        params = {
+            "lvol_name": lvol_name,
+            "snapshot_name": snapshot_name,
+            "blobid": blobid,
+            "registered_uuid": registered_uuid,
+        }
+        return self._request("bdev_lvol_snapshot_register", params)
+
+    def bdev_lvol_clone_register(self, clone_name, snapshot_name, registered_uuid, blobid):
+        params = {
+            "snapshot_name": snapshot_name,
+            "clone_name": clone_name,
+            "blobid": blobid,
+            "registered_uuid": registered_uuid,
+        }
+        return self._request("bdev_lvol_clone_register", params)
+
+    def distr_replace_id_in_map_prob(self, storage_ID_from, storage_ID_to):
+        params = {
+            "storage_ID_from": storage_ID_from,
+            "storage_ID_to": storage_ID_to,
+        }
+        return self._request("distr_replace_id_in_map_prob", params)
+
+    def nvmf_set_max_subsystems(self, max_subsystems):
+        params = {
+            "max_subsystems": max_subsystems,
+        }
+        return self._request("nvmf_set_max_subsystems", params)
+
+    def bdev_lvol_set_lvs_ops(self, lvs_name, groupid, subsystem_port=9090):
+        params = {
+            "groupid": groupid,
+            "lvs_name": lvs_name,
+            "subsystem_port": subsystem_port,
+        }
+        return self._request("bdev_lvol_set_lvs_op", params)
+
+    def bdev_lvol_get_lvol_delete_status(self, name):
+        """
+        Returns :-
+            0: lvol is deleted.
+            1: lvole deletion is in progress.
+            2: No delete action on lvol or the delete requets is queued or previous delete request
+               failed due to error.
+        """
+        params = {
+            "name": name
+        }
+        return self._request("bdev_lvol_get_lvol_delete_status", params)
+
+    def bdev_lvol_set_lvs_read_only(self, lvs_name, read_only=False):
+        params = {
+            "lvs_name": lvs_name,
+            "read_only": read_only,
+        }
+        return self._request("bdev_lvol_set_lvs_read_only", params)
+

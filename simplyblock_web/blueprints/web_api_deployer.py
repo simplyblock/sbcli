@@ -12,29 +12,36 @@ from flask import request
 
 from simplyblock_web import utils
 
-from simplyblock_core import kv_store
+from simplyblock_core import db_controller
 from simplyblock_core.models.deployer import Deployer
 
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG)
+
 bp = Blueprint("deployer", __name__)
-db_controller = kv_store.DBController()
+db_controller = db_controller.DBController()
 
 
 ## Terraform variables
 document_name = 'AWS-RunShellScript'
 output_key_prefix = 'ssm-output'
 
-# intialise clients
-ssm = boto3.client('ssm', region_name='us-east-1')
-s3 = boto3.client('s3', region_name='us-east-1')
+region = None
+ssm = None
+s3 = None
+try:
+    region = utils.get_aws_region()
+    ssm = boto3.client('ssm', region_name=region)
+    s3 = boto3.client('s3', region_name=region)
+    logger.info("boto3 client created!")
+except Exception as e:
+    logger.error(f"Exception while connecting to AWS: {e}")
 
 
-def get_instance_tf_engine_instance_id():
-    tag_value = 'tfengine'
+def get_instance_tf_engine_instance_id(workspace: str):
+    tag_value = f'{workspace}-tfengine'
     tag_key = 'Name'
 
-    ec2 = boto3.client('ec2', region_name='us-east-1')
+    ec2 = boto3.client('ec2', region_name=region)
     response = ec2.describe_instances(
         Filters=[
             {
@@ -141,11 +148,15 @@ def update_cluster(d, kv_store, storage_nodes, availability_zone):
     ECR_IMAGE_TAG = d.ecr_image_tag
     ECR_ACCOUNT_ID = d.ecr_account_id
     tf_logs_bucket_name = d.tf_logs_bucket_name
+    sbcli_cmd = d.sbcli_cmd
+    mgmt_nodes_instance_type = d.mgmt_nodes_instance_type
+    storage_nodes_instance_type = d.storage_nodes_instance_type
+    volumes_per_storage_nodes = d.volumes_per_storage_nodes
 
     d.status = "in_progress"
     d.write_to_db(kv_store)
 
-    instance_ids = get_instance_tf_engine_instance_id()
+    instance_ids = get_instance_tf_engine_instance_id(d.tf_workspace)
     if len(instance_ids) == 0:
         # wait for a min and try again before returning error on the API
         print('no instance IDs')
@@ -159,10 +170,6 @@ def update_cluster(d, kv_store, storage_nodes, availability_zone):
         docker volume create terraform
         """,
         f"""
-        docker run --rm -v terraform:/app -e TF_LOG=DEBUG -w /app {ECR_ACCOUNT_ID}.dkr.ecr.{ECR_REGION}.amazonaws.com/{ECR_REPOSITORY_NAME}:{ECR_IMAGE_TAG} \
-            workspace select -or-create {TF_WORKSPACE}
-        """,
-        f"""
         docker run --rm -v terraform:/app -w /app {ECR_ACCOUNT_ID}.dkr.ecr.{ECR_REGION}.amazonaws.com/{ECR_REPOSITORY_NAME}:{ECR_IMAGE_TAG} \
             init -reconfigure -input=false \
                     -backend-config='bucket={TFSTATE_BUCKET}' \
@@ -170,25 +177,40 @@ def update_cluster(d, kv_store, storage_nodes, availability_zone):
                     -backend-config='region={TFSTATE_REGION}'
         """,
         f"""
-        docker run --rm -v terraform:/app -w /app {ECR_ACCOUNT_ID}.dkr.ecr.{ECR_REGION}.amazonaws.com/{ECR_REPOSITORY_NAME}:{ECR_IMAGE_TAG} \
-            plan -var mgmt_nodes={mgmt_nodes} -var storage_nodes={storage_nodes} -var az={availability_zone} -var region={aws_region}
+        docker run --rm -v terraform:/app -e TF_LOG=DEBUG -w /app {ECR_ACCOUNT_ID}.dkr.ecr.{ECR_REGION}.amazonaws.com/{ECR_REPOSITORY_NAME}:{ECR_IMAGE_TAG} \
+            workspace select -or-create {TF_WORKSPACE}
         """,
         f"""
         docker run --rm -v terraform:/app -w /app {ECR_ACCOUNT_ID}.dkr.ecr.{ECR_REGION}.amazonaws.com/{ECR_REPOSITORY_NAME}:{ECR_IMAGE_TAG} \
-         apply -var mgmt_nodes={mgmt_nodes} -var storage_nodes={storage_nodes} -var az={availability_zone} -var region={aws_region} --auto-approve
+          plan -var mgmt_nodes={mgmt_nodes} -var storage_nodes={storage_nodes} -var az={availability_zone} -var region={aws_region} \
+               -var mgmt_nodes_instance_type={mgmt_nodes_instance_type} -var storage_nodes_instance_type={storage_nodes_instance_type} \
+               -var volumes_per_storage_nodes={volumes_per_storage_nodes} -var sbcli_cmd={sbcli_cmd}
+        """,
+        f"""
+        docker run --rm -v terraform:/app -w /app {ECR_ACCOUNT_ID}.dkr.ecr.{ECR_REGION}.amazonaws.com/{ECR_REPOSITORY_NAME}:{ECR_IMAGE_TAG} \
+         apply -var mgmt_nodes={mgmt_nodes} -var storage_nodes={storage_nodes} -var az={availability_zone} -var region={aws_region} \
+               -var mgmt_nodes_instance_type={mgmt_nodes_instance_type} -var storage_nodes_instance_type={storage_nodes_instance_type} \
+               -var volumes_per_storage_nodes={volumes_per_storage_nodes} -var sbcli_cmd={sbcli_cmd} \
+            --auto-approve
         """
     ]
 
     # Send command with S3 output parameters
-    response = ssm.send_command(
-        InstanceIds=instance_ids,
-        DocumentName=document_name,
-        Parameters={
-            'commands': commands
-        },
-        OutputS3BucketName=tf_logs_bucket_name,
-        OutputS3KeyPrefix=output_key_prefix
-    )
+    try:
+        response = ssm.send_command(
+            InstanceIds=instance_ids,
+            DocumentName=document_name,
+            Parameters={
+                'commands': commands
+            },
+            OutputS3BucketName=tf_logs_bucket_name,
+            OutputS3KeyPrefix=output_key_prefix
+        )
+    except Exception as e:
+        print(f"Exception: {e}")
+        d.status = "failed"
+        d.write_to_db(kv_store)
+        return False, "", "Exception"
 
     command_id = response['Command']['CommandId']
     print(f'Command ID: {command_id}')
@@ -293,6 +315,8 @@ def validate_tf_vars(dpl_data):
         return "missing required param: mgmt_nodes_instance_type"
     if 'storage_nodes_instance_type' not in dpl_data:
         return "missing required param: storage_nodes_instance_type"
+    if 'volumes_per_storage_nodes' not in dpl_data:
+        return "missing required param: volumes_per_storage_nodes"
 
     return ""
 
@@ -369,6 +393,9 @@ def add_deployer():
     d.write_to_db(db_controller.kv_store)
 
     storage_nodes = int(dpl_data['storage_nodes'])
+    if d.storage_nodes+storage_nodes < 0:
+        return utils.get_response_error("total storage_nodes cannot be less than 0", 400)
+
     availability_zone = dpl_data['availability_zone']
     d.write_to_db(db_controller.kv_store)
 

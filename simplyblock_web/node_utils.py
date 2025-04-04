@@ -4,8 +4,15 @@ import json
 import logging
 import os
 import subprocess
+import re
+
+import jc
+from kubernetes.stream import stream
+from kubernetes import client, config
 
 from simplyblock_web import utils
+
+
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +30,9 @@ def run_command(cmd):
 def _get_spdk_pcie_list():  # return: ['0000:00:1e.0', '0000:00:1f.0']
     out, err, _ = run_command("ls /sys/bus/pci/drivers/uio_pci_generic")
     spdk_pcie_list = [line for line in out.split() if line.startswith("0000")]
+    if not spdk_pcie_list:
+        out, err, _ = run_command("ls /sys/bus/pci/drivers/vfio-pci")
+        spdk_pcie_list = [line for line in out.split() if line.startswith("0000")]
     logger.debug(spdk_pcie_list)
     return spdk_pcie_list
 
@@ -114,56 +124,91 @@ def _get_spdk_devices():
 
 def _get_mem_info():
     out, err, rc = run_command("cat /proc/meminfo")
-    data = {}
-    if rc == 0:
-        for line in out.split('\n'):
-            tm = line.split(":")
-            data[tm[0].strip()] = tm[1].strip()
-    return data
+
+    if rc != 0:
+        raise ValueError('Failed to get memory info')
+
+    entry_regex = r'^(?P<name>[\w\(\)]+):\s+(?P<size>\d+)( (?P<kb>kB))?'
+
+    return {
+            m.group('name'): int(m.group('size')) * (1024 if m.group('kb') else 1)
+            for line in out.splitlines()
+            if (m := re.match(entry_regex, line)) is not None
+    }
 
 
 def get_memory():
-    try:
-        mem_kb = _get_mem_info()['MemTotal']
-        mem_kb = mem_kb.replace(" ", "").lower()
-        mem_kb = mem_kb.replace("b", "")
-        return utils.parse_size(mem_kb)
-    except:
-        return 0
+    return _get_mem_info().get('MemTotal', 0)
 
 
 def get_huge_memory():
-    try:
-        mem_kb = _get_mem_info()['Hugetlb']
-        mem_kb = mem_kb.replace(" ", "").lower()
-        mem_kb = mem_kb.replace("b", "")
-        return utils.parse_size(mem_kb)
-    except:
-        return 0
+    return _get_mem_info().get('Hugetlb', 0)
 
 
 def get_memory_details():
-    data = {}
     mem_info = _get_mem_info()
-    try:
-        mem_kb = mem_info['MemTotal']
-        data['total'] = utils.parse_size(mem_kb.replace(" ", ""))
+    result = {}
 
-        mem_kb = mem_info['MemAvailable']
-        data['free'] = utils.parse_size(mem_kb.replace(" ", ""))
+    if 'MemTotal' in mem_info:
+        result['total'] = mem_info['MemTotal']
 
-        mem_kb = mem_info['Hugetlb']
-        data['huge_total'] = utils.parse_size(mem_kb.replace(" ", ""))
+    if 'MemAvailable' in mem_info:
+            result['free'] = mem_info['MemAvailable']
 
-        mem_kb = mem_info['Hugepagesize']
-        hugePages_Free = int(mem_info['HugePages_Free'])
-        data['huge_free'] = utils.parse_size(mem_kb.replace(" ", "")) * hugePages_Free
+    if 'Hugetlb' in mem_info:
+            result['huge_total'] = mem_info['Hugetlb']
 
-    except:
-        pass
-    return data
+    if 'HugePages_Free' in mem_info and 'Hugepagesize' in mem_info:
+        result['huge_free'] = mem_info['HugePages_Free'] * mem_info['Hugepagesize']
+
+    return result
 
 
 def get_host_arch():
     out, err, rc = run_command("uname -m")
     return out
+
+
+def firewall_port(port_id=9090, port_type="tcp", block=True):
+    cmd_list = []
+    try:
+        iptables_command_output = firewall_get()
+        result = jc.parse('iptables', iptables_command_output)
+        for chain in result:
+            if chain['chain'] in ["INPUT", "OUTPUT"]:
+                for rule in chain['rules']:
+                    if str(port_id) in rule['options']:
+                        cmd_list.append(f"iptables -D {chain['chain']} -p {port_type} --dport {port_id} -j {rule['target']}")
+
+    except Exception as e:
+        logger.error(e)
+
+    if block:
+        cmd_list.extend([
+            f"iptables -A INPUT -p {port_type} --dport {port_id} -j DROP",
+            f"iptables -A OUTPUT -p {port_type} --dport {port_id} -j DROP",
+            "iptables -L -n -v",
+        ])
+    else:
+        cmd_list.extend([
+            # f"iptables -A INPUT -p {port_type} --dport {port_id} -j ACCEPT",
+            # f"iptables -A OUTPUT -p {port_type} --dport {port_id} -j ACCEPT",
+            "iptables -L -n -v",
+        ])
+
+    out = ""
+    for cmd in cmd_list:
+        stream = os.popen("docker exec spdk "+cmd)
+        ret = stream.read()
+        if ret != "":
+            out += ret + "\n"
+            logger.info(ret)
+
+    return out
+
+
+def firewall_get():
+    cmd = "docker exec spdk iptables -L -n"
+    stream = os.popen(cmd)
+    ret = stream.read()
+    return ret

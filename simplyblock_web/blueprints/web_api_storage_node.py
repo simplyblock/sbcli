@@ -6,36 +6,35 @@ import threading
 
 from flask import Blueprint, request
 
+from simplyblock_core.controllers import tasks_controller
 from simplyblock_web import utils
 
-from simplyblock_core import kv_store
-from simplyblock_core import storage_node_ops
+from simplyblock_core import db_controller, storage_node_ops, utils as core_utils
 
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG)
+
 bp = Blueprint("snode", __name__)
-db_controller = kv_store.DBController()
+db_controller = db_controller.DBController()
 
 
 @bp.route('/storagenode', methods=['GET'], defaults={'uuid': None})
 @bp.route('/storagenode/<string:uuid>', methods=['GET'])
 def list_storage_nodes(uuid):
+    cluster_id = utils.get_cluster_id(request)
     if uuid:
         node = db_controller.get_storage_node_by_id(uuid)
-        if not node:
-            node = db_controller.get_storage_node_by_hostname(uuid)
-
-        if node:
+        if node and node.cluster_id == cluster_id:
             nodes = [node]
         else:
             return utils.get_response_error(f"node not found: {uuid}", 404)
     else:
-        cluster_id = utils.get_cluster_id(request)
         nodes = db_controller.get_storage_nodes_by_cluster_id(cluster_id)
     data = []
     for node in nodes:
         d = node.get_clean_dict()
         d['status_code'] = node.get_status_code()
+        lvs = db_controller.get_lvols_by_node_id(node.get_id()) or []
+        d['lvols'] = len(lvs)
         data.append(d)
     return utils.get_response(data)
 
@@ -62,12 +61,12 @@ def storagenode_iostats(uuid, history):
     if not node:
         return utils.get_response_error(f"node not found: {uuid}", 404)
 
-    data = storage_node_ops.get_node_iostats_history(uuid, history, parse_sizes=False)
-
-    if data:
-        return utils.get_response(data)
-    else:
-        return utils.get_response(False)
+    data = storage_node_ops.get_node_iostats_history(uuid, history, parse_sizes=False, with_sizes=True)
+    ret = {
+        "object_data": node.get_clean_dict(),
+        "stats": data or []
+    }
+    return utils.get_response(ret)
 
 
 @bp.route('/storagenode/port/<string:uuid>', methods=['GET'])
@@ -136,19 +135,39 @@ def storage_node_shutdown(uuid):
     if not node:
         return utils.get_response_error(f"node not found: {uuid}", 404)
 
-    out = storage_node_ops.shutdown_storage_node(uuid)
-    return utils.get_response(out)
+    force = True
+    try:
+        args = request.args
+        force = bool(args.get('force', True))
+    except:
+        pass
+
+    threading.Thread(
+        target=storage_node_ops.shutdown_storage_node,
+        args=(uuid, force)
+    ).start()
+
+    return utils.get_response(True)
 
 
-@bp.route('/storagenode/restart/<string:uuid>', methods=['GET'])
-def storage_node_restart(uuid):
+@bp.route('/storagenode/restart', methods=['PUT'])
+def storage_node_restart():
+    req_data = request.get_json()
+    uuid = req_data.get("uuid", "")
+    node_ip = req_data.get("node_ip", "")
+    force = bool(req_data.get("force", ""))
+
     node = db_controller.get_storage_node_by_id(uuid)
     if not node:
         return utils.get_response_error(f"node not found: {uuid}", 404)
 
     threading.Thread(
         target=storage_node_ops.restart_storage_node,
-        args=(uuid,)
+        kwargs={
+            "node_id": uuid,
+            "node_ip": node_ip,
+            "force": force,
+        }
     ).start()
 
     return utils.get_response(True)
@@ -170,18 +189,28 @@ def storage_node_add():
     if 'max_lvol' not in req_data:
         return utils.get_response_error("missing required param: max_lvol", 400)
 
-    if 'max_snap' not in req_data:
-        return utils.get_response_error("missing required param: max_snap", 400)
-
     if 'max_prov' not in req_data:
         return utils.get_response_error("missing required param: max_prov", 400)
 
     cluster_id = req_data['cluster_id']
     node_ip = req_data['node_ip']
     ifname = req_data['ifname']
-    max_lvol = req_data['max_lvol']
-    max_snap = req_data['max_snap']
-    max_prov = req_data['max_prov']
+    max_lvol = int(req_data['max_lvol'])
+    max_snap = int(req_data.get('max_snap', 500))
+    max_prov = core_utils.parse_size(req_data['max_prov'], unit='G')
+    number_of_distribs = int(req_data.get('number_of_distribs', 2))
+    if req_data.get('disable_ha_jm', "") == "true":
+        disable_ha_jm = True
+    else:
+        disable_ha_jm = False
+
+    enable_test_device = False
+    param = req_data.get('enable_test_device')
+    if param:
+        if type(param) == bool:
+            enable_test_device = param
+        elif type(param) == str:
+            enable_test_device = param == "true"
 
     spdk_image = None
     if 'spdk_image' in req_data:
@@ -196,10 +225,74 @@ def storage_node_add():
         data_nics = req_data['data_nics']
         data_nics = data_nics.split(",")
 
+    namespace = "default"
+    if 'namespace' in req_data:
+        namespace = req_data['namespace']
+
+    jm_percent = 3
+    if 'jm_percent' in req_data:
+        jm_percent = int(req_data['jm_percent'])
+
+    partitions = 1
+    if 'partitions' in req_data:
+        partitions = int(req_data['partitions'])
+
+    number_of_devices = 0
+    if 'number_of_devices' in req_data:
+        number_of_devices = int(req_data['number_of_devices'])
+
+    spdk_cpu_mask = None
+    if 'spdk_cpu_mask' in req_data:
+        msk = req_data['spdk_cpu_mask']
+        if utils.validate_cpu_mask(msk):
+            spdk_cpu_mask = msk
+        else:
+            return utils.get_response_error(f"Invalid cpu mask value: {msk}", 400)
+
+    iobuf_small_pool_count = 0
+    if 'iobuf_small_pool_count' in req_data:
+        iobuf_small_pool_count = int(req_data['iobuf_small_pool_count'])
+
+    iobuf_large_pool_count = 0
+    if 'iobuf_large_pool_count' in req_data:
+        iobuf_large_pool_count = int(req_data['iobuf_large_pool_count'])
+
+    is_secondary_node = False
+    if 'is_secondary_node' in req_data:
+        is_secondary_node = bool(req_data['is_secondary_node'])
 
 
-    out = storage_node_ops.add_node(
-        cluster_id, node_ip, ifname, data_nics, max_lvol, max_snap, max_prov,
-        spdk_image=spdk_image, spdk_debug=spdk_debug)
+    tasks_controller.add_node_add_task(cluster_id, {
+        "cluster_id": cluster_id,
+        "node_ip": node_ip,
+        "iface_name": ifname,
+        "data_nics_list": data_nics,
+        "max_lvol": max_lvol,
+        "max_snap": max_snap,
+        "max_prov": max_prov,
+        "spdk_cpu_mask": spdk_cpu_mask,
+        "spdk_image": spdk_image,
+        "spdk_debug": spdk_debug,
+        "small_bufsize": iobuf_small_pool_count,
+        "large_bufsize": iobuf_large_pool_count,
+        "num_partitions_per_dev": partitions,
+        "jm_percent": jm_percent,
+        "number_of_devices": number_of_devices,
+        "enable_test_device": enable_test_device,
+        "number_of_distribs": number_of_distribs,
+        "namespace": namespace,
+        "enable_ha_jm": not disable_ha_jm,
+        "is_secondary_node": is_secondary_node,
+    })
 
+    return utils.get_response(True)
+
+
+@bp.route('/storagenode/make-sec-new-primary/<string:uuid>', methods=['GET'])
+def make_primary(uuid):
+    node = db_controller.get_storage_node_by_id(uuid)
+    if not node:
+        return utils.get_response_error(f"node not found: {uuid}", 404)
+
+    out = storage_node_ops.make_sec_new_primary(uuid)
     return utils.get_response(out)

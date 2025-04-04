@@ -30,10 +30,12 @@ def configure_docker(docker_ip):
     return __run_script(['bash', '-x', os.path.join(DIR_PATH, 'config_docker.sh'), docker_ip])
 
 
-def deploy_stack(cli_pass, dev_ip, image_name, graylog_password, cluster_id, log_del_interval, metrics_retention_period):
+def deploy_stack(cli_pass, dev_ip, image_name, graylog_password, cluster_id,
+                 log_del_interval, metrics_retention_period, log_level, grafana_endpoint):
     pass_hash = hashlib.sha256(graylog_password.encode('utf-8')).hexdigest()
     return __run_script(
-        ['sudo', 'bash', '-x', os.path.join(DIR_PATH, 'deploy_stack.sh'), cli_pass, dev_ip, image_name, pass_hash, graylog_password, cluster_id, log_del_interval, metrics_retention_period])
+        ['sudo', 'bash', '-x', os.path.join(DIR_PATH, 'deploy_stack.sh'), cli_pass, dev_ip, image_name, pass_hash,
+         graylog_password, cluster_id, log_del_interval, metrics_retention_period, log_level, grafana_endpoint])
 
 
 def deploy_cleaner():
@@ -41,7 +43,7 @@ def deploy_cleaner():
 
 
 def set_db_config(DEV_IP):
-    return __run_script(['bash', os.path.join(DIR_PATH, 'set_db_config.sh'), DEV_IP])
+    return __run_script(['sudo', 'bash', '-x', os.path.join(DIR_PATH, 'set_db_config.sh'), DEV_IP])
 
 
 def set_db_config_single():
@@ -50,3 +52,12 @@ def set_db_config_single():
 
 def set_db_config_double():
     return __run_script(['bash', os.path.join(DIR_PATH, 'db_config_double.sh')])
+
+def deploy_fdb_from_file_service(zip_path):
+    args = ["sudo", 'bash']
+    if logger.level == logging.DEBUG:
+        args.append("-x")
+    args.append(os.path.join(DIR_PATH, 'deploy_fdb.sh'))
+    args.append(zip_path)
+    process = subprocess.run(" ".join(args), shell=True,  text=True)
+    return process.returncode

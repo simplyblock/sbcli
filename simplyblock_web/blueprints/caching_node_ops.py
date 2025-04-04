@@ -14,10 +14,10 @@ from flask import Blueprint
 from flask import request
 
 from simplyblock_web import utils, node_utils
-from simplyblock_core import scripts, constants
+from simplyblock_core import scripts, constants, shell_utils, utils as core_utils
 
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG)
+
 bp = Blueprint("caching_node", __name__, url_prefix="/cnode")
 
 
@@ -35,7 +35,7 @@ def run_command(cmd):
     process = subprocess.Popen(
         cmd.split(), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     stdout, stderr = process.communicate()
-    return stdout.strip().decode("utf-8"), stderr.strip(), process.returncode
+    return stdout.strip().decode("utf-8"), stderr.strip().decode("utf-8"), process.returncode
 
 
 def _get_spdk_pcie_list():  # return: ['0000:00:1e.0', '0000:00:1f.0']
@@ -139,14 +139,14 @@ def scan_devices():
 
 @bp.route('/spdk_process_start', methods=['POST'])
 def spdk_process_start():
-    data = request.get_json()
+    try:
+        data = request.get_json()
+    except:
+        data = {}
 
     spdk_cpu_mask = None
     if 'spdk_cpu_mask' in data:
         spdk_cpu_mask = data['spdk_cpu_mask']
-    spdk_mem = None
-    if 'spdk_mem' in data:
-        spdk_mem = data['spdk_mem']
     node_cpu_count = os.cpu_count()
 
     if spdk_cpu_mask:
@@ -159,10 +159,8 @@ def spdk_process_start():
     else:
         spdk_cpu_mask = hex(int(math.pow(2, node_cpu_count)) - 1)
 
-    if spdk_mem:
-        spdk_mem = int(spdk_mem / (1024 * 1024))
-    else:
-        spdk_mem = 64096
+    spdk_mem_mib = core_utils.convert_size(
+            data.get('spdk_mem', core_utils.parse_size('64GiB')), 'MiB')
 
     node_docker = get_docker_client()
     nodes = node_docker.containers.list(all=True)
@@ -175,16 +173,13 @@ def spdk_process_start():
 
     spdk_image = constants.SIMPLY_BLOCK_SPDK_CORE_IMAGE
 
-    if node_utils.get_host_arch() == "aarch64":
-        spdk_image = constants.SIMPLY_BLOCK_SPDK_CORE_IMAGE_ARM64
-
     if 'spdk_image' in data and data['spdk_image']:
         spdk_image = data['spdk_image']
         node_docker.images.pull(spdk_image)
 
     container = node_docker.containers.run(
         spdk_image,
-        f"/root/scripts/run_spdk_tgt.sh {spdk_cpu_mask} {spdk_mem}",
+        f"/root/spdk/scripts/run_spdk_tgt.sh {spdk_cpu_mask} {spdk_mem_mib}",
         name="spdk",
         detach=True,
         privileged=True,
@@ -205,8 +200,8 @@ def spdk_process_start():
     rpc_password = data['rpc_password']
 
     container2 = node_docker.containers.run(
-        spdk_image,
-        "python /root/scripts/spdk_http_proxy_server.py",
+        constants.SIMPLY_BLOCK_DOCKER_IMAGE,
+        "python simplyblock_core/services/spdk_http_proxy_server.py",
         name="spdk_proxy",
         detach=True,
         network_mode="host",
@@ -266,49 +261,23 @@ def spdk_process_is_up():
     return utils.get_response(False, "SPDK container not found")
 
 
-def _get_mem_info():
-    out, err, _ = run_command("cat /proc/meminfo")
-    data = {}
-    for line in out.split('\n'):
-        tm = line.split(":")
-        data[tm[0].strip()] = tm[1].strip()
-    return data
-
-
-def get_memory():
-    try:
-        mem_kb = _get_mem_info()['MemTotal']
-        mem_kb = mem_kb.replace(" ", "").lower()
-        mem_kb = mem_kb.replace("b", "")
-        return utils.parse_size(mem_kb)
-    except:
-        return 0
-
-
-def get_huge_memory():
-    try:
-        mem_kb = _get_mem_info()['Hugetlb']
-        mem_kb = mem_kb.replace(" ", "").lower()
-        mem_kb = mem_kb.replace("b", "")
-        return utils.parse_size(mem_kb)
-    except:
-        return 0
+CPU_INFO = cpuinfo.get_cpu_info()
+HOSTNAME, _, _ = node_utils.run_command("hostname -s")
+SYSTEM_ID, _, _ = node_utils.run_command("dmidecode -s system-uuid")
 
 
 @bp.route('/info', methods=['GET'])
 def get_info():
-    hostname, _, _ = run_command("hostname -s")
-    system_id, _, _ = run_command("dmidecode -s system-uuid")
 
     out = {
-        "hostname": hostname,
-        "system_id": system_id,
+        "hostname": HOSTNAME,
+        "system_id": SYSTEM_ID,
 
-        "cpu_count": cpuinfo.get_cpu_info()['count'],
-        "cpu_hz": cpuinfo.get_cpu_info()['hz_advertised'][0] if 'hz_advertised' in cpuinfo.get_cpu_info() else 1,
+        "cpu_count": CPU_INFO['count'],
+        "cpu_hz": CPU_INFO['hz_advertised'][0] if 'hz_advertised' in CPU_INFO else 1,
 
-        "memory": get_memory(),
-        "hugepages": get_huge_memory(),
+        "memory": node_utils.get_memory(),
+        "hugepages": node_utils.get_huge_memory(),
         "memory_details": node_utils.get_memory_details(),
 
         "nvme_devices": _get_nvme_devices(),
@@ -392,3 +361,76 @@ def disconnect_all():
     logger.debug(out)
     logger.debug(err)
     return utils.get_response(ret_code)
+
+
+
+@bp.route('/make_gpt_partitions', methods=['POST'])
+def make_gpt_partitions_for_nbd():
+    nbd_device = '/dev/nbd0'
+    jm_percent = 10
+
+    try:
+        data = request.get_json()
+        nbd_device = data['nbd_device']
+        jm_percent = data['jm_percent']
+    except:
+        pass
+
+    cmd_list = [
+        f"parted -fs {nbd_device} mklabel gpt",
+        f"parted -f {nbd_device} mkpart journal \"0%\" \"{jm_percent}%\"",
+        f"parted -f {nbd_device} mkpart part \"{jm_percent}%\" \"100%\" ",
+    ]
+    sg_cmd_list = [
+        f"sgdisk -t 1:6527994e-2c5a-4eec-9613-8f5944074e8b {nbd_device}",
+        f"sgdisk -t 2:6527994e-2c5a-4eec-9613-8f5944074e8b {nbd_device}",
+    ]
+
+    for cmd in cmd_list+sg_cmd_list:
+        logger.debug(cmd)
+        out, err, ret_code = shell_utils.run_command(cmd)
+        logger.debug(out)
+        logger.debug(ret_code)
+        if ret_code != 0:
+            logger.error(err)
+            return utils.get_response(False, f"Error running cmd: {cmd}, returncode: {ret_code}, output: {out}, err: {err}")
+        time.sleep(1)
+
+    return utils.get_response(True)
+
+
+
+@bp.route('/delete_dev_gpt_partitions', methods=['POST'])
+def delete_gpt_partitions_for_dev():
+
+    data = request.get_json()
+
+    if "device_pci" not in data:
+        return utils.get_response(False, "Required parameter is missing: device_pci")
+
+    device_pci = data['device_pci']
+
+    cmd_list = [
+        f"echo -n \"{device_pci}\" > /sys/bus/pci/drivers/uio_pci_generic/unbind",
+        f"echo -n \"{device_pci}\" > /sys/bus/pci/drivers/nvme/bind",
+    ]
+
+    for cmd in cmd_list:
+        logger.debug(cmd)
+        ret = os.popen(cmd).read().strip()
+        logger.debug(ret)
+        time.sleep(1)
+
+    device_name = os.popen(f"ls /sys/devices/pci0000:00/{device_pci}/nvme/nvme*/ | grep nvme").read().strip()
+    cmd_list = [
+        f"parted -fs /dev/{device_name} mklabel gpt",
+        f"echo -n \"{device_pci}\" > /sys/bus/pci/drivers/nvme/unbind",
+    ]
+
+    for cmd in cmd_list:
+        logger.debug(cmd)
+        ret = os.popen(cmd).read().strip()
+        logger.debug(ret)
+        time.sleep(1)
+
+    return utils.get_response(True)

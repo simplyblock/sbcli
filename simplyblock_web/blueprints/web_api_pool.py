@@ -9,32 +9,32 @@ from simplyblock_web import utils
 from simplyblock_core.controllers import pool_controller
 
 from simplyblock_core.models.pool import Pool
-from simplyblock_core import kv_store, utils as core_utils
+from simplyblock_core import db_controller, utils as core_utils
 
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG)
+
 bp = Blueprint("pool", __name__)
-db_controller = kv_store.DBController()
+db_controller = db_controller.DBController()
 
 
-@bp.route('/pool', defaults={'uuid': None, "cluster_id": None}, methods=['GET'])
-@bp.route('/pool/<string:uuid>', defaults={"cluster_id": None}, methods=['GET'])
-@bp.route('/pool/cluster_id/<string:cluster_id>', defaults={'uuid': None,}, methods=['GET'])
-def list_pools(uuid, cluster_id):
+@bp.route('/pool', defaults={'uuid': None}, methods=['GET'])
+@bp.route('/pool/<string:uuid>', methods=['GET'])
+def list_pools(uuid):
+    cluster_id = utils.get_cluster_id(request)
     if uuid:
         pool = db_controller.get_pool_by_id(uuid)
-        if pool:
+        if pool and pool.cluster_id == cluster_id:
             pools = [pool]
         else:
             return utils.get_response_error(f"Pool not found: {uuid}", 404)
-    elif cluster_id:
-        pools = db_controller.get_pools(cluster_id)
     else:
-        cluster_id = utils.get_cluster_id(request)
         pools = db_controller.get_pools(cluster_id)
     data = []
     for pool in pools:
-        data.append(pool.get_clean_dict())
+        d = pool.get_clean_dict()
+        lvs = db_controller.get_lvols_by_pool_id(pool.get_id()) or []
+        d['lvols'] = len(lvs)
+        data.append(d)
     return utils.get_response(data)
 
 
@@ -60,9 +60,9 @@ def add_pool():
         return utils.get_response_error("missing required param: cluster_id", 400)
 
     name = pool_data['name']
-    cluster_id = pool_data['cluster_id']
+    cluster_id = utils.get_cluster_id(request)
     for p in db_controller.get_pools():
-        if p.pool_name == name:
+        if p.pool_name == name and p.cluster_id == cluster_id:
             return utils.get_response_error(f"Pool found with the same name: {name}", 400)
 
     pool_secret = True
@@ -72,10 +72,10 @@ def add_pool():
     pool_max_size = 0
     lvol_max_size = 0
     if 'pool_max' in pool_data:
-        pool_max_size = utils.parse_size(pool_data['pool_max'])
+        pool_max_size = core_utils.parse_size(pool_data['pool_max'])
 
     if 'lvol_max' in pool_data:
-        lvol_max_size = utils.parse_size(pool_data['lvol_max'])
+        lvol_max_size = core_utils.parse_size(pool_data['lvol_max'])
 
     max_rw_iops = utils.get_int_value_or_default(pool_data, "max_rw_iops", 0)
     max_rw_mbytes = utils.get_int_value_or_default(pool_data, "max_rw_mbytes", 0)
@@ -103,8 +103,11 @@ def delete_pool(uuid):
         if req_secret != pool.secret:
             return utils.get_response_error(f"Pool secret doesn't mach the value in the request header", 400)
 
-    if pool.lvols:
-        return utils.get_response_error(f"Can not delete Pool with LVols", 400)
+    lvols = db_controller.get_lvols_by_pool_id(uuid)
+    if lvols and len(lvols) > 0:
+        msg = f"Pool {uuid} is not empty, lvols found {len(lvols)}"
+        logger.error(msg)
+        return utils.get_response_error(msg, 400)
 
     pool.remove(db_controller.kv_store)
     return utils.get_response("Done")
@@ -128,23 +131,23 @@ def update_pool(uuid):
 
     pool.pool_name = pool_data.get('name') or pool.pool_name
 
-    if 'pool-max' in pool_data:
-        pool.pool_max_size = utils.parse_size(pool_data['pool-max'])
+    if 'pool_max' in pool_data:
+        pool.pool_max_size = core_utils.parse_size(pool_data['pool_max'])
 
-    if 'lvol-max' in pool_data:
-        pool.lvol_max_size = utils.parse_size(pool_data['lvol-max'])
+    if 'lvol_max' in pool_data:
+        pool.lvol_max_size = core_utils.parse_size(pool_data['lvol_max'])
 
-    if 'max-r-iops' in pool_data:
-        pool.max_r_iops = utils.parse_size(pool_data['max-r-iops'])
+    if 'max_r_iops' in pool_data:
+        pool.max_r_iops = core_utils.parse_size(pool_data['max_r_iops'])
 
-    if 'max-w-iops' in pool_data:
-        pool.max_w_iops = utils.parse_size(pool_data['max-w-iops'])
+    if 'max_w_iops' in pool_data:
+        pool.max_w_iops = core_utils.parse_size(pool_data['max_w_iops'])
 
-    if 'max-r-mbytes' in pool_data:
-        pool.max_r_mbytes_per_sec = utils.parse_size(pool_data['max-r-mbytes'])
+    if 'max_r_mbytes' in pool_data:
+        pool.max_r_mbytes_per_sec = core_utils.parse_size(pool_data['max_r_mbytes'])
 
-    if 'max-w-mbytes' in pool_data:
-        pool.max_w_mbytes_per_sec = utils.parse_size(pool_data['max-w-mbytes'])
+    if 'max_w_mbytes' in pool_data:
+        pool.max_w_mbytes_per_sec = core_utils.parse_size(pool_data['max_w_mbytes'])
 
     pool.write_to_db(db_controller.kv_store)
     return utils.get_response(pool.to_dict())
@@ -163,8 +166,7 @@ def pool_capacity(uuid):
 
     out = []
     total_size = 0
-    for lvol_id in pool.lvols:
-        lvol = db_controller.get_lvol_by_id(lvol_id)
+    for lvol in db_controller.get_lvols_by_pool_id(uuid):
         total_size += lvol.size
         out.append({
             "device name": lvol.lvol_name,
@@ -172,7 +174,7 @@ def pool_capacity(uuid):
             "util_percent": 0,
             "util": 0,
         })
-    if pool.lvols:
+    if total_size:
         out.append({
             "device name": "Total",
             "provisioned": total_size,
@@ -206,4 +208,31 @@ def pool_iostats(uuid, history):
     records_count = 20
     new_records = core_utils.process_records(out, records_count)
 
-    return utils.get_response(new_records)
+    ret = {
+        "object_data": pool.get_clean_dict(),
+        "stats": new_records or []
+    }
+    return utils.get_response(ret)
+
+
+
+@bp.route('/pool/iostats-all-lvols/<string:pool_uuid>', methods=['GET'])
+def lvol_iostats(pool_uuid):
+    pool = db_controller.get_pool_by_id(pool_uuid)
+    if not pool:
+        return utils.get_response_error(f"Pool not found: {pool_uuid}", 404)
+
+    ret = []
+    for lvol in db_controller.get_lvols_by_pool_id(pool_uuid):
+
+        records_list = db_controller.get_lvol_stats(lvol, limit=1)
+
+        if records_list:
+            data = records_list[0].get_clean_dict()
+        else:
+            data = {}
+        ret.append({
+            "object_data": lvol.get_clean_dict(),
+            "stats": data
+        })
+    return utils.get_response(ret)
