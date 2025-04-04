@@ -75,7 +75,7 @@ SIMPLY_BLOCK_DOCKER_IMAGE = get_from_env_var_file(
 SIMPLY_BLOCK_CLI_NAME = get_from_env_var_file(
         "SIMPLY_BLOCK_COMMAND_NAME", "sbcli")
 SIMPLY_BLOCK_SPDK_ULTRA_IMAGE = get_from_env_var_file(
-        "SIMPLY_BLOCK_SPDK_ULTRA_IMAGE", " public.ecr.aws/simply-block/ultra:main-latest")
+        "SIMPLY_BLOCK_SPDK_ULTRA_IMAGE", "public.ecr.aws/simply-block/ultra:main-latest")
 
 GELF_PORT = 12202
 
