@@ -59,7 +59,8 @@ def get_next_cluster_status(cluster_id):
         else:
             offline_nodes += 1
         for dev in node.nvme_devices:
-            if dev.status in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_JM, NVMeDevice.STATUS_READONLY]:
+            if dev.status in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_JM,
+                              NVMeDevice.STATUS_READONLY, NVMeDevice.STATUS_CANNOT_ALLOCATE]:
                 node_online_devices += 1
             elif dev.status == NVMeDevice.STATUS_FAILED_AND_MIGRATED:
                 pass
@@ -117,8 +118,7 @@ def update_cluster_status(cluster_id):
     cluster = db_controller.get_cluster_by_id(cluster_id)
     current_cluster_status = cluster.status
     logger.info("cluster_status: %s", current_cluster_status)
-    if current_cluster_status in [
-        Cluster.STATUS_READONLY, Cluster.STATUS_UNREADY, Cluster.STATUS_IN_ACTIVATION, Cluster.STATUS_READONLY]:
+    if current_cluster_status in [Cluster.STATUS_UNREADY, Cluster.STATUS_IN_ACTIVATION]:
         return
 
     next_current_status = get_next_cluster_status(cluster_id)
@@ -137,6 +137,9 @@ def update_cluster_status(cluster_id):
     # if cluster.status not in [Cluster.STATUS_ACTIVE, Cluster.STATUS_UNREADY] and cluster_current_status == Cluster.STATUS_ACTIVE:
         # cluster_ops.cluster_activate(cluster_id, True)
         cluster_ops.set_cluster_status(cluster_id, Cluster.STATUS_ACTIVE)
+        return
+    elif current_cluster_status == Cluster.STATUS_READONLY and next_current_status in [
+        Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED]:
         return
     elif current_cluster_status == Cluster.STATUS_SUSPENDED and next_current_status \
             in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED]:

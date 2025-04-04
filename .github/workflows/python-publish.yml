@@ -39,6 +39,9 @@ jobs:
         user: __token__
         password: ${{ secrets.PYPI_API_TOKEN }}
 
+    - name: print package name
+      run: echo "::notice title=PIP Package::$(ls dist)"
+
     - name: Configure AWS Credentials
       uses: aws-actions/configure-aws-credentials@v1
       with:

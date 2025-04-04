@@ -318,6 +318,8 @@ class CLIWrapper(CLIWrapperBase):
         self.init_cluster__list_tasks(subparser)
         self.init_cluster__cancel_task(subparser)
         self.init_cluster__delete(subparser)
+        if self.developer_mode:
+            self.init_cluster__set(subparser)
 
 
     def init_cluster__deploy(self, subparser):
@@ -558,6 +560,12 @@ class CLIWrapper(CLIWrapperBase):
     def init_cluster__delete(self, subparser):
         subcommand = self.add_sub_command(subparser, 'delete', 'Deletes a cluster')
         subcommand.add_argument('cluster_id', help='Cluster id', type=str).completer = self._completer_get_cluster_list
+
+    def init_cluster__set(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'set', 'set cluster db value')
+        subcommand.add_argument('cluster_id', help='cluster id', type=str)
+        subcommand.add_argument('attr_name', help='attr_name', type=str)
+        subcommand.add_argument('attr_value', help='attr_value', type=str)
 
 
     def init_volume(self):
@@ -1108,6 +1116,12 @@ class CLIWrapper(CLIWrapperBase):
                 ret = self.cluster__cancel_task(sub_command, args)
             elif sub_command in ['delete']:
                 ret = self.cluster__delete(sub_command, args)
+            elif sub_command in ['set']:
+                if not self.developer_mode:
+                    print("This command is private.")
+                    ret = False
+                else:
+                    ret = self.cluster__set(sub_command, args)
             else:
                 self.parser.print_help()
 

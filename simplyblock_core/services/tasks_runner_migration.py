@@ -64,10 +64,8 @@ def task_runner(task):
                     logger.error(f"Failed to get online since: {e}")
 
             for dev in node.nvme_devices:
-                if dev.status not in [NVMeDevice.STATUS_ONLINE,
-                                      NVMeDevice.STATUS_FAILED,
-                                      NVMeDevice.STATUS_FAILED_AND_MIGRATED]:
-                    task.function_result = "Some devs are offline, retrying"
+                if dev.status in [NVMeDevice.STATUS_NEW, NVMeDevice.STATUS_UNAVAILABLE]:
+                    task.function_result = f"Some dev status is {dev.status }, retrying"
                     task.status = JobSchedule.STATUS_SUSPENDED
                     task.retry += 1
                     task.write_to_db(db_controller.kv_store)

@@ -364,6 +364,10 @@ class CLIWrapperBase:
         cluster_id = args.cluster_id
         return cluster_ops.get_ssh_pass(cluster_id)
 
+    def cluster__set(self, sub_command, args):
+        cluster_id = args.cluster_id
+        return cluster_ops.set(cluster_id,  args.attr_name, args.attr_value)
+
     def volume__add(self, sub_command, args):
         name = args.name
         size = self.parse_size(args.size)
