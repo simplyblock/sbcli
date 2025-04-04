@@ -1,5 +1,5 @@
 SIMPLY_BLOCK_COMMAND_NAME=sbcli-msn
-SIMPLY_BLOCK_VERSION=0.8.1
+SIMPLY_BLOCK_VERSION=0.8.2
 
 SIMPLY_BLOCK_DOCKER_IMAGE=public.ecr.aws/simply-block/simplyblock:multi-snode
 DOCKER_USER=hamdysimplyblock

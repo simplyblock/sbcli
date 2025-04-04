@@ -1075,10 +1075,8 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
     number_of_alceml_devices = number_of_devices * number_of_split
     # for jm
     number_of_alceml_devices += 1
-    # if is_secondary_node:
-    number_of_distribs *= 2
     small_pool_count, large_pool_count = utils.calculate_pool_count(
-        number_of_alceml_devices, number_of_distribs, req_cpu_count, len(poller_cpu_cores) or req_cpu_count)
+        number_of_alceml_devices, number_of_distribs*2, req_cpu_count, len(poller_cpu_cores) or req_cpu_count)
 
     # Calculate minimum huge page memory
     if spdk_hp_mem:
