@@ -2143,7 +2143,7 @@ def list_storage_devices(node_id, is_json):
             "UUID": device.uuid,
             "Name": device.remote_bdev,
             "Size": utils.humanbytes(device.size),
-            "Node ID": device.device_data_dict["node_id"],
+            "Node ID": device.node_id,
             "Status": device.status,
         })
 
