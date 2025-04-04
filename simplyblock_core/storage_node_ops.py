@@ -1046,6 +1046,14 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
             logger.error("Unsupported instance type please specify --number-of-devices.")
             return False
 
+    if not isinstance(max_prov, int):
+        try:
+            max_prov = int(max_prov)
+            max_prov = f"{max_prov}g"
+        except Exception:
+            pass
+        max_prov = int(utils.parse_size(max_prov))
+    
     if max_prov <= 0:
         logger.error(f"Incorrect max-prov value {max_prov}")
         return False
@@ -1626,6 +1634,15 @@ def restart_storage_node(
         snode.max_lvol = max_lvol
     if max_snap:
         snode.max_snap = max_snap
+
+    if not isinstance(max_prov, int):
+        try:
+            max_prov = int(max_prov)
+            max_prov = f"{max_prov}g"
+            max_prov = int(utils.parse_size(max_prov))
+        except Exception:
+            logger.error(f"Invalid max_prov value: {max_prov}")
+            return False
 
     snode.max_prov = max_prov
     if snode.max_prov <= 0:
