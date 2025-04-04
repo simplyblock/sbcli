@@ -1526,7 +1526,9 @@ commands:
             dest: uid
             type: str
             private: true
-          - name: "--pvc_name"
+          - name: "--pvc-name"
+            aliases:
+              - "--pvc_name"
             help: "Set logical volume PVC name for k8s clients"
             dest: pvc_name
             type: str
