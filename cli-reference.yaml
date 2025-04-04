@@ -1530,6 +1530,11 @@ commands:
             aliases:
               - "--pvc_name"
             help: "Set logical volume PVC name for k8s clients"
+            description: |
+              Set the logical volume persistent volume claim name for Kubernetes clients.<br><br>
+              !!! warning
+                  The old parameter name `--pvc_name` is deprecated and shouldn't be used anymore. It will eventually be
+                  removed. Please exchange the use of `--pvc_name` with `--pvc-name`.
             dest: pvc_name
             type: str
       - name: qos-set
