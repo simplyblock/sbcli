@@ -4,7 +4,6 @@ on:
   push:
     branches:
       - pre-release
-      - sbcli
 
   workflow_dispatch:
     inputs:
