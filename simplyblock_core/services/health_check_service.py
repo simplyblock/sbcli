@@ -99,9 +99,11 @@ while True:
                 else:
                     node_bdev_names = []
 
-                subsystem_list = rpc_client.subsystem_list()
-                if subsystem_list:
-                    subsystem_list = [item['nqn'] for item in subsystem_list]
+                sub_list = rpc_client.subsystem_list()
+                if sub_list:
+                    subsystem_list = [item['nqn'] for item in sub_list]
+                else:
+                    subsystem_list =[]
 
                 for device in snode.nvme_devices:
                     passed = True
