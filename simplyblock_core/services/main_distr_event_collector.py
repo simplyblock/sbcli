@@ -147,6 +147,10 @@ def start_event_collector_on_node(node_id):
                 try:
                     events = client.distr_status_events_discard_then_get(
                         0, constants.DISTR_EVENT_COLLECTOR_NUM_OF_EVENTS * page)
+                    if events is None:
+                        logger.error("No events received")
+                        return
+
                     if events:
                         logger.info(f"Found events: {len(events)}")
                         for event_dict in events:
