@@ -658,9 +658,8 @@ def add_device(device_id):
 
     snodes = db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id)
     for node in snodes:
-        if node.status != StorageNode.STATUS_ONLINE:
-            continue
-        distr_controller.send_cluster_map_add_device(device_obj, node)
+        if node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN]:
+            distr_controller.send_cluster_map_add_device(device_obj, node)
 
     tasks_controller.add_new_device_mig_task(device_id)
     return device_id

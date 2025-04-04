@@ -309,7 +309,7 @@ def send_cluster_map_add_device(device: NVMeDevice, target_node):
         rpc_client = RPCClient(
             target_node.mgmt_ip, target_node.rpc_port, target_node.rpc_username, target_node.rpc_password, timeout=3)
 
-        if target_node.get_id() != dnode.get_id():
+        if target_node.get_id() == dnode.get_id():
             name = device.alceml_bdev
         else:
             name = f"remote_{device.alceml_bdev}n1"
