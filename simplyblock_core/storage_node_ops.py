@@ -2970,8 +2970,6 @@ def recreate_lvstore(snode):
         snode.mgmt_ip, snode.rpc_port,
         snode.rpc_username, snode.rpc_password)
 
-    snode_api = SNodeClient(snode.api_endpoint)
-
     sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
     sec_node_api = SNodeClient(sec_node.api_endpoint)
 
@@ -3005,7 +3003,7 @@ def recreate_lvstore(snode):
             sec_rpc_client = RPCClient(sec_node.mgmt_ip, sec_node.rpc_port, sec_node.rpc_username, sec_node.rpc_password)
             sec_node.lvstore_status = "in_creation"
             sec_node.write_to_db()
-            # time.sleep(3)
+            time.sleep(3)
 
             sec_node_api.firewall_set_port(snode.lvol_subsys_port, "tcp", "block")
             tcp_ports_events.port_deny(sec_node, snode.lvol_subsys_port)
@@ -3032,7 +3030,7 @@ def recreate_lvstore(snode):
     #     logger.info(f"JM Sync res: {ret}")
     #     time.sleep(1)
 
-    executor = ThreadPoolExecutor(max_workers=10)
+    executor = ThreadPoolExecutor(max_workers=100)
 
     for lvol in lvol_list:
         a = executor.submit(add_lvol_thread, lvol, snode, lvol_ana_state)
@@ -3048,7 +3046,7 @@ def recreate_lvstore(snode):
 
 
     if sec_node.status == StorageNode.STATUS_ONLINE:
-        time.sleep(1)
+        time.sleep(10)
         sec_node_api.firewall_set_port(snode.lvol_subsys_port, "tcp", "allow")
         tcp_ports_events.port_allowed(sec_node, snode.lvol_subsys_port)
         sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
@@ -3078,29 +3076,19 @@ def add_lvol_thread(lvol, snode, lvol_ana_state="optimized"):
             return False, msg
 
 
-    ret = rpc_client.nvmf_subsystem_add_ns(lvol.nqn, lvol.top_bdev, lvol.uuid, lvol.guid)
     logger.info("Add BDev to subsystem")
-    logger.info(ret)
-
+    ret = rpc_client.nvmf_subsystem_add_ns(lvol.nqn, lvol.top_bdev, lvol.uuid, lvol.guid)
     for iface in snode.data_nics:
         if iface.ip4_address:
             tr_type = iface.get_transport_type()
             logger.info("adding listener for %s on IP %s" % (lvol.nqn, iface.ip4_address))
-            ret = rpc_client.listeners_create(
-                lvol.nqn, tr_type, iface.ip4_address, lvol.subsys_port, lvol_ana_state)
+            ret = rpc_client.nvmf_subsystem_listener_set_ana_state(
+                lvol.nqn, tr_type, iface.ip4_address, lvol.subsys_port, ana=lvol_ana_state)
 
     lvol_obj = db_controller.get_lvol_by_id(lvol.get_id())
-    if ret:
-
-        lvol_obj.status = LVol.STATUS_ONLINE
-        lvol_obj.io_error = False
-        lvol_obj.health_check = True
-
-    else:
-
-        logger.error(f"Failed to recreate LVol: {lvol_obj.get_id()} on node: {snode.get_id()}")
-        lvol_obj.status = LVol.STATUS_OFFLINE
-
+    lvol_obj.status = LVol.STATUS_ONLINE
+    lvol_obj.io_error = False
+    lvol_obj.health_check = True
     lvol_obj.write_to_db()
     return True, None
 
