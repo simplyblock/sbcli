@@ -1912,7 +1912,8 @@ def restart_storage_node(
     # time.sleep(1)
     snode = db_controller.get_storage_node_by_id(snode.get_id())
     for db_dev in snode.nvme_devices:
-        if db_dev.status in [NVMeDevice.STATUS_UNAVAILABLE, NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_READONLY]:
+        if db_dev.status in [NVMeDevice.STATUS_UNAVAILABLE, NVMeDevice.STATUS_ONLINE,
+                             NVMeDevice.STATUS_CANNOT_ALLOCATE, NVMeDevice.STATUS_READONLY]:
             db_dev.status = NVMeDevice.STATUS_ONLINE
             db_dev.health_check = True
             device_events.device_restarted(db_dev)
@@ -2067,15 +2068,19 @@ def list_storage_devices(node_id, is_json):
         logger.debug(device)
         logger.debug("*" * 20)
         name = device.alceml_name
+        status = device.status
         if device.remote_bdev:
             name = device.remote_bdev
+            org_dev = db_controller.get_storage_device_by_id(device.get_id())
+            if org_dev:
+                status = org_dev.status
 
         remote_devices.append({
             "UUID": device.uuid,
             "Name": name,
             "Size": utils.humanbytes(device.size),
             "Node ID": device.node_id,
-            "Status": device.status,
+            "Status": status,
         })
 
     for device in snode.remote_jm_devices:
@@ -2140,7 +2145,8 @@ def shutdown_storage_node(node_id, force=False):
         device_controller.set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_UNAVAILABLE)
 
     for dev in snode.nvme_devices:
-        if dev.status in [NVMeDevice.STATUS_ONLINE]:
+        if dev.status in [NVMeDevice.STATUS_UNAVAILABLE, NVMeDevice.STATUS_ONLINE,
+                          NVMeDevice.STATUS_CANNOT_ALLOCATE, NVMeDevice.STATUS_READONLY]:
             device_controller.device_set_unavailable(dev.get_id())
 
     # # make other nodes disconnect from this node
@@ -2150,7 +2156,7 @@ def shutdown_storage_node(node_id, force=False):
 
     logger.info("Stopping SPDK")
     if health_controller._check_node_api(snode.mgmt_ip):
-        snode_api = SNodeClient(snode.api_endpoint)
+        snode_api = SNodeClient(snode.api_endpoint, timeout=30, retry=1)
         results, err = snode_api.spdk_process_kill()
 
     logger.info("Setting node status to offline")

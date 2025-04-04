@@ -731,6 +731,7 @@ def handle_task_result(task: JobSchedule, res: dict, allowed_error_codes = None)
                 task.status = JobSchedule.STATUS_SUSPENDED
                 del task.function_params['migration']
 
+            task.status = JobSchedule.STATUS_DONE
             task.write_to_db()
             return True
 
@@ -762,19 +763,16 @@ def get_next_port(cluster_id):
     from simplyblock_core.db_controller import DBController
     db_controller = DBController()
 
-    port = 9090
+    port = constants.LVOL_NVMF_PORT_START
     used_ports = []
     for node in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
-        if node.lvol_subsys_port > 0 and node.lvol_subsys_port != 4420:
+        if node.lvol_subsys_port > 0:
             used_ports.append(node.lvol_subsys_port)
 
-    for i in range(100):
-        next_port = port + i
+    while port in used_ports:
+        port += 1
 
-        if next_port not in used_ports:
-            return next_port
-
-    return 0
+    return port
 
 
 def generate_realtime_variables_file(isolated_cores, realtime_variables_file_path="/etc/tuned/realtime-variables.conf"):

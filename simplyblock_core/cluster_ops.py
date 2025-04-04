@@ -591,7 +591,8 @@ def cluster_activate(cl_id, force=False, force_lvstore_create=False):
         if node.status == node.STATUS_ONLINE:
             online_nodes.append(node)
             for dev in node.nvme_devices:
-                if dev.status == dev.STATUS_ONLINE:
+                if dev.status in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_READONLY,
+                                  NVMeDevice.STATUS_CANNOT_ALLOCATE]:
                     dev_count += 1
     minimum_devices = cluster.distr_ndcs + cluster.distr_npcs + 1
     if dev_count < minimum_devices:
@@ -723,20 +724,11 @@ def cluster_set_read_only(cl_id):
         for node in st:
             if node.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
                 continue
-
-            rpc_client = RPCClient(
-                node.mgmt_ip, node.rpc_port,
-                node.rpc_username, node.rpc_password, timeout=3, retry=2)
-
-            if node.lvstore:
-                rpc_client.bdev_lvol_set_lvs_read_only(node.lvstore, True)
-                if node.secondary_node_id:
-                    sec_node = db_controller.get_storage_node_by_id(node.secondary_node_id)
-                    if sec_node:
-                        sec_rpc_client = RPCClient(
-                            sec_node.mgmt_ip, sec_node.rpc_port,
-                            sec_node.rpc_username, sec_node.rpc_password, timeout=3, retry=2)
-                        sec_rpc_client.bdev_lvol_set_lvs_read_only(node.lvstore, True)
+            for dev in node.nvme_devices:
+                if dev.status == NVMeDevice.STATUS_ONLINE:
+                    # dev_stat = db_controller.get_device_stats(dev, 1)
+                    # if dev_stat and dev_stat[0].size_util >= cluster.cap_crit:
+                    device_controller.device_set_state(dev.get_id(), NVMeDevice.STATUS_CANNOT_ALLOCATE)
 
     return True
 
@@ -758,19 +750,12 @@ def cluster_set_active(cl_id):
             if node.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
                 continue
 
-            rpc_client = RPCClient(
-                node.mgmt_ip, node.rpc_port,
-                node.rpc_username, node.rpc_password, timeout=3, retry=2)
+            for dev in node.nvme_devices:
+                if dev.status in [NVMeDevice.STATUS_CANNOT_ALLOCATE, NVMeDevice.STATUS_READONLY]:
+                    dev_stat = db_controller.get_device_stats(dev, 1)
+                    if dev_stat and dev_stat[0].size_util < cluster.cap_crit:
+                        device_controller.device_set_online(dev.get_id())
 
-            if node.lvstore:
-                rpc_client.bdev_lvol_set_lvs_read_only(node.lvstore, False)
-                if node.secondary_node_id:
-                    sec_node = db_controller.get_storage_node_by_id(node.secondary_node_id)
-                    if sec_node:
-                        sec_rpc_client = RPCClient(
-                            sec_node.mgmt_ip, sec_node.rpc_port,
-                            sec_node.rpc_username, sec_node.rpc_password, timeout=3, retry=2)
-                        sec_rpc_client.bdev_lvol_set_lvs_read_only(node.lvstore, False)
     return True
 
 
@@ -1384,48 +1369,20 @@ def open_db_from_zip(fip_path):
 
 
 
-def cluster_reset():
-    """
+def set(cl_id, attr, value):
+    db_controller = DBController()
+    cluster = db_controller.get_cluster_by_id(cl_id)
+    if not cluster:
+        logger.error(f"Cluster not found {cl_id}")
+        return False
 
+    if attr in cluster.get_attrs_map():
+        try:
+            value = cluster.get_attrs_map()[attr]['type'](value)
+            logger.info(f"Setting {attr} to {value}")
+            setattr(cluster, attr, value)
+            cluster.write_to_db()
+        except:
+            pass
 
-set -x
-
-CMD=$(ls ~/.local/bin/sbcli-* | awk '{n=split($0,a,"/"); print a[n]}')
-cl=$($CMD cluster list | tail -n -3 | awk '{print $2}')
-
-#$CMD cluster graceful-shutdown $cl
-
-for sn_id in $($CMD sn list | grep / | awk '{print $2}'); do
-  $CMD -d sn shutdown --force $sn_id
-done
-
-sudo mv /etc/foundationdb/fdb.cluster /etc/foundationdb/fdb.cluster.bck
-for service_id in $(docker service ls | grep / | awk '{print $1}'); do
-  docker service update "$service_id" --force --detach
-done
-
-# restore
-fdb_cont=$(sudo docker ps | grep "app_fdb-server" | awk '{print $1}')
-sudo docker rm --force $fdb_cont
-sudo rm -rf /etc/foundationdb/data/*
-fdbcli --exec "configure new single ssd ; writemode on ; clearrange \"\" \\xff" -C /etc/foundationdb/fdb.cluster.bck
-BF=$(fdbbackup list -b file:///etc/foundationdb/backup/)
-fdbrestore start -r "$BF" --dest-cluster-file /etc/foundationdb/fdb.cluster.bck -t fresh_deploy
-
-sudo mv /etc/foundationdb/fdb.cluster.bck /etc/foundationdb/fdb.cluster
-
-for service_id in $(docker service ls | grep / | awk '{print $1}'); do
-  docker service update "$service_id" --force --detach
-done
-
-sleep 30
-for sn_id in $($CMD sn list | grep / | awk '{print $2}'); do
-  $CMD -d sn shutdown --force $sn_id
-done
-
-sleep 5
-$CMD -d cluster graceful-startup $cl  --clear-data
-
-$CMD -d cluster activate $cl
-
-    """
+    return True

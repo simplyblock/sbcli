@@ -1436,6 +1436,22 @@ commands:
             dest: cluster_id
             type: str
             completer: _completer_get_cluster_list
+      - name: set
+        help: "set cluster db value"
+        private: true
+        arguments:
+          - name: "cluster_id"
+            help: "cluster id"
+            dest: cluster_id
+            type: str
+          - name: "attr_name"
+            help: "attr_name"
+            dest: attr_name
+            type: str
+          - name: "attr_value"
+            help: "attr_value"
+            dest: attr_value
+            type: str
   - name: "volume"
     help: "Logical volume commands"
     aliases:

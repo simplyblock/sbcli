@@ -20,9 +20,11 @@ logger = utils.get_logger(__name__)
 # get DB controller
 db_controller = db_controller.DBController()
 
+EVENTS_LIST = ['SPDK_BDEV_EVENT_REMOVE', "error_open", 'error_read', "error_write", "error_unmap",
+               "error_write_cannot_allocate"]
 
 def process_device_event(event):
-    if event.message in ['SPDK_BDEV_EVENT_REMOVE', "error_open", 'error_read', "error_write", "error_unmap"]:
+    if event.message in EVENTS_LIST:
         node_id = event.node_id
         storage_id = event.storage_id
         event_node_obj = db_controller.get_storage_node_by_id(node_id)
@@ -41,9 +43,10 @@ def process_device_event(event):
             event.status = 'device_not_found'
             return
 
-        if device_obj.status not in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_READONLY]:
+        if device_obj.status not in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_READONLY,
+                                     NVMeDevice.STATUS_CANNOT_ALLOCATE]:
             logger.info(f"The device is not online, skipping. status: {device_obj.status}")
-            event.status = 'skipped:dev_unav'
+            event.status = f'skipped:dev_{device_obj.status}'
             distr_controller.send_dev_status_event(device_obj, device_obj.status, event_node_obj)
             return
 
@@ -73,7 +76,6 @@ def process_device_event(event):
                 logger.info(f"Setting device to unavailable")
                 device_controller.device_set_unavailable(device_obj.get_id())
                 device_controller.device_set_io_error(device_obj.get_id(), True)
-
         else:
             event_node_obj = db_controller.get_storage_node_by_id(event_node_obj.get_id())
             for dev in event_node_obj.remote_devices:
