@@ -155,7 +155,8 @@ def start_event_collector_on_node(node_id):
                             elif "vuid" in event_dict:
                                 sid = event_dict['vuid']
                             else:
-                                raise ValueError(f'Invalid event_dict: {event_dict}')
+                                logger.error(f"Unknown event: {event_dict}")
+                                continue
 
                             et = event_dict['event_type']
                             msg = event_dict['status']
