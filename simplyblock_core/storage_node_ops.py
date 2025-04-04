@@ -3027,6 +3027,12 @@ def recreate_lvstore(snode):
     for lvol in lvol_list:
         logger.info("creating subsystem %s", lvol.nqn)
         rpc_client.subsystem_create(lvol.nqn, 'sbcli-cn', lvol.uuid, 1)
+        for iface in snode.data_nics:
+            if iface.ip4_address:
+                tr_type = iface.get_transport_type()
+                logger.info("adding listener for %s on IP %s" % (lvol.nqn, iface.ip4_address))
+                ret = rpc_client.listeners_create(
+                    lvol.nqn, tr_type, iface.ip4_address, lvol.subsys_port, "inaccessible")
 
     if sec_node:
 
@@ -3122,7 +3128,6 @@ def add_lvol_thread(lvol, snode, lvol_ana_state="optimized"):
     ret = rpc_client.nvmf_subsystem_add_ns(lvol.nqn, lvol.top_bdev, lvol.uuid, lvol.guid)
     logger.info("Add BDev to subsystem")
     logger.info(ret)
-
     for iface in snode.data_nics:
         if iface.ip4_address:
             tr_type = iface.get_transport_type()
