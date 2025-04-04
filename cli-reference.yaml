@@ -262,12 +262,15 @@ commands:
             type: str
             default: "0"
             private: true
-          - name: "--node-ip"
+          - name: "--node-addr"
+            aliases:
+              - "--node-ip"
             help: "Restart Node on new node"
             description: >
               Allows to restart an existing storage node on new host or hardware. Devices attached to storage nodes
               have to be attached to new hosts. Otherwise, they have to be marked as failed and removed from cluster.
-              Triggers a pro-active migration of data from those devices onto other storage nodes.
+              Triggers a pro-active migration of data from those devices onto other storage nodes.<br><br>
+              The provided value must be presented in the form of _IP:PORT_. Be default the port number is _5000_.
             dest: node_ip
             type: str
           - name: "--number-of-devices"
