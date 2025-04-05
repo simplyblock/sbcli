@@ -1977,8 +1977,8 @@ def restart_storage_node(
 
     cluster = db_controller.get_cluster_by_id(snode.cluster_id)
     if cluster.status in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_READONLY]:
-        ret = recreate_lvstore(snode)
         snode = db_controller.get_storage_node_by_id(snode.get_id())
+        ret = recreate_lvstore(snode)
         if not ret:
             logger.error("Failed to recreate lvstore")
             snode.lvstore_status = "failed"
