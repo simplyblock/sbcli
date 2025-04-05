@@ -250,51 +250,38 @@ while True:
                         storage_node_ops._connect_to_remote_jm_devs(snode)
 
                 lvstore_check = True
-                if snode.lvstore_status != "in_creation":
-                    # node = db_controller.get_storage_node_by_id(snode.lvstore_stack_secondary_1)
-                    # if node and node.status == StorageNode.STATUS_ONLINE and node.lvstore_status == "ready":
-                    #     logger.info(f"Checking stack from node : {node.get_id()}")
-                    #     lvstore_check &= health_controller._check_node_lvstore(
-                    #                node.lvstore_stack, snode, auto_fix=True, node_bdev_names=node_bdev_names)
-                    #     lvol_port_check = False
-                    #     if node_api_check:
-                    #         lvol_port_check = health_controller._check_port_on_node(snode, node.lvol_subsys_port)
-                    #         logger.info(
-                    #             f"Check: node {snode.mgmt_ip}, port: {node.lvol_subsys_port} ... {lvol_port_check}")
-                    #         if not lvol_port_check:
-                    #             if snode.get_id() in nodes_ports_blocked:
-                    #                 nodes_ports_blocked[snode.get_id()].append(node.lvol_subsys_port)
-                    #             else:
-                    #                 nodes_ports_blocked[snode.get_id()] = [node.lvol_subsys_port]
+                snode = db_controller.get_storage_node_by_id(snode.get_id())
+                if snode.lvstore_status == "ready":
 
-                    if not snode.is_secondary_node:
-                        lvstore_stack = snode.lvstore_stack
-                        lvstore_check &= health_controller._check_node_lvstore(
-                            lvstore_stack, snode, auto_fix=True, node_bdev_names=node_bdev_names)
-                        if snode.secondary_node_id:
-                            second_node_1 = db_controller.get_storage_node_by_id(snode.secondary_node_id)
-                            if second_node_1 and second_node_1.status == StorageNode.STATUS_ONLINE:
-                                lvstore_check &= health_controller._check_node_lvstore(lvstore_stack, second_node_1,
-                                                                                       auto_fix=True, stack_src_node=snode)
+                    lvstore_stack = snode.lvstore_stack
+                    lvstore_check &= health_controller._check_node_lvstore(
+                        lvstore_stack, snode, auto_fix=True, node_bdev_names=node_bdev_names)
 
-                        lvol_port_check = False
-                        if node_api_check:
-                            lvol_port_check = health_controller._check_port_on_node(snode, snode.lvol_subsys_port)
-                            logger.info(
-                                f"Check: node {snode.mgmt_ip}, port: {snode.lvol_subsys_port} ... {lvol_port_check}")
-                            if not lvol_port_check:
-                                if snode.get_id() in nodes_ports_blocked:
-                                    nodes_ports_blocked[snode.get_id()].append(snode.lvol_subsys_port)
-                                else:
-                                    nodes_ports_blocked[snode.get_id()] = [snode.lvol_subsys_port]
-                            if snode.secondary_node_id:
-                                second_node_1 = db_controller.get_storage_node_by_id(snode.secondary_node_id)
-                                if second_node_1 and second_node_1.status == StorageNode.STATUS_ONLINE:
-                                    lvol_port_check = health_controller._check_port_on_node(
-                                        second_node_1, snode.lvol_subsys_port)
-                                    logger.info(f"Check: node {second_node_1.mgmt_ip}, port: {snode.lvol_subsys_port} "
-                                                f"... {lvol_port_check}")
+                    if snode.secondary_node_id:
+                        second_node_1 = db_controller.get_storage_node_by_id(snode.secondary_node_id)
+                        if second_node_1 and second_node_1.status == StorageNode.STATUS_ONLINE:
+                            lvstore_check &= health_controller._check_node_lvstore(lvstore_stack, second_node_1,
+                                                                                   auto_fix=True, stack_src_node=snode)
 
+                    lvol_port_check = False
+                    # if node_api_check:
+                    ports = [snode.lvol_subsys_port]
+
+                    if snode.lvstore_stack_secondary_1:
+                        second_node_1 = db_controller.get_storage_node_by_id(snode.lvstore_stack_secondary_1)
+                        if second_node_1 and second_node_1.status == StorageNode.STATUS_ONLINE:
+                            ports.append(second_node_1.lvol_subsys_port)
+
+                    for port in ports:
+                        lvol_port_check = health_controller._check_port_on_node(snode, port)
+                        logger.info(
+                            f"Check: node {snode.mgmt_ip}, port: {port} ... {lvol_port_check}")
+                        if not lvol_port_check:
+                            if snode.get_id() in nodes_ports_blocked:
+                                if port not in nodes_ports_blocked[snode.get_id()]:
+                                    nodes_ports_blocked[snode.get_id()].append(port)
+                            else:
+                                nodes_ports_blocked[snode.get_id()] = [port]
 
                 health_check_status = is_node_online and node_devices_check and node_remote_devices_check and lvstore_check
             set_node_health_check(snode, health_check_status)

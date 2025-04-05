@@ -132,19 +132,20 @@ while True:
                             if not ret:
                                 passed = False
 
+                    if snode.lvstore_status == "ready":
 
-                    logger.info(f"LVol: {lvol.get_id()}, is healthy: {passed}")
-                    set_lvol_health_check(lvol, passed)
-                    if passed:
-                        set_lvol_status(lvol, LVol.STATUS_ONLINE)
+                        logger.info(f"LVol: {lvol.get_id()}, is healthy: {passed}")
+                        set_lvol_health_check(lvol, passed)
+                        if passed:
+                            set_lvol_status(lvol, LVol.STATUS_ONLINE)
 
-                for snap in db_controller.get_snapshots_by_node_id(snode.get_id()):
-                    if snap.snap_bdev in node_bdev_names:
-                        logger.info(f"Checking bdev: {snap.snap_bdev} ... ok")
-                        set_snapshot_health_check(snap, True)
-                    else:
-                        logger.error(f"Checking bdev: {snap.snap_bdev} ... failed")
-                        set_snapshot_health_check(snap, False)
-                        passed = False
+                        for snap in db_controller.get_snapshots_by_node_id(snode.get_id()):
+                            if snap.snap_bdev in node_bdev_names:
+                                logger.info(f"Checking bdev: {snap.snap_bdev} ... ok")
+                                set_snapshot_health_check(snap, True)
+                            else:
+                                logger.error(f"Checking bdev: {snap.snap_bdev} ... failed")
+                                set_snapshot_health_check(snap, False)
+                                passed = False
 
     time.sleep(constants.LVOL_MONITOR_INTERVAL_SEC)

@@ -800,13 +800,12 @@ def _connect_to_remote_devs(this_node, force_conect_restarting_nodes=False):
 
     remote_devices = []
 
-    if force_conect_restarting_nodes:
-        allowed_node_statuses = [StorageNode.STATUS_ONLINE, StorageNode.STATUS_RESTARTING]
-        allowed_dev_statuses = [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_UNAVAILABLE, NVMeDevice.STATUS_READONLY]
-    else:
-        allowed_node_statuses = [StorageNode.STATUS_ONLINE]
-        allowed_dev_statuses = [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_READONLY]
+    allowed_node_statuses = [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN]
+    allowed_dev_statuses = [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_READONLY, NVMeDevice.STATUS_CANNOT_ALLOCATE]
 
+    if force_conect_restarting_nodes:
+        allowed_node_statuses.append(StorageNode.STATUS_RESTARTING)
+        allowed_dev_statuses.append(NVMeDevice.STATUS_UNAVAILABLE)
 
     nodes = db_controller.get_storage_nodes_by_cluster_id(this_node.cluster_id)
     # connect to remote devs
@@ -920,7 +919,7 @@ def _connect_to_remote_jm_devs(this_node, jm_ids=[]):
                 logger.debug(f"bdev found {bdev_name}")
                 org_dev.status = JMDevice.STATUS_ONLINE
                 new_devs.append(org_dev)
-            else:
+            elif org_dev_node.status == StorageNode.STATUS_ONLINE:
                 if rpc_client.bdev_nvme_controller_list(name):
                     logger.info(f"detaching {name} from {this_node.get_id()}")
                     rpc_client.bdev_nvme_detach_controller(name)
@@ -934,6 +933,9 @@ def _connect_to_remote_jm_devs(this_node, jm_ids=[]):
                 else:
                     logger.error(f"failed to connect to remote JM {name}")
                     org_dev.status = JMDevice.STATUS_UNAVAILABLE
+                new_devs.append(org_dev)
+            else:
+                org_dev.status = JMDevice.STATUS_UNAVAILABLE
                 new_devs.append(org_dev)
 
         else:
