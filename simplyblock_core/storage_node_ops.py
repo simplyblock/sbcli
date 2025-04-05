@@ -3121,7 +3121,7 @@ def add_lvol_thread(lvol, snode, lvol_ana_state="optimized"):
             tr_type = iface.get_transport_type()
             logger.info("adding listener for %s on IP %s" % (lvol.nqn, iface.ip4_address))
             ret = rpc_client.nvmf_subsystem_listener_set_ana_state(
-                lvol.nqn, tr_type, iface.ip4_address, lvol.subsys_port, ana=lvol_ana_state)
+                lvol.nqn, iface.ip4_address, lvol.subsys_port, ana=lvol_ana_state)
 
     lvol_obj = db_controller.get_lvol_by_id(lvol.get_id())
     # if ret:
