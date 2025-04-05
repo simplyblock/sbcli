@@ -1397,11 +1397,6 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
             continue
         ret = distr_controller.send_cluster_map_add_node(snode, node)
 
-    for dev in snode.nvme_devices:
-        if dev.status == NVMeDevice.STATUS_ONLINE:
-            tasks_controller.add_new_device_mig_task(dev.get_id())
-
-
     # Create distribs
     max_size = cluster.cluster_max_size
     ret = create_lvstore(snode, cluster.distr_ndcs, cluster.distr_npcs, cluster.distr_bs,
@@ -1416,6 +1411,10 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
         snode.write_to_db()
         logger.error("Failed to create lvstore")
         return False
+
+    for dev in snode.nvme_devices:
+        if dev.status == NVMeDevice.STATUS_ONLINE:
+            tasks_controller.add_new_device_mig_task(dev.get_id())
 
     storage_events.snode_add(snode)
     logger.info("Done")
@@ -1674,7 +1673,7 @@ def restart_storage_node(
             else:
                 logger.error("Unsupported instance type please specify --number-of-devices")
                 return False
-    snode.number_of_devices = number_of_devices
+    # snode.number_of_devices = number_of_devices
 
     number_of_split = snode.num_partitions_per_dev if snode.num_partitions_per_dev else snode.num_partitions_per_dev + 1
     number_of_alceml_devices = number_of_devices * number_of_split
@@ -1956,16 +1955,15 @@ def restart_storage_node(
 
     cluster = db_controller.get_cluster_by_id(snode.cluster_id)
     if cluster.status in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_READONLY]:
-        if snode.lvstore_stack or snode.is_secondary_node:
-            ret = recreate_lvstore(snode)
-            snode = db_controller.get_storage_node_by_id(snode.get_id())
-            if not ret:
-                logger.error("Failed to recreate lvstore")
-                snode.lvstore_status = "failed"
-                snode.write_to_db()
-            else:
-                snode.lvstore_status = "ready"
-                snode.write_to_db()
+        ret = recreate_lvstore(snode)
+        snode = db_controller.get_storage_node_by_id(snode.get_id())
+        if not ret:
+            logger.error("Failed to recreate lvstore")
+            snode.lvstore_status = "failed"
+            snode.write_to_db()
+        else:
+            snode.lvstore_status = "ready"
+            snode.write_to_db()
 
     if cluster.status in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_READONLY]:
         for dev in snode.nvme_devices:
@@ -2072,7 +2070,7 @@ def list_storage_devices(node_id, is_json):
             "JM_VUID": distrib_params['jm_vuid'],
         })
 
-    if snode.jm_device:
+    if snode.jm_device and snode.jm_device.get_id():
         jm_devices.append({
             "UUID": snode.jm_device.uuid,
             "Name": snode.jm_device.alceml_name,
@@ -2108,7 +2106,7 @@ def list_storage_devices(node_id, is_json):
             "UUID": device.uuid,
             "Name": device.remote_bdev,
             "Size": utils.humanbytes(device.size),
-            "Node ID": device.device_data_dict["node_id"],
+            "Node ID": device.node_id,
             "Status": device.status,
         })
 
