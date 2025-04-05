@@ -797,13 +797,12 @@ def _connect_to_remote_devs(this_node, force_conect_restarting_nodes=False):
 
     remote_devices = []
 
-    if force_conect_restarting_nodes:
-        allowed_node_statuses = [StorageNode.STATUS_ONLINE, StorageNode.STATUS_RESTARTING]
-        allowed_dev_statuses = [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_UNAVAILABLE, NVMeDevice.STATUS_READONLY]
-    else:
-        allowed_node_statuses = [StorageNode.STATUS_ONLINE]
-        allowed_dev_statuses = [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_READONLY]
+    allowed_node_statuses = [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN]
+    allowed_dev_statuses = [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_READONLY, NVMeDevice.STATUS_CANNOT_ALLOCATE]
 
+    if force_conect_restarting_nodes:
+        allowed_node_statuses.append(StorageNode.STATUS_RESTARTING)
+        allowed_dev_statuses.append(NVMeDevice.STATUS_UNAVAILABLE)
 
     nodes = db_controller.get_storage_nodes_by_cluster_id(this_node.cluster_id)
     # connect to remote devs
@@ -1955,8 +1954,8 @@ def restart_storage_node(
 
     cluster = db_controller.get_cluster_by_id(snode.cluster_id)
     if cluster.status in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_READONLY]:
-        ret = recreate_lvstore(snode)
         snode = db_controller.get_storage_node_by_id(snode.get_id())
+        ret = recreate_lvstore(snode)
         if not ret:
             logger.error("Failed to recreate lvstore")
             snode.lvstore_status = "failed"
@@ -2867,27 +2866,27 @@ def recreate_lvstore_on_sec(snode):
         node.lvstore_status = "in_creation"
         node.write_to_db()
 
-        time.sleep(3)
-
         lvol_list = db_controller.get_lvols_by_node_id(node.get_id())
+
+        ret, err = _create_bdev_stack(snode, node.lvstore_stack, primary_node=node)
+        if err:
+            logger.error(f"Failed to recreate lvstore on node {snode.get_id()}")
+            logger.error(err)
+            return False
 
         node_api = SNodeClient(node.api_endpoint)
         sec_node_api = SNodeClient(snode.api_endpoint)
 
-        sec_node_api.firewall_set_port(node.lvol_subsys_port, "tcp", "block")
-        tcp_ports_events.port_deny(snode, node.lvol_subsys_port)
-
-        ret, err = _create_bdev_stack(snode, node.lvstore_stack, primary_node=node)
 
         for lvol in lvol_list:
             logger.info("creating subsystem %s", lvol.nqn)
             rpc_client.subsystem_create(lvol.nqn, 'sbcli-cn', lvol.uuid, 1000)
-            # for iface in snode.data_nics:
-            #     if iface.ip4_address:
-            #         tr_type = iface.get_transport_type()
-            #         logger.info("adding listener for %s on IP %s" % (lvol.nqn, iface.ip4_address))
-            #         ret = rpc_client.listeners_create(
-            #             lvol.nqn, tr_type, iface.ip4_address, lvol.subsys_port, "non_optimized")
+            for iface in snode.data_nics:
+                if iface.ip4_address:
+                    tr_type = iface.get_transport_type()
+                    logger.info("adding listener for %s on IP %s" % (lvol.nqn, iface.ip4_address))
+                    ret = rpc_client.listeners_create(
+                        lvol.nqn, tr_type, iface.ip4_address, lvol.subsys_port, "inaccessible")
 
         if node.status == StorageNode.STATUS_ONLINE:
             # for lvol in lvol_list:
@@ -2907,43 +2906,22 @@ def recreate_lvstore_on_sec(snode):
         ret = rpc_client.bdev_wait_for_examine()
         ret = rpc_client.bdev_lvol_set_lvs_ops(node.lvstore, node.jm_vuid, node.lvol_subsys_port)
 
-        if node.status == StorageNode.STATUS_ONLINE:
+        node_api.firewall_set_port(node.lvol_subsys_port, "tcp", "allow")
+        tcp_ports_events.port_allowed(node, node.lvol_subsys_port)
 
-            node_api.firewall_set_port(node.lvol_subsys_port, "tcp", "allow")
-            tcp_ports_events.port_allowed(node, node.lvol_subsys_port)
+        executor = ThreadPoolExecutor(max_workers=100)
 
-            node = db_controller.get_storage_node_by_id(node.get_id())
-            node.lvstore_status = "ready"
-            node.write_to_db()
-
-        # time.sleep(1)
         for lvol in lvol_list:
-            is_created, error = add_lvol_thread(lvol, snode, lvol_ana_state="non_optimized")
-            for iface in node.data_nics:
-                if iface.ip4_address:
-                    ret = remote_rpc_client.nvmf_subsystem_listener_set_ana_state(
-                        lvol.nqn, iface.ip4_address, lvol.subsys_port, True)
+            a = executor.submit(add_lvol_thread, lvol, snode,  lvol_ana_state="non_optimized")
 
-            # is_created, error = lvol_controller.recreate_lvol_on_node(
-            #     lvol, snode, 1, "non-optimize")
-            # if error:
-            #     logger.error(f"Failed to recreate LVol: {lvol.get_id()} on node: {snode.get_id()}")
-            #     lvol.status = LVol.STATUS_OFFLINE
-            # else:
-            #     lvol.status = LVol.STATUS_ONLINE
-            #     lvol.io_error = False
-            #     lvol.health_check = True
-            # lvol.write_to_db(db_controller.kv_store)
-
-        time.sleep(10)
+        time.sleep(5)
         sec_node_api.firewall_set_port(node.lvol_subsys_port, "tcp", "allow")
         tcp_ports_events.port_allowed(snode, node.lvol_subsys_port)
 
-        # for lvol in lvol_list:
-        #     for iface in snode.data_nics:
-        #         if iface.ip4_address:
-        #             ret = rpc_client.nvmf_subsystem_listener_set_ana_state(
-        #                 lvol.nqn, iface.ip4_address, lvol.subsys_port, False)
+        node = db_controller.get_storage_node_by_id(node.get_id())
+        node.lvstore_status = "ready"
+        node.write_to_db()
+
 
     return True
 
@@ -2957,7 +2935,7 @@ def recreate_lvstore(snode):
     if snode.is_secondary_node:
         return recreate_lvstore_on_sec(snode)
 
-    ret, err = _create_bdev_stack(snode, [], primary_node=snode)
+    ret, err = _create_bdev_stack(snode, [])
 
     if err:
         logger.error(f"Failed to recreate lvstore on node {snode.get_id()}")
@@ -3033,10 +3011,6 @@ def recreate_lvstore(snode):
     for lvol in lvol_list:
         a = executor.submit(add_lvol_thread, lvol, snode, lvol_ana_state)
 
-    # time.sleep(1)
-    # snode_api.firewall_set_port(snode.lvol_subsys_port, "tcp", "allow")
-    # tcp_ports_events.port_allowed(snode, snode.lvol_subsys_port)
-
     if prim_node_suspend:
         logger.info("Node restart interrupted because secondary node is unreachable")
         logger.info("Node status changed to suspended")
@@ -3044,7 +3018,7 @@ def recreate_lvstore(snode):
 
 
     if sec_node.status == StorageNode.STATUS_ONLINE:
-        time.sleep(10)
+        time.sleep(5)
         sec_node_api.firewall_set_port(snode.lvol_subsys_port, "tcp", "allow")
         tcp_ports_events.port_allowed(sec_node, snode.lvol_subsys_port)
         sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
@@ -3060,12 +3034,10 @@ def add_lvol_thread(lvol, snode, lvol_ana_state="optimized"):
 
     rpc_client = RPCClient(
         snode.mgmt_ip, snode.rpc_port,
-        snode.rpc_username, snode.rpc_password)
-
-
-    base = f"{lvol.lvs_name}/{lvol.lvol_bdev}"
+        snode.rpc_username, snode.rpc_password, timeout=5, retry=2)
 
     if "crypto" in lvol.lvol_type:
+        base = f"{lvol.lvs_name}/{lvol.lvol_bdev}"
         ret = lvol_controller._create_crypto_lvol(
             rpc_client, lvol.crypto_bdev, base, lvol.crypto_key1, lvol.crypto_key2)
         if not ret:
@@ -3073,15 +3045,13 @@ def add_lvol_thread(lvol, snode, lvol_ana_state="optimized"):
             logger.error(msg)
             return False, msg
 
-
     logger.info("Add BDev to subsystem")
     ret = rpc_client.nvmf_subsystem_add_ns(lvol.nqn, lvol.top_bdev, lvol.uuid, lvol.guid)
     for iface in snode.data_nics:
         if iface.ip4_address:
-            tr_type = iface.get_transport_type()
             logger.info("adding listener for %s on IP %s" % (lvol.nqn, iface.ip4_address))
             ret = rpc_client.nvmf_subsystem_listener_set_ana_state(
-                lvol.nqn, tr_type, iface.ip4_address, lvol.subsys_port, ana=lvol_ana_state)
+                lvol.nqn, iface.ip4_address, lvol.subsys_port, ana=lvol_ana_state)
 
     lvol_obj = db_controller.get_lvol_by_id(lvol.get_id())
     lvol_obj.status = LVol.STATUS_ONLINE
