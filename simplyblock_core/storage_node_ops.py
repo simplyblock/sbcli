@@ -2097,7 +2097,7 @@ def list_storage_devices(node_id, is_json):
             "JM_VUID": distrib_params['jm_vuid'],
         })
 
-    if snode.jm_device:
+    if snode.jm_device and snode.jm_device.get_id():
         jm_devices.append({
             "UUID": snode.jm_device.uuid,
             "Name": snode.jm_device.alceml_name,
@@ -3046,7 +3046,7 @@ def recreate_lvstore(snode):
             sec_rpc_client = RPCClient(sec_node.mgmt_ip, sec_node.rpc_port, sec_node.rpc_username, sec_node.rpc_password)
             sec_node.lvstore_status = "in_creation"
             sec_node.write_to_db()
-            # time.sleep(3)
+            time.sleep(3)
 
             sec_node_api.firewall_set_port(snode.lvol_subsys_port, "tcp", "block", sec_node.rpc_port)
             tcp_ports_events.port_deny(sec_node, snode.lvol_subsys_port)
@@ -3073,7 +3073,7 @@ def recreate_lvstore(snode):
     #     logger.info(f"JM Sync res: {ret}")
     #     time.sleep(1)
 
-    executor = ThreadPoolExecutor(max_workers=10)
+    executor = ThreadPoolExecutor(max_workers=100)
 
     for lvol in lvol_list:
         a = executor.submit(add_lvol_thread, lvol, snode, lvol_ana_state)
@@ -3117,7 +3117,7 @@ def add_lvol_thread(lvol, snode, lvol_ana_state="optimized"):
 
     rpc_client = RPCClient(
         snode.mgmt_ip, snode.rpc_port,
-        snode.rpc_username, snode.rpc_password)
+        snode.rpc_username, snode.rpc_password, timeout=5, retry=2)
 
 
     base = f"{lvol.lvs_name}/{lvol.lvol_bdev}"
@@ -3138,20 +3138,20 @@ def add_lvol_thread(lvol, snode, lvol_ana_state="optimized"):
         if iface.ip4_address:
             tr_type = iface.get_transport_type()
             logger.info("adding listener for %s on IP %s" % (lvol.nqn, iface.ip4_address))
-            ret = rpc_client.listeners_create(
-                lvol.nqn, tr_type, iface.ip4_address, lvol.subsys_port, lvol_ana_state)
+            ret = rpc_client.nvmf_subsystem_listener_set_ana_state(
+                lvol.nqn, tr_type, iface.ip4_address, lvol.subsys_port, ana=lvol_ana_state)
 
     lvol_obj = db_controller.get_lvol_by_id(lvol.get_id())
-    if ret:
+    # if ret:
 
-        lvol_obj.status = LVol.STATUS_ONLINE
-        lvol_obj.io_error = False
-        lvol_obj.health_check = True
+    lvol_obj.status = LVol.STATUS_ONLINE
+    lvol_obj.io_error = False
+    lvol_obj.health_check = True
 
-    else:
-
-        logger.error(f"Failed to recreate LVol: {lvol_obj.get_id()} on node: {snode.get_id()}")
-        lvol_obj.status = LVol.STATUS_OFFLINE
+    # else:
+    #
+    #     logger.error(f"Failed to recreate LVol: {lvol_obj.get_id()} on node: {snode.get_id()}")
+    #     lvol_obj.status = LVol.STATUS_OFFLINE
 
     lvol_obj.write_to_db()
     return True, None
