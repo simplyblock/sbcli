@@ -2881,12 +2881,12 @@ def recreate_lvstore_on_sec(snode):
         for lvol in lvol_list:
             logger.info("creating subsystem %s", lvol.nqn)
             rpc_client.subsystem_create(lvol.nqn, 'sbcli-cn', lvol.uuid, 1000)
-            for iface in snode.data_nics:
-                if iface.ip4_address:
-                    tr_type = iface.get_transport_type()
-                    logger.info("adding listener for %s on IP %s" % (lvol.nqn, iface.ip4_address))
-                    ret = rpc_client.listeners_create(
-                        lvol.nqn, tr_type, iface.ip4_address, lvol.subsys_port, "inaccessible")
+            # for iface in snode.data_nics:
+                # if iface.ip4_address:
+                #     tr_type = iface.get_transport_type()
+                #     logger.info("adding listener for %s on IP %s" % (lvol.nqn, iface.ip4_address))
+                #     ret = rpc_client.listeners_create(
+                #         lvol.nqn, tr_type, iface.ip4_address, lvol.subsys_port, "inaccessible")
 
         if node.status == StorageNode.STATUS_ONLINE:
             # for lvol in lvol_list:
@@ -2966,12 +2966,12 @@ def recreate_lvstore(snode):
     for lvol in lvol_list:
         logger.info("creating subsystem %s", lvol.nqn)
         rpc_client.subsystem_create(lvol.nqn, 'sbcli-cn', lvol.uuid, 1)
-        for iface in snode.data_nics:
-            if iface.ip4_address:
-                tr_type = iface.get_transport_type()
-                logger.info("adding listener for %s on IP %s" % (lvol.nqn, iface.ip4_address))
-                ret = rpc_client.listeners_create(
-                    lvol.nqn, tr_type, iface.ip4_address, lvol.subsys_port, "inaccessible")
+        # for iface in snode.data_nics:
+        #     if iface.ip4_address:
+        #         tr_type = iface.get_transport_type()
+        #         logger.info("adding listener for %s on IP %s" % (lvol.nqn, iface.ip4_address))
+        #         ret = rpc_client.listeners_create(
+        #             lvol.nqn, tr_type, iface.ip4_address, lvol.subsys_port, "inaccessible")
 
     if sec_node:
 
@@ -3050,8 +3050,8 @@ def add_lvol_thread(lvol, snode, lvol_ana_state="optimized"):
     for iface in snode.data_nics:
         if iface.ip4_address:
             logger.info("adding listener for %s on IP %s" % (lvol.nqn, iface.ip4_address))
-            ret = rpc_client.nvmf_subsystem_listener_set_ana_state(
-                lvol.nqn, iface.ip4_address, lvol.subsys_port, ana=lvol_ana_state)
+            ret = rpc_client.listeners_create(
+                lvol.nqn, iface.get_transport_type(), iface.ip4_address, lvol.subsys_port, ana_state=lvol_ana_state)
 
     lvol_obj = db_controller.get_lvol_by_id(lvol.get_id())
     lvol_obj.status = LVol.STATUS_ONLINE
