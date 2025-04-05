@@ -3030,6 +3030,9 @@ def recreate_lvstore(snode):
         set_node_status(snode.get_id(), StorageNode.STATUS_SUSPENDED)
         lvol_ana_state = "inaccessible"
 
+    snode_api.firewall_set_port(snode.lvol_subsys_port, "tcp", "block", snode.rpc_port)
+    tcp_ports_events.port_deny(snode, snode.lvol_subsys_port)
+
     for lvol in lvol_list:
         logger.info("creating subsystem %s", lvol.nqn)
         rpc_client.subsystem_create(lvol.nqn, 'sbcli-cn', lvol.uuid, 1)
@@ -3078,9 +3081,9 @@ def recreate_lvstore(snode):
     for lvol in lvol_list:
         a = executor.submit(add_lvol_thread, lvol, snode, lvol_ana_state)
 
-    # time.sleep(1)
-    # snode_api.firewall_set_port(snode.lvol_subsys_port, "tcp", "allow")
-    # tcp_ports_events.port_allowed(snode, snode.lvol_subsys_port)
+    time.sleep(1)
+    snode_api.firewall_set_port(snode.lvol_subsys_port, "tcp", "allow", snode.rpc_port)
+    tcp_ports_events.port_allowed(snode, snode.lvol_subsys_port)
 
     if prim_node_suspend:
         logger.info("Node restart interrupted because secondary node is unreachable")
@@ -3089,11 +3092,11 @@ def recreate_lvstore(snode):
 
 
     if sec_node.status == StorageNode.STATUS_ONLINE:
-        ret = recreate_lvstore_on_sec(sec_node)
-        if not ret:
-            logger.error(f"Failed to recreate secondary node: {sec_node.get_id()}")
+        # ret = recreate_lvstore_on_sec(sec_node)
+        # if not ret:
+        #     logger.error(f"Failed to recreate secondary node: {sec_node.get_id()}")
 
-        time.sleep(1)
+        time.sleep(10)
         sec_node_api.firewall_set_port(snode.lvol_subsys_port, "tcp", "allow", sec_node.rpc_port)
         tcp_ports_events.port_allowed(sec_node, snode.lvol_subsys_port)
         sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
