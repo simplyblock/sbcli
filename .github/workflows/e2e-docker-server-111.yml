@@ -15,7 +15,7 @@ on:
       sbcli_cmd:
         description: 'Command for sbcli execution'
         required: true
-        default: 'sbcli-dev'
+        default: 'sbcli'
       ndcs:
         description: 'Value for NDCS'
         required: false
@@ -101,8 +101,8 @@ jobs:
             echo "Branch is sbcli. Setting SBCLI_CMD to sbcli."
             echo "SBCLI_CMD=sbcli" >> $GITHUB_ENV
           else
-            echo "Setting SBCLI_CMD to input or default to sbcli-dev."
-            echo "SBCLI_CMD=${{ github.event.inputs.sbcli_cmd || 'sbcli-dev' }}" >> $GITHUB_ENV
+            echo "Setting SBCLI_CMD to input or default to sbcli."
+            echo "SBCLI_CMD=${{ github.event.inputs.sbcli_cmd || 'sbcli' }}" >> $GITHUB_ENV
           fi
           echo "NDCS=${{ github.event.inputs.ndcs || 2 }}" >> $GITHUB_ENV
           echo "NPCS=${{ github.event.inputs.npcs || 1 }}" >> $GITHUB_ENV
