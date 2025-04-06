@@ -3,7 +3,7 @@
 set -e
 
 # Variables
-SBCLI_CMD="sbcli-dev"
+SBCLI_CMD="sbcli"
 # cloning for xfs does not work well
 MOUNT_DIR="/mnt"
 
