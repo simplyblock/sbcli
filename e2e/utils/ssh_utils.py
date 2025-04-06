@@ -38,7 +38,7 @@ class SshUtils:
     def __init__(self, bastion_server):
         self.ssh_connections = dict()
         self.bastion_server = bastion_server
-        self.base_cmd = os.environ.get("SBCLI_CMD", "sbcli-dev")
+        self.base_cmd = os.environ.get("SBCLI_CMD", "sbcli")
         self.logger = setup_logger(__name__)
         self.fio_runtime = {}
         self.ssh_user = os.environ.get("SSH_USER", None)
