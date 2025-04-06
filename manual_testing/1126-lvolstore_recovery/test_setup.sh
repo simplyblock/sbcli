@@ -3,7 +3,7 @@
 set -e
 
 # Variables
-SBCLI_CMD="sbcli-dev"
+SBCLI_CMD="sbcli"
 POOL_NAME="testing1"
 LVOL_SIZE="300G"
 # cloning for xfs does not work well
