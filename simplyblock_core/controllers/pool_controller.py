@@ -12,6 +12,7 @@ from simplyblock_core import utils
 from simplyblock_core.controllers import pool_events
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.pool import Pool
+from simplyblock_core.rpc_client import RPCClient
 
 logger = lg.getLogger()
 
@@ -27,7 +28,8 @@ def add_pool(name, pool_max, lvol_max, max_rw_iops, max_rw_mbytes, max_r_mbytes,
         logger.error("Pool name is empty!")
         return False
 
-    for p in db_controller.get_pools():
+    pool_list = db_controller.get_pools()
+    for p in pool_list:
         if p.pool_name == name:
             logger.error(f"Pool found with the same name: {name}")
             return False
@@ -53,6 +55,7 @@ def add_pool(name, pool_max, lvol_max, max_rw_iops, max_rw_mbytes, max_r_mbytes,
     pool = Pool()
     pool.uuid = str(uuid.uuid4())
     pool.cluster_id = cluster.get_id()
+    pool.numeric_id = _generate_numeric_id(pool_list)
     pool.pool_name = name
     if has_secret:
         pool.secret = _generate_string(20)
@@ -68,6 +71,16 @@ def add_pool(name, pool_max, lvol_max, max_rw_iops, max_rw_mbytes, max_r_mbytes,
     pool_events.pool_add(pool)
     logger.info("Done")
     return pool.get_id()
+
+def _generate_numeric_id(pool_list: list[Pool]):
+    if (pool_list is None) or (len(pool_list) == 0):
+        return 1
+
+    existing_ids = []
+    for p in pool_list:
+        existing_ids.append(p.numeric_id)
+
+    return (max(existing_ids) + 1)
 
 
 def set_pool_value_if_above(pool, key, value):
@@ -100,18 +113,31 @@ def set_pool(uuid, pool_max, lvol_max, max_rw_iops,
         if not set_pool_value_if_above(pool, "lvol_max_size", lvol_max):
             return False
 
-    if max_rw_iops:
-        if not set_pool_value_if_above(pool, "max_rw_ios_per_sec", max_rw_iops):
-            return False
-    if max_rw_mbytes:
-        if not set_pool_value_if_above(pool, "max_rw_mbytes_per_sec", max_rw_mbytes):
-            return False
-    if max_r_mbytes:
-        if not set_pool_value_if_above(pool, "max_r_mbytes_per_sec", max_r_mbytes):
-            return False
-    if max_w_mbytes:
-        if not set_pool_value_if_above(pool, "max_w_mbytes_per_sec", max_w_mbytes):
-            return False
+    if max_rw_iops is None:
+        max_rw_iops = 0
+    if max_rw_mbytes is None:
+        max_rw_mbytes = 0
+    if max_r_mbytes is None:
+        max_r_mbytes = 0
+    if max_w_mbytes is None:
+        max_w_mbytes = 0
+
+    pool.max_rw_ios_per_sec = max_rw_iops
+    pool.max_rw_mbytes_per_sec = max_rw_mbytes
+    pool.max_r_mbytes_per_sec = max_r_mbytes
+    pool.max_w_mbytes_per_sec = max_w_mbytes
+
+    snode = db_controller.get_storage_node_by_hostname(pool.hostname)
+    rpc_client = RPCClient(
+        snode.mgmt_ip,
+        snode.rpc_port,
+        snode.rpc_username,
+        snode.rpc_password)
+
+    ret = rpc_client.bdev_lvol_set_qos_limit(pool.numeric_id, max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes)
+    if not ret:
+        logger.error("RPC failed bdev_lvol_set_qos_limit")
+        return False
 
     pool.write_to_db(db_controller.kv_store)
     pool_events.pool_updated(pool)

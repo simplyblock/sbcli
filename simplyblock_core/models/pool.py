@@ -25,6 +25,8 @@ class Pool(BaseModel):
     max_w_mbytes_per_sec: int = 0
     pool_max_size: int = 0
     pool_name: str = ""
+    numeric_id: int = 0
+    hostname: str = ""
     secret: str = ""
     users: List[str] = []
 

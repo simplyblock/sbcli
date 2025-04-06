@@ -588,9 +588,11 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
     lvol.write_to_db(db_controller.kv_store)
     lvol_events.lvol_create(lvol)
 
+    connect_lvol_to_pool(lvol.uuid)
+
     # set QOS
-    if max_rw_iops or max_rw_mbytes or max_r_mbytes or max_w_mbytes:
-        set_lvol(lvol.uuid, max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes)
+#    if max_rw_iops or max_rw_mbytes or max_r_mbytes or max_w_mbytes:
+#        set_lvol(lvol.uuid, max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes)
     return lvol.uuid, None
 
 
@@ -999,6 +1001,35 @@ def delete_lvol(id_or_name, force_delete=False):
     logger.info("Done")
     return True
 
+def connect_lvol_to_pool(uuid):
+    db_controller = DBController()
+    lvol = db_controller.get_lvol_by_id(uuid)
+    if not lvol:
+        logger.error(f"lvol not found: {uuid}")
+        return False
+    pool = db_controller.get_pool_by_id(lvol.pool_uuid)
+    if pool.status == Pool.STATUS_INACTIVE:
+        logger.error(f"Pool is disabled")
+        return False
+
+    snode = db_controller.get_storage_node_by_hostname(lvol.hostname)
+    # creating RPCClient instance
+    rpc_client = RPCClient(
+        snode.mgmt_ip,
+        snode.rpc_port,
+        snode.rpc_username,
+        snode.rpc_password)
+
+    ret = rpc_client.bdev_lvol_add_to_group(pool.numeric_id, [lvol.top_bdev])
+    if not ret:
+        logger.error("RPC failed bdev_lvol_add_to_group")
+        return False
+
+    pool.hostname = lvol.hostname
+    lvol.write_to_db(db_controller.kv_store)
+    pool.write_to_db(db_controller.kv_store)
+    logger.info("Done")
+    return True
 
 def set_lvol(uuid, max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes, name=None):
     db_controller = DBController()
