@@ -3,7 +3,7 @@
 set -e
 
 # Variables
-SBCLI_CMD="sbcli-dev"
+SBCLI_CMD="sbcli"
 SLEEP_INTEVAL=30
 
 
