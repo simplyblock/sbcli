@@ -141,8 +141,8 @@ jobs:
             echo "Branch is sbcli. Setting SBCLI_CMD to sbcli."
             echo "SBCLI_CMD=sbcli" >> $GITHUB_ENV
           else
-            echo "Setting SBCLI_CMD to input or default to sbcli-dev."
-            echo "SBCLI_CMD=${{ github.event.inputs.sbcli_cmd || 'sbcli-dev' }}" >> $GITHUB_ENV
+            echo "Setting SBCLI_CMD to input or default to sbcli."
+            echo "SBCLI_CMD=${{ github.event.inputs.sbcli_cmd || 'sbcli' }}" >> $GITHUB_ENV
           fi
           echo "NDCS=${{ github.event.inputs.ndcs || 2 }}" >> $GITHUB_ENV
           echo "NPCS=${{ github.event.inputs.npcs || 1 }}" >> $GITHUB_ENV
@@ -250,7 +250,7 @@ jobs:
       #         -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no \
       #         -o ProxyCommand="ssh -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -i \"$HOME/.ssh/${{ steps.terraform_outputs.outputs.key_name }}\" -W %h:%p ec2-user@${{ steps.terraform_outputs.outputs.bastion_public_ip }}" \
       #         ec2-user@${{ steps.terraform_outputs.outputs.mgmt_private_ip }} \
-      #         "sbcli-dev sn list | grep -Eo 'online|offline'" || echo "SSH command failed")
+      #         "sbcli sn list | grep -Eo 'online|offline'" || echo "SSH command failed")
 
       #       SSH_EXIT_CODE=$?
       #       if [ $SSH_EXIT_CODE -ne 0 ]; then
@@ -260,7 +260,7 @@ jobs:
       #       fi
 
       #       if [ -z "$NODE_STATUS" ]; then
-      #         echo "No output from sbcli-dev sn list. Retrying..."
+      #         echo "No output from sbcli sn list. Retrying..."
       #         sleep 30
       #         continue
       #       fi
