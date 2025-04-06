@@ -244,7 +244,7 @@ while True:
             if snode.status == StorageNode.STATUS_SCHEDULABLE and not ping_check and not node_api_check:
                 continue
 
-            spdk_process = False
+            spdk_process = True
             if node_api_check:
                 # 3- check spdk_process
                 spdk_process = health_controller._check_spdk_process_up(snode.mgmt_ip)
@@ -281,7 +281,7 @@ while True:
                             node_port_check = False
                             down_ports.append(data_nic.ip4_address)
 
-            is_node_online = ping_check and node_api_check and spdk_process and node_rpc_check and node_port_check
+            is_node_online = ping_check and spdk_process and node_rpc_check and node_port_check
             if is_node_online:
                 set_node_online(snode)
 
@@ -310,10 +310,13 @@ while True:
                             device_controller.device_set_unavailable(dev.get_id())
 
                 elif ping_check and node_api_check and (not spdk_process or not node_rpc_check):
-                    # add node to auto restart
-                    if cluster.status in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED,
-                                          Cluster.STATUS_SUSPENDED, Cluster.STATUS_READONLY]:
+
+                    if cluster.status !=  Cluster.STATUS_IN_ACTIVATION:
                         set_node_offline(snode)
+
+                    # add node to auto restart
+                    if cluster.status in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_UNREADY,
+                                          Cluster.STATUS_SUSPENDED, Cluster.STATUS_READONLY]:
                         tasks_controller.add_node_to_auto_restart(snode)
                 elif not node_port_check:
                     if cluster.status in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_READONLY]:
