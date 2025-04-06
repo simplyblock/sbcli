@@ -14,7 +14,7 @@ openssl rand -hex 32
 After the keys are generated, an encrypted lvol can created by passing the generated keys to `crypto-key1` and `crypto-key2` cli flags
 
 ```
-sbcli-dev lvol add --distr-ndcs 1 \
+sbcli lvol add --distr-ndcs 1 \
     --distr-npcs 1 \
     --distr-bs 4096 \
     --distr-chunk-bs 4096 \
