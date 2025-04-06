@@ -15,7 +15,7 @@ on:
       sbcli_cmd:
         description: 'Command for sbcli execution'
         required: true
-        default: 'sbcli-main'
+        default: 'sbcli'
       testname:
         description: 'Name of test to run. Empty to run all'
         required: false
