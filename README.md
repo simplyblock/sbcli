@@ -13,7 +13,7 @@ aws codeartifact login --tool pip --repository sbcli --domain simplyblock --doma
 ```
 Install package
 ```bash
-pip install --extra-index-url https://pypi.org/simple sbcli-dev
+pip install --extra-index-url https://pypi.org/simple sbcli
 ```
 
 # Components
