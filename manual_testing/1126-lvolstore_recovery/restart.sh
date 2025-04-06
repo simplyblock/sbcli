@@ -3,7 +3,7 @@
 set -e
 
 # Variables
-SBCLI_CMD="sbcli-dev"
+SBCLI_CMD="sbcli"
 SN_IDS=($(${SBCLI_CMD} sn list | grep -Eo '^[|][ ]+[a-f0-9-]+[ ]+[|]' | awk '{print $2}'))
 host_id=${SN_IDS[0]}
 MOUNT_DIR="/mnt"
