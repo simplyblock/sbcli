@@ -404,24 +404,9 @@ class CLIWrapper(CLIWrapperBase):
         if self.developer_mode:
             argument = subcommand.add_argument('--encrypt', help='Use inline data encryption and decryption on the logical volume', dest='encrypt', required=False, action='store_true')
         if self.developer_mode:
-            argument = subcommand.add_argument('--crypto-key1', help='Hex value of key1 to be used for logical volume encryption', type=str, dest='crypto_key1', required=False)
-        if self.developer_mode:
-            argument = subcommand.add_argument('--crypto-key2', help='Hex value of key2 to be used for logical volume encryption', type=str, dest='crypto_key2', required=False)
-        if self.developer_mode:
-            argument = subcommand.add_argument('--max-rw-iops', help='Maximum Read Write IO Per Second', type=int, dest='max_rw_iops', required=False)
-        if self.developer_mode:
-            argument = subcommand.add_argument('--max-rw-mbytes', help='Maximum Read Write Megabytes Per Second', type=int, dest='max_rw_mbytes', required=False)
-        if self.developer_mode:
-            argument = subcommand.add_argument('--max-r-mbytes', help='Maximum Read Megabytes Per Second', type=int, dest='max_r_mbytes', required=False)
-        if self.developer_mode:
-            argument = subcommand.add_argument('--max-w-mbytes', help='Maximum Write Megabytes Per Second', type=int, dest='max_w_mbytes', required=False)
-        if self.developer_mode:
             argument = subcommand.add_argument('--distr-vuid', help='(Dev) set vuid manually, default: random (1-99999)', type=int, dest='distr_vuid', required=False)
         if self.developer_mode:
             argument = subcommand.add_argument('--lvol-ha-type', help='Logical volume HA type (single, ha), default is cluster HA type', type=str, default='ha', dest='lvol_ha_type', required=False, choices=['single','default','ha',])
-        argument = subcommand.add_argument('--lvol-priority-class', help='Logical volume priority class', type=int, default=0, dest='lvol_priority_class', required=False)
-        if self.developer_mode:
-            argument = subcommand.add_argument('--fstype', help='Filesystem type for testing (ext4, xfs)', type=str, default='xfs', dest='fstype', required=False, choices=['ext4','xfs',])
 
     def init_cluster__create(self, subparser):
         subcommand = self.add_sub_command(subparser, 'create', 'Creates a new cluster')
@@ -899,7 +884,7 @@ class CLIWrapper(CLIWrapperBase):
                     args.small_bufsize = 0
                     args.large_bufsize = 0
                     args.enable_test_device = None
-                    args.enable_ha_jm = False
+                    args.enable_ha_jm = True
                     args.id_device_by_nqn = False
                     args.max_snap = 5000
                 ret = self.storage_node__add_node(sub_command, args)
@@ -931,8 +916,6 @@ class CLIWrapper(CLIWrapperBase):
             elif sub_command in ['get-capacity']:
                 ret = self.storage_node__get_capacity(sub_command, args)
             elif sub_command in ['list-devices']:
-                if not self.developer_mode:
-                    args.sort = None
                 ret = self.storage_node__list_devices(sub_command, args)
             elif sub_command in ['device-testing-mode']:
                 if not self.developer_mode:
@@ -1032,9 +1015,15 @@ class CLIWrapper(CLIWrapperBase):
                     args.large_bufsize = 0
                     args.enable_test_device = None
                     args.enable_ha_jm = False
+                    args.lvol_name = 'lvol01'
+                    args.lvol_size = '10G'
+                    args.pool_name = 'pool01'
+                    args.pool_max = '25G'
+                    args.snapshot = False
+                    args.max_size = '1000G'
+                    args.encrypt = None
                     args.distr_vuid = None
                     args.lvol_ha_type = 'ha'
-                    args.fstype = 'xfs'
                 ret = self.cluster__deploy(sub_command, args)
             elif sub_command in ['create']:
                 if not self.developer_mode:
