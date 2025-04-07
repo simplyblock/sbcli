@@ -1221,7 +1221,7 @@ class CLIWrapper(CLIWrapperBase):
             self.parser.print_help()
 
         if not ret:
-            return False
+            exit(1)
 
         print(ret)
 
