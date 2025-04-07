@@ -3,16 +3,18 @@ info:
   title: SimplyBlock-API
   description: SimplyBlock Web API
   version: 1.0.0
-servers:
-  - url: http://{{base_url}}
 components:
   securitySchemes:
     cluster:
       type: apiKey
       name: Authorization
       in: header
+    basicAuth:
+      type: http
+      scheme: basic
 security:
   - cluster: []
+  - basicAuth: []
 tags:
   - name: Cluster
   - name: Mgmt Node
