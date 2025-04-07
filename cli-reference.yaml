@@ -1199,12 +1199,12 @@ commands:
             help: "Erasure coding schema parameter k (distributed raid), default: 1"
             dest: distr_ndcs
             type: int
-            default: 0
+            default: 1
           - name: "--parity-chunks-per-stripe"
             help: "Erasure coding schema parameter n (distributed raid), default: 1"
             dest: distr_npcs
             type: int
-            default: 0
+            default: 1
           - name: "--distr-bs"
             help: "(Dev) distrb bdev block size, default: 4096"
             dest: distr_bs
