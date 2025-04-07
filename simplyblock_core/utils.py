@@ -939,20 +939,20 @@ def store_cores_config(spdk_cpu_mask):
         logger.error(f"Error writing to file: {e}")
 
 def init_sentry_sdk(name=None):
-    import sentry_sdk
-    params = {
-        "dsn": constants.SENTRY_SDK_DNS,
-        # Set traces_sample_rate to 1.0 to capture 100%
-        # of transactions for tracing.
-        "traces_sample_rate": 1.0,
-        # Add request headers and IP for users,
-        # see https://docs.sentry.io/platforms/python/data-management/data-collected/ for more info
-        "send_default_pii": True,
-    }
-    if name:
-        params["server_name"] = name
-    sentry_sdk.init(**params)
-    # from sentry_sdk import set_level
-    # set_level("critical")
+    # import sentry_sdk
+    # params = {
+    #     "dsn": constants.SENTRY_SDK_DNS,
+    #     # Set traces_sample_rate to 1.0 to capture 100%
+    #     # of transactions for tracing.
+    #     "traces_sample_rate": 1.0,
+    #     # Add request headers and IP for users,
+    #     # see https://docs.sentry.io/platforms/python/data-management/data-collected/ for more info
+    #     "send_default_pii": True,
+    # }
+    # if name:
+    #     params["server_name"] = name
+    # sentry_sdk.init(**params)
+    # # from sentry_sdk import set_level
+    # # set_level("critical")
 
     return True
