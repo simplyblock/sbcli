@@ -87,6 +87,7 @@ data_files.append(('', ["requirements.txt"]))
 setup(
     name=COMMAND_NAME,
     version=VERSION,
+    requires_python='>= 3.9',
     packages=find_packages(exclude=["e2e*"]),
     url='https://www.simplyblock.io/',
     author='Hamdy',
