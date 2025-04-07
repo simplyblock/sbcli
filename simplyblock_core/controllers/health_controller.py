@@ -141,8 +141,11 @@ def _check_node_lvstore(lvstore_stack, node, auto_fix=False, node_bdev_names=Non
             bdev_lvstore = bdev["name"]
 
     if not node_bdev_names:
-        node_bdevs = rpc_client.get_bdevs()
-        node_bdev_names = [b['name'] for b in node_bdevs]
+        ret = rpc_client.get_bdevs()
+        if ret:
+            node_bdev_names = [b['name'] for b in ret]
+        else:
+            node_bdev_names = []
 
     for distr in distribs_list:
         if distr in node_bdev_names:

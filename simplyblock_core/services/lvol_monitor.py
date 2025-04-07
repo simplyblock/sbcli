@@ -69,8 +69,9 @@ while True:
 
                 node_lvols_nqns = {}
                 ret = rpc_client.subsystem_list()
-                for sub in ret:
-                    node_lvols_nqns[sub['nqn']] = sub
+                if ret:
+                    for sub in ret:
+                        node_lvols_nqns[sub['nqn']] = sub
 
                 sec_node_bdev_names = {}
                 sec_node_lvols_nqns = {}
