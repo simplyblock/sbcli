@@ -122,13 +122,10 @@ while True:
                         continue
 
                     passed = True
-
-                    if lvol.ha_type == 'single':
-                        ret = health_controller.check_lvol_on_node(
-                            lvol.get_id(), lvol.node_id, node_bdev_names, node_lvols_nqns)
-                        if not ret:
-                            passed = False
-
+                    ret = health_controller.check_lvol_on_node(
+                        lvol.get_id(), lvol.node_id, node_bdev_names, node_lvols_nqns)
+                    if not ret:
+                        passed = False
 
                     if lvol.ha_type == "ha":
                         sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
