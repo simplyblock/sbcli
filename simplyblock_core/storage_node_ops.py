@@ -442,7 +442,7 @@ def _create_storage_device_stack(rpc_client, nvme, snode, after_restart):
         ret = rpc_client.bdev_passtest_create(test_name, nvme_bdev)
         if not ret:
             logger.error(f"Failed to create passtest bdev {test_name}")
-            return False
+            return None
         nvme_bdev = test_name
     alceml_id = nvme.get_id()
     alceml_name = device_controller.get_alceml_name(alceml_id)
@@ -469,7 +469,7 @@ def _create_storage_device_stack(rpc_client, nvme, snode, after_restart):
                                         pba_page_size=cluster.page_size_in_blocks, write_protection=write_protection)
     if not ret:
         logger.error(f"Failed to create alceml bdev: {alceml_name}")
-        return False
+        return None
     alceml_bdev = alceml_name
     qos_bdev = ""
     # Add qos bdev device
@@ -480,7 +480,7 @@ def _create_storage_device_stack(rpc_client, nvme, snode, after_restart):
         ret = rpc_client.qos_vbdev_create(qos_bdev, alceml_name, inflight_io_threshold)
         if not ret:
             logger.error(f"Failed to create qos bdev: {qos_bdev}")
-            return False
+            return None
         alceml_bdev = qos_bdev
 
     # add pass through
@@ -488,7 +488,7 @@ def _create_storage_device_stack(rpc_client, nvme, snode, after_restart):
     ret = rpc_client.bdev_PT_NoExcl_create(pt_name, alceml_bdev)
     if not ret:
         logger.error(f"Failed to create pt noexcl bdev: {pt_name}")
-        return False
+        return None
 
     subsystem_nqn = snode.subsystem + ":dev:" + alceml_id
     logger.info("creating subsystem %s", subsystem_nqn)
@@ -505,9 +505,9 @@ def _create_storage_device_stack(rpc_client, nvme, snode, after_restart):
     ret = rpc_client.nvmf_subsystem_add_ns(subsystem_nqn, pt_name)
     if not ret:
         logger.error(f"Failed to add: {pt_name} to the subsystem: {subsystem_nqn}")
-        return False
-    if snode.enable_test_device:
-        nvme.testing_bdev = test_name
+        return None
+    # if snode.enable_test_device:
+    #     nvme.testing_bdev = test_name
     nvme.alceml_bdev = alceml_bdev
     nvme.pt_bdev = pt_name
     nvme.qos_bdev = qos_bdev
@@ -844,7 +844,7 @@ def _connect_to_remote_devs(this_node, force_conect_restarting_nodes=False):
     return remote_devices
 
 
-def _connect_to_remote_jm_devs(this_node, jm_ids=[]):
+def _connect_to_remote_jm_devs(this_node, jm_ids=None):
     db_controller = DBController()
 
     rpc_client = RPCClient(
@@ -1723,7 +1723,7 @@ def restart_storage_node(
         logger.info(f"Minimum required huge pages memory is : {utils.humanbytes(minimum_hp_memory)}")
     else:
         logger.error(f"Cannot get memory info from the instance.. Exiting")
-        # return False
+        return False
 
     # Calculate minimum sys memory
     minimum_sys_memory = utils.calculate_minimum_sys_memory(snode.max_prov, memory_details['total'])
