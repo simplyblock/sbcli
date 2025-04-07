@@ -83,12 +83,14 @@ while True:
                             sec_node.mgmt_ip, sec_node.rpc_port,
                             sec_node.rpc_username, sec_node.rpc_password, timeout=3, retry=2)
                         ret = sec_rpc_client.get_bdevs()
-                        for bdev in ret:
-                            sec_node_bdev_names[bdev['name']] = bdev
+                        if ret:
+                            for bdev in ret:
+                                sec_node_bdev_names[bdev['name']] = bdev
 
                         ret = sec_rpc_client.subsystem_list()
-                        for sub in ret:
-                            sec_node_lvols_nqns[sub['nqn']] = sub
+                        if ret:
+                            for sub in ret:
+                                sec_node_lvols_nqns[sub['nqn']] = sub
 
                 for lvol in db_controller.get_lvols_by_node_id(snode.get_id()):
 
