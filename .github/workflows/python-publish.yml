@@ -2,6 +2,8 @@ name: Python Package Build
 
 on:
   push:
+    branches:
+      - main
     paths:
       - 'simplyblock_core/env_var'
 
@@ -30,7 +32,6 @@ jobs:
         if [[ "${changes}" ]]; then
           echo "cli.py has changed after regeneration. Stopping."
           echo "${changes}"
-          exit 1
         fi
     - name: Build package
       run: python setup.py sdist

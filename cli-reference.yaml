@@ -176,17 +176,36 @@ commands:
             type: int
             default: 5000
             private: true
+          - name: "--spdk-mem"
+            help: "Set spdk hugepage size limitation"
+            dest: spdk_mem
+            required: false
+            type: str
+            default: ""
+          - name: "--ssd-pcie"
+            help: "Nvme PCIe address to use for storage device. Can be more than one."
+            dest: ssd_pcie
+            required: false
+            type: str
+            nargs: +
+            default: ""
+
       - name: delete
         help: "Deletes a storage node object from the state database."
         usage: >
           Deletes a storage node object from the state database. It must only be used on clusters without any logical
-          volumes.
+          volumes. Warning: This is dangerous and could lead to unstable cluster if used on active cluster.
         arguments:
           - name: node_id
             help: Storage node id
             dest: node_id
             completer: _completer_get_sn_list
             type: str
+          - name: "--force"
+            help: "Force delete storage node from DB...Hopefully you know what you do"
+            dest: force_remove
+            type: bool
+            action: store_true
       - name: remove
         help: "Removes a storage node from the cluster"
         description: >

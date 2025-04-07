@@ -299,7 +299,7 @@ class DBController(metaclass=Singleton):
         ret = StorageNode().read_from_db(self.kv_store)
         nodes = []
         for n in ret:
-            if n.cluster_id == cluster_id and not n.is_secondary_node:
+            if n.cluster_id == cluster_id and not n.is_secondary_node:  # pass
                 nodes.append(n)
         return sorted(nodes, key=lambda x: x.create_dt)
 

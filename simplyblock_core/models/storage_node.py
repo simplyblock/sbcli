@@ -68,6 +68,7 @@ class StorageNode(BaseNodeObject):
     online_since: str = ""
     partitions_count: int = 0
     poller_cpu_cores: List[int] = []
+    ssd_pcie: List = []
     pollers_mask: str = ""
     primary_ip: str = ""
     raid: str = ""
@@ -78,7 +79,7 @@ class StorageNode(BaseNodeObject):
     rpc_username: str = ""
     secondary_node_id: str = ""
     sequential_number: int = 0
-    services: List[str] = []
+    jm_ids: List[str] = []
     spdk_cpu_mask: str = ""
     spdk_debug: bool = False
     spdk_image: str = ""
@@ -87,3 +88,5 @@ class StorageNode(BaseNodeObject):
     subsystem: str = ""
     system_uuid: str = ""
     lvstore_status: str = ""
+    nvmf_port: int = 4420
+    physical_label: int = 0

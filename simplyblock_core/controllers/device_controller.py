@@ -194,7 +194,7 @@ def _def_create_device_stack(device_obj, snode, force=False):
         for iface in snode.data_nics:
             if iface.ip4_address:
                 tr_type = iface.get_transport_type()
-                ret = rpc_client.listeners_create(subsystem_nqn, tr_type, iface.ip4_address, "4420")
+                ret = rpc_client.listeners_create(subsystem_nqn, tr_type, iface.ip4_address, snode.nvmf_port)
                 device_obj.nvmf_ip = iface.ip4_address
                 break
     else:
@@ -210,7 +210,7 @@ def _def_create_device_stack(device_obj, snode, force=False):
     device_obj.alceml_name = alceml_name
     device_obj.pt_bdev = pt_name
     device_obj.nvmf_nqn = subsystem_nqn
-    device_obj.nvmf_port = 4420
+    device_obj.nvmf_port = snode.nvmf_port
     return True
 
 
@@ -535,6 +535,13 @@ def reset_storage_device(dev_id):
 
     logger.info("Setting devices to unavailable")
     device_set_unavailable(dev_id)
+    devs = []
+    # for dev in snode.nvme_devices:
+    #     if dev.get_id() == device.get_id():
+    #         continue
+    #     if dev.status == NVMeDevice.STATUS_ONLINE and dev.physical_label == device.physical_label:
+    #         devs.append(dev)
+    #         device_set_unavailable(dev.get_id())
 
     logger.info("Resetting device")
     rpc_client = RPCClient(
@@ -931,7 +938,7 @@ def restart_jm_device(device_id, force=False, format_alceml=False):
                     if iface.ip4_address:
                         tr_type = iface.get_transport_type()
                         logger.info("adding listener for %s on IP %s" % (subsystem_nqn, iface.ip4_address))
-                        ret = rpc_client.listeners_create(subsystem_nqn, tr_type, iface.ip4_address, "4420")
+                        ret = rpc_client.listeners_create(subsystem_nqn, tr_type, iface.ip4_address, snode.nvmf_port)
                         IP = iface.ip4_address
                         break
                 logger.info(f"add {pt_name} to subsystem")

@@ -17,6 +17,7 @@ from simplyblock_core.rpc_client import RPCClient
 
 def task_runner(task):
 
+    task = db_controller.get_task_by_id(task.uuid)
     snode = db_controller.get_storage_node_by_id(task.node_id)
     if not snode:
         task.status = JobSchedule.STATUS_DONE
@@ -47,7 +48,7 @@ def task_runner(task):
 
     if task.status in [JobSchedule.STATUS_NEW, JobSchedule.STATUS_SUSPENDED]:
         for node in db_controller.get_storage_nodes_by_cluster_id(task.cluster_id):
-            if node.is_secondary_node:
+            if node.is_secondary_node:  # pass
                 continue
 
             if node.status == StorageNode.STATUS_ONLINE and node.online_since:
@@ -101,7 +102,7 @@ def task_runner(task):
         task.function_params['migration'] = {
             "name": distr_name}
         task.write_to_db(db_controller.kv_store)
-        time.sleep(1)
+        # time.sleep(1)
 
     if "migration" in task.function_params:
         mig_info = task.function_params["migration"]
@@ -125,19 +126,22 @@ while True:
         for cl in clusters:
             tasks = db_controller.get_job_tasks(cl.get_id(), reverse=False)
             for task in tasks:
-                delay_seconds = 3
-                if task.function_name == JobSchedule.FN_DEV_MIG:
+                if task.function_name == JobSchedule.FN_DEV_MIG and task.status != JobSchedule.STATUS_DONE:
+                    task = db_controller.get_task_by_id(task.uuid)
                     if task.status in [JobSchedule.STATUS_NEW, JobSchedule.STATUS_SUSPENDED]:
                         active_task = tasks_controller.get_active_node_mig_task(task.cluster_id, task.node_id)
                         if active_task:
                             logger.info("task found on same node, retry")
                             continue
-                    if task.status != JobSchedule.STATUS_DONE:
-                        # get new task object because it could be changed from cancel task
-                        task = db_controller.get_task_by_id(task.uuid)
+
                         res = task_runner(task)
                         if res:
                             tasks_events.task_updated(task)
-                            continue
+
+                    elif task.status == JobSchedule.STATUS_RUNNING:
+
+                        res = task_runner(task)
+                        if res:
+                            tasks_events.task_updated(task)
 
     time.sleep(3)

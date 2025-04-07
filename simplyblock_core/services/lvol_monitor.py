@@ -12,6 +12,7 @@ from simplyblock_core.rpc_client import RPCClient
 
 logger = utils.get_logger(__name__)
 
+utils.init_sentry_sdk(__name__)
 
 def set_lvol_status(lvol, status):
     if lvol.status != status:
@@ -83,12 +84,14 @@ while True:
                             sec_node.mgmt_ip, sec_node.rpc_port,
                             sec_node.rpc_username, sec_node.rpc_password, timeout=3, retry=2)
                         ret = sec_rpc_client.get_bdevs()
-                        for bdev in ret:
-                            sec_node_bdev_names[bdev['name']] = bdev
+                        if ret:
+                            for bdev in ret:
+                                sec_node_bdev_names[bdev['name']] = bdev
 
                         ret = sec_rpc_client.subsystem_list()
-                        for sub in ret:
-                            sec_node_lvols_nqns[sub['nqn']] = sub
+                        if ret:
+                            for sub in ret:
+                                sec_node_lvols_nqns[sub['nqn']] = sub
 
                 for lvol in db_controller.get_lvols_by_node_id(snode.get_id()):
 
@@ -132,19 +135,20 @@ while True:
                             if not ret:
                                 passed = False
 
+                    if snode.lvstore_status == "ready":
 
-                    logger.info(f"LVol: {lvol.get_id()}, is healthy: {passed}")
-                    set_lvol_health_check(lvol, passed)
-                    if passed:
-                        set_lvol_status(lvol, LVol.STATUS_ONLINE)
+                        logger.info(f"LVol: {lvol.get_id()}, is healthy: {passed}")
+                        set_lvol_health_check(lvol, passed)
+                        if passed:
+                            set_lvol_status(lvol, LVol.STATUS_ONLINE)
 
-                for snap in db_controller.get_snapshots_by_node_id(snode.get_id()):
-                    if snap.snap_bdev in node_bdev_names:
-                        logger.info(f"Checking bdev: {snap.snap_bdev} ... ok")
-                        set_snapshot_health_check(snap, True)
-                    else:
-                        logger.error(f"Checking bdev: {snap.snap_bdev} ... failed")
-                        set_snapshot_health_check(snap, False)
-                        passed = False
+                        for snap in db_controller.get_snapshots_by_node_id(snode.get_id()):
+                            if snap.snap_bdev in node_bdev_names:
+                                logger.info(f"Checking bdev: {snap.snap_bdev} ... ok")
+                                set_snapshot_health_check(snap, True)
+                            else:
+                                logger.error(f"Checking bdev: {snap.snap_bdev} ... failed")
+                                set_snapshot_health_check(snap, False)
+                                passed = False
 
     time.sleep(constants.LVOL_MONITOR_INTERVAL_SEC)

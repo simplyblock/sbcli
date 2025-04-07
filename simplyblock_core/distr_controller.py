@@ -100,7 +100,7 @@ def get_distr_cluster_map(snodes, target_node, distr_name=""):
     db_controller = DBController()
     cluster = db_controller.get_cluster_by_id(target_node.cluster_id)
     for index, snode in enumerate(snodes):
-        if snode.is_secondary_node:
+        if snode.is_secondary_node:  # pass
             continue
         dev_map = {}
         dev_w_map = {}
@@ -129,7 +129,7 @@ def get_distr_cluster_map(snodes, target_node, distr_name=""):
                 "UUID": dev.get_id(),
                 "bdev_name": name,
                 "status": dev_status,
-                # "physical_label": dev.physical_label
+                "physical_label": dev.physical_label
             }
             if dev.status in [NVMeDevice.STATUS_FAILED, NVMeDevice.STATUS_FAILED_AND_MIGRATED]:
                 dev_w_map[dev.cluster_device_order] = {"weight": dev_w_gib, "id": -1}
@@ -154,12 +154,12 @@ def get_distr_cluster_map(snodes, target_node, distr_name=""):
         "map_prob": [d for k, d in map_prob.items()]
     }
     if cluster.enable_node_affinity:
-        if target_node.is_secondary_node and distr_name:
-            for index, snode in enumerate(snodes):
-                for bdev in snode.lvstore_stack:
-                    if bdev['type'] == "bdev_distr" and bdev['name'] == distr_name:
-                        local_node_index = index
-                        break
+        # if target_node.is_secondary_node and distr_name:
+        #     for index, snode in enumerate(snodes):
+        #         for bdev in snode.lvstore_stack:
+        #             if bdev['type'] == "bdev_distr" and bdev['name'] == distr_name:
+        #                 local_node_index = index
+        #                 break
         cl_map['ppln1'] = local_node_index
     return cl_map
 
@@ -229,24 +229,24 @@ def send_cluster_map_to_node(node):
     snodes = db_controller.get_storage_nodes_by_cluster_id(node.cluster_id)
     rpc_client = RPCClient(node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password, timeout=10)
 
-    if node.is_secondary_node:
-        for snode in db_controller.get_primary_storage_nodes_by_secondary_node_id(node.get_id()):
-            for bdev in snode.lvstore_stack:
-                if bdev['type'] == "bdev_distr":
-                    cluster_map_data = get_distr_cluster_map(snodes, node, bdev["name"])
-                    ret = rpc_client.distr_send_cluster_map(cluster_map_data)
-                    if not ret:
-                        logger.error("Failed to send cluster map")
-                        return False
-        return True
-    else:
-        cluster_map_data = get_distr_cluster_map(snodes, node)
-        ret = rpc_client.distr_send_cluster_map(cluster_map_data)
-        if not ret:
-            logger.error("Failed to send cluster map")
-            logger.info(cluster_map_data)
-            return False
-        return True
+    # if node.lvstore_stack_secondary_1:
+    #     for snode in db_controller.get_primary_storage_nodes_by_secondary_node_id(node.get_id()):
+    #         for bdev in snode.lvstore_stack:
+    #             if bdev['type'] == "bdev_distr":
+    #                 cluster_map_data = get_distr_cluster_map(snodes, node, bdev["name"])
+    #                 ret = rpc_client.distr_send_cluster_map(cluster_map_data)
+    #                 if not ret:
+    #                     logger.error("Failed to send cluster map")
+    #                     return False
+    #     return True
+    # else:
+    cluster_map_data = get_distr_cluster_map(snodes, node)
+    ret = rpc_client.distr_send_cluster_map(cluster_map_data)
+    if not ret:
+        logger.error("Failed to send cluster map")
+        logger.info(cluster_map_data)
+        return False
+    return True
 
 
 def send_cluster_map_to_distr(node, distr_name):

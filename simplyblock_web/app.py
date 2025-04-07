@@ -16,6 +16,8 @@ from prometheus_client import make_wsgi_app
 logger = core_utils.get_logger(__name__)
 
 
+core_utils.init_sentry_sdk()
+
 
 app = Flask(__name__)
 app.logger.setLevel(constants.LOG_WEB_LEVEL)

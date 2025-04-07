@@ -1,7 +1,6 @@
 # coding=utf-8
 import time
 
-
 from simplyblock_core import constants, db_controller, storage_node_ops, utils
 from simplyblock_core.controllers import device_controller, tasks_events, health_controller, tasks_controller
 from simplyblock_core.models.job_schedule import JobSchedule
@@ -13,6 +12,8 @@ logger = utils.get_logger(__name__)
 
 # get DB controller
 db_controller = db_controller.DBController()
+
+utils.init_sentry_sdk()
 
 
 def _get_node_unavailable_devices_count(node_id):

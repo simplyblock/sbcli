@@ -25,6 +25,7 @@ class CLIWrapperBase:
     def init_parser(self):
         self.parser = argparse.ArgumentParser(prog=constants.SIMPLY_BLOCK_CLI_NAME, description='SimplyBlock management CLI')
         self.parser.add_argument("-d", '--debug', help='Print debug messages', required=False, action='store_true')
+        self.parser.add_argument('--dev', help='Enable developer options', required=False, action='store_true')
         self.subparser = self.parser.add_subparsers(dest='command')
 
     def add_command(self, command, help, aliases=None):
@@ -83,6 +84,9 @@ class CLIWrapperBase:
         number_of_distribs = args.number_of_distribs
         namespace = args.namespace
         ha_jm_count = args.ha_jm_count
+        spdk_mem = args.spdk_mem
+        ssd_pcie = args.ssd_pcie
+        spdk_cpu_count = args.vcpu_count
 
         out = storage_ops.add_node(
             cluster_id=cluster_id,
@@ -104,16 +108,19 @@ class CLIWrapperBase:
             namespace=namespace,
             number_of_distribs=number_of_distribs,
             enable_ha_jm=enable_ha_jm,
-            is_secondary_node=args.is_secondary_node,
+            is_secondary_node=args.is_secondary_node,   # pass
             id_device_by_nqn=args.id_device_by_nqn,
             partition_size=args.partition_size,
             ha_jm_count=ha_jm_count,
+            spdk_hp_mem=spdk_mem,
+            ssd_pcie=ssd_pcie,
+            spdk_cpu_count=spdk_cpu_count,
         )
 
         return out
 
     def storage_node__delete(self, sub_command, args):
-        return storage_ops.delete_storage_node(args.node_id)
+        return storage_ops.delete_storage_node(args.node_id, args.force_remove)
 
     def storage_node__remove(self, sub_command, args):
         return storage_ops.remove_storage_node(args.node_id, args.force_remove)
