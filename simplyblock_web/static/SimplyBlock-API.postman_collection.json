@@ -3,7 +3,7 @@
 		"_postman_id": "4f0ccde4-75b2-4bf2-a224-9ea62d8eb18c",
 		"name": "SimplyBlock-API",
 		"description": "SimplyBlock Web API",
-		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+		"schema": "https://schema.getpostman.com/json/collection/v2.0.0/collection.json",
 		"_exporter_id": "434798",
 		"_collection_link": "https://red-firefly-736457.postman.co/workspace/SimplyBlock~91867c59-4e78-4ca3-97cc-af3fdb72f0a8/collection/434798-4f0ccde4-75b2-4bf2-a224-9ea62d8eb18c?action=share&source=collection_link&creator=434798"
 	},
@@ -16,16 +16,7 @@
 					"request": {
 						"method": "GET",
 						"header": [],
-						"url": {
-							"raw": "{{BASE_URL}}/cluster/",
-							"host": [
-								"{{BASE_URL}}"
-							],
-							"path": [
-								"cluster",
-								""
-							]
-						}
+						"url": "{{BASE_URL}}/cluster/"
 					},
 					"response": [
 						{
@@ -33,16 +24,7 @@
 							"originalRequest": {
 								"method": "GET",
 								"header": [],
-								"url": {
-									"raw": "{{BASE_URL}}/cluster/",
-									"host": [
-										"{{BASE_URL}}"
-									],
-									"path": [
-										"cluster",
-										""
-									]
-								}
+								"url": "{{BASE_URL}}/cluster/"
 							},
 							"status": "OK",
 							"code": 200,
@@ -75,16 +57,7 @@
 					"request": {
 						"method": "GET",
 						"header": [],
-						"url": {
-							"raw": "{{BASE_URL}}/cluster/{{CLUSTER_ID}}",
-							"host": [
-								"{{BASE_URL}}"
-							],
-							"path": [
-								"cluster",
-								"{{CLUSTER_ID}}"
-							]
-						}
+						"url": "{{BASE_URL}}/cluster/{{CLUSTER_ID}}"
 					},
 					"response": [
 						{
@@ -92,16 +65,7 @@
 							"originalRequest": {
 								"method": "GET",
 								"header": [],
-								"url": {
-									"raw": "{{BASE_URL}}/cluster/{{CLUSTER_ID}}",
-									"host": [
-										"{{BASE_URL}}"
-									],
-									"path": [
-										"cluster",
-										"{{CLUSTER_ID}}"
-									]
-								}
+								"url": "{{BASE_URL}}/cluster/{{CLUSTER_ID}}"
 							},
 							"status": "OK",
 							"code": 200,
@@ -134,17 +98,7 @@
 					"request": {
 						"method": "GET",
 						"header": [],
-						"url": {
-							"raw": "{{BASE_URL}}/cluster/show/{{CLUSTER_ID}}",
-							"host": [
-								"{{BASE_URL}}"
-							],
-							"path": [
-								"cluster",
-								"show",
-								"{{CLUSTER_ID}}"
-							]
-						}
+						"url": "{{BASE_URL}}/cluster/show/{{CLUSTER_ID}}"
 					},
 					"response": [
 						{
@@ -152,16 +106,7 @@
 							"originalRequest": {
 								"method": "GET",
 								"header": [],
-								"url": {
-									"raw": "{{BASE_URL}}/cluster/{{CLUSTER_ID}}",
-									"host": [
-										"{{BASE_URL}}"
-									],
-									"path": [
-										"cluster",
-										"{{CLUSTER_ID}}"
-									]
-								}
+								"url": "{{BASE_URL}}/cluster/{{CLUSTER_ID}}"
 							},
 							"status": "OK",
 							"code": 200,
@@ -194,17 +139,7 @@
 					"request": {
 						"method": "GET",
 						"header": [],
-						"url": {
-							"raw": "{{BASE_URL}}/cluster/status/{{CLUSTER_ID}}",
-							"host": [
-								"{{BASE_URL}}"
-							],
-							"path": [
-								"cluster",
-								"status",
-								"{{CLUSTER_ID}}"
-							]
-						}
+						"url": "{{BASE_URL}}/cluster/status/{{CLUSTER_ID}}"
 					},
 					"response": [
 						{
@@ -212,17 +147,7 @@
 							"originalRequest": {
 								"method": "GET",
 								"header": [],
-								"url": {
-									"raw": "{{BASE_URL}}/cluster/status/{{CLUSTER_ID}}",
-									"host": [
-										"{{BASE_URL}}"
-									],
-									"path": [
-										"cluster",
-										"status",
-										"{{CLUSTER_ID}}"
-									]
-								}
+								"url": "{{BASE_URL}}/cluster/status/{{CLUSTER_ID}}"
 							},
 							"status": "OK",
 							"code": 200,
@@ -328,17 +253,7 @@
 					"request": {
 						"method": "GET",
 						"header": [],
-						"url": {
-							"raw": "{{BASE_URL}}/cluster/get-tasks/{{CLUSTER_ID}}",
-							"host": [
-								"{{BASE_URL}}"
-							],
-							"path": [
-								"cluster",
-								"get-tasks",
-								"{{CLUSTER_ID}}"
-							]
-						}
+						"url": "{{BASE_URL}}/cluster/get-tasks/{{CLUSTER_ID}}"
 					},
 					"response": [
 						{
@@ -346,17 +261,7 @@
 							"originalRequest": {
 								"method": "GET",
 								"header": [],
-								"url": {
-									"raw": "{{BASE_URL}}/cluster/get-tasks/{{CLUSTER_ID}}",
-									"host": [
-										"{{BASE_URL}}"
-									],
-									"path": [
-										"cluster",
-										"get-tasks",
-										"{{CLUSTER_ID}}"
-									]
-								}
+								"url": "{{BASE_URL}}/cluster/get-tasks/{{CLUSTER_ID}}"
 							},
 							"status": "OK",
 							"code": 200,
@@ -389,17 +294,7 @@
 					"request": {
 						"method": "GET",
 						"header": [],
-						"url": {
-							"raw": "{{BASE_URL}}/cluster/capacity/{{CLUSTER_ID}}",
-							"host": [
-								"{{BASE_URL}}"
-							],
-							"path": [
-								"cluster",
-								"capacity",
-								"{{CLUSTER_ID}}"
-							]
-						}
+						"url": "{{BASE_URL}}/cluster/capacity/{{CLUSTER_ID}}"
 					},
 					"response": [
 						{
@@ -407,17 +302,7 @@
 							"originalRequest": {
 								"method": "GET",
 								"header": [],
-								"url": {
-									"raw": "{{BASE_URL}}/cluster/capacity/{{CLUSTER_ID}}",
-									"host": [
-										"{{BASE_URL}}"
-									],
-									"path": [
-										"cluster",
-										"capacity",
-										"{{CLUSTER_ID}}"
-									]
-								}
+								"url": "{{BASE_URL}}/cluster/capacity/{{CLUSTER_ID}}"
 							},
 							"status": "OK",
 							"code": 200,
@@ -450,19 +335,7 @@
 					"request": {
 						"method": "GET",
 						"header": [],
-						"url": {
-							"raw": "{{BASE_URL}}/cluster/capacity/{{CLUSTER_ID}}/history/1m",
-							"host": [
-								"{{BASE_URL}}"
-							],
-							"path": [
-								"cluster",
-								"capacity",
-								"{{CLUSTER_ID}}",
-								"history",
-								"1m"
-							]
-						}
+						"url": "{{BASE_URL}}/cluster/capacity/{{CLUSTER_ID}}/history/1m"
 					},
 					"response": [
 						{
@@ -470,19 +343,7 @@
 							"originalRequest": {
 								"method": "GET",
 								"header": [],
-								"url": {
-									"raw": "{{BASE_URL}}/cluster/capacity/{{CLUSTER_ID}}/history/1m",
-									"host": [
-										"{{BASE_URL}}"
-									],
-									"path": [
-										"cluster",
-										"capacity",
-										"{{CLUSTER_ID}}",
-										"history",
-										"1m"
-									]
-								}
+								"url": "{{BASE_URL}}/cluster/capacity/{{CLUSTER_ID}}/history/1m"
 							},
 							"status": "OK",
 							"code": 200,
@@ -515,17 +376,7 @@
 					"request": {
 						"method": "GET",
 						"header": [],
-						"url": {
-							"raw": "{{BASE_URL}}/cluster/iostats/{{CLUSTER_ID}}",
-							"host": [
-								"{{BASE_URL}}"
-							],
-							"path": [
-								"cluster",
-								"iostats",
-								"{{CLUSTER_ID}}"
-							]
-						}
+						"url": "{{BASE_URL}}/cluster/iostats/{{CLUSTER_ID}}"
 					},
 					"response": [
 						{
@@ -533,17 +384,7 @@
 							"originalRequest": {
 								"method": "GET",
 								"header": [],
-								"url": {
-									"raw": "{{BASE_URL}}/cluster/iostats/{{CLUSTER_ID}}",
-									"host": [
-										"{{BASE_URL}}"
-									],
-									"path": [
-										"cluster",
-										"iostats",
-										"{{CLUSTER_ID}}"
-									]
-								}
+								"url": "{{BASE_URL}}/cluster/iostats/{{CLUSTER_ID}}"
 							},
 							"status": "OK",
 							"code": 200,
@@ -664,15 +505,7 @@
 								}
 							}
 						},
-						"url": {
-							"raw": "{{BASE_URL}}/cluster",
-							"host": [
-								"{{BASE_URL}}"
-							],
-							"path": [
-								"cluster"
-							]
-						}
+						"url": "{{BASE_URL}}/cluster"
 					},
 					"response": [
 						{
@@ -689,15 +522,7 @@
 										}
 									}
 								},
-								"url": {
-									"raw": "{{BASE_URL}}/cluster",
-									"host": [
-										"{{BASE_URL}}"
-									],
-									"path": [
-										"cluster"
-									]
-								}
+								"url": "{{BASE_URL}}/cluster"
 							},
 							"status": "OK",
 							"code": 200,
@@ -739,16 +564,7 @@
 								}
 							}
 						},
-						"url": {
-							"raw": "{{BASE_URL}}/cluster/{{CLUSTER_ID}}",
-							"host": [
-								"{{BASE_URL}}"
-							],
-							"path": [
-								"cluster",
-								"{{CLUSTER_ID}}"
-							]
-						}
+						"url": "{{BASE_URL}}/cluster/{{CLUSTER_ID}}"
 					},
 					"response": []
 				},
@@ -757,17 +573,7 @@
 					"request": {
 						"method": "PUT",
 						"header": [],
-						"url": {
-							"raw": "{{BASE_URL}}/cluster/activate/{{CLUSTER_ID}}",
-							"host": [
-								"{{BASE_URL}}"
-							],
-							"path": [
-								"cluster",
-								"activate",
-								"{{CLUSTER_ID}}"
-							]
-						}
+						"url": "{{BASE_URL}}/cluster/activate/{{CLUSTER_ID}}"
 					},
 					"response": [
 						{
@@ -775,17 +581,7 @@
 							"originalRequest": {
 								"method": "PUT",
 								"header": [],
-								"url": {
-									"raw": "{{BASE_URL}}/cluster/activate/{{CLUSTER_ID}}",
-									"host": [
-										"{{BASE_URL}}"
-									],
-									"path": [
-										"cluster",
-										"activate",
-										"{{CLUSTER_ID}}"
-									]
-								}
+								"url": "{{BASE_URL}}/cluster/activate/{{CLUSTER_ID}}"
 							},
 							"status": "OK",
 							"code": 200,
@@ -823,15 +619,7 @@
 					"request": {
 						"method": "GET",
 						"header": [],
-						"url": {
-							"raw": "{{BASE_URL}}/mgmtnode",
-							"host": [
-								"{{BASE_URL}}"
-							],
-							"path": [
-								"mgmtnode"
-							]
-						}
+						"url": "{{BASE_URL}}/mgmtnode"
 					},
 					"response": [
 						{
@@ -839,15 +627,7 @@
 							"originalRequest": {
 								"method": "GET",
 								"header": [],
-								"url": {
-									"raw": "{{BASE_URL}}/mgmtnode",
-									"host": [
-										"{{BASE_URL}}"
-									],
-									"path": [
-										"mgmtnode"
-									]
-								}
+								"url": "{{BASE_URL}}/mgmtnode"
 							},
 							"status": "OK",
 							"code": 200,
@@ -880,16 +660,7 @@
 					"request": {
 						"method": "GET",
 						"header": [],
-						"url": {
-							"raw": "{{BASE_URL}}/mgmtnode/{{MGMT_NODE_ID}}",
-							"host": [
-								"{{BASE_URL}}"
-							],
-							"path": [
-								"mgmtnode",
-								"{{MGMT_NODE_ID}}"
-							]
-						}
+						"url": "{{BASE_URL}}/mgmtnode/{{MGMT_NODE_ID}}"
 					},
 					"response": [
 						{
@@ -897,16 +668,7 @@
 							"originalRequest": {
 								"method": "GET",
 								"header": [],
-								"url": {
-									"raw": "{{BASE_URL}}/mgmtnode/{{MGMT_NODE_ID}}",
-									"host": [
-										"{{BASE_URL}}"
-									],
-									"path": [
-										"mgmtnode",
-										"{{MGMT_NODE_ID}}"
-									]
-								}
+								"url": "{{BASE_URL}}/mgmtnode/{{MGMT_NODE_ID}}"
 							},
 							"status": "OK",
 							"code": 200,
@@ -945,16 +707,7 @@
 					"request": {
 						"method": "GET",
 						"header": [],
-						"url": {
-							"raw": "{{BASE_URL}}/storagenode/",
-							"host": [
-								"{{BASE_URL}}"
-							],
-							"path": [
-								"storagenode",
-								""
-							]
-						}
+						"url": "{{BASE_URL}}/storagenode/"
 					},
 					"response": [
 						{
@@ -962,16 +715,7 @@
 							"originalRequest": {
 								"method": "GET",
 								"header": [],
-								"url": {
-									"raw": "{{BASE_URL}}/storagenode/",
-									"host": [
-										"{{BASE_URL}}"
-									],
-									"path": [
-										"storagenode",
-										""
-									]
-								}
+								"url": "{{BASE_URL}}/storagenode/"
 							},
 							"status": "OK",
 							"code": 200,
@@ -1004,16 +748,7 @@
 					"request": {
 						"method": "GET",
 						"header": [],
-						"url": {
-							"raw": "{{BASE_URL}}/storagenode/{{STORAGE_NODE_ID}}",
-							"host": [
-								"{{BASE_URL}}"
-							],
-							"path": [
-								"storagenode",
-								"{{STORAGE_NODE_ID}}"
-							]
-						}
+						"url": "{{BASE_URL}}/storagenode/{{STORAGE_NODE_ID}}"
 					},
 					"response": [
 						{
@@ -1021,16 +756,7 @@
 							"originalRequest": {
 								"method": "GET",
 								"header": [],
-								"url": {
-									"raw": "{{BASE_URL}}/storagenode/{{STORAGE_NODE_ID}}",
-									"host": [
-										"{{BASE_URL}}"
-									],
-									"path": [
-										"storagenode",
-										"{{STORAGE_NODE_ID}}"
-									]
-								}
+								"url": "{{BASE_URL}}/storagenode/{{STORAGE_NODE_ID}}"
 							},
 							"status": "OK",
 							"code": 200,
@@ -1063,17 +789,7 @@
 					"request": {
 						"method": "GET",
 						"header": [],
-						"url": {
-							"raw": "{{BASE_URL}}/storagenode/capacity/{{STORAGE_NODE_ID}}",
-							"host": [
-								"{{BASE_URL}}"
-							],
-							"path": [
-								"storagenode",
-								"capacity",
-								"{{STORAGE_NODE_ID}}"
-							]
-						}
+						"url": "{{BASE_URL}}/storagenode/capacity/{{STORAGE_NODE_ID}}"
 					},
 					"response": [
 						{
@@ -1081,17 +797,7 @@
 							"originalRequest": {
 								"method": "GET",
 								"header": [],
-								"url": {
-									"raw": "{{BASE_URL}}/storagenode/capacity/{{STORAGE_NODE_ID}}",
-									"host": [
-										"{{BASE_URL}}"
-									],
-									"path": [
-										"storagenode",
-										"capacity",
-										"{{STORAGE_NODE_ID}}"
-									]
-								}
+								"url": "{{BASE_URL}}/storagenode/capacity/{{STORAGE_NODE_ID}}"
 							},
 							"status": "OK",
 							"code": 200,
@@ -1124,19 +830,7 @@
 					"request": {
 						"method": "GET",
 						"header": [],
-						"url": {
-							"raw": "{{BASE_URL}}/storagenode/capacity/{{STORAGE_NODE_ID}}/history/1h",
-							"host": [
-								"{{BASE_URL}}"
-							],
-							"path": [
-								"storagenode",
-								"capacity",
-								"{{STORAGE_NODE_ID}}",
-								"history",
-								"1h"
-							]
-						}
+						"url": "{{BASE_URL}}/storagenode/capacity/{{STORAGE_NODE_ID}}/history/1h"
 					},
 					"response": [
 						{
@@ -1144,19 +838,7 @@
 							"originalRequest": {
 								"method": "GET",
 								"header": [],
-								"url": {
-									"raw": "{{BASE_URL}}/storagenode/capacity/{{STORAGE_NODE_ID}}/history/1h",
-									"host": [
-										"{{BASE_URL}}"
-									],
-									"path": [
-										"storagenode",
-										"capacity",
-										"{{STORAGE_NODE_ID}}",
-										"history",
-										"1h"
-									]
-								}
+								"url": "{{BASE_URL}}/storagenode/capacity/{{STORAGE_NODE_ID}}/history/1h"
 							},
 							"status": "OK",
 							"code": 200,
@@ -1189,17 +871,7 @@
 					"request": {
 						"method": "GET",
 						"header": [],
-						"url": {
-							"raw": "{{BASE_URL}}/storagenode/iostats/{{STORAGE_NODE_ID}}",
-							"host": [
-								"{{BASE_URL}}"
-							],
-							"path": [
-								"storagenode",
-								"iostats",
-								"{{STORAGE_NODE_ID}}"
-							]
-						}
+						"url": "{{BASE_URL}}/storagenode/iostats/{{STORAGE_NODE_ID}}"
 					},
 					"response": [
 						{
@@ -1207,17 +879,7 @@
 							"originalRequest": {
 								"method": "GET",
 								"header": [],
-								"url": {
-									"raw": "{{BASE_URL}}/storagenode/iostats/{{STORAGE_NODE_ID}}",
-									"host": [
-										"{{BASE_URL}}"
-									],
-									"path": [
-										"storagenode",
-										"iostats",
-										"{{STORAGE_NODE_ID}}"
-									]
-								}
+								"url": "{{BASE_URL}}/storagenode/iostats/{{STORAGE_NODE_ID}}"
 							},
 							"status": "OK",
 							"code": 200,
@@ -1250,19 +912,7 @@
 					"request": {
 						"method": "GET",
 						"header": [],
-						"url": {
-							"raw": "{{BASE_URL}}/storagenode/iostats/{{STORAGE_NODE_ID}}/history/1d",
-							"host": [
-								"{{BASE_URL}}"
-							],
-							"path": [
-								"storagenode",
-								"iostats",
-								"{{STORAGE_NODE_ID}}",
-								"history",
-								"1d"
-							]
-						}
+						"url": "{{BASE_URL}}/storagenode/iostats/{{STORAGE_NODE_ID}}/history/1d"
 					},
 					"response": [
 						{
@@ -1270,19 +920,7 @@
 							"originalRequest": {
 								"method": "GET",
 								"header": [],
-								"url": {
-									"raw": "{{BASE_URL}}/storagenode/iostats/{{STORAGE_NODE_ID}}/history/1d",
-									"host": [
-										"{{BASE_URL}}"
-									],
-									"path": [
-										"storagenode",
-										"iostats",
-										"{{STORAGE_NODE_ID}}",
-										"history",
-										"1d"
-									]
-								}
+								"url": "{{BASE_URL}}/storagenode/iostats/{{STORAGE_NODE_ID}}/history/1d"
 							},
 							"status": "OK",
 							"code": 200,
@@ -1315,17 +953,7 @@
 					"request": {
 						"method": "GET",
 						"header": [],
-						"url": {
-							"raw": "{{BASE_URL}}/storagenode/port/{{STORAGE_NODE_ID}}",
-							"host": [
-								"{{BASE_URL}}"
-							],
-							"path": [
-								"storagenode",
-								"port",
-								"{{STORAGE_NODE_ID}}"
-							]
-						}
+						"url": "{{BASE_URL}}/storagenode/port/{{STORAGE_NODE_ID}}"
 					},
 					"response": [
 						{
@@ -1333,17 +961,7 @@
 							"originalRequest": {
 								"method": "GET",
 								"header": [],
-								"url": {
-									"raw": "{{BASE_URL}}/storagenode/port/{{STORAGE_NODE_ID}}",
-									"host": [
-										"{{BASE_URL}}"
-									],
-									"path": [
-										"storagenode",
-										"port",
-										"{{STORAGE_NODE_ID}}"
-									]
-								}
+								"url": "{{BASE_URL}}/storagenode/port/{{STORAGE_NODE_ID}}"
 							},
 							"status": "OK",
 							"code": 200,
@@ -1376,17 +994,7 @@
 					"request": {
 						"method": "GET",
 						"header": [],
-						"url": {
-							"raw": "{{BASE_URL}}/storagenode/suspend/{{STORAGE_NODE_ID}}",
-							"host": [
-								"{{BASE_URL}}"
-							],
-							"path": [
-								"storagenode",
-								"suspend",
-								"{{STORAGE_NODE_ID}}"
-							]
-						}
+						"url": "{{BASE_URL}}/storagenode/suspend/{{STORAGE_NODE_ID}}"
 					},
 					"response": [
 						{
@@ -1394,17 +1002,7 @@
 							"originalRequest": {
 								"method": "GET",
 								"header": [],
-								"url": {
-									"raw": "{{BASE_URL}}/storagenode/suspend/{{STORAGE_NODE_ID}}",
-									"host": [
-										"{{BASE_URL}}"
-									],
-									"path": [
-										"storagenode",
-										"suspend",
-										"{{STORAGE_NODE_ID}}"
-									]
-								}
+								"url": "{{BASE_URL}}/storagenode/suspend/{{STORAGE_NODE_ID}}"
 							},
 							"status": "OK",
 							"code": 200,
@@ -1437,17 +1035,7 @@
 					"request": {
 						"method": "GET",
 						"header": [],
-						"url": {
-							"raw": "{{BASE_URL}}/storagenode/make-sec-new-primary/{{STORAGE_NODE_ID}}",
-							"host": [
-								"{{BASE_URL}}"
-							],
-							"path": [
-								"storagenode",
-								"make-sec-new-primary",
-								"{{STORAGE_NODE_ID}}"
-							]
-						}
+						"url": "{{BASE_URL}}/storagenode/make-sec-new-primary/{{STORAGE_NODE_ID}}"
 					},
 					"response": [
 						{
@@ -1455,17 +1043,7 @@
 							"originalRequest": {
 								"method": "GET",
 								"header": [],
-								"url": {
-									"raw": "{{BASE_URL}}/storagenode/make-sec-new-primary/{{STORAGE_NODE_ID}}",
-									"host": [
-										"{{BASE_URL}}"
-									],
-									"path": [
-										"storagenode",
-										"make-sec-new-primary",
-										"{{STORAGE_NODE_ID}}"
-									]
-								}
+								"url": "{{BASE_URL}}/storagenode/make-sec-new-primary/{{STORAGE_NODE_ID}}"
 							},
 							"status": "OK",
 							"code": 200,
@@ -1580,16 +1158,7 @@
 								}
 							}
 						},
-						"url": {
-							"raw": "{{BASE_URL}}/storagenode/restart",
-							"host": [
-								"{{BASE_URL}}"
-							],
-							"path": [
-								"storagenode",
-								"restart"
-							]
-						}
+						"url": "{{BASE_URL}}/storagenode/restart"
 					},
 					"response": [
 						{
@@ -1606,16 +1175,7 @@
 										}
 									}
 								},
-								"url": {
-									"raw": "{{BASE_URL}}/storagenode/restart",
-									"host": [
-										"{{BASE_URL}}"
-									],
-									"path": [
-										"storagenode",
-										"restart"
-									]
-								}
+								"url": "{{BASE_URL}}/storagenode/restart"
 							},
 							"status": "OK",
 							"code": 200,
@@ -1657,16 +1217,7 @@
 								}
 							}
 						},
-						"url": {
-							"raw": "{{BASE_URL}}/storagenode/add",
-							"host": [
-								"{{BASE_URL}}"
-							],
-							"path": [
-								"storagenode",
-								"add"
-							]
-						}
+						"url": "{{BASE_URL}}/storagenode/add"
 					},
 					"response": []
 				}
@@ -1680,16 +1231,7 @@
 					"request": {
 						"method": "GET",
 						"header": [],
-						"url": {
-							"raw": "{{BASE_URL}}/pool/",
-							"host": [
-								"{{BASE_URL}}"
-							],
-							"path": [
-								"pool",
-								""
-							]
-						}
+						"url": "{{BASE_URL}}/pool/"
 					},
 					"response": [
 						{
@@ -1697,16 +1239,7 @@
 							"originalRequest": {
 								"method": "GET",
 								"header": [],
-								"url": {
-									"raw": "{{BASE_URL}}/pool/",
-									"host": [
-										"{{BASE_URL}}"
-									],
-									"path": [
-										"pool",
-										""
-									]
-								}
+								"url": "{{BASE_URL}}/pool/"
 							},
 							"status": "OK",
 							"code": 200,
@@ -1739,16 +1272,7 @@
 					"request": {
 						"method": "GET",
 						"header": [],
-						"url": {
-							"raw": "{{BASE_URL}}/pool/{{POOL_ID}}",
-							"host": [
-								"{{BASE_URL}}"
-							],
-							"path": [
-								"pool",
-								"{{POOL_ID}}"
-							]
-						}
+						"url": "{{BASE_URL}}/pool/{{POOL_ID}}"
 					},
 					"response": [
 						{
@@ -1756,16 +1280,7 @@
 							"originalRequest": {
 								"method": "GET",
 								"header": [],
-								"url": {
-									"raw": "{{BASE_URL}}/pool/{{POOL_ID}}",
-									"host": [
-										"{{BASE_URL}}"
-									],
-									"path": [
-										"pool",
-										"{{POOL_ID}}"
-									]
-								}
+								"url": "{{BASE_URL}}/pool/{{POOL_ID}}"
 							},
 							"status": "OK",
 							"code": 200,
@@ -1807,16 +1322,7 @@
 								}
 							}
 						},
-						"url": {
-							"raw": "{{BASE_URL}}/pool/",
-							"host": [
-								"{{BASE_URL}}"
-							],
-							"path": [
-								"pool",
-								""
-							]
-						}
+						"url": "{{BASE_URL}}/pool/"
 					},
 					"response": [
 						{
@@ -1833,16 +1339,7 @@
 										}
 									}
 								},
-								"url": {
-									"raw": "{{BASE_URL}}/pool/",
-									"host": [
-										"{{BASE_URL}}"
-									],
-									"path": [
-										"pool",
-										""
-									]
-								}
+								"url": "{{BASE_URL}}/pool/"
 							},
 							"status": "OK",
 							"code": 200,
@@ -1884,16 +1381,7 @@
 								}
 							}
 						},
-						"url": {
-							"raw": "{{BASE_URL}}/pool/{{POOL_ID}}",
-							"host": [
-								"{{BASE_URL}}"
-							],
-							"path": [
-								"pool",
-								"{{POOL_ID}}"
-							]
-						}
+						"url": "{{BASE_URL}}/pool/{{POOL_ID}}"
 					},
 					"response": [
 						{
@@ -1910,16 +1398,7 @@
 										}
 									}
 								},
-								"url": {
-									"raw": "{{BASE_URL}}/pool/{{POOL_ID}}",
-									"host": [
-										"{{BASE_URL}}"
-									],
-									"path": [
-										"pool",
-										"{{POOL_ID}}"
-									]
-								}
+								"url": "{{BASE_URL}}/pool/{{POOL_ID}}"
 							},
 							"status": "OK",
 							"code": 200,
@@ -1957,17 +1436,7 @@
 								"value": "XLZp2ZnRJEvIi60B1ztW"
 							}
 						],
-						"url": {
-							"raw": "{{BASE_URL}}/pool/iostats/{{POOL_ID}}",
-							"host": [
-								"{{BASE_URL}}"
-							],
-							"path": [
-								"pool",
-								"iostats",
-								"{{POOL_ID}}"
-							]
-						}
+						"url": "{{BASE_URL}}/pool/iostats/{{POOL_ID}}"
 					},
 					"response": [
 						{
@@ -1980,17 +1449,7 @@
 										"value": "XLZp2ZnRJEvIi60B1ztW"
 									}
 								],
-								"url": {
-									"raw": "{{BASE_URL}}/pool/iostats/{{POOL_ID}}",
-									"host": [
-										"{{BASE_URL}}"
-									],
-									"path": [
-										"pool",
-										"iostats",
-										"{{POOL_ID}}"
-									]
-								}
+								"url": "{{BASE_URL}}/pool/iostats/{{POOL_ID}}"
 							},
 							"status": "OK",
 							"code": 200,
@@ -2028,17 +1487,7 @@
 								"value": "XLZp2ZnRJEvIi60B1ztW"
 							}
 						],
-						"url": {
-							"raw": "{{BASE_URL}}/pool/iostats-all-lvols/{{POOL_ID}}",
-							"host": [
-								"{{BASE_URL}}"
-							],
-							"path": [
-								"pool",
-								"iostats-all-lvols",
-								"{{POOL_ID}}"
-							]
-						}
+						"url": "{{BASE_URL}}/pool/iostats-all-lvols/{{POOL_ID}}"
 					},
 					"response": [
 						{
@@ -2051,17 +1500,7 @@
 										"value": "XLZp2ZnRJEvIi60B1ztW"
 									}
 								],
-								"url": {
-									"raw": "{{BASE_URL}}/pool/iostats-all-lvols/{{POOL_ID}}",
-									"host": [
-										"{{BASE_URL}}"
-									],
-									"path": [
-										"pool",
-										"iostats-all-lvols",
-										"{{POOL_ID}}"
-									]
-								}
+								"url": "{{BASE_URL}}/pool/iostats-all-lvols/{{POOL_ID}}"
 							},
 							"status": "OK",
 							"code": 200,
@@ -2099,19 +1538,7 @@
 								"value": "XLZp2ZnRJEvIi60B1ztW"
 							}
 						],
-						"url": {
-							"raw": "{{BASE_URL}}/pool/iostats/{{POOL_ID}}/history/10m",
-							"host": [
-								"{{BASE_URL}}"
-							],
-							"path": [
-								"pool",
-								"iostats",
-								"{{POOL_ID}}",
-								"history",
-								"10m"
-							]
-						}
+						"url": "{{BASE_URL}}/pool/iostats/{{POOL_ID}}/history/10m"
 					},
 					"response": [
 						{
@@ -2124,19 +1551,7 @@
 										"value": "XLZp2ZnRJEvIi60B1ztW"
 									}
 								],
-								"url": {
-									"raw": "{{BASE_URL}}/pool/iostats/{{POOL_ID}}/history/10m",
-									"host": [
-										"{{BASE_URL}}"
-									],
-									"path": [
-										"pool",
-										"iostats",
-										"{{POOL_ID}}",
-										"history",
-										"10m"
-									]
-								}
+								"url": "{{BASE_URL}}/pool/iostats/{{POOL_ID}}/history/10m"
 							},
 							"status": "OK",
 							"code": 200,
@@ -2169,17 +1584,7 @@
 					"request": {
 						"method": "GET",
 						"header": [],
-						"url": {
-							"raw": "{{BASE_URL}}/pool/capacity/{{POOL_ID}}",
-							"host": [
-								"{{BASE_URL}}"
-							],
-							"path": [
-								"pool",
-								"capacity",
-								"{{POOL_ID}}"
-							]
-						}
+						"url": "{{BASE_URL}}/pool/capacity/{{POOL_ID}}"
 					},
 					"response": [
 						{
@@ -2187,17 +1592,7 @@
 							"originalRequest": {
 								"method": "GET",
 								"header": [],
-								"url": {
-									"raw": "{{BASE_URL}}/pool/capacity/c1bffbbf-09a8-4fe2-9cdb-901e303d470e",
-									"host": [
-										"{{BASE_URL}}"
-									],
-									"path": [
-										"pool",
-										"capacity",
-										"c1bffbbf-09a8-4fe2-9cdb-901e303d470e"
-									]
-								}
+								"url": "{{BASE_URL}}/pool/capacity/c1bffbbf-09a8-4fe2-9cdb-901e303d470e"
 							},
 							"status": "OK",
 							"code": 200,
@@ -2230,19 +1625,7 @@
 					"request": {
 						"method": "GET",
 						"header": [],
-						"url": {
-							"raw": "{{BASE_URL}}/pool/capacity/{{POOL_ID}}/history/10m",
-							"host": [
-								"{{BASE_URL}}"
-							],
-							"path": [
-								"pool",
-								"capacity",
-								"{{POOL_ID}}",
-								"history",
-								"10m"
-							]
-						}
+						"url": "{{BASE_URL}}/pool/capacity/{{POOL_ID}}/history/10m"
 					},
 					"response": [
 						{
@@ -2250,17 +1633,7 @@
 							"originalRequest": {
 								"method": "GET",
 								"header": [],
-								"url": {
-									"raw": "{{BASE_URL}}/pool/capacity/c1bffbbf-09a8-4fe2-9cdb-901e303d470e",
-									"host": [
-										"{{BASE_URL}}"
-									],
-									"path": [
-										"pool",
-										"capacity",
-										"c1bffbbf-09a8-4fe2-9cdb-901e303d470e"
-									]
-								}
+								"url": "{{BASE_URL}}/pool/capacity/c1bffbbf-09a8-4fe2-9cdb-901e303d470e"
 							},
 							"status": "OK",
 							"code": 200,
@@ -2298,16 +1671,7 @@
 								"value": "{{POOL_SECRET}}"
 							}
 						],
-						"url": {
-							"raw": "{{BASE_URL}}/pool/{{POOL_ID}}",
-							"host": [
-								"{{BASE_URL}}"
-							],
-							"path": [
-								"pool",
-								"{{POOL_ID}}"
-							]
-						}
+						"url": "{{BASE_URL}}/pool/{{POOL_ID}}"
 					},
 					"response": [
 						{
@@ -2320,16 +1684,7 @@
 										"value": "Qyctfj1URHNfT59Wo1rT"
 									}
 								],
-								"url": {
-									"raw": "{{BASE_URL}}/pool/{{POOL_ID}}",
-									"host": [
-										"{{BASE_URL}}"
-									],
-									"path": [
-										"pool",
-										"{{POOL_ID}}"
-									]
-								}
+								"url": "{{BASE_URL}}/pool/{{POOL_ID}}"
 							},
 							"status": "BAD REQUEST",
 							"code": 400,
@@ -2365,16 +1720,7 @@
 										"value": "{{POOL_SECRET}}"
 									}
 								],
-								"url": {
-									"raw": "{{BASE_URL}}/pool/{{POOL_ID}}",
-									"host": [
-										"{{BASE_URL}}"
-									],
-									"path": [
-										"pool",
-										"{{POOL_ID}}"
-									]
-								}
+								"url": "{{BASE_URL}}/pool/{{POOL_ID}}"
 							},
 							"status": "OK",
 							"code": 200,
@@ -2412,16 +1758,7 @@
 					"request": {
 						"method": "GET",
 						"header": [],
-						"url": {
-							"raw": "{{BASE_URL}}/lvol/",
-							"host": [
-								"{{BASE_URL}}"
-							],
-							"path": [
-								"lvol",
-								""
-							]
-						}
+						"url": "{{BASE_URL}}/lvol/"
 					},
 					"response": [
 						{
@@ -2429,16 +1766,7 @@
 							"originalRequest": {
 								"method": "GET",
 								"header": [],
-								"url": {
-									"raw": "{{BASE_URL}}/lvol/",
-									"host": [
-										"{{BASE_URL}}"
-									],
-									"path": [
-										"lvol",
-										""
-									]
-								}
+								"url": "{{BASE_URL}}/lvol/"
 							},
 							"status": "OK",
 							"code": 200,
@@ -2471,16 +1799,7 @@
 					"request": {
 						"method": "GET",
 						"header": [],
-						"url": {
-							"raw": "{{BASE_URL}}/lvol/{{LVOL_ID}}",
-							"host": [
-								"{{BASE_URL}}"
-							],
-							"path": [
-								"lvol",
-								"{{LVOL_ID}}"
-							]
-						}
+						"url": "{{BASE_URL}}/lvol/{{LVOL_ID}}"
 					},
 					"response": [
 						{
@@ -2488,16 +1807,7 @@
 							"originalRequest": {
 								"method": "GET",
 								"header": [],
-								"url": {
-									"raw": "{{BASE_URL}}/lvol/{{LVOL_ID}}",
-									"host": [
-										"{{BASE_URL}}"
-									],
-									"path": [
-										"lvol",
-										"{{LVOL_ID}}"
-									]
-								}
+								"url": "{{BASE_URL}}/lvol/{{LVOL_ID}}"
 							},
 							"status": "OK",
 							"code": 200,
@@ -2539,15 +1849,7 @@
 								}
 							}
 						},
-						"url": {
-							"raw": "{{BASE_URL}}/lvol",
-							"host": [
-								"{{BASE_URL}}"
-							],
-							"path": [
-								"lvol"
-							]
-						}
+						"url": "{{BASE_URL}}/lvol"
 					},
 					"response": [
 						{
@@ -2564,16 +1866,7 @@
 										}
 									}
 								},
-								"url": {
-									"raw": "{{BASE_URL}}/lvol/",
-									"host": [
-										"{{BASE_URL}}"
-									],
-									"path": [
-										"lvol",
-										""
-									]
-								}
+								"url": "{{BASE_URL}}/lvol/"
 							},
 							"status": "OK",
 							"code": 200,
@@ -2615,16 +1908,7 @@
 								}
 							}
 						},
-						"url": {
-							"raw": "{{BASE_URL}}/lvol/{{LVOL_ID}}",
-							"host": [
-								"{{BASE_URL}}"
-							],
-							"path": [
-								"lvol",
-								"{{LVOL_ID}}"
-							]
-						}
+						"url": "{{BASE_URL}}/lvol/{{LVOL_ID}}"
 					},
 					"response": [
 						{
@@ -2641,16 +1925,7 @@
 										}
 									}
 								},
-								"url": {
-									"raw": "{{BASE_URL}}/lvol/{{LVOL_ID}}",
-									"host": [
-										"{{BASE_URL}}"
-									],
-									"path": [
-										"lvol",
-										"{{LVOL_ID}}"
-									]
-								}
+								"url": "{{BASE_URL}}/lvol/{{LVOL_ID}}"
 							},
 							"status": "OK",
 							"code": 200,
@@ -2683,16 +1958,7 @@
 					"request": {
 						"method": "DELETE",
 						"header": [],
-						"url": {
-							"raw": "{{BASE_URL}}/lvol/{{LVOL_ID}}",
-							"host": [
-								"{{BASE_URL}}"
-							],
-							"path": [
-								"lvol",
-								"{{LVOL_ID}}"
-							]
-						}
+						"url": "{{BASE_URL}}/lvol/{{LVOL_ID}}"
 					},
 					"response": [
 						{
@@ -2700,16 +1966,7 @@
 							"originalRequest": {
 								"method": "DELETE",
 								"header": [],
-								"url": {
-									"raw": "{{BASE_URL}}/lvol/{{LVOL_ID}}",
-									"host": [
-										"{{BASE_URL}}"
-									],
-									"path": [
-										"lvol",
-										"{{LVOL_ID}}"
-									]
-								}
+								"url": "{{BASE_URL}}/lvol/{{LVOL_ID}}"
 							},
 							"status": "OK",
 							"code": 200,
@@ -2751,17 +2008,7 @@
 								}
 							}
 						},
-						"url": {
-							"raw": "{{BASE_URL}}/lvol/resize/{{LVOL_ID}}",
-							"host": [
-								"{{BASE_URL}}"
-							],
-							"path": [
-								"lvol",
-								"resize",
-								"{{LVOL_ID}}"
-							]
-						}
+						"url": "{{BASE_URL}}/lvol/resize/{{LVOL_ID}}"
 					},
 					"response": [
 						{
@@ -2778,17 +2025,7 @@
 										}
 									}
 								},
-								"url": {
-									"raw": "{{BASE_URL}}/lvol/resize/{{LVOL_ID}}",
-									"host": [
-										"{{BASE_URL}}"
-									],
-									"path": [
-										"lvol",
-										"resize",
-										"{{LVOL_ID}}"
-									]
-								}
+								"url": "{{BASE_URL}}/lvol/resize/{{LVOL_ID}}"
 							},
 							"status": "OK",
 							"code": 200,
@@ -2830,16 +2067,7 @@
 								}
 							}
 						},
-						"url": {
-							"raw": "{{BASE_URL}}/lvol/create_snapshot",
-							"host": [
-								"{{BASE_URL}}"
-							],
-							"path": [
-								"lvol",
-								"create_snapshot"
-							]
-						}
+						"url": "{{BASE_URL}}/lvol/create_snapshot"
 					},
 					"response": [
 						{
@@ -2856,16 +2084,7 @@
 										}
 									}
 								},
-								"url": {
-									"raw": "{{BASE_URL}}/lvol/create_snapshot",
-									"host": [
-										"{{BASE_URL}}"
-									],
-									"path": [
-										"lvol",
-										"create_snapshot"
-									]
-								}
+								"url": "{{BASE_URL}}/lvol/create_snapshot"
 							},
 							"status": "OK",
 							"code": 200,
@@ -2907,16 +2126,7 @@
 								}
 							}
 						},
-						"url": {
-							"raw": "{{BASE_URL}}/snapshot/clone",
-							"host": [
-								"{{BASE_URL}}"
-							],
-							"path": [
-								"snapshot",
-								"clone"
-							]
-						}
+						"url": "{{BASE_URL}}/snapshot/clone"
 					},
 					"response": [
 						{
@@ -2933,16 +2143,7 @@
 										}
 									}
 								},
-								"url": {
-									"raw": "{{BASE_URL}}/snapshot/clone",
-									"host": [
-										"{{BASE_URL}}"
-									],
-									"path": [
-										"snapshot",
-										"clone"
-									]
-								}
+								"url": "{{BASE_URL}}/snapshot/clone"
 							},
 							"status": "OK",
 							"code": 200,
@@ -2981,17 +2182,7 @@
 								"type": "text"
 							}
 						],
-						"url": {
-							"raw": "{{BASE_URL}}/lvol/iostats/{{LVOL_ID}}",
-							"host": [
-								"{{BASE_URL}}"
-							],
-							"path": [
-								"lvol",
-								"iostats",
-								"{{LVOL_ID}}"
-							]
-						}
+						"url": "{{BASE_URL}}/lvol/iostats/{{LVOL_ID}}"
 					},
 					"response": [
 						{
@@ -3005,17 +2196,7 @@
 										"type": "text"
 									}
 								],
-								"url": {
-									"raw": "{{BASE_URL}}/lvol/iostats/{{LVOL_ID}}",
-									"host": [
-										"{{BASE_URL}}"
-									],
-									"path": [
-										"lvol",
-										"iostats",
-										"{{LVOL_ID}}"
-									]
-								}
+								"url": "{{BASE_URL}}/lvol/iostats/{{LVOL_ID}}"
 							},
 							"status": "OK",
 							"code": 200,
@@ -3048,19 +2229,7 @@
 					"request": {
 						"method": "GET",
 						"header": [],
-						"url": {
-							"raw": "{{BASE_URL}}/lvol/iostats/{{LVOL_ID}}/history/1h",
-							"host": [
-								"{{BASE_URL}}"
-							],
-							"path": [
-								"lvol",
-								"iostats",
-								"{{LVOL_ID}}",
-								"history",
-								"1h"
-							]
-						}
+						"url": "{{BASE_URL}}/lvol/iostats/{{LVOL_ID}}/history/1h"
 					},
 					"response": [
 						{
@@ -3068,19 +2237,7 @@
 							"originalRequest": {
 								"method": "GET",
 								"header": [],
-								"url": {
-									"raw": "{{BASE_URL}}/lvol/iostats/{{LVOL_ID}}/history/1h",
-									"host": [
-										"{{BASE_URL}}"
-									],
-									"path": [
-										"lvol",
-										"iostats",
-										"{{LVOL_ID}}",
-										"history",
-										"1h"
-									]
-								}
+								"url": "{{BASE_URL}}/lvol/iostats/{{LVOL_ID}}/history/1h"
 							},
 							"status": "OK",
 							"code": 200,
@@ -3113,17 +2270,7 @@
 					"request": {
 						"method": "GET",
 						"header": [],
-						"url": {
-							"raw": "{{BASE_URL}}/lvol/capacity/{{LVOL_ID}}",
-							"host": [
-								"{{BASE_URL}}"
-							],
-							"path": [
-								"lvol",
-								"capacity",
-								"{{LVOL_ID}}"
-							]
-						}
+						"url": "{{BASE_URL}}/lvol/capacity/{{LVOL_ID}}"
 					},
 					"response": [
 						{
@@ -3131,17 +2278,7 @@
 							"originalRequest": {
 								"method": "GET",
 								"header": [],
-								"url": {
-									"raw": "{{BASE_URL}}/lvol/capacity/{{LVOL_ID}}",
-									"host": [
-										"{{BASE_URL}}"
-									],
-									"path": [
-										"lvol",
-										"capacity",
-										"{{LVOL_ID}}"
-									]
-								}
+								"url": "{{BASE_URL}}/lvol/capacity/{{LVOL_ID}}"
 							},
 							"status": "OK",
 							"code": 200,
@@ -3174,19 +2311,7 @@
 					"request": {
 						"method": "GET",
 						"header": [],
-						"url": {
-							"raw": "{{BASE_URL}}/lvol/capacity/{{LVOL_ID}}/history/1h",
-							"host": [
-								"{{BASE_URL}}"
-							],
-							"path": [
-								"lvol",
-								"capacity",
-								"{{LVOL_ID}}",
-								"history",
-								"1h"
-							]
-						}
+						"url": "{{BASE_URL}}/lvol/capacity/{{LVOL_ID}}/history/1h"
 					},
 					"response": [
 						{
@@ -3194,19 +2319,7 @@
 							"originalRequest": {
 								"method": "GET",
 								"header": [],
-								"url": {
-									"raw": "{{BASE_URL}}/lvol/capacity/{{LVOL_ID}}/history/1h",
-									"host": [
-										"{{BASE_URL}}"
-									],
-									"path": [
-										"lvol",
-										"capacity",
-										"{{LVOL_ID}}",
-										"history",
-										"1h"
-									]
-								}
+								"url": "{{BASE_URL}}/lvol/capacity/{{LVOL_ID}}/history/1h"
 							},
 							"status": "OK",
 							"code": 200,
@@ -3239,17 +2352,7 @@
 					"request": {
 						"method": "GET",
 						"header": [],
-						"url": {
-							"raw": "{{BASE_URL}}/lvol/connect/{{LVOL_ID}}",
-							"host": [
-								"{{BASE_URL}}"
-							],
-							"path": [
-								"lvol",
-								"connect",
-								"{{LVOL_ID}}"
-							]
-						}
+						"url": "{{BASE_URL}}/lvol/connect/{{LVOL_ID}}"
 					},
 					"response": [
 						{
@@ -3257,17 +2360,7 @@
 							"originalRequest": {
 								"method": "GET",
 								"header": [],
-								"url": {
-									"raw": "{{BASE_URL}}/lvol/connect/{{LVOL_ID}}",
-									"host": [
-										"{{BASE_URL}}"
-									],
-									"path": [
-										"lvol",
-										"connect",
-										"{{LVOL_ID}}"
-									]
-								}
+								"url": "{{BASE_URL}}/lvol/connect/{{LVOL_ID}}"
 							},
 							"status": "OK",
 							"code": 200,
@@ -3305,16 +2398,7 @@
 					"request": {
 						"method": "GET",
 						"header": [],
-						"url": {
-							"raw": "{{BASE_URL}}/cachingnode/",
-							"host": [
-								"{{BASE_URL}}"
-							],
-							"path": [
-								"cachingnode",
-								""
-							]
-						}
+						"url": "{{BASE_URL}}/cachingnode/"
 					},
 					"response": [
 						{
@@ -3322,16 +2406,7 @@
 							"originalRequest": {
 								"method": "GET",
 								"header": [],
-								"url": {
-									"raw": "{{BASE_URL}}/cachingnode/",
-									"host": [
-										"{{BASE_URL}}"
-									],
-									"path": [
-										"cachingnode",
-										""
-									]
-								}
+								"url": "{{BASE_URL}}/cachingnode/"
 							},
 							"status": "OK",
 							"code": 200,
@@ -3364,16 +2439,7 @@
 					"request": {
 						"method": "GET",
 						"header": [],
-						"url": {
-							"raw": "{{BASE_URL}}/cachingnode/{{CACHING_NODE}}",
-							"host": [
-								"{{BASE_URL}}"
-							],
-							"path": [
-								"cachingnode",
-								"{{CACHING_NODE}}"
-							]
-						}
+						"url": "{{BASE_URL}}/cachingnode/{{CACHING_NODE}}"
 					},
 					"response": [
 						{
@@ -3381,16 +2447,7 @@
 							"originalRequest": {
 								"method": "GET",
 								"header": [],
-								"url": {
-									"raw": "{{BASE_URL}}/cachingnode/{{CACHING_NODE}}",
-									"host": [
-										"{{BASE_URL}}"
-									],
-									"path": [
-										"cachingnode",
-										"{{CACHING_NODE}}"
-									]
-								}
+								"url": "{{BASE_URL}}/cachingnode/{{CACHING_NODE}}"
 							},
 							"status": "OK",
 							"code": 200,
@@ -3432,16 +2489,7 @@
 								}
 							}
 						},
-						"url": {
-							"raw": "{{BASE_URL}}/cachingnode/",
-							"host": [
-								"{{BASE_URL}}"
-							],
-							"path": [
-								"cachingnode",
-								""
-							]
-						}
+						"url": "{{BASE_URL}}/cachingnode/"
 					},
 					"response": [
 						{
@@ -3458,16 +2506,7 @@
 										}
 									}
 								},
-								"url": {
-									"raw": "{{BASE_URL}}/cachingnode/",
-									"host": [
-										"{{BASE_URL}}"
-									],
-									"path": [
-										"cachingnode",
-										""
-									]
-								}
+								"url": "{{BASE_URL}}/cachingnode/"
 							},
 							"status": "OK",
 							"code": 200,
@@ -3509,17 +2548,7 @@
 								}
 							}
 						},
-						"url": {
-							"raw": "{{BASE_URL}}/cachingnode/connect/{{CACHING_NODE}}",
-							"host": [
-								"{{BASE_URL}}"
-							],
-							"path": [
-								"cachingnode",
-								"connect",
-								"{{CACHING_NODE}}"
-							]
-						}
+						"url": "{{BASE_URL}}/cachingnode/connect/{{CACHING_NODE}}"
 					},
 					"response": [
 						{
@@ -3536,17 +2565,7 @@
 										}
 									}
 								},
-								"url": {
-									"raw": "{{BASE_URL}}/cachingnode/connect/{{CACHING_NODE}}",
-									"host": [
-										"{{BASE_URL}}"
-									],
-									"path": [
-										"cachingnode",
-										"connect",
-										"{{CACHING_NODE}}"
-									]
-								}
+								"url": "{{BASE_URL}}/cachingnode/connect/{{CACHING_NODE}}"
 							},
 							"status": "OK",
 							"code": 200,
@@ -3588,17 +2607,7 @@
 								}
 							}
 						},
-						"url": {
-							"raw": "{{BASE_URL}}/cachingnode/disconnect/{{CACHING_NODE}}",
-							"host": [
-								"{{BASE_URL}}"
-							],
-							"path": [
-								"cachingnode",
-								"disconnect",
-								"{{CACHING_NODE}}"
-							]
-						}
+						"url": "{{BASE_URL}}/cachingnode/disconnect/{{CACHING_NODE}}"
 					},
 					"response": [
 						{
@@ -3615,17 +2624,7 @@
 										}
 									}
 								},
-								"url": {
-									"raw": "{{BASE_URL}}/cachingnode/disconnect/{{CACHING_NODE}}",
-									"host": [
-										"{{BASE_URL}}"
-									],
-									"path": [
-										"cachingnode",
-										"disconnect",
-										"{{CACHING_NODE}}"
-									]
-								}
+								"url": "{{BASE_URL}}/cachingnode/disconnect/{{CACHING_NODE}}"
 							},
 							"status": "OK",
 							"code": 200,
@@ -3658,17 +2657,7 @@
 					"request": {
 						"method": "GET",
 						"header": [],
-						"url": {
-							"raw": "{{BASE_URL}}/cachingnode/recreate/{{CACHING_NODE}}",
-							"host": [
-								"{{BASE_URL}}"
-							],
-							"path": [
-								"cachingnode",
-								"recreate",
-								"{{CACHING_NODE}}"
-							]
-						}
+						"url": "{{BASE_URL}}/cachingnode/recreate/{{CACHING_NODE}}"
 					},
 					"response": [
 						{
@@ -3676,17 +2665,7 @@
 							"originalRequest": {
 								"method": "GET",
 								"header": [],
-								"url": {
-									"raw": "{{BASE_URL}}/cachingnode/recreate/0d544ecf-f25a-4e8e-a198-99f4db368be2",
-									"host": [
-										"{{BASE_URL}}"
-									],
-									"path": [
-										"cachingnode",
-										"recreate",
-										"0d544ecf-f25a-4e8e-a198-99f4db368be2"
-									]
-								}
+								"url": "{{BASE_URL}}/cachingnode/recreate/0d544ecf-f25a-4e8e-a198-99f4db368be2"
 							},
 							"status": "OK",
 							"code": 200,
@@ -3719,17 +2698,7 @@
 					"request": {
 						"method": "GET",
 						"header": [],
-						"url": {
-							"raw": "{{BASE_URL}}/cachingnode/lvols/{{CACHING_NODE}}",
-							"host": [
-								"{{BASE_URL}}"
-							],
-							"path": [
-								"cachingnode",
-								"lvols",
-								"{{CACHING_NODE}}"
-							]
-						}
+						"url": "{{BASE_URL}}/cachingnode/lvols/{{CACHING_NODE}}"
 					},
 					"response": [
 						{
@@ -3737,17 +2706,7 @@
 							"originalRequest": {
 								"method": "GET",
 								"header": [],
-								"url": {
-									"raw": "{{BASE_URL}}/cachingnode/lvols/{{CACHING_NODE}}",
-									"host": [
-										"{{BASE_URL}}"
-									],
-									"path": [
-										"cachingnode",
-										"lvols",
-										"{{CACHING_NODE}}"
-									]
-								}
+								"url": "{{BASE_URL}}/cachingnode/lvols/{{CACHING_NODE}}"
 							},
 							"status": "OK",
 							"code": 200,
@@ -3780,17 +2739,7 @@
 					"request": {
 						"method": "GET",
 						"header": [],
-						"url": {
-							"raw": "{{BASE_URL}}/cachingnode/systemid/ec2c9789-b46b-ac17-a117-190a05e8b56d",
-							"host": [
-								"{{BASE_URL}}"
-							],
-							"path": [
-								"cachingnode",
-								"systemid",
-								"ec2c9789-b46b-ac17-a117-190a05e8b56d"
-							]
-						}
+						"url": "{{BASE_URL}}/cachingnode/systemid/ec2c9789-b46b-ac17-a117-190a05e8b56d"
 					},
 					"response": [
 						{
@@ -3798,17 +2747,7 @@
 							"originalRequest": {
 								"method": "GET",
 								"header": [],
-								"url": {
-									"raw": "{{BASE_URL}}/cachingnode/systemid/ec2c9789-b46b-ac17-a117-190a05e8b56d",
-									"host": [
-										"{{BASE_URL}}"
-									],
-									"path": [
-										"cachingnode",
-										"systemid",
-										"ec2c9789-b46b-ac17-a117-190a05e8b56d"
-									]
-								}
+								"url": "{{BASE_URL}}/cachingnode/systemid/ec2c9789-b46b-ac17-a117-190a05e8b56d"
 							},
 							"status": "OK",
 							"code": 200,
@@ -3846,17 +2785,7 @@
 					"request": {
 						"method": "GET",
 						"header": [],
-						"url": {
-							"raw": "{{BASE_URL}}/device/list/{{STORAGE_NODE_ID}}",
-							"host": [
-								"{{BASE_URL}}"
-							],
-							"path": [
-								"device",
-								"list",
-								"{{STORAGE_NODE_ID}}"
-							]
-						}
+						"url": "{{BASE_URL}}/device/list/{{STORAGE_NODE_ID}}"
 					},
 					"response": [
 						{
@@ -3864,17 +2793,7 @@
 							"originalRequest": {
 								"method": "GET",
 								"header": [],
-								"url": {
-									"raw": "{{BASE_URL}}/device/list/{{STORAGE_NODE_ID}}",
-									"host": [
-										"{{BASE_URL}}"
-									],
-									"path": [
-										"device",
-										"list",
-										"{{STORAGE_NODE_ID}}"
-									]
-								}
+								"url": "{{BASE_URL}}/device/list/{{STORAGE_NODE_ID}}"
 							},
 							"status": "OK",
 							"code": 200,
@@ -3907,17 +2826,7 @@
 					"request": {
 						"method": "GET",
 						"header": [],
-						"url": {
-							"raw": "{{BASE_URL}}/device/capacity/{{DEVICE_ID}}",
-							"host": [
-								"{{BASE_URL}}"
-							],
-							"path": [
-								"device",
-								"capacity",
-								"{{DEVICE_ID}}"
-							]
-						}
+						"url": "{{BASE_URL}}/device/capacity/{{DEVICE_ID}}"
 					},
 					"response": [
 						{
@@ -3925,17 +2834,7 @@
 							"originalRequest": {
 								"method": "GET",
 								"header": [],
-								"url": {
-									"raw": "{{BASE_URL}}/device/capacity/{{DEVICE_ID}}",
-									"host": [
-										"{{BASE_URL}}"
-									],
-									"path": [
-										"device",
-										"capacity",
-										"{{DEVICE_ID}}"
-									]
-								}
+								"url": "{{BASE_URL}}/device/capacity/{{DEVICE_ID}}"
 							},
 							"status": "OK",
 							"code": 200,
@@ -3968,19 +2867,7 @@
 					"request": {
 						"method": "GET",
 						"header": [],
-						"url": {
-							"raw": "{{BASE_URL}}/device/capacity/{{DEVICE_ID}}/history/1h",
-							"host": [
-								"{{BASE_URL}}"
-							],
-							"path": [
-								"device",
-								"capacity",
-								"{{DEVICE_ID}}",
-								"history",
-								"1h"
-							]
-						}
+						"url": "{{BASE_URL}}/device/capacity/{{DEVICE_ID}}/history/1h"
 					},
 					"response": [
 						{
@@ -3988,19 +2875,7 @@
 							"originalRequest": {
 								"method": "GET",
 								"header": [],
-								"url": {
-									"raw": "{{BASE_URL}}/device/capacity/{{DEVICE_ID}}/history/1h",
-									"host": [
-										"{{BASE_URL}}"
-									],
-									"path": [
-										"device",
-										"capacity",
-										"{{DEVICE_ID}}",
-										"history",
-										"1h"
-									]
-								}
+								"url": "{{BASE_URL}}/device/capacity/{{DEVICE_ID}}/history/1h"
 							},
 							"status": "OK",
 							"code": 200,
@@ -4033,17 +2908,7 @@
 					"request": {
 						"method": "GET",
 						"header": [],
-						"url": {
-							"raw": "{{BASE_URL}}/device/iostats/{{DEVICE_ID}}",
-							"host": [
-								"{{BASE_URL}}"
-							],
-							"path": [
-								"device",
-								"iostats",
-								"{{DEVICE_ID}}"
-							]
-						}
+						"url": "{{BASE_URL}}/device/iostats/{{DEVICE_ID}}"
 					},
 					"response": [
 						{
@@ -4051,17 +2916,7 @@
 							"originalRequest": {
 								"method": "GET",
 								"header": [],
-								"url": {
-									"raw": "{{BASE_URL}}/device/iostats/{{DEVICE_ID}}",
-									"host": [
-										"{{BASE_URL}}"
-									],
-									"path": [
-										"device",
-										"iostats",
-										"{{DEVICE_ID}}"
-									]
-								}
+								"url": "{{BASE_URL}}/device/iostats/{{DEVICE_ID}}"
 							},
 							"status": "OK",
 							"code": 200,
@@ -4094,19 +2949,7 @@
 					"request": {
 						"method": "GET",
 						"header": [],
-						"url": {
-							"raw": "{{BASE_URL}}/device/iostats/{{DEVICE_ID}}/history/1m",
-							"host": [
-								"{{BASE_URL}}"
-							],
-							"path": [
-								"device",
-								"iostats",
-								"{{DEVICE_ID}}",
-								"history",
-								"1m"
-							]
-						}
+						"url": "{{BASE_URL}}/device/iostats/{{DEVICE_ID}}/history/1m"
 					},
 					"response": [
 						{
@@ -4114,19 +2957,7 @@
 							"originalRequest": {
 								"method": "GET",
 								"header": [],
-								"url": {
-									"raw": "{{BASE_URL}}/device/iostats/{{DEVICE_ID}}/history/1m",
-									"host": [
-										"{{BASE_URL}}"
-									],
-									"path": [
-										"device",
-										"iostats",
-										"{{DEVICE_ID}}",
-										"history",
-										"1m"
-									]
-								}
+								"url": "{{BASE_URL}}/device/iostats/{{DEVICE_ID}}/history/1m"
 							},
 							"status": "OK",
 							"code": 200,
@@ -4173,16 +3004,7 @@
 								}
 							}
 						},
-						"url": {
-							"raw": "{{BASE_URL}}/snapshot/",
-							"host": [
-								"{{BASE_URL}}"
-							],
-							"path": [
-								"snapshot",
-								""
-							]
-						}
+						"url": "{{BASE_URL}}/snapshot/"
 					},
 					"response": [
 						{
@@ -4199,16 +3021,7 @@
 										}
 									}
 								},
-								"url": {
-									"raw": "{{BASE_URL}}/snapshot/",
-									"host": [
-										"{{BASE_URL}}"
-									],
-									"path": [
-										"snapshot",
-										""
-									]
-								}
+								"url": "{{BASE_URL}}/snapshot/"
 							},
 							"status": "OK",
 							"code": 200,
@@ -4250,16 +3063,7 @@
 								}
 							}
 						},
-						"url": {
-							"raw": "{{BASE_URL}}/snapshot/clone",
-							"host": [
-								"{{BASE_URL}}"
-							],
-							"path": [
-								"snapshot",
-								"clone"
-							]
-						}
+						"url": "{{BASE_URL}}/snapshot/clone"
 					},
 					"response": [
 						{
@@ -4276,16 +3080,7 @@
 										}
 									}
 								},
-								"url": {
-									"raw": "{{BASE_URL}}/snapshot/clone",
-									"host": [
-										"{{BASE_URL}}"
-									],
-									"path": [
-										"snapshot",
-										"clone"
-									]
-								}
+								"url": "{{BASE_URL}}/snapshot/clone"
 							},
 							"status": "OK",
 							"code": 200,
@@ -4318,16 +3113,7 @@
 					"request": {
 						"method": "GET",
 						"header": [],
-						"url": {
-							"raw": "{{BASE_URL}}/snapshot/",
-							"host": [
-								"{{BASE_URL}}"
-							],
-							"path": [
-								"snapshot",
-								""
-							]
-						}
+						"url": "{{BASE_URL}}/snapshot/"
 					},
 					"response": [
 						{
@@ -4335,16 +3121,7 @@
 							"originalRequest": {
 								"method": "GET",
 								"header": [],
-								"url": {
-									"raw": "{{BASE_URL}}/snapshot/",
-									"host": [
-										"{{BASE_URL}}"
-									],
-									"path": [
-										"snapshot",
-										""
-									]
-								}
+								"url": "{{BASE_URL}}/snapshot/"
 							},
 							"status": "OK",
 							"code": 200,
@@ -4377,16 +3154,7 @@
 					"request": {
 						"method": "DELETE",
 						"header": [],
-						"url": {
-							"raw": "{{BASE_URL}}/snapshot/{{SNAPSHOT_ID}}",
-							"host": [
-								"{{BASE_URL}}"
-							],
-							"path": [
-								"snapshot",
-								"{{SNAPSHOT_ID}}"
-							]
-						}
+						"url": "{{BASE_URL}}/snapshot/{{SNAPSHOT_ID}}"
 					},
 					"response": [
 						{
@@ -4394,16 +3162,7 @@
 							"originalRequest": {
 								"method": "DELETE",
 								"header": [],
-								"url": {
-									"raw": "{{BASE_URL}}/snapshot/244a0e90-3c2d-40e6-b7f9-f0fab24a41dc",
-									"host": [
-										"{{BASE_URL}}"
-									],
-									"path": [
-										"snapshot",
-										"244a0e90-3c2d-40e6-b7f9-f0fab24a41dc"
-									]
-								}
+								"url": "{{BASE_URL}}/snapshot/244a0e90-3c2d-40e6-b7f9-f0fab24a41dc"
 							},
 							"status": "OK",
 							"code": 200,
@@ -4438,15 +3197,7 @@
 			"request": {
 				"method": "GET",
 				"header": [],
-				"url": {
-					"raw": "{{BASE_URL}}/",
-					"host": [
-						"{{BASE_URL}}"
-					],
-					"path": [
-						""
-					]
-				}
+				"url": "{{BASE_URL}}/"
 			},
 			"response": [
 				{
@@ -4454,15 +3205,7 @@
 					"originalRequest": {
 						"method": "GET",
 						"header": [],
-						"url": {
-							"raw": "{{BASE_URL}}/",
-							"host": [
-								"{{BASE_URL}}"
-							],
-							"path": [
-								""
-							]
-						}
+						"url": "{{BASE_URL}}/"
 					},
 					"status": "OK",
 					"code": 200,
@@ -4493,18 +3236,10 @@
 	],
 	"auth": {
 		"type": "apikey",
-		"apikey": [
-			{
-				"key": "value",
-				"value": "{{CLUSTER_ID}} {{CLUSTER_SECRET}}",
-				"type": "string"
-			},
-			{
-				"key": "key",
-				"value": "Authorization",
-				"type": "string"
-			}
-		]
+		"apikey": {
+			"value": "{{CLUSTER_ID}} {{CLUSTER_SECRET}}",
+			"key": "Authorization"
+		}
 	},
 	"event": [
 		{
@@ -4545,32 +3280,32 @@
 		{
 			"key": "MGMT_NODE_ID",
 			"value": "9fd19a15-c5e1-40d1-b41c-9b1957f9774c",
-			"type": "string"
+			"type": "default"
 		},
 		{
 			"key": "STORAGE_NODE_ID",
 			"value": "e39846b5-1ab1-4356-8c3c-66bd37894cf9",
-			"type": "string"
+			"type": "default"
 		},
 		{
 			"key": "POOL_ID",
 			"value": "152bcfb6-50a8-41f3-b786-62c801a65219",
-			"type": "string"
+			"type": "default"
 		},
 		{
 			"key": "LVOL_ID",
 			"value": "58ce0b3f-805d-44e4-b008-6c8930b2dd77",
-			"type": "string"
+			"type": "default"
 		},
 		{
 			"key": "CACHING_NODE",
 			"value": "0d544ecf-f25a-4e8e-a198-99f4db368be2",
-			"type": "string"
+			"type": "default"
 		},
 		{
 			"key": "DEVICE_ID",
 			"value": "f0bac32f-c481-4448-83b5-359787fee724",
-			"type": "string"
+			"type": "default"
 		},
 		{
 			"key": "SNAPSHOT_ID",
