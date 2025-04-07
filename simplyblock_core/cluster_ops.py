@@ -580,13 +580,16 @@ def cluster_activate(cl_id, force=False, force_lvstore_create=False):
             return False
 
     ols_status = cluster.status
-    set_cluster_status(cl_id, Cluster.STATUS_IN_ACTIVATION)
+    if ols_status == Cluster.STATUS_IN_ACTIVATION:
+        ols_status = Cluster.STATUS_UNREADY
+    else:
+        set_cluster_status(cl_id, Cluster.STATUS_IN_ACTIVATION)
     snodes = db_controller.get_storage_nodes_by_cluster_id(cl_id)
     online_nodes = []
     dev_count = 0
 
     for node in snodes:
-        if node.is_secondary_node:
+        if node.is_secondary_node:  # pass
             continue
         if node.status == node.STATUS_ONLINE:
             online_nodes.append(node)
@@ -603,20 +606,34 @@ def cluster_activate(cl_id, force=False, force_lvstore_create=False):
     records = db_controller.get_cluster_capacity(cluster)
     max_size = records[0]['size_total']
 
+    used_nodes_as_sec = []
+    snodes = db_controller.get_storage_nodes_by_cluster_id(cl_id)
     if cluster.ha_type == "ha":
         for snode in snodes:
-            if snode.is_secondary_node or snode.secondary_node_id:
+            if snode.is_secondary_node:  # pass
+                continue
+            if snode.secondary_node_id:
+                sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
+                sec_node.lvstore_stack_secondary_1 = snode.get_id()
+                sec_node.write_to_db()
+                used_nodes_as_sec.append(snode.secondary_node_id)
                 continue
             secondary_nodes = storage_node_ops.get_secondary_nodes(snode)
             if not secondary_nodes:
                 logger.error(f"Failed to activate cluster, No enough secondary nodes")
                 set_cluster_status(cl_id, ols_status)
                 return False
+            snode = db_controller.get_storage_node_by_id(snode.get_id())
             snode.secondary_node_id = secondary_nodes[0]
             snode.write_to_db()
+            sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
+            sec_node.lvstore_stack_secondary_1 = snode.get_id()
+            sec_node.write_to_db()
+            used_nodes_as_sec.append(snode.secondary_node_id)
 
+    snodes = db_controller.get_storage_nodes_by_cluster_id(cl_id)
     for snode in snodes:
-        if snode.is_secondary_node:
+        if snode.is_secondary_node:  # pass
             continue
         if snode.status != StorageNode.STATUS_ONLINE:
             continue
@@ -666,6 +683,7 @@ def get_cluster_status(cl_id, is_json=False):
             data.append({
                 "UUID": dev.get_id(),
                 "Storage ID": dev.cluster_device_order,
+                "Physical label": dev.physical_label,
                 "Size": utils.humanbytes(dev.size),
                 "Hostname": node.hostname,
                 "Status": dev.status,
@@ -830,7 +848,9 @@ def list_all_info(cluster_id):
         elif task.status in [JobSchedule.STATUS_NEW, JobSchedule.STATUS_SUSPENDED]:
             task_pending += 1
 
-
+    status = cl.status
+    if cl.is_re_balancing and status in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED]:
+        status = f"{status} - ReBalancing"
     data.append({
         "Cluster UUID": cl.get_id(),
         "Type": cl.ha_type.upper(),
@@ -852,8 +872,7 @@ def list_all_info(cluster_id):
         # "Size prov": f"{utils.humanbytes(rec.size_prov)}",
         # "Size util": f"{rec.size_util}%",
         # "Size prov util": f"{rec.size_prov_util}%",
-
-        "Status": cl.status,
+        "Status": status.upper(),
 
     })
 
@@ -880,7 +899,7 @@ def list_all_info(cluster_id):
         "Write IOP/s": f"{rec.write_io_ps}",
 
         "Health": "True",
-        "Status": cl.status,
+        "Status": status.upper(),
 
     })
 
@@ -1048,12 +1067,12 @@ def get_iostats_history(cluster_id, history_string, records_count=20, parse_size
     db_controller = DBController()
     cluster = db_controller.get_cluster_by_id(cluster_id)
     if not cluster:
-        logger.error(f"Cluster not found {cluster_id}")
+        logger.warning(f"Cluster not found {cluster_id}")
         return False
 
     nodes = db_controller.get_storage_nodes_by_cluster_id(cluster_id)
     if not nodes:
-        logger.error("no nodes found")
+        logger.warning("no nodes found")
         return False
 
     if history_string:

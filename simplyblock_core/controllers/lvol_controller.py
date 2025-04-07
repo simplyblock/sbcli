@@ -173,7 +173,7 @@ def _get_next_3_nodes(cluster_id, lvol_size=0):
     online_nodes = []
     node_stats = {}
     for node in snodes:
-        if node.is_secondary_node:
+        if node.is_secondary_node:  # pass
             continue
 
         if node.status == node.STATUS_ONLINE:

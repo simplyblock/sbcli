@@ -50,7 +50,7 @@ def task_runner(task):
 
     if task.status in [JobSchedule.STATUS_NEW, JobSchedule.STATUS_SUSPENDED]:
         for node in db_controller.get_storage_nodes_by_cluster_id(task.cluster_id):
-            if node.is_secondary_node:
+            if node.is_secondary_node:  # pass
                 continue
 
             if node.online_since:

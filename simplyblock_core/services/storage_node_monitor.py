@@ -2,6 +2,7 @@
 import time
 from datetime import datetime, timezone
 
+
 from simplyblock_core import constants, db_controller, cluster_ops, storage_node_ops, utils
 from simplyblock_core.controllers import health_controller, device_controller, tasks_controller
 from simplyblock_core.models.cluster import Cluster
@@ -15,6 +16,8 @@ logger = utils.get_logger(__name__)
 
 # get DB controller
 db_controller = db_controller.DBController()
+
+utils.init_sentry_sdk()
 
 
 def is_new_migrated_node(cluster_id, node):
@@ -123,7 +126,8 @@ def update_cluster_status(cluster_id):
 
     task_pending = 0
     for task in db_controller.get_job_tasks(cluster_id):
-        if task.status != JobSchedule.STATUS_DONE:
+        if task.status != JobSchedule.STATUS_DONE and task.function_name in [
+            JobSchedule.FN_DEV_MIG, JobSchedule.FN_NEW_DEV_MIG, JobSchedule.FN_FAILED_DEV_MIG]:
             task_pending += 1
 
     cluster.is_re_balancing = task_pending  > 0
@@ -143,10 +147,10 @@ def update_cluster_status(cluster_id):
         # check node statuss, check auto restart for nodes
         can_activate = True
         for node in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
-            if node.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_REMOVED]:
-                logger.error(f"can not activate cluster: node in not online {node.get_id()}: {node.status}")
-                can_activate = False
-                break
+            # if node.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_REMOVED]:
+            #     logger.error(f"can not activate cluster: node in not online {node.get_id()}: {node.status}")
+            #     can_activate = False
+            #     break
             if tasks_controller.get_active_node_restart_task(cluster_id, node.get_id()):
                 logger.error(f"can not activate cluster: restart tasks found")
                 can_activate = False
@@ -247,7 +251,7 @@ while True:
             spdk_process = True
             if node_api_check:
                 # 3- check spdk_process
-                spdk_process = health_controller._check_spdk_process_up(snode.mgmt_ip)
+                spdk_process = health_controller._check_spdk_process_up(snode.mgmt_ip, snode.rpc_port)
             logger.info(f"Check: spdk process {snode.mgmt_ip}:5000 ... {spdk_process}")
 
                 # 4- check rpc
@@ -258,19 +262,19 @@ while True:
             node_port_check = True
             down_ports = []
             if spdk_process and snode.lvstore_status == "ready":
-                if snode.is_secondary_node:
-                    ports = [4420]
+                ports = [snode.nvmf_port]
+                if snode.lvstore_stack_secondary_1:
                     for n in db_controller.get_primary_storage_nodes_by_secondary_node_id(snode.get_id()):
                         if n.lvstore_status == "ready":
                             ports.append(n.lvol_subsys_port)
-                else:
-                    ports = [snode.lvol_subsys_port, 4420]
+                if not snode.is_secondary_node:
+                    ports.append(snode.lvol_subsys_port)
 
                 for port in ports:
                     ret = health_controller._check_port_on_node(snode, port)
                     logger.info(f"Check: node port {snode.mgmt_ip}, {port} ... {ret}")
                     node_port_check &= ret
-                    if not ret and port == 4420:
+                    if not ret and port == snode.nvmf_port:
                         down_ports.append(port)
 
                 for data_nic in snode.data_nics:

@@ -542,7 +542,7 @@ def calculate_minimum_hp_memory(small_pool_count, large_pool_count, lvol_count, 
     '''
     pool_consumption = (small_pool_count * 8 + large_pool_count * 128) / 1024 + 1092
     memory_consumption = (4 * cpu_count + 1.0277 * pool_consumption + 25 * lvol_count) * (1024 * 1024) + (250 * 1024 * 1024) * 1.1 * convert_size(max_prov, 'TiB') + constants.EXTRA_HUGE_PAGE_MEMORY
-    return int(memory_consumption*1.5)
+    return int(memory_consumption)
 
 
 def calculate_minimum_sys_memory(max_prov, total):
@@ -629,7 +629,7 @@ def get_logger(name=""):
 def _parse_unit(unit: str, mode: str = 'si/iec', strict: bool = True) -> tuple[int, int]:
     """Parse the given unit, returning the associated base and exponent
 
-    Mode can be either 'si/iec' to parse decimal (SI) and binary (IEC) units, or 
+    Mode can be either 'si/iec' to parse decimal (SI) and binary (IEC) units, or
     'jedec' for binary only units. If `strict`, parsing will be case-sensitive and
     expect the 'B' suffix.
     """
@@ -659,7 +659,7 @@ def parse_size(size_string: str, mode: str = 'si/iec', unit: str = '', strict: b
     """Parse the given data size
 
     If passed and not explicitly given, 'unit' will be assumed.
-    Mode can be either 'si/iec' to parse decimal (SI) and binary (IEC) units, or 
+    Mode can be either 'si/iec' to parse decimal (SI) and binary (IEC) units, or
     'jedec' for binary only units. If `strict`, parsing will be case-sensitive and
     expect the 'B' suffix.
     """
@@ -769,8 +769,42 @@ def get_next_port(cluster_id):
         if node.lvol_subsys_port > 0:
             used_ports.append(node.lvol_subsys_port)
 
-    while port in used_ports:
-        port += 1
+    next_port = port
+    while True:
+        if next_port not in used_ports:
+            return next_port
+        next_port += 1
+
+def get_next_rpc_port(cluster_id):
+    from simplyblock_core.db_controller import DBController
+    db_controller = DBController()
+
+    port = 8080
+    used_ports = []
+    for node in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
+        if node.rpc_port > 0:
+            used_ports.append(node.rpc_port)
+
+    for i in range(1000):
+        next_port = port + i
+
+        if next_port not in used_ports:
+            return next_port
+
+    return 0
+
+def get_next_dev_port(cluster_id):
+    from simplyblock_core.db_controller import DBController
+    db_controller = DBController()
+
+    port = 9080
+    used_ports = []
+    for node in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
+        if node.nvmf_port > 0:
+            used_ports.append(node.nvmf_port)
+
+    for i in range(1000):
+        next_port = port + i
 
     return port
 
@@ -903,3 +937,22 @@ def store_cores_config(spdk_cpu_mask):
         logger.info(f"JSON file successfully written to {file_path}")
     except subprocess.CalledProcessError as e:
         logger.error(f"Error writing to file: {e}")
+
+def init_sentry_sdk(name=None):
+    import sentry_sdk
+    params = {
+        "dsn": constants.SENTRY_SDK_DNS,
+        # Set traces_sample_rate to 1.0 to capture 100%
+        # of transactions for tracing.
+        "traces_sample_rate": 1.0,
+        # Add request headers and IP for users,
+        # see https://docs.sentry.io/platforms/python/data-management/data-collected/ for more info
+        "send_default_pii": True,
+    }
+    if name:
+        params["server_name"] = name
+    sentry_sdk.init(**params)
+    # from sentry_sdk import set_level
+    # set_level("critical")
+
+    return True

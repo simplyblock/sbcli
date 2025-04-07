@@ -292,18 +292,18 @@ services:
     environment:
       SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
 
-  NewDeviceDiscovery:
-    image: $SIMPLYBLOCK_DOCKER_IMAGE
-    command: "python simplyblock_core/services/new_device_discovery.py"
-    deploy:
-      placement:
-        constraints: [node.role == manager]
-    volumes:
-      - "/etc/foundationdb:/etc/foundationdb"
-    networks:
-      - hostnet
-    environment:
-      SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
+#  NewDeviceDiscovery:
+#    image: $SIMPLYBLOCK_DOCKER_IMAGE
+#    command: "python simplyblock_core/services/new_device_discovery.py"
+#    deploy:
+#      placement:
+#        constraints: [node.role == manager]
+#    volumes:
+#      - "/etc/foundationdb:/etc/foundationdb"
+#    networks:
+#      - hostnet
+#    environment:
+#      SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
 
   TasksNodeAddRunner:
     image: $SIMPLYBLOCK_DOCKER_IMAGE
