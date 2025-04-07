@@ -93,6 +93,11 @@ def set_pool_value_if_above(pool, key, value):
         logger.error(f"{key}: {value} can't be less than current value: {current_value}")
         return False
 
+def qos_exists_on_child_lvol(db_controller: DBController, pool_uuid):
+    for lvol in db_controller.get_lvols_by_pool_id(pool_uuid):
+        if lvol.has_qos():
+            return True
+    return False
 
 def set_pool(uuid, pool_max, lvol_max, max_rw_iops,
              max_rw_mbytes, max_r_mbytes, max_w_mbytes):
@@ -122,28 +127,32 @@ def set_pool(uuid, pool_max, lvol_max, max_rw_iops,
     if max_w_mbytes is None:
         max_w_mbytes = 0
 
+    if ((max_rw_iops + max_rw_mbytes + max_r_mbytes + max_w_mbytes) > 0) and (qos_exists_on_child_lvol(db_controller, uuid)):
+        logger.error("One of the lvols already have QOS")
+        return False
+
     pool.max_rw_ios_per_sec = max_rw_iops
     pool.max_rw_mbytes_per_sec = max_rw_mbytes
     pool.max_r_mbytes_per_sec = max_r_mbytes
     pool.max_w_mbytes_per_sec = max_w_mbytes
 
-    snode = db_controller.get_storage_node_by_hostname(pool.hostname)
-    rpc_client = RPCClient(
-        snode.mgmt_ip,
-        snode.rpc_port,
-        snode.rpc_username,
-        snode.rpc_password)
+    for hostname in db_controller.get_hostnames_by_pool_id(uuid):
+        snode = db_controller.get_storage_node_by_hostname(hostname)
+        rpc_client = RPCClient(
+            snode.mgmt_ip,
+            snode.rpc_port,
+            snode.rpc_username,
+            snode.rpc_password)
 
-    ret = rpc_client.bdev_lvol_set_qos_limit(pool.numeric_id, max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes)
-    if not ret:
-        logger.error("RPC failed bdev_lvol_set_qos_limit")
-        return False
+        ret = rpc_client.bdev_lvol_set_qos_limit(pool.numeric_id, max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes)
+        if not ret:
+            logger.error("RPC failed bdev_lvol_set_qos_limit")
+            return False
 
     pool.write_to_db(db_controller.kv_store)
     pool_events.pool_updated(pool)
     logger.info("Done")
     return True
-
 
 def delete_pool(uuid):
     db_controller = DBController()

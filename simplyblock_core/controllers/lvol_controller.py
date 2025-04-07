@@ -164,6 +164,10 @@ def validate_add_lvol_func(name, size, host_id_or_name, pool_id_or_name,
                 return False, f"Invalid LVol max_w_mbytes: {max_w_mbytes} " \
                               f"Pool Max W MBytes has reached {total} of {pool.max_w_mbytes_per_sec}"
 
+    # If user gave a QOS and the pool also have a QOS, return error
+    if (max_rw_iops or max_rw_mbytes or max_r_mbytes or max_w_mbytes) and (pool.has_qos()):
+        return False, "Both Lvol and Pool have QOS settings"
+
     return True, ""
 
 
@@ -591,8 +595,8 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
     connect_lvol_to_pool(lvol.uuid)
 
     # set QOS
-#    if max_rw_iops or max_rw_mbytes or max_r_mbytes or max_w_mbytes:
-#        set_lvol(lvol.uuid, max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes)
+    if max_rw_iops or max_rw_mbytes or max_r_mbytes or max_w_mbytes:
+        set_lvol(lvol.uuid, max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes)
     return lvol.uuid, None
 
 
@@ -1009,7 +1013,6 @@ def connect_lvol_to_pool(uuid):
         logger.error("RPC failed bdev_lvol_add_to_group")
         return False
 
-    pool.hostname = lvol.hostname
     lvol.write_to_db(db_controller.kv_store)
     pool.write_to_db(db_controller.kv_store)
     logger.info("Done")
@@ -1024,6 +1027,9 @@ def set_lvol(uuid, max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes, name=
     pool = db_controller.get_pool_by_id(lvol.pool_uuid)
     if pool.status == Pool.STATUS_INACTIVE:
         logger.error(f"Pool is disabled")
+        return False
+    if pool.has_qos():
+        logger.error(f"Pool already has QOS settings")
         return False
 
     if name:
