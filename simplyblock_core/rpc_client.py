@@ -792,13 +792,6 @@ class RPCClient:
         params = {"name": name, "vuid": vuid}
         return self._request("bdev_jm_unmap_vuid", params)
 
-    def sock_impl_set_options(self):
-        method = "sock_impl_set_options"
-        params = {"impl_name": "posix", "enable_quickack": True,
-                  "enable_zerocopy_send_server": True,
-                  "enable_zerocopy_send_client": True}
-        return self._request(method, params)
-
     def nvmf_set_config(self, poll_groups_mask):
         params = {"poll_groups_mask": poll_groups_mask}
         return self._request("nvmf_set_config", params)

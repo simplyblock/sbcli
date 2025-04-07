@@ -333,40 +333,6 @@ def get_random_vuid():
     return r
 
 
-def calculate_core_allocation(cpu_count):
-    '''
-    If number of cpu cores >= 8, tune cpu core mask
-        1. Never use core 0 for spdk.
-        2. Core 1 is for app_thread
-        3. Core 2 for Journal manager
-        4. Poller cpu cores are 30% of Available cores
-        5. Alceml cpu cores are 30% of Available cores
-        6. Distribs cpu cores are 40% of Available cores
-    JIRA ticket link/s
-    https://simplyblock.atlassian.net/browse/SFAM-885
-    '''
-
-    if cpu_count > 64:
-        cpu_count = 64
-
-    all_cores = list(range(0, cpu_count))
-    app_thread_core = all_cores[1:2]
-    jm_cpu_core = all_cores[2:3]
-
-    # Calculate available cores
-    available_cores_count = cpu_count - 3
-
-    # Calculate cpus counts
-    poller_cpus_count = int(available_cores_count * 0.3)
-    alceml_cpus_cout = int(available_cores_count * 0.3)
-
-    # Calculate cpus cores
-    poller_cpu_cores = all_cores[3:poller_cpus_count+3]
-    alceml_cpu_cores = all_cores[3+poller_cpus_count:poller_cpus_count+alceml_cpus_cout+3]
-    distrib_cpu_cores = all_cores[3+poller_cpus_count+alceml_cpus_cout:]
-
-    return app_thread_core, jm_cpu_core, poller_cpu_cores, alceml_cpu_cores, distrib_cpu_cores
-
 def hexa_to_cpu_list(cpu_mask):
     # Convert the hex string to an integer
     mask_int = int(cpu_mask, 16)
