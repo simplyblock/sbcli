@@ -44,6 +44,7 @@ class DBController(metaclass=Singleton):
     def __init__(self):
         try:
             if not os.path.isfile(constants.KVD_DB_FILE_PATH):
+                # logger.error(f"DB File Not Found: {constants.KVD_DB_FILE_PATH}")
                 return
             fdb.api_version(constants.KVD_DB_VERSION)
             self.kv_store = fdb.open(constants.KVD_DB_FILE_PATH)
@@ -176,9 +177,9 @@ class DBController(metaclass=Singleton):
             return ret[0]
 
     def get_lvol_by_id(self, id) -> LVol:
-        ret = LVol().read_from_db(self.kv_store, id)
-        if ret:
-            return ret[0]
+        for lvol in self.get_lvols():
+            if lvol.get_id() == id:
+                return lvol
 
     def get_lvol_by_name(self, lvol_name) -> LVol:
         for lvol in self.get_lvols():
@@ -298,7 +299,7 @@ class DBController(metaclass=Singleton):
         ret = StorageNode().read_from_db(self.kv_store)
         nodes = []
         for n in ret:
-            if n.cluster_id == cluster_id and not n.is_secondary_node:
+            if n.cluster_id == cluster_id and not n.is_secondary_node:  # pass
                 nodes.append(n)
         return sorted(nodes, key=lambda x: x.create_dt)
 

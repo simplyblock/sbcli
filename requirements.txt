@@ -17,3 +17,5 @@ boto3
 jinja2
 argcomplete
 jc
+sentry-sdk
+prometheus_client

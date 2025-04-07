@@ -1,5 +1,6 @@
 import time
 from logger_config import setup_logger
+from utils import proxmox
 import re
 import os
 import requests
@@ -272,7 +273,18 @@ class CommonUtils:
         except Exception as e:
             print(f"Error rebooting instance {instance_id}: {e}")
             raise e
-        
+
+    def reboot_proxmox_node(self, ip):
+        """Reboots a Proxmox node.
+
+        Args:
+            node (str): Node name or IP address to reboot.
+        """
+        proxmox_id, vm_id = proxmox.get_proxmox(ip)
+        proxmox.stop_vm(proxmox_id, vm_id)
+        time.sleep(120)
+        proxmox.start_vm(proxmox_id, vm_id)
+
     def terminate_instance(self, ec2_resource, instance_id):
         # Terminate the given instance
         instance = ec2_resource.Instance(instance_id)

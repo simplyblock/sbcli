@@ -7,7 +7,7 @@ from flask import Blueprint
 from flask import request
 
 from simplyblock_web import utils
-from simplyblock_core import db_controller
+from simplyblock_core import db_controller, utils as core_utils
 from simplyblock_core.controllers import snapshot_controller
 
 
@@ -59,10 +59,8 @@ def clone_snapshot():
 
     new_size = 0
     if 'new_size' in cl_data:
-        new_size = utils.parse_size(cl_data['new_size'])
+        new_size = core_utils.parse_size(cl_data['new_size'])
 
-    res, msg = snapshot_controller.clone(
+    clone_id, error = snapshot_controller.clone(
         cl_data['snapshot_id'], cl_data['clone_name'], new_size)
-    if res:
-        return utils.get_response(msg)
-    return utils.get_response(None, msg)
+    return utils.get_response(clone_id, error, http_code=400)

@@ -1,3 +1,4 @@
+import base64
 import random
 import re
 import string
@@ -35,11 +36,6 @@ def generate_string(length):
         string.ascii_letters + string.digits) for _ in range(length))
 
 
-def parse_size(size_string: str):
-    from simplyblock_core import utils as core_utils
-    return core_utils.parse_size(size_string)
-
-
 def validate_cpu_mask(spdk_cpu_mask):
     return re.match("^(0x|0X)?[a-fA-F0-9]+$", spdk_cpu_mask)
 
@@ -62,6 +58,16 @@ def get_cluster_id(request):
     if len(au.split()) == 2:
         cluster_id = au.split()[0]
         cluster_secret = au.split()[1]
+        if cluster_id and cluster_id == "Basic":
+            try:
+                tkn = base64.b64decode(cluster_secret).decode('utf-8')
+                if tkn:
+                    cluster_id = tkn.split(":")[0]
+                    cluster_secret = tkn.split(":")[1]
+            except Exception as e:
+                print(e)
+                return
+
         return cluster_id
 
 

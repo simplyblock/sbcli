@@ -20,6 +20,17 @@ commands:
               and the storage node.
             dest: ifname
             type: str
+          - name: "--cpu-mask"
+            help: "SPDK app CPU mask, default is all cores found"
+            dest: "spdk_cpu_mask"
+            required: false
+            type: str
+          - name: "--isolate-cores"
+            help: "Isolate cores in kernel args for provided cpu mask"
+            dest: isolate_cores
+            type: bool
+            default: false
+            action: store_true
       - name: deploy-cleaner
         help: "Cleans a previous simplyblock deploy (local run)"
         description: >
@@ -165,17 +176,36 @@ commands:
             type: int
             default: 5000
             private: true
+          - name: "--spdk-mem"
+            help: "Set spdk hugepage size limitation"
+            dest: spdk_mem
+            required: false
+            type: str
+            default: ""
+          - name: "--ssd-pcie"
+            help: "Nvme PCIe address to use for storage device. Can be more than one."
+            dest: ssd_pcie
+            required: false
+            type: str
+            nargs: +
+            default: ""
+
       - name: delete
         help: "Deletes a storage node object from the state database."
         usage: >
           Deletes a storage node object from the state database. It must only be used on clusters without any logical
-          volumes.
+          volumes. Warning: This is dangerous and could lead to unstable cluster if used on active cluster.
         arguments:
           - name: node_id
             help: Storage node id
             dest: node_id
             completer: _completer_get_sn_list
             type: str
+          - name: "--force"
+            help: "Force delete storage node from DB...Hopefully you know what you do"
+            dest: force_remove
+            type: bool
+            action: store_true
       - name: remove
         help: "Removes a storage node from the cluster"
         description: >
@@ -249,14 +279,17 @@ commands:
               _150 TiB / 3 * 2 = 100TiB_ would be a safe choice.
             dest: max_prov
             type: str
-            default: ""
+            default: "0"
             private: true
-          - name: "--node-ip"
+          - name: "--node-addr"
+            aliases:
+              - "--node-ip"
             help: "Restart Node on new node"
             description: >
               Allows to restart an existing storage node on new host or hardware. Devices attached to storage nodes
               have to be attached to new hosts. Otherwise, they have to be marked as failed and removed from cluster.
-              Triggers a pro-active migration of data from those devices onto other storage nodes.
+              Triggers a pro-active migration of data from those devices onto other storage nodes.<br><br>
+              The provided value must be presented in the form of _IP:PORT_. Be default the port number is _5000_.
             dest: node_ip
             type: str
           - name: "--number-of-devices"
@@ -364,16 +397,6 @@ commands:
             dest: node_id
             completer: _completer_get_sn_list
             type: str
-          - name: "--sort"
-            help: "Sort the outputs"
-            dest: sort
-            type: str
-            choices:
-              - node-seq
-              - serial
-              - dev-seq
-            nargs: "1"
-            private: true
           - name: "--json"
             help: "Print outputs in json format"
             dest: json
@@ -592,8 +615,10 @@ commands:
             type: str
             completer: _completer_get_sn_list
       - name: make-primary
-        help: "In case of HA SNode, makes the current node as primary"
-        private: true
+        help: "Forces to make the provided node id primary"
+        description: |
+          Makes the storage node the primary node. This is required after certain storage cluster operations, such
+          as a storage node migration.
         arguments:
           - name: "node_id"
             help: "Storage node id"
@@ -609,6 +634,22 @@ commands:
             dest: node_id
             type: str
             completer: _completer_get_sn_list
+      - name: set
+        help: "set storage node db value"
+        private: true
+        arguments:
+          - name: "node_id"
+            help: "Storage node id"
+            dest: node_id
+            type: str
+          - name: "attr_name"
+            help: "attr_name"
+            dest: attr_name
+            type: str
+          - name: "attr_value"
+            help: "attr_value"
+            dest: attr_value
+            type: str
   - name: "cluster"
     help: "Cluster commands"
     weight: 200
@@ -657,7 +698,7 @@ commands:
             help: "Enable qos bdev for storage nodes"
             dest: enable_qos
             type: bool
-            action: store_true
+            default: true
             private: true
           - name: "--ifname"
             help: "Management interface name, e.g. eth0"
@@ -862,6 +903,73 @@ commands:
             default: false
             action: store_true
             private: true
+          - name: "--is-secondary-node"
+            help: >
+              Adds as secondary node. A secondary node does not have any disks attached. It is only used for I/O
+              processing in case a primary goes down.
+            dest: is_secondary_node
+            type: bool
+            default: false
+            action: store_true
+          - name: "--namespace"
+            help: "k8s namespace to deploy on"
+            dest: namespace
+            type: str
+          - name: "--id-device-by-nqn"
+            help: "Use device nqn to identify it instead of serial number"
+            dest: id_device_by_nqn
+            type: bool
+            default: false
+            action: store_true
+          - name: "--lvol-name"
+            help: "Logical volume name or id"
+            dest: lvol_name
+            type: str
+            default: lvol01
+            private: true
+          - name: "--lvol-size"
+            help: "Logical volume size: 10M, 10G, 10(bytes)"
+            dest: lvol_size
+            type: str
+            default: 10G
+            private: true
+          - name: "--pool-name"
+            help: "Pool id or name"
+            dest: pool_name
+            type: str
+            default: pool01
+            private: true
+          - name: "--pool-max"
+            help: "Pool maximum size: 20M, 20G, 0(default)"
+            dest: pool_max
+            type: str
+            default: 25G
+            private: true
+          - name: "--snapshot"
+            aliases:
+              - "-s"
+            help: "Make logical volume with snapshot capability, default: false"
+            dest: snapshot
+            type: bool
+            action: store_true
+            default: false
+            private: true
+          - name: "--max-volume-size"
+            help: "Logical volume max size"
+            dest: max_size
+            type: str
+            default: 1000G
+            private: true
+          - name: "--host-id"
+            help: "Primary storage node id or hostname"
+            dest: host_id
+            type: str
+          - name: "--encrypt"
+            help: "Use inline data encryption and decryption on the logical volume"
+            dest: encrypt
+            type: bool
+            action: store_true
+            private: true
           - name: "--distr-vuid"
             help: "(Dev) set vuid manually, default: random (1-99999)"
             dest: distr_vuid
@@ -875,7 +983,7 @@ commands:
               - single
               - default
               - ha
-            default: default
+            default: ha
             private: true
       - name: create
         help: "Creates a new cluster"
@@ -1295,6 +1403,22 @@ commands:
             dest: cluster_id
             type: str
             completer: _completer_get_cluster_list
+      - name: set
+        help: "set cluster db value"
+        private: true
+        arguments:
+          - name: "cluster_id"
+            help: "cluster id"
+            dest: cluster_id
+            type: str
+          - name: "attr_name"
+            help: "attr_name"
+            dest: attr_name
+            type: str
+          - name: "attr_value"
+            help: "attr_value"
+            dest: attr_value
+            type: str
   - name: "volume"
     help: "Logical volume commands"
     aliases:
@@ -1317,6 +1441,8 @@ commands:
             dest: pool
             type: str
           - name: "--snapshot"
+            aliases:
+              - "-s"
             help: "Make logical volume with snapshot capability, default: false"
             dest: snapshot
             type: bool
@@ -1325,7 +1451,8 @@ commands:
           - name: "--max-size"
             help: "Logical volume max size"
             dest: max_size
-            type: int
+            type: str
+            default: "1000T"
           - name: "--host-id"
             help: "Primary storage node id or Hostname"
             dest: host_id
@@ -1372,7 +1499,7 @@ commands:
               - single
               - default
               - ha
-            default: ha
+            default: default
           - name: "--lvol-priority-class"
             help: "Logical volume priority class"
             dest: lvol_priority_class
@@ -1387,8 +1514,15 @@ commands:
             dest: uid
             type: str
             private: true
-          - name: "--pvc_name"
+          - name: "--pvc-name"
+            aliases:
+              - "--pvc_name"
             help: "Set logical volume PVC name for k8s clients"
+            description: |
+              Set the logical volume persistent volume claim name for Kubernetes clients.<br><br>
+              !!! warning
+                  The old parameter name `--pvc_name` is deprecated and shouldn't be used anymore. It will eventually be
+                  removed. Please exchange the use of `--pvc_name` with `--pvc-name`.
             dest: pvc_name
             type: str
       - name: qos-set
@@ -1784,9 +1918,9 @@ commands:
       - name: add
         help: "Creates a new snapshot"
         arguments:
-          - name: "snapshot_id"
+          - name: "volume_id"
             help: "Logical volume id"
-            dest: snapshot_id
+            dest: volume_id
             type: str
           - name: "name"
             help: "New snapshot name"

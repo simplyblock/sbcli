@@ -2,6 +2,7 @@
 import time
 from datetime import datetime, timezone
 
+
 from simplyblock_core import constants, db_controller, cluster_ops, storage_node_ops, utils
 from simplyblock_core.controllers import health_controller, device_controller, tasks_controller
 from simplyblock_core.models.cluster import Cluster
@@ -15,6 +16,8 @@ logger = utils.get_logger(__name__)
 
 # get DB controller
 db_controller = db_controller.DBController()
+
+utils.init_sentry_sdk()
 
 
 def is_new_migrated_node(cluster_id, node):
@@ -56,7 +59,8 @@ def get_next_cluster_status(cluster_id):
         else:
             offline_nodes += 1
         for dev in node.nvme_devices:
-            if dev.status in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_JM, NVMeDevice.STATUS_READONLY]:
+            if dev.status in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_JM,
+                              NVMeDevice.STATUS_READONLY, NVMeDevice.STATUS_CANNOT_ALLOCATE]:
                 node_online_devices += 1
             elif dev.status == NVMeDevice.STATUS_FAILED_AND_MIGRATED:
                 pass
@@ -114,8 +118,7 @@ def update_cluster_status(cluster_id):
     cluster = db_controller.get_cluster_by_id(cluster_id)
     current_cluster_status = cluster.status
     logger.info("cluster_status: %s", current_cluster_status)
-    if current_cluster_status in [
-        Cluster.STATUS_READONLY, Cluster.STATUS_UNREADY, Cluster.STATUS_IN_ACTIVATION, Cluster.STATUS_READONLY]:
+    if current_cluster_status in [Cluster.STATUS_UNREADY, Cluster.STATUS_IN_ACTIVATION]:
         return
 
     next_current_status = get_next_cluster_status(cluster_id)
@@ -123,7 +126,8 @@ def update_cluster_status(cluster_id):
 
     task_pending = 0
     for task in db_controller.get_job_tasks(cluster_id):
-        if task.status != JobSchedule.STATUS_DONE:
+        if task.status != JobSchedule.STATUS_DONE and task.function_name in [
+            JobSchedule.FN_DEV_MIG, JobSchedule.FN_NEW_DEV_MIG, JobSchedule.FN_FAILED_DEV_MIG]:
             task_pending += 1
 
     cluster.is_re_balancing = task_pending  > 0
@@ -134,16 +138,19 @@ def update_cluster_status(cluster_id):
         # cluster_ops.cluster_activate(cluster_id, True)
         cluster_ops.set_cluster_status(cluster_id, Cluster.STATUS_ACTIVE)
         return
+    elif current_cluster_status == Cluster.STATUS_READONLY and next_current_status in [
+        Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED]:
+        return
     elif current_cluster_status == Cluster.STATUS_SUSPENDED and next_current_status \
             in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED]:
         # needs activation
         # check node statuss, check auto restart for nodes
         can_activate = True
         for node in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
-            if node.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_REMOVED]:
-                logger.error(f"can not activate cluster: node in not online {node.get_id()}: {node.status}")
-                can_activate = False
-                break
+            # if node.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_REMOVED]:
+            #     logger.error(f"can not activate cluster: node in not online {node.get_id()}: {node.status}")
+            #     can_activate = False
+            #     break
             if tasks_controller.get_active_node_restart_task(cluster_id, node.get_id()):
                 logger.error(f"can not activate cluster: restart tasks found")
                 can_activate = False
@@ -241,35 +248,33 @@ while True:
             if snode.status == StorageNode.STATUS_SCHEDULABLE and not ping_check and not node_api_check:
                 continue
 
-            spdk_process = False
+            spdk_process = True
             if node_api_check:
                 # 3- check spdk_process
-                spdk_process = health_controller._check_spdk_process_up(snode.mgmt_ip)
+                spdk_process = health_controller._check_spdk_process_up(snode.mgmt_ip, snode.rpc_port)
             logger.info(f"Check: spdk process {snode.mgmt_ip}:5000 ... {spdk_process}")
 
-            node_rpc_check = False
-            if spdk_process:
                 # 4- check rpc
-                node_rpc_check = health_controller._check_node_rpc(
-                    snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
+            node_rpc_check = health_controller._check_node_rpc(
+                snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password, timeout=5, retry=3)
             logger.info(f"Check: node RPC {snode.mgmt_ip}:{snode.rpc_port} ... {node_rpc_check}")
 
             node_port_check = True
             down_ports = []
             if spdk_process and snode.lvstore_status == "ready":
-                if snode.is_secondary_node:
-                    ports = [4420]
+                ports = [snode.nvmf_port]
+                if snode.lvstore_stack_secondary_1:
                     for n in db_controller.get_primary_storage_nodes_by_secondary_node_id(snode.get_id()):
                         if n.lvstore_status == "ready":
                             ports.append(n.lvol_subsys_port)
-                else:
-                    ports = [snode.lvol_subsys_port, 4420]
+                if not snode.is_secondary_node:
+                    ports.append(snode.lvol_subsys_port)
 
                 for port in ports:
                     ret = health_controller._check_port_on_node(snode, port)
                     logger.info(f"Check: node port {snode.mgmt_ip}, {port} ... {ret}")
                     node_port_check &= ret
-                    if not ret and port == 4420:
+                    if not ret and port == snode.nvmf_port:
                         down_ports.append(port)
 
                 for data_nic in snode.data_nics:
@@ -280,7 +285,7 @@ while True:
                             node_port_check = False
                             down_ports.append(data_nic.ip4_address)
 
-            is_node_online = ping_check and node_api_check and spdk_process and node_rpc_check and node_port_check
+            is_node_online = ping_check and spdk_process and node_rpc_check and node_port_check
             if is_node_online:
                 set_node_online(snode)
 
@@ -303,12 +308,19 @@ while True:
                 if not ping_check and not node_api_check and not spdk_process:
                     # restart on new node
                     storage_node_ops.set_node_status(snode.get_id(), StorageNode.STATUS_SCHEDULABLE)
+                    # set devices unavailable
+                    for dev in snode.nvme_devices:
+                        if dev.status in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_READONLY]:
+                            device_controller.device_set_unavailable(dev.get_id())
 
                 elif ping_check and node_api_check and (not spdk_process or not node_rpc_check):
-                    # add node to auto restart
-                    if cluster.status in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED,
-                                          Cluster.STATUS_SUSPENDED, Cluster.STATUS_READONLY]:
+
+                    if cluster.status !=  Cluster.STATUS_IN_ACTIVATION:
                         set_node_offline(snode)
+
+                    # add node to auto restart
+                    if cluster.status in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_UNREADY,
+                                          Cluster.STATUS_SUSPENDED, Cluster.STATUS_READONLY]:
                         tasks_controller.add_node_to_auto_restart(snode)
                 elif not node_port_check:
                     if cluster.status in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_READONLY]:

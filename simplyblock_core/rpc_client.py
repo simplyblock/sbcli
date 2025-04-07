@@ -402,7 +402,8 @@ class RPCClient:
         return self._request2("qos_vbdev_delete", params)
 
     def bdev_alceml_create(self, alceml_name, nvme_name, uuid, pba_init_mode=3,
-                           alceml_cpu_mask="", alceml_worker_cpu_mask=""):
+                           alceml_cpu_mask="", alceml_worker_cpu_mask="", pba_page_size=2097152,
+                           write_protection=False):
         params = {
             "name": alceml_name,
             "cntr_path": nvme_name,
@@ -412,7 +413,7 @@ class RPCClient:
             "md_size": 0,
             "use_ram": False,
             "pba_init_mode": pba_init_mode,
-            "pba_page_size": 2097152,
+            "pba_page_size": pba_page_size,
             "uuid": uuid,
             # "use_scheduling": True,
             "use_optimized": True,
@@ -423,11 +424,13 @@ class RPCClient:
             params["bdb_lcpu_mask"] = int(alceml_cpu_mask, 16)
         if alceml_worker_cpu_mask:
             params["bdb_lcpu_mask_alt_workers"] = int(alceml_worker_cpu_mask, 16)
+        if write_protection:
+            params["write_protection"] = True
         return self._request("bdev_alceml_create", params)
 
     def bdev_distrib_create(self, name, vuid, ndcs, npcs, num_blocks, block_size, jm_names,
                             chunk_size, ha_comm_addrs=None, ha_inode_self=None, pba_page_size=2097152,
-                            distrib_cpu_mask="", ha_is_non_leader=True, jm_vuid=0):
+                            distrib_cpu_mask="", ha_is_non_leader=True, jm_vuid=0, write_protection=False):
         """"
             // Optional (not specified = no HA)
             // Comma-separated communication addresses, for each node, e.g. "192.168.10.1:45001,192.168.10.1:32768".
@@ -465,7 +468,8 @@ class RPCClient:
             params['ha_inode_self'] = ha_inode_self
         if distrib_cpu_mask:
             params["bdb_lcpu_mask"] = int(distrib_cpu_mask, 16)
-
+        if write_protection:
+            params["write_protection"] = True
         return self._request("bdev_distrib_create", params)
 
     def bdev_lvol_delete_lvstore(self, name):
@@ -807,6 +811,9 @@ class RPCClient:
     def thread_get_stats(self):
         return self._request("thread_get_stats")
 
+    def framework_get_reactors(self):
+        return self._request("framework_get_reactors")
+
     def thread_set_cpumask(self, app_thread_process_id, app_thread_mask):
         params = {"id": app_thread_process_id, "cpumask": app_thread_mask}
         return self._request("thread_set_cpumask", params)
@@ -816,8 +823,8 @@ class RPCClient:
             "name": name,
             "storage_ID": storage_ID,
         }
-        # if qos_high_priority:
-        #     params["qos_high_priority"] = qos_high_priority
+        if qos_high_priority:
+            params["qos_high_priority"] = qos_high_priority
         return self._request("distr_migration_to_primary_start", params)
 
     def distr_migration_status(self, name):
@@ -829,16 +836,16 @@ class RPCClient:
             "name": name,
             "storage_ID": storage_ID,
         }
-        # if qos_high_priority:
-        #     params["qos_high_priority"] = qos_high_priority
+        if qos_high_priority:
+            params["qos_high_priority"] = qos_high_priority
         return self._request("distr_migration_failure_start", params)
 
     def distr_migration_expansion_start(self, name, qos_high_priority=False):
         params = {
             "name": name,
         }
-        # if qos_high_priority:
-        #     params["qos_high_priority"] = qos_high_priority
+        if qos_high_priority:
+            params["qos_high_priority"] = qos_high_priority
         return self._request("distr_migration_expansion_start", params)
 
     def bdev_raid_add_base_bdev(self, raid_bdev, base_bdev):
@@ -923,14 +930,14 @@ class RPCClient:
 
     def bdev_lvol_set_leader(self, is_leader=False, uuid=None, lvs_name=None, bs_nonleadership=False):
         params = {
-            "leadership": is_leader,
+            "lvs_leadership": is_leader,
         }
         if uuid:
             params["uuid"] = uuid
         elif lvs_name:
             params["lvs_name"] = lvs_name
 
-        # params["bs_nonleadership"] = bs_nonleadership
+        params["bs_nonleadership"] = bs_nonleadership
 
         return self._request("bdev_lvol_set_leader_all", params)
 

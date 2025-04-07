@@ -4,25 +4,24 @@ import threading
 import time
 
 
-from simplyblock_core import constants, db_controller, utils, rpc_client, distr_controller, storage_node_ops
-from simplyblock_core.controllers import events_controller, device_controller, lvol_events, tasks_controller
-from simplyblock_core.models.lvol_model import LVol
-
-
+from simplyblock_core import constants, db_controller, utils, rpc_client, distr_controller
+from simplyblock_core.controllers import events_controller, device_controller
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
-from simplyblock_core.rpc_client import RPCClient
 
 
 logger = utils.get_logger(__name__)
 
+utils.init_sentry_sdk()
 
 # get DB controller
 db_controller = db_controller.DBController()
 
+EVENTS_LIST = ['SPDK_BDEV_EVENT_REMOVE', "error_open", 'error_read', "error_write", "error_unmap",
+               "error_write_cannot_allocate"]
 
 def process_device_event(event):
-    if event.message in ['SPDK_BDEV_EVENT_REMOVE', "error_open", 'error_read', "error_write", "error_unmap"]:
+    if event.message in EVENTS_LIST:
         node_id = event.node_id
         storage_id = event.storage_id
         event_node_obj = db_controller.get_storage_node_by_id(node_id)
@@ -41,9 +40,10 @@ def process_device_event(event):
             event.status = 'device_not_found'
             return
 
-        if device_obj.status not in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_READONLY]:
+        if device_obj.status not in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_READONLY,
+                                     NVMeDevice.STATUS_CANNOT_ALLOCATE]:
             logger.info(f"The device is not online, skipping. status: {device_obj.status}")
-            event.status = 'skipped:dev_unav'
+            event.status = f'skipped:dev_{device_obj.status}'
             distr_controller.send_dev_status_event(device_obj, device_obj.status, event_node_obj)
             return
 
@@ -60,53 +60,26 @@ def process_device_event(event):
             return
 
 
-        if event.message in ['SPDK_BDEV_EVENT_REMOVE', 'error_open']:
-
-            if device_node_obj.get_id() == event_node_obj.get_id():
+        if device_node_obj.get_id() == event_node_obj.get_id():
+            if event.message in ['SPDK_BDEV_EVENT_REMOVE', 'error_open']:
                 logger.info(f"Removing storage id: {storage_id} from node: {node_id}")
                 device_controller.device_remove(device_obj.get_id())
 
+            elif event.message in ['error_write', 'error_unmap']:
+                logger.info(f"Setting device to read-only")
+                device_controller.device_set_read_only(device_obj.get_id())
+
             else:
-                event_node_obj = db_controller.get_storage_node_by_id(event_node_obj.get_id())
-                for dev in event_node_obj.remote_devices:
-                    if dev.get_id() == device_obj.get_id():
-                        event_node_obj.remote_devices.remove(dev)
-                        event_node_obj.write_to_db()
-                        break
-
-        elif event.message in ['error_write', 'error_unmap']:
-            logger.info(f"Setting device to read-only")
-            device_controller.device_set_read_only(device_obj.get_id())
-
+                logger.info(f"Setting device to unavailable")
+                device_controller.device_set_unavailable(device_obj.get_id())
+                device_controller.device_set_io_error(device_obj.get_id(), True)
         else:
-            logger.info(f"Setting device to unavailable")
-            device_controller.device_set_unavailable(device_obj.get_id())
-            device_controller.device_set_io_error(device_obj.get_id(), True)
-
-        # else:
-        #     event_node_obj = db_controller.get_storage_node_by_id(event_node_obj.get_id())
-        #     for dev in event_node_obj.remote_devices:
-        #         if dev.get_id() == device_obj.get_id():
-        #             event_node_obj.remote_devices.remove(dev)
-        #             event_node_obj.write_to_db()
-        #             break
-        #
-        #     # check other nodes
-        #     node_not_connected = 0
-        #     for node in db_controller.get_storage_nodes_by_cluster_id(event_node_obj.cluster_id):
-        #         if node.status == StorageNode.STATUS_ONLINE and node.get_id() != device_node_obj.get_id():
-        #             found = False
-        #             for remote_device in node.remote_devices:
-        #                 if remote_device.get_id() == device_obj.get_id():
-        #                     found = True
-        #                     break
-        #             if not found:
-        #                 node_not_connected += 1
-        #
-        #     if node_not_connected >= 2:
-        #         logger.info(f"Setting device to unavailable")
-        #         device_controller.device_set_unavailable(device_obj.get_id())
-        #         device_controller.device_set_io_error(device_obj.get_id(), True)
+            event_node_obj = db_controller.get_storage_node_by_id(event_node_obj.get_id())
+            for dev in event_node_obj.remote_devices:
+                if dev.get_id() == device_obj.get_id():
+                    event_node_obj.remote_devices.remove(dev)
+                    event_node_obj.write_to_db()
+                    break
 
         event.status = 'processed'
 
@@ -173,6 +146,10 @@ def start_event_collector_on_node(node_id):
                 try:
                     events = client.distr_status_events_discard_then_get(
                         0, constants.DISTR_EVENT_COLLECTOR_NUM_OF_EVENTS * page)
+                    if events is False:
+                        logger.error("No events received")
+                        return
+
                     if events:
                         logger.info(f"Found events: {len(events)}")
                         for event_dict in events:
@@ -180,6 +157,10 @@ def start_event_collector_on_node(node_id):
                                 sid = event_dict['storage_ID']
                             elif "vuid" in event_dict:
                                 sid = event_dict['vuid']
+                            else:
+                                logger.error(f"Unknown event: {event_dict}")
+                                continue
+
                             et = event_dict['event_type']
                             msg = event_dict['status']
                             if sid not in events_groups:

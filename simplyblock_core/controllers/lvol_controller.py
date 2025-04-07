@@ -89,7 +89,7 @@ def validate_add_lvol_func(name, size, host_id_or_name, pool_id_or_name,
         return False, "Name can not be empty"
 
     #  size validation
-    if size < 100 * 1024 * 1024:
+    if size < utils.parse_size('100MiB'):
         return False, "Size must be larger than 100M"
 
     #  host validation
@@ -173,7 +173,7 @@ def _get_next_3_nodes(cluster_id, lvol_size=0):
     online_nodes = []
     node_stats = {}
     for node in snodes:
-        if node.is_secondary_node:
+        if node.is_secondary_node:  # pass
             continue
 
         if node.status == node.STATUS_ONLINE:
@@ -466,7 +466,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
         "name": lvol.lvol_bdev,
         "params": {
             "name": lvol.lvol_bdev,
-            "size_in_mib": int(lvol.size / (constants.ONE_KB * constants.ONE_KB)),
+            "size_in_mib": utils.convert_size(lvol.size, 'MiB'),
             "lvs_name": lvol.lvs_name,
             "lvol_priority_class": 0
         }
@@ -649,14 +649,6 @@ def _create_bdev_stack(lvol, snode, is_primary=True):
 def add_lvol_on_node(lvol, snode, is_primary=True):
     rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
     db_controller = DBController()
-
-    if is_primary:
-        if not is_node_leader(snode, lvol.lvs_name):
-            rpc_client.bdev_lvol_set_leader(True, lvs_name=lvol.lvs_name)
-
-    else:
-        if is_node_leader(snode, lvol.lvs_name):
-            rpc_client.bdev_lvol_set_leader(False, lvs_name=lvol.lvs_name)
 
     ret, msg = _create_bdev_stack(lvol, snode, is_primary=is_primary)
     if not ret:
@@ -860,7 +852,6 @@ def delete_lvol(id_or_name, force_delete=False):
         logger.error(f"lvol node id not found: {lvol.node_id}")
         if not force_delete:
             return False
-        lvol_events.lvol_delete(lvol)
         lvol.remove(db_controller.kv_store)
 
         # if lvol is clone and snapshot is deleted, then delete snapshot
@@ -953,11 +944,7 @@ def delete_lvol(id_or_name, force_delete=False):
             logger.error(msg)
             return False, msg
 
-
         if primary_node:
-
-            if not is_node_leader(primary_node, lvol.lvs_name):
-                rpc_client.bdev_lvol_set_leader(True, lvs_name=lvol.lvs_name)
 
             ret = delete_lvol_from_node(lvol.get_id(), primary_node.get_id())
             if not ret:
@@ -968,9 +955,6 @@ def delete_lvol(id_or_name, force_delete=False):
         if secondary_node:
             secondary_node = db_controller.get_storage_node_by_id(secondary_node.get_id())
             if secondary_node.status == StorageNode.STATUS_ONLINE:
-
-                if not is_node_leader(secondary_node, lvol.lvs_name):
-                    sec_rpc_client.bdev_lvol_set_leader(False, lvs_name=lvol.lvs_name)
 
                 ret = delete_lvol_from_node(lvol.get_id(), secondary_node.get_id())
                 if not ret:
@@ -1191,8 +1175,6 @@ def resize_lvol(id, new_size):
         logger.error(f"Pool is disabled")
         return False
 
-    new_size = utils.parse_size(new_size)
-
     if lvol.size >= new_size:
         logger.error(f"New size {new_size} must be higher than the original size {lvol.size}")
         return False
@@ -1217,16 +1199,13 @@ def resize_lvol(id, new_size):
     logger.info(f"Resizing LVol: {lvol.get_id()}")
     logger.info(f"Current size: {utils.humanbytes(lvol.size)}, new size: {utils.humanbytes(new_size)}")
 
-    size_in_mib = int(new_size / (constants.ONE_KB * constants.ONE_KB))
+    size_in_mib = utils.convert_size(new_size, 'MiB')
 
     rpc_client = RPCClient(
         snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
 
     error = False
     if lvol.ha_type == "single":
-
-        if not is_node_leader(snode, lvol.lvs_name):
-            rpc_client.bdev_lvol_set_leader(True, lvs_name=lvol.lvs_name)
 
         ret = rpc_client.bdev_lvol_resize(f"{lvol.lvs_name}/{lvol.lvol_bdev}", size_in_mib)
         if not ret:
@@ -1285,9 +1264,6 @@ def resize_lvol(id, new_size):
 
             rpc_client = RPCClient(primary_node.mgmt_ip, primary_node.rpc_port, primary_node.rpc_username,
                                        primary_node.rpc_password)
-
-            if not is_node_leader(primary_node, lvol.lvs_name):
-                rpc_client.bdev_lvol_set_leader(True, lvs_name=lvol.lvs_name)
 
             ret = rpc_client.bdev_lvol_resize(f"{lvol.lvs_name}/{lvol.lvol_bdev}", size_in_mib)
             if not ret:

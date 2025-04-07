@@ -114,6 +114,7 @@ def get_alceml_name(alceml_id):
 
 
 def _def_create_device_stack(device_obj, snode, force=False):
+    db_controller = DBController()
 
     rpc_client = RPCClient(
         snode.mgmt_ip, snode.rpc_port,
@@ -142,15 +143,20 @@ def _def_create_device_stack(device_obj, snode, force=False):
     alceml_id = device_obj.get_id()
     alceml_name = get_alceml_name(alceml_id)
 
+    cluster = db_controller.get_cluster_by_id(snode.cluster_id)
+    write_protection = False
+    if cluster.distr_ndcs > 1:
+        write_protection = True
     if alceml_name not in bdev_names:
         logger.info(f"adding {alceml_name}")
         if snode.alceml_cpu_cores:
             alceml_cpu_mask = utils.decimal_to_hex_power_of_2(snode.alceml_cpu_cores[snode.alceml_cpu_index])
             ret = rpc_client.bdev_alceml_create(alceml_name, nvme_bdev, alceml_id, pba_init_mode=2,
-                                                alceml_cpu_mask=alceml_cpu_mask)
+                                                alceml_cpu_mask=alceml_cpu_mask,  pba_page_size=cluster.page_size_in_blocks, write_protection=write_protection)
             snode.alceml_cpu_index = (snode.alceml_cpu_index + 1) % len(snode.alceml_cpu_cores)
         else:
-            ret = rpc_client.bdev_alceml_create(alceml_name, nvme_bdev, alceml_id, pba_init_mode=2)
+            ret = rpc_client.bdev_alceml_create(alceml_name, nvme_bdev, alceml_id, pba_init_mode=2,
+                                                pba_page_size=cluster.page_size_in_blocks, write_protection=write_protection)
 
         if not ret:
             logger.error(f"Failed to create alceml bdev: {alceml_name}")
@@ -188,7 +194,7 @@ def _def_create_device_stack(device_obj, snode, force=False):
         for iface in snode.data_nics:
             if iface.ip4_address:
                 tr_type = iface.get_transport_type()
-                ret = rpc_client.listeners_create(subsystem_nqn, tr_type, iface.ip4_address, "4420")
+                ret = rpc_client.listeners_create(subsystem_nqn, tr_type, iface.ip4_address, snode.nvmf_port)
                 device_obj.nvmf_ip = iface.ip4_address
                 break
     else:
@@ -204,7 +210,7 @@ def _def_create_device_stack(device_obj, snode, force=False):
     device_obj.alceml_name = alceml_name
     device_obj.pt_bdev = pt_name
     device_obj.nvmf_nqn = subsystem_nqn
-    device_obj.nvmf_port = 4420
+    device_obj.nvmf_port = snode.nvmf_port
     return True
 
 
@@ -529,6 +535,13 @@ def reset_storage_device(dev_id):
 
     logger.info("Setting devices to unavailable")
     device_set_unavailable(dev_id)
+    devs = []
+    # for dev in snode.nvme_devices:
+    #     if dev.get_id() == device.get_id():
+    #         continue
+    #     if dev.status == NVMeDevice.STATUS_ONLINE and dev.physical_label == device.physical_label:
+    #         devs.append(dev)
+    #         device_set_unavailable(dev.get_id())
 
     logger.info("Resetting device")
     rpc_client = RPCClient(
@@ -652,9 +665,8 @@ def add_device(device_id):
 
     snodes = db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id)
     for node in snodes:
-        if node.status != StorageNode.STATUS_ONLINE:
-            continue
-        distr_controller.send_cluster_map_add_device(device_obj, node)
+        if node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN]:
+            distr_controller.send_cluster_map_add_device(device_obj, node)
 
     tasks_controller.add_new_device_mig_task(device_id)
     return device_id
@@ -894,9 +906,11 @@ def restart_jm_device(device_id, force=False, format_alceml=False):
                     snode.alceml_worker_cpu_cores[snode.alceml_worker_cpu_index])
                 snode.alceml_worker_cpu_index = (snode.alceml_worker_cpu_index + 1) % len(snode.alceml_worker_cpu_cores)
 
+            cluster = db_controller.get_cluster_by_id(snode.cluster_id)
             ret = rpc_client.bdev_alceml_create(jm_device.alceml_bdev, nvme_bdev, jm_device.get_id(),
                                                 pba_init_mode=1, alceml_cpu_mask=alceml_cpu_mask,
-                                                alceml_worker_cpu_mask=alceml_worker_cpu_mask)
+                                                alceml_worker_cpu_mask=alceml_worker_cpu_mask,
+                                                pba_page_size=cluster.page_size_in_blocks)
 
             if not ret:
                 logger.error(f"Failed to create alceml bdev: {jm_device.alceml_bdev}")
@@ -924,7 +938,7 @@ def restart_jm_device(device_id, force=False, format_alceml=False):
                     if iface.ip4_address:
                         tr_type = iface.get_transport_type()
                         logger.info("adding listener for %s on IP %s" % (subsystem_nqn, iface.ip4_address))
-                        ret = rpc_client.listeners_create(subsystem_nqn, tr_type, iface.ip4_address, "4420")
+                        ret = rpc_client.listeners_create(subsystem_nqn, tr_type, iface.ip4_address, snode.nvmf_port)
                         IP = iface.ip4_address
                         break
                 logger.info(f"add {pt_name} to subsystem")

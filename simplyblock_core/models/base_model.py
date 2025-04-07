@@ -107,6 +107,8 @@ class BaseModel(object):
         return pprint.pformat(self.to_dict())
 
     def read_from_db(self, kv_store, id="", limit=0, reverse=False):
+        if not kv_store:
+            return []
         try:
             objects = []
             prefix = self.get_db_id(id)

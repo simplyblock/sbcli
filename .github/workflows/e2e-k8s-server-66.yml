@@ -68,7 +68,7 @@ jobs:
 
       - name: Set send_slack_notification for manual workflow_dispatch
         if: github.event_name == 'workflow_dispatch'
-        run: echo "send_slack_notification=${{ github.event.inputs.cleanup_cluster }}" >> $GITHUB_ENV
+        run: echo "send_slack_notification=${{ github.event.inputs.send_slack_notification }}" >> $GITHUB_ENV
 
       - name: Set cleanup_cluster for scheduled and push events
         if: github.event_name == 'schedule' || github.event_name == 'push'
@@ -95,7 +95,7 @@ jobs:
           repository: simplyblock-io/simplyBlockDeploy
           ref: refs/heads/${{ github.event.inputs.simplyBlockDeploy_branch || 'main'}}
           path: 'simplyBlockDeploy'
-          token: ${{ secrets.GH_ACCESS_KEY_ID_HAMDI }}
+          token: ${{ secrets.GH_ACCESS_KEY_ID_RAUNAK }}
       
       - uses: actions/checkout@master
         name: Checkout code simplyblock_csi_branch
@@ -103,7 +103,7 @@ jobs:
           repository: simplyblock-io/simplyblock-csi
           ref: refs/heads/${{ github.event.inputs.simplyblock_csi_branch || 'master'}}
           path: 'simplyblock-csi'
-          token: ${{ secrets.GH_ACCESS_KEY_ID_HAMDI }}
+          token: ${{ secrets.GH_ACCESS_KEY_ID_RAUNAK }}
 
       - name: Install Helm v3.15.4
         run: |
@@ -137,10 +137,9 @@ jobs:
           echo "CHUNK_BS=${{ github.event.inputs.chunk_bs || 4096 }}" >> $GITHUB_ENV
         shell: bash
 
-
-      - name: Bootstrap Cluster
+      - name: Uninstall K3s agent on all nodes
+        if: always() && (github.event_name == 'schedule' || env.cleanup_cluster == 'true')
         run: |
-          cd $GITHUB_WORKSPACE/simplyBlockDeploy
           helm uninstall -n spdk-csi spdk-csi || echo "No helm release found. Skipping uninstall."
           
           echo "[INFO] Deleting deployments..."
@@ -150,7 +149,7 @@ jobs:
           kubectl delete daemonset --all -n spdk-csi || echo "No daemonsets found. Skipping delete."
           
           echo "[INFO] Deleting all pods..."
-          kubectl delete pods --all -n spdk-csi --timeout=10s || echo "Pods not deleted within timeout."
+          kubectl delete pods --all -n spdk-csi --force --timeout=10s || echo "Pods not deleted within timeout."
 
           echo "[INFO] Waiting for all resources to be deleted..."
           timeout=120  # Max wait time (in seconds)
@@ -168,6 +167,30 @@ jobs:
           else
             echo "[WARNING] Resources were not deleted within the timeout of ${timeout}s."
           fi
+
+          for node in $K3S_MNODES $STORAGE_PRIVATE_IPS $SEC_STORAGE_PRIVATE_IPS; do
+            ssh -i ~/.ssh/simplyblock-us-east-2.pem  root@${node} "k3s-agent-uninstall.sh" || echo "[WARNING] K3s-agent-uninstall failed on $node"
+          done
+          
+          for node in $MNODES; do
+            if ssh -i ~/.ssh/simplyblock-us-east-2.pem root@${node} "command -v $SBCLI_CMD" &>/dev/null; then
+              ssh -i ~/.ssh/simplyblock-us-east-2.pem root@${node} "$SBCLI_CMD sn deploy-cleaner" || echo "[WARNING] Failed to run deploy-cleaner on $node"
+            else
+              echo "[WARNING] SBCLI_CMD not found on $node. Skipping deploy-cleaner."
+            fi
+
+            ssh -i ~/.ssh/simplyblock-us-east-2.pem root@${node} "rm -rf /etc/foundationdb/* || true" || echo "[WARNING] Failed to clean foundationdb on $node"
+          done
+        env:
+          STORAGE_PRIVATE_IPS: "192.168.10.67 192.168.10.68 192.168.10.69"
+          SEC_STORAGE_PRIVATE_IPS: "192.168.10.70"
+          MNODES: "192.168.10.66"
+          SBCLI_CMD: ${{ env.SBCLI_CMD }}
+
+
+      - name: Bootstrap Cluster
+        run: |
+          cd $GITHUB_WORKSPACE/simplyBlockDeploy
 
           ./bootstrap-cluster.sh --sbcli-cmd "$SBCLI_CMD" \
             --max-lvol 20 --max-snap 20 --max-prov 150G --number-of-devices 3 \
@@ -377,7 +400,7 @@ jobs:
           CLUSTER_UUID="${CLUSTER_ID}"
           CLUSTER_SECRET="${CLUSTER_SECRET}"
           n=0
-          until [ "$n" -ge 60 ]
+          until [ "$n" -ge 100 ]
           do
             response=$(curl -s -X GET "$CLUSTER_API_GATEWAY_ENDPOINT/cluster/$CLUSTER_UUID" \
               -H "Content-Type: application/json" \
@@ -392,7 +415,7 @@ jobs:
             
             echo "Cluster status is not active, current status: $status, retrying"
             n=$((n+1)) 
-            sleep 10
+            sleep 20
           done
           
           if [ "$status" != "active" ]; then
@@ -422,7 +445,7 @@ jobs:
         run: echo "TEST_START_TIME=$(date +%s)" >> $GITHUB_ENV
 
       - name: Setup Tests & Run Tests
-        timeout-minutes: 120
+        timeout-minutes: 200
         run: |
           cd $GITHUB_WORKSPACE/e2e
           pip install virtualenv
@@ -474,21 +497,6 @@ jobs:
           echo "TEST_TIME_HOURS=$TEST_TIME_HOURS" >> $GITHUB_ENV
           echo "TEST_TIME_MINS=$TEST_TIME_MINS" >> $GITHUB_ENV
           echo "TEST_TIME_SECS=$TEST_TIME_SECS" >> $GITHUB_ENV
-
-      - name: Upload automation and docker logs to miniio
-        run: |
-          cd $GITHUB_WORKSPACE/e2e/
-          python3 logs/upload_logs_to_miniio.py --k8s
-        if: always()
-        env:
-          GITHUB_RUN_ID: ${{ github.run_id }}
-          MINIO_ACCESS_KEY: "KxtpwblgG3AFDYJkyg8i"
-          MINIO_SECRET_KEY: "Yae4q5wJU9ZBzJhdsUGzu9wWqON8o0ERU7nGbJER"
-          BASTION_IP: "192.168.10.66"
-          MNODES: "192.168.10.66"
-          STORAGE_PRIVATE_IPS: "192.168.10.67 192.168.10.68 192.168.10.69"
-          SEC_STORAGE_PRIVATE_IPS: "192.168.10.70"
-          USER: "root"
 
       - name: Parse test results
         if: always() && (github.event_name == 'schedule' || env.send_slack_notification == 'true')
@@ -596,7 +604,7 @@ jobs:
           BS: ${{ env.BS }}
         run: |
           GITHUB_RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}"
-          AWS_LOGS_URL="https://s3.console.aws.amazon.com/s3/buckets/${S3_BUCKET_NAME}?prefix=${RUN_ID}/&region=us-east-2"
+          AWS_LOGS_URL="http://192.168.10.164:9001/browser/e2e-run-logs/${RUN_ID}%2F"
           if [[ ${{ job.status }} == 'success' ]]; then
             OVERALL_STATUS=":white_check_mark: Overall Status: SUCCESS"
           else
@@ -608,6 +616,21 @@ jobs:
           MESSAGE="Python E2E K8s tests run triggered on branch *${BRANCH_NAME}*. \nTotal Time Taken to run the tests: ${TIME_TAKEN}. \n\n${OVERALL_STATUS}\nGitHub Run: ${GITHUB_RUN_URL}\nAWS Logs: ${AWS_LOGS_URL}\n\n*Configuration*: *NDCS: ${NDCS}, NPCS: ${NPCS}, Block Size: ${BS}, Chunk Block Size: ${CHUNK_BS}*\n\nTotal Tests: *${TOTAL_TESTS}*, Passed Tests: *${PASSED_TESTS}*, Failed Tests: *${FAILED_TESTS}*\n\n-- Test Cases Passed :white_check_mark:\n${PASSED_CASES_BULLETS}\n\n-- Test Cases Failed :x:\n${FAILED_CASES_BULLETS}\n\n-- Test Cases Skipped :x:\n${SKIPPED_CASES_BULLETS}"
 
           curl -X POST -H 'Content-type: application/json' --data "{\"text\":\"${MESSAGE}\"}" $SLACK_WEBHOOK_URL
+
+      - name: Upload automation and docker logs to miniio
+        run: |
+          cd $GITHUB_WORKSPACE/e2e/
+          python3 logs/upload_logs_to_miniio.py --k8s
+        if: always()
+        env:
+          GITHUB_RUN_ID: ${{ github.run_id }}
+          MINIO_ACCESS_KEY: "KxtpwblgG3AFDYJkyg8i"
+          MINIO_SECRET_KEY: "Yae4q5wJU9ZBzJhdsUGzu9wWqON8o0ERU7nGbJER"
+          BASTION_IP: "192.168.10.66"
+          MNODES: "192.168.10.66"
+          STORAGE_PRIVATE_IPS: "192.168.10.67 192.168.10.68 192.168.10.69"
+          SEC_STORAGE_PRIVATE_IPS: "192.168.10.70"
+          USER: "root"
       
       - name: Uninstall K3s agent on all nodes
         if: always() && (github.event_name == 'schedule' || env.cleanup_cluster == 'true')
@@ -621,7 +644,7 @@ jobs:
           kubectl delete daemonset --all -n spdk-csi || echo "No daemonsets found. Skipping delete."
           
           echo "[INFO] Deleting all pods..."
-          kubectl delete pods --all -n spdk-csi --timeout=10s || echo "Pods not deleted within timeout."
+          kubectl delete pods --all -n spdk-csi --force --timeout=10s || echo "Pods not deleted within timeout."
 
           echo "[INFO] Waiting for all resources to be deleted..."
           timeout=120  # Max wait time (in seconds)

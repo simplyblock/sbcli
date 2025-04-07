@@ -2,6 +2,8 @@ name: Python Package Build
 
 on:
   push:
+    branches:
+      - main
     paths:
       - 'simplyblock_core/env_var'
 
@@ -23,6 +25,14 @@ jobs:
       run: |
         python -m pip install --upgrade pip twine setuptools
         pip install build
+    - name: Checking cli.py status
+      run: |
+        ./scripts/generate.sh
+        changes="$(git diff simplyblock_cli/cli.py)"
+        if [[ "${changes}" ]]; then
+          echo "cli.py has changed after regeneration. Stopping."
+          echo "${changes}"
+        fi
     - name: Build package
       run: python setup.py sdist
     - name: Publish package to pypi
@@ -30,6 +40,9 @@ jobs:
       with:
         user: __token__
         password: ${{ secrets.PYPI_API_TOKEN }}
+
+    - name: print package name
+      run: echo "::notice title=PIP Package::$(ls dist)"
 
     - name: Configure AWS Credentials
       uses: aws-actions/configure-aws-credentials@v1

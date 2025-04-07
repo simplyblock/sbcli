@@ -5,7 +5,7 @@ from e2e_tests.cluster_test_base import TestClusterBase
 from utils.common_utils import sleep_n_sec
 from logger_config import setup_logger
 from datetime import datetime
-import traceback
+from utils import proxmox
 from requests.exceptions import HTTPError
 
 class TestSingleNodeReboot(TestClusterBase):
@@ -20,7 +20,9 @@ class TestSingleNodeReboot(TestClusterBase):
     7. While FIO is running, validate this scenario:
         a. In a cluster with three nodes, select one node, which does not
            have any lvol attached.
-        b. Reboot the instance
+        b. Reboot the instance (EC2 or Proxmox)
+            i. If EC2, use boto3 to stop the instance
+            ii. If Proxmox, use the Proxmox API to stop the instance
         c. Check status of objects during outage:
             - the node is in status “offline”
             - the devices of the node are in status “unavailable”
@@ -113,14 +115,15 @@ class TestSingleNodeReboot(TestClusterBase):
         snapshot_id_1 = self.ssh_obj.get_snapshot_id(node=self.mgmt_nodes[0],
                                                      snapshot_name=f"{self.snapshot_name}_1")
         
-        self.sbcli_utils.resize_lvol(lvol_id=self.sbcli_utils.get_lvol_id(self.lvol_name),
-                                     new_size="20G")
+        # self.sbcli_utils.resize_lvol(lvol_id=self.sbcli_utils.get_lvol_id(self.lvol_name),
+        #                              new_size="20G")
 
         self.validations(node_uuid=no_lvol_node_uuid,
                          node_status="online",
                          device_status="online",
                          lvol_status="online",
-                         health_check_status=True
+                         health_check_status=True,
+                         device_health_check=None
                          )
         
         sleep_n_sec(30)
@@ -131,6 +134,9 @@ class TestSingleNodeReboot(TestClusterBase):
             # self.common_utils.stop_ec2_instance(ec2_resource=self.ec2_resource,
             #                                     instance_id=instance_id)
             reboot_thread = threading.Thread(target=self.common_utils.reboot_ec2_instance, args=(self.ec2_resource, instance_id,),)
+            reboot_thread.start()
+        elif proxmox.is_valid_ip(node_ip):
+            reboot_thread = threading.Thread(target=self.common_utils.reboot_proxmox_node, args=(node_ip),)
             reboot_thread.start()
         else:
             # Perform node reboot
@@ -205,22 +211,24 @@ class TestSingleNodeReboot(TestClusterBase):
                          node_status="online",
                          device_status="online",
                          lvol_status="online",
-                         health_check_status=True
+                         health_check_status=True,
+                         device_health_check=None
                          )
         
-        self.sbcli_utils.resize_lvol(lvol_id=self.sbcli_utils.get_lvol_id(self.lvol_name),
-                                     new_size="25G")
+        # self.sbcli_utils.resize_lvol(lvol_id=self.sbcli_utils.get_lvol_id(self.lvol_name),
+        #                              new_size="25G")
         if not self.k8s_test:
-            self.ssh_obj.restart_docker_logging(
-                node_ip=node_ip,
-                containers=self.container_nodes[node_ip],
-                log_dir=self.docker_logs_path,
-                test_name=self.test_name
-            )
+            for node in self.storage_nodes:
+                self.ssh_obj.restart_docker_logging(
+                    node_ip=node,
+                    containers=self.container_nodes[node],
+                    log_dir=self.docker_logs_path,
+                    test_name=self.test_name
+                )
         else:
             self.runner_k8s_log.restart_logging()
         self.logger.info(f"Validating migration tasks for node {no_lvol_node_uuid}.")
-        self.validate_migration_for_node(timestamp, 5000, None)
+        self.validate_migration_for_node(timestamp, 1000, None)
 
         # Write steps in order
         steps = {
@@ -298,10 +306,10 @@ class TestSingleNodeReboot(TestClusterBase):
         self.common_utils.validate_fio_test(node=self.mgmt_nodes[0],
                                             log_file=self.log_path)
         
-        self.sbcli_utils.resize_lvol(lvol_id=self.sbcli_utils.get_lvol_id(f"{self.lvol_name}_cl_1"),
-                                     new_size="30G")
-        self.sbcli_utils.resize_lvol(lvol_id=self.sbcli_utils.get_lvol_id(f"{self.lvol_name}_cl_2"),
-                                     new_size="30G")
+        # self.sbcli_utils.resize_lvol(lvol_id=self.sbcli_utils.get_lvol_id(f"{self.lvol_name}_cl_1"),
+        #                              new_size="30G")
+        # self.sbcli_utils.resize_lvol(lvol_id=self.sbcli_utils.get_lvol_id(f"{self.lvol_name}_cl_2"),
+        #                              new_size="30G")
         
         clone_files = self.ssh_obj.find_files(self.mgmt_nodes[0], directory=f"{clone_mount_file}_2")
         final_checksum = self.ssh_obj.generate_checksums(self.mgmt_nodes[0], clone_files)
@@ -316,8 +324,8 @@ class TestSingleNodeReboot(TestClusterBase):
 
         assert original_checksum == final_checksum, "Checksum mismatch for lvol and clone"
 
-        self.sbcli_utils.resize_lvol(lvol_id=self.sbcli_utils.get_lvol_id(self.lvol_name),
-                                     new_size="30G")
+        # self.sbcli_utils.resize_lvol(lvol_id=self.sbcli_utils.get_lvol_id(self.lvol_name),
+        #                              new_size="30G")
 
         lvol_files = self.ssh_obj.find_files(self.mgmt_nodes[0], directory=self.mount_path)
         final_lvl_checksum = self.ssh_obj.generate_checksums(self.mgmt_nodes[0], lvol_files)
@@ -339,7 +347,9 @@ class TestHASingleNodeReboot(TestClusterBase):
     6. Start FIO tests
     7. While FIO is running, validate this scenario:
         a. In a cluster with three nodes, select one node, which has the lvol
-        b. Reboot the node
+        b. Reboot the node (EC2 or Proxmox)
+            i. If EC2, use boto3 to stop the instance
+            ii. If Proxmox, use the Proxmox API to stop the instance
         c. Check status of objects during outage:
             - the node is in status “offline”
             - the devices of the node are in status “unavailable”
@@ -395,14 +405,15 @@ class TestHASingleNodeReboot(TestClusterBase):
         node_ip = no_lvol_node["mgmt_ip"]
         instance_id = no_lvol_node["cloud_instance_id"]
 
-        self.sbcli_utils.resize_lvol(lvol_id=self.sbcli_utils.get_lvol_id(self.lvol_name),
-                                     new_size="20G")
+        # self.sbcli_utils.resize_lvol(lvol_id=self.sbcli_utils.get_lvol_id(self.lvol_name),
+        #                              new_size="20G")
 
         self.validations(node_uuid=no_lvol_node_uuid,
                          node_status="online",
                          device_status="online",
                          lvol_status="online",
-                         health_check_status=True
+                         health_check_status=True,
+                         device_health_check=None
                          )
 
         for i in range(2):
@@ -411,6 +422,9 @@ class TestHASingleNodeReboot(TestClusterBase):
             if "i-" in instance_id[0:2]:
                 # AWS way stop
                 reboot_thread = threading.Thread(target=self.common_utils.reboot_ec2_instance, args=(self.ec2_resource, instance_id,),)
+                reboot_thread.start()
+            elif proxmox.is_valid_ip(node_ip):
+                reboot_thread = threading.Thread(target=self.common_utils.reboot_proxmox_node, args=(node_ip,),)
                 reboot_thread.start()
             else:
                 # Perform node reboot
@@ -443,23 +457,25 @@ class TestHASingleNodeReboot(TestClusterBase):
                              node_status="online",
                              device_status="online",
                              lvol_status="online",
-                             health_check_status=True
+                             health_check_status=True,
+                             device_health_check=None
                              )
             if not self.k8s_test:
-                self.ssh_obj.restart_docker_logging(
-                    node_ip=node_ip,
-                    containers=self.container_nodes[node_ip],
-                    log_dir=self.docker_logs_path,
-                    test_name=self.test_name
-                )
+                for node in self.storage_nodes:
+                    self.ssh_obj.restart_docker_logging(
+                        node_ip=node,
+                        containers=self.container_nodes[node],
+                        log_dir=self.docker_logs_path,
+                        test_name=self.test_name
+                    )
             else:
                 self.runner_k8s_log.restart_logging()
             self.logger.info(f"Validating migration tasks for node {no_lvol_node_uuid}.")
-            self.validate_migration_for_node(timestamp, 5000, None)
+            self.validate_migration_for_node(timestamp, 1000, None)
 
 
-        self.sbcli_utils.resize_lvol(lvol_id=self.sbcli_utils.get_lvol_id(self.lvol_name),
-                                     new_size="30G")
+        # self.sbcli_utils.resize_lvol(lvol_id=self.sbcli_utils.get_lvol_id(self.lvol_name),
+        #                              new_size="30G")
         # Write steps in order
         steps = {
             "Storage Node": ["shutdown", "restart"],

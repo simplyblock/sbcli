@@ -1,4 +1,6 @@
 # coding=utf-8
+import time
+
 import jc
 
 from simplyblock_core import utils, distr_controller, storage_node_ops
@@ -51,19 +53,6 @@ def check_cluster(cluster_id):
     return result
 
 
-def _check_node_docker_api(ip):
-    return True
-    # try:
-    #     node_docker = docker.DockerClient(base_url=f"tcp://{ip}:2375", version="auto", timeout=3)
-    #     ret = node_docker.info()
-    #     if ret:
-    #         logger.debug(ret)
-    #         return True
-    # except Exception as e:
-    #     logger.error(f"Failed to connect to node's docker: {e}")
-    # return False
-
-
 def _check_node_rpc(rpc_ip, rpc_port, rpc_username, rpc_password, timeout=3, retry=2):
     try:
         rpc_client = RPCClient(
@@ -91,11 +80,11 @@ def _check_node_api(ip):
     return False
 
 
-def _check_spdk_process_up(ip):
+def _check_spdk_process_up(ip, rpc_port):
     try:
         snode_api = SNodeClient(f"{ip}:5000", timeout=3, retry=2)
         logger.debug(f"Node API={ip}:5000")
-        is_up, _ = snode_api.spdk_process_is_up()
+        is_up, _ = snode_api.spdk_process_is_up(rpc_port)
         logger.debug(f"SPDK is {is_up}")
         return is_up
     except Exception as e:
@@ -106,7 +95,7 @@ def _check_spdk_process_up(ip):
 def _check_port_on_node(snode, port_id):
     try:
         snode_api = SNodeClient(f"{snode.mgmt_ip}:5000", timeout=3, retry=2)
-        iptables_command_output, _ = snode_api.get_firewall()
+        iptables_command_output, _ = snode_api.get_firewall(snode.rpc_port)
         result = jc.parse('iptables', iptables_command_output)
         for chain in result:
             if chain['chain'] in ["INPUT", "OUTPUT"]:
@@ -130,7 +119,8 @@ def _check_node_ping(ip):
         return False
 
 
-def _check_node_lvstore(lvstore_stack, node, auto_fix=False):
+def _check_node_lvstore(
+        lvstore_stack, node, auto_fix=False, node_bdev_names=None, stack_src_node=None):
     db_controller = DBController()
     lvstore_check = True
     logger.info(f"Checking distr stack on node : {node.get_id()}")
@@ -151,16 +141,31 @@ def _check_node_lvstore(lvstore_stack, node, auto_fix=False):
         elif type == "bdev_lvstore":
             bdev_lvstore = bdev["name"]
 
-    node_bdevs = rpc_client.get_bdevs()
-    if node_bdevs:
-        node_bdev_names = [b['name'] for b in node_bdevs]
-    else:
-        node_bdev_names = []
+    node_distribs_list = []
+    for bdev in node.lvstore_stack:
+        type = bdev['type']
+        if type == "bdev_raid":
+            node_distribs_list = bdev["distribs_list"]
+
+    if not node_bdev_names:
+        ret = rpc_client.get_bdevs()
+        if ret:
+            node_bdev_names = [b['name'] for b in ret]
+        else:
+            node_bdev_names = []
 
     for distr in distribs_list:
-        # ret = rpc_client.get_bdevs(distr)
         if distr in node_bdev_names:
             logger.info(f"Checking distr bdev : {distr} ... ok")
+            logger.info(f"Checking distr JM names:")
+            if distr in node_distribs_list:
+                jm_names = storage_node_ops.get_node_jm_names(node)
+            elif stack_src_node:
+                jm_names = storage_node_ops.get_node_jm_names(stack_src_node, remote_node=node)
+            else:
+                jm_names = node.jm_ids
+            for jm in jm_names:
+                logger.info(jm)
             logger.info("Checking Distr map ...")
             ret = rpc_client.distr_get_cluster_map(distr)
             if not ret:
@@ -178,6 +183,10 @@ def _check_node_lvstore(lvstore_stack, node, auto_fix=False):
                                     if result['Reported Status']:
                                         dev = db_controller.get_storage_device_by_id(result['UUID'])
                                         if dev.status == NVMeDevice.STATUS_ONLINE:
+                                            name = f"remote_{dev.alceml_bdev}"
+                                            logger.info(f"detaching {name} from {node.get_id()}")
+                                            rpc_client.bdev_nvme_detach_controller(name)
+                                            time.sleep(1)
                                             remote_devices = storage_node_ops._connect_to_remote_devs(node)
                                             n = db_controller.get_storage_node_by_id(node.get_id())
                                             n.remote_devices = remote_devices
@@ -201,7 +210,6 @@ def _check_node_lvstore(lvstore_stack, node, auto_fix=False):
             logger.info(f"Checking distr bdev : {distr} ... not found")
             lvstore_check = False
     if raid:
-        # ret = rpc_client.get_bdevs(raid)
         if raid in node_bdev_names:
             logger.info(f"Checking raid bdev: {raid} ... ok")
         else:
@@ -246,10 +254,6 @@ def check_node(node_id, with_devices=True):
         snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
     logger.info(f"Check: node RPC {snode.mgmt_ip}:{snode.rpc_port} ... {node_rpc_check}")
 
-    # 4- docker API
-    node_docker_check = _check_node_docker_api(snode.mgmt_ip)
-    logger.info(f"Check: node docker API {snode.mgmt_ip}:2375 ... {node_docker_check}")
-
     data_nics_check = True
     for data_nic in snode.data_nics:
         if data_nic.ip4_address:
@@ -257,15 +261,16 @@ def check_node(node_id, with_devices=True):
             logger.info(f"Check: ping ip {data_nic.ip4_address} ... {ping_check}")
             data_nics_check &= ping_check
 
-    if snode.is_secondary_node:
-        for n in db_controller.get_primary_storage_nodes_by_secondary_node_id(node_id):
+    if snode.lvstore_stack_secondary_1:
+        n = db_controller.get_storage_node_by_id(snode.lvstore_stack_secondary_1)
+        if n:
             lvol_port_check = _check_port_on_node(snode, n.lvol_subsys_port)
             logger.info(f"Check: node {snode.mgmt_ip}, port: {n.lvol_subsys_port} ... {lvol_port_check}")
-    else:
+    if not snode.is_secondary_node:
         lvol_port_check = _check_port_on_node(snode, snode.lvol_subsys_port)
         logger.info(f"Check: node {snode.mgmt_ip}, port: {snode.lvol_subsys_port} ... {lvol_port_check}")
 
-    is_node_online = ping_check and node_api_check and node_rpc_check and node_docker_check
+    is_node_online = ping_check and node_api_check and node_rpc_check
 
     logger.info(f"Results : {is_node_online}")
     print("*" * 100)
@@ -329,13 +334,13 @@ def check_node(node_id, with_devices=True):
             if snode.secondary_node_id:
                 second_node_1 = db_controller.get_storage_node_by_id(snode.secondary_node_id)
                 if second_node_1.status == StorageNode.STATUS_ONLINE:
-                    lvstore_check &= _check_node_lvstore(lvstore_stack, second_node_1)
+                    lvstore_check &= _check_node_lvstore(lvstore_stack, second_node_1, stack_src_node=snode)
 
-        if snode.is_secondary_node:
-            for node in db_controller.get_storage_nodes():
-                if node.secondary_node_id == snode.get_id() and node.status == StorageNode.STATUS_ONLINE:
-                    logger.info(f"Checking stack from node : {node.get_id()}")
-                    lvstore_check &= _check_node_lvstore(node.lvstore_stack, snode)
+        # if snode.lvstore_stack_secondary_1:
+        #     for node in db_controller.get_storage_nodes():
+        #         if node.secondary_node_id == snode.get_id() and node.status == StorageNode.STATUS_ONLINE:
+        #             logger.info(f"Checking stack from node : {node.get_id()}")
+        #             lvstore_check &= _check_node_lvstore(node.lvstore_stack, snode)
 
     return is_node_online and node_devices_check and node_remote_devices_check and lvstore_check
 
@@ -442,7 +447,8 @@ def check_remote_device(device_id):
     return result
 
 
-def check_lvol_on_node(lvol_id, node_id):
+def check_lvol_on_node(lvol_id, node_id, node_bdev_names=None, node_lvols_nqns=None):
+    logger.info(f"Checking lvol on node: {node_id}")
 
     db_controller = DBController()
     lvol = db_controller.get_lvol_by_id(lvol_id)
@@ -458,29 +464,40 @@ def check_lvol_on_node(lvol_id, node_id):
         snode.mgmt_ip, snode.rpc_port,
         snode.rpc_username, snode.rpc_password, timeout=5, retry=1)
 
+    if not node_bdev_names:
+        node_bdev_names = {}
+        ret = rpc_client.get_bdevs()
+        for bdev in ret:
+            node_bdev_names[bdev['name']] = bdev
+
+    if not node_lvols_nqns:
+        node_lvols_nqns = {}
+        ret = rpc_client.subsystem_list()
+        for sub in ret:
+            node_lvols_nqns[sub['nqn']] = sub
+
     passed = True
     try:
         for bdev_info in lvol.bdev_stack:
             bdev_name = bdev_info['name']
-            if bdev_info['type'] == "bdev_lvol":
-                bdev_name = bdev_info['params']["lvs_name"] + "/" + bdev_info['params']["name"]
-            ret = rpc_client.get_bdevs(bdev_name)
-            if ret:
+            if bdev_info['type'] in ["bdev_lvol", "bdev_lvol_clone"]:
+                bdev_name = lvol.lvol_uuid
+
+            if bdev_name in node_bdev_names:
                 logger.info(f"Checking bdev: {bdev_name} ... ok")
             else:
                 logger.error(f"Checking bdev: {bdev_name} ... failed")
                 passed = False
 
-        ret = rpc_client.subsystem_list(lvol.nqn)
-        if ret:
+        if lvol.nqn in node_lvols_nqns:
             logger.info(f"Checking subsystem ... ok")
-            if ret[0]["listen_addresses"]:
+            if node_lvols_nqns[lvol.nqn]["listen_addresses"]:
                 logger.info(f"Checking listener ... ok")
             else:
                 logger.info(f"Checking listener ... not found")
                 passed = False
 
-            if ret[0]["namespaces"]:
+            if node_lvols_nqns[lvol.nqn]["namespaces"]:
                 logger.info(f"Checking namespaces ... ok")
             else:
                 logger.info(f"Checking namespaces ... not found")

@@ -6,12 +6,12 @@ services:
     image: $SIMPLYBLOCK_DOCKER_IMAGE
     command: "python simplyblock_core/services/spdk_stats_collector.py"
     volumes:
-          - '/etc/simplyblock:/etc/simplyblock'
-          - '/var/tmp/spdk.sock:/var/tmp/spdk.sock'
+      - "/etc/foundationdb:/etc/foundationdb"
     deploy:
-      mode: global
       placement:
-        constraints: [ node.role == worker ]
+        constraints: [ node.role == manager ]
+    networks:
+      - monitoring-net
 
   fdb-server:
     image: foundationdb/foundationdb:7.3.42
@@ -292,18 +292,18 @@ services:
     environment:
       SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
 
-  NewDeviceDiscovery:
-    image: $SIMPLYBLOCK_DOCKER_IMAGE
-    command: "python simplyblock_core/services/new_device_discovery.py"
-    deploy:
-      placement:
-        constraints: [node.role == manager]
-    volumes:
-      - "/etc/foundationdb:/etc/foundationdb"
-    networks:
-      - hostnet
-    environment:
-      SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
+#  NewDeviceDiscovery:
+#    image: $SIMPLYBLOCK_DOCKER_IMAGE
+#    command: "python simplyblock_core/services/new_device_discovery.py"
+#    deploy:
+#      placement:
+#        constraints: [node.role == manager]
+#    volumes:
+#      - "/etc/foundationdb:/etc/foundationdb"
+#    networks:
+#      - hostnet
+#    environment:
+#      SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
 
   TasksNodeAddRunner:
     image: $SIMPLYBLOCK_DOCKER_IMAGE

@@ -11,7 +11,7 @@ from simplyblock_core.controllers import lvol_controller, snapshot_controller
 
 from simplyblock_web import utils
 
-from simplyblock_core import db_controller
+from simplyblock_core import db_controller, utils as core_utils
 
 logger = logging.getLogger(__name__)
 
@@ -135,7 +135,7 @@ def add_lvol():
 
     name = cl_data['name']
     pool_id_or_name = cl_data['pool']
-    size = utils.parse_size(cl_data['size'])
+    size = core_utils.parse_size(cl_data['size'])
 
     pool = None
     for p in db_controller.get_pools():
@@ -264,7 +264,7 @@ def resize_lvol(uuid):
     if 'size' not in cl_data:
         return utils.get_response(None, "missing required param: size", 400)
 
-    new_size = utils.parse_size(cl_data['size'])
+    new_size = core_utils.parse_size(cl_data['size'])
 
     ret = lvol_controller.resize_lvol(uuid, new_size)
     return utils.get_response(ret)
@@ -288,10 +288,10 @@ def create_snapshot():
     if 'snapshot_name' not in cl_data:
         return utils.get_response(None, "missing required param: snapshot_name", 400)
 
-    snapID = snapshot_controller.add(
+    snapID, err = snapshot_controller.add(
         cl_data['lvol_id'],
         cl_data['snapshot_name'])
-    return utils.get_response(snapID)
+    return utils.get_response(snapID, err, http_code=400)
 
 
 @bp.route('/lvol/inflate_lvol/<string:uuid>', methods=['PUT'])

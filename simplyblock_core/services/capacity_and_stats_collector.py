@@ -172,12 +172,12 @@ while True:
             rpc_client = RPCClient(
                 node.mgmt_ip, node.rpc_port,
                 node.rpc_username, node.rpc_password,
-                timeout=1, retry=2)
+                timeout=2, retry=2)
 
             devices_records = []
             for device in node.nvme_devices:
                 logger.info("Getting device stats: %s", device.uuid)
-                if device.status not in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_READONLY]:
+                if device.status not in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_READONLY, NVMeDevice.STATUS_CANNOT_ALLOCATE]:
                     logger.info(f"Device is skipped: {device.get_id()} status: {device.status}")
                     continue
                 capacity_dict = rpc_client.alceml_get_capacity(device.alceml_name)

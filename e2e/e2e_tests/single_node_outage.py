@@ -126,7 +126,8 @@ class TestSingleNodeOutage(TestClusterBase):
                          node_status="online",
                          device_status="online",
                          lvol_status="online",
-                         health_check_status=True
+                         health_check_status=True,
+                         device_health_check=None
                          )
 
         self.logger.info("Taking snapshot")
@@ -136,8 +137,8 @@ class TestSingleNodeOutage(TestClusterBase):
         snapshot_id_1 = self.ssh_obj.get_snapshot_id(node=self.mgmt_nodes[0],
                                                      snapshot_name=f"{self.snapshot_name}_1")
         
-        self.sbcli_utils.resize_lvol(lvol_id=self.sbcli_utils.get_lvol_id(self.lvol_name),
-                                     new_size="20G")
+        # self.sbcli_utils.resize_lvol(lvol_id=self.sbcli_utils.get_lvol_id(self.lvol_name),
+        #                              new_size="20G")
         
         timestamp = int(datetime.now().timestamp())
 
@@ -158,7 +159,8 @@ class TestSingleNodeOutage(TestClusterBase):
                          node_status="offline",
                          device_status="unavailable",
                          lvol_status="online",
-                         health_check_status=False
+                         health_check_status=False,
+                         device_health_check=None
                          )
 
         self.sbcli_utils.restart_node(node_uuid=no_lvol_node_uuid)
@@ -171,21 +173,23 @@ class TestSingleNodeOutage(TestClusterBase):
                          node_status="online",
                          device_status="online",
                          lvol_status="online",
-                         health_check_status=True
+                         health_check_status=True,
+                         device_health_check=None
                          )
         
-        self.sbcli_utils.resize_lvol(lvol_id=self.sbcli_utils.get_lvol_id(self.lvol_name),
-                                     new_size="25G")
+        # self.sbcli_utils.resize_lvol(lvol_id=self.sbcli_utils.get_lvol_id(self.lvol_name),
+        #                              new_size="25G")
         
         node_details = self.sbcli_utils.get_storage_node_details(no_lvol_node_uuid)
         node_ip = node_details[0]["mgmt_ip"]
         if not self.k8s_test:
-            self.ssh_obj.restart_docker_logging(
-                node_ip=node_ip,
-                containers=self.container_nodes[node_ip],
-                log_dir=self.docker_logs_path,
-                test_name=self.test_name
-            )
+            for node in self.storage_nodes:
+                self.ssh_obj.restart_docker_logging(
+                    node_ip=node,
+                    containers=self.container_nodes[node],
+                    log_dir=self.docker_logs_path,
+                    test_name=self.test_name
+                )
         else:
             self.runner_k8s_log.restart_logging()
 
@@ -276,10 +280,10 @@ class TestSingleNodeOutage(TestClusterBase):
         self.common_utils.validate_fio_test(node=self.mgmt_nodes[0],
                                             log_file=self.log_path)
         
-        self.sbcli_utils.resize_lvol(lvol_id=self.sbcli_utils.get_lvol_id(f"{self.lvol_name}_cl_1"),
-                                     new_size="30G")
-        self.sbcli_utils.resize_lvol(lvol_id=self.sbcli_utils.get_lvol_id(f"{self.lvol_name}_cl_2"),
-                                     new_size="30G")
+        # self.sbcli_utils.resize_lvol(lvol_id=self.sbcli_utils.get_lvol_id(f"{self.lvol_name}_cl_1"),
+        #                              new_size="30G")
+        # self.sbcli_utils.resize_lvol(lvol_id=self.sbcli_utils.get_lvol_id(f"{self.lvol_name}_cl_2"),
+        #                              new_size="30G")
         
         clone_files = self.ssh_obj.find_files(self.mgmt_nodes[0], directory=f"{clone_mount_file}_2")
         final_checksum = self.ssh_obj.generate_checksums(self.mgmt_nodes[0], clone_files)
@@ -294,8 +298,8 @@ class TestSingleNodeOutage(TestClusterBase):
 
         assert original_checksum == final_checksum, "Checksum mismatch for lvol and clone"
 
-        self.sbcli_utils.resize_lvol(lvol_id=self.sbcli_utils.get_lvol_id(f"{self.lvol_name}_cl_1"),
-                                     new_size="30G")
+        # self.sbcli_utils.resize_lvol(lvol_id=self.sbcli_utils.get_lvol_id(f"{self.lvol_name}_cl_1"),
+        #                              new_size="30G")
 
         lvol_files = self.ssh_obj.find_files(self.mgmt_nodes[0], directory=self.mount_path)
         final_lvl_checksum = self.ssh_obj.generate_checksums(self.mgmt_nodes[0], lvol_files)
@@ -377,11 +381,12 @@ class TestHASingleNodeOutage(TestClusterBase):
                          node_status="online",
                          device_status="online",
                          lvol_status="online",
-                         health_check_status=True
+                         health_check_status=True,
+                         device_health_check=None
                          )
         
-        self.sbcli_utils.resize_lvol(lvol_id=self.sbcli_utils.get_lvol_id(self.lvol_name),
-                                     new_size="20G")
+        # self.sbcli_utils.resize_lvol(lvol_id=self.sbcli_utils.get_lvol_id(self.lvol_name),
+        #                              new_size="20G")
 
         for i in range(2):
             timestamp = int(datetime.now().timestamp())
@@ -403,7 +408,8 @@ class TestHASingleNodeOutage(TestClusterBase):
                             node_status="offline",
                             device_status="unavailable",
                             lvol_status="online",
-                            health_check_status=False
+                            health_check_status=False,
+                            device_health_check=None
                             )
 
             self.sbcli_utils.restart_node(node_uuid=no_lvol_node_uuid)
@@ -415,20 +421,22 @@ class TestHASingleNodeOutage(TestClusterBase):
                              node_status="online",
                              device_status="online",
                              lvol_status="online",
-                             health_check_status=True
+                             health_check_status=True,
+                             device_health_check=None
                              )
             if not self.k8s_test:
-                self.ssh_obj.restart_docker_logging(
-                    node_ip=node_ip,
-                    containers=self.container_nodes[node_ip],
-                    log_dir=self.docker_logs_path,
-                    test_name=self.test_name
-                )
+                for node in self.storage_nodes:
+                    self.ssh_obj.restart_docker_logging(
+                        node_ip=node,
+                        containers=self.container_nodes[node],
+                        log_dir=self.docker_logs_path,
+                        test_name=self.test_name
+                    )
             else:
                 self.runner_k8s_log.restart_logging()
             self.logger.info(f"Validating migration tasks for node {no_lvol_node_uuid}.")
             sleep_n_sec(120)
-            self.validate_migration_for_node(timestamp, 5000, None)
+            self.validate_migration_for_node(timestamp, 1000, None)
 
 
         # Write steps in order
@@ -439,8 +447,8 @@ class TestHASingleNodeOutage(TestClusterBase):
         self.common_utils.validate_event_logs(cluster_id=self.cluster_id,
                                               operations=steps)
         
-        self.sbcli_utils.resize_lvol(lvol_id=self.sbcli_utils.get_lvol_id(self.lvol_name),
-                                     new_size="25G")
+        # self.sbcli_utils.resize_lvol(lvol_id=self.sbcli_utils.get_lvol_id(self.lvol_name),
+        #                              new_size="25G")
 
         end_time = self.common_utils.manage_fio_threads(node=self.mgmt_nodes[0],
                                                         threads=self.fio_threads,

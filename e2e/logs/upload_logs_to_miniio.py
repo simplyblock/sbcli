@@ -163,7 +163,8 @@ except Exception as e:
         f"{HOME_DIR}/*.txt*",
         f"{HOME_DIR}/*.log",
         f"{HOME_DIR}/*.state",
-        f"/etc/simplyblock/*"
+        "/etc/simplyblock/*",
+        "/var/simplyblock/*"
     ]:
         print(f"[INFO] Checking if {remote_path} exists on {node}...")
         stdout, _ = exec_command(ssh, f"ls -1 {remote_path} 2>/dev/null")
@@ -344,7 +345,9 @@ def cleanup_remote_logs(ssh, node):
         f"rm -rf {HOME_DIR}/container-logs.tar.gz",  # Remove compressed tar file
         f"rm -rf {HOME_DIR}/container-logs/*",  # Remove container logs content
         f"rm -rf {HOME_DIR}/*.txt {HOME_DIR}/*.log {HOME_DIR}/*.state",  # Remove uploaded logs
-        "rm -rf /etc/simplyblock/*",  # Remove dump logs
+        "rm -rf /etc/simplyblock/[0-9]*",  # Remove dump logs
+        "rm -rf /etc/simplyblock/*core*",  # Remove dump logs
+        "rm -rf /etc/simplyblock/LVS*",  # Remove dump logs
         f"rm -rf {HOME_DIR}/upload_to_minio.py"  # Remove temporary upload script
     ]
 
@@ -395,33 +398,32 @@ for node in MNODES:
     except Exception as e:
         print(f"[ERROR] Error processing Management Node {node}: {e}")
 
-# **Step 2: Process Storage Nodes (Only for Docker mode)**
-if not args.k8s:
-    for node in STORAGE_PRIVATE_IPS + SEC_STORAGE_PRIVATE_IPS:
-        try:
-            ssh = connect_ssh(node, bastion_ip=BASTION_IP)
-            print(f"[INFO] Processing Storage Node {node}...")
+# **Step 2: Process Storage Node**
+for node in STORAGE_PRIVATE_IPS + SEC_STORAGE_PRIVATE_IPS:
+    try:
+        ssh = connect_ssh(node, bastion_ip=BASTION_IP)
+        print(f"[INFO] Processing Storage Node {node}...")
 
-            stdout, _ = exec_command(ssh, "sudo docker ps -aq")
-            container_ids = stdout.strip().split("\n")
+        stdout, _ = exec_command(ssh, "sudo docker ps -aq")
+        container_ids = stdout.strip().split("\n")
 
-            for container_id in container_ids:
-                if not container_id:
-                    continue
+        for container_id in container_ids:
+            if not container_id:
+                continue
 
-                stdout, _ = exec_command(ssh, f'sudo docker inspect --format="{{{{.Name}}}}" {container_id}')
-                container_name = stdout.strip().replace("/", "")
+            stdout, _ = exec_command(ssh, f'sudo docker inspect --format="{{{{.Name}}}}" {container_id}')
+            container_name = stdout.strip().replace("/", "")
 
-                log_file = f"{HOME_DIR}/{container_name}_{container_id}_{node}.txt"
-                exec_command(ssh, f"sudo docker logs {container_id} &> {log_file}")
-            if node in SEC_STORAGE_PRIVATE_IPS:
-                upload_from_remote(ssh, node, node_type="sec-storage")
-            else:
-                upload_from_remote(ssh, node, node_type="storage")
-            ssh.close()
-            print(f"[SUCCESS] Successfully processed Storage Node {node}")
-        except Exception as e:
-            print(f"[ERROR] Error processing Storage Node {node}: {e}")
+            log_file = f"{HOME_DIR}/{container_name}_{container_id}_{node}.txt"
+            exec_command(ssh, f"sudo docker logs {container_id} &> {log_file}")
+        if node in SEC_STORAGE_PRIVATE_IPS:
+            upload_from_remote(ssh, node, node_type="sec-storage")
+        else:
+            upload_from_remote(ssh, node, node_type="storage")
+        ssh.close()
+        print(f"[SUCCESS] Successfully processed Storage Node {node}")
+    except Exception as e:
+        print(f"[ERROR] Error processing Storage Node {node}: {e}")
 
 for node in CLIENTNODES:
     try:
@@ -431,10 +433,10 @@ for node in CLIENTNODES:
         upload_from_remote(ssh, node, node_type="client")
 
         ssh.close()
-        print(f"[SUCCESS] Successfully processed Management Node {node}")
+        print(f"[SUCCESS] Successfully processed Client Node {node}")
 
     except Exception as e:
-        print(f"[ERROR] Error processing Management Node {node}: {e}")
+        print(f"[ERROR] Error processing Client Node {node}: {e}")
 
 # **Step 3: Process Kubernetes Nodes (Upload logs directly from runner)**
 if args.k8s:
@@ -446,17 +448,16 @@ if args.k8s:
 else:
     upload_local_logs()
 
-for node in MNODES:
-    ssh = connect_ssh(node, bastion_ip=BASTION_IP)
-    cleanup_remote_logs(ssh, node)
+# for node in MNODES:
+#     ssh = connect_ssh(node, bastion_ip=BASTION_IP)
+#     cleanup_remote_logs(ssh, node)
 
-for node in CLIENTNODES:
-    ssh = connect_ssh(node, bastion_ip=BASTION_IP)
-    cleanup_remote_logs(ssh, node)
+# for node in CLIENTNODES:
+#     ssh = connect_ssh(node, bastion_ip=BASTION_IP)
+#     cleanup_remote_logs(ssh, node)
 
-if not args.k8s:
-    for node in STORAGE_PRIVATE_IPS + SEC_STORAGE_PRIVATE_IPS:
-        ssh = connect_ssh(node, bastion_ip=BASTION_IP)
-        cleanup_remote_logs(ssh, node)
+# for node in STORAGE_PRIVATE_IPS + SEC_STORAGE_PRIVATE_IPS:
+#     ssh = connect_ssh(node, bastion_ip=BASTION_IP)
+#     cleanup_remote_logs(ssh, node)
 
-cleanup_local_logs()
+# cleanup_local_logs()

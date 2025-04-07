@@ -1,7 +1,6 @@
 # coding=utf-8
 import time
 
-
 from simplyblock_core import constants, db_controller, storage_node_ops, utils
 from simplyblock_core.controllers import device_controller, tasks_events, health_controller, tasks_controller
 from simplyblock_core.models.job_schedule import JobSchedule
@@ -13,6 +12,8 @@ logger = utils.get_logger(__name__)
 
 # get DB controller
 db_controller = db_controller.DBController()
+
+utils.init_sentry_sdk()
 
 
 def _get_node_unavailable_devices_count(node_id):
@@ -132,6 +133,12 @@ def task_runner_node(task):
         task.status = JobSchedule.STATUS_DONE
         task.write_to_db(db_controller.kv_store)
         storage_node_ops.set_node_status(task.node_id, StorageNode.STATUS_OFFLINE)
+        return True
+
+    if not node:
+        task.function_result = "node not found"
+        task.status = JobSchedule.STATUS_DONE
+        task.write_to_db(db_controller.kv_store)
         return True
 
     if node.status in [StorageNode.STATUS_REMOVED, StorageNode.STATUS_SCHEDULABLE, StorageNode.STATUS_DOWN]:
