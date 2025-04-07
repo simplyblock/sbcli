@@ -2739,7 +2739,7 @@
 					"request": {
 						"method": "GET",
 						"header": [],
-						"url": "{{BASE_URL}}/cachingnode/systemid/ec2c9789-b46b-ac17-a117-190a05e8b56d"
+						"url": "{{BASE_URL}}/cachingnode/systemid/{{CACHING_NODE}}"
 					},
 					"response": [
 						{
@@ -2747,7 +2747,7 @@
 							"originalRequest": {
 								"method": "GET",
 								"header": [],
-								"url": "{{BASE_URL}}/cachingnode/systemid/ec2c9789-b46b-ac17-a117-190a05e8b56d"
+								"url": "{{BASE_URL}}/cachingnode/systemid/{{CACHING_NODE}}"
 							},
 							"status": "OK",
 							"code": 200,

@@ -20706,11 +20706,17 @@ paths:
                     Status: online
                     UUID: 274ea4d5-10a9-4a92-86ae-299a2d22a30c
                 status: true
-  /cachingnode/systemid/ec2c9789-b46b-ac17-a117-190a05e8b56d:
+  /cachingnode/systemid/{CACHING_NODE}:
     get:
       tags:
         - Caching Node
       summary: Get Caching node by system ID
+      parameters:
+        - name: CACHING_NODE
+          in: path
+          schema:
+            type: string
+          required: true
       responses:
         '200':
           description: OK
