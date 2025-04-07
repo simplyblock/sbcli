@@ -9,8 +9,7 @@ from flask import Blueprint, request
 from simplyblock_core.controllers import tasks_controller
 from simplyblock_web import utils
 
-from simplyblock_core import db_controller
-from simplyblock_core import storage_node_ops
+from simplyblock_core import db_controller, storage_node_ops, utils as core_utils
 
 logger = logging.getLogger(__name__)
 
@@ -198,7 +197,7 @@ def storage_node_add():
     ifname = req_data['ifname']
     max_lvol = int(req_data['max_lvol'])
     max_snap = int(req_data.get('max_snap', 500))
-    max_prov = req_data['max_prov']
+    max_prov = core_utils.parse_size(req_data['max_prov'], unit='G')
     number_of_distribs = int(req_data.get('number_of_distribs', 2))
     if req_data.get('disable_ha_jm', "") == "true":
         disable_ha_jm = True

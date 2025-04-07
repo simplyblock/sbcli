@@ -591,7 +591,8 @@ def cluster_activate(cl_id, force=False, force_lvstore_create=False):
         if node.status == node.STATUS_ONLINE:
             online_nodes.append(node)
             for dev in node.nvme_devices:
-                if dev.status == dev.STATUS_ONLINE:
+                if dev.status in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_READONLY,
+                                  NVMeDevice.STATUS_CANNOT_ALLOCATE]:
                     dev_count += 1
     minimum_devices = cluster.distr_ndcs + cluster.distr_npcs + 1
     if dev_count < minimum_devices:
@@ -638,29 +639,6 @@ def cluster_activate(cl_id, force=False, force_lvstore_create=False):
                 logger.error("Failed to activate cluster")
                 set_cluster_status(cl_id, ols_status)
                 return False
-
-    for snode in snodes:
-        if not snode.is_secondary_node:
-            continue
-        if snode.status != StorageNode.STATUS_ONLINE:
-            continue
-
-        ret = storage_node_ops.recreate_lvstore(snode)
-        snode = db_controller.get_storage_node_by_id(snode.get_id())
-        if ret:
-            snode.lvstore_status = "ready"
-            snode.write_to_db()
-
-        else:
-            snode.lvstore_status = "failed"
-            snode.write_to_db()
-
-            logger.error(f"Failed to restore lvstore on node {snode.get_id()}")
-            if not force:
-                logger.error("Failed to activate cluster")
-                set_cluster_status(cl_id, ols_status)
-                return False
-
 
 
     if not cluster.cluster_max_size:
@@ -746,20 +724,11 @@ def cluster_set_read_only(cl_id):
         for node in st:
             if node.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
                 continue
-
-            rpc_client = RPCClient(
-                node.mgmt_ip, node.rpc_port,
-                node.rpc_username, node.rpc_password, timeout=3, retry=2)
-
-            if node.lvstore:
-                rpc_client.bdev_lvol_set_lvs_read_only(node.lvstore, True)
-                if node.secondary_node_id:
-                    sec_node = db_controller.get_storage_node_by_id(node.secondary_node_id)
-                    if sec_node:
-                        sec_rpc_client = RPCClient(
-                            sec_node.mgmt_ip, sec_node.rpc_port,
-                            sec_node.rpc_username, sec_node.rpc_password, timeout=3, retry=2)
-                        sec_rpc_client.bdev_lvol_set_lvs_read_only(node.lvstore, True)
+            for dev in node.nvme_devices:
+                if dev.status == NVMeDevice.STATUS_ONLINE:
+                    # dev_stat = db_controller.get_device_stats(dev, 1)
+                    # if dev_stat and dev_stat[0].size_util >= cluster.cap_crit:
+                    device_controller.device_set_state(dev.get_id(), NVMeDevice.STATUS_CANNOT_ALLOCATE)
 
     return True
 
@@ -781,19 +750,12 @@ def cluster_set_active(cl_id):
             if node.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
                 continue
 
-            rpc_client = RPCClient(
-                node.mgmt_ip, node.rpc_port,
-                node.rpc_username, node.rpc_password, timeout=3, retry=2)
+            for dev in node.nvme_devices:
+                if dev.status in [NVMeDevice.STATUS_CANNOT_ALLOCATE, NVMeDevice.STATUS_READONLY]:
+                    dev_stat = db_controller.get_device_stats(dev, 1)
+                    if dev_stat and dev_stat[0].size_util < cluster.cap_crit:
+                        device_controller.device_set_online(dev.get_id())
 
-            if node.lvstore:
-                rpc_client.bdev_lvol_set_lvs_read_only(node.lvstore, False)
-                if node.secondary_node_id:
-                    sec_node = db_controller.get_storage_node_by_id(node.secondary_node_id)
-                    if sec_node:
-                        sec_rpc_client = RPCClient(
-                            sec_node.mgmt_ip, sec_node.rpc_port,
-                            sec_node.rpc_username, sec_node.rpc_password, timeout=3, retry=2)
-                        sec_rpc_client.bdev_lvol_set_lvs_read_only(node.lvstore, False)
     return True
 
 
@@ -973,6 +935,7 @@ def list_all_info(cluster_id):
 
             dev_data.append({
                 "Device UUID": dev.uuid,
+                "StorgeID": dev.cluster_device_order,
 
                 "Size total": f"{utils.humanbytes(rec.size_total)}",
                 "Size Used": f"{utils.humanbytes(rec.size_used)}",
@@ -1213,6 +1176,9 @@ def get_logs(cluster_id, is_json=False):
         if 'storage_ID' in record.object_dict:
             Storage_ID = record.object_dict['storage_ID']
 
+        elif 'cluster_device_order' in record.object_dict:
+            Storage_ID = record.object_dict['cluster_device_order']
+
         vuid = None
         if 'vuid' in record.object_dict:
             vuid = record.object_dict['vuid']
@@ -1254,11 +1220,6 @@ def update_cluster(cl_id, mgmt_only=False, restart_cluster=False):
         logger.error(f"Cluster not found {cl_id}")
         return False
 
-    if cluster.status != Cluster.STATUS_ACTIVE:
-        logger.error(f"Cluster is not active")
-        return False
-
-
     try:
         sbcli=constants.SIMPLY_BLOCK_CLI_NAME
         out, _, ret_code = shell_utils.run_command(f"pip install {sbcli} --upgrade")
@@ -1273,6 +1234,7 @@ def update_cluster(cl_id, mgmt_only=False, restart_cluster=False):
         logger.info(f"Pulling image {constants.SIMPLY_BLOCK_DOCKER_IMAGE}")
         cluster_docker.images.pull(constants.SIMPLY_BLOCK_DOCKER_IMAGE)
         image_without_tag = constants.SIMPLY_BLOCK_DOCKER_IMAGE.split(":")[0]
+        image_without_tag = image_without_tag.split("/")[-1]
         for service in cluster_docker.services.list():
             if image_without_tag in service.attrs['Spec']['Labels']['com.docker.stack.image']:
                 logger.info(f"Updating service {service.name}")
@@ -1407,48 +1369,20 @@ def open_db_from_zip(fip_path):
 
 
 
-def cluster_reset():
-    """
+def set(cl_id, attr, value):
+    db_controller = DBController()
+    cluster = db_controller.get_cluster_by_id(cl_id)
+    if not cluster:
+        logger.error(f"Cluster not found {cl_id}")
+        return False
 
+    if attr in cluster.get_attrs_map():
+        try:
+            value = cluster.get_attrs_map()[attr]['type'](value)
+            logger.info(f"Setting {attr} to {value}")
+            setattr(cluster, attr, value)
+            cluster.write_to_db()
+        except:
+            pass
 
-set -x
-
-CMD=$(ls ~/.local/bin/sbcli-* | awk '{n=split($0,a,"/"); print a[n]}')
-cl=$($CMD cluster list | tail -n -3 | awk '{print $2}')
-
-#$CMD cluster graceful-shutdown $cl
-
-for sn_id in $($CMD sn list | grep / | awk '{print $2}'); do
-  $CMD -d sn shutdown --force $sn_id
-done
-
-sudo mv /etc/foundationdb/fdb.cluster /etc/foundationdb/fdb.cluster.bck
-for service_id in $(docker service ls | grep / | awk '{print $1}'); do
-  docker service update "$service_id" --force --detach
-done
-
-# restore
-fdb_cont=$(sudo docker ps | grep "app_fdb-server" | awk '{print $1}')
-sudo docker rm --force $fdb_cont
-sudo rm -rf /etc/foundationdb/data/*
-fdbcli --exec "configure new single ssd ; writemode on ; clearrange \"\" \\xff" -C /etc/foundationdb/fdb.cluster.bck
-BF=$(fdbbackup list -b file:///etc/foundationdb/backup/)
-fdbrestore start -r "$BF" --dest-cluster-file /etc/foundationdb/fdb.cluster.bck -t fresh_deploy
-
-sudo mv /etc/foundationdb/fdb.cluster.bck /etc/foundationdb/fdb.cluster
-
-for service_id in $(docker service ls | grep / | awk '{print $1}'); do
-  docker service update "$service_id" --force --detach
-done
-
-sleep 30
-for sn_id in $($CMD sn list | grep / | awk '{print $2}'); do
-  $CMD -d sn shutdown --force $sn_id
-done
-
-sleep 5
-$CMD -d cluster graceful-startup $cl  --clear-data
-
-$CMD -d cluster activate $cl
-
-    """
+    return True

@@ -15,7 +15,7 @@ from flask import request
 
 from simplyblock_web import utils, node_utils
 
-from simplyblock_core import scripts, constants, shell_utils
+from simplyblock_core import scripts, constants, shell_utils, utils as core_utils
 
 logger = logging.getLogger(__name__)
 
@@ -83,14 +83,23 @@ def get_amazon_cloud_info():
 
 
 def get_docker_client():
-    ip = os.getenv("DOCKER_IP")
-    if not ip:
-        for ifname in node_utils.get_nics_data():
-            if ifname in ["eth0", "ens0"]:
-                ip = node_utils.get_nics_data()[ifname]['ip']
-                break
-    return docker.DockerClient(base_url=f"tcp://{ip}:2375", version="auto", timeout=60 * 5)
-
+    try:
+        cl = docker.DockerClient(base_url='unix://var/run/docker.sock', version="auto", timeout=60 * 5)
+        cl.info()
+        return cl
+    except:
+        ip = os.getenv("DOCKER_IP")
+        if not ip:
+            for ifname in node_utils.get_nics_data():
+                if ifname in ["eth0", "ens0"]:
+                    ip = node_utils.get_nics_data()[ifname]['ip']
+                    break
+        cl = docker.DockerClient(base_url=f"tcp://{ip}:2375", version="auto", timeout=60 * 5)
+        try:
+            cl.info()
+            return cl
+        except:
+            pass
 
 @bp.route('/scan_devices', methods=['GET'])
 def scan_devices():
@@ -119,10 +128,6 @@ def spdk_process_start():
     if 'spdk_cpu_mask' in data:
         spdk_cpu_mask = data['spdk_cpu_mask']
 
-    spdk_mem = None
-    if 'spdk_mem' in data:
-        spdk_mem = data['spdk_mem']
-
     multi_threading_enabled = False
     if 'multi_threading_enabled' in data:
         multi_threading_enabled = bool(data['multi_threading_enabled'])
@@ -134,10 +139,8 @@ def spdk_process_start():
         except:
             pass
 
-    if spdk_mem:
-        spdk_mem = int(utils.parse_size(spdk_mem) / (constants.ONE_KB * constants.ONE_KB))
-    else:
-        spdk_mem = 4000
+    spdk_mem_mib = core_utils.convert_size(
+            data.get('spdk_mem', core_utils.parse_size('4GiB')), 'MiB')
 
     node_docker = get_docker_client()
     nodes = node_docker.containers.list(all=True)
@@ -165,7 +168,7 @@ def spdk_process_start():
 
     container = node_docker.containers.run(
         spdk_image,
-        f"/root/scripts/run_distr.sh {spdk_cpu_mask} {spdk_mem} {spdk_debug}",
+        f"/root/scripts/run_distr.sh {spdk_cpu_mask} {spdk_mem_mib} {spdk_debug}",
         name="spdk",
         detach=True,
         privileged=True,

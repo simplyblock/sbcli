@@ -3,6 +3,7 @@ import datetime
 import logging
 import re
 
+from simplyblock_core import utils
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.rpc_client import RPCClient
@@ -107,7 +108,7 @@ def get_distr_cluster_map(snodes, target_node, distr_name=""):
         for i, dev in enumerate(snode.nvme_devices):
             if dev.status in [NVMeDevice.STATUS_JM, NVMeDevice.STATUS_NEW]:
                 continue
-            dev_w = int(dev.size/(1024*1024*1024)) or 1
+            dev_w_gib = utils.convert_size(dev.size, 'GiB') or 1
             name = None
             dev_status = dev.status
             if snode.get_id() == target_node.get_id():
@@ -131,10 +132,10 @@ def get_distr_cluster_map(snodes, target_node, distr_name=""):
                 # "physical_label": dev.physical_label
             }
             if dev.status in [NVMeDevice.STATUS_FAILED, NVMeDevice.STATUS_FAILED_AND_MIGRATED]:
-                dev_w_map[dev.cluster_device_order] = {"weight": dev_w, "id": -1}
+                dev_w_map[dev.cluster_device_order] = {"weight": dev_w_gib, "id": -1}
             else:
-                dev_w_map[dev.cluster_device_order] = {"weight": dev_w, "id": dev.cluster_device_order}
-                node_w += dev_w
+                dev_w_map[dev.cluster_device_order] = {"weight": dev_w_gib, "id": dev.cluster_device_order}
+                node_w += dev_w_gib
 
         node_status = snode.status
         if node_status == StorageNode.STATUS_SCHEDULABLE:
@@ -303,28 +304,23 @@ def send_cluster_map_add_node(snode, target_node):
 def send_cluster_map_add_device(device: NVMeDevice, target_node):
     db_controller = DBController()
     dnode = db_controller.get_storage_node_by_id(device.node_id)
-    dev_w = int(device.size / (1024 * 1024 * 1024)) or 1
+    dev_w_gib = utils.convert_size(device.size, 'GiB') or 1
     if target_node.status == StorageNode.STATUS_ONLINE:
-        rpc_client = RPCClient(target_node.mgmt_ip, target_node.rpc_port, target_node.rpc_username, target_node.rpc_password, timeout=3)
-        name = "not_connected"
-        dev_status = NVMeDevice.STATUS_UNAVAILABLE
+        rpc_client = RPCClient(
+            target_node.mgmt_ip, target_node.rpc_port, target_node.rpc_username, target_node.rpc_password, timeout=3)
+
         if target_node.get_id() == dnode.get_id():
             name = device.alceml_bdev
-            dev_status = device.status
         else:
-            for dev2 in target_node.remote_devices:
-                if dev2.get_id() == device.get_id():
-                    name = dev2.remote_bdev
-                    dev_status = device.status
-                    break
+            name = f"remote_{device.alceml_bdev}n1"
 
         cl_map = {
             "UUID_node": dnode.get_id(),
             "devices" : {device.cluster_device_order: {
                 "UUID": device.get_id(),
                 "bdev_name": name,
-                "status": dev_status,
-                "weight": dev_w
+                "status": device.status,
+                "weight": dev_w_gib,
             }}
         }
         ret = rpc_client.distr_add_devices(cl_map)

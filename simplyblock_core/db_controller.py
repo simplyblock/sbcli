@@ -44,6 +44,7 @@ class DBController(metaclass=Singleton):
     def __init__(self):
         try:
             if not os.path.isfile(constants.KVD_DB_FILE_PATH):
+                # logger.error(f"DB File Not Found: {constants.KVD_DB_FILE_PATH}")
                 return
             fdb.api_version(constants.KVD_DB_VERSION)
             self.kv_store = fdb.open(constants.KVD_DB_FILE_PATH)

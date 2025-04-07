@@ -3,6 +3,10 @@ import yaml
 import sys
 import re
 
+from jsonschema import validators
+from jsonschema.exceptions import ValidationError
+
+
 def is_parameter(item):
     return item["name"].startswith("--") or item["name"].startswith("-")
 
@@ -115,7 +119,8 @@ def get_description(item):
         return "<missing documentation>"
 
 
-def nargs(value):
+def nargs(item):
+    value = item["nargs"]
     if not isinstance(value, int) and value not in ('?', '*', '+'):
         raise ValueError(f"Invalid nargs parameters: '{value}'")
     return value if isinstance(value, int) else f"'{value}'"
@@ -125,6 +130,16 @@ base_path = sys.argv[1]
 with open("%s/cli-reference.yaml" % base_path) as stream:
     try:
         reference = yaml.safe_load(stream)
+        # validate reference file against schema
+        with open("%s/cli-reference-schema.yaml" % base_path) as schema:
+            schema = yaml.safe_load(schema)
+            validator_type = validators.validator_for(schema)
+            validator = validator_type(schema)
+            errors = list(validator.iter_errors(reference))
+            if errors:
+                print("Generator failed on schema validation. Found the following errors:", file=sys.stderr)
+                print('\n'.join(f" - {error.json_path}: {error.message}" for error in errors), file=sys.stderr)
+                sys.exit(1)
 
         for command in reference["commands"]:
             for subcommand in command["subcommands"]:

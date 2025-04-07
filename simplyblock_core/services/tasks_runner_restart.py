@@ -134,6 +134,12 @@ def task_runner_node(task):
         storage_node_ops.set_node_status(task.node_id, StorageNode.STATUS_OFFLINE)
         return True
 
+    if not node:
+        task.function_result = "node not found"
+        task.status = JobSchedule.STATUS_DONE
+        task.write_to_db(db_controller.kv_store)
+        return True
+
     if node.status in [StorageNode.STATUS_REMOVED, StorageNode.STATUS_SCHEDULABLE, StorageNode.STATUS_DOWN]:
         logger.info(f"Node is {node.status}, stopping task")
         task.function_result = f"Node is {node.status}, stopping"

@@ -14,7 +14,7 @@ from flask import Blueprint
 from flask import request
 
 from simplyblock_web import utils, node_utils
-from simplyblock_core import scripts, constants, shell_utils
+from simplyblock_core import scripts, constants, shell_utils, utils as core_utils
 
 logger = logging.getLogger(__name__)
 
@@ -147,9 +147,6 @@ def spdk_process_start():
     spdk_cpu_mask = None
     if 'spdk_cpu_mask' in data:
         spdk_cpu_mask = data['spdk_cpu_mask']
-    spdk_mem = None
-    if 'spdk_mem' in data:
-        spdk_mem = data['spdk_mem']
     node_cpu_count = os.cpu_count()
 
     if spdk_cpu_mask:
@@ -162,10 +159,8 @@ def spdk_process_start():
     else:
         spdk_cpu_mask = hex(int(math.pow(2, node_cpu_count)) - 1)
 
-    if spdk_mem:
-        spdk_mem = int(spdk_mem / (1024 * 1024))
-    else:
-        spdk_mem = 64096
+    spdk_mem_mib = core_utils.convert_size(
+            data.get('spdk_mem', core_utils.parse_size('64GiB')), 'MiB')
 
     node_docker = get_docker_client()
     nodes = node_docker.containers.list(all=True)
@@ -184,7 +179,7 @@ def spdk_process_start():
 
     container = node_docker.containers.run(
         spdk_image,
-        f"/root/spdk/scripts/run_spdk_tgt.sh {spdk_cpu_mask} {spdk_mem}",
+        f"/root/spdk/scripts/run_spdk_tgt.sh {spdk_cpu_mask} {spdk_mem_mib}",
         name="spdk",
         detach=True,
         privileged=True,
@@ -266,35 +261,6 @@ def spdk_process_is_up():
     return utils.get_response(False, "SPDK container not found")
 
 
-def _get_mem_info():
-    out, err, _ = run_command("cat /proc/meminfo")
-    data = {}
-    for line in out.split('\n'):
-        tm = line.split(":")
-        data[tm[0].strip()] = tm[1].strip()
-    return data
-
-
-def get_memory():
-    try:
-        mem_kb = _get_mem_info()['MemTotal']
-        mem_kb = mem_kb.replace(" ", "").lower()
-        mem_kb = mem_kb.replace("b", "")
-        return utils.parse_size(mem_kb)
-    except:
-        return 0
-
-
-def get_huge_memory():
-    try:
-        mem_kb = _get_mem_info()['Hugetlb']
-        mem_kb = mem_kb.replace(" ", "").lower()
-        mem_kb = mem_kb.replace("b", "")
-        return utils.parse_size(mem_kb)
-    except:
-        return 0
-
-
 CPU_INFO = cpuinfo.get_cpu_info()
 HOSTNAME, _, _ = node_utils.run_command("hostname -s")
 SYSTEM_ID, _, _ = node_utils.run_command("dmidecode -s system-uuid")
@@ -310,8 +276,8 @@ def get_info():
         "cpu_count": CPU_INFO['count'],
         "cpu_hz": CPU_INFO['hz_advertised'][0] if 'hz_advertised' in CPU_INFO else 1,
 
-        "memory": get_memory(),
-        "hugepages": get_huge_memory(),
+        "memory": node_utils.get_memory(),
+        "hugepages": node_utils.get_huge_memory(),
         "memory_details": node_utils.get_memory_details(),
 
         "nvme_devices": _get_nvme_devices(),

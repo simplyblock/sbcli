@@ -14,7 +14,7 @@ from flask import request
 from kubernetes.client import ApiException
 from jinja2 import Environment, FileSystemLoader
 
-from simplyblock_core import constants, shell_utils
+from simplyblock_core import constants, shell_utils, utils as core_utils
 
 from simplyblock_web import utils, node_utils
 
@@ -85,9 +85,6 @@ def spdk_process_start():
     spdk_cpu_mask = None
     if 'spdk_cpu_mask' in data:
         spdk_cpu_mask = data['spdk_cpu_mask']
-    spdk_mem = None
-    if 'spdk_mem' in data:
-        spdk_mem = data['spdk_mem']
     node_cpu_count = os.cpu_count()
 
     namespace = get_namespace()
@@ -105,12 +102,7 @@ def spdk_process_start():
     else:
         spdk_cpu_mask = hex(int(math.pow(2, node_cpu_count)) - 1)
 
-    if spdk_mem:
-        spdk_mem = int(spdk_mem / (1024 * 1024))
-    else:
-        spdk_mem = 64096
-
-    spdk_mem_gega = int(spdk_mem / 1024)
+    spdk_mem = data.get('spdk_mem', core_utils.parse_size('64GiB'))
 
     spdk_image = constants.SIMPLY_BLOCK_SPDK_CORE_IMAGE
 
@@ -130,8 +122,8 @@ def spdk_process_start():
         values = {
             'SPDK_IMAGE': spdk_image,
             'SPDK_CPU_MASK': spdk_cpu_mask,
-            'SPDK_MEM': spdk_mem,
-            'MEM_GEGA': spdk_mem_gega,
+            'SPDK_MEM': core_utils.convert_size(spdk_mem, 'MiB'),
+            'MEM_GEGA': core_utils.convert_size(spdk_mem, 'GiB'),
             'SERVER_IP': data['server_ip'],
             'RPC_PORT': data['rpc_port'],
             'RPC_USERNAME': data['rpc_username'],

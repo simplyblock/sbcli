@@ -56,7 +56,8 @@ def get_next_cluster_status(cluster_id):
         else:
             offline_nodes += 1
         for dev in node.nvme_devices:
-            if dev.status in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_JM, NVMeDevice.STATUS_READONLY]:
+            if dev.status in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_JM,
+                              NVMeDevice.STATUS_READONLY, NVMeDevice.STATUS_CANNOT_ALLOCATE]:
                 node_online_devices += 1
             elif dev.status == NVMeDevice.STATUS_FAILED_AND_MIGRATED:
                 pass
@@ -114,8 +115,7 @@ def update_cluster_status(cluster_id):
     cluster = db_controller.get_cluster_by_id(cluster_id)
     current_cluster_status = cluster.status
     logger.info("cluster_status: %s", current_cluster_status)
-    if current_cluster_status in [
-        Cluster.STATUS_READONLY, Cluster.STATUS_UNREADY, Cluster.STATUS_IN_ACTIVATION, Cluster.STATUS_READONLY]:
+    if current_cluster_status in [Cluster.STATUS_UNREADY, Cluster.STATUS_IN_ACTIVATION]:
         return
 
     next_current_status = get_next_cluster_status(cluster_id)
@@ -133,6 +133,9 @@ def update_cluster_status(cluster_id):
     # if cluster.status not in [Cluster.STATUS_ACTIVE, Cluster.STATUS_UNREADY] and cluster_current_status == Cluster.STATUS_ACTIVE:
         # cluster_ops.cluster_activate(cluster_id, True)
         cluster_ops.set_cluster_status(cluster_id, Cluster.STATUS_ACTIVE)
+        return
+    elif current_cluster_status == Cluster.STATUS_READONLY and next_current_status in [
+        Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED]:
         return
     elif current_cluster_status == Cluster.STATUS_SUSPENDED and next_current_status \
             in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED]:
@@ -241,14 +244,12 @@ while True:
             if snode.status == StorageNode.STATUS_SCHEDULABLE and not ping_check and not node_api_check:
                 continue
 
-            spdk_process = False
+            spdk_process = True
             if node_api_check:
                 # 3- check spdk_process
                 spdk_process = health_controller._check_spdk_process_up(snode.mgmt_ip)
             logger.info(f"Check: spdk process {snode.mgmt_ip}:5000 ... {spdk_process}")
 
-            # node_rpc_check = False
-            # if spdk_process:
                 # 4- check rpc
             node_rpc_check = health_controller._check_node_rpc(
                 snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password, timeout=5, retry=3)
@@ -280,7 +281,7 @@ while True:
                             node_port_check = False
                             down_ports.append(data_nic.ip4_address)
 
-            is_node_online = ping_check and node_api_check and spdk_process and node_rpc_check and node_port_check
+            is_node_online = ping_check and spdk_process and node_rpc_check and node_port_check
             if is_node_online:
                 set_node_online(snode)
 
@@ -303,12 +304,19 @@ while True:
                 if not ping_check and not node_api_check and not spdk_process:
                     # restart on new node
                     storage_node_ops.set_node_status(snode.get_id(), StorageNode.STATUS_SCHEDULABLE)
+                    # set devices unavailable
+                    for dev in snode.nvme_devices:
+                        if dev.status in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_READONLY]:
+                            device_controller.device_set_unavailable(dev.get_id())
 
                 elif ping_check and node_api_check and (not spdk_process or not node_rpc_check):
-                    # add node to auto restart
-                    if cluster.status in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED,
-                                          Cluster.STATUS_SUSPENDED, Cluster.STATUS_READONLY]:
+
+                    if cluster.status !=  Cluster.STATUS_IN_ACTIVATION:
                         set_node_offline(snode)
+
+                    # add node to auto restart
+                    if cluster.status in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_UNREADY,
+                                          Cluster.STATUS_SUSPENDED, Cluster.STATUS_READONLY]:
                         tasks_controller.add_node_to_auto_restart(snode)
                 elif not node_port_check:
                     if cluster.status in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_READONLY]:

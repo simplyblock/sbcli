@@ -17,3 +17,4 @@ boto3
 jinja2
 argcomplete
 jc
+prometheus_client

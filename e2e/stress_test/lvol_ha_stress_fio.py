@@ -275,7 +275,7 @@ class TestLvolHAClusterGracefulShutdown(TestLvolHACluster):
         self.logger.info(f"Fetching migration tasks for cluster {self.cluster_id}.")
 
         self.logger.info(f"Validating migration tasks for node {self.lvol_node}.")
-        self.validate_migration_for_node(timestamp, 5000, None)
+        self.validate_migration_for_node(timestamp, 2000, None)
         sleep_n_sec(30)
 
         time_secs = node_up_time - restart_start_time
@@ -335,7 +335,7 @@ class TestLvolHAClusterStorageNodeCrash(TestLvolHACluster):
         self.logger.info(f"Fetching migration tasks for cluster {self.cluster_id}.")
 
         self.logger.info(f"Validating migration tasks for node {self.lvol_node}.")
-        self.validate_migration_for_node(timestamp, 5000, None)
+        self.validate_migration_for_node(timestamp, 2000, None)
         sleep_n_sec(30)
 
         time_secs = node_up_time - restart_start_time
@@ -417,7 +417,7 @@ class TestLvolHAClusterNetworkInterrupt(TestLvolHACluster):
         self.logger.info(f"Data migration output: {output}")
 
         self.logger.info(f"Validating migration tasks for node {self.lvol_node}.")
-        self.validate_migration_for_node(timestamp, 5000, None)
+        self.validate_migration_for_node(timestamp, 2000, None)
         sleep_n_sec(120)
 
         self.validate_checksums()
@@ -496,7 +496,7 @@ class TestLvolHAClusterPartialNetworkOutage(TestLvolHACluster):
         self.logger.info(f"Fetching migration tasks for cluster {self.cluster_id}.")
 
         self.logger.info(f"Validating migration tasks for node {self.lvol_node}.")
-        self.validate_migration_for_node(timestamp, 5000, None)
+        self.validate_migration_for_node(timestamp, 2000, None)
         sleep_n_sec(30)
 
         time_secs = node_up_time - restart_start_time
@@ -582,7 +582,7 @@ class TestLvolHAClusterRunAllScenarios(TestLvolHACluster):
         self.logger.info(f"Fetching migration tasks for cluster {self.cluster_id}.")
 
         self.logger.info(f"Validating migration tasks for node {self.lvol_node}.")
-        self.validate_migration_for_node(timestamp, 5000, None)
+        self.validate_migration_for_node(timestamp, 2000, None)
         sleep_n_sec(30)
 
         self.validate_checksums()
@@ -617,7 +617,7 @@ class TestLvolHAClusterRunAllScenarios(TestLvolHACluster):
         self.logger.info(f"Fetching migration tasks for cluster {self.cluster_id}.")
 
         self.logger.info(f"Validating migration tasks for node {self.lvol_node}.")
-        self.validate_migration_for_node(timestamp, 5000, None)
+        self.validate_migration_for_node(timestamp, 2000, None)
         sleep_n_sec(30)
 
         self.validate_checksums()
@@ -679,7 +679,7 @@ class TestLvolHAClusterRunAllScenarios(TestLvolHACluster):
         self.logger.info(f"Fetching migration tasks for cluster {self.cluster_id}.")
 
         self.logger.info(f"Validating migration tasks for node {self.lvol_node}.")
-        self.validate_migration_for_node(timestamp, 5000, None)
+        self.validate_migration_for_node(timestamp, 2000, None)
         sleep_n_sec(30)
 
 

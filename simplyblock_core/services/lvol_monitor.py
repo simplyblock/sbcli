@@ -69,8 +69,9 @@ while True:
 
                 node_lvols_nqns = {}
                 ret = rpc_client.subsystem_list()
-                for sub in ret:
-                    node_lvols_nqns[sub['nqn']] = sub
+                if ret:
+                    for sub in ret:
+                        node_lvols_nqns[sub['nqn']] = sub
 
                 sec_node_bdev_names = {}
                 sec_node_lvols_nqns = {}
@@ -134,6 +135,8 @@ while True:
 
                     logger.info(f"LVol: {lvol.get_id()}, is healthy: {passed}")
                     set_lvol_health_check(lvol, passed)
+                    if passed:
+                        set_lvol_status(lvol, LVol.STATUS_ONLINE)
 
                 for snap in db_controller.get_snapshots_by_node_id(snode.get_id()):
                     if snap.snap_bdev in node_bdev_names:

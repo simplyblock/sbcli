@@ -282,8 +282,8 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
             self.fio_threads.append(fio_thread)
 
             self.logger.info(f"Created snapshot {snapshot_name} and clone {clone_name}")
-            self.sbcli_utils.resize_lvol(self.lvol_mount_details[lvol]["ID"], f"{self.int_lvol_size}G")
-            self.sbcli_utils.resize_lvol(self.clone_mount_details[clone_name]["ID"], f"{self.int_lvol_size}G")
+            # self.sbcli_utils.resize_lvol(self.lvol_mount_details[lvol]["ID"], f"{self.int_lvol_size}G")
+            # self.sbcli_utils.resize_lvol(self.clone_mount_details[clone_name]["ID"], f"{self.int_lvol_size}G")
 
 
     def run(self):
@@ -339,7 +339,7 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
             no_task_ok = outage_type in {"partial_nw", "partial_nw_single_port", "lvol_disconnect_primary"}
             # for node, outage_type in outage_events:
             #     if not self.sbcli_utils.is_secondary_node(node):
-            self.validate_migration_for_node(self.outage_start_time, 4000, None, 60, no_task_ok=no_task_ok)
+            self.validate_migration_for_node(self.outage_start_time, 2000, None, 60, no_task_ok=no_task_ok)
 
             for clone, clone_details in self.clone_mount_details.items():
                 self.common_utils.validate_fio_test(clone_details["Client"], clone_details["Log"])

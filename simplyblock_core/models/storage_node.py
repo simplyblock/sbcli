@@ -53,7 +53,7 @@ class StorageNode(BaseNodeObject):
     lvstore_stack: List[dict] = []
     lvstore_stack_secondary_1: List[dict] = []
     lvstore_stack_secondary_2: List[dict] = []
-    lvol_subsys_port: int = 0
+    lvol_subsys_port: int = 9090
     max_lvol: int = 0
     max_prov: int = 0
     max_snap: int = 0

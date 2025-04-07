@@ -62,6 +62,8 @@ while True:
                                     StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
                 logger.info(f"Node status is: {snode.status}, skipping")
                 set_node_health_check(snode, False)
+                for device in snode.nvme_devices:
+                    set_device_health_check(cluster_id, device, False)
                 continue
 
             # 1- check node ping
@@ -77,24 +79,13 @@ while True:
                 snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
             logger.info(f"Check: node RPC {snode.mgmt_ip}:{snode.rpc_port} ... {node_rpc_check}")
 
-            # # 4- docker API
-            # node_docker_check = health_controller._check_node_docker_api(snode.mgmt_ip)
-            # logger.info(f"Check: node docker API {snode.mgmt_ip}:2375 ... {node_docker_check}")
-
             is_node_online = ping_check and node_api_check and node_rpc_check
 
             health_check_status = is_node_online
-            if not node_rpc_check:
-                for dev in snode.nvme_devices:
-                    if dev.io_error:
-                        logger.debug(f"Skipping Device action because of io_error {dev.get_id()}")
-                        continue
-                    set_device_health_check(cluster_id, dev, False)
-            else:
+            if node_rpc_check:
                 logger.info(f"Node device count: {len(snode.nvme_devices)}")
                 node_devices_check = True
                 node_remote_devices_check = True
-
 
                 rpc_client = RPCClient(
                     snode.mgmt_ip, snode.rpc_port,
@@ -108,16 +99,23 @@ while True:
                 else:
                     node_bdev_names = []
 
-                subsystem_list = rpc_client.subsystem_list()
-                if subsystem_list:
-                    subsystem_list = [item['nqn'] for item in subsystem_list]
+                sub_list = rpc_client.subsystem_list()
+                if sub_list:
+                    subsystem_list = [item['nqn'] for item in sub_list]
+                else:
+                    subsystem_list =[]
 
                 for device in snode.nvme_devices:
-                    if device.io_error:
-                        logger.debug(f"Skipping Device check because of io_error {device.get_id()}")
-                        continue
-                    # ret = health_controller.check_device(dev.get_id())
                     passed = True
+
+                    if device.io_error:
+                        logger.info(f"Device io_error {device.get_id()}")
+                        passed = False
+
+                    if device.status != NVMeDevice.STATUS_ONLINE:
+                        logger.info(f"Device status {device.status}")
+                        passed = False
+
                     if snode.enable_test_device:
                         bdevs_stack = [device.nvme_bdev, device.testing_bdev, device.alceml_bdev, device.pt_bdev]
                     else:
@@ -135,7 +133,7 @@ while True:
                             logger.error(f"Checking bdev: {bdev} ... not found")
                             problems += 1
                             passed = False
-                            # return False
+
                     logger.info(f"Checking Device's BDevs ... ({(len(bdevs_stack) - problems)}/{len(bdevs_stack)})")
 
                     logger.debug(f"Checking subsystem: {device.nvmf_nqn}")
@@ -260,8 +258,8 @@ while True:
                             else:
                                 continue
 
-                    if online_jms < 2:
-                        node_remote_devices_check = False
+                    # if online_jms < 2:
+                    #     node_remote_devices_check = False
                 else:
                     if online_jms == 0:
                         node_remote_devices_check = False
@@ -324,4 +322,5 @@ while True:
                     tcp_ports_events.port_allowed(snode, port)
 
     nodes_ports_blocked = {}
+    time.sleep(3)
 

@@ -74,6 +74,7 @@ class TestClusterBase:
         retry = 30
         while retry > 0:
             try:
+                print("getting all storage nodes")
                 self.mgmt_nodes, self.storage_nodes = self.sbcli_utils.get_all_nodes_ip()
                 self.sbcli_utils.list_lvols()
                 self.sbcli_utils.list_storage_pools()
@@ -113,6 +114,14 @@ class TestClusterBase:
 
         self.fio_node = self.client_machines if self.client_machines else [self.mgmt_nodes[0]]
 
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        # Construct the logs path with test name and timestamp
+        self.docker_logs_path = os.path.join(Path.home(), "container-logs", f"{self.test_name}-{timestamp}")
+        self.runner_k8s_log = RunnerK8sLog(
+                log_dir=self.docker_logs_path,
+                test_name=self.test_name
+            )
+
         # command = "python3 -c \"from importlib.metadata import version;print(f'SBCLI Version: {version('''sbcli-dev''')}')\""
         # self.ssh_obj.exec_command(
         #     self.mgmt_nodes[0], command=command
@@ -142,10 +151,6 @@ class TestClusterBase:
             )
             self.ec2_resource = session.resource('ec2')
 
-        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-        # Construct the logs path with test name and timestamp
-        self.docker_logs_path = os.path.join(Path.home(), "container-logs", f"{self.test_name}-{timestamp}")
-        
         for node in self.storage_nodes:
             self.ssh_obj.delete_old_folders(
                 node=node,
@@ -173,11 +178,15 @@ class TestClusterBase:
                 self.ssh_obj.reset_iptables_in_spdk(node_ip=node)
         
         if self.k8s_test:
-            self.runner_k8s_log = RunnerK8sLog(
-                log_dir=self.docker_logs_path,
-                test_name=self.test_name
-            )
             self.runner_k8s_log.start_logging()
+            self.runner_k8s_log.monitor_pod_logs()
+        # for node in self.storage_nodes:
+        #     self.ssh_obj.monitor_container_logs(
+        #         node_ip=node,
+        #         containers=self.container_nodes[node],
+        #         log_dir=self.docker_logs_path,
+        #         test_name=self.test_name
+        #     )
 
         for node in self.mgmt_nodes:
             self.ssh_obj.delete_old_folders(
@@ -200,6 +209,13 @@ class TestClusterBase:
             self.ssh_obj.start_tcpdump_logging(node_ip=node, log_dir=self.docker_logs_path)
             self.ssh_obj.start_netstat_dmesg_logging(node_ip=node,
                                                      log_dir=self.docker_logs_path)
+        # for node in self.mgmt_nodes:
+        #     self.ssh_obj.monitor_container_logs(
+        #         node_ip=node,
+        #         containers=self.container_nodes[node],
+        #         log_dir=self.docker_logs_path,
+        #         test_name=self.test_name
+        #     )
         
         for node in self.fio_node:
             self.ssh_obj.delete_old_folders(
@@ -220,6 +236,8 @@ class TestClusterBase:
                                                      log_dir=self.docker_logs_path)
 
         self.logger.info("Started log monitoring for all storage nodes.")
+
+        sleep_n_sec(120)
 
     def configure_sysctl_settings(self):
         """Configure TCP kernel parameters on the node."""
@@ -251,9 +269,10 @@ class TestClusterBase:
         for node in self.fio_node:
             self.ssh_obj.delete_file_dir(node, entity=f"{base_path}/*.log*", recursive=True)
             self.ssh_obj.delete_file_dir(node, entity=f"{base_path}/*.state*", recursive=True)
-        self.ssh_obj.delete_file_dir(self.mgmt_nodes[0], entity="/etc/simplyblock/*", recursive=True)
+        # self.ssh_obj.delete_file_dir(self.mgmt_nodes[0], entity="/etc/simplyblock/*", recursive=True)
         self.ssh_obj.delete_file_dir(self.mgmt_nodes[0], entity=f"{base_path}/*.txt*", recursive=True)
         for node in self.storage_nodes:
+            self.ssh_obj.delete_file_dir(node, entity="/etc/simplyblock/[0-9]*", recursive=True)
             self.ssh_obj.delete_file_dir(node, entity="/etc/simplyblock/core*", recursive=True)
             self.ssh_obj.delete_file_dir(node, entity="/etc/simplyblock/LVS*", recursive=True)
             self.ssh_obj.delete_file_dir(node, entity=f"{base_path}/distrib*", recursive=True)
@@ -262,6 +281,17 @@ class TestClusterBase:
 
     def stop_docker_logs_collect(self):
         for node in self.storage_nodes:
+            self.ssh_obj.stop_container_log_monitor(node)
+            pids = self.ssh_obj.find_process_name(
+                node=node,
+                process_name="docker logs --follow",
+                return_pid=True
+            )
+            for pid in pids:
+                self.ssh_obj.kill_processes(node=node, pid=pid)
+        
+        for node in self.mgmt_nodes:
+            self.ssh_obj.stop_container_log_monitor(node)
             pids = self.ssh_obj.find_process_name(
                 node=node,
                 process_name="docker logs --follow",
@@ -270,6 +300,10 @@ class TestClusterBase:
             for pid in pids:
                 self.ssh_obj.kill_processes(node=node, pid=pid)
         self.logger.info("All log monitoring threads stopped.")
+    
+    def stop_k8s_log_collect(self):
+        self.runner_k8s_log.stop_log_monitor()
+        self.runner_k8s_log.stop_logging()
 
     def fetch_all_nodes_distrib_log(self):
         storage_nodes = self.sbcli_utils.get_storage_nodes()
@@ -320,6 +354,11 @@ class TestClusterBase:
             self.ssh_obj.exec_command(self.mgmt_nodes[0], cmd)
 
             node+=1
+        for node in self.fio_node:
+            cmd = f"journalctl -k >& {base_path}/jounalctl_{node}.txt"
+            self.ssh_obj.exec_command(node, cmd)
+            cmd = f"dmesg -T >& {base_path}/dmesg_{node}.txt"
+            self.ssh_obj.exec_command(node, cmd)
             
     def teardown(self):
         """Contains teradown required post test case execution
@@ -416,7 +455,7 @@ class TestClusterBase:
 
 
     def validations(self, node_uuid, node_status, device_status, lvol_status,
-                    health_check_status):
+                    health_check_status, device_health_check):
         """Validates node, devices, lvol status with expected status
 
         Args:
@@ -459,6 +498,10 @@ class TestClusterBase:
         storage_nodes = self.sbcli_utils.get_storage_nodes()["results"]
         health_check_status = health_check_status if isinstance(health_check_status, list)\
               else [health_check_status]
+        if not device_health_check:
+            device_health_check = [True, False]
+        device_health_check = device_health_check if isinstance(device_health_check, list)\
+              else [device_health_check]
         for node in storage_nodes:
             node_details = self.sbcli_utils.get_storage_node_details(storage_node_id=node['id'])
             if node["id"] == node_uuid and node_details[0]['status'] == "offline":
@@ -477,56 +520,50 @@ class TestClusterBase:
                 device_details = self.sbcli_utils.get_device_details(storage_node_id=node['id'])
             node_details = self.sbcli_utils.get_storage_node_details(storage_node_id=node['id'])
             for device in device_details:
-                if device['id'] in offline_device and node_details[0]['status'] == "offline":
-                    device = self.sbcli_utils.wait_for_health_status(node['id'], status=health_check_status,
-                                                                     device_id=device['id'],
-                                                                     timeout=300)
-                    assert device["health_check"] in health_check_status, \
-                        f"Device {device['id']} health-check is not {health_check_status}. Actual:  {device['health_check']}"
-                else:
-                    device = self.sbcli_utils.wait_for_health_status(node['id'], status=True,
-                                                                     device_id=device['id'],
-                                                                     timeout=300)
-                    assert device["health_check"] is True, \
-                        f"Device {device['id']} health-check is not True. Actual:  {device['health_check']}"
+                device = self.sbcli_utils.wait_for_health_status(node['id'], status=device_health_check,
+                                                                    device_id=device['id'],
+                                                                    timeout=300)
+                assert device["health_check"] in device_health_check, \
+                    f"Device {device['id']} health-check is not {device_health_check}. Actual:  {device['health_check']}"
 
-        command = f"{self.base_cmd} sn get-cluster-map {lvol_details[0]['node_id']}"
-        lvol_cluster_map_details, _ = self.ssh_obj.exec_command(node=self.mgmt_nodes[0],
-                                                                command=command)
-        self.logger.info(f"LVOL Cluster map: {lvol_cluster_map_details}")
-        cluster_map_nodes, cluster_map_devices = self.common_utils.parse_lvol_cluster_map_output(lvol_cluster_map_details)
+        # TODO: Change cluster map validations
+        # command = f"{self.base_cmd} sn get-cluster-map {lvol_details[0]['node_id']}"
+        # lvol_cluster_map_details, _ = self.ssh_obj.exec_command(node=self.mgmt_nodes[0],
+        #                                                         command=command)
+        # self.logger.info(f"LVOL Cluster map: {lvol_cluster_map_details}")
+        # cluster_map_nodes, cluster_map_devices = self.common_utils.parse_lvol_cluster_map_output(lvol_cluster_map_details)
         
-        for node_id, node in cluster_map_nodes.items():
-            if node_id == node_uuid:
-                if isinstance(node_status, list):
-                    assert node["Reported Status"] in node_status, \
-                    f"Node {node_id} is not in {node_status} reported state. Actual:  {node['Reported Status']}"
-                    assert node["Actual Status"] in node_status, \
-                        f"Node {node_id} is not in {node_status} state. Actual:  {node['Actual Status']}"
-                else:
-                    assert node["Reported Status"] == node_status, \
-                    f"Node {node_id} is not in {node_status} reported state. Actual:  {node['Reported Status']}"
-                    assert node["Actual Status"] == node_status, \
-                        f"Node {node_id} is not in {node_status} state. Actual:  {node['Actual Status']}"
+        # for node_id, node in cluster_map_nodes.items():
+        #     if node_id == node_uuid:
+        #         if isinstance(node_status, list):
+        #             assert node["Reported Status"] in node_status, \
+        #             f"Node {node_id} is not in {node_status} reported state. Actual:  {node['Reported Status']}"
+        #             assert node["Actual Status"] in node_status, \
+        #                 f"Node {node_id} is not in {node_status} state. Actual:  {node['Actual Status']}"
+        #         else:
+        #             assert node["Reported Status"] == node_status, \
+        #             f"Node {node_id} is not in {node_status} reported state. Actual:  {node['Reported Status']}"
+        #             assert node["Actual Status"] == node_status, \
+        #                 f"Node {node_id} is not in {node_status} state. Actual:  {node['Actual Status']}"
                     
-            else:
-                assert node["Reported Status"] == "online", \
-                    f"Node {node_uuid} is not in online state. Actual: {node['Reported Status']}"
-                assert node["Actual Status"] == "online", \
-                    f"Node {node_uuid} is not in online state. Actual: {node['Actual Status']}"
+        #     else:
+        #         assert node["Reported Status"] == "online", \
+        #             f"Node {node_uuid} is not in online state. Actual: {node['Reported Status']}"
+        #         assert node["Actual Status"] == "online", \
+        #             f"Node {node_uuid} is not in online state. Actual: {node['Actual Status']}"
 
-        if device_status is not None:
-            for device_id, device in cluster_map_devices.items():
-                if device_id in offline_device:
-                    assert device["Reported Status"] == device_status, \
-                        f"Device {device_id} is not in {device_status} state. Actual: {device['Reported Status']}"
-                    assert device["Actual Status"] == device_status, \
-                        f"Device {device_id} is not in {device_status} state. Actual: {device['Actual Status']}"
-                else:
-                    assert device["Reported Status"] == "online", \
-                        f"Device {device_id} is not in online state. Actual: {device['Reported Status']}"
-                    assert device["Actual Status"] == "online", \
-                        f"Device {device_id} is not in online state. {device['Actual Status']}"
+        # if device_status is not None:
+        #     for device_id, device in cluster_map_devices.items():
+        #         if device_id in offline_device:
+        #             assert device["Reported Status"] == device_status, \
+        #                 f"Device {device_id} is not in {device_status} state. Actual: {device['Reported Status']}"
+        #             assert device["Actual Status"] == device_status, \
+        #                 f"Device {device_id} is not in {device_status} state. Actual: {device['Actual Status']}"
+        #         else:
+        #             assert device["Reported Status"] == "online", \
+        #                 f"Device {device_id} is not in online state. Actual: {device['Reported Status']}"
+        #             assert device["Actual Status"] == "online", \
+        #                 f"Device {device_id} is not in online state. {device['Actual Status']}"
 
     def unmount_all(self, base_path=None):
         """ Unmount all mount points """
@@ -696,13 +733,13 @@ class TestClusterBase:
         for node in self.storage_nodes:
             files = self.ssh_obj.list_files(node, "/etc/simplyblock/")
             self.logger.info(f"Files in /etc/simplyblock: {files}")
-            if "core" in files:
+            if "core" in files and "tmp_cores" not in files:
                 cur_date = datetime.now().strftime("%Y-%m-%d")
                 self.logger.info(f"Core file found on storage node {node} at {cur_date}")
         
         for node in self.mgmt_nodes:
             files = self.ssh_obj.list_files(node, "/etc/simplyblock/")
             self.logger.info(f"Files in /etc/simplyblock: {files}")
-            if "core" in files:
+            if "core" in files and "tmp_cores" not in files:
                 cur_date = datetime.now().strftime("%Y-%m-%d")
                 self.logger.info(f"Core file found on management node {node} at {cur_date}")

@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 # encoding: utf-8
 
+import base64
 from functools import wraps
 from flask import request
 
@@ -10,6 +11,10 @@ from simplyblock_core.db_controller import DBController
 def token_required(f):
     @wraps(f)
     def decorated(*args, **kwargs):
+
+        if request.method == "GET" and request.path.startswith("/swagger"):
+            return f(*args, **kwargs)
+
         cluster_id = None
         cluster_secret = None
         if "Authorization" in request.headers:
@@ -17,6 +22,14 @@ def token_required(f):
             if len(au.split()) == 2:
                 cluster_id = au.split()[0]
                 cluster_secret = au.split()[1]
+            if cluster_id and cluster_id == "Basic":
+                try:
+                    tkn = base64.b64decode(cluster_secret).decode('utf-8')
+                    if tkn:
+                        cluster_id = tkn.split(":")[0]
+                        cluster_secret = tkn.split(":")[1]
+                except Exception as e:
+                    print(e)
 
         if not cluster_id or not cluster_secret:
             return {

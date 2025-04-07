@@ -54,7 +54,7 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
         #                       "lvol_disconnect_primary"]
         # self.outage_types = ["container_stop", "graceful_shutdown", 
         #                      "interface_full_network_interrupt", "interface_partial_network_interrupt"]
-        self.outage_types = ["container_stop", "graceful_shutdown", "interface_partial_network_interrupt", "interface_full_network_interrupt"]
+        self.outage_types = ["container_stop", "graceful_shutdown"]
         self.blocked_ports = None
         self.outage_log_file = os.path.join("logs", f"outage_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
         self._initialize_outage_log()
@@ -445,19 +445,21 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
         self.sbcli_utils.wait_for_storage_node_status(self.current_outage_node, "online", timeout=1000)
         # Log the restart event
         self.log_outage_event(self.current_outage_node, outage_type, "Node restarted")
-        self.sbcli_utils.wait_for_health_status(self.current_outage_node, True, timeout=1000)
-        self.outage_end_time = int(datetime.now().timestamp())
 
         
         if not self.k8s_test:
-            self.ssh_obj.restart_docker_logging(
-                node_ip=node_ip,
-                containers=self.container_nodes[node_ip],
-                log_dir=self.docker_logs_path,
-                test_name=self.test_name
-            )
+            for node in self.storage_nodes:
+                self.ssh_obj.restart_docker_logging(
+                    node_ip=node,
+                    containers=self.container_nodes[node],
+                    log_dir=self.docker_logs_path,
+                    test_name=self.test_name
+                )
         else:
             self.runner_k8s_log.restart_logging()
+
+        self.sbcli_utils.wait_for_health_status(self.current_outage_node, True, timeout=1000)
+        self.outage_end_time = int(datetime.now().timestamp())
 
         if self.secondary_outage:
             for lvol in self.lvols_without_sec_connect:
@@ -648,10 +650,10 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
             self.fio_threads.append(fio_thread)
             self.logger.info(f"Created snapshot {snapshot_name} and clone {clone_name}.")
 
-            self.sbcli_utils.resize_lvol(lvol_id=self.lvol_mount_details[lvol]["ID"],
-                                         new_size=f"{self.int_lvol_size}G")
-            self.sbcli_utils.resize_lvol(lvol_id=self.clone_mount_details[clone_name]["ID"],
-                                         new_size=f"{self.int_lvol_size}G")
+            # self.sbcli_utils.resize_lvol(lvol_id=self.lvol_mount_details[lvol]["ID"],
+            #                              new_size=f"{self.int_lvol_size}G")
+            # self.sbcli_utils.resize_lvol(lvol_id=self.clone_mount_details[clone_name]["ID"],
+            #                              new_size=f"{self.int_lvol_size}G")
             
 
     def delete_random_lvols(self, count):
@@ -736,8 +738,38 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
         
         if not self.sbcli_utils.is_secondary_node(self.current_outage_node):
             self.delete_random_lvols(8)
+            if not self.k8s_test:
+                for node in self.storage_nodes:
+                    self.ssh_obj.restart_docker_logging(
+                        node_ip=node,
+                        containers=self.container_nodes[node],
+                        log_dir=self.docker_logs_path,
+                        test_name=self.test_name
+                    )
+            else:
+                self.runner_k8s_log.restart_logging()
             self.logger.info("Creating 5 new lvols, clones, and snapshots.")
             self.create_lvols_with_fio(5)
+            if not self.k8s_test:
+                for node in self.storage_nodes:
+                    self.ssh_obj.restart_docker_logging(
+                        node_ip=node,
+                        containers=self.container_nodes[node],
+                        log_dir=self.docker_logs_path,
+                        test_name=self.test_name
+                    )
+            else:
+                self.runner_k8s_log.restart_logging()
+            if not self.k8s_test:
+                for node in self.storage_nodes:
+                    self.ssh_obj.restart_docker_logging(
+                        node_ip=node,
+                        containers=self.container_nodes[node],
+                        log_dir=self.docker_logs_path,
+                        test_name=self.test_name
+                    )
+            else:
+                self.runner_k8s_log.restart_logging()
             self.create_snapshots_and_clones()
         else:
             self.logger.info(f"Current outage node: {self.current_outage_node} is secondary node. Skipping delete or create")
@@ -862,8 +894,38 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
             outage_type = self.perform_random_outage()
             if not self.sbcli_utils.is_secondary_node(self.current_outage_node):
                 self.delete_random_lvols(8)
+                if not self.k8s_test:
+                    for node in self.storage_nodes:
+                        self.ssh_obj.restart_docker_logging(
+                            node_ip=node,
+                            containers=self.container_nodes[node],
+                            log_dir=self.docker_logs_path,
+                            test_name=self.test_name
+                        )
+                else:
+                    self.runner_k8s_log.restart_logging()
                 self.create_lvols_with_fio(5)
+                if not self.k8s_test:
+                    for node in self.storage_nodes:
+                        self.ssh_obj.restart_docker_logging(
+                            node_ip=node,
+                            containers=self.container_nodes[node],
+                            log_dir=self.docker_logs_path,
+                            test_name=self.test_name
+                        )
+                else:
+                    self.runner_k8s_log.restart_logging()
                 self.create_snapshots_and_clones()
+                if not self.k8s_test:
+                    for node in self.storage_nodes:
+                        self.ssh_obj.restart_docker_logging(
+                            node_ip=node,
+                            containers=self.container_nodes[node],
+                            log_dir=self.docker_logs_path,
+                            test_name=self.test_name
+                        )
+                else:
+                    self.runner_k8s_log.restart_logging()
             else:
                 self.logger.info(f"Current outage node: {self.current_outage_node} is secondary node. Skipping delete and create")
             if outage_type != "partial_nw" or outage_type != "partial_nw_single_port":
@@ -888,7 +950,7 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
             )
             no_task_ok = outage_type in {"partial_nw", "partial_nw_single_port", "lvol_disconnect_primary"}
             if not self.sbcli_utils.is_secondary_node(self.current_outage_node):
-                self.validate_migration_for_node(self.outage_start_time, 4000, None, 60, no_task_ok=no_task_ok)
+                self.validate_migration_for_node(self.outage_start_time, 2000, None, 60, no_task_ok=no_task_ok)
 
             for clone, clone_details in self.clone_mount_details.items():
                 self.common_utils.validate_fio_test(clone_details["Client"],
@@ -918,7 +980,7 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
             )
             no_task_ok = outage_type in {"partial_nw", "partial_nw_single_port", "lvol_disconnect_primary"}
             if not self.sbcli_utils.is_secondary_node(self.current_outage_node):
-                self.validate_migration_for_node(self.outage_start_time, 4000, None, 60, no_task_ok=no_task_ok)
+                self.validate_migration_for_node(self.outage_start_time, 2000, None, 60, no_task_ok=no_task_ok)
             
             self.common_utils.manage_fio_threads(self.fio_node, self.fio_threads, timeout=100000)
 

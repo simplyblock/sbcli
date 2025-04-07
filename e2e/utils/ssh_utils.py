@@ -8,12 +8,12 @@ import paramiko.ssh_exception
 from logger_config import setup_logger
 from pathlib import Path
 from datetime import datetime
+import threading
 import random, string, re
 import subprocess
 
 
 SSH_KEY_LOCATION = os.path.join(Path.home(), ".ssh", os.environ.get("KEY_NAME"))
-
 
 def generate_random_string(length=6):
     """Generate a random string of uppercase letters and digits."""
@@ -42,6 +42,9 @@ class SshUtils:
         self.logger = setup_logger(__name__)
         self.fio_runtime = {}
         self.ssh_user = os.environ.get("SSH_USER", None)
+        self.log_monitor_threads = {}
+        self.log_monitor_stop_flags = {}
+        self.ssh_semaphore = threading.Semaphore(10)  # Max 10 SSH calls in parallel (tune as needed)
 
     def connect(self, address: str, port: int = 22,
                 bastion_server_address: str = None,
@@ -127,7 +130,7 @@ class SshUtils:
         self.ssh_connections[address] = target_ssh
 
 
-    def exec_command(self, node, command, timeout=360, max_retries=3, stream_callback=None):
+    def exec_command(self, node, command, timeout=360, max_retries=3, stream_callback=None, supress_logs=False):
         """Executes a command on a given machine with streaming output and retry mechanism.
 
         Args:
@@ -142,89 +145,94 @@ class SshUtils:
         """
         retry_count = 0
         while retry_count < max_retries:
-            ssh_connection = self.ssh_connections.get(node)
-            try:
-                # Ensure the SSH connection is active, otherwise reconnect
-                if not ssh_connection or not ssh_connection.get_transport().is_active() or retry_count > 0:
-                    self.logger.info(f"Reconnecting SSH to node {node}")
-                    self.connect(
-                        address=node,
-                        is_bastion_server=True if node == self.bastion_server else False
-                    )
-                    ssh_connection = self.ssh_connections[node]
+            with self.ssh_semaphore:
+                ssh_connection = self.ssh_connections.get(node)
+                try:
+                    # Ensure the SSH connection is active, otherwise reconnect
+                    if not ssh_connection or not ssh_connection.get_transport().is_active() or retry_count > 0:
+                        self.logger.info(f"Reconnecting SSH to node {node}")
+                        self.connect(
+                            address=node,
+                            is_bastion_server=True if node == self.bastion_server else False
+                        )
+                        ssh_connection = self.ssh_connections[node]
+                    
+                    if not supress_logs:
+                        self.logger.info(f"Executing command: {command}")
+                    stdin, stdout, stderr = ssh_connection.exec_command(command, timeout=timeout)
 
-                self.logger.info(f"Executing command: {command}")
-                stdin, stdout, stderr = ssh_connection.exec_command(command, timeout=timeout)
+                    output = []
+                    error = []
 
-                output = []
-                error = []
+                    # Read stdout and stderr dynamically if stream_callback is provided
+                    if stream_callback:
+                        while not stdout.channel.exit_status_ready():
+                            # Process stdout
+                            if stdout.channel.recv_ready():
+                                chunk = stdout.channel.recv(1024).decode()
+                                output.append(chunk)
+                                stream_callback(chunk, is_error=False)  # Callback for stdout
 
-                # Read stdout and stderr dynamically if stream_callback is provided
-                if stream_callback:
-                    while not stdout.channel.exit_status_ready():
-                        # Process stdout
+                            # Process stderr
+                            if stderr.channel.recv_stderr_ready():
+                                chunk = stderr.channel.recv_stderr(1024).decode()
+                                error.append(chunk)
+                                stream_callback(chunk, is_error=True)  # Callback for stderr
+
+                            time.sleep(0.1)
+
+                        # Finalize any remaining output
                         if stdout.channel.recv_ready():
                             chunk = stdout.channel.recv(1024).decode()
                             output.append(chunk)
-                            stream_callback(chunk, is_error=False)  # Callback for stdout
+                            stream_callback(chunk, is_error=False)
 
-                        # Process stderr
                         if stderr.channel.recv_stderr_ready():
                             chunk = stderr.channel.recv_stderr(1024).decode()
                             error.append(chunk)
-                            stream_callback(chunk, is_error=True)  # Callback for stderr
+                            stream_callback(chunk, is_error=True)
+                    else:
+                        # Default behavior: Read the entire output at once
+                        output = stdout.read().decode()
+                        error = stderr.read().decode()
 
-                        time.sleep(0.1)
+                    # Combine the output into strings
+                    output = "".join(output) if isinstance(output, list) else output
+                    error = "".join(error) if isinstance(error, list) else error
 
-                    # Finalize any remaining output
-                    if stdout.channel.recv_ready():
-                        chunk = stdout.channel.recv(1024).decode()
-                        output.append(chunk)
-                        stream_callback(chunk, is_error=False)
+                    # Log the results
+                    if output:
+                        if not supress_logs:
+                            self.logger.info(f"Command output: {output}")
+                    if error:
+                        if not supress_logs:
+                            self.logger.error(f"Command error: {error}")
 
-                    if stderr.channel.recv_stderr_ready():
-                        chunk = stderr.channel.recv_stderr(1024).decode()
-                        error.append(chunk)
-                        stream_callback(chunk, is_error=True)
-                else:
-                    # Default behavior: Read the entire output at once
-                    output = stdout.read().decode()
-                    error = stderr.read().decode()
+                    if not output and not error:
+                        if not supress_logs:
+                            self.logger.warning(f"Command '{command}' executed but returned no output or error.")
 
-                # Combine the output into strings
-                output = "".join(output) if isinstance(output, list) else output
-                error = "".join(error) if isinstance(error, list) else error
+                    return output, error
 
-                # Log the results
-                if output:
-                    self.logger.info(f"Command output: {output}")
-                if error:
-                    self.logger.error(f"Command error: {error}")
+                except EOFError as e:
+                    self.logger.error(f"EOFError occurred while executing command '{command}': {e}. Retrying ({retry_count + 1}/{max_retries})...")
+                    retry_count += 1
+                    time.sleep(2)  # Short delay before retrying
 
-                if not output and not error:
-                    self.logger.warning(f"Command '{command}' executed but returned no output or error.")
+                except paramiko.SSHException as e:
+                    self.logger.error(f"SSH command failed: {e}. Retrying ({retry_count + 1}/{max_retries})...")
+                    retry_count += 1
+                    time.sleep(2)  # Short delay before retrying
 
-                return output, error
+                except paramiko.buffered_pipe.PipeTimeout as e:
+                    self.logger.error(f"SSH command failed: {e}. Retrying ({retry_count + 1}/{max_retries})...")
+                    retry_count += 1
+                    time.sleep(2)  # Short delay before retrying
 
-            except EOFError as e:
-                self.logger.error(f"EOFError occurred while executing command '{command}': {e}. Retrying ({retry_count + 1}/{max_retries})...")
-                retry_count += 1
-                time.sleep(2)  # Short delay before retrying
-
-            except paramiko.SSHException as e:
-                self.logger.error(f"SSH command failed: {e}. Retrying ({retry_count + 1}/{max_retries})...")
-                retry_count += 1
-                time.sleep(2)  # Short delay before retrying
-
-            except paramiko.buffered_pipe.PipeTimeout as e:
-                self.logger.error(f"SSH command failed: {e}. Retrying ({retry_count + 1}/{max_retries})...")
-                retry_count += 1
-                time.sleep(2)  # Short delay before retrying
-
-            except Exception as e:
-                self.logger.error(f"SSH command failed (General Exception): {e}. Retrying ({retry_count + 1}/{max_retries})...")
-                retry_count += 1
-                time.sleep(2)  # Short delay before retrying
+                except Exception as e:
+                    self.logger.error(f"SSH command failed (General Exception): {e}. Retrying ({retry_count + 1}/{max_retries})...")
+                    retry_count += 1
+                    time.sleep(2)  # Short delay before retrying
 
         # If we exhaust retries, return failure
         self.logger.error(f"Failed to execute command '{command}' on node {node} after {max_retries} retries.")
@@ -403,6 +411,7 @@ class SshUtils:
         """
         rec = "r" if recursive else ""
         cmd = f'sudo rm -{rec}f {entity}'
+        self.logger.info(f"Delete command: {cmd}")
         output, _ = self.exec_command(node=node, command=cmd)
         return output
     
@@ -1454,6 +1463,73 @@ class SshUtils:
             self.logger.error(f"Failed to check logs for keyword '{keyword}' on node {node_ip}: {e}")
             return {}
 
+    def get_container_id(self, node_ip, container):
+        """Fetch container ID by name"""
+        cmd = f"docker inspect --format='{{{{.Id}}}}' {container}"
+        output, error = self.exec_command(node_ip, cmd, supress_logs=True)
+        return output.strip() if output else None
+
+    def monitor_container_logs(self, node_ip, containers, log_dir, test_name, poll_interval=10):
+        """Monitor container logs and auto-detect new containers."""
+        container_ids = {}
+        known_containers = set(containers)
+        stop_flag = threading.Event()
+
+        def _monitor():
+            while not stop_flag.is_set():
+                try:
+                    # Get current list of running containers
+                    current_containers = self.get_running_containers(node_ip)
+
+                    # Start logging for newly found containers
+                    for container in current_containers:
+                        if container not in known_containers:
+                            self.logger.info(f"[{node_ip}] New container detected: {container}")
+                            known_containers.add(container)
+
+                    # Now monitor for restarts of all known containers
+                    for container in list(known_containers):
+                        try:
+                            new_id = self.get_container_id(node_ip, container)
+                            old_id = container_ids.get(container)
+
+                            if not new_id:
+                                continue  # container might have exited
+
+                            if new_id != old_id:
+                                container_ids[container] = new_id
+                                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                                log_file = f"{log_dir}/{container}_{test_name}_{node_ip}_{timestamp}_restart.log"
+                                session = f"{container}_restart_{generate_random_string()}"
+                                self.logger.info(f"[{node_ip}] Logging for container: {container}")
+                                cmd = (
+                                    f"sudo tmux new-session -d -s {session} "
+                                    f"\"docker logs --follow {container} > {log_file} 2>&1\""
+                                )
+                                self.exec_command(node_ip, cmd, supress_logs=True)
+                        except Exception as e:
+                            self.logger.error(f"Error monitoring container {container} on {node_ip}: {e}")
+
+                except Exception as outer_e:
+                    self.logger.error(f"[{node_ip}] Error during container polling: {outer_e}")
+
+                time.sleep(poll_interval)
+
+        thread = threading.Thread(target=_monitor, daemon=True)
+        thread.start()
+
+        self.log_monitor_threads[node_ip] = thread
+        self.log_monitor_stop_flags[node_ip] = stop_flag
+        self.logger.info(f"Started background log monitor on {node_ip} with poll interval {poll_interval}s")
+
+
+    def stop_container_log_monitor(self, node_ip):
+        """Stop Monitoring thread in teardown"""
+        if node_ip in self.log_monitor_stop_flags:
+            self.log_monitor_stop_flags[node_ip].set()
+            self.logger.info(f"Stopping container log monitor thread for {node_ip}")
+
+
 
 
     # def stop_netstat_dmesg_logging(self, node_ip):
@@ -1488,6 +1564,9 @@ class RunnerK8sLog:
         self.namespace = namespace
         self.log_dir = log_dir
         self.test_name = test_name
+        self._monitor_thread = None
+        self._monitor_stop_flag = threading.Event()
+        self._pod_container_map = {}
 
         # Ensure log directory exists
         os.makedirs(self.log_dir, exist_ok=True)
@@ -1501,7 +1580,7 @@ class RunnerK8sLog:
         try:
             subprocess.run(["tmux", "-V"], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             print("tmux is already installed.")
-        except subprocess.CalledProcessError:
+        except (subprocess.CalledProcessError, FileNotFoundError):
             print("tmux is not installed. Installing now...")
             install_cmd = "sudo apt-get update -y && sudo apt-get install -y tmux || sudo yum install -y tmux"
             subprocess.run(install_cmd, shell=True, check=True)
@@ -1567,6 +1646,9 @@ class RunnerK8sLog:
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                 log_file = f"{self.log_dir}/{pod}_{container}_{self.test_name}_{timestamp}_{outage_type}.log"
                 session_name = f"{pod}_{container}_logs_{self.generate_random_string()}"
+                container_id = self._get_container_id(pod, container)
+                key = f"{pod}:{container}"
+                self._pod_container_map[key] = container_id
 
                 command_logs = [
                     "tmux", "new-session", "-d", "-s", session_name,
@@ -1605,3 +1687,70 @@ class RunnerK8sLog:
                 subprocess.run(describe_command, stdout=f, stderr=subprocess.STDOUT)
 
             print(f"Stored pod description for '{pod}' at {describe_file}.")
+
+    def _get_container_id(self, pod, container):
+        try:
+            cmd = [
+                "kubectl", "get", "pod", pod, "-n", self.namespace,
+                "-o", f"jsonpath={{.status.containerStatuses[?(@.name=='{container}')].containerID}}"
+            ]
+            output = subprocess.check_output(cmd, universal_newlines=True).strip()
+            return output.split("//")[-1] if output else None
+        except subprocess.CalledProcessError:
+            return None
+
+    def monitor_pod_logs(self, poll_interval=10):
+        """
+        Continuously monitor running pods and their containers for restarts.
+        Starts new kubectl log sessions if containers change.
+        """
+
+        def _monitor():
+            while not self._monitor_stop_flag.is_set():
+                pods = self.get_running_pods()
+                for pod in pods:
+                    if not (pod.startswith("storage-node-ds") or pod.startswith("snode-spdk-deployment") or pod.startswith("storage-node-handler-")):
+                        continue
+
+                    cmd = ["kubectl", "get", "pod", pod, "-n", self.namespace,
+                        "-o", "jsonpath={.spec.containers[*].name}"]
+                    try:
+                        containers = subprocess.check_output(cmd, universal_newlines=True).strip().split()
+                    except subprocess.CalledProcessError:
+                        continue
+
+                    for container in containers:
+                        key = f"{pod}:{container}"
+                        current_id = self._get_container_id(pod, container)
+                        prev_id = self._pod_container_map.get(key)
+
+                        if not current_id:
+                            continue
+
+                        if current_id != prev_id:
+                            self._pod_container_map[key] = current_id
+                            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                            log_file = f"{self.log_dir}/{pod}_{container}_{self.test_name}_{timestamp}_restart.log"
+                            session_name = f"{pod}_{container}_restart_{self.generate_random_string()}"
+
+                            cmd = [
+                                "tmux", "new-session", "-d", "-s", session_name,
+                                "bash", "-c",
+                                f"kubectl logs --follow {pod} -c {container} -n {self.namespace} > {log_file} 2>&1"
+                            ]
+                            subprocess.Popen(cmd)
+                            print(f"[K8s] Restarted log collection for {pod}:{container} due to new container instance.")
+
+                time.sleep(poll_interval)
+
+        self._monitor_thread = threading.Thread(target=_monitor, daemon=True)
+        self._monitor_thread.start()
+        print("Started background K8s log monitor.")
+
+    def stop_log_monitor(self):
+        if self._monitor_thread and self._monitor_thread.is_alive():
+            self._monitor_stop_flag.set()
+            self._monitor_thread.join(timeout=10)
+            print("K8s log monitor thread stopped.")
+
+

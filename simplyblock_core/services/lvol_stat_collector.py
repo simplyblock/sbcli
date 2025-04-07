@@ -219,7 +219,7 @@ while True:
                     stats.append( stats_dict['bdevs'][0])
 
                 if not capacity_dict:
-                    capacity_dict = rpc_client.get_bdevs(lvol.base_bdev)
+                    capacity_dict = rpc_client.get_bdevs(lvol.top_bdev)
 
                 ret = rpc_client.nvmf_subsystem_get_controllers(lvol.nqn)
                 if ret:

@@ -25,13 +25,15 @@ db_controller = DBController()
 def add(lvol_id, snapshot_name):
     lvol = db_controller.get_lvol_by_id(lvol_id)
     if not lvol:
-        logger.error(f"LVol not found: {lvol_id}")
-        return False
+        msg = f"LVol not found: {lvol_id}"
+        logger.error(msg)
+        return False, msg
 
     pool = db_controller.get_pool_by_id(lvol.pool_uuid)
     if pool.status == Pool.STATUS_INACTIVE:
-        logger.error(f"Pool is disabled")
-        return False
+        msg = f"Pool is disabled"
+        logger.error(msg)
+        return False, msg
 
     if lvol.cloned_from_snap:
         snap = db_controller.get_snapshot_by_id(lvol.cloned_from_snap)
@@ -60,15 +62,16 @@ def add(lvol_id, snapshot_name):
         size = lvol.size
 
     if 0 < pool.lvol_max_size < size:
-        logger.error(f"Pool Max LVol size is: {utils.humanbytes(pool.lvol_max_size)}, LVol size: {utils.humanbytes(size)} must be below this limit")
-        return False
+        msg = f"Pool Max LVol size is: {utils.humanbytes(pool.lvol_max_size)}, LVol size: {utils.humanbytes(size)} must be below this limit"
+        logger.error(msg)
+        return False, msg
 
     if pool.pool_max_size > 0:
         total = pool_controller.get_pool_total_capacity(pool.get_id())
         if total + size > pool.pool_max_size:
-            logger.error( f"Invalid LVol size: {utils.humanbytes(size)} " 
-                          f"Pool max size has reached {utils.humanbytes(total+size)} of {utils.humanbytes(pool.pool_max_size)}")
-            return False
+            msg =  f"Invalid LVol size: {utils.humanbytes(size)}. pool max size has reached {utils.humanbytes(total+size)} of {utils.humanbytes(pool.pool_max_size)}"
+            logger.error(msg)
+            return False, msg
 
     if pool.pool_max_size > 0:
         total = pool_controller.get_pool_total_capacity(pool.get_id())
@@ -78,6 +81,9 @@ def add(lvol_id, snapshot_name):
             return False, msg
 
     cluster = db_controller.get_cluster_by_id(pool.cluster_id)
+    if cluster.status not in [cluster.STATUS_ACTIVE, cluster.STATUS_DEGRADED]:
+        return False, f"Cluster is not active, status: {cluster.status}"
+
     snap_bdev_name = f"SNAP_{utils.get_random_vuid()}"
     size = lvol.size
     blobid = 0
@@ -87,8 +93,6 @@ def add(lvol_id, snapshot_name):
     if lvol.ha_type == "single":
         if snode.status == StorageNode.STATUS_ONLINE:
             rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
-            if not lvol_controller.is_node_leader(snode, lvol.lvs_name):
-                rpc_client.bdev_lvol_set_leader(True, lvs_name=lvol.lvs_name)
             logger.info("Creating Snapshot bdev")
             ret = rpc_client.lvol_create_snapshot(f"{lvol.lvs_name}/{lvol.lvol_bdev}", snap_bdev_name)
             if not ret:
@@ -140,9 +144,6 @@ def add(lvol_id, snapshot_name):
             rpc_client = RPCClient(
                 primary_node.mgmt_ip, primary_node.rpc_port, primary_node.rpc_username, primary_node.rpc_password)
 
-            if not lvol_controller.is_node_leader(primary_node, lvol.lvs_name):
-                rpc_client.bdev_lvol_set_leader(True, lvs_name=lvol.lvs_name)
-
             logger.info("Creating Snapshot bdev")
             ret = rpc_client.lvol_create_snapshot(f"{lvol.lvs_name}/{lvol.lvol_bdev}", snap_bdev_name)
             if not ret:
@@ -162,9 +163,6 @@ def add(lvol_id, snapshot_name):
         if secondary_node:
             sec_rpc_client = RPCClient(
                 secondary_node.mgmt_ip, secondary_node.rpc_port, secondary_node.rpc_username, secondary_node.rpc_password)
-
-            if lvol_controller.is_node_leader(primary_node, lvol.lvs_name):
-                sec_rpc_client.bdev_lvol_set_leader(False, lvs_name=lvol.lvs_name)
 
             ret = sec_rpc_client.bdev_lvol_snapshot_register(
                 f"{lvol.lvs_name}/{lvol.lvol_bdev}", snap_bdev_name, snap_uuid, blobid)
@@ -262,12 +260,6 @@ def delete(snapshot_uuid, force_delete=False):
                 snode.rpc_port,
                 snode.rpc_username,
                 snode.rpc_password)
-            if not lvol_controller.is_node_leader(snode, snap.lvol.lvs_name):
-                ret = rpc_client.bdev_lvol_set_leader(True, lvs_name=snap.lvol.lvs_name)
-                if not ret:
-                    logger.error(f"Failed to set leader for primary node: {snode.get_id()}")
-                    if not force_delete:
-                        return False
 
             ret = rpc_client.delete_lvol(snap.snap_bdev)
             if not ret:
@@ -329,13 +321,6 @@ def delete(snapshot_uuid, force_delete=False):
             rpc_client = RPCClient(primary_node.mgmt_ip, primary_node.rpc_port, primary_node.rpc_username,
                                        primary_node.rpc_password)
 
-            if not lvol_controller.is_node_leader(primary_node, snap.lvol.lvs_name):
-                ret = rpc_client.bdev_lvol_set_leader(True, lvs_name=snap.lvol.lvs_name)
-                if not ret:
-                    logger.error(f"Failed to set leader for primary node: {snode.get_id()}")
-                    if not force_delete:
-                        return False
-
             ret = rpc_client.delete_lvol(snap.snap_bdev)
             if not ret:
                 logger.error(f"Failed to delete snap from node: {snode.get_id()}")
@@ -345,18 +330,8 @@ def delete(snapshot_uuid, force_delete=False):
         if secondary_node:
             secondary_node = db_controller.get_storage_node_by_id(secondary_node.get_id())
             if secondary_node.status == StorageNode.STATUS_ONLINE:
-
                 sec_rpc_client = RPCClient(secondary_node.mgmt_ip, secondary_node.rpc_port, secondary_node.rpc_username,
                                            secondary_node.rpc_password)
-
-                if lvol_controller.is_node_leader(secondary_node, snap.lvol.lvs_name):
-                    if not lvol_controller.is_node_leader(snode, snap.lvol.lvs_name):
-                        ret = sec_rpc_client.bdev_lvol_set_leader(True, lvs_name=snap.lvol.lvs_name)
-                        if not ret:
-                            logger.error(f"Failed to set leader for node: {secondary_node.get_id()}")
-                            if not force_delete:
-                                return False
-
                 ret = sec_rpc_client.delete_lvol(snap.snap_bdev)
                 if not ret:
                     logger.error(f"Failed to delete snap from node: {secondary_node.get_id()}")
@@ -399,10 +374,9 @@ def clone(snapshot_id, clone_name, new_size=0):
         logger.error(msg)
         return False, msg
 
-    # if snode.status != snode.STATUS_ONLINE:
-    #     msg = "Storage node in not Online"
-    #     logger.error(msg)
-    #     return False, msg
+    cluster = db_controller.get_cluster_by_id(pool.cluster_id)
+    if cluster.status not in [cluster.STATUS_ACTIVE, cluster.STATUS_DEGRADED]:
+        return False, f"Cluster is not active, status: {cluster.status}"
 
     ref_count = snap.ref_count
     if snap.snap_ref_id:
@@ -423,15 +397,16 @@ def clone(snapshot_id, clone_name, new_size=0):
 
     size = snap.size
     if 0 < pool.lvol_max_size < size:
-        logger.error(f"Pool Max LVol size is: {utils.humanbytes(pool.lvol_max_size)}, LVol size: {utils.humanbytes(size)} must be below this limit")
-        return False
+        msg = f"Pool Max LVol size is: {utils.humanbytes(pool.lvol_max_size)}, LVol size: {utils.humanbytes(size)} must be below this limit"
+        logger.error(msg)
+        return False, msg
 
     if pool.pool_max_size > 0:
         total = pool_controller.get_pool_total_capacity(pool.get_id())
         if total + size > pool.pool_max_size:
-            logger.error( f"Invalid LVol size: {utils.humanbytes(size)} " 
-                          f"Pool max size has reached {utils.humanbytes(total+size)} of {utils.humanbytes(pool.pool_max_size)}")
-            return False
+            msg =  f"Invalid LVol size: {utils.humanbytes(size)}. Pool max size has reached {utils.humanbytes(total+size)} of {utils.humanbytes(pool.pool_max_size)}"
+            logger.error(msg)
+            return False, msg
 
     lvol_count = len(db_controller.get_lvols_by_node_id(snode.get_id()))
     if lvol_count >= snode.max_lvol:
@@ -445,9 +420,6 @@ def clone(snapshot_id, clone_name, new_size=0):
             msg = f"Pool max size has reached {utils.humanbytes(total)} of {utils.humanbytes(pool.pool_max_size)}"
             logger.error(msg)
             return False, msg
-
-
-    cluster = db_controller.get_cluster_by_id(snode.cluster_id)
 
     lvol = LVol()
     lvol.uuid = str(uuid.uuid4())
@@ -600,4 +572,4 @@ def clone(snapshot_id, clone_name, new_size=0):
     snapshot_events.snapshot_clone(snap, lvol)
     if new_size:
         lvol_controller.resize_lvol(lvol.get_id(), new_size)
-    return True, lvol.uuid
+    return lvol.uuid, False

@@ -8,6 +8,7 @@ import re
 import string
 import subprocess
 import sys
+from typing import Union
 
 import docker
 from prettytable import PrettyTable
@@ -105,26 +106,27 @@ def print_table(data: list, title=None):
         return x.__str__()
 
 
-def humanbytes(B):
-    """Return the given bytes as a human friendly KB, MB, GB, or TB string."""
-    if not B:
-        return "0"
-    B = float(B)
-    KB = float(constants.ONE_KB)
-    MB = float(KB ** 2) # 1,048,576
-    GB = float(KB ** 3) # 1,073,741,824
-    TB = float(KB ** 4) # 1,099,511,627,776
+_humanbytes_parameter = {
+    'si': (10, 3, math.log10, ''),
+    'iec': (2, 10, math.log2, 'i'),
+    'jedec': (2, 10, math.log2, ''),
+}
 
-    if B < KB:
-        return '{0} {1}'.format(B, 'Bytes' if 0 == B > 1 else 'Byte')
-    elif KB <= B < MB:
-        return '{0:.1f} KB'.format(B / KB)
-    elif MB <= B < GB:
-        return '{0:.1f} MB'.format(B / MB)
-    elif GB <= B < TB:
-        return '{0:.1f} GB'.format(B / GB)
-    elif TB <= B:
-        return '{0:.1f} TB'.format(B / TB)
+
+def humanbytes(size: int, mode: str = 'si') -> str:
+    """Return the given bytes as a human friendly including the appropriate unit."""
+    if not size:
+        return '0 B'
+
+    base, exponent, log, infix = _humanbytes_parameter[mode]
+
+    prefixes = ['', 'k' if mode == 'si' else 'K', 'M', 'G', 'T', 'P', 'E', 'Z']
+    exponent_multiplier = min(int(log(size) / exponent), len(prefixes) - 1)
+
+    size_in_unit = size / (base ** (exponent * exponent_multiplier))
+    prefix = prefixes[exponent_multiplier]
+
+    return f"{size_in_unit:.1f} {prefix}{infix if prefix else ''}B"
 
 
 def generate_string(length):
@@ -539,14 +541,12 @@ def calculate_minimum_hp_memory(small_pool_count, large_pool_count, lvol_count, 
     return: minimum_hp_memory in bytes
     '''
     pool_consumption = (small_pool_count * 8 + large_pool_count * 128) / 1024 + 1092
-    max_prov_tb = max_prov / (1024 * 1024 * 1024 * 1024)
-    memory_consumption = (4 * cpu_count + 1.0277 * pool_consumption + 25 * lvol_count) * (1024 * 1024) + (250 * 1024 * 1024) * 1.1 * max_prov_tb + constants.EXTRA_HUGE_PAGE_MEMORY
+    memory_consumption = (4 * cpu_count + 1.0277 * pool_consumption + 25 * lvol_count) * (1024 * 1024) + (250 * 1024 * 1024) * 1.1 * convert_size(max_prov, 'TiB') + constants.EXTRA_HUGE_PAGE_MEMORY
     return int(memory_consumption*1.5)
 
 
 def calculate_minimum_sys_memory(max_prov, total):
-    max_prov_tb = max_prov / (1024 * 1024 * 1024 * 1024)
-    minimum_sys_memory = (250 * 1024 * 1024) * 1.1 * max_prov_tb + (constants.EXTRA_SYS_MEMORY * total)
+    minimum_sys_memory = (250 * 1024 * 1024) * 1.1 * convert_size(max_prov, 'TiB') + (constants.EXTRA_SYS_MEMORY * total)
     logger.debug(f"Minimum system memory is {humanbytes(minimum_sys_memory)}")
     return int(minimum_sys_memory)
 
@@ -626,38 +626,64 @@ def get_logger(name=""):
     return logg
 
 
-def parse_size(size_string: str):
+def _parse_unit(unit: str, mode: str = 'si/iec', strict: bool = True) -> tuple[int, int]:
+    """Parse the given unit, returning the associated base and exponent
+
+    Mode can be either 'si/iec' to parse decimal (SI) and binary (IEC) units, or 
+    'jedec' for binary only units. If `strict`, parsing will be case-sensitive and
+    expect the 'B' suffix.
+    """
+    regexes = {
+        'si/iec': r'^((?P<prefix>[kKMGTPEZ])(?P<binary>i)?)?' + ('B$' if strict else 'B?$'),
+        'jedec': r'^(?P<prefix>[KMGTPEZ])?' + ('B$' if strict else 'B?$'),
+    }
+
+    m = re.match(regexes[mode], unit, flags=re.IGNORECASE if not strict else 0)
+    if m is None:
+        raise ValueError("Invalid unit")
+
+    binary = (mode == 'jedec') or (m.group('binary') is not None)
+    prefix = m.group('prefix') or ''
+
+    if strict and (binary and (prefix == 'k')) or ((not binary) and (prefix == 'K')):
+        raise ValueError("Invalid unit")
+
+    exponent_multipliers = ['', 'K', 'M', 'G', 'T', 'P', 'E', 'Z']
+    return (
+        2 if binary else 10,
+        (10 if binary else 3) * exponent_multipliers.index(prefix.upper())
+    )
+
+
+def parse_size(size_string: str, mode: str = 'si/iec', unit: str = '', strict: bool = False) -> int:
+    """Parse the given data size
+
+    If passed and not explicitly given, 'unit' will be assumed.
+    Mode can be either 'si/iec' to parse decimal (SI) and binary (IEC) units, or 
+    'jedec' for binary only units. If `strict`, parsing will be case-sensitive and
+    expect the 'B' suffix.
+    """
     try:
-        x = int(size_string)
-        return x
-    except Exception:
-        pass
-    try:
-        if size_string:
-            size_string = size_string.lower()
-            size_string = size_string.replace(" ", "")
-            size_string = size_string.replace("b", "")
-            size_number = int(size_string[:-1])
-            size_v = size_string[-1]
-            one_k = constants.ONE_KB
-            multi = 0
-            if size_v == "k":
-                multi = 1
-            elif size_v == "m":
-                multi = 2
-            elif size_v == "g":
-                multi = 3
-            elif size_v == "t":
-                multi = 4
-            else:
-                print(f"Error parsing size: {size_string}")
-                return -1
-            return size_number * math.pow(one_k, multi)
-        else:
-            return -1
-    except:
-        print(f"Error parsing size: {size_string}")
+        m = re.match(r'^(?P<size_in_unit>\d+) ?(?P<unit>\w+)?$', size_string.strip())
+        if m is None:
+            raise ValueError(f"Invalid size: {size_string}")
+
+        size_in_unit = int(m.group('size_in_unit'))
+        unit = m.group('unit') if m.group('unit') else unit
+        base, exponent = _parse_unit(unit, mode, strict=strict)
+        return size_in_unit * (base ** exponent)
+    except ValueError:
         return -1
+
+
+def convert_size(size: int, unit: str) -> int:
+    """Convert the given number of bytes to target unit
+
+    Accepts both decimal (kB, MB, ...) and binary (KiB, MiB, ...) units.
+    Note that the result will be cast to int, i.e. rounded down.
+    """
+    base, exponent = _parse_unit(unit, 'si/iec')
+    return int(size / (base ** exponent))
 
 
 def nearest_upper_power_of_2(n):
@@ -705,6 +731,7 @@ def handle_task_result(task: JobSchedule, res: dict, allowed_error_codes = None)
                 task.status = JobSchedule.STATUS_SUSPENDED
                 del task.function_params['migration']
 
+            task.status = JobSchedule.STATUS_DONE
             task.write_to_db()
             return True
 
@@ -736,19 +763,16 @@ def get_next_port(cluster_id):
     from simplyblock_core.db_controller import DBController
     db_controller = DBController()
 
-    port = 9090
+    port = constants.LVOL_NVMF_PORT_START
     used_ports = []
     for node in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
-        if node.lvol_subsys_port > 0 and node.lvol_subsys_port != 4420:
+        if node.lvol_subsys_port > 0:
             used_ports.append(node.lvol_subsys_port)
 
-    for i in range(100):
-        next_port = port + i
+    while port in used_ports:
+        port += 1
 
-        if next_port not in used_ports:
-            return next_port
-
-    return 0
+    return port
 
 
 def generate_realtime_variables_file(isolated_cores, realtime_variables_file_path="/etc/tuned/realtime-variables.conf"):

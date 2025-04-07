@@ -1,4 +1,6 @@
 # coding=utf-8
+import time
+
 import jc
 
 from simplyblock_core import utils, distr_controller, storage_node_ops
@@ -49,19 +51,6 @@ def check_cluster(cluster_id):
         })
     print(utils.print_table(data))
     return result
-
-
-def _check_node_docker_api(ip):
-    return True
-    # try:
-    #     node_docker = docker.DockerClient(base_url=f"tcp://{ip}:2375", version="auto", timeout=3)
-    #     ret = node_docker.info()
-    #     if ret:
-    #         logger.debug(ret)
-    #         return True
-    # except Exception as e:
-    #     logger.error(f"Failed to connect to node's docker: {e}")
-    # return False
 
 
 def _check_node_rpc(rpc_ip, rpc_port, rpc_username, rpc_password, timeout=3, retry=2):
@@ -152,8 +141,11 @@ def _check_node_lvstore(lvstore_stack, node, auto_fix=False, node_bdev_names=Non
             bdev_lvstore = bdev["name"]
 
     if not node_bdev_names:
-        node_bdevs = rpc_client.get_bdevs()
-        node_bdev_names = [b['name'] for b in node_bdevs]
+        ret = rpc_client.get_bdevs()
+        if ret:
+            node_bdev_names = [b['name'] for b in ret]
+        else:
+            node_bdev_names = []
 
     for distr in distribs_list:
         if distr in node_bdev_names:
@@ -175,6 +167,10 @@ def _check_node_lvstore(lvstore_stack, node, auto_fix=False, node_bdev_names=Non
                                     if result['Reported Status']:
                                         dev = db_controller.get_storage_device_by_id(result['UUID'])
                                         if dev.status == NVMeDevice.STATUS_ONLINE:
+                                            name = f"remote_{dev.alceml_bdev}"
+                                            logger.info(f"detaching {name} from {node.get_id()}")
+                                            rpc_client.bdev_nvme_detach_controller(name)
+                                            time.sleep(1)
                                             remote_devices = storage_node_ops._connect_to_remote_devs(node)
                                             n = db_controller.get_storage_node_by_id(node.get_id())
                                             n.remote_devices = remote_devices
@@ -242,10 +238,6 @@ def check_node(node_id, with_devices=True):
         snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
     logger.info(f"Check: node RPC {snode.mgmt_ip}:{snode.rpc_port} ... {node_rpc_check}")
 
-    # 4- docker API
-    node_docker_check = _check_node_docker_api(snode.mgmt_ip)
-    logger.info(f"Check: node docker API {snode.mgmt_ip}:2375 ... {node_docker_check}")
-
     data_nics_check = True
     for data_nic in snode.data_nics:
         if data_nic.ip4_address:
@@ -261,7 +253,7 @@ def check_node(node_id, with_devices=True):
         lvol_port_check = _check_port_on_node(snode, snode.lvol_subsys_port)
         logger.info(f"Check: node {snode.mgmt_ip}, port: {snode.lvol_subsys_port} ... {lvol_port_check}")
 
-    is_node_online = ping_check and node_api_check and node_rpc_check and node_docker_check
+    is_node_online = ping_check and node_api_check and node_rpc_check
 
     logger.info(f"Results : {is_node_online}")
     print("*" * 100)
@@ -455,11 +447,13 @@ def check_lvol_on_node(lvol_id, node_id, node_bdev_names=None, node_lvols_nqns=N
         snode.rpc_username, snode.rpc_password, timeout=5, retry=1)
 
     if not node_bdev_names:
+        node_bdev_names = {}
         ret = rpc_client.get_bdevs()
         for bdev in ret:
             node_bdev_names[bdev['name']] = bdev
 
     if not node_lvols_nqns:
+        node_lvols_nqns = {}
         ret = rpc_client.subsystem_list()
         for sub in ret:
             node_lvols_nqns[sub['nqn']] = sub
@@ -468,7 +462,7 @@ def check_lvol_on_node(lvol_id, node_id, node_bdev_names=None, node_lvols_nqns=N
     try:
         for bdev_info in lvol.bdev_stack:
             bdev_name = bdev_info['name']
-            if bdev_info['type'] == "bdev_lvol":
+            if bdev_info['type'] in ["bdev_lvol", "bdev_lvol_clone"]:
                 bdev_name = lvol.lvol_uuid
 
             if bdev_name in node_bdev_names:

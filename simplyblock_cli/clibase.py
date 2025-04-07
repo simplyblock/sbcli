@@ -76,7 +76,7 @@ class CLIWrapperBase:
 
         max_lvol = args.max_lvol
         max_snap = args.max_snap
-        max_prov = args.max_prov
+        max_prov = utils.parse_size(args.max_prov, unit='G')
         number_of_devices = args.number_of_devices
         enable_test_device = args.enable_test_device
         enable_ha_jm = args.enable_ha_jm
@@ -132,7 +132,7 @@ class CLIWrapperBase:
 
         max_lvol = args.max_lvol
         max_snap = args.max_snap
-        max_prov = args.max_prov if args.max_prov else 0
+        max_prov = utils.parse_size(args.max_prov, unit='G')
         number_of_devices = args.number_of_devices
 
         small_bufsize = args.small_bufsize
@@ -263,6 +263,9 @@ class CLIWrapperBase:
         node_id = args.node_id
         return storage_ops.dump_lvstore(node_id)
 
+    def storage_node__set(self, sub_command, args):
+        return storage_ops.set(args.node_id, args.attr_name, args.attr_value)
+
     def cluster__deploy(self, sub_command, args):
         return self.cluster_deploy(args)
 
@@ -354,10 +357,14 @@ class CLIWrapperBase:
         cluster_id = args.cluster_id
         return cluster_ops.get_ssh_pass(cluster_id)
 
+    def cluster__set(self, sub_command, args):
+        cluster_id = args.cluster_id
+        return cluster_ops.set(cluster_id,  args.attr_name, args.attr_value)
+
     def volume__add(self, sub_command, args):
         name = args.name
-        size = self.parse_size(args.size)
-        max_size = self.parse_size(args.max_size)
+        size = utils.parse_size(args.size)
+        max_size = utils.parse_size(args.max_size)
         host_id = args.host_id
         ha_type = args.ha_type
         pool = args.pool
@@ -411,19 +418,22 @@ class CLIWrapperBase:
 
     def volume__resize(self, sub_command, args):
         volume_id = args.volume_id
-        size = self.parse_size(args.size)
+        size = utils.parse_size(args.size)
         return lvol_controller.resize_lvol(volume_id, size)
 
     def volume__create_snapshot(self, sub_command, args):
         volume_id = args.volume_id
         name = args.name
-        return lvol_controller.create_snapshot(volume_id, name)
+        snapshot_id, error = lvol_controller.create_snapshot(volume_id, name)
+        return snapshot_id if not error else error
 
     def volume__clone(self, sub_command, args):
         new_size = 0
         if args.resize:
-            new_size = self.parse_size(args.resize)
-        return snapshot_controller.clone(args.snapshot_id, args.clone_name, new_size)
+            new_size = utils.parse_size(args.resize)
+
+        clone_id, error = snapshot_controller.clone(args.snapshot_id, args.clone_name, new_size)
+        return clone_id if not error else error
 
     def volume__move(self, sub_command, args):
         return lvol_controller.move(args.volume_id, args.node_id, args.force)
@@ -473,8 +483,8 @@ class CLIWrapperBase:
             has_secret = False
         return pool_controller.add_pool(
             args.name,
-            self.parse_size(args.pool_max),
-            self.parse_size(args.lvol_max),
+            utils.parse_size(args.pool_max),
+            utils.parse_size(args.lvol_max),
             args.max_rw_iops,
             args.max_rw_mbytes,
             args.max_r_mbytes,
@@ -487,9 +497,9 @@ class CLIWrapperBase:
         pool_max = None
         lvol_max = None
         if args.pool_max:
-            pool_max = self.parse_size(args.pool_max)
+            pool_max = utils.parse_size(args.pool_max)
         if args.lvol_max:
-            lvol_max = self.parse_size(args.lvol_max)
+            lvol_max = utils.parse_size(args.lvol_max)
         return pool_controller.set_pool(
             args.pool_id,
             pool_max,
@@ -527,7 +537,8 @@ class CLIWrapperBase:
         return pool_controller.get_io_stats(args.pool_id, args.history, args.records)
 
     def snapshot__add(self, sub_command, args):
-        return snapshot_controller.add(args.volume_id, args.name)
+        snapshot_id, error = snapshot_controller.add(args.volume_id, args.name)
+        return snapshot_id if not error else error
 
     def snapshot__list(self, sub_command, args):
         return snapshot_controller.list(args.all)
@@ -538,8 +549,10 @@ class CLIWrapperBase:
     def snapshot__clone(self, sub_command, args):
         new_size = 0
         if args.resize:
-            new_size = self.parse_size(args.resize)
-        return snapshot_controller.clone(args.snapshot_id, args.lvol_name, new_size)
+            new_size = utils.parse_size(args.resize)
+
+        success, details = snapshot_controller.clone(args.snapshot_id, args.lvol_name, new_size)
+        return details
 
     def caching_node__deploy(self, sub_command, args):
         return caching_node_controller.deploy(args.ifname)
@@ -562,9 +575,9 @@ class CLIWrapperBase:
 
         spdk_mem = None
         if args.spdk_mem:
-            spdk_mem = self.parse_size(args.spdk_mem)
-            if spdk_mem < 1 * 1024 * 1024:
-                return f"SPDK memory:{args.spdk_mem} must be larger than 1G"
+            spdk_mem = utils.parse_size(args.spdk_mem)
+            if spdk_mem < utils.parse_size('1GiB'):
+                return f"SPDK memory:{args.spdk_mem} must be larger than 1GiB"
 
         return caching_node_controller.add_node(
             cluster_id, node_ip, ifname, data_nics, spdk_cpu_mask, spdk_mem, spdk_image, namespace, multipathing)
@@ -596,11 +609,8 @@ class CLIWrapperBase:
 
     def storage_node_list_devices(self, args):
         node_id = args.node_id
-        sort = args.sort
-        if sort:
-            sort = sort[0]
         is_json = args.json
-        out = storage_ops.list_storage_devices(node_id, sort, is_json)
+        out = storage_ops.list_storage_devices(node_id, is_json)
         return out
 
     def cluster_add(self, args):
@@ -675,9 +685,11 @@ class CLIWrapperBase:
             else:
                 return f"Invalid cpu mask value: {args.spdk_cpu_mask}"
 
+        
+
         max_lvol = args.max_lvol
         max_snap = args.max_snap
-        max_prov = args.max_prov
+        max_prov = utils.parse_size(args.max_prov, unit='G')
         number_of_devices = args.number_of_devices
         enable_test_device = args.enable_test_device
         enable_ha_jm = args.enable_ha_jm
@@ -686,11 +698,11 @@ class CLIWrapperBase:
         secondary_nodes = args.secondary_nodes
         
         lvol_name = args.lvol_name
-        lvol_size = self.parse_size(args.lvol_size)
-        max_size = self.parse_size(args.max_size)
+        lvol_size = utils.parse_size(args.lvol_size)
+        max_size = utils.parse_size(args.max_size)
         lvol_ha_type = args.lvol_ha_type
         pool_name = args.pool_name
-        pool_max = self.parse_size(args.pool_max)
+        pool_max = utils.parse_size(args.pool_max)
         host_id = args.host_id
         comp = None
         crypto = args.encrypt
@@ -779,39 +791,6 @@ class CLIWrapperBase:
                 return valid[choice]
             else:
                 sys.stdout.write("Please respond with 'yes' or 'no' " "(or 'y' or 'n').\n")
-
-    def parse_size(self, size_string: str):
-        try:
-            x = int(size_string)
-            return x
-        except Exception:
-            pass
-        try:
-            if size_string:
-                size_string = size_string.lower()
-                size_string = size_string.replace(" ", "")
-                size_string = size_string.replace("b", "")
-                size_number = int(size_string[:-1])
-                size_v = size_string[-1]
-                one_k = constants.ONE_KB
-                multi = 0
-                if size_v == "k":
-                    multi = 1
-                elif size_v == "m":
-                    multi = 2
-                elif size_v == "g":
-                    multi = 3
-                elif size_v == "t":
-                    multi = 4
-                else:
-                    print(f"Error parsing size: {size_string}")
-                    return -1
-                return size_number * math.pow(one_k, multi)
-            else:
-                return -1
-        except:
-            print(f"Error parsing size: {size_string}")
-            return -1
 
     def validate_cpu_mask(self, spdk_cpu_mask):
         return re.match("^(0x|0X)?[a-fA-F0-9]+$", spdk_cpu_mask)
