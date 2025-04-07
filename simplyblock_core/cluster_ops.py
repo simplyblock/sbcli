@@ -203,8 +203,8 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     if prov_cap_crit and prov_cap_crit > 0:
         c.prov_cap_crit = prov_cap_crit
     if distr_ndcs == 0 and distr_npcs == 0:
-        c.distr_ndcs = 1
-        c.distr_npcs = 1
+        logger.error("both distr_ndcs and distr_npcs cannot be 0")
+        return False
     else:
         c.distr_ndcs = distr_ndcs
         c.distr_npcs = distr_npcs
@@ -537,11 +537,11 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
     _create_update_user(cluster.uuid, cluster.grafana_endpoint, cluster.grafana_secret, cluster.secret)
 
     if distr_ndcs == 0 and distr_npcs == 0:
-        cluster.distr_ndcs = 2
-        cluster.distr_npcs = 1
-    else:
-        cluster.distr_ndcs = distr_ndcs
-        cluster.distr_npcs = distr_npcs
+        logger.error("both distr_ndcs and distr_npcs cannot be 0")
+        return False
+
+    cluster.distr_ndcs = distr_ndcs
+    cluster.distr_npcs = distr_npcs
     cluster.distr_bs = distr_bs
     cluster.distr_chunk_bs = distr_chunk_bs
     cluster.ha_type = ha_type
