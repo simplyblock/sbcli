@@ -1737,7 +1737,13 @@ def restart_storage_node(
 
     if not snode.is_secondary_node:   # pass
 
-        nvme_devs = addNvmeDevices(snode, snode.ssd_pcie)
+        if not snode.ssd_pcie:
+            node_info, _ = snode_api.info()
+            ssds = node_info['spdk_pcie_list']
+        else:
+            ssds = snode.ssd_pcie
+
+        nvme_devs = addNvmeDevices(snode, ssds)
         if not nvme_devs:
             logger.error("No NVMe devices was found!")
             return False

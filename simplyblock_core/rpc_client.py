@@ -163,7 +163,7 @@ class RPCClient:
             "recv_buf_size": 2097152,
             "send_buf_size": 2097152,
             "enable_recv_pipe": True,
-            "enable_quick_ack": True,
+            "enable_quickack": True,
             "enable_placement_id": 1,
             "enable_zerocopy_send_server": True,
             "enable_zerocopy_send_client": True    
