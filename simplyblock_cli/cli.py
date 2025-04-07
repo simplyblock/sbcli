@@ -348,8 +348,6 @@ class CLIWrapper(CLIWrapperBase):
         argument = subcommand.add_argument('--metrics-retention-period', help='Retention period for I/O statistics (Prometheus), default: 7d', type=str, default='7d', dest='metrics_retention_period', required=False)
         argument = subcommand.add_argument('--contact-point', help='Email or slack webhook url to be used for alerting', type=str, default='', dest='contact_point', required=False)
         if self.developer_mode:
-            argument = subcommand.add_argument('--grafana-endpoint', help='Endpoint url for Grafana', type=str, default='', dest='grafana_endpoint', required=False)
-        if self.developer_mode:
             argument = subcommand.add_argument('--distr-bs', help='(Dev) distrb bdev block size, default: 4096', type=int, default=4096, dest='distr_bs', required=False)
         argument = subcommand.add_argument('--chunk-size-in-bytes', help='(Dev) distrb bdev chunk block size, default: 4096', type=int, default=4096, dest='distr_chunk_bs', required=False)
         argument = subcommand.add_argument('--enable-node-affinity', help='Enable node affinity for storage nodes', dest='enable_node_affinity', required=False, action='store_true')
@@ -406,24 +404,9 @@ class CLIWrapper(CLIWrapperBase):
         if self.developer_mode:
             argument = subcommand.add_argument('--encrypt', help='Use inline data encryption and decryption on the logical volume', dest='encrypt', required=False, action='store_true')
         if self.developer_mode:
-            argument = subcommand.add_argument('--crypto-key1', help='Hex value of key1 to be used for logical volume encryption', type=str, dest='crypto_key1', required=False)
-        if self.developer_mode:
-            argument = subcommand.add_argument('--crypto-key2', help='Hex value of key2 to be used for logical volume encryption', type=str, dest='crypto_key2', required=False)
-        if self.developer_mode:
-            argument = subcommand.add_argument('--max-rw-iops', help='Maximum Read Write IO Per Second', type=int, dest='max_rw_iops', required=False)
-        if self.developer_mode:
-            argument = subcommand.add_argument('--max-rw-mbytes', help='Maximum Read Write Megabytes Per Second', type=int, dest='max_rw_mbytes', required=False)
-        if self.developer_mode:
-            argument = subcommand.add_argument('--max-r-mbytes', help='Maximum Read Megabytes Per Second', type=int, dest='max_r_mbytes', required=False)
-        if self.developer_mode:
-            argument = subcommand.add_argument('--max-w-mbytes', help='Maximum Write Megabytes Per Second', type=int, dest='max_w_mbytes', required=False)
-        if self.developer_mode:
             argument = subcommand.add_argument('--distr-vuid', help='(Dev) set vuid manually, default: random (1-99999)', type=int, dest='distr_vuid', required=False)
         if self.developer_mode:
             argument = subcommand.add_argument('--lvol-ha-type', help='Logical volume HA type (single, ha), default is cluster HA type', type=str, default='ha', dest='lvol_ha_type', required=False, choices=['single','default','ha',])
-        argument = subcommand.add_argument('--lvol-priority-class', help='Logical volume priority class', type=int, default=0, dest='lvol_priority_class', required=False)
-        if self.developer_mode:
-            argument = subcommand.add_argument('--fstype', help='Filesystem type for testing (ext4, xfs)', type=str, default='xfs', dest='fstype', required=False, choices=['ext4','xfs',])
 
     def init_cluster__create(self, subparser):
         subcommand = self.add_sub_command(subparser, 'create', 'Creates a new cluster')
@@ -1018,7 +1001,6 @@ class CLIWrapper(CLIWrapperBase):
                     args.blk_size = 512
                     args.page_size = 2097152
                     args.CLI_PASS = None
-                    args.grafana_endpoint = ''
                     args.distr_bs = 4096
                     args.max_queue_size = 128
                     args.inflight_io_threshold = 4
@@ -1039,16 +1021,9 @@ class CLIWrapper(CLIWrapperBase):
                     args.pool_max = '25G'
                     args.snapshot = False
                     args.max_size = '1000G'
-                    args.encrypt = False
-                    args.crypto_key1 = None
-                    args.crypto_key2 = None
-                    args.max_rw_iops = None
-                    args.max_rw_mbytes = None
-                    args.max_r_mbytes = None
-                    args.max_w_mbytes = None
+                    args.encrypt = None
                     args.distr_vuid = None
                     args.lvol_ha_type = 'ha'
-                    args.fstype = 'xfs'
                 ret = self.cluster__deploy(sub_command, args)
             elif sub_command in ['create']:
                 if not self.developer_mode:

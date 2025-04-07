@@ -380,7 +380,7 @@ def deploy_cluster(storage_nodes,test,ha_type,distr_ndcs,distr_npcs,enable_qos,i
                    ha_jm_count, number_of_distribs,namespace,secondary_nodes,partition_size,
                    lvol_name, lvol_size, lvol_ha_type, pool_name, pool_max, host_id, comp, crypto, distr_vuid, max_rw_iops,
                    max_rw_mbytes, max_r_mbytes, max_w_mbytes, with_snapshot, max_size, crypto_key1, crypto_key2,
-                   lvol_priority_class, fstype):
+                   lvol_priority_class, id_device_by_nqn, fstype):
     logger.info("run deploy-cleaner")
     
     storage_node_ops.deploy_cleaner()
@@ -401,7 +401,7 @@ def deploy_cluster(storage_nodes,test,ha_type,distr_ndcs,distr_npcs,enable_qos,i
         dev_ip=f"{node_ip}:5000"
         add_node_status=storage_node_ops.add_node(cluster_uuid,dev_ip,ifname,data_nics,max_lvol,max_snap,max_prov,spdk_image,spdk_debug,
                                   small_bufsize,large_bufsize,spdk_cpu_mask,num_partitions_per_dev,jm_percent,number_of_devices,
-                                  enable_test_device,namespace,number_of_distribs,enable_ha_jm,False,False,partition_size,ha_jm_count)
+                                  enable_test_device,namespace,number_of_distribs,enable_ha_jm,False,id_device_by_nqn,partition_size,ha_jm_count)
         
         
         if not add_node_status:
@@ -417,7 +417,7 @@ def deploy_cluster(storage_nodes,test,ha_type,distr_ndcs,distr_npcs,enable_qos,i
             dev_ip=f"{node_ip}:5000"
             add_node_status=storage_node_ops.add_node(cluster_uuid,dev_ip,ifname,data_nics,max_lvol,max_snap,max_prov,spdk_image,spdk_debug,
                                     small_bufsize,large_bufsize,spdk_cpu_mask,num_partitions_per_dev,jm_percent,number_of_devices,
-                                    enable_test_device,namespace,number_of_distribs,enable_ha_jm,True,False,partition_size,ha_jm_count)
+                                    enable_test_device,namespace,number_of_distribs,enable_ha_jm,True,id_device_by_nqn,partition_size,ha_jm_count)
                     
             if not add_node_status:
                 logger.error("Could not add storage node successfully")

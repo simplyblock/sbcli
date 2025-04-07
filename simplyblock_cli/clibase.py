@@ -648,7 +648,27 @@ class CLIWrapperBase:
 
 
     def cluster_deploy(self,args):
-        
+        grafana_endpoint = ""
+        secondary_nodes = False
+        namespace = None
+        lvol_name = "lvol01"
+        lvol_size = self.parse_size("10G")
+        pool_max = self.parse_size("25G")
+        max_size = self.parse_size("1000G")
+        pool_name = "pool01"
+        with_snapshot = False
+        host_id = None
+        crypto = False
+        crypto_key1 = None
+        crypto_key2 = None
+        max_rw_iops = None
+        max_rw_mbytes = None
+        max_r_mbytes = None
+        max_w_mbytes = None
+        lvol_priority_class = 0
+        id_device_by_nqn = False
+        fstype = "xfs"
+
         storage_nodes = args.storage_nodes
         test = args.test
         ha_type = args.ha_type
@@ -669,7 +689,6 @@ class CLIWrapperBase:
         log_del_interval = args.log_del_interval
         metrics_retention_period = args.metrics_retention_period
         contact_point = args.contact_point
-        grafana_endpoint = args.grafana_endpoint
         enable_node_affinity = args.enable_node_affinity
         qpair_count = args.qpair_count
         max_queue_size = args.max_queue_size
@@ -712,17 +731,7 @@ class CLIWrapperBase:
         pool_max = utils.parse_size(args.pool_max)
         host_id = args.host_id
         comp = None
-        crypto = args.encrypt
         distr_vuid = args.distr_vuid
-        with_snapshot = args.snapshot
-        lvol_priority_class = args.lvol_priority_class
-        max_rw_iops = args.max_rw_iops
-        max_rw_mbytes = args.max_rw_mbytes
-        max_r_mbytes = args.max_r_mbytes
-        max_w_mbytes = args.max_w_mbytes
-        crypto_key1 = args.crypto_key1
-        crypto_key2 = args.crypto_key2
-        fstype = args.fstype
 
         return cluster_ops.deploy_cluster(
             storage_nodes,test,ha_type,distr_ndcs,distr_npcs,enable_qos,ifname,
@@ -732,8 +741,8 @@ class CLIWrapperBase:
             qpair_count, max_queue_size, inflight_io_threshold, strict_node_anti_affinity,data_nics,
             spdk_image,spdk_debug,small_bufsize,large_bufsize,num_partitions_per_dev,jm_percent,spdk_cpu_mask,max_lvol,
             max_snap,max_prov,number_of_devices,enable_test_device,enable_ha_jm,ha_jm_count,number_of_distribs,namespace,secondary_nodes,partition_size,
-            lvol_name, lvol_size, lvol_ha_type, pool_name, pool_max, host_id, comp, crypto, distr_vuid, max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes, 
-            with_snapshot, max_size, crypto_key1, crypto_key2, lvol_priority_class, fstype)
+            lvol_name, lvol_size, lvol_ha_type, pool_name, pool_max, host_id, comp, crypto, distr_vuid, max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes,
+            with_snapshot, max_size, crypto_key1, crypto_key2, lvol_priority_class, id_device_by_nqn, fstype)
 
     def cluster_create(self, args):
         page_size_in_blocks = args.page_size
