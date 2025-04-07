@@ -2,6 +2,8 @@ name: Python Package Build
 
 on:
   push:
+    branches:
+      - main
     paths:
       - 'simplyblock_core/env_var'
 
