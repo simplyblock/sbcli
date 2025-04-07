@@ -663,6 +663,13 @@ def parse_size(size_string: str, mode: str = 'si/iec', unit: str = '', strict: b
     'jedec' for binary only units. If `strict`, parsing will be case-sensitive and
     expect the 'B' suffix.
     """
+    if not unit:
+        try:
+            x = int(size_string)
+            return x
+        except Exception:
+            pass
+
     try:
         m = re.match(r'^(?P<size_in_unit>\d+) ?(?P<unit>\w+)?$', size_string.strip())
         if m is None:
