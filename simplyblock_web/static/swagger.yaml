@@ -7,11 +7,12 @@ servers:
   - url: http://{{base_url}}
 components:
   securitySchemes:
-    apikeyAuth:
-      type: http
-      scheme: apikey
+    cluster:
+      type: apiKey
+      name: Authorization
+      in: header
 security:
-  - apikeyAuth: []
+  - cluster: []
 tags:
   - name: Cluster
   - name: Mgmt Node
