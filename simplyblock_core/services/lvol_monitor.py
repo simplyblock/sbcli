@@ -99,6 +99,9 @@ while True:
                         logger.debug(f"Skipping LVol health check because of io_error {lvol.get_id()}")
                         continue
 
+                    if lvol.status == LVol.STATUS_IN_CREATION:
+                        continue
+
                     if lvol.status == lvol.STATUS_IN_DELETION:
                         ret = rpc_client.bdev_lvol_get_lvol_delete_status(f"{lvol.lvs_name}/{lvol.lvol_bdev}")
                         if ret == 0: # delete complete
