@@ -4,6 +4,9 @@ on:
   push:
     paths:
       - 'simplyblock_core/env_var'
+  pull_request:
+    paths:
+      - 'simplyblock_core/env_var'
 
 permissions:
   contents: read
