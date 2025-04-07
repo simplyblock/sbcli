@@ -5,6 +5,7 @@ import math
 import os
 
 import pprint
+import threading
 
 import time
 import uuid
@@ -557,6 +558,7 @@ def _prepare_cluster_devices_on_restart(snode, clear_data=False):
         snode.mgmt_ip, snode.rpc_port,
         snode.rpc_username, snode.rpc_password, timeout=5*60)
 
+    thread_list = []
     for index, nvme in enumerate(snode.nvme_devices):
         if nvme.status == NVMeDevice.STATUS_JM:
             continue
@@ -567,12 +569,17 @@ def _prepare_cluster_devices_on_restart(snode, clear_data=False):
                                NVMeDevice.STATUS_READONLY, NVMeDevice.STATUS_NEW]:
             logger.debug(f"Device is skipped: {nvme.get_id()}, status: {nvme.status}")
             continue
-        dev = _create_storage_device_stack(rpc_client, nvme, snode, after_restart=not clear_data)
-        if not dev:
-            logger.error(f"Failed to create dev stack {nvme.get_id()}")
-            return False
-        # if nvme.status == NVMeDevice.STATUS_ONLINE:
-        #     device_events.device_restarted(dev)
+
+        t = threading.Thread(
+            target=_create_storage_device_stack,
+            args=(rpc_client, nvme, snode, not clear_data,))
+        thread_list.append(t)
+
+    for thread in thread_list:
+        thread.start()
+
+    for thread in thread_list:
+        thread.join()
 
     snode.nvme_devices = new_devices
     snode.write_to_db()

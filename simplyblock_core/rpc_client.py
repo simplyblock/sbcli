@@ -155,22 +155,12 @@ class RPCClient:
         return self._request("nvmf_create_transport", params)
 
     def sock_impl_set_options(self):
-        """
-            optimizing sockets for high load and performance
-        """
-        params = {
-            "impl_name": "posix",
-            "recv_buf_size": 2097152,
-            "send_buf_size": 2097152,
-            "enable_recv_pipe": True,
-            "enable_quickack": True,
-            "enable_placement_id": 1,
-            "enable_zerocopy_send_server": True,
-            "enable_zerocopy_send_client": True    
-        }
-        return self._request("sock_impl_set_options", params)
+        method = "sock_impl_set_options"
+        params = {"impl_name": "posix", "enable_quickack": True,
+                  "enable_zerocopy_send_server": True,
+                  "enable_zerocopy_send_client": True}
+        return self._request(method, params)
 
-    
     def transport_create_caching(self, trtype):
         params = {
             "trtype": trtype,
