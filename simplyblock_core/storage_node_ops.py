@@ -3167,6 +3167,9 @@ def get_secondary_nodes(current_node):
         if node.get_id() != current_node.get_id() and not node.lvstore_stack_secondary_1 \
                 and node.status == StorageNode.STATUS_ONLINE and node.mgmt_ip != current_node.mgmt_ip:
             nodes.append(node.get_id())
+        if node.get_id() != current_node.get_id() and node.is_secondary_node:
+            return [node.get_id()]
+
     return nodes
 
 

@@ -580,6 +580,10 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
                 lvol_bdev, error = add_lvol_on_node(lvol, secondary_node, is_primary=False)
                 if error:
                     logger.error(error)
+                    # remove lvol from primary
+                    ret = delete_lvol_from_node(lvol.get_id(), primary_node.get_id())
+                    if not ret:
+                        logger.error("")
                     lvol.remove(db_controller.kv_store)
                     return False, error
 
