@@ -31,6 +31,8 @@ from simplyblock_core import utils
     (('1byte',), -1),
     (('1', 'jedec', 'G',), 2 ** 30),
     (('1M', 'jedec', 'G',), 2 ** 20),
+    ((1,), 1),
+    ((1, 'jedec', 'G'), 2 ** 30),
 ])
 def test_parse_size(args, expected):
     assert utils.parse_size(*args) == expected

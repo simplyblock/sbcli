@@ -139,14 +139,15 @@ def spdk_process_start():
     if 'spdk_cpu_mask' in data:
         spdk_cpu_mask = data['spdk_cpu_mask']
 
-    spdk_mem = None
+    spdk_mem_mib = core_utils.convert_size(core_utils.parse_size('4GiB'), 'MiB')
     if 'spdk_mem' in data:
-        spdk_mem = data['spdk_mem']
+        spdk_mem = core_utils.parse_size(data['spdk_mem'])
+        spdk_mem_mib = core_utils.convert_size(spdk_mem, 'MiB')
 
-    total_mem = ""
+    total_mem_mib = ""
     if 'total_mem' in data:
-        total_mem = data['total_mem']
-        total_mem = int(core_utils.parse_size(total_mem) / (1000 * 1000))
+        total_mem = core_utils.parse_size(data['total_mem'])
+        total_mem_mib = core_utils.convert_size(total_mem, 'MB')
 
     multi_threading_enabled = False
     if 'multi_threading_enabled' in data:
@@ -158,9 +159,6 @@ def spdk_process_start():
             timeout = int(data['timeout'])
         except:
             pass
-
-    spdk_mem_mib = core_utils.convert_size(
-            data.get('spdk_mem', core_utils.parse_size('4GiB')), 'MiB')
 
     node_docker = get_docker_client()
     nodes = node_docker.containers.list(all=True)
