@@ -31,7 +31,7 @@ jobs:
 
       - name: Update simplyblock_core/env_var
         run: |
-          sed -i 's/sbcli-dev/sbcli-pre/g' simplyblock_core/env_var
+          sed -i 's/sbcli/sbcli-pre/g' simplyblock_core/env_var
           version="${{ github.event.release.tag_name }}"
           echo "Replacing SIMPLY_BLOCK_VERSION with $version"
           sed -i "s/^SIMPLY_BLOCK_VERSION=.*/SIMPLY_BLOCK_VERSION=${version}/" simplyblock_core/env_var
