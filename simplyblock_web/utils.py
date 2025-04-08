@@ -6,6 +6,21 @@ import string
 from flask import jsonify
 
 
+IP_PATTERN = re.compile(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$')
+
+
+def response_schema(result_schema: dict) -> dict:
+    return {
+        'type': 'object',
+        'required': ['status', 'results'],
+        'properties': {
+            'status': {'type': 'boolean'},
+            'results': result_schema,
+            'error': {'type': 'string'},
+        },
+    }
+
+
 def get_response(data, error=None, http_code=None):
     resp = {
         "status": True,

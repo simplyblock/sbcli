@@ -3,7 +3,9 @@
 import logging
 
 import cpuinfo
-from flask import Blueprint
+
+from pydantic import BaseModel, Field
+from flask_openapi3 import APIBlueprint
 from flask import request
 
 from simplyblock_core import shell_utils, utils as core_utils
@@ -11,7 +13,7 @@ from simplyblock_web import utils, node_utils
 
 logger = logging.getLogger(__name__)
 
-bp = Blueprint("node_api_basic", __name__, url_prefix="/")
+api = APIBlueprint("node_api_basic", __name__, url_prefix="/")
 
 cpu_info = cpuinfo.get_cpu_info()
 hostname, _, _ = shell_utils.run_command("hostname -s")
@@ -22,19 +24,33 @@ except:
     pass
 
 
-@bp.route('/scan_devices', methods=['GET'])
+@api.get('/scan_devices', responses={
+    200: {'content': {'application/json': {'schema': utils.response_schema({
+        'type': 'object',
+        'required': ['nvme_devices', 'nvme_pcie_list', 'spdk_devices', 'spdk_pcie_list'],
+        'properties': {
+            'nvme_devices': {'type': 'array', 'items': {'type': 'string'}},
+            'nvme_pcie_list': {'type': 'array', 'items': {'type': 'string'}},
+            'spdk_devices': {'type': 'array', 'items': {'type': 'string'}},
+            'spdk_pcie_list': {'type': 'array', 'items': {'type': 'string'}},
+        },
+    })}}},
+})
 def scan_devices():
-    run_health_check = request.args.get('run_health_check', default=False, type=bool)
-    out = {
+    return utils.get_response({
         "nvme_devices": node_utils.get_nvme_devices(),
         "nvme_pcie_list": node_utils.get_nvme_pcie_list(),
         "spdk_devices": node_utils.get_spdk_devices(),
         "spdk_pcie_list": node_utils.get_spdk_pcie_list(),
-    }
-    return utils.get_response(out)
+    })
 
 
-@bp.route('/info', methods=['GET'])
+@api.get('/info', responses={
+    200: {'content': {'application/json': {'schema': utils.response_schema({
+        'type': 'object',
+        'additionalProperties': True,
+    })}}},
+})
 def get_info():
 
     out = {
@@ -59,13 +75,19 @@ def get_info():
     return utils.get_response(out)
 
 
-@bp.route('/nvme_connect', methods=['POST'])
-def connect_to_nvme():
-    data = request.get_json()
-    ip = data['ip']
-    port = data['port']
-    nqn = data['nqn']
-    st = f"nvme connect --transport=tcp --traddr={ip} --trsvcid={port} --nqn={nqn}"
+class _NVMeParams(BaseModel):
+    ip: str = Field(pattern=utils.IP_PATTERN)
+    port: int = Field(ge=0, le=65536)
+    nqn: str
+
+
+@api.post('/nvme_connect', responses={
+    200: {'content': {'application/json': {'schema': utils.response_schema({
+        'type': 'boolean',
+    })}}},
+})
+def connect_to_nvme(body: _NVMeParams):
+    st = f"nvme connect --transport=tcp --traddr={body.ip} --trsvcid={body.port} --nqn={body.nqn}"
     logger.debug(st)
     out, err, ret_code = shell_utils.run_command(st)
     logger.debug(ret_code)
@@ -77,11 +99,17 @@ def connect_to_nvme():
         return utils.get_response(ret_code, error=err)
 
 
-@bp.route('/disconnect_device', methods=['POST'])
-def disconnect_device():
-    data = request.get_json()
-    dev_path = data['dev_path']
-    st = f"nvme disconnect --device={dev_path}"
+class _DisconnectParams(BaseModel):
+    dev_path: str
+
+
+@api.post('/disconnect_device', responses={
+    200: {'content': {'application/json': {'schema': utils.response_schema({
+        'type': 'integer',
+    })}}},
+})
+def disconnect_device(body: _DisconnectParams):
+    st = f"nvme disconnect --device={body.dev_path}"
     out, err, ret_code = shell_utils.run_command(st)
     logger.debug(ret_code)
     logger.debug(out)
@@ -89,11 +117,17 @@ def disconnect_device():
     return utils.get_response(ret_code)
 
 
-@bp.route('/disconnect_nqn', methods=['POST'])
-def disconnect_nqn():
-    data = request.get_json()
-    nqn = data['nqn']
-    st = f"nvme disconnect --nqn={nqn}"
+class _DisconnectNQNParams(BaseModel):
+    nqn: str
+
+
+@api.post('/disconnect_nqn', responses={
+    200: {'content': {'application/json': {'schema': utils.response_schema({
+        'type': 'integer',
+    })}}},
+})
+def disconnect_nqn(body: _DisconnectNQNParams):
+    st = f"nvme disconnect --nqn={body.nqn}"
     out, err, ret_code = shell_utils.run_command(st)
     logger.debug(ret_code)
     logger.debug(out)
@@ -101,7 +135,11 @@ def disconnect_nqn():
     return utils.get_response(ret_code)
 
 
-@bp.route('/disconnect_all', methods=['POST'])
+@api.post('/disconnect_all', responses={
+    200: {'content': {'application/json': {'schema': utils.response_schema({
+        'type': 'integer',
+    })}}},
+})
 def disconnect_all():
     st = "nvme disconnect-all"
     out, err, ret_code = shell_utils.run_command(st)

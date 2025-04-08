@@ -4,11 +4,12 @@ import logging
 import math
 import os
 import time
+from typing import Annotated, Optional
 
+from pydantic import BaseModel, Field
 import docker
 from docker.types import LogConfig
-from flask import Blueprint
-from flask import request
+from flask_openapi3 import APIBlueprint
 
 from simplyblock_web import utils, node_utils
 from simplyblock_core import scripts, constants, utils as core_utils
@@ -16,7 +17,7 @@ from simplyblock_core.utils import pull_docker_image_with_retry
 
 logger = logging.getLogger(__name__)
 
-bp = Blueprint("node_api_caching_docker", __name__, url_prefix="/cnode")
+api = APIBlueprint("node_api_caching_docker", __name__, url_prefix="/cnode")
 
 
 def get_docker_client():
@@ -29,17 +30,27 @@ def get_docker_client():
     return docker.DockerClient(base_url=f"tcp://{ip}:2375", version="auto", timeout=60 * 5)
 
 
-@bp.route('/spdk_process_start', methods=['POST'])
-def spdk_process_start():
-    data = request.get_json()
+class SPDKParams(BaseModel):
+    server_ip: Annotated[str, Field(default=None, pattern=utils.IP_PATTERN)]
+    rpc_port: Annotated[int, Field(constants.RPC_HTTP_PROXY_PORT, ge=1, le=65536)]
+    rpc_username: str
+    rpc_password: str
+    spdk_cpu_mask: Optional[Annotated[str, Field(None, pattern=r'^0x[0-9a-zA-Z]+$')]]
+    spdk_mem: Optional[Annotated[int, Field(core_utils.parse_size('64GiB'))]]
+    spdk_image: Optional[str] = Field(constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE)
 
-    spdk_cpu_mask = None
-    if 'spdk_cpu_mask' in data:
-        spdk_cpu_mask = data['spdk_cpu_mask']
+
+@api.post('/spdk_process_start', responses={
+    200: {'content': {'application/json': {'schema': utils.response_schema({
+        'type': 'boolean'
+    })}}},
+})
+def spdk_process_start(body: SPDKParams):
     node_cpu_count = os.cpu_count()
 
-    if spdk_cpu_mask:
-        requested_cpu_count = len(format(int(spdk_cpu_mask, 16), 'b'))
+    if body.spdk_cpu_mask is not None:
+        spdk_cpu_mask = body.spdk_cpu_mask
+        requested_cpu_count = int(spdk_cpu_mask, 16).bit_length()
         if requested_cpu_count > node_cpu_count:
             return utils.get_response(
                 False,
@@ -48,8 +59,7 @@ def spdk_process_start():
     else:
         spdk_cpu_mask = hex(int(math.pow(2, node_cpu_count)) - 1)
 
-    spdk_mem_mib = core_utils.convert_size(
-            data.get('spdk_mem', core_utils.parse_size('64GiB')), 'MiB')
+    spdk_mem_mib = core_utils.convert_size(body.spdk_mem, 'MiB')
 
     node_docker = get_docker_client()
     nodes = node_docker.containers.list(all=True)
@@ -60,13 +70,10 @@ def spdk_process_start():
             node.remove(force=True)
             time.sleep(2)
 
-    spdk_image = constants.SIMPLY_BLOCK_SPDK_CORE_IMAGE
-    if 'spdk_image' in data and data['spdk_image']:
-        spdk_image = data['spdk_image']
-        pull_docker_image_with_retry(node_docker, spdk_image)
+    pull_docker_image_with_retry(node_docker, body.spdk_image)
 
     container = node_docker.containers.run(
-        spdk_image,
+        body.spdk_image,
         f"/root/spdk/scripts/run_spdk_tgt.sh {spdk_cpu_mask} {spdk_mem_mib}",
         name="spdk",
         detach=True,
@@ -82,10 +89,6 @@ def spdk_process_start():
         # restart_policy={"Name": "on-failure", "MaximumRetryCount": 99}
     )
 
-    server_ip = data['server_ip']
-    rpc_port = data['rpc_port']
-    rpc_username = data['rpc_username']
-    rpc_password = data['rpc_password']
 
     container2 = node_docker.containers.run(
         constants.SIMPLY_BLOCK_DOCKER_IMAGE,
@@ -98,10 +101,10 @@ def spdk_process_start():
             '/var/tmp:/var/tmp',
             '/etc/foundationdb:/etc/foundationdb'],
         environment=[
-            f"SERVER_IP={server_ip}",
-            f"RPC_PORT={rpc_port}",
-            f"RPC_USERNAME={rpc_username}",
-            f"RPC_PASSWORD={rpc_password}",
+            f"SERVER_IP={body.server_ip}",
+            f"RPC_PORT={body.rpc_port}",
+            f"RPC_USERNAME={body.rpc_username}",
+            f"RPC_PASSWORD={body.rpc_password}",
         ]
         # restart_policy={"Name": "always"}
     )
@@ -122,19 +125,30 @@ def spdk_process_start():
         False, f"Container create max retries reached, Container status: {status}, Is Running: {is_running}")
 
 
-@bp.route('/spdk_process_kill', methods=['GET'])
-def spdk_process_kill():
-    force = request.args.get('force', default=False, type=bool)
+class _SPDKKillQuery(BaseModel):
+    force: Optional[Annotated[bool, Field(False)]]
+
+
+@api.get('/spdk_process_kill', responses={
+    200: {'content': {'application/json': {'schema': utils.response_schema({
+        'type': 'boolean'
+    })}}},
+})
+def spdk_process_kill(query: _SPDKKillQuery):
     node_docker = get_docker_client()
     for cont in node_docker.containers.list(all=True):
         logger.debug(cont.attrs)
         if cont.attrs['Name'] == "/spdk" or cont.attrs['Name'] == "/spdk_proxy":
             cont.stop()
-            cont.remove(force=force)
+            cont.remove(force=query.force)
     return utils.get_response(True)
 
 
-@bp.route('/spdk_process_is_up', methods=['GET'])
+@api.get('/spdk_process_is_up', responses={
+    200: {'content': {'application/json': {'schema': utils.response_schema({
+        'type': 'boolean'
+    })}}},
+})
 def spdk_process_is_up():
     node_docker = get_docker_client()
     for cont in node_docker.containers.list(all=True):
@@ -149,13 +163,18 @@ def spdk_process_is_up():
     return utils.get_response(False, "SPDK container not found")
 
 
-@bp.route('/join_db', methods=['POST'])
-def join_db():
-    data = request.get_json()
-    db_connection = data['db_connection']
+class _DBConnectionParams(BaseModel):
+    db_connection: str
 
+
+@api.post('/join_db', responses={
+    200: {'content': {'application/json': {'schema': utils.response_schema({
+        'type': 'boolean'
+    })}}},
+})
+def join_db(body: _DBConnectionParams):
     logger.info("Setting DB connection")
-    ret = scripts.set_db_config(db_connection)
+    ret = scripts.set_db_config(body.db_connection)
 
     try:
         node_docker = get_docker_client()

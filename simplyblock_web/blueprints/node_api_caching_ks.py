@@ -4,10 +4,11 @@ import logging
 import math
 import os
 import time
+from typing import Annotated, Optional
 
+from pydantic import BaseModel, Field
 import yaml
-from flask import Blueprint
-from flask import request
+from flask_openapi3 import APIBlueprint
 from kubernetes.client import ApiException
 
 from simplyblock_core import constants, utils as core_utils
@@ -16,7 +17,7 @@ from simplyblock_web import utils
 
 logger = logging.getLogger(__name__)
 
-bp = Blueprint("caching_node_k", __name__, url_prefix="/cnode")
+api = APIBlueprint("caching_node_k", __name__, url_prefix="/cnode")
 
 
 namespace = 'default'
@@ -28,25 +29,32 @@ TOP_DIR = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 spdk_deploy_yaml = os.path.join(TOP_DIR, 'static/deploy_spdk.yaml')
 
 
-@bp.route('/spdk_process_start', methods=['POST'])
-def spdk_process_start():
-    data = request.get_json()
+class SPDKParams(BaseModel):
+    server_ip: Annotated[str, Field(default=None, pattern=utils.IP_PATTERN)]
+    rpc_port: Annotated[int, Field(constants.RPC_HTTP_PROXY_PORT, ge=1, le=65536)]
+    rpc_username: str
+    rpc_password: str
+    spdk_cpu_mask: Optional[Annotated[str, Field(None, pattern=r'^0x[0-9a-zA-Z]+$')]]
+    spdk_mem: Optional[Annotated[int, Field(core_utils.parse_size('64GiB'))]]
+    spdk_image: Optional[str] = Field(constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE)
+    namespace: Optional[Annotated[str, Field(None)]]
+    socket: Optional[str] = '0'
 
-    spdk_cpu_mask = None
-    if 'spdk_cpu_mask' in data:
-        spdk_cpu_mask = data['spdk_cpu_mask']
+
+@api.post('/spdk_process_start', responses={
+    200: {'content': {'application/json': {'schema': utils.response_schema({
+        'type': 'boolean'
+    })}}},
+})
+def spdk_process_start(body: SPDKParams):
     node_cpu_count = os.cpu_count()
 
-    socket = '0' 
-    if 'socket' in data: 
-       socket = data['socket']
-    
     global namespace
-    if 'namespace' in data:
-        namespace = data['namespace']
+    if body.namespace is not None:
+        namespace = body.namespace
 
-    if spdk_cpu_mask:
-        requested_cpu_count = len(format(int(spdk_cpu_mask, 16), 'b'))
+    if body.spdk_cpu_mask is not None:
+        requested_cpu_count = int(body.spdk_cpu_mask, 16).bit_length()
         if requested_cpu_count > node_cpu_count:
             return utils.get_response(
                 False,
@@ -55,26 +63,17 @@ def spdk_process_start():
     else:
         spdk_cpu_mask = hex(int(math.pow(2, node_cpu_count)) - 1)
 
-    spdk_mem = data.get('spdk_mem', core_utils.parse_size('64GiB'))
-
-    spdk_image = constants.SIMPLY_BLOCK_SPDK_CORE_IMAGE
-    if 'spdk_image' in data and data['spdk_image']:
-        spdk_image = data['spdk_image']
-
-    # with open(spdk_deploy_yaml, 'r') as f:
-    #     dep = yaml.safe_load(f)
-
     from jinja2 import Environment, FileSystemLoader
     env = Environment(loader=FileSystemLoader(os.path.join(TOP_DIR, 'templates')), trim_blocks=True, lstrip_blocks=True)
     template = env.get_template('caching_deploy_spdk.yaml.j2')
     values = {
-        'SPDK_IMAGE': spdk_image,
+        'SPDK_IMAGE': body.spdk_image,
         'SPDK_CPU_MASK': spdk_cpu_mask,
-        'SPDK_MEM': core_utils.convert_size(spdk_mem, 'MiB'),
-        'SERVER_IP': data['server_ip'],
-        'RPC_PORT': data['rpc_port'],
-        'RPC_USERNAME': data['rpc_username'],
-        'RPC_PASSWORD': data['rpc_password'],
+        'SPDK_MEM': core_utils.convert_size(body.spdk_mem, 'MiB'),
+        'SERVER_IP': body.server_ip,
+        'RPC_PORT': body.rpc_port,
+        'RPC_USERNAME': body.rpc_username,
+        'RPC_PASSWORD': body.rpc_password,
         'SIMPLYBLOCK_DOCKER_IMAGE': constants.SIMPLY_BLOCK_DOCKER_IMAGE,
     }
     dep = yaml.safe_load(template.render(values))
@@ -115,11 +114,15 @@ def spdk_process_start():
         False, f"Deployment create max retries reached")
 
 
-@bp.route('/spdk_process_kill', methods=['GET'])
+@api.get('/spdk_process_kill', responses={
+    200: {'content': {'application/json': {'schema': utils.response_schema({
+        'type': 'boolean'
+    })}}},
+})
 def spdk_process_kill():
-
     k8s_core_v1 = core_utils.get_k8s_core_client()
     k8s_apps_v1 = core_utils.get_k8s_apps_client()
+
     try:
         resp = k8s_apps_v1.delete_namespaced_deployment(deployment_name, namespace)
 
@@ -144,7 +147,11 @@ def spdk_process_kill():
     return utils.get_response(True)
 
 
-@bp.route('/spdk_process_is_up', methods=['GET'])
+@api.get('/spdk_process_is_up', responses={
+    200: {'content': {'application/json': {'schema': utils.response_schema({
+        'type': 'boolean'
+    })}}},
+})
 def spdk_process_is_up():
     k8s_core_v1 = core_utils.get_k8s_core_client()
     resp = k8s_core_v1.list_namespaced_pod(namespace)
@@ -158,6 +165,10 @@ def spdk_process_is_up():
     return utils.get_response(False, "SPDK container not found")
 
 
-@bp.route('/join_db', methods=['POST'])
+@api.post('/join_db', responses={
+    200: {'content': {'application/json': {'schema': utils.response_schema({
+        'type': 'boolean'
+    })}}},
+})
 def join_db():
     return utils.get_response(True)
