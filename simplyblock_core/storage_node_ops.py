@@ -2814,6 +2814,7 @@ def recreate_lvstore_on_sec(snode):
 
         lvol_list = db_controller.get_lvols_by_node_id(node.get_id())
 
+        ### 1- create distribs and raid
         ret, err = _create_bdev_stack(snode, node.lvstore_stack, primary_node=node)
         if err:
             logger.error(f"Failed to recreate lvstore on node {snode.get_id()}")
@@ -2821,53 +2822,43 @@ def recreate_lvstore_on_sec(snode):
             return False
 
         node_api = SNodeClient(node.api_endpoint)
-        sec_node_api = SNodeClient(snode.api_endpoint)
 
-
+        ### 2- create lvols nvmf subsystems
         for lvol in lvol_list:
             logger.info("creating subsystem %s", lvol.nqn)
             rpc_client.subsystem_create(lvol.nqn, 'sbcli-cn', lvol.uuid, 1000)
-            # for iface in snode.data_nics:
-                # if iface.ip4_address:
-                #     tr_type = iface.get_transport_type()
-                #     logger.info("adding listener for %s on IP %s" % (lvol.nqn, iface.ip4_address))
-                #     ret = rpc_client.listeners_create(
-                #         lvol.nqn, tr_type, iface.ip4_address, lvol.subsys_port, "inaccessible")
 
         if node.status == StorageNode.STATUS_ONLINE:
-            # for lvol in lvol_list:
-            #     for iface in node.data_nics:
-            #         if iface.ip4_address:
-            #             ret = remote_rpc_client.nvmf_subsystem_listener_set_ana_state(
-            #                 lvol.nqn, iface.ip4_address, lvol.subsys_port, False, "inaccessible")
+
+            ### 3- block primary port
             node_api.firewall_set_port(node.lvol_subsys_port, "tcp", "block")
             tcp_ports_events.port_deny(node, node.lvol_subsys_port)
 
+            ### 4- set leadership to false
             remote_rpc_client.bdev_lvol_set_leader(False, lvs_name=node.lvstore)
             remote_rpc_client.bdev_distrib_force_to_non_leader(node.jm_vuid)
             # time.sleep(1)
 
-        # ret, err = _create_bdev_stack(snode, node.lvstore_stack, primary_node=node)
+
+        ### 5- examine
         ret = rpc_client.bdev_examine(node.raid)
+
+        ### 6- wait for examine
         ret = rpc_client.bdev_wait_for_examine()
         ret = rpc_client.bdev_lvol_set_lvs_ops(node.lvstore, node.jm_vuid, node.lvol_subsys_port)
 
+        ### 8- allow port on primary
         node_api.firewall_set_port(node.lvol_subsys_port, "tcp", "allow")
         tcp_ports_events.port_allowed(node, node.lvol_subsys_port)
 
+        ### 7- add lvols to subsystems
         executor = ThreadPoolExecutor(max_workers=100)
-
         for lvol in lvol_list:
             a = executor.submit(add_lvol_thread, lvol, snode,  lvol_ana_state="non_optimized")
-
-        time.sleep(5)
-        sec_node_api.firewall_set_port(node.lvol_subsys_port, "tcp", "allow")
-        tcp_ports_events.port_allowed(snode, node.lvol_subsys_port)
 
         node = db_controller.get_storage_node_by_id(node.get_id())
         node.lvstore_status = "ready"
         node.write_to_db()
-
 
     return True
 
@@ -2885,6 +2876,7 @@ def recreate_lvstore(snode):
     snode.remote_jm_devices = _connect_to_remote_jm_devs(snode)
     snode.write_to_db()
 
+    ### 1- create distribs and raid
     ret, err = _create_bdev_stack(snode, [])
 
     if err:
@@ -2913,6 +2905,7 @@ def recreate_lvstore(snode):
         set_node_status(snode.get_id(), StorageNode.STATUS_SUSPENDED)
         lvol_ana_state = "inaccessible"
 
+    ### 2- create lvols nvmf subsystems
     for lvol in lvol_list:
         logger.info("creating subsystem %s", lvol.nqn)
         rpc_client.subsystem_create(lvol.nqn, 'sbcli-cn', lvol.uuid, 1)
@@ -2925,33 +2918,27 @@ def recreate_lvstore(snode):
             sec_node.write_to_db()
             time.sleep(3)
 
+            ### 3- block secondary port
             sec_node_api.firewall_set_port(snode.lvol_subsys_port, "tcp", "block", sec_node.rpc_port)
             tcp_ports_events.port_deny(sec_node, snode.lvol_subsys_port)
 
             # time.sleep(1)
-
+            ### 4- set leadership to false
             sec_rpc_client.bdev_lvol_set_leader(False, lvs_name=snode.lvstore, bs_nonleadership=True)
             sec_rpc_client.bdev_distrib_force_to_non_leader(snode.jm_vuid)
             # time.sleep(1)
 
-
+    ### 5- examine
     ret = rpc_client.bdev_examine(snode.raid)
     # time.sleep(1)
 
+    ### 6- wait for examine
     ret = rpc_client.bdev_wait_for_examine()
     ret = rpc_client.bdev_lvol_set_lvs_ops(snode.lvstore, snode.jm_vuid, snode.lvol_subsys_port)
     ret = rpc_client.bdev_lvol_set_leader(True, lvs_name=snode.lvstore)
 
-    # if not lvol_list:
-    #     prim_node_suspend = False
-
-    # if snode.jm_vuid:
-    #     ret = rpc_client.jc_explicit_synchronization(snode.jm_vuid)
-    #     logger.info(f"JM Sync res: {ret}")
-    #     time.sleep(1)
-
+    ### 7- add lvols to subsystems
     executor = ThreadPoolExecutor(max_workers=100)
-
     for lvol in lvol_list:
         a = executor.submit(add_lvol_thread, lvol, snode, lvol_ana_state)
 
@@ -2960,9 +2947,9 @@ def recreate_lvstore(snode):
         logger.info("Node status changed to suspended")
         return False
 
-
+    ### 8- allow secondary port
     if sec_node.status == StorageNode.STATUS_ONLINE:
-        time.sleep(5)
+        time.sleep(7)
         sec_node_api.firewall_set_port(snode.lvol_subsys_port, "tcp", "allow", sec_node.rpc_port)
         tcp_ports_events.port_allowed(sec_node, snode.lvol_subsys_port)
         sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
@@ -2972,8 +2959,8 @@ def recreate_lvstore(snode):
     if snode.lvstore_stack_secondary_1:
         node = db_controller.get_storage_node_by_id(snode.lvstore_stack_secondary_1)
         if node:
+            time.sleep(2)
             ret = recreate_lvstore_on_sec(snode)
-
             if not ret:
                 logger.error(f"Failed to recreate secondary on node: {snode.get_id()}")
 
