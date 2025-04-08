@@ -3059,11 +3059,17 @@ def get_node_jm_names(current_node, remote_node=None):
 def get_secondary_nodes(current_node):
     db_controller = DBController()
     nodes = []
+    nod_found = False
     for node in db_controller.get_storage_nodes_by_cluster_id(current_node.cluster_id):
+        if node.get_id() == current_node.get_id():
+            nod_found = True
+            continue
         if node.get_id() != current_node.get_id() and not node.lvstore_stack_secondary_1 \
                 and node.status == StorageNode.STATUS_ONLINE and node.mgmt_ip != current_node.mgmt_ip \
                 and node.secondary_node_id != current_node.get_id():
             nodes.append(node.get_id())
+            if nod_found:
+                return [node.get_id()]
         if node.get_id() != current_node.get_id() and node.is_secondary_node:
             return [node.get_id()]
 
