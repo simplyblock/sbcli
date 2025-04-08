@@ -927,20 +927,22 @@ def list_all_info(cluster_id):
 
         data.append({
             "Storage node UUID": node.uuid,
-            "Devices": f"{total_devices}/{online_devices}",
-            "LVols": f"{len(lvs)}",
 
-            "Size prov": f"{utils.humanbytes(rec.size_total)}",
-            "Size Used": f"{utils.humanbytes(rec.size_used)}",
-            "Size free": f"{utils.humanbytes(rec.size_free)}",
-            "Size %": f"{rec.size_util}%",
-            "Size prov %": f"{rec.size_prov_util}%",
+            "Size": f"{utils.humanbytes(rec.size_total)}",
+            "Used": f"{utils.humanbytes(rec.size_used)}",
+            "Free": f"{utils.humanbytes(rec.size_free)}",
+            "Util": f"{rec.size_util}%",
 
             "Read BW/s": f"{utils.humanbytes(rec.read_bytes_ps)}",
             "Write BW/s": f"{utils.humanbytes(rec.write_bytes_ps)}",
             "Read IOP/s": f"{rec.read_io_ps}",
             "Write IOP/s": f"{rec.write_io_ps}",
 
+            "Size prov": f"{utils.humanbytes(rec.size_prov)}",
+            "Util prov": f"{rec.size_prov_util}%",
+
+            "Devices": f"{total_devices}/{online_devices}",
+            "LVols": f"{len(lvs)}",
             "Status": node.status,
 
         })
@@ -954,19 +956,15 @@ def list_all_info(cluster_id):
 
             dev_data.append({
                 "Device UUID": dev.uuid,
-                "StorgeID": dev.cluster_device_order,
-
-                "Size total": f"{utils.humanbytes(rec.size_total)}",
-                "Size Used": f"{utils.humanbytes(rec.size_used)}",
-                "Size free": f"{utils.humanbytes(rec.size_free)}",
-                "Size %": f"{rec.size_util}%",
-                # "Size prov %": f"{rec.size_prov_util}%",
-
+                "Size": f"{utils.humanbytes(rec.size_total)}",
+                "Used": f"{utils.humanbytes(rec.size_used)}",
+                "Free": f"{utils.humanbytes(rec.size_free)}",
+                "Util": f"{rec.size_util}%",
                 "Read BW/s": f"{utils.humanbytes(rec.read_bytes_ps)}",
                 "Write BW/s": f"{utils.humanbytes(rec.write_bytes_ps)}",
                 "Read IOP/s": f"{rec.read_io_ps}",
                 "Write IOP/s": f"{rec.write_io_ps}",
-
+                "StorgeID": dev.cluster_device_order,
                 "Health": dev.health_check,
                 "Status": dev.status,
 
@@ -992,18 +990,14 @@ def list_all_info(cluster_id):
 
         lvol_data.append({
             "LVol UUID": lvol.uuid,
-
-            "Size prov": f"{utils.humanbytes(rec.size_total)}",
-            "Size Used": f"{utils.humanbytes(rec.size_used)}",
-            "Size free": f"{utils.humanbytes(rec.size_free)}",
-            "Size %": f"{rec.size_util}%",
-            # "Size prov %": f"{rec.size_prov_util}%",
-
+            "Size": f"{utils.humanbytes(rec.size_total)}",
+            "Used": f"{utils.humanbytes(rec.size_used)}",
+            "Free": f"{utils.humanbytes(rec.size_free)}",
+            "Util": f"{rec.size_util}%",
             "Read BW/s": f"{utils.humanbytes(rec.read_bytes_ps)}",
             "Write BW/s": f"{utils.humanbytes(rec.write_bytes_ps)}",
             "Read IOP/s": f"{rec.read_io_ps}",
             "Write IOP/s": f"{rec.write_io_ps}",
-
             "Connections": f"{rec.connected_clients}",
             "Health": lvol.health_check,
             "Status": lvol.status,
