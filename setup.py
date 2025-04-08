@@ -7,9 +7,9 @@ from setuptools.command.install import install as _install
 
 def _post_install():
     from subprocess import getstatusoutput
-    _, out = getstatusoutput('activate-global-python-argcomplete --user')
-    if out:
-        print(out)
+    # _, out = getstatusoutput('activate-global-python-argcomplete --user')
+    # if out:
+    #     print(out)
 
     if os.environ.get("SHELL") and os.environ.get("HOME"):
         if "zsh" in os.environ.get("SHELL", ""):
