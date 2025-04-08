@@ -6,18 +6,15 @@ from setuptools.command.install import install as _install
 
 
 def _post_install():
-    from subprocess import getstatusoutput
+    # from subprocess import getstatusoutput
     # _, out = getstatusoutput('activate-global-python-argcomplete --user')
     # if out:
     #     print(out)
 
     if os.environ.get("SHELL") and os.environ.get("HOME"):
-        if "zsh" in os.environ.get("SHELL", ""):
-            path = f"{os.environ.get('HOME')}/.zshenv"
-        else:
-            path = f"{os.environ.get('HOME')}/.bash_completion"
+        path = f"{os.environ.get('HOME')}/.bash_completion"
         if os.path.isfile(path):
-            _, out = getstatusoutput(f'source {path}')
+            # _, out = getstatusoutput(f'source {path}')
             found = False
             if os.path.exists(os.environ.get("HOME")+"/.bashrc"):
                 with open(os.environ.get("HOME")+"/.bashrc", "r") as bashrc:
