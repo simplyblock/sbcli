@@ -261,6 +261,9 @@ def storage_node_add():
     if 'is_secondary_node' in req_data:
         is_secondary_node = bool(req_data['is_secondary_node'])
 
+    ssd_pcie = []
+    if 'ssd_pcie' in req_data:
+        ssd_pcie = req_data['ssd_pcie']
 
     tasks_controller.add_node_add_task(cluster_id, {
         "cluster_id": cluster_id,
@@ -283,6 +286,8 @@ def storage_node_add():
         "namespace": namespace,
         "enable_ha_jm": not disable_ha_jm,
         "is_secondary_node": is_secondary_node,
+        "ssd_pcie": ssd_pcie,
+
     })
 
     return utils.get_response(True)
