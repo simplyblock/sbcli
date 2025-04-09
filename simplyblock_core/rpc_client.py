@@ -1,4 +1,5 @@
 import json
+import inspect
 
 import requests
 
@@ -913,18 +914,12 @@ class RPCClient:
             params = {"jm_vuid": jm_vuid}
         return self._request("bdev_distrib_force_to_non_leader", params)
 
-    def bdev_lvol_set_leader(self, is_leader=False, uuid=None, lvs_name=None, bs_nonleadership=False):
-        params = {
-            "lvs_leadership": is_leader,
-        }
-        if uuid:
-            params["uuid"] = uuid
-        elif lvs_name:
-            params["lvs_name"] = lvs_name
-
-        params["bs_nonleadership"] = bs_nonleadership
-
-        return self._request("bdev_lvol_set_leader_all", params)
+    def bdev_lvol_set_leader(self, lvs, *, leader=False, bs_nonleadership=False):
+        return self._request("bdev_lvol_set_leader_all", {
+            "uuid" if utils.UUID_PATTERN.match(lvs) else "lvs_name": lvs,
+            "lvs_leadership": leader,
+            "bs_nonleadership": bs_nonleadership,
+        })
 
     def bdev_lvol_register(self, name, lvs_name, registered_uuid, blobid, priority_class=0):
         params = {
@@ -982,13 +977,19 @@ class RPCClient:
         }
         return self._request("nvmf_set_max_subsystems", params)
 
-    def bdev_lvol_set_lvs_ops(self, lvs_name, groupid, subsystem_port=9090):
-        params = {
+    def bdev_lvol_set_lvs_opts(self, lvs, *, groupid, subsystem_port=9090, primary=False, secondary=False):
+        """Set lvstore options
+
+        `lvs` must be either an ID or the lvstore name.
+        """
+
+        return self._request(inspect.currentframe().f_code.co_name, {
+            "uuid" if utils.UUID_PATTERN.match(lvs) else "lvs_name": lvs,
             "groupid": groupid,
-            "lvs_name": lvs_name,
             "subsystem_port": subsystem_port,
-        }
-        return self._request("bdev_lvol_set_lvs_op", params)
+            "primary": primary,
+            "secondary": secondary,
+        })
 
     def bdev_lvol_get_lvol_delete_status(self, name):
         """

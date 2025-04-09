@@ -28,6 +28,10 @@ CONFIG_KEYS = [
     "jc_singleton_core",
 ]
 
+
+UUID_PATTERN = re.compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
+
+
 def get_env_var(name, default=None, is_required=False):
     if not name:
         logger.warning("Invalid env var name %s", name)

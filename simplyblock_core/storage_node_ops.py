@@ -2198,7 +2198,7 @@ def suspend_storage_node(node_id, force=False):
                             ret = rpc_client.nvmf_subsystem_listener_set_ana_state(
                                 lvol.nqn, iface.ip4_address, lvol.subsys_port, False, ana="inaccessible")
 
-                rpc_client.bdev_lvol_set_leader(False, lvs_name=node.lvstore)
+                rpc_client.bdev_lvol_set_leader(node.lvstore, leader=False)
                 rpc_client.bdev_distrib_force_to_non_leader(node.jm_vuid)
 
 
@@ -2213,7 +2213,7 @@ def suspend_storage_node(node_id, force=False):
                     ret = sec_node_client.nvmf_subsystem_listener_set_ana_state(
                         lvol.nqn, iface.ip4_address, lvol.subsys_port, False, ana="inaccessible")
         time.sleep(1)
-        # sec_node_client.bdev_lvol_set_leader(False, lvs_name=snode.lvstore)
+        # sec_node_client.bdev_lvol_set_leader(snode.lvstore, leader=False)
         # sec_node_client.bdev_distrib_force_to_non_leader(snode.jm_vuid)
 
     for lvol in db_controller.get_lvols_by_node_id(snode.get_id()):
@@ -2223,7 +2223,7 @@ def suspend_storage_node(node_id, force=False):
                     lvol.nqn, iface.ip4_address, lvol.subsys_port, False, ana="inaccessible")
     time.sleep(1)
 
-    rpc_client.bdev_lvol_set_leader(False, lvs_name=snode.lvstore)
+    rpc_client.bdev_lvol_set_leader(snode.lvstore, leader=False)
     rpc_client.bdev_distrib_force_to_non_leader(snode.jm_vuid)
     time.sleep(1)
 
@@ -2311,7 +2311,7 @@ def resume_storage_node(node_id):
                         ret = sec_node_client.nvmf_subsystem_listener_set_ana_state(
                             lvol.nqn, iface.ip4_address, lvol.subsys_port, False, ana="inaccessible")
             time.sleep(1)
-            sec_node_client.bdev_lvol_set_leader(False, lvs_name=snode.lvstore)
+            sec_node_client.bdev_lvol_set_leader(snode.lvstore, leader=False)
             sec_node_client.bdev_distrib_force_to_non_leader(snode.jm_vuid)
             time.sleep(1)
 
@@ -2838,7 +2838,7 @@ def recreate_lvstore_on_sec(snode):
             tcp_ports_events.port_deny(node, node.lvol_subsys_port)
 
             ### 4- set leadership to false
-            remote_rpc_client.bdev_lvol_set_leader(False, lvs_name=node.lvstore)
+            remote_rpc_client.bdev_lvol_set_leader(node.lvstore, leader=False)
             remote_rpc_client.bdev_distrib_force_to_non_leader(node.jm_vuid)
             # time.sleep(1)
 
@@ -2848,7 +2848,11 @@ def recreate_lvstore_on_sec(snode):
 
         ### 6- wait for examine
         ret = rpc_client.bdev_wait_for_examine()
-        ret = rpc_client.bdev_lvol_set_lvs_ops(node.lvstore, node.jm_vuid, node.lvol_subsys_port)
+        ret = rpc_client.bdev_lvol_set_lvs_opts(
+                node.lvstore,
+                groupid=node.jm_vuid,
+                subsystem_port=node.lvol_subsys_port
+        )
 
         ### 8- allow port on primary
         node_api.firewall_set_port(node.lvol_subsys_port, "tcp", "allow")
@@ -2930,7 +2934,7 @@ def recreate_lvstore(snode):
 
             # time.sleep(1)
             ### 4- set leadership to false
-            sec_rpc_client.bdev_lvol_set_leader(False, lvs_name=snode.lvstore, bs_nonleadership=True)
+            sec_rpc_client.bdev_lvol_set_leader(snode.lvstore, leader=False, bs_nonleadership=True)
             sec_rpc_client.bdev_distrib_force_to_non_leader(snode.jm_vuid)
             # time.sleep(1)
 
@@ -2940,8 +2944,12 @@ def recreate_lvstore(snode):
 
     ### 6- wait for examine
     ret = rpc_client.bdev_wait_for_examine()
-    ret = rpc_client.bdev_lvol_set_lvs_ops(snode.lvstore, snode.jm_vuid, snode.lvol_subsys_port)
-    ret = rpc_client.bdev_lvol_set_leader(True, lvs_name=snode.lvstore)
+    ret = rpc_client.bdev_lvol_set_lvs_opts(
+            snode.lvstore,
+            groupid=snode.jm_vuid,
+            subsystem_port=snode.lvol_subsys_port
+    )
+    ret = rpc_client.bdev_lvol_set_leader(snode.lvstore, leader=True)
 
     ### 7- add lvols to subsystems
     executor = ThreadPoolExecutor(max_workers=100)
@@ -3196,7 +3204,11 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
 
         ret = temp_rpc_client.bdev_examine(snode.raid)
         ret = temp_rpc_client.bdev_wait_for_examine()
-        ret = temp_rpc_client.bdev_lvol_set_lvs_ops(snode.lvstore, snode.jm_vuid, snode.lvol_subsys_port)
+        ret = temp_rpc_client.bdev_lvol_set_lvs_opts(
+                snode.lvstore,
+                groupid=snode.jm_vuid,
+                subsystem_port=snode.lvol_subsys_port
+        )
 
         sec_node_1.write_to_db()
 
