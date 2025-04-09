@@ -1938,7 +1938,7 @@ def list_storage_nodes(is_json, cluster_id=None):
             "Status": node.status,
             "Health": node.health_check,
             "Up time": uptime,
-            "CPU": f"{len(utils.hexa_to_cpu_list(node.spdk_cpu_mask))} {format(int(node.spdk_cpu_mask, 16), f'#0{node.cpu+2}b')}",
+            "CPU": f"{len(utils.hexa_to_cpu_list(node.spdk_cpu_mask))} {node.spdk_cpu_mask}",
             "MEM": utils.humanbytes(node.spdk_mem),
             "SPDK P": node.rpc_port,
             "LVOL P": node.lvol_subsys_port,
