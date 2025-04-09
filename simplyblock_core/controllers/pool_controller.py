@@ -105,7 +105,7 @@ def set_pool(uuid, pool_max=0, lvol_max=0, max_rw_iops=0,
                 msg = f"Pool found with the same name: {name}"
                 logger.error(msg)
                 return False, msg
-        values.append(("name", name))
+        pool.pool_name = name
 
     if pool_max:
         values.append(("pool_max_size", pool_max))
