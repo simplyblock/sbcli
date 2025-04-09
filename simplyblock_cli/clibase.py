@@ -426,7 +426,8 @@ class CLIWrapperBase:
     def volume__resize(self, sub_command, args):
         volume_id = args.volume_id
         size = utils.parse_size(args.size)
-        return lvol_controller.resize_lvol(volume_id, size)
+        ret, err =  lvol_controller.resize_lvol(volume_id, size)
+        return ret
 
     def volume__create_snapshot(self, sub_command, args):
         volume_id = args.volume_id

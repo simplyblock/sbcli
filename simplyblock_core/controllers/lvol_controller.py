@@ -1061,10 +1061,16 @@ def list_lvols(is_json, cluster_id, pool_id_or_name, all=False):
         logger.debug(lvol)
         if lvol.deleted is True and all is False:
             continue
+        size_used = 0
+        records = db_controller.get_lvol_stats(lvol, 1)
+        if records:
+            size_used = records[0].size_used
+
         data.append({
             "Id": lvol.uuid,
             "Name": lvol.lvol_name,
             "Size": utils.humanbytes(lvol.size),
+            "Used": f"{utils.humanbytes(size_used)}",
             "Hostname": lvol.hostname,
             "HA": lvol.ha_type,
             "BlobID": lvol.blobid or "",
@@ -1172,32 +1178,38 @@ def resize_lvol(id, new_size):
     db_controller = DBController()
     lvol = db_controller.get_lvol_by_id(id)
     if not lvol:
-        logger.error(f"LVol not found: {id}")
-        return False
+        msg = f"LVol not found: {id}"
+        logger.error(msg)
+        return False, msg
 
     pool = db_controller.get_pool_by_id(lvol.pool_uuid)
     if pool.status == Pool.STATUS_INACTIVE:
-        logger.error(f"Pool is disabled")
-        return False
+        msg = f"Pool is disabled {pool.get_id()}"
+        logger.error(msg)
+        return False, msg
 
     if lvol.size >= new_size:
-        logger.error(f"New size {new_size} must be higher than the original size {lvol.size}")
-        return False
+        msg = f"New size {new_size} must be higher than the original size {lvol.size}"
+        logger.error(msg)
+        return False, msg
 
     if lvol.max_size < new_size:
-        logger.error(f"New size {new_size} must be smaller than the max size {lvol.max_size}")
-        return False
+        msg = f"New size {new_size} must be smaller than the max size {lvol.max_size}"
+        logger.error(msg)
+        return False, msg
 
     if 0 < pool.lvol_max_size < new_size:
-        logger.error(f"Pool Max LVol size is: {utils.humanbytes(pool.lvol_max_size)}, LVol size: {utils.humanbytes(new_size)} must be below this limit")
-        return False
+        msg = f"Pool Max LVol size is: {utils.humanbytes(pool.lvol_max_size)}, "\
+              "LVol size: {utils.humanbytes(new_size)} must be below this limit"
+        logger.error(msg)
+        return False, msg
 
     if pool.pool_max_size > 0:
         total = pool_controller.get_pool_total_capacity(pool.get_id())
         if total + new_size > pool.pool_max_size:
-            logger.error( f"Invalid LVol size: {utils.humanbytes(new_size)} " 
-                          f"Pool max size has reached {utils.humanbytes(total+new_size)} of {utils.humanbytes(pool.pool_max_size)}")
-            return False
+            msg =f"Invalid LVol size: {utils.humanbytes(new_size)}, Pool max size has reached {utils.humanbytes(total+new_size)} of {utils.humanbytes(pool.pool_max_size)}"
+            logger.error(msg)
+            return False, msg
 
     snode = db_controller.get_storage_node_by_id(lvol.node_id)
 
@@ -1209,13 +1221,13 @@ def resize_lvol(id, new_size):
     rpc_client = RPCClient(
         snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
 
-    error = False
     if lvol.ha_type == "single":
 
         ret = rpc_client.bdev_lvol_resize(f"{lvol.lvs_name}/{lvol.lvol_bdev}", size_in_mib)
         if not ret:
-            logger.error(f"Error resizing lvol on node: {snode.get_id()}")
-            error = True
+            msg = f"Error resizing lvol on node: {snode.get_id()}"
+            logger.error(msg)
+            return False, msg
 
     else:
         primary_node = None
@@ -1229,7 +1241,7 @@ def resize_lvol(id, new_size):
                 if sec_node.status == StorageNode.STATUS_DOWN:
                     msg = f"Secondary node is in down status, can not resize lvol"
                     logger.error(msg)
-                    error = True
+                    return False, msg
 
                 elif sec_node.status == StorageNode.STATUS_ONLINE:
                     secondary_node = sec_node
@@ -1259,10 +1271,8 @@ def resize_lvol(id, new_size):
             # both primary and secondary are not online
             msg = f"Host nodes are not online"
             logger.error(msg)
-            error = True
+            return False, msg
 
-        if error:
-            return False
 
         if primary_node:
             logger.info(f"Resizing LVol: {lvol.get_id()} on node: {primary_node.get_id()}")
@@ -1272,8 +1282,9 @@ def resize_lvol(id, new_size):
 
             ret = rpc_client.bdev_lvol_resize(f"{lvol.lvs_name}/{lvol.lvol_bdev}", size_in_mib)
             if not ret:
-                logger.error(f"Error resizing lvol on node: {primary_node.get_id()}")
-                error = True
+                msg = f"Error resizing lvol on node: {primary_node.get_id()}"
+                logger.error(msg)
+                return False, msg
 
         if secondary_node:
             logger.info(f"Resizing LVol: {lvol.get_id()} on node: {secondary_node.get_id()}")
@@ -1285,18 +1296,17 @@ def resize_lvol(id, new_size):
 
                 ret = sec_rpc_client.bdev_lvol_resize(f"{lvol.lvs_name}/{lvol.lvol_bdev}", size_in_mib)
                 if not ret:
-                    logger.error(f"Error resizing lvol on node: {sec_node.get_id()}")
-                    error = True
+                    msg = f"Error resizing lvol on node: {sec_node.get_id()}"
+                    logger.error(msg)
+                    return False, msg
 
+    lvol = db_controller.get_lvol_by_id(id)
+    lvol.size = new_size
+    lvol.write_to_db(db_controller.kv_store)
+    logger.info("Done")
 
-    if not error:
-        lvol = db_controller.get_lvol_by_id(id)
-        lvol.size = new_size
-        lvol.write_to_db(db_controller.kv_store)
-        logger.info("Done")
-        return True
-    else:
-        return False
+    return True, None
+
 
 
 def set_read_only(id):

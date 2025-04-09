@@ -259,8 +259,8 @@ def resize_lvol(uuid):
 
     new_size = core_utils.parse_size(cl_data['size'])
 
-    ret = lvol_controller.resize_lvol(uuid, new_size)
-    return utils.get_response(ret)
+    ret, error = lvol_controller.resize_lvol(uuid, new_size)
+    return utils.get_response(ret, error)
 
 
 @bp.route('/lvol/connect/<string:uuid>', methods=['GET'])
