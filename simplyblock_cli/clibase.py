@@ -508,7 +508,7 @@ class CLIWrapperBase:
             pool_max = utils.parse_size(args.pool_max)
         if args.lvol_max:
             lvol_max = utils.parse_size(args.lvol_max)
-        return pool_controller.set_pool(
+        ret, err = pool_controller.set_pool(
             args.pool_id,
             pool_max,
             lvol_max,
@@ -516,6 +516,7 @@ class CLIWrapperBase:
             args.max_rw_mbytes,
             args.max_r_mbytes,
             args.max_w_mbytes)
+        return ret
 
     def storage_pool__list(self, sub_command, args):
         return pool_controller.list_pools(args.json, args.cluster_id)
