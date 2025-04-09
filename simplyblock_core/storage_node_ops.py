@@ -2877,7 +2877,10 @@ def recreate_lvstore_on_sec(snode):
         node.lvstore_status = "in_creation"
         node.write_to_db()
 
-        lvol_list = db_controller.get_lvols_by_node_id(node.get_id())
+        lvol_list = []
+        for lv in db_controller.get_lvols_by_node_id(node.get_id()):
+            if lv.status not in [LVol.STATUS_IN_DELETION, LVol.STATUS_IN_CREATION]:
+                lvol_list.append(lv)
 
         ret, err = _create_bdev_stack(snode, node.lvstore_stack, primary_node=node)
         if err:
@@ -2960,7 +2963,10 @@ def recreate_lvstore(snode):
     sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
     sec_node_api = SNodeClient(sec_node.api_endpoint)
 
-    lvol_list = db_controller.get_lvols_by_node_id(snode.get_id())
+    lvol_list = []
+    for lv in db_controller.get_lvols_by_node_id(snode.get_id()):
+        if lv.status not in [LVol.STATUS_IN_DELETION, LVol.STATUS_IN_CREATION]:
+            lvol_list.append(lv)
 
     prim_node_suspend = False
     if sec_node:
