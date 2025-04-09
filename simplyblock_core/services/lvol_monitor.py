@@ -95,10 +95,6 @@ while True:
 
                 for lvol in db_controller.get_lvols_by_node_id(snode.get_id()):
 
-                    if lvol.io_error:
-                        logger.debug(f"Skipping LVol health check because of io_error {lvol.get_id()}")
-                        continue
-
                     if lvol.status == LVol.STATUS_IN_CREATION:
                         continue
 
