@@ -75,11 +75,13 @@ def set_pool_value_if_above(pool, key, value):
     current_value = getattr(pool, key)
     if value > current_value:
         setattr(pool, key, value)
-        return True, None
+    elif value == -1:
+        setattr(pool, key, 0)
     else:
         msg = f"{key}: {value} can't be less than current value: {current_value}"
         logger.error(msg)
         return False, msg
+    return True, None
 
 
 def set_pool(uuid, pool_max=0, lvol_max=0, max_rw_iops=0,
