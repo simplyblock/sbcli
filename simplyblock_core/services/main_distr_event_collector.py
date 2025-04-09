@@ -69,6 +69,10 @@ def process_device_event(event):
                 logger.info(f"Setting device to read-only")
                 device_controller.device_set_read_only(device_obj.get_id())
 
+            elif event.message == 'error_write_cannot_allocate':
+                logger.info(f"Setting device to cannot_allocate")
+                device_controller.device_set_state(device_obj.get_id(), NVMeDevice.STATUS_CANNOT_ALLOCATE)
+
             else:
                 logger.info(f"Setting device to unavailable")
                 device_controller.device_set_unavailable(device_obj.get_id())
