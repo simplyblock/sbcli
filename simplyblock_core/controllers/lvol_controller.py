@@ -1189,7 +1189,7 @@ def resize_lvol(id, new_size):
         return False, msg
 
     if lvol.size >= new_size:
-        msg = f"New size {new_size} must be higher than the original size {lvol.size}"
+        msg = f"New size {utils.humanbytes(new_size)} must be higher than the original size {utils.humanbytes(lvol.size)}"
         logger.error(msg)
         return False, msg
 
@@ -1200,7 +1200,7 @@ def resize_lvol(id, new_size):
 
     if 0 < pool.lvol_max_size < new_size:
         msg = f"Pool Max LVol size is: {utils.humanbytes(pool.lvol_max_size)}, "\
-              "LVol size: {utils.humanbytes(new_size)} must be below this limit"
+              f"LVol size: {utils.humanbytes(new_size)} must be below this limit"
         logger.error(msg)
         return False, msg
 
