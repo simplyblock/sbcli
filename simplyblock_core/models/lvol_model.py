@@ -51,6 +51,7 @@ class LVol(BaseModel):
     subsys_port: int = 9090
     nvme_dev: NVMeDevice = None
     pool_uuid: str = ""
+    pool_name: str = ""
     pvc_name: str = ""
     r_mbytes_per_sec: int = 0
     rw_ios_per_sec: int = 0
