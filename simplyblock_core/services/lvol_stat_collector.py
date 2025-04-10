@@ -288,7 +288,7 @@ while True:
                     record = add_lvol_stats(cluster, lvol, stats, capacity_dict)
                     if record:
                         if lvol.pool_uuid in pools_lvols_stats and pools_lvols_stats[lvol.pool_uuid]:
-                            pools_lvols_stats[lvol.pool_uuid] = pools_lvols_stats[lvol.pool_uuid].append(record)
+                            pools_lvols_stats[lvol.pool_uuid].append(record)
                         else:
                             pools_lvols_stats[lvol.pool_uuid] = [record]
 
