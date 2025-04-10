@@ -115,7 +115,7 @@ _humanbytes_parameter = {
 
 def humanbytes(size: int, mode: str = 'si') -> str:
     """Return the given bytes as a human friendly including the appropriate unit."""
-    if not size:
+    if not size or size < 0:
         return '0 B'
 
     base, exponent, log, infix = _humanbytes_parameter[mode]

@@ -806,7 +806,6 @@ def _remove_bdev_stack(bdev_stack, rpc_client):
             logger.error(f"Failed to delete BDev {name}")
 
         bdev['status'] = 'deleted'
-        time.sleep(1)
     return True
 
 
@@ -818,7 +817,7 @@ def delete_lvol_from_node(lvol_id, node_id, clear_data=True):
         return True
 
     logger.info(f"Deleting LVol:{lvol.get_id()} from node:{snode.get_id()}")
-    rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
+    rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password, timeout=5, retry=2)
 
     # 1- remove subsystem
     if rpc_client.subsystem_list(lvol.nqn):
@@ -843,6 +842,11 @@ def delete_lvol(id_or_name, force_delete=False):
         lvol = db_controller.get_lvol_by_name(id_or_name)
         if not lvol:
             logger.error(f"lvol not found: {id_or_name}")
+            return False
+
+    if lvol.status == LVol.STATUS_IN_DELETION:
+        logger.info(f"lvol:{lvol.get_id()} status is in deletion")
+        if not force_delete:
             return False
 
     pool = db_controller.get_pool_by_id(lvol.pool_uuid)
