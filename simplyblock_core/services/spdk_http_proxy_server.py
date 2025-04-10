@@ -54,13 +54,13 @@ def rpc_call(req):
         if newdata == b'':
             closed = True
         buf += newdata.decode('ascii')
-        try:
-            response = json.loads(buf)
-        except ValueError:
-            continue  # incomplete response; keep buffering
-        break
 
     sock.close()
+
+    try:
+        response = json.loads(buf)
+    except ValueError:
+        response = buf
 
     if not response and len(buf) > 0:
         raise ValueError('Invalid response')
