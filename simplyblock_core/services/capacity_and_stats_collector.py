@@ -92,11 +92,11 @@ def add_device_stats(cl, device, capacity_dict, stats_dict):
     for g in ng:
         v = g.replace("device_", "")
         if v in data:
-            ng[g].labels(cluster=cl.get_id(), node_ip=node.get_id(), device_id=device.get_id()).set(data[v])
+            ng[g].labels(cluster=cl.get_id(), snode=node.get_id(), device_id=device.get_id()).set(data[v])
         elif v == "status_code":
-            ng[g].labels(cluster=cl.get_id(), node_ip=node.get_id(), device_id=device.get_id()).set(device.get_status_code())
+            ng[g].labels(cluster=cl.get_id(), snode=node.get_id(), device_id=device.get_id()).set(device.get_status_code())
         elif v == "health_check":
-            ng[g].labels(cluster=cl.get_id(), node_ip=node.get_id(), device_id=device.get_id()).set(device.health_check)
+            ng[g].labels(cluster=cl.get_id(), snode=node.get_id(), device_id=device.get_id()).set(device.health_check)
 
 
     return stat_obj
@@ -137,11 +137,11 @@ def add_node_stats(node, records):
     for g in ng:
         v = g.replace("snode_", "")
         if v in data:
-            ng[g].labels(cluster=cl.get_id(), node_ip=node.get_id()).set(data[v])
+            ng[g].labels(cluster=cl.get_id(), snode=node.get_id()).set(data[v])
         elif v == "status_code":
-            ng[g].labels(cluster=cl.get_id(), node_ip=node.get_id()).set(node.get_status_code())
+            ng[g].labels(cluster=cl.get_id(), snode=node.get_id()).set(node.get_status_code())
         elif v == "health_check":
-            ng[g].labels(cluster=cl.get_id(), node_ip=node.get_id()).set(node.health_check)
+            ng[g].labels(cluster=cl.get_id(), snode=node.get_id()).set(node.health_check)
 
     return stat_obj
 
@@ -228,7 +228,7 @@ dg = {}
 def get_device_metrics():
     global dg
     if not dg:
-        labels = ['cluster', "node_ip", "device_id"]
+        labels = ['cluster', "snode", "device_id"]
         for k in io_stats_keys + ["status_code", "health_check"]:
             dg["device_" + k] = Gauge("device_" + k, "device_" + k, labelnames=labels, registry=registry)
     return dg
@@ -236,7 +236,7 @@ def get_device_metrics():
 def get_snode_metrics():
     global ng
     if not ng:
-        labels = ['cluster', "node_ip"]
+        labels = ['cluster', "snode"]
         for k in io_stats_keys + ["status_code", "health_check"]:
             ng["snode_" + k] = Gauge("snode_" + k, "snode_" + k, labelnames=labels, registry=registry)
     return ng
