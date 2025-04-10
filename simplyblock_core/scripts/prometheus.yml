@@ -4,11 +4,16 @@ global:
     monitor: 'codelab-monitor'
 
 scrape_configs:
+  - job_name: 'metricsgateway'
+    static_configs:
+      - targets: ['pushgateway:9091']
+
   - job_name: 'cluster_metrics'
     static_configs:
       - targets: ['HAProxy:80']
-        labels:
-          metrics_path: '/cluster/metrics'
+
+    honor_labels: true
+    metrics_path: '/cluster/metrics'
 
   - job_name: 'node'
     dns_sd_configs:
