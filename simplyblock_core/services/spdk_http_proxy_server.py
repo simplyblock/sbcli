@@ -50,17 +50,17 @@ def rpc_call(req):
     response = None
 
     while not closed:
-        newdata = sock.recv(1024)
+        newdata = sock.recv(1024*1024*1024)
         if newdata == b'':
             closed = True
         buf += newdata.decode('ascii')
+        try:
+            response = json.loads(buf)
+        except ValueError:
+            continue  # incomplete response; keep buffering
+        break
 
     sock.close()
-
-    try:
-        response = json.loads(buf)
-    except ValueError:
-        response = buf
 
     if not response and len(buf) > 0:
         raise ValueError('Invalid response')
@@ -151,7 +151,7 @@ def run_server(host, port, user, password, is_threading_enabled=False):
 
 TIMEOUT = int(get_env_var("TIMEOUT", is_required=False, default=60*5))
 is_threading_enabled = get_env_var("MULTI_THREADING_ENABLED", is_required=False, default=False)
-server_ip = get_env_var("SERVER_IP", is_required=True)
+server_ip = get_env_var("SERVER_IP", is_required=True, default="")
 rpc_port = get_env_var("RPC_PORT", is_required=True)
 rpc_username = get_env_var("RPC_USERNAME", is_required=True)
 rpc_password = get_env_var("RPC_PASSWORD", is_required=True)
