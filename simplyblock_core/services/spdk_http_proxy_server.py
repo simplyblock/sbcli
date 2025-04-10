@@ -50,7 +50,7 @@ def rpc_call(req):
     response = None
 
     while not closed:
-        newdata = sock.recv(1024)
+        newdata = sock.recv(1024*1024*1024)
         if newdata == b'':
             closed = True
         buf += newdata.decode('ascii')
