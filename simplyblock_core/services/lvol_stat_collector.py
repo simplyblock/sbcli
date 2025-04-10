@@ -8,7 +8,6 @@ from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.stats import LVolStatObject, PoolStatObject
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.rpc_client import RPCClient
-from simplyblock_core.services.capacity_and_stats_collector import get_lvol_metrics, get_pool_metrics
 
 logger = utils.get_logger(__name__)
 
@@ -156,15 +155,15 @@ def add_lvol_stats(cluster, lvol, stats_list, capacity_dict=None):
     stat_obj.write_to_db(db_controller.kv_store)
     last_object_record[lvol.get_id()] = stat_obj
 
-    ng = get_lvol_metrics()
-    for g in ng:
-        v = g.replace("lvol_", "")
-        if v in data:
-            ng[g].labels(cluster=cluster.get_id(), lvol=lvol.get_id(), pool=lvol.pool_name).set(data[v])
-        elif v == "status_code":
-            ng[g].labels(cluster=cluster.get_id(), lvol=lvol.get_id(), pool=lvol.pool_name).set(lvol.get_status_code())
-        elif v == "health_check":
-            ng[g].labels(cluster=cluster.get_id(), lvol=lvol.get_id(), pool=lvol.pool_name).set(lvol.health_check)
+    # ng = capacity_and_stats_collector.get_lvol_metrics()
+    # for g in ng:
+    #     v = g.replace("lvol_", "")
+    #     if v in data:
+    #         ng[g].labels(cluster=cluster.get_id(), lvol=lvol.get_id(), pool=lvol.pool_name).set(data[v])
+    #     elif v == "status_code":
+    #         ng[g].labels(cluster=cluster.get_id(), lvol=lvol.get_id(), pool=lvol.pool_name).set(lvol.get_status_code())
+    #     elif v == "health_check":
+    #         ng[g].labels(cluster=cluster.get_id(), lvol=lvol.get_id(), pool=lvol.pool_name).set(lvol.health_check)
 
     return stat_obj
 
@@ -186,15 +185,15 @@ def add_pool_stats(pool, records):
     stat_obj = PoolStatObject(data=data)
     stat_obj.write_to_db(db_controller.kv_store)
 
-    ng = get_pool_metrics()
-    for g in ng:
-        v = g.replace("pool_", "")
-        if v in data:
-            ng[g].labels(cluster=cluster.get_id(), name=pool.pool_name, pool=pool.get_id()).set(data[v])
-        elif v == "status_code":
-            ng[g].labels(cluster=cluster.get_id(), name=pool.pool_name, pool=pool.get_id()).set(pool.get_status_code())
-        elif v == "health_check":
-            ng[g].labels(cluster=cluster.get_id(), name=pool.pool_name, pool=pool.get_id()).set(pool.health_check)
+    # ng = capacity_and_stats_collector.get_pool_metrics()
+    # for g in ng:
+    #     v = g.replace("pool_", "")
+    #     if v in data:
+    #         ng[g].labels(cluster=cluster.get_id(), name=pool.pool_name, pool=pool.get_id()).set(data[v])
+    #     elif v == "status_code":
+    #         ng[g].labels(cluster=cluster.get_id(), name=pool.pool_name, pool=pool.get_id()).set(pool.get_status_code())
+    #     elif v == "health_check":
+    #         ng[g].labels(cluster=cluster.get_id(), name=pool.pool_name, pool=pool.get_id()).set(pool.health_check)
 
 
     return stat_obj
