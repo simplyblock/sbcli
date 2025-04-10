@@ -44,6 +44,7 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
         self.outage_end_time = None
         self.node_vs_lvol = {}
         self.sn_nodes_with_sec = []
+        self.sn_primary_secondary_map = {}
         self.lvol_node = ""
         self.secondary_outage = False
         self.lvols_without_sec_connect = []
@@ -88,19 +89,20 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                 lvol_name = f"{self.lvol_name}_{i}" if not is_crypto else f"c{self.lvol_name}_{i}"
             self.logger.info(f"Creating lvol with Name: {lvol_name}, fs type: {fs_type}, crypto: {is_crypto}")
             try:
-                self.sbcli_utils.add_lvol(
-                    lvol_name=lvol_name,
-                    pool_name=self.pool_name,
-                    size=self.lvol_size,
-                    crypto=is_crypto,
-                    key1=self.lvol_crypt_keys[0],
-                    key2=self.lvol_crypt_keys[1],
-                )
-            except Exception as e:
-                self.logger.warning(f"Lvol creation fails with {str(e)}. Retrying with different name.")
-                self.lvol_name = f"lvl{generate_random_sequence(15)}"
-                lvol_name = f"{self.lvol_name}_{i}" if not is_crypto else f"c{self.lvol_name}_{i}"
-                try:
+                if self.current_outage_node:
+                    skip_nodes = [node for node in self.sn_primary_secondary_map if self.sn_primary_secondary_map[node] == self.current_outage_node]
+                    skip_nodes.append(self.current_outage_node)
+                    host_id = [node for node in self.sn_nodes_with_sec if node not in skip_nodes]
+                    self.sbcli_utils.add_lvol(
+                        lvol_name=lvol_name,
+                        pool_name=self.pool_name,
+                        size=self.lvol_size,
+                        crypto=is_crypto,
+                        key1=self.lvol_crypt_keys[0],
+                        key2=self.lvol_crypt_keys[1],
+                        host_id=host_id[0]
+                    )
+                else:
                     self.sbcli_utils.add_lvol(
                         lvol_name=lvol_name,
                         pool_name=self.pool_name,
@@ -109,6 +111,33 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                         key1=self.lvol_crypt_keys[0],
                         key2=self.lvol_crypt_keys[1],
                     )
+            except Exception as e:
+                self.logger.warning(f"Lvol creation fails with {str(e)}. Retrying with different name.")
+                self.lvol_name = f"lvl{generate_random_sequence(15)}"
+                lvol_name = f"{self.lvol_name}_{i}" if not is_crypto else f"c{self.lvol_name}_{i}"
+                try:
+                    if self.current_outage_node:
+                        skip_nodes = [node for node in self.sn_primary_secondary_map if self.sn_primary_secondary_map[node] == self.current_outage_node]
+                        skip_nodes.append(self.current_outage_node)
+                        host_id = [node for node in self.sn_nodes_with_sec if node not in skip_nodes]
+                        self.sbcli_utils.add_lvol(
+                            lvol_name=lvol_name,
+                            pool_name=self.pool_name,
+                            size=self.lvol_size,
+                            crypto=is_crypto,
+                            key1=self.lvol_crypt_keys[0],
+                            key2=self.lvol_crypt_keys[1],
+                            host_id=host_id[0]
+                        )
+                    else:
+                        self.sbcli_utils.add_lvol(
+                            lvol_name=lvol_name,
+                            pool_name=self.pool_name,
+                            size=self.lvol_size,
+                            crypto=is_crypto,
+                            key1=self.lvol_crypt_keys[0],
+                            key2=self.lvol_crypt_keys[1],
+                        )
                 except Exception as exp:
                     self.logger.warning(f"Retry Lvol creation fails with {str(exp)}.")
                     continue
@@ -511,8 +540,10 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
         """Create snapshots and clones during an outage."""
         # Filter lvols on nodes that are not in outage
         self.int_lvol_size += 1
+        skip_nodes = [node for node in self.sn_primary_secondary_map if self.sn_primary_secondary_map[node] == self.current_outage_node]
+        skip_nodes.append(self.current_outage_node)
         available_lvols = [
-            lvol for node, lvols in self.node_vs_lvol.items() if node != self.current_outage_node for lvol in lvols
+            lvol for node, lvols in self.node_vs_lvol.items() if node not in skip_nodes for lvol in lvols
         ]
         if not available_lvols:
             self.logger.warning("No available lvols to create snapshots and clones.")
@@ -658,8 +689,10 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
 
     def delete_random_lvols(self, count):
         """Delete random lvols during an outage."""
+        skip_nodes = [node for node in self.sn_primary_secondary_map if self.sn_primary_secondary_map[node] == self.current_outage_node]
+        skip_nodes.append(self.current_outage_node)
         available_lvols = [
-            lvol for node, lvols in self.node_vs_lvol.items() if node != self.current_outage_node for lvol in lvols
+            lvol for node, lvols in self.node_vs_lvol.items() if node not in skip_nodes for lvol in lvols
         ]
         if len(available_lvols) < count:
             self.logger.warning("Not enough lvols available to delete the requested count.")
@@ -883,6 +916,7 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
         for result in storage_nodes['results']:
             self.sn_nodes.append(result["uuid"])
             self.sn_nodes_with_sec.append(result["uuid"])
+            self.sn_primary_secondary_map[result["uuid"]] = result["lvstore_stack_secondary_1"]
         
         sleep_n_sec(30)
         
