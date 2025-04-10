@@ -102,7 +102,7 @@ def add(lvol_id, snapshot_name):
             if snap_bdev:
                 snap_uuid = snap_bdev[0]['uuid']
                 blobid = snap_bdev[0]['driver_specific']['lvol']['blobid']
-                cluster_size = cluster.distr_ndcs * cluster.page_size_in_blocks
+                cluster_size = cluster.page_size_in_blocks
                 num_allocated_clusters = snap_bdev[0]["driver_specific"]["lvol"]["num_allocated_clusters"]
                 used_size = int(num_allocated_clusters*cluster_size)
         else:
@@ -153,7 +153,7 @@ def add(lvol_id, snapshot_name):
             if snap_bdev:
                 snap_uuid = snap_bdev[0]['uuid']
                 blobid = snap_bdev[0]['driver_specific']['lvol']['blobid']
-                cluster_size = cluster.distr_ndcs * cluster.page_size_in_blocks
+                cluster_size = cluster.page_size_in_blocks
                 num_allocated_clusters = snap_bdev[0]["driver_specific"]["lvol"]["num_allocated_clusters"]
                 used_size = int(num_allocated_clusters*cluster_size)
             else:

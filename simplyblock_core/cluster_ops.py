@@ -998,7 +998,7 @@ def list_all_info(cluster_id):
             "Write BW/s": f"{utils.humanbytes(rec.write_bytes_ps)}",
             "Read IOP/s": f"{rec.read_io_ps}",
             "Write IOP/s": f"{rec.write_io_ps}",
-            "Connections": f"{rec.connected_clients}",
+            # "Connections": f"{rec.connected_clients}",
             "Health": lvol.health_check,
             "Status": lvol.status,
 
