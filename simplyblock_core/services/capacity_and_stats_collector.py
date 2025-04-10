@@ -183,9 +183,9 @@ def add_cluster_stats(cl, records):
     return stat_obj
 
 
-if os.path.exists(PROMETHEUS_MULTIPROC_DIR):
-    shell_utils.run_command(f"rm -rf {PROMETHEUS_MULTIPROC_DIR}")
-os.makedirs(PROMETHEUS_MULTIPROC_DIR, exist_ok=True)
+if not os.path.exists(PROMETHEUS_MULTIPROC_DIR):
+    shell_utils.run_command(f"mkdir -p {PROMETHEUS_MULTIPROC_DIR}")
+
 
 registry = CollectorRegistry()
 multiprocess.MultiProcessCollector(registry)

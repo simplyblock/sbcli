@@ -2,7 +2,7 @@
 import time
 import os
 
-from simplyblock_core import constants, db_controller, utils
+from simplyblock_core import constants, db_controller, utils, shell_utils
 from simplyblock_core.controllers import lvol_events
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.lvol_model import LVol
@@ -12,6 +12,9 @@ from simplyblock_core.rpc_client import RPCClient
 PROMETHEUS_MULTIPROC_DIR = constants.PROMETHEUS_MULTIPROC_DIR
 os.environ["PROMETHEUS_MULTIPROC_DIR"] = PROMETHEUS_MULTIPROC_DIR
 from prometheus_client import Gauge, CollectorRegistry, multiprocess
+
+if not os.path.exists(PROMETHEUS_MULTIPROC_DIR):
+    shell_utils.run_command(f"mkdir -p {PROMETHEUS_MULTIPROC_DIR}")
 
 
 logger = utils.get_logger(__name__)
