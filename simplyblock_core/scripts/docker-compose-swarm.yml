@@ -60,6 +60,7 @@ services:
         constraints: [node.role == manager]
     volumes:
       - "/etc/foundationdb:/etc/foundationdb"
+      - "/etc/simplyblock:/etc/simplyblock"
     environment:
       SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
       FLASK_DEBUG: "False"
@@ -169,6 +170,7 @@ services:
         constraints: [node.role == manager]
     volumes:
       - "/etc/foundationdb:/etc/foundationdb"
+      - "/etc/simplyblock:/etc/simplyblock"
     networks:
       - hostnet
     environment:
