@@ -113,7 +113,6 @@ services:
         constraints: [node.role == manager]
     volumes:
       - "/etc/foundationdb:/etc/foundationdb"
-      - "/etc/simplyblock:/etc/simplyblock"
     networks:
       - hostnet
     environment:
@@ -171,7 +170,6 @@ services:
         constraints: [node.role == manager]
     volumes:
       - "/etc/foundationdb:/etc/foundationdb"
-      - "/etc/simplyblock:/etc/simplyblock"
     networks:
       - hostnet
     environment:
