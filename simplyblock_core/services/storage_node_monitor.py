@@ -261,7 +261,7 @@ while True:
             if snode.status == StorageNode.STATUS_SCHEDULABLE and not ping_check and not node_api_check:
                 continue
 
-            spdk_process = True
+            spdk_process = False
             if node_api_check:
                 # 3- check spdk_process
                 spdk_process = health_controller._check_spdk_process_up(snode.mgmt_ip, snode.rpc_port)
