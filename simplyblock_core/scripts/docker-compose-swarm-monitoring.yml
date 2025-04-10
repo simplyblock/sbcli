@@ -67,27 +67,27 @@ services:
     networks:
       - monitoring-net
 
-  promagent:
-    image: simplyblock/promagent
-    environment:
-      ClusterID: "${CLUSTER_ID}"
-      ClusterIP: "HAProxy"
-      ClusterSecret: "${CLUSTER_SECRET}"
-    deploy:
-      mode: global
-      placement:
-        constraints: [node.role == manager]
-    networks:
-      - monitoring-net
-
-  pushgateway:
-    image: prom/pushgateway
-    deploy:
-      mode: global
-      placement:
-        constraints: [node.role == manager]
-    networks:
-      - monitoring-net
+#  promagent:
+#    image: simplyblock/promagent
+#    environment:
+#      ClusterID: "${CLUSTER_ID}"
+#      ClusterIP: "HAProxy"
+#      ClusterSecret: "${CLUSTER_SECRET}"
+#    deploy:
+#      mode: global
+#      placement:
+#        constraints: [node.role == manager]
+#    networks:
+#      - monitoring-net
+#
+#  pushgateway:
+#    image: prom/pushgateway
+#    deploy:
+#      mode: global
+#      placement:
+#        constraints: [node.role == manager]
+#    networks:
+#      - monitoring-net
 
   prometheus:
     image: prom/prometheus:v2.44.0
