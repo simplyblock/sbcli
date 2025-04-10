@@ -174,7 +174,7 @@ while True:
             rpc_client = RPCClient(
                 node.mgmt_ip, node.rpc_port,
                 node.rpc_username, node.rpc_password,
-                timeout=2, retry=2)
+                timeout=5, retry=2)
 
             node_devs_stats = {}
             ret = rpc_client.get_lvol_stats()
@@ -188,10 +188,11 @@ while True:
                     logger.info(f"Device is skipped: {device.get_id()} status: {device.status}")
                     continue
                 capacity_dict = rpc_client.alceml_get_capacity(device.alceml_name)
-                stats_dict = node_devs_stats[device.nvme_bdev]
-                record = add_device_stats(cl, device, capacity_dict, stats_dict)
-                if record:
-                    devices_records.append(record)
+                if device.nvme_bdev in node_devs_stats:
+                    stats_dict = node_devs_stats[device.nvme_bdev]
+                    record = add_device_stats(cl, device, capacity_dict, stats_dict)
+                    if record:
+                        devices_records.append(record)
 
             node_record = add_node_stats(node, devices_records)
             node_records.append(node_record)

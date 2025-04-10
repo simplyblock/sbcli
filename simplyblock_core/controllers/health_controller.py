@@ -53,7 +53,7 @@ def check_cluster(cluster_id):
     return result
 
 
-def _check_node_rpc(rpc_ip, rpc_port, rpc_username, rpc_password, timeout=3, retry=2):
+def _check_node_rpc(rpc_ip, rpc_port, rpc_username, rpc_password, timeout=5, retry=2):
     try:
         rpc_client = RPCClient(
             rpc_ip, rpc_port, rpc_username, rpc_password,
@@ -69,7 +69,7 @@ def _check_node_rpc(rpc_ip, rpc_port, rpc_username, rpc_password, timeout=3, ret
 
 def _check_node_api(ip):
     try:
-        snode_api = SNodeClient(f"{ip}:5000", timeout=3, retry=2)
+        snode_api = SNodeClient(f"{ip}:5000", timeout=5, retry=2)
         logger.debug(f"Node API={ip}:5000")
         info, _ = snode_api.info()
         if info:
@@ -82,7 +82,7 @@ def _check_node_api(ip):
 
 def _check_spdk_process_up(ip, rpc_port):
     try:
-        snode_api = SNodeClient(f"{ip}:5000", timeout=3, retry=2)
+        snode_api = SNodeClient(f"{ip}:5000", timeout=5, retry=2)
         logger.debug(f"Node API={ip}:5000")
         is_up, _ = snode_api.spdk_process_is_up(rpc_port)
         logger.debug(f"SPDK is {is_up}")
@@ -94,7 +94,7 @@ def _check_spdk_process_up(ip, rpc_port):
 
 def _check_port_on_node(snode, port_id):
     try:
-        snode_api = SNodeClient(f"{snode.mgmt_ip}:5000", timeout=3, retry=2)
+        snode_api = SNodeClient(f"{snode.mgmt_ip}:5000", timeout=5, retry=2)
         iptables_command_output, _ = snode_api.get_firewall(snode.rpc_port)
         result = jc.parse('iptables', iptables_command_output)
         for chain in result:
@@ -125,7 +125,7 @@ def _check_node_lvstore(
     lvstore_check = True
     logger.info(f"Checking distr stack on node : {node.get_id()}")
     rpc_client = RPCClient(
-        node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password, timeout=3, retry=1)
+        node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password, timeout=5, retry=1)
     cluster = db_controller.get_cluster_by_id(node.cluster_id)
     if cluster.status not in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_READONLY]:
         auto_fix = False
@@ -295,7 +295,7 @@ def check_node(node_id, with_devices=True):
         rpc_client = RPCClient(
             snode.mgmt_ip, snode.rpc_port,
             snode.rpc_username, snode.rpc_password,
-            timeout=3, retry=1)
+            timeout=5, retry=1)
         for remote_device in snode.remote_devices:
             ret = rpc_client.get_bdevs(remote_device.remote_bdev)
             if ret:
@@ -580,7 +580,7 @@ def check_jm_device(device_id):
     try:
         rpc_client = RPCClient(
             snode.mgmt_ip, snode.rpc_port,
-            snode.rpc_username, snode.rpc_password, timeout=3, retry=2)
+            snode.rpc_username, snode.rpc_password, timeout=5, retry=2)
 
         ret = rpc_client.get_bdevs(jm_device.jm_bdev)
         if ret:

@@ -2172,7 +2172,7 @@ def suspend_storage_node(node_id, force=False):
             online_nodes += 1
 
     if cluster.ha_type == "ha":
-        if online_nodes <= 3 and cluster.status == cluster.STATUS_ACTIVE:
+        if online_nodes < 3 and cluster.status == cluster.STATUS_ACTIVE:
             logger.warning(f"Cluster mode is HA but online storage nodes are less than 3")
             if force is False:
                 return False
