@@ -12,7 +12,8 @@ def token_required(f):
     @wraps(f)
     def decorated(*args, **kwargs):
 
-        if request.method == "GET" and request.path.startswith("/swagger"):
+        if request.method == "GET" and [request.path.startswith("/swagger") or
+                                        request.path.startswith("/cluster/metrics")]:
             return f(*args, **kwargs)
 
         cluster_id = None

@@ -1,12 +1,16 @@
 # coding=utf-8
+import os
 import time
 
-from simplyblock_core import constants, db_controller, utils
+from simplyblock_core import constants, db_controller, utils, shell_utils
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.rpc_client import RPCClient
 from simplyblock_core.models.stats import DeviceStatObject, NodeStatObject, ClusterStatObject
 
+PROMETHEUS_MULTIPROC_DIR = constants.PROMETHEUS_MULTIPROC_DIR
+os.environ["PROMETHEUS_MULTIPROC_DIR"] = PROMETHEUS_MULTIPROC_DIR
+from prometheus_client import Gauge, CollectorRegistry, multiprocess
 
 logger = utils.get_logger(__name__)
 
@@ -83,6 +87,18 @@ def add_device_stats(cl, device, capacity_dict, stats_dict):
     stat_obj = DeviceStatObject(data=data)
     stat_obj.write_to_db(db_controller.kv_store)
     last_object_record[device.get_id()] = stat_obj
+
+    ng = get_device_metrics()
+    for g in ng:
+        v = g.replace("device_", "")
+        if v in data:
+            ng[g].labels(cluster=cl.get_id(), node_ip=node.get_id(), device_id=device.get_id()).set(data[v])
+        elif v == "status_code":
+            ng[g].labels(cluster=cl.get_id(), node_ip=node.get_id(), device_id=device.get_id()).set(device.get_status_code())
+        elif v == "health_check":
+            ng[g].labels(cluster=cl.get_id(), node_ip=node.get_id(), device_id=device.get_id()).set(device.health_check)
+
+
     return stat_obj
 
 
@@ -116,6 +132,17 @@ def add_node_stats(node, records):
     })
     stat_obj = NodeStatObject(data=data)
     stat_obj.write_to_db(db_controller.kv_store)
+
+    ng = get_snode_metrics()
+    for g in ng:
+        v = g.replace("snode_", "")
+        if v in data:
+            ng[g].labels(cluster=cl.get_id(), node_ip=node.get_id()).set(data[v])
+        elif v == "status_code":
+            ng[g].labels(cluster=cl.get_id(), node_ip=node.get_id()).set(node.get_status_code())
+        elif v == "health_check":
+            ng[g].labels(cluster=cl.get_id(), node_ip=node.get_id()).set(node.health_check)
+
     return stat_obj
 
 
@@ -144,7 +171,83 @@ def add_cluster_stats(cl, records):
 
     stat_obj = ClusterStatObject(data=data)
     stat_obj.write_to_db(db_controller.kv_store)
+
+    ng = get_cluster_metrics()
+    for g in ng:
+        v = g.replace("cluster_", "")
+        if v in data:
+            ng[g].labels(cluster=cl.get_id()).set(data[v])
+        elif v == "status_code":
+            ng[g].labels(cluster=cl.get_id()).set(cl.get_status_code())
+
     return stat_obj
+
+
+if os.path.exists(PROMETHEUS_MULTIPROC_DIR):
+    shell_utils.run_command(f"rm -rf {PROMETHEUS_MULTIPROC_DIR}")
+os.makedirs(PROMETHEUS_MULTIPROC_DIR, exist_ok=True)
+
+registry = CollectorRegistry()
+multiprocess.MultiProcessCollector(registry)
+
+io_stats_keys = [
+    "date",
+    "read_bytes",
+    "read_bytes_ps",
+    "read_io_ps",
+    "read_io",
+    "read_latency_ps",
+    "write_bytes",
+    "write_bytes_ps",
+    "write_io",
+    "write_io_ps",
+    "write_latency_ps",
+    "size_total",
+    "size_prov",
+    "size_used",
+    "size_free",
+    "size_util",
+    "size_prov_util",
+    "read_latency_ticks",
+    "record_duration",
+    "record_end_time",
+    "record_start_time",
+    "unmap_bytes",
+    "unmap_bytes_ps",
+    "unmap_io",
+    "unmap_io_ps",
+    "unmap_latency_ps",
+    "unmap_latency_ticks",
+    "write_latency_ticks",
+]
+
+ng = {}
+cg = {}
+dg = {}
+
+def get_device_metrics():
+    global dg
+    if not dg:
+        labels = ['cluster', "node_ip", "device_id"]
+        for k in io_stats_keys + ["status_code", "health_check"]:
+            dg["device_" + k] = Gauge("device_" + k, "device_" + k, labelnames=labels, registry=registry)
+    return dg
+
+def get_snode_metrics():
+    global ng
+    if not ng:
+        labels = ['cluster', "node_ip"]
+        for k in io_stats_keys + ["status_code", "health_check"]:
+            ng["snode_" + k] = Gauge("snode_" + k, "snode_" + k, labelnames=labels, registry=registry)
+    return ng
+
+def get_cluster_metrics():
+    global cg
+    if not cg:
+        labels = ['cluster']
+        for k in io_stats_keys + ["status_code"]:
+            cg["cluster_" + k] = Gauge("cluster_" + k, "cluster_" + k, labelnames=labels, registry=registry)
+    return cg
 
 
 

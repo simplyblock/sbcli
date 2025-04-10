@@ -132,3 +132,4 @@ HA_JM_COUNT=3
 SENTRY_SDK_DNS = "https://745047b017ac424b4173550e19910fb7@o4508953941311488.ingest.de.sentry.io/4508996361584720"
 ONE_KB = 1024
 TEMP_CORES_FILE = "/etc/simplyblock/tmp_cores_config"
+PROMETHEUS_MULTIPROC_DIR = "/etc/simplyblock/metrics"
