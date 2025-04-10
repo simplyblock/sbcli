@@ -224,8 +224,6 @@ io_stats_keys = [
 ng = {}
 cg = {}
 dg = {}
-lg = {}
-pg = {}
 
 def get_device_metrics():
     global dg
@@ -234,22 +232,6 @@ def get_device_metrics():
         for k in io_stats_keys + ["status_code", "health_check"]:
             dg["device_" + k] = Gauge("device_" + k, "device_" + k, labelnames=labels, registry=registry)
     return dg
-
-def get_lvol_metrics():
-    global lg
-    if not lg:
-        labels = ['cluster', "pool", "lvol"]
-        for k in io_stats_keys + ["status_code", "health_check"]:
-            lg["lvol_" + k] = Gauge("lvol_" + k, "lvol_" + k, labelnames=labels, registry=registry)
-    return lg
-
-def get_pool_metrics():
-    global pg
-    if not pg:
-        labels = ['cluster', "pool", "name"]
-        for k in io_stats_keys + ["status_code", "health_check"]:
-            pg["pool_" + k] = Gauge("pool_" + k, "pool_" + k, labelnames=labels, registry=registry)
-    return pg
 
 def get_snode_metrics():
     global ng

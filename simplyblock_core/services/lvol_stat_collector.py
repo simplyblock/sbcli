@@ -1,18 +1,77 @@
 # coding=utf-8
 import time
+import os
 
 from simplyblock_core import constants, db_controller, utils
+PROMETHEUS_MULTIPROC_DIR = constants.PROMETHEUS_MULTIPROC_DIR
+os.environ["PROMETHEUS_MULTIPROC_DIR"] = PROMETHEUS_MULTIPROC_DIR
+
 from simplyblock_core.controllers import lvol_events
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.stats import LVolStatObject, PoolStatObject
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.rpc_client import RPCClient
+from prometheus_client import Gauge, CollectorRegistry, multiprocess
+
 
 logger = utils.get_logger(__name__)
 
-
 last_object_record = {}
+
+registry = CollectorRegistry()
+multiprocess.MultiProcessCollector(registry)
+
+io_stats_keys = [
+    "date",
+    "read_bytes",
+    "read_bytes_ps",
+    "read_io_ps",
+    "read_io",
+    "read_latency_ps",
+    "write_bytes",
+    "write_bytes_ps",
+    "write_io",
+    "write_io_ps",
+    "write_latency_ps",
+    "size_total",
+    "size_prov",
+    "size_used",
+    "size_free",
+    "size_util",
+    "size_prov_util",
+    "read_latency_ticks",
+    "record_duration",
+    "record_end_time",
+    "record_start_time",
+    "unmap_bytes",
+    "unmap_bytes_ps",
+    "unmap_io",
+    "unmap_io_ps",
+    "unmap_latency_ps",
+    "unmap_latency_ticks",
+    "write_latency_ticks",
+]
+
+lg = {}
+pg = {}
+
+
+def get_lvol_metrics():
+    global lg
+    if not lg:
+        labels = ['cluster', "pool", "lvol"]
+        for k in io_stats_keys + ["status_code", "health_check"]:
+            lg["lvol_" + k] = Gauge("lvol_" + k, "lvol_" + k, labelnames=labels, registry=registry)
+    return lg
+
+def get_pool_metrics():
+    global pg
+    if not pg:
+        labels = ['cluster', "pool", "name"]
+        for k in io_stats_keys + ["status_code"]:
+            pg["pool_" + k] = Gauge("pool_" + k, "pool_" + k, labelnames=labels, registry=registry)
+    return pg
 
 
 def sum_stats(stats_list):
@@ -155,15 +214,15 @@ def add_lvol_stats(cluster, lvol, stats_list, capacity_dict=None):
     stat_obj.write_to_db(db_controller.kv_store)
     last_object_record[lvol.get_id()] = stat_obj
 
-    # ng = capacity_and_stats_collector.get_lvol_metrics()
-    # for g in ng:
-    #     v = g.replace("lvol_", "")
-    #     if v in data:
-    #         ng[g].labels(cluster=cluster.get_id(), lvol=lvol.get_id(), pool=lvol.pool_name).set(data[v])
-    #     elif v == "status_code":
-    #         ng[g].labels(cluster=cluster.get_id(), lvol=lvol.get_id(), pool=lvol.pool_name).set(lvol.get_status_code())
-    #     elif v == "health_check":
-    #         ng[g].labels(cluster=cluster.get_id(), lvol=lvol.get_id(), pool=lvol.pool_name).set(lvol.health_check)
+    ng = get_lvol_metrics()
+    for g in ng:
+        v = g.replace("lvol_", "")
+        if v in data:
+            ng[g].labels(cluster=cluster.get_id(), lvol=lvol.get_id(), pool=lvol.pool_name).set(data[v])
+        elif v == "status_code":
+            ng[g].labels(cluster=cluster.get_id(), lvol=lvol.get_id(), pool=lvol.pool_name).set(lvol.get_status_code())
+        elif v == "health_check":
+            ng[g].labels(cluster=cluster.get_id(), lvol=lvol.get_id(), pool=lvol.pool_name).set(lvol.health_check)
 
     return stat_obj
 
@@ -185,16 +244,13 @@ def add_pool_stats(pool, records):
     stat_obj = PoolStatObject(data=data)
     stat_obj.write_to_db(db_controller.kv_store)
 
-    # ng = capacity_and_stats_collector.get_pool_metrics()
-    # for g in ng:
-    #     v = g.replace("pool_", "")
-    #     if v in data:
-    #         ng[g].labels(cluster=cluster.get_id(), name=pool.pool_name, pool=pool.get_id()).set(data[v])
-    #     elif v == "status_code":
-    #         ng[g].labels(cluster=cluster.get_id(), name=pool.pool_name, pool=pool.get_id()).set(pool.get_status_code())
-    #     elif v == "health_check":
-    #         ng[g].labels(cluster=cluster.get_id(), name=pool.pool_name, pool=pool.get_id()).set(pool.health_check)
-
+    ng = get_pool_metrics()
+    for g in ng:
+        v = g.replace("pool_", "")
+        if v in data:
+            ng[g].labels(cluster=cluster.get_id(), name=pool.pool_name, pool=pool.get_id()).set(data[v])
+        elif v == "status_code":
+            ng[g].labels(cluster=cluster.get_id(), name=pool.pool_name, pool=pool.get_id()).set(pool.get_status_code())
 
     return stat_obj
 
