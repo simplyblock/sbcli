@@ -21,11 +21,24 @@ utils.init_sentry_sdk()
 
 
 def is_new_migrated_node(cluster_id, node):
+    dev_lst = []
     for dev in node.nvme_devices:
         if dev.status == NVMeDevice.STATUS_ONLINE:
-            for item in node.lvstore_stack:
-                if item["type"] == "bdev_distr":
-                    if tasks_controller.get_new_device_mig_task(cluster_id, node.uuid, item["name"],dev.get_id()):
+            dev_lst.append(dev.get_id())
+
+    distr_names = []
+    for item in node.lvstore_stack:
+        if item["type"] == "bdev_distr":
+            distr_names.append(item["name"])
+
+    if dev_lst:
+        tasks = db_controller.get_job_tasks(cluster_id)
+        for task in tasks:
+            if task.function_name == JobSchedule.FN_NEW_DEV_MIG and task.node_id == node.get_id():
+                if task.device_id not in dev_lst:
+                    continue
+                if task.status != JobSchedule.STATUS_DONE and task.canceled is False:
+                    if "distr_name" in task.function_params and task.function_params["distr_name"] in distr_names:
                         return True
     return False
 
