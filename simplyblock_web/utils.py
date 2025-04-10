@@ -54,27 +54,31 @@ def get_int_value_or_default(data, key, default):
 
 
 def get_cluster_id(request):
-    au = request.headers["Authorization"]
-    if len(au.split()) == 2:
-        cluster_id = au.split()[0]
-        cluster_secret = au.split()[1]
-        if cluster_id and cluster_id == "Basic":
-            try:
-                tkn = base64.b64decode(cluster_secret).decode('utf-8')
-                if tkn:
-                    cluster_id = tkn.split(":")[0]
-                    cluster_secret = tkn.split(":")[1]
-            except Exception as e:
-                print(e)
-                return
+    if "Authorization" in request.headers and request.headers["Authorization"]:
+        au = request.headers["Authorization"]
+        if len(au.split()) == 2:
+            cluster_id = au.split()[0]
+            cluster_secret = au.split()[1]
+            if cluster_id and cluster_id == "Basic":
+                try:
+                    tkn = base64.b64decode(cluster_secret).decode('utf-8')
+                    if tkn:
+                        cluster_id = tkn.split(":")[0]
+                        cluster_secret = tkn.split(":")[1]
+                except Exception as e:
+                    print(e)
+                    return
 
-        return cluster_id
+            return cluster_id
 
 
 def get_aws_region():
     try:
         from ec2_metadata import ec2_metadata
-        data = ec2_metadata.instance_identity_document
+        import requests
+        session = requests.session()
+        session.timeout = 3
+        data = ec2_metadata.EC2Metadata(session=session).instance_identity_document
         return data["region"]
     except:
         pass

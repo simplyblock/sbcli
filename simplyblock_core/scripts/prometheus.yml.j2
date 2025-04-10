@@ -10,6 +10,9 @@ scrape_configs:
       - targets: ['HAProxy:80']
     honor_labels: true
     metrics_path: '/cluster/metrics'
+    basic_auth:
+      username: '{{ CLUSTER_ID }}'
+      password: '{{ CLUSTER_SECRET }}'
 
   - job_name: 'node'
     dns_sd_configs:

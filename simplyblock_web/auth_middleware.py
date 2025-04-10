@@ -12,8 +12,7 @@ def token_required(f):
     @wraps(f)
     def decorated(*args, **kwargs):
 
-        if request.method == "GET" and [request.path.startswith("/swagger") or
-                                        request.path.startswith("/cluster/metrics")]:
+        if request.method == "GET" and request.path.startswith("/swagger"):
             return f(*args, **kwargs)
 
         cluster_id = None
@@ -32,12 +31,13 @@ def token_required(f):
                 except Exception as e:
                     print(e)
 
+        headers = {"WWW-Authenticate": 'Basic realm="Login Required"'}
         if not cluster_id or not cluster_secret:
             return {
                 "message": "Authentication Token is missing!",
                 "data": None,
                 "error": "Unauthorized"
-            }, 401
+            }, 401, headers
         try:
             db_controller = DBController()
             cluster = db_controller.get_cluster_by_id(cluster_id)
@@ -46,13 +46,13 @@ def token_required(f):
                     "message": "Invalid Cluster ID",
                     "data": None,
                     "error": "Unauthorized"
-                }, 401
+                }, 401, headers
             if cluster.secret != cluster_secret:
                 return {
                     "message": "Invalid Cluster secret",
                     "data": None,
                     "error": "Unauthorized"
-                }, 401
+                }, 401, headers
         except Exception as e:
             return {
                 "message": "Something went wrong",

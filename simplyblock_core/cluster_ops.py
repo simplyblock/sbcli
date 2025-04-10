@@ -261,6 +261,17 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
         print(f"An error occurred: {e}")
     shutil.rmtree(temp_dir)
 
+    scripts_folder = os.path.join(TOP_DIR, "simplyblock_core/scripts/")
+    prometheus_file = "prometheus.yml"
+    env = Environment(loader=FileSystemLoader(scripts_folder), trim_blocks=True, lstrip_blocks=True)
+    template = env.get_template(f'{prometheus_file}.j2')
+    values = {
+        'CLUSTER_ID': c.uuid,
+        'CLUSTER_SECRET': c.secret}
+    file_path = os.path.join(scripts_folder, prometheus_file)
+    with open(file_path, 'w') as file:
+        file.write(template.render(values))
+
     logger.info("Deploying swarm stack ...")
     log_level = "DEBUG" if constants.LOG_WEB_DEBUG else "INFO"
     ret = scripts.deploy_stack(cli_pass, DEV_IP, constants.SIMPLY_BLOCK_DOCKER_IMAGE, c.secret, c.uuid,
