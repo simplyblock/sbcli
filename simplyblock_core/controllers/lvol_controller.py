@@ -690,10 +690,11 @@ def add_lvol_on_node(lvol, snode, is_primary=True):
     logger.debug(spdk_mem_info_after)
 
     ret = rpc_client.get_bdevs(f"{lvol.lvs_name}/{lvol.lvol_bdev}")
-    lvol_bdev = ret[0]
-
-    return lvol_bdev, None
-
+    if ret:
+        lvol_bdev = ret[0]
+        return lvol_bdev, None
+    else:
+        return False, "Failed to get lvol bdev"
 
 def is_node_leader(snode, lvs_name):
     rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
