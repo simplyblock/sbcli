@@ -1,6 +1,5 @@
 # coding=utf-8
 
-from __future__ import annotations
 from typing import List
 from uuid import uuid4
 
@@ -176,7 +175,7 @@ class StorageNode(BaseNodeObject):
         self.write_to_db()
         return self.hublvol
 
-    def connect_to_hublvol(self, primary_node: StorageNode):
+    def connect_to_hublvol(self, primary_node):
         """Connect to a primary node's hublvol
         """
         logger.info(f'Connecting node {self.get_id()} to hublvol on {primary_node.get_id()}')
