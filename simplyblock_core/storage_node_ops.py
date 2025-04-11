@@ -25,7 +25,7 @@ from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.nvme_device import NVMeDevice, JMDevice
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.models.cluster import Cluster
-from simplyblock_core.rpc_client import RPCClient
+from simplyblock_core.rpc_client import RPCClient, RPCException
 from simplyblock_core.snode_client import SNodeClient
 
 logger = utils.get_logger(__name__)
@@ -2951,7 +2951,25 @@ def recreate_lvstore(snode):
     )
     ret = rpc_client.bdev_lvol_set_leader(snode.lvstore, leader=True)
 
-    ### 7- add lvols to subsystems
+    if sec_node:
+        ### 7- create and connect hublvol
+        cluster_nqn = db_controller.get_cluster_by_id(snode.cluster_id).nqn
+        try:
+            snode.create_hublvol(cluster_nqn)
+            if sec_node.status == StorageNode.STATUS_ONLINE:
+                sec_node.connect_to_hublvol(snode.hublvol, snode.lvol_subsys_port)
+
+        except RPCException as e:
+            logger.error("Error establishing hublvol: %s", e.message)
+            return False
+
+        finally:
+            ### 8- allow secondary port
+            if sec_node.status == StorageNode.STATUS_ONLINE:
+                sec_node_api.firewall_set_port(snode.lvol_subsys_port, "tcp", "allow", sec_node.rpc_port)
+                tcp_ports_events.port_allowed(sec_node, snode.lvol_subsys_port)
+
+    ### 9- add lvols to subsystems
     executor = ThreadPoolExecutor(max_workers=100)
     for lvol in lvol_list:
         a = executor.submit(add_lvol_thread, lvol, snode, lvol_ana_state)
@@ -2961,11 +2979,8 @@ def recreate_lvstore(snode):
         logger.info("Node status changed to suspended")
         return False
 
-    ### 8- allow secondary port
+    ### 10- finish
     if sec_node.status == StorageNode.STATUS_ONLINE:
-        time.sleep(7)
-        sec_node_api.firewall_set_port(snode.lvol_subsys_port, "tcp", "allow", sec_node.rpc_port)
-        tcp_ports_events.port_allowed(sec_node, snode.lvol_subsys_port)
         sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
         sec_node.lvstore_status = "ready"
         sec_node.write_to_db()
