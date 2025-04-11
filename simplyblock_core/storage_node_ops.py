@@ -3203,29 +3203,32 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
         return False
 
     if snode.secondary_node_id:
+        sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
+
         # creating lvstore on secondary
-        sec_node_1 = db_controller.get_storage_node_by_id(snode.secondary_node_id)
-        sec_node_1.remote_jm_devices = _connect_to_remote_jm_devs(sec_node_1)
-        sec_node_1.write_to_db()
-        ret, err = _create_bdev_stack(sec_node_1, lvstore_stack, primary_node=snode)
+        sec_node.remote_jm_devices = _connect_to_remote_jm_devs(sec_node)
+        sec_node.write_to_db()
+        ret, err = _create_bdev_stack(sec_node, lvstore_stack, primary_node=snode)
         if err:
-            logger.error(f"Failed to create lvstore on node {sec_node_1.get_id()}")
+            logger.error(f"Failed to create lvstore on node {sec_node.get_id()}")
             logger.error(err)
             return False
 
-        temp_rpc_client = RPCClient(
-                sec_node_1.mgmt_ip, sec_node_1.rpc_port,
-                sec_node_1.rpc_username, sec_node_1.rpc_password)
+        sec_rpc_client = sec_node.rpc_client()
+        sec_rpc_client.bdev_examine(snode.raid)
+        sec_rpc_client.bdev_wait_for_examine()
 
-        ret = temp_rpc_client.bdev_examine(snode.raid)
-        ret = temp_rpc_client.bdev_wait_for_examine()
-        ret = temp_rpc_client.bdev_lvol_set_lvs_opts(
-                snode.lvstore,
-                groupid=snode.jm_vuid,
-                subsystem_port=snode.lvol_subsys_port
-        )
+        cluster_nqn = db_controller.get_cluster_by_id(snode.cluster_id).nqn
+        try:
+            snode.create_hublvol(cluster_nqn)
+            if sec_node.status == StorageNode.STATUS_ONLINE:
+                sec_node.connect_to_hublvol(snode.hublvol, snode.lvol_subsys_port)
 
-        sec_node_1.write_to_db()
+        except RPCException as e:
+            logger.error("Error establishing hublvol: %s", e.message)
+            return False
+
+        sec_node.write_to_db()
 
     return True
 
