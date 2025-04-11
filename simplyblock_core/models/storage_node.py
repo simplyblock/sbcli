@@ -1,10 +1,16 @@
 # coding=utf-8
 
 from typing import List
+import uuid
 
+from simplyblock_core import utils
 from simplyblock_core.models.base_model import BaseNodeObject
+from simplyblock_core.models.hublvol import HubLVol
 from simplyblock_core.models.iface import IFace
 from simplyblock_core.models.nvme_device import NVMeDevice, JMDevice
+from simplyblock_core.rpc_client import RPCClient, RPCException
+
+logger = utils.get_logger(__name__)
 
 
 class StorageNode(BaseNodeObject):
@@ -90,3 +96,92 @@ class StorageNode(BaseNodeObject):
     lvstore_status: str = ""
     nvmf_port: int = 4420
     physical_label: int = 0
+    hublvol: HubLVol = None
+
+    def rpc_client(self, **kwargs):
+        """Return rpc client to this node
+        """
+        return RPCClient(
+            self.mgmt_ip, self.rpc_port,
+            self.rpc_username, self.rpc_password, **kwargs)
+
+    def create_hublvol(self, cluster_nqn):
+        """Create a hublvol for this node's lvstore
+        """
+        logger.info(f'Creating hublvol on {self.get_id()}')
+        rpc_client = self.rpc_client()
+
+        hublvol_uuid = None
+        try:
+            hublvol_uuid = rpc_client.bdev_lvol_create_hublvol(self.lvstore)
+            if not uuid:
+                raise RPCException('Failed to create hublvol')
+            self.hublvol = HubLVol({
+                'uuid': uuid,
+                'nqn': f'{cluster_nqn}:lvol:{uuid}',
+                'name': f'{self.lvstore}/hublvol',
+            })
+
+            if not rpc_client.subsystem_create(
+                    nqn=self.hublvol.nqn,
+                    serial_number='sbcli-cn',
+                    model_number=uuid.uuid4(),  # ?
+            ):
+                raise RPCException(f'Failed to create subsystem for {self.hublvol.nqn}')
+
+            for ip in (iface.ip4_address for iface in self.data_nics):
+                if not rpc_client.listeners_create(
+                        nqn=self.hublvol.nqn,
+                        trtype='TCP',
+                        traddr=ip,
+                        trsvcid=self.lvol_subsys_port,
+                ):
+                    raise RPCException(f'Failed to create listener for {self.hublvol.nqn}')
+
+            if not rpc_client.nvmf_subsystem_add_ns(
+                    nqn=self.hublvol.nqn,
+                    dev_name=self.hublvol.name,
+                    uuid=self.hublvol.uuid,
+                    nguid=utils.generate_hex_string(16),
+            ):
+                raise RPCException(f'Failed to add namespace to subsytem {self.hublvol.nqn}')
+        except RPCException:
+            if hublvol_uuid is not None and rpc_client.get_bdevs(uuid):
+                rpc_client.bdev_lvol_delete_hublvol(self.hublvol.nqn)
+
+            if self.hublvol and rpc_client.subsystem_list(self.hublvol.nqn):
+                rpc_client.subsystem_delete(self.hublvol.nqn)
+                self.hublvol = None
+
+            raise
+
+        self.write_to_db()
+        return self.hublvol
+
+    def connect_to_hublvol(self, hublvol: HubLVol, primary_node):
+        """Connect to a primary node's hublvol
+        """
+        logger.info(f'Connecting node {self.get_id()} to hublvol on {primary_node.get_id()}')
+        rpc_client = self.rpc_client()
+
+        remote_bdev = None
+        for ip in (iface.ip4_address for iface in self.data_nics):
+            remote_bdev = rpc_client.bdev_nvme_attach_controller_tcp(hublvol.name, hublvol.nqn, ip, primary_node.lvol_subsys_port)
+            if remote_bdev is not None:
+                break
+            else:
+                logger.warning(f'Failed to connect to hublvol on {ip}')
+
+        if remote_bdev is None:
+            raise RPCException('Failed to connect to hublvol')
+
+        if not rpc_client.bdev_lvol_set_lvs_opts(
+                primary_node.lvstore,
+                groupid=primary_node.jm_vuid,
+                subsystem_port=self.lvol_subsys_port,
+                secondary=True,
+        ):
+            raise RPCException('Failed to set secondary lvstore options')
+
+        if not rpc_client.bdev_lvol_connect_hublvol(primary_node.lvstore, remote_bdev):
+            raise RPCException('Failed to connect secondary lvstore to primary')
