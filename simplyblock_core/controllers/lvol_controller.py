@@ -23,14 +23,6 @@ from simplyblock_core.snode_client import SNodeClient
 logger = lg.getLogger()
 
 
-def _generate_hex_string(length):
-    def _generate_string(length):
-        return ''.join(random.SystemRandom().choice(
-            string.ascii_letters + string.digits) for _ in range(length))
-
-    return _generate_string(length).encode('utf-8').hex()
-
-
 def _create_crypto_lvol(rpc_client, name, base_name, key1, key2):
     key_name = f'key_{name}'
     ret = rpc_client.lvol_crypto_key_create(key_name, key1, key2)
@@ -427,7 +419,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
     lvol.ha_type = ha_type
     lvol.bdev_stack = []
     lvol.uuid = uid or str(uuid.uuid4())
-    lvol.guid = _generate_hex_string(16)
+    lvol.guid = utils.generate_hex_string(16)
     lvol.vuid = vuid
     lvol.lvol_bdev = f"LVOL_{vuid}"
 
