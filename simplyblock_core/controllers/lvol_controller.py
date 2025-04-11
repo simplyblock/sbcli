@@ -664,7 +664,7 @@ def add_lvol_on_node(lvol, snode, is_primary=True):
     else:
         min_cntlid =  1000
     logger.info("creating subsystem %s", lvol.nqn)
-    ret = rpc_client.subsystem_create(lvol.nqn, 'sbcli-cn', lvol.uuid, min_cntlid)
+    ret = rpc_client.subsystem_create(lvol.nqn, lvol.ha_type, lvol.uuid, min_cntlid)
     logger.debug(ret)
 
     # add listeners
@@ -723,7 +723,7 @@ def recreate_lvol_on_node(lvol, snode, ha_inode_self=0, ana_state=None):
 
     min_cntlid = 1 + 1000 * ha_inode_self
     logger.info("creating subsystem %s", lvol.nqn)
-    rpc_client.subsystem_create(lvol.nqn, 'sbcli-cn', lvol.uuid, min_cntlid)
+    rpc_client.subsystem_create(lvol.nqn, lvol.ha_type, lvol.uuid, min_cntlid)
 
     # if namespace_found is False:
     logger.info("Add BDev to subsystem")
