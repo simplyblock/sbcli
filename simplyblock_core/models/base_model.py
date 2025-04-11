@@ -7,11 +7,6 @@ from inspect import ismethod
 from typing import Mapping
 from collections import ChainMap
 
-from simplyblock_core import utils
-
-
-logger = utils.get_logger(__name__)
-
 
 class BaseModel(object):
 
@@ -122,7 +117,9 @@ class BaseModel(object):
                 objects.append(self.__class__().from_dict(json.loads(v)))
             return objects
         except Exception:
-            logging.exception('Error reading from FDB')
+            from simplyblock_core import utils
+            logger = utils.get_logger(__name__)
+            logger.exception('Error reading from FDB')
             return []
 
     def get_last(self, kv_store):
