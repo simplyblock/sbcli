@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 from typing import List
-import uuid
+from uuid import uuid4
 
 from simplyblock_core import utils
 from simplyblock_core.models.base_model import BaseNodeObject
@@ -106,6 +106,39 @@ class StorageNode(BaseNodeObject):
             self.mgmt_ip, self.rpc_port,
             self.rpc_username, self.rpc_password, **kwargs)
 
+    def expose_bdev(self, nqn, bdev_name, model_number, uuid, nguid):
+        rpc_client = self.rpc_client()
+
+        try:
+            if not rpc_client.subsystem_create(
+                    nqn=nqn,
+                    serial_number='sbcli-cn',
+                    model_number=model_number,
+            ):
+                raise RPCException(f'Failed to create subsystem for {nqn}')
+
+            for ip in (iface.ip4_address for iface in self.data_nics):
+                if not rpc_client.listeners_create(
+                        nqn=nqn,
+                        trtype='TCP',
+                        traddr=ip,
+                        trsvcid=self.lvol_subsys_port,
+                ):
+                    raise RPCException(f'Failed to create listener for {nqn}')
+
+            if not rpc_client.nvmf_subsystem_add_ns(
+                    nqn=nqn,
+                    dev_name=bdev_name,
+                    uuid=uuid,
+                    nguid=nguid,
+            ):
+                raise RPCException(f'Failed to add namespace to subsytem {nqn}')
+        except RPCException:
+            if self.hublvol and rpc_client.subsystem_list(self.hublvol.nqn):
+                rpc_client.subsystem_delete(self.hublvol.nqn)
+
+            raise
+
     def create_hublvol(self, cluster_nqn):
         """Create a hublvol for this node's lvstore
         """
@@ -115,39 +148,23 @@ class StorageNode(BaseNodeObject):
         hublvol_uuid = None
         try:
             hublvol_uuid = rpc_client.bdev_lvol_create_hublvol(self.lvstore)
-            if not uuid:
+            if not hublvol_uuid:
                 raise RPCException('Failed to create hublvol')
             self.hublvol = HubLVol({
-                'uuid': uuid,
-                'nqn': f'{cluster_nqn}:lvol:{uuid}',
+                'uuid': hublvol_uuid,
+                'nqn': f'{cluster_nqn}:lvol:{hublvol_uuid}',
                 'name': f'{self.lvstore}/hublvol',
             })
 
-            if not rpc_client.subsystem_create(
+            self.expose_bdev(
                     nqn=self.hublvol.nqn,
-                    serial_number='sbcli-cn',
-                    model_number=uuid.uuid4(),  # ?
-            ):
-                raise RPCException(f'Failed to create subsystem for {self.hublvol.nqn}')
-
-            for ip in (iface.ip4_address for iface in self.data_nics):
-                if not rpc_client.listeners_create(
-                        nqn=self.hublvol.nqn,
-                        trtype='TCP',
-                        traddr=ip,
-                        trsvcid=self.lvol_subsys_port,
-                ):
-                    raise RPCException(f'Failed to create listener for {self.hublvol.nqn}')
-
-            if not rpc_client.nvmf_subsystem_add_ns(
-                    nqn=self.hublvol.nqn,
-                    dev_name=self.hublvol.name,
+                    bdev_name=self.hublvol.name,
+                    model_number=uuid4(),
                     uuid=self.hublvol.uuid,
                     nguid=utils.generate_hex_string(16),
-            ):
-                raise RPCException(f'Failed to add namespace to subsytem {self.hublvol.nqn}')
+            )
         except RPCException:
-            if hublvol_uuid is not None and rpc_client.get_bdevs(uuid):
+            if hublvol_uuid is not None and rpc_client.get_bdevs(hublvol_uuid):
                 rpc_client.bdev_lvol_delete_hublvol(self.hublvol.nqn)
 
             if self.hublvol and rpc_client.subsystem_list(self.hublvol.nqn):
