@@ -2848,11 +2848,12 @@ def recreate_lvstore_on_sec(secondary_node):
 
         ### 6- wait for examine
         ret = secondary_rpc_client.bdev_wait_for_examine()
-        ret = secondary_rpc_client.bdev_lvol_set_lvs_opts(
-                primary_node.lvstore,
-                groupid=primary_node.jm_vuid,
-                subsystem_port=primary_node.lvol_subsys_port
-        )
+        try:
+            secondary_node.connect_to_hublvol(primary_node.hublvol, primary_node.lvol_subsys_port)
+
+        except RPCException as e:
+            logger.error("Error connecting to hublvol: %s", e.message)
+            return False
 
         ### 8- allow port on primary
         primary_node_api.firewall_set_port(primary_node.lvol_subsys_port, "tcp", "allow")
