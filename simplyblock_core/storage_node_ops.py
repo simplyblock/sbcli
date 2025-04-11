@@ -2849,7 +2849,7 @@ def recreate_lvstore_on_sec(secondary_node):
         ### 6- wait for examine
         ret = secondary_rpc_client.bdev_wait_for_examine()
         try:
-            secondary_node.connect_to_hublvol(primary_node.hublvol, primary_node.lvol_subsys_port)
+            secondary_node.connect_to_hublvol(primary_node)
 
         except RPCException as e:
             logger.error("Error connecting to hublvol: %s", e.message)
@@ -2958,7 +2958,7 @@ def recreate_lvstore(snode):
         try:
             snode.create_hublvol(cluster_nqn)
             if sec_node.status == StorageNode.STATUS_ONLINE:
-                sec_node.connect_to_hublvol(snode.hublvol, snode.lvol_subsys_port)
+                sec_node.connect_to_hublvol(snode)
 
         except RPCException as e:
             logger.error("Error establishing hublvol: %s", e.message)
@@ -3223,7 +3223,7 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
         try:
             snode.create_hublvol(cluster_nqn)
             if sec_node.status == StorageNode.STATUS_ONLINE:
-                sec_node.connect_to_hublvol(snode.hublvol, snode.lvol_subsys_port)
+                sec_node.connect_to_hublvol(snode)
 
         except RPCException as e:
             logger.error("Error establishing hublvol: %s", e.message)

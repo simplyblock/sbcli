@@ -176,15 +176,21 @@ class StorageNode(BaseNodeObject):
         self.write_to_db()
         return self.hublvol
 
-    def connect_to_hublvol(self, hublvol: HubLVol, primary_node: StorageNode):
+    def connect_to_hublvol(self, primary_node: StorageNode):
         """Connect to a primary node's hublvol
         """
         logger.info(f'Connecting node {self.get_id()} to hublvol on {primary_node.get_id()}')
+
+        if primary_node.hublvol is None:
+            raise ValueError(f"HubLVol of primary node {primary_node.get_id()} is not present")
+
         rpc_client = self.rpc_client()
 
         remote_bdev = None
         for ip in (iface.ip4_address for iface in self.data_nics):
-            remote_bdev = rpc_client.bdev_nvme_attach_controller_tcp(hublvol.name, hublvol.nqn, ip, primary_node.lvol_subsys_port)
+            remote_bdev = rpc_client.bdev_nvme_attach_controller_tcp(
+                    primary_node.hublvol.name, primary_node.hublvol.nqn,
+                    ip, primary_node.lvol_subsys_port)
             if remote_bdev is not None:
                 break
             else:
