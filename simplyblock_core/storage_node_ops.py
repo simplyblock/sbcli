@@ -1953,30 +1953,36 @@ def restart_storage_node(
         device_controller.set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_ONLINE)
 
     cluster = db_controller.get_cluster_by_id(snode.cluster_id)
-    if cluster.status in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_READONLY]:
+    if cluster.status not in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_READONLY]:
+        logger.info("Cluster is not ready yet")
+        logger.info("Setting node status to Online")
+        set_node_status(node_id, StorageNode.STATUS_ONLINE, reconnect_on_online=False)
+        return True
+
+    else:
         snode = db_controller.get_storage_node_by_id(snode.get_id())
+        logger.info("Recreate lvstore")
         ret = recreate_lvstore(snode)
+        snode = db_controller.get_storage_node_by_id(snode.get_id())
         if not ret:
             logger.error("Failed to recreate lvstore")
             snode.lvstore_status = "failed"
             snode.write_to_db()
+            logger.info("Suspending node")
+            set_node_status(snode.get_id(), StorageNode.STATUS_SUSPENDED)
             return False
         else:
             snode.lvstore_status = "ready"
             snode.write_to_db()
 
             logger.info("Setting node status to Online")
-            set_node_status(node_id, StorageNode.STATUS_ONLINE, reconnect_on_online=False)
+            set_node_status(snode.get_id(), StorageNode.STATUS_ONLINE)
 
-            if cluster.status in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_READONLY]:
-                for dev in snode.nvme_devices:
-                    if dev.status == NVMeDevice.STATUS_ONLINE:
-                        logger.info(f"Starting migration task for device {dev.get_id()}")
-                        tasks_controller.add_device_mig_task(dev.get_id())
+            for dev in snode.nvme_devices:
+                if dev.status == NVMeDevice.STATUS_ONLINE:
+                    logger.info(f"Starting migration task for device {dev.get_id()}")
+                    tasks_controller.add_device_mig_task(dev.get_id())
             return True
-
-    logger.info("Done")
-    return True
 
 
 def list_storage_nodes(is_json, cluster_id=None):
