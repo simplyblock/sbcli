@@ -55,7 +55,7 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
         #                       "lvol_disconnect_primary"]
         # self.outage_types = ["container_stop", "graceful_shutdown", 
         #                      "interface_full_network_interrupt", "interface_partial_network_interrupt"]
-        self.outage_types = ["container_stop", "graceful_shutdown"]
+        self.outage_types = ["graceful_shutdown", "interface_partial_network_interrupt"]
         self.blocked_ports = None
         self.outage_log_file = os.path.join("logs", f"outage_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
         self._initialize_outage_log()
@@ -922,7 +922,8 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
         for result in storage_nodes['results']:
             self.sn_nodes.append(result["uuid"])
             self.sn_nodes_with_sec.append(result["uuid"])
-            self.sn_primary_secondary_map[result["uuid"]] = result["lvstore_stack_secondary_1"]
+            self.sn_primary_secondary_map[result["uuid"]] = result["secondary_node_id"]
+        self.logger.info(f"Secondary node map: {self.sn_primary_secondary_map}")
         
         sleep_n_sec(30)
         
