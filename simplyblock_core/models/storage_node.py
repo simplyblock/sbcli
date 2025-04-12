@@ -105,7 +105,7 @@ class StorageNode(BaseNodeObject):
             self.mgmt_ip, self.rpc_port,
             self.rpc_username, self.rpc_password, **kwargs)
 
-    def expose_bdev(self, nqn, bdev_name, model_number, uuid, nguid):
+    def expose_bdev(self, nqn, bdev_name, model_number, uuid, nguid, port):
         rpc_client = self.rpc_client()
 
         try:
@@ -121,7 +121,7 @@ class StorageNode(BaseNodeObject):
                         nqn=nqn,
                         trtype='TCP',
                         traddr=ip,
-                        trsvcid=self.lvol_subsys_port,
+                        trsvcid=port,
                 ):
                     raise RPCException(f'Failed to create listener for {nqn}')
 
@@ -158,9 +158,10 @@ class StorageNode(BaseNodeObject):
             self.expose_bdev(
                     nqn=self.hublvol.nqn,
                     bdev_name=self.hublvol.name,
-                    model_number=uuid4(),
+                    model_number=str(uuid4()),
                     uuid=self.hublvol.uuid,
                     nguid=utils.generate_hex_string(16),
+                    port=self.hublvol.nvmf_port
             )
         except RPCException:
             if hublvol_uuid is not None and rpc_client.get_bdevs(hublvol_uuid):
@@ -186,10 +187,10 @@ class StorageNode(BaseNodeObject):
         rpc_client = self.rpc_client()
 
         remote_bdev = None
-        for ip in (iface.ip4_address for iface in self.data_nics):
+        for ip in (iface.ip4_address for iface in primary_node.data_nics):
             remote_bdev = rpc_client.bdev_nvme_attach_controller_tcp(
                     primary_node.hublvol.name, primary_node.hublvol.nqn,
-                    ip, primary_node.lvol_subsys_port)
+                    ip, primary_node.hublvol.nvmf_port)[0]
             if remote_bdev is not None:
                 break
             else:
