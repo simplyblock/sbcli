@@ -4,7 +4,8 @@ import logging
 
 import json
 from inspect import ismethod
-from typing import Mapping
+import sys
+from typing import Mapping, Type
 from collections import ChainMap
 
 
@@ -27,10 +28,24 @@ class BaseModel(object):
         self.name = self.__class__.__name__
         self.from_dict(data)
 
-    def all_annotations(self) -> ChainMap:
+    @classmethod
+    def all_annotations(cls) -> Mapping[str, Type]:
         """Returns a dictionary-like ChainMap that includes annotations for all
            attributes defined in cls or inherited from superclasses."""
-        return ChainMap(*(c.__annotations__ for c in self.__class__.__mro__ if '__annotations__' in c.__dict__))
+        if sys.version_info >= (3, 10):
+            from inspect import get_annotations
+            return ChainMap(*(
+                get_annotations(c)
+                for c
+                in cls.__mro__
+            ))
+        else:
+            return ChainMap(*(
+                c.__annotations__
+                for c
+                in cls.__mro__
+                if '__annotations__' in c.__dict__
+            ))
 
     def get_id(self):
         return self.uuid
