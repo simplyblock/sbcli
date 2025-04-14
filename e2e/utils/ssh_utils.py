@@ -1529,6 +1529,22 @@ class SshUtils:
             self.log_monitor_stop_flags[node_ip].set()
             self.logger.info(f"Stopping container log monitor thread for {node_ip}")
 
+    def get_node_version(self, node):
+        """
+        Fetches sbcli command version from all storage nodes.
+
+        Returns:
+            str: Current sbcli version string
+        """
+        version = None
+        try:
+            version_cmd = f"pip show {self.base_cmd} | grep Version"
+            output, _ = self.exec_command(node=node, command=version_cmd)
+            version = output.strip().split(":")[1].strip() if ":" in output else "UNKNOWN"
+        except Exception as e:
+            self.logger.error(f"Failed to fetch sbcli-dev version from node {node}: {e}")
+        return version if version else "ERROR"
+
 
 
 
