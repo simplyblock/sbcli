@@ -465,15 +465,49 @@ class SshUtils:
         return output
     
     def stop_spdk_process(self, node):
-        """Stops spdk process
+        """Stops spdk process and waits until spdk_* containers are either exited or no longer listed.
+        
+        If containers are not killed within 20 seconds, the kill command is retried.
+        A maximum of 50 kill attempts is allowed.
 
         Args:
             node (str): Node IP
         """
+        max_attempts = 50
+        attempt = 0
 
-        cmd = "curl 0.0.0.0:5000/snode/spdk_process_kill"
-        output, error = self.exec_command(node=node, command=cmd)
+        kill_cmd = "curl 0.0.0.0:5000/snode/spdk_process_kill"
+        output, error = self.exec_command(node=node, command=kill_cmd)
+        # record the time when the kill command was last sent
+        last_kill_time = time.time()
+
+        while attempt < max_attempts:
+            # Command to check the status of containers matching "spdk_"
+            status_cmd = "docker ps -a --filter 'name=spdk_' --format '{{.Status}}'"
+            status_output, err = self.exec_command(node=node, command=status_cmd)
+            status_output = status_output.strip()
+
+            # If no containers found, exit the loop
+            if not status_output:
+                break
+
+            statuses = status_output.splitlines()
+            # Determine if every container is in an "Exited" state (e.g., "Exited (0)")
+            all_exited = all("Exited" in status for status in statuses)
+            if all_exited:
+                break
+
+            # If 20 seconds have passed since the last kill command, retry the kill command.
+            if time.time() - last_kill_time >= 20:
+                output, error = self.exec_command(node=node, command=kill_cmd)
+                last_kill_time = time.time()
+                attempt += 1
+
+            # Wait a short period before checking again
+            time.sleep(2)
+
         return output
+
 
     def get_mount_points(self, node, base_path):
         """Get all mount points on the node."""

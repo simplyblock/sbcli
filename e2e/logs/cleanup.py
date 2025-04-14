@@ -82,7 +82,7 @@ def cleanup_remote_logs(ssh, node):
         f"rm -rf {HOME_DIR}/container-logs/*",  # Remove container logs content
         f"rm -rf {HOME_DIR}/*.txt* {HOME_DIR}/*.log {HOME_DIR}/*.state",  # Remove uploaded logs
         "rm -rf /etc/simplyblock/[0-9]*",  # Remove dump logs
-        "rm -rf /etc/simplyblock/*core*",  # Remove dump logs
+        "rm -rf /etc/simplyblock/*core*.zst",  # Remove dump logs
         "rm -rf /etc/simplyblock/LVS*",  # Remove dump logs
         f"rm -rf {HOME_DIR}/upload_to_minio.py"  # Remove temporary upload script
     ]
