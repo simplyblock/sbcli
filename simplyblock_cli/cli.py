@@ -723,6 +723,7 @@ class CLIWrapper(CLIWrapperBase):
     def init_storage_pool__set(self, subparser):
         subcommand = self.add_sub_command(subparser, 'set', 'Sets a storage pool\'s attributes')
         subcommand.add_argument('pool_id', help='Pool id', type=str)
+        subcommand.add_argument('cluster_id', help='Cluster id', type=str)
         argument = subcommand.add_argument('--pool-max', help='Pool maximum size: 20M, 20G', type=str, dest='pool_max', required=False)
         argument = subcommand.add_argument('--lvol-max', help='Logical volume maximum size: 20M, 20G', type=str, dest='lvol_max', required=False)
         argument = subcommand.add_argument('--max-rw-iops', help='Maximum Read Write IO Per Second', type=int, dest='max_rw_iops', required=False)

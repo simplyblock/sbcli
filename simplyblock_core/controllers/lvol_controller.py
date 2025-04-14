@@ -650,7 +650,9 @@ def _create_bdev_stack(lvol, snode, is_primary=True):
 
     return True, None
 
-
+# show a warning that existing QOS limits will overwitten by pool settings
+# at the end, call bdev_lvol_add_to_group with pool ID and [lvol ID]
+# check: if this functions sets QOS limits for the LVOL.
 def add_lvol_on_node(lvol, snode, is_primary=True):
     rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
     db_controller = DBController()

@@ -1,7 +1,7 @@
 import json
-
 import requests
 
+from typing import Any
 from simplyblock_core import constants, utils
 from requests.adapters import HTTPAdapter
 from urllib3 import Retry
@@ -1010,3 +1010,53 @@ class RPCClient:
         }
         return self._request("bdev_lvol_set_lvs_read_only", params)
 
+    # question: To which should this RPC be sent? 
+    def bdev_lvol_set_qos_limit(
+        self,
+        group_id: int,
+        rw_ios_per_sec: int = 0,
+        rw_mbytes_per_sec: int = 0,
+        r_mbytes_per_sec: int = 0,
+        w_mbytes_per_sec: int = 0
+    ) -> Any:
+        """Set QoS limits on pool (a bdev lvol group).
+
+        Used during:
+        * lvol add —> Check which pool LVOL is in and apply those settings. (do we need to do this? or SPDK does this?)
+        * pool set —> re-apply the settings to all lvols
+        * Restart node —> when we restart, we are recreating lvols. We run an examine on the lvol store, and all these lvols will store as bdevs. Reapply all these LVOLs to all pools.
+
+        Args:
+            group_id (int): Pool ID for the lvols.
+            rw_ios_per_sec (int): Number of read/write I/Os per second to allow. 0 means unlimited.
+            rw_mbytes_per_sec (int): Number of read/write MB/s to allow. 0 means unlimited.
+            r_mbytes_per_sec (int): Number of read MB/s to allow. 0 means unlimited.
+            w_mbytes_per_sec (int): Number of write MB/s to allow. 0 means unlimited.
+        """
+        params = {
+            "bdev_group_id": group_id,
+            "rw_ios_per_sec": rw_ios_per_sec,
+            "rw_mbytes_per_sec": rw_mbytes_per_sec,
+            "r_mbytes_per_sec": r_mbytes_per_sec,
+            "w_mbytes_per_sec": w_mbytes_per_sec
+        }
+        return self._request("bdev_lvol_set_qos_limit", params)
+
+    # question: To which should this RPC be sent? 
+    def bdev_lvol_add_to_group(
+        self,
+        bdev_group_id: int,
+        lvol_vbdev_list: list
+    ) -> Any:
+        """Add LVOL to a pool and sets QOS Limits
+
+        Args:
+            bdev_group_id (int): Pool ID for the lvols.
+            lvol_vbdev_list (list): List of lvols to add to the pool.
+        """
+        params = {
+            "bdev_group_id": bdev_group_id,
+            "lvol_vbdev_list": lvol_vbdev_list,
+        }
+        return self._request("bdev_lvol_add_to_group", params
+    )

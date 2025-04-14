@@ -12,6 +12,7 @@ from simplyblock_core import utils
 from simplyblock_core.controllers import pool_events
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.pool import Pool
+from simplyblock_core.rpc_client import RPCClient
 
 logger = lg.getLogger()
 
@@ -51,7 +52,9 @@ def add_pool(name, pool_max, lvol_max, max_rw_iops, max_rw_mbytes, max_r_mbytes,
 
     logger.info("Adding pool")
     pool = Pool()
-    pool.uuid = str(uuid.uuid4())
+    pool_id = uuid.uuid4()
+    pool_group_id = pool_id.int >> 64 # take only the first 64 bits
+    pool.uuid = str(pool_id)
     pool.cluster_id = cluster.get_id()
     pool.pool_name = name
     if has_secret:
@@ -62,6 +65,11 @@ def add_pool(name, pool_max, lvol_max, max_rw_iops, max_rw_mbytes, max_r_mbytes,
     pool.max_rw_mbytes_per_sec = max_rw_mbytes
     pool.max_r_mbytes_per_sec = max_r_mbytes
     pool.max_w_mbytes_per_sec = max_w_mbytes
+
+    # set lvol QOS
+    set_pool_qos(db_controller, cluster_id, pool_group_id,
+                 max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes)
+
     pool.status = "active"
     pool.write_to_db(db_controller.kv_store)
 
@@ -84,8 +92,8 @@ def set_pool_value_if_above(pool, key, value):
     return True, None
 
 
-def set_pool(uuid, pool_max=0, lvol_max=0, max_rw_iops=0,
-             max_rw_mbytes=0, max_r_mbytes=0, max_w_mbytes=0, name=""):
+def set_pool(uuid, cluster_id, pool_max=0, lvol_max=0, max_rw_iops=0,
+             max_rw_mbytes=0, max_r_mbytes=0, max_w_mbytes=0, name="", ):
     db_controller = DBController()
     pool = db_controller.get_pool_by_id(uuid)
     if not pool:
@@ -131,6 +139,11 @@ def set_pool(uuid, pool_max=0, lvol_max=0, max_rw_iops=0,
         ret, err = set_pool_value_if_above(pool, k, v)
         if err:
             return False, err
+
+    # set lvol QOS
+    pool_group_id = uuid.UUID(pool.uuid).int >> 64 # take only the first 64 bits
+    set_pool_qos(db_controller, cluster_id, pool_group_id,
+                 max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes)
 
     pool.write_to_db(db_controller.kv_store)
     pool_events.pool_updated(pool)
@@ -378,3 +391,32 @@ def get_pool_total_w_mbytes(pool_id):
         total += lvol.w_mbytes_per_sec
 
     return total
+
+
+def set_pool_qos(db_controller, cluster_id, pool_group_id, max_rw_iops=0,
+                  max_rw_mbytes=0, max_r_mbytes=0, max_w_mbytes=0):
+        # create this lvol pool on all storage nodes
+    storage_nodes = db_controller.get_storage_nodes_by_cluster_id(cluster_id)
+    if not storage_nodes:
+        logger.error(f"No storage nodes found for cluster: {cluster_id}")
+        return False
+    # create pool on all storage nodes
+    for snode in storage_nodes:
+        if snode.is_secondary_node:
+            continue
+        if not snode.lvstore:
+            logger.error(f"Storage node {snode.get_id()} is not a lvstore")
+            return False
+        # create pool on this storage node
+        try:
+            rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
+            rpc_client.bdev_lvol_set_qos_limit(
+                pool_group_id,
+                rw_ios_per_sec=max_rw_iops,
+                rw_mbytes_per_sec=max_rw_mbytes,
+                r_mbytes_per_sec=max_r_mbytes,
+                w_mbytes_per_sec=max_w_mbytes
+            )
+        except Exception as e:
+            logger.error(f"Failed to create pool on storage node {snode.get_id()}: {e}")
+            return False

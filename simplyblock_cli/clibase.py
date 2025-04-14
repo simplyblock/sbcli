@@ -510,6 +510,7 @@ class CLIWrapperBase:
             lvol_max = utils.parse_size(args.lvol_max)
         ret, err = pool_controller.set_pool(
             args.pool_id,
+            args.cluster_id,
             pool_max,
             lvol_max,
             args.max_rw_iops,
