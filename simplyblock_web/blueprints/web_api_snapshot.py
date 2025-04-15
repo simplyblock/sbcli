@@ -47,7 +47,7 @@ def list_snapshots():
         if snap.cluster_id != cluster_id:
             continue
         d = snap.get_clean_dict()
-        d["created_at"] = str(time.strftime("%H:%M:%S, %d/%m/%Y", time.gmtime(snap.created_at)))
+        d["created_at"] = str(snap.created_at)
         data.append(d)
     return utils.get_response(data)
 
