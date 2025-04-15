@@ -2,6 +2,7 @@
 # encoding: utf-8
 
 import logging
+import time
 
 from flask import Blueprint
 from flask import request
@@ -45,7 +46,9 @@ def list_snapshots():
     for snap in snaps:
         if snap.cluster_id != cluster_id:
             continue
-        data.append(snap.get_clean_dict())
+        d = snap.get_clean_dict()
+        d["created_at"] = time.strftime("%H:%M:%S, %d/%m/%Y", time.gmtime(snap.created_at))
+        data.append(d)
     return utils.get_response(data)
 
 
