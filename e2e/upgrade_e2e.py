@@ -16,16 +16,24 @@ def main():
     parser.add_argument('--fio_debug', type=bool, help="Add debug flag to fio", default=False)
     parser.add_argument('--run_k8s', type=bool, help="Run K8s tests", default=False)
     parser.add_argument('--send_debug_notification', type=bool, help="Send notification for debug", default=False)
+    parser.add_argument('--testname', type=str, help="The name of the test to run", default=None)
 
     args = parser.parse_args()
 
     logger.info(f"Running upgrade tests from version {args.base_version} to {args.target_version}")
 
     upgrade_tests = get_upgrade_tests()
+    test_class_run = []
+    if args.testname is None or len(args.testname.strip()) == 0:
+        test_class_run = upgrade_tests
+    else:
+        for cls in upgrade_tests:
+            if args.testname.lower() in cls.__name__.lower():
+                test_class_run.append(cls)
     passed_cases = []
     errors = {}
 
-    for i, test in enumerate(upgrade_tests):
+    for i, test in enumerate(test_class_run):
         logger.info(f"Running Test {test}")
         test_obj = test(base_version=args.base_version,
                         target_version=args.target_version,
@@ -47,7 +55,7 @@ def main():
             else:
                 test_obj.stop_k8s_log_collect()
             test_obj.fetch_all_nodes_distrib_log()
-            if i == (len(upgrade_tests) - 1) or check_for_dumps():
+            if i == (len(test_class_run) - 1) or check_for_dumps():
                 test_obj.collect_management_details()
             test_obj.teardown()
             # pass
@@ -61,17 +69,17 @@ def main():
                 break
 
     failed_cases = list(errors.keys())
-    skipped_cases = len(upgrade_tests) - (len(passed_cases) + len(failed_cases))
+    skipped_cases = len(test_class_run) - (len(passed_cases) + len(failed_cases))
 
     logger.info("Upgrade Test Summary:")
-    logger.info(f"Total Cases: {len(upgrade_tests)}")
+    logger.info(f"Total Cases: {len(test_class_run)}")
     logger.info(f"Passed: {len(passed_cases)}")
     logger.info(f"Failed: {len(failed_cases)}")
     logger.info(f"Skipped: {skipped_cases}")
 
     summary = f"""
         *Upgrade Test Suite:* from {args.base_version} to {args.target_version}
-        *Total Test Cases:* {len(upgrade_tests)}
+        *Total Test Cases:* {len(test_class_run)}
         *Passed Cases:* {len(passed_cases)}
         *Failed Cases:* {len(failed_cases)}
         *Skipped Cases:* {skipped_cases}
