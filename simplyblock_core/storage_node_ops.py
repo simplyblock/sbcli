@@ -3043,6 +3043,8 @@ def get_sorted_ha_jms(current_node):
         if (node.get_id() == current_node.get_id() or node.status != StorageNode.STATUS_ONLINE  or
                 node.is_secondary_node):  # pass
             continue
+        if node.mgmt_ip == current_node.mgmt_ip:
+            continue
         if node.jm_device and node.jm_device.status == JMDevice.STATUS_ONLINE:
             jm_count[node.jm_device.get_id()] = 1 + jm_count.get(node.jm_device.get_id(), 0)
         for rem_jm_device in node.remote_jm_devices:
