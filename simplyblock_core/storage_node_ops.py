@@ -3210,6 +3210,15 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
         logger.error(err)
         return False
 
+    rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password )
+    ret = rpc_client.bdev_lvol_set_lvs_opts(
+            snode.lvstore,
+            groupid=snode.jm_vuid,
+            subsystem_port=snode.lvol_subsys_port,
+            primary=True
+    )
+    ret = rpc_client.bdev_lvol_set_leader(snode.lvstore, leader=True)
+
     if snode.secondary_node_id:
         sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
 

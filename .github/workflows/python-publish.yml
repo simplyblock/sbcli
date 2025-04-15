@@ -5,6 +5,7 @@ on:
   push:
     branches:
       - main
+      - lvolstore-redirect
     paths:
       - 'simplyblock_core/env_var'
 
