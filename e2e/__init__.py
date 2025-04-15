@@ -118,3 +118,4 @@ def get_upgrade_tests():
     tests = [
         TestMajorUpgrade
     ]
+    return tests

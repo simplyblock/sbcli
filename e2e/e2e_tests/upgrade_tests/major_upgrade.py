@@ -100,7 +100,6 @@ class TestMajorUpgrade(TestClusterBase):
                 disk_use = f"/dev/{device.strip()}"
                 break
 
-        self.ssh_obj.format_disk(self.mgmt_nodes[0], disk_use)
         self.ssh_obj.mount_path(self.mgmt_nodes[0], disk_use, f"{self.mount_path}_clone_pre")
 
         files = self.ssh_obj.find_files(self.mgmt_nodes[0], f"{self.mount_path}_clone_pre")
@@ -151,7 +150,6 @@ class TestMajorUpgrade(TestClusterBase):
                 disk_use = f"/dev/{device.strip()}"
                 break
 
-        self.ssh_obj.format_disk(self.mgmt_nodes[0], disk_use)
         self.ssh_obj.mount_path(self.mgmt_nodes[0], disk_use, f"{self.mount_path}_clone_pre_post")
 
         files = self.ssh_obj.find_files(self.mgmt_nodes[0], f"{self.mount_path}_clone_pre_post")
