@@ -28,6 +28,10 @@ CONFIG_KEYS = [
     "jc_singleton_core",
 ]
 
+
+UUID_PATTERN = re.compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
+
+
 def get_env_var(name, default=None, is_required=False):
     if not name:
         logger.warning("Invalid env var name %s", name)
@@ -929,3 +933,11 @@ def init_sentry_sdk(name=None):
     # # set_level("critical")
 
     return True
+
+
+def generate_hex_string(length):
+    def _generate_string(length):
+        return ''.join(random.SystemRandom().choice(
+            string.ascii_letters + string.digits) for _ in range(length))
+
+    return _generate_string(length).encode('utf-8').hex()
