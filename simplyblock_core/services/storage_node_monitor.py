@@ -55,6 +55,8 @@ def get_next_cluster_status(cluster_id):
     online_devices = 0
     offline_devices = 0
 
+    affected_physical_nodes = []
+
     for node in snodes:
 
         node_online_devices = 0
@@ -82,11 +84,13 @@ def get_next_cluster_status(cluster_id):
 
         if node_offline_devices > 0 or (node_online_devices == 0 and node.status != StorageNode.STATUS_REMOVED):
             affected_nodes += 1
+            if node.mgmt_ip not in affected_physical_nodes:
+                affected_physical_nodes.append(node.mgmt_ip)
 
         online_devices += node_online_devices
         offline_devices += node_offline_devices
 
-
+    affected_nodes = len(affected_physical_nodes)
     logger.debug(f"online_nodes: {online_nodes}")
     logger.debug(f"offline_nodes: {offline_nodes}")
     logger.debug(f"affected_nodes: {affected_nodes}")
