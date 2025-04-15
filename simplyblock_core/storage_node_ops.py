@@ -2954,7 +2954,8 @@ def recreate_lvstore(snode):
     ret = rpc_client.bdev_lvol_set_lvs_opts(
             snode.lvstore,
             groupid=snode.jm_vuid,
-            subsystem_port=snode.lvol_subsys_port
+            subsystem_port=snode.lvol_subsys_port,
+            primary=True
     )
     ret = rpc_client.bdev_lvol_set_leader(snode.lvstore, leader=True)
 
