@@ -982,6 +982,14 @@ def connect_lvol_to_pool(uuid):
         logger.error("RPC failed bdev_lvol_add_to_group")
         return False
 
+    # re-apply the QOS limits
+    ret = rpc_client.bdev_lvol_set_qos_limit(pool.numeric_id, pool.max_rw_ios_per_sec,
+                                        pool.max_rw_mbytes_per_sec, pool.max_r_mbytes_per_sec,
+                                        pool.max_w_mbytes_per_sec)
+    if not ret:
+        logger.error("RPC failed bdev_set_qos_limit")
+        return False
+
     lvol.write_to_db(db_controller.kv_store)
     pool.write_to_db(db_controller.kv_store)
     logger.info("Done")

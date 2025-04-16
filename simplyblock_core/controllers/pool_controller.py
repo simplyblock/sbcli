@@ -66,30 +66,6 @@ def add_pool(name, pool_max, lvol_max, max_rw_iops, max_rw_mbytes, max_r_mbytes,
     pool.max_r_mbytes_per_sec = max_r_mbytes
     pool.max_w_mbytes_per_sec = max_w_mbytes
     pool.status = "active"
-
-    if pool.has_qos():
-        # get all storage nodes in the cluster and call bdev_lvol_set_qos_limit
-        # on each of them
-        storage_nodes = db_controller.get_storage_nodes_by_cluster_id(cluster.get_id())
-        if not storage_nodes:
-            logger.warning("No storage nodes found in the cluster")
-            return True
-        
-        for snode in storage_nodes:
-            if snode.status == "inactive":
-                continue
-
-            rpc_client = RPCClient(
-                snode.mgmt_ip,
-                snode.rpc_port,
-                snode.rpc_username,
-                snode.rpc_password)
-
-            ret = rpc_client.bdev_lvol_set_qos_limit(pool.numeric_id, max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes)
-            if not ret:
-                logger.error("RPC failed bdev_lvol_set_qos_limit")
-                return False
-
     pool.write_to_db(db_controller.kv_store)
     pool_events.pool_add(pool)
     logger.info("Done")
@@ -139,7 +115,7 @@ def set_pool(uuid, pool_max=0, lvol_max=0, max_rw_iops=0,
         logger.error(msg)
         return False, msg
 
-    if name:
+    if name and name != pool.pool_name:
         for p in db_controller.get_pools():
             if p.pool_name == name:
                 msg = f"Pool found with the same name: {name}"
@@ -147,60 +123,41 @@ def set_pool(uuid, pool_max=0, lvol_max=0, max_rw_iops=0,
                 return False, msg
         pool.pool_name = name
 
-    values = []
-    if pool_max:
-        values.append(("pool_max_size", pool_max))
+    # Normalize inputs
+    max_rw_iops = max_rw_iops or 0
+    max_rw_mbytes = max_rw_mbytes or 0
+    max_r_mbytes = max_r_mbytes or 0
+    max_w_mbytes = max_w_mbytes or 0
 
-    if lvol_max:
-        values.append(("lvol_max_size", lvol_max))
+    # Check for QoS conflict
+    if (max_rw_iops + max_rw_mbytes + max_r_mbytes + max_w_mbytes) > 0:
+        if qos_exists_on_child_lvol(db_controller, uuid):
+            logger.error("One of the lvols already has QOS")
+            return False, "QOS already set on one of the lvols"
 
-    if max_rw_iops:
-        values.append(("max_rw_ios_per_sec", max_rw_iops))
+    # Update values if needed
+    fields_to_update = [
+        ("pool_max_size", pool_max),
+        ("lvol_max_size", lvol_max),
+        ("max_rw_ios_per_sec", max_rw_iops),
+        ("max_rw_mbytes_per_sec", max_rw_mbytes),
+        ("max_r_mbytes_per_sec", max_r_mbytes),
+        ("max_w_mbytes_per_sec", max_w_mbytes),
+    ]
 
-    if max_rw_mbytes:
-        values.append(("max_rw_mbytes_per_sec", max_rw_mbytes))
+    for key, val in fields_to_update:
+        if val:
+            success, err = set_pool_value_if_above(pool, key, val)
+            if err:
+                return False, err
 
-    if max_r_mbytes:
-        values.append(("max_r_mbytes_per_sec", max_r_mbytes))
-
-    if max_w_mbytes:
-        values.append(("max_w_mbytes_per_sec", max_w_mbytes))
-
-    if max_rw_iops is None:
-        max_rw_iops = 0
-    if max_rw_mbytes is None:
-        max_rw_mbytes = 0
-    if max_r_mbytes is None:
-        max_r_mbytes = 0
-    if max_w_mbytes is None:
-        max_w_mbytes = 0
-
-    if ((max_rw_iops + max_rw_mbytes + max_r_mbytes + max_w_mbytes) > 0) and (qos_exists_on_child_lvol(db_controller, uuid)):
-        logger.error("One of the lvols already have QOS")
-        return False
-
-    pool.max_rw_ios_per_sec = max_rw_iops
-    pool.max_rw_mbytes_per_sec = max_rw_mbytes
-    pool.max_r_mbytes_per_sec = max_r_mbytes
-    pool.max_w_mbytes_per_sec = max_w_mbytes
-
+    # Apply QoS settings via RPC
     for hostname in db_controller.get_hostnames_by_pool_id(uuid):
-        snode = db_controller.get_storage_node_by_hostname(hostname)
-        rpc_client = RPCClient(
-            snode.mgmt_ip,
-            snode.rpc_port,
-            snode.rpc_username,
-            snode.rpc_password)
-
-        ret = rpc_client.bdev_lvol_set_qos_limit(pool.numeric_id, max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes)
-        if not ret:
+        sn = db_controller.get_storage_node_by_hostname(hostname)
+        client = RPCClient(sn.mgmt_ip, sn.rpc_port, sn.rpc_username, sn.rpc_password)
+        if not client.bdev_lvol_set_qos_limit(pool.numeric_id, max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes):
             logger.error("RPC failed bdev_lvol_set_qos_limit")
-            return False
-
-    for k, v in values:
-        ret, err = set_pool_value_if_above(pool, k, v)
-        if err:
-            return False, err
+            return False, "RPC failed"
 
     pool.write_to_db(db_controller.kv_store)
     pool_events.pool_updated(pool)
