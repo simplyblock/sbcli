@@ -2905,14 +2905,13 @@ def recreate_lvstore(snode):
     sec_node_api = SNodeClient(sec_node.api_endpoint)
 
     # recreate pools
-    pools = db_controller.get_pools(snode.pool_id)
+    pools = db_controller.get_pools()
     for pool in pools:
-
         ret = rpc_client.bdev_lvol_set_qos_limit(pool.numeric_id,
-                                                pool.max_rw_iops, 
-                                                pool.max_rw_mbytes,
-                                                pool.max_r_mbytes,
-                                                pool.max_w_mbytes,
+                                                pool.max_rw_ios_per_sec, 
+                                                pool.max_rw_mbytes_per_sec,
+                                                pool.max_r_mbytes_per_sec,
+                                                pool.max_w_mbytes_per_sec,
                                                 )
         if not ret:
             logger.error("RPC failed bdev_lvol_set_qos_limit")

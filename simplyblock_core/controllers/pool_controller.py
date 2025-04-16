@@ -66,11 +66,31 @@ def add_pool(name, pool_max, lvol_max, max_rw_iops, max_rw_mbytes, max_r_mbytes,
     pool.max_r_mbytes_per_sec = max_r_mbytes
     pool.max_w_mbytes_per_sec = max_w_mbytes
     pool.status = "active"
+
+    if pool.has_qos():
+        # get all storage nodes in the cluster and call bdev_lvol_set_qos_limit
+        # on each of them
+        storage_nodes = db_controller.get_storage_nodes_by_cluster_id(cluster.get_id())
+        if not storage_nodes:
+            logger.warning("No storage nodes found in the cluster")
+            return True
+        
+        for snode in storage_nodes:
+            if snode.status == "inactive":
+                continue
+
+            rpc_client = RPCClient(
+                snode.mgmt_ip,
+                snode.rpc_port,
+                snode.rpc_username,
+                snode.rpc_password)
+
+            ret = rpc_client.bdev_lvol_set_qos_limit(pool.numeric_id, max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes)
+            if not ret:
+                logger.error("RPC failed bdev_lvol_set_qos_limit")
+                return False
+
     pool.write_to_db(db_controller.kv_store)
-
-    set_pool(pool.get_id(), 0, 0, max_rw_iops,
-             max_rw_mbytes, max_r_mbytes, max_w_mbytes)
-
     pool_events.pool_add(pool)
     logger.info("Done")
     return pool.get_id()
@@ -119,9 +139,6 @@ def set_pool(uuid, pool_max=0, lvol_max=0, max_rw_iops=0,
         logger.error(msg)
         return False, msg
 
-
-    values = []
-
     if name:
         for p in db_controller.get_pools():
             if p.pool_name == name:
@@ -130,6 +147,7 @@ def set_pool(uuid, pool_max=0, lvol_max=0, max_rw_iops=0,
                 return False, msg
         pool.pool_name = name
 
+    values = []
     if pool_max:
         values.append(("pool_max_size", pool_max))
 
