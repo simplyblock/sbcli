@@ -127,12 +127,12 @@ def _check_node_hublvol(node: StorageNode, node_bdev_names=None, node_lvols_nqns
         rpc_client = RPCClient(
             node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password, timeout=5, retry=1)
 
-        # if not node_bdev_names:
-        #     ret = rpc_client.get_bdevs()
-        #     if ret:
-        #         node_bdev_names = [b['name'] for b in ret]
-        #     else:
-        #         node_bdev_names = []
+        if not node_bdev_names:
+            ret = rpc_client.get_bdevs()
+            if ret:
+                node_bdev_names = [b['name'] for b in ret]
+            else:
+                node_bdev_names = []
 
         if not node_lvols_nqns:
             node_lvols_nqns = {}
@@ -191,7 +191,7 @@ def _check_node_hublvol(node: StorageNode, node_bdev_names=None, node_lvols_nqns
                 logger.info(line)
 
     except Exception as e:
-        logger.debug(e)
+        logger.exception(e)
     return passed
 
 
@@ -268,7 +268,7 @@ def _check_sec_node_hublvol(node: StorageNode, node_bdev=None, node_lvols_nqns=N
             for line in utils.print_table(lvs_info_dict).splitlines():
                 logger.info(line)
     except Exception as e:
-        logger.error(e)
+        logger.exception(e)
     return passed
 
 
