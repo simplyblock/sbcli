@@ -105,7 +105,13 @@ class TestMajorUpgrade(TestClusterBase):
         files = self.ssh_obj.find_files(self.mgmt_nodes[0], f"{self.mount_path}_clone_pre")
         pre_upgrade_clone_md5 = self.ssh_obj.generate_checksums(self.mgmt_nodes[0], files)
 
-        assert pre_upgrade_lvol_md5 == pre_upgrade_clone_md5, "Checksum mismatch between lvol and clone before upgrade!!"
+        original_checksum = set(pre_upgrade_lvol_md5.values())
+        final_checksum = set(pre_upgrade_clone_md5.values())
+
+        self.logger.info(f"Set Original checksum: {original_checksum}")
+        self.logger.info(f"Set Final checksum: {final_checksum}")
+
+        assert original_checksum == final_checksum, "Checksum mismatch between lvol and clone before upgrade!!"
 
         self.logger.info("Step 8: Perform Upgrade")
         package_name = f"{self.base_cmd}=={self.target_version}" if self.target_version != "latest" else self.base_cmd
@@ -126,12 +132,26 @@ class TestMajorUpgrade(TestClusterBase):
         self.logger.info("Step 10: Verify pre-upgrade LVOL checksum")
         post_files = self.ssh_obj.find_files(self.mgmt_nodes[0], self.mount_path)
         post_md5_lvol = self.ssh_obj.generate_checksums(self.mgmt_nodes[0], post_files)
-        assert pre_upgrade_lvol_md5 == post_md5_lvol, "Checksum mismatch after upgrade!!"
+
+        original_checksum = set(pre_upgrade_lvol_md5.values())
+        final_checksum = set(post_md5_lvol.values())
+
+        self.logger.info(f"Set Original checksum: {original_checksum}")
+        self.logger.info(f"Set Final checksum: {final_checksum}")
+
+        assert original_checksum == final_checksum, "Checksum mismatch after upgrade!!"
 
         self.logger.info("Step 11: Clone from old snapshot and verify MD5")
         files = self.ssh_obj.find_files(self.mgmt_nodes[0], f"{self.mount_path}_clone_pre")
         post_upgrade_clone_md5 = self.ssh_obj.generate_checksums(self.mgmt_nodes[0], files)
-        assert pre_upgrade_clone_md5 == post_upgrade_clone_md5, "Post-upgrade clone checksum mismatch!!"
+
+        original_checksum = set(pre_upgrade_clone_md5.values())
+        final_checksum = set(post_upgrade_clone_md5.values())
+
+        self.logger.info(f"Set Original checksum: {original_checksum}")
+        self.logger.info(f"Set Final checksum: {final_checksum}")
+
+        assert original_checksum == final_checksum, "Post-upgrade clone checksum mismatch!!"
 
         self.ssh_obj.add_clone(self.mgmt_nodes[0], snapshot_id, f"{self.clone_name}_pre_post")
         initial_devices = self.ssh_obj.get_devices(self.mgmt_nodes[0])
@@ -154,7 +174,14 @@ class TestMajorUpgrade(TestClusterBase):
 
         files = self.ssh_obj.find_files(self.mgmt_nodes[0], f"{self.mount_path}_clone_pre_post")
         pre_post_upgrade_clone_md5 = self.ssh_obj.generate_checksums(self.mgmt_nodes[0], files)
-        assert pre_upgrade_clone_md5 == pre_post_upgrade_clone_md5, "Post-upgrade clone create and older clone checksum mismatch!!"
+        
+        original_checksum = set(pre_upgrade_clone_md5.values())
+        final_checksum = set(pre_post_upgrade_clone_md5.values())
+
+        self.logger.info(f"Set Original checksum: {original_checksum}")
+        self.logger.info(f"Set Final checksum: {final_checksum}")
+
+        assert original_checksum == final_checksum, "Post-upgrade clone create and older clone checksum mismatch!!"
 
         self.logger.info("Step 12-13: Create new LVOL, run fio, snapshot + clone")
         new_lvol = f"{self.lvol_name}_new"
