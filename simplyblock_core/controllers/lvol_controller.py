@@ -131,39 +131,6 @@ def validate_add_lvol_func(name, size, host_id_or_name, pool_id_or_name,
             if lvol.lvol_name == name:
                 return False, f"LVol name must be unique: {name}"
 
-    if pool.has_qos():
-        if pool.max_rw_ios_per_sec > 0:
-            if max_rw_iops <= 0:
-                return False, "LVol must have max_rw_iops value because the Pool has it set"
-            total = pool_controller.get_pool_total_rw_iops(pool.get_id())
-            if max_rw_iops + total > pool.max_rw_ios_per_sec:
-                return False, f"Invalid LVol max_rw_iops: {max_rw_iops} " \
-                              f"Pool Max RW IOPS has reached {total} of {pool.max_rw_ios_per_sec}"
-
-        if pool.max_rw_mbytes_per_sec > 0:
-            if max_rw_mbytes <= 0:
-                return False, "LVol must have max_rw_mbytes value because the Pool has it set"
-            total = pool_controller.get_pool_total_rw_mbytes(pool.get_id())
-            if max_rw_mbytes + total > pool.max_rw_mbytes_per_sec:
-                return False, f"Invalid LVol max_rw_mbytes: {max_rw_mbytes} " \
-                              f"Pool Max RW MBytes has reached {total} of {pool.max_rw_mbytes_per_sec}"
-
-        if pool.max_r_mbytes_per_sec > 0:
-            if max_r_mbytes <= 0:
-                return False, "LVol must have max_r_mbytes value because the Pool has it set"
-            total = pool_controller.get_pool_total_r_mbytes(pool.get_id())
-            if max_r_mbytes + total > pool.max_r_mbytes_per_sec:
-                return False, f"Invalid LVol max_r_mbytes: {max_r_mbytes} " \
-                              f"Pool Max R MBytes has reached {total} of {pool.max_r_mbytes_per_sec}"
-
-        if pool.max_w_mbytes_per_sec > 0:
-            if max_w_mbytes <= 0:
-                return False, "LVol must have max_w_mbytes value because the Pool has it set"
-            total = pool_controller.get_pool_total_w_mbytes(pool.get_id())
-            if max_w_mbytes + total > pool.max_w_mbytes_per_sec:
-                return False, f"Invalid LVol max_w_mbytes: {max_w_mbytes} " \
-                              f"Pool Max W MBytes has reached {total} of {pool.max_w_mbytes_per_sec}"
-
     # If user gave a QOS and the pool also have a QOS, return error
     if (max_rw_iops or max_rw_mbytes or max_r_mbytes or max_w_mbytes) and (pool.has_qos()):
         return False, "Both Lvol and Pool have QOS settings"

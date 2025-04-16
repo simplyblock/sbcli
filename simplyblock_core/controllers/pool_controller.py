@@ -68,6 +68,9 @@ def add_pool(name, pool_max, lvol_max, max_rw_iops, max_rw_mbytes, max_r_mbytes,
     pool.status = "active"
     pool.write_to_db(db_controller.kv_store)
 
+    set_pool(pool.get_id(), 0, 0, max_rw_iops,
+             max_rw_mbytes, max_r_mbytes, max_w_mbytes)
+
     pool_events.pool_add(pool)
     logger.info("Done")
     return pool.get_id()
