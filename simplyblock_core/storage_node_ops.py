@@ -3073,14 +3073,18 @@ def get_sorted_ha_jms(current_node):
         if node.mgmt_ip == current_node.mgmt_ip:
             continue
         if node.jm_device and node.jm_device.status == JMDevice.STATUS_ONLINE:
-            jm_count[node.jm_device.get_id()] = 1 + jm_count.get(node.jm_device.get_id(), 0)
-        for rem_jm_device in node.remote_jm_devices:
-            if rem_jm_device.get_id() != current_node.jm_device.get_id():
-                try:
-                    if db_controller.get_jm_device_by_id(rem_jm_device.get_id()).status == JMDevice.STATUS_ONLINE:
-                        jm_count[rem_jm_device.get_id()] = 1 + jm_count.get(rem_jm_device.get_id(), 0)
-                except :
-                    pass
+            jm_count[node.jm_device.get_id()] = 1
+
+    for node in db_controller.get_storage_nodes_by_cluster_id(current_node.cluster_id):
+        if (node.get_id() == current_node.get_id() or node.status != StorageNode.STATUS_ONLINE or
+                node.is_secondary_node):  # pass
+            continue
+        if node.mgmt_ip == current_node.mgmt_ip or not node.jm_ids:
+            continue
+        for rem_jm_id in node.jm_ids:
+            if rem_jm_id in jm_count:
+                jm_count[rem_jm_id] += 1
+
     jm_count = dict(sorted(jm_count.items(), key=lambda x: x[1]))
     return list(jm_count.keys())[:3]
 
