@@ -118,6 +118,159 @@ def _check_node_ping(ip):
     else:
         return False
 
+def _check_node_hublvol(node: StorageNode, node_bdev_names=None, node_lvols_nqns=None):
+    logger.info(f"Checking Hublvol: {node.hublvol.name} on node {node.get_id()}")
+    db_controller = DBController()
+
+    passed = True
+    try:
+        rpc_client = RPCClient(
+            node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password, timeout=5, retry=1)
+
+        # if not node_bdev_names:
+        #     ret = rpc_client.get_bdevs()
+        #     if ret:
+        #         node_bdev_names = [b['name'] for b in ret]
+        #     else:
+        #         node_bdev_names = []
+
+        if not node_lvols_nqns:
+            node_lvols_nqns = {}
+            ret = rpc_client.subsystem_list()
+            for sub in ret:
+                node_lvols_nqns[sub['nqn']] = sub
+
+        if node.hublvol.uuid in node_bdev_names:
+            logger.info(f"Checking bdev: {node.hublvol.uuid} ... ok")
+        else:
+            logger.error(f"Checking bdev: {node.hublvol.uuid} ... failed")
+            passed = False
+
+        if node.hublvol.nqn in node_lvols_nqns:
+            logger.info(f"Checking subsystem ... ok")
+            if node_lvols_nqns[node.hublvol.nqn]["listen_addresses"]:
+                logger.info(f"Checking listener ... ok")
+            else:
+                logger.info(f"Checking listener ... not found")
+                passed = False
+
+            if node_lvols_nqns[node.hublvol.nqn]["namespaces"]:
+                logger.info(f"Checking namespaces ... ok")
+            else:
+                logger.info(f"Checking namespaces ... not found")
+                passed = False
+        else:
+            logger.info(f"Checking subsystem ... not found")
+            passed = False
+        cl = db_controller.get_cluster_by_id(node.cluster_id)
+
+        ret = rpc_client.bdev_lvol_get_lvstores(node.lvstore)
+        if ret:
+            logger.info(f"Checking lvstore: {node.lvstore} ... ok")
+            lvs_info = ret[0]
+            logger.info(f"lVol store Info:")
+            lvs_info_dict = []
+            expected = {}
+            expected["lvs leadership"] = True
+            expected["lvs_primary"] = True
+            expected["lvs_read_only"] = False
+            expected["name"] = node.lvstore
+            expected["base_bdev"] = node.raid
+            expected["block_size"] = cl.blk_size
+            expected["cluster_size"] = cl.page_size_in_blocks
+
+            for k, v in lvs_info.items():
+                if k in expected:
+                    value = expected[k] == v
+                    lvs_info_dict.append({"Key": k, "Value": v, "expected": value})
+                    if value is bool and v is False:
+                        passed = False
+                else:
+                    lvs_info_dict.append({"Key": k, "Value": v, "expected": " "})
+            for line in utils.print_table(lvs_info_dict).splitlines():
+                logger.info(line)
+
+    except Exception as e:
+        logger.debug(e)
+    return passed
+
+
+
+def _check_sec_node_hublvol(node: StorageNode, node_bdev=None, node_lvols_nqns=None):
+    logger.info(f"Checking secondary Hublvol: {node.hublvol.name} on node {node.get_id()}")
+    db_controller = DBController()
+
+    passed = True
+    try:
+        rpc_client = RPCClient(
+            node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password, timeout=5, retry=1)
+
+        if not node_bdev:
+            node_bdev = {}
+            ret = rpc_client.get_bdevs()
+            if ret:
+                for b in ret:
+                    node_bdev[b['name']] = b
+                    for al in b['aliases']:
+                        node_bdev[al]= b
+            else:
+                node_bdev = []
+
+        if not node_lvols_nqns:
+            node_lvols_nqns = {}
+            ret = rpc_client.subsystem_list()
+            for sub in ret:
+                node_lvols_nqns[sub['nqn']] = sub
+
+        primary_node = db_controller.get_storage_node_by_id(node.lvstore_stack_secondary_1)
+
+        ret = rpc_client.bdev_nvme_controller_list(primary_node.hublvol.name)
+        if ret:
+            logger.info(f"Checking controller: {primary_node.hublvol.name} ... ok")
+        else:
+            logger.info(f"Checking controller: {primary_node.hublvol.name} ... failed")
+            passed = False
+
+        if primary_node.hublvol.get_remote_bdev_name() in node_bdev:
+            logger.info(f"Checking bdev: {primary_node.hublvol.get_remote_bdev_name()} ... ok")
+        else:
+            logger.error(f"Checking bdev: {primary_node.hublvol.get_remote_bdev_name()} ... failed")
+            passed = False
+        cl = db_controller.get_cluster_by_id(node.cluster_id)
+        ret = rpc_client.bdev_lvol_get_lvstores(primary_node.lvstore)
+        if ret:
+            logger.info(f"Checking lvstore: {primary_node.lvstore} ... ok")
+            lvs_info = ret[0]
+            logger.info(f"lVol store Info:")
+            lvs_info_dict = []
+            expected = {}
+            expected["name"] = primary_node.lvstore
+            expected["lvs leadership"] = False
+            expected["lvs_secondary"] = True
+            expected["lvs_read_only"] = False
+            expected["lvs_redirect"] = True
+            expected["remote_bdev"] = primary_node.hublvol.get_remote_bdev_name()
+            expected["connect_state"] = True
+            expected["base_bdev"] = primary_node.raid
+            expected["block_size"] = cl.blk_size
+            expected["cluster_size"] = cl.page_size_in_blocks
+
+            for k, v in lvs_info.items():
+
+                if k in expected:
+                    value = expected[k] == v
+                    lvs_info_dict.append({"Key": k, "Value": v, "expected": value})
+                    if value is bool and value is False:
+                        passed = False
+
+                else:
+                    lvs_info_dict.append({"Key": k, "Value": v, "expected": " "})
+            for line in utils.print_table(lvs_info_dict).splitlines():
+                logger.info(line)
+    except Exception as e:
+        logger.error(e)
+    return passed
+
 
 def _check_node_lvstore(
         lvstore_stack, node, auto_fix=False, node_bdev_names=None, stack_src_node=None):
@@ -330,17 +483,16 @@ def check_node(node_id, with_devices=True):
         if snode.lvstore_stack:
             lvstore_stack = snode.lvstore_stack
             lvstore_check &= _check_node_lvstore(lvstore_stack, snode)
-
+            print("*" * 100)
             if snode.secondary_node_id:
                 second_node_1 = db_controller.get_storage_node_by_id(snode.secondary_node_id)
                 if second_node_1.status == StorageNode.STATUS_ONLINE:
                     lvstore_check &= _check_node_lvstore(lvstore_stack, second_node_1, stack_src_node=snode)
-
-        # if snode.lvstore_stack_secondary_1:
-        #     for node in db_controller.get_storage_nodes():
-        #         if node.secondary_node_id == snode.get_id() and node.status == StorageNode.STATUS_ONLINE:
-        #             logger.info(f"Checking stack from node : {node.get_id()}")
-        #             lvstore_check &= _check_node_lvstore(node.lvstore_stack, snode)
+                    print("*" * 100)
+                lvstore_check &= _check_node_hublvol(snode)
+                if second_node_1.status == StorageNode.STATUS_ONLINE:
+                    print("*" * 100)
+                    lvstore_check &= _check_sec_node_hublvol(second_node_1)
 
     return is_node_online and node_devices_check and node_remote_devices_check and lvstore_check
 

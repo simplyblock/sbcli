@@ -10,3 +10,6 @@ class HubLVol(BaseModel):
     nqn: str = ""
     name: str = ""
     nvmf_port: int = 9099
+
+    def get_remote_bdev_name(self):
+        return f"{self.name}n1"

@@ -96,15 +96,20 @@ while True:
 
                 node_bdevs = rpc_client.get_bdevs()
                 if node_bdevs:
-                    node_bdev_names = [b['name'] for b in node_bdevs]
+                    # node_bdev_names = [b['name'] for b in node_bdevs]
+                    node_bdev_names = {}
+                    for b in node_bdevs:
+                        node_bdev_names[b['name']] = b
+                        for al in b['aliases']:
+                            node_bdev_names[al] = b
                 else:
                     node_bdev_names = []
 
                 sub_list = rpc_client.subsystem_list()
                 if sub_list:
-                    subsystem_list = [item['nqn'] for item in sub_list]
+                    subsystem_list = {item['nqn']: item for item in sub_list }
                 else:
-                    subsystem_list =[]
+                    subsystem_list = {}
 
                 for device in snode.nvme_devices:
                     passed = True
@@ -230,11 +235,15 @@ while True:
                     lvstore_check &= health_controller._check_node_lvstore(
                         lvstore_stack, snode, auto_fix=True, node_bdev_names=node_bdev_names)
 
+                    lvstore_check &= health_controller._check_node_hublvol(
+                        snode, node_bdev_names=node_bdev_names, node_lvols_nqns=subsystem_list)
+
                     if snode.secondary_node_id:
                         second_node_1 = db_controller.get_storage_node_by_id(snode.secondary_node_id)
                         if second_node_1 and second_node_1.status == StorageNode.STATUS_ONLINE:
-                            lvstore_check &= health_controller._check_node_lvstore(lvstore_stack, second_node_1,
-                                                                                   auto_fix=True, stack_src_node=snode)
+                            lvstore_check &= health_controller._check_node_lvstore(
+                                lvstore_stack, second_node_1, auto_fix=True, stack_src_node=snode)
+                        lvstore_check &= health_controller._check_sec_node_hublvol(second_node_1)
 
                     lvol_port_check = False
                     # if node_api_check:
