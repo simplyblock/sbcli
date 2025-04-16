@@ -906,8 +906,26 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
 
     poller_cpu_cores = []
 
-    if not spdk_cpu_mask:
-        spdk_cpu_mask = cores_config["cpu_mask"]
+    if spdk_cpu_mask:
+        pass
+    else:
+        total_spdk_cpu_mask = cores_config["cpu_mask"]
+        total_spdk_cores = utils.hexa_to_cpu_list(total_spdk_cpu_mask)
+        used_cores = []
+        for core in total_spdk_cores:
+            for node in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
+                if node.api_endpoint == node_ip:
+                    if core in utils.hexa_to_cpu_list(node.spdk_cpu_mask):
+                        used_cores.append(core)
+                        break
+
+        free_cores = list(set(total_spdk_cores) - set(used_cores))
+        if len(free_cores) >= spdk_cpu_count:
+            spdk_cpu_mask = utils.generate_mask(free_cores[:spdk_cpu_count])
+        else:
+            logger.error("No more CPU cores available")
+            return False
+
     spdk_cores = utils.hexa_to_cpu_list(spdk_cpu_mask)
     req_cpu_count = len(spdk_cores)
     if cpu_count < req_cpu_count:
@@ -997,6 +1015,14 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
         logger.error(
             f"Not enough memory for the provided max_lvo: {max_lvol}, max_snap: {max_snap}, max_prov: {max_prov}.. Exiting")
         # return False
+
+    if ssd_pcie:
+        for ssd in ssd_pcie:
+            for node in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
+                if node.api_endpoint == node_ip:
+                    if ssd in node.ssd_pcie:
+                        logger.error(f"SSD is being used by other node, ssd: {ssd}, node: {node.get_id()}")
+                        return False
 
     logger.info("Joining docker swarm...")
     cluster_docker = utils.get_docker_client(cluster_id)
@@ -3446,7 +3472,7 @@ def dump_lvstore(node_id):
     return True
 
 
-def set(node_id, attr, value):
+def set_value(node_id, attr, value):
     db_controller = DBController()
 
     snode = db_controller.get_storage_node_by_id(node_id)
