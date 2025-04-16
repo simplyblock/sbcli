@@ -1,5 +1,6 @@
 # coding=utf-8
 import pprint
+import logging
 
 import json
 from inspect import ismethod
@@ -115,8 +116,10 @@ class BaseModel(object):
             for k, v in kv_store.get_range_startswith(prefix.strip().encode('utf-8'),  limit=limit, reverse=reverse):
                 objects.append(self.__class__().from_dict(json.loads(v)))
             return objects
-        except Exception as e:
-            print(f"Error reading from FDB: {e}")
+        except Exception:
+            from simplyblock_core import utils
+            logger = utils.get_logger(__name__)
+            logger.exception('Error reading from FDB')
             return []
 
     def get_last(self, kv_store):

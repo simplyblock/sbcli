@@ -1,4 +1,5 @@
 import json
+import inspect
 
 import requests
 
@@ -155,22 +156,12 @@ class RPCClient:
         return self._request("nvmf_create_transport", params)
 
     def sock_impl_set_options(self):
-        """
-            optimizing sockets for high load and performance
-        """
-        params = {
-            "impl_name": "posix",
-            "recv_buf_size": 2097152,
-            "send_buf_size": 2097152,
-            "enable_recv_pipe": True,
-            "enable_quick_ack": True,
-            "enable_placement_id": 1,
-            "enable_zerocopy_send_server": True,
-            "enable_zerocopy_send_client": True    
-        }
-        return self._request("sock_impl_set_options", params)
+        method = "sock_impl_set_options"
+        params = {"impl_name": "posix", "enable_quickack": True,
+                  "enable_zerocopy_send_server": True,
+                  "enable_zerocopy_send_client": True}
+        return self._request(method, params)
 
-    
     def transport_create_caching(self, trtype):
         params = {
             "trtype": trtype,
@@ -484,8 +475,10 @@ class RPCClient:
         params = {"name": name}
         return self._request2("bdev_alceml_delete", params)
 
-    def get_lvol_stats(self, uuid):
-        params = {"name": uuid}
+    def get_lvol_stats(self, uuid=""):
+        params = {}
+        if uuid:
+            params["uuid"] = uuid
         return self._request("bdev_get_iostat", params)
 
     def bdev_raid_create(self, name, bdevs_list, raid_level="0", strip_size_kb=4):
@@ -809,13 +802,6 @@ class RPCClient:
         params = {"name": name, "vuid": vuid}
         return self._request("bdev_jm_unmap_vuid", params)
 
-    def sock_impl_set_options(self):
-        method = "sock_impl_set_options"
-        params = {"impl_name": "posix", "enable_quickack": True,
-                  "enable_zerocopy_send_server": True,
-                  "enable_zerocopy_send_client": True}
-        return self._request(method, params)
-
     def nvmf_set_config(self, poll_groups_mask):
         params = {"poll_groups_mask": poll_groups_mask}
         return self._request("nvmf_set_config", params)
@@ -840,8 +826,8 @@ class RPCClient:
             "name": name,
             "storage_ID": storage_ID,
         }
-        # if qos_high_priority:
-        #     params["qos_high_priority"] = qos_high_priority
+        if qos_high_priority:
+            params["qos_high_priority"] = qos_high_priority
         return self._request("distr_migration_to_primary_start", params)
 
     def distr_migration_status(self, name):
@@ -853,16 +839,16 @@ class RPCClient:
             "name": name,
             "storage_ID": storage_ID,
         }
-        # if qos_high_priority:
-        #     params["qos_high_priority"] = qos_high_priority
+        if qos_high_priority:
+            params["qos_high_priority"] = qos_high_priority
         return self._request("distr_migration_failure_start", params)
 
     def distr_migration_expansion_start(self, name, qos_high_priority=False):
         params = {
             "name": name,
         }
-        # if qos_high_priority:
-        #     params["qos_high_priority"] = qos_high_priority
+        if qos_high_priority:
+            params["qos_high_priority"] = qos_high_priority
         return self._request("distr_migration_expansion_start", params)
 
     def bdev_raid_add_base_bdev(self, raid_bdev, base_bdev):
@@ -945,18 +931,12 @@ class RPCClient:
             params = {"jm_vuid": jm_vuid}
         return self._request("bdev_distrib_force_to_non_leader", params)
 
-    def bdev_lvol_set_leader(self, is_leader=False, uuid=None, lvs_name=None, bs_nonleadership=False):
-        params = {
-            "lvs_leadership": is_leader,
-        }
-        if uuid:
-            params["uuid"] = uuid
-        elif lvs_name:
-            params["lvs_name"] = lvs_name
-
-        params["bs_nonleadership"] = bs_nonleadership
-
-        return self._request("bdev_lvol_set_leader_all", params)
+    def bdev_lvol_set_leader(self, lvs, *, leader=False, bs_nonleadership=False):
+        return self._request("bdev_lvol_set_leader_all", {
+            "uuid" if utils.UUID_PATTERN.match(lvs) else "lvs_name": lvs,
+            "lvs_leadership": leader,
+            "bs_nonleadership": bs_nonleadership,
+        })
 
     def bdev_lvol_register(self, name, lvs_name, registered_uuid, blobid, priority_class=0):
         params = {
@@ -1014,13 +994,19 @@ class RPCClient:
         }
         return self._request("nvmf_set_max_subsystems", params)
 
-    def bdev_lvol_set_lvs_ops(self, lvs_name, groupid, subsystem_port=9090):
-        params = {
+    def bdev_lvol_set_lvs_opts(self, lvs, *, groupid, subsystem_port=9090, primary=False, secondary=False):
+        """Set lvstore options
+
+        `lvs` must be either an ID or the lvstore name.
+        """
+
+        return self._request(inspect.currentframe().f_code.co_name, {
+            "uuid" if utils.UUID_PATTERN.match(lvs) else "lvs_name": lvs,
             "groupid": groupid,
-            "lvs_name": lvs_name,
             "subsystem_port": subsystem_port,
-        }
-        return self._request("bdev_lvol_set_lvs_op", params)
+            "primary": primary,
+            "secondary": secondary,
+        })
 
     def bdev_lvol_get_lvol_delete_status(self, name):
         """
@@ -1042,3 +1028,18 @@ class RPCClient:
         }
         return self._request("bdev_lvol_set_lvs_read_only", params)
 
+    def bdev_lvol_create_hublvol(self, lvs):
+        return self._request(inspect.currentframe().f_code.co_name, {
+            "uuid" if utils.UUID_PATTERN.match(lvs) else "lvs_name": lvs,
+        })
+
+    def bdev_lvol_delete_hublvol(self, lvs):
+        return self._request(inspect.currentframe().f_code.co_name, {
+            "uuid" if utils.UUID_PATTERN.match(lvs) else "lvs_name": lvs,
+        })
+
+    def bdev_lvol_connect_hublvol(self, lvs, bdev):
+        return self._request(inspect.currentframe().f_code.co_name, {
+            "uuid" if utils.UUID_PATTERN.match(lvs) else "lvs_name": lvs,
+            "remote_bdev": bdev,
+        })

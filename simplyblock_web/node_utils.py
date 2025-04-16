@@ -169,10 +169,10 @@ def get_host_arch():
     return out
 
 
-def firewall_port(port_id=9090, port_type="tcp", block=True):
+def firewall_port(port_id=9090, port_type="tcp", block=True, rpc_port=None):
     cmd_list = []
     try:
-        iptables_command_output = firewall_get()
+        iptables_command_output = firewall_get(rpc_port)
         result = jc.parse('iptables', iptables_command_output)
         for chain in result:
             if chain['chain'] in ["INPUT", "OUTPUT"]:
@@ -197,8 +197,11 @@ def firewall_port(port_id=9090, port_type="tcp", block=True):
         ])
 
     out = ""
+    spk_name = "spdk"
+    if rpc_port:
+        spk_name = f"spdk_{rpc_port}"
     for cmd in cmd_list:
-        stream = os.popen("docker exec spdk "+cmd)
+        stream = os.popen(f"docker exec {spk_name} {cmd}")
         ret = stream.read()
         if ret != "":
             out += ret + "\n"
@@ -207,8 +210,11 @@ def firewall_port(port_id=9090, port_type="tcp", block=True):
     return out
 
 
-def firewall_get():
-    cmd = "docker exec spdk iptables -L -n"
+def firewall_get(rpc_port=None):
+    spk_name = "spdk"
+    if rpc_port:
+        spk_name = f"spdk_{rpc_port}"
+    cmd = f"docker exec {spk_name} iptables -L -n"
     stream = os.popen(cmd)
     ret = stream.read()
     return ret

@@ -726,3 +726,9 @@ class SbcliUtils:
 
         data = self.delete_request(api_url=f"/snapshot/{snap_id}")
         self.logger.info(f"Delete snap resp: {data}")
+    
+    def get_cluster_capacity(self):
+        """Get cluster capacity
+        """
+        data = self.get_request(api_url=f"/cluster/capacity/{self.cluster_id}")
+        return data["results"]

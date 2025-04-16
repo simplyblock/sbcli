@@ -176,17 +176,36 @@ commands:
             type: int
             default: 5000
             private: true
+          - name: "--spdk-mem"
+            help: "Set spdk hugepage size limitation"
+            dest: spdk_mem
+            required: false
+            type: str
+            default: ""
+          - name: "--ssd-pcie"
+            help: "Nvme PCIe address to use for storage device. Can be more than one."
+            dest: ssd_pcie
+            required: false
+            type: str
+            nargs: +
+            default: ""
+
       - name: delete
         help: "Deletes a storage node object from the state database."
         usage: >
           Deletes a storage node object from the state database. It must only be used on clusters without any logical
-          volumes.
+          volumes. Warning: This is dangerous and could lead to unstable cluster if used on active cluster.
         arguments:
           - name: node_id
             help: Storage node id
             dest: node_id
             completer: _completer_get_sn_list
             type: str
+          - name: "--force"
+            help: "Force delete storage node from DB...Hopefully you know what you do"
+            dest: force_remove
+            type: bool
+            action: store_true
       - name: remove
         help: "Removes a storage node from the cluster"
         description: >
@@ -740,12 +759,6 @@ commands:
             dest: contact_point
             type: str
             default: ""
-          - name: "--grafana-endpoint"
-            help: "Endpoint url for Grafana"
-            dest: grafana_endpoint
-            type: str
-            default: ""
-            private: true
           - name: "--distr-bs"
             help: "(Dev) distrb bdev block size, default: 4096"
             dest: distr_bs
@@ -956,37 +969,6 @@ commands:
             dest: encrypt
             type: bool
             action: store_true
-            default: false
-            private: true
-          - name: "--crypto-key1"
-            help: "Hex value of key1 to be used for logical volume encryption"
-            dest: crypto_key1
-            type: str
-            private: true
-          - name: "--crypto-key2"
-            help: "Hex value of key2 to be used for logical volume encryption"
-            dest: crypto_key2
-            type: str
-            private: true
-          - name: "--max-rw-iops"
-            help: "Maximum Read Write IO Per Second"
-            dest: max_rw_iops
-            type: int
-            private: true
-          - name: "--max-rw-mbytes"
-            help: "Maximum Read Write Megabytes Per Second"
-            dest: max_rw_mbytes
-            type: int
-            private: true
-          - name: "--max-r-mbytes"
-            help: "Maximum Read Megabytes Per Second"
-            dest: max_r_mbytes
-            type: int
-            private: true
-          - name: "--max-w-mbytes"
-            help: "Maximum Write Megabytes Per Second"
-            dest: max_w_mbytes
-            type: int
             private: true
           - name: "--distr-vuid"
             help: "(Dev) set vuid manually, default: random (1-99999)"
@@ -1002,21 +984,6 @@ commands:
               - default
               - ha
             default: ha
-            private: true
-          - name: "--lvol-priority-class"
-            help: "Logical volume priority class"
-            dest: lvol_priority_class
-            type: int
-            default: 0
-            private: false
-          - name: "--fstype"
-            help: "Filesystem type for testing (ext4, xfs)"
-            dest: fstype
-            type: str
-            choices:
-              - ext4
-              - xfs
-            default: xfs
             private: true
       - name: create
         help: "Creates a new cluster"
@@ -1180,12 +1147,12 @@ commands:
             help: "Erasure coding schema parameter k (distributed raid), default: 1"
             dest: distr_ndcs
             type: int
-            default: 0
+            default: 1
           - name: "--parity-chunks-per-stripe"
             help: "Erasure coding schema parameter n (distributed raid), default: 1"
             dest: distr_npcs
             type: int
-            default: 0
+            default: 1
           - name: "--distr-bs"
             help: "(Dev) distrb bdev block size, default: 4096"
             dest: distr_bs

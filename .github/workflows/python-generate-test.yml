@@ -1,4 +1,4 @@
-name: Python Package Build
+name: Verify Python Package Build
 
 on:
   pull_request:

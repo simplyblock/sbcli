@@ -162,10 +162,18 @@ def spdk_process_start():
     spdk_mem_mib = core_utils.convert_size(
             data.get('spdk_mem', core_utils.parse_size('64GiB')), 'MiB')
 
+    server_ip = data['server_ip']
+    rpc_port = data['rpc_port']
+    rpc_username = data['rpc_username']
+    rpc_password = data['rpc_password']
+    rpc_sock = f"/var/tmp/spdk_{rpc_port}.sock"
+    if 'rpc_sock' in data and data['rpc_sock']:
+        rpc_sock = data['rpc_sock']
+
     node_docker = get_docker_client()
     nodes = node_docker.containers.list(all=True)
     for node in nodes:
-        if node.attrs["Name"] in ["/spdk", "/spdk_proxy"]:
+        if node.attrs["Name"] in [f"/spdk_{rpc_port}", f"/spdk_proxy_{rpc_port}"]:
             logger.info(f"{node.attrs['Name']} container found, removing...")
             node.stop()
             node.remove(force=True)
@@ -179,11 +187,11 @@ def spdk_process_start():
 
     container = node_docker.containers.run(
         spdk_image,
-        f"/root/spdk/scripts/run_spdk_tgt.sh {spdk_cpu_mask} {spdk_mem_mib}",
-        name="spdk",
+        f"/root/scripts/run_spdk_tgt.sh {spdk_cpu_mask} {spdk_mem_mib} {rpc_sock}",
+        name=f"spdk_{rpc_port}",
         detach=True,
         privileged=True,
-        network_mode="host",
+        # network_mode="host",
         log_config=LogConfig(type=LogConfig.types.JOURNALD),
         volumes=[
             '/var/tmp:/var/tmp',
@@ -194,15 +202,10 @@ def spdk_process_start():
         # restart_policy={"Name": "on-failure", "MaximumRetryCount": 99}
     )
 
-    server_ip = data['server_ip']
-    rpc_port = data['rpc_port']
-    rpc_username = data['rpc_username']
-    rpc_password = data['rpc_password']
-
-    container2 = node_docker.containers.run(
+    node_docker.containers.run(
         constants.SIMPLY_BLOCK_DOCKER_IMAGE,
         "python simplyblock_core/services/spdk_http_proxy_server.py",
-        name="spdk_proxy",
+        name=f"spdk_proxy_{rpc_port}",
         detach=True,
         network_mode="host",
         log_config=LogConfig(type=LogConfig.types.JOURNALD),
@@ -214,6 +217,7 @@ def spdk_process_start():
             f"RPC_PORT={rpc_port}",
             f"RPC_USERNAME={rpc_username}",
             f"RPC_PASSWORD={rpc_password}",
+            f"RPC_SOCK={rpc_sock}",
         ]
         # restart_policy={"Name": "always"}
     )
@@ -237,10 +241,10 @@ def spdk_process_start():
 @bp.route('/spdk_process_kill', methods=['GET'])
 def spdk_process_kill():
     force = request.args.get('force', default=False, type=bool)
+    rpc_port = request.args.get('rpc_port', default=f"{constants.RPC_HTTP_PROXY_PORT}", type=str)
     node_docker = get_docker_client()
     for cont in node_docker.containers.list(all=True):
-        logger.debug(cont.attrs)
-        if cont.attrs['Name'] == "/spdk" or cont.attrs['Name'] == "/spdk_proxy":
+        if cont.attrs['Name'] == f"/spdk_{rpc_port}" or cont.attrs['Name'] == f"/spdk_proxy_{rpc_port}":
             cont.stop()
             cont.remove(force=force)
     return utils.get_response(True)
@@ -248,14 +252,14 @@ def spdk_process_kill():
 
 @bp.route('/spdk_process_is_up', methods=['GET'])
 def spdk_process_is_up():
+    rpc_port = request.args.get('rpc_port', default=f"{constants.RPC_HTTP_PROXY_PORT}", type=str)
     node_docker = get_docker_client()
     for cont in node_docker.containers.list(all=True):
-        logger.debug(cont.attrs)
-        if cont.attrs['Name'] == "/spdk":
+        if cont.attrs['Name'] == f"/spdk_{rpc_port}":
             status = cont.attrs['State']["Status"]
             is_running = cont.attrs['State']["Running"]
             if is_running:
-                return utils.get_response(True)
+                return utils.get_response(cont.attrs)
             else:
                 return utils.get_response(False, f"SPDK container status: {status}, is running: {is_running}")
     return utils.get_response(False, "SPDK container not found")
@@ -295,6 +299,9 @@ def get_info():
 def join_db():
     data = request.get_json()
     db_connection = data['db_connection']
+    rpc_port =constants.RPC_HTTP_PROXY_PORT
+    if 'rpc_port' in data:
+        rpc_port = data['rpc_port']
 
     logger.info("Setting DB connection")
     ret = scripts.set_db_config(db_connection)
@@ -303,7 +310,7 @@ def join_db():
         node_docker = get_docker_client()
         nodes = node_docker.containers.list(all=True)
         for node in nodes:
-            if node.attrs["Name"] == "/spdk_proxy":
+            if node.attrs["Name"] == f"/spdk_proxy_{rpc_port}":
                 node_docker.containers.get(node.attrs["Id"]).restart()
                 break
     except:

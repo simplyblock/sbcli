@@ -91,10 +91,13 @@ def set_pool_value_if_above(pool, key, value):
     current_value = getattr(pool, key)
     if value > current_value:
         setattr(pool, key, value)
-        return True
+    elif value == -1:
+        setattr(pool, key, 0)
     else:
-        logger.error(f"{key}: {value} can't be less than current value: {current_value}")
-        return False
+        msg = f"{key}: {value} can't be less than current value: {current_value}"
+        logger.error(msg)
+        return False, msg
+    return True, None
 
 def qos_exists_on_child_lvol(db_controller: DBController, pool_uuid):
     for lvol in db_controller.get_lvols_by_pool_id(pool_uuid):
@@ -102,24 +105,48 @@ def qos_exists_on_child_lvol(db_controller: DBController, pool_uuid):
             return True
     return False
 
-def set_pool(uuid, pool_max, lvol_max, max_rw_iops,
-             max_rw_mbytes, max_r_mbytes, max_w_mbytes):
+def set_pool(uuid, pool_max=0, lvol_max=0, max_rw_iops=0,
+             max_rw_mbytes=0, max_r_mbytes=0, max_w_mbytes=0, name=""):
     db_controller = DBController()
     pool = db_controller.get_pool_by_id(uuid)
     if not pool:
-        logger.error(f"Pool not found {uuid}")
-        return False
+        msg = f"Pool not found: {uuid}"
+        logger.error(msg)
+        return False, msg
 
     if pool.status == Pool.STATUS_INACTIVE:
-        logger.error("Pool is disabled")
-        return False
+        msg = "Pool is disabled"
+        logger.error(msg)
+        return False, msg
+
+
+    values = []
+
+    if name:
+        for p in db_controller.get_pools():
+            if p.pool_name == name:
+                msg = f"Pool found with the same name: {name}"
+                logger.error(msg)
+                return False, msg
+        pool.pool_name = name
 
     if pool_max:
-        if not set_pool_value_if_above(pool, "pool_max_size", pool_max):
-            return False
+        values.append(("pool_max_size", pool_max))
+
     if lvol_max:
-        if not set_pool_value_if_above(pool, "lvol_max_size", lvol_max):
-            return False
+        values.append(("lvol_max_size", lvol_max))
+
+    if max_rw_iops:
+        values.append(("max_rw_ios_per_sec", max_rw_iops))
+
+    if max_rw_mbytes:
+        values.append(("max_rw_mbytes_per_sec", max_rw_mbytes))
+
+    if max_r_mbytes:
+        values.append(("max_r_mbytes_per_sec", max_r_mbytes))
+
+    if max_w_mbytes:
+        values.append(("max_w_mbytes_per_sec", max_w_mbytes))
 
     if max_rw_iops is None:
         max_rw_iops = 0
@@ -152,14 +179,21 @@ def set_pool(uuid, pool_max, lvol_max, max_rw_iops,
             logger.error("RPC failed bdev_lvol_set_qos_limit")
             return False
 
+    for k, v in values:
+        ret, err = set_pool_value_if_above(pool, k, v)
+        if err:
+            return False, err
+
     pool.write_to_db(db_controller.kv_store)
     pool_events.pool_updated(pool)
     logger.info("Done")
-    return True
+    return True, None
 
 def delete_pool(uuid):
     db_controller = DBController()
     pool = db_controller.get_pool_by_id(uuid)
+    if not pool:
+        pool = db_controller.get_pool_by_name(uuid)
     if not pool:
         logger.error(f"Pool not found {uuid}")
         return False

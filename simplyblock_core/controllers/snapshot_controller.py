@@ -102,7 +102,7 @@ def add(lvol_id, snapshot_name):
             if snap_bdev:
                 snap_uuid = snap_bdev[0]['uuid']
                 blobid = snap_bdev[0]['driver_specific']['lvol']['blobid']
-                cluster_size = cluster.distr_ndcs * cluster.page_size_in_blocks
+                cluster_size = cluster.page_size_in_blocks
                 num_allocated_clusters = snap_bdev[0]["driver_specific"]["lvol"]["num_allocated_clusters"]
                 used_size = int(num_allocated_clusters*cluster_size)
         else:
@@ -153,7 +153,7 @@ def add(lvol_id, snapshot_name):
             if snap_bdev:
                 snap_uuid = snap_bdev[0]['uuid']
                 blobid = snap_bdev[0]['driver_specific']['lvol']['blobid']
-                cluster_size = cluster.distr_ndcs * cluster.page_size_in_blocks
+                cluster_size = cluster.page_size_in_blocks
                 num_allocated_clusters = snap_bdev[0]["driver_specific"]["lvol"]["num_allocated_clusters"]
                 used_size = int(num_allocated_clusters*cluster_size)
             else:
@@ -439,7 +439,7 @@ def clone(snapshot_id, clone_name, new_size=0):
     lvol.pool_uuid = pool.get_id()
     lvol.ha_type = snap.lvol.ha_type
     lvol.lvol_type = 'lvol'
-    lvol.guid = lvol_controller._generate_hex_string(16)
+    lvol.guid = utils.generate_hex_string(16)
     lvol.vuid = snap.lvol.vuid
     lvol.snapshot_name = snap.snap_bdev
     lvol.subsys_port = snap.lvol.subsys_port

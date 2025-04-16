@@ -136,7 +136,7 @@ class DBController(metaclass=Singleton):
     def get_lvols(self, cluster_id=None) -> List[LVol]:
         lvols = self.get_all_lvols()
         if not cluster_id:
-            return sorted(lvols, key=lambda x: x.create_dt)
+            return lvols
 
         node_ids=[]
         cluster_lvols = []
@@ -147,7 +147,7 @@ class DBController(metaclass=Singleton):
             if lvol.node_id in node_ids:
                 cluster_lvols.append(lvol)
 
-        return sorted(cluster_lvols, key=lambda x: x.create_dt)
+        return cluster_lvols
 
     def get_all_lvols(self) -> List[LVol]:
         lvols = LVol().read_from_db(self.kv_store)
@@ -185,9 +185,9 @@ class DBController(metaclass=Singleton):
             return ret[0]
 
     def get_lvol_by_id(self, id) -> LVol:
-        for lvol in self.get_lvols():
-            if lvol.get_id() == id:
-                return lvol
+        lvols = LVol().read_from_db(self.kv_store, id=id)
+        if lvols:
+            return lvols[0]
 
     def get_lvol_by_name(self, lvol_name) -> LVol:
         for lvol in self.get_lvols():
@@ -307,7 +307,7 @@ class DBController(metaclass=Singleton):
         ret = StorageNode().read_from_db(self.kv_store)
         nodes = []
         for n in ret:
-            if n.cluster_id == cluster_id and not n.is_secondary_node:
+            if n.cluster_id == cluster_id and not n.is_secondary_node:  # pass
                 nodes.append(n)
         return sorted(nodes, key=lambda x: x.create_dt)
 

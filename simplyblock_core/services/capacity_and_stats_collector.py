@@ -1,11 +1,12 @@
 # coding=utf-8
+import os
 import time
 
 from simplyblock_core import constants, db_controller, utils
 from simplyblock_core.models.nvme_device import NVMeDevice
+from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.rpc_client import RPCClient
 from simplyblock_core.models.stats import DeviceStatObject, NodeStatObject, ClusterStatObject
-
 
 logger = utils.get_logger(__name__)
 
@@ -38,8 +39,8 @@ def add_device_stats(cl, device, capacity_dict, stats_dict):
     else:
         logger.error(f"Error getting Alceml capacity, response={capacity_dict}")
 
-    if stats_dict and stats_dict['bdevs']:
-        stats = stats_dict['bdevs'][0]
+    if stats_dict:
+        stats = stats_dict
         data.update({
             "read_bytes": stats['bytes_read'],
             "read_io": stats['num_read_ops'],
@@ -82,6 +83,7 @@ def add_device_stats(cl, device, capacity_dict, stats_dict):
     stat_obj = DeviceStatObject(data=data)
     stat_obj.write_to_db(db_controller.kv_store)
     last_object_record[device.get_id()] = stat_obj
+
     return stat_obj
 
 
@@ -115,6 +117,7 @@ def add_node_stats(node, records):
     })
     stat_obj = NodeStatObject(data=data)
     stat_obj.write_to_db(db_controller.kv_store)
+
     return stat_obj
 
 
@@ -143,6 +146,7 @@ def add_cluster_stats(cl, records):
 
     stat_obj = ClusterStatObject(data=data)
     stat_obj.write_to_db(db_controller.kv_store)
+
     return stat_obj
 
 
@@ -162,9 +166,10 @@ while True:
         node_records = []
         for node in snodes:
             logger.info("Node: %s", node.get_id())
-            if node.status != 'online':
+            if node.status != StorageNode.STATUS_ONLINE:
                 logger.info("Node is not online, skipping")
                 continue
+
             if not node.nvme_devices:
                 logger.error("No devices found in node: %s", node.get_id())
                 continue
@@ -172,7 +177,12 @@ while True:
             rpc_client = RPCClient(
                 node.mgmt_ip, node.rpc_port,
                 node.rpc_username, node.rpc_password,
-                timeout=2, retry=2)
+                timeout=5, retry=2)
+
+            node_devs_stats = {}
+            ret = rpc_client.get_lvol_stats()
+            if ret:
+                node_devs_stats = {b['name']: b for b in ret['bdevs']}
 
             devices_records = []
             for device in node.nvme_devices:
@@ -181,10 +191,11 @@ while True:
                     logger.info(f"Device is skipped: {device.get_id()} status: {device.status}")
                     continue
                 capacity_dict = rpc_client.alceml_get_capacity(device.alceml_name)
-                stats_dict = rpc_client.get_device_stats(device.nvme_bdev)
-                record = add_device_stats(cl, device, capacity_dict, stats_dict)
-                if record:
-                    devices_records.append(record)
+                if device.nvme_bdev in node_devs_stats:
+                    stats_dict = node_devs_stats[device.nvme_bdev]
+                    record = add_device_stats(cl, device, capacity_dict, stats_dict)
+                    if record:
+                        devices_records.append(record)
 
             node_record = add_node_stats(node, devices_records)
             node_records.append(node_record)

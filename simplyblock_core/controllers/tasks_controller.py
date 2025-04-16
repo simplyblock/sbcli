@@ -207,13 +207,14 @@ def add_node_add_task(cluster_id, function_params):
     return _add_task(JobSchedule.FN_NODE_ADD, cluster_id, "", "", function_params=function_params)
 
 
-def get_active_node_task(cluster_id, node_id):
+def get_active_node_tasks(cluster_id, node_id):
     tasks = db_controller.get_job_tasks(cluster_id)
+    out = []
     for task in tasks:
         if task.node_id == node_id:
             if task.status != JobSchedule.STATUS_DONE and task.canceled is False:
-                return task.uuid
-    return False
+                out.append(task)
+    return out
 
 
 def get_new_device_mig_task(cluster_id, node_id, distr_name, dev_id=None):

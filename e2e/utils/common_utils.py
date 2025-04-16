@@ -453,8 +453,20 @@ class CommonUtils:
             raise AssertionError(f"{key} is 0 for record: {stat}")
         self.logger.info(f"{key}: {value} is valid.")
 
+    def get_all_node_versions(self):
+        """
+        Fetches sbcli version from all storage nodes.
 
-    
+        Returns:
+            dict: Dictionary mapping node IPs to their sbcli version strings.
+        """
+        versions = {}
+        mgmt_nodes, storage_nodes = self.sbcli_utils.get_all_nodes_ip()
+        nodes = mgmt_nodes + storage_nodes
+        for node in nodes:
+            versions[node] = self.ssh_utils.get_node_version(node=node)
+        return versions
+
 
 def sleep_n_sec(seconds):
     """Sleeps for given seconds

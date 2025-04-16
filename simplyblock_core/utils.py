@@ -28,6 +28,10 @@ CONFIG_KEYS = [
     "jc_singleton_core",
 ]
 
+
+UUID_PATTERN = re.compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
+
+
 def get_env_var(name, default=None, is_required=False):
     if not name:
         logger.warning("Invalid env var name %s", name)
@@ -115,7 +119,7 @@ _humanbytes_parameter = {
 
 def humanbytes(size: int, mode: str = 'si') -> str:
     """Return the given bytes as a human friendly including the appropriate unit."""
-    if not size:
+    if not size or size < 0:
         return '0 B'
 
     base, exponent, log, infix = _humanbytes_parameter[mode]
@@ -333,40 +337,6 @@ def get_random_vuid():
     return r
 
 
-def calculate_core_allocation(cpu_count):
-    '''
-    If number of cpu cores >= 8, tune cpu core mask
-        1. Never use core 0 for spdk.
-        2. Core 1 is for app_thread
-        3. Core 2 for Journal manager
-        4. Poller cpu cores are 30% of Available cores
-        5. Alceml cpu cores are 30% of Available cores
-        6. Distribs cpu cores are 40% of Available cores
-    JIRA ticket link/s
-    https://simplyblock.atlassian.net/browse/SFAM-885
-    '''
-
-    if cpu_count > 64:
-        cpu_count = 64
-
-    all_cores = list(range(0, cpu_count))
-    app_thread_core = all_cores[1:2]
-    jm_cpu_core = all_cores[2:3]
-
-    # Calculate available cores
-    available_cores_count = cpu_count - 3
-
-    # Calculate cpus counts
-    poller_cpus_count = int(available_cores_count * 0.3)
-    alceml_cpus_cout = int(available_cores_count * 0.3)
-
-    # Calculate cpus cores
-    poller_cpu_cores = all_cores[3:poller_cpus_count+3]
-    alceml_cpu_cores = all_cores[3+poller_cpus_count:poller_cpus_count+alceml_cpus_cout+3]
-    distrib_cpu_cores = all_cores[3+poller_cpus_count+alceml_cpus_cout:]
-
-    return app_thread_core, jm_cpu_core, poller_cpu_cores, alceml_cpu_cores, distrib_cpu_cores
-
 def hexa_to_cpu_list(cpu_mask):
     # Convert the hex string to an integer
     mask_int = int(cpu_mask, 16)
@@ -542,7 +512,7 @@ def calculate_minimum_hp_memory(small_pool_count, large_pool_count, lvol_count, 
     '''
     pool_consumption = (small_pool_count * 8 + large_pool_count * 128) / 1024 + 1092
     memory_consumption = (4 * cpu_count + 1.0277 * pool_consumption + 25 * lvol_count) * (1024 * 1024) + (250 * 1024 * 1024) * 1.1 * convert_size(max_prov, 'TiB') + constants.EXTRA_HUGE_PAGE_MEMORY
-    return int(memory_consumption*1.5)
+    return int(memory_consumption)
 
 
 def calculate_minimum_sys_memory(max_prov, total):
@@ -629,7 +599,7 @@ def get_logger(name=""):
 def _parse_unit(unit: str, mode: str = 'si/iec', strict: bool = True) -> tuple[int, int]:
     """Parse the given unit, returning the associated base and exponent
 
-    Mode can be either 'si/iec' to parse decimal (SI) and binary (IEC) units, or 
+    Mode can be either 'si/iec' to parse decimal (SI) and binary (IEC) units, or
     'jedec' for binary only units. If `strict`, parsing will be case-sensitive and
     expect the 'B' suffix.
     """
@@ -659,10 +629,17 @@ def parse_size(size_string: str, mode: str = 'si/iec', unit: str = '', strict: b
     """Parse the given data size
 
     If passed and not explicitly given, 'unit' will be assumed.
-    Mode can be either 'si/iec' to parse decimal (SI) and binary (IEC) units, or 
+    Mode can be either 'si/iec' to parse decimal (SI) and binary (IEC) units, or
     'jedec' for binary only units. If `strict`, parsing will be case-sensitive and
     expect the 'B' suffix.
     """
+    if not unit:
+        try:
+            x = int(size_string)
+            return x
+        except Exception:
+            pass
+
     try:
         m = re.match(r'^(?P<size_in_unit>\d+) ?(?P<unit>\w+)?$', size_string.strip())
         if m is None:
@@ -769,8 +746,42 @@ def get_next_port(cluster_id):
         if node.lvol_subsys_port > 0:
             used_ports.append(node.lvol_subsys_port)
 
-    while port in used_ports:
-        port += 1
+    next_port = port
+    while True:
+        if next_port not in used_ports:
+            return next_port
+        next_port += 1
+
+def get_next_rpc_port(cluster_id):
+    from simplyblock_core.db_controller import DBController
+    db_controller = DBController()
+
+    port = 8080
+    used_ports = []
+    for node in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
+        if node.rpc_port > 0:
+            used_ports.append(node.rpc_port)
+
+    for i in range(1000):
+        next_port = port + i
+
+        if next_port not in used_ports:
+            return next_port
+
+    return 0
+
+def get_next_dev_port(cluster_id):
+    from simplyblock_core.db_controller import DBController
+    db_controller = DBController()
+
+    port = 9080
+    used_ports = []
+    for node in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
+        if node.nvmf_port > 0:
+            used_ports.append(node.nvmf_port)
+
+    for i in range(1000):
+        next_port = port + i
 
     return port
 
@@ -903,3 +914,30 @@ def store_cores_config(spdk_cpu_mask):
         logger.info(f"JSON file successfully written to {file_path}")
     except subprocess.CalledProcessError as e:
         logger.error(f"Error writing to file: {e}")
+
+def init_sentry_sdk(name=None):
+    # import sentry_sdk
+    # params = {
+    #     "dsn": constants.SENTRY_SDK_DNS,
+    #     # Set traces_sample_rate to 1.0 to capture 100%
+    #     # of transactions for tracing.
+    #     "traces_sample_rate": 1.0,
+    #     # Add request headers and IP for users,
+    #     # see https://docs.sentry.io/platforms/python/data-management/data-collected/ for more info
+    #     "send_default_pii": True,
+    # }
+    # if name:
+    #     params["server_name"] = name
+    # sentry_sdk.init(**params)
+    # # from sentry_sdk import set_level
+    # # set_level("critical")
+
+    return True
+
+
+def generate_hex_string(length):
+    def _generate_string(length):
+        return ''.join(random.SystemRandom().choice(
+            string.ascii_letters + string.digits) for _ in range(length))
+
+    return _generate_string(length).encode('utf-8').hex()

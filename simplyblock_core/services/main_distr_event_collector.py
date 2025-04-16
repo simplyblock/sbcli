@@ -4,18 +4,15 @@ import threading
 import time
 
 
-from simplyblock_core import constants, db_controller, utils, rpc_client, distr_controller, storage_node_ops
-from simplyblock_core.controllers import events_controller, device_controller, lvol_events, tasks_controller
-from simplyblock_core.models.lvol_model import LVol
-
-
+from simplyblock_core import constants, db_controller, utils, rpc_client, distr_controller
+from simplyblock_core.controllers import events_controller, device_controller
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
-from simplyblock_core.rpc_client import RPCClient
 
 
 logger = utils.get_logger(__name__)
 
+utils.init_sentry_sdk()
 
 # get DB controller
 db_controller = db_controller.DBController()
@@ -71,6 +68,10 @@ def process_device_event(event):
             elif event.message in ['error_write', 'error_unmap']:
                 logger.info(f"Setting device to read-only")
                 device_controller.device_set_read_only(device_obj.get_id())
+
+            elif event.message == 'error_write_cannot_allocate':
+                logger.info(f"Setting device to cannot_allocate")
+                device_controller.device_set_state(device_obj.get_id(), NVMeDevice.STATUS_CANNOT_ALLOCATE)
 
             else:
                 logger.info(f"Setting device to unavailable")
@@ -149,7 +150,7 @@ def start_event_collector_on_node(node_id):
                 try:
                     events = client.distr_status_events_discard_then_get(
                         0, constants.DISTR_EVENT_COLLECTOR_NUM_OF_EVENTS * page)
-                    if events is None:
+                    if events is False:
                         logger.error("No events received")
                         return
 

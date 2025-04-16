@@ -2,6 +2,7 @@
 import time
 from datetime import datetime, timezone
 
+
 from simplyblock_core import constants, db_controller, cluster_ops, storage_node_ops, utils
 from simplyblock_core.controllers import health_controller, device_controller, tasks_controller
 from simplyblock_core.models.cluster import Cluster
@@ -16,13 +17,28 @@ logger = utils.get_logger(__name__)
 # get DB controller
 db_controller = db_controller.DBController()
 
+utils.init_sentry_sdk()
+
 
 def is_new_migrated_node(cluster_id, node):
+    dev_lst = []
     for dev in node.nvme_devices:
         if dev.status == NVMeDevice.STATUS_ONLINE:
-            for item in node.lvstore_stack:
-                if item["type"] == "bdev_distr":
-                    if tasks_controller.get_new_device_mig_task(cluster_id, node.uuid, item["name"],dev.get_id()):
+            dev_lst.append(dev.get_id())
+
+    distr_names = []
+    for item in node.lvstore_stack:
+        if item["type"] == "bdev_distr":
+            distr_names.append(item["name"])
+
+    if dev_lst:
+        tasks = db_controller.get_job_tasks(cluster_id)
+        for task in tasks:
+            if task.function_name == JobSchedule.FN_NEW_DEV_MIG and task.node_id == node.get_id():
+                if task.device_id not in dev_lst:
+                    continue
+                if task.status != JobSchedule.STATUS_DONE and task.canceled is False:
+                    if "distr_name" in task.function_params and task.function_params["distr_name"] in distr_names:
                         return True
     return False
 
@@ -38,6 +54,8 @@ def get_next_cluster_status(cluster_id):
     affected_nodes = 0
     online_devices = 0
     offline_devices = 0
+
+    affected_physical_nodes = []
 
     for node in snodes:
 
@@ -66,11 +84,13 @@ def get_next_cluster_status(cluster_id):
 
         if node_offline_devices > 0 or (node_online_devices == 0 and node.status != StorageNode.STATUS_REMOVED):
             affected_nodes += 1
+            if node.mgmt_ip not in affected_physical_nodes:
+                affected_physical_nodes.append(node.mgmt_ip)
 
         online_devices += node_online_devices
         offline_devices += node_offline_devices
 
-
+    affected_nodes = len(affected_physical_nodes)
     logger.debug(f"online_nodes: {online_nodes}")
     logger.debug(f"offline_nodes: {offline_nodes}")
     logger.debug(f"affected_nodes: {affected_nodes}")
@@ -123,7 +143,8 @@ def update_cluster_status(cluster_id):
 
     task_pending = 0
     for task in db_controller.get_job_tasks(cluster_id):
-        if task.status != JobSchedule.STATUS_DONE:
+        if task.status != JobSchedule.STATUS_DONE and task.function_name in [
+            JobSchedule.FN_DEV_MIG, JobSchedule.FN_NEW_DEV_MIG, JobSchedule.FN_FAILED_DEV_MIG]:
             task_pending += 1
 
     cluster.is_re_balancing = task_pending  > 0
@@ -143,10 +164,10 @@ def update_cluster_status(cluster_id):
         # check node statuss, check auto restart for nodes
         can_activate = True
         for node in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
-            if node.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_REMOVED]:
-                logger.error(f"can not activate cluster: node in not online {node.get_id()}: {node.status}")
-                can_activate = False
-                break
+            # if node.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_REMOVED]:
+            #     logger.error(f"can not activate cluster: node in not online {node.get_id()}: {node.status}")
+            #     can_activate = False
+            #     break
             if tasks_controller.get_active_node_restart_task(cluster_id, node.get_id()):
                 logger.error(f"can not activate cluster: restart tasks found")
                 can_activate = False
@@ -244,10 +265,10 @@ while True:
             if snode.status == StorageNode.STATUS_SCHEDULABLE and not ping_check and not node_api_check:
                 continue
 
-            spdk_process = True
+            spdk_process = False
             if node_api_check:
                 # 3- check spdk_process
-                spdk_process = health_controller._check_spdk_process_up(snode.mgmt_ip)
+                spdk_process = health_controller._check_spdk_process_up(snode.mgmt_ip, snode.rpc_port)
             logger.info(f"Check: spdk process {snode.mgmt_ip}:5000 ... {spdk_process}")
 
                 # 4- check rpc
@@ -258,19 +279,19 @@ while True:
             node_port_check = True
             down_ports = []
             if spdk_process and snode.lvstore_status == "ready":
-                if snode.is_secondary_node:
-                    ports = [4420]
+                ports = [snode.nvmf_port]
+                if snode.lvstore_stack_secondary_1:
                     for n in db_controller.get_primary_storage_nodes_by_secondary_node_id(snode.get_id()):
                         if n.lvstore_status == "ready":
                             ports.append(n.lvol_subsys_port)
-                else:
-                    ports = [snode.lvol_subsys_port, 4420]
+                if not snode.is_secondary_node:
+                    ports.append(snode.lvol_subsys_port)
 
                 for port in ports:
                     ret = health_controller._check_port_on_node(snode, port)
                     logger.info(f"Check: node port {snode.mgmt_ip}, {port} ... {ret}")
                     node_port_check &= ret
-                    if not ret and port == 4420:
+                    if not ret and port == snode.nvmf_port:
                         down_ports.append(port)
 
                 for data_nic in snode.data_nics:

@@ -203,8 +203,8 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     if prov_cap_crit and prov_cap_crit > 0:
         c.prov_cap_crit = prov_cap_crit
     if distr_ndcs == 0 and distr_npcs == 0:
-        c.distr_ndcs = 1
-        c.distr_npcs = 1
+        logger.error("both distr_ndcs and distr_npcs cannot be 0")
+        return False
     else:
         c.distr_ndcs = distr_ndcs
         c.distr_npcs = distr_npcs
@@ -260,6 +260,17 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     except subprocess.CalledProcessError as e:
         print(f"An error occurred: {e}")
     shutil.rmtree(temp_dir)
+
+    scripts_folder = os.path.join(TOP_DIR, "simplyblock_core/scripts/")
+    prometheus_file = "prometheus.yml"
+    env = Environment(loader=FileSystemLoader(scripts_folder), trim_blocks=True, lstrip_blocks=True)
+    template = env.get_template(f'{prometheus_file}.j2')
+    values = {
+        'CLUSTER_ID': c.uuid,
+        'CLUSTER_SECRET': c.secret}
+    file_path = os.path.join(scripts_folder, prometheus_file)
+    with open(file_path, 'w') as file:
+        file.write(template.render(values))
 
     logger.info("Deploying swarm stack ...")
     log_level = "DEBUG" if constants.LOG_WEB_DEBUG else "INFO"
@@ -380,7 +391,7 @@ def deploy_cluster(storage_nodes,test,ha_type,distr_ndcs,distr_npcs,enable_qos,i
                    ha_jm_count, number_of_distribs,namespace,secondary_nodes,partition_size,
                    lvol_name, lvol_size, lvol_ha_type, pool_name, pool_max, host_id, comp, crypto, distr_vuid, max_rw_iops,
                    max_rw_mbytes, max_r_mbytes, max_w_mbytes, with_snapshot, max_size, crypto_key1, crypto_key2,
-                   lvol_priority_class, fstype):
+                   lvol_priority_class, id_device_by_nqn, fstype):
     logger.info("run deploy-cleaner")
     
     storage_node_ops.deploy_cleaner()
@@ -401,7 +412,7 @@ def deploy_cluster(storage_nodes,test,ha_type,distr_ndcs,distr_npcs,enable_qos,i
         dev_ip=f"{node_ip}:5000"
         add_node_status=storage_node_ops.add_node(cluster_uuid,dev_ip,ifname,data_nics,max_lvol,max_snap,max_prov,spdk_image,spdk_debug,
                                   small_bufsize,large_bufsize,spdk_cpu_mask,num_partitions_per_dev,jm_percent,number_of_devices,
-                                  enable_test_device,namespace,number_of_distribs,enable_ha_jm,False,False,partition_size,ha_jm_count)
+                                  enable_test_device,namespace,number_of_distribs,enable_ha_jm,False,id_device_by_nqn,partition_size,ha_jm_count)
         
         
         if not add_node_status:
@@ -417,7 +428,7 @@ def deploy_cluster(storage_nodes,test,ha_type,distr_ndcs,distr_npcs,enable_qos,i
             dev_ip=f"{node_ip}:5000"
             add_node_status=storage_node_ops.add_node(cluster_uuid,dev_ip,ifname,data_nics,max_lvol,max_snap,max_prov,spdk_image,spdk_debug,
                                     small_bufsize,large_bufsize,spdk_cpu_mask,num_partitions_per_dev,jm_percent,number_of_devices,
-                                    enable_test_device,namespace,number_of_distribs,enable_ha_jm,True,False,partition_size,ha_jm_count)
+                                    enable_test_device,namespace,number_of_distribs,enable_ha_jm,True,id_device_by_nqn,partition_size,ha_jm_count)
                     
             if not add_node_status:
                 logger.error("Could not add storage node successfully")
@@ -537,11 +548,11 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
     _create_update_user(cluster.uuid, cluster.grafana_endpoint, cluster.grafana_secret, cluster.secret)
 
     if distr_ndcs == 0 and distr_npcs == 0:
-        cluster.distr_ndcs = 2
-        cluster.distr_npcs = 1
-    else:
-        cluster.distr_ndcs = distr_ndcs
-        cluster.distr_npcs = distr_npcs
+        logger.error("both distr_ndcs and distr_npcs cannot be 0")
+        return False
+
+    cluster.distr_ndcs = distr_ndcs
+    cluster.distr_npcs = distr_npcs
     cluster.distr_bs = distr_bs
     cluster.distr_chunk_bs = distr_chunk_bs
     cluster.ha_type = ha_type
@@ -580,13 +591,16 @@ def cluster_activate(cl_id, force=False, force_lvstore_create=False):
             return False
 
     ols_status = cluster.status
-    set_cluster_status(cl_id, Cluster.STATUS_IN_ACTIVATION)
+    if ols_status == Cluster.STATUS_IN_ACTIVATION:
+        ols_status = Cluster.STATUS_UNREADY
+    else:
+        set_cluster_status(cl_id, Cluster.STATUS_IN_ACTIVATION)
     snodes = db_controller.get_storage_nodes_by_cluster_id(cl_id)
     online_nodes = []
     dev_count = 0
 
     for node in snodes:
-        if node.is_secondary_node:
+        if node.is_secondary_node:  # pass
             continue
         if node.status == node.STATUS_ONLINE:
             online_nodes.append(node)
@@ -603,20 +617,34 @@ def cluster_activate(cl_id, force=False, force_lvstore_create=False):
     records = db_controller.get_cluster_capacity(cluster)
     max_size = records[0]['size_total']
 
+    used_nodes_as_sec = []
+    snodes = db_controller.get_storage_nodes_by_cluster_id(cl_id)
     if cluster.ha_type == "ha":
         for snode in snodes:
-            if snode.is_secondary_node or snode.secondary_node_id:
+            if snode.is_secondary_node:  # pass
+                continue
+            if snode.secondary_node_id:
+                sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
+                sec_node.lvstore_stack_secondary_1 = snode.get_id()
+                sec_node.write_to_db()
+                used_nodes_as_sec.append(snode.secondary_node_id)
                 continue
             secondary_nodes = storage_node_ops.get_secondary_nodes(snode)
             if not secondary_nodes:
                 logger.error(f"Failed to activate cluster, No enough secondary nodes")
                 set_cluster_status(cl_id, ols_status)
                 return False
+            snode = db_controller.get_storage_node_by_id(snode.get_id())
             snode.secondary_node_id = secondary_nodes[0]
             snode.write_to_db()
+            sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
+            sec_node.lvstore_stack_secondary_1 = snode.get_id()
+            sec_node.write_to_db()
+            used_nodes_as_sec.append(snode.secondary_node_id)
 
+    snodes = db_controller.get_storage_nodes_by_cluster_id(cl_id)
     for snode in snodes:
-        if snode.is_secondary_node:
+        if snode.is_secondary_node:  # pass
             continue
         if snode.status != StorageNode.STATUS_ONLINE:
             continue
@@ -666,6 +694,7 @@ def get_cluster_status(cl_id, is_json=False):
             data.append({
                 "UUID": dev.get_id(),
                 "Storage ID": dev.cluster_device_order,
+                "Physical label": dev.physical_label,
                 "Size": utils.humanbytes(dev.size),
                 "Hostname": node.hostname,
                 "Status": dev.status,
@@ -830,7 +859,9 @@ def list_all_info(cluster_id):
         elif task.status in [JobSchedule.STATUS_NEW, JobSchedule.STATUS_SUSPENDED]:
             task_pending += 1
 
-
+    status = cl.status
+    if cl.is_re_balancing and status in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED]:
+        status = f"{status} - ReBalancing"
     data.append({
         "Cluster UUID": cl.get_id(),
         "Type": cl.ha_type.upper(),
@@ -852,8 +883,7 @@ def list_all_info(cluster_id):
         # "Size prov": f"{utils.humanbytes(rec.size_prov)}",
         # "Size util": f"{rec.size_util}%",
         # "Size prov util": f"{rec.size_prov_util}%",
-
-        "Status": cl.status,
+        "Status": status.upper(),
 
     })
 
@@ -880,7 +910,7 @@ def list_all_info(cluster_id):
         "Write IOP/s": f"{rec.write_io_ps}",
 
         "Health": "True",
-        "Status": cl.status,
+        "Status": status.upper(),
 
     })
 
@@ -908,20 +938,22 @@ def list_all_info(cluster_id):
 
         data.append({
             "Storage node UUID": node.uuid,
-            "Devices": f"{total_devices}/{online_devices}",
-            "LVols": f"{len(lvs)}",
 
-            "Size prov": f"{utils.humanbytes(rec.size_total)}",
-            "Size Used": f"{utils.humanbytes(rec.size_used)}",
-            "Size free": f"{utils.humanbytes(rec.size_free)}",
-            "Size %": f"{rec.size_util}%",
-            "Size prov %": f"{rec.size_prov_util}%",
+            "Size": f"{utils.humanbytes(rec.size_total)}",
+            "Used": f"{utils.humanbytes(rec.size_used)}",
+            "Free": f"{utils.humanbytes(rec.size_free)}",
+            "Util": f"{rec.size_util}%",
 
             "Read BW/s": f"{utils.humanbytes(rec.read_bytes_ps)}",
             "Write BW/s": f"{utils.humanbytes(rec.write_bytes_ps)}",
             "Read IOP/s": f"{rec.read_io_ps}",
             "Write IOP/s": f"{rec.write_io_ps}",
 
+            "Size prov": f"{utils.humanbytes(rec.size_prov)}",
+            "Util prov": f"{rec.size_prov_util}%",
+
+            "Devices": f"{total_devices}/{online_devices}",
+            "LVols": f"{len(lvs)}",
             "Status": node.status,
 
         })
@@ -935,19 +967,15 @@ def list_all_info(cluster_id):
 
             dev_data.append({
                 "Device UUID": dev.uuid,
-                "StorgeID": dev.cluster_device_order,
-
-                "Size total": f"{utils.humanbytes(rec.size_total)}",
-                "Size Used": f"{utils.humanbytes(rec.size_used)}",
-                "Size free": f"{utils.humanbytes(rec.size_free)}",
-                "Size %": f"{rec.size_util}%",
-                # "Size prov %": f"{rec.size_prov_util}%",
-
+                "Size": f"{utils.humanbytes(rec.size_total)}",
+                "Used": f"{utils.humanbytes(rec.size_used)}",
+                "Free": f"{utils.humanbytes(rec.size_free)}",
+                "Util": f"{rec.size_util}%",
                 "Read BW/s": f"{utils.humanbytes(rec.read_bytes_ps)}",
                 "Write BW/s": f"{utils.humanbytes(rec.write_bytes_ps)}",
                 "Read IOP/s": f"{rec.read_io_ps}",
                 "Write IOP/s": f"{rec.write_io_ps}",
-
+                "StorgeID": dev.cluster_device_order,
                 "Health": dev.health_check,
                 "Status": dev.status,
 
@@ -973,19 +1001,15 @@ def list_all_info(cluster_id):
 
         lvol_data.append({
             "LVol UUID": lvol.uuid,
-
-            "Size prov": f"{utils.humanbytes(rec.size_total)}",
-            "Size Used": f"{utils.humanbytes(rec.size_used)}",
-            "Size free": f"{utils.humanbytes(rec.size_free)}",
-            "Size %": f"{rec.size_util}%",
-            # "Size prov %": f"{rec.size_prov_util}%",
-
+            "Size": f"{utils.humanbytes(rec.size_total)}",
+            "Used": f"{utils.humanbytes(rec.size_used)}",
+            "Free": f"{utils.humanbytes(rec.size_free)}",
+            "Util": f"{rec.size_util}%",
             "Read BW/s": f"{utils.humanbytes(rec.read_bytes_ps)}",
             "Write BW/s": f"{utils.humanbytes(rec.write_bytes_ps)}",
             "Read IOP/s": f"{rec.read_io_ps}",
             "Write IOP/s": f"{rec.write_io_ps}",
-
-            "Connections": f"{rec.connected_clients}",
+            # "Connections": f"{rec.connected_clients}",
             "Health": lvol.health_check,
             "Status": lvol.status,
 
@@ -1048,12 +1072,12 @@ def get_iostats_history(cluster_id, history_string, records_count=20, parse_size
     db_controller = DBController()
     cluster = db_controller.get_cluster_by_id(cluster_id)
     if not cluster:
-        logger.error(f"Cluster not found {cluster_id}")
+        logger.warning(f"Cluster not found {cluster_id}")
         return False
 
     nodes = db_controller.get_storage_nodes_by_cluster_id(cluster_id)
     if not nodes:
-        logger.error("no nodes found")
+        logger.warning("no nodes found")
         return False
 
     if history_string:

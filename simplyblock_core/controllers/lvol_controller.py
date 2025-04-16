@@ -23,14 +23,6 @@ from simplyblock_core.snode_client import SNodeClient
 logger = lg.getLogger()
 
 
-def _generate_hex_string(length):
-    def _generate_string(length):
-        return ''.join(random.SystemRandom().choice(
-            string.ascii_letters + string.digits) for _ in range(length))
-
-    return _generate_string(length).encode('utf-8').hex()
-
-
 def _create_crypto_lvol(rpc_client, name, base_name, key1, key2):
     key_name = f'key_{name}'
     ret = rpc_client.lvol_crypto_key_create(key_name, key1, key2)
@@ -144,7 +136,7 @@ def _get_next_3_nodes(cluster_id, lvol_size=0):
     online_nodes = []
     node_stats = {}
     for node in snodes:
-        if node.is_secondary_node:
+        if node.is_secondary_node:  # pass
             continue
 
         if node.status == node.STATUS_ONLINE:
@@ -398,7 +390,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
     lvol.ha_type = ha_type
     lvol.bdev_stack = []
     lvol.uuid = uid or str(uuid.uuid4())
-    lvol.guid = _generate_hex_string(16)
+    lvol.guid = utils.generate_hex_string(16)
     lvol.vuid = vuid
     lvol.lvol_bdev = f"LVOL_{vuid}"
 
@@ -551,10 +543,15 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
                 lvol_bdev, error = add_lvol_on_node(lvol, secondary_node, is_primary=False)
                 if error:
                     logger.error(error)
+                    # remove lvol from primary
+                    ret = delete_lvol_from_node(lvol.get_id(), primary_node.get_id())
+                    if not ret:
+                        logger.error("")
                     lvol.remove(db_controller.kv_store)
                     return False, error
 
     lvol.pool_uuid = pool.get_id()
+    lvol.pool_name = pool.pool_name
     lvol.status = LVol.STATUS_ONLINE
     lvol.write_to_db(db_controller.kv_store)
     lvol_events.lvol_create(lvol)
@@ -632,7 +629,7 @@ def add_lvol_on_node(lvol, snode, is_primary=True):
     else:
         min_cntlid =  1000
     logger.info("creating subsystem %s", lvol.nqn)
-    ret = rpc_client.subsystem_create(lvol.nqn, 'sbcli-cn', lvol.uuid, min_cntlid)
+    ret = rpc_client.subsystem_create(lvol.nqn, lvol.ha_type, lvol.uuid, min_cntlid)
     logger.debug(ret)
 
     # add listeners
@@ -663,10 +660,11 @@ def add_lvol_on_node(lvol, snode, is_primary=True):
     logger.debug(spdk_mem_info_after)
 
     ret = rpc_client.get_bdevs(f"{lvol.lvs_name}/{lvol.lvol_bdev}")
-    lvol_bdev = ret[0]
-
-    return lvol_bdev, None
-
+    if ret:
+        lvol_bdev = ret[0]
+        return lvol_bdev, None
+    else:
+        return False, "Failed to get lvol bdev"
 
 def is_node_leader(snode, lvs_name):
     rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
@@ -691,7 +689,7 @@ def recreate_lvol_on_node(lvol, snode, ha_inode_self=0, ana_state=None):
 
     min_cntlid = 1 + 1000 * ha_inode_self
     logger.info("creating subsystem %s", lvol.nqn)
-    rpc_client.subsystem_create(lvol.nqn, 'sbcli-cn', lvol.uuid, min_cntlid)
+    rpc_client.subsystem_create(lvol.nqn, lvol.ha_type, lvol.uuid, min_cntlid)
 
     # if namespace_found is False:
     logger.info("Add BDev to subsystem")
@@ -774,7 +772,6 @@ def _remove_bdev_stack(bdev_stack, rpc_client):
             logger.error(f"Failed to delete BDev {name}")
 
         bdev['status'] = 'deleted'
-        time.sleep(1)
     return True
 
 
@@ -786,7 +783,7 @@ def delete_lvol_from_node(lvol_id, node_id, clear_data=True):
         return True
 
     logger.info(f"Deleting LVol:{lvol.get_id()} from node:{snode.get_id()}")
-    rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
+    rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password, timeout=5, retry=2)
 
     # 1- remove subsystem
     if rpc_client.subsystem_list(lvol.nqn):
@@ -811,6 +808,11 @@ def delete_lvol(id_or_name, force_delete=False):
         lvol = db_controller.get_lvol_by_name(id_or_name)
         if not lvol:
             logger.error(f"lvol not found: {id_or_name}")
+            return False
+
+    if lvol.status == LVol.STATUS_IN_DELETION:
+        logger.info(f"lvol:{lvol.get_id()} status is in deletion")
+        if not force_delete:
             return False
 
     pool = db_controller.get_pool_by_id(lvol.pool_uuid)
@@ -1060,10 +1062,16 @@ def list_lvols(is_json, cluster_id, pool_id_or_name, all=False):
         logger.debug(lvol)
         if lvol.deleted is True and all is False:
             continue
+        size_used = 0
+        records = db_controller.get_lvol_stats(lvol, 1)
+        if records:
+            size_used = records[0].size_used
+
         data.append({
             "Id": lvol.uuid,
             "Name": lvol.lvol_name,
             "Size": utils.humanbytes(lvol.size),
+            "Used": f"{utils.humanbytes(size_used)}",
             "Hostname": lvol.hostname,
             "HA": lvol.ha_type,
             "BlobID": lvol.blobid or "",
@@ -1171,32 +1179,38 @@ def resize_lvol(id, new_size):
     db_controller = DBController()
     lvol = db_controller.get_lvol_by_id(id)
     if not lvol:
-        logger.error(f"LVol not found: {id}")
-        return False
+        msg = f"LVol not found: {id}"
+        logger.error(msg)
+        return False, msg
 
     pool = db_controller.get_pool_by_id(lvol.pool_uuid)
     if pool.status == Pool.STATUS_INACTIVE:
-        logger.error(f"Pool is disabled")
-        return False
+        msg = f"Pool is disabled {pool.get_id()}"
+        logger.error(msg)
+        return False, msg
 
     if lvol.size >= new_size:
-        logger.error(f"New size {new_size} must be higher than the original size {lvol.size}")
-        return False
+        msg = f"New size {utils.humanbytes(new_size)} must be higher than the original size {utils.humanbytes(lvol.size)}"
+        logger.error(msg)
+        return False, msg
 
     if lvol.max_size < new_size:
-        logger.error(f"New size {new_size} must be smaller than the max size {lvol.max_size}")
-        return False
+        msg = f"New size {new_size} must be smaller than the max size {lvol.max_size}"
+        logger.error(msg)
+        return False, msg
 
     if 0 < pool.lvol_max_size < new_size:
-        logger.error(f"Pool Max LVol size is: {utils.humanbytes(pool.lvol_max_size)}, LVol size: {utils.humanbytes(new_size)} must be below this limit")
-        return False
+        msg = f"Pool Max LVol size is: {utils.humanbytes(pool.lvol_max_size)}, "\
+              f"LVol size: {utils.humanbytes(new_size)} must be below this limit"
+        logger.error(msg)
+        return False, msg
 
     if pool.pool_max_size > 0:
         total = pool_controller.get_pool_total_capacity(pool.get_id())
         if total + new_size > pool.pool_max_size:
-            logger.error( f"Invalid LVol size: {utils.humanbytes(new_size)} " 
-                          f"Pool max size has reached {utils.humanbytes(total+new_size)} of {utils.humanbytes(pool.pool_max_size)}")
-            return False
+            msg =f"Invalid LVol size: {utils.humanbytes(new_size)}, Pool max size has reached {utils.humanbytes(total+new_size)} of {utils.humanbytes(pool.pool_max_size)}"
+            logger.error(msg)
+            return False, msg
 
     snode = db_controller.get_storage_node_by_id(lvol.node_id)
 
@@ -1208,13 +1222,13 @@ def resize_lvol(id, new_size):
     rpc_client = RPCClient(
         snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
 
-    error = False
     if lvol.ha_type == "single":
 
         ret = rpc_client.bdev_lvol_resize(f"{lvol.lvs_name}/{lvol.lvol_bdev}", size_in_mib)
         if not ret:
-            logger.error(f"Error resizing lvol on node: {snode.get_id()}")
-            error = True
+            msg = f"Error resizing lvol on node: {snode.get_id()}"
+            logger.error(msg)
+            return False, msg
 
     else:
         primary_node = None
@@ -1228,7 +1242,7 @@ def resize_lvol(id, new_size):
                 if sec_node.status == StorageNode.STATUS_DOWN:
                     msg = f"Secondary node is in down status, can not resize lvol"
                     logger.error(msg)
-                    error = True
+                    return False, msg
 
                 elif sec_node.status == StorageNode.STATUS_ONLINE:
                     secondary_node = sec_node
@@ -1258,10 +1272,8 @@ def resize_lvol(id, new_size):
             # both primary and secondary are not online
             msg = f"Host nodes are not online"
             logger.error(msg)
-            error = True
+            return False, msg
 
-        if error:
-            return False
 
         if primary_node:
             logger.info(f"Resizing LVol: {lvol.get_id()} on node: {primary_node.get_id()}")
@@ -1271,8 +1283,9 @@ def resize_lvol(id, new_size):
 
             ret = rpc_client.bdev_lvol_resize(f"{lvol.lvs_name}/{lvol.lvol_bdev}", size_in_mib)
             if not ret:
-                logger.error(f"Error resizing lvol on node: {primary_node.get_id()}")
-                error = True
+                msg = f"Error resizing lvol on node: {primary_node.get_id()}"
+                logger.error(msg)
+                return False, msg
 
         if secondary_node:
             logger.info(f"Resizing LVol: {lvol.get_id()} on node: {secondary_node.get_id()}")
@@ -1284,18 +1297,17 @@ def resize_lvol(id, new_size):
 
                 ret = sec_rpc_client.bdev_lvol_resize(f"{lvol.lvs_name}/{lvol.lvol_bdev}", size_in_mib)
                 if not ret:
-                    logger.error(f"Error resizing lvol on node: {sec_node.get_id()}")
-                    error = True
+                    msg = f"Error resizing lvol on node: {sec_node.get_id()}"
+                    logger.error(msg)
+                    return False, msg
 
+    lvol = db_controller.get_lvol_by_id(id)
+    lvol.size = new_size
+    lvol.write_to_db(db_controller.kv_store)
+    logger.info("Done")
 
-    if not error:
-        lvol = db_controller.get_lvol_by_id(id)
-        lvol.size = new_size
-        lvol.write_to_db(db_controller.kv_store)
-        logger.info("Done")
-        return True
-    else:
-        return False
+    return True, None
+
 
 
 def set_read_only(id):

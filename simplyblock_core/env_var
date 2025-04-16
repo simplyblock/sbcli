@@ -1,5 +1,5 @@
 SIMPLY_BLOCK_COMMAND_NAME=sbcli-pool
-SIMPLY_BLOCK_VERSION=1.0.2
+SIMPLY_BLOCK_VERSION=1.0.3
 
 SIMPLY_BLOCK_DOCKER_IMAGE=public.ecr.aws/simply-block/simplyblock:SFAM-1613
 SIMPLY_BLOCK_SPDK_ULTRA_IMAGE=simplyblock/spdk:qos_bdev_1-latest

@@ -129,28 +129,34 @@ def update_pool(uuid):
 
     pool_data = request.get_json()
 
-    pool.pool_name = pool_data.get('name') or pool.pool_name
+    fn_params = {"uuid": uuid}
+
+    if 'name' in pool_data:
+        nm = pool_data['name']
+        if nm:
+            fn_params['name'] = nm
 
     if 'pool_max' in pool_data:
-        pool.pool_max_size = core_utils.parse_size(pool_data['pool_max'])
+        fn_params['pool_max'] = core_utils.parse_size(pool_data['pool_max'])
 
     if 'lvol_max' in pool_data:
-        pool.lvol_max_size = core_utils.parse_size(pool_data['lvol_max'])
+        fn_params['lvol_max'] = core_utils.parse_size(pool_data['lvol_max'])
 
-    if 'max_r_iops' in pool_data:
-        pool.max_r_iops = core_utils.parse_size(pool_data['max_r_iops'])
+    if 'max_rw_iops' in pool_data:
+        fn_params['max_rw_iops'] = core_utils.parse_size(pool_data['max_rw_iops'])
 
-    if 'max_w_iops' in pool_data:
-        pool.max_w_iops = core_utils.parse_size(pool_data['max_w_iops'])
+    if 'max_rw_mbytes' in pool_data:
+        fn_params['max_rw_mbytes'] = core_utils.parse_size(pool_data['max_rw_mbytes'])
 
     if 'max_r_mbytes' in pool_data:
-        pool.max_r_mbytes_per_sec = core_utils.parse_size(pool_data['max_r_mbytes'])
+        fn_params['max_r_mbytes'] = core_utils.parse_size(pool_data['max_r_mbytes'])
 
     if 'max_w_mbytes' in pool_data:
-        pool.max_w_mbytes_per_sec = core_utils.parse_size(pool_data['max_w_mbytes'])
+        fn_params['max_w_mbytes'] = core_utils.parse_size(pool_data['max_w_mbytes'])
 
-    pool.write_to_db(db_controller.kv_store)
-    return utils.get_response(pool.to_dict())
+    ret, err = pool_controller.set_pool(**fn_params)
+
+    return utils.get_response(ret, err)
 
 
 @bp.route('/pool/capacity/<string:uuid>', methods=['GET'])
