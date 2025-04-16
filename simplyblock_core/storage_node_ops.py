@@ -2936,7 +2936,6 @@ def recreate_lvstore(snode):
         return recreate_lvstore_on_sec(snode)
 
     ret, err = _create_bdev_stack(snode, [])
-
     if err:
         logger.error(f"Failed to recreate lvstore on node {snode.get_id()}")
         logger.error(err)
@@ -2948,6 +2947,20 @@ def recreate_lvstore(snode):
 
     sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
     sec_node_api = SNodeClient(sec_node.api_endpoint)
+
+    # recreate pools
+    pools = db_controller.get_pools(snode.pool_id)
+    for pool in pools:
+
+        ret = rpc_client.bdev_lvol_set_qos_limit(pool.numeric_id,
+                                                pool.max_rw_iops, 
+                                                pool.max_rw_mbytes,
+                                                pool.max_r_mbytes,
+                                                pool.max_w_mbytes,
+                                                )
+        if not ret:
+            logger.error("RPC failed bdev_lvol_set_qos_limit")
+            return False
 
     lvol_list = db_controller.get_lvols_by_node_id(snode.get_id())
 
@@ -3025,6 +3038,9 @@ def recreate_lvstore(snode):
         sec_node.lvstore_status = "ready"
         sec_node.write_to_db()
 
+    # all lvols to their respect loops
+    for lvol in lvol_list:
+        lvol_controller.connect_lvol_to_pool(lvol.uuid)
     return True
 
 
