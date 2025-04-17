@@ -2886,8 +2886,8 @@ def recreate_lvstore_on_sec(secondary_node):
             time.sleep(1)
             secondary_node.connect_to_hublvol(primary_node)
 
-        except RPCException as e:
-            logger.error("Error connecting to hublvol: %s", e.message)
+        except Exception as e:
+            logger.error("Error connecting to hublvol: %s", e)
             # return False
 
         ### 8- allow port on primary
@@ -3008,8 +3008,8 @@ def recreate_lvstore(snode):
             try:
                 time.sleep(1)
                 sec_node.connect_to_hublvol(snode)
-            except RPCException as e:
-                logger.error("Error establishing hublvol: %s", e.message)
+            except Exception as e:
+                logger.error("Error establishing hublvol: %s", e)
                 # return False
             ### 8- allow secondary port
             sec_node_api.firewall_set_port(snode.lvol_subsys_port, "tcp", "allow", sec_node.rpc_port)
@@ -3290,8 +3290,8 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
             try:
                 time.sleep(1)
                 sec_node.connect_to_hublvol(snode)
-            except RPCException as e:
-                logger.error("Error establishing hublvol: %s", e.message)
+            except Exception as e:
+                logger.error("Error establishing hublvol: %s", e)
                 # return False
 
         sec_node.write_to_db()
