@@ -138,7 +138,7 @@ class RPCClient:
         """
         params = {
             "trtype": trtype,
-            "max_io_qpairs_per_ctrlr": qpair_count,
+            "max_io_qpairs_per_ctrlr": 64,
             "max_queue_depth": 64,
             "abort_timeout_sec": 5,
             "ack_timeout": 2048,
@@ -546,7 +546,7 @@ class RPCClient:
             "subnqn": nqn,
             "fabrics_connect_timeout_us": 100000,
             # "fast_io_fail_timeout_sec": 1,
-            "num_io_queues": 16384,
+            "num_io_queues": 128,
             # "ctrlr_loss_timeout_sec": 1,
             "multipath":"disable",
             # "reconnect_delay_sec":1
