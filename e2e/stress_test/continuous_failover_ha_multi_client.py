@@ -724,10 +724,11 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                             raise Exception("FIO not killed on clone")
                         attempt += 1
                         sleep_n_sec(10)
-                        
+                    
+                    self.disconnect_lvol(clone_details['ID'])
+                    sleep_n_sec(10)
                     self.ssh_obj.unmount_path(clone_details["Client"], f"/mnt/{clone_name}")
                     self.ssh_obj.remove_dir(clone_details["Client"], dir_path=f"/mnt/{clone_name}")
-                    self.disconnect_lvol(clone_details['ID'])
                     self.sbcli_utils.delete_lvol(clone_name)
                     sleep_n_sec(30)
                     if clone_name in self.lvols_without_sec_connect:
@@ -755,9 +756,10 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                 attempt += 1
                 sleep_n_sec(10)
 
+            self.disconnect_lvol(self.lvol_mount_details[lvol]['ID'])
+            sleep_n_sec(10)
             self.ssh_obj.unmount_path(self.lvol_mount_details[lvol]["Client"], f"/mnt/{lvol}")
             self.ssh_obj.remove_dir(self.lvol_mount_details[lvol]["Client"], dir_path=f"/mnt/{lvol}")
-            self.disconnect_lvol(self.lvol_mount_details[lvol]['ID'])
             self.sbcli_utils.delete_lvol(lvol)
             if lvol in self.lvols_without_sec_connect:
                 self.lvols_without_sec_connect.remove(lvol)
