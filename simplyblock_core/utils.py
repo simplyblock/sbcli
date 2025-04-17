@@ -779,12 +779,11 @@ def get_next_dev_port(cluster_id):
     for node in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
         if node.nvmf_port > 0:
             used_ports.append(node.nvmf_port)
-
-    for i in range(1000):
-        next_port = port + i
-
-    return port
-
+    next_port = port
+    while True:
+        if next_port not in used_ports:
+            return next_port
+        next_port += 1
 
 def generate_realtime_variables_file(isolated_cores, realtime_variables_file_path="/etc/tuned/realtime-variables.conf"):
     """
