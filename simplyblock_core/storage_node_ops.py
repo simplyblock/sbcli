@@ -921,7 +921,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
 
         free_cores = list(set(total_spdk_cores) - set(used_cores))
         if not spdk_cpu_count:
-            spdk_cpu_count = free_cores
+            spdk_cpu_count = len(free_cores)
         if len(free_cores) >= spdk_cpu_count:
             spdk_cpu_mask = utils.generate_mask(free_cores[:spdk_cpu_count])
         else:
