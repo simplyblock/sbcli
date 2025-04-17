@@ -1891,7 +1891,7 @@ def restart_storage_node(
     for node in snodes:
         if node.get_id() == snode.get_id() or node.status != StorageNode.STATUS_ONLINE:
             continue
-        node.remote_devices = _connect_to_remote_devs(node)
+        node.remote_devices = _connect_to_remote_devs(node, force_conect_restarting_nodes=True)
         node.write_to_db(kv_store)
 
     logger.info(f"Sending device status event")
