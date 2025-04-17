@@ -1026,3 +1026,10 @@ class RPCClient:
             "uuid" if utils.UUID_PATTERN.match(lvs) else "lvs_name": lvs,
             "remote_bdev": bdev,
         })
+
+    def jc_suspend_compression(self, jm_vuid, suspend=False):
+        params = {
+            "jm_vuid": jm_vuid,
+            "suspend": suspend,
+        }
+        return self._request("jc_suspend_compression", params)
