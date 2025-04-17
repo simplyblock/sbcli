@@ -7,6 +7,8 @@ on:
       - main
     paths:
       - 'simplyblock_core/env_var'
+    tags-ignore:
+      - '*'
 
 permissions:
   contents: read
