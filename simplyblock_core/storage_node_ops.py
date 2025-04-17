@@ -2883,11 +2883,12 @@ def recreate_lvstore_on_sec(secondary_node):
         ### 6- wait for examine
         ret = secondary_rpc_client.bdev_wait_for_examine()
         try:
+            time.sleep(1)
             secondary_node.connect_to_hublvol(primary_node)
 
         except RPCException as e:
             logger.error("Error connecting to hublvol: %s", e.message)
-            return False
+            # return False
 
         ### 8- allow port on primary
         primary_node_api.firewall_set_port(primary_node.lvol_subsys_port, "tcp", "allow")
@@ -2999,18 +3000,20 @@ def recreate_lvstore(snode):
         cluster_nqn = db_controller.get_cluster_by_id(snode.cluster_id).nqn
         try:
             snode.create_hublvol(cluster_nqn)
-            if sec_node.status == StorageNode.STATUS_ONLINE:
-                sec_node.connect_to_hublvol(snode)
-
         except RPCException as e:
-            logger.error("Error establishing hublvol: %s", e.message)
-            return False
+            logger.error("Error creating hublvol: %s", e.message)
+            # return False
 
-        finally:
+        if sec_node.status == StorageNode.STATUS_ONLINE:
+            try:
+                time.sleep(1)
+                sec_node.connect_to_hublvol(snode)
+            except RPCException as e:
+                logger.error("Error establishing hublvol: %s", e.message)
+                # return False
             ### 8- allow secondary port
-            if sec_node.status == StorageNode.STATUS_ONLINE:
-                sec_node_api.firewall_set_port(snode.lvol_subsys_port, "tcp", "allow", sec_node.rpc_port)
-                tcp_ports_events.port_allowed(sec_node, snode.lvol_subsys_port)
+            sec_node_api.firewall_set_port(snode.lvol_subsys_port, "tcp", "allow", sec_node.rpc_port)
+            tcp_ports_events.port_allowed(sec_node, snode.lvol_subsys_port)
 
     ### 9- add lvols to subsystems
     executor = ThreadPoolExecutor(max_workers=100)
@@ -3279,12 +3282,17 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
         cluster_nqn = db_controller.get_cluster_by_id(snode.cluster_id).nqn
         try:
             snode.create_hublvol(cluster_nqn)
-            if sec_node.status == StorageNode.STATUS_ONLINE:
-                sec_node.connect_to_hublvol(snode)
 
         except RPCException as e:
             logger.error("Error establishing hublvol: %s", e.message)
-            return False
+            # return False
+        if sec_node.status == StorageNode.STATUS_ONLINE:
+            try:
+                time.sleep(1)
+                sec_node.connect_to_hublvol(snode)
+            except RPCException as e:
+                logger.error("Error establishing hublvol: %s", e.message)
+                # return False
 
         sec_node.write_to_db()
 

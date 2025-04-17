@@ -205,8 +205,7 @@ class StorageNode(BaseNodeObject):
                 subsystem_port=self.lvol_subsys_port,
                 secondary=True,
         ):
-            logger.warning('Failed to set secondary lvstore options')
-            # raise RPCException('Failed to set secondary lvstore options')
+            raise RPCException('Failed to set secondary lvstore options')
 
         if not rpc_client.bdev_lvol_connect_hublvol(primary_node.lvstore, remote_bdev):
             raise RPCException('Failed to connect secondary lvstore to primary')
