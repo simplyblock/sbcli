@@ -1579,6 +1579,23 @@ class SshUtils:
             self.logger.error(f"Failed to fetch sbcli-dev version from node {node}: {e}")
         return version if version else "ERROR"
 
+    def get_image_dict(self, node):
+        """Get images dictionary
+
+        Args:
+            node (str): Node IP to check docker images list on
+
+        Returns:
+            dict: Image name vs the Image hash
+        """
+        cmd = "docker images --format '{{.Repository}}:{{.Tag}} {{.ID}}'"
+        output, _ = self.exec_command(node=node, command=cmd)
+        image_map = {}
+        for line in output.strip().split('\n'):
+            if line:
+                name_tag, img_id = line.strip().split()
+                image_map[name_tag] = img_id
+        return image_map
 
 
 

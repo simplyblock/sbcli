@@ -42,6 +42,13 @@ class TestMajorUpgrade(TestClusterBase):
         prev_versions = self.common_utils.get_all_node_versions()
         for node_ip, version in prev_versions.items():
             assert self.base_version in version, f"Base version mismatch on {node_ip}: {version}"
+        
+        self.logger.info("Getting Containers on all the nodes before upgrade!!")
+        pre_upgrade_containers = {}
+        mgmt, storage = self.sbcli_utils.get_all_nodes_ip()
+        all_nodes = mgmt + storage
+        for node in all_nodes:
+            pre_upgrade_containers[node] = self.ssh_obj.get_image_dict(node=node)
 
         self.logger.info("Step 2: Recreate storage pool and add LVOL")
         self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
@@ -121,13 +128,11 @@ class TestMajorUpgrade(TestClusterBase):
         sleep_n_sec(180)
 
         self.logger.info("Step 9: Validate upgraded version")
-        versions = self.common_utils.get_all_node_versions()
-        if self.target_version != "latest":
-            for node_ip, version in versions.items():
-                assert self.target_version in version, f"Target version mismatch on {node_ip}: {version}"
+        post_upgrade_containers = {}
+        for node in all_nodes:
+            post_upgrade_containers[node] = self.ssh_obj.get_image_dict(node=node)
         
-        mgmt_version = version[self.mgmt_nodes[0]]
-        assert mgmt_version != prev_versions[self.mgmt_nodes[0]], "Mgmt version similar before and after upgrade!!"
+        self.common_utils.assert_upgrade_docker_image(pre_upgrade_containers, post_upgrade_containers)
 
         self.logger.info("Step 10: Verify pre-upgrade LVOL checksum")
         post_files = self.ssh_obj.find_files(self.mgmt_nodes[0], self.mount_path)
@@ -174,7 +179,7 @@ class TestMajorUpgrade(TestClusterBase):
 
         files = self.ssh_obj.find_files(self.mgmt_nodes[0], f"{self.mount_path}_clone_pre_post")
         pre_post_upgrade_clone_md5 = self.ssh_obj.generate_checksums(self.mgmt_nodes[0], files)
-        
+
         original_checksum = set(pre_upgrade_clone_md5.values())
         final_checksum = set(pre_post_upgrade_clone_md5.values())
 
