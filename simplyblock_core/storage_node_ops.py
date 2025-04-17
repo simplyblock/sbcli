@@ -2984,7 +2984,7 @@ def recreate_lvstore(snode):
     ret = rpc_client.jc_suspend_compression(jm_vuid=snode.jm_vuid, suspend=True)
     if not ret:
         logger.error("Failed to suspend JC compression")
-        return False
+        # return False
 
     ret = rpc_client.bdev_lvol_set_lvs_opts(
             snode.lvstore,
