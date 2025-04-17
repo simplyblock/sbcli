@@ -235,10 +235,11 @@ while True:
                     lvstore_check &= health_controller._check_node_lvstore(
                         lvstore_stack, snode, auto_fix=True, node_bdev_names=node_bdev_names)
 
-                    lvstore_check &= health_controller._check_node_hublvol(
-                        snode, node_bdev_names=node_bdev_names, node_lvols_nqns=subsystem_list)
-
                     if snode.secondary_node_id:
+
+                        lvstore_check &= health_controller._check_node_hublvol(
+                            snode, node_bdev_names=node_bdev_names, node_lvols_nqns=subsystem_list)
+
                         second_node_1 = db_controller.get_storage_node_by_id(snode.secondary_node_id)
                         if second_node_1 and second_node_1.status == StorageNode.STATUS_ONLINE:
                             lvstore_check &= health_controller._check_node_lvstore(
