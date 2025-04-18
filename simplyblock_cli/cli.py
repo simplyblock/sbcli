@@ -515,6 +515,7 @@ class CLIWrapper(CLIWrapperBase):
     def init_cluster__get_logs(self, subparser):
         subcommand = self.add_sub_command(subparser, 'get-logs', 'Returns a cluster\'s status logs')
         subcommand.add_argument('cluster_id', help='Cluster id', type=str).completer = self._completer_get_cluster_list
+        argument = subcommand.add_argument('--limit', help='show last number of logs, default 50', type=int, default=50, dest='limit', required=False)
 
     def init_cluster__get_secret(self, subparser):
         subcommand = self.add_sub_command(subparser, 'get-secret', 'Gets a cluster\'s secret')
@@ -534,6 +535,8 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('cluster_id', help='Cluster id', type=str).completer = self._completer_get_cluster_list
         argument = subcommand.add_argument('--cp-only', help='Update the control plane only', type=bool, default=False, dest='mgmt_only', required=False)
         argument = subcommand.add_argument('--restart', help='Restart the management services', type=bool, default=False, dest='restart', required=False)
+        argument = subcommand.add_argument('--spdk-image', help='Restart the storage nodes using the provided image', type=str, dest='spdk_image', required=False)
+        argument = subcommand.add_argument('--mgmt-image', help='Restart the management services using the provided image', type=str, dest='mgmt_image', required=False)
 
     def init_cluster__graceful_shutdown(self, subparser):
         subcommand = self.add_sub_command(subparser, 'graceful-shutdown', 'Initiates a graceful shutdown of a cluster\'s storage nodes')
@@ -548,6 +551,7 @@ class CLIWrapper(CLIWrapperBase):
     def init_cluster__list_tasks(self, subparser):
         subcommand = self.add_sub_command(subparser, 'list-tasks', 'Lists tasks of a cluster')
         subcommand.add_argument('cluster_id', help='Cluster id', type=str).completer = self._completer_get_cluster_list
+        argument = subcommand.add_argument('--limit', help='show last number of tasks, default 50', type=int, default=50, dest='limit', required=False)
 
     def init_cluster__cancel_task(self, subparser):
         subcommand = self.add_sub_command(subparser, 'cancel-task', 'Cancels task by task id')

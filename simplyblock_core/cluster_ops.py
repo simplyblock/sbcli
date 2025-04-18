@@ -1161,27 +1161,27 @@ def set_secret(cluster_id, secret):
     return "Done"
 
 
-def get_logs(cluster_id, is_json=False):
+def get_logs(cluster_id, is_json=False, limit=50, **kwargs):
     db_controller = DBController()
     cluster = db_controller.get_cluster_by_id(cluster_id)
     if not cluster:
         logger.error(f"Cluster not found {cluster_id}")
         return False
 
-    events = db_controller.get_events(cluster_id)
+    events = db_controller.get_events(cluster_id, limit=limit, reverse=True)
     out = []
+    events.reverse()
     for record in events:
-        logger.debug(record)
         Storage_ID = None
-        if 'storage_ID' in record.object_dict:
-            Storage_ID = record.object_dict['storage_ID']
+        if record.storage_id >= 0:
+            Storage_ID = record.storage_id
 
         elif 'cluster_device_order' in record.object_dict:
             Storage_ID = record.object_dict['cluster_device_order']
 
         vuid = None
-        if 'vuid' in record.object_dict:
-            vuid = record.object_dict['vuid']
+        if record.vuid > 0:
+            vuid = record.vuid
 
         msg =  record.message
         if record.event in ["device_status", "node_status"]:
@@ -1213,11 +1213,11 @@ def get_cluster(cl_id):
     return json.dumps(cluster.get_clean_dict(), indent=2, sort_keys=True)
 
 
-def update_cluster(cl_id, mgmt_only=False, restart_cluster=False):
+def update_cluster(cluster_id, mgmt_only=False, restart_cluster=False, spdk_image=None, mgmt_image=None, **kwargs):
     db_controller = DBController()
-    cluster = db_controller.get_cluster_by_id(cl_id)
+    cluster = db_controller.get_cluster_by_id(cluster_id)
     if not cluster:
-        logger.error(f"Cluster not found {cl_id}")
+        logger.error(f"Cluster not found {cluster_id}")
         return False
 
     try:
@@ -1230,34 +1230,55 @@ def update_cluster(cl_id, mgmt_only=False, restart_cluster=False):
 
     try:
         logger.info("Updating mgmt cluster")
-        cluster_docker = utils.get_docker_client(cl_id)
+        cluster_docker = utils.get_docker_client(cluster_id)
         logger.info(f"Pulling image {constants.SIMPLY_BLOCK_DOCKER_IMAGE}")
         cluster_docker.images.pull(constants.SIMPLY_BLOCK_DOCKER_IMAGE)
         image_without_tag = constants.SIMPLY_BLOCK_DOCKER_IMAGE.split(":")[0]
         image_without_tag = image_without_tag.split("/")[-1]
+        service_image = constants.SIMPLY_BLOCK_DOCKER_IMAGE
+        if mgmt_image:
+            service_image = mgmt_image
         for service in cluster_docker.services.list():
             if image_without_tag in service.attrs['Spec']['Labels']['com.docker.stack.image']:
                 logger.info(f"Updating service {service.name}")
-                service.update(image=constants.SIMPLY_BLOCK_DOCKER_IMAGE, force_update=True)
+                service.update(image=service_image, force_update=True)
         logger.info("Done updating mgmt cluster")
     except Exception as e:
-        print(e)
+        logger.exception(e)
 
-    if not mgmt_only:
-        set_cluster_status(cl_id, Cluster.STATUS_SUSPENDED)
-        logger.info("updating storage nodes")
-        for node in db_controller.get_storage_nodes_by_cluster_id(cl_id):
-            if node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED]:
-                try:
-                    storage_node_ops.start_storage_node_api_container(node.mgmt_ip)
-                except Exception as e:
-                    logger.error(e)
+    if mgmt_only:
+        return True
 
-        if restart_cluster:
-            logger.info("Restarting cluster")
-            ret = cluster_grace_shutdown(cl_id)
-            if ret:
-                cluster_grace_startup(cl_id)
+    logger.info("Suspending cluster")
+    time.sleep(3)
+    set_cluster_status(cluster_id, Cluster.STATUS_SUSPENDED)
+    logger.info("Updating storage nodes")
+    for node in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
+        if node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
+            try:
+                storage_node_ops.start_storage_node_api_container(node.mgmt_ip)
+            except Exception as e:
+                logger.error(e)
+
+    if not restart_cluster:
+        return True
+
+    logger.info("Restarting cluster")
+    for node in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
+        if node.status == StorageNode.STATUS_ONLINE:
+            logger.info(f"Suspending node: {node.get_id()}")
+            storage_node_ops.suspend_storage_node(node.get_id())
+            logger.info(f"Shutting down node: {node.get_id()}")
+            storage_node_ops.shutdown_storage_node(node.get_id(), force=True)
+            time.sleep(3)
+
+    for node in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
+        if node.status == StorageNode.STATUS_OFFLINE:
+            if spdk_image:
+                logger.info(f"Restarting node: {node.get_id()} with SPDK image: {spdk_image}")
+            else:
+                logger.info(f"Restarting node: {node.get_id()}")
+            storage_node_ops.restart_storage_node(node.get_id(), force=True, spdk_image=spdk_image)
 
     logger.info("Done")
     return True

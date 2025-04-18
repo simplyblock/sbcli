@@ -97,14 +97,15 @@ def add_node_to_auto_restart(node):
     return _add_task(JobSchedule.FN_NODE_RESTART, node.cluster_id, node.get_id(), "")
 
 
-def list_tasks(cluster_id, is_json=False):
+def list_tasks(cluster_id, is_json=False, limit=50, **kwargs):
     cluster = db_controller.get_cluster_by_id(cluster_id)
     if not cluster:
         logger.error("Cluster not found: %s", cluster_id)
         return False
 
     data = []
-    tasks = db_controller.get_job_tasks(cluster_id, reverse=False)
+    tasks = db_controller.get_job_tasks(cluster_id, reverse=True, limit=limit)
+    tasks.reverse()
     if tasks and is_json is True:
         for t in tasks:
             data.append(t.get_clean_dict())
