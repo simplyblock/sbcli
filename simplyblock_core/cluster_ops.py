@@ -1276,11 +1276,16 @@ def update_cluster(cluster_id, mgmt_only=False, restart_cluster=False, spdk_imag
     logger.info("Suspending cluster")
     time.sleep(3)
     set_cluster_status(cluster_id, Cluster.STATUS_SUSPENDED)
-    logger.info("Updating storage nodes")
+    logger.info("Updating spdk image on storage nodes")
     for node in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
         if node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
             try:
-                storage_node_ops.start_storage_node_api_container(node.mgmt_ip)
+                node_docker = docker.DockerClient(base_url=f"tcp://{node.mgmt_ip}:2375", version="auto", timeout=60 * 5)
+                img = constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE
+                if spdk_image:
+                    img = spdk_image
+                logger.info(f"Pulling image {img}")
+                node_docker.images.pull(img)
             except Exception as e:
                 logger.error(e)
 
