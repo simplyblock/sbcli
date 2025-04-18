@@ -170,7 +170,6 @@ def get_host_arch():
     out, err, rc = run_command("uname -m")
     return out
 
-<<<<<<< HEAD
 def get_region():
     try:
         response = requests.get("http://169.254.169.254/latest/meta-data/placement/region", timeout=2)
@@ -274,7 +273,6 @@ def get_available_device_name(instance_id):
     except Exception as e:
         logger.error(f"Failed to get available device name: {str(e)}")
         return None
-=======
 
 def firewall_port(port_id=9090, port_type="tcp", block=True, rpc_port=None):
     cmd_list = []
@@ -325,4 +323,3 @@ def firewall_get(rpc_port=None):
     stream = os.popen(cmd)
     ret = stream.read()
     return ret
->>>>>>> main
