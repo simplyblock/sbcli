@@ -157,7 +157,7 @@ class CLIWrapper(CLIWrapperBase):
         if self.developer_mode:
             argument = subcommand.add_argument('--spdk-image', help='SPDK image uri', type=str, dest='spdk_image', required=False)
         if self.developer_mode:
-            argument = subcommand.add_argument('--reattach-volume', help='Reattach volume to new instance', type=bool, dest='reattach_volume', required=False)
+            argument = subcommand.add_argument('--reattach-volume', help='Reattach volume to new instance', dest='reattach_volume', required=False, action='store_true')
         if self.developer_mode:
             argument = subcommand.add_argument('--spdk-debug', help='Enable spdk debug logs', dest='spdk_debug', required=False, action='store_true')
         if self.developer_mode:

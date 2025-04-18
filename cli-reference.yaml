@@ -305,6 +305,7 @@ commands:
             help: "Reattach volume to new instance"
             dest: reattach_volume
             type: bool
+            action: store_true
             private: true
           - name: "--spdk-debug"
             help: "Enable spdk debug logs"
