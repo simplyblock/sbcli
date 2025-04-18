@@ -495,6 +495,7 @@ def delete_gpt_partitions_for_dev():
 CPU_INFO = cpuinfo.get_cpu_info()
 HOSTNAME, _, _ = node_utils.run_command("hostname -s")
 SYSTEM_ID, _, _ = node_utils.run_command("dmidecode -s system-uuid")
+CLOUD_INFO = None
 
 if not os.environ.get("WITHOUT_CLOUD_INFO"):
     CLOUD_INFO = get_amazon_cloud_info()
