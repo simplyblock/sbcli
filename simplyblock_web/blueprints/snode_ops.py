@@ -494,18 +494,18 @@ def delete_gpt_partitions_for_dev():
 
 CPU_INFO = cpuinfo.get_cpu_info()
 HOSTNAME, _, _ = node_utils.run_command("hostname -s")
-SYSTEM_ID = ""
-CLOUD_INFO = get_amazon_cloud_info()
-if not CLOUD_INFO:
-    CLOUD_INFO = get_google_cloud_info()
+SYSTEM_ID, _, _ = node_utils.run_command("dmidecode -s system-uuid")
 
-if not CLOUD_INFO:
-    CLOUD_INFO = get_equinix_cloud_info()
+if not os.environ.get("WITHOUT_CLOUD_INFO"):
+    CLOUD_INFO = get_amazon_cloud_info()
+    if not CLOUD_INFO:
+        CLOUD_INFO = get_google_cloud_info()
 
-if CLOUD_INFO:
-    SYSTEM_ID = CLOUD_INFO["id"]
-else:
-    SYSTEM_ID, _, _ = node_utils.run_command("dmidecode -s system-uuid")
+    if not CLOUD_INFO:
+        CLOUD_INFO = get_equinix_cloud_info()
+
+    if CLOUD_INFO:
+        SYSTEM_ID = CLOUD_INFO["id"]
 
 
 @bp.route('/bind_device_to_spdk', methods=['POST'])

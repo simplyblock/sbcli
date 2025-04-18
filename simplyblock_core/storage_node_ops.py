@@ -2637,7 +2637,8 @@ def start_storage_node_api_container(node_ip):
             '/sys:/sys'],
         restart_policy={"Name": "always"},
         environment=[
-            f"DOCKER_IP={node_ip}"
+            f"DOCKER_IP={node_ip}",
+            "WITHOUT_CLOUD_INFO=True",
         ]
     )
     logger.info(f"Pulling image {constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE}")

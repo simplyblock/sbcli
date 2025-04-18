@@ -26,9 +26,10 @@ def status():
 
 
 MODES = [
-    "storage_node",
     "caching_docker_node",
     "caching_kubernetes_node",
+    "storage_node",
+    "storage_node_k8s",
 ]
 
 parser = argparse.ArgumentParser()
