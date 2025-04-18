@@ -1273,9 +1273,6 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
     if mgmt_only:
         return True
 
-    logger.info("Suspending cluster")
-    time.sleep(3)
-    set_cluster_status(cluster_id, Cluster.STATUS_SUSPENDED)
     logger.info("Updating spdk image on storage nodes")
     for node in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
         if node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
@@ -1299,7 +1296,6 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
             storage_node_ops.suspend_storage_node(node.get_id())
             logger.info(f"Shutting down node: {node.get_id()}")
             storage_node_ops.shutdown_storage_node(node.get_id(), force=True)
-            time.sleep(3)
 
     for node in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
         if node.status == StorageNode.STATUS_OFFLINE:
