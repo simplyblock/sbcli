@@ -1234,4 +1234,3 @@ def main():
     utils.init_sentry_sdk()
     cli = CLIWrapper()
     cli.run()
-    
