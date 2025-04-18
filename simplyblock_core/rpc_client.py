@@ -383,6 +383,12 @@ class RPCClient:
             "max_num_queues": 2,
             "standard_queue_weight": 3,
             "low_priority_3_queue_weight": 1,
+            "low_priority_2_queue_weight": 1,
+            "low_priority_1_queue_weight": 1,
+            "medium_priority_1_queue_weight": 1,
+            "medium_priority_2_queue_weight": 1,
+            "medium_priority_3_queue_weight": 1,
+            "keep_priority_bits": True,
             "inflight_io_threshold": inflight_io_threshold or 12
         }
 
