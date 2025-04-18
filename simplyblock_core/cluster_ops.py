@@ -1237,7 +1237,7 @@ def get_cluster(cl_id):
     return json.dumps(cluster.get_clean_dict(), indent=2, sort_keys=True)
 
 
-def update_cluster(cluster_id, mgmt_only=False, restart_cluster=False, spdk_image=None, mgmt_image=None, **kwargs):
+def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, mgmt_image=None, **kwargs):
     db_controller = DBController()
     cluster = db_controller.get_cluster_by_id(cluster_id)
     if not cluster:
@@ -1289,7 +1289,7 @@ def update_cluster(cluster_id, mgmt_only=False, restart_cluster=False, spdk_imag
             except Exception as e:
                 logger.error(e)
 
-    if not restart_cluster:
+    if not restart:
         return True
 
     logger.info("Restarting cluster")
