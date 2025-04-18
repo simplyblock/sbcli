@@ -301,6 +301,11 @@ commands:
             dest: spdk_image
             type: str
             private: true
+          - name: "--reattach-volume"
+            help: "Reattach volume to new instance"
+            dest: reattach_volume
+            type: str
+            private: true
           - name: "--spdk-debug"
             help: "Enable spdk debug logs"
             dest: spdk_debug

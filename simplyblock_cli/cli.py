@@ -157,6 +157,8 @@ class CLIWrapper(CLIWrapperBase):
         if self.developer_mode:
             argument = subcommand.add_argument('--spdk-image', help='SPDK image uri', type=str, dest='spdk_image', required=False)
         if self.developer_mode:
+            argument = subcommand.add_argument('--reattach-volume', help='Reattach volume to new instance', type=str, dest='reattach_volume', required=False)
+        if self.developer_mode:
             argument = subcommand.add_argument('--spdk-debug', help='Enable spdk debug logs', dest='spdk_debug', required=False, action='store_true')
         if self.developer_mode:
             argument = subcommand.add_argument('--iobuf_small_bufsize', help='bdev_set_options param', type=int, default=0, dest='small_bufsize', required=False)
@@ -905,6 +907,7 @@ class CLIWrapper(CLIWrapperBase):
                     args.max_snap = 5000
                     args.max_prov = '0'
                     args.spdk_image = None
+                    args.reattach_volume = None
                     args.spdk_debug = None
                     args.small_bufsize = 0
                     args.large_bufsize = 0
