@@ -54,7 +54,7 @@ class CLIWrapperBase:
         if not args.max_lvol:
             self.parser.error(f"Mandatory argument '--max-lvol' not provided for {sub_command}")
         if not args.max_prov:
-            self.parser.error(f"Mandatory argument '--max-prov' not provided for {sub_command}")
+            self.parser.error(f"Mandatory argument '--max-size' not provided for {sub_command}")
         # if not args.spdk_cpu_mask:
         #     self.parser.error(f"Mandatory argument '--cpu-mask' not provided for {sub_command}")
         cluster_id = args.cluster_id
