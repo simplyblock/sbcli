@@ -318,7 +318,7 @@ class CLIWrapperBase:
             return False
 
     def cluster__get_logs(self, sub_command, args):
-        return cluster_ops.get_logs(**args)
+        return cluster_ops.get_logs(**args.__dict__)
 
     def cluster__get_secret(self, sub_command, args):
         cluster_id = args.cluster_id
@@ -334,7 +334,7 @@ class CLIWrapperBase:
         return health_controller.check_cluster(cluster_id)
 
     def cluster__update(self, sub_command, args):
-        return cluster_ops.update_cluster(**args)
+        return cluster_ops.update_cluster(**args.__dict__)
     
     def cluster__graceful_shutdown(self, sub_command, args):
         return cluster_ops.cluster_grace_shutdown(args.cluster_id)
@@ -343,7 +343,7 @@ class CLIWrapperBase:
         return cluster_ops.cluster_grace_startup(args.cluster_id, args.clear_data, args.spdk_image)
 
     def cluster__list_tasks(self, sub_command, args):
-        return tasks_controller.list_tasks(**args)
+        return tasks_controller.list_tasks(**args.__dict__)
 
     def cluster__cancel_task(self, sub_command, args):
         return tasks_controller.cancel_task(args.task_id)
