@@ -8,6 +8,7 @@ from simplyblock_core.models.nvme_device import NVMeDevice
 
 class LVol(BaseModel):
 
+    STATUS_IN_CREATION = 'in_creation'
     STATUS_ONLINE = 'online'
     STATUS_OFFLINE = 'offline'
     STATUS_IN_DELETION = 'in_deletion'
@@ -16,6 +17,7 @@ class LVol(BaseModel):
         STATUS_ONLINE: 1,
         STATUS_OFFLINE: 2,
         STATUS_IN_DELETION: 3,
+        STATUS_IN_CREATION: 4,
     }
 
     base_bdev: str = ""
@@ -46,8 +48,10 @@ class LVol(BaseModel):
     node_id: str = ""
     nodes: List[str] = []
     nqn: str = ""
+    subsys_port: int = 9090
     nvme_dev: NVMeDevice = None
     pool_uuid: str = ""
+    pool_name: str = ""
     pvc_name: str = ""
     r_mbytes_per_sec: int = 0
     rw_ios_per_sec: int = 0

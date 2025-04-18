@@ -1,0 +1,240 @@
+$schema: "http://json-schema.org/draft-04/schema"
+$id: "https://www.simplyblock.io/schemas/cli-reference-1.0.0"
+title: Schema for cli-reference.yaml
+type: object
+additionalProperties: false
+properties:
+  commands:
+    type: array
+    minItems: 1
+    description: |
+      Contains a list of all top level commands, e.g. storage-node, volume, cluster.
+    x-intellij-html-description: |
+      Contains a list of all top level commands, e.g. storage-node, volume, cluster.
+    items:
+      type: object
+      additionalProperties: false
+      description: Describes a single top level command.
+      x-intellij-html-description: Describes a single top level command.
+      required:
+        - name
+        - help
+        - subcommands
+      properties:
+        name:
+          type: string
+          description: The name of the command, e.g. "cluster".
+          x-intellij-html-description: The name of the command, e.g. "cluster".
+        help:
+          type: string
+          description: The inline help short description of the top level command, e.g. "Cluster commands".
+          x-intellij-html-description: |
+            The inline help short description of the top level command, e.g. "Cluster commands".
+        weight:
+          type: integer
+          description: The integer defining the menu position in the documentation.
+          x-intellij-html-description: The integer defining the menu position in the documentation.
+        description:
+          type: string
+          description: |
+            The long description for the documentation. Can contain markdown.
+            If not available, the documentation generator will resolve in the following order: description -> help
+          x-intellij-html-description: |
+            The long description for the documentation. Can contain markdown.<br>
+            If not available, the documentation generator will resolve in the following order:<br>
+            <pre>description -> help</pre>
+        aliases:
+          type: array
+          description: The list of available aliases.
+          x-intellij-html-description: The list of available aliases.
+          minItems: 1
+          items:
+            type: string
+        subcommands:
+          type: array
+          description: The list of sub-commands, e.g. cluster list.
+          x-intellij-html-description: The list of sub-commands, e.g. cluster list.
+          minItems: 1
+          items:
+            type: object
+            description: Describes a single sub-command.
+            x-intellij-html-description: Describes a single sub-command.
+            additionalProperties: false
+            required:
+              - name
+              - help
+            properties:
+              name:
+                type: string
+                description: The name of the subcommand, e.g. list.
+                x-intellij-html-description: The name of the subcommand, e.g. list.
+              help:
+                type: string
+                description: The inline help value of the subcommand. Needs to be short!
+                x-intellij-html-description: The inline help value of the subcommand. <b>Needs to be short!</b>
+              usage:
+                type: string
+                description: |
+                  The usage description of the subcommand for the inline help. This can be more extensive.
+                x-intellij-html-description: |
+                  The usage description of the subcommand for the inline help. This can be more extensive.
+              description:
+                type: string
+                description: |
+                  The long description for the documentation. Can contain markdown.
+                  If not available, the documentation generator will resolve in the following order:
+                  description -> usage -> help
+                x-intellij-html-description: |
+                  The long description for the documentation. Can contain markdown.<br>
+                  If not available, the documentation generator will resolve in the following order:<br>
+                  <pre>description -> usage -> help</pre>
+              private:
+                type: boolean
+                description: The private status of the subcommand.
+                x-intellij-html-description: The private status of the subcommand.
+                default: false
+              arguments:
+                type: array
+                description: The list of positional arguments and parameters of the subcommand.
+                x-intellij-html-description: The list of positional arguments and parameters of the subcommand.
+                minItems: 1
+                items:
+                  type: object
+                  additionalProperties: false
+                  description: Describes a single positional argument or parameter.
+                  x-intellij-html-description: Describes a single positional argument or parameter.
+                  required:
+                    - name
+                    - help
+                    - type
+                    - dest
+                  properties:
+                    name:
+                      type: string
+                      description: The name of the positional argument or parameter.
+                      x-intellij-html-description: The name of the positional argument or parameter.
+                    aliases:
+                      type: array
+                      items:
+                        type: string
+                        description: |
+                          The aliases (e.g. long or short form) of the parameter. Aliases are ignored for positional
+                          arguments.
+                        x-intellij-html-description: |
+                          The aliases (e.g. long or short form) of the parameter. Aliases are ignored for positional
+                          arguments.
+                    help:
+                      type: string
+                      description: The inline help of the positional argument or parameter.
+                      x-intellij-html-description: The inline help of the positional argument or parameter.
+                    usage:
+                      type: string
+                      description: The extended inline help of the positional argument or parameter.
+                      x-intellij-html-description: |
+                        The extended inline help of the positional argument or parameter.
+                    description:
+                      type: string
+                      description: The long description for the documentation. Can contain markdown.
+                      x-intellij-html-description: |
+                        The long description for the documentation. Can contain markdown.
+                    dest:
+                      type: string
+                      description: The name of the property in the Python source code.
+                      x-intellij-html-description: The name of the property in the Python source code.
+                    required:
+                      type: boolean
+                      description: |
+                        The required status of the of the positional argument or parameter.
+                        The following rules apply if this parameter isn't defined:
+                        - if "action" is defined => always false
+                        - if "default" is defined => always false
+                        - if "private" is defined and true => always false
+                        - if "required" is defined and true and not positional-argument => always true
+                        - if positional-argument => always true
+                        - else false
+                      x-intellij-html-description: |
+                        The required status of the of the positional argument or parameter.<br>
+                        The following rules apply if this parameter isn't defined:<br>
+                        <ul>
+                        <ol>if <pre>action</pre> is defined: always false</ol>
+                        <ol>if <pre>default</pre> is defined: always false</ol>
+                        <ol>if <pre>private</pre> is defined and true: always false</ol>
+                        <ol>if <pre>required</pre> is defined and true and not positional-argument: always true</ol>
+                        <ol>if positional-argument: always true</ol>
+                        <ol>else: false</ol>
+                        </ul>
+                      default: false
+                    type:
+                      type: string
+                      description: |
+                        The parameter type of the positional argument or parameter.
+                        Valid options are:
+                        - str
+                        - bool
+                        - int
+                      x-intellij-html-description: |
+                        The parameter type of the positional argument or parameter.<br>
+                        Valid options are:<br>
+                        <ul>
+                        <li>str</li>
+                        <li>bool</li>
+                        <li>int</li>
+                        </ul>
+                      enum:
+                        - str
+                        - bool
+                        - int
+                    completer:
+                      type: string
+                      description: The completer value of the positional argument or parameter.
+                      x-intellij-html-description: |
+                        The completer value of the positional argument or parameter.
+                    default:
+                      oneOf:
+                        - type: string
+                        - type: integer
+                        - type: boolean
+                      description: |
+                        The default value of the positional argument or parameter.
+                        Can be of type string, integer, boolean
+                      x-intellij-html-description: |
+                        The default value of the positional argument or parameter.<br>
+                        Can be of type string, integer, boolean
+                    nargs:
+                      oneOf:
+                        - type: string
+                          pattern: '\+|\?|\*'
+                        - type: integer
+                      description: The nargs value of the positional argument or parameter.
+                      x-intellij-html-description: The nargs value of the positional argument or parameter.
+                    private:
+                      type: boolean
+                      description: |
+                        The private status of the parameter. Positional arguments cannot be private.
+                        Private parameters will only be enabled in sbcli if --dev is provided.
+                      x-intellij-html-description: |
+                        The private status of the parameter. <b>Positional arguments cannot be private.</b><br>
+                        Private parameters will only be enabled in sbcli if --dev is provided.
+                      default: false
+                    action:
+                      type: string
+                      description: The action value parameter. Positional arguments cannot have actions.
+                      x-intellij-html-description: |
+                        The action value parameter. <b>Positional arguments cannot have actions.</b>
+                    choices:
+                        type: array
+                        description: The valid choices of the positional argument or parameter.
+                        x-intellij-html-description: The valid choices of the positional argument or parameter.
+                        items:
+                          minItems: 2
+                          oneOf:
+                            - type: string
+                            - type: integer
+                    value_range:
+                        type: string
+                        description: |
+                          The value range of the positional argument or parameter.
+                          Value ranges are defined as <min_inclusive>..<max_exclusive>: 0..128
+                        x-intellij-html-description: |
+                          The value range of the positional argument or parameter.<br>
+                          Value ranges are defined as <pre><min_inclusive>..<max_exclusive></pre>: <pre>0..128</pre>

@@ -6,6 +6,7 @@ from datetime import datetime
 
 from simplyblock_core import constants, db_controller, utils
 from simplyblock_core.controllers import tasks_events, tasks_controller, device_controller
+from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
 
 
@@ -25,6 +26,14 @@ def task_runner(task):
         task.function_result = f"Node not found: {task.node_id}"
         task.write_to_db(db_controller.kv_store)
         return True
+
+    cluster = db_controller.get_cluster_by_id(task.cluster_id)
+    if cluster.status not in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_READONLY]:
+        task.function_result = "cluster is not active, retrying"
+        task.status = JobSchedule.STATUS_SUSPENDED
+        task.retry += 1
+        task.write_to_db(db_controller.kv_store)
+        return False
 
     if task.canceled:
         task.function_result = "canceled"

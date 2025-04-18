@@ -44,6 +44,7 @@ class DBController(metaclass=Singleton):
     def __init__(self):
         try:
             if not os.path.isfile(constants.KVD_DB_FILE_PATH):
+                # logger.error(f"DB File Not Found: {constants.KVD_DB_FILE_PATH}")
                 return
             fdb.api_version(constants.KVD_DB_VERSION)
             self.kv_store = fdb.open(constants.KVD_DB_FILE_PATH)
@@ -135,7 +136,7 @@ class DBController(metaclass=Singleton):
     def get_lvols(self, cluster_id=None) -> List[LVol]:
         lvols = self.get_all_lvols()
         if not cluster_id:
-            return sorted(lvols, key=lambda x: x.create_dt)
+            return lvols
 
         node_ids=[]
         cluster_lvols = []
@@ -146,7 +147,7 @@ class DBController(metaclass=Singleton):
             if lvol.node_id in node_ids:
                 cluster_lvols.append(lvol)
 
-        return sorted(cluster_lvols, key=lambda x: x.create_dt)
+        return cluster_lvols
 
     def get_all_lvols(self) -> List[LVol]:
         lvols = LVol().read_from_db(self.kv_store)
@@ -176,9 +177,9 @@ class DBController(metaclass=Singleton):
             return ret[0]
 
     def get_lvol_by_id(self, id) -> LVol:
-        ret = LVol().read_from_db(self.kv_store, id)
-        if ret:
-            return ret[0]
+        lvols = LVol().read_from_db(self.kv_store, id=id)
+        if lvols:
+            return lvols[0]
 
     def get_lvol_by_name(self, lvol_name) -> LVol:
         for lvol in self.get_lvols():
@@ -263,11 +264,11 @@ class DBController(metaclass=Singleton):
         stats = PortStat().read_from_db(self.kv_store, id="%s/%s" % (node_id, port_id), limit=limit, reverse=True)
         return stats
 
-    def get_events(self, event_id=" ") -> List[EventObj]:
-        return EventObj().read_from_db(self.kv_store, id=event_id)
+    def get_events(self, event_id=" ", limit=0, reverse=False) -> List[EventObj]:
+        return EventObj().read_from_db(self.kv_store, id=event_id, limit=limit, reverse=reverse)
 
-    def get_job_tasks(self, cluster_id, reverse=True) -> List[JobSchedule]:
-        return JobSchedule().read_from_db(self.kv_store, id=cluster_id, reverse=reverse)
+    def get_job_tasks(self, cluster_id, reverse=True, limit=0) -> List[JobSchedule]:
+        return JobSchedule().read_from_db(self.kv_store, id=cluster_id, reverse=reverse, limit=limit)
 
     def get_task_by_id(self, task_id) -> JobSchedule:
         for task in self.get_job_tasks(" "):
@@ -298,7 +299,7 @@ class DBController(metaclass=Singleton):
         ret = StorageNode().read_from_db(self.kv_store)
         nodes = []
         for n in ret:
-            if n.cluster_id == cluster_id and not n.is_secondary_node:
+            if n.cluster_id == cluster_id and not n.is_secondary_node:  # pass
                 nodes.append(n)
         return sorted(nodes, key=lambda x: x.create_dt)
 
@@ -306,8 +307,6 @@ class DBController(metaclass=Singleton):
         ret = StorageNode().read_from_db(self.kv_store)
         nodes = []
         for node in ret:
-            if node.secondary_node_id == node_id \
-                    and node.status == StorageNode.STATUS_ONLINE \
-                    and node.lvstore:
+            if node.secondary_node_id == node_id and node.lvstore:
                 nodes.append(node)
         return sorted(nodes, key=lambda x: x.create_dt)

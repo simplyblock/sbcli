@@ -135,6 +135,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spd
     snode.multipathing = multipathing
 
     # check for memory
+    spdk_mem_min = utils.parse_size('1GiB')
     if "memory_details" in node_info and node_info['memory_details']:
         memory_details = node_info['memory_details']
         logger.info("Node Memory info")
@@ -144,13 +145,11 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spd
         logger.info(f"HP Total: {utils.humanbytes(huge_total)}")
         huge_free = memory_details['huge_free']
         logger.info(f"HP Free: {utils.humanbytes(huge_free)}")
-        # if huge_free < 1 * 1024 * 1024:
-        #     logger.warning(f"Free hugepages are less than 1G: {utils.humanbytes(huge_free)}")
         if not spdk_mem:
-            if huge_total > 1024 * 1024 * 1024:
+            if huge_total > spdk_mem_min:
                 spdk_mem = huge_total
             else:
-                logger.error(f"Free hugepages are less than 1G: {utils.humanbytes(huge_total)}")
+                logger.error(f"Free hugepages are less than {utils.humanbytes(spdk_mem_min)}: {utils.humanbytes(huge_total)}")
                 return False
 
     logger.info(f"Deploying SPDK with HP: {utils.humanbytes(spdk_mem)}")
@@ -204,11 +203,11 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spd
     snode.write_to_db(db_controller.kv_store)
     ssd_dev = nvme_devs[0]
 
-    if spdk_mem < 1024*1024:
-        logger.error("Hugepages must be larger than 1G")
+    if spdk_mem < spdk_mem_min:
+        logger.error(f"Hugepages must be larger than {utils.humanbytes(spdk_mem_min)}")
         return False
 
-    mem = spdk_mem - 1024*1024*1024
+    mem = spdk_mem - spdk_mem_min
     snode.hugepages = mem
     logger.info(f"Hugepages to be used: {utils.humanbytes(mem)}")
 
@@ -273,7 +272,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spd
     # create tmp ocf
     logger.info(f"Creating first ocf bdev...")
 
-    ret = rpc_client.bdev_malloc_create("malloc_tmp", 512, int((100*1024*1024)/512))
+    ret = rpc_client.bdev_malloc_create("malloc_tmp", 512, int(utils.parse_size('100MiB')/512))
     if not ret:
         logger.error("Failed ot create tmp malloc")
         return False
@@ -356,7 +355,7 @@ def recreate(node_id):
     # create tmp ocf
     logger.info(f"Creating first ocf bdev...")
 
-    ret = rpc_client.bdev_malloc_create("malloc_tmp", 512, int((100 * 1024 * 1024) / 512))
+    ret = rpc_client.bdev_malloc_create("malloc_tmp", 512, int(utils.parse_size('100MiB') / 512))
     if not ret:
         logger.error("Failed ot create tmp malloc")
         return False
@@ -642,7 +641,7 @@ def deploy(ifname):
     cont_image = constants.SIMPLY_BLOCK_DOCKER_IMAGE
     container = node_docker.containers.run(
         cont_image,
-        "python simplyblock_web/caching_node_app.py",
+        "python simplyblock_web/node_webapp.py caching_kubernetes_node",
         detach=True,
         privileged=True,
         name="CachingNodeAPI",

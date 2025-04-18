@@ -1,5 +1,6 @@
 #!/usr/bin/env python
 # encoding: utf-8
+import json
 import logging
 import math
 import os
@@ -15,8 +16,9 @@ from kubernetes.client import ApiException
 from jinja2 import Environment, FileSystemLoader
 import yaml
 
-from simplyblock_web import utils, node_utils
-from simplyblock_core import scripts, constants, shell_utils
+from simplyblock_web import utils, node_utils, node_utils_k8s
+from simplyblock_core import scripts, constants, shell_utils, utils as core_utils
+from simplyblock_web.node_utils_k8s import deployment_name, namespace_id_file, pod_name
 
 logger = logging.getLogger(__name__)
 logger.setLevel(constants.LOG_LEVEL)
@@ -24,27 +26,11 @@ bp = Blueprint("snode", __name__, url_prefix="/snode")
 
 cluster_id_file = "/etc/foundationdb/sbcli_cluster_id"
 
-node_name = os.environ.get("HOSTNAME")
-deployment_name = f"snode-spdk-deployment-{node_name}"
-default_namespace = 'default'
-namespace_id_file = '/etc/simplyblock/namespace'
-pod_name = deployment_name[:50]
-
-
 config.load_incluster_config()
 k8s_apps_v1 = client.AppsV1Api()
 k8s_core_v1 = client.CoreV1Api()
 
 TOP_DIR = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
-# spdk_deploy_yaml = os.path.join(TOP_DIR, 'static/deploy_spdk.yaml')
-
-
-def get_namespace():
-    if os.path.exists(namespace_id_file):
-        with open(namespace_id_file, 'r') as f:
-            out = f.read()
-            return out
-    return default_namespace
 
 
 def set_namespace(namespace):
@@ -61,7 +47,7 @@ def set_namespace(namespace):
 def get_google_cloud_info():
     try:
         headers = {'Metadata-Flavor': 'Google'}
-        response = requests.get("http://169.254.169.254/computeMetadata/v1/instance/?recursive=true", headers=headers)
+        response = requests.get("http://169.254.169.254/computeMetadata/v1/instance/?recursive=true", headers=headers, timeout=2)
         data = response.json()
         return {
             "id": str(data["id"]),
@@ -76,7 +62,7 @@ def get_google_cloud_info():
 
 def get_equinix_cloud_info():
     try:
-        response = requests.get("https://metadata.platformequinix.com/metadata")
+        response = requests.get("https://metadata.platformequinix.com/metadata", timeout=2)
         data = response.json()
         public_ip = ""
         ip = ""
@@ -99,14 +85,17 @@ def get_equinix_cloud_info():
 
 def get_amazon_cloud_info():
     try:
-        from ec2_metadata import ec2_metadata
-        data = ec2_metadata.instance_identity_document
+        import ec2_metadata
+        import requests
+        session = requests.session()
+        session.timeout = 3
+        data = ec2_metadata.EC2Metadata(session=session).instance_identity_document
         return {
             "id": data["instanceId"],
             "type": data["instanceType"],
             "cloud": "amazon",
             "ip": data["privateIp"],
-            "public_ip": ec2_metadata.public_ipv4 or "",
+            "public_ip":  "",
         }
     except:
         pass
@@ -139,6 +128,14 @@ def delete_cluster_id():
     return out
 
 
+def get_cores_config(cpu_count):
+    spdk_cpu_mask = hex(int(math.pow(2, cpu_count)) - 2)
+    cores_config = {
+        "cpu_mask": spdk_cpu_mask
+    }
+    return cores_config
+
+
 @bp.route('/info', methods=['GET'])
 def get_info():
 
@@ -164,58 +161,18 @@ def get_info():
         "network_interface": node_utils.get_nics_data(),
 
         "cloud_instance": CLOUD_INFO,
+        "cores_config": get_cores_config(CPU_INFO['count']),
     }
     return utils.get_response(out)
 
 
 @bp.route('/join_swarm', methods=['POST'])
 def join_swarm():
-    # data = request.get_json()
-    # cluster_ip = data['cluster_ip']
-    # cluster_id = data['cluster_id']
-    # join_token = data['join_token']
-    # db_connection = data['db_connection']
-    #
-    # logger.info("Setting DB connection")
-    # scripts.set_db_config(db_connection)
-    # set_cluster_id(cluster_id)
-    #
-    # logger.info("Joining Swarm")
-    # node_docker = get_docker_client()
-    # if node_docker.info()["Swarm"]["LocalNodeState"] == "active":
-    #     logger.info("Node is part of another swarm, leaving swarm")
-    #     node_docker.swarm.leave(force=True)
-    #     time.sleep(2)
-    # node_docker.swarm.join([f"{cluster_ip}:2377"], join_token)
-    # retries = 10
-    # while retries > 0:
-    #     if node_docker.info()["Swarm"]["LocalNodeState"] == "active":
-    #         break
-    #     logger.info("Waiting for node to be active...")
-    #     retries -= 1
-    #     time.sleep(1)
-    # logger.info("Joining docker swarm > Done")
-    #
-    # try:
-    #     nodes = node_docker.containers.list(all=True)
-    #     for node in nodes:
-    #         if node.attrs["Name"] == "/spdk_proxy":
-    #             node_docker.containers.get(node.attrs["Id"]).restart()
-    #             break
-    # except:
-    #     pass
-
     return utils.get_response(True)
 
 
 @bp.route('/leave_swarm', methods=['GET'])
 def leave_swarm():
-    # delete_cluster_id()
-    # try:
-    #     node_docker = get_docker_client()
-    #     node_docker.swarm.leave(force=True)
-    # except:
-    #     pass
     return utils.get_response(True)
 
 
@@ -312,12 +269,6 @@ else:
     SYSTEM_ID, _, _ = node_utils.run_command("dmidecode -s system-uuid")
 
 
-
-
-
-
-
-
 @bp.route('/spdk_process_start', methods=['POST'])
 def spdk_process_start():
     data = request.get_json()
@@ -325,12 +276,9 @@ def spdk_process_start():
     spdk_cpu_mask = None
     if 'spdk_cpu_mask' in data:
         spdk_cpu_mask = data['spdk_cpu_mask']
-    spdk_mem = None
-    if 'spdk_mem' in data:
-        spdk_mem = data['spdk_mem']
     node_cpu_count = os.cpu_count()
 
-    namespace = get_namespace()
+    namespace = node_utils_k8s.get_namespace()
     if 'namespace' in data:
         namespace = data['namespace']
         set_namespace(namespace)
@@ -345,12 +293,7 @@ def spdk_process_start():
     else:
         spdk_cpu_mask = hex(int(math.pow(2, node_cpu_count)) - 1)
 
-    if spdk_mem:
-        spdk_mem = int(spdk_mem / (1024 * 1024))
-    else:
-        spdk_mem = 64096
-
-    spdk_mem_gega = int(spdk_mem / 1024)
+    spdk_mem = data.get('spdk_mem', core_utils.parse_size('64GiB'))
 
     spdk_image = constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE
     # if node_utils.get_host_arch() == "aarch64":
@@ -376,9 +319,9 @@ def spdk_process_start():
         values = {
             'SPDK_IMAGE': spdk_image,
             'SPDK_CPU_MASK': spdk_cpu_mask,
-            'SPDK_MEM': spdk_mem,
-            'MEM_GEGA': spdk_mem_gega,
-            'MEM2_GEGA': spdk_mem_gega+4,
+            'SPDK_MEM': core_utils.convert_size(spdk_mem, 'MiB'),
+            'MEM_GEGA': core_utils.convert_size(spdk_mem, 'GiB'),
+            'MEM2_GEGA': 2,
             'SERVER_IP': data['server_ip'],
             'RPC_PORT': data['rpc_port'],
             'RPC_USERNAME': data['rpc_username'],
@@ -404,7 +347,7 @@ def spdk_process_start():
 def spdk_process_kill():
 
     try:
-        namespace = get_namespace()
+        namespace = node_utils_k8s.get_namespace()
         resp = k8s_apps_v1.delete_namespaced_deployment(deployment_name, namespace)
         retries = 10
         while retries > 0:
@@ -428,14 +371,17 @@ def spdk_process_kill():
 
 
 def _is_pod_up():
-    resp = k8s_core_v1.list_namespaced_pod(get_namespace())
-    for pod in resp.items:
-        if pod.metadata.name.startswith(pod_name):
-            status = pod.status.phase
-            if status == "Running":
-                return True
-            else:
-                return False
+    try:
+        resp = k8s_core_v1.list_namespaced_pod(node_utils_k8s.get_namespace())
+        for pod in resp.items:
+            if pod.metadata.name.startswith(pod_name):
+                return pod.status.phase == "Running"
+    except ApiException as e:
+        logger.error(f"API error: {e}")
+        return False
+    except Exception as e:
+        logger.error(f"Unexpected error: {e}")
+        return False
     return False
 
 
@@ -456,3 +402,32 @@ def get_file_content(file_name):
         err = err.decode("utf-8")
         logger.debug(err)
         return utils.get_response(None, err)
+
+
+@bp.route('/firewall_set_port', methods=['POST'])
+def firewall_set_port():
+    data = request.get_json()
+    if "port_id" not in data:
+        return utils.get_response(False, "Required parameter is missing: port_id")
+    if "port_type" not in data:
+        return utils.get_response(False, "Required parameter is missing: port_type")
+    if "action" not in data:
+        return utils.get_response(False, "Required parameter is missing: action")
+
+    port_id = data['port_id']
+    port_type = data['port_type']
+    action = data['action']
+    container = "spdk-container"
+
+    resp = k8s_core_v1.list_namespaced_pod(node_utils_k8s.get_namespace())
+    for pod in resp.items:
+        if pod.metadata.name.startswith(pod_name):
+            ret = node_utils_k8s.firewall_port_k8s(port_id, port_type, action=="block", k8s_core_v1, node_utils_k8s.get_namespace(), pod.metadata.name, container)
+            return utils.get_response(ret)
+    return utils.get_response(False)
+
+
+@bp.route('/get_firewall', methods=['GET'])
+def get_firewall():
+    ret = node_utils_k8s.firewall_get_k8s()
+    return utils.get_response(ret)

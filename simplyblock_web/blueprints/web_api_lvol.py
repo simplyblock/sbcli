@@ -11,7 +11,7 @@ from simplyblock_core.controllers import lvol_controller, snapshot_controller
 
 from simplyblock_web import utils
 
-from simplyblock_core import db_controller
+from simplyblock_core import db_controller, utils as core_utils
 
 logger = logging.getLogger(__name__)
 
@@ -38,13 +38,6 @@ def list_lvols(uuid):
     data = []
     for lvol in lvols:
         tmp = lvol.get_clean_dict()
-        tmp['pool_name'] = db_controller.get_pool_by_id(lvol.pool_uuid).pool_name
-        # records_list = lvol_controller.get_io_stats(lvol.get_id(), history=None, parse_sizes=False)
-        # records_list = False
-        # if records_list:
-        #     tmp['iostats'] = records_list
-        # else:
-        tmp['iostats'] = []
         data.append(tmp)
     return utils.get_response(data)
 
@@ -62,7 +55,7 @@ def lvol_iostats(uuid, history):
         if req_secret != pool.secret:
             return utils.get_response_error(f"Pool secret doesn't mach the value in the request header", 400)
 
-    data = lvol_controller.get_io_stats(uuid, history, parse_sizes=False)
+    data = lvol_controller.get_io_stats(uuid, history, parse_sizes=False, with_sizes=True)
     ret = {
         "object_data": lvol.get_clean_dict(),
         "stats": data or []
@@ -135,7 +128,7 @@ def add_lvol():
 
     name = cl_data['name']
     pool_id_or_name = cl_data['pool']
-    size = utils.parse_size(cl_data['size'])
+    size = core_utils.parse_size(cl_data['size'])
 
     pool = None
     for p in db_controller.get_pools():
@@ -264,10 +257,10 @@ def resize_lvol(uuid):
     if 'size' not in cl_data:
         return utils.get_response(None, "missing required param: size", 400)
 
-    new_size = utils.parse_size(cl_data['size'])
+    new_size = core_utils.parse_size(cl_data['size'])
 
-    ret = lvol_controller.resize_lvol(uuid, new_size)
-    return utils.get_response(ret)
+    ret, error = lvol_controller.resize_lvol(uuid, new_size)
+    return utils.get_response(ret, error)
 
 
 @bp.route('/lvol/connect/<string:uuid>', methods=['GET'])
@@ -288,10 +281,10 @@ def create_snapshot():
     if 'snapshot_name' not in cl_data:
         return utils.get_response(None, "missing required param: snapshot_name", 400)
 
-    snapID = snapshot_controller.add(
+    snapID, err = snapshot_controller.add(
         cl_data['lvol_id'],
         cl_data['snapshot_name'])
-    return utils.get_response(snapID)
+    return utils.get_response(snapID, err, http_code=400)
 
 
 @bp.route('/lvol/inflate_lvol/<string:uuid>', methods=['PUT'])

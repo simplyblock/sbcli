@@ -30,8 +30,12 @@ class SbcliUtils:
         Returns:
             dict: response returned
         """
+        print(self.cluster_api_url)
+        print(api_url)
         request_url = self.cluster_api_url + api_url
+        print(request_url)
         headers = headers if headers else self.headers
+        print(headers)
         self.logger.info(f"Calling GET for {api_url} with headers: {headers}")
         retry = 10
         data = None
@@ -49,6 +53,7 @@ class SbcliUtils:
                 if expected_error_code:
                     if e.response.status_code in expected_error_code:
                         self.logger.info(f"Expected error: {e}")
+                        break
                 else:
                     retry -= 1
                     if retry == 0:
@@ -86,10 +91,10 @@ class SbcliUtils:
                                      json=body, timeout=100)
                 if resp.status_code == HTTPStatus.OK:
                     data = resp.json()
+                    return data
                 else:
                     self.logger.error(f"request failed. status_code: {resp.status_code}, text: {resp.text}")
                     resp.raise_for_status()
-                return data
             except requests.exceptions.HTTPError as e:
                 self.logger.debug(f"API call {api_url} failed with error:{e}")
                 if expected_error_code:
@@ -130,10 +135,11 @@ class SbcliUtils:
                 resp = requests.delete(request_url, headers=headers)
                 if resp.status_code == HTTPStatus.OK:
                     data = resp.json()
+                    return data
                 else:
                     self.logger.error(f"request failed. status_code: {resp.status_code}, text: {resp.text}")
                     resp.raise_for_status()
-                return data
+                
             except requests.exceptions.HTTPError as e:
                 self.logger.debug(f"API call {api_url} failed with error:{e}")
                 if expected_error_code:
@@ -176,10 +182,10 @@ class SbcliUtils:
                                      json=body, timeout=100)
                 if resp.status_code == HTTPStatus.OK:
                     data = resp.json()
+                    return data
                 else:
                     self.logger.error(f"request failed. status_code: {resp.status_code}, text: {resp.text}")
                     resp.raise_for_status()
-                return data
             except requests.exceptions.HTTPError as e:
                 self.logger.debug(f"API call {api_url} failed with error:{e}")
                 if expected_error_code:
@@ -285,6 +291,7 @@ class SbcliUtils:
         management_nodes = []
         storage_nodes = []
 
+        print("get_all_nodes_ip")
         data = self.get_management_nodes()
 
         for nodes in data["results"]:
@@ -300,6 +307,7 @@ class SbcliUtils:
     def get_management_nodes(self):
         """Return management nodes part of cluster
         """
+        print("get_management_nodes")
         data = self.get_request(api_url="/mgmtnode/")
         return data
 
@@ -450,6 +458,25 @@ class SbcliUtils:
 
         data = self.delete_request(api_url=f"/lvol/{lvol_id}")
         self.logger.info(f"Delete lvol resp: {data}")
+
+        lvols = self.list_lvols()
+        attempt = 0
+        while True:
+            if lvol_name not in list(lvols.keys()):
+                self.logger.info(f"Lvol {lvol_name} deleted successfully!!")
+                break
+            if attempt % 12 == 0:
+                cur_state = self.get_lvol_details(lvol_id=lvol_id)[0]["status"]
+                if cur_state == "online":
+                    self.logger.info(f"Lvol {lvol_name} in online state. Retrying Delete!")
+                    data = self.delete_request(api_url=f"/lvol/{lvol_id}")
+                    self.logger.info(f"Delete lvol resp: {data}")
+            if attempt > 120:
+                raise Exception(f"Lvol {lvol_name} is not getting deleted!!")
+            attempt += 1
+            self.logger.info(f"Lvol {lvol_name} is in_deletion. Checking again!")
+            sleep_n_sec(5)
+            lvols = self.list_lvols()
 
     def delete_all_lvols(self):
         """Deletes all lvols
@@ -608,7 +635,7 @@ class SbcliUtils:
         """List all migration tasks for a given cluster."""
         return self.get_request(f"/cluster/list-tasks/{cluster_id}")
     
-    def get_io_stats(self, cluster_id, time_duration):
+    def get_io_stats(self, cluster_id, time_duration=None):
         """
         Fetch I/O statistics for the given cluster at the specified time duration.
         Args:
@@ -618,8 +645,90 @@ class SbcliUtils:
         Returns:
             dict: Parsed I/O stats
         """
-        api_url = f"/cluster/iostats/{cluster_id}/history/{time_duration}"
-        self.logger.info(f"Fetching I/O stats for cluster {cluster_id} with time duration {time_duration}.")
-        response = self.get_request(api_url)
+        if time_duration:
+            api_url = f"/cluster/iostats/{cluster_id}/history/{time_duration}"
+            self.logger.info(f"Fetching I/O stats for cluster {cluster_id} with time duration {time_duration}.")
+            response = self.get_request(api_url)
+        else:
+            api_url = f"/cluster/iostats/{cluster_id}"
+            self.logger.info(f"Fetching I/O stats for cluster {cluster_id}.")
+            response = self.get_request(api_url)
         return response.get("results", {}).get("stats", [])
     
+    def resize_lvol(self, lvol_id, new_size):
+        """Resizes lvol to given size
+
+        Args:
+            lvol_id (str): LVOL id for which we need to modify size
+            new_size (str): New size of lvol. Eg: 20G
+        """
+        body = {
+            "size": new_size
+        }
+        self.put_request(api_url=f"/lvol/resize/{lvol_id}", 
+                         body=body)
+        
+    def is_secondary_node(self, node_id):
+        sec_nodes = []
+        storage_nodes = self.get_storage_nodes()
+        for result in storage_nodes['results']:
+            if result['is_secondary_node'] is True:
+                sec_nodes.append(result["uuid"])
+        return node_id in sec_nodes
+    
+    def add_snapshot(self, lvol_id, snapshot_name, retry=3):
+        """Adds snapshot with given params
+        """
+        
+        body = {
+            "lvol_id": lvol_id,
+            "snapshot_name": snapshot_name,
+        }
+        
+        self.post_request(api_url="/snapshot", body=body, retry=retry)
+
+    def add_clone(self, snapshot_id, clone_name, retry=3):
+        """Adds clone with given params
+        """
+        
+        body = {
+            "snapshot_id": snapshot_id,
+            "clone_name": clone_name,
+        }
+        
+        self.post_request(api_url="/snapshot/clone", body=body, retry=retry)
+
+    def list_snapshot(self):
+        """Return all snapshots
+        """
+        snap_data = dict()
+        data = self.get_request(api_url="/snapshot")
+        for snap_info in data["results"]:
+            snap_data[snap_info["snap_name"]] = snap_info["id"]
+        self.logger.info(f"Snap List: {snap_data}")
+        return snap_data
+
+    def get_snapshot_id(self, snap_name):
+        """Get snapshot id
+        """
+        snap_list = self.list_snapshot()
+        return snap_list.get(snap_name, None)
+
+
+    def delete_snapshot(self, snap_name):
+        """Deletes lvol with given name
+        """
+        snap_id = self.get_snapshot_id(snap_name=snap_name)
+
+        if not snap_id:
+            self.logger.info("Snap does not exist. Exiting")
+            return
+
+        data = self.delete_request(api_url=f"/snapshot/{snap_id}")
+        self.logger.info(f"Delete snap resp: {data}")
+    
+    def get_cluster_capacity(self):
+        """Get cluster capacity
+        """
+        data = self.get_request(api_url=f"/cluster/capacity/{self.cluster_id}")
+        return data["results"]

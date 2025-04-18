@@ -1,5 +1,6 @@
 # coding=utf-8
 import pprint
+import logging
 
 import json
 from inspect import ismethod
@@ -107,14 +108,18 @@ class BaseModel(object):
         return pprint.pformat(self.to_dict())
 
     def read_from_db(self, kv_store, id="", limit=0, reverse=False):
+        if not kv_store:
+            return []
         try:
             objects = []
             prefix = self.get_db_id(id)
             for k, v in kv_store.get_range_startswith(prefix.strip().encode('utf-8'),  limit=limit, reverse=reverse):
                 objects.append(self.__class__().from_dict(json.loads(v)))
             return objects
-        except Exception as e:
-            print(f"Error reading from FDB: {e}")
+        except Exception:
+            from simplyblock_core import utils
+            logger = utils.get_logger(__name__)
+            logger.exception('Error reading from FDB')
             return []
 
     def get_last(self, kv_store):
@@ -178,18 +183,17 @@ class BaseNodeObject(BaseModel):
     STATUS_IN_CREATION = 'in_creation'
     STATUS_UNREACHABLE = 'unreachable'
     STATUS_SCHEDULABLE = 'schedulable'
+    STATUS_DOWN = 'down'
 
     _STATUS_CODE_MAP = {
         STATUS_ONLINE: 0,
         STATUS_OFFLINE: 1,
         STATUS_SUSPENDED: 2,
         STATUS_REMOVED: 3,
-
         STATUS_IN_CREATION: 10,
         STATUS_IN_SHUTDOWN: 11,
         STATUS_RESTARTING: 12,
-
         STATUS_UNREACHABLE: 20,
-
         STATUS_SCHEDULABLE: 30,
+        STATUS_DOWN: 40,
     }

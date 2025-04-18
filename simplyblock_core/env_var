@@ -1,5 +1,5 @@
-SIMPLY_BLOCK_COMMAND_NAME=sbcli-mig 
-SIMPLY_BLOCK_VERSION=1.0.341	
+SIMPLY_BLOCK_COMMAND_NAME=sbcli-dev
+SIMPLY_BLOCK_VERSION=17.4.22
 
-SIMPLY_BLOCK_DOCKER_IMAGE=simplyblock/simplyblock:force_detach_attach_ebs
-DOCKER_USER=hamdysimplyblock
+SIMPLY_BLOCK_DOCKER_IMAGE=public.ecr.aws/simply-block/simplyblock:main
+SIMPLY_BLOCK_SPDK_ULTRA_IMAGE=public.ecr.aws/simply-block/ultra:main-latest

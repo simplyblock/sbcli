@@ -5,7 +5,6 @@ import json
 import logging
 import os
 import socket
-import ssl
 import sys
 
 from http.server import HTTPServer
@@ -33,7 +32,10 @@ def get_env_var(name, default=None, is_required=False):
 
 def rpc_call(req):
     req_data = json.loads(req.decode('ascii'))
-    logger.info(f"Request function: {str(req_data['method'])}")
+    params = ""
+    if "params" in req_data:
+        params = str(req_data['params'])
+    logger.info(f"Request function: {str(req_data['method'])}, params: {params}")
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     sock.settimeout(TIMEOUT)
     sock.connect(rpc_sock)
@@ -48,7 +50,7 @@ def rpc_call(req):
     response = None
 
     while not closed:
-        newdata = sock.recv(1024)
+        newdata = sock.recv(1024*1024*1024)
         if newdata == b'':
             closed = True
         buf += newdata.decode('ascii')
@@ -61,7 +63,7 @@ def rpc_call(req):
     sock.close()
 
     if not response and len(buf) > 0:
-        raise
+        raise ValueError('Invalid response')
 
     logger.debug(f"Response data: {buf}")
 
@@ -129,7 +131,7 @@ class ServerHandler(BaseHTTPRequestHandler):
                 self.do_INTERNALERROR()
 
 
-def run_server(host, port, user, password, cert=None, is_threading_enabled=False):
+def run_server(host, port, user, password, is_threading_enabled=False):
     # encoding user and password
     key = base64.b64encode((user+':'+password).encode(encoding='ascii')).decode('ascii')
 
@@ -140,8 +142,6 @@ def run_server(host, port, user, password, cert=None, is_threading_enabled=False
         else:
             httpd = HTTPServer((host, port), ServerHandler)
         httpd.timeout = TIMEOUT
-        if cert is not None:
-            httpd.socket = ssl.wrap_socket(httpd.socket, certfile=cert, server_side=True)
         logger.info('Started RPC http proxy server')
         httpd.serve_forever()
     except KeyboardInterrupt:
@@ -151,7 +151,7 @@ def run_server(host, port, user, password, cert=None, is_threading_enabled=False
 
 TIMEOUT = int(get_env_var("TIMEOUT", is_required=False, default=60*5))
 is_threading_enabled = get_env_var("MULTI_THREADING_ENABLED", is_required=False, default=False)
-server_ip = get_env_var("SERVER_IP", is_required=True)
+server_ip = get_env_var("SERVER_IP", is_required=True, default="")
 rpc_port = get_env_var("RPC_PORT", is_required=True)
 rpc_username = get_env_var("RPC_USERNAME", is_required=True)
 rpc_password = get_env_var("RPC_PASSWORD", is_required=True)

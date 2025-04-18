@@ -5,11 +5,13 @@ from __init__ import get_all_tests, ALL_TESTS
 from logger_config import setup_logger
 from exceptions.custom_exception import (
     TestNotFoundException,
-    MultipleExceptions
+    MultipleExceptions,
+    SkippedTestsException
 )
 from e2e_tests.cluster_test_base import TestClusterBase
 from utils.sbcli_utils import SbcliUtils
 from utils.ssh_utils import SshUtils
+from utils.common_utils import CommonUtils
 
 
 def main():
@@ -23,15 +25,17 @@ def main():
     parser.add_argument('--npcs', type=int, help="Number of parity chunks (npcs)", default=1)
     parser.add_argument('--bs', type=int, help="Block size (bs)", default=4096)
     parser.add_argument('--chunk_bs', type=int, help="Chunk block size (chunk_bs)", default=4096)
-    parser.add_argument('--run_k8s', type=bool, help="Run K8s setup", default=False)
-
+    parser.add_argument('--run_k8s', type=bool, help="Run K8s tests", default=False)
+    parser.add_argument('--run_ha', type=bool, help="Run HA tests", default=False)
+    parser.add_argument('--send_debug_notification', type=bool, help="Send notification for debug", default=False)
+    
 
     args = parser.parse_args()
 
     if args.ndcs == 0 and args.npcs == 0:
-        tests = get_all_tests(custom=False, k8s_test=args.run_k8s)
+        tests = get_all_tests(custom=False, ha_test=args.run_ha)
     else:
-        tests = get_all_tests(custom=True, k8s_test=args.run_k8s)
+        tests = get_all_tests(custom=True, ha_test=args.run_ha)
 
     test_class_run = []
     if args.testname is None or len(args.testname.strip()) == 0:
@@ -47,7 +51,8 @@ def main():
         raise TestNotFoundException(args.testname, available_tests)
 
     errors = {}
-    for test in test_class_run:
+    passed_cases = []
+    for i, test in enumerate(test_class_run):
         logger.info(f"Running Test {test}")
         test_obj = test(fio_debug=args.fio_debug,
                         ndcs=args.ndcs,
@@ -57,12 +62,22 @@ def main():
                         k8s_run=args.run_k8s)
         try:
             test_obj.setup()
+            if i == 0:
+                test_obj.cleanup_logs()
+                test_obj.configure_sysctl_settings()
             test_obj.run()
+            passed_cases.append(f"{test.__name__}")
         except Exception as exp:
             logger.error(traceback.format_exc())
             errors[f"{test.__name__}"] = [exp]
         try:
-            test_obj.stop_docker_logs_collect()
+            if not args.run_k8s:
+                test_obj.stop_docker_logs_collect()
+            else:
+                test_obj.stop_k8s_log_collect()
+            test_obj.fetch_all_nodes_distrib_log()
+            if i == (len(test_class_run) - 1) or check_for_dumps():
+                test_obj.collect_management_details()
             test_obj.teardown()
             # pass
         except Exception as _:
@@ -75,21 +90,50 @@ def main():
                 break
 
     failed_cases = list(errors.keys())
+    skipped_cases = len(test_class_run) - (len(passed_cases) + len(failed_cases))
     logger.info(f"Number of Total Cases: {len(test_class_run)}")
-    logger.info(f"Number of Passed Cases: {len(test_class_run) - len(failed_cases)}")
+    logger.info(f"Number of Passed Cases: {len(passed_cases)}")
     logger.info(f"Number of Failed Cases: {len(failed_cases)}")
+    logger.info(f"Number of Skipped Cases: {skipped_cases}")
+
+    summary = f"""
+        *Total Test Cases:* {len(test_class_run)}
+        *Passed Cases:* {len(passed_cases)}
+        *Failed Cases:* {len(failed_cases)}
+        *Skipped Cases:* {skipped_cases}
+
+        *Test Wise Run Status:*
+    """
 
     logger.info("Test Wise run status:")
     for test in test_class_run:
-        if test.__name__ not in failed_cases:
+        if test.__name__ in passed_cases:
             logger.info(f"{test.__name__} PASSED CASE.")
-        else:
+            summary += f"✅ {test.__name__}: *PASSED*\n"
+        elif test.__name__ in failed_cases:
             logger.info(f"{test.__name__} FAILED CASE.")
+            summary += f"❌ {test.__name__}: *FAILED*\n"
+        else:
+            logger.info(f"{test.__name__} SKIPPED CASE.")
+            summary += f"⚠️ {test.__name__}: *SKIPPED*\n"
+    
+    if args.send_debug_notification:
+        # Send Slack notification
+        cluster_base = TestClusterBase()
+        ssh_obj = SshUtils(bastion_server=cluster_base.bastion_server)
+        sbcli_utils = SbcliUtils(
+            cluster_api_url=cluster_base.api_base_url,
+            cluster_id=cluster_base.cluster_id,
+            cluster_secret=cluster_base.cluster_secret
+        )
+        common_utils = CommonUtils(sbcli_utils, ssh_obj)
+        common_utils.send_slack_summary("E2E Test Summary Report", summary)
 
     if errors:
         raise MultipleExceptions(errors)
-
-
+    if skipped_cases:
+        raise SkippedTestsException("There are SKIPPED Tests. Please check!!")
+    
 def check_for_dumps():
     """Validates whether core dumps present on machines
     
@@ -115,7 +159,7 @@ def check_for_dumps():
     for node in storage_nodes:
         files = ssh_obj.list_files(node, "/etc/simplyblock/")
         logger.info(f"Files in /etc/simplyblock: {files}")
-        if "core" in files:
+        if "core" in files and "tmp_cores" not in files:
             core_exist = True
             break
 

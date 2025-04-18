@@ -34,6 +34,19 @@ jobs:
         username: hamdysimplyblock
         password: ${{ secrets.DOCKER_PASS }}
 
+    - name: Configure AWS Credentials
+      uses: aws-actions/configure-aws-credentials@v1
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID_HAMDI }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY_HAMDI }}
+        aws-region: us-east-1
+
+    - name: Login to ECR
+      id: login-ecr
+      uses: aws-actions/amazon-ecr-login@v2
+      with:
+        registry-type: public
+
     - name: Set up QEMU
       uses: docker/setup-qemu-action@v3
 
@@ -42,5 +55,8 @@ jobs:
         SHORT_SHA=$(echo ${{ env.SHA }} | head -c 8)
         docker buildx ls
         docker buildx create --name mybuilder --bootstrap --use
-        docker buildx build --platform linux/amd64,linux/arm64 -t simplyblock/simplyblock:$TAG -f docker/Dockerfile . --push
-        docker buildx build --platform linux/amd64,linux/arm64 -t simplyblock/simplyblock:$TAG-$SHORT_SHA -f docker/Dockerfile . --push
+        docker buildx build --platform linux/amd64,linux/arm64 -t simplyblock/simplyblock:$TAG -t public.ecr.aws/simply-block/simplyblock:$TAG  -f docker/Dockerfile . --push
+        docker buildx build --platform linux/amd64,linux/arm64 -t simplyblock/simplyblock:$TAG-$SHORT_SHA -t public.ecr.aws/simply-block/simplyblock:$TAG-$SHORT_SHA -f docker/Dockerfile . --push
+
+        echo "::notice title=Docker.com::simplyblock/simplyblock:$TAG"
+        echo "::notice title=AWS-ECR::public.ecr.aws/simply-block/simplyblock:$TAG"

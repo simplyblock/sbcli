@@ -15,8 +15,6 @@ from simplyblock_core.models.pool import Pool
 
 logger = lg.getLogger()
 
-db_controller = DBController()
-
 
 def _generate_string(length):
     return ''.join(random.SystemRandom().choice(
@@ -24,7 +22,7 @@ def _generate_string(length):
 
 
 def add_pool(name, pool_max, lvol_max, max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes, has_secret, cluster_id):
-
+    db_controller = DBController()
     if not name:
         logger.error("Pool name is empty!")
         return False
@@ -77,51 +75,74 @@ def set_pool_value_if_above(pool, key, value):
     current_value = getattr(pool, key)
     if value > current_value:
         setattr(pool, key, value)
-        return True
+    elif value == -1:
+        setattr(pool, key, 0)
     else:
-        logger.error(f"{key}: {value} can't be less than current value: {current_value}")
-        return False
+        msg = f"{key}: {value} can't be less than current value: {current_value}"
+        logger.error(msg)
+        return False, msg
+    return True, None
 
 
-def set_pool(uuid, pool_max, lvol_max, max_rw_iops,
-             max_rw_mbytes, max_r_mbytes, max_w_mbytes):
+def set_pool(uuid, pool_max=0, lvol_max=0, max_rw_iops=0,
+             max_rw_mbytes=0, max_r_mbytes=0, max_w_mbytes=0, name=""):
+    db_controller = DBController()
     pool = db_controller.get_pool_by_id(uuid)
     if not pool:
-        logger.error(f"Pool not found {uuid}")
-        return False
+        msg = f"Pool not found: {uuid}"
+        logger.error(msg)
+        return False, msg
 
     if pool.status == Pool.STATUS_INACTIVE:
-        logger.error("Pool is disabled")
-        return False
+        msg = "Pool is disabled"
+        logger.error(msg)
+        return False, msg
+
+
+    values = []
+
+    if name:
+        for p in db_controller.get_pools():
+            if p.pool_name == name:
+                msg = f"Pool found with the same name: {name}"
+                logger.error(msg)
+                return False, msg
+        pool.pool_name = name
 
     if pool_max:
-        if not set_pool_value_if_above(pool, "pool_max_size", pool_max):
-            return False
+        values.append(("pool_max_size", pool_max))
+
     if lvol_max:
-        if not set_pool_value_if_above(pool, "lvol_max_size", lvol_max):
-            return False
+        values.append(("lvol_max_size", lvol_max))
 
     if max_rw_iops:
-        if not set_pool_value_if_above(pool, "max_rw_ios_per_sec", max_rw_iops):
-            return False
+        values.append(("max_rw_ios_per_sec", max_rw_iops))
+
     if max_rw_mbytes:
-        if not set_pool_value_if_above(pool, "max_rw_mbytes_per_sec", max_rw_mbytes):
-            return False
+        values.append(("max_rw_mbytes_per_sec", max_rw_mbytes))
+
     if max_r_mbytes:
-        if not set_pool_value_if_above(pool, "max_r_mbytes_per_sec", max_r_mbytes):
-            return False
+        values.append(("max_r_mbytes_per_sec", max_r_mbytes))
+
     if max_w_mbytes:
-        if not set_pool_value_if_above(pool, "max_w_mbytes_per_sec", max_w_mbytes):
-            return False
+        values.append(("max_w_mbytes_per_sec", max_w_mbytes))
+
+    for k, v in values:
+        ret, err = set_pool_value_if_above(pool, k, v)
+        if err:
+            return False, err
 
     pool.write_to_db(db_controller.kv_store)
     pool_events.pool_updated(pool)
     logger.info("Done")
-    return True
+    return True, None
 
 
 def delete_pool(uuid):
+    db_controller = DBController()
     pool = db_controller.get_pool_by_id(uuid)
+    if not pool:
+        pool = db_controller.get_pool_by_name(uuid)
     if not pool:
         logger.error(f"Pool not found {uuid}")
         return False
@@ -129,9 +150,10 @@ def delete_pool(uuid):
         logger.error(f"Pool is disabled")
         return False
 
-    # if pool.lvols:
-    #     logger.error(f"Pool is not empty {uuid}")
-    #     return False
+    lvols = db_controller.get_lvols_by_pool_id(uuid)
+    if lvols and len(lvols) > 0:
+        logger.error(f"Pool {uuid} is not empty, lvols found {len(lvols)}")
+        return False
 
     logger.info(f"Deleting pool {pool.get_id()}")
     pool_events.pool_remove(pool)
@@ -141,6 +163,7 @@ def delete_pool(uuid):
 
 
 def list_pools(is_json, cluster_id=None):
+    db_controller = DBController()
     pools = db_controller.get_pools(cluster_id)
     data = []
     for pool in pools:
@@ -163,6 +186,7 @@ def list_pools(is_json, cluster_id=None):
 
 
 def set_status(pool_id, status):
+    db_controller = DBController()
     pool = db_controller.get_pool_by_id(pool_id)
     logger.info(f"Setting pool:{pool_id} status to Active")
     if not pool:
@@ -174,6 +198,7 @@ def set_status(pool_id, status):
 
 
 def get_pool(pool_id, is_json):
+    db_controller = DBController()
     pool = db_controller.get_pool_by_id(pool_id)
     if not pool:
         logger.error(f"Pool not found {pool_id}")
@@ -188,6 +213,7 @@ def get_pool(pool_id, is_json):
 
 
 def get_capacity(pool_id):
+    db_controller = DBController()
     pool = db_controller.get_pool_by_id(pool_id)
     if not pool:
         logger.error(f"Pool not found {pool_id}")
@@ -214,6 +240,7 @@ def get_capacity(pool_id):
 
 
 def get_io_stats(pool_id, history, records_count=20):
+    db_controller = DBController()
     pool = db_controller.get_pool_by_id(pool_id)
     if not pool:
         logger.error(f"Pool not found {pool_id}")
@@ -245,6 +272,7 @@ def get_io_stats(pool_id, history, records_count=20):
 
 
 def get_secret(pool_id):
+    db_controller = DBController()
     pool = db_controller.get_pool_by_id(pool_id)
     if not pool:
         logger.error(f"Pool not found {pool_id}")
@@ -257,6 +285,7 @@ def get_secret(pool_id):
 
 
 def set_secret(pool_id, secret):
+    db_controller = DBController()
     pool = db_controller.get_pool_by_id(pool_id)
     if not pool:
         logger.error(f"Pool not found {pool_id}")
@@ -271,6 +300,7 @@ def set_secret(pool_id, secret):
 
 
 def get_pool_total_capacity(pool_id):
+    db_controller = DBController()
     pool = db_controller.get_pool_by_id(pool_id)
     if not pool:
         logger.error(f"Pool not found {pool_id}")
@@ -282,11 +312,12 @@ def get_pool_total_capacity(pool_id):
     snaps = db_controller.get_snapshots()
     for snap in snaps:
         if snap.lvol.pool_uuid == pool_id:
-            total += snap.lvol.size
+            total += snap.used_size
     return total
 
 
 def get_pool_total_rw_iops(pool_id):
+    db_controller = DBController()
     pool = db_controller.get_pool_by_id(pool_id)
     if not pool:
         logger.error(f"Pool not found {pool_id}")
@@ -302,6 +333,7 @@ def get_pool_total_rw_iops(pool_id):
 
 
 def get_pool_total_rw_mbytes(pool_id):
+    db_controller = DBController()
     pool = db_controller.get_pool_by_id(pool_id)
     if not pool:
         logger.error(f"Pool not found {pool_id}")
@@ -317,6 +349,7 @@ def get_pool_total_rw_mbytes(pool_id):
 
 
 def get_pool_total_r_mbytes(pool_id):
+    db_controller = DBController()
     pool = db_controller.get_pool_by_id(pool_id)
     if not pool:
         logger.error(f"Pool not found {pool_id}")
@@ -332,6 +365,7 @@ def get_pool_total_r_mbytes(pool_id):
 
 
 def get_pool_total_w_mbytes(pool_id):
+    db_controller = DBController()
     pool = db_controller.get_pool_by_id(pool_id)
     if not pool:
         logger.error(f"Pool not found {pool_id}")

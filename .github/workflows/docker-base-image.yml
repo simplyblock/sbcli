@@ -28,14 +28,20 @@ jobs:
     - name: Login to ECR
       id: login-ecr
       uses: aws-actions/amazon-ecr-login@v2
+      with:
+        registry-type: public
+
+    - name: Set up QEMU
+      uses: docker/setup-qemu-action@v3
 
     - name: Build & Push
       run: |
         SHORT_SHA=$(echo ${{ env.SHA }} | head -c 8)
 
-        sudo apt-get update -y
-        sudo apt-get install -y qemu-system qemu-user-static
         docker buildx ls
         docker buildx create --name mybuilder --bootstrap --use
         docker buildx build --platform linux/amd64,linux/arm64 -t simplyblock/simplyblock:base_image \
-        -t 565979732541.dkr.ecr.us-east-1.amazonaws.com/simplyblock:base_image -f docker/Dockerfile_base . --push
+        -t public.ecr.aws/simply-block/simplyblock:base_image -f docker/Dockerfile_base . --push
+
+        echo "::notice title=Docker.com::simplyblock/simplyblock:base_image
+        echo "::notice title=AWS-ECR::public.ecr.aws/simply-block/simplyblock:base_image

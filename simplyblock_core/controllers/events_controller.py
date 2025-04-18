@@ -66,7 +66,7 @@ def log_distr_event(cluster_id, node_id, event_dict):
 
 
 def log_event_cluster(cluster_id, domain, event, db_object, caused_by, message,
-                      node_id=None, event_level=EventObj.LEVEL_INFO, status=None):
+                      node_id=None, event_level=EventObj.LEVEL_INFO, status=None, storage_id=None):
     """
     uuid:
     cluster_uuid: 1234
@@ -94,11 +94,14 @@ def log_event_cluster(cluster_id, domain, event, db_object, caused_by, message,
     ds.caused_by = caused_by
     ds.message = message
     ds.status = status
+    if storage_id:
+        ds.storage_id = storage_id
 
     log_event_based_on_level(cluster_id, event, db_object.name, message, caused_by, event_level)
 
     db_controller = DBController()
     ds.write_to_db(db_controller.kv_store)
+    return ds.to_dict()
 
 
 def log_event_based_on_level(cluster_id, event, db_object, message, caused_by, event_level):

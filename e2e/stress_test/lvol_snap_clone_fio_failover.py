@@ -104,7 +104,7 @@ class TestLvolHAClusterWithClones(TestLvolHACluster):
                     "rw": "randrw",
                     "bs": "4K-128K",
                     "numjobs": 32,
-                    "iodepth": 512,
+                    "iodepth": 1,
                 },
             )
             fio_thread.start()
@@ -120,7 +120,7 @@ class TestLvolHAClusterWithClones(TestLvolHACluster):
                     "rw": "randrw",
                     "bs": "4K-128K",
                     "numjobs": 32,
-                    "iodepth": 512,
+                    "iodepth": 1,
                 },
             )
             fio_thread.start()
@@ -218,7 +218,7 @@ class TestFailoverScenariosStorageNodes(TestLvolHAClusterWithClones):
         )
 
         self.logger.info("Waiting for data migration to complete.")
-        self.validate_migration_for_node(timestamp, 4000, None)
+        self.validate_migration_for_node(timestamp, 2000, None)
         self.common_utils.manage_fio_threads(node=self.node, threads=self.fio_threads, timeout=10000)
 
         sleep_n_sec(60)

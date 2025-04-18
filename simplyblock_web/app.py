@@ -2,22 +2,19 @@
 # encoding: utf-8
 
 import logging
-import sys
 from flask import Flask
 
 import utils
 from blueprints import web_api_cluster, web_api_mgmt_node, web_api_device, \
-    web_api_lvol, web_api_storage_node, web_api_pool, web_api_caching_node, web_api_snapshot, web_api_deployer
+    web_api_lvol, web_api_storage_node, web_api_pool, web_api_caching_node, \
+    web_api_snapshot, web_api_deployer, swagger_ui_blueprint, web_api_metrics
 from auth_middleware import token_required
-from simplyblock_core import constants
-from werkzeug.middleware.dispatcher import DispatcherMiddleware
-from prometheus_client import make_wsgi_app
+from simplyblock_core import constants, utils as core_utils
 
-logger_handler = logging.StreamHandler(sys.stdout)
-logger_handler.setFormatter(logging.Formatter('%(asctime)s: %(levelname)s: %(message)s'))
-logger = logging.getLogger()
-logger.addHandler(logger_handler)
-logger.setLevel(constants.LOG_WEB_LEVEL)
+logger = core_utils.get_logger(__name__)
+
+
+core_utils.init_sentry_sdk()
 
 
 app = Flask(__name__)
@@ -35,6 +32,8 @@ app.register_blueprint(web_api_storage_node.bp)
 app.register_blueprint(web_api_pool.bp)
 app.register_blueprint(web_api_caching_node.bp)
 app.register_blueprint(web_api_deployer.bp)
+app.register_blueprint(swagger_ui_blueprint.bp, url_prefix=swagger_ui_blueprint.SWAGGER_URL)
+app.register_blueprint(web_api_metrics.bp)
 
 
 @app.before_request
@@ -47,10 +46,6 @@ def before_request():
 def status():
     return utils.get_response("Live")
 
-
-app.wsgi_app = DispatcherMiddleware(app.wsgi_app, {
-    '/cluster/metrics': make_wsgi_app()
-})
 
 app.config['JSONIFY_PRETTYPRINT_REGULAR'] = True
 if __name__ == '__main__':

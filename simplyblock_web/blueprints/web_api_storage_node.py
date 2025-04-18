@@ -9,8 +9,7 @@ from flask import Blueprint, request
 from simplyblock_core.controllers import tasks_controller
 from simplyblock_web import utils
 
-from simplyblock_core import db_controller
-from simplyblock_core import storage_node_ops
+from simplyblock_core import db_controller, storage_node_ops, utils as core_utils
 
 logger = logging.getLogger(__name__)
 
@@ -62,7 +61,7 @@ def storagenode_iostats(uuid, history):
     if not node:
         return utils.get_response_error(f"node not found: {uuid}", 404)
 
-    data = storage_node_ops.get_node_iostats_history(uuid, history, parse_sizes=False)
+    data = storage_node_ops.get_node_iostats_history(uuid, history, parse_sizes=False, with_sizes=True)
     ret = {
         "object_data": node.get_clean_dict(),
         "stats": data or []
@@ -136,10 +135,10 @@ def storage_node_shutdown(uuid):
     if not node:
         return utils.get_response_error(f"node not found: {uuid}", 404)
 
-    force = False
+    force = True
     try:
         args = request.args
-        force = bool(args.get('force', False))
+        force = bool(args.get('force', True))
     except:
         pass
 
@@ -200,13 +199,20 @@ def storage_node_add():
     ifname = req_data['ifname']
     max_lvol = int(req_data['max_lvol'])
     max_snap = int(req_data.get('max_snap', 500))
-    max_prov = req_data['max_prov']
+    max_prov = core_utils.parse_size(req_data['max_prov'], unit='G')
     number_of_distribs = int(req_data.get('number_of_distribs', 2))
     if req_data.get('disable_ha_jm', "") == "true":
         disable_ha_jm = True
     else:
         disable_ha_jm = False
-    enable_test_device = bool(req_data.get('enable_test_device', False))
+
+    enable_test_device = False
+    param = req_data.get('enable_test_device')
+    if param:
+        if type(param) == bool:
+            enable_test_device = param
+        elif type(param) == str:
+            enable_test_device = param == "true"
 
     spdk_image = None
     if 'spdk_image' in req_data:
@@ -257,6 +263,9 @@ def storage_node_add():
     if 'is_secondary_node' in req_data:
         is_secondary_node = bool(req_data['is_secondary_node'])
 
+    ssd_pcie = []
+    if 'ssd_pcie' in req_data:
+        ssd_pcie = req_data['ssd_pcie']
 
     tasks_controller.add_node_add_task(cluster_id, {
         "cluster_id": cluster_id,
@@ -279,6 +288,8 @@ def storage_node_add():
         "namespace": namespace,
         "enable_ha_jm": not disable_ha_jm,
         "is_secondary_node": is_secondary_node,
+        "ssd_pcie": ssd_pcie,
+
     })
 
     return utils.get_response(True)

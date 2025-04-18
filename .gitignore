@@ -1,3 +1,6 @@
 /.idea/
 *.pyc
 e2e/logs/*.log!
+.DS_Store
+*.log
+.python-version

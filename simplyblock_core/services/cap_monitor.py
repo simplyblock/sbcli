@@ -1,7 +1,7 @@
 # coding=utf-8
 
 import time
-
+from datetime import datetime, timezone
 
 from simplyblock_core import db_controller, constants, cluster_ops, utils
 from simplyblock_core.controllers import cluster_events
@@ -12,6 +12,7 @@ logger = utils.get_logger(__name__)
 
 # get DB controller
 db_controller = db_controller.DBController()
+last_event = {}
 
 logger.info("Starting capacity monitoring service...")
 while True:
@@ -30,8 +31,18 @@ while True:
             if cl.cap_crit <= size_util:
                 logger.warning(f"Cluster absolute cap critical, util: {size_util}% of cluster util: {cl.cap_crit}, "
                                f"putting the cluster in read_only mode")
-                cluster_events.cluster_cap_crit(cl, size_util)
-                cluster_ops.cluster_set_read_only(cl.get_id())
+                if cl.id in last_event:
+                    diff = datetime.now(timezone.utc) - datetime.fromtimestamp(last_event[cl.id]["date"]/1000, timezone.utc)
+                    if diff and diff.total_seconds() > 60 * 15:
+                        ev = cluster_events.cluster_cap_crit(cl, size_util)
+                        if ev:
+                            last_event[cl.id] = ev
+                else:
+                    ev = cluster_events.cluster_cap_crit(cl, size_util)
+                    if ev:
+                        last_event[cl.id] = ev
+                if cl.status in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED]:
+                    cluster_ops.cluster_set_read_only(cl.get_id())
             else:
                 if cl.status == Cluster.STATUS_READONLY:
                     cluster_ops.cluster_set_active(cl.get_id())

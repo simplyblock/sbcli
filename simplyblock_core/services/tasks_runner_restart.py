@@ -1,7 +1,6 @@
 # coding=utf-8
 import time
 
-
 from simplyblock_core import constants, db_controller, storage_node_ops, utils
 from simplyblock_core.controllers import device_controller, tasks_events, health_controller, tasks_controller
 from simplyblock_core.models.job_schedule import JobSchedule
@@ -13,6 +12,8 @@ logger = utils.get_logger(__name__)
 
 # get DB controller
 db_controller = db_controller.DBController()
+
+utils.init_sentry_sdk()
 
 
 def _get_node_unavailable_devices_count(node_id):
@@ -131,19 +132,18 @@ def task_runner_node(task):
         task.function_result = "max retry reached"
         task.status = JobSchedule.STATUS_DONE
         task.write_to_db(db_controller.kv_store)
-        storage_node_ops.set_node_status(task.node_id, StorageNode.STATUS_UNREACHABLE)
+        storage_node_ops.set_node_status(task.node_id, StorageNode.STATUS_OFFLINE)
         return True
 
-    if node.status == StorageNode.STATUS_REMOVED:
-        logger.info(f"Node is removed: {task.node_id}, stopping task")
-        task.function_result = f"Node is removed"
+    if not node:
+        task.function_result = "node not found"
         task.status = JobSchedule.STATUS_DONE
         task.write_to_db(db_controller.kv_store)
         return True
 
-    if node.status == StorageNode.STATUS_SCHEDULABLE:
-        logger.info(f"Node is schedulable, stopping task")
-        task.function_result = f"Node is schedulable"
+    if node.status in [StorageNode.STATUS_REMOVED, StorageNode.STATUS_SCHEDULABLE, StorageNode.STATUS_DOWN]:
+        logger.info(f"Node is {node.status}, stopping task")
+        task.function_result = f"Node is {node.status}, stopping"
         task.status = JobSchedule.STATUS_DONE
         task.write_to_db(db_controller.kv_store)
         return True
@@ -190,6 +190,7 @@ def task_runner_node(task):
     ret = storage_node_ops.shutdown_storage_node(node.get_id(), force=True)
     if ret:
         logger.info(f"Node shutdown succeeded")
+
     time.sleep(3)
 
     # resetting node
@@ -200,7 +201,7 @@ def task_runner_node(task):
 
     time.sleep(3)
     node = db_controller.get_storage_node_by_id(task.node_id)
-    if node.status == StorageNode.STATUS_ONLINE:
+    if _get_node_unavailable_devices_count(node.get_id()) == 0 and node.status == StorageNode.STATUS_ONLINE:
         logger.info(f"Node is online: {node.get_id()}")
         task.function_result = "done"
         task.status = JobSchedule.STATUS_DONE

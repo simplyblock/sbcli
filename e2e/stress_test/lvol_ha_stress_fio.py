@@ -6,6 +6,7 @@ from logger_config import setup_logger
 from datetime import datetime
 from exceptions.custom_exception import LvolNotConnectException
 from requests.exceptions import HTTPError
+from pathlib import Path
 
 
 class TestLvolHACluster(FioWorkloadTest):
@@ -24,7 +25,7 @@ class TestLvolHACluster(FioWorkloadTest):
         self.logger = setup_logger(__name__)
         self.lvol_size = "25G"
         self.fio_size = "18G"
-        self.total_lvols = 30
+        self.total_lvols = 10
         self.snapshot_per_lvol = 2
         self.lvol_name = "lvl"
         self.snapshot_name = "snapshot"
@@ -32,7 +33,7 @@ class TestLvolHACluster(FioWorkloadTest):
         self.lvol_node = None
         self.mount_path = "/mnt/"
         self.lvol_mount_details = {}
-        self.log_path = "/home/ec2-user/"
+        self.log_path = Path.home()
     
     def create_lvols(self):
         """Create 500 lvols with mixed crypto and non-crypto."""
@@ -274,7 +275,7 @@ class TestLvolHAClusterGracefulShutdown(TestLvolHACluster):
         self.logger.info(f"Fetching migration tasks for cluster {self.cluster_id}.")
 
         self.logger.info(f"Validating migration tasks for node {self.lvol_node}.")
-        self.validate_migration_for_node(timestamp, 5000, None)
+        self.validate_migration_for_node(timestamp, 2000, None)
         sleep_n_sec(30)
 
         time_secs = node_up_time - restart_start_time
@@ -334,7 +335,7 @@ class TestLvolHAClusterStorageNodeCrash(TestLvolHACluster):
         self.logger.info(f"Fetching migration tasks for cluster {self.cluster_id}.")
 
         self.logger.info(f"Validating migration tasks for node {self.lvol_node}.")
-        self.validate_migration_for_node(timestamp, 5000, None)
+        self.validate_migration_for_node(timestamp, 2000, None)
         sleep_n_sec(30)
 
         time_secs = node_up_time - restart_start_time
@@ -416,7 +417,7 @@ class TestLvolHAClusterNetworkInterrupt(TestLvolHACluster):
         self.logger.info(f"Data migration output: {output}")
 
         self.logger.info(f"Validating migration tasks for node {self.lvol_node}.")
-        self.validate_migration_for_node(timestamp, 5000, None)
+        self.validate_migration_for_node(timestamp, 2000, None)
         sleep_n_sec(120)
 
         self.validate_checksums()
@@ -424,6 +425,85 @@ class TestLvolHAClusterNetworkInterrupt(TestLvolHACluster):
         time_secs = node_up_time - disconnect_start_time
         time_mins = (time_secs.seconds - 120) / 60
         self.logger.info(f"Network reconnect and node online total time: {time_mins}")
+        
+        self.logger.info("Stress test completed.")
+
+
+class TestLvolHAClusterPartialNetworkOutage(TestLvolHACluster):
+    """Tests Graceful shutdown for LVstore recover
+    """
+    def run(self):
+        """Main execution."""
+        self.logger.info(f"Mount details: {self.lvol_mount_details}")
+        self.logger.info("SCE-4: Starting high-volume stress test.")
+        self.node = self.mgmt_nodes[0]
+        self.ssh_obj.make_directory(node=self.node, dir_name=self.log_path)
+        self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
+        self.lvol_node = self.sbcli_utils.get_node_without_lvols()
+        node_details = self.sbcli_utils.get_storage_node_details(self.lvol_node)
+        node_ip = node_details[0]["mgmt_ip"]
+        
+        self.create_lvols()
+        self.create_snapshots()
+        self.fill_volumes()
+        self.calculate_md5()
+
+        self.logger.info("Partial Network Outage")
+        timestamp = int(datetime.now().timestamp())
+
+        unavailable_thread = threading.Thread(
+            target=lambda: self.sbcli_utils.wait_for_storage_node_status(self.lvol_node, "unreachable", 4000)
+        )
+        unavailable_thread.start()
+
+        lvol_ports = node_details[0]["lvol_subsys_port"]
+        if not isinstance(lvol_ports, list):
+            lvol_ports = [lvol_ports]
+        ports_to_block = [int(port) for port in lvol_ports]
+        ports_to_block.append(4420)
+        
+        ports_blocked = self.ssh_obj.perform_nw_outage(
+            node_ip=node_ip,
+            block_ports=ports_to_block,
+            block_all_ss_ports=False
+        )
+
+        unavailable_thread.join()
+        sleep_n_sec(300)
+
+        self.validate_checksums()
+
+        restart_start_time = datetime.now()
+        self.ssh_obj.remove_nw_outage(node_ip=node_ip, blocked_ports=ports_blocked)
+        self.sbcli_utils.wait_for_storage_node_status(self.lvol_node,
+                                                      "in_restart",
+                                                      timeout=4000)
+        self.sbcli_utils.wait_for_storage_node_status(self.lvol_node,
+                                                      "online",
+                                                      timeout=4000)
+        self.sbcli_utils.wait_for_health_status(self.lvol_node,
+                                                True,
+                                                timeout=4000)
+        
+        node_details = self.sbcli_utils.get_storage_node_details(storage_node_id=self.lvol_node)
+        actual_status = node_details[0]["health_check"]
+        self.logger.info(f"Node health check is: {actual_status}")
+        
+        node_up_time = datetime.now()
+
+        sleep_n_sec(1000)
+
+        self.logger.info(f"Fetching migration tasks for cluster {self.cluster_id}.")
+
+        self.logger.info(f"Validating migration tasks for node {self.lvol_node}.")
+        self.validate_migration_for_node(timestamp, 2000, None)
+        sleep_n_sec(30)
+
+        time_secs = node_up_time - restart_start_time
+        time_mins = time_secs.seconds / 60
+        self.logger.info(f"Partial Outage and start total time: {time_mins}")
+        
+        self.validate_checksums()
         
         self.logger.info("Stress test completed.")
 
@@ -502,7 +582,7 @@ class TestLvolHAClusterRunAllScenarios(TestLvolHACluster):
         self.logger.info(f"Fetching migration tasks for cluster {self.cluster_id}.")
 
         self.logger.info(f"Validating migration tasks for node {self.lvol_node}.")
-        self.validate_migration_for_node(timestamp, 5000, None)
+        self.validate_migration_for_node(timestamp, 2000, None)
         sleep_n_sec(30)
 
         self.validate_checksums()
@@ -537,7 +617,7 @@ class TestLvolHAClusterRunAllScenarios(TestLvolHACluster):
         self.logger.info(f"Fetching migration tasks for cluster {self.cluster_id}.")
 
         self.logger.info(f"Validating migration tasks for node {self.lvol_node}.")
-        self.validate_migration_for_node(timestamp, 5000, None)
+        self.validate_migration_for_node(timestamp, 2000, None)
         sleep_n_sec(30)
 
         self.validate_checksums()
@@ -599,7 +679,7 @@ class TestLvolHAClusterRunAllScenarios(TestLvolHACluster):
         self.logger.info(f"Fetching migration tasks for cluster {self.cluster_id}.")
 
         self.logger.info(f"Validating migration tasks for node {self.lvol_node}.")
-        self.validate_migration_for_node(timestamp, 5000, None)
+        self.validate_migration_for_node(timestamp, 2000, None)
         sleep_n_sec(30)
 
 

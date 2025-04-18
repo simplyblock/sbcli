@@ -8,15 +8,24 @@ from setuptools.command.install import install as _install
 def _post_install():
     from subprocess import getstatusoutput
     _, out = getstatusoutput('activate-global-python-argcomplete --user')
-    print(out)
+    if out:
+        print(out)
 
     if os.environ.get("SHELL") and os.environ.get("HOME"):
-        if "zsh" in os.environ.get("SHELL", ""):
-            path = f"{os.environ.get('HOME')}/.zshenv"
-        else:
-            path = f"{os.environ.get('HOME')}/.bash_completion"
+        path = f"{os.environ.get('HOME')}/.bash_completion"
         if os.path.isfile(path):
             _, out = getstatusoutput(f'source {path}')
+            found = False
+            if os.path.exists(os.environ.get("HOME")+"/.bashrc"):
+                with open(os.environ.get("HOME")+"/.bashrc", "r") as bashrc:
+                    for line in bashrc.readlines():
+                        line = line.strip()
+                        if not line.startswith("#") and f"source {path}" in line:
+                            found = True
+                            break
+            if not found:
+                with open(os.environ.get("HOME") + "/.bashrc", "a") as bashrc:
+                    bashrc.writelines([f"\nsource {path}\n"])
 
 
 class install(_install):
@@ -76,6 +85,7 @@ data_files.append(('', ["requirements.txt"]))
 setup(
     name=COMMAND_NAME,
     version=VERSION,
+    requires_python='>= 3.9',
     packages=find_packages(exclude=["e2e*"]),
     url='https://www.simplyblock.io/',
     author='Hamdy',
@@ -95,5 +105,5 @@ setup(
         '': ["/etc/simplyblock/requirements.txt"],
         '/etc/simplyblock': ["requirements.txt"]
     },
-    cmdclass={'install': install},
+    # cmdclass={'install': install},
 )

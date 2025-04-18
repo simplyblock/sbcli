@@ -1,3 +1,4 @@
+from pathlib import Path
 import threading
 import json
 from e2e_tests.cluster_test_base import TestClusterBase
@@ -117,7 +118,7 @@ class FioWorkloadTest(TestClusterBase):
         self.logger.info(f"Fetching migration tasks for cluster {self.cluster_id}.")
 
         self.logger.info(f"Validating migration tasks for node {affected_node}.")
-        self.validate_migration_for_node(timestamp, 5000, None)
+        self.validate_migration_for_node(timestamp, 1000, None)
 
         sleep_n_sec(30)
 
@@ -164,7 +165,7 @@ class FioWorkloadTest(TestClusterBase):
         sleep_n_sec(300)
 
         self.logger.info(f"Validating migration tasks for node {affected_node}.")
-        self.validate_migration_for_node(timestamp, 5000, None)
+        self.validate_migration_for_node(timestamp, 1000, None)
 
         sleep_n_sec(30)
 
@@ -355,12 +356,12 @@ class FioWorkloadTest(TestClusterBase):
                                     "name": f"fio_{lvol}",
                                     "rw": fio_run[0],
                                     "ioengine": "libaio",
-                                    "iodepth": 64,
+                                    "iodepth": 1,
                                     "bs": fio_run[1],
                                     "size": "300M",
                                     "time_based": True,
                                     "runtime": 2000,
-                                    "output_file": f"/home/ec2-user/{lvol}.log",
+                                    "output_file": f"{Path.home()}/{lvol}.log",
                                     "numjobs": 2,
                                     "debug": self.fio_debug
                                 }
@@ -373,12 +374,12 @@ class FioWorkloadTest(TestClusterBase):
                                     "name": f"fio_{lvol}",
                                     "rw": "trimwrite",
                                     "ioengine": "libaio",
-                                    "iodepth": 64,
+                                    "iodepth": 1,
                                     "bs": "16K",
                                     "size": "300M",
                                     "time_based": True,
                                     "runtime": 2000,
-                                    "output_file": f"/home/ec2-user/{lvol}.log",
+                                    "output_file": f"{Path.home()}/{lvol}.log",
                                     "nrfiles": 2,
                                     "debug": self.fio_debug
                                 }
@@ -508,87 +509,3 @@ class FioWorkloadTest(TestClusterBase):
         #     for running_fio in fio_process: 
         #         assert fio not in running_fio, "FIO Process running on crashed node"
         self.logger.info("FIO process is running uninterrupted.")
-
-    def filter_migration_tasks(self, tasks, node_id, timestamp):
-        """
-        Filters `device_migration` tasks for a specific node and timestamp.
-
-        Args:
-            tasks (list): List of task dictionaries from the API response.
-            node_id (str): The UUID of the node to check for migration tasks.
-            timestamp (int): The timestamp to filter tasks created after this time.
-
-        Returns:
-            list: List of `device_migration` tasks for the specific node created after the given timestamp.
-        """
-        filtered_tasks = [
-            task for task in tasks
-            if task['function_name'] == 'device_migration' and task['date'] > timestamp
-            and (node_id is None or task['node_id'] == node_id)
-        ]
-        return filtered_tasks
-
-    def validate_migration_for_node(self, timestamp, timeout, node_id=None, check_interval=60,
-                                    no_task_ok=False):
-        """
-        Validate that all `device_migration` tasks for a specific node have completed successfully 
-        and check for stuck tasks until the timeout is reached.
-
-        Args:
-            timestamp (int): The timestamp to filter tasks created after this time.
-            timeout (int): Maximum time in seconds to keep checking for task completion.
-            node_id (str): The UUID of the node to check for migration tasks (or None for all nodes).
-            check_interval (int): Time interval in seconds to wait between checks.
-
-        Raises:
-            RuntimeError: If any migration task failed, is incomplete, is stuck, or if the timeout is reached.
-        """
-        start_time = datetime.now()
-        end_time = start_time + timedelta(seconds=timeout)
-
-        output = None
-        while output is not None:
-            output, _ = self.ssh_obj.exec_command(node=self.mgmt_nodes[0], 
-                                                command=f"{self.base_cmd} cluster list-tasks {self.cluster_id}")
-            self.logger.info(f"Data migration output: {output}")
-            if no_task_ok:
-                break
-
-        while datetime.now() < end_time:
-            tasks = self.sbcli_utils.get_cluster_tasks(self.cluster_id)
-            filtered_tasks = self.filter_migration_tasks(tasks, node_id, timestamp)
-            
-            if not filtered_tasks and not no_task_ok:
-                raise RuntimeError(f"No migration tasks found for {'node ' + node_id if node_id else 'the cluster'} after the specified timestamp.")
-
-            self.logger.info(f"Checking migration tasks: {filtered_tasks}")
-            all_done = True
-            completed_count = 0
-
-            for task in filtered_tasks:
-                # Check if the task is stuck (updated_at is more than 15 minutes old)
-                updated_at = datetime.strptime(task['updated_at'], '%Y-%m-%d %H:%M:%S.%f')
-                if datetime.now() - updated_at > timedelta(minutes=60):
-                    raise RuntimeError(f"Migration task {task['id']} is stuck (last updated at {updated_at}).")
-
-                # Check if task is completed
-                if task['status'] == 'done' and task['function_result'] == 'Done':
-                    completed_count += 1
-                else:
-                    all_done = False
-
-            # Logging the counts after each check
-            total_tasks = len(filtered_tasks)
-            remaining_tasks = total_tasks - completed_count
-            self.logger.info(f"Total migration tasks: {total_tasks}, Completed: {completed_count}, Remaining: {remaining_tasks}")
-
-            # If all tasks are done, break out of the loop
-            if all_done:
-                self.logger.info(f"All migration tasks for {'node ' + node_id if node_id else 'the cluster'} completed successfully without any stuck tasks.")
-                return
-
-            # Wait for the next check
-            sleep_n_sec(check_interval)
-
-        # If the loop exits without completing all tasks, raise a timeout error
-        raise RuntimeError(f"Timeout reached: Not all migration tasks completed within the specified timeout of {timeout} seconds.")

@@ -15,7 +15,7 @@ from flask import request
 
 from simplyblock_web import utils, node_utils
 
-from simplyblock_core import scripts, constants, shell_utils
+from simplyblock_core import scripts, constants, shell_utils, utils as core_utils
 
 logger = logging.getLogger(__name__)
 
@@ -83,14 +83,23 @@ def get_amazon_cloud_info():
 
 
 def get_docker_client():
-    ip = os.getenv("DOCKER_IP")
-    if not ip:
-        for ifname in node_utils.get_nics_data():
-            if ifname in ["eth0", "ens0"]:
-                ip = node_utils.get_nics_data()[ifname]['ip']
-                break
-    return docker.DockerClient(base_url=f"tcp://{ip}:2375", version="auto", timeout=60 * 5)
-
+    try:
+        cl = docker.DockerClient(base_url='unix://var/run/docker.sock', version="auto", timeout=60 * 5)
+        cl.info()
+        return cl
+    except:
+        ip = os.getenv("DOCKER_IP")
+        if not ip:
+            for ifname in node_utils.get_nics_data():
+                if ifname in ["eth0", "ens0"]:
+                    ip = node_utils.get_nics_data()[ifname]['ip']
+                    break
+        cl = docker.DockerClient(base_url=f"tcp://{ip}:2375", version="auto", timeout=60 * 5)
+        try:
+            cl.info()
+            return cl
+        except:
+            pass
 
 @bp.route('/scan_devices', methods=['GET'])
 def scan_devices():
@@ -111,6 +120,17 @@ def spdk_process_start():
     except:
         data = {}
 
+    ssd_pcie_list = "none"
+    ssd_pcie_params = ""
+    if 'ssd_pcie' in data and data['ssd_pcie']:
+        ssd_pcie = data['ssd_pcie']
+        ssd_pcie_params = " -A " + " -A ".join(ssd_pcie)
+        ssd_pcie_list = " ".join(ssd_pcie)
+
+    rpc_port = constants.RPC_HTTP_PROXY_PORT
+    if 'rpc_port' in data and data['rpc_port']:
+        rpc_port = data['rpc_port']
+
     set_debug = None
     if 'spdk_debug' in data and data['spdk_debug']:
         set_debug = data['spdk_debug']
@@ -123,6 +143,11 @@ def spdk_process_start():
     if 'spdk_mem' in data:
         spdk_mem = data['spdk_mem']
 
+    total_mem = ""
+    if 'total_mem' in data:
+        total_mem = data['total_mem']
+        total_mem = int(core_utils.parse_size(total_mem) / (1000 * 1000))
+
     multi_threading_enabled = False
     if 'multi_threading_enabled' in data:
         multi_threading_enabled = bool(data['multi_threading_enabled'])
@@ -134,19 +159,16 @@ def spdk_process_start():
         except:
             pass
 
-    if spdk_mem:
-        spdk_mem = int(utils.parse_size(spdk_mem) / (1000 * 1000))
-    else:
-        spdk_mem = 4000
+    spdk_mem_mib = core_utils.convert_size(
+            data.get('spdk_mem', core_utils.parse_size('4GiB')), 'MiB')
 
     node_docker = get_docker_client()
     nodes = node_docker.containers.list(all=True)
     for node in nodes:
-        if node.attrs["Name"] in ["/spdk", "/spdk_proxy"]:
+        if node.attrs["Name"] in [f"/spdk_{rpc_port}", f"/spdk_proxy_{rpc_port}"]:
             logger.info(f"{node.attrs['Name']} container found, removing...")
-            node.stop()
+            node.stop(timeout=3)
             node.remove(force=True)
-            time.sleep(2)
 
     spdk_debug = ""
     if set_debug:
@@ -155,7 +177,8 @@ def spdk_process_start():
     spdk_image = constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE
     if 'spdk_image' in data and data['spdk_image']:
         spdk_image = data['spdk_image']
-        # node_docker.images.pull(spdk_image)
+
+    node_docker.images.pull(spdk_image)
 
     if "cluster_ip" in data and data['cluster_ip']:
         cluster_ip = data['cluster_ip']
@@ -165,30 +188,37 @@ def spdk_process_start():
 
     container = node_docker.containers.run(
         spdk_image,
-        f"/root/scripts/run_distr.sh {spdk_cpu_mask} {spdk_mem} {spdk_debug}",
-        name="spdk",
+        f"/root/scripts/run_distr_with_ssd.sh {spdk_cpu_mask} {spdk_mem_mib} {spdk_debug}",
+        name=f"spdk_{rpc_port}",
         detach=True,
         privileged=True,
         network_mode="host",
         log_config=log_config,
         volumes=[
             '/etc/simplyblock:/etc/simplyblock',
-            '/var/tmp:/var/tmp',
+            f'/var/tmp/spdk_{rpc_port}:/var/tmp',
             '/dev:/dev',
+            f'/tmp/shm_{rpc_port}/:/dev/shm/',
             '/lib/modules/:/lib/modules/',
             '/var/lib/systemd/coredump/:/var/lib/systemd/coredump/',
             '/sys:/sys'],
+        environment=[
+            f"RPC_PORT={rpc_port}",
+            f"ssd_pcie={ssd_pcie_params}",
+            f"PCI_ALLOWED={ssd_pcie_list}",
+            f"TOTAL_HP={total_mem}",
+        ]
         # restart_policy={"Name": "on-failure", "MaximumRetryCount": 99}
     )
     container2 = node_docker.containers.run(
         constants.SIMPLY_BLOCK_DOCKER_IMAGE,
         "python simplyblock_core/services/spdk_http_proxy_server.py",
-        name="spdk_proxy",
+        name=f"spdk_proxy_{rpc_port}",
         detach=True,
         network_mode="host",
         log_config=log_config,
         volumes=[
-            '/var/tmp:/var/tmp'
+            f'/var/tmp/spdk_{rpc_port}:/var/tmp',
         ],
         environment=[
             f"SERVER_IP={data['server_ip']}",
@@ -219,9 +249,10 @@ def spdk_process_start():
 
 @bp.route('/spdk_process_kill', methods=['GET'])
 def spdk_process_kill():
+    rpc_port = request.args.get('rpc_port', default=f"{constants.RPC_HTTP_PROXY_PORT}", type=str)
     node_docker = get_docker_client()
     for cont in node_docker.containers.list(all=True):
-        if cont.attrs['Name'] == "/spdk" or cont.attrs['Name'] == "/spdk_proxy":
+        if cont.attrs["Name"] in [f"/spdk_{rpc_port}", f"/spdk_proxy_{rpc_port}"]:
             cont.stop(timeout=3)
             cont.remove(force=True)
     return utils.get_response(True)
@@ -229,16 +260,20 @@ def spdk_process_kill():
 
 @bp.route('/spdk_process_is_up', methods=['GET'])
 def spdk_process_is_up():
-    node_docker = get_docker_client()
-    for cont in node_docker.containers.list(all=True):
-        if cont.attrs['Name'] == "/spdk":
-            status = cont.attrs['State']["Status"]
-            is_running = cont.attrs['State']["Running"]
-            if is_running:
-                return utils.get_response(True)
-            else:
-                return utils.get_response(False, f"SPDK container status: {status}, is running: {is_running}")
-    return utils.get_response(False, "SPDK container not found")
+    rpc_port = request.args.get('rpc_port', default=f"{constants.RPC_HTTP_PROXY_PORT}", type=str)
+    try:
+        node_docker = get_docker_client()
+        for cont in node_docker.containers.list(all=True):
+            if cont.attrs['Name'] == f"/spdk_{rpc_port}":
+                status = cont.attrs['State']["Status"]
+                is_running = cont.attrs['State']["Running"]
+                if is_running:
+                    return utils.get_response(True)
+                else:
+                    return utils.get_response(False, f"SPDK container status: {status}, is running: {is_running}")
+    except Exception as e:
+        logger.error(e)
+    return utils.get_response(True)
 
 
 def get_cluster_id():
@@ -275,6 +310,26 @@ def get_node_lsblk():
     return data
 
 
+def get_cores_config():
+    file_path = constants.TEMP_CORES_FILE
+    try:
+        # Open and read the JSON file
+        with open(file_path, "r") as file:
+            cores_config = json.load(file)
+
+        # Output the parsed data
+        logger.info("Parsed Core Configuration:")
+        for key, value in cores_config.items():
+            logger.info(f"{key}: {value}")
+        return cores_config
+
+    except FileNotFoundError:
+        logger.error(f"The file '{file_path}' does not exist.")
+        return {}
+    except json.JSONDecodeError as e:
+        logger.error(f"Error decoding JSON: {e}")
+        return {}
+
 
 @bp.route('/info', methods=['GET'])
 def get_info():
@@ -303,6 +358,7 @@ def get_info():
         "cloud_instance": CLOUD_INFO,
 
         "lsblk": get_node_lsblk(),
+        "cores_config": get_cores_config(),
     }
     return utils.get_response(out)
 
@@ -323,26 +379,18 @@ def join_swarm():
     node_docker = get_docker_client()
     if node_docker.info()["Swarm"]["LocalNodeState"] in ["active", "pending"]:
         logger.info("Node is part of another swarm, leaving swarm")
-        node_docker.swarm.leave(force=True)
-        time.sleep(2)
-    node_docker.swarm.join([f"{cluster_ip}:2377"], join_token)
-    # retries = 10
-    # while retries > 0:
-    #     if node_docker.info()["Swarm"]["LocalNodeState"] == "active":
-    #         break
-    #     logger.info("Waiting for node to be active...")
-    #     retries -= 1
-    #     time.sleep(1)
-    logger.info("Joining docker swarm > Done")
+        try:
+            node_docker.swarm.leave(force=True)
+            time.sleep(2)
+        except Exception as e:
+            logger.error(e)
 
     try:
-        nodes = node_docker.containers.list(all=True)
-        for node in nodes:
-            if node.attrs["Name"] == "/spdk_proxy":
-                node_docker.containers.get(node.attrs["Id"]).restart()
-                break
-    except:
-        pass
+        node_docker.swarm.join([f"{cluster_ip}:2377"], join_token)
+        logger.info("Joining docker swarm > Done")
+    except Exception as e:
+        logger.error(e)
+        return utils.get_response(False, str(e))
 
     return utils.get_response(True)
 
@@ -446,18 +494,19 @@ def delete_gpt_partitions_for_dev():
 
 CPU_INFO = cpuinfo.get_cpu_info()
 HOSTNAME, _, _ = node_utils.run_command("hostname -s")
-SYSTEM_ID = ""
-CLOUD_INFO = get_amazon_cloud_info()
-if not CLOUD_INFO:
-    CLOUD_INFO = get_google_cloud_info()
+SYSTEM_ID, _, _ = node_utils.run_command("dmidecode -s system-uuid")
+CLOUD_INFO = None
 
-if not CLOUD_INFO:
-    CLOUD_INFO = get_equinix_cloud_info()
+if not os.environ.get("WITHOUT_CLOUD_INFO"):
+    CLOUD_INFO = get_amazon_cloud_info()
+    if not CLOUD_INFO:
+        CLOUD_INFO = get_google_cloud_info()
 
-if CLOUD_INFO:
-    SYSTEM_ID = CLOUD_INFO["id"]
-else:
-    SYSTEM_ID, _, _ = node_utils.run_command("dmidecode -s system-uuid")
+    if not CLOUD_INFO:
+        CLOUD_INFO = get_equinix_cloud_info()
+
+    if CLOUD_INFO:
+        SYSTEM_ID = CLOUD_INFO["id"]
 
 
 @bp.route('/bind_device_to_spdk', methods=['POST'])
@@ -483,3 +532,31 @@ def bind_device_to_spdk():
         time.sleep(1)
 
     return utils.get_response(True)
+
+
+@bp.route('/firewall_set_port', methods=['POST'])
+def firewall_set_port():
+    data = request.get_json()
+    if "port_id" not in data:
+        return utils.get_response(False, "Required parameter is missing: port_id")
+    if "port_type" not in data:
+        return utils.get_response(False, "Required parameter is missing: port_type")
+    if "action" not in data:
+        return utils.get_response(False, "Required parameter is missing: action")
+    if "rpc_port" not in data:
+        return utils.get_response(False, "Required parameter is missing: rpc_port")
+
+    port_id = data['port_id']
+    port_type = data['port_type']
+    action = data['action']
+    rpc_port = data['rpc_port']
+
+    ret = node_utils.firewall_port(port_id, port_type, block=action=="block", rpc_port=rpc_port)
+    return utils.get_response(ret)
+
+
+@bp.route('/get_firewall', methods=['GET'])
+def get_firewall():
+    rpc_port = request.args.get('rpc_port', default="", type=str)
+    ret = node_utils.firewall_get(rpc_port)
+    return utils.get_response(ret)

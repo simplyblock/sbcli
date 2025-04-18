@@ -11,7 +11,7 @@ from flask import Blueprint
 from flask import request
 
 from simplyblock_web import utils, node_utils
-from simplyblock_core import scripts, constants
+from simplyblock_core import scripts, constants, utils as core_utils
 
 logger = logging.getLogger(__name__)
 
@@ -35,9 +35,6 @@ def spdk_process_start():
     spdk_cpu_mask = None
     if 'spdk_cpu_mask' in data:
         spdk_cpu_mask = data['spdk_cpu_mask']
-    spdk_mem = None
-    if 'spdk_mem' in data:
-        spdk_mem = data['spdk_mem']
     node_cpu_count = os.cpu_count()
 
     if spdk_cpu_mask:
@@ -50,10 +47,8 @@ def spdk_process_start():
     else:
         spdk_cpu_mask = hex(int(math.pow(2, node_cpu_count)) - 1)
 
-    if spdk_mem:
-        spdk_mem = int(spdk_mem / (1024 * 1024))
-    else:
-        spdk_mem = 64096
+    spdk_mem_mib = core_utils.convert_size(
+            data.get('spdk_mem', core_utils.parse_size('64GiB')), 'MiB')
 
     node_docker = get_docker_client()
     nodes = node_docker.containers.list(all=True)
@@ -71,7 +66,7 @@ def spdk_process_start():
 
     container = node_docker.containers.run(
         spdk_image,
-        f"/root/spdk/scripts/run_spdk_tgt.sh {spdk_cpu_mask} {spdk_mem}",
+        f"/root/spdk/scripts/run_spdk_tgt.sh {spdk_cpu_mask} {spdk_mem_mib}",
         name="spdk",
         detach=True,
         privileged=True,
