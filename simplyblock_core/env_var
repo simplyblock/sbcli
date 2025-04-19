@@ -1,5 +1,6 @@
 SIMPLY_BLOCK_COMMAND_NAME=sbcli-configure
 SIMPLY_BLOCK_VERSION=1.0.47
 
+
 SIMPLY_BLOCK_DOCKER_IMAGE=public.ecr.aws/simply-block/simplyblock:configure
 SIMPLY_BLOCK_SPDK_ULTRA_IMAGE=public.ecr.aws/simply-block/ultra:main-latest

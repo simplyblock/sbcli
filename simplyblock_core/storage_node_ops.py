@@ -298,7 +298,7 @@ def _create_storage_device_stack(rpc_client, nvme, snode, after_restart):
     alceml_bdev = alceml_name
     qos_bdev = ""
     # Add qos bdev device
-    if False:
+    if cluster.enable_qos:
         max_queue_size = cluster.max_queue_size
         inflight_io_threshold = cluster.inflight_io_threshold
         qos_bdev = f"{alceml_name}_qos"
@@ -306,7 +306,7 @@ def _create_storage_device_stack(rpc_client, nvme, snode, after_restart):
         if not ret:
             logger.error(f"Failed to create qos bdev: {qos_bdev}")
             return None
-        alceml_bdev = qos_bdev
+        #alceml_bdev = qos_bdev
 
     # add pass through
     pt_name = f"{alceml_name}_PT"
