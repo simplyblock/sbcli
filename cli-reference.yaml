@@ -189,7 +189,12 @@ commands:
             type: str
             nargs: +
             default: ""
-
+          - name: "--numa-socket"
+                help: "The numa socket on which to start the storage node, e.g. 0 or 1."
+            dest: socket
+            required: false
+            type: str
+            default: ""
       - name: delete
         help: "Deletes a storage node object from the state database."
         usage: >
@@ -324,6 +329,12 @@ commands:
             dest: force
             type: bool
             action: store_true
+          - name: "--numa-socket"
+            help: "The numa socket on which to start the storage node, e.g. 0 or 1."
+            dest: socket
+            required: false
+            type: str
+            default: ""
       - name: shutdown
         help: "Initiates a storage node shutdown"
         usage: Once the command is issued, the node will stop accepting IO,but IO, which was previously received, will still be processed. In a high-availability setup, this will not impact operations.
