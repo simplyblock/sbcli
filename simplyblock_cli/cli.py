@@ -126,6 +126,7 @@ class CLIWrapper(CLIWrapperBase):
             argument = subcommand.add_argument('--max-snap', help='Max snapshot per storage node', type=int, default=5000, dest='max_snap', required=False)
         argument = subcommand.add_argument('--spdk-mem', help='Set spdk hugepage size limitation', type=str, default='', dest='spdk_mem', required=False)
         argument = subcommand.add_argument('--ssd-pcie', help='Nvme PCIe address to use for storage device. Can be more than one.', type=str, default='', dest='ssd_pcie', required=False, nargs='+')
+        argument = subcommand.add_argument('--numa-socket', help='The numa socket on which to start the storage node, e.g. 0 or 1.', type=str, default='', dest='socket', required=False)
 
     def init_storage_node__delete(self, subparser):
         subcommand = self.add_sub_command(subparser, 'delete', 'Deletes a storage node object from the state database.')
@@ -167,6 +168,7 @@ class CLIWrapper(CLIWrapperBase):
         if self.developer_mode:
             argument = subcommand.add_argument('--iobuf_large_bufsize', help='bdev_set_options param', type=int, default=0, dest='large_bufsize', required=False)
         argument = subcommand.add_argument('--force', help='Force restart', dest='force', required=False, action='store_true')
+        argument = subcommand.add_argument('--numa-socket', help='The numa socket on which to start the storage node, e.g. 0 or 1.', type=str, default='', dest='socket', required=False)
 
     def init_storage_node__shutdown(self, subparser):
         subcommand = self.add_sub_command(subparser, 'shutdown', 'Initiates a storage node shutdown')

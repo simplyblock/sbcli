@@ -196,7 +196,7 @@ commands:
             nargs: +
             default: ""
           - name: "--numa-socket"
-                help: "The numa socket on which to start the storage node, e.g. 0 or 1."
+            help: "The numa socket on which to start the storage node, e.g. 0 or 1."
             dest: socket
             required: false
             type: str
