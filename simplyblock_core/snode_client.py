@@ -79,13 +79,14 @@ class SNodeClient:
     def spdk_process_start(self, spdk_cpu_mask, spdk_mem, spdk_image=None, spdk_debug=None, cluster_ip=None,
                            fdb_connection=None, namespace=None, server_ip=None, rpc_port=None,
                            rpc_username=None, rpc_password=None, multi_threading_enabled=False, timeout=0, ssd_pcie=None,
-                           total_mem=None):
+                           total_mem=None, socket=0):
         params = {
             "cluster_ip": cluster_ip,
             "server_ip": server_ip,
             "rpc_port": rpc_port,
             "rpc_username": rpc_username,
-            "rpc_password": rpc_password}
+            "rpc_password": rpc_password,
+            "socket": socket}
 
         if spdk_cpu_mask:
             params['spdk_cpu_mask'] = spdk_cpu_mask
