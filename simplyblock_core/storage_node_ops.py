@@ -27,6 +27,8 @@ from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.rpc_client import RPCClient, RPCException
 from simplyblock_core.snode_client import SNodeClient
+from simplyblock_web import node_utils
+
 
 logger = utils.get_logger(__name__)
 
@@ -1510,7 +1512,7 @@ def restart_storage_node(
         node_id, max_lvol=0, max_snap=0, max_prov=0,
         spdk_image=None, set_spdk_debug=None,
         small_bufsize=0, large_bufsize=0, number_of_devices=0,
-        force=False, node_ip=None, clear_data=False):
+        force=False, node_ip=None, reattach_volume=False, clear_data=False):
 
     db_controller = DBController()
     kv_store = db_controller.kv_store
@@ -1568,6 +1570,28 @@ def restart_storage_node(
                         'net_type': device['net_type']}))
             snode.data_nics = data_nics
             snode.hostname = node_info['hostname']
+
+            if snode.num_partitions_per_dev == 0 and reattach_volume:
+                new_cloud_instance_id = node_info['cloud_instance']['id']
+                detached_volumes = node_utils.detach_ebs_volumes(snode.cloud_instance_id)
+                if not detached_volumes:
+                    logger.error("No volumes with matching tags were detached.")
+                    return False
+
+                attached_volumes = node_utils.attach_ebs_volumes(new_cloud_instance_id, detached_volumes) 
+                if not attached_volumes:
+                    logger.error("Failed to attach volumes.")
+                    return False
+
+                snode.cloud_instance_id = new_cloud_instance_id
+                known_sn = [dev.serial_number for dev in snode.nvme_devices]
+                if snode.jm_device and 'serial_number' in snode.jm_device.device_data_dict:
+                   known_sn.append(snode.jm_device.device_data_dict['serial_number'])
+
+                node_info, _ = snode_api.info()
+                for dev in node_info['nvme_devices']:
+                    if dev['serial_number'] in known_sn:
+                        snode_api.bind_device_to_spdk(dev['address'])
         else:
             node_ip = None
 

@@ -155,6 +155,7 @@ def storage_node_restart():
     req_data = request.get_json()
     uuid = req_data.get("uuid", "")
     node_ip = req_data.get("node_ip", "")
+    reattach_volume = bool(req_data.get("reattach_volume", False))
     force = bool(req_data.get("force", ""))
 
     node = db_controller.get_storage_node_by_id(uuid)
@@ -167,6 +168,7 @@ def storage_node_restart():
             "node_id": uuid,
             "node_ip": node_ip,
             "force": force,
+            "reattach_volume": reattach_volume,
         }
     ).start()
 
