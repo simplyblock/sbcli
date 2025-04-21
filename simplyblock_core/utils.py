@@ -362,100 +362,106 @@ def hexa_to_cpu_list(cpu_mask):
 
     return cpu_list
 
-def calculate_core_allocation(cpu_cores):
-    if len(cpu_cores) >= 23:
-        app_thread_core = [cpu_cores[pos - 1] for pos in [10]]
-        jm_cpu_core = [cpu_cores[pos - 1] for pos in [11, 22]]
-        poller_cpu_cores = [cpu_cores[pos - 1] for pos in [9, 7, 8, 12, 14, 15, 19, 20]]
-        alceml_cpu_cores = [cpu_cores[pos - 1] for pos in [1, 2, 3]]
-        alceml_worker_cpu_cores = [cpu_cores[pos - 1] for pos in [13, 21]]
-        distrib_cpu_cores = [cpu_cores[pos - 1] for pos in [4, 5, 6, 16, 17, 18]]
-        jc_singleton_core = [cpu_cores[pos - 1] for pos in [23]]
-    elif len(cpu_cores) >= 21:
-        app_thread_core = [cpu_cores[pos - 1] for pos in [14]]
-        jm_cpu_core = [cpu_cores[pos - 1] for pos in [15, 21]]
-        poller_cpu_cores = [cpu_cores[pos - 1] for pos in [3, 7, 8, 9, 10, 11, 13]]
-        alceml_cpu_cores = [cpu_cores[pos - 1] for pos in [1, 2]]
-        alceml_worker_cpu_cores = [cpu_cores[pos - 1] for pos in [12, 20]]
-        distrib_cpu_cores = [cpu_cores[pos - 1] for pos in [4, 5, 6, 16, 17, 18]]
-        jc_singleton_core = [cpu_cores[pos - 1] for pos in [19]]
-    elif len(cpu_cores) >= 19:
-        app_thread_core = [cpu_cores[pos - 1] for pos in [13]]
-        jm_cpu_core = [cpu_cores[pos - 1] for pos in [14]]
-        poller_cpu_cores = [cpu_cores[pos - 1] for pos in [3, 8, 7, 9, 12, 15]]
-        alceml_cpu_cores = [cpu_cores[pos - 1] for pos in [1, 2]]
-        alceml_worker_cpu_cores = [cpu_cores[pos - 1] for pos in [11, 19]]
-        distrib_cpu_cores = [cpu_cores[pos - 1] for pos in [4, 5, 6, 16, 17, 18]]
-        jc_singleton_core = [cpu_cores[pos - 1] for pos in [10]]
-    elif len(cpu_cores) >= 17:
-        app_thread_core = [cpu_cores[pos - 1] for pos in [12]]
-        jm_cpu_core = [cpu_cores[pos - 1] for pos in [13]]
-        poller_cpu_cores = [cpu_cores[pos - 1] for pos in [6, 7, 8, 11, 14]]
-        alceml_cpu_cores = [cpu_cores[pos - 1] for pos in [1, 2]]
-        alceml_worker_cpu_cores = [cpu_cores[pos - 1] for pos in [10]]
-        distrib_cpu_cores = [cpu_cores[pos - 1] for pos in [3, 4, 5, 15, 16, 17]]
-        jc_singleton_core = [cpu_cores[pos - 1] for pos in [9]]
-    elif len(cpu_cores) >= 15:
-        app_thread_core = [cpu_cores[pos - 1] for pos in [8]]
-        jm_cpu_core = [cpu_cores[pos - 1] for pos in [15]]
-        poller_cpu_cores = [cpu_cores[pos - 1] for pos in [6, 7, 10, 13]]
-        alceml_cpu_cores = [cpu_cores[pos - 1] for pos in [1, 2]]
-        alceml_worker_cpu_cores = [cpu_cores[pos - 1] for pos in [9]]
-        distrib_cpu_cores = [cpu_cores[pos - 1] for pos in [3, 4, 5, 11, 12]]
-        jc_singleton_core = [cpu_cores[pos - 1] for pos in [14]]
-    elif len(cpu_cores) >= 13:
-        app_thread_core = [cpu_cores[pos - 1] for pos in [9]]
-        jm_cpu_core = [cpu_cores[pos - 1] for pos in [10]]
-        poller_cpu_cores = [cpu_cores[pos - 1] for pos in [2, 5, 6, 7]]
-        alceml_cpu_cores = [cpu_cores[pos - 1] for pos in [1]]
-        alceml_worker_cpu_cores = [cpu_cores[pos - 1] for pos in [8]]
-        distrib_cpu_cores = [cpu_cores[pos - 1] for pos in [3, 4, 11, 12]]
-        jc_singleton_core = [cpu_cores[pos - 1] for pos in [13]]
-    elif len(cpu_cores) >= 11:
-        app_thread_core = [cpu_cores[pos - 1] for pos in [8]]
-        jm_cpu_core = [cpu_cores[pos - 1] for pos in [9]]
-        poller_cpu_cores = [cpu_cores[pos - 1] for pos in [3, 4, 10]]
-        alceml_cpu_cores = [cpu_cores[pos - 1] for pos in [1]]
-        alceml_worker_cpu_cores = [cpu_cores[pos - 1] for pos in [7]]
-        distrib_cpu_cores = [cpu_cores[pos - 1] for pos in [2, 5, 6]]
-        jc_singleton_core = [cpu_cores[pos - 1] for pos in [11]]
-    elif len(cpu_cores) >= 9:
-        app_thread_core = [cpu_cores[pos - 1] for pos in [7]]
-        jm_cpu_core = [cpu_cores[pos - 1] for pos in [8]]
-        poller_cpu_cores = [cpu_cores[pos - 1] for pos in [3, 4]]
-        alceml_cpu_cores = [cpu_cores[pos - 1] for pos in [1]]
-        alceml_worker_cpu_cores = [cpu_cores[pos - 1] for pos in [4, 9]]
-        distrib_cpu_cores = [cpu_cores[pos - 1] for pos in [2, 5, 6]]
-        jc_singleton_core = [cpu_cores[pos - 1] for pos in [7]]
-    elif len(cpu_cores) >= 7:
-        app_thread_core = [cpu_cores[pos - 1] for pos in [6]]
-        jm_cpu_core = [cpu_cores[pos - 1] for pos in [5]]
-        poller_cpu_cores = [cpu_cores[pos - 1] for pos in [3, 5]]
-        alceml_cpu_cores = [cpu_cores[pos - 1] for pos in [1]]
-        alceml_worker_cpu_cores = [cpu_cores[pos - 1] for pos in [1]]
-        distrib_cpu_cores = [cpu_cores[pos - 1] for pos in [2, 4]]
-        jc_singleton_core = [cpu_cores[pos - 1] for pos in [7]]
-    elif len(cpu_cores) >= 5:
-        app_thread_core = [cpu_cores[pos - 1] for pos in [5]]
-        jm_cpu_core = [cpu_cores[pos - 1] for pos in [4]]
-        poller_cpu_cores = [cpu_cores[pos - 1] for pos in [2, 3]]
-        alceml_cpu_cores = [cpu_cores[pos - 1] for pos in [1]]
-        alceml_worker_cpu_cores = [cpu_cores[pos - 1] for pos in [1]]
-        distrib_cpu_cores = [cpu_cores[pos - 1] for pos in [2, 3]]
-        jc_singleton_core = [cpu_cores[pos - 1] for pos in [5]]
-    elif len(cpu_cores) >= 4:
-        app_thread_core = [cpu_cores[pos - 1] for pos in [4]]
-        jm_cpu_core = [cpu_cores[pos - 1] for pos in [4]]
-        poller_cpu_cores = [cpu_cores[pos - 1] for pos in [2, 3]]
-        alceml_cpu_cores = [cpu_cores[pos - 1] for pos in [1]]
-        alceml_worker_cpu_cores = [cpu_cores[pos - 1] for pos in [1]]
-        distrib_cpu_cores = [cpu_cores[pos - 1] for pos in [2, 3]]
-        jc_singleton_core = [cpu_cores[pos - 1] for pos in [4]]
-    else:
-        app_thread_core = jm_cpu_core = poller_cpu_cores = alceml_cpu_cores = alceml_worker_cpu_cores = distrib_cpu_cores = jc_singleton_core = []
+def pair_hyperthreads(vcpus):
+        half = len(vcpus) // 2
+        return {vcpus[i]: vcpus[i + half] for i in range(half)}
 
-    return app_thread_core, jm_cpu_core, poller_cpu_cores, alceml_cpu_cores, alceml_worker_cpu_cores, distrib_cpu_cores, jc_singleton_core
+def calculate_core_allocations(vcpu_list, is_hyperthreaded=True, alceml_count=4):
+        total = len(vcpu_list)
+        pairs = pair_hyperthreads(vcpu_list) if is_hyperthreaded else {}
+        remaining = set(vcpu_list)
 
+        def reserve(vcpu):
+            if vcpu in remaining:
+               remaining.remove(vcpu)
+               if is_hyperthreaded and vcpu in pairs:
+                  sibling = pairs[vcpu]
+                  if sibling in remaining:
+                     remaining.remove(sibling)
+                     return [vcpu, sibling]
+               return [vcpu]
+            return []
+
+        def reserve_n(count):
+            vcpus = []
+            for v in sorted(remaining):
+                vcpus += reserve(v)
+                if len(vcpus) >= count:
+                    break
+            return vcpus[:count]
+
+        # Fixed non-co-locatable thread types
+        thread_types = {
+            "app_thread_core": (1, 1, False),
+            "alceml_cpu_cores": (1, alceml_count, False),
+            "alceml_worker_cpu_cores": (1, alceml_count, False),
+            "distrib_cpu_cores": (1, min(24, total), False),
+            "poller_cpu_cores": (1, min(24, total), False)
+        }
+
+        # Proportional allocation for the scalable types
+        proportional_targets = ["alceml_cpu_cores", "alceml_worker_cpu_cores", "distrib_cpu_cores", "poller_cpu_cores"]
+        max_sum = sum(thread_types[t][1] for t in proportional_targets)
+        proportional_vcpu = max(total - 3, 1)  # reserve for jc, jm, app
+
+        allocations = {}
+        for t in proportional_targets:
+            _, max_v, _ = thread_types[t]
+            target = round((max_v / max_sum) * proportional_vcpu)
+            allocations[t] = max(thread_types[t][0], min(target, max_v))
+
+        # Apply jm_cpu_core scaling rule based on distrib_cpu_cores allocation
+        distrib_vcpu = allocations["distrib_cpu_cores"]
+        if distrib_vcpu >= 18:
+            jm_vcpu = 4
+        elif distrib_vcpu >= 12:
+            jm_vcpu = 3
+        elif distrib_vcpu >= 6:
+            jm_vcpu = 2
+        else:
+            jm_vcpu = 1
+
+        # Apply jc_singleton_core scaling based on jm_cpu_core
+        jc_vcpu = 2 if jm_vcpu == 4 else 1
+
+        # Store allocations
+        allocations["jm_cpu_core"] = jm_vcpu
+        allocations["jc_singleton_core"] = jc_vcpu
+        allocations["app_thread_core"] = 1  # always 1
+
+        # Assign non-co-locatable first
+        assigned = {}
+        for t in ["app_thread_core", "alceml_cpu_cores", "alceml_worker_cpu_cores", "distrib_cpu_cores", "poller_cpu_cores"]:
+            count = allocations.get(t, 1)
+            vcpus = reserve_n(count)
+            if len(vcpus) < count:
+                # attempt colocated fallback
+                if t in ["alceml_cpu_cores", "alceml_worker_cpu_cores"] and "alceml_cpu_cores+alceml_worker_cpu_cores" not in assigned:
+                    both = reserve_n(count)
+                    assigned["alceml_cpu_cores+alceml_worker_cpu_cores"] = both
+                    continue
+            assigned[t] = vcpus
+
+        # Co-locatable: jc_singleton_core, jm_cpu_core (can share if not enough)
+        for t in ["jc_singleton_core", "jm_cpu_core"]:
+            count = allocations.get(t, 1)
+            vcpus = reserve_n(count)
+            if len(vcpus) < count and "jc_singleton_core+jm_cpu_core" not in assigned:
+                both = reserve_n(max(count, allocations.get("jc_singleton_core", 1)))
+                assigned["jc_singleton_core+jm_cpu_core"] = both
+                continue
+            assigned[t] = vcpus
+
+        # Return the individual threads as separate values
+        return (
+            assigned.get("app_thread_core", []),
+            assigned.get("jm_cpu_core", []),
+            assigned.get("poller_cpu_cores", []),
+            assigned.get("alceml_cpu_cores", []),
+            assigned.get("alceml_worker_cpu_cores", []),
+            assigned.get("distrib_cpu_cores", []),
+            assigned.get("jc_singleton_core", [])
+        )
 
 def isolate_cores(spdk_cpu_mask):
     spdk_cores = hexa_to_cpu_list(spdk_cpu_mask)
