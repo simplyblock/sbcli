@@ -412,10 +412,6 @@ class CLIWrapper(CLIWrapperBase):
 
     def init_cluster__create(self, subparser):
         subcommand = self.add_sub_command(subparser, 'create', 'Creates a new cluster')
-        if self.developer_mode:
-            argument = subcommand.add_argument('--page_size', help='The size of a data page in bytes', type=int, default=2097152, dest='page_size', required=False)
-        if self.developer_mode:
-            argument = subcommand.add_argument('--CLI_PASS', help='Password for CLI SSH connection', type=str, dest='CLI_PASS', required=False)
         argument = subcommand.add_argument('--cap-warn', help='Capacity warning level in percent, default: 89', type=int, default=89, dest='cap_warn', required=False)
         argument = subcommand.add_argument('--cap-crit', help='Capacity critical level in percent, default: 99', type=int, default=99, dest='cap_crit', required=False)
         argument = subcommand.add_argument('--prov-cap-warn', help='Capacity warning level in percent, default: 250', type=int, default=250, dest='prov_cap_warn', required=False)
@@ -427,10 +423,6 @@ class CLIWrapper(CLIWrapperBase):
         argument = subcommand.add_argument('--grafana-endpoint', help='Endpoint url for Grafana', type=str, default='', dest='grafana_endpoint', required=False)
         argument = subcommand.add_argument('--data-chunks-per-stripe', help='Erasure coding schema parameter k (distributed raid), default: 1', type=int, default=1, dest='distr_ndcs', required=False)
         argument = subcommand.add_argument('--parity-chunks-per-stripe', help='Erasure coding schema parameter n (distributed raid), default: 1', type=int, default=1, dest='distr_npcs', required=False)
-        if self.developer_mode:
-            argument = subcommand.add_argument('--distr-bs', help='(Dev) distrb bdev block size, default: 4096', type=int, default=4096, dest='distr_bs', required=False)
-        if self.developer_mode:
-            argument = subcommand.add_argument('--distr-chunk-bs', help='(Dev) distrb bdev chunk block size, default: 4096', type=int, default=4096, dest='distr_chunk_bs', required=False)
         argument = subcommand.add_argument('--ha-type', help='Logical volume HA type (single, ha), default is cluster ha type', type=str, default='ha', dest='ha_type', required=False, choices=['single','ha',])
         argument = subcommand.add_argument('--enable-node-affinity', help='Enable node affinity for storage nodes', dest='enable_node_affinity', required=False, action='store_true')
         argument = subcommand.add_argument('--qpair-count', help='NVMe/TCP transport qpair count per logical volume', type=int, default=0, dest='qpair_count', required=False, choices=range(0, 128))
@@ -441,13 +433,21 @@ class CLIWrapper(CLIWrapperBase):
         argument = subcommand.add_argument('--low-priority-1-queue-weight', help='Number of bytes processed from the priority 1 queue before moving to next queue.', type=int, default=0, dest='low_priority_1_queue_weight', required=False)
         argument = subcommand.add_argument('--low-priority-2-queue-weight', help='Number of bytes processed from the priority 2 queue before moving to next queue.', type=int, default=0, dest='low_priority_2_queue_weight', required=False)
         argument = subcommand.add_argument('--low-priority-3-queue-weight', help='Number of bytes processed from the priority 3 queue before moving to next queue.', type=int, default=0, dest='low_priority_3_queue_weight', required=False)
+        argument = subcommand.add_argument('--strict-node-anti-affinity', help='Enable strict node anti affinity for storage nodes. Never more than one chunk is placed on a node. This requires a minimum of _data-chunks-in-stripe + parity-chunks-in-stripe + 1_ nodes in the cluster.', dest='strict_node_anti_affinity', required=False, action='store_true')
+        if self.developer_mode:
+            argument = subcommand.add_argument('--distr-bs', help='(Dev) distrb bdev block size, default: 4096', type=int, default=4096, dest='distr_bs', required=False)
+        if self.developer_mode:
+            argument = subcommand.add_argument('--distr-chunk-bs', help='(Dev) distrb bdev chunk block size, default: 4096', type=int, default=4096, dest='distr_chunk_bs', required=False)
+        if self.developer_mode:
+            argument = subcommand.add_argument('--page_size', help='The size of a data page in bytes', type=int, default=2097152, dest='page_size', required=False)
+        if self.developer_mode:
+            argument = subcommand.add_argument('--CLI_PASS', help='Password for CLI SSH connection', type=str, dest='CLI_PASS', required=False)
         if self.developer_mode:
             argument = subcommand.add_argument('--max-queue-size', help='The max size the queue will grow', type=int, default=128, dest='max_queue_size', required=False)
         if self.developer_mode:
             argument = subcommand.add_argument('--inflight-io-threshold', help='The number of inflight IOs allowed before the IO queuing starts', type=int, default=4, dest='inflight_io_threshold', required=False)
         if self.developer_mode:
             argument = subcommand.add_argument('--enable-qos', help='Enable qos bdev for storage nodes, true by default', type=bool, default=True, dest='enable_qos', required=False)
-        argument = subcommand.add_argument('--strict-node-anti-affinity', help='Enable strict node anti affinity for storage nodes. Never more than one chunk is placed on a node. This requires a minimum of _data-chunks-in-stripe + parity-chunks-in-stripe + 1_ nodes in the cluster.', dest='strict_node_anti_affinity', required=False, action='store_true')
 
     def init_cluster__add(self, subparser):
         subcommand = self.add_sub_command(subparser, 'add', 'Adds a new cluster')
@@ -1041,10 +1041,10 @@ class CLIWrapper(CLIWrapperBase):
                 ret = self.cluster__deploy(sub_command, args)
             elif sub_command in ['create']:
                 if not self.developer_mode:
-                    args.page_size = 2097152
-                    args.CLI_PASS = None
                     args.distr_bs = 4096
                     args.distr_chunk_bs = 4096
+                    args.page_size = 2097152
+                    args.CLI_PASS = None
                     args.max_queue_size = 128
                     args.inflight_io_threshold = 4
                     args.enable_qos = True

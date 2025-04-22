@@ -996,17 +996,6 @@ commands:
         usage: >
           Created a new control plane cluster with the current node as the primary control plane node.
         arguments:
-          - name: "--page_size"
-            help: "The size of a data page in bytes"
-            dest: page_size
-            type: int
-            default: 2097152
-            private: true
-          - name: "--CLI_PASS"
-            help: "Password for CLI SSH connection"
-            dest: CLI_PASS
-            type: str
-            private: true
           - name: "--cap-warn"
             help: "Capacity warning level in percent, default: 89"
             dest: cap_warn
@@ -1061,18 +1050,6 @@ commands:
             dest: distr_npcs
             type: int
             default: 1
-          - name: "--distr-bs"
-            help: "(Dev) distrb bdev block size, default: 4096"
-            dest: distr_bs
-            type: int
-            default: 4096
-            private: true
-          - name: "--distr-chunk-bs"
-            help: "(Dev) distrb bdev chunk block size, default: 4096"
-            dest: distr_chunk_bs
-            type: int
-            default: 4096
-            private: true
           - name: "--ha-type"
             help: "Logical volume HA type (single, ha), default is cluster ha type"
             dest: ha_type
@@ -1130,6 +1107,36 @@ commands:
             dest: low_priority_3_queue_weight
             type: int
             default: 0
+          - name: "--strict-node-anti-affinity"
+            help: >
+              Enable strict node anti affinity for storage nodes. Never more than one chunk is placed on a node. This
+              requires a minimum of _data-chunks-in-stripe + parity-chunks-in-stripe + 1_ nodes in the cluster.
+            dest: strict_node_anti_affinity
+            type: bool
+            action: store_true
+          - name: "--distr-bs"
+            help: "(Dev) distrb bdev block size, default: 4096"
+            dest: distr_bs
+            type: int
+            default: 4096
+            private: true
+          - name: "--distr-chunk-bs"
+            help: "(Dev) distrb bdev chunk block size, default: 4096"
+            dest: distr_chunk_bs
+            type: int
+            default: 4096
+            private: true
+          - name: "--page_size"
+            help: "The size of a data page in bytes"
+            dest: page_size
+            type: int
+            default: 2097152
+            private: true
+          - name: "--CLI_PASS"
+            help: "Password for CLI SSH connection"
+            dest: CLI_PASS
+            type: str
+            private: true
           - name: "--max-queue-size"
             help: "The max size the queue will grow"
             dest: max_queue_size
@@ -1148,13 +1155,6 @@ commands:
             type: bool
             default: true
             private: true
-          - name: "--strict-node-anti-affinity"
-            help: >
-              Enable strict node anti affinity for storage nodes. Never more than one chunk is placed on a node. This
-              requires a minimum of _data-chunks-in-stripe + parity-chunks-in-stripe + 1_ nodes in the cluster.
-            dest: strict_node_anti_affinity
-            type: bool
-            action: store_true
       - name: add
         help: "Adds a new cluster"
         arguments:
