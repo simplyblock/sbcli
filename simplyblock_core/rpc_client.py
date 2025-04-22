@@ -408,7 +408,7 @@ class RPCClient:
             "name": qos_bdev,
             "inflight_io_threshold": inflight_io_threshold or 12,
 
-            "max_num_queues": max_num_queues,
+            "max_num_queues": 6,
             "standard_queue_weight": priority_queue_weights.get("standard_queue_weight", 0),
             "low_priority_1_queue_weight": priority_queue_weights.get("low_priority_1_queue_weight", 40),
             "low_priority_2_queue_weight": priority_queue_weights.get("low_priority_2_queue_weight", 20),
