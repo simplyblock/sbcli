@@ -625,40 +625,41 @@ def _parse_unit(unit: str, mode: str = 'si/iec', strict: bool = True) -> tuple[i
     )
 
 
-def parse_size(size_string: str, mode: str = 'si/iec', unit: str = '', strict: bool = False) -> int:
+def parse_size(size: str | int, mode: str = 'si/iec', assume_unit: str = '', strict: bool = False) -> int:
     """Parse the given data size
 
-    If passed and not explicitly given, 'unit' will be assumed.
+    If passed and not explicitly given, 'assume_unit' will be assumed.
     Mode can be either 'si/iec' to parse decimal (SI) and binary (IEC) units, or
     'jedec' for binary only units. If `strict`, parsing will be case-sensitive and
     expect the 'B' suffix.
     """
-    if not unit:
-        try:
-            x = int(size_string)
-            return x
-        except Exception:
-            pass
-
     try:
-        m = re.match(r'^(?P<size_in_unit>\d+) ?(?P<unit>\w+)?$', size_string.strip())
-        if m is None:
-            raise ValueError(f"Invalid size: {size_string}")
+        if isinstance(size, int):
+            size_in_unit = size
+            unit = assume_unit
+        else:
+            m = re.match(r'^(?P<size_in_unit>\d+) ?(?P<unit>\w+)?$', size.strip())
+            if m is None:
+                raise ValueError(f"Invalid size: {size}")
 
-        size_in_unit = int(m.group('size_in_unit'))
-        unit = m.group('unit') if m.group('unit') else unit
+            size_in_unit = int(m.group('size_in_unit'))
+            unit = m.group('unit') if m.group('unit') else assume_unit
+
         base, exponent = _parse_unit(unit, mode, strict=strict)
         return size_in_unit * (base ** exponent)
     except ValueError:
         return -1
 
 
-def convert_size(size: int, unit: str) -> int:
+def convert_size(size: int | str, unit: str) -> int:
     """Convert the given number of bytes to target unit
 
     Accepts both decimal (kB, MB, ...) and binary (KiB, MiB, ...) units.
     Note that the result will be cast to int, i.e. rounded down.
     """
+    if isinstance(size, str):
+        size = int(size)
+
     base, exponent = _parse_unit(unit, 'si/iec')
     return int(size / (base ** exponent))
 
