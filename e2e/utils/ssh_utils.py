@@ -1596,6 +1596,35 @@ class SshUtils:
                 name_tag, img_id = line.strip().split()
                 image_map[name_tag] = img_id
         return image_map
+    
+    def start_resource_monitors(self, node_ip, log_dir):
+        """
+        Starts background resource monitoring for:
+        1. Root partition usage
+        2. Container-wise memory usage
+
+        Each logs every 10s to a separate file in the log_dir.
+        """
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        root_log = f"{log_dir}/root_partition_usage_{node_ip}_{timestamp}.txt"
+        docker_mem_log = f"{log_dir}/docker_mem_usage_{node_ip}_{timestamp}.txt"
+
+        # Ensure log directory exists
+        self.exec_command(node_ip, f"sudo mkdir -p {log_dir} && sudo chmod 777 {log_dir}")
+
+        # Root partition utilization monitor (df -h /)
+        df_cmd = f"""sudo tmux new-session -d -s root_usage_monitor \
+            'bash -c "while true; do echo $(date) >> {root_log}; df -h / >> {root_log}; echo >> {root_log}; sleep 10; done"'"""
+
+        # Docker memory usage monitor (docker stats --no-stream)
+        docker_cmd = f"""sudo tmux new-session -d -s docker_mem_monitor \
+            'bash -c "while true; do echo $(date) >> {docker_mem_log}; \
+            docker stats --no-stream --format \\\"table {{.Name}}\\t{{.MemUsage}}\\\" >> {docker_mem_log}; echo >> {docker_mem_log}; sleep 10; done"'"""
+
+        self.exec_command(node_ip, df_cmd)
+        self.exec_command(node_ip, docker_cmd)
+
+        self.logger.info(f"Started root partition and container memory logging on {node_ip}")
 
 
 
