@@ -376,7 +376,7 @@ class RPCClient:
         params = {"name": name}
         return self._request2("ultra21_bdev_pass_delete", params)
 
-    def qos_vbdev_create(self, qos_bdev, base_bdev_name, inflight_io_threshold, priority_queue_weights):
+    def qos_vbdev_create(self, qos_bdev, base_bdev_name, inflight_io_threshold, priority_queue_weights=None):
         """
         What is IO passing between queues ?
         What is inflight IO threshold ?

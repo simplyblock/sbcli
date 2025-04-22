@@ -3259,6 +3259,35 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
             }
         )
 
+    # add QOS Bdev
+    cluster = db_controller.get_cluster_by_id(snode.cluster_id)
+    enable_qos = cluster.enable_qos
+    if enable_qos:
+        qos_bdev_name = f"qos_{jm_vuid}"
+        lvstore_stack.append(
+            {
+                "type": "bdev_qos",
+                "name": qos_bdev_name,
+                "params": {
+                    "qos_bdev": qos_bdev_name,
+                    "base_bdev_name": raid_device,
+                    "inflight_io_threshold": cluster.inflight_io_threshold,
+                    "priority_queue_weights": {
+                        "standard_queue_weight": cluster.standard_queue_weight,
+                        "medium_priority_1_queue_weight": cluster.medium_priority_1_queue_weight,
+                        "medium_priority_2_queue_weight": cluster.medium_priority_2_queue_weight,
+                        "medium_priority_3_queue_weight": cluster.medium_priority_3_queue_weight,
+                        "low_priority_1_queue_weight": cluster.low_priority_1_queue_weight,
+                        "low_priority_2_queue_weight": cluster.low_priority_2_queue_weight,
+                        "low_priority_3_queue_weight": cluster.low_priority_3_queue_weight,
+                    },
+                    "keep_priority_bits": True,
+                    "apply_iops_limits": True,
+                    "apply_througput_limits": False,
+                }
+            }
+        )
+
     lvs_name = f"LVS_{jm_vuid}"
     lvstore_stack.append(
         {
@@ -3266,7 +3295,7 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
             "name": lvs_name,
             "params": {
                 "name": lvs_name,
-                "bdev_name": raid_device,
+                "bdev_name": qos_bdev_name if enable_qos else raid_device,
                 "cluster_sz": cluster_sz,
                 "clear_method": "none",
                 "num_md_pages_per_cluster_ratio": 1,
@@ -3387,6 +3416,13 @@ def _create_bdev_stack(snode, lvstore_stack=None, primary_node=None):
             strip_size_kb = params["strip_size_kb"]
             ret = rpc_client.bdev_raid_create(name, distribs_list, strip_size_kb=strip_size_kb)
 
+        elif type == "bdev_qos":
+            qos_bdev = params['qos_bdev']
+            base_bdev_name = params['base_bdev_name']
+            inflight_io_threshold = params['inflight_io_threshold']
+            priority_queue_weights = params['priority_queue_weights']
+            ret = rpc_client.qos_vbdev_create(qos_bdev, base_bdev_name, inflight_io_threshold,
+                                              priority_queue_weights)
         else:
             logger.debug(f"Unknown BDev type: {type}")
             continue
