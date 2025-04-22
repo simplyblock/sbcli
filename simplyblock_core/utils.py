@@ -410,15 +410,15 @@ def calculate_core_allocations(vcpu_list, is_hyperthreaded=True, alceml_count=4)
             k=2
             jm_vcpu=1
             jc_vcpu=1
-        else if total < 24:
+        elif total < 24:
             k=3
             jm_vcpu=1
             jc_vcpu=1
-        else if total < 32:
+        elif total < 32:
             k=4
             jm_vcpu=2
             jc_vcpu=1
-        else
+        else:
             k=7
             jm_vcpu=4
             jc_vcpu=2
@@ -433,7 +433,7 @@ def calculate_core_allocations(vcpu_list, is_hyperthreaded=True, alceml_count=4)
         for t in proportional_targets:
             _, max_v, _ = thread_types[t]
             target = round((max_v / max_sum) * proportional_vcpu)
-            if t = "alceml_cpu_cores":
+            if t == "alceml_cpu_cores":
                max_v = max_v / 5 
             allocations[t] = max(thread_types[t][0], min(target, max_v))
 
