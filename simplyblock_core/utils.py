@@ -392,11 +392,10 @@ def calculate_core_allocations(vcpu_list, is_hyperthreaded=False, alceml_count=2
 
         # Fixed non-co-locatable thread types
         thread_types = {
-            "app_thread_core": (1, 1, False),
             "alceml_cpu_cores": (1, alceml_count*5, False),
             "alceml_worker_cpu_cores": (1, alceml_count, False),
-            "distrib_cpu_cores": (1, min(22, total), False),
-            "poller_cpu_cores": (1, min(32, total), False)
+            "distrib_cpu_cores": (1, min(26, total), False),
+            "poller_cpu_cores": (1, min(26, total), False)
         }
 
         # Proportional allocation for the scalable types
@@ -405,30 +404,15 @@ def calculate_core_allocations(vcpu_list, is_hyperthreaded=False, alceml_count=2
         
         # Apply jm_cpu_core scaling rule based on distrib_cpu_cores allocation
         allocations = {}
+        assigned = {}
+
+        vcpus = reserve_n(1)
+        assigned["app_thread_core"] = vcpus
+        vcpus = reserve_n(1)
+        assigned["jm_cpu_core"] = vcpus
+        assigned["jc_singleton_core"] = vcpus
         
-        if total < 9:
-            k=2
-            jm_vcpu=1
-            jc_vcpu=1
-        elif total < 24:
-            k=3
-            jm_vcpu=1
-            jc_vcpu=1
-        elif total < 32:
-            k=4
-            jm_vcpu=2
-            jc_vcpu=1
-        else:
-            k=7
-            jm_vcpu=4
-            jc_vcpu=2
-
-        proportional_vcpu = max(total - k, 1)  # reserve for jc, jm, app
-
-         # Store allocations
-        allocations["jm_cpu_core"] = jm_vcpu
-        allocations["jc_singleton_core"] = jc_vcpu
-        allocations["app_thread_core"] = 1  # always 1
+        proportional_vcpu = max(total-2, 1)  # reserve for jc, jm, app
         
         for t in proportional_targets:
             _, max_v, _ = thread_types[t]
@@ -438,28 +422,17 @@ def calculate_core_allocations(vcpu_list, is_hyperthreaded=False, alceml_count=2
             allocations[t] = int(max(thread_types[t][0], min(target, max_v)))
 
         # Assign non-co-locatable first
-        assigned = {}
-        for t in ["app_thread_core", "alceml_cpu_cores", "alceml_worker_cpu_cores", "distrib_cpu_cores", "poller_cpu_cores"]:
+        
+        for t in ["alceml_cpu_cores", "alceml_worker_cpu_cores", "distrib_cpu_cores", "poller_cpu_cores"]:
             count = allocations.get(t, 1)
             vcpus = reserve_n(count)
-            if len(vcpus) < count:
-                # attempt colocated fallback
-                if t in ["alceml_cpu_cores", "alceml_worker_cpu_cores"] and "alceml_cpu_cores+alceml_worker_cpu_cores" not in assigned:
-                    both = reserve_n(count)
-                    assigned["alceml_cpu_cores+alceml_worker_cpu_cores"] = both
-                    continue
             assigned[t] = vcpus
 
-        # Co-locatable: jc_singleton_core, jm_cpu_core (can share if not enough)
-        for t in ["jc_singleton_core", "jm_cpu_core"]:
-            count = allocations.get(t, 1)
-            vcpus = reserve_n(count)
-            if len(vcpus) < count and "jc_singleton_core+jm_cpu_core" not in assigned:
-                both = reserve_n(max(count, allocations.get("jc_singleton_core", 1)))
-                assigned["jc_singleton_core+jm_cpu_core"] = both
-                continue
-            assigned[t] = vcpus
-
+        for t in ["poller_cpu_cores","distrib_cpu_cores"]:
+            vcpus = reserve_n(1)
+            if len(vcpu)>0:
+            assigned[t] = assigned[t] + vcpu
+        
         # Return the individual threads as separate values
         return (
             assigned.get("app_thread_core", []),
