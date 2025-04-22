@@ -427,6 +427,14 @@ class CLIWrapper(CLIWrapperBase):
         argument = subcommand.add_argument('--grafana-endpoint', help='Endpoint url for Grafana', type=str, default='', dest='grafana_endpoint', required=False)
         argument = subcommand.add_argument('--data-chunks-per-stripe', help='Erasure coding schema parameter k (distributed raid), default: 1', type=int, default=1, dest='distr_ndcs', required=False)
         argument = subcommand.add_argument('--parity-chunks-per-stripe', help='Erasure coding schema parameter n (distributed raid), default: 1', type=int, default=1, dest='distr_npcs', required=False)
+        argument = subcommand.add_argument('--standard-queue-weight', help='Number of bytes processed from the standard queue before moving to next queue.', type=int, default=0, dest='standard_queue_weight', required=False)
+        argument = subcommand.add_argument('--medium-priority-1-queue-weight', help='Number of bytes processed from the priority 1 queue before moving to next queue.', type=int, default=0, dest='medium_priority_1_queue_weight', required=False)
+        argument = subcommand.add_argument('--medium-priority-2-queue-weight', help='Number of bytes processed from the priority 2 queue before moving to next queue.', type=int, default=0, dest='medium_priority_2_queue_weight', required=False)
+        argument = subcommand.add_argument('--medium-priority-3-queue-weight', help='Number of bytes processed from the priority 3 queue before moving to next queue.', type=int, default=0, dest='medium_priority_3_queue_weight', required=False)
+        argument = subcommand.add_argument('--low-priority-1-queue-weight', help='Number of bytes processed from the priority 1 queue before moving to next queue.', type=int, default=0, dest='low_priority_1_queue_weight', required=False)
+        argument = subcommand.add_argument('--low-priority-2-queue-weight', help='Number of bytes processed from the priority 2 queue before moving to next queue.', type=int, default=0, dest='low_priority_2_queue_weight', required=False)
+        argument = subcommand.add_argument('--low-priority-3-queue-weight', help='Number of bytes processed from the priority 3 queue before moving to next queue.', type=int, default=0, dest='low_priority_3_queue_weight', required=False)
+
         if self.developer_mode:
             argument = subcommand.add_argument('--distr-bs', help='(Dev) distrb bdev block size, default: 4096', type=int, default=4096, dest='distr_bs', required=False)
         if self.developer_mode:

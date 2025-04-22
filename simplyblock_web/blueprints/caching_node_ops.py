@@ -170,6 +170,10 @@ def spdk_process_start():
     if 'rpc_sock' in data and data['rpc_sock']:
         rpc_sock = data['rpc_sock']
 
+    priority_queue_weights = {}
+    if 'priority_queue_weights' in data and data['priority_queue_weights']:
+        priority_queue_weights = data['priority_queue_weights']
+
     node_docker = get_docker_client()
     nodes = node_docker.containers.list(all=True)
     for node in nodes:

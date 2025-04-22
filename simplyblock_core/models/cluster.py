@@ -57,6 +57,7 @@ class Cluster(BaseModel):
     strict_node_anti_affinity: bool = False
     tls: bool = False
     is_re_balancing: bool = False
+    priority_queue_weights: dict = {}
 
     def get_status_code(self):
         if self.status in self.STATUS_CODE_MAP:

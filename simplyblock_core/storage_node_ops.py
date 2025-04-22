@@ -320,7 +320,7 @@ def _create_jm_stack_on_device(rpc_client, nvme, snode, after_restart):
     })
 
 
-def _create_storage_device_stack(rpc_client, nvme, snode, after_restart):
+def _create_storage_device_stack(rpc_client, nvme, snode, after_restart, priority_queue_weights=None):
     db_controller = DBController()
     nvme_bdev = nvme.nvme_bdev
     if snode.enable_test_device:
@@ -363,7 +363,7 @@ def _create_storage_device_stack(rpc_client, nvme, snode, after_restart):
         max_queue_size = cluster.max_queue_size
         inflight_io_threshold = cluster.inflight_io_threshold
         qos_bdev = f"{alceml_name}_qos"
-        ret = rpc_client.qos_vbdev_create(qos_bdev, alceml_name, inflight_io_threshold)
+        ret = rpc_client.qos_vbdev_create(qos_bdev, alceml_name, inflight_io_threshold, priority_queue_weights)
         if not ret:
             logger.error(f"Failed to create qos bdev: {qos_bdev}")
             return None
@@ -435,7 +435,7 @@ def _create_device_partitions(rpc_client, nvme, snode, num_partitions_per_dev, j
     return True
 
 
-def _prepare_cluster_devices_partitions(snode, devices):
+def _prepare_cluster_devices_partitions(snode, devices, priority_queue_weights=None):
     db_controller = DBController()
     rpc_client = RPCClient(
         snode.mgmt_ip, snode.rpc_port,
@@ -460,7 +460,9 @@ def _prepare_cluster_devices_partitions(snode, devices):
                 if dev_part not in jm_devices:
                     jm_devices.append(dev_part)
 
-            new_device = _create_storage_device_stack(rpc_client, nvme, snode, after_restart=False)
+            new_device = _create_storage_device_stack(rpc_client, nvme, snode,
+                                                      after_restart=False,
+                                                      priority_queue_weights=priority_queue_weights)
             if not new_device:
                 logger.error("failed to create dev stack")
                 return False
@@ -488,7 +490,9 @@ def _prepare_cluster_devices_partitions(snode, devices):
             jm_devices.append(partitioned_devices.pop(0).nvme_bdev)
 
             for dev in partitioned_devices:
-                ret = _create_storage_device_stack(rpc_client, dev, snode, after_restart=False)
+                ret = _create_storage_device_stack(rpc_client, dev, snode,
+                                                   after_restart=False,
+                                                   priority_queue_weights=priority_queue_weights)
                 if not ret:
                     logger.error("failed to create dev stack")
                     return False
@@ -512,7 +516,7 @@ def _prepare_cluster_devices_partitions(snode, devices):
     return True
 
 
-def _prepare_cluster_devices_jm_on_dev(snode, devices):
+def _prepare_cluster_devices_jm_on_dev(snode, devices, pirority_queue_weights=None):
     db_controller = DBController()
     if not devices:
         return True
@@ -537,7 +541,9 @@ def _prepare_cluster_devices_jm_on_dev(snode, devices):
         if nvme.status not in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_NEW, NVMeDevice.STATUS_READONLY]:
             logger.debug(f"Device is not online : {nvme.get_id()}, status: {nvme.status}")
         else:
-            ret = _create_storage_device_stack(rpc_client, nvme, snode, after_restart=False)
+            ret = _create_storage_device_stack(rpc_client, nvme, snode,
+                                               after_restart=False,
+                                               priority_queue_weights=pirority_queue_weights)
             if not ret:
                 logger.error("failed to create dev stack")
                 return False
@@ -551,7 +557,7 @@ def _prepare_cluster_devices_jm_on_dev(snode, devices):
     return True
 
 
-def _prepare_cluster_devices_on_restart(snode, clear_data=False):
+def _prepare_cluster_devices_on_restart(snode, clear_data=False, priority_queue_weights=None):
     db_controller = DBController()
 
     new_devices = []
@@ -574,7 +580,7 @@ def _prepare_cluster_devices_on_restart(snode, clear_data=False):
 
         t = threading.Thread(
             target=_create_storage_device_stack,
-            args=(rpc_client, nvme, snode, not clear_data,))
+            args=(rpc_client, nvme, snode, not clear_data, priority_queue_weights,))
         thread_list.append(t)
 
     for thread in thread_list:
@@ -1060,7 +1066,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
             spdk_cpu_mask, minimum_hp_memory, spdk_image, spdk_debug, cluster_ip, fdb_connection,
             namespace, mgmt_ip, rpc_port, rpc_user, rpc_pass,
             multi_threading_enabled=constants.SPDK_PROXY_MULTI_THREADING_ENABLED, timeout=constants.SPDK_PROXY_TIMEOUT,
-            ssd_pcie=ssd_pcie, total_mem=total_mem)
+            ssd_pcie=ssd_pcie, total_mem=total_mem, priority_queue_weights=cluster.priority_queue_weights)
         time.sleep(5)
 
     except Exception as e:
@@ -1268,9 +1274,9 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
                         jm_device = nvme
                 jm_device.status = NVMeDevice.STATUS_JM
 
-                ret = _prepare_cluster_devices_jm_on_dev(snode, nvme_devs)
+                ret = _prepare_cluster_devices_jm_on_dev(snode, nvme_devs, pirority_queue_weights=cluster.priority_queue_weights)
             else:
-                ret = _prepare_cluster_devices_partitions(snode, nvme_devs)
+                ret = _prepare_cluster_devices_partitions(snode, nvme_devs, cluster.priority_queue_weights)
             if not ret:
                 logger.error("Failed to prepare cluster devices")
                 return False
@@ -1699,7 +1705,7 @@ def restart_storage_node(
             snode.spdk_cpu_mask, snode.spdk_mem, snode.spdk_image, spdk_debug, cluster_ip, fdb_connection,
             snode.namespace, snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password,
             multi_threading_enabled=constants.SPDK_PROXY_MULTI_THREADING_ENABLED, timeout=constants.SPDK_PROXY_TIMEOUT,
-            ssd_pcie=snode.ssd_pcie, total_mem=total_mem)
+            ssd_pcie=snode.ssd_pcie, total_mem=total_mem, priority_queue_weights=cluster.priority_queue_weights)
     except Exception as e:
         logger.error(e)
         return False
@@ -1871,14 +1877,16 @@ def restart_storage_node(
                 if snode.jm_device and snode.jm_device.get_id():
                     jm_device.uuid = snode.jm_device.get_id()
 
-                ret = _prepare_cluster_devices_jm_on_dev(snode, snode.nvme_devices)
+                ret = _prepare_cluster_devices_jm_on_dev(snode, snode.nvme_devices, cluster.priority_queue_weights)
             else:
-                ret = _prepare_cluster_devices_partitions(snode, snode.nvme_devices)
+                ret = _prepare_cluster_devices_partitions(snode, snode.nvme_devices, cluster.priority_queue_weights)
             if not ret:
                 logger.error("Failed to prepare cluster devices")
                 # return False
         else:
-            ret = _prepare_cluster_devices_on_restart(snode, clear_data=clear_data)
+            ret = _prepare_cluster_devices_on_restart(snode,
+                                                      clear_data=clear_data,
+                                                      priority_queue_weights=cluster.priority_queue_weights)
             if not ret:
                 logger.error("Failed to prepare cluster devices")
                 return False

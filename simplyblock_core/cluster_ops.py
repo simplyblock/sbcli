@@ -143,7 +143,8 @@ def _set_max_result_window(cluster_ip, max_window=100000):
 def create_cluster(blk_size, page_size_in_blocks, cli_pass,
                    cap_warn, cap_crit, prov_cap_warn, prov_cap_crit, ifname, log_del_interval, metrics_retention_period,
                    contact_point, grafana_endpoint, distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type,
-                   enable_node_affinity, qpair_count, max_queue_size, inflight_io_threshold, enable_qos, strict_node_anti_affinity):
+                   enable_node_affinity, qpair_count, max_queue_size, inflight_io_threshold, enable_qos, strict_node_anti_affinity,
+                   priority_queues_weights):
 
     logger.info("Installing dependencies...")
     ret = scripts.install_deps()
@@ -222,6 +223,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     c.inflight_io_threshold = inflight_io_threshold
     c.enable_qos = enable_qos
     c.strict_node_anti_affinity = strict_node_anti_affinity
+    c.priority_queues_weights = priority_queues_weights
 
     alerts_template_folder = os.path.join(TOP_DIR, "simplyblock_core/scripts/alerting/")
     alert_resources_file = "alert_resources.yaml"
@@ -397,12 +399,13 @@ def deploy_cluster(storage_nodes,test,ha_type,distr_ndcs,distr_npcs,enable_qos,i
     storage_node_ops.deploy_cleaner()
     
     logger.info("creating cluster")
+    priority_queues_weights = {}
     cluster_uuid = create_cluster(
             blk_size, page_size_in_blocks,
             cli_pass, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
             ifname, log_del_interval, metrics_retention_period, contact_point, grafana_endpoint,
             distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, enable_node_affinity,
-            qpair_count, max_queue_size, inflight_io_threshold, enable_qos, strict_node_anti_affinity)
+            qpair_count, max_queue_size, inflight_io_threshold, enable_qos, strict_node_anti_affinity, priority_queues_weights)
     
     time.sleep(5)
 

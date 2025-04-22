@@ -771,13 +771,22 @@ class CLIWrapperBase:
         enable_qos = args.enable_qos
         strict_node_anti_affinity = args.strict_node_anti_affinity
 
+        priority_queues_weights = {
+            "standard_queue_weight": args.standard_queue_weight,
+            "medium_priority_1_queue_weight": args.medium_priority_1_queue_weight,
+            "medium_priority_2_queue_weight": args.medium_priority_2_queue_weight,
+            "medium_priority_3_queue_weight": args.medium_priority_3_queue_weight,
+            "low_priority_1_queue_weight": args.low_priority_1_queue_weight,
+            "low_priority_2_queue_weight": args.low_priority_2_queue_weight,
+            "low_priority_3_queue_weight": args.low_priority_3_queue_weight
+        }
 
         return cluster_ops.create_cluster(
             blk_size, page_size_in_blocks,
             CLI_PASS, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
             ifname, log_del_interval, metrics_retention_period, contact_point, grafana_endpoint,
             distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, enable_node_affinity,
-            qpair_count, max_queue_size, inflight_io_threshold, enable_qos, strict_node_anti_affinity)
+            qpair_count, max_queue_size, inflight_io_threshold, enable_qos, strict_node_anti_affinity, priority_queues_weights)
 
 
     def query_yes_no(self, question, default="yes"):

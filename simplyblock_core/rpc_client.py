@@ -376,20 +376,50 @@ class RPCClient:
         params = {"name": name}
         return self._request2("ultra21_bdev_pass_delete", params)
 
-    def qos_vbdev_create(self, qos_bdev, base_bdev_name, inflight_io_threshold):
+    def qos_vbdev_create(self, qos_bdev, base_bdev_name, inflight_io_threshold, priority_queue_weights):
+        """
+        What is IO passing between queues ?
+        What is inflight IO threshold ?
+        
+        Args:
+            qos_bdev (str): Name of the QoS vbdev.
+            base_bdev_name (str): Name of the base bdev.
+            inflight_io_threshold (int): Infilght IO threshold after which the IO queing starts based on the IO priority.
+            max_num_queues (int): Number of queues created per QoS. If set minimum 2 queues will be created or and max 4.
+            
+            # Weights should be in descending order as per the queue priority.
+            standard_queue_weight (int): Number of bytes processed from the standard queue before moving to next queue.
+            medium_priority_1_queue_weight (int): Number of bytes processed from the priority 1 queue before moving to next queue.
+            medium_priority_2_queue_weight (int): Number of bytes processed from the priority 2 queue before moving to next queue.
+            medium_priority_3_queue_weight (int): Number of bytes processed from the priority 3 queue before moving to next queue.
+            low_priority_1_queue_weight (int): Number of bytes processed from the priority 1 queue before moving to next queue.
+            low_priority_2_queue_weight (int): Number of bytes processed from the priority 2 queue before moving to next queue.
+            low_priority_3_queue_weight (int): Number of bytes processed from the priority 3 queue before moving to next queue.
+            
+            keep_priority_bits (bool):    Flag to check if priority bits are to be removed before passing the IO the next level.
+            apply_iops_limits (bool):     Flag to apply the qos limits on iops.
+            apply_througput_limits (boo): Flag to apply the qos limits on throughput.
+        Returns:
+            dict: Response from the server.
+        """
+        max_num_queues = len({k: v for k, v in priority_queue_weights.items() if v != 0})
         params = {
             "base_bdev_name": base_bdev_name,
             "name": qos_bdev,
-            "max_num_queues": 2,
-            "standard_queue_weight": 3,
-            "low_priority_3_queue_weight": 1,
-            "low_priority_2_queue_weight": 1,
-            "low_priority_1_queue_weight": 1,
-            "medium_priority_1_queue_weight": 1,
-            "medium_priority_2_queue_weight": 1,
-            "medium_priority_3_queue_weight": 1,
+            "inflight_io_threshold": inflight_io_threshold or 12,
+
+            "max_num_queues": max_num_queues,
+            "standard_queue_weight": priority_queue_weights.get("standard_queue_weight", 0),
+            "low_priority_1_queue_weight": priority_queue_weights.get("low_priority_1_queue_weight", 40),
+            "low_priority_2_queue_weight": priority_queue_weights.get("low_priority_2_queue_weight", 20),
+            "low_priority_3_queue_weight":  priority_queue_weights.get("low_priority_3_queue_weight", 15),
+            "medium_priority_1_queue_weight": priority_queue_weights.get("medium_priority_1_queue_weight", 10),
+            "medium_priority_2_queue_weight":   priority_queue_weights.get("medium_priority_2_queue_weight", 10),
+            "medium_priority_3_queue_weight":   priority_queue_weights.get("medium_priority_3_queue_weight", 5),
+            
             "keep_priority_bits": True,
-            "inflight_io_threshold": inflight_io_threshold or 12
+            "apply_iops_limits": True,
+            "apply_througput_limits": True,
         }
 
         return self._request("qos_vbdev_create", params)

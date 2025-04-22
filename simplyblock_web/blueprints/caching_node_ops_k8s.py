@@ -92,6 +92,10 @@ def spdk_process_start():
         namespace = data['namespace']
         set_namespace(namespace)
 
+    priority_queue_weights = {}
+    if 'priority_queue_weights' in data and data['priority_queue_weights']:
+        priority_queue_weights = data['priority_queue_weights']
+
     if spdk_cpu_mask:
         requested_cpu_count = len(format(int(spdk_cpu_mask, 16), 'b'))
         if requested_cpu_count > node_cpu_count:
