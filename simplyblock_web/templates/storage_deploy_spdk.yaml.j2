@@ -13,7 +13,7 @@ spec:
       labels:
         app: spdk-app-{{ HOSTNAME }}
     spec:
-      serviceAccountName: storage-node-sa
+      serviceAccountName: simplyblock-storage-node-sa
       nodeSelector:
         kubernetes.io/hostname: {{ HOSTNAME }}
       hostNetwork: true
