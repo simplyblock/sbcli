@@ -152,6 +152,10 @@ def spdk_process_start():
     if 'multi_threading_enabled' in data:
         multi_threading_enabled = bool(data['multi_threading_enabled'])
 
+    numa_node = '0'
+    if 'numa_node' in data:
+        numa_node = data['numa_node']
+
     timeout = 60*5
     if 'timeout' in data:
         try:
@@ -184,7 +188,7 @@ def spdk_process_start():
 
     container = node_docker.containers.run(
         spdk_image,
-        f"numactl --cpunodebind={SPDK_SOCKET} --membind={SPDK_SOCKET} /root/scripts/run_distr_with_ssd.sh {spdk_cpu_mask} {spdk_mem_mib} {spdk_debug}",
+        f"numactl --cpunodebind={numa_node} --membind={numa_node} /root/scripts/run_distr_with_ssd.sh {spdk_cpu_mask} {spdk_mem_mib} {spdk_debug}",
         name=f"spdk_{rpc_port}",
         detach=True,
         privileged=True,
