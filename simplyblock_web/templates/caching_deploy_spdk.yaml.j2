@@ -71,6 +71,10 @@ spec:
               configMapKeyRef:
                 name: simplyblock-csi-cm
                 key: config.json
+        lifecycle:
+          postStart:
+            exec:
+              command: ["/bin/sh", "-c", "sudo modprobe nbd || echo failed to modprobe nbd"]
         securityContext:
           privileged: true
         volumeMounts:
