@@ -782,7 +782,6 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
              partition_size="", ha_jm_count=3, spdk_hp_mem=None, ssd_pcie=None, spdk_cpu_count=0,
              full_page_unmap=False):
 
-
     db_controller = DBController()
     kv_store = db_controller.kv_store
 
