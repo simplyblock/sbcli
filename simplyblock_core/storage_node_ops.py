@@ -938,8 +938,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
         return False
 
     if req_cpu_count >= 4:
-        app_thread_core, jm_cpu_core, poller_cpu_cores, alceml_cpu_cores, alceml_worker_cpu_cores, distrib_cpu_cores, jc_singleton_core = utils.calculate_core_allocation(
-            spdk_cores)
+        app_thread_core, jm_cpu_core, poller_cpu_cores, alceml_cpu_cores, alceml_worker_cpu_cores, distrib_cpu_cores, jc_singleton_core = utils.calculate_core_allocations(spdk_cores)
 
         if is_secondary_node:
             distrib_cpu_cores = distrib_cpu_cores + alceml_cpu_cores
