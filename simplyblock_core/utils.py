@@ -435,7 +435,7 @@ def calculate_core_allocations(vcpu_list, is_hyperthreaded=True, alceml_count=4)
             target = round((max_v / max_sum) * proportional_vcpu)
             if t == "alceml_cpu_cores":
                max_v = max_v / 5 
-            allocations[t] = max(thread_types[t][0], min(target, max_v))
+            allocations[t] = int(max(thread_types[t][0], min(target, max_v)))
 
         # Assign non-co-locatable first
         assigned = {}
