@@ -1614,12 +1614,12 @@ class SshUtils:
 
         # Root partition utilization monitor (df -h /)
         df_cmd = f"""sudo tmux new-session -d -s root_usage_monitor \
-            'bash -c "while true; do echo $(date) >> {root_log}; df -h / >> {root_log}; echo >> {root_log}; sleep 10; done"'"""
+        'bash -c "while true; do date >> {root_log}; df -h / >> {root_log}; echo >> {root_log}; sleep 10; done"'"""
+
 
         # Docker memory usage monitor (docker stats --no-stream)
         docker_cmd = f"""sudo tmux new-session -d -s docker_mem_monitor \
-            'bash -c "while true; do echo $(date) >> {docker_mem_log}; \
-            docker stats --no-stream --format \\\"table {{.Name}}\\t{{.MemUsage}}\\\" >> {docker_mem_log}; echo >> {docker_mem_log}; sleep 10; done"'"""
+        'bash -c "while true; do date >> {docker_mem_log}; docker stats --no-stream --format \\"table {{.Name}}\\t{{.MemUsage}}\\" >> {docker_mem_log}; echo >> {docker_mem_log}; sleep 10; done"'"""
 
         self.exec_command(node_ip, df_cmd)
         self.exec_command(node_ip, docker_cmd)
