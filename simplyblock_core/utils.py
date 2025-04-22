@@ -389,49 +389,41 @@ def calculate_core_allocations(vcpu_list, is_hyperthreaded=True, alceml_count=4)
         # Fixed non-co-locatable thread types
         thread_types = {
             "app_thread_core": (1, 1, False),
-            "alceml_cpu_cores": (1, alceml_count*5, False),
+            "alceml_cpu_cores": (1, alceml_count * 5, False),
             "alceml_worker_cpu_cores": (1, alceml_count, False),
-            "distrib_cpu_cores": (1, min(22, total), False),
-            "poller_cpu_cores": (1, min(32, total), False)
+            "distrib_cpu_cores": (1, min(24, total), False),
+            "poller_cpu_cores": (1, min(24, total), False)
         }
 
         # Proportional allocation for the scalable types
         proportional_targets = ["alceml_cpu_cores", "alceml_worker_cpu_cores", "distrib_cpu_cores", "poller_cpu_cores"]
         max_sum = sum(thread_types[t][1] for t in proportional_targets)
-        
-        # Apply jm_cpu_core scaling rule based on distrib_cpu_cores allocation
+        proportional_vcpu = max(total - 3, 1)  # reserve for jc, jm, app
+
         allocations = {}
-        
-        if total < 9:
-            k=2
-            jm_vcpu=1
-            jc_vcpu=1
-        elif total < 24:
-            k=3
-            jm_vcpu=1
-            jc_vcpu=1
-        elif total < 32:
-            k=4
-            jm_vcpu=2
-            jc_vcpu=1
-        else:
-            k=7
-            jm_vcpu=4
-            jc_vcpu=2
-
-        proportional_vcpu = max(total - k, 1)  # reserve for jc, jm, app
-
-         # Store allocations
-        allocations["jm_cpu_core"] = jm_vcpu
-        allocations["jc_singleton_core"] = jc_vcpu
-        allocations["app_thread_core"] = 1  # always 1
-        
         for t in proportional_targets:
             _, max_v, _ = thread_types[t]
             target = round((max_v / max_sum) * proportional_vcpu)
-            if t == "alceml_cpu_cores":
-               max_v = max_v / 5 
             allocations[t] = max(thread_types[t][0], min(target, max_v))
+
+        # Apply jm_cpu_core scaling rule based on distrib_cpu_cores allocation
+        distrib_vcpu = allocations["distrib_cpu_cores"]
+        if distrib_vcpu >= 18:
+            jm_vcpu = 4
+        elif distrib_vcpu >= 12:
+            jm_vcpu = 3
+        elif distrib_vcpu >= 6:
+            jm_vcpu = 2
+        else:
+            jm_vcpu = 1
+
+        # Apply jc_singleton_core scaling based on jm_cpu_core
+        jc_vcpu = 2 if jm_vcpu == 4 else 1
+
+        # Store allocations
+        allocations["jm_cpu_core"] = jm_vcpu
+        allocations["jc_singleton_core"] = jc_vcpu
+        allocations["app_thread_core"] = 1  # always 1
 
         # Assign non-co-locatable first
         assigned = {}
