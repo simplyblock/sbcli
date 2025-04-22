@@ -1095,6 +1095,41 @@ commands:
             type: int
             value_range: 0..128
             default: 0
+          - name: "--standard-queue-weight"
+            help: "Number of bytes processed from the standard queue before moving to next queue."
+            dest: standard_queue_weight
+            type: int
+            default: 0
+          - name: "--medium-priority-1-queue-weight"
+            help: "Number of bytes processed from the priority 1 queue before moving to next queue."
+            dest: medium_priority_1_queue_weight
+            type: int
+            default: 0
+          - name: "--medium-priority-2-queue-weight"
+            help: "Number of bytes processed from the priority 2 queue before moving to next queue."
+            dest: medium_priority_2_queue_weight
+            type: int
+            default: 0
+          - name: "--medium-priority-3-queue-weight"
+            help: "Number of bytes processed from the priority 3 queue before moving to next queue."
+            dest: medium_priority_3_queue_weight
+            type: int
+            default: 0
+          - name: "--low-priority-1-queue-weight"
+            help: "Number of bytes processed from the priority 1 queue before moving to next queue."
+            dest: low_priority_1_queue_weight
+            type: int
+            default: 0
+          - name: "--low-priority-2-queue-weight"
+            help: "Number of bytes processed from the priority 2 queue before moving to next queue."
+            dest: low_priority_2_queue_weight
+            type: int
+            default: 0
+          - name: "--low-priority-3-queue-weight"
+            help: "Number of bytes processed from the priority 3 queue before moving to next queue."
+            dest: low_priority_3_queue_weight
+            type: int
+            default: 0
           - name: "--max-queue-size"
             help: "The max size the queue will grow"
             dest: max_queue_size
