@@ -209,7 +209,7 @@ def get_info():
         "spdk_devices": node_utils.get_spdk_devices(),
         "spdk_pcie_list": node_utils.get_spdk_pcie_list(),
 
-        "network_interface": node_utils.get_nics_data()
+        "network_interface": core_utils.get_nics_data()
     }
     return utils.get_response(out)
 

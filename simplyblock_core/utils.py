@@ -67,30 +67,30 @@ def get_ips():
 
 
 def get_nics_data():
-    try:
-        out, _, _ = shell_utils.run_command("ip -j address show")
-        data = json.loads(out)
-        def _get_ip4_address(list_of_addr):
-            if list_of_addr:
-                for data in list_of_addr:
-                    if data['family'] == 'inet':
-                        return data['local']
-            return ""
+    out, err, rc = shell_utils.run_command("ip -j address show")
+    if rc != 0:
+        logger.error(err)
+        return []
+    data = json.loads(out)
 
-        devices = {i["ifname"]: i for i in data}
-        iface_list = {}
-        for nic in devices:
-            device = devices[nic]
-            iface = {
-                'name': device['ifname'],
-                'ip': _get_ip4_address(device['addr_info']),
-                'status': device['operstate'],
-                'net_type': device['link_type']}
-            iface_list[nic] = iface
-        return iface_list
-    except Exception as e:
-        logger.error(e)
-        return False
+    def _get_ip4_address(list_of_addr):
+        if list_of_addr:
+            for data in list_of_addr:
+                if data['family'] == 'inet':
+                    return data['local']
+        return ""
+
+    devices = {i["ifname"]: i for i in data}
+    iface_list = {}
+    for nic in devices:
+        device = devices[nic]
+        iface = {
+            'name': device['ifname'],
+            'ip': _get_ip4_address(device['addr_info']),
+            'status': device['operstate'],
+            'net_type': device['link_type']}
+        iface_list[nic] = iface
+    return iface_list
 
 
 def get_iface_ip(ifname):

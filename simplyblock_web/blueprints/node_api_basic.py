@@ -6,7 +6,7 @@ import cpuinfo
 from flask import Blueprint
 from flask import request
 
-from simplyblock_core import shell_utils
+from simplyblock_core import shell_utils, utils as core_utils
 from simplyblock_web import utils, node_utils
 
 logger = logging.getLogger(__name__)
@@ -54,7 +54,7 @@ def get_info():
         "spdk_devices": node_utils.get_spdk_devices(),
         "spdk_pcie_list": node_utils.get_spdk_pcie_list(),
 
-        "network_interface": node_utils.get_nics_data()
+        "network_interface": core_utils.get_nics_data()
     }
     return utils.get_response(out)
 

@@ -24,9 +24,9 @@ bp = Blueprint("caching_node", __name__, url_prefix="/cnode")
 def get_docker_client():
     ip = os.getenv("DOCKER_IP")
     if not ip:
-        for ifname in node_utils.get_nics_data():
+        for ifname in core_utils.get_nics_data():
             if ifname in ["eth0", "ens0"]:
-                ip = node_utils.get_nics_data()[ifname]['ip']
+                ip = core_utils.get_nics_data()[ifname]['ip']
                 break
     return docker.DockerClient(base_url=f"tcp://{ip}:2375", version="auto", timeout=60 * 5)
 
@@ -196,7 +196,7 @@ def get_info():
         "spdk_devices": node_utils.get_spdk_devices(),
         "spdk_pcie_list": node_utils.get_spdk_pcie_list(),
 
-        "network_interface": node_utils.get_nics_data()
+        "network_interface": core_utils.get_nics_data()
     }
     return utils.get_response(out)
 
