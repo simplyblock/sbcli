@@ -410,12 +410,12 @@ class RPCClient:
 
             "max_num_queues": 6,
             "standard_queue_weight": priority_queue_weights.get("standard_queue_weight", 0),
-            "low_priority_1_queue_weight": priority_queue_weights.get("low_priority_1_queue_weight", 40),
-            "low_priority_2_queue_weight": priority_queue_weights.get("low_priority_2_queue_weight", 20),
-            "low_priority_3_queue_weight":  priority_queue_weights.get("low_priority_3_queue_weight", 15),
-            "medium_priority_1_queue_weight": priority_queue_weights.get("medium_priority_1_queue_weight", 10),
-            "medium_priority_2_queue_weight":   priority_queue_weights.get("medium_priority_2_queue_weight", 10),
-            "medium_priority_3_queue_weight":   priority_queue_weights.get("medium_priority_3_queue_weight", 5),
+            "medium_priority_1_queue_weight": priority_queue_weights.get("medium_priority_1_queue_weight", 40),
+            "medium_priority_2_queue_weight":   priority_queue_weights.get("medium_priority_2_queue_weight", 20),
+            "medium_priority_3_queue_weight":   priority_queue_weights.get("medium_priority_3_queue_weight", 15),
+            "low_priority_1_queue_weight": priority_queue_weights.get("low_priority_1_queue_weight", 10),
+            "low_priority_2_queue_weight": priority_queue_weights.get("low_priority_2_queue_weight", 10),
+            "low_priority_3_queue_weight":  priority_queue_weights.get("low_priority_3_queue_weight", 5),
             
             "keep_priority_bits": True,
             "apply_iops_limits": True,
