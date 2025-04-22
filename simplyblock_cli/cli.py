@@ -634,6 +634,7 @@ class CLIWrapper(CLIWrapperBase):
     def init_volume__connect(self, subparser):
         subcommand = self.add_sub_command(subparser, 'connect', 'Gets the logical volume\'s NVMe/TCP connection string(s)')
         subcommand.add_argument('volume_id', help='Logical volume id', type=str)
+        argument = subcommand.add_argument('--ctrl-loss-tmo', help='Control loss timeout for this volume', type=int, dest='ctrl_loss_tmo', required=False)
 
     def init_volume__resize(self, subparser):
         subcommand = self.add_sub_command(subparser, 'resize', 'Resizes a logical volume')

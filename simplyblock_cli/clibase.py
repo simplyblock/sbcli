@@ -418,8 +418,11 @@ class CLIWrapperBase:
             return lvol_controller.delete_lvol(id, force)
 
     def volume__connect(self, sub_command, args):
-        volume_id = args.volume_id
-        data = lvol_controller.connect_lvol(volume_id)
+        kwargs = {}
+        if (ctrl_loss_tmo := args.ctrl_loss_tmo) is not None:
+            kwargs['ctrl_loss_tmo'] = ctrl_loss_tmo
+
+        data = lvol_controller.connect_lvol(args.volume_id, **kwargs)
         if data:
             return "\n".join(con['connect'] for con in data)
 

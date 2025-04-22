@@ -1644,6 +1644,10 @@ commands:
             help: "Logical volume id"
             dest: volume_id
             type: str
+          - name: "--ctrl-loss-tmo"
+            dest: "ctrl_loss_tmo"
+            help: "Control loss timeout for this volume"
+            type: int
       - name: resize
         help: "Resizes a logical volume"
         usage: >
