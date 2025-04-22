@@ -223,7 +223,13 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     c.inflight_io_threshold = inflight_io_threshold
     c.enable_qos = enable_qos
     c.strict_node_anti_affinity = strict_node_anti_affinity
-    c.priority_queues_weights = priority_queues_weights
+    c.standard_queue_weight = priority_queues_weights.get("standard_queue_weight", 0)
+    c.medium_priority_1_queue_weight = priority_queues_weights.get("medium_priority_1_queue_weight", 0)
+    c.medium_priority_2_queue_weight = priority_queues_weights.get("medium_priority_2_queue_weight", 0)
+    c.medium_priority_3_queue_weight = priority_queues_weights.get("medium_priority_3_queue_weight", 0)
+    c.low_priority_1_queue_weight = priority_queues_weights.get("low_priority_1_queue_weight", 0)
+    c.low_priority_2_queue_weight = priority_queues_weights.get("low_priority_2_queue_weight", 0)
+    c.low_priority_3_queue_weight = priority_queues_weights.get("low_priority_3_queue_weight", 0)
 
     alerts_template_folder = os.path.join(TOP_DIR, "simplyblock_core/scripts/alerting/")
     alert_resources_file = "alert_resources.yaml"
