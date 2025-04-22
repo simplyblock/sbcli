@@ -1058,7 +1058,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
             spdk_cpu_mask, minimum_hp_memory, spdk_image, spdk_debug, cluster_ip, fdb_connection,
             namespace, mgmt_ip, rpc_port, rpc_user, rpc_pass,
             multi_threading_enabled=constants.SPDK_PROXY_MULTI_THREADING_ENABLED, timeout=constants.SPDK_PROXY_TIMEOUT,
-            ssd_pcie=ssd_pcie, total_mem=total_mem, socket)
+            ssd_pcie=ssd_pcie, total_mem=total_mem, socket=socket)
         time.sleep(5)
 
     except Exception as e:
@@ -1675,7 +1675,7 @@ def restart_storage_node(
             snode.spdk_cpu_mask, snode.spdk_mem, snode.spdk_image, spdk_debug, cluster_ip, fdb_connection,
             snode.namespace, snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password,
             multi_threading_enabled=constants.SPDK_PROXY_MULTI_THREADING_ENABLED, timeout=constants.SPDK_PROXY_TIMEOUT,
-            ssd_pcie=snode.ssd_pcie, total_mem=total_mem, socket)
+            ssd_pcie=snode.ssd_pcie, total_mem=total_mem, socket=socket)
     except Exception as e:
         logger.error(e)
         return False
