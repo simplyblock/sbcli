@@ -1618,8 +1618,14 @@ class SshUtils:
 
 
         # Docker memory usage monitor (docker stats --no-stream)
-        docker_cmd = f"""sudo tmux new-session -d -s docker_mem_monitor \
-        'bash -c "while true; do date >> {docker_mem_log}; docker stats --no-stream --format \\"table {{.Name}}\\t{{.MemUsage}}\\" >> {docker_mem_log}; echo >> {docker_mem_log}; sleep 10; done"'"""
+        docker_cmd = "sudo tmux new-session -d -s docker_mem_monitor " \
+                     "'bash -c \"while true; do " \
+                     "date >> {log}; " \
+                     "docker stats --no-stream --format \\\"table {{.Name}}\\t{{.MemUsage}}\\\" >> {log}; " \
+                     "echo >> {log}; " \
+                     "sleep 10; " \
+                     "done\"'".format(log=docker_mem_log)
+
 
         self.exec_command(node_ip, df_cmd)
         self.exec_command(node_ip, docker_cmd)
