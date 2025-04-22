@@ -418,8 +418,8 @@ class RPCClient:
             "low_priority_3_queue_weight":  priority_queue_weights.get("low_priority_3_queue_weight", 5),
             
             "keep_priority_bits": True,
-            "apply_iops_limits": True,
-            "apply_througput_limits": True,
+            "apply_iops_limits": True, # Set either apply_iops_limits or apply_througput_limits. Cannot set both.
+            "apply_througput_limits": False,
         }
 
         return self._request("qos_vbdev_create", params)
