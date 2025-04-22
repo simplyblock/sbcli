@@ -837,7 +837,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
              small_bufsize=0, large_bufsize=0, spdk_cpu_mask=None,
              num_partitions_per_dev=0, jm_percent=0, number_of_devices=0, enable_test_device=False,
              namespace=None, number_of_distribs=2, enable_ha_jm=False, is_secondary_node=False, id_device_by_nqn=False,
-             partition_size="", ha_jm_count=3, spdk_hp_mem=None, ssd_pcie=None, spdk_cpu_count=0, socket='0'):
+             partition_size="", ha_jm_count=3, spdk_hp_mem=None, ssd_pcie=None, spdk_cpu_count=0, numa_node='0'):
 
     db_controller = DBController()
     kv_store = db_controller.kv_store
@@ -1057,7 +1057,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
             spdk_cpu_mask, minimum_hp_memory, spdk_image, spdk_debug, cluster_ip, fdb_connection,
             namespace, mgmt_ip, rpc_port, rpc_user, rpc_pass,
             multi_threading_enabled=constants.SPDK_PROXY_MULTI_THREADING_ENABLED, timeout=constants.SPDK_PROXY_TIMEOUT,
-            ssd_pcie=ssd_pcie, total_mem=total_mem, socket=socket)
+            ssd_pcie=ssd_pcie, total_mem=total_mem, numa_node=numa_node)
         time.sleep(5)
 
     except Exception as e:
@@ -1509,7 +1509,7 @@ def restart_storage_node(
         node_id, max_lvol=0, max_snap=0, max_prov=0,
         spdk_image=None, set_spdk_debug=None,
         small_bufsize=0, large_bufsize=0, number_of_devices=0,
-        force=False, node_ip=None, clear_data=False, socket='0'):
+        force=False, node_ip=None, clear_data=False, numa_node='0'):
 
     db_controller = DBController()
     kv_store = db_controller.kv_store
@@ -1674,7 +1674,7 @@ def restart_storage_node(
             snode.spdk_cpu_mask, snode.spdk_mem, snode.spdk_image, spdk_debug, cluster_ip, fdb_connection,
             snode.namespace, snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password,
             multi_threading_enabled=constants.SPDK_PROXY_MULTI_THREADING_ENABLED, timeout=constants.SPDK_PROXY_TIMEOUT,
-            ssd_pcie=snode.ssd_pcie, total_mem=total_mem, socket=socket)
+            ssd_pcie=snode.ssd_pcie, total_mem=total_mem, numa_node=numa_node)
     except Exception as e:
         logger.error(e)
         return False
