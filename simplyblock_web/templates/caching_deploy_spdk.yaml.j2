@@ -64,12 +64,12 @@ spec:
           - name: SPDKCSI_SECRET
             valueFrom:
               secretKeyRef:
-                name: spdkcsi-secret
+                name: simplyblock-csi-secret
                 key: secret.json
           - name: CLUSTER_CONFIG
             valueFrom:
               configMapKeyRef:
-                name: spdkcsi-cm
+                name: simplyblock-csi-cm
                 key: config.json
         securityContext:
           privileged: true
