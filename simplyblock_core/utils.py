@@ -426,8 +426,8 @@ def calculate_core_allocations(vcpu_list, is_hyperthreaded=False, alceml_count=2
 
         for t in ["poller_cpu_cores","distrib_cpu_cores"]:
             vcpus = reserve_n(1)
-            if len(vcpu)>0:
-            assigned[t] = assigned[t] + vcpu
+            if len(vcpus) > 0:
+                assigned[t] = assigned[t] + vcpus
         
         # Return the individual threads as separate values
         return (
