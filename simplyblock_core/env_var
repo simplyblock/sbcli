@@ -1,5 +1,5 @@
 SIMPLY_BLOCK_COMMAND_NAME=sbcli-pool
-SIMPLY_BLOCK_VERSION=1.0.14
+SIMPLY_BLOCK_VERSION=1.0.15
 
 SIMPLY_BLOCK_DOCKER_IMAGE=public.ecr.aws/simply-block/simplyblock:qos-priority
 SIMPLY_BLOCK_SPDK_ULTRA_IMAGE=public.ecr.aws/simply-block/ultra:qos_bdev_1-latest
