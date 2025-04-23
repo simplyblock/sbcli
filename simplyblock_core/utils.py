@@ -625,7 +625,7 @@ def _parse_unit(unit: str, mode: str = 'si/iec', strict: bool = True) -> tuple[i
     )
 
 
-def parse_size(size: str | int, mode: str = 'si/iec', assume_unit: str = '', strict: bool = False) -> int:
+def parse_size(size: Union[str, int], mode: str = 'si/iec', assume_unit: str = '', strict: bool = False) -> int:
     """Parse the given data size
 
     If passed and not explicitly given, 'assume_unit' will be assumed.
