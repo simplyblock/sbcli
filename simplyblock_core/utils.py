@@ -651,7 +651,7 @@ def parse_size(size: Union[str, int], mode: str = 'si/iec', assume_unit: str = '
         return -1
 
 
-def convert_size(size: int | str, unit: str) -> int:
+def convert_size(size: Union[int, str], unit: str) -> int:
     """Convert the given number of bytes to target unit
 
     Accepts both decimal (kB, MB, ...) and binary (KiB, MiB, ...) units.
