@@ -16,7 +16,7 @@ from simplyblock_core.models.caching_node import CachingNode, CachedLVol
 from simplyblock_core.models.iface import IFace
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.pool import Pool
-from simplyblock_core.storage_node_ops import addNvmeDevices
+from simplyblock_core.utils import addNvmeDevices
 from simplyblock_core.rpc_client import RPCClient
 
 logger = lg.getLogger()
@@ -146,7 +146,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spd
     # logger.info(f"Free Hugepages detected: {utils.humanbytes(mem)}")
 
     # adding devices
-    nvme_devs = addNvmeDevices(snode, node_info['spdk_pcie_list'])
+    nvme_devs = addNvmeDevices(rpc_client, snode, node_info['spdk_pcie_list'])
     if not nvme_devs:
         logger.error("No NVMe devices was found!")
         return False
