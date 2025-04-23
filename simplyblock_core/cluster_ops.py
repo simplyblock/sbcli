@@ -640,6 +640,27 @@ def cluster_activate(cl_id, force=False, force_lvstore_create=False):
                 set_cluster_status(cl_id, ols_status)
                 return False
 
+    for snode in snodes:
+        if not snode.is_secondary_node:
+            continue
+        if snode.status != StorageNode.STATUS_ONLINE:
+            continue
+
+        logger.info(f"Activating sec node: {snode.get_id()}")
+        ret = storage_node_ops.recreate_lvstore_on_sec(snode)
+        snode = db_controller.get_storage_node_by_id(snode.get_id())
+        if ret:
+            snode.lvstore_status = "ready"
+            snode.write_to_db()
+
+        else:
+            snode.lvstore_status = "failed"
+            snode.write_to_db()
+            logger.error(f"Failed to activate node {snode.get_id()}")
+            if not force:
+                logger.error("Failed to activate cluster")
+                # set_cluster_status(cl_id, ols_status)
+                # return False
 
     if not cluster.cluster_max_size:
         cluster = db_controller.get_cluster_by_id(cl_id)
