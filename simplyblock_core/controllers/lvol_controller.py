@@ -950,7 +950,7 @@ def delete_lvol(id_or_name, force_delete=False):
         if snap and snap.deleted is True:
             lvols_count = 0
             for lvol in db_controller.get_lvols():  # pass
-                if lvol.cloned_from_snap == snap.get_id():
+                if lvol.status != LVol.STATUS_IN_DELETION and lvol.cloned_from_snap == snap.get_id():
                     lvols_count += 1
             if lvols_count == 0:
                 snapshot_controller.delete(snap.get_id())
