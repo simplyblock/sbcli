@@ -54,7 +54,7 @@ class CLIWrapperBase:
         if not args.max_lvol:
             self.parser.error(f"Mandatory argument '--max-lvol' not provided for {sub_command}")
         if not args.max_prov:
-            self.parser.error(f"Mandatory argument '--max-prov' not provided for {sub_command}")
+            self.parser.error(f"Mandatory argument '--max-size' not provided for {sub_command}")
         # if not args.spdk_cpu_mask:
         #     self.parser.error(f"Mandatory argument '--cpu-mask' not provided for {sub_command}")
         cluster_id = args.cluster_id
@@ -136,6 +136,7 @@ class CLIWrapperBase:
 
         spdk_image = args.spdk_image
         spdk_debug = args.spdk_debug
+        reattach_volume = args.reattach_volume
 
         max_lvol = args.max_lvol
         max_snap = args.max_snap
@@ -148,7 +149,7 @@ class CLIWrapperBase:
         return storage_ops.restart_storage_node(
             node_id, max_lvol, max_snap, max_prov,
             spdk_image, spdk_debug,
-            small_bufsize, large_bufsize, number_of_devices, node_ip=args.node_ip, force=args.force)
+            small_bufsize, large_bufsize, number_of_devices, node_ip=args.node_ip, reattach_volume=reattach_volume, force=args.force)
 
     def storage_node__shutdown(self, sub_command, args):
         return storage_ops.shutdown_storage_node(args.node_id, args.force)
@@ -271,7 +272,7 @@ class CLIWrapperBase:
         return storage_ops.dump_lvstore(node_id)
 
     def storage_node__set(self, sub_command, args):
-        return storage_ops.set(args.node_id, args.attr_name, args.attr_value)
+        return storage_ops.set_value(args.node_id, args.attr_name, args.attr_value)
 
     def cluster__deploy(self, sub_command, args):
         return self.cluster_deploy(args)
@@ -318,8 +319,7 @@ class CLIWrapperBase:
             return False
 
     def cluster__get_logs(self, sub_command, args):
-        cluster_id = args.cluster_id
-        return cluster_ops.get_logs(cluster_id)
+        return cluster_ops.get_logs(**args.__dict__)
 
     def cluster__get_secret(self, sub_command, args):
         cluster_id = args.cluster_id
@@ -335,7 +335,7 @@ class CLIWrapperBase:
         return health_controller.check_cluster(cluster_id)
 
     def cluster__update(self, sub_command, args):
-        return cluster_ops.update_cluster(args.cluster_id, mgmt_only=args.mgmt_only, restart_cluster=args.restart)
+        return cluster_ops.update_cluster(**args.__dict__)
     
     def cluster__graceful_shutdown(self, sub_command, args):
         return cluster_ops.cluster_grace_shutdown(args.cluster_id)
@@ -344,7 +344,7 @@ class CLIWrapperBase:
         return cluster_ops.cluster_grace_startup(args.cluster_id, args.clear_data, args.spdk_image)
 
     def cluster__list_tasks(self, sub_command, args):
-        return tasks_controller.list_tasks(args.cluster_id)
+        return tasks_controller.list_tasks(**args.__dict__)
 
     def cluster__cancel_task(self, sub_command, args):
         return tasks_controller.cancel_task(args.task_id)
@@ -418,8 +418,11 @@ class CLIWrapperBase:
             return lvol_controller.delete_lvol(id, force)
 
     def volume__connect(self, sub_command, args):
-        volume_id = args.volume_id
-        data = lvol_controller.connect_lvol(volume_id)
+        kwargs = {}
+        if (ctrl_loss_tmo := args.ctrl_loss_tmo) is not None:
+            kwargs['ctrl_loss_tmo'] = ctrl_loss_tmo
+
+        data = lvol_controller.connect_lvol(args.volume_id, **kwargs)
         if data:
             return "\n".join(con['connect'] for con in data)
 

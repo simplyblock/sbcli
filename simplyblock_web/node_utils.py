@@ -4,6 +4,8 @@ import json
 import logging
 import os
 import subprocess
+import requests
+import boto3
 import re
 
 import jc
@@ -168,6 +170,109 @@ def get_host_arch():
     out, err, rc = run_command("uname -m")
     return out
 
+def get_region():
+    try:
+        response = requests.get("http://169.254.169.254/latest/meta-data/placement/region", timeout=2)
+        response.raise_for_status()
+        region = response.text
+        logger.info(f"Dynamically retrieved region: {region}")
+        return region
+    except Exception as e:
+        logger.error(f"Failed to retrieve region: {str(e)}")
+        return ""
+
+
+def detach_ebs_volumes(instance_id):
+    detached_volumes = []
+
+    try:
+        region = get_region()
+        session = boto3.Session(region_name=region)
+
+        ec2 = session.resource("ec2")
+        client = session.client("ec2")
+
+        instance = ec2.Instance(instance_id)
+        volumes = instance.volumes.all()
+
+        logger.info(f"Checking volumes attached to instance {instance_id}.")
+
+        for volume in volumes:
+            for tag in (volume.tags or []):
+                logger.debug(f"Tags for volume {volume.id}: {tag}")
+                if "simplyblock-jm" in tag['Value'] or "simplyblock-storage" in tag['Value']:
+                    volume_id = volume.id
+                    logger.info(f"Found volume {volume_id} with matching tags on instance {instance_id}.")
+
+                    # Detach the volume
+                    client.detach_volume(VolumeId=volume_id, InstanceId=instance_id, Force=True)
+                    logger.info(f"Successfully detached volume {volume_id} from instance {instance_id}.")
+                    
+                    detached_volumes.append(volume_id)
+
+        if detached_volumes:
+            logger.info(f"Detached volumes: {detached_volumes}")
+        else:
+            logger.info(f"No volumes with matching tags found on instance {instance_id}.")
+
+    except Exception as e:
+        logger.error(f"Failed to detach EBS volumes: {str(e)}")
+
+    return detached_volumes
+
+def attach_ebs_volumes(instance_id, volume_ids):
+    try:
+        region = get_region()
+        session = boto3.Session(region_name=region)  
+        client = session.client("ec2")
+
+        logger.info(f"Attaching volumes to instance {instance_id}. Volumes: {volume_ids}")
+
+        for volume_id in volume_ids:
+            device_name = get_available_device_name(instance_id)
+            
+            if not device_name:
+                logger.error(f"Could not find an available device name for volume {volume_id}.")
+                continue
+
+            # Attach the volume to the instance
+            client.attach_volume(VolumeId=volume_id, InstanceId=instance_id, Device=device_name)
+            logger.info(f"Successfully attached volume {volume_id} to instance {instance_id} with device name {device_name}.")
+
+        logger.info("All volumes attached successfully.")
+        return True 
+    except Exception as e:
+        logger.error(f"Failed to attach EBS volumes: {str(e)}")
+        return False
+
+def get_available_device_name(instance_id):
+    region = get_region()
+    session = boto3.Session(region_name=region)  
+    ec2 = session.client('ec2')
+
+    try:
+        response = ec2.describe_instances(InstanceIds=[instance_id])
+        instance = response['Reservations'][0]['Instances'][0]
+
+        block_device_mappings = instance.get('BlockDeviceMappings', [])
+        
+        in_use_devices = [device['DeviceName'] for device in block_device_mappings]
+        
+        logger.info(f"Current devices in use by instance {instance_id}: {in_use_devices}")
+
+        device_letter = ord('f')
+        while True:
+            device_name = f'/dev/sd{chr(device_letter)}'
+            
+            if device_name not in in_use_devices:
+                logger.info(f"Available device name for attachment: {device_name}")
+                return device_name
+
+            device_letter += 1
+
+    except Exception as e:
+        logger.error(f"Failed to get available device name: {str(e)}")
+        return None
 
 def firewall_port(port_id=9090, port_type="tcp", block=True, rpc_port=None):
     cmd_list = []

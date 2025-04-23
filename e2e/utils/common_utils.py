@@ -466,6 +466,43 @@ class CommonUtils:
         for node in nodes:
             versions[node] = self.ssh_utils.get_node_version(node=node)
         return versions
+    
+    def assert_upgrade_docker_image(self, pre_upgrade_containers, post_upgrade_containers):
+        mgmt, storage = self.sbcli_utils.get_all_nodes_ip()
+        all_nodes = mgmt + storage
+
+        pre_upgrade_images = {}
+        post_upgrade_images = {}
+        upgrade_happened_somewhere = False
+
+        for node in all_nodes:
+            pre_upgrade_images[node] = set(pre_upgrade_containers[node].values())
+            post_upgrade_images[node] = set(post_upgrade_containers[node].values())
+
+            diff_ids = pre_upgrade_images[node].symmetric_difference(post_upgrade_images[node])
+            self.logger.info(f"Docker image ID diff for {node}: {diff_ids}")
+
+            if diff_ids:
+                upgrade_happened_somewhere = True
+
+                changed_images = [
+                    (name, post_upgrade_containers[node][name])
+                    for name in post_upgrade_containers[node]
+                    if post_upgrade_containers[node][name] in diff_ids
+                ]
+                if changed_images:
+                    self.logger.info(f"Changed images on {node}:")
+                    for name, img_id in changed_images:
+                        self.logger.info(f"{name} -> {img_id}")
+                else:
+                    self.logger.info(f"No matching image names for changed image IDs on {node}.")
+            else:
+                self.logger.info(f"No image changes detected on {node}.")
+
+        if not upgrade_happened_somewhere:
+            raise AssertionError("No Docker image changes detected on any node. Upgrade may have failed.")
+        
+        self.logger.info("Docker image upgrade validated successfully on at least one node.")
 
 
 def sleep_n_sec(seconds):

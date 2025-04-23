@@ -163,6 +163,8 @@ class TestClusterBase:
             self.ssh_obj.check_tmux_installed(node_ip=node)
             self.ssh_obj.exec_command(node=node,
                                     command="sudo tmux kill-server")
+            
+            self.ssh_obj.start_resource_monitors(node_ip=node, log_dir=self.docker_logs_path)
 
             if not self.k8s_test:
                 self.ssh_obj.start_docker_logging(node_ip=node,
@@ -200,6 +202,9 @@ class TestClusterBase:
             self.ssh_obj.check_tmux_installed(node_ip=node)
             self.ssh_obj.exec_command(node=node,
                                     command="sudo tmux kill-server")
+            
+            self.ssh_obj.start_resource_monitors(node_ip=node, log_dir=self.docker_logs_path)
+
             self.ssh_obj.start_docker_logging(node_ip=node,
                                               containers=containers,
                                               log_dir=self.docker_logs_path,

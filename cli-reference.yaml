@@ -301,6 +301,12 @@ commands:
             dest: spdk_image
             type: str
             private: true
+          - name: "--reattach-volume"
+            help: "Reattach volume to new instance"
+            dest: reattach_volume
+            type: bool
+            action: store_true
+            private: true
           - name: "--spdk-debug"
             help: "Enable spdk debug logs"
             dest: spdk_debug
@@ -1302,6 +1308,11 @@ commands:
             dest: cluster_id
             type: str
             completer: _completer_get_cluster_list
+          - name: "--limit"
+            help: "show last number of logs, default 50"
+            dest: limit
+            type: int
+            default: 50
       - name: get-secret
         help: "Gets a cluster's secret"
         arguments:
@@ -1352,6 +1363,14 @@ commands:
             dest: restart
             type: bool
             default: false
+          - name: "--spdk-image"
+            help: "Restart the storage nodes using the provided image"
+            dest: spdk_image
+            type: str
+          - name: "--mgmt-image"
+            help: "Restart the management services using the provided image"
+            dest: mgmt_image
+            type: str
       - name: graceful-shutdown
         help: "Initiates a graceful shutdown of a cluster's storage nodes"
         private: true
@@ -1387,6 +1406,11 @@ commands:
             dest: cluster_id
             type: str
             completer: _completer_get_cluster_list
+          - name: "--limit"
+            help: "show last number of tasks, default 50"
+            dest: limit
+            type: int
+            default: 50
       - name: cancel-task
         help: "Cancels task by task id"
         arguments:
@@ -1620,6 +1644,10 @@ commands:
             help: "Logical volume id"
             dest: volume_id
             type: str
+          - name: "--ctrl-loss-tmo"
+            dest: "ctrl_loss_tmo"
+            help: "Control loss timeout for this volume"
+            type: int
       - name: resize
         help: "Resizes a logical volume"
         usage: >

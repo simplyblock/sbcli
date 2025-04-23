@@ -133,15 +133,21 @@ while True:
                         if active_task:
                             logger.info("task found on same node, retry")
                             continue
-
-                        res = task_runner(task)
-                        if res:
-                            tasks_events.task_updated(task)
-
                     elif task.status == JobSchedule.STATUS_RUNNING:
+                        pass
 
-                        res = task_runner(task)
-                        if res:
-                            tasks_events.task_updated(task)
+                    res = task_runner(task)
+                    if res:
+                        tasks_events.task_updated(task)
+
+                        node_task = tasks_controller.get_active_node_tasks(task.cluster_id, task.node_id)
+                        if not node_task:
+                            logger.info("no task found on same node, resuming compression")
+                            node = db_controller.get_storage_node_by_id(task.node_id)
+                            rpc_client = RPCClient(
+                                node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password, timeout=5, retry=2)
+                            ret = rpc_client.jc_suspend_compression(jm_vuid=node.jm_vuid, suspend=False)
+                            if not ret:
+                                logger.error("Failed to resume JC compression")
 
     time.sleep(3)

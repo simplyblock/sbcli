@@ -157,6 +157,8 @@ class CLIWrapper(CLIWrapperBase):
         if self.developer_mode:
             argument = subcommand.add_argument('--spdk-image', help='SPDK image uri', type=str, dest='spdk_image', required=False)
         if self.developer_mode:
+            argument = subcommand.add_argument('--reattach-volume', help='Reattach volume to new instance', dest='reattach_volume', required=False, action='store_true')
+        if self.developer_mode:
             argument = subcommand.add_argument('--spdk-debug', help='Enable spdk debug logs', dest='spdk_debug', required=False, action='store_true')
         if self.developer_mode:
             argument = subcommand.add_argument('--iobuf_small_bufsize', help='bdev_set_options param', type=int, default=0, dest='small_bufsize', required=False)
@@ -501,6 +503,7 @@ class CLIWrapper(CLIWrapperBase):
     def init_cluster__get_logs(self, subparser):
         subcommand = self.add_sub_command(subparser, 'get-logs', 'Returns a cluster\'s status logs')
         subcommand.add_argument('cluster_id', help='Cluster id', type=str).completer = self._completer_get_cluster_list
+        argument = subcommand.add_argument('--limit', help='show last number of logs, default 50', type=int, default=50, dest='limit', required=False)
 
     def init_cluster__get_secret(self, subparser):
         subcommand = self.add_sub_command(subparser, 'get-secret', 'Gets a cluster\'s secret')
@@ -520,6 +523,8 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('cluster_id', help='Cluster id', type=str).completer = self._completer_get_cluster_list
         argument = subcommand.add_argument('--cp-only', help='Update the control plane only', type=bool, default=False, dest='mgmt_only', required=False)
         argument = subcommand.add_argument('--restart', help='Restart the management services', type=bool, default=False, dest='restart', required=False)
+        argument = subcommand.add_argument('--spdk-image', help='Restart the storage nodes using the provided image', type=str, dest='spdk_image', required=False)
+        argument = subcommand.add_argument('--mgmt-image', help='Restart the management services using the provided image', type=str, dest='mgmt_image', required=False)
 
     def init_cluster__graceful_shutdown(self, subparser):
         subcommand = self.add_sub_command(subparser, 'graceful-shutdown', 'Initiates a graceful shutdown of a cluster\'s storage nodes')
@@ -534,6 +539,7 @@ class CLIWrapper(CLIWrapperBase):
     def init_cluster__list_tasks(self, subparser):
         subcommand = self.add_sub_command(subparser, 'list-tasks', 'Lists tasks of a cluster')
         subcommand.add_argument('cluster_id', help='Cluster id', type=str).completer = self._completer_get_cluster_list
+        argument = subcommand.add_argument('--limit', help='show last number of tasks, default 50', type=int, default=50, dest='limit', required=False)
 
     def init_cluster__cancel_task(self, subparser):
         subcommand = self.add_sub_command(subparser, 'cancel-task', 'Cancels task by task id')
@@ -628,6 +634,7 @@ class CLIWrapper(CLIWrapperBase):
     def init_volume__connect(self, subparser):
         subcommand = self.add_sub_command(subparser, 'connect', 'Gets the logical volume\'s NVMe/TCP connection string(s)')
         subcommand.add_argument('volume_id', help='Logical volume id', type=str)
+        argument = subcommand.add_argument('--ctrl-loss-tmo', help='Control loss timeout for this volume', type=int, dest='ctrl_loss_tmo', required=False)
 
     def init_volume__resize(self, subparser):
         subcommand = self.add_sub_command(subparser, 'resize', 'Resizes a logical volume')
@@ -901,6 +908,7 @@ class CLIWrapper(CLIWrapperBase):
                     args.max_snap = 5000
                     args.max_prov = '0'
                     args.spdk_image = None
+                    args.reattach_volume = None
                     args.spdk_debug = None
                     args.small_bufsize = 0
                     args.large_bufsize = 0

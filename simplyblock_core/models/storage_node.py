@@ -114,7 +114,8 @@ class StorageNode(BaseNodeObject):
                     serial_number='sbcli-cn',
                     model_number=model_number,
             ):
-                raise RPCException(f'Failed to create subsystem for {nqn}')
+                logger.error("fFailed to create subsystem for {nqn}")
+                # raise RPCException(f'Failed to create subsystem for {nqn}')
 
             for ip in (iface.ip4_address for iface in self.data_nics):
                 if not rpc_client.listeners_create(
@@ -123,7 +124,8 @@ class StorageNode(BaseNodeObject):
                         traddr=ip,
                         trsvcid=port,
                 ):
-                    raise RPCException(f'Failed to create listener for {nqn}')
+                    logger.error(f'Failed to create listener for {nqn}')
+                    # raise RPCException(f'Failed to create listener for {nqn}')
 
             if not rpc_client.nvmf_subsystem_add_ns(
                     nqn=nqn,
@@ -131,12 +133,14 @@ class StorageNode(BaseNodeObject):
                     uuid=uuid,
                     nguid=nguid,
             ):
-                raise RPCException(f'Failed to add namespace to subsytem {nqn}')
-        except RPCException:
-            if self.hublvol and rpc_client.subsystem_list(self.hublvol.nqn):
-                rpc_client.subsystem_delete(self.hublvol.nqn)
-
-            raise
+                logger.error(f'Failed to add namespace to subsytem {nqn}')
+                # raise RPCException(f'Failed to add namespace to subsytem {nqn}')
+        except RPCException as e:
+            logger.exception(e)
+            # if self.hublvol and rpc_client.subsystem_list(self.hublvol.nqn):
+            #     rpc_client.subsystem_delete(self.hublvol.nqn)
+            #
+            # raise
 
     def create_hublvol(self, cluster_nqn):
         """Create a hublvol for this node's lvstore

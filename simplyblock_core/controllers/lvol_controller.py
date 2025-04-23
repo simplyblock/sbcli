@@ -1144,7 +1144,7 @@ def get_lvol(lvol_id_or_name, is_json):
         return utils.print_table(data2)
 
 
-def connect_lvol(uuid):
+def connect_lvol(uuid, ctrl_loss_tmo=constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO):
     db_controller = DBController()
     lvol = db_controller.get_lvol_by_id(uuid)
     if not lvol:
@@ -1171,11 +1171,11 @@ def connect_lvol(uuid):
                 "port": port,
                 "nqn": lvol.nqn,
                 "reconnect-delay": constants.LVOL_NVME_CONNECT_RECONNECT_DELAY,
-                "ctrl-loss-tmo": constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO,
+                "ctrl-loss-tmo": ctrl_loss_tmo,
                 "nr-io-queues": constants.LVOL_NVME_CONNECT_NR_IO_QUEUES,
                 "keep-alive-tmo": constants.LVOL_NVME_KEEP_ALIVE_TO,
                 "connect": f"sudo nvme connect --reconnect-delay={constants.LVOL_NVME_CONNECT_RECONNECT_DELAY} "
-                           f"--ctrl-loss-tmo={constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO} "
+                           f"--ctrl-loss-tmo={ctrl_loss_tmo} "
                            f"--nr-io-queues={constants.LVOL_NVME_CONNECT_NR_IO_QUEUES} "
                            f"--keep-alive-tmo={constants.LVOL_NVME_KEEP_ALIVE_TO} "
                            f"--transport={transport} --traddr={ip} --trsvcid={port} --nqn={lvol.nqn}",

@@ -15,7 +15,7 @@ spec:
       hostNetwork: true
       containers:
       - name: c-node-api-container
-        image: hamdykhader/simplyblock:latest
+        image: simplyblock/simplyblock:main
         imagePullPolicy: "Always"
         command: ["python", "simplyblock_web/node_webapp.py", "caching_kubernetes_node"]
         securityContext:

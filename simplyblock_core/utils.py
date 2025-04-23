@@ -625,40 +625,41 @@ def _parse_unit(unit: str, mode: str = 'si/iec', strict: bool = True) -> tuple[i
     )
 
 
-def parse_size(size_string: str, mode: str = 'si/iec', unit: str = '', strict: bool = False) -> int:
+def parse_size(size: Union[str, int], mode: str = 'si/iec', assume_unit: str = '', strict: bool = False) -> int:
     """Parse the given data size
 
-    If passed and not explicitly given, 'unit' will be assumed.
+    If passed and not explicitly given, 'assume_unit' will be assumed.
     Mode can be either 'si/iec' to parse decimal (SI) and binary (IEC) units, or
     'jedec' for binary only units. If `strict`, parsing will be case-sensitive and
     expect the 'B' suffix.
     """
-    if not unit:
-        try:
-            x = int(size_string)
-            return x
-        except Exception:
-            pass
-
     try:
-        m = re.match(r'^(?P<size_in_unit>\d+) ?(?P<unit>\w+)?$', size_string.strip())
-        if m is None:
-            raise ValueError(f"Invalid size: {size_string}")
+        if isinstance(size, int):
+            size_in_unit = size
+            unit = assume_unit
+        else:
+            m = re.match(r'^(?P<size_in_unit>\d+) ?(?P<unit>\w+)?$', size.strip())
+            if m is None:
+                raise ValueError(f"Invalid size: {size}")
 
-        size_in_unit = int(m.group('size_in_unit'))
-        unit = m.group('unit') if m.group('unit') else unit
+            size_in_unit = int(m.group('size_in_unit'))
+            unit = m.group('unit') if m.group('unit') else assume_unit
+
         base, exponent = _parse_unit(unit, mode, strict=strict)
         return size_in_unit * (base ** exponent)
     except ValueError:
         return -1
 
 
-def convert_size(size: int, unit: str) -> int:
+def convert_size(size: int | str, unit: str) -> int:
     """Convert the given number of bytes to target unit
 
     Accepts both decimal (kB, MB, ...) and binary (KiB, MiB, ...) units.
     Note that the result will be cast to int, i.e. rounded down.
     """
+    if isinstance(size, str):
+        size = int(size)
+
     base, exponent = _parse_unit(unit, 'si/iec')
     return int(size / (base ** exponent))
 
@@ -779,12 +780,11 @@ def get_next_dev_port(cluster_id):
     for node in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
         if node.nvmf_port > 0:
             used_ports.append(node.nvmf_port)
-
-    for i in range(1000):
-        next_port = port + i
-
-    return port
-
+    next_port = port
+    while True:
+        if next_port not in used_ports:
+            return next_port
+        next_port += 1
 
 def generate_realtime_variables_file(isolated_cores, realtime_variables_file_path="/etc/tuned/realtime-variables.conf"):
     """

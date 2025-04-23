@@ -139,14 +139,15 @@ def spdk_process_start():
     if 'spdk_cpu_mask' in data:
         spdk_cpu_mask = data['spdk_cpu_mask']
 
-    spdk_mem = None
+    spdk_mem_mib = core_utils.convert_size(core_utils.parse_size('4GiB'), 'MiB')
     if 'spdk_mem' in data:
-        spdk_mem = data['spdk_mem']
+        spdk_mem = core_utils.parse_size(data['spdk_mem'])
+        spdk_mem_mib = core_utils.convert_size(spdk_mem, 'MiB')
 
-    total_mem = ""
+    total_mem_mib = ""
     if 'total_mem' in data:
-        total_mem = data['total_mem']
-        total_mem = int(core_utils.parse_size(total_mem) / (1000 * 1000))
+        total_mem = core_utils.parse_size(data['total_mem'])
+        total_mem_mib = core_utils.convert_size(total_mem, 'MB')
 
     multi_threading_enabled = False
     if 'multi_threading_enabled' in data:
@@ -158,9 +159,6 @@ def spdk_process_start():
             timeout = int(data['timeout'])
         except:
             pass
-
-    spdk_mem_mib = core_utils.convert_size(
-            data.get('spdk_mem', core_utils.parse_size('4GiB')), 'MiB')
 
     node_docker = get_docker_client()
     nodes = node_docker.containers.list(all=True)
@@ -494,18 +492,18 @@ def delete_gpt_partitions_for_dev():
 
 CPU_INFO = cpuinfo.get_cpu_info()
 HOSTNAME, _, _ = node_utils.run_command("hostname -s")
-SYSTEM_ID = ""
-CLOUD_INFO = get_amazon_cloud_info()
-if not CLOUD_INFO:
-    CLOUD_INFO = get_google_cloud_info()
+SYSTEM_ID, _, _ = node_utils.run_command("dmidecode -s system-uuid")
+CLOUD_INFO = {}
+if not os.environ.get("WITHOUT_CLOUD_INFO"):
+    CLOUD_INFO = get_amazon_cloud_info()
+    if not CLOUD_INFO:
+        CLOUD_INFO = get_google_cloud_info()
 
-if not CLOUD_INFO:
-    CLOUD_INFO = get_equinix_cloud_info()
+    if not CLOUD_INFO:
+        CLOUD_INFO = get_equinix_cloud_info()
 
-if CLOUD_INFO:
-    SYSTEM_ID = CLOUD_INFO["id"]
-else:
-    SYSTEM_ID, _, _ = node_utils.run_command("dmidecode -s system-uuid")
+    if CLOUD_INFO:
+        SYSTEM_ID = CLOUD_INFO["id"]
 
 
 @bp.route('/bind_device_to_spdk', methods=['POST'])

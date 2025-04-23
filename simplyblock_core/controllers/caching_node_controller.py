@@ -16,60 +16,12 @@ from simplyblock_core.models.caching_node import CachingNode, CachedLVol
 from simplyblock_core.models.iface import IFace
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.pool import Pool
+from simplyblock_core.storage_node_ops import addNvmeDevices
 from simplyblock_core.rpc_client import RPCClient
 
 logger = lg.getLogger()
 
 db_controller = DBController()
-
-
-def addNvmeDevices(rpc_client, devs, snode):
-    devices = []
-    ret = rpc_client.bdev_nvme_controller_list()
-    ctr_map = {}
-    try:
-        if ret:
-            ctr_map = {i["ctrlrs"][0]['trid']['traddr']: i["name"] for i in ret}
-    except:
-        pass
-
-    for index, pcie in enumerate(devs):
-        if pcie in ctr_map:
-            nvme_controller = ctr_map[pcie]
-            nvme_bdevs = []
-            for bdev in rpc_client.get_bdevs():
-                if bdev['name'].startswith(nvme_controller):
-                    nvme_bdevs.append(bdev['name'])
-        else:
-            pci_st = str(pcie).replace("0", "").replace(":", "").replace(".", "")
-            nvme_controller = "nvme_%s" % pci_st
-            nvme_bdevs, err = rpc_client.bdev_nvme_controller_attach(nvme_controller, pcie)
-            time.sleep(2)
-
-        for nvme_bdev in nvme_bdevs:
-            rpc_client.bdev_examine(nvme_bdev)
-            time.sleep(3)
-            ret = rpc_client.get_bdevs(nvme_bdev)
-            nvme_dict = ret[0]
-            nvme_driver_data = nvme_dict['driver_specific']['nvme'][0]
-            model_number = nvme_driver_data['ctrlr_data']['model_number']
-            total_size = nvme_dict['block_size'] * nvme_dict['num_blocks']
-
-            devices.append(
-                NVMeDevice({
-                    'uuid': str(uuid.uuid4()),
-                    'device_name': nvme_dict['name'],
-                    'size': total_size,
-                    'pcie_address': nvme_driver_data['pci_address'],
-                    'model_id': model_number,
-                    'serial_number': nvme_driver_data['ctrlr_data']['serial_number'],
-                    'nvme_bdev': nvme_bdev,
-                    'nvme_controller': nvme_controller,
-                    'node_id': snode.get_id(),
-                    'cluster_id': snode.cluster_id,
-                    'status': NVMeDevice.STATUS_ONLINE
-                }))
-    return devices
 
 
 def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spdk_mem, spdk_image=None, namespace=None, multipathing=True):
@@ -194,7 +146,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spd
     # logger.info(f"Free Hugepages detected: {utils.humanbytes(mem)}")
 
     # adding devices
-    nvme_devs = addNvmeDevices(rpc_client, node_info['spdk_pcie_list'], snode)
+    nvme_devs = addNvmeDevices(snode, node_info['spdk_pcie_list'])
     if not nvme_devs:
         logger.error("No NVMe devices was found!")
         return False

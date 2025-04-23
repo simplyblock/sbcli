@@ -1579,6 +1579,58 @@ class SshUtils:
             self.logger.error(f"Failed to fetch sbcli-dev version from node {node}: {e}")
         return version if version else "ERROR"
 
+    def get_image_dict(self, node):
+        """Get images dictionary
+
+        Args:
+            node (str): Node IP to check docker images list on
+
+        Returns:
+            dict: Image name vs the Image hash
+        """
+        cmd = "docker images --format '{{.Repository}}:{{.Tag}} {{.ID}}'"
+        output, _ = self.exec_command(node=node, command=cmd)
+        image_map = {}
+        for line in output.strip().split('\n'):
+            if line:
+                name_tag, img_id = line.strip().split()
+                image_map[name_tag] = img_id
+        return image_map
+    
+    def start_resource_monitors(self, node_ip, log_dir):
+        """
+        Starts background resource monitoring for:
+        1. Root partition usage
+        2. Container-wise memory usage
+
+        Each logs every 10s to a separate file in the log_dir.
+        """
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        root_log = f"{log_dir}/root_partition_usage_{node_ip}_{timestamp}.txt"
+        docker_mem_log = f"{log_dir}/docker_mem_usage_{node_ip}_{timestamp}.txt"
+
+        # Ensure log directory exists
+        self.exec_command(node_ip, f"sudo mkdir -p {log_dir} && sudo chmod 777 {log_dir}")
+
+        # Root partition utilization monitor (df -h /)
+        df_cmd = f"""sudo tmux new-session -d -s root_usage_monitor \
+        'bash -c "while true; do date >> {root_log}; df -h / >> {root_log}; echo >> {root_log}; sleep 10; done"'"""
+
+
+        # Docker memory usage monitor (docker stats --no-stream)
+        docker_cmd = "sudo tmux new-session -d -s docker_mem_monitor " \
+                     "'while true; do " \
+                     "date >> %s; " \
+                     "docker stats --no-stream --format \"table {{.Name}}\\t{{.MemUsage}}\" >> %s; " \
+                     "echo >> %s; " \
+                     "sleep 10; " \
+                     "done'" % (docker_mem_log, docker_mem_log, docker_mem_log)
+
+
+        self.exec_command(node_ip, df_cmd)
+        self.exec_command(node_ip, docker_cmd)
+
+        self.logger.info(f"Started root partition and container memory logging on {node_ip}")
 
 
 
