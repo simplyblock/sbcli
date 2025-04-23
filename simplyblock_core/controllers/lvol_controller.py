@@ -123,38 +123,9 @@ def validate_add_lvol_func(name, size, host_id_or_name, pool_id_or_name,
             if lvol.lvol_name == name:
                 return False, f"LVol name must be unique: {name}"
 
-    if pool.has_qos():
-        if pool.max_rw_ios_per_sec > 0:
-            if max_rw_iops <= 0:
-                return False, "LVol must have max_rw_iops value because the Pool has it set"
-            total = pool_controller.get_pool_total_rw_iops(pool.get_id())
-            if max_rw_iops + total > pool.max_rw_ios_per_sec:
-                return False, f"Invalid LVol max_rw_iops: {max_rw_iops} " \
-                              f"Pool Max RW IOPS has reached {total} of {pool.max_rw_ios_per_sec}"
-
-        if pool.max_rw_mbytes_per_sec > 0:
-            if max_rw_mbytes <= 0:
-                return False, "LVol must have max_rw_mbytes value because the Pool has it set"
-            total = pool_controller.get_pool_total_rw_mbytes(pool.get_id())
-            if max_rw_mbytes + total > pool.max_rw_mbytes_per_sec:
-                return False, f"Invalid LVol max_rw_mbytes: {max_rw_mbytes} " \
-                              f"Pool Max RW MBytes has reached {total} of {pool.max_rw_mbytes_per_sec}"
-
-        if pool.max_r_mbytes_per_sec > 0:
-            if max_r_mbytes <= 0:
-                return False, "LVol must have max_r_mbytes value because the Pool has it set"
-            total = pool_controller.get_pool_total_r_mbytes(pool.get_id())
-            if max_r_mbytes + total > pool.max_r_mbytes_per_sec:
-                return False, f"Invalid LVol max_r_mbytes: {max_r_mbytes} " \
-                              f"Pool Max R MBytes has reached {total} of {pool.max_r_mbytes_per_sec}"
-
-        if pool.max_w_mbytes_per_sec > 0:
-            if max_w_mbytes <= 0:
-                return False, "LVol must have max_w_mbytes value because the Pool has it set"
-            total = pool_controller.get_pool_total_w_mbytes(pool.get_id())
-            if max_w_mbytes + total > pool.max_w_mbytes_per_sec:
-                return False, f"Invalid LVol max_w_mbytes: {max_w_mbytes} " \
-                              f"Pool Max W MBytes has reached {total} of {pool.max_w_mbytes_per_sec}"
+    # If user gave a QOS and the pool also have a QOS, return error
+    if (max_rw_iops or max_rw_mbytes or max_r_mbytes or max_w_mbytes) and (pool.has_qos()):
+        return False, "Both Lvol and Pool have QOS settings"
 
     return True, ""
 
@@ -585,6 +556,8 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
     lvol.write_to_db(db_controller.kv_store)
     lvol_events.lvol_create(lvol)
 
+    connect_lvol_to_pool(lvol.uuid)
+
     # set QOS
     if max_rw_iops or max_rw_mbytes or max_r_mbytes or max_w_mbytes:
         set_lvol(lvol.uuid, max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes)
@@ -985,6 +958,42 @@ def delete_lvol(id_or_name, force_delete=False):
     logger.info("Done")
     return True
 
+def connect_lvol_to_pool(uuid):
+    db_controller = DBController()
+    lvol = db_controller.get_lvol_by_id(uuid)
+    if not lvol:
+        logger.error(f"lvol not found: {uuid}")
+        return False
+    pool = db_controller.get_pool_by_id(lvol.pool_uuid)
+    if pool.status == Pool.STATUS_INACTIVE:
+        logger.error(f"Pool is disabled")
+        return False
+
+    snode = db_controller.get_storage_node_by_hostname(lvol.hostname)
+    # creating RPCClient instance
+    rpc_client = RPCClient(
+        snode.mgmt_ip,
+        snode.rpc_port,
+        snode.rpc_username,
+        snode.rpc_password)
+
+    ret = rpc_client.bdev_lvol_add_to_group(pool.numeric_id, [lvol.top_bdev])
+    if not ret:
+        logger.error("RPC failed bdev_lvol_add_to_group")
+        return False
+
+    # re-apply the QOS limits
+    ret = rpc_client.bdev_lvol_set_qos_limit(pool.numeric_id, pool.max_rw_ios_per_sec,
+                                        pool.max_rw_mbytes_per_sec, pool.max_r_mbytes_per_sec,
+                                        pool.max_w_mbytes_per_sec)
+    if not ret:
+        logger.error("RPC failed bdev_set_qos_limit")
+        return False
+
+    lvol.write_to_db(db_controller.kv_store)
+    pool.write_to_db(db_controller.kv_store)
+    logger.info("Done")
+    return True
 
 def set_lvol(uuid, max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes, name=None):
     db_controller = DBController()
@@ -995,6 +1004,9 @@ def set_lvol(uuid, max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes, name=
     pool = db_controller.get_pool_by_id(lvol.pool_uuid)
     if pool.status == Pool.STATUS_INACTIVE:
         logger.error(f"Pool is disabled")
+        return False
+    if pool.has_qos():
+        logger.error(f"Pool already has QOS settings")
         return False
 
     if name:

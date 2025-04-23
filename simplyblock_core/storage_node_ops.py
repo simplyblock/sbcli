@@ -1946,6 +1946,26 @@ def restart_storage_node(
             logger.info("Setting node status to Online")
             set_node_status(snode.get_id(), StorageNode.STATUS_ONLINE)
 
+            lvol_list = db_controller.get_lvols_by_node_id(snode.get_id())
+            logger.info(f"Found {len(lvol_list)} lvols")
+
+            # connect lvols to their respect pool
+            for lvol in lvol_list:
+                lvol_controller.connect_lvol_to_pool(lvol.uuid)
+
+            # recreate pools
+            pools = db_controller.get_pools()
+            for pool in pools:
+                ret = rpc_client.bdev_lvol_set_qos_limit(pool.numeric_id,
+                                                        pool.max_rw_ios_per_sec, 
+                                                        pool.max_rw_mbytes_per_sec,
+                                                        pool.max_r_mbytes_per_sec,
+                                                        pool.max_w_mbytes_per_sec,
+                                                        )
+                if not ret:
+                    logger.error("RPC failed bdev_lvol_set_qos_limit")
+                    return False
+
             for dev in snode.nvme_devices:
                 if dev.status == NVMeDevice.STATUS_ONLINE:
                     logger.info(f"Starting migration task for device {dev.get_id()}")
@@ -2938,7 +2958,6 @@ def recreate_lvstore(snode):
 
     ### 1- create distribs and raid
     ret, err = _create_bdev_stack(snode, [])
-
     if err:
         logger.error(f"Failed to recreate lvstore on node {snode.get_id()}")
         logger.error(err)
@@ -2951,6 +2970,7 @@ def recreate_lvstore(snode):
     sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
     sec_node_api = SNodeClient(sec_node.api_endpoint, timeout=5, retry=5)
 
+    lvol_list = db_controller.get_lvols_by_node_id(snode.get_id())
     lvol_list = []
     for lv in db_controller.get_lvols_by_node_id(snode.get_id()):
         if lv.status not in [LVol.STATUS_IN_DELETION, LVol.STATUS_IN_CREATION]:
@@ -3048,6 +3068,7 @@ def recreate_lvstore(snode):
         sec_node.lvstore_status = "ready"
         sec_node.write_to_db()
 
+    # all lvols to their respect loops
     if snode.lvstore_stack_secondary_1:
         node = db_controller.get_storage_node_by_id(snode.lvstore_stack_secondary_1)
         if node:

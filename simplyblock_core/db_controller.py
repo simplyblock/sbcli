@@ -167,6 +167,14 @@ class DBController(metaclass=Singleton):
                 lvols.append(lvol)
         return sorted(lvols, key=lambda x: x.create_dt)
 
+    def get_hostnames_by_pool_id(self, pool_id) -> List[str]:
+        lvols = self.get_lvols_by_pool_id(pool_id)
+        hostnames = []
+        for lv in lvols:
+            if (lv.hostname not in hostnames):
+                hostnames.append(lv.hostname)
+        return hostnames
+
     def get_snapshots(self) -> List[SnapShot]:
         ret = SnapShot().read_from_db(self.kv_store)
         return ret
