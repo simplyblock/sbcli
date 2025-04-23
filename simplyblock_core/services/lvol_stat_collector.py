@@ -1,6 +1,5 @@
 # coding=utf-8
 import time
-import os
 
 from simplyblock_core import constants, db_controller, utils
 from simplyblock_core.controllers import lvol_events
@@ -31,7 +30,7 @@ def sum_stats(stats_list):
                     ret[key] += v_int
                 else:
                     ret[key] = v_int
-            except:
+            except Exception:
                 pass
     return ret
 
@@ -245,7 +244,6 @@ while True:
                         if sec_node.get_id() not in all_node_bdev_names or not all_node_bdev_names[sec_node.get_id()]:
                             ret = sec_rpc_client.get_bdevs()
                             if ret:
-                                # node_bdev_names = {}
                                 node_bdev_names = {b['name']: b for b in ret}
                                 all_node_bdev_names[sec_node.get_id()] = node_bdev_names
 

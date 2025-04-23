@@ -3,8 +3,6 @@ import time
 from datetime import datetime
 
 from simplyblock_core import utils
-logger = utils.get_logger(__name__)
-
 from simplyblock_core.controllers import health_controller, storage_events, device_events, tcp_ports_events
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.nvme_device import NVMeDevice
@@ -13,6 +11,7 @@ from simplyblock_core.rpc_client import RPCClient
 from simplyblock_core import constants, db_controller, distr_controller, storage_node_ops
 from simplyblock_core.snode_client import SNodeClient
 
+logger = utils.get_logger(__name__)
 
 utils.init_sentry_sdk()
 

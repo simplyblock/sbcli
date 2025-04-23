@@ -11,7 +11,7 @@ import docker
 from docker.types import LogConfig
 from flask_openapi3 import APIBlueprint
 
-from simplyblock_web import utils, node_utils
+from simplyblock_web import utils
 from simplyblock_core import scripts, constants, utils as core_utils
 from simplyblock_core.utils import pull_docker_image_with_retry
 
@@ -86,11 +86,10 @@ def spdk_process_start(body: SPDKParams):
             '/lib/modules/:/lib/modules/',
             '/dev/hugepages:/mnt/huge',
             '/sys:/sys'],
-        # restart_policy={"Name": "on-failure", "MaximumRetryCount": 99}
     )
 
 
-    container2 = node_docker.containers.run(
+    _ = node_docker.containers.run(
         constants.SIMPLY_BLOCK_DOCKER_IMAGE,
         "python simplyblock_core/services/spdk_http_proxy_server.py",
         name="spdk_proxy",
@@ -106,7 +105,6 @@ def spdk_process_start(body: SPDKParams):
             f"RPC_USERNAME={body.rpc_username}",
             f"RPC_PASSWORD={body.rpc_password}",
         ]
-        # restart_policy={"Name": "always"}
     )
     retries = 10
     while retries > 0:
@@ -174,7 +172,7 @@ class _DBConnectionParams(BaseModel):
 })
 def join_db(body: _DBConnectionParams):
     logger.info("Setting DB connection")
-    ret = scripts.set_db_config(body.db_connection)
+    scripts.set_db_config(body.db_connection)
 
     try:
         node_docker = get_docker_client()
@@ -183,6 +181,6 @@ def join_db(body: _DBConnectionParams):
             if node.attrs["Name"] == "/spdk_proxy":
                 node_docker.containers.get(node.attrs["Id"]).restart()
                 break
-    except:
+    except Exception:
         pass
     return utils.get_response(True)

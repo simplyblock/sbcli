@@ -34,7 +34,7 @@ def send_node_status_event(node, node_status, target_node=None):
             continue
         logger.info(f"Sending to: {node.get_id()}")
         rpc_client = RPCClient(node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password, timeout=3, retry=1)
-        ret = rpc_client.distr_status_events_update(events)
+        _ = rpc_client.distr_status_events_update(events)
 
 
 def send_dev_status_event(device, status, target_node=None):
@@ -154,21 +154,15 @@ def get_distr_cluster_map(snodes, target_node, distr_name=""):
         "map_prob": [d for k, d in map_prob.items()]
     }
     if cluster.enable_node_affinity:
-        # if target_node.is_secondary_node and distr_name:
-        #     for index, snode in enumerate(snodes):
-        #         for bdev in snode.lvstore_stack:
-        #             if bdev['type'] == "bdev_distr" and bdev['name'] == distr_name:
-        #                 local_node_index = index
-        #                 break
         cl_map['ppln1'] = local_node_index
     return cl_map
 
 
 def parse_distr_cluster_map(map_string):
     db_controller = DBController()
-    node_pattern = re.compile(r".*uuid_node=(.*)  status=(.*)$", re.IGNORECASE)
+    node_pattern = re.compile(r".*uuid_node=(.*)\s+status=(.*)$", re.IGNORECASE)
     device_pattern = re.compile(
-        r".*storage_ID=(.*)  status=(.*)  uuid_device=(.*)  storage_bdev_name=(.*)$", re.IGNORECASE)
+        r".*storage_ID=(.*)\s+status=(.*)\s+uuid_device=(.*)\s+storage_bdev_name=(.*)$", re.IGNORECASE)
 
     results = []
     passed = True
@@ -201,7 +195,7 @@ def parse_distr_cluster_map(map_string):
             results.append(data)
         m = device_pattern.match(line)
         if m:
-            storage_id, status, device_id, bdev_name = m.groups()
+            _, status, device_id, _ = m.groups()
             data = {
                 "Kind": "Device",
                 "UUID": device_id,

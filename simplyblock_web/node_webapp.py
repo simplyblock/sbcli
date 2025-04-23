@@ -1,10 +1,6 @@
 #!/usr/bin/env python
 # encoding: utf-8
-from simplyblock_core import utils as core_utils
-logger = core_utils.get_logger(__name__)
-
 import argparse
-
 from flask_openapi3 import OpenAPI
 
 from simplyblock_web import utils

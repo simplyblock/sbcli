@@ -19,21 +19,17 @@ db = db_controller.DBController()
 def set_node_online(node):
     if node.status == CachingNode.STATUS_UNREACHABLE:
         snode = db.get_caching_node_by_id(node.get_id())
-        old_status = snode.status
         snode.status = CachingNode.STATUS_ONLINE
         snode.updated_at = str(datetime.now())
         snode.write_to_db()
-        # mgmt_events.status_change(snode, snode.status, old_status, caused_by="monitor")
 
 
 def set_node_offline(node):
     if node.status == CachingNode.STATUS_ONLINE:
         snode = db.get_caching_node_by_id(node.get_id())
-        old_status = snode.status
         snode.status = CachingNode.STATUS_UNREACHABLE
         snode.updated_at = str(datetime.now())
         snode.write_to_db()
-        # mgmt_events.status_change(snode, snode.status, old_status, caused_by="monitor")
 
 
 def ping_host(ip):
@@ -69,7 +65,7 @@ while True:
             node.rpc_password,
             timeout=3, retry=1)
         try:
-            logger.info(f"Calling rpc get_version...")
+            logger.info("Calling rpc get_version...")
             response = rpc_client.get_version()
             if response:
                 logger.info(f"Node {node.hostname} is online")

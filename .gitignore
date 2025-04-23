@@ -9,3 +9,6 @@ e2e/logs/*.log!
 sbcli*
 build
 dist
+
+.ruff_cache
+.env

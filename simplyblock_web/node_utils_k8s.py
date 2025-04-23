@@ -5,7 +5,6 @@ import os
 
 import jc
 from kubernetes.stream import stream
-from kubernetes import client, config
 from simplyblock_core.utils import get_k8s_core_client
 
 

@@ -1,7 +1,5 @@
 # coding=utf-8
-import logging
 import time
-import sys
 from datetime import datetime
 
 from simplyblock_core import db_controller, utils

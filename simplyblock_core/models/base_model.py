@@ -1,6 +1,5 @@
 # coding=utf-8
 import pprint
-import logging
 
 import json
 from inspect import ismethod
@@ -72,17 +71,17 @@ class BaseModel(object):
                 if dtype in [int, float, str, bool]:
                     try:
                         value = dtype(value)
-                    except:
-                        if type(value) == list and dtype == int:
+                    except Exception:
+                        if type(value) is list and dtype is int:
                             value = len(value)
 
                 elif hasattr(dtype, '__origin__'):
-                    if dtype.__origin__ == list:
+                    if dtype.__origin__ is list:
                         if hasattr(dtype, "__args__") and hasattr(dtype.__args__[0], "from_dict"):
                             value = [dtype.__args__[0]().from_dict(item) for item in data[attr]]
                         else:
                             value = data[attr]
-                    elif dtype.__origin__ == Mapping:
+                    elif isinstance(dtype.__origin__ , Mapping):
                         if hasattr(dtype, "__args__") and hasattr(dtype.__args__[1], "from_dict"):
                             value = {item: dtype.__args__[1]().from_dict(data[attr][item]) for item in data[attr]}
                         else:
@@ -138,8 +137,8 @@ class BaseModel(object):
             return []
 
     def get_last(self, kv_store):
-        id = self.get_db_id(" ")
-        objects = self.read_from_db(kv_store, id=id, limit=1, reverse=True)
+        db_id = self.get_db_id(" ")
+        objects = self.read_from_db(kv_store, id=db_id, limit=1, reverse=True)
         if objects:
             return objects[0]
         return None
@@ -178,7 +177,7 @@ class BaseModel(object):
         return self.get_id() == other.get_id()
 
     def __ne__(self, other):
-        return not self == other
+        return self != other
 
     def __getitem__(self, item):
         if isinstance(item, str) and item in self.get_attrs_map().keys():

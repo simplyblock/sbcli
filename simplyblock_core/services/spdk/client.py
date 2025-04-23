@@ -23,12 +23,12 @@ def get_addr_type(addr):
     try:
         socket.inet_pton(socket.AF_INET, addr)
         return socket.AF_INET
-    except Exception as e:
+    except Exception:
         pass
     try:
         socket.inet_pton(socket.AF_INET6, addr)
         return socket.AF_INET6
-    except Exception as e:
+    except Exception:
         pass
     if os.path.exists(addr):
         return socket.AF_UNIX
@@ -56,12 +56,11 @@ class JSONRPCClient(object):
         self._recv_buf = ""
         self._reqs = []
 
-        for i in range(connect_retries):
+        for _ in range(connect_retries):
             try:
                 self._connect(addr, port)
                 return
-            except Exception as e:
-                # ignore and retry in 200ms
+            except Exception:
                 time.sleep(0.2)
 
         # try one last time without try/except
@@ -84,7 +83,7 @@ class JSONRPCClient(object):
             elif addr_type == socket.AF_INET6:
                 self._logger.debug("Trying to connect to IPv6 address addr:%s, port:%i", addr, port)
                 for res in socket.getaddrinfo(addr, port, socket.AF_INET6, socket.SOCK_STREAM, socket.SOL_TCP):
-                    af, socktype, proto, canonname, sa = res
+                    af, socktype, proto, _, sa = res
                 self.sock = socket.socket(af, socktype, proto)
                 self.sock.connect(sa)
             elif addr_type == socket.AF_INET:
@@ -141,9 +140,9 @@ class JSONRPCClient(object):
         self.sock.sendall(reqstr.encode("utf-8"))
 
     def send(self, method, params=None):
-        id = self.add_request(method, params)
+        request_id = self.add_request(method, params)
         self.flush()
-        return id
+        return request_id
 
     def decode_one_response(self):
         try:

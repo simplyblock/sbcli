@@ -101,7 +101,7 @@ def delete_pool(uuid):
     if pool.secret:
         req_secret = request.headers.get('secret', "")
         if req_secret != pool.secret:
-            return utils.get_response_error(f"Pool secret doesn't mach the value in the request header", 400)
+            return utils.get_response_error("Pool secret doesn't mach the value in the request header", 400)
 
     lvols = db.get_lvols_by_pool_id(uuid)
     if lvols and len(lvols) > 0:
@@ -121,11 +121,6 @@ def update_pool(uuid):
 
     if pool.status == Pool.STATUS_INACTIVE:
         return utils.get_response_error("Pool is disabled")
-
-    # if pool.secret:
-    #     req_secret = request.headers.get('secret', "")
-    #     if req_secret != pool.secret:
-    #         return utils.get_response_error(f"Pool secret doesn't mach the value in the request header", 400)
 
     pool_data = request.get_json()
 
@@ -168,7 +163,7 @@ def pool_capacity(uuid):
     if pool.secret:
         req_secret = request.headers.get('secret', "")
         if req_secret != pool.secret:
-            return utils.get_response_error(f"Pool secret doesn't mach the value in the request header", 400)
+            return utils.get_response_error("Pool secret doesn't mach the value in the request header", 400)
 
     out = []
     total_size = 0
@@ -200,7 +195,7 @@ def pool_iostats(uuid, history):
     if pool.secret:
         req_secret = request.headers.get('secret', "")
         if req_secret != pool.secret:
-            return utils.get_response_error(f"Pool secret doesn't mach the value in the request header", 400)
+            return utils.get_response_error("Pool secret doesn't mach the value in the request header", 400)
 
     if history:
         records_number = core_utils.parse_history_param(history)

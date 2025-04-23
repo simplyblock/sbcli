@@ -1,11 +1,9 @@
 #!/usr/bin/env python
 # encoding: utf-8
-import json
 import logging
 import math
 import os
 import time
-import subprocess
 
 import cpuinfo
 import docker
@@ -33,7 +31,7 @@ def get_docker_client():
 
 @bp.route('/scan_devices', methods=['GET'])
 def scan_devices():
-    run_health_check = request.args.get('run_health_check', default=False, type=bool)
+    request.args.get('run_health_check', default=False, type=bool)
     out = {
         "nvme_devices": node_utils.get_nvme_devices(),
         "nvme_pcie_list": node_utils.get_nvme_pcie_list(),
@@ -47,7 +45,7 @@ def scan_devices():
 def spdk_process_start():
     try:
         data = request.get_json()
-    except:
+    except Exception:
         data = {}
 
     spdk_cpu_mask = None
@@ -97,7 +95,6 @@ def spdk_process_start():
         name=f"spdk_{rpc_port}",
         detach=True,
         privileged=True,
-        # network_mode="host",
         log_config=LogConfig(type=LogConfig.types.JOURNALD),
         volumes=[
             '/var/tmp:/var/tmp',
@@ -105,7 +102,6 @@ def spdk_process_start():
             '/lib/modules/:/lib/modules/',
             '/var/lib/systemd/coredump/:/var/lib/systemd/coredump/',
             '/sys:/sys'],
-        # restart_policy={"Name": "on-failure", "MaximumRetryCount": 99}
     )
 
     node_docker.containers.run(
@@ -125,7 +121,6 @@ def spdk_process_start():
             f"RPC_PASSWORD={rpc_password}",
             f"RPC_SOCK={rpc_sock}",
         ]
-        # restart_policy={"Name": "always"}
     )
     retries = 10
     while retries > 0:
@@ -210,7 +205,7 @@ def join_db():
         rpc_port = data['rpc_port']
 
     logger.info("Setting DB connection")
-    ret = scripts.set_db_config(db_connection)
+    scripts.set_db_config(db_connection)
 
     try:
         node_docker = get_docker_client()
@@ -219,7 +214,7 @@ def join_db():
             if node.attrs["Name"] == f"/spdk_proxy_{rpc_port}":
                 node_docker.containers.get(node.attrs["Id"]).restart()
                 break
-    except:
+    except Exception:
         pass
     return utils.get_response(True)
 
@@ -286,7 +281,7 @@ def make_gpt_partitions_for_nbd():
         data = request.get_json()
         nbd_device = data['nbd_device']
         jm_percent = data['jm_percent']
-    except:
+    except Exception:
         pass
 
     cmd_list = [

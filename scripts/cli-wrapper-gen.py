@@ -4,7 +4,6 @@ import sys
 import re
 
 from jsonschema import validators
-from jsonschema.exceptions import ValidationError
 
 
 def is_parameter(item):
@@ -37,7 +36,7 @@ def argument_type(spec):
         return f"regex_type(r'{regex}')"
 
     if spec == 'size':
-        return f"size_type()"
+        return "size_type()"
 
     if isinstance(spec, dict) and ((size := spec.get('size')) is not None):
         min = "utils.parse_size('{}')".format(size['min']) if 'min' in size else None
@@ -71,23 +70,26 @@ def bool_value(value):
 
 
 def default_value(item):
-    type = item["type"]
-    if not "default" in item:
+    item_type = item["type"]
+    if "default" not in item:
         return "None"
     value = item["default"]
-    if type == "str":
+    if item_type == "str":
         return "'%s'" % value
-    elif type == "int":
+    elif item_type == "int":
         return value
-    elif type == "bool":
+    elif item_type == "bool":
         return value if isinstance(value, bool) else value.lower() == "true"
-    elif type == "size" or (isinstance(type, dict) and 'size' in type):
+    elif item_type == "size" or (isinstance(item_type, dict) and 'size' in type):
         return f"'{value}'"
-    elif isinstance(type, dict) and 'range' in type:
+    elif isinstance(item_type, dict) and 'range' in item_type:
         return f"{value}"
     else:
-        raise "unknown data type %s" % type
+        raise "unknown data type %s" % item_type
 
+
+def split_value_range(value):
+    return str.replace("\\.\\.", ', ', value)
 
 def arg_value(item):
     if "action" in item:

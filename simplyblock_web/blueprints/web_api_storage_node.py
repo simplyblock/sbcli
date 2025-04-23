@@ -9,7 +9,7 @@ from flask import Blueprint, request
 from simplyblock_core.controllers import tasks_controller
 from simplyblock_web import utils
 
-from simplyblock_core import db_controller, storage_node_ops, utils as core_utils
+from simplyblock_core import db_controller, storage_node_ops
 
 logger = logging.getLogger(__name__)
 
@@ -139,7 +139,7 @@ def storage_node_shutdown(uuid):
     try:
         args = request.args
         force = bool(args.get('force', True))
-    except:
+    except Exception:
         pass
 
     threading.Thread(
@@ -201,9 +201,9 @@ def storage_node_add():
     enable_test_device = False
     param = req_data.get('enable_test_device')
     if param:
-        if type(param) == bool:
+        if type(param) is bool:
             enable_test_device = param
-        elif type(param) == str:
+        elif type(param) is str:
             enable_test_device = param == "true"
 
     spdk_image = None

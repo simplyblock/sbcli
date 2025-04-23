@@ -21,11 +21,11 @@ def _lvol_event(lvol, message, caused_by, event):
 
 
 def lvol_create(lvol, caused_by=ec.CAUSED_BY_CLI):
-    _lvol_event(lvol, f"LVol created", caused_by, ec.EVENT_OBJ_CREATED)
+    _lvol_event(lvol, "LVol created", caused_by, ec.EVENT_OBJ_CREATED)
 
 
 def lvol_delete(lvol, caused_by=ec.CAUSED_BY_CLI):
-    _lvol_event(lvol, f"LVol deleted", caused_by, ec.EVENT_OBJ_DELETED)
+    _lvol_event(lvol, "LVol deleted", caused_by, ec.EVENT_OBJ_DELETED)
 
 
 def lvol_status_change(lvol, new_state, old_status, caused_by=ec.CAUSED_BY_CLI):

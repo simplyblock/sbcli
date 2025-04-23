@@ -29,20 +29,17 @@ class SNodeClient:
         self.session.timeout = self.timeout
 
     def _request(self, method, path, payload=None):
-        try:
-            logger.debug("Requesting path: %s, params: %s", path, payload)
-            data = None
-            params = None
-            if payload:
-                if method == "GET" :
-                    params = payload
-                else:
-                    data = json.dumps(payload)
+        logger.debug("Requesting path: %s, params: %s", path, payload)
+        data = None
+        params = None
+        if payload:
+            if method == "GET" :
+                params = payload
+            else:
+                data = json.dumps(payload)
 
-            response = self.session.request(method, self.url+path, data=data,
-                                            timeout=self.timeout, params=params)
-        except Exception as e:
-            raise e
+        response = self.session.request(method, self.url+path, data=data,
+                                        timeout=self.timeout, params=params)
 
         logger.debug("Response: status_code: %s, content: %s",
                      response.status_code, response.content)
@@ -123,7 +120,7 @@ class SNodeClient:
         params = {"rpc_port": rpc_port}
         try:
             return self._request("GET", "spdk_process_kill", params)
-        except Exception as e:
+        except Exception:
             return False
 
     def leave_swarm(self):

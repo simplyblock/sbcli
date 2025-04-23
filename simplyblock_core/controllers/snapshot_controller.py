@@ -1,20 +1,17 @@
 # coding=utf-8
-import datetime
-import json
 import logging as lg
 import time
 import uuid
 
 from simplyblock_core.controllers import lvol_controller, snapshot_events, pool_controller
 
-from simplyblock_core import utils, distr_controller, constants
+from simplyblock_core import utils, constants
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.rpc_client import RPCClient
-from simplyblock_core.snode_client import SNodeClient
 
 
 logger = lg.getLogger()
@@ -31,7 +28,7 @@ def add(lvol_id, snapshot_name):
 
     pool = db_controller.get_pool_by_id(lvol.pool_uuid)
     if pool.status == Pool.STATUS_INACTIVE:
-        msg = f"Pool is disabled"
+        msg = "Pool is disabled"
         logger.error(msg)
         return False, msg
 
@@ -48,8 +45,7 @@ def add(lvol_id, snapshot_name):
             return False, msg
 
     for sn in db_controller.get_snapshots():
-        if sn.cluster_id == pool.cluster_id:
-            if sn.snap_name == snapshot_name:
+        if sn.cluster_id == pool.cluster_id and sn.snap_name == snapshot_name:
                 return False, f"Snapshot name must be unique: {snapshot_name}"
 
     logger.info(f"Creating snapshot: {snapshot_name} from LVol: {lvol.get_id()}")
@@ -123,7 +119,7 @@ def add(lvol_id, snapshot_name):
             if sec_node.status == StorageNode.STATUS_ONLINE:
                 secondary_node = sec_node
             elif sec_node.status == StorageNode.STATUS_DOWN:
-                msg = f"Secondary node is in down status, can not create snapshot"
+                msg = "Secondary node is in down status, can not create snapshot"
                 logger.error(msg)
                 return False, msg
             else:
@@ -137,7 +133,7 @@ def add(lvol_id, snapshot_name):
 
         else:
             # both primary and secondary are not online
-            msg = f"Host nodes are not online"
+            msg = "Host nodes are not online"
             logger.error(msg)
             return False, msg
 
@@ -247,7 +243,7 @@ def delete(snapshot_uuid, force_delete=False):
             clones.append(lvol)
 
     if len(clones) >= 1:
-        logger.warning(f"Soft delete snapshot with clones")
+        logger.warning("Soft delete snapshot with clones")
         snap = db_controller.get_snapshot_by_id(snapshot_uuid)
         snap.deleted = True
         snap.write_to_db(db_controller.kv_store)
@@ -284,7 +280,7 @@ def delete(snapshot_uuid, force_delete=False):
             if lvol_controller.is_node_leader(host_node, snap.lvol.lvs_name):
                 primary_node = host_node
                 if sec_node.status == StorageNode.STATUS_DOWN:
-                    msg = f"Secondary node is in down status, can not delete snapshot"
+                    msg = "Secondary node is in down status, can not delete snapshot"
                     logger.error(msg)
                     return False
 
@@ -314,7 +310,7 @@ def delete(snapshot_uuid, force_delete=False):
 
         else:
             # both primary and secondary are not online
-            msg = f"Host nodes are not online"
+            msg = "Host nodes are not online"
             logger.error(msg)
             return False
 
@@ -391,8 +387,7 @@ def clone(snapshot_id, clone_name, new_size=0):
         return False, msg
 
     for lvol in db_controller.get_lvols():
-        if lvol.pool_uuid == pool.get_id():
-            if lvol.lvol_name == clone_name:
+        if lvol.pool_uuid == pool.get_id() and lvol.lvol_name == clone_name:
                 msg=f"LVol name must be unique: {clone_name}"
                 logger.error(msg)
                 return False, msg
@@ -508,7 +503,7 @@ def clone(snapshot_id, clone_name, new_size=0):
             if lvol_controller.is_node_leader(host_node, lvol.lvs_name):
                 primary_node = host_node
                 if sec_node.status == StorageNode.STATUS_DOWN:
-                    msg = f"Secondary node is in down status, can not clone snapshot"
+                    msg = "Secondary node is in down status, can not clone snapshot"
                     logger.error(msg)
                     lvol.remove(db_controller.kv_store)
                     return False, msg
@@ -537,7 +532,7 @@ def clone(snapshot_id, clone_name, new_size=0):
 
         else:
             # both primary and secondary are not online
-            msg = f"Host nodes are not online"
+            msg = "Host nodes are not online"
             logger.error(msg)
             lvol.remove(db_controller.kv_store)
             return False, msg

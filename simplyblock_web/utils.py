@@ -95,7 +95,7 @@ def get_aws_region():
         session.timeout = 3
         data = ec2_metadata.EC2Metadata(session=session).instance_identity_document
         return data["region"]
-    except:
+    except Exception:
         pass
 
     return 'us-east-1'

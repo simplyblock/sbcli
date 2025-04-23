@@ -1,5 +1,4 @@
 # coding=utf-8
-import datetime
 import threading
 import time
 
@@ -66,15 +65,15 @@ def process_device_event(event):
                 device_controller.device_remove(device_obj.get_id())
 
             elif event.message in ['error_write', 'error_unmap']:
-                logger.info(f"Setting device to read-only")
+                logger.info("Setting device to read-only")
                 device_controller.device_set_read_only(device_obj.get_id())
 
             elif event.message == 'error_write_cannot_allocate':
-                logger.info(f"Setting device to cannot_allocate")
+                logger.info("Setting device to cannot_allocate")
                 device_controller.device_set_state(device_obj.get_id(), NVMeDevice.STATUS_CANNOT_ALLOCATE)
 
             else:
-                logger.info(f"Setting device to unavailable")
+                logger.info("Setting device to unavailable")
                 device_controller.device_set_unavailable(device_obj.get_id())
                 device_controller.device_set_io_error(device_obj.get_id(), True)
         else:
@@ -91,7 +90,7 @@ def process_device_event(event):
 def process_lvol_event(event):
     if event.message in ["error_open", 'error_read', "error_write", "error_unmap"]:
         vuid = event.object_dict['vuid']
-        node_id = event.node_id
+        # node_id = event.node_id
         # storage_node_ops.set_node_status(node_id, StorageNode.STATUS_SUSPENDED)
         # event_node_obj = db.get_storage_node_by_id(node_id)
         # tasks_controller.add_node_to_auto_restart(event_node_obj)
@@ -170,9 +169,9 @@ def start_event_collector_on_node(node_id):
                             if sid not in events_groups:
                                 events_groups[sid] = {et:{msg: 1}}
                             elif et not in events_groups[sid]:
-                                events_groups[sid][et]: {msg: 1}
+                                events_groups[sid][et] = {msg: 1}
                             elif msg not in events_groups[sid][et]:
-                                events_groups[sid][et][msg]: 1
+                                events_groups[sid][et][msg] = 1
                             else:
                                 events_groups[sid][et][msg].count += 1
                                 events_groups[sid][et][msg].write_to_db()

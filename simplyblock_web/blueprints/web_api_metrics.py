@@ -1,10 +1,8 @@
 #!/usr/bin/env python
 # encoding: utf-8
-import json
 import logging
-import os
 
-from flask import Blueprint
+from flask import Blueprint, Response
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core import db_controller
@@ -12,7 +10,6 @@ from simplyblock_core.rpc_client import RPCClient
 
 
 from prometheus_client import generate_latest
-from flask import Response
 from prometheus_client import Gauge, CollectorRegistry
 
 

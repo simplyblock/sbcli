@@ -194,7 +194,7 @@ def _check_node_hublvol(node: StorageNode, node_bdev_names=None, node_lvols_nqns
         if ret:
             logger.info(f"Checking lvstore: {node.lvstore} ... ok")
             lvs_info = ret[0]
-            logger.info(f"lVol store Info:")
+            logger.info("lVol store Info:")
             lvs_info_dict = []
             expected: dict[str, Any] = {}
             expected["lvs leadership"] = True
@@ -263,7 +263,7 @@ def _check_sec_node_hublvol(node: StorageNode, node_bdev=None, node_lvols_nqns=N
         if ret:
             logger.info(f"Checking lvstore: {primary_node.lvstore} ... ok")
             lvs_info = ret[0]
-            logger.info(f"lVol store Info:")
+            logger.info("lVol store Info:")
             lvs_info_dict = []
             expected: dict [str, Any] = {}
             expected["name"] = primary_node.lvstore
@@ -309,17 +309,17 @@ def _check_node_lvstore(
     raid = None
     bdev_lvstore = None
     for bdev in lvstore_stack:
-        type = bdev['type']
-        if type == "bdev_raid":
+        bdev_type = bdev['type']
+        if bdev_type == "bdev_raid":
             distribs_list = bdev["distribs_list"]
             raid = bdev["name"]
-        elif type == "bdev_lvstore":
+        elif bdev_type == "bdev_lvstore":
             bdev_lvstore = bdev["name"]
 
     node_distribs_list = []
     for bdev in node.lvstore_stack:
-        type = bdev['type']
-        if type == "bdev_raid":
+        bdev_type = bdev['type']
+        if bdev_type == "bdev_raid":
             node_distribs_list = bdev["distribs_list"]
 
     if not node_bdev_names:
@@ -332,7 +332,7 @@ def _check_node_lvstore(
     for distr in distribs_list:
         if distr in node_bdev_names:
             logger.info(f"Checking distr bdev : {distr} ... ok")
-            logger.info(f"Checking distr JM names:")
+            logger.info("Checking distr JM names:")
             if distr in node_distribs_list:
                 jm_names = storage_node_ops.get_node_jm_names(node)
             elif stack_src_node:
@@ -399,7 +399,7 @@ def _check_node_lvstore(
             lvstore_check = False
     return lvstore_check
 
-def check_node(node_id, with_devices=True):
+def check_node(node_id):
     db_controller = DBController()
     snode = db_controller.get_storage_node_by_id(node_id)
     if not snode:
@@ -414,8 +414,6 @@ def check_node(node_id, with_devices=True):
 
     print("*" * 100)
 
-    # passed = True
-
     # 1- check node ping
     ping_check = _check_node_ping(snode.mgmt_ip)
     logger.info(f"Check: ping mgmt ip {snode.mgmt_ip} ... {ping_check}")
@@ -429,12 +427,10 @@ def check_node(node_id, with_devices=True):
         snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
     logger.info(f"Check: node RPC {snode.mgmt_ip}:{snode.rpc_port} ... {node_rpc_check}")
 
-    data_nics_check = True
     for data_nic in snode.data_nics:
         if data_nic.ip4_address:
             ping_check = _check_node_ping(data_nic.ip4_address)
             logger.info(f"Check: ping ip {data_nic.ip4_address} ... {ping_check}")
-            data_nics_check &= ping_check
 
     if snode.lvstore_stack_secondary_1:
         n = db_controller.get_storage_node_by_id(snode.lvstore_stack_secondary_1)
@@ -545,8 +541,6 @@ def check_device(device_id):
         else:
             bdevs_stack = [device.nvme_bdev, device.alceml_bdev, device.pt_bdev]
 
-        # if device.jm_bdev:
-        #     bdevs_stack.append(device.jm_bdev)
         logger.info(f"Checking Device: {device_id}, status:{device.status}")
         problems = 0
         for bdev in bdevs_stack:
@@ -563,8 +557,7 @@ def check_device(device_id):
 
         if device.status == NVMeDevice.STATUS_ONLINE:
             logger.info("Checking other node's connection to this device...")
-            ret = check_remote_device(device_id)
-            # passed &= ret
+            check_remote_device(device_id)
 
     except Exception as e:
         logger.error(f"Failed to connect to node's SPDK: {e}")
