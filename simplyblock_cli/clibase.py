@@ -77,7 +77,7 @@ class CLIWrapperBase:
 
         max_lvol = args.max_lvol
         max_snap = args.max_snap
-        max_prov = utils.parse_size(args.max_prov, unit='G')
+        max_prov = utils.parse_size(args.max_prov, assume_unit='G')
         number_of_devices = args.number_of_devices
         enable_test_device = args.enable_test_device
         enable_ha_jm = args.enable_ha_jm
@@ -140,7 +140,7 @@ class CLIWrapperBase:
 
         max_lvol = args.max_lvol
         max_snap = args.max_snap
-        max_prov = utils.parse_size(args.max_prov, unit='G')
+        max_prov = utils.parse_size(args.max_prov, assume_unit='G')
         number_of_devices = args.number_of_devices
 
         small_bufsize = args.small_bufsize
@@ -720,7 +720,7 @@ class CLIWrapperBase:
 
         max_lvol = args.max_lvol
         max_snap = args.max_snap
-        max_prov = utils.parse_size(args.max_prov, unit='G')
+        max_prov = utils.parse_size(args.max_prov, assume_unit='G')
         number_of_devices = args.number_of_devices
         enable_test_device = args.enable_test_device
         enable_ha_jm = args.enable_ha_jm
