@@ -28,67 +28,10 @@ from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.rpc_client import RPCClient, RPCException
 from simplyblock_core.snode_client import SNodeClient
 from simplyblock_web import node_utils
+from simplyblock_core.utils import addNvmeDevices
 
 
 logger = utils.get_logger(__name__)
-
-
-def addNvmeDevices(rpc_client, snode, devs):
-    devices = []
-    ret = rpc_client.bdev_nvme_controller_list()
-    ctr_map = {}
-    try:
-        if ret:
-            ctr_map = {i["ctrlrs"][0]['trid']['traddr']: i["name"] for i in ret}
-    except:
-        pass
-
-    next_physical_label = snode.physical_label
-    for pcie in devs:
-
-        if pcie in ctr_map:
-            nvme_controller = ctr_map[pcie]
-            nvme_bdevs = []
-            for bdev in rpc_client.get_bdevs():
-                if bdev['name'].startswith(nvme_controller):
-                    nvme_bdevs.append(bdev['name'])
-        else:
-            pci_st = str(pcie).replace("0", "").replace(":", "").replace(".", "")
-            nvme_controller = "nvme_%s" % pci_st
-            nvme_bdevs, err = rpc_client.bdev_nvme_controller_attach(nvme_controller, pcie)
-
-        for nvme_bdev in nvme_bdevs:
-            rpc_client.bdev_examine(nvme_bdev)
-            rpc_client.bdev_wait_for_examine()
-
-            ret = rpc_client.get_bdevs(nvme_bdev)
-            nvme_dict = ret[0]
-            nvme_driver_data = nvme_dict['driver_specific']['nvme'][0]
-            model_number = nvme_driver_data['ctrlr_data']['model_number']
-            total_size = nvme_dict['block_size'] * nvme_dict['num_blocks']
-
-            serial_number = nvme_driver_data['ctrlr_data']['serial_number']
-            if snode.id_device_by_nqn:
-                subnqn = nvme_driver_data['ctrlr_data']['subnqn']
-                serial_number = subnqn.split(":")[-1] + f"_{nvme_driver_data['ctrlr_data']['cntlid']}"
-
-            devices.append(
-                NVMeDevice({
-                    'uuid': str(uuid.uuid4()),
-                    'device_name': nvme_dict['name'],
-                    'size': total_size,
-                    'physical_label': next_physical_label,
-                    'pcie_address': nvme_driver_data['pci_address'],
-                    'model_id': model_number,
-                    'serial_number': serial_number,
-                    'nvme_bdev': nvme_bdev,
-                    'nvme_controller': nvme_controller,
-                    'node_id': snode.get_id(),
-                    'cluster_id': snode.cluster_id,
-                    'status': NVMeDevice.STATUS_ONLINE
-            }))
-        # next_physical_label += 1
-    return devices
 
 
 def get_next_cluster_device_order(db_controller, cluster_id):

@@ -17,6 +17,7 @@ from graypy import GELFTCPHandler
 from simplyblock_core import constants
 from simplyblock_core import shell_utils
 from simplyblock_core.models.job_schedule import JobSchedule
+from simplyblock_core.models.nvme_device import NVMeDevice
 
 CONFIG_KEYS = [
     "app_thread_core",
@@ -941,3 +942,61 @@ def generate_hex_string(length):
             string.ascii_letters + string.digits) for _ in range(length))
 
     return _generate_string(length).encode('utf-8').hex()
+
+
+def addNvmeDevices(rpc_client, snode, devs):
+    devices = []
+    ret = rpc_client.bdev_nvme_controller_list()
+    ctr_map = {}
+    try:
+        if ret:
+            ctr_map = {i["ctrlrs"][0]['trid']['traddr']: i["name"] for i in ret}
+    except:
+        pass
+
+    next_physical_label = snode.physical_label
+    for pcie in devs:
+
+        if pcie in ctr_map:
+            nvme_controller = ctr_map[pcie]
+            nvme_bdevs = []
+            for bdev in rpc_client.get_bdevs():
+                if bdev['name'].startswith(nvme_controller):
+                    nvme_bdevs.append(bdev['name'])
+        else:
+            pci_st = str(pcie).replace("0", "").replace(":", "").replace(".", "")
+            nvme_controller = "nvme_%s" % pci_st
+            nvme_bdevs, err = rpc_client.bdev_nvme_controller_attach(nvme_controller, pcie)
+
+        for nvme_bdev in nvme_bdevs:
+            rpc_client.bdev_examine(nvme_bdev)
+            rpc_client.bdev_wait_for_examine()
+
+            ret = rpc_client.get_bdevs(nvme_bdev)
+            nvme_dict = ret[0]
+            nvme_driver_data = nvme_dict['driver_specific']['nvme'][0]
+            model_number = nvme_driver_data['ctrlr_data']['model_number']
+            total_size = nvme_dict['block_size'] * nvme_dict['num_blocks']
+
+            serial_number = nvme_driver_data['ctrlr_data']['serial_number']
+            if snode.id_device_by_nqn:
+                subnqn = nvme_driver_data['ctrlr_data']['subnqn']
+                serial_number = subnqn.split(":")[-1] + f"_{nvme_driver_data['ctrlr_data']['cntlid']}"
+
+            devices.append(
+                NVMeDevice({
+                    'uuid': str(uuid.uuid4()),
+                    'device_name': nvme_dict['name'],
+                    'size': total_size,
+                    'physical_label': next_physical_label,
+                    'pcie_address': nvme_driver_data['pci_address'],
+                    'model_id': model_number,
+                    'serial_number': serial_number,
+                    'nvme_bdev': nvme_bdev,
+                    'nvme_controller': nvme_controller,
+                    'node_id': snode.get_id(),
+                    'cluster_id': snode.cluster_id,
+                    'status': NVMeDevice.STATUS_ONLINE
+            }))
+    return devices
+
