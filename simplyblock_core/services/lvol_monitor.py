@@ -16,7 +16,7 @@ utils.init_sentry_sdk(__name__)
 
 def set_lvol_status(lvol, status):
     if lvol.status != status:
-        lvol = db_controller.get_lvol_by_id(lvol.get_id())
+        lvol = db.get_lvol_by_id(lvol.get_id())
         old_status = lvol.status
         lvol.status = status
         lvol.write_to_db()
@@ -24,7 +24,7 @@ def set_lvol_status(lvol, status):
 
 
 def set_lvol_health_check(lvol, health_check_status):
-    lvol = db_controller.get_lvol_by_id(lvol.get_id())
+    lvol = db.get_lvol_by_id(lvol.get_id())
     if lvol.health_check == health_check_status:
         return
     old_status = lvol.health_check
@@ -35,7 +35,7 @@ def set_lvol_health_check(lvol, health_check_status):
 
 
 def set_snapshot_health_check(snap, health_check_status):
-    snap = db_controller.get_snapshot_by_id(snap.get_id())
+    snap = db.get_snapshot_by_id(snap.get_id())
     if snap.health_check == health_check_status:
         return
     snap.health_check = health_check_status
@@ -44,18 +44,18 @@ def set_snapshot_health_check(snap, health_check_status):
 
 
 # get DB controller
-db_controller = db_controller.DBController()
+db = db_controller.DBController()
 
 logger.info("Starting LVol monitor...")
 while True:
 
-    for cluster in db_controller.get_clusters():
+    for cluster in db.get_clusters():
 
         if cluster.status in [Cluster.STATUS_INACTIVE, Cluster.STATUS_UNREADY, Cluster.STATUS_IN_ACTIVATION]:
             logger.warning(f"Cluster {cluster.get_id()} is in {cluster.status} state, skipping")
             continue
 
-        for snode in db_controller.get_storage_nodes_by_cluster_id(cluster.get_id()):
+        for snode in db.get_storage_nodes_by_cluster_id(cluster.get_id()):
 
             if snode.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
 
@@ -78,7 +78,7 @@ while True:
                 sec_node_lvols_nqns = {}
 
                 if snode.secondary_node_id:
-                    sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
+                    sec_node = db.get_storage_node_by_id(snode.secondary_node_id)
                     if sec_node and sec_node.status==StorageNode.STATUS_ONLINE:
                         sec_rpc_client = RPCClient(
                             sec_node.mgmt_ip, sec_node.rpc_port,
@@ -93,7 +93,7 @@ while True:
                             for sub in ret:
                                 sec_node_lvols_nqns[sub['nqn']] = sub
 
-                for lvol in db_controller.get_lvols_by_node_id(snode.get_id()):
+                for lvol in db.get_lvols_by_node_id(snode.get_id()):
 
                     if lvol.status == LVol.STATUS_IN_CREATION:
                         continue
@@ -103,14 +103,14 @@ while True:
                         if ret == 0: # delete complete
                             logger.info(f"LVol deleted successfully, id: {lvol.get_id()}")
                             lvol_events.lvol_delete(lvol)
-                            lvol.remove(db_controller.kv_store)
+                            lvol.remove(db.kv_store)
 
                         elif ret == 1: # deletion is in progress.
                             logger.info(f"LVol deletion in progress, id: {lvol.get_id()}")
 
                         elif ret == 2: # deletion error
                             logger.info(f"LVol deletion error, id: {lvol.get_id()}")
-                            lvol = db_controller.get_lvol_by_id(lvol.get_id())
+                            lvol = db.get_lvol_by_id(lvol.get_id())
                             lvol.io_error = True
                             lvol.write_to_db()
                             set_lvol_status(lvol, LVol.STATUS_OFFLINE)
@@ -124,7 +124,7 @@ while True:
                         passed = False
 
                     if lvol.ha_type == "ha":
-                        sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
+                        sec_node = db.get_storage_node_by_id(snode.secondary_node_id)
                         if sec_node and sec_node.status == StorageNode.STATUS_ONLINE:
                             ret = health_controller.check_lvol_on_node(
                                 lvol.get_id(), snode.secondary_node_id, sec_node_bdev_names, sec_node_lvols_nqns)
@@ -138,7 +138,7 @@ while True:
                         if passed:
                             set_lvol_status(lvol, LVol.STATUS_ONLINE)
 
-                        for snap in db_controller.get_snapshots_by_node_id(snode.get_id()):
+                        for snap in db.get_snapshots_by_node_id(snode.get_id()):
                             if snap.snap_bdev in node_bdev_names:
                                 logger.info(f"Checking bdev: {snap.snap_bdev} ... ok")
                                 set_snapshot_health_check(snap, True)
