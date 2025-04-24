@@ -1,15 +1,58 @@
-version: '3.8'
-
 services:
-  webappapi:
+  fdb-server:
+    image: foundationdb/foundationdb:7.3.42
+    entrypoint: ["/bin/bash", "/var/fdb/scripts/fdb_single.bash"]
+    environment:
+      FDB_NETWORKING_MODE: 'container'
+      FDB_CLUSTER_FILE: '/etc/foundationdb/fdb.cluster'
+    volumes:
+      - "fdb-config:/etc/foundationdb"
+      - "fdb-data:/var/fdb/data"
+      - "fdb-logs:/var/fdb/logs"
+
+  mgmt-server:
     build:
       context: .
       dockerfile: docker/Dockerfile
     command: "python simplyblock_web/app.py"
     volumes:
-      - "/etc/foundationdb:/etc/foundationdb"
+      - "fdb-config:/etc/foundationdb"
     environment:
       - FLASK_DEBUG=False
       - FLASK_ENV=production
+    depends_on:
+      - fdb-server
     ports:
       - 7200:5000
+
+  storage-node:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    command: "python simplyblock_web/node_webapp.py"
+    environment:
+      - FLASK_DEBUG=False
+      - FLASK_ENV=production
+    depends_on:
+      - fdb-server
+    ports:
+      - 7201:5000
+
+  tests:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    command: "python manual_testing/test.py"
+    depends_on:
+      - fdb-server
+      - mgmt-server
+      - storage-node
+    volumes:
+      - "fdb-config:/etc/foundationdb"
+      - "fdb-data:/var/fdb/data"
+      - "fdb-logs:/var/fdb/logs"
+
+volumes:
+  fdb-data:
+  fdb-logs:
+  fdb-config:
