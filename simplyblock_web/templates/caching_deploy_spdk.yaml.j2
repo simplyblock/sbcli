@@ -1,3 +1,4 @@
+
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -64,13 +65,17 @@ spec:
           - name: SPDKCSI_SECRET
             valueFrom:
               secretKeyRef:
-                name: spdkcsi-secret
+                name: simplyblock-csi-secret
                 key: secret.json
           - name: CLUSTER_CONFIG
             valueFrom:
               configMapKeyRef:
-                name: spdkcsi-cm
+                name: simplyblock-csi-cm
                 key: config.json
+        lifecycle:
+          postStart:
+            exec:
+              command: ["/bin/sh", "-c", "sudo modprobe nbd || echo failed to modprobe nbd"]
         securityContext:
           privileged: true
         volumeMounts:
