@@ -657,9 +657,9 @@ class CLIWrapperBase:
         secondary_nodes = False
         namespace = None
         lvol_name = "lvol01"
-        lvol_size = self.parse_size("10G")
-        pool_max = self.parse_size("25G")
-        max_size = self.parse_size("1000G")
+        lvol_size = utils.parse_size("10G")
+        pool_max = utils.parse_size("25G")
+        max_size = utils.parse_size("1000G")
         pool_name = "pool01"
         with_snapshot = False
         host_id = None
