@@ -326,11 +326,11 @@ class TestClusterBase:
         self.ssh_obj.exec_command(node=self.mgmt_nodes[0],
                                   command=cmd)
         
-        cmd = f"{self.base_cmd} cluster get-logs {self.cluster_id} >& {base_path}/cluster_get_logs.txt"
+        cmd = f"{self.base_cmd} cluster get-logs {self.cluster_id} --limit 0 >& {base_path}/cluster_get_logs.txt"
         self.ssh_obj.exec_command(node=self.mgmt_nodes[0],
                                   command=cmd)
         
-        cmd = f"{self.base_cmd} cluster list-tasks {self.cluster_id} >& {base_path}/cluster_list_tasks.txt"
+        cmd = f"{self.base_cmd} cluster list-tasks {self.cluster_id} --limit 0 >& {base_path}/cluster_list_tasks.txt"
         self.ssh_obj.exec_command(node=self.mgmt_nodes[0],
                                   command=cmd)
         
@@ -679,7 +679,7 @@ class TestClusterBase:
         while output is None:
             output, _ = self.ssh_obj.exec_command(
                 node=self.mgmt_nodes[0], 
-                command=f"{self.base_cmd} cluster list-tasks {self.cluster_id}"
+                command=f"{self.base_cmd} cluster list-tasks {self.cluster_id} --limit 0"
             )
             self.logger.info(f"Data migration output: {output}")
             if no_task_ok:

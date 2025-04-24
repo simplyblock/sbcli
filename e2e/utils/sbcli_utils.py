@@ -553,7 +553,7 @@ class SbcliUtils:
         """Get Cluster logs for given cluster id
         """
         cluster_id = self.cluster_id if not cluster_id else cluster_id
-        cluster_logs = self.get_request(api_url=f"/cluster/get-logs/{cluster_id}")
+        cluster_logs = self.get_request(api_url=f"/cluster/get-logs/{cluster_id}?limit=0")
         self.logger.info(f"Cluster Logs: {cluster_logs}")
         return cluster_logs["results"]
     
@@ -561,7 +561,7 @@ class SbcliUtils:
         """Get Cluster tasks for given cluster id
         """
         cluster_id = self.cluster_id if not cluster_id else cluster_id
-        cluster_tasks = self.get_request(api_url=f"/cluster/get-tasks/{cluster_id}")
+        cluster_tasks = self.get_request(api_url=f"/cluster/get-tasks/{cluster_id}?limit=0")
         self.logger.debug(f"Cluster Tasks: {cluster_tasks}")
         return cluster_tasks["results"]
     
@@ -648,7 +648,7 @@ class SbcliUtils:
 
     def list_migration_tasks(self, cluster_id):
         """List all migration tasks for a given cluster."""
-        return self.get_request(f"/cluster/list-tasks/{cluster_id}")
+        return self.get_request(f"/cluster/list-tasks/{cluster_id}?limit=0")
     
     def get_io_stats(self, cluster_id, time_duration=None):
         """
