@@ -5,6 +5,7 @@ services:
     environment:
       FDB_NETWORKING_MODE: 'container'
       FDB_CLUSTER_FILE: '/etc/foundationdb/fdb.cluster'
+      FDB_CLUSTER_FILE_CONTENTS: 'docker:4500@fdb-server:4500'
     volumes:
       - "fdb-config:/etc/foundationdb"
       - "fdb-data:/var/fdb/data"
@@ -22,35 +23,17 @@ services:
       - FLASK_ENV=production
     depends_on:
       - fdb-server
-    ports:
-      - 7200:5000
 
   storage-node:
     build:
       context: .
       dockerfile: docker/Dockerfile
-    command: "python simplyblock_web/node_webapp.py"
+    command: "python simplyblock_web/node_webapp.py storage_node"
     environment:
       - FLASK_DEBUG=False
       - FLASK_ENV=production
     depends_on:
       - fdb-server
-    ports:
-      - 7201:5000
-
-  tests:
-    build:
-      context: .
-      dockerfile: docker/Dockerfile
-    command: "python manual_testing/test.py"
-    depends_on:
-      - fdb-server
-      - mgmt-server
-      - storage-node
-    volumes:
-      - "fdb-config:/etc/foundationdb"
-      - "fdb-data:/var/fdb/data"
-      - "fdb-logs:/var/fdb/logs"
 
 volumes:
   fdb-data:
