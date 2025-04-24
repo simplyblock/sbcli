@@ -1,3 +1,18 @@
 [build-system]
 requires = ['setuptools>=42']
 build-backend = 'setuptools.build_meta'
+
+[tool.tox]
+env_list = ["type"]
+
+[tool.tox.env.type]
+description = "run type checks"
+deps = ["mypy", "types-requests", "types-PyYAML", "kubernetes-typed", "types-docker", "types-boto3"]
+commands = [["mypy", "simplyblock_core", "simplyblock_web", "simplyblock_cli"]]
+
+[tool.mypy]
+check_untyped_defs = true
+
+[[tool.mypy.overrides]]
+module = ["cpuinfo", "flask_swagger_ui", "fdb", "graypy"]
+ignore_missing_imports = true
