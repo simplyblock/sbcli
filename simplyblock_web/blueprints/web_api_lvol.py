@@ -11,7 +11,7 @@ from simplyblock_core.controllers import lvol_controller, snapshot_controller
 
 from simplyblock_web import utils
 
-from simplyblock_core import db_controller, utils as core_utils
+from simplyblock_core import db_controller, utils as core_utils, constants
 
 logger = logging.getLogger(__name__)
 
@@ -269,7 +269,12 @@ def connect_lvol(uuid):
     if not lvol:
         return utils.get_response_error(f"LVol not found: {uuid}", 404)
 
-    ret = lvol_controller.connect_lvol(uuid)
+    cl_data = request.get_json()
+    ctrl_loss_tmo = constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO
+    if 'ctrl_loss_tmo' in cl_data:
+        ctrl_loss_tmo = cl_data['name']
+
+    ret = lvol_controller.connect_lvol(uuid, ctrl_loss_tmo)
     return utils.get_response(ret)
 
 
