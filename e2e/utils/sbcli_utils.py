@@ -493,8 +493,7 @@ class SbcliUtils:
         return lvols.get(lvol_name, None)
 
     def get_lvol_connect_str(self, lvol_name):
-        """Return connect string for the lvol
-        """
+        """Return list of formatted connect strings for the lvol"""
         lvol_id = self.get_lvol_id(lvol_name=lvol_name)
         if not lvol_id:
             self.logger.info(f"Lvol {lvol_name} does not exist. Exiting")
@@ -503,7 +502,23 @@ class SbcliUtils:
         data = self.get_request(api_url=f"/lvol/connect/{lvol_id}")
         self.logger.info(f"Connect lvol resp: {data}")
 
-        return [d["connect"] for d in data["results"]]
+        connect_lines = []
+
+        for entry in data.get("results", []):
+            connect_line = (
+                "sudo nvme connect "
+                f"--reconnect-delay={entry['reconnect-delay']} "
+                f"--ctrl-loss-tmo=-1 "
+                f"--nr-io-queues={entry['nr-io-queues']} "
+                f"--keep-alive-tmo={entry['keep-alive-tmo']} "
+                f"--transport={entry['transport']} "
+                f"--traddr={entry['ip']} "
+                f"--trsvcid={entry['port']} "
+                f"--nqn={entry['nqn']}"
+            )
+            connect_lines.append(connect_line)
+
+        return connect_lines
 
     def get_cluster_status(self, cluster_id=None):
         """Return cluster status for given cluster id
