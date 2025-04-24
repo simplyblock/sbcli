@@ -14,12 +14,12 @@ logger = utils.get_logger(__name__)
 
 
 # get DB controller
-db_controller = db_controller.DBController()
+db = db_controller.DBController()
 
 
 def set_node_online(node):
     if node.status == MgmtNode.STATUS_UNREACHABLE:
-        snode = db_controller.get_mgmt_node_by_id(node.get_id())
+        snode = db.get_mgmt_node_by_id(node.get_id())
         old_status = snode.status
         snode.status = MgmtNode.STATUS_ONLINE
         snode.updated_at = str(datetime.now())
@@ -29,7 +29,7 @@ def set_node_online(node):
 
 def set_node_offline(node):
     if node.status == MgmtNode.STATUS_ONLINE:
-        snode = db_controller.get_mgmt_node_by_id(node.get_id())
+        snode = db.get_mgmt_node_by_id(node.get_id())
         old_status = snode.status
         snode.status = MgmtNode.STATUS_UNREACHABLE
         snode.updated_at = str(datetime.now())
@@ -53,7 +53,7 @@ logger.info("Starting Mgmt node monitor")
 
 while True:
     # get storage nodes
-    nodes = db_controller.get_mgmt_nodes()
+    nodes = db.get_mgmt_nodes()
     for node in nodes:
         if node.status not in [MgmtNode.STATUS_ONLINE, MgmtNode.STATUS_UNREACHABLE]:
             logger.info(f"Node status is: {node.status}, skipping")

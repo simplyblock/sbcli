@@ -18,7 +18,7 @@ from simplyblock_core.models.deployer import Deployer
 logger = logging.getLogger(__name__)
 
 bp = Blueprint("deployer", __name__)
-db_controller = db_controller.DBController()
+db = db_controller.DBController()
 
 
 ## Terraform variables
@@ -258,13 +258,13 @@ def update_cluster(d, kv_store, storage_nodes, availability_zone):
 def list_deployer(uuid):
     deployers_list = []
     if uuid:
-        dpl = db_controller.get_deployer_by_id(uuid)
+        dpl = db.get_deployer_by_id(uuid)
         if dpl:
             deployers_list.append(dpl)
         else:
             return utils.get_response_error(f"Deployer not found: {uuid}", 404)
     else:
-        dpls = db_controller.get_deployers()
+        dpls = db.get_deployers()
         if dpls:
             deployers_list.extend(dpls)
 
@@ -364,7 +364,7 @@ def set_tf_vars():
     d.ecr_repository_name = dpl_data['ecr_repository_name']
     d.ecr_image_tag = dpl_data['ecr_image_tag']
 
-    d.write_to_db(db_controller.kv_store)
+    d.write_to_db(db.kv_store)
     return utils.get_response(d.to_dict()), 201
 
 @bp.route('/deployer', methods=['POST'])
@@ -380,7 +380,7 @@ def add_deployer():
         return utils.get_response_error("missing required param: uuid", 400)
 
     uuid = dpl_data['uuid']
-    d = db_controller.get_deployer_by_id(uuid)
+    d = db.get_deployer_by_id(uuid)
 
     if "storage_nodes" not in dpl_data:
         return utils.get_response_error("missing required param: storage_nodes", 400)
@@ -390,18 +390,18 @@ def add_deployer():
 
     # start the deployment
     d.status = "started"
-    d.write_to_db(db_controller.kv_store)
+    d.write_to_db(db.kv_store)
 
     storage_nodes = int(dpl_data['storage_nodes'])
     if d.storage_nodes+storage_nodes < 0:
         return utils.get_response_error("total storage_nodes cannot be less than 0", 400)
 
     availability_zone = dpl_data['availability_zone']
-    d.write_to_db(db_controller.kv_store)
+    d.write_to_db(db.kv_store)
 
     t = threading.Thread(
         target=update_cluster,
-        args=(d, db_controller.kv_store, d.storage_nodes+storage_nodes, availability_zone))
+        args=(d, db.kv_store, d.storage_nodes+storage_nodes, availability_zone))
 
     t.start()
 
@@ -415,7 +415,7 @@ def get_deployer():
     """
     get the deployer if it exists. Else returns an None
     """
-    dpls = db_controller.get_deployers()
+    dpls = db.get_deployers()
     if len(dpls) > 0:
         return dpls[0]
     return None
