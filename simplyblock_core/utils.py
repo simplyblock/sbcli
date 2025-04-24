@@ -366,7 +366,7 @@ def pair_hyperthreads(vcpus):
         half = len(vcpus) // 2
         return {vcpus[i]: vcpus[i + half] for i in range(half)}
 
-def calculate_core_allocations(vcpu_list, is_hyperthreaded=False, alceml_count=2):
+def calculate_core_allocations(vcpu_list, alceml_count=2):
         total = len(vcpu_list)
         pairs = pair_hyperthreads(vcpu_list) if is_hyperthreaded else {}
         remaining = set(vcpu_list)
@@ -389,50 +389,42 @@ def calculate_core_allocations(vcpu_list, is_hyperthreaded=False, alceml_count=2
                 if len(vcpus) >= count:
                     break
             return vcpus[:count]
+            
+        assigned = {}   
+        assigned["app_thread_core"] = reserve_n(1)
+        if (len(vcpu_list)<12):
+           vcpu = reserve_n(1)
+           assigned["jm_cpu_core"] = vcpu
+           assigned["jc_singleton_core"] = vcpu
+           assigned["alceml_worker_cpu_cores"] = vcpu
+           vcpu = reserve_n(1) 
+           assigned["alceml_cpu_cores"]=vcpu 
+        else if(len(vcpu)<22):
+           vcpu = reserve_n(1)
+           assigned["jm_cpu_core"] = vcpu
+           assigned["jc_singleton_core"] = vcpu
+           vcpus = reserve_n(1)
+           assigned["alceml_worker_cpu_cores"] = vcpu 
+           vcpus=reserve_n(2)
+           assigned["alceml_cpu_cores"] = vcpus
+       else:
+           vcpus = reserve_n(2)
+           assigned["jm_cpu_core"] = vcpus
+           vcpu = reserve_n(1)
+           assigned["jc_singleton_core"] = vcpu
+           vcpus = reserve_n(int(alceml_count / 3) + ((alceml_count % 3) >0))
+           assigned["alceml_worker_cpu_cores"] = vcpu 
+           vcpus=reserve_n(alceml_count)
+           assigned["alceml_cpu_cores"] = vcpus    
 
-        # Fixed non-co-locatable thread types
-        thread_types = {
-            "alceml_cpu_cores": (1, alceml_count*5, False),
-            "alceml_worker_cpu_cores": (1, alceml_count, False),
-            "distrib_cpu_cores": (1, min(26, total), False),
-            "poller_cpu_cores": (1, min(26, total), False)
-        }
+        dp = int(len(remaining) / 2)
+        vcpus=reserve_n(dp)
+        assigned["distrib_cpu_cores"] = vcpus
+        vcpus=reserve_n(dp)
+        assigned["poller_cpu_cores"] = vcpus
+        if(len(remaining)>0)
+            assigned["poller_cpu_cores"] = assigned["poller_cpu_cores"] + reserve_n(1)
 
-        # Proportional allocation for the scalable types
-        proportional_targets = ["alceml_cpu_cores", "alceml_worker_cpu_cores", "distrib_cpu_cores", "poller_cpu_cores"]
-        max_sum = sum(thread_types[t][1] for t in proportional_targets)
-        
-        # Apply jm_cpu_core scaling rule based on distrib_cpu_cores allocation
-        allocations = {}
-        assigned = {}
-
-        vcpus = reserve_n(1)
-        assigned["app_thread_core"] = vcpus
-        vcpus = reserve_n(1)
-        assigned["jm_cpu_core"] = vcpus
-        assigned["jc_singleton_core"] = vcpus
-        
-        proportional_vcpu = max(total-2, 1)  # reserve for jc, jm, app
-        
-        for t in proportional_targets:
-            _, max_v, _ = thread_types[t]
-            target = round((max_v / max_sum) * proportional_vcpu)
-            if t == "alceml_cpu_cores":
-               max_v = max_v / 5 
-            allocations[t] = int(max(thread_types[t][0], min(target, max_v)))
-
-        # Assign non-co-locatable first
-        
-        for t in ["alceml_cpu_cores", "alceml_worker_cpu_cores", "distrib_cpu_cores", "poller_cpu_cores"]:
-            count = allocations.get(t, 1)
-            vcpus = reserve_n(count)
-            assigned[t] = vcpus
-
-        for t in ["poller_cpu_cores","distrib_cpu_cores"]:
-            vcpus = reserve_n(1)
-            if len(vcpus) > 0:
-                assigned[t] = assigned[t] + vcpus
-        
         # Return the individual threads as separate values
         return (
             assigned.get("app_thread_core", []),
@@ -493,7 +485,6 @@ def calculate_pool_count(alceml_count, number_of_distribs, cpu_count, poller_cou
     large_pool_count = 48 * (alceml_count + number_of_distribs + 3 + poller_count) + (6 + alceml_count + number_of_distribs) * 32 + poller_number * 15 + 384 + 16 * poller_number + constants.EXTRA_LARGE_POOL_COUNT
     return 2.0*small_pool_count, 1.5*large_pool_count
 
-
 def calculate_minimum_hp_memory(small_pool_count, large_pool_count, lvol_count, max_prov, cpu_count):
     '''
     1092 (initial consumption) + 4 * CPU + 1.0277 * POOL_COUNT(Sum in MB) + (25) * lvol_count
@@ -505,7 +496,8 @@ def calculate_minimum_hp_memory(small_pool_count, large_pool_count, lvol_count, 
     pool_consumption = (small_pool_count * 8 + large_pool_count * 128) / 1024 + 1092
     memory_consumption = (4 * cpu_count + 1.0277 * pool_consumption + 12 * lvol_count) * (1024 * 1024) + (250 * 1024 * 1024) * 1.1 * convert_size(max_prov, 'TiB') + constants.EXTRA_HUGE_PAGE_MEMORY
     return int(memory_consumption)
-    
+
+
 def calculate_minimum_sys_memory(max_prov, total):
     minimum_sys_memory = (1800 * 1024 * 1024) * convert_size(max_prov, 'TiB') + 500 * 1024 * 1024 + (constants.EXTRA_SYS_MEMORY * total)
     logger.debug(f"Minimum system memory is {humanbytes(minimum_sys_memory)}")
