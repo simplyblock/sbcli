@@ -272,7 +272,7 @@ def connect_lvol(uuid):
     cl_data = request.get_json()
     ctrl_loss_tmo = constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO
     if 'ctrl_loss_tmo' in cl_data:
-        ctrl_loss_tmo = cl_data['name']
+        ctrl_loss_tmo = cl_data['ctrl_loss_tmo']
 
     ret = lvol_controller.connect_lvol(uuid, ctrl_loss_tmo)
     return utils.get_response(ret)
