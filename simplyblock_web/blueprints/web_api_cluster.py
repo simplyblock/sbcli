@@ -129,7 +129,14 @@ def cluster_get_logs(uuid):
     if cluster.status == Cluster.STATUS_INACTIVE:
         return utils.get_response("Cluster already inactive")
 
-    data = cluster_ops.get_logs(uuid, is_json=True)
+    limit = 50
+    try:
+        args = request.args
+        limit = int(args.get('limit', limit))
+    except:
+        pass
+
+    data = cluster_ops.get_logs(uuid, is_json=True, limit=limit)
     return utils.get_response(json.loads(data))
 
 
@@ -141,7 +148,14 @@ def cluster_get_tasks(uuid):
     if cluster.status == Cluster.STATUS_INACTIVE:
         return utils.get_response("Cluster is inactive")
 
-    tasks = tasks_controller.list_tasks(uuid, is_json=True)
+    limit = 50
+    try:
+        args = request.args
+        limit = int(args.get('limit', limit))
+    except:
+        pass
+
+    tasks = tasks_controller.list_tasks(uuid, is_json=True, limit=limit)
     return utils.get_response(json.loads(tasks))
 
 
