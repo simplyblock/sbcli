@@ -31,4 +31,5 @@ jobs:
       - name: Stop and clean up
         if: always()
         run: |
+          docker compose -f docker-compose-dev.yml logs
           docker compose -f docker-compose-dev.yml down --volumes --remove-orphans
