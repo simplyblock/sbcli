@@ -50,9 +50,6 @@ class TestLvolFioBase(TestClusterBase):
                     lvol_name=lvol_name,
                     pool_name=self.pool_name,
                     size=config['size'],
-                    max_rw_iops=6000,
-                    max_r_mbytes=50,
-                    max_w_mbytes=50,
                     distr_ndcs=config['ndcs'],
                     distr_npcs=config['npcs'],
                     distr_bs=4096,
@@ -64,9 +61,6 @@ class TestLvolFioBase(TestClusterBase):
                     lvol_name=lvol_name,
                     pool_name=self.pool_name,
                     size=config['size'],
-                    max_rw_iops=6000,
-                    max_r_mbytes=50,
-                    max_w_mbytes=50
                 )
 
             initial_devices = self.ssh_obj.get_devices(node=self.mgmt_nodes[0])

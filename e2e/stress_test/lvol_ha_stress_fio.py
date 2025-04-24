@@ -413,7 +413,7 @@ class TestLvolHAClusterNetworkInterrupt(TestLvolHACluster):
 
         self.logger.info(f"Fetching migration tasks for cluster {self.cluster_id}.")
         output, _ = self.ssh_obj.exec_command(node=self.mgmt_nodes[0], 
-                                              command=f"{self.base_cmd} cluster list-tasks {self.cluster_id}")
+                                              command=f"{self.base_cmd} cluster list-tasks {self.cluster_id} --limit 0")
         self.logger.info(f"Data migration output: {output}")
 
         self.logger.info(f"Validating migration tasks for node {self.lvol_node}.")
