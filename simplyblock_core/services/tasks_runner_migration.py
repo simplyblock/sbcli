@@ -17,37 +17,37 @@ from simplyblock_core.rpc_client import RPCClient
 
 def task_runner(task):
 
-    task = db_controller.get_task_by_id(task.uuid)
-    snode = db_controller.get_storage_node_by_id(task.node_id)
+    task = db.get_task_by_id(task.uuid)
+    snode = db.get_storage_node_by_id(task.node_id)
     if not snode:
         task.status = JobSchedule.STATUS_DONE
         task.function_result = f"Node not found: {task.node_id}"
-        task.write_to_db(db_controller.kv_store)
+        task.write_to_db(db.kv_store)
         return True
 
     if task.canceled:
         task.function_result = "canceled"
         task.status = JobSchedule.STATUS_DONE
-        task.write_to_db(db_controller.kv_store)
+        task.write_to_db(db.kv_store)
         return True
 
     if snode.status != StorageNode.STATUS_ONLINE:
         task.function_result = "node is not online, retrying"
         task.status = JobSchedule.STATUS_SUSPENDED
         task.retry += 1
-        task.write_to_db(db_controller.kv_store)
+        task.write_to_db(db.kv_store)
         return False
 
-    cluster = db_controller.get_cluster_by_id(task.cluster_id)
+    cluster = db.get_cluster_by_id(task.cluster_id)
     if cluster.status not in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_READONLY]:
         task.function_result = "cluster is not active, retrying"
         task.status = JobSchedule.STATUS_SUSPENDED
         task.retry += 1
-        task.write_to_db(db_controller.kv_store)
+        task.write_to_db(db.kv_store)
         return False
 
     if task.status in [JobSchedule.STATUS_NEW, JobSchedule.STATUS_SUSPENDED]:
-        for node in db_controller.get_storage_nodes_by_cluster_id(task.cluster_id):
+        for node in db.get_storage_nodes_by_cluster_id(task.cluster_id):
             if node.is_secondary_node:  # pass
                 continue
 
@@ -58,7 +58,7 @@ def task_runner(task):
                         task.function_result = "node is online < 1 min, retrying"
                         task.status = JobSchedule.STATUS_SUSPENDED
                         task.retry += 1
-                        task.write_to_db(db_controller.kv_store)
+                        task.write_to_db(db.kv_store)
                         return False
                 except Exception as e:
                     logger.error(f"Failed to get online since: {e}")
@@ -68,40 +68,40 @@ def task_runner(task):
                     task.function_result = f"Some dev status is {dev.status }, retrying"
                     task.status = JobSchedule.STATUS_SUSPENDED
                     task.retry += 1
-                    task.write_to_db(db_controller.kv_store)
+                    task.write_to_db(db.kv_store)
                     return False
 
         task.status = JobSchedule.STATUS_RUNNING
         task.function_result = ""
-        task.write_to_db(db_controller.kv_store)
+        task.write_to_db(db.kv_store)
 
 
     rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password,
                            timeout=5, retry=2)
     if "migration" not in task.function_params:
 
-        device = db_controller.get_storage_device_by_id(task.device_id)
+        device = db.get_storage_device_by_id(task.device_id)
         distr_name = task.function_params["distr_name"]
 
         if not device:
             task.status = JobSchedule.STATUS_DONE
             task.function_result = "Device not found"
-            task.write_to_db(db_controller.kv_store)
+            task.write_to_db(db.kv_store)
             return True
 
         qos_high_priority = False
-        if db_controller.get_cluster_by_id(snode.cluster_id).enable_qos:
+        if db.get_cluster_by_id(snode.cluster_id).enable_qos:
             qos_high_priority = True
         rsp = rpc_client.distr_migration_to_primary_start(device.cluster_device_order, distr_name, qos_high_priority)
         if not rsp:
             logger.error(f"Failed to start device migration task, storage_ID: {device.cluster_device_order}")
             task.function_result = "Failed to start device migration task"
             task.status = JobSchedule.STATUS_DONE
-            task.write_to_db(db_controller.kv_store)
+            task.write_to_db(db.kv_store)
             return True
         task.function_params['migration'] = {
             "name": distr_name}
-        task.write_to_db(db_controller.kv_store)
+        task.write_to_db(db.kv_store)
         # time.sleep(1)
 
     if "migration" in task.function_params:
@@ -110,24 +110,24 @@ def task_runner(task):
         return utils.handle_task_result(task, res)
     else:
         task.retry += 1
-        task.write_to_db(db_controller.kv_store)
+        task.write_to_db(db.kv_store)
         return False
 
 
 # get DB controller
-db_controller = db_controller.DBController()
+db = db_controller.DBController()
 
 logger.info("Starting Tasks runner...")
 while True:
-    clusters = db_controller.get_clusters()
+    clusters = db.get_clusters()
     if not clusters:
         logger.error("No clusters found!")
     else:
         for cl in clusters:
-            tasks = db_controller.get_job_tasks(cl.get_id(), reverse=False)
+            tasks = db.get_job_tasks(cl.get_id(), reverse=False)
             for task in tasks:
                 if task.function_name == JobSchedule.FN_DEV_MIG and task.status != JobSchedule.STATUS_DONE:
-                    task = db_controller.get_task_by_id(task.uuid)
+                    task = db.get_task_by_id(task.uuid)
                     if task.status in [JobSchedule.STATUS_NEW, JobSchedule.STATUS_SUSPENDED]:
                         active_task = tasks_controller.get_active_node_mig_task(task.cluster_id, task.node_id)
                         if active_task:
@@ -143,7 +143,7 @@ while True:
                         node_task = tasks_controller.get_active_node_tasks(task.cluster_id, task.node_id)
                         if not node_task:
                             logger.info("no task found on same node, resuming compression")
-                            node = db_controller.get_storage_node_by_id(task.node_id)
+                            node = db.get_storage_node_by_id(task.node_id)
                             rpc_client = RPCClient(
                                 node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password, timeout=5, retry=2)
                             ret = rpc_client.jc_suspend_compression(jm_vuid=node.jm_vuid, suspend=False)

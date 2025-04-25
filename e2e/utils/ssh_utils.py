@@ -1214,38 +1214,43 @@ class SshUtils:
             create_json_command = f"echo '{rpc_json_str}' > {remote_json_path}"
             self.exec_command(storage_node_ip, create_json_command)
 
-            # Save JSON inside SPDK container
-            rpc_script_path = "/tmp/stack.json"
-            create_json_command = f"sudo docker cp {remote_json_path} spdk:{rpc_script_path}"
-            self.exec_command(storage_node_ip, create_json_command)
+            find_container_cmd = "docker ps --format '{{.Names}}' | grep -E '^spdk_[0-9]+$'"
+            container_name_output, _ = self.exec_command(storage_node_ip, find_container_cmd)
+            if container_name_output:
+                container_name = container_name_output.strip()
+                # Save JSON inside SPDK container
+                rpc_script_path = "/tmp/stack.json"
+                create_json_command = f"sudo docker cp {remote_json_path} {container_name}:{rpc_script_path}"
+                self.exec_command(storage_node_ip, create_json_command)
 
-            # Execute RPC call inside SPDK Docker container
-            rpc_command = f"sudo docker exec spdk bash -c 'python scripts/rpc_sock.py {rpc_script_path}'"
-            self.exec_command(storage_node_ip, rpc_command)
+                # Execute RPC call inside SPDK Docker container
+                rpc_command = f"sudo docker exec {container_name} bash -c 'python scripts/rpc_sock.py {rpc_script_path}'"
+                self.exec_command(storage_node_ip, rpc_command)
 
+                # Find log file name dynamically
+                find_log_command = f"sudo docker exec {container_name} ls /tmp/ | grep distrib"
+                log_file_name, _ = self.exec_command(storage_node_ip, find_log_command)
+                log_file_name = log_file_name.strip().replace("\r", "").replace("\n", "")
 
-            # Find log file name dynamically
-            find_log_command = "sudo docker exec spdk ls /tmp/ | grep distrib"
-            log_file_name, _ = self.exec_command(storage_node_ip, find_log_command)
-            log_file_name = log_file_name.strip().replace("\r", "").replace("\n", "")
+                if not log_file_name:
+                    self.logger.error(f"No log file found for distrib {distrib} in /tmp/.")
+                    continue
 
-            if not log_file_name:
-                self.logger.error(f"No log file found for distrib {distrib} in /tmp/.")
-                continue
+                log_file_path = f"/tmp/{log_file_name}"
+                destination_path = f"{Path.home()}/{log_file_name}_{storage_node_ip}"
 
-            log_file_path = f"/tmp/{log_file_name}"
-            destination_path = f"{Path.home()}/{log_file_name}_{storage_node_ip}"
+                # Copy log file from inside container to host machine
+                copy_command = f"sudo docker cp {container_name}:{log_file_path} {destination_path}"
+                self.exec_command(storage_node_ip, copy_command)
 
-            # Copy log file from inside container to host machine
-            copy_command = f"sudo docker cp spdk:{log_file_path} {destination_path}"
-            self.exec_command(storage_node_ip, copy_command)
+                self.logger.info(f"Processed {distrib}: Logs copied to {destination_path}")
 
-            self.logger.info(f"Processed {distrib}: Logs copied to {destination_path}")
-
-            # Remove log file from container
-            delete_command = f"sudo docker exec spdk rm -f {log_file_path}"
-            self.exec_command(storage_node_ip, delete_command)
-            self.logger.info(f"Processed {distrib}: Logs copied to {destination_path} and deleted from container.")
+                # Remove log file from container
+                delete_command = f"sudo docker exec {container_name} rm -f {log_file_path}"
+                self.exec_command(storage_node_ip, delete_command)
+                self.logger.info(f"Processed {distrib}: Logs copied to {destination_path} and deleted from container.")
+            else:
+                self.logger.warning(f"No SPDK container found on {storage_node_ip}")
 
         self.logger.info("All logs retrieved successfully!")
 
@@ -1436,22 +1441,29 @@ class SshUtils:
         try:
             self.logger.info(f"Resetting iptables inside SPDK container on {node_ip}.")
 
-            # Commands to run inside the SPDK container
-            iptables_reset_cmds = [
-                "sudo docker exec spdk iptables -L -v -n",
-                "sudo docker exec spdk iptables -P INPUT ACCEPT",
-                "sudo docker exec spdk iptables -P OUTPUT ACCEPT",
-                "sudo docker exec spdk iptables -P FORWARD ACCEPT",
-                "sudo docker exec spdk iptables -F",
-                "sudo docker exec spdk iptables -L -v -n"
-            ]
+            find_container_cmd = "docker ps --format '{{.Names}}' | grep -E '^spdk_[0-9]+$'"
 
-            # Execute each command
-            for cmd in iptables_reset_cmds:
-                self.exec_command(node_ip, cmd)
+            container_name_output, _ = self.exec_command(node_ip, find_container_cmd)
 
-            self.logger.info(f"Successfully reset iptables inside SPDK container on {node_ip}.")
+            if container_name_output:
+                container_name = container_name_output.strip()
+                # Commands to run inside the SPDK container
+                iptables_reset_cmds = [
+                    f"sudo docker exec {container_name} iptables -L -v -n",
+                    f"sudo docker exec {container_name} iptables -P INPUT ACCEPT",
+                    f"sudo docker exec {container_name} iptables -P OUTPUT ACCEPT",
+                    f"sudo docker exec {container_name} iptables -P FORWARD ACCEPT",
+                    f"sudo docker exec {container_name} iptables -F",
+                    f"sudo docker exec {container_name} iptables -L -v -n"
+                ]
 
+                # Execute each command
+                for cmd in iptables_reset_cmds:
+                    self.exec_command(node_ip, cmd)
+
+                self.logger.info(f"Successfully reset iptables inside SPDK container on {node_ip}.")
+            else:
+                self.logger.warning(f"No SPDK container found on {node_ip}")
         except Exception as e:
             self.logger.error(f"Failed to reset iptables in SPDK container on {node_ip}: {e}")
 
