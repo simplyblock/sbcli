@@ -8,7 +8,7 @@ from simplyblock_core.rpc_client import RPCClient
 
 logger = utils.get_logger(__name__)
 
-last_object_record = {}
+last_object_record: dict[str, CachedLVolStatObject] = {}
 
 
 def add_lvol_stats(lvol, stats_dict):

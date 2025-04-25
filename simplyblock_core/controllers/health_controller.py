@@ -1,5 +1,6 @@
 # coding=utf-8
 import time
+from typing import Any
 
 import jc
 
@@ -170,7 +171,7 @@ def _check_node_hublvol(node: StorageNode, node_bdev_names=None, node_lvols_nqns
             lvs_info = ret[0]
             logger.info(f"lVol store Info:")
             lvs_info_dict = []
-            expected = {}
+            expected: dict[str, Any] = {}
             expected["lvs leadership"] = True
             expected["lvs_primary"] = True
             expected["lvs_read_only"] = False
@@ -243,7 +244,7 @@ def _check_sec_node_hublvol(node: StorageNode, node_bdev=None, node_lvols_nqns=N
             lvs_info = ret[0]
             logger.info(f"lVol store Info:")
             lvs_info_dict = []
-            expected = {}
+            expected: dict [str, Any] = {}
             expected["name"] = primary_node.lvstore
             expected["lvs leadership"] = False
             expected["lvs_secondary"] = True

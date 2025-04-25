@@ -15,7 +15,7 @@ def __run_script(args: list):
         result = process.poll()
         if result is not None:
             break
-        output = process.stdout.readline()
+        output = process.stdout.readline()  # type: ignore
         if output:
             logger.debug(output.strip())
 

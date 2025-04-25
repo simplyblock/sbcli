@@ -12,7 +12,7 @@ from simplyblock_core.rpc_client import RPCClient
 
 logger = utils.get_logger(__name__)
 
-last_object_record = {}
+last_object_record: dict[str, LVolStatObject] = {}
 
 
 def sum_stats(stats_list):
@@ -189,11 +189,11 @@ while True:
             logger.warning(f"Cluster {cluster.get_id()} is in {cluster.status} state, skipping")
             continue
 
-        all_node_bdev_names = {}
-        all_node_lvols_nqns = {}
-        all_node_lvols_stats = {}
+        all_node_bdev_names: dict[str, dict[str, dict]] = {}
+        all_node_lvols_nqns: dict[str, dict[str, str]] = {}
+        all_node_lvols_stats: dict[str, dict] = {}
 
-        pools_lvols_stats = {}
+        pools_lvols_stats: dict[str, list[LVolStatObject]] = {}
         for snode in db.get_storage_nodes_by_cluster_id(cluster.get_id()):
 
             if snode.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:

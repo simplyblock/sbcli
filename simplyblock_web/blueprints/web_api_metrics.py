@@ -52,11 +52,11 @@ io_stats_keys = [
     "write_latency_ticks",
 ]
 
-ng = {}
-cg = {}
-dg = {}
-lg = {}
-pg = {}
+ng: dict[str, Gauge] = {}
+cg: dict[str, Gauge] = {}
+dg: dict[str, Gauge] = {}
+lg: dict[str, Gauge] = {}
+pg: dict[str, Gauge] = {}
 
 def get_device_metrics():
     global dg

@@ -11,7 +11,7 @@ from simplyblock_core.models.stats import DeviceStatObject, NodeStatObject, Clus
 logger = utils.get_logger(__name__)
 
 
-last_object_record = {}
+last_object_record: dict[str, DeviceStatObject] = {}
 
 
 def add_device_stats(cl, device, capacity_dict, stats_dict):

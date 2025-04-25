@@ -202,7 +202,7 @@ def start_event_collector_on_node(node_id):
     logger.info(f"Stopping Distr event collector on node: {node_id}")
 
 
-threads_maps = {}
+threads_maps: dict[str, threading.Thread] = {}
 
 while True:
     clusters = db.get_clusters()
