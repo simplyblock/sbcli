@@ -114,7 +114,7 @@ INSTANCE_STORAGE_DATA = {
         'm6id.8xlarge': {'number_of_devices': 1, 'size_per_device_gb': 1900},
     }
 
-MAX_SNAP_COUNT = 15
+MAX_SNAP_COUNT = 100
 
 SPDK_PROXY_MULTI_THREADING_ENABLED=True
 SPDK_PROXY_TIMEOUT=60*5
