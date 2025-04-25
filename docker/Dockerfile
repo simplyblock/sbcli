@@ -9,6 +9,6 @@ COPY simplyblock_web/requirements.txt .
 RUN pip3 install -r requirements.txt \
     && pip3 install -r simplyblock_web/requirements.txt
 
-COPY . .
+COPY . /app
 
 RUN python setup.py install
