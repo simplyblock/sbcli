@@ -169,7 +169,7 @@ class StorageNode(BaseNodeObject):
             )
         except RPCException:
             if hublvol_uuid is not None and rpc_client.get_bdevs(hublvol_uuid):
-                rpc_client.bdev_lvol_delete_hublvol(self.hublvol.nqn)
+                rpc_client.bdev_lvol_delete_hublvol(hublvol_uuid)
 
             if self.hublvol and rpc_client.subsystem_list(self.hublvol.nqn):
                 rpc_client.subsystem_delete(self.hublvol.nqn)
