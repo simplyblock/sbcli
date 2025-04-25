@@ -52,5 +52,5 @@ class CachingNode(BaseNodeObject):
     system_uuid: str = ""
     namespace: str = ""
     spdk_cpu_mask: str = ""
-    spdk_mem: int = ""
+    spdk_mem: int = 0
     spdk_image: str = ""
