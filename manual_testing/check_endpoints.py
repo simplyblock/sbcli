@@ -49,6 +49,7 @@ if __name__ == "__main__":
     check_endpoint("Cluster Info", f"{BASE_URL}/cluster/{CLUSTER_UUID}")
     check_endpoint("Cluster Status", f"{BASE_URL}/cluster/status/{CLUSTER_UUID}")
     check_endpoint("Cluster Logs", f"{BASE_URL}/cluster/get-logs/{CLUSTER_UUID}")
+    # FIXME: this endpoint return 500 error
     # check_endpoint("Cluster Tasks", f"{BASE_URL}/cluster/get-tasks/{CLUSTER_UUID}")
     check_endpoint("Cluster Capacity", f"{BASE_URL}/cluster/capacity/{CLUSTER_UUID}")
     check_endpoint("Capacity History (1d)", f"{BASE_URL}/cluster/capacity/{CLUSTER_UUID}/history/1d")
