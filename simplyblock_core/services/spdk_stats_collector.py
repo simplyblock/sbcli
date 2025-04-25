@@ -8,7 +8,7 @@ logger = utils.get_logger(__name__)
 
 PUSHGATEWAY_URL = "http://pushgateway:9091"
 
-db_controller = db_controller.DBController()
+db = db_controller.DBController()
 
 def push_metrics(reactor_data, thread_data, cluster_id, snode):
     """Formats and pushes SPDK metrics to Prometheus Pushgateway."""
@@ -53,10 +53,10 @@ def push_metrics(reactor_data, thread_data, cluster_id, snode):
 
 logger.info("Starting spdk stats collector...")
 while True:
-    clusters = db_controller.get_clusters()
+    clusters = db.get_clusters()
     for cluster in clusters:
         cluster_id = cluster.get_id()
-        nodes = db_controller.get_storage_nodes_by_cluster_id(cluster_id)
+        nodes = db.get_storage_nodes_by_cluster_id(cluster_id)
         for snode in nodes:
             if len(snode.nvme_devices) > 0:
                 rpc_client = RPCClient(

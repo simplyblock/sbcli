@@ -12,13 +12,13 @@ logger = utils.get_logger(__name__)
 
 
 # get DB controller
-db_controller = db_controller.DBController()
+db = db_controller.DBController()
 
 
 logger.info("Starting Device monitor...")
 while True:
-    for cluster in db_controller.get_clusters():
-        for node in db_controller.get_storage_nodes_by_cluster_id(cluster.get_id()):
+    for cluster in db.get_clusters():
+        for node in db.get_storage_nodes_by_cluster_id(cluster.get_id()):
             auto_restart_devices = []
 
             if node.status != StorageNode.STATUS_ONLINE:
@@ -31,7 +31,7 @@ while True:
                     continue
                 if cluster.status == Cluster.STATUS_ACTIVE:
                     if dev.status in [NVMeDevice.STATUS_READONLY, NVMeDevice.STATUS_CANNOT_ALLOCATE]:
-                        dev_stat = db_controller.get_device_stats(dev, 1)
+                        dev_stat = db.get_device_stats(dev, 1)
                         if dev_stat and dev_stat[0].size_util < cluster.cap_crit:
                             device_controller.device_set_online(dev.get_id())
 

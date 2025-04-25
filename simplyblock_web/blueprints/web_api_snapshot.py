@@ -14,7 +14,7 @@ from simplyblock_core.controllers import snapshot_controller
 
 logger = logging.getLogger(__name__)
 
-db_controller = db_controller.DBController()
+db = db_controller.DBController()
 bp = Blueprint("snapshot", __name__)
 
 
@@ -41,7 +41,7 @@ def delete_snapshot(uuid):
 @bp.route('/snapshot', methods=['GET'])
 def list_snapshots():
     cluster_id = utils.get_cluster_id(request)
-    snaps = db_controller.get_snapshots()
+    snaps = db.get_snapshots()
     data = []
     for snap in snaps:
         if snap.cluster_id != cluster_id:
