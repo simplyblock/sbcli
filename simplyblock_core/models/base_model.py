@@ -5,7 +5,7 @@ import logging
 import json
 from inspect import ismethod
 import sys
-from typing import Mapping, Optional, Type, Union
+from typing import Any, Mapping, Optional, Type, Union
 from collections import ChainMap
 
 
@@ -82,23 +82,25 @@ class BaseModel(object):
                 if dtype in [int, float, str, bool]:
                     try:
                         value = dtype(value)
-                    except:
-                        if type(value) == list and dtype == int:
+                    except Exception:
+                        if type(value) is list and dtype is int:
                             value = len(value)
 
                 elif hasattr(dtype, '__origin__'):
-                    if dtype.__origin__ == list:
+                    if dtype.__origin__ is list:
                         if hasattr(dtype, "__args__") and hasattr(dtype.__args__[0], "from_dict"):
                             value = [dtype.__args__[0]().from_dict(item) for item in data[attr]]
                         else:
                             value = data[attr]
-                    elif dtype.__origin__ == Mapping:
+                    elif dtype.__origin__ is Mapping:
                         if hasattr(dtype, "__args__") and hasattr(dtype.__args__[1], "from_dict"):
                             value = {item: dtype.__args__[1]().from_dict(data[attr][item]) for item in data[attr]}
                         else:
                             value = value_dict['type'](data[attr])
                     elif (option_type := _optional_type(dtype)) is not None:
                         value = option_type(data[attr])
+                    else:
+                        raise ValueError('Invalid type')
                 else:
                     value = value_dict['type'](data[attr])
             setattr(self, attr, value)
@@ -106,7 +108,7 @@ class BaseModel(object):
         return self
 
     def to_dict(self):
-        result = {}
+        result: dict[str, Any] = {}
         for attr in self.get_attrs_map():
             value = getattr(self, attr)
             if isinstance(value, list):
