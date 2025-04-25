@@ -5,8 +5,18 @@ import logging
 import json
 from inspect import ismethod
 import sys
-from typing import Mapping, Type
+from typing import Mapping, Optional, Type, Union
 from collections import ChainMap
+
+
+def _optional_type(t: Type) -> Optional[Type]:
+    return (t.__args__[0]
+            if (
+                t.__origin__ is Union and
+                len(t.__args__) == 2 and
+                t.__args__[1] is None
+            )
+            else None)
 
 
 class BaseModel(object):
@@ -87,6 +97,8 @@ class BaseModel(object):
                             value = {item: dtype.__args__[1]().from_dict(data[attr][item]) for item in data[attr]}
                         else:
                             value = value_dict['type'](data[attr])
+                    elif (option_type := _optional_type(dtype)) is not None:
+                        value = option_type(data[attr])
                 else:
                     value = value_dict['type'](data[attr])
             setattr(self, attr, value)

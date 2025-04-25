@@ -1,6 +1,6 @@
 # coding=utf-8
 
-from typing import List
+from typing import List, Optional
 
 from simplyblock_core.models.base_model import BaseModel, BaseNodeObject
 from simplyblock_core.models.iface import IFace
@@ -13,7 +13,7 @@ class CachedLVol(BaseModel):
     device_path: str = ""
     hostname: str = ""
     local_nqn: str = ""
-    lvol: LVol = None
+    lvol: Optional[LVol] = None
     lvol_id: str = ""
     ocf_bdev: str = ""
 
