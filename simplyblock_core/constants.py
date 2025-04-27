@@ -138,3 +138,6 @@ LINUX_DRV_MASS_STORAGE_ID = 1
 LINUX_DRV_MASS_STORAGE_NVME_TYPE_ID = 8
 
 NODE_NVMF_PORT_START=9060
+
+NODES_CONFIG_FILE = "/etc/simplyblock/sn_config_file"
+SYSTEM_INFO_FILE = "/etc/simplyblock/system_info"

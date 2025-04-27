@@ -330,18 +330,14 @@ def get_node_lsblk():
     return data
 
 
-def get_cores_config():
-    file_path = constants.TEMP_CORES_FILE
+def get_nodes_config():
+    file_path = constants.NODES_CONFIG_FILE
     try:
         # Open and read the JSON file
         with open(file_path, "r") as file:
-            cores_config = json.load(file)
-
-        # Output the parsed data
-        logger.info("Parsed Core Configuration:")
-        for key, value in cores_config.items():
-            logger.info(f"{key}: {value}")
-        return cores_config
+            nodes_config = json.load(file)
+        core_utils.validate_node_config(nodes_config)
+        return nodes_config
 
     except FileNotFoundError:
         logger.error(f"The file '{file_path}' does not exist.")
@@ -378,7 +374,7 @@ def get_info():
         "cloud_instance": CLOUD_INFO,
 
         "lsblk": get_node_lsblk(),
-        "cores_config": get_cores_config(),
+        "nodes_config": get_nodes_config(),
     }
     return utils.get_response(out)
 

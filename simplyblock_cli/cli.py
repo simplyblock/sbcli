@@ -31,6 +31,7 @@ class CLIWrapper(CLIWrapperBase):
     def init_storage_node(self):
         subparser = self.add_command('storage-node', 'Storage node commands', aliases=['sn',])
         self.init_storage_node__deploy(subparser)
+        self.init_storage_node__configure(subparser)
         self.init_storage_node__deploy_cleaner(subparser)
         self.init_storage_node__add_node(subparser)
         self.init_storage_node__delete(subparser)
@@ -80,6 +81,13 @@ class CLIWrapper(CLIWrapperBase):
         argument = subcommand.add_argument('--ifname', help='Management interface name, e.g. eth0', type=str, dest='ifname', required=False)
         argument = subcommand.add_argument('--cpu-mask', help='SPDK app CPU mask, default is all cores found', type=str, dest='spdk_cpu_mask', required=False)
         argument = subcommand.add_argument('--isolate-cores', help='Isolate cores in kernel args for provided cpu mask', default=False, dest='isolate_cores', required=False, action='store_true')
+
+    def init_storage_node__configure(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'configure', 'Prepare a configuration file to be used when adding the storage node')
+        argument = subcommand.add_argument('--max-lvol', help='Max logical volume per storage node', type=int, dest='max_lvol', required=False)
+        argument = subcommand.add_argument('--max-size', help='Maximum amount of GB to be utilized on this storage node', type=str, dest='max_prov', required=False)
+        argument = subcommand.add_argument('--nodes-per-socket', help='number of each node to be added per each socket.', type=int, default=1, dest='nodes_per_socket', required=False)
+        argument = subcommand.add_argument('--sockets-to-use', help='The system socket to use when adding the storage nodes', type=str, default='0', dest='sockets_to_use', required=False)
 
     def init_storage_node__deploy_cleaner(self, subparser):
         subcommand = self.add_sub_command(subparser, 'deploy-cleaner', 'Cleans a previous simplyblock deploy (local run)')
@@ -882,6 +890,8 @@ class CLIWrapper(CLIWrapperBase):
             sub_command = args_dict['storage-node']
             if sub_command in ['deploy']:
                 ret = self.storage_node__deploy(sub_command, args)
+            elif sub_command in ['configure']:
+                ret = self.storage_node__configure(sub_command, args)
             elif sub_command in ['deploy-cleaner']:
                 ret = self.storage_node__deploy_cleaner(sub_command, args)
             elif sub_command in ['add-node']:

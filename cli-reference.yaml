@@ -31,6 +31,39 @@ commands:
             type: bool
             default: false
             action: store_true
+      - name: configure
+        help: "Prepare a configuration file to be used when adding the storage node"
+        description: >
+          Runs locally on to-be storage node hosts. Reads system information (CPUs topology, NVME devices) and prepares
+          yaml config to be used when adding the storage node.
+        arguments:
+          - name: "--max-lvol"
+            help: "Max logical volume per storage node"
+            dest: max_lvol
+            type: int
+          - name: "--max-size"
+            help: "Maximum amount of GB to be utilized on this storage node"
+            description: >
+              Maximum amount of GB to be utilized on this storage node. This cannot be larger than the total effective
+              cluster capacity. A safe value is `1/n * 2.0` of effective cluster capacity. Meaning, if you have three
+              storage nodes, each with 100 TiB of raw capacity and a cluster with erasure coding scheme 1+1
+              (two replicas), the effective cluster capacity is _100 TiB * 3 / 2 = 150 TiB_. Setting this parameter to
+              _150 TiB / 3 * 2 = 100TiB_ would be a safe choice.
+            dest: max_prov
+            type: str
+          - name: "--nodes-per-socket"
+            help: "number of each node to be added per each socket."
+            dest: nodes_per_socket
+            type: int
+            default: 1
+          - name: "--sockets-to-use"
+            help: "The system socket to use when adding the storage nodes"
+            description: >
+              System socket to use when adding storage nodes. Comma-separated list: e.g. 0,1
+            dest: sockets_to_use
+            type: str
+            default: "0"
+
       - name: deploy-cleaner
         help: "Cleans a previous simplyblock deploy (local run)"
         description: >

@@ -19,11 +19,12 @@ from simplyblock_core.models.pool import Pool
 class CLIWrapperBase:
 
     def __init__(self):
-        self.parser.add_argument("--cmd", help='cmd', nargs = '+')
+        self.parser.add_argument("--cmd", help='cmd', nargs='+')
         argcomplete.autocomplete(self.parser)
 
     def init_parser(self):
-        self.parser = argparse.ArgumentParser(prog=constants.SIMPLY_BLOCK_CLI_NAME, description='SimplyBlock management CLI')
+        self.parser = argparse.ArgumentParser(prog=constants.SIMPLY_BLOCK_CLI_NAME,
+                                              description='SimplyBlock management CLI')
         self.parser.add_argument("-d", '--debug', help='Print debug messages', required=False, action='store_true')
         self.parser.add_argument('--dev', help='Enable developer options', required=False, action='store_true')
         self.subparser = self.parser.add_subparsers(dest='command')
@@ -46,6 +47,25 @@ class CLIWrapperBase:
                 return f"Invalid cpu mask value: {args.spdk_cpu_mask}"
         isolate_cores = args.isolate_cores
         return storage_ops.deploy(args.ifname, spdk_cpu_mask, isolate_cores)
+
+    def storage_node__configure(self, sub_command, args):
+        if not args.max_lvol:
+            self.parser.error(f"Mandatory argument '--max-lvol' not provided for {sub_command}")
+        if not args.max_prov:
+            self.parser.error(f"Mandatory argument '--max-size' not provided for {sub_command}")
+        sockets_to_use = [0]
+        if args.sockets_to_use:
+            try:
+                sockets_to_use = [int(x) for x in args.sockets_to_use.split(',')]
+            except ValueError:
+                self.parser.error(
+                        f"Invalid value for sockets_to_use {args.sockets_to_use}. It must be a comma-separated list of integers.")
+
+        if args.nodes_per_socket not in [1, 2]:
+            self.parser.error(f"nodes_per_socket {args.nodes_per_socket}must be either 1 or 2")
+        max_prov = utils.parse_size(args.max_prov, assume_unit='G')
+        return storage_ops.generate_automated_deployment_config(args.max_lvol, max_prov, sockets_to_use,
+                                                                args.nodes_per_socket)
 
     def storage_node__deploy_cleaner(self, sub_command, args):
         return storage_ops.deploy_cleaner()
@@ -108,7 +128,7 @@ class CLIWrapperBase:
             namespace=namespace,
             number_of_distribs=number_of_distribs,
             enable_ha_jm=enable_ha_jm,
-            is_secondary_node=args.is_secondary_node,   # pass
+            is_secondary_node=args.is_secondary_node,  # pass
             id_device_by_nqn=args.id_device_by_nqn,
             partition_size=args.partition_size,
             ha_jm_count=ha_jm_count,
@@ -141,7 +161,7 @@ class CLIWrapperBase:
 
         max_lvol = args.max_lvol
         max_snap = args.max_snap
-        max_prov = utils.parse_size(args.max_prov, assume_unit='G')
+        max_prov = utils.parse_size(args.max_prov)
         number_of_devices = args.number_of_devices
 
         small_bufsize = args.small_bufsize
@@ -173,13 +193,13 @@ class CLIWrapperBase:
             return False
 
     def storage_node__get_capacity(self, sub_command, args):
-                node_id = args.node_id
-                history = args.history
-                data = storage_ops.get_node_capacity(node_id, history)
-                if data:
-                    return utils.print_table(data)
-                else:
-                    return False
+        node_id = args.node_id
+        history = args.history
+        data = storage_ops.get_node_capacity(node_id, history)
+        if data:
+            return utils.print_table(data)
+        else:
+            return False
 
     def storage_node__list_devices(self, sub_command, args):
         return self.storage_node_list_devices(args)
@@ -337,7 +357,7 @@ class CLIWrapperBase:
 
     def cluster__update(self, sub_command, args):
         return cluster_ops.update_cluster(**args.__dict__)
-    
+
     def cluster__graceful_shutdown(self, sub_command, args):
         return cluster_ops.cluster_grace_shutdown(args.cluster_id)
 
@@ -352,22 +372,22 @@ class CLIWrapperBase:
 
     def cluster__delete(self, sub_command, args):
         return cluster_ops.delete_cluster(args.cluster_id)
-    
+
     def cluster_suspend(self, sub_command, args):
         cluster_id = args.cluster_id
-        return cluster_ops.suspend_cluster(cluster_id) 
-    
+        return cluster_ops.suspend_cluster(cluster_id)
+
     def cluster_unsuspend(self, sub_command, args):
         cluster_id = args.cluster_id
-        return cluster_ops.unsuspend_cluster(cluster_id) 
-    
+        return cluster_ops.unsuspend_cluster(cluster_id)
+
     def cluster_get_cli_ssh_pass(self, sub_command, args):
         cluster_id = args.cluster_id
         return cluster_ops.get_ssh_pass(cluster_id)
 
     def cluster__set(self, sub_command, args):
         cluster_id = args.cluster_id
-        return cluster_ops.set(cluster_id,  args.attr_name, args.attr_value)
+        return cluster_ops.set(cluster_id, args.attr_name, args.attr_value)
 
     def volume__add(self, sub_command, args):
         name = args.name
@@ -430,7 +450,7 @@ class CLIWrapperBase:
     def volume__resize(self, sub_command, args):
         volume_id = args.volume_id
         size = utils.parse_size(args.size)
-        ret, err =  lvol_controller.resize_lvol(volume_id, size)
+        ret, err = lvol_controller.resize_lvol(volume_id, size)
         return ret
 
     def volume__create_snapshot(self, sub_command, args):
@@ -646,14 +666,12 @@ class CLIWrapperBase:
         enable_qos = args.enable_qos
         strict_node_anti_affinity = args.strict_node_anti_affinity
 
-
         return cluster_ops.add_cluster(
             blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
             distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, enable_node_affinity,
             qpair_count, max_queue_size, inflight_io_threshold, enable_qos, strict_node_anti_affinity)
 
-
-    def cluster_deploy(self,args):
+    def cluster_deploy(self, args):
         grafana_endpoint = ""
         secondary_nodes = False
         namespace = None
@@ -700,7 +718,7 @@ class CLIWrapperBase:
         max_queue_size = args.max_queue_size
         inflight_io_threshold = args.inflight_io_threshold
         strict_node_anti_affinity = args.strict_node_anti_affinity
-        
+
         data_nics = args.data_nics
         spdk_image = args.spdk_image
         spdk_debug = args.spdk_debug
@@ -717,8 +735,6 @@ class CLIWrapperBase:
             else:
                 return f"Invalid cpu mask value: {args.spdk_cpu_mask}"
 
-        
-
         max_lvol = args.max_lvol
         max_snap = args.max_snap
         max_prov = utils.parse_size(args.max_prov, assume_unit='G')
@@ -728,7 +744,7 @@ class CLIWrapperBase:
         number_of_distribs = args.number_of_distribs
         namespace = args.namespace
         secondary_nodes = args.secondary_nodes
-        
+
         lvol_name = args.lvol_name
         lvol_size = utils.parse_size(args.lvol_size)
         max_size = utils.parse_size(args.max_size)
@@ -740,14 +756,17 @@ class CLIWrapperBase:
         distr_vuid = args.distr_vuid
 
         return cluster_ops.deploy_cluster(
-            storage_nodes,test,ha_type,distr_ndcs,distr_npcs,enable_qos,ifname,
-            blk_size, page_size_in_blocks,CLI_PASS, cap_warn, cap_crit, prov_cap_warn, 
-            prov_cap_crit,log_del_interval, metrics_retention_period, contact_point, grafana_endpoint,
+            storage_nodes, test, ha_type, distr_ndcs, distr_npcs, enable_qos, ifname,
+            blk_size, page_size_in_blocks, CLI_PASS, cap_warn, cap_crit, prov_cap_warn,
+            prov_cap_crit, log_del_interval, metrics_retention_period, contact_point, grafana_endpoint,
             distr_bs, distr_chunk_bs, enable_node_affinity,
-            qpair_count, max_queue_size, inflight_io_threshold, strict_node_anti_affinity,data_nics,
-            spdk_image,spdk_debug,small_bufsize,large_bufsize,num_partitions_per_dev,jm_percent,spdk_cpu_mask,max_lvol,
-            max_snap,max_prov,number_of_devices,enable_test_device,enable_ha_jm,ha_jm_count,number_of_distribs,namespace,secondary_nodes,partition_size,
-            lvol_name, lvol_size, lvol_ha_type, pool_name, pool_max, host_id, comp, crypto, distr_vuid, max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes,
+            qpair_count, max_queue_size, inflight_io_threshold, strict_node_anti_affinity, data_nics,
+            spdk_image, spdk_debug, small_bufsize, large_bufsize, num_partitions_per_dev, jm_percent, spdk_cpu_mask,
+            max_lvol,
+            max_snap, max_prov, number_of_devices, enable_test_device, enable_ha_jm, ha_jm_count, number_of_distribs,
+            namespace, secondary_nodes, partition_size,
+            lvol_name, lvol_size, lvol_ha_type, pool_name, pool_max, host_id, comp, crypto, distr_vuid, max_rw_iops,
+            max_rw_mbytes, max_r_mbytes, max_w_mbytes,
             with_snapshot, max_size, crypto_key1, crypto_key2, lvol_priority_class, id_device_by_nqn, fstype)
 
     def cluster_create(self, args):
@@ -775,14 +794,12 @@ class CLIWrapperBase:
         enable_qos = args.enable_qos
         strict_node_anti_affinity = args.strict_node_anti_affinity
 
-
         return cluster_ops.create_cluster(
             blk_size, page_size_in_blocks,
             CLI_PASS, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
             ifname, log_del_interval, metrics_retention_period, contact_point, grafana_endpoint,
             distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, enable_node_affinity,
             qpair_count, max_queue_size, inflight_io_threshold, enable_qos, strict_node_anti_affinity)
-
 
     def query_yes_no(self, question, default="yes"):
         """Ask a yes/no question via raw_input() and return their answer.
@@ -820,7 +837,6 @@ class CLIWrapperBase:
     def _completer_get_cluster_list(self, prefix, parsed_args, **kwargs):
         db = db_controller.DBController()
         return (cluster.get_id() for cluster in db.get_clusters() if cluster.get_id().startswith(prefix))
-
 
     def _completer_get_sn_list(self, prefix, parsed_args, **kwargs):
         db = db_controller.DBController()
