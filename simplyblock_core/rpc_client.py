@@ -394,7 +394,7 @@ class RPCClient:
 
     def bdev_alceml_create(self, alceml_name, nvme_name, uuid, pba_init_mode=3,
                            alceml_cpu_mask="", alceml_worker_cpu_mask="", pba_page_size=2097152,
-                           write_protection=False):
+                           write_protection=False, full_page_unmap=False):
         params = {
             "name": alceml_name,
             "cntr_path": nvme_name,
@@ -409,7 +409,7 @@ class RPCClient:
             # "use_scheduling": True,
             "use_optimized": True,
             "pba_nbalign": 4096,
-            "use_map_whole_page_on_1st_write": False
+            "use_map_whole_page_on_1st_write": full_page_unmap,
         }
         if alceml_cpu_mask:
             params["bdb_lcpu_mask"] = int(alceml_cpu_mask, 16)
@@ -421,7 +421,8 @@ class RPCClient:
 
     def bdev_distrib_create(self, name, vuid, ndcs, npcs, num_blocks, block_size, jm_names,
                             chunk_size, ha_comm_addrs=None, ha_inode_self=None, pba_page_size=2097152,
-                            distrib_cpu_mask="", ha_is_non_leader=True, jm_vuid=0, write_protection=False):
+                            distrib_cpu_mask="", ha_is_non_leader=True, jm_vuid=0, write_protection=False,
+                            full_page_unmap=False):
         """"
             // Optional (not specified = no HA)
             // Comma-separated communication addresses, for each node, e.g. "192.168.10.1:45001,192.168.10.1:32768".
@@ -449,6 +450,7 @@ class RPCClient:
             "block_size": block_size,
             "chunk_size": chunk_size,
             "pba_page_size": pba_page_size,
+            "use_map_whole_page_on_1st_write": full_page_unmap,
         }
         if jm_vuid > 0:
             params["jm_vuid"] = jm_vuid
