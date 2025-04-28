@@ -69,9 +69,11 @@ Then run:
 nohup python3 stress.py --testname RandomFailoverTest --send_debug_notification True --upload_logs True > stress_output.log 2>&1 &
 ```
 
-> Use `--upload_logs True` to automatically upload logs to MinIO after the test.
+**Note:**
 
-> To send slack notification in case of failure use `export SLACK_WEBHOOK_URL="SLACK_HOOK"` and use flag `--send_debug_notification True`
+- Use `--upload_logs True` to automatically upload logs to MinIO after the test.
+
+- To send slack notification in case of failure use `export SLACK_WEBHOOK_URL="SLACK_HOOK"` and use flag `--send_debug_notification True`
 
 ---
 
