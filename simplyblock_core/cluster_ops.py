@@ -268,9 +268,22 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     values = {
         'CLUSTER_ID': c.uuid,
         'CLUSTER_SECRET': c.secret}
-    file_path = os.path.join(scripts_folder, prometheus_file)
+
+    temp_dir = tempfile.mkdtemp()
+
+    file_path = os.path.join(temp_dir, prometheus_file)
     with open(file_path, 'w') as file:
         file.write(template.render(values))
+
+    prometheus_file_path = os.path.join(scripts_folder, prometheus_file)
+    try:
+        subprocess.run(['sudo', '-v'], check=True)  # sudo -v checks if the current user has sudo permissions
+        subprocess.run(['sudo', 'mv', file_path, prometheus_file_path], check=True)
+        print(f"File moved to {prometheus_file_path} successfully.")
+    except subprocess.CalledProcessError as e:
+        print(f"An error occurred: {e}")
+    shutil.rmtree(temp_dir)
+
 
     logger.info("Deploying swarm stack ...")
     log_level = "DEBUG" if constants.LOG_WEB_DEBUG else "INFO"
