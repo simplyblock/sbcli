@@ -18,6 +18,11 @@ Navigate to your project directory:
 cd sbcli/e2e
 ```
 
+Run requirements installation.
+```sh
+python3 -m pip install -r requirements.txt
+```
+
 ---
 
 ## 2. Export Required Environment Variables (Common for All)
