@@ -277,7 +277,6 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
 
     prometheus_file_path = os.path.join(scripts_folder, prometheus_file)
     try:
-        subprocess.run(['sudo', '-v'], check=True)  # sudo -v checks if the current user has sudo permissions
         subprocess.run(['sudo', 'mv', file_path, prometheus_file_path], check=True)
         print(f"File moved to {prometheus_file_path} successfully.")
     except subprocess.CalledProcessError as e:
