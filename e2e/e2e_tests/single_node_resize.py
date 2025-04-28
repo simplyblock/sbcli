@@ -26,7 +26,7 @@ class TestSingleNodeResizeLvolCone(TestClusterBase):
         super().__init__(**kwargs)
         self.snapshot_name = "snapshot"
         self.logger = setup_logger(__name__)
-        self.test_name = "single_node_outage"
+        self.test_name = "single_node_resize"
 
     def run(self):
         """ Performs each step of the testcase

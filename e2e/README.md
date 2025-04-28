@@ -1,71 +1,139 @@
-# Running Stress Tests
+# Running Tests: E2E, Stress, and Upgrade
 
-## 1. Login to the Test Machine
-- SSH into the **192.168.10.72** machine as `root` using the **simplyblock-us-east-2.pem** key.
-- Navigate to the stress test directory:
-  ```sh
-  cd raunak/sbcli-client-stress-node-affinity/e2e
-  ```
+---
 
-## 2. Export Required Variables
-Before running the stress test, set up the necessary environment variables:
+## 1. Setup for Running Tests
+
+You can run these tests from **any machine** (Management Node, Local Machine, Lab VMs, etc.) as long as the **Bastion** and **API** are reachable. It is not restricted to any machine.
+
+
+Clone the repository:
 ```sh
-export AWS_REGION=us-east-2
-export AWS_ACCESS_KEY_ID=<AWS_ACCESS_KEY_ID>
-export AWS_SECRET_ACCESS_KEY=<AWS_SECRET_ACCESS_KEY>
+git clone https://github.com/simplyblock-io/sbcli.git
+```
+
+Navigate to your project directory:
+
+```sh
+cd sbcli/e2e
+```
+
+---
+
+## 2. Export Required Environment Variables (Common for All)
+
+Before running any test, set up these environment variables:
+
+```sh
 export SSH_USER=root
 export KEY_NAME=simplyblock-us-east-2.pem
-export BASTION_SERVER=192.168.10.61
-export API_BASE_URL=http://192.168.10.61/
-export SBCLI_CMD=sbcli-down
-export CLUSTER_SECRET=pPnq6A01X6sJPa0Hfo9X
-export CLUSTER_ID=4c9dd051-c9ba-4297-8c5c-c97652403041
-export SLACK_WEBHOOK_URL="SLACK_HOOK"
-export CLIENT_IP=192.168.10.93
+export BASTION_SERVER=<mgmt ip>
+export API_BASE_URL=http://<mgmt ip>/
+export SBCLI_CMD=sbcli-dev
+export CLUSTER_SECRET=<Your_Cluster_Secret>
+export CLUSTER_ID=<Your_Cluster_ID>
 ```
 
-**Note:** Modify the **CLUSTER_ID** and **CLUSTER_SECRET** by creating a setup on **192.168.10.61**.
+**Notes:**
+- `CLUSTER_ID` and `CLUSTER_SECRET` should be **taken from the cluster created by the user**.
+- `CLIENT_IP` is **only needed for Stress Tests**, not for E2E or Upgrade Tests.
+---
 
-## 3. Running the Stress Test
-Execute the stress test in the background using `nohup`:
+## 3. Running an E2E Test
+
+To run an **E2E test**:
+
 ```sh
-nohup python3 stress.py --testname RandomFailoverTest --send_debug_notification True > output.log 2>&1 &
+nohup python3 e2e.py --testname RandomE2ETest > e2e_output.log 2>&1 &
 ```
 
-## 4. Uploading Logs to MinIO
-Once the test is completed, export the following variables before uploading logs:
+> Make sure you are in the `e2e` directory before running.
+
+---
+
+## 4. Running a Stress Test
+
+For **Stress Testing**, you need to export an additional variable:
+
+```sh
+export CLIENT_IP=192.168.xx.xx
+
+OR
+
+export CLIENT_IP="<IP1> <IP2>"
+```
+
+Then run:
+
+```sh
+nohup python3 stress.py --testname RandomFailoverTest --send_debug_notification True --upload_logs True > stress_output.log 2>&1 &
+```
+
+> Use `--upload_logs True` to automatically upload logs to MinIO after the test.
+
+> To send slack notification in case of failure use `export SLACK_WEBHOOK_URL="SLACK_HOOK"` and use flag `--send_debug_notification True`
+
+---
+
+## 5. Running an Upgrade Test
+
+For **Upgrade Testing**, no additional variables are needed.
+Run:
+
+```sh
+nohup python3 upgrade.py --testname RandomUpgradeTest > upgrade_output.log 2>&1 &
+```
+
+---
+
+## 6. Uploading Logs to MinIO
+
+If logs were **not uploaded automatically** during Stress Test or you want to upload manually, export these variables:
+
 ```sh
 export MINIO_ACCESS_KEY="MinIOAccessKey"
 export MINIO_SECRET_KEY="MinIOSecretKey"
-export BASTION_IP="192.168.10.61"
-export MNODES="192.168.10.61"
-export STORAGE_PRIVATE_IPS="192.168.10.62 192.168.10.63 192.168.10.64"
-export SEC_STORAGE_PRIVATE_IPS="192.168.10.65"
-export GITHUB_RUN_ID=07-03-2025-RandomOutage-FIOInterrupt-GCImage-sbcli-down
+export BASTION_IP="<Mgmt IP>"
+export MNODES="<Mgmt IP>"
+export STORAGE_PRIVATE_IPS="<IP1> <IP2> <IP3>"
+export GITHUB_RUN_ID="<Name of folder on MINIO>"
 ```
 
-- **`GITHUB_RUN_ID`**: This can be set to the **directory name** you want to store logs in MinIO.
-  - If **not provided**, it will default to **today’s date**.
+**Note:**
+- `GITHUB_RUN_ID` is optional. If not set, today's date will be used as the folder name in MinIO.
 
-Run the log upload script:
+Run the upload script:
+
 ```sh
 python3 logs/upload_logs_to_miniio.py
 ```
 
-## 5. Downloading Logs from MinIO
-To download logs, export MinIO credentials:
+---
+
+## 7. Downloading Logs from MinIO
+
+To download logs:
+
 ```sh
 export MINIO_ACCESS_KEY="MinIOAccessKey"
 export MINIO_SECRET_KEY="MinIOSecretKey"
 ```
 
-Then navigate to the directory where you want to download the logs and run:
+Navigate to your desired directory and run:
+
 ```sh
 python3 download_logs_from_minio.py "e2e-run-logs/<Folder to download>/"
 ```
 
-## 6. Additional Resources
-- **All log-related scripts** are available here:
-  [GitHub Logs Directory](https://github.com/simplyblock-io/sbcli/tree/main/e2e/logs)
-- For **E2E testing**, GitHub Actions can be used directly.
+---
 
+## 8. Additional Resources
+
+- All log-related scripts are available here:
+  [GitHub Logs Directory](https://github.com/simplyblock-io/sbcli/tree/main/e2e/logs)
+
+- For full E2E testing pipelines, you can also use GitHub Actions directly.
+
+---
+
+# 🔧 Happy Testing!
