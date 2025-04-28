@@ -13,8 +13,6 @@ import random, string, re
 import subprocess
 
 
-SSH_KEY_LOCATION = os.path.join(Path.home(), ".ssh", os.environ.get("KEY_NAME"))
-
 def generate_random_string(length=6):
     """Generate a random string of uppercase letters and digits."""
     return ''.join(random.choices(string.ascii_uppercase + string.digits, k=length))
@@ -65,10 +63,20 @@ class SshUtils:
         username = self.ssh_user if self.ssh_user else username
 
         # Load the private key
-        if not os.path.exists(SSH_KEY_LOCATION):
-            raise FileNotFoundError(f"SSH private key not found at {SSH_KEY_LOCATION}")
-        
-        private_key = paramiko.Ed25519Key(filename=SSH_KEY_LOCATION)
+        key_name = os.environ.get("KEY_NAME")
+        if key_name is None:
+            raise ValueError('No private key configured')
+
+        if os.path.exists(ssh_key_location := os.path.join(Path.home(), ".ssh", key_name)):
+            private_key = paramiko.Ed25519Key(filename=ssh_key_location)
+        elif (agent_key := next((
+            key
+            for key in paramiko.Agent().get_keys()
+            if key.comment == 'max@simplyblock.io'
+        ), None)) is not None:
+            private_key = agent_key
+        else:
+            raise ValueError(f'Private key {key_name} not found')
 
         # Check if we need to connect to the bastion server
         bastion_server_address = bastion_server_address or self.bastion_server
