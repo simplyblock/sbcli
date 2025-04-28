@@ -49,10 +49,14 @@ export CLUSTER_ID=<Your_Cluster_ID>
 To run an **E2E test**:
 
 ```sh
-nohup python3 e2e.py --testname RandomE2ETest > e2e_output.log 2>&1 &
+nohup python3 e2e.py --testname RandomE2ETest --run_ha True > e2e_output.log 2>&1 &
 ```
 
-> Make sure you are in the `e2e` directory before running.
+**Note:**
+
+- For a basic sanity run, we can run TestHASingleNodeOutage test case.
+
+- To send slack notification in case of failure use `export SLACK_WEBHOOK_URL="SLACK_HOOK"` and use flag `--send_debug_notification True`
 
 ---
 
