@@ -629,7 +629,7 @@ def get_logger(name=""):
 def _parse_unit(unit: str, mode: str = 'si/iec', strict: bool = True) -> tuple[int, int]:
     """Parse the given unit, returning the associated base and exponent
 
-    Mode can be either 'si/iec' to parse decimal (SI) and binary (IEC) units, or 
+    Mode can be either 'si/iec' to parse decimal (SI) and binary (IEC) units, or
     'jedec' for binary only units. If `strict`, parsing will be case-sensitive and
     expect the 'B' suffix.
     """
@@ -659,7 +659,7 @@ def parse_size(size_string: str, mode: str = 'si/iec', unit: str = '', strict: b
     """Parse the given data size
 
     If passed and not explicitly given, 'unit' will be assumed.
-    Mode can be either 'si/iec' to parse decimal (SI) and binary (IEC) units, or 
+    Mode can be either 'si/iec' to parse decimal (SI) and binary (IEC) units, or
     'jedec' for binary only units. If `strict`, parsing will be case-sensitive and
     expect the 'B' suffix.
     """
@@ -910,3 +910,16 @@ def store_cores_config(spdk_cpu_mask):
         logger.info(f"JSON file successfully written to {file_path}")
     except subprocess.CalledProcessError as e:
         logger.error(f"Error writing to file: {e}")
+
+
+def get_random_snapshot_vuid():
+    from simplyblock_core.db_controller import DBController
+    db_controller = DBController()
+    used_vuids = []
+    for snap in db_controller.get_snapshots():
+        used_vuids.append(snap.vuid)
+
+    r = 1 + int(random.random() * 1000000)
+    while r in used_vuids:
+        r = 1 + int(random.random() * 1000000)
+    return r
