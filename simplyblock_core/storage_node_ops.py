@@ -3278,7 +3278,7 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
         {
             "type": "bdev_lvstore",
             "name": lvs_name,
-            "disaster_recovery": disaster_recovery
+            "disaster_recovery": disaster_recovery,
             "params": {
                 "name": lvs_name,
                 "bdev_name": raid_device,
