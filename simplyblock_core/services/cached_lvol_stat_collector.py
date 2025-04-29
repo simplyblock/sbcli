@@ -38,7 +38,7 @@ def add_lvol_stats(lvol, stats_dict):
         if lvol.get_id() in last_object_record:
             last_record = last_object_record[lvol.get_id()]
         else:
-            records = db_controller.get_cached_lvol_stats(lvol.get_id(), limit=1)
+            records = db.get_cached_lvol_stats(lvol.get_id(), limit=1)
             if records:
                 last_record = records[0]
 
@@ -67,16 +67,16 @@ def add_lvol_stats(lvol, stats_dict):
         logger.error("Error getting stats")
 
     stat_obj = CachedLVolStatObject(data=data)
-    stat_obj.write_to_db(db_controller.kv_store)
+    stat_obj.write_to_db(db.kv_store)
     last_object_record[lvol.get_id()] = stat_obj
     return stat_obj
 
 
-db_controller = db_controller.DBController()
+db = db_controller.DBController()
 
 logger.info("Starting stats collector...")
 while True:
-    cnodes = db_controller.get_caching_nodes()
+    cnodes = db.get_caching_nodes()
     for node in cnodes:
         rpc_client = RPCClient(node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password, timeout=3, retry=1)
         for cached_lvol in node.lvols:

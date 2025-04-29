@@ -268,9 +268,21 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     values = {
         'CLUSTER_ID': c.uuid,
         'CLUSTER_SECRET': c.secret}
-    file_path = os.path.join(scripts_folder, prometheus_file)
+
+    temp_dir = tempfile.mkdtemp()
+
+    file_path = os.path.join(temp_dir, prometheus_file)
     with open(file_path, 'w') as file:
         file.write(template.render(values))
+
+    prometheus_file_path = os.path.join(scripts_folder, prometheus_file)
+    try:
+        subprocess.run(['sudo', 'mv', file_path, prometheus_file_path], check=True)
+        print(f"File moved to {prometheus_file_path} successfully.")
+    except subprocess.CalledProcessError as e:
+        print(f"An error occurred: {e}")
+    shutil.rmtree(temp_dir)
+
 
     logger.info("Deploying swarm stack ...")
     log_level = "DEBUG" if constants.LOG_WEB_DEBUG else "INFO"
@@ -1290,12 +1302,13 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
         logger.info(f"Pulling image {constants.SIMPLY_BLOCK_DOCKER_IMAGE}")
         cluster_docker.images.pull(constants.SIMPLY_BLOCK_DOCKER_IMAGE)
         image_without_tag = constants.SIMPLY_BLOCK_DOCKER_IMAGE.split(":")[0]
-        image_without_tag = image_without_tag.split("/")[-1]
+        image_without_tag = image_without_tag.split("/")
+        image_parts = "/".join(image_without_tag[-2:])
         service_image = constants.SIMPLY_BLOCK_DOCKER_IMAGE
         if mgmt_image:
             service_image = mgmt_image
         for service in cluster_docker.services.list():
-            if image_without_tag in service.attrs['Spec']['Labels']['com.docker.stack.image']:
+            if image_parts in service.attrs['Spec']['Labels']['com.docker.stack.image']:
                 logger.info(f"Updating service {service.name}")
                 service.update(image=service_image, force_update=True)
         logger.info("Done updating mgmt cluster")

@@ -37,7 +37,9 @@ def firewall_port_k8s(port_id=9090, port_type="tcp", block=True, k8s_core_v1=Non
     if block:
         cmd_list.extend([
             f"iptables -A INPUT -p {port_type} --dport {port_id} -j DROP",
+            f"iptables -A INPUT -p {port_type} --dport {port_id} -j REJECT",
             f"iptables -A OUTPUT -p {port_type} --dport {port_id} -j DROP",
+            f"iptables -A OUTPUT -p {port_type} --dport {port_id} -j REJECT",
             "iptables -L -n -v",
         ])
     else:

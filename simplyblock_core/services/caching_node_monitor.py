@@ -13,12 +13,12 @@ from simplyblock_core.models.caching_node import CachingNode
 logger = utils.get_logger(__name__)
 
 # get DB controller
-db_controller = db_controller.DBController()
+db = db_controller.DBController()
 
 
 def set_node_online(node):
     if node.status == CachingNode.STATUS_UNREACHABLE:
-        snode = db_controller.get_caching_node_by_id(node.get_id())
+        snode = db.get_caching_node_by_id(node.get_id())
         old_status = snode.status
         snode.status = CachingNode.STATUS_ONLINE
         snode.updated_at = str(datetime.now())
@@ -28,7 +28,7 @@ def set_node_online(node):
 
 def set_node_offline(node):
     if node.status == CachingNode.STATUS_ONLINE:
-        snode = db_controller.get_caching_node_by_id(node.get_id())
+        snode = db.get_caching_node_by_id(node.get_id())
         old_status = snode.status
         snode.status = CachingNode.STATUS_UNREACHABLE
         snode.updated_at = str(datetime.now())
@@ -51,7 +51,7 @@ logger.info("Starting Caching node monitor")
 
 
 while True:
-    nodes = db_controller.get_caching_nodes()
+    nodes = db.get_caching_nodes()
     for node in nodes:
         if node.status not in [CachingNode.STATUS_ONLINE, CachingNode.STATUS_UNREACHABLE]:
             logger.info(f"Node status is: {node.status}, skipping")

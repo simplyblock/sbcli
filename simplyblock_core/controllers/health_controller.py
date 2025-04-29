@@ -119,7 +119,7 @@ def _check_node_ping(ip):
         return False
 
 def _check_node_hublvol(node: StorageNode, node_bdev_names=None, node_lvols_nqns=None):
-    logger.info(f"Checking Hublvol: {node.hublvol.name} on node {node.get_id()}")
+    logger.info(f"Checking Hublvol: {node.hublvol.bdev_name} on node {node.get_id()}")
     db_controller = DBController()
 
     passed = True
@@ -197,7 +197,7 @@ def _check_node_hublvol(node: StorageNode, node_bdev_names=None, node_lvols_nqns
 
 
 def _check_sec_node_hublvol(node: StorageNode, node_bdev=None, node_lvols_nqns=None):
-    logger.info(f"Checking secondary Hublvol: {node.hublvol.name} on node {node.get_id()}")
+    logger.info(f"Checking secondary Hublvol: {node.hublvol.bdev_name} on node {node.get_id()}")
     db_controller = DBController()
 
     passed = True
@@ -224,11 +224,11 @@ def _check_sec_node_hublvol(node: StorageNode, node_bdev=None, node_lvols_nqns=N
 
         primary_node = db_controller.get_storage_node_by_id(node.lvstore_stack_secondary_1)
 
-        ret = rpc_client.bdev_nvme_controller_list(primary_node.hublvol.name)
+        ret = rpc_client.bdev_nvme_controller_list(primary_node.hublvol.bdev_name)
         if ret:
-            logger.info(f"Checking controller: {primary_node.hublvol.name} ... ok")
+            logger.info(f"Checking controller: {primary_node.hublvol.bdev_name} ... ok")
         else:
-            logger.info(f"Checking controller: {primary_node.hublvol.name} ... failed")
+            logger.info(f"Checking controller: {primary_node.hublvol.bdev_name} ... failed")
             passed = False
 
         if primary_node.hublvol.get_remote_bdev_name() in node_bdev:

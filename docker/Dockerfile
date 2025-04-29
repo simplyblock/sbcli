@@ -3,12 +3,12 @@ FROM simplyblock/simplyblock:base_image
 
 WORKDIR /app
 
-COPY . /app/
-COPY ./docker/motd /etc/
+COPY requirements.txt .
+COPY simplyblock_web/requirements.txt .
 
-RUN pip3 install -r requirements.txt
-RUN pip3 install -r simplyblock_web/requirements.txt
+RUN pip3 install -r requirements.txt \
+    && pip3 install -r simplyblock_web/requirements.txt
+
+COPY . /app
 
 RUN python setup.py install
-
-RUN rm -rf ".git"

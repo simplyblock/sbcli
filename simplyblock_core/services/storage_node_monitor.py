@@ -15,7 +15,7 @@ logger = utils.get_logger(__name__)
 
 
 # get DB controller
-db_controller = db_controller.DBController()
+db = db_controller.DBController()
 
 utils.init_sentry_sdk()
 
@@ -32,7 +32,7 @@ def is_new_migrated_node(cluster_id, node):
             distr_names.append(item["name"])
 
     if dev_lst:
-        tasks = db_controller.get_job_tasks(cluster_id)
+        tasks = db.get_job_tasks(cluster_id)
         for task in tasks:
             if task.function_name == JobSchedule.FN_NEW_DEV_MIG and task.node_id == node.get_id():
                 if task.device_id not in dev_lst:
@@ -44,10 +44,10 @@ def is_new_migrated_node(cluster_id, node):
 
 
 def get_next_cluster_status(cluster_id):
-    cluster = db_controller.get_cluster_by_id(cluster_id)
+    cluster = db.get_cluster_by_id(cluster_id)
     if cluster.status == cluster.STATUS_UNREADY:
         return Cluster.STATUS_UNREADY
-    snodes = db_controller.get_primary_storage_nodes_by_cluster_id(cluster_id)
+    snodes = db.get_primary_storage_nodes_by_cluster_id(cluster_id)
 
     online_nodes = 0
     offline_nodes = 0
@@ -132,7 +132,7 @@ def get_next_cluster_status(cluster_id):
 
 
 def update_cluster_status(cluster_id):
-    cluster = db_controller.get_cluster_by_id(cluster_id)
+    cluster = db.get_cluster_by_id(cluster_id)
     current_cluster_status = cluster.status
     logger.info("cluster_status: %s", current_cluster_status)
     if current_cluster_status in [Cluster.STATUS_UNREADY, Cluster.STATUS_IN_ACTIVATION]:
@@ -142,11 +142,12 @@ def update_cluster_status(cluster_id):
     logger.info("cluster_new_status: %s", next_current_status)
 
     task_pending = 0
-    for task in db_controller.get_job_tasks(cluster_id):
+    for task in db.get_job_tasks(cluster_id):
         if task.status != JobSchedule.STATUS_DONE and task.function_name in [
             JobSchedule.FN_DEV_MIG, JobSchedule.FN_NEW_DEV_MIG, JobSchedule.FN_FAILED_DEV_MIG]:
             task_pending += 1
 
+    cluster = db.get_cluster_by_id(cluster_id)
     cluster.is_re_balancing = task_pending  > 0
     cluster.write_to_db()
 
@@ -163,7 +164,7 @@ def update_cluster_status(cluster_id):
         # needs activation
         # check node status, check auto restart for nodes
         can_activate = True
-        for node in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
+        for node in db.get_storage_nodes_by_cluster_id(cluster_id):
             if node.status in [StorageNode.STATUS_IN_SHUTDOWN, StorageNode.STATUS_IN_CREATION,
                                StorageNode.STATUS_RESTARTING]:
                 logger.error(f"can not activate cluster: node is not in correct status {node.get_id()}: {node.status}")
@@ -236,14 +237,14 @@ def set_node_down(node, dev_status):
 
 logger.info("Starting node monitor")
 while True:
-    clusters = db_controller.get_clusters()
+    clusters = db.get_clusters()
     for cluster in clusters:
         cluster_id = cluster.get_id()
         if cluster.status == Cluster.STATUS_IN_ACTIVATION:
             logger.info(f"Cluster status is: {cluster.status}, skipping monitoring")
             continue
 
-        nodes = db_controller.get_storage_nodes_by_cluster_id(cluster_id)
+        nodes = db.get_storage_nodes_by_cluster_id(cluster_id)
         for snode in nodes:
             if snode.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_UNREACHABLE,
                                     StorageNode.STATUS_SCHEDULABLE, StorageNode.STATUS_DOWN]:
@@ -287,7 +288,7 @@ while True:
             if spdk_process and snode.lvstore_status == "ready":
                 ports = [snode.nvmf_port]
                 if snode.lvstore_stack_secondary_1:
-                    for n in db_controller.get_primary_storage_nodes_by_secondary_node_id(snode.get_id()):
+                    for n in db.get_primary_storage_nodes_by_secondary_node_id(snode.get_id()):
                         if n.lvstore_status == "ready":
                             ports.append(n.lvol_subsys_port)
                 if not snode.is_secondary_node:
@@ -327,7 +328,7 @@ while True:
                                                                       JMDevice.STATUS_UNAVAILABLE)
             else:
 
-                cluster = db_controller.get_cluster_by_id(cluster.get_id())
+                cluster = db.get_cluster_by_id(cluster.get_id())
                 if not ping_check and not node_api_check and not spdk_process:
                     # restart on new node
                     storage_node_ops.set_node_status(snode.get_id(), StorageNode.STATUS_SCHEDULABLE)

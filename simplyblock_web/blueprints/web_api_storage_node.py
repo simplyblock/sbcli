@@ -14,7 +14,7 @@ from simplyblock_core import db_controller, storage_node_ops, utils as core_util
 logger = logging.getLogger(__name__)
 
 bp = Blueprint("snode", __name__)
-db_controller = db_controller.DBController()
+db = db_controller.DBController()
 
 
 @bp.route('/storagenode', methods=['GET'], defaults={'uuid': None})
@@ -22,18 +22,18 @@ db_controller = db_controller.DBController()
 def list_storage_nodes(uuid):
     cluster_id = utils.get_cluster_id(request)
     if uuid:
-        node = db_controller.get_storage_node_by_id(uuid)
+        node = db.get_storage_node_by_id(uuid)
         if node and node.cluster_id == cluster_id:
             nodes = [node]
         else:
             return utils.get_response_error(f"node not found: {uuid}", 404)
     else:
-        nodes = db_controller.get_storage_nodes_by_cluster_id(cluster_id)
+        nodes = db.get_storage_nodes_by_cluster_id(cluster_id)
     data = []
     for node in nodes:
         d = node.get_clean_dict()
         d['status_code'] = node.get_status_code()
-        lvs = db_controller.get_lvols_by_node_id(node.get_id()) or []
+        lvs = db.get_lvols_by_node_id(node.get_id()) or []
         d['lvols'] = len(lvs)
         data.append(d)
     return utils.get_response(data)
@@ -42,7 +42,7 @@ def list_storage_nodes(uuid):
 @bp.route('/storagenode/capacity/<string:uuid>/history/<string:history>', methods=['GET'])
 @bp.route('/storagenode/capacity/<string:uuid>', methods=['GET'], defaults={'history': None})
 def storage_node_capacity(uuid, history):
-    node = db_controller.get_storage_node_by_id(uuid)
+    node = db.get_storage_node_by_id(uuid)
     if not node:
         return utils.get_response_error(f"node not found: {uuid}", 404)
 
@@ -57,7 +57,7 @@ def storage_node_capacity(uuid, history):
 @bp.route('/storagenode/iostats/<string:uuid>/history/<string:history>', methods=['GET'])
 @bp.route('/storagenode/iostats/<string:uuid>', methods=['GET'], defaults={'history': None})
 def storagenode_iostats(uuid, history):
-    node = db_controller.get_storage_node_by_id(uuid)
+    node = db.get_storage_node_by_id(uuid)
     if not node:
         return utils.get_response_error(f"node not found: {uuid}", 404)
 
@@ -71,7 +71,7 @@ def storagenode_iostats(uuid, history):
 
 @bp.route('/storagenode/port/<string:uuid>', methods=['GET'])
 def storage_node_ports(uuid):
-    node = db_controller.get_storage_node_by_id(uuid)
+    node = db.get_storage_node_by_id(uuid)
     if not node:
         return utils.get_response_error(f"node not found: {uuid}", 404)
 
@@ -89,7 +89,7 @@ def storage_node_ports(uuid):
 
 @bp.route('/storagenode/port-io-stats/<string:uuid>', methods=['GET'])
 def storage_node_port_io_stats(uuid):
-    nodes = db_controller.get_storage_nodes()
+    nodes = db.get_storage_nodes()
     nd = None
     port = None
     for node in nodes:
@@ -102,7 +102,7 @@ def storage_node_port_io_stats(uuid):
     if not port:
         return utils.get_response_error(f"Port not found: {uuid}", 404)
 
-    data = db_controller.get_port_stats(nd.get_id(), port.get_id())
+    data = db.get_port_stats(nd.get_id(), port.get_id())
     out = []
     for record in data:
         out.append(record.get_clean_dict())
@@ -111,7 +111,7 @@ def storage_node_port_io_stats(uuid):
 
 @bp.route('/storagenode/suspend/<string:uuid>', methods=['GET'])
 def storage_node_suspend(uuid):
-    node = db_controller.get_storage_node_by_id(uuid)
+    node = db.get_storage_node_by_id(uuid)
     if not node:
         return utils.get_response_error(f"node not found: {uuid}", 404)
 
@@ -121,7 +121,7 @@ def storage_node_suspend(uuid):
 
 @bp.route('/storagenode/resume/<string:uuid>', methods=['GET'])
 def storage_node_resume(uuid):
-    node = db_controller.get_storage_node_by_id(uuid)
+    node = db.get_storage_node_by_id(uuid)
     if not node:
         return utils.get_response_error(f"node not found: {uuid}", 404)
 
@@ -131,7 +131,7 @@ def storage_node_resume(uuid):
 
 @bp.route('/storagenode/shutdown/<string:uuid>', methods=['GET'])
 def storage_node_shutdown(uuid):
-    node = db_controller.get_storage_node_by_id(uuid)
+    node = db.get_storage_node_by_id(uuid)
     if not node:
         return utils.get_response_error(f"node not found: {uuid}", 404)
 
@@ -158,7 +158,7 @@ def storage_node_restart():
     reattach_volume = bool(req_data.get("reattach_volume", False))
     force = bool(req_data.get("force", ""))
 
-    node = db_controller.get_storage_node_by_id(uuid)
+    node = db.get_storage_node_by_id(uuid)
     if not node:
         return utils.get_response_error(f"node not found: {uuid}", 404)
 
@@ -297,7 +297,7 @@ def storage_node_add():
 
 @bp.route('/storagenode/make-sec-new-primary/<string:uuid>', methods=['GET'])
 def make_primary(uuid):
-    node = db_controller.get_storage_node_by_id(uuid)
+    node = db.get_storage_node_by_id(uuid)
     if not node:
         return utils.get_response_error(f"node not found: {uuid}", 404)
 

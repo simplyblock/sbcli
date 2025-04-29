@@ -10,12 +10,12 @@ from simplyblock_core.snode_client import SNodeClient
 logger = utils.get_logger(__name__)
 
 # get DB controller
-db_controller = db_controller.DBController()
+db = db_controller.DBController()
 
 
 logger.info("Starting new device discovery service...")
 while True:
-    nodes = db_controller.get_storage_nodes()
+    nodes = db.get_storage_nodes()
     for node in nodes:
         time.sleep(constants.DEV_DISCOVERY_INTERVAL_SEC)
         break
@@ -51,6 +51,6 @@ while True:
                                 new_dev = devs[0]
                                 new_dev.status = NVMeDevice.STATUS_NEW
                                 node.nvme_devices.append(new_dev)
-                                node.write_to_db(db_controller.kv_store)
+                                node.write_to_db(db.kv_store)
 
     time.sleep(constants.DEV_DISCOVERY_INTERVAL_SEC)
