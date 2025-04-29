@@ -1001,3 +1001,15 @@ def addNvmeDevices(rpc_client, snode, devs):
             }))
     return devices
 
+
+def get_random_snapshot_vuid():
+    from simplyblock_core.db_controller import DBController
+    db_controller = DBController()
+    used_vuids = []
+    for snap in db_controller.get_snapshots():
+        used_vuids.append(snap.vuid)
+
+    r = 1 + int(random.random() * 1000000)
+    while r in used_vuids:
+        r = 1 + int(random.random() * 1000000)
+    return r
