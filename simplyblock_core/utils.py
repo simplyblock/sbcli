@@ -777,7 +777,7 @@ def get_next_dev_port(cluster_id):
     from simplyblock_core.db_controller import DBController
     db_controller = DBController()
 
-    port = 9080
+    port = constants.NODE_NVMF_PORT_START
     used_ports = []
     for node in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
         if node.nvmf_port > 0:
