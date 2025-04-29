@@ -437,7 +437,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
             "name": lvol.lvol_bdev,
             "size_in_mib": utils.convert_size(lvol.size, 'MiB'),
             "lvs_name": lvol.lvs_name,
-            "lvol_priority_class": 0
+            "lvol_priority_class": 0,
             "size_in_mib": int(lvol.size / (1000 * 1000)),
             "lvs_name": lvol.lvs_name
         }
