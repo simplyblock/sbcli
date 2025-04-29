@@ -2913,7 +2913,6 @@ def recreate_lvstore(snode):
     sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
     sec_node_api = SNodeClient(sec_node.api_endpoint, timeout=5, retry=5)
 
-    lvol_list = db_controller.get_lvols_by_node_id(snode.get_id())
     lvol_list = []
     for lv in db_controller.get_lvols_by_node_id(snode.get_id()):
         if lv.status not in [LVol.STATUS_IN_DELETION, LVol.STATUS_IN_CREATION]:
