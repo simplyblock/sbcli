@@ -147,6 +147,7 @@ def update_cluster_status(cluster_id):
             JobSchedule.FN_DEV_MIG, JobSchedule.FN_NEW_DEV_MIG, JobSchedule.FN_FAILED_DEV_MIG]:
             task_pending += 1
 
+    cluster = db.get_cluster_by_id(cluster_id)
     cluster.is_re_balancing = task_pending  > 0
     cluster.write_to_db()
 
