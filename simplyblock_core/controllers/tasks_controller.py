@@ -106,7 +106,7 @@ def list_tasks(cluster_id, is_json=False, limit=50, **kwargs):
     data = []
     tasks = db.get_job_tasks(cluster_id, reverse=True, limit=limit)
     tasks.reverse()
-    if tasks and is_json is True:
+    if is_json is True:
         for t in tasks:
             data.append(t.get_clean_dict())
         return json.dumps(data, indent=2)
