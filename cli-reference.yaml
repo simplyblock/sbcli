@@ -20,11 +20,6 @@ commands:
               and the storage node.
             dest: ifname
             type: str
-          - name: "--cpu-mask"
-            help: "SPDK app CPU mask, default is all cores found"
-            dest: "spdk_cpu_mask"
-            required: false
-            type: str
           - name: "--isolate-cores"
             help: "Isolate cores in kernel args for provided cpu mask"
             dest: isolate_cores
@@ -63,6 +58,26 @@ commands:
             dest: sockets_to_use
             type: str
             default: "0"
+          - name: "--pci-allowed"
+            help: "Comma separated list of PCI addresses of Nvme devices to use for storage devices."
+            description: >
+              Storage PCI addresses to use for storage devices(Normal address and full address are accepted). Comma-separated list: e.g. 0000:00:01.0,00:02.0
+            dest: pci_allowed
+            required: false
+            type: str
+            default: ""
+          - name: "--pci-blocked"
+            help: "Comma separated list of PCI addresses of Nvme devices to not use for storage devices"
+            description: >
+              Storage PCI addresses to not use for storage devices(Normal address and full address are accepted). Comma-separated list: e.g. 0000:00:01.0,00:02.0
+            dest: pci_blocked
+            required: false
+            type: str
+            default: ""
+      - name: configure-upgrade
+        help: "Upgrade the automated configuration file with new changes of cpu mask or storage devices"
+        description: >
+          Regenerate the core distribution and auto calculation according to changes in cpu_mask and ssd_pcis only
 
       - name: deploy-cleaner
         help: "Cleans a previous simplyblock deploy (local run)"
@@ -102,45 +117,9 @@ commands:
             dest: data_nics
             type: str
             nargs: "+"
-          - name: "--max-lvol"
-            help: "Max logical volume per storage node"
-            dest: max_lvol
-            type: int
-          - name: "--max-size"
-            help: "Maximum amount of GB to be utilized on this storage node"
-            description: >
-              Maximum amount of GB to be utilized on this storage node. This cannot be larger than the total effective
-              cluster capacity. A safe value is `1/n * 2.0` of effective cluster capacity. Meaning, if you have three
-              storage nodes, each with 100 TiB of raw capacity and a cluster with erasure coding scheme 1+1
-              (two replicas), the effective cluster capacity is _100 TiB * 3 / 2 = 150 TiB_. Setting this parameter to
-              _150 TiB / 3 * 2 = 100TiB_ would be a safe choice.
-            dest: max_prov
-            type: str
-          - name: "--number-of-distribs"
-            help: "The number of distirbs to be created on the node"
-            dest: number_of_distribs
-            type: int
-            default: 4
-            private: true
-          - name: "--number-of-devices"
-            help: "Number of devices per storage node if it's not supported EC2 instance"
-            dest: number_of_devices
-            type: int
           - name: "--size-of-device"
             help: "Size of device per storage node"
             dest: partition_size
-            type: str
-            private: true
-          - name: "--vcpu-count"
-            help: >
-              Number of vCPUs used for SPDK. Remaining CPUs will be used for Linux system, TCP/IP processing, and
-              other workloads. The default on non-Kubernetes hosts is 80%.
-            dest: vcpu_count
-            type: int
-          - name: "--cpu-mask"
-            help: >
-              SPDK app CPU mask, default is all cores found
-            dest: spdk_cpu_mask
             type: str
             private: true
           - name: "--spdk-image"
@@ -190,14 +169,6 @@ commands:
             dest: ha_jm_count
             type: int
             default: 3
-          - name: "--is-secondary-node"
-            help: >
-              Adds as secondary node. A secondary node does not have any disks attached. It is only used for I/O
-              processing in case a primary goes down.
-            dest: is_secondary_node
-            type: bool
-            default: false
-            action: store_true
           - name: "--namespace"
             help: "Kubernetes namespace to deploy on"
             dest: namespace
@@ -215,25 +186,6 @@ commands:
             type: int
             default: 5000
             private: true
-          - name: "--spdk-mem"
-            help: "Set spdk hugepage size limitation"
-            dest: spdk_mem
-            required: false
-            type: str
-            default: ""
-          - name: "--ssd-pcie"
-            help: "Nvme PCIe address to use for storage device. Can be more than one."
-            dest: ssd_pcie
-            required: false
-            type: str
-            nargs: +
-            default: ""
-          - name: "--numa-socket"
-            help: "The numa socket on which to start the storage node, e.g. 0 or 1."
-            dest: socket
-            required: false
-            type: str
-            default: ""
       - name: delete
         help: "Deletes a storage node object from the state database."
         usage: >
@@ -336,10 +288,6 @@ commands:
               The provided value must be presented in the form of _IP:PORT_. Be default the port number is _5000_.
             dest: node_ip
             type: str
-          - name: "--number-of-devices"
-            help: "Number of devices per storage node if it's not supported EC2 instance"
-            dest: number_of_devices
-            type: int
           - name: "--spdk-image"
             help: "SPDK image uri"
             dest: spdk_image
@@ -374,12 +322,6 @@ commands:
             dest: force
             type: bool
             action: store_true
-          - name: "--numa-socket"
-            help: "The numa socket on which to start the storage node, e.g. 0 or 1."
-            dest: socket
-            required: false
-            type: str
-            default: ""
       - name: shutdown
         help: "Initiates a storage node shutdown"
         usage: Once the command is issued, the node will stop accepting IO,but IO, which was previously received, will still be processed. In a high-availability setup, this will not impact operations.
@@ -722,10 +664,6 @@ commands:
             dest: test
             type: bool
             action: store_true
-          - name: "--secondary-nodes"
-            help: "comma separated ip addresses"
-            dest: secondary_nodes
-            type: str
           - name: "--ha-type"
             help: "Logical volume HA type (single, ha), default is cluster HA type"
             dest: ha_type
@@ -754,7 +692,7 @@ commands:
             help: "Enable qos bdev for storage nodes"
             dest: enable_qos
             type: bool
-            default: true
+            default: false
             private: true
           - name: "--ifname"
             help: "Management interface name, e.g. eth0"
@@ -896,31 +834,9 @@ commands:
             dest: max_prov
             type: str
             default: ""
-          - name: "--number-of-distribs"
-            help: "The number of distirbs to be created on the node"
-            dest: number_of_distribs
-            type: int
-            default: 4
-            private: true
-          - name: "--number-of-devices"
-            help: "Number of devices per storage node if it's not supported EC2 instance"
-            dest: number_of_devices
-            type: int
-            default: 0
           - name: "--size-of-device"
             help: "Size of device per storage node"
             dest: partition_size
-            type: str
-            private: true
-          - name: "--vcpu-count"
-            help: >
-              Number of vCPUs used for SPDK. Remaining CPUs will be used for Linux system, TCP/IP processing, and
-              other workloads. The default on non-Kubernetes hosts is 80%.
-            dest: vcpu_count
-            type: int
-          - name: "--cpu-mask"
-            help: "SPDK app CPU mask, default is all cores found"
-            dest: spdk_cpu_mask
             type: str
             private: true
           - name: "--spdk-image"
@@ -959,14 +875,6 @@ commands:
             default: false
             action: store_true
             private: true
-          - name: "--is-secondary-node"
-            help: >
-              Adds as secondary node. A secondary node does not have any disks attached. It is only used for I/O
-              processing in case a primary goes down.
-            dest: is_secondary_node
-            type: bool
-            default: false
-            action: store_true
           - name: "--namespace"
             help: "k8s namespace to deploy on"
             dest: namespace
@@ -1161,7 +1069,7 @@ commands:
             help: "Enable qos bdev for storage nodes, true by default"
             dest: enable_qos
             type: bool
-            default: true
+            default: false
             private: true
           - name: "--strict-node-anti-affinity"
             help: >
@@ -1259,7 +1167,7 @@ commands:
             help: "Enable qos bdev for storage nodes, default: true"
             dest: enable_qos
             type: bool
-            default: true
+            default: false
             private: true
           - name: "--strict-node-anti-affinity"
             help: >

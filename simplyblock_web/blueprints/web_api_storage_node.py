@@ -188,19 +188,11 @@ def storage_node_add():
     if 'ifname' not in req_data:
         return utils.get_response_error("missing required param: ifname", 400)
 
-    if 'max_lvol' not in req_data:
-        return utils.get_response_error("missing required param: max_lvol", 400)
-
-    if 'max_prov' not in req_data:
-        return utils.get_response_error("missing required param: max_prov", 400)
-
     cluster_id = req_data['cluster_id']
     node_ip = req_data['node_ip']
     ifname = req_data['ifname']
-    max_lvol = int(req_data['max_lvol'])
     max_snap = int(req_data.get('max_snap', 500))
-    max_prov = core_utils.parse_size(req_data['max_prov'], assume_unit='G')
-    number_of_distribs = int(req_data.get('number_of_distribs', 2))
+
     if req_data.get('disable_ha_jm', "") == "true":
         disable_ha_jm = True
     else:
@@ -243,18 +235,6 @@ def storage_node_add():
     if 'partitions' in req_data:
         partitions = int(req_data['partitions'])
 
-    number_of_devices = 0
-    if 'number_of_devices' in req_data:
-        number_of_devices = int(req_data['number_of_devices'])
-
-    spdk_cpu_mask = None
-    if 'spdk_cpu_mask' in req_data:
-        msk = req_data['spdk_cpu_mask']
-        if utils.validate_cpu_mask(msk):
-            spdk_cpu_mask = msk
-        else:
-            return utils.get_response_error(f"Invalid cpu mask value: {msk}", 400)
-
     iobuf_small_pool_count = 0
     if 'iobuf_small_pool_count' in req_data:
         iobuf_small_pool_count = int(req_data['iobuf_small_pool_count'])
@@ -263,36 +243,21 @@ def storage_node_add():
     if 'iobuf_large_pool_count' in req_data:
         iobuf_large_pool_count = int(req_data['iobuf_large_pool_count'])
 
-    is_secondary_node = False
-    if 'is_secondary_node' in req_data:
-        is_secondary_node = bool(req_data['is_secondary_node'])
-
-    ssd_pcie = []
-    if 'ssd_pcie' in req_data:
-        ssd_pcie = req_data['ssd_pcie']
-
     tasks_controller.add_node_add_task(cluster_id, {
         "cluster_id": cluster_id,
         "node_ip": node_ip,
         "iface_name": ifname,
         "data_nics_list": data_nics,
-        "max_lvol": max_lvol,
         "max_snap": max_snap,
-        "max_prov": max_prov,
-        "spdk_cpu_mask": spdk_cpu_mask,
         "spdk_image": spdk_image,
         "spdk_debug": spdk_debug,
         "small_bufsize": iobuf_small_pool_count,
         "large_bufsize": iobuf_large_pool_count,
         "num_partitions_per_dev": partitions,
         "jm_percent": jm_percent,
-        "number_of_devices": number_of_devices,
         "enable_test_device": enable_test_device,
-        "number_of_distribs": number_of_distribs,
         "namespace": namespace,
         "enable_ha_jm": not disable_ha_jm,
-        "is_secondary_node": is_secondary_node,
-        "ssd_pcie": ssd_pcie,
         "full_page_unmap": full_page_unmap,
     })
 

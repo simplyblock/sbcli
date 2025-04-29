@@ -39,14 +39,11 @@ class CLIWrapperBase:
         return parent_parser.add_parser(command, description=help, help=help, usage=usage)
 
     def storage_node__deploy(self, sub_command, args):
-        spdk_cpu_mask = None
-        if args.spdk_cpu_mask:
-            if self.validate_cpu_mask(args.spdk_cpu_mask):
-                spdk_cpu_mask = args.spdk_cpu_mask
-            else:
-                return f"Invalid cpu mask value: {args.spdk_cpu_mask}"
         isolate_cores = args.isolate_cores
-        return storage_ops.deploy(args.ifname, spdk_cpu_mask, isolate_cores)
+        return storage_ops.deploy(args.ifname, isolate_cores)
+
+    def storage_node__configure_upgrade(self, sub_command, args):
+        storage_ops.upgrade_automated_deployment_config()
 
     def storage_node__configure(self, sub_command, args):
         if not args.max_lvol:
@@ -63,18 +60,24 @@ class CLIWrapperBase:
 
         if args.nodes_per_socket not in [1, 2]:
             self.parser.error(f"nodes_per_socket {args.nodes_per_socket}must be either 1 or 2")
+        if args.pci_allowed and args.pci_blocked:
+            self.parser.error("pci-allowed and pci-blocked cannot be both specified")
         max_prov = utils.parse_size(args.max_prov, assume_unit='G')
+        pci_allowed = []
+        pci_blocked = []
+        if args.pci_allowed:
+            pci_allowed = [str(x) for x in args.pci_allowed.split(',')]
+        if args.pci_blocked:
+            pci_blocked = [str(x) for x in args.pci_blocked.split(',')]
+
         return storage_ops.generate_automated_deployment_config(args.max_lvol, max_prov, sockets_to_use,
-                                                                args.nodes_per_socket)
+                                                                args.nodes_per_socket, pci_allowed, pci_blocked)
 
     def storage_node__deploy_cleaner(self, sub_command, args):
         return storage_ops.deploy_cleaner()
 
     def storage_node__add_node(self, sub_command, args):
-        if not args.max_lvol:
-            self.parser.error(f"Mandatory argument '--max-lvol' not provided for {sub_command}")
-        if not args.max_prov:
-            self.parser.error(f"Mandatory argument '--max-size' not provided for {sub_command}")
+
         # if not args.spdk_cpu_mask:
         #     self.parser.error(f"Mandatory argument '--cpu-mask' not provided for {sub_command}")
         cluster_id = args.cluster_id
@@ -88,54 +91,33 @@ class CLIWrapperBase:
         large_bufsize = args.large_bufsize
         num_partitions_per_dev = args.partitions
         jm_percent = args.jm_percent
-        spdk_cpu_mask = None
-        if args.spdk_cpu_mask:
-            if self.validate_cpu_mask(args.spdk_cpu_mask):
-                spdk_cpu_mask = args.spdk_cpu_mask
-            else:
-                return f"Invalid cpu mask value: {args.spdk_cpu_mask}"
 
-        max_lvol = args.max_lvol
         max_snap = args.max_snap
-        max_prov = utils.parse_size(args.max_prov, assume_unit='G')
-        number_of_devices = args.number_of_devices
         enable_test_device = args.enable_test_device
         enable_ha_jm = args.enable_ha_jm
-        number_of_distribs = args.number_of_distribs
         namespace = args.namespace
         ha_jm_count = args.ha_jm_count
-        spdk_mem = args.spdk_mem
-        ssd_pcie = args.ssd_pcie
-        spdk_cpu_count = args.vcpu_count
+        storage_ops.configure_huge_pages(node_ip)
 
         out = storage_ops.add_node(
             cluster_id=cluster_id,
             node_ip=node_ip,
             iface_name=ifname,
             data_nics_list=data_nics,
-            max_lvol=max_lvol,
             max_snap=max_snap,
-            max_prov=max_prov,
             spdk_image=spdk_image,
             spdk_debug=spdk_debug,
             small_bufsize=small_bufsize,
             large_bufsize=large_bufsize,
-            spdk_cpu_mask=spdk_cpu_mask,
             num_partitions_per_dev=num_partitions_per_dev,
             jm_percent=jm_percent,
-            number_of_devices=number_of_devices,
             enable_test_device=enable_test_device,
             namespace=namespace,
-            number_of_distribs=number_of_distribs,
             enable_ha_jm=enable_ha_jm,
-            is_secondary_node=args.is_secondary_node,  # pass
             id_device_by_nqn=args.id_device_by_nqn,
             partition_size=args.partition_size,
             ha_jm_count=ha_jm_count,
-            spdk_hp_mem=spdk_mem,
-            ssd_pcie=ssd_pcie,
-            spdk_cpu_count=spdk_cpu_count,
-            full_page_unmap=args.full_page_unmap,
+            full_page_unmap=args.full_page_unmap
         )
 
         return out
@@ -162,7 +144,6 @@ class CLIWrapperBase:
         max_lvol = args.max_lvol
         max_snap = args.max_snap
         max_prov = utils.parse_size(args.max_prov)
-        number_of_devices = args.number_of_devices
 
         small_bufsize = args.small_bufsize
         large_bufsize = args.large_bufsize
@@ -170,7 +151,7 @@ class CLIWrapperBase:
         return storage_ops.restart_storage_node(
             node_id, max_lvol, max_snap, max_prov,
             spdk_image, spdk_debug,
-            small_bufsize, large_bufsize, number_of_devices, node_ip=args.node_ip, reattach_volume=reattach_volume, force=args.force)
+            small_bufsize, large_bufsize, node_ip=args.node_ip, reattach_volume=reattach_volume, force=args.force)
 
     def storage_node__shutdown(self, sub_command, args):
         return storage_ops.shutdown_storage_node(args.node_id, args.force)

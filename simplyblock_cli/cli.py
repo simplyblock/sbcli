@@ -32,6 +32,7 @@ class CLIWrapper(CLIWrapperBase):
         subparser = self.add_command('storage-node', 'Storage node commands', aliases=['sn',])
         self.init_storage_node__deploy(subparser)
         self.init_storage_node__configure(subparser)
+        self.init_storage_node__configure_upgrade(subparser)
         self.init_storage_node__deploy_cleaner(subparser)
         self.init_storage_node__add_node(subparser)
         self.init_storage_node__delete(subparser)
@@ -79,7 +80,6 @@ class CLIWrapper(CLIWrapperBase):
     def init_storage_node__deploy(self, subparser):
         subcommand = self.add_sub_command(subparser, 'deploy', 'Prepares a host to be used as a storage node')
         argument = subcommand.add_argument('--ifname', help='Management interface name, e.g. eth0', type=str, dest='ifname', required=False)
-        argument = subcommand.add_argument('--cpu-mask', help='SPDK app CPU mask, default is all cores found', type=str, dest='spdk_cpu_mask', required=False)
         argument = subcommand.add_argument('--isolate-cores', help='Isolate cores in kernel args for provided cpu mask', default=False, dest='isolate_cores', required=False, action='store_true')
 
     def init_storage_node__configure(self, subparser):
@@ -88,6 +88,11 @@ class CLIWrapper(CLIWrapperBase):
         argument = subcommand.add_argument('--max-size', help='Maximum amount of GB to be utilized on this storage node', type=str, dest='max_prov', required=False)
         argument = subcommand.add_argument('--nodes-per-socket', help='number of each node to be added per each socket.', type=int, default=1, dest='nodes_per_socket', required=False)
         argument = subcommand.add_argument('--sockets-to-use', help='The system socket to use when adding the storage nodes', type=str, default='0', dest='sockets_to_use', required=False)
+        argument = subcommand.add_argument('--pci-allowed', help='Comma separated list of PCI addresses of Nvme devices to use for storage devices.', type=str, default='', dest='pci_allowed', required=False)
+        argument = subcommand.add_argument('--pci-blocked', help='Comma separated list of PCI addresses of Nvme devices to not use for storage devices', type=str, default='', dest='pci_blocked', required=False)
+
+    def init_storage_node__configure_upgrade(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'configure-upgrade', 'Upgrade the automated configuration file with new changes of cpu mask or storage devices')
 
     def init_storage_node__deploy_cleaner(self, subparser):
         subcommand = self.add_sub_command(subparser, 'deploy-cleaner', 'Cleans a previous simplyblock deploy (local run)')
@@ -101,16 +106,8 @@ class CLIWrapper(CLIWrapperBase):
         if self.developer_mode:
             argument = subcommand.add_argument('--jm-percent', help='Number in percent to use for JM from each device', type=int, default=3, dest='jm_percent', required=False)
         argument = subcommand.add_argument('--data-nics', help='Storage network interface name(s). Can be more than one.', type=str, dest='data_nics', required=False, nargs='+')
-        argument = subcommand.add_argument('--max-lvol', help='Max logical volume per storage node', type=int, dest='max_lvol', required=False)
-        argument = subcommand.add_argument('--max-size', help='Maximum amount of GB to be utilized on this storage node', type=str, dest='max_prov', required=False)
-        if self.developer_mode:
-            argument = subcommand.add_argument('--number-of-distribs', help='The number of distirbs to be created on the node', type=int, default=4, dest='number_of_distribs', required=False)
-        argument = subcommand.add_argument('--number-of-devices', help='Number of devices per storage node if it\'s not supported EC2 instance', type=int, dest='number_of_devices', required=False)
         if self.developer_mode:
             argument = subcommand.add_argument('--size-of-device', help='Size of device per storage node', type=str, dest='partition_size', required=False)
-        argument = subcommand.add_argument('--vcpu-count', help='Number of vCPUs used for SPDK. Remaining CPUs will be used for Linux system, TCP/IP processing, and other workloads. The default on non-Kubernetes hosts is 80%%.', type=int, dest='vcpu_count', required=False)
-        if self.developer_mode:
-            argument = subcommand.add_argument('--cpu-mask', help='SPDK app CPU mask, default is all cores found', type=str, dest='spdk_cpu_mask', required=False)
         if self.developer_mode:
             argument = subcommand.add_argument('--spdk-image', help='SPDK image uri', type=str, dest='spdk_image', required=False)
         if self.developer_mode:
@@ -126,15 +123,11 @@ class CLIWrapper(CLIWrapperBase):
         if self.developer_mode:
             argument = subcommand.add_argument('--disable-ha-jm', help='Disable HA JM for distrib creation', dest='enable_ha_jm', required=False, action='store_false')
         argument = subcommand.add_argument('--ha-jm-count', help='HA JM count', type=int, default=3, dest='ha_jm_count', required=False)
-        argument = subcommand.add_argument('--is-secondary-node', help='Adds as secondary node. A secondary node does not have any disks attached. It is only used for I/O processing in case a primary goes down.', default=False, dest='is_secondary_node', required=False, action='store_true')
         argument = subcommand.add_argument('--namespace', help='Kubernetes namespace to deploy on', type=str, dest='namespace', required=False)
         if self.developer_mode:
             argument = subcommand.add_argument('--id-device-by-nqn', help='Use device nqn to identify it instead of serial number', dest='id_device_by_nqn', required=False, action='store_true')
         if self.developer_mode:
             argument = subcommand.add_argument('--max-snap', help='Max snapshot per storage node', type=int, default=5000, dest='max_snap', required=False)
-        argument = subcommand.add_argument('--spdk-mem', help='Set spdk hugepage size limitation', type=str, default='', dest='spdk_mem', required=False)
-        argument = subcommand.add_argument('--ssd-pcie', help='Nvme PCIe address to use for storage device. Can be more than one.', type=str, default='', dest='ssd_pcie', required=False, nargs='+')
-        argument = subcommand.add_argument('--numa-socket', help='The numa socket on which to start the storage node, e.g. 0 or 1.', type=str, default='', dest='socket', required=False)
 
     def init_storage_node__delete(self, subparser):
         subcommand = self.add_sub_command(subparser, 'delete', 'Deletes a storage node object from the state database.')
@@ -164,7 +157,6 @@ class CLIWrapper(CLIWrapperBase):
         if self.developer_mode:
             argument = subcommand.add_argument('--max-size', help='Maximum amount of GB to be utilized on this storage node', type=str, default='0', dest='max_prov', required=False)
         argument = subcommand.add_argument('--node-addr', '--node-ip', help='Restart Node on new node', type=str, dest='node_ip', required=False)
-        argument = subcommand.add_argument('--number-of-devices', help='Number of devices per storage node if it\'s not supported EC2 instance', type=int, dest='number_of_devices', required=False)
         if self.developer_mode:
             argument = subcommand.add_argument('--spdk-image', help='SPDK image uri', type=str, dest='spdk_image', required=False)
         if self.developer_mode:
@@ -176,7 +168,6 @@ class CLIWrapper(CLIWrapperBase):
         if self.developer_mode:
             argument = subcommand.add_argument('--iobuf_large_bufsize', help='bdev_set_options param', type=int, default=0, dest='large_bufsize', required=False)
         argument = subcommand.add_argument('--force', help='Force restart', dest='force', required=False, action='store_true')
-        argument = subcommand.add_argument('--numa-socket', help='The numa socket on which to start the storage node, e.g. 0 or 1.', type=str, default='', dest='socket', required=False)
 
     def init_storage_node__shutdown(self, subparser):
         subcommand = self.add_sub_command(subparser, 'shutdown', 'Initiates a storage node shutdown')
@@ -339,14 +330,13 @@ class CLIWrapper(CLIWrapperBase):
         subcommand = self.add_sub_command(subparser, 'deploy', 'Deploys a storage nodes')
         argument = subcommand.add_argument('--storage-nodes', help='comma separated ip addresses', type=str, dest='storage_nodes', required=False)
         argument = subcommand.add_argument('--test', help='Test Cluster', dest='test', required=False, action='store_true')
-        argument = subcommand.add_argument('--secondary-nodes', help='comma separated ip addresses', type=str, dest='secondary_nodes', required=False)
         argument = subcommand.add_argument('--ha-type', help='Logical volume HA type (single, ha), default is cluster HA type', type=str, default='ha', dest='ha_type', required=False, choices=['single','ha',])
         if self.developer_mode:
             argument = subcommand.add_argument('--ha-jm-count', help='HA JM count', type=int, default=3, dest='ha_jm_count', required=False)
         argument = subcommand.add_argument('--data-chunks-per-stripe', help='Erasure coding schema parameter k (distributed raid), default: 1', type=int, default=1, dest='distr_ndcs', required=False)
         argument = subcommand.add_argument('--parity-chunks-per-stripe', help='Erasure coding schema parameter n (distributed raid), default: 1', type=int, default=1, dest='distr_npcs', required=False)
         if self.developer_mode:
-            argument = subcommand.add_argument('--enable-qos', help='Enable qos bdev for storage nodes', type=bool, default=True, dest='enable_qos', required=False)
+            argument = subcommand.add_argument('--enable-qos', help='Enable qos bdev for storage nodes', type=bool, default=False, dest='enable_qos', required=False)
         argument = subcommand.add_argument('--ifname', help='Management interface name, e.g. eth0', type=str, dest='ifname', required=False)
         if self.developer_mode:
             argument = subcommand.add_argument('--blk_size', help='The block size in bytes', type=int, default=512, dest='blk_size', required=False, choices=['512','4096',])
@@ -380,13 +370,7 @@ class CLIWrapper(CLIWrapperBase):
             argument = subcommand.add_argument('--max-snap', help='Max snapshot per storage node', type=int, default=5000, dest='max_snap', required=False)
         argument = subcommand.add_argument('--max-size', help='Maximum amount of GB to be provisioned via all storage nodes', type=str, default='', dest='max_prov', required=False)
         if self.developer_mode:
-            argument = subcommand.add_argument('--number-of-distribs', help='The number of distirbs to be created on the node', type=int, default=4, dest='number_of_distribs', required=False)
-        argument = subcommand.add_argument('--number-of-devices', help='Number of devices per storage node if it\'s not supported EC2 instance', type=int, default=0, dest='number_of_devices', required=False)
-        if self.developer_mode:
             argument = subcommand.add_argument('--size-of-device', help='Size of device per storage node', type=str, dest='partition_size', required=False)
-        argument = subcommand.add_argument('--vcpu-count', help='Number of vCPUs used for SPDK. Remaining CPUs will be used for Linux system, TCP/IP processing, and other workloads. The default on non-Kubernetes hosts is 80%%.', type=int, dest='vcpu_count', required=False)
-        if self.developer_mode:
-            argument = subcommand.add_argument('--cpu-mask', help='SPDK app CPU mask, default is all cores found', type=str, dest='spdk_cpu_mask', required=False)
         if self.developer_mode:
             argument = subcommand.add_argument('--spdk-image', help='SPDK image uri', type=str, dest='spdk_image', required=False)
         if self.developer_mode:
@@ -399,7 +383,6 @@ class CLIWrapper(CLIWrapperBase):
             argument = subcommand.add_argument('--enable-test-device', help='Enable creation of test device', dest='enable_test_device', required=False, action='store_true')
         if self.developer_mode:
             argument = subcommand.add_argument('--disable-ha-jm', help='Disable HA JM for distrib creation', dest='enable_ha_jm', required=False, action='store_true')
-        argument = subcommand.add_argument('--is-secondary-node', help='Adds as secondary node. A secondary node does not have any disks attached. It is only used for I/O processing in case a primary goes down.', default=False, dest='is_secondary_node', required=False, action='store_true')
         argument = subcommand.add_argument('--namespace', help='k8s namespace to deploy on', type=str, dest='namespace', required=False)
         argument = subcommand.add_argument('--id-device-by-nqn', help='Use device nqn to identify it instead of serial number', default=False, dest='id_device_by_nqn', required=False, action='store_true')
         if self.developer_mode:
@@ -451,7 +434,7 @@ class CLIWrapper(CLIWrapperBase):
         if self.developer_mode:
             argument = subcommand.add_argument('--inflight-io-threshold', help='The number of inflight IOs allowed before the IO queuing starts', type=int, default=4, dest='inflight_io_threshold', required=False)
         if self.developer_mode:
-            argument = subcommand.add_argument('--enable-qos', help='Enable qos bdev for storage nodes, true by default', type=bool, default=True, dest='enable_qos', required=False)
+            argument = subcommand.add_argument('--enable-qos', help='Enable qos bdev for storage nodes, true by default', type=bool, default=False, dest='enable_qos', required=False)
         argument = subcommand.add_argument('--strict-node-anti-affinity', help='Enable strict node anti affinity for storage nodes. Never more than one chunk is placed on a node. This requires a minimum of _data-chunks-in-stripe + parity-chunks-in-stripe + 1_ nodes in the cluster.', dest='strict_node_anti_affinity', required=False, action='store_true')
 
     def init_cluster__add(self, subparser):
@@ -476,7 +459,7 @@ class CLIWrapper(CLIWrapperBase):
         if self.developer_mode:
             argument = subcommand.add_argument('--inflight-io-threshold', help='The number of inflight IOs allowed before the IO queuing starts', type=int, default=4, dest='inflight_io_threshold', required=False)
         if self.developer_mode:
-            argument = subcommand.add_argument('--enable-qos', help='Enable qos bdev for storage nodes, default: true', type=bool, default=True, dest='enable_qos', required=False)
+            argument = subcommand.add_argument('--enable-qos', help='Enable qos bdev for storage nodes, default: true', type=bool, default=False, dest='enable_qos', required=False)
         argument = subcommand.add_argument('--strict-node-anti-affinity', help='Enable strict node anti affinity for storage nodes. Never more than one chunk is placed on a node. This requires a minimum of _data-chunks-in-stripe + parity-chunks-in-stripe + 1_ nodes in the cluster."', dest='strict_node_anti_affinity', required=False, action='store_true')
 
     def init_cluster__activate(self, subparser):
@@ -892,14 +875,14 @@ class CLIWrapper(CLIWrapperBase):
                 ret = self.storage_node__deploy(sub_command, args)
             elif sub_command in ['configure']:
                 ret = self.storage_node__configure(sub_command, args)
+            elif sub_command in ['configure-upgrade']:
+                ret = self.storage_node__configure_upgrade(sub_command, args)
             elif sub_command in ['deploy-cleaner']:
                 ret = self.storage_node__deploy_cleaner(sub_command, args)
             elif sub_command in ['add-node']:
                 if not self.developer_mode:
                     args.jm_percent = 3
-                    args.number_of_distribs = 4
                     args.partition_size = None
-                    args.spdk_cpu_mask = None
                     args.spdk_image = None
                     args.spdk_debug = None
                     args.full_page_unmap = None
@@ -1020,7 +1003,7 @@ class CLIWrapper(CLIWrapperBase):
             if sub_command in ['deploy']:
                 if not self.developer_mode:
                     args.ha_jm_count = 3
-                    args.enable_qos = True
+                    args.enable_qos = False
                     args.blk_size = 512
                     args.page_size = 2097152
                     args.CLI_PASS = None
@@ -1029,9 +1012,7 @@ class CLIWrapper(CLIWrapperBase):
                     args.inflight_io_threshold = 4
                     args.jm_percent = 3
                     args.max_snap = 5000
-                    args.number_of_distribs = 4
                     args.partition_size = None
-                    args.spdk_cpu_mask = None
                     args.spdk_image = None
                     args.spdk_debug = None
                     args.small_bufsize = 0
@@ -1056,7 +1037,7 @@ class CLIWrapper(CLIWrapperBase):
                     args.distr_chunk_bs = 4096
                     args.max_queue_size = 128
                     args.inflight_io_threshold = 4
-                    args.enable_qos = True
+                    args.enable_qos = False
                 ret = self.cluster__create(sub_command, args)
             elif sub_command in ['add']:
                 if not self.developer_mode:
@@ -1065,7 +1046,7 @@ class CLIWrapper(CLIWrapperBase):
                     args.distr_chunk_bs = 4096
                     args.max_queue_size = 128
                     args.inflight_io_threshold = 4
-                    args.enable_qos = True
+                    args.enable_qos = False
                 ret = self.cluster__add(sub_command, args)
             elif sub_command in ['activate']:
                 ret = self.cluster__activate(sub_command, args)

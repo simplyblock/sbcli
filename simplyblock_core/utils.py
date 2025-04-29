@@ -424,7 +424,7 @@ def calculate_core_allocations(vcpu_list, alceml_count=2):
         vcpus = reserve_n(2)
         assigned["alceml_cpu_cores"] = vcpus
     else:
-        vcpus = reserve_n(2)
+        vcpus = reserve_n(1)
         assigned["jm_cpu_core"] = vcpus
         vcpu = reserve_n(1)
         assigned["jc_singleton_core"] = vcpu
@@ -503,7 +503,7 @@ def calculate_pool_count(alceml_count, number_of_distribs, cpu_count, poller_cou
     small_pool_count = 384 * (alceml_count + number_of_distribs + 3 + poller_count) + (6 + alceml_count + number_of_distribs) * 256 + poller_number * 127 + 384 + 128 * poller_number + constants.EXTRA_SMALL_POOL_COUNT
     large_pool_count = 48 * (alceml_count + number_of_distribs + 3 + poller_count) + (6 + alceml_count + number_of_distribs) * 32 + poller_number * 15 + 384 + 16 * poller_number + constants.EXTRA_LARGE_POOL_COUNT
 
-    return 2.0 * small_pool_count, 1.5 * large_pool_count
+    return int(2.0 * small_pool_count), int(1.5 * large_pool_count)
 
 
 def calculate_minimum_hp_memory(small_pool_count, large_pool_count, lvol_count, max_prov, cpu_count):
@@ -903,39 +903,7 @@ def load_core_distribution_from_file(file_path, number_of_cores):
         return None  # Indicate that defaults should be used
 
 
-def load_config_file(file_path):
-    """Load node configuration from the configuration file."""
-    # Check if the file exists
-    if not os.path.exists(file_path):
-        logger.error("Configuration file not found. please run sbcli sn configure firstly.")
-        return None
-
-    # Attempt to read the file
-    try:
-        with open(file_path, "r") as configfile:
-            config = {}
-            for line in configfile:
-                if line.strip() and not line.startswith("#"):  # Skip comments and empty lines
-                    key, value = line.split("=", 1)
-                    key = key.strip()
-                    value = value.strip()
-                    if key in CONFIG_KEYS:
-                        config[key] = [int(core) for core in value.split(",")] if value else None
-                        if any(core > number_of_cores for core in config[key]):
-                            raise ValueError(f"Invalid distribution, the index of the core {value}: "
-                                             f"must be in range of number of cores {number_of_cores}")
-
-            # Validate all keys are present
-            if not all(key in config and config[key] is not None for key in CONFIG_KEYS):
-                logger.warning("Incomplete configuration provided. Using default values.")
-                return None  # Indicate that defaults should be used
-
-            return config
-    except Exception as e:
-        logger.warning(f"Error reading configuration file: {e}, Using default values.")
-        return None  # Indicate that defaults should be used
-
-def store_config_file(data_config, file_path):
+def store_config_file(data_config, file_path, create_read_only_file=False):
     # Ensure the directory exists
     os.makedirs(os.path.dirname(file_path), exist_ok=True)
     cores_config_json = json.dumps(data_config, indent=4)
@@ -950,6 +918,17 @@ def store_config_file(data_config, file_path):
             check=True  # Raise an error if command fails
         )
         logger.info(f"JSON file successfully written to {file_path}")
+        # Write to read-only file
+        if create_read_only_file:
+            subprocess.run(
+                ["sudo", "tee", f"{file_path}_read_only"],
+                input=cores_config_json.encode("utf-8"),
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                check=True
+            )
+            subprocess.run(["sudo", "chmod", "444", f"{file_path}_read_only"], check=True)
+
     except subprocess.CalledProcessError as e:
         logger.error(f"Error writing to file: {e}")
 
@@ -1141,35 +1120,134 @@ def detect_nics():
     return nics
 
 
-def detect_nvmes():
+def get_nvme_pci_devices():
+    try:
+        # Step 1: Get all NVMe devices that mounted or have partitions
+        lsblk_output = subprocess.check_output(
+            ["lsblk", "-dn", "-o", "NAME,MOUNTPOINT"],
+            text=True
+        )
+        blocked_devices = []
+        for line in lsblk_output.strip().splitlines():
+            name = line.strip().split()
+            partitions = subprocess.check_output(
+                ["lsblk", "-n", f"/dev/{name[0]}"],
+                text=True
+            ).strip().splitlines()
+
+            if len(name) > 1 or len(partitions) > 1:
+                blocked_devices.append(name[0])
+
+
+        # Step 3: Map NVMe devices to PCI addresses
+        pci_addresses = []
+        lspci_output = subprocess.check_output(
+            "lspci -DnnP | grep '0108'",
+            shell=True,
+            text=True
+        )
+        pci_addresses = [line.split()[0] for line in lspci_output.strip().splitlines()]
+        return pci_addresses, blocked_devices
+
+    except subprocess.CalledProcessError:
+        logger.warning("No NVMe devices with class 0108 found.")
+        return [], []
+
+
+def get_bound_driver(pci_address):
+    driver_path = f"/sys/bus/pci/devices/{pci_address}/driver"
+    if os.path.islink(driver_path):
+        return os.path.basename(os.readlink(driver_path))
+    return None
+
+
+def unbind_pci_driver(pci_address):
+    current_driver = get_bound_driver(pci_address)
+    if current_driver:
+        unbind_path = f"/sys/bus/pci/devices/{pci_address}/driver/unbind"
+        try:
+            cmd = f"echo {pci_address} | sudo tee {unbind_path}"
+            subprocess.run(cmd, shell=True, check=True)
+            logger.debug(f"Unbound {pci_address} from {current_driver}.")
+        except Exception as e:
+            logger.error(f"Failed to unbind {pci_address} from {current_driver}: {e}")
+
+
+def bind_to_nvme_driver(pci_address):
+    NVME_DRIVER = "nvme"
+    current_driver = get_bound_driver(pci_address)
+    if current_driver == NVME_DRIVER:
+        logger.info(f"{pci_address} is already bound to {NVME_DRIVER}.")
+        return
+
+    # Unbind from current driver if any
+    unbind_pci_driver(pci_address)
+
+    # Bind to nvme
+    new_id_path = f"/sys/bus/pci/drivers/{NVME_DRIVER}/bind"
+    try:
+        cmd = f"echo {pci_address} | sudo tee {new_id_path}"
+        subprocess.run(cmd, shell=True, check=True)
+        logger.debug(f"Bound {pci_address} to {NVME_DRIVER}.")
+    except Exception as e:
+        logger.error(f"Failed to bind {pci_address} to {NVME_DRIVER}: {e}")
+
+
+def detect_nvmes(pci_allowed, pci_blocked):
+    pci_addresses, blocked_devices = get_nvme_pci_devices()
+    ssd_pci_set = set(pci_addresses)
+
+    # Normalize SSD PCI addresses and user PCI list
+    if pci_allowed:
+        user_pci_set = set(
+            addr if len(addr.split(":")[0]) == 4 else f"0000:{addr}"
+            for addr in pci_allowed
+        )
+
+        # Check for unmatched addresses
+        unmatched = user_pci_set - ssd_pci_set
+        if unmatched:
+            logger.error(f"Invalid PCI addresses: {', '.join(unmatched)}")
+            return []
+
+        pci_addresses = list(user_pci_set)
+    elif pci_blocked:
+        user_pci_set = set(
+            addr if len(addr.split(":")[0]) == 4 else f"0000:{addr}"
+            for addr in pci_blocked
+        )
+        rest = ssd_pci_set - user_pci_set
+        pci_addresses = list(rest)
+
+    for pci in pci_addresses:
+        bind_to_nvme_driver(pci)
+
+    nvme_base_path = '/sys/class/nvme/'
+    nvme_devices = [dev for dev in os.listdir(nvme_base_path) if dev.startswith('nvme')]
     nvmes = {}
-    nvme_devices = [dev for dev in glob.glob("/dev/nvme*n1") if os.path.exists(dev)]
     for dev in nvme_devices:
         dev_name = os.path.basename(dev)
+        if dev_name in blocked_devices:
+            continue
+        device_symlink = os.path.join(nvme_base_path, dev)
         try:
-            output = get_nvme_info(dev_name)
             pci_address = "unknown"
-            for line in output.splitlines():
-                if line.strip().startswith("E: ID_PATH="):
-                    id_path = line.split("=", 1)[-1].strip()
-                    if "pci-" in id_path:
-                        pci_part = id_path.split("pci-")[-1].split("-nvme")[0]
-                        pci_parts = pci_part.split(":")
-                        if len(pci_parts) == 3:
-                            domain, bus, slot_func = pci_parts
-                        elif len(pci_parts) == 2:
-                            domain = "0000"
-                            bus, slot_func = pci_parts
-                        else:
-                            continue
-                        pci_address = f"{domain}:{bus}:{slot_func}"
-                        break
-            numa_path = f"/sys/block/{dev_name}/device/numa_node"
-            try:
-                with open(numa_path, "r") as f:
-                    numa_node = int(f.read().strip())
-            except:
-                numa_node = -1
+
+            # Resolve the real path to get the actual device path
+            real_path = os.path.realpath(device_symlink)
+
+            # Read the PCI address from the 'address' file
+            address_file = os.path.join(real_path, 'address')
+            with open(address_file, 'r') as f:
+                pci_address = f.read().strip()
+
+            # Read the NUMA node information
+            numa_node_file = os.path.join(real_path, 'numa_node')
+            with open(numa_node_file, 'r') as f:
+                numa_node = f.read().strip()
+
+            if pci_address not in pci_addresses:
+                continue
             nvmes[dev_name] = {"pci_address": pci_address, "numa_node": numa_node}
         except Exception:
             continue
@@ -1274,7 +1352,74 @@ def calculate_sys_memory(max_size_bytes):
     return int(minimum_sys_memory)
 
 
-def generate_configs(max_lvol, max_prov, sockets_to_use, nodes_per_socket):
+def regenerate_config(new_config, old_config):
+    if len(old_config.get("nodes")) != len(new_config.get("nodes")):
+        logger.error("The number of node in old config not equal to the number of node in updated config")
+        return False
+    for i in range(len(old_config.get("nodes"))):
+        validate_node_config(new_config.get("nodes")[i])
+        if old_config["nodes"][i]["socket"] != new_config["nodes"][i]["socket"]:
+            logger.error("The socket is changed, please rerun sbcli configure without upgrade firstly")
+            return False
+        if old_config["nodes"][i]["cpu_mask"] != new_config["nodes"][i]["cpu_mask"]:
+            try:
+                isolated_cores = hexa_to_cpu_list(new_config["nodes"][i]["cpu_mask"])
+            except ValueError:
+                logger.error(f"The updated cpu mask is incorrect {new_config['nodes'][i]['cpu_mask']}")
+                return False
+            old_config["nodes"][i]["cpu_mask"] = new_config["nodes"][i]["cpu_mask"]
+            old_config["nodes"][i]["l-cores"] = ",".join([f"{i}@{core}" for i, core in enumerate(isolated_cores)])
+            old_config["nodes"][i]["isolated"] = isolated_cores
+            distribution = calculate_core_allocations(isolated_cores)
+            core_to_index = {core: idx for idx, core in enumerate(isolated_cores)}
+            old_config["nodes"][i]["distribution"] ={
+                "app_thread_core": get_core_indexes(core_to_index, distribution[0]),
+                "jm_cpu_core": get_core_indexes(core_to_index, distribution[1]),
+                "poller_cpu_cores": get_core_indexes(core_to_index, distribution[2]),
+                "alceml_cpu_cores": get_core_indexes(core_to_index, distribution[3]),
+                "alceml_worker_cpu_cores": get_core_indexes(core_to_index, distribution[4]),
+                "distrib_cpu_cores": get_core_indexes(core_to_index, distribution[5]),
+                "jc_singleton_core": get_core_indexes(core_to_index, distribution[6])}
+
+        isolated_cores = old_config["nodes"][i]["isolated"]
+        number_of_distribs = 2
+        number_of_distribs_cores = len(old_config["nodes"][i]["distribution"]["distrib_cpu_cores"])
+        number_of_poller_cores = len(old_config["nodes"][i]["distribution"]["poller_cpu_cores"])
+        if number_of_distribs_cores > 2:
+            number_of_distribs = number_of_distribs_cores
+        old_config["nodes"][i]["number_of_distribs"] = number_of_distribs
+        old_config["nodes"][i]["ssd_pcis"] = new_config["nodes"][i]["ssd_pcis"]
+        number_of_alcemls = len(old_config["nodes"][i]["ssd_pcis"])
+        old_config["nodes"][i]["number_of_alcemls"] = number_of_alcemls
+        small_pool_count, large_pool_count = calculate_pool_count(number_of_alcemls, 2 * number_of_distribs,
+                                                                  len(isolated_cores),
+                                                                  number_of_poller_cores or len(
+                                                                      isolated_cores),)
+        minimum_hp_memory = calculate_minimum_hp_memory(small_pool_count, large_pool_count, old_config["nodes"][i]["max_lvol"],
+                                                        old_config["nodes"][i]["max_size"], len(isolated_cores))
+        old_config["nodes"][i]["small_pool_count"] = small_pool_count
+        old_config["nodes"][i]["large_pool_count"] = large_pool_count
+        old_config["nodes"][i]["huge_page_memory"] = minimum_hp_memory
+        minimum_sys_memory = calculate_sys_memory(old_config["nodes"][i]["max_size"])
+        old_config["nodes"][i]["sys_memory"] =  minimum_sys_memory
+
+    memory_details = node_utils.get_memory_details()
+    free_memory = memory_details.get("free")
+    huge_total = memory_details.get("huge_total")
+    total_free_memory = free_memory + huge_total
+    total_required_memory = 0
+    for node in old_config["nodes"]:
+        if len(node["ssd_pcis"]) == 0:
+            logger.error(f"There is no enough SSD devices on numa {node['socket']}")
+            return False
+        total_required_memory += node["huge_page_memory"] + node["sys_memory"]
+    if total_free_memory < total_required_memory:
+            logger.error(f"The Free memory {total_free_memory} is less than required memory {total_required_memory}")
+            return False
+    return old_config
+
+
+def generate_configs(max_lvol, max_prov, sockets_to_use, nodes_per_socket, pci_allowed, pci_blocked):
     system_info = {}
     nodes_config = {"nodes": []}
 
@@ -1282,7 +1427,8 @@ def generate_configs(max_lvol, max_prov, sockets_to_use, nodes_per_socket):
     validate_sockets(sockets_to_use, cores_by_numa)
     logger.debug(f"Cores by numa {cores_by_numa}")
     nics = detect_nics()
-    nvmes = detect_nvmes()
+    nvmes = detect_nvmes(pci_allowed, pci_blocked)
+
     node_cores = generate_core_allocation(cores_by_numa, sockets_to_use, nodes_per_socket)
 
     for nid in sockets_to_use:
@@ -1302,6 +1448,7 @@ def generate_configs(max_lvol, max_prov, sockets_to_use, nodes_per_socket):
     for nvme, val in nvmes.items():
         pci = val["pci_address"]
         numa = val["numa_node"]
+        unbind_pci_driver(pci)
         if numa in sockets_to_use:
             system_info[numa]["nvmes"].append(pci)
         else:
@@ -1313,7 +1460,7 @@ def generate_configs(max_lvol, max_prov, sockets_to_use, nodes_per_socket):
         numa = val["numa_node"]
         if numa in sockets_to_use:
             nvme_by_numa[numa].append(nvme_name)
-        elif numa == -1:
+        elif int(numa) == -1:
             nvme_numa_neg1.append(nvme_name)
 
     total_nodes = nodes_per_socket * len(sockets_to_use)
@@ -1478,6 +1625,7 @@ def validate_node_config(node):
     if not node["l-cores"]:
         logger.error(f"'l-cores' string is empty in node: {node.get('socket')}")
         return False
+    return True
 
 
 def get_system_cores():
@@ -1490,7 +1638,7 @@ def get_system_cores():
     return set(cores)
 
 
-def validate_config(config):
+def validate_config(config, upgrade=False):
     if "nodes" not in config:
         logger.error("Missing 'nodes' in config")
         return False
@@ -1506,7 +1654,8 @@ def validate_config(config):
             if key not in node:
                 logger.error(f"Missing key '{key}' in node config")
                 return False
-
+        if upgrade:
+            continue
         # Validate that cpu_mask includes isolated cores
         cpu_mask_value = int(node["cpu_mask"], 16)
         for core in node["isolated"]:
@@ -1517,6 +1666,7 @@ def validate_config(config):
         # Validate l-cores syntax
         l_cores_pairs = node["l-cores"].split(",")
         core_to_index = {}
+        index_to_core = {}
         for pair in l_cores_pairs:
             if "@" not in pair:
                 logger.error(f"Invalid l-cores format in node {node['socket']}: '{pair}'")
@@ -1531,6 +1681,7 @@ def validate_config(config):
                 logger.error(f"Duplicate core {core} in l-cores for node {node['socket']}")
                 return False
             core_to_index[core] = index
+            index_to_core[index] = core
 
         # Check that all cores in 'isolated' are also in l-cores
         for core in node["isolated"]:
@@ -1545,7 +1696,7 @@ def validate_config(config):
                 logger.error(f"Distribution key '{key}' must be a list")
                 return False
             for core in cores:
-                if core not in core_to_index:
+                if core not in index_to_core:
                     logger.error(f"Core {core} in distribution '{key}' not found in l-cores for node {node['socket']}")
                     return False
         system_cores = get_system_cores()
@@ -1560,5 +1711,6 @@ def validate_config(config):
             logger.error(f"Duplicate isolated cores found between nodes: {all_isolated_cores.intersection(node_cores_set)}")
             return False
         all_isolated_cores.update(node_cores_set)
-
+    if upgrade:
+        return True
     return all_isolated_cores

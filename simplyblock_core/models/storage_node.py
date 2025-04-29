@@ -70,6 +70,7 @@ class StorageNode(BaseNodeObject):
     num_partitions_per_dev: int = 1
     number_of_devices: int = 0
     number_of_distribs: int = 4
+    number_of_alceml_devices: int = 0
     nvme_devices: List[NVMeDevice] = []
     online_since: str = ""
     partitions_count: int = 0  # Unused
@@ -87,6 +88,7 @@ class StorageNode(BaseNodeObject):
     sequential_number: int = 0  # Unused
     jm_ids: List[str] = []
     spdk_cpu_mask: str = ""
+    l_cores: str = ""
     spdk_debug: bool = False
     spdk_image: str = ""
     spdk_mem: int = 0

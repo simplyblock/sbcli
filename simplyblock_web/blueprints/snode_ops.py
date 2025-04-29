@@ -134,9 +134,9 @@ def spdk_process_start():
     if 'spdk_debug' in data and data['spdk_debug']:
         set_debug = data['spdk_debug']
 
-    spdk_cpu_mask = None
-    if 'spdk_cpu_mask' in data:
-        spdk_cpu_mask = data['spdk_cpu_mask']
+    l_cores = None
+    if 'l_cores' in data:
+        l_cores = data['l_cores']
 
     spdk_mem_mib = core_utils.convert_size(core_utils.parse_size('4GiB'), 'MiB')
     if 'spdk_mem' in data:
@@ -151,10 +151,6 @@ def spdk_process_start():
     multi_threading_enabled = False
     if 'multi_threading_enabled' in data:
         multi_threading_enabled = bool(data['multi_threading_enabled'])
-
-    numa_node = '0'
-    if 'numa_node' in data:
-        numa_node = data['numa_node']
 
     timeout = 60*5
     if 'timeout' in data:
@@ -188,7 +184,7 @@ def spdk_process_start():
 
     container = node_docker.containers.run(
         spdk_image,
-        f"numactl --cpunodebind={numa_node} --membind={numa_node} /root/scripts/run_distr_with_ssd.sh {spdk_cpu_mask} {spdk_mem_mib} {spdk_debug}",
+        f"/root/scripts/run_distr_with_ssd.sh {l_cores} {spdk_mem_mib} {spdk_debug}",
         name=f"spdk_{rpc_port}",
         detach=True,
         privileged=True,
@@ -336,6 +332,7 @@ def get_nodes_config():
         # Open and read the JSON file
         with open(file_path, "r") as file:
             nodes_config = json.load(file)
+
         core_utils.validate_node_config(nodes_config)
         return nodes_config
 

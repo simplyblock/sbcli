@@ -74,7 +74,6 @@ def spdk_process_start():
     values = {
         'SPDK_IMAGE': spdk_image,
         'SPDK_CPU_MASK': spdk_cpu_mask,
-        'SPDK_SOCKET': socket,
         'SPDK_MEM': core_utils.convert_size(spdk_mem, 'MiB'),
         'SERVER_IP': data['server_ip'],
         'RPC_PORT': data['rpc_port'],
