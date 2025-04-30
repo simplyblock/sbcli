@@ -409,7 +409,6 @@ class RPCClient:
             # "use_scheduling": True,
             "use_optimized": True,
             "pba_nbalign": 4096,
-            "use_map_whole_page_on_1st_write": full_page_unmap,
         }
         if alceml_cpu_mask:
             params["bdb_lcpu_mask"] = int(alceml_cpu_mask, 16)
@@ -417,6 +416,8 @@ class RPCClient:
             params["bdb_lcpu_mask_alt_workers"] = int(alceml_worker_cpu_mask, 16)
         if write_protection:
             params["write_protection"] = True
+        if full_page_unmap:
+            params["use_map_whole_page_on_1st_write"] = True
         return self._request("bdev_alceml_create", params)
 
     def bdev_distrib_create(self, name, vuid, ndcs, npcs, num_blocks, block_size, jm_names,
@@ -463,6 +464,8 @@ class RPCClient:
             params["bdb_lcpu_mask"] = int(distrib_cpu_mask, 16)
         if write_protection:
             params["write_protection"] = True
+        if full_page_unmap:
+            params["use_map_whole_page_on_1st_write"] = True
         return self._request("bdev_distrib_create", params)
 
     def bdev_lvol_delete_lvstore(self, name):
