@@ -143,10 +143,10 @@ def _check_node_hublvol(node: StorageNode, node_bdev_names=None, node_lvols_nqns
             for sub in ret:
                 node_lvols_nqns[sub['nqn']] = sub
 
-        if node.hublvol.uuid in node_bdev_names:
-            logger.info(f"Checking bdev: {node.hublvol.uuid} ... ok")
+        if node.hublvol.bdev_name in node_bdev_names:
+            logger.info(f"Checking bdev: {node.hublvol.bdev_name} ... ok")
         else:
-            logger.error(f"Checking bdev: {node.hublvol.uuid} ... failed")
+            logger.error(f"Checking bdev: {node.hublvol.bdev_name} ... failed")
             passed = False
 
         if node.hublvol.nqn in node_lvols_nqns:
