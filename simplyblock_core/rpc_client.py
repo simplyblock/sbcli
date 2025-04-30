@@ -451,7 +451,6 @@ class RPCClient:
             "block_size": block_size,
             "chunk_size": chunk_size,
             "pba_page_size": pba_page_size,
-            "use_map_whole_page_on_1st_write": full_page_unmap,
         }
         if jm_vuid > 0:
             params["jm_vuid"] = jm_vuid
