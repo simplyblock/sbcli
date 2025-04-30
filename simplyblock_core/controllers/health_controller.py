@@ -128,14 +128,13 @@ def _check_node_hublvol(node: StorageNode, node_bdev_names=None, node_lvols_nqns
             node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password, timeout=5, retry=1)
 
         if not node_bdev_names:
+            node_bdev_names = {}
             ret = rpc_client.get_bdevs()
             if ret:
                 for b in ret:
                     node_bdev_names[b['name']] = b
                     for al in b['aliases']:
                         node_bdev_names[al] = b
-            else:
-                node_bdev_names = []
 
         if not node_lvols_nqns:
             node_lvols_nqns = {}
