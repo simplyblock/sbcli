@@ -1,5 +1,5 @@
 SIMPLY_BLOCK_COMMAND_NAME=sbcli-alsh
-SIMPLY_BLOCK_VERSION=17.4.40
+SIMPLY_BLOCK_VERSION=17.4.41
 
 SIMPLY_BLOCK_DOCKER_IMAGE=public.ecr.aws/simply-block/simplyblock:1559-full-page-unmap
 SIMPLY_BLOCK_SPDK_ULTRA_IMAGE=public.ecr.aws/simply-block/ultra:1559-full-page-unmap-latest

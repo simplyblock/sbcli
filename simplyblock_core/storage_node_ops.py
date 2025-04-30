@@ -778,7 +778,8 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
              small_bufsize=0, large_bufsize=0, spdk_cpu_mask=None,
              num_partitions_per_dev=0, jm_percent=0, number_of_devices=0, enable_test_device=False,
              namespace=None, number_of_distribs=2, enable_ha_jm=False, is_secondary_node=False, id_device_by_nqn=False,
-             partition_size="", ha_jm_count=3, spdk_hp_mem=None, ssd_pcie=None, spdk_cpu_count=0):
+             partition_size="", ha_jm_count=3, spdk_hp_mem=None, ssd_pcie=None, spdk_cpu_count=0,
+             full_page_unmap=False):
 
     db_controller = DBController()
     kv_store = db_controller.kv_store
@@ -1099,6 +1100,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
     snode.num_partitions_per_dev = num_partitions_per_dev
     snode.jm_percent = jm_percent
     snode.id_device_by_nqn = id_device_by_nqn
+    snode.full_page_unmap = full_page_unmap
 
     if partition_size:
         snode.partition_size = utils.parse_size(partition_size)
