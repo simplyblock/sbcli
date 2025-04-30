@@ -2134,7 +2134,7 @@ def shutdown_storage_node(node_id, force=False):
     logger.info("Stopping SPDK")
     if health_controller._check_node_api(snode.mgmt_ip):
         snode_api = SNodeClient(snode.api_endpoint, timeout=30, retry=1)
-        results, err = snode_api.spdk_process_kill(snode.rpc_port)
+        snode_api.spdk_process_kill(snode.rpc_port)
 
     logger.info("Setting node status to offline")
     set_node_status(node_id, StorageNode.STATUS_OFFLINE)
