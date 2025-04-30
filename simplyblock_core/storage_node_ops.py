@@ -1472,6 +1472,10 @@ def restart_storage_node(
         logger.error(f"Node is in restart: {node_id}")
         if force is False:
             return False
+    cluster = db_controller.get_cluster_by_id(snode.cluster_id)
+    if cluster.status == Cluster.STATUS_IN_ACTIVATION:
+        logger.error("Cluster is in activation status, can not restart node")
+        return False
 
     task_id = tasks_controller.get_active_node_restart_task(snode.cluster_id, snode.get_id())
     if task_id:
