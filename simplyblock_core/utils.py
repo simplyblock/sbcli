@@ -1013,3 +1013,13 @@ def get_random_snapshot_vuid():
     while r in used_vuids:
         r = 1 + int(random.random() * 1000000)
     return r
+
+def get_fdb_connection_string(DEV_IP):
+    with open(constants.KVD_DB_FILE_PATH, 'r') as f:
+        content = f.read().strip()
+    modified = re.sub(r'@[\d\.]+(?=:\d+)', f'@{DEV_IP}', content)
+
+    with open(constants.KVD_DB_FILE_PATH, 'w') as f:
+        f.write(modified + "\n")
+
+    return modified
