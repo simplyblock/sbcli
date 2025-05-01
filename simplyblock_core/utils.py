@@ -364,7 +364,6 @@ def pair_hyperthreads(vcpus):
 
 def calculate_core_allocations(vcpu_list, alceml_count=2):
         total = len(vcpu_list)
-        pairs = pair_hyperthreads(vcpu_list) if is_hyperthreaded else {}
         remaining = set(vcpu_list)
 
         def reserve(vcpu):
