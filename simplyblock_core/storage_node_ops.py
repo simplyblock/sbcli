@@ -2827,8 +2827,8 @@ def recreate_lvstore_on_sec(secondary_node):
         primary_rpc_client = RPCClient(
             primary_node.mgmt_ip, primary_node.rpc_port, primary_node.rpc_username, primary_node.rpc_password)
 
-        # primary_node.lvstore_status = "in_creation"
-        # primary_node.write_to_db()
+        primary_node.lvstore_status = "in_creation"
+        primary_node.write_to_db()
 
         lvol_list = []
         for lv in db_controller.get_lvols_by_node_id(primary_node.get_id()):
@@ -2884,9 +2884,9 @@ def recreate_lvstore_on_sec(secondary_node):
         for lvol in lvol_list:
             a = executor.submit(add_lvol_thread, lvol, secondary_node,  lvol_ana_state="non_optimized")
 
-        # primary_node = db_controller.get_storage_node_by_id(primary_node.get_id())
-        # primary_node.lvstore_status = "ready"
-        # primary_node.write_to_db()
+        primary_node = db_controller.get_storage_node_by_id(primary_node.get_id())
+        primary_node.lvstore_status = "ready"
+        primary_node.write_to_db()
 
     return True
 
@@ -2994,6 +2994,8 @@ def recreate_lvstore(snode):
                 logger.error("Error establishing hublvol: %s", e)
                 # return False
             ### 8- allow secondary port
+            ret = rpc_client.bdev_lvol_set_leader(snode.lvstore, leader=False)
+
             sec_node_api.firewall_set_port(snode.lvol_subsys_port, "tcp", "allow", sec_node.rpc_port)
             tcp_ports_events.port_allowed(sec_node, snode.lvol_subsys_port)
 
