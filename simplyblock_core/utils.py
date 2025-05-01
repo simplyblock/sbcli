@@ -483,14 +483,14 @@ def calculate_pool_count(alceml_count, number_of_distribs, cpu_count, poller_cou
 
 def calculate_minimum_hp_memory(small_pool_count, large_pool_count, lvol_count, max_prov, cpu_count):
     '''
-    1092 (initial consumption) + 4 * CPU + 1.0277 * POOL_COUNT(Sum in MB) + (25) * lvol_count
+    1092 (initial consumption) + 4 * CPU + 1.0277 * POOL_COUNT(Sum in MB) + (13) * lvol_count
     then you can amend the expected memory need for the creation of lvols (6MB),
     connection number over lvols (7MB per connection), creation of snaps (12MB),
     extra buffer 2GB
     return: minimum_hp_memory in bytes
     '''
     pool_consumption = (small_pool_count * 8 + large_pool_count * 128) / 1024 + 1092
-    memory_consumption = (4 * cpu_count + 1.0277 * pool_consumption + 25 * lvol_count) * (1024 * 1024) + (250 * 1024 * 1024) * 1.1 * convert_size(max_prov, 'TiB') + constants.EXTRA_HUGE_PAGE_MEMORY
+    memory_consumption = (4 * cpu_count + 1.0277 * pool_consumption + 13 * lvol_count) * (1024 * 1024) + (250 * 1024 * 1024) * 1.1 * convert_size(max_prov, 'TiB') + constants.EXTRA_HUGE_PAGE_MEMORY
     return int(memory_consumption)
 
 def calculate_minimum_sys_memory(max_prov, total):
