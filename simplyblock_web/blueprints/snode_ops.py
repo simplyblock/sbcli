@@ -192,7 +192,7 @@ def spdk_process_start():
 
     container = node_docker.containers.run(
         spdk_image,
-        f"numactl --cpunodebind={numa_node} --membind={numa_node} /root/scripts/run_distr_with_ssd.sh {spdk_cpu_mask} {spdk_mem_mib} {spdk_debug}",
+        f"/root/scripts/run_distr_with_ssd.sh {spdk_cpu_mask} {spdk_mem_mib} {spdk_debug}",
         name=f"spdk_{rpc_port}",
         detach=True,
         privileged=True,
