@@ -385,7 +385,7 @@ def calculate_core_allocations(vcpu_list, alceml_count=2):
            assigned["alceml_worker_cpu_cores"] = vcpu
            vcpu = reserve_n(1) 
            assigned["alceml_cpu_cores"]=vcpu 
-        elif len(vcpu)<22:
+        elif len(vcpu_list)<22:
            vcpu = reserve_n(1)
            assigned["jm_cpu_core"] = vcpu
            assigned["jc_singleton_core"] = vcpu
