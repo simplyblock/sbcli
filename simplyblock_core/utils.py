@@ -358,10 +358,6 @@ def hexa_to_cpu_list(cpu_mask):
 
     return cpu_list
 
-def pair_hyperthreads(vcpus):
-        half = len(vcpus) // 2
-        return {vcpus[i]: vcpus[i + half] for i in range(half)}
-
 def calculate_core_allocations(vcpu_list, alceml_count=2):
         total = len(vcpu_list)
         remaining = set(vcpu_list)
@@ -369,11 +365,6 @@ def calculate_core_allocations(vcpu_list, alceml_count=2):
         def reserve(vcpu):
             if vcpu in remaining:
                remaining.remove(vcpu)
-               if is_hyperthreaded and vcpu in pairs:
-                  sibling = pairs[vcpu]
-                  if sibling in remaining:
-                     remaining.remove(sibling)
-                     return [vcpu, sibling]
                return [vcpu]
             return []
 
