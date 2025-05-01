@@ -2236,9 +2236,9 @@ def suspend_storage_node(node_id, force=False):
     for lvol in db_controller.get_lvols_by_node_id(snode.get_id()):
         for iface in snode.data_nics:
             if iface.ip4_address:
-                ret = rpc_client.nvmf_subsystem_listener_set_ana_state(
-                    lvol.nqn, iface.ip4_address, lvol.subsys_port, False, ana="inaccessible")
-    time.sleep(1)
+                ret = rpc_client.listeners_del(
+                    lvol.nqn, iface.get_transport_type(), iface.ip4_address, lvol.subsys_port)
+    # time.sleep(1)
 
     rpc_client.bdev_lvol_set_leader(snode.lvstore, leader=False)
     rpc_client.bdev_distrib_force_to_non_leader(snode.jm_vuid)
@@ -2335,8 +2335,9 @@ def resume_storage_node(node_id):
     for lvol in db_controller.get_lvols_by_node_id(snode.get_id()):
         for iface in snode.data_nics:
             if iface.ip4_address:
-                ret = rpc_client.nvmf_subsystem_listener_set_ana_state(
-                        lvol.nqn, iface.ip4_address, lvol.subsys_port, True)
+                ret = rpc_client.listeners_create(
+                    lvol.nqn, iface.get_transport_type(), iface.ip4_address, lvol.subsys_port, ana_state="optimized")
+
         lvol.status = LVol.STATUS_ONLINE
         lvol.io_error = False
         lvol.health_check = True
