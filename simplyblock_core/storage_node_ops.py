@@ -2980,6 +2980,11 @@ def recreate_lvstore(snode):
     )
     ret = rpc_client.bdev_lvol_set_leader(snode.lvstore, leader=True)
 
+    ### 9- add lvols to subsystems
+    executor = ThreadPoolExecutor(max_workers=100)
+    for lvol in lvol_list:
+        a = executor.submit(add_lvol_thread, lvol, snode, lvol_ana_state)
+
     if sec_node:
         ### 7- create and connect hublvol
         try:
@@ -2995,13 +3000,9 @@ def recreate_lvstore(snode):
                 logger.error("Error establishing hublvol: %s", e)
                 # return False
             ### 8- allow secondary port
+            time.sleep(1)
             sec_node_api.firewall_set_port(snode.lvol_subsys_port, "tcp", "allow", sec_node.rpc_port)
             tcp_ports_events.port_allowed(sec_node, snode.lvol_subsys_port)
-
-    ### 9- add lvols to subsystems
-    executor = ThreadPoolExecutor(max_workers=100)
-    for lvol in lvol_list:
-        a = executor.submit(add_lvol_thread, lvol, snode, lvol_ana_state)
 
     if prim_node_suspend:
         logger.info("Node restart interrupted because secondary node is unreachable")
