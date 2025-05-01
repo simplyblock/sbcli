@@ -403,7 +403,7 @@ def calculate_core_allocations(vcpu_list, alceml_count=2):
            assigned["alceml_worker_cpu_cores"] = vcpu 
            vcpus=reserve_n(2)
            assigned["alceml_cpu_cores"] = vcpus
-       else:
+        else:
            vcpus = reserve_n(2)
            assigned["jm_cpu_core"] = vcpus
            vcpu = reserve_n(1)
