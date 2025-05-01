@@ -237,6 +237,7 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                     "runtime": 2000,
                     "log_avg_msec": 1000,
                     "iolog_file": self.lvol_mount_details[lvol_name]["iolog_base_path"],
+                    "debug": True,
                 },
             )
             fio_thread.start()
@@ -687,6 +688,7 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                     "runtime": 2000,
                     "log_avg_msec": 1000,
                     "iolog_file": self.clone_mount_details[clone_name]["iolog_base_path"],
+                    "debug": True,
                 },
             )
             fio_thread.start()
@@ -889,6 +891,7 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                     "runtime": 2000,
                     "log_avg_msec": 1000,
                     "iolog_file": self.lvol_mount_details[lvol]["iolog_base_path"],
+                    "debug": True,
                 },
             )
             fio_thread.start()
@@ -926,6 +929,7 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                     "runtime": 2000,
                     "log_avg_msec": 1000,
                     "iolog_file": self.clone_mount_details[clone]["iolog_base_path"],
+                    "debug": True,
                 },
             )
             fio_thread.start()
