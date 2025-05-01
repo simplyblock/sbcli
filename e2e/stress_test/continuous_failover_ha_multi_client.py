@@ -152,7 +152,8 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                    "MD5": None,
                    "FS": fs_type,
                    "Log": f"{self.log_path}/{lvol_name}.log",
-                   "snapshots": []
+                   "snapshots": [],
+                   "iolog_base_path": f"{self.log_path}/{lvol_name}_fio_iolog"
             }
 
             self.logger.info(f"Created lvol {lvol_name}.")
@@ -216,6 +217,7 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
 
             self.ssh_obj.delete_files(client_node, [f"{mount_point}/*fio*"])
             self.ssh_obj.delete_files(client_node, [f"{self.log_path}/local-{lvol_name}_fio*"])
+            self.ssh_obj.delete_files(client_node, [f"{self.log_path}/{lvol_name}_fio_iolog"])
 
             sleep_n_sec(5)
 
@@ -233,6 +235,8 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                     "numjobs": 5,
                     "time_based": True,
                     "runtime": 2000,
+                    "log_avg_msec": 1000,
+                    "iolog_file": self.lvol_mount_details[lvol_name]["iolog_base_path"],
                 },
             )
             fio_thread.start()
@@ -605,7 +609,8 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                    "FS": fs_type,
                    "Log": f"{self.log_path}/{clone_name}.log",
                    "snapshot": snapshot_name,
-                   "Client": client
+                   "Client": client,
+                   "iolog_base_path": f"{self.log_path}/{clone_name}_fio_iolog"
             }
 
             self.logger.info(f"Created clone {clone_name}.")
@@ -662,6 +667,7 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
 
             self.ssh_obj.delete_files(client, [f"{mount_point}/*fio*"])
             self.ssh_obj.delete_files(client, [f"{self.log_path}/local-{clone_name}_fio*"])
+            self.ssh_obj.delete_files(client, [f"{self.log_path}/{clone_name}_fio_iolog*"])
 
             sleep_n_sec(5)
 
@@ -679,6 +685,8 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                     "numjobs": 5,
                     "time_based": True,
                     "runtime": 2000,
+                    "log_avg_msec": 1000,
+                    "iolog_file": self.clone_mount_details[clone_name]["iolog_base_path"],
                 },
             )
             fio_thread.start()
@@ -734,6 +742,8 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                     if clone_name in self.lvols_without_sec_connect:
                         self.lvols_without_sec_connect.remove(clone_name)
                     to_delete.append(clone_name)
+                    self.ssh_obj.delete_files(clone_details["Client"], [f"{self.log_path}/local-{clone_name}_fio*"])
+                    self.ssh_obj.delete_files(clone_details["Client"], [f"{self.log_path}/{clone_name}_fio_iolog*"])
             for del_key in to_delete:
                 del self.clone_mount_details[del_key]
             for snapshot in snapshots:
@@ -761,6 +771,8 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
             self.ssh_obj.unmount_path(self.lvol_mount_details[lvol]["Client"], f"/mnt/{lvol}")
             self.ssh_obj.remove_dir(self.lvol_mount_details[lvol]["Client"], dir_path=f"/mnt/{lvol}")
             self.sbcli_utils.delete_lvol(lvol)
+            self.ssh_obj.delete_files(self.lvol_mount_details[lvol]["Client"], [f"{self.log_path}/local-{lvol}_fio*"])
+            self.ssh_obj.delete_files(self.lvol_mount_details[lvol]["Client"], [f"{self.log_path}/{lvol}_fio_iolog*"])
             if lvol in self.lvols_without_sec_connect:
                 self.lvols_without_sec_connect.remove(lvol)
             del self.lvol_mount_details[lvol]
@@ -851,12 +863,15 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
 
             mount_point = lvol_details["Mount"]
             log_file = f"{self.log_path}/{lvol}-{iteration}.log"
+            iolog_base_path = f"{self.log_path}/{lvol}_fio_iolog_{iteration}"
 
             self.ssh_obj.delete_files(lvol_details["Client"], [f"{mount_point}/*fio*"])
             self.ssh_obj.delete_files(lvol_details["Client"], [f"{self.log_path}/local-{lvol}*"])
+            self.ssh_obj.delete_files(lvol_details["Client"], [f"{self.log_path}/{lvol}_fio_iolog*"])
 
             sleep_n_sec(5)
             self.lvol_mount_details[lvol]["Log"] = log_file
+            self.lvol_mount_details[lvol]["iolog_base_path"] = iolog_base_path
 
             # Start FIO
             fio_thread = threading.Thread(
@@ -872,6 +887,8 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                     "numjobs": 5,
                     "time_based": True,
                     "runtime": 2000,
+                    "log_avg_msec": 1000,
+                    "iolog_file": self.lvol_mount_details[lvol]["iolog_base_path"],
                 },
             )
             fio_thread.start()
@@ -882,11 +899,14 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
 
             mount_point = clone_details["Mount"]
             log_file = f"{self.log_path}/{clone}-{iteration}.log"
+            iolog_base_path = f"{self.log_path}/{clone}_fio_iolog_{iteration}"
 
             self.ssh_obj.delete_files(clone_details["Client"], [f"{mount_point}/*fio*"])
             self.ssh_obj.delete_files(clone_details["Client"], [f"{self.log_path}/local-{clone}_fio*"])
+            self.ssh_obj.delete_files(clone_details["Client"], [f"{self.log_path}/{clone}_fio_iolog*"])
 
             self.clone_mount_details[clone]["Log"] = log_file
+            self.clone_mount_details[clone]["iolog_base_path"] = iolog_base_path
 
             sleep_n_sec(5)
 
@@ -904,11 +924,12 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                     "numjobs": 5,
                     "time_based": True,
                     "runtime": 2000,
+                    "log_avg_msec": 1000,
+                    "iolog_file": self.clone_mount_details[clone]["iolog_base_path"],
                 },
             )
             fio_thread.start()
             self.fio_threads.append(fio_thread)
-
 
 
     def run(self):

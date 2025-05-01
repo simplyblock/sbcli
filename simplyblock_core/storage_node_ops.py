@@ -1483,6 +1483,10 @@ def restart_storage_node(
         logger.error(f"Node is in restart: {node_id}")
         if force is False:
             return False
+    cluster = db_controller.get_cluster_by_id(snode.cluster_id)
+    if cluster.status == Cluster.STATUS_IN_ACTIVATION:
+        logger.error("Cluster is in activation status, can not restart node")
+        return False
 
     task_id = tasks_controller.get_active_node_restart_task(snode.cluster_id, snode.get_id())
     if task_id:
@@ -2145,7 +2149,7 @@ def shutdown_storage_node(node_id, force=False):
     logger.info("Stopping SPDK")
     if health_controller._check_node_api(snode.mgmt_ip):
         snode_api = SNodeClient(snode.api_endpoint, timeout=30, retry=1)
-        results, err = snode_api.spdk_process_kill(snode.rpc_port)
+        snode_api.spdk_process_kill(snode.rpc_port)
 
     logger.info("Setting node status to offline")
     set_node_status(node_id, StorageNode.STATUS_OFFLINE)
@@ -2243,9 +2247,9 @@ def suspend_storage_node(node_id, force=False):
     for lvol in db_controller.get_lvols_by_node_id(snode.get_id()):
         for iface in snode.data_nics:
             if iface.ip4_address:
-                ret = rpc_client.nvmf_subsystem_listener_set_ana_state(
-                    lvol.nqn, iface.ip4_address, lvol.subsys_port, False, ana="inaccessible")
-    time.sleep(1)
+                ret = rpc_client.listeners_del(
+                    lvol.nqn, iface.get_transport_type(), iface.ip4_address, lvol.subsys_port)
+    # time.sleep(1)
 
     rpc_client.bdev_lvol_set_leader(snode.lvstore, leader=False)
     rpc_client.bdev_distrib_force_to_non_leader(snode.jm_vuid)
@@ -2342,8 +2346,9 @@ def resume_storage_node(node_id):
     for lvol in db_controller.get_lvols_by_node_id(snode.get_id()):
         for iface in snode.data_nics:
             if iface.ip4_address:
-                ret = rpc_client.nvmf_subsystem_listener_set_ana_state(
-                        lvol.nqn, iface.ip4_address, lvol.subsys_port, True)
+                ret = rpc_client.listeners_create(
+                    lvol.nqn, iface.get_transport_type(), iface.ip4_address, lvol.subsys_port, ana_state="optimized")
+
         lvol.status = LVol.STATUS_ONLINE
         lvol.io_error = False
         lvol.health_check = True
@@ -2869,8 +2874,8 @@ def recreate_lvstore_on_sec(secondary_node):
         primary_rpc_client = RPCClient(
             primary_node.mgmt_ip, primary_node.rpc_port, primary_node.rpc_username, primary_node.rpc_password)
 
-        # primary_node.lvstore_status = "in_creation"
-        # primary_node.write_to_db()
+        primary_node.lvstore_status = "in_creation"
+        primary_node.write_to_db()
 
         lvol_list = []
         for lv in db_controller.get_lvols_by_node_id(primary_node.get_id()):
@@ -2926,9 +2931,9 @@ def recreate_lvstore_on_sec(secondary_node):
         for lvol in lvol_list:
             a = executor.submit(add_lvol_thread, lvol, secondary_node,  lvol_ana_state="non_optimized")
 
-        # primary_node = db_controller.get_storage_node_by_id(primary_node.get_id())
-        # primary_node.lvstore_status = "ready"
-        # primary_node.write_to_db()
+        primary_node = db_controller.get_storage_node_by_id(primary_node.get_id())
+        primary_node.lvstore_status = "ready"
+        primary_node.write_to_db()
 
     return True
 
@@ -3021,6 +3026,11 @@ def recreate_lvstore(snode):
     )
     ret = rpc_client.bdev_lvol_set_leader(snode.lvstore, leader=True)
 
+    ### 9- add lvols to subsystems
+    executor = ThreadPoolExecutor(max_workers=100)
+    for lvol in lvol_list:
+        a = executor.submit(add_lvol_thread, lvol, snode, lvol_ana_state)
+
     if sec_node:
         ### 7- create and connect hublvol
         try:
@@ -3036,13 +3046,9 @@ def recreate_lvstore(snode):
                 logger.error("Error establishing hublvol: %s", e)
                 # return False
             ### 8- allow secondary port
+            time.sleep(1)
             sec_node_api.firewall_set_port(snode.lvol_subsys_port, "tcp", "allow", sec_node.rpc_port)
             tcp_ports_events.port_allowed(sec_node, snode.lvol_subsys_port)
-
-    ### 9- add lvols to subsystems
-    executor = ThreadPoolExecutor(max_workers=100)
-    for lvol in lvol_list:
-        a = executor.submit(add_lvol_thread, lvol, snode, lvol_ana_state)
 
     if prim_node_suspend:
         logger.info("Node restart interrupted because secondary node is unreachable")

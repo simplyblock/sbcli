@@ -272,10 +272,10 @@ while True:
                     capacity_dict = {}
                     stats = []
                     logger.info("Getting lVol stats: %s from node: %s", lvol.uuid, snode.get_id())
-                    if lvol.lvol_uuid in all_node_lvols_stats[snode.get_id()]:
+                    if snode.get_id() in all_node_lvols_stats and lvol.lvol_uuid in all_node_lvols_stats[snode.get_id()]:
                         stats.append(all_node_lvols_stats[snode.get_id()][lvol.lvol_uuid])
 
-                    if lvol.lvol_uuid in all_node_bdev_names[snode.get_id()]:
+                    if snode.get_id() in all_node_bdev_names and lvol.lvol_uuid in all_node_bdev_names[snode.get_id()]:
                         capacity_dict = all_node_bdev_names[snode.get_id()][lvol.lvol_uuid]
 
                     if lvol.ha_type == "ha":

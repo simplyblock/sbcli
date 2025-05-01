@@ -796,7 +796,7 @@ def get_next_dev_port(cluster_id):
     from simplyblock_core.db_controller import DBController
     db_controller = DBController()
 
-    port = 9080
+    port = constants.NODE_NVMF_PORT_START
     used_ports = []
     for node in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
         if node.nvmf_port > 0:
@@ -1020,3 +1020,15 @@ def addNvmeDevices(rpc_client, snode, devs):
             }))
     return devices
 
+
+def get_random_snapshot_vuid():
+    from simplyblock_core.db_controller import DBController
+    db_controller = DBController()
+    used_vuids = []
+    for snap in db_controller.get_snapshots():
+        used_vuids.append(snap.vuid)
+
+    r = 1 + int(random.random() * 1000000)
+    while r in used_vuids:
+        r = 1 + int(random.random() * 1000000)
+    return r
