@@ -154,7 +154,7 @@ def join_db():
     db_connection = data['db_connection']
 
     logger.info("Setting DB connection")
-    ret = core_utils.set_db_config(dev_ip=None, db_connection=db_connection)
+    ret = core_utils.set_db_config(db_connection)
 
     try:
         node_docker = get_docker_client()

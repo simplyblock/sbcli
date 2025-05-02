@@ -1015,7 +1015,7 @@ def get_random_snapshot_vuid():
         r = 1 + int(random.random() * 1000000)
     return r
 
-def set_db_config(dev_ip=None, db_connection=None):
+def set_db_config(db_connection=None):
     try:
         command = f"echo '{db_connection}' | sudo tee {constants.KVD_DB_FILE_PATH} > /dev/null"
         subprocess.run(command, shell=True, check=True)
