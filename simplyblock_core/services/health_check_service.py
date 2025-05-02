@@ -105,11 +105,12 @@ while True:
                 else:
                     node_bdev_names = []
 
-                sub_list = rpc_client.subsystem_list()
-                if sub_list:
-                    subsystem_list = {item['nqn']: item for item in sub_list }
-                else:
-                    subsystem_list = {}
+                subsystem_list = rpc_client.subsystem_list() or []
+                subsystems = {
+                        subsystem['nqn']: subsystem
+                        for subsystem
+                        in subsystem_list
+                }
 
                 for device in snode.nvme_devices:
                     passed = True
@@ -142,12 +143,7 @@ while True:
 
                     logger.info(f"Checking Device's BDevs ... ({(len(bdevs_stack) - problems)}/{len(bdevs_stack)})")
 
-                    logger.debug(f"Checking subsystem: {device.nvmf_nqn}")
-                    if device.nvmf_nqn in subsystem_list:
-                        logger.info(f"Checking subsystem ... ok")
-                    else:
-                        logger.info(f"Checking subsystem: ... not found")
-                        passed = False
+                    passed &= health_controller.check_subsystem(device.nvmf_nqn, nqns=subsystem_list)
 
                     set_device_health_check(cluster_id, device, passed)
                     if device.status == NVMeDevice.STATUS_ONLINE:
