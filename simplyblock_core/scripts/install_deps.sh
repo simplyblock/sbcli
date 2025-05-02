@@ -10,12 +10,6 @@ sudo systemctl enable docker
 sudo systemctl start docker
 
 
-
-if [[ 1 == $(yum info foundationdb-clients &> /dev/null ; echo $?) ]]
-then
-  sudo yum install -y https://github.com/apple/foundationdb/releases/download/7.3.3/foundationdb-clients-7.3.3-1.el7.x86_64.rpm
-fi
-
 sudo mkdir -p /etc/foundationdb/data /etc/foundationdb/logs
 sudo chown -R foundationdb:foundationdb /etc/foundationdb
 sudo chmod 777 /etc/foundationdb
