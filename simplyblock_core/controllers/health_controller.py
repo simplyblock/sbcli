@@ -24,6 +24,28 @@ def check_bdev(name, *, rpc_client=None, bdev_names=None):
     return present
 
 
+def check_subsystem(nqn, *, rpc_client=None, nqns=None):
+    if rpc_client:
+        subsystem = subsystems[0] if (subsystems := rpc_client.subsystem_list(nqn)) is not None else None
+    elif nqns:
+        subsystem = nqns.get(nqn)
+    else:
+        raise ValueError('Either rpc_client or nqns must be passed')
+
+    if not subsystem:
+        logger.error(f"Checking subsystem {nqn} ... not found")
+        return False
+
+    logger.debug(f"Checking subsystem {nqn} ... ok")
+
+    listeners = bool(subsystem['listen_addresses'])
+    namespaces = bool(subsystem['namespaces'])
+
+    logger.log(DEBUG if listeners else ERROR, "Checking listener ... " + ('ok' if listeners else 'not found'))
+    logger.log(DEBUG if namespaces else ERROR, "Checking namespaces ... " + ('ok' if namespaces else 'not found'))
+    return listeners and namespaces
+
+
 def check_cluster(cluster_id):
     db_controller = DBController()
     st = db_controller.get_storage_nodes_by_cluster_id(cluster_id)
@@ -153,23 +175,8 @@ def _check_node_hublvol(node: StorageNode, node_bdev_names=None, node_lvols_nqns
                 node_lvols_nqns[sub['nqn']] = sub
 
         passed &= check_bdev(node.hublvol.bdev_name, bdev_names=node_bdev_names)
+        passed &= check_subsystem(node.hublvol.nqn, nqns=node_lvols_nqns)
 
-        if node.hublvol.nqn in node_lvols_nqns:
-            logger.info(f"Checking subsystem ... ok")
-            if node_lvols_nqns[node.hublvol.nqn]["listen_addresses"]:
-                logger.info(f"Checking listener ... ok")
-            else:
-                logger.info(f"Checking listener ... not found")
-                passed = False
-
-            if node_lvols_nqns[node.hublvol.nqn]["namespaces"]:
-                logger.info(f"Checking namespaces ... ok")
-            else:
-                logger.info(f"Checking namespaces ... not found")
-                passed = False
-        else:
-            logger.info(f"Checking subsystem ... not found")
-            passed = False
         cl = db_controller.get_cluster_by_id(node.cluster_id)
 
         ret = rpc_client.bdev_lvol_get_lvstores(node.lvstore)
@@ -541,13 +548,7 @@ def check_device(device_id):
 
         logger.info(f"Checking Device's BDevs ... ({(len(bdevs_stack)-problems)}/{len(bdevs_stack)})")
 
-        ret = rpc_client.subsystem_list(device.nvmf_nqn)
-        logger.debug(f"Checking subsystem: {device.nvmf_nqn}")
-        if ret:
-            logger.info(f"Checking subsystem ... ok")
-        else:
-            logger.info(f"Checking subsystem: ... not found")
-            passed = False
+        passed &= check_subsystem(device.nvmf_nqn, rpc_client=rpc_client)
 
         if device.status == NVMeDevice.STATUS_ONLINE:
             logger.info("Checking other node's connection to this device...")
@@ -623,22 +624,7 @@ def check_lvol_on_node(lvol_id, node_id, node_bdev_names=None, node_lvols_nqns=N
 
             passed &= check_bdev(bdev_name, bdev_names=node_bdev_names)
 
-        if lvol.nqn in node_lvols_nqns:
-            logger.info(f"Checking subsystem ... ok")
-            if node_lvols_nqns[lvol.nqn]["listen_addresses"]:
-                logger.info(f"Checking listener ... ok")
-            else:
-                logger.info(f"Checking listener ... not found")
-                passed = False
-
-            if node_lvols_nqns[lvol.nqn]["namespaces"]:
-                logger.info(f"Checking namespaces ... ok")
-            else:
-                logger.info(f"Checking namespaces ... not found")
-                passed = False
-        else:
-            logger.info(f"Checking subsystem ... not found")
-            passed = False
+        passed &= check_subsystem(lvol.nqn, nqns=node_lvols_nqns)
 
     except Exception as e:
         logger.exception(e)
