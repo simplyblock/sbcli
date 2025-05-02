@@ -286,7 +286,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     logger.info("Deploying swarm stack ...")
     log_level = "DEBUG" if constants.LOG_WEB_DEBUG else "INFO"
     ret = scripts.deploy_stack(cli_pass, DEV_IP, constants.SIMPLY_BLOCK_DOCKER_IMAGE, c.secret, c.uuid,
-                               log_del_interval, metrics_retention_period, log_level, c.grafana_endpoint)
+                               log_del_interval, metrics_retention_period, log_level, c.grafana_endpoint, constants.FDB_DOCKER_IMAGE)
     logger.info("Deploying swarm stack > Done")
 
     if ret == 0:
@@ -295,8 +295,11 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
         logger.error("deploying swarm stack failed")
 
     logger.info("Configuring DB...")
-    out = scripts.set_db_config_single()
-    logger.info("Configuring DB > Done")
+    out, error = utils.run_fdbcli_command(command="configure new single ssd",timeout="100")
+    if error:
+        logger.error(f"FDB Error: {error}")
+    else:
+        logger.info("Configuring DB > Done")
 
     _set_max_result_window(DEV_IP)
 

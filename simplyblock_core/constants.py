@@ -77,6 +77,8 @@ SIMPLY_BLOCK_CLI_NAME = get_from_env_var_file(
 SIMPLY_BLOCK_SPDK_ULTRA_IMAGE = get_from_env_var_file(
         "SIMPLY_BLOCK_SPDK_ULTRA_IMAGE", "public.ecr.aws/simply-block/ultra:main-latest")
 
+FDB_DOCKER_IMAGE = "foundationdb/foundationdb:7.3.42"
+
 GELF_PORT = 12202
 
 MIN_HUGE_PAGE_MEMORY_FOR_LVOL = 209715200

@@ -14,7 +14,7 @@ services:
       - monitoring-net
 
   fdb-server:
-    image: foundationdb/foundationdb:7.3.42
+    image: $FDB_DOCKER_IMAGE
     networks:
       - hostnet
     environment:
@@ -36,7 +36,7 @@ services:
           memory: 4g
 
   fdb-backup-agent:
-    image: foundationdb/foundationdb:7.3.42
+    image: $FDB_DOCKER_IMAGE
     entrypoint: "/usr/bin/backup_agent -C  /etc/foundationdb/fdb.cluster"
     networks:
       - hostnet

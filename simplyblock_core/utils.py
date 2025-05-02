@@ -9,6 +9,7 @@ import string
 import subprocess
 import sys
 import uuid
+import time
 from typing import Union
 
 import docker
@@ -1023,3 +1024,46 @@ def get_fdb_connection_string(DEV_IP):
         f.write(modified + "\n")
 
     return modified
+
+def run_fdbcli_command(command="status",timeout="100"):
+    """
+    Run an ephemeral fdbcli container to interact with a running FoundationDB cluster.
+    """
+    fdb_image = constants.FDB_DOCKER_IMAGE
+    
+    client = docker.from_env()
+
+    try:
+        logger.info(f"Pulling image: {fdb_image}")
+        client.images.pull(fdb_image)
+
+        volumes = {
+            "/etc/foundationdb": {"bind": "/etc/foundationdb", "mode": "ro"},
+        }
+
+        environment = {
+            "FDB_CLUSTER_FILE": "/etc/foundationdb/fdb.cluster",
+            "FDB_NETWORKING_MODE": "host"
+        }
+
+        logger.info(f"Running fdbcli --exec '{command}'")
+        container = client.containers.run(
+            image=fdb_image,
+            entrypoint="fdbcli",  
+            command=["--exec", command, "--timeout", timeout],
+            environment=environment,
+            volumes=volumes,
+            network="host",
+            remove=True,
+            detach=False,
+            tty=True
+        )
+
+        time.sleep(10)
+        
+        output = container.decode("utf-8") if isinstance(container, bytes) else str(container)
+        return output, None
+
+    except Exception as e:
+        logger.exception("Failed to run fdbcli container command")
+        return None, str(e)
