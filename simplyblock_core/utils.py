@@ -1030,7 +1030,7 @@ def run_fdbcli_command(command="status",timeout="100"):
     Run an ephemeral fdbcli container to interact with a running FoundationDB cluster.
     """
     fdb_image = constants.FDB_DOCKER_IMAGE
-    
+
     client = docker.from_env()
 
     try:
@@ -1042,7 +1042,7 @@ def run_fdbcli_command(command="status",timeout="100"):
         }
 
         environment = {
-            "FDB_CLUSTER_FILE": "/etc/foundationdb/fdb.cluster",
+            "FDB_CLUSTER_FILE": constants.KVD_DB_FILE_PATH,
             "FDB_NETWORKING_MODE": "host"
         }
 
