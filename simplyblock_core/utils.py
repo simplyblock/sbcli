@@ -1015,25 +1015,14 @@ def get_random_snapshot_vuid():
         r = 1 + int(random.random() * 1000000)
     return r
 
-def get_fdb_connection_string(DEV_IP=None):
+def set_db_config(dev_ip=None, db_connection=None):
     try:
-        command = f"sudo cat {constants.KVD_DB_FILE_PATH}"
-        result = subprocess.run(command, shell=True, capture_output=True, text=True, check=True)
-        content = result.stdout.strip()
+        if dev_ip is not None:
+            command = f"sudo cat {constants.KVD_DB_FILE_PATH}"
+            result = subprocess.run(command, shell=True, capture_output=True, text=True, check=True)
+            content = result.stdout.strip()
+            db_connection = re.sub(r'@[\d\.]+(?=:\d+)', f'@{dev_ip}', content)
 
-        modified = re.sub(r'@[\d\.]+(?=:\d+)', f'@{DEV_IP}', content)
-
-        write_command = f"echo '{modified}' | sudo tee {constants.KVD_DB_FILE_PATH} > /dev/null"
-        subprocess.run(write_command, shell=True, check=True)
-
-        return modified
-
-    except Exception as e:
-        logger.error(f"Failed to get and update FDB connection string: {str(e)}")
-        return None
-
-def set_db_config(db_connection):
-    try:
         command = f"echo '{db_connection}' | sudo tee {constants.KVD_DB_FILE_PATH} > /dev/null"
         subprocess.run(command, shell=True, check=True)
         logger.info(f"Successfully wrote to {constants.KVD_DB_FILE_PATH}")

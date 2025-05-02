@@ -370,7 +370,7 @@ def join_swarm():
     db_connection = data['db_connection']
 
     logger.info("Setting DB connection")
-    core_utils.set_db_config(db_connection)
+    core_utils.set_db_config(dev_ip=None, db_connection=db_connection)
     set_cluster_id(cluster_id)
 
     logger.info("Joining Swarm")
