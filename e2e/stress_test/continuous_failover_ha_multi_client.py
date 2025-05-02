@@ -1091,10 +1091,14 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
             for clone, clone_details in self.clone_mount_details.items():
                 self.common_utils.validate_fio_test(clone_details["Client"],
                                                     log_file=clone_details["Log"])
+                self.ssh_obj.delete_files(clone_details["Client"], [f"{self.log_path}/local-{clone}_fio*"])
+                self.ssh_obj.delete_files(clone_details["Client"], [f"{self.log_path}/{clone}_fio_iolog*"])
             
             for lvol, lvol_details in self.lvol_mount_details.items():
                 self.common_utils.validate_fio_test(lvol_details["Client"],
                                                     log_file=lvol_details["Log"])
+                self.ssh_obj.delete_files(lvol_details["Client"], [f"{self.log_path}/local-{lvol}_fio*"])
+                self.ssh_obj.delete_files(lvol_details["Client"], [f"{self.log_path}/{lvol}_fio_iolog*"])
 
             # Perform failover and manage resources during outage
             outage_type = self.perform_failover_during_outage()
@@ -1125,11 +1129,15 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                     lvol_details["Client"],
                     lvol_details["Log"]
                 )
+                self.ssh_obj.delete_files(lvol_details["Client"], [f"{self.log_path}/local-{lvol_name}_fio*"])
+                self.ssh_obj.delete_files(lvol_details["Client"], [f"{self.log_path}/{lvol_name}_fio_iolog*"])
             for clone_name, clone_details in self.clone_mount_details.items():
                 self.common_utils.validate_fio_test(
                     clone_details["Client"],
                     clone_details["Log"]
                 )
+                self.ssh_obj.delete_files(clone_details["Client"], [f"{self.log_path}/local-{clone_name}_fio*"])
+                self.ssh_obj.delete_files(clone_details["Client"], [f"{self.log_path}/{clone_name}_fio_iolog*"])
 
             self.logger.info(f"Failover iteration {iteration} complete.")
             iteration += 1
