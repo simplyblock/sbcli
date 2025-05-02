@@ -295,7 +295,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
         logger.error("deploying swarm stack failed")
 
     logger.info("Configuring DB...")
-    out, error = utils.run_fdbcli_command(command="configure new single ssd",timeout="100")
+    out, error = utils.run_fdbcli_command(mgmt_ip=DEV_IP,command="configure new single ssd",timeout="100")
     if error:
         logger.error(f"FDB Error: {error}")
     else:

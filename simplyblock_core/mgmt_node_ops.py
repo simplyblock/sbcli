@@ -131,10 +131,10 @@ def deploy_mgmt_node(cluster_ip, cluster_id, ifname, cluster_secret):
 
         logger.info("Configuring Double DB...")
         time.sleep(3)
-        _, error = utils.run_fdbcli_command(command="configure FORCE double",timeout="60")
+        _, error = utils.run_fdbcli_command(mgmt_ip=docker_ip,command="configure FORCE double",timeout="60")
         if error:
             logger.error(f"FDB Error: {error}")
-        _, error = utils.run_fdbcli_command(command="coordinators auto",timeout="60")
+        _, error = utils.run_fdbcli_command(mgmt_ip=docker_ip, command="coordinators auto",timeout="60")
         if error:
             logger.error(f"FDB Error: {error}")
         else:

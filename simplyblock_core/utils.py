@@ -1032,17 +1032,16 @@ def set_db_config(dev_ip=None, db_connection=None):
         return False
 
 
-def run_fdbcli_command(command="status",timeout="100"):
+def run_fdbcli_command(mgmt_ip=None,command="status",timeout="100"):
     """
     Run an ephemeral fdbcli container to interact with a running FoundationDB cluster.
     """
-    fdb_image = constants.FDB_DOCKER_IMAGE
 
-    client = docker.from_env()
+    client = docker.DockerClient(base_url=f"tcp://{mgmt_ip}:2375", version="auto")
 
     try:
-        logger.info(f"Pulling image: {fdb_image}")
-        client.images.pull(fdb_image)
+        logger.info(f"Pulling image: {constants.FDB_DOCKER_IMAGE}")
+        client.images.pull(constants.FDB_DOCKER_IMAGE)
 
         volumes = {
             "/etc/foundationdb": {"bind": "/etc/foundationdb", "mode": "ro"},
@@ -1055,7 +1054,7 @@ def run_fdbcli_command(command="status",timeout="100"):
 
         logger.info(f"Running fdbcli --exec '{command}'")
         container = client.containers.run(
-            image=fdb_image,
+            image=constants.FDB_DOCKER_IMAGE,
             entrypoint="fdbcli",  
             command=["--exec", command, "--timeout", timeout],
             environment=environment,
