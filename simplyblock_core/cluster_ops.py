@@ -160,7 +160,8 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     logger.info(f"Node IP: {DEV_IP}")
     ret = scripts.configure_docker(DEV_IP)
 
-    db_connection = utils.set_db_config(dev_ip=DEV_IP, db_connection=None)
+    db_connection = f"{utils.generate_string(8)}:{utils.generate_string(32)}@{DEV_IP}:4500"
+    ret = utils.set_db_config(dev_ip=DEV_IP, db_connection=db_connection)
 
     logger.info("Configuring docker swarm...")
     c = docker.DockerClient(base_url=f"tcp://{DEV_IP}:2375", version="auto")

@@ -1017,12 +1017,6 @@ def get_random_snapshot_vuid():
 
 def set_db_config(dev_ip=None, db_connection=None):
     try:
-        if dev_ip is not None:
-            command = f"sudo cat {constants.KVD_DB_FILE_PATH}"
-            result = subprocess.run(command, shell=True, capture_output=True, text=True, check=True)
-            content = result.stdout.strip()
-            db_connection = re.sub(r'@[\d\.]+(?=:\d+)', f'@{dev_ip}', content)
-
         command = f"echo '{db_connection}' | sudo tee {constants.KVD_DB_FILE_PATH} > /dev/null"
         subprocess.run(command, shell=True, check=True)
         logger.info(f"Successfully wrote to {constants.KVD_DB_FILE_PATH}")
