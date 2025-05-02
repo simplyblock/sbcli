@@ -283,25 +283,20 @@ def firewall_port(port_id=9090, port_type="tcp", block=True, rpc_port=None):
             if chain['chain'] in ["INPUT", "OUTPUT"]:
                 for rule in chain['rules']:
                     if str(port_id) in rule['options']:
-                        cmd_list.append(f"iptables -D {chain['chain']} -p {port_type} --dport {port_id} -j {rule['target']}")
+                        cmd_list.append(f"iptables -D {chain['chain']} -p {port_type} --dport {port_id} -j {rule['target']} -w")
 
     except Exception as e:
         logger.error(e)
 
     if block:
         cmd_list.extend([
-            f"iptables -A INPUT -p {port_type} --dport {port_id} -j DROP",
-            f"iptables -A INPUT -p {port_type} --dport {port_id} -j REJECT",
-            f"iptables -A OUTPUT -p {port_type} --dport {port_id} -j DROP",
-            f"iptables -A OUTPUT -p {port_type} --dport {port_id} -j REJECT",
-            "iptables -L -n -v",
+            f"iptables -A INPUT -p {port_type} --dport {port_id} -j DROP -w",
+            f"iptables -A INPUT -p {port_type} --dport {port_id} -j REJECT -w",
+            f"iptables -A OUTPUT -p {port_type} --dport {port_id} -j DROP -w",
+            f"iptables -A OUTPUT -p {port_type} --dport {port_id} -j REJECT -w",
         ])
-    else:
-        cmd_list.extend([
-            # f"iptables -A INPUT -p {port_type} --dport {port_id} -j ACCEPT",
-            # f"iptables -A OUTPUT -p {port_type} --dport {port_id} -j ACCEPT",
-            "iptables -L -n -v",
-        ])
+
+    cmd_list.append("iptables -L -n -v -w")
 
     out = ""
     spk_name = "spdk"
@@ -321,7 +316,7 @@ def firewall_get(rpc_port=None):
     spk_name = "spdk"
     if rpc_port:
         spk_name = f"spdk_{rpc_port}"
-    cmd = f"docker exec {spk_name} iptables -L -n"
+    cmd = f"docker exec {spk_name} iptables -L -n -w"
     stream = os.popen(cmd)
     ret = stream.read()
     return ret
