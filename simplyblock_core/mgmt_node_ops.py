@@ -47,7 +47,7 @@ def deploy_mgmt_node(cluster_ip, cluster_id, ifname, cluster_secret):
     ret = scripts.configure_docker(DEV_IP)
 
     db_connection = cluster_data['db_connection']
-    scripts.set_db_config(db_connection)
+    utils.set_db_config(db_connection)
     time.sleep(1)
     hostname = utils.get_hostname()
     db_controller = DBController()

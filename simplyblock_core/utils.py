@@ -1015,7 +1015,7 @@ def get_random_snapshot_vuid():
         r = 1 + int(random.random() * 1000000)
     return r
 
-def get_fdb_connection_string(DEV_IP):
+def get_fdb_connection_string(DEV_IP=None):
     with open(constants.KVD_DB_FILE_PATH, 'r') as f:
         content = f.read().strip()
     modified = re.sub(r'@[\d\.]+(?=:\d+)', f'@{DEV_IP}', content)
@@ -1024,6 +1024,19 @@ def get_fdb_connection_string(DEV_IP):
         f.write(modified + "\n")
 
     return modified
+
+def set_db_config(db_connection):
+    try:        
+        with open(constants.KVD_DB_FILE_PATH, 'w') as f:
+            f.write(db_connection)
+            logger.info(f"Successfully wrote to {constants.KVD_DB_FILE_PATH}")
+        
+        return True
+    
+    except Exception as e:
+        logger.error(f"Failed to set DB config: {str(e)}")
+        return False
+
 
 def run_fdbcli_command(command="status",timeout="100"):
     """
