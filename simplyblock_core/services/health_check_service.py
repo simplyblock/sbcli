@@ -133,10 +133,7 @@ while True:
                         if not bdev:
                             continue
 
-                        if bdev in node_bdev_names:
-                            logger.debug(f"Checking bdev: {bdev} ... ok")
-                        else:
-                            logger.error(f"Checking bdev: {bdev} ... not found")
+                        if not health_controller.check_bdev(bdev, bdev_names=node_bdev_names):
                             problems += 1
                             passed = False
 
@@ -159,12 +156,10 @@ while True:
                     org_dev = db.get_storage_device_by_id(remote_device.get_id())
                     org_node =  db.get_storage_node_by_id(remote_device.node_id)
                     if org_dev.status == NVMeDevice.STATUS_ONLINE and org_node.status == StorageNode.STATUS_ONLINE:
-                        if remote_device.remote_bdev in node_bdev_names:
-                            logger.info(f"Checking bdev: {remote_device.remote_bdev} ... ok")
+                        if health_controller.check_bdev(remote_device.remote_bdev, bdev_names=node_bdev_names):
                             connected_devices.append(remote_device.get_id())
                             ret = True
                         else:
-                            logger.info(f"Checking bdev: {remote_device.remote_bdev} ... not found")
                             if not org_dev.alceml_bdev:
                                 logger.error(f"device alceml bdev not found!, {org_dev.get_id()}")
                                 continue
@@ -201,11 +196,8 @@ while True:
                 if snode.enable_ha_jm:
                     logger.info(f"Node remote JMs: {len(snode.remote_jm_devices)}")
                     for remote_device in snode.remote_jm_devices:
-                        if remote_device.remote_bdev in node_bdev_names:
-                            logger.info(f"Checking bdev: {remote_device.remote_bdev} ... ok")
+                        if health_controller.check_bdev(remote_device.remote_bdev, bdev_names=node_bdev_names):
                             connected_jms.append(remote_device.get_id())
-                        else:
-                            logger.info(f"Checking bdev: {remote_device.remote_bdev} ... not found")
 
                     for jm_id in snode.jm_ids:
                         if jm_id not in connected_jms:

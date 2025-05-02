@@ -139,12 +139,8 @@ while True:
                             set_lvol_status(lvol, LVol.STATUS_ONLINE)
 
                         for snap in db.get_snapshots_by_node_id(snode.get_id()):
-                            if snap.snap_bdev in node_bdev_names:
-                                logger.info(f"Checking bdev: {snap.snap_bdev} ... ok")
-                                set_snapshot_health_check(snap, True)
-                            else:
-                                logger.error(f"Checking bdev: {snap.snap_bdev} ... failed")
-                                set_snapshot_health_check(snap, False)
-                                passed = False
+                            present = health_controller.check_bdev(snap.snap_bdev, bdev_names=node_bdev_names)
+                            set_snapshot_health_check(snap, present)
+                            passed &= present
 
     time.sleep(constants.LVOL_MONITOR_INTERVAL_SEC)
