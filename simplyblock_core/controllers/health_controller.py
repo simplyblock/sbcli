@@ -128,11 +128,13 @@ def _check_node_hublvol(node: StorageNode, node_bdev_names=None, node_lvols_nqns
             node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password, timeout=5, retry=1)
 
         if not node_bdev_names:
+            node_bdev_names = {}
             ret = rpc_client.get_bdevs()
             if ret:
-                node_bdev_names = [b['name'] for b in ret]
-            else:
-                node_bdev_names = []
+                for b in ret:
+                    node_bdev_names[b['name']] = b
+                    for al in b['aliases']:
+                        node_bdev_names[al] = b
 
         if not node_lvols_nqns:
             node_lvols_nqns = {}
@@ -140,10 +142,10 @@ def _check_node_hublvol(node: StorageNode, node_bdev_names=None, node_lvols_nqns
             for sub in ret:
                 node_lvols_nqns[sub['nqn']] = sub
 
-        if node.hublvol.uuid in node_bdev_names:
-            logger.info(f"Checking bdev: {node.hublvol.uuid} ... ok")
+        if node.hublvol.bdev_name in node_bdev_names:
+            logger.info(f"Checking bdev: {node.hublvol.bdev_name} ... ok")
         else:
-            logger.error(f"Checking bdev: {node.hublvol.uuid} ... failed")
+            logger.error(f"Checking bdev: {node.hublvol.bdev_name} ... failed")
             passed = False
 
         if node.hublvol.nqn in node_lvols_nqns:
@@ -619,8 +621,9 @@ def check_lvol_on_node(lvol_id, node_id, node_bdev_names=None, node_lvols_nqns=N
     if not node_bdev_names:
         node_bdev_names = {}
         ret = rpc_client.get_bdevs()
-        for bdev in ret:
-            node_bdev_names[bdev['name']] = bdev
+        if ret:
+            for bdev in ret:
+                node_bdev_names[bdev['name']] = bdev
 
     if not node_lvols_nqns:
         node_lvols_nqns = {}

@@ -204,7 +204,7 @@ def spdk_process_start():
             f"RPC_PORT={rpc_port}",
             f"ssd_pcie={ssd_pcie_params}",
             f"PCI_ALLOWED={ssd_pcie_list}",
-            f"TOTAL_HP={total_mem}",
+            f"TOTAL_HP={total_mem_mib}",
         ]
         # restart_policy={"Name": "on-failure", "MaximumRetryCount": 99}
     )
