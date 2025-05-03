@@ -224,16 +224,9 @@ def set_node_offline(node):
         # if node.jm_device.status != JMDevice.STATUS_UNAVAILABLE:
         #     device_controller.set_jm_device_state(node.jm_device.get_id(), JMDevice.STATUS_UNAVAILABLE)
 
-def set_node_down(node, dev_status):
+def set_node_down(node):
     if node.status != StorageNode.STATUS_DOWN:
         storage_node_ops.set_node_status(node.get_id(), StorageNode.STATUS_DOWN)
-        #
-        # if dev_status:
-        #     # set devices status
-        #     for dev in node.nvme_devices:
-        #         if dev.status != dev_status:
-        #             device_controller.device_set_state(dev.get_id(), dev_status)
-
 
 logger.info("Starting node monitor")
 while True:
@@ -322,6 +315,12 @@ while True:
                         tasks_controller.add_node_to_auto_restart(snode)
                         continue
 
+                if not node_port_check:
+                    if cluster.status in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_READONLY]:
+                        logger.error(f"Port check failed")
+                        set_node_down(snode)
+                        continue
+
                 set_node_online(snode)
 
                 # # check JM device
@@ -356,10 +355,7 @@ while True:
                 elif not node_port_check:
                     if cluster.status in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_READONLY]:
                         logger.error(f"Port check failed")
-                        if down_ports:
-                            set_node_down(snode, dev_status=NVMeDevice.STATUS_UNAVAILABLE)
-                        else:
-                            set_node_down(snode, dev_status=NVMeDevice.STATUS_ONLINE)
+                        set_node_down(snode)
 
                 else:
                     set_node_offline(snode)
