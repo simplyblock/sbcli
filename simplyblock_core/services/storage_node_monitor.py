@@ -272,8 +272,10 @@ while True:
             if snode.status == StorageNode.STATUS_SCHEDULABLE and not ping_check and not node_api_check:
                 continue
 
-            # 3- check spdk_process
-            spdk_process = health_controller._check_spdk_process_up(snode.mgmt_ip, snode.rpc_port)
+            spdk_process = False
+            if node_api_check:
+                # 3- check spdk_process
+                spdk_process = health_controller._check_spdk_process_up(snode.mgmt_ip, snode.rpc_port)
             logger.info(f"Check: spdk process {snode.mgmt_ip}:5000 ... {spdk_process}")
 
                 # 4- check rpc
@@ -307,9 +309,19 @@ while True:
                             node_port_check = False
                             down_ports.append(data_nic.ip4_address)
 
+
+            cluster = db.get_cluster_by_id(cluster.get_id())
+
             # is_node_online = ping_check and spdk_process and node_rpc_check and node_port_check
             is_node_online =  spdk_process or node_rpc_check
             if is_node_online:
+
+                if snode.status == StorageNode.STATUS_UNREACHABLE:
+                    if cluster.status in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_UNREADY,
+                                          Cluster.STATUS_SUSPENDED, Cluster.STATUS_READONLY]:
+                        tasks_controller.add_node_to_auto_restart(snode)
+                        continue
+
                 set_node_online(snode)
 
                 # # check JM device
@@ -327,7 +339,6 @@ while True:
                 #                                                       JMDevice.STATUS_UNAVAILABLE)
             else:
 
-                cluster = db.get_cluster_by_id(cluster.get_id())
                 if not ping_check and not node_api_check and not spdk_process:
                     # restart on new node
                     storage_node_ops.set_node_status(snode.get_id(), StorageNode.STATUS_SCHEDULABLE)
