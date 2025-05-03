@@ -3000,7 +3000,7 @@ def recreate_lvstore(snode):
                 logger.error("Error establishing hublvol: %s", e)
                 # return False
             ### 8- allow secondary port
-            time.sleep(1)
+            time.sleep(3)
             sec_node_api.firewall_set_port(snode.lvol_subsys_port, "tcp", "allow", sec_node.rpc_port)
             tcp_ports_events.port_allowed(sec_node, snode.lvol_subsys_port)
 
