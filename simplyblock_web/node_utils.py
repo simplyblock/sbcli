@@ -291,9 +291,9 @@ def firewall_port(port_id=9090, port_type="tcp", block=True, rpc_port=None):
     if block:
         cmd_list.extend([
             f"iptables -A INPUT -p {port_type} --dport {port_id} -j DROP -w",
-            # f"iptables -A INPUT -p {port_type} --dport {port_id} -j REJECT -w",
+            f"iptables -A INPUT -p {port_type} --dport {port_id} -j REJECT -w",
             f"iptables -A OUTPUT -p {port_type} --dport {port_id} -j DROP -w",
-            # f"iptables -A OUTPUT -p {port_type} --dport {port_id} -j REJECT -w",
+            f"iptables -A OUTPUT -p {port_type} --dport {port_id} -j REJECT -w",
         ])
 
     cmd_list.append("iptables -L -n -v -w")
