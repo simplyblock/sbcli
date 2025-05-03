@@ -82,9 +82,9 @@ def get_amazon_cloud_info():
         pass
 
 
-def get_docker_client():
+def get_docker_client(timeout=60):
     try:
-        cl = docker.DockerClient(base_url='unix://var/run/docker.sock', version="auto", timeout=60 * 5)
+        cl = docker.DockerClient(base_url='unix://var/run/docker.sock', version="auto", timeout=timeout)
         cl.info()
         return cl
     except:
@@ -94,7 +94,7 @@ def get_docker_client():
                 if ifname in ["eth0", "ens0"]:
                     ip = node_utils.get_nics_data()[ifname]['ip']
                     break
-        cl = docker.DockerClient(base_url=f"tcp://{ip}:2375", version="auto", timeout=60 * 5)
+        cl = docker.DockerClient(base_url=f"tcp://{ip}:2375", version="auto", timeout=timeout)
         try:
             cl.info()
             return cl
@@ -160,7 +160,7 @@ def spdk_process_start():
         except:
             pass
 
-    node_docker = get_docker_client()
+    node_docker = get_docker_client(timeout=60*3)
     nodes = node_docker.containers.list(all=True)
     for node in nodes:
         if node.attrs["Name"] in [f"/spdk_{rpc_port}", f"/spdk_proxy_{rpc_port}"]:
@@ -271,6 +271,26 @@ def spdk_process_is_up():
                     return utils.get_response(False, f"SPDK container status: {status}, is running: {is_running}")
     except Exception as e:
         logger.error(e)
+    return utils.get_response(True)
+
+
+
+@bp.route('/spdk_proxy_restart', methods=['GET'])
+def spdk_proxy_restart():
+    if "rpc_port" not in request.args:
+        return utils.get_response(False, f"param rpc_port is required")
+
+    rpc_port = request.args.get('rpc_port')
+    try:
+        node_docker = get_docker_client()
+        for cont in node_docker.containers.list(all=True):
+            if cont.attrs['Name'] == f"/spdk_proxy_{rpc_port}":
+                cont.restart()
+                return utils.get_response(True)
+    except Exception as e:
+        logger.error(e)
+        return utils.get_response(False, str(e))
+
     return utils.get_response(True)
 
 
