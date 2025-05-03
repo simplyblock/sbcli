@@ -336,19 +336,6 @@ while True:
                         if dev.status in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_READONLY]:
                             device_controller.device_set_unavailable(dev.get_id())
 
-
-                elif ping_check and node_api_check and spdk_process and not node_rpc_check:
-                    # restart spdk proxy cont
-                    if cluster.status in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_UNREADY,
-                                          Cluster.STATUS_SUSPENDED, Cluster.STATUS_READONLY]:
-                        logger.info(f"Restarting spdk_proxy_{snode.rpc_port} on {snode.get_id()}")
-                        snode_api = SNodeClient(f"{snode.mgmt_ip}:5000", timeout=60, retry=1)
-                        ret, err  = snode_api.spdk_proxy_restart(snode.rpc_port)
-                        if ret:
-                            logger.info(f"Restarting spdk_proxy on {snode.get_id()} successfully")
-                            continue
-                        if err:
-                            logger.error(err)
                 elif ping_check and node_api_check and (not spdk_process or not node_rpc_check):
                     # add node to auto restart
                     if cluster.status in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_UNREADY,
@@ -365,6 +352,19 @@ while True:
 
                 else:
                     set_node_offline(snode)
+
+            if ping_check and node_api_check and spdk_process and not node_rpc_check:
+                # restart spdk proxy cont
+                if cluster.status in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_UNREADY,
+                                      Cluster.STATUS_SUSPENDED, Cluster.STATUS_READONLY]:
+                    logger.info(f"Restarting spdk_proxy_{snode.rpc_port} on {snode.get_id()}")
+                    snode_api = SNodeClient(f"{snode.mgmt_ip}:5000", timeout=60, retry=1)
+                    ret, err = snode_api.spdk_proxy_restart(snode.rpc_port)
+                    if ret:
+                        logger.info(f"Restarting spdk_proxy on {snode.get_id()} successfully")
+                        continue
+                    if err:
+                        logger.error(err)
 
         update_cluster_status(cluster_id)
 
