@@ -108,6 +108,8 @@ class TestSingleNodeOutage(TestClusterBase):
         fio_thread1 = threading.Thread(target=self.ssh_obj.run_fio_test, args=(self.mgmt_nodes[0], None, self.mount_path, self.log_path,),
                                        kwargs={"name": "fio_run_1",
                                                "runtime": 150,
+                                               "log_avg_msec": 1000,
+                                               "iolog_file": f"{self.log_path}/{self.lvol_name}_fio_iolog",
                                                "debug": self.fio_debug})
         fio_thread1.start()
 
@@ -516,6 +518,8 @@ class TestHASingleNodeOutage(TestClusterBase):
                                        args=(self.mgmt_nodes[0], None, mount_path, log_path,),
                                        kwargs={"name": f"fio_run_{lvol_name}",
                                                "runtime": self.fio_runtime,
+                                               "log_avg_msec": 1000,
+                                               "iolog_file": f"{self.log_path}/{self.lvol_name}_fio_iolog",
                                                "debug": self.fio_debug})
         fio_thread1.start()
         self.fio_threads.append(fio_thread1)

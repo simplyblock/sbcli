@@ -9,13 +9,13 @@ from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.nvme_device import NVMeDevice, JMDevice
 from simplyblock_core.models.storage_node import StorageNode
-
+from simplyblock_core.snode_client import SNodeClient
 
 logger = utils.get_logger(__name__)
 
 
 # get DB controller
-db_controller = db_controller.DBController()
+db = db_controller.DBController()
 
 utils.init_sentry_sdk()
 
@@ -32,7 +32,7 @@ def is_new_migrated_node(cluster_id, node):
             distr_names.append(item["name"])
 
     if dev_lst:
-        tasks = db_controller.get_job_tasks(cluster_id)
+        tasks = db.get_job_tasks(cluster_id)
         for task in tasks:
             if task.function_name == JobSchedule.FN_NEW_DEV_MIG and task.node_id == node.get_id():
                 if task.device_id not in dev_lst:
@@ -44,10 +44,10 @@ def is_new_migrated_node(cluster_id, node):
 
 
 def get_next_cluster_status(cluster_id):
-    cluster = db_controller.get_cluster_by_id(cluster_id)
+    cluster = db.get_cluster_by_id(cluster_id)
     if cluster.status == cluster.STATUS_UNREADY:
         return Cluster.STATUS_UNREADY
-    snodes = db_controller.get_primary_storage_nodes_by_cluster_id(cluster_id)
+    snodes = db.get_primary_storage_nodes_by_cluster_id(cluster_id)
 
     online_nodes = 0
     offline_nodes = 0
@@ -132,7 +132,7 @@ def get_next_cluster_status(cluster_id):
 
 
 def update_cluster_status(cluster_id):
-    cluster = db_controller.get_cluster_by_id(cluster_id)
+    cluster = db.get_cluster_by_id(cluster_id)
     current_cluster_status = cluster.status
     logger.info("cluster_status: %s", current_cluster_status)
     if current_cluster_status in [Cluster.STATUS_UNREADY, Cluster.STATUS_IN_ACTIVATION]:
@@ -142,11 +142,12 @@ def update_cluster_status(cluster_id):
     logger.info("cluster_new_status: %s", next_current_status)
 
     task_pending = 0
-    for task in db_controller.get_job_tasks(cluster_id):
+    for task in db.get_job_tasks(cluster_id):
         if task.status != JobSchedule.STATUS_DONE and task.function_name in [
             JobSchedule.FN_DEV_MIG, JobSchedule.FN_NEW_DEV_MIG, JobSchedule.FN_FAILED_DEV_MIG]:
             task_pending += 1
 
+    cluster = db.get_cluster_by_id(cluster_id)
     cluster.is_re_balancing = task_pending  > 0
     cluster.write_to_db()
 
@@ -163,7 +164,7 @@ def update_cluster_status(cluster_id):
         # needs activation
         # check node status, check auto restart for nodes
         can_activate = True
-        for node in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
+        for node in db.get_storage_nodes_by_cluster_id(cluster_id):
             if node.status in [StorageNode.STATUS_IN_SHUTDOWN, StorageNode.STATUS_IN_CREATION,
                                StorageNode.STATUS_RESTARTING]:
                 logger.error(f"can not activate cluster: node is not in correct status {node.get_id()}: {node.status}")
@@ -214,36 +215,29 @@ def set_node_offline(node):
         # set node unavailable
         storage_node_ops.set_node_status(node.get_id(), StorageNode.STATUS_UNREACHABLE)
 
-        # set devices unavailable
-        for dev in node.nvme_devices:
-            if dev.status in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_READONLY]:
-                device_controller.device_set_unavailable(dev.get_id())
+        # # set devices unavailable
+        # for dev in node.nvme_devices:
+        #     if dev.status in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_READONLY]:
+        #         device_controller.device_set_unavailable(dev.get_id())
 
         # # set jm dev offline
         # if node.jm_device.status != JMDevice.STATUS_UNAVAILABLE:
         #     device_controller.set_jm_device_state(node.jm_device.get_id(), JMDevice.STATUS_UNAVAILABLE)
 
-def set_node_down(node, dev_status):
+def set_node_down(node):
     if node.status != StorageNode.STATUS_DOWN:
         storage_node_ops.set_node_status(node.get_id(), StorageNode.STATUS_DOWN)
-        #
-        # if dev_status:
-        #     # set devices status
-        #     for dev in node.nvme_devices:
-        #         if dev.status != dev_status:
-        #             device_controller.device_set_state(dev.get_id(), dev_status)
-
 
 logger.info("Starting node monitor")
 while True:
-    clusters = db_controller.get_clusters()
+    clusters = db.get_clusters()
     for cluster in clusters:
         cluster_id = cluster.get_id()
         if cluster.status == Cluster.STATUS_IN_ACTIVATION:
             logger.info(f"Cluster status is: {cluster.status}, skipping monitoring")
             continue
 
-        nodes = db_controller.get_storage_nodes_by_cluster_id(cluster_id)
+        nodes = db.get_storage_nodes_by_cluster_id(cluster_id)
         for snode in nodes:
             if snode.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_UNREACHABLE,
                                     StorageNode.STATUS_SCHEDULABLE, StorageNode.STATUS_DOWN]:
@@ -260,8 +254,8 @@ while True:
             ping_check = health_controller._check_node_ping(snode.mgmt_ip)
             logger.info(f"Check: ping mgmt ip {snode.mgmt_ip} ... {ping_check}")
             if not ping_check:
-                time.sleep(1)
-                ping_check = health_controller._check_node_ping(snode.mgmt_ip)
+                # time.sleep(1)
+                # ping_check = health_controller._check_node_ping(snode.mgmt_ip)
                 logger.info(f"Check 2: ping mgmt ip {snode.mgmt_ip} ... {ping_check}")
 
             # 2- check node API
@@ -279,15 +273,15 @@ while True:
 
                 # 4- check rpc
             node_rpc_check = health_controller._check_node_rpc(
-                snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password, timeout=5, retry=3)
+                snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password, timeout=5, retry=2)
             logger.info(f"Check: node RPC {snode.mgmt_ip}:{snode.rpc_port} ... {node_rpc_check}")
 
             node_port_check = True
             down_ports = []
-            if spdk_process and snode.lvstore_status == "ready":
+            if spdk_process and node_rpc_check and snode.lvstore_status == "ready":
                 ports = [snode.nvmf_port]
                 if snode.lvstore_stack_secondary_1:
-                    for n in db_controller.get_primary_storage_nodes_by_secondary_node_id(snode.get_id()):
+                    for n in db.get_primary_storage_nodes_by_secondary_node_id(snode.get_id()):
                         if n.lvstore_status == "ready":
                             ports.append(n.lvol_subsys_port)
                 if not snode.is_secondary_node:
@@ -308,26 +302,42 @@ while True:
                             node_port_check = False
                             down_ports.append(data_nic.ip4_address)
 
-            is_node_online = ping_check and spdk_process and node_rpc_check and node_port_check
+
+            cluster = db.get_cluster_by_id(cluster.get_id())
+
+            # is_node_online = ping_check and spdk_process and node_rpc_check and node_port_check
+            is_node_online =  spdk_process or node_rpc_check
             if is_node_online:
+
+                if snode.status == StorageNode.STATUS_UNREACHABLE:
+                    if cluster.status in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_UNREADY,
+                                          Cluster.STATUS_SUSPENDED, Cluster.STATUS_READONLY]:
+                        tasks_controller.add_node_to_auto_restart(snode)
+                        continue
+
+                if not node_port_check:
+                    if cluster.status in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_READONLY]:
+                        logger.error(f"Port check failed")
+                        set_node_down(snode)
+                        continue
+
                 set_node_online(snode)
 
-                # check JM device
-                if snode.jm_device:
-                    if snode.jm_device.status in [JMDevice.STATUS_ONLINE, JMDevice.STATUS_UNAVAILABLE]:
-                        ret = health_controller.check_jm_device(snode.jm_device.get_id())
-                        if ret:
-                            logger.info(f"JM bdev is online: {snode.jm_device.get_id()}")
-                            if snode.jm_device.status != JMDevice.STATUS_ONLINE:
-                                device_controller.set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_ONLINE)
-                        else:
-                            logger.error(f"JM bdev is offline: {snode.jm_device.get_id()}")
-                            if snode.jm_device.status != JMDevice.STATUS_UNAVAILABLE:
-                                device_controller.set_jm_device_state(snode.jm_device.get_id(),
-                                                                      JMDevice.STATUS_UNAVAILABLE)
+                # # check JM device
+                # if snode.jm_device:
+                #     if snode.jm_device.status in [JMDevice.STATUS_ONLINE, JMDevice.STATUS_UNAVAILABLE]:
+                #         ret = health_controller.check_jm_device(snode.jm_device.get_id())
+                #         if ret:
+                #             logger.info(f"JM bdev is online: {snode.jm_device.get_id()}")
+                #             if snode.jm_device.status != JMDevice.STATUS_ONLINE:
+                #                 device_controller.set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_ONLINE)
+                #         else:
+                #             logger.error(f"JM bdev is offline: {snode.jm_device.get_id()}")
+                #             if snode.jm_device.status != JMDevice.STATUS_UNAVAILABLE:
+                #                 device_controller.set_jm_device_state(snode.jm_device.get_id(),
+                #                                                       JMDevice.STATUS_UNAVAILABLE)
             else:
 
-                cluster = db_controller.get_cluster_by_id(cluster.get_id())
                 if not ping_check and not node_api_check and not spdk_process:
                     # restart on new node
                     storage_node_ops.set_node_status(snode.get_id(), StorageNode.STATUS_SCHEDULABLE)
@@ -337,24 +347,31 @@ while True:
                             device_controller.device_set_unavailable(dev.get_id())
 
                 elif ping_check and node_api_check and (not spdk_process or not node_rpc_check):
-
-                    if cluster.status !=  Cluster.STATUS_IN_ACTIVATION:
-                        set_node_offline(snode)
-
                     # add node to auto restart
                     if cluster.status in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_UNREADY,
                                           Cluster.STATUS_SUSPENDED, Cluster.STATUS_READONLY]:
+                        set_node_offline(snode)
                         tasks_controller.add_node_to_auto_restart(snode)
                 elif not node_port_check:
                     if cluster.status in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_READONLY]:
                         logger.error(f"Port check failed")
-                        if down_ports:
-                            set_node_down(snode, dev_status=NVMeDevice.STATUS_UNAVAILABLE)
-                        else:
-                            set_node_down(snode, dev_status=NVMeDevice.STATUS_ONLINE)
+                        set_node_down(snode)
 
                 else:
                     set_node_offline(snode)
+
+            if ping_check and node_api_check and spdk_process and not node_rpc_check:
+                # restart spdk proxy cont
+                if cluster.status in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_UNREADY,
+                                      Cluster.STATUS_SUSPENDED, Cluster.STATUS_READONLY]:
+                    logger.info(f"Restarting spdk_proxy_{snode.rpc_port} on {snode.get_id()}")
+                    snode_api = SNodeClient(f"{snode.mgmt_ip}:5000", timeout=60, retry=1)
+                    ret, err = snode_api.spdk_proxy_restart(snode.rpc_port)
+                    if ret:
+                        logger.info(f"Restarting spdk_proxy on {snode.get_id()} successfully")
+                        continue
+                    if err:
+                        logger.error(err)
 
         update_cluster_status(cluster_id)
 

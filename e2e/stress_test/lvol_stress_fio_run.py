@@ -73,7 +73,8 @@ class TestStressLvolCloneClusterFioRun(TestLvolHACluster):
                    "FS": fs_type,
                    "Log": f"{self.log_path}/{lvol_name}.log",
                    "snapshots": [],
-                   "Client": client
+                   "Client": client,
+                   "iolog_base_path": f"{self.log_path}/{lvol_name}_fio_iolog"
             }
 
             self.logger.info(f"Created lvol {lvol_name}.")
@@ -114,6 +115,7 @@ class TestStressLvolCloneClusterFioRun(TestLvolHACluster):
 
             self.ssh_obj.delete_files(client, [f"{mount_point}/*fio*"])
             self.ssh_obj.delete_files(client, [f"{self.log_path}/local-{lvol_name}_fio*"])
+            self.ssh_obj.delete_files(client, [f"{self.log_path}/{lvol_name}_fio_iolog"])
 
             sleep_n_sec(5)
 
@@ -128,8 +130,11 @@ class TestStressLvolCloneClusterFioRun(TestLvolHACluster):
                     "bs": f"{2 ** random.randint(2, 7)}K",
                     "nrfiles": 16,
                     "iodepth": 1,
-                    "numjobs": 4,
-                    "time_based": False,
+                    "numjobs": 5,
+                    "time_based": True,
+                    "runtime": 2000,
+                    "log_avg_msec": 1000,
+                    "iolog_file": self.lvol_mount_details[lvol_name]["iolog_base_path"],
                 },
             )
             fio_thread.start()
@@ -168,7 +173,8 @@ class TestStressLvolCloneClusterFioRun(TestLvolHACluster):
                    "MD5": None,
                    "Log": f"{self.log_path}/{clone_name}.log",
                    "snapshot": snapshot_name,
-                   "Client": client
+                   "Client": client,
+                   "iolog_base_path": f"{self.log_path}/{clone_name}_fio_iolog"
             }
 
             self.logger.info(f"Created clone {clone_name}.")
@@ -200,6 +206,7 @@ class TestStressLvolCloneClusterFioRun(TestLvolHACluster):
 
             self.ssh_obj.delete_files(client, [f"{mount_point}/*fio*"])
             self.ssh_obj.delete_files(client, [f"{self.log_path}/local-{clone_name}_fio*"])
+            self.ssh_obj.delete_files(client, [f"{self.log_path}/{clone_name}_fio_iolog"])
 
             sleep_n_sec(4)
 
@@ -214,8 +221,11 @@ class TestStressLvolCloneClusterFioRun(TestLvolHACluster):
                     "bs": f"{2 ** random.randint(2, 7)}K",
                     "nrfiles": 16,
                     "iodepth": 1,
-                    "numjobs": 4,
-                    "time_based": False,
+                    "numjobs": 5,
+                    "time_based": True,
+                    "runtime": 2000,
+                    "log_avg_msec": 1000,
+                    "iolog_file": self.clone_mount_details[clone_name]["iolog_base_path"],
                 },
             )
             fio_thread.start()
@@ -258,6 +268,8 @@ class TestStressLvolCloneClusterFioRun(TestLvolHACluster):
                     self.disconnect_lvol(clone_details['ID'])
                     self.sbcli_utils.delete_lvol(clone_name)
                     to_delete.append(clone_name)
+                    self.ssh_obj.delete_files(clone_details["Client"], [f"{self.log_path}/local-{clone_name}_fio*"])
+                    self.ssh_obj.delete_files(clone_details["Client"], [f"{self.log_path}/{clone_name}_fio_iolog*"])
             for del_key in to_delete:
                 del self.clone_mount_details[del_key]
             for snapshot in snapshots:
@@ -284,6 +296,8 @@ class TestStressLvolCloneClusterFioRun(TestLvolHACluster):
             self.ssh_obj.remove_dir(client, dir_path=f"/mnt/{lvol}")
             self.disconnect_lvol(self.lvol_mount_details[lvol]['ID'])
             self.sbcli_utils.delete_lvol(lvol)
+            self.ssh_obj.delete_files(self.lvol_mount_details["Client"], [f"{self.log_path}/local-{lvol}_fio*"])
+            self.ssh_obj.delete_files(self.lvol_mount_details["Client"], [f"{self.log_path}/{lvol}_fio_iolog*"])
             del self.lvol_mount_details[lvol]
             for _, lvols in self.node_vs_lvol.items():
                 if lvol in lvols:
@@ -346,10 +360,14 @@ class TestStressLvolCloneClusterFioRun(TestLvolHACluster):
             for clone, clone_details in self.clone_mount_details.items():
                 self.common_utils.validate_fio_test(clone_details["Client"],
                                                     log_file=clone_details["Log"])
+                self.ssh_obj.delete_files(clone_details["Client"], [f"{self.log_path}/local-{clone}_fio*"])
+                self.ssh_obj.delete_files(clone_details["Client"], [f"{self.log_path}/{clone}_fio_iolog*"])
             
             for lvol, lvol_details in self.lvol_mount_details.items():
                 self.common_utils.validate_fio_test(lvol_details["Client"],
                                                     log_file=lvol_details["Log"])
+                self.ssh_obj.delete_files(lvol_details["Client"], [f"{self.log_path}/local-{lvol}_fio*"])
+                self.ssh_obj.delete_files(lvol_details["Client"], [f"{self.log_path}/{lvol}_fio_iolog*"])
                 
 
             self.logger.info(f"Iteration {iteration} complete.")

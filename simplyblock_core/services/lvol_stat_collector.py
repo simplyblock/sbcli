@@ -90,7 +90,7 @@ def add_lvol_stats(cluster, lvol, stats_list, capacity_dict=None):
         else:
             last_record = LVolStatObject(
                 data={"uuid": lvol.get_id(), "pool_id": lvol.pool_uuid},
-            ).get_last(db_controller.kv_store)
+            ).get_last(db.kv_store)
         if last_record:
             time_diff = (now - last_record.date)
             if time_diff > 0:
@@ -141,7 +141,7 @@ def add_lvol_stats(cluster, lvol, stats_list, capacity_dict=None):
 
                 if data['read_io_ps'] > 0 and data['write_io_ps'] > 0 and lvol.io_error:
                     # set lvol io error to false
-                    lvol = db_controller.get_lvol_by_id(lvol.get_id())
+                    lvol = db.get_lvol_by_id(lvol.get_id())
                     lvol.io_error = False
                     lvol.write_to_db()
                     lvol_events.lvol_io_error_change(lvol, False, True, caused_by="monitor")
@@ -152,7 +152,7 @@ def add_lvol_stats(cluster, lvol, stats_list, capacity_dict=None):
         logger.error("Error getting stats")
 
     stat_obj = LVolStatObject(data=data)
-    stat_obj.write_to_db(db_controller.kv_store)
+    stat_obj.write_to_db(db.kv_store)
     last_object_record[lvol.get_id()] = stat_obj
 
     return stat_obj
@@ -173,17 +173,17 @@ def add_pool_stats(pool, records):
     })
 
     stat_obj = PoolStatObject(data=data)
-    stat_obj.write_to_db(db_controller.kv_store)
+    stat_obj.write_to_db(db.kv_store)
     return stat_obj
 
 
 # get DB controller
-db_controller = db_controller.DBController()
+db = db_controller.DBController()
 
 logger.info("Starting stats collector...")
 while True:
 
-    for cluster in db_controller.get_clusters():
+    for cluster in db.get_clusters():
 
         if cluster.status in [Cluster.STATUS_INACTIVE, Cluster.STATUS_UNREADY, Cluster.STATUS_IN_ACTIVATION]:
             logger.warning(f"Cluster {cluster.get_id()} is in {cluster.status} state, skipping")
@@ -194,11 +194,11 @@ while True:
         all_node_lvols_stats = {}
 
         pools_lvols_stats = {}
-        for snode in db_controller.get_storage_nodes_by_cluster_id(cluster.get_id()):
+        for snode in db.get_storage_nodes_by_cluster_id(cluster.get_id()):
 
             if snode.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
 
-                lvol_list = db_controller.get_lvols_by_node_id(snode.get_id())
+                lvol_list = db.get_lvols_by_node_id(snode.get_id())
 
                 if not lvol_list:
                     continue
@@ -236,7 +236,7 @@ while True:
                         all_node_lvols_stats[snode.get_id()] = node_lvols_stats
 
                 if snode.secondary_node_id:
-                    sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
+                    sec_node = db.get_storage_node_by_id(snode.secondary_node_id)
                     if sec_node and sec_node.status==StorageNode.STATUS_ONLINE:
                         sec_rpc_client = RPCClient(
                             sec_node.mgmt_ip, sec_node.rpc_port,
@@ -272,14 +272,14 @@ while True:
                     capacity_dict = {}
                     stats = []
                     logger.info("Getting lVol stats: %s from node: %s", lvol.uuid, snode.get_id())
-                    if lvol.lvol_uuid in all_node_lvols_stats[snode.get_id()]:
+                    if snode.get_id() in all_node_lvols_stats and lvol.lvol_uuid in all_node_lvols_stats[snode.get_id()]:
                         stats.append(all_node_lvols_stats[snode.get_id()][lvol.lvol_uuid])
 
-                    if lvol.lvol_uuid in all_node_bdev_names[snode.get_id()]:
+                    if snode.get_id() in all_node_bdev_names and lvol.lvol_uuid in all_node_bdev_names[snode.get_id()]:
                         capacity_dict = all_node_bdev_names[snode.get_id()][lvol.lvol_uuid]
 
                     if lvol.ha_type == "ha":
-                        sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
+                        sec_node = db.get_storage_node_by_id(snode.secondary_node_id)
                         if sec_node and sec_node.status == StorageNode.STATUS_ONLINE:
                             logger.info("Getting lVol stats: %s from node: %s", lvol.uuid, sec_node.get_id())
                             if lvol.lvol_uuid in all_node_lvols_stats[sec_node.get_id()]:
@@ -292,7 +292,7 @@ while True:
                         else:
                             pools_lvols_stats[lvol.pool_uuid] = [record]
 
-        for pool in db_controller.get_pools(cluster_id=cluster.get_id()):
+        for pool in db.get_pools(cluster_id=cluster.get_id()):
 
             if pool.get_id() in pools_lvols_stats:
                 stat_records = pools_lvols_stats[pool.get_id()]

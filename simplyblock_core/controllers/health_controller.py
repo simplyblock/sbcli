@@ -102,7 +102,7 @@ def _check_port_on_node(snode, port_id):
                 for rule in chain['rules']:
                     if str(port_id) in rule['options']:
                         action = rule['target']
-                        if action == "DROP":
+                        if action in ["DROP", "REJECT"]:
                             return False
 
         return True
@@ -119,7 +119,7 @@ def _check_node_ping(ip):
         return False
 
 def _check_node_hublvol(node: StorageNode, node_bdev_names=None, node_lvols_nqns=None):
-    logger.info(f"Checking Hublvol: {node.hublvol.name} on node {node.get_id()}")
+    logger.info(f"Checking Hublvol: {node.hublvol.bdev_name} on node {node.get_id()}")
     db_controller = DBController()
 
     passed = True
@@ -128,11 +128,13 @@ def _check_node_hublvol(node: StorageNode, node_bdev_names=None, node_lvols_nqns
             node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password, timeout=5, retry=1)
 
         if not node_bdev_names:
+            node_bdev_names = {}
             ret = rpc_client.get_bdevs()
             if ret:
-                node_bdev_names = [b['name'] for b in ret]
-            else:
-                node_bdev_names = []
+                for b in ret:
+                    node_bdev_names[b['name']] = b
+                    for al in b['aliases']:
+                        node_bdev_names[al] = b
 
         if not node_lvols_nqns:
             node_lvols_nqns = {}
@@ -140,10 +142,10 @@ def _check_node_hublvol(node: StorageNode, node_bdev_names=None, node_lvols_nqns
             for sub in ret:
                 node_lvols_nqns[sub['nqn']] = sub
 
-        if node.hublvol.uuid in node_bdev_names:
-            logger.info(f"Checking bdev: {node.hublvol.uuid} ... ok")
+        if node.hublvol.bdev_name in node_bdev_names:
+            logger.info(f"Checking bdev: {node.hublvol.bdev_name} ... ok")
         else:
-            logger.error(f"Checking bdev: {node.hublvol.uuid} ... failed")
+            logger.error(f"Checking bdev: {node.hublvol.bdev_name} ... failed")
             passed = False
 
         if node.hublvol.nqn in node_lvols_nqns:
@@ -197,7 +199,7 @@ def _check_node_hublvol(node: StorageNode, node_bdev_names=None, node_lvols_nqns
 
 
 def _check_sec_node_hublvol(node: StorageNode, node_bdev=None, node_lvols_nqns=None):
-    logger.info(f"Checking secondary Hublvol: {node.hublvol.name} on node {node.get_id()}")
+    logger.info(f"Checking secondary Hublvol: {node.hublvol.bdev_name} on node {node.get_id()}")
     db_controller = DBController()
 
     passed = True
@@ -224,11 +226,11 @@ def _check_sec_node_hublvol(node: StorageNode, node_bdev=None, node_lvols_nqns=N
 
         primary_node = db_controller.get_storage_node_by_id(node.lvstore_stack_secondary_1)
 
-        ret = rpc_client.bdev_nvme_controller_list(primary_node.hublvol.name)
+        ret = rpc_client.bdev_nvme_controller_list(primary_node.hublvol.bdev_name)
         if ret:
-            logger.info(f"Checking controller: {primary_node.hublvol.name} ... ok")
+            logger.info(f"Checking controller: {primary_node.hublvol.bdev_name} ... ok")
         else:
-            logger.info(f"Checking controller: {primary_node.hublvol.name} ... failed")
+            logger.info(f"Checking controller: {primary_node.hublvol.bdev_name} ... failed")
             passed = False
 
         if primary_node.hublvol.get_remote_bdev_name() in node_bdev:
@@ -619,8 +621,9 @@ def check_lvol_on_node(lvol_id, node_id, node_bdev_names=None, node_lvols_nqns=N
     if not node_bdev_names:
         node_bdev_names = {}
         ret = rpc_client.get_bdevs()
-        for bdev in ret:
-            node_bdev_names[bdev['name']] = bdev
+        if ret:
+            for bdev in ret:
+                node_bdev_names[bdev['name']] = bdev
 
     if not node_lvols_nqns:
         node_lvols_nqns = {}

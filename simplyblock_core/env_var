@@ -1,5 +1,6 @@
+
 SIMPLY_BLOCK_COMMAND_NAME=sbcli-storage-tiering
-SIMPLY_BLOCK_VERSION=12.2.10
+SIMPLY_BLOCK_VERSION=12.2.11
 
 SIMPLY_BLOCK_DOCKER_IMAGE=public.ecr.aws/simply-block/simplyblock:storage-tiering
 SIMPLY_BLOCK_SPDK_ULTRA_IMAGE=public.ecr.aws/simply-block/ultra:storage-tiering-ha-latest

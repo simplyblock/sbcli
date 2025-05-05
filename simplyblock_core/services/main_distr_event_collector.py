@@ -15,7 +15,7 @@ logger = utils.get_logger(__name__)
 utils.init_sentry_sdk()
 
 # get DB controller
-db_controller = db_controller.DBController()
+db = db_controller.DBController()
 
 EVENTS_LIST = ['SPDK_BDEV_EVENT_REMOVE', "error_open", 'error_read', "error_write", "error_unmap",
                "error_write_cannot_allocate"]
@@ -24,11 +24,11 @@ def process_device_event(event):
     if event.message in EVENTS_LIST:
         node_id = event.node_id
         storage_id = event.storage_id
-        event_node_obj = db_controller.get_storage_node_by_id(node_id)
+        event_node_obj = db.get_storage_node_by_id(node_id)
 
         device_obj = None
         device_node_obj = None
-        for node in db_controller.get_storage_nodes():
+        for node in db.get_storage_nodes():
             for dev in node.nvme_devices:
                 if dev.cluster_device_order == storage_id:
                     device_obj = dev
@@ -78,7 +78,7 @@ def process_device_event(event):
                 device_controller.device_set_unavailable(device_obj.get_id())
                 device_controller.device_set_io_error(device_obj.get_id(), True)
         else:
-            event_node_obj = db_controller.get_storage_node_by_id(event_node_obj.get_id())
+            event_node_obj = db.get_storage_node_by_id(event_node_obj.get_id())
             for dev in event_node_obj.remote_devices:
                 if dev.get_id() == device_obj.get_id():
                     event_node_obj.remote_devices.remove(dev)
@@ -93,11 +93,11 @@ def process_lvol_event(event):
         vuid = event.object_dict['vuid']
         node_id = event.node_id
         # storage_node_ops.set_node_status(node_id, StorageNode.STATUS_SUSPENDED)
-        # event_node_obj = db_controller.get_storage_node_by_id(node_id)
+        # event_node_obj = db.get_storage_node_by_id(node_id)
         # tasks_controller.add_node_to_auto_restart(event_node_obj)
 
         # lvols = []
-        # for lv in db_controller.get_lvols():  # pass
+        # for lv in db.get_lvols():  # pass
         #     if lv.node_id == node_id:
         #         lvols.append(lv)
         #
@@ -111,7 +111,7 @@ def process_lvol_event(event):
         #             lvol.io_error = True
         #             old_status = lvol.status
         #             lvol.status = LVol.STATUS_OFFLINE
-        #             lvol.write_to_db(db_controller.kv_store)
+        #             lvol.write_to_db(db.kv_store)
         #             lvol_events.lvol_status_change(lvol, lvol.status, old_status, caused_by="monitor")
         #             lvol_events.lvol_io_error_change(lvol, True, False, caused_by="monitor")
         event.status = f'distr error {vuid}'
@@ -128,13 +128,13 @@ def process_event(event):
         if event.vuid >= 0:
             process_lvol_event(event)
 
-    event.write_to_db(db_controller.kv_store)
+    event.write_to_db(db.kv_store)
 
 
 def start_event_collector_on_node(node_id):
     logger.info(f"Starting Distr event collector on node: {node_id}")
 
-    snode = db_controller.get_storage_node_by_id(node_id)
+    snode = db.get_storage_node_by_id(node_id)
     client = rpc_client.RPCClient(
         snode.mgmt_ip,
         snode.rpc_port,
@@ -205,11 +205,11 @@ def start_event_collector_on_node(node_id):
 threads_maps = {}
 
 while True:
-    clusters = db_controller.get_clusters()
+    clusters = db.get_clusters()
     for cluster in clusters:
         cluster_id = cluster.get_id()
 
-        nodes = db_controller.get_storage_nodes_by_cluster_id(cluster_id)
+        nodes = db.get_storage_nodes_by_cluster_id(cluster_id)
         for snode in nodes:
             node_id = snode.get_id()
             # logger.info(f"Checking node {snode.hostname}")
