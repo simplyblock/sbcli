@@ -143,7 +143,7 @@ class RPCClient:
             "abort_timeout_sec": 5,
             "ack_timeout": 2048,
             "zcopy": True,
-            "in_capsule_data_size": 24500,
+            "in_capsule_data_size": 8192,
             "max_io_size": 131072,
             "io_unit_size": 8192,
             "max_aq_depth": 128,
