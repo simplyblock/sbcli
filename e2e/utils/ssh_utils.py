@@ -347,7 +347,9 @@ class SshUtils:
         else:
             command += " --debug=verify"
         
-        command = f"{command} | ts '[%Y-%m-%d %H:%M:%S]' | tee {log_file}"
+        awk_ts = " | awk '{ print strftime(\"[%Y-%m-%d %H:%M:%S]\"), $0; fflush(); }' | "
+        command += awk_ts
+        command += f"tee {log_file}"
 
         self.logger.info(f"Executing FIO command:\n{command}")
 
