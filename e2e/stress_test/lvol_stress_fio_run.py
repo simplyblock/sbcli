@@ -28,7 +28,7 @@ class TestStressLvolCloneClusterFioRun(TestLvolHACluster):
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        self.total_lvols = 10
+        self.total_lvols = 20
         self.lvol_name = f"lvl{random_char(3)}"
         self.clone_name = f"cln{random_char(3)}"
         self.snapshot_name = f"snap{random_char(3)}"
